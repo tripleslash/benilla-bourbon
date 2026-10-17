@@ -68,7 +68,7 @@ pub enum BindingInput {
 }
 
 /// The VM's half of the binding functions.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct InputState {
     /// The calls made since the app last drained them.
     queue: Vec<BindingInput>,

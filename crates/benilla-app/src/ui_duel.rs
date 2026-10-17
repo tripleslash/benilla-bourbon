@@ -13,6 +13,7 @@ use bevy::prelude::*;
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::target::Selection;
 use crate::ui_action::Spells;
 use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
@@ -48,6 +49,9 @@ pub(crate) struct DuelState {
     pub(crate) arbiter: u64,
     /// Set while the challenge popup is owed; the challenger never gets one.
     challenger: Option<u64>,
+    /// The owed popup's name has been looked up once, as the challenge packet's: the frames that
+    /// wait on it read.
+    challenger_asked: bool,
     out_of_bounds: bool,
     countdown: Option<Countdown>,
 }
@@ -65,6 +69,7 @@ impl DuelState {
         self.arbiter = arbiter;
         let ours = Some(challenger) == own;
         self.challenger = (!ours).then_some(challenger);
+        self.challenger_asked = false;
         ours
     }
 
@@ -298,7 +303,11 @@ fn feed_duel(
 
     // `DUEL_REQUESTED(name)`, held until the name resolves (the module's deviation).
     if let Some(guid) = duel.challenger {
-        if let Some(name) = names.resolve_player(guid, &commands).map(str::to_string) {
+        let ask = Ask::at(
+            !std::mem::replace(&mut duel.challenger_asked, true),
+            &commands,
+        );
+        if let Some(name) = names.resolve_player(guid, ask).map(str::to_string) {
             script.fire_event("DUEL_REQUESTED", vec![ScriptValue::Str(name)]);
             duel.challenger = None;
         }
@@ -423,7 +432,11 @@ pub(crate) fn streamed_player_named(
         .keys()
         .copied()
         .filter(|g| benilla_protocol::guid::is_player(*g))
-        .find(|g| names.peek(*g).is_some_and(|n| n.eq_ignore_ascii_case(name)))
+        .find(|g| {
+            names
+                .resolve_unit(*g, None, Ask::Read)
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })
 }
 
 /// Cast the duel spell at `guid`, a plain spell cast as in the reference's `0x4d4810`, not a duel
@@ -490,6 +503,46 @@ impl Plugin for UiDuelPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The challenge looks its challenger's name up once, as its packet's; the frames the popup
+    /// waits through read. A refused name is asked by no frame after it, only by the next
+    /// challenge.
+    #[test]
+    fn a_refused_challenger_is_asked_by_the_next_challenge_never_by_a_frame() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<DuelState>()
+            .init_resource::<NameCache>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .add_systems(Update, feed_duel);
+        app.insert_non_send(UiScript::new().unwrap());
+        let challenge = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<DuelState>()
+                .apply_requested(0xA1, 9, Some(7));
+            app.update();
+        };
+        challenge(&mut app);
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(9, String::new(), None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "no frame asks a refusal"
+        );
+        challenge(&mut app);
+        assert_eq!(
+            crate::query_cache::queries(&rx).len(),
+            1,
+            "the next challenge asks again"
+        );
+    }
 
     /// Both sides store the arbiter, so `DUEL_FINISHED` reaches both.
     #[test]

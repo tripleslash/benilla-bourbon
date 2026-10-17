@@ -283,7 +283,6 @@ fn arm_transports(
     mut commands: Commands,
     mut timetables: ResMut<Timetables>,
     templates: Res<GameObjectTemplates>,
-    net: Res<crate::net::NetCommands>,
     // A re-created lift is already armed but carries a fresh seed, so it re-enters to consume it.
     pending: Query<
         (Entity, &Guid, Option<&ElevatorSeed>, Option<&ObjectStore>),
@@ -358,10 +357,10 @@ fn arm_transports(
         let Some(store) = store else {
             continue; // no descriptor yet: next frame
         };
+        // Read, never asked: the create asked, and a refused (invalidated) template is asked
+        // again by the next create (`GameObjectTemplates::request_at_create`).
         let Some(template) = templates.of(&store.0) else {
-            // Not in yet, or evicted by a server invalidate after the spawn asked: ask (once).
-            templates.request(guid.0, &store.0, &net);
-            continue;
+            continue; // template answer not in yet: next frame
         };
         let Some(mo) = template.mo_transport else {
             continue;
@@ -996,7 +995,7 @@ mod tests {
                     speed: 0.0,
                     vertical_velocity: 0.0,
                     jump_xy_vel: [0.0; 2],
-                    fall_start_z: None,
+                    fall_start: None,
                     pending: std::collections::VecDeque::new(),
                     relay: Default::default(),
                     last_apply_ms: 0.0,

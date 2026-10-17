@@ -2457,7 +2457,7 @@ fn the_chat_cache_restore_is_finished_before_player_login() {
     world.init_resource::<super::settings::ChatWindowFile>();
     crate::ui_script::setup_script(&mut world);
 
-    world.insert_resource(crate::char_select::Roster::with_pending_pick(
+    world.insert_resource(crate::glue_session::roster::Roster::with_pending_pick(
         vec![benilla_protocol::Character {
             guid: 1,
             name: "Probeorder".into(),
@@ -3087,4 +3087,15 @@ fn a_macro_script_line_that_moves_signals_the_macro_event() {
     );
     assert!(s.take_binding_input().is_empty(), "nothing moved");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A line the engine shows inside a verb carries the same ten arguments as a system line the
+/// chat feed fires, so `ChatFrame_OnEvent` cannot tell them apart.
+#[test]
+fn an_engine_shown_line_fires_the_feeds_system_arguments() {
+    let text = "Deliver the Message failed.".to_string();
+    assert_eq!(
+        ChatEvent::text_only(K::System, text.clone()).script_args(),
+        benilla_ui::script::system_chat_args(text)
+    );
 }

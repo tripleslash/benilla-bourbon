@@ -41,6 +41,30 @@ impl Conn {
         self.stream.set_nodelay(on)
     }
 
+    /// Without blocking: whether bytes wait (`true`), none yet (`false`), or the peer closed the
+    /// connection (`UnexpectedEof`), for the character-select park's link check.
+    pub fn poll_readable(&self) -> io::Result<bool> {
+        self.stream.set_nonblocking(true)?;
+        let peeked = self.stream.peek(&mut [0u8; 1]);
+        self.stream.set_nonblocking(false)?;
+        match peeked {
+            Ok(0) => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the server ended the connection",
+            )),
+            Ok(_) => Ok(true),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Bound how long a read may wait; `None` blocks forever (decision 0065's handshake timeout).
     pub fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()> {
         self.stream.set_read_timeout(t)

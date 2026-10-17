@@ -84,7 +84,11 @@ fn seed_items(s: &mut UiScript) {
         guid: 0x715,
         equip_slots: vec![1],
         creator: None,
+        gift_creator: None,
+        creator_guid: 0,
+        gift_creator_guid: 0,
         enchants: Vec::new(),
+        spell_0: false,
     });
     s.set_inventory_slots(inv);
     s.set_item_template(
@@ -138,8 +142,12 @@ fn seed_items(s: &mut UiScript) {
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     s.set_container(
@@ -212,7 +220,11 @@ fn doll_hover_renders_the_live_instance() {
         guid: 0x717,
         equip_slots: vec![1],
         creator: None,
+        gift_creator: None,
+        creator_guid: 0,
+        gift_creator_guid: 0,
         enchants: Vec::new(),
+        spell_0: false,
     });
     s.set_inventory_slots(inv);
     s.set_item_template(

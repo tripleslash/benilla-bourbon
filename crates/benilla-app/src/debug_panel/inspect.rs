@@ -8,6 +8,7 @@ use bevy_egui::{egui, EguiContexts};
 
 use super::{overlay_text, OVERLAY_FILL, OVERLAY_TEXT_DIM};
 use crate::net::ObjectStore;
+use crate::query_cache::Ask;
 use crate::ui_script::{InspectMode, PointerOverUi};
 use benilla_world::interact::{WorldObject, WorldPick};
 use benilla_world::model_render::ModelKind;
@@ -69,7 +70,7 @@ type MotionReadout = (
     Option<&'static crate::net::RemoteMotion>,
     Option<&'static crate::net::UnitMoveModes>,
     // The ground clamp's memo, for the card's `ground` line.
-    Option<&'static crate::net::GroundClamped>,
+    Option<&'static crate::net::motion::spline::GroundClamped>,
     // Where the unit stands now, which the `ground` line reads the terrain against.
     &'static Transform,
 );
@@ -291,7 +292,7 @@ pub(super) fn inspect_ui(
     // The unit's name through the ask-once cache; it fills on a later frame.
     let name_line = net_entity
         .and_then(|p| guids.get(p).ok())
-        .and_then(|g| names.resolve_unit(g.0, store, &net_commands))
+        .and_then(|g| names.resolve_unit(g.0, store, Ask::New(&net_commands)))
         .map(str::to_string);
     // Gate by kind, not field presence: a create-seeded store answers every field (absent is 0).
     let kind = net_entity.and_then(|p| kinds.get(p).ok()).map(|n| n.kind);
@@ -533,7 +534,7 @@ pub(super) fn inspect_ui(
                 None => moving,
             }
         });
-    // The ground clamp's memo ([`crate::net::GroundClamped`]): `z` is drawn, `seat` the server's
+    // The ground clamp's memo ([`crate::net::motion::spline::GroundClamped`]): `z` is drawn, `seat` the server's
     // last pose, `drop` = `seat - z` the clamp's correction, `terrain` the MCNK height. `walk` is
     // the swept step on a server path and `idle` the settle from the seat; an idle miss stays at
     // the seat, a walk miss descends.

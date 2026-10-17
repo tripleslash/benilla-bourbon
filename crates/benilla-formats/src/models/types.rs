@@ -355,20 +355,33 @@ pub struct RenderSubmesh {
     /// (`texture_unit_lookup[texCoordSet] > 2`): `uv = normalize(P − 2(P·N)N).xy · 0.5 + 0.5`.
     /// Such a mesh parks its UVs at one point (`GnomeSubwayGlass.m2`).
     pub env_map: bool,
-    /// The batch's second texture stage (`textureCount` 2), which the reference modulates over
-    /// the first. Only the star dome draws it; every other lane draws stage 0 alone.
-    pub stage2: Option<Box<TextureStage>>,
+    /// The batch's second texture stage, for a unit of two or more textures; `None` for one.
+    pub stage1: Option<TextureStage>,
+    /// Stage 0's combine preset, 0 to 5 (`benilla_m2::M2Model::stage_combine`): preset 0, the
+    /// stock opaque batch's, takes its alpha from the diffuse alone, 1 modulates it by the texel.
+    pub combine: u8,
 }
 
-/// A batch's second texture stage: the record through `textureComboIndex + 1`, sampled through
-/// the coordinate set `texture_unit_lookup[texCoordComboIndex + 1]` names. An environment-mapped
-/// stage is not built.
-#[derive(Debug, Clone)]
+/// A texture stage after the first: the reference binds one per texture of the unit
+/// (`0x70b740`-`0x70b823`), each with its own texture, coordinates and combine.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextureStage {
-    pub texture: String,
+    /// The texture through the batch's lookup at `texture_combo_index + k` (`0x70b768`); `None`
+    /// for a slot the spawn site fills (skin, character, icon) or no record.
+    pub texture: Option<String>,
+    /// The texture record's address mode (`flags & 0x1/0x2`), as stage 0's.
     pub wrap_x: bool,
     pub wrap_y: bool,
-    /// Parallel to [`RenderSubmesh::positions`].
+    /// Generated coordinates: the lookup `texture_unit_lookup[texCoordSet + k]` is above 2
+    /// (`0x70b8bd`), the same view-space sphere map as [`RenderSubmesh::env_map`]. Otherwise the
+    /// stage reads a vertex UV set (`Model2.bls` binds `texcoord[k]`), as `Stars.m2`'s does.
+    pub env_map: bool,
+    /// The combine preset (`benilla_m2::M2Model::stage_combine`): 0 and 1 modulate the colour
+    /// with alpha passed or modulated, 3 adds, 4 modulates ×2, 2 and 5 interpolate.
+    pub combine: u8,
+    /// A stage that is not env-mapped: its coordinates, the vertex UV set
+    /// `texture_unit_lookup[texCoordSet + k]` names (0 or 1), parallel to
+    /// [`RenderSubmesh::positions`]; empty for an env-mapped stage.
     pub uvs: Vec<[f32; 2]>,
 }
 
@@ -435,8 +448,9 @@ impl Default for RenderSubmesh {
             rgb_seq: None,
             wmo_batch: None,
             env_map: false,
+            stage1: None,
+            combine: 1,
             section: None,
-            stage2: None,
         }
     }
 }

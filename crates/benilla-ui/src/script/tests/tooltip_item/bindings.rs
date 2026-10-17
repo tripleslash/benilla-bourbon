@@ -86,8 +86,12 @@ fn merchant_compare_renders_the_compare_shape_and_no_hover_seats_a_plate() {
             cooldown: None,
             readable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             flags: 0,
             enchants: Vec::new(),
+            spell_0: false,
         },
     );
     s.set_container(
@@ -222,6 +226,7 @@ fn set_inventory_item_name_only_is_the_trimmed_build() {
         ..Default::default()
     });
     s.set_inventory_slots(inv);
+    s.set_lock_rows(HashMap::from([(7, Vec::new())]));
     s.set_item_template(
         8100,
         ItemTemplateView {
@@ -410,7 +415,7 @@ fn ts_recipe(spell_id: u32, name: &str, group: (u32, u32, &str)) -> TradeSkillRe
         icon: None,
         min_made: 1,
         max_made: 1,
-        cooldown_secs: None,
+        cooldown: None,
         product_item: spell_id + 10_000,
         product_inv_type: 0,
         product_item_level: 0,
@@ -789,6 +794,7 @@ fn locked_is_drawn_for_a_locked_object_and_sets_the_builder_flag() {
             slots: HashMap::from([(1, slot(0)), (2, slot(0x4))]),
         }),
     );
+    s.set_lock_rows(HashMap::from([(7, Vec::new())]));
     s.set_item_template(
         8300,
         ItemTemplateView {
@@ -853,6 +859,7 @@ fn bank_vault_items_keep_their_flags_and_expiry() {
             ]),
         }),
     );
+    s.set_lock_rows(HashMap::from([(7, Vec::new())]));
     s.set_item_template(
         8300,
         ItemTemplateView {

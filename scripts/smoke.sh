@@ -136,20 +136,24 @@ panics="$(printf '%s\n' "$plain" | grep -cE 'panicked at')"
 
 # A marker counts once per edge it fires on. Each world entry builds a world VM beside the
 # character screen's glue VM (the reference's `0x490bd0`/`0x48fbf0` pair), so the VM marker counts
-# twice per login; half that means an entry adopted the glue VM and its spent `VmMemo`s.
-sessions=2            # world entries in this walk
-vms=$((sessions * 2)) # …and the Lua states they cost: a glue VM and a world VM each
+# twice per login; half that means an entry adopted the glue VM and its spent `VmMemo`s. One more
+# is built once at startup: the boot strings beside the glue VM, read for the slash-command table
+# (`ui_chat::commands::build_slash_commands`).
+sessions=2                # world entries in this walk
+vms=$((sessions * 2 + 1)) # …and the Lua states they cost: a glue VM and a world VM each
 for marker in "new VM, session"; do
     n="$(printf '%s\n' "$plain" | grep -cF "$marker")"
     printf '  %-24s %s\n' "$marker" "$n"
     [ "$n" -eq "$vms" ] ||
-        fail "'$marker' happened $n time(s), expected $vms — one per VM built, two per login; \
-$sessions would mean the entry adopted the character screen's VM and inherited its spent VmMemos"
+        fail "'$marker' happened $n time(s), expected $vms — one per VM built, two per login and \
+the startup strings; $((sessions + 1)) would mean the entry adopted the character screen's VM and \
+inherited its spent VmMemos"
 done
 # The in-game UI, `FrameXML.toc`'s `Fonts.xml` included, and the key-binding commands (the core's
 # `Bindings.xml`, loaded after the toc) build once per login; one count for two logins means the
-# second reused the first's frame tree.
-for marker in "Fonts.xml loaded" "UIParent.xml loaded" "commands registered"; do
+# second reused the first's frame tree. The `Fonts.xml` marker names its folder: the glue's
+# `GlueFonts.xml` ends the same way.
+for marker in 'FrameXML\Fonts.xml loaded' "UIParent.xml loaded" "commands registered"; do
     n="$(printf '%s\n' "$plain" | grep -cF "$marker")"
     printf '  %-24s %s\n' "$marker" "$n"
     [ "$n" -eq "$sessions" ] ||
@@ -200,7 +204,7 @@ fi
 # fails anything but a completed walk.
 echo "smoke: running the realm-list boundary walk (~12 s, opens a window)…"
 rlog="$(mktemp "${TMPDIR:-/tmp}/benilla-smoke-realm.XXXXXX")"
-# No WOW_CHAR: the walk drives character select, and `realm_select::smoke` refuses a seated body.
+# No WOW_CHAR: the walk drives character select, and `glue_session::realm_smoke` refuses a seated body.
 WOW_UNATTENDED=1 WOW_NOSOUND=1 WOW_USER="$user" WOW_PASS="$pass" WOW_REALM_SMOKE=1 \
     timeout 120 cargo run -q -p benilla >"$rlog" 2>&1
 rcode=$?

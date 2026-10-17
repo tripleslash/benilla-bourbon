@@ -266,6 +266,22 @@ impl Conn {
         Ok(())
     }
 
+    /// Without blocking: whether bytes wait (`true`), none yet (`false`), or the socket closed
+    /// with nothing left to read (`UnexpectedEof`), the native body's answers off the inbox.
+    pub fn poll_readable(&self) -> io::Result<bool> {
+        let inbox = self.sock.inbox.borrow();
+        if !inbox.buf.is_empty() {
+            return Ok(true);
+        }
+        if inbox.closed {
+            return Err(io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "the server ended the connection",
+            ));
+        }
+        Ok(false)
+    }
+
     /// Bound how long a read may wait. Applied by the reader's future (there is no socket option to
     /// set), and an expiry raises [`ErrorKind::TimedOut`] — the kind a native socket's own timeout
     /// gives, so decision 0065's handshake bound behaves the same in a page.

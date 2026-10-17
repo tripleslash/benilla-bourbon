@@ -17,6 +17,7 @@ use super::{enrich_unit, faction_group, faction_group_localized, snapshot, unit_
 use crate::creature_type::CreatureTypeSources;
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, ObjectStore, Reputations, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::target::{Candidacy, Factions, NameSearch};
 use crate::ui_script::{gate, VmMemo};
 
@@ -40,9 +41,12 @@ impl HeldUnits<'_> {
     /// other than the player carries it. It has no guild leg, so `GetGuildInfo` on a chain answers
     /// nothing, where the reference resolves the token and reads the object's guild (`0x4c9330`).
     pub(super) fn state(&self, store: &ObjectStore, guid: u64) -> UnitState {
+        // The unit's create looked its name up with a callback (`0x5dec12`); a frame asks only
+        // a name the cache holds nothing for, as one invalidated since, and a refused one waits
+        // for the next create.
         let name = self
             .names
-            .resolve_unit(guid, Some(store), self.commands)
+            .resolve_unit(guid, Some(store), Ask::New(self.commands))
             .map(str::to_string);
         self.state_named(store, guid, name)
     }
@@ -335,7 +339,9 @@ pub(crate) fn feed_name_candidates(
         let state = match store.as_deref() {
             // The name as the target feed reads it off the descriptor, from the cache alone.
             Some(store) => {
-                let named = names.peek_unit(guid, Some(store)).map(str::to_string);
+                let named = names
+                    .resolve_unit(guid, Some(store), Ask::Read)
+                    .map(str::to_string);
                 held.state_named(store, guid, named)
             }
             None => UnitState {
@@ -458,7 +464,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
-            .insert_state(crate::char_select::ClientState::InWorld)
+            .insert_state(crate::client_state::ClientState::InWorld)
             .init_resource::<Selection>()
             .init_resource::<GuidIndex>()
             .init_resource::<Reputations>()

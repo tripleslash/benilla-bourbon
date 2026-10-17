@@ -479,6 +479,7 @@ mod tests {
         let scrolled = |x: f32, y: f32| {
             stamped(&|app| {
                 app.world_mut().write_message(MouseWheel {
+                    phase: bevy::input::touch::TouchPhase::Moved,
                     unit: MouseScrollUnit::Line,
                     x,
                     y,

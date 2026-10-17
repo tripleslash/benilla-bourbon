@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::test_support::link_dir;
 use super::{survey, Drew};
 
 /// One throwaway AddOns root, cleaned up on drop even if a test panics.
@@ -138,33 +139,6 @@ fn the_render_column_can_fail() {
     );
 }
 
-/// Put a corpus addon folder under the fixture root. A symlink where the platform gives one for
-/// free, a copy where it does not: Windows needs a privilege for `symlink_dir` that an ordinary
-/// developer shell does not have, and these folders are a few kilobytes of Lua and XML.
-fn link_corpus_addon(from: &std::path::Path, to: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(from, to).unwrap();
-    }
-    #[cfg(not(unix))]
-    {
-        fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
-            std::fs::create_dir_all(to)?;
-            for e in std::fs::read_dir(from)? {
-                let e = e?;
-                let dst = to.join(e.file_name());
-                if e.file_type()?.is_dir() {
-                    copy_dir(&e.path(), &dst)?;
-                } else {
-                    std::fs::copy(e.path(), dst)?;
-                }
-            }
-            Ok(())
-        }
-        copy_dir(from, to).unwrap();
-    }
-}
-
 /// `!OmniCC` paints through an anonymous frame parented to an existing cooldown, an overlay;
 /// Bagnon builds its own window of item-slot buttons.
 #[test]
@@ -175,7 +149,7 @@ fn omnicc_and_bagnon_come_out_on_opposite_sides() {
     // Symlinked into a small root: the full corpus sweep is the `addon_harness` example's job.
     let fx = Fixtures::new("oracle");
     for name in ["!OmniCC", "Bagnon", "Bagnon_Core", "Bagnon_Forever"] {
-        link_corpus_addon(&corpus.join(name), &fx.root().join(name));
+        link_dir(&corpus.join(name), &fx.root().join(name)).unwrap();
     }
     let reports = survey(fx.root());
     let row = |name: &str| {

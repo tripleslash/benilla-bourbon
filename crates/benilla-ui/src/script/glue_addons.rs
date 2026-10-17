@@ -35,7 +35,7 @@ const CVAR_VERSION_CHECK: &str = "checkAddonVersion";
 const CVAR_SCRIPT_MEMORY: &str = "scriptMemory";
 
 /// The glue's AddOn state: the enable nodes and the files they come from and go to.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct GlueAddons {
     /// `ADDONSTATELIST` (`0xbe1bd0`).
     store: EnableStore,

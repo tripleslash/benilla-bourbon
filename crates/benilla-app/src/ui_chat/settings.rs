@@ -395,7 +395,7 @@ fn shortcut_rows(channels: &super::edit::ChannelState) -> Vec<(u32, String)> {
 /// printed with no explicit colour, an addon's login `Print` among them.
 pub(crate) fn restore_chat_looks(world: &mut World, script: &mut UiScript) {
     let Some(id) = world
-        .get_resource::<crate::char_select::Roster>()
+        .get_resource::<crate::glue_session::roster::Roster>()
         .and_then(crate::ui_macro::identity)
     else {
         return;
@@ -635,13 +635,13 @@ pub(super) fn plugin(app: &mut App) {
             // After the tick: every write it watches is Lua's.
             watch_chat_looks
                 .after(crate::ui_script::UiInput)
-                .in_set(crate::char_select::InWorldGated),
+                .in_set(crate::client_state::InWorldGated),
         )
         .add_systems(
             Update,
             save_chat_looks
                 .after(crate::ui_script::UiInput)
-                .in_set(crate::char_select::InWorldGated),
+                .in_set(crate::client_state::InWorldGated),
         );
     // The session-end flush is `fold_dying_vm_chat_cache`; the quit flush rides the exit edge,
     // as the close button's `AppExit` is written in `PostUpdate`, after an `Update` save.
@@ -1057,7 +1057,7 @@ mod tests {
         );
 
         // `/reload` at once, inside `SAVE_QUIET`.
-        world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+        world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
         world.resource_mut::<crate::ui_script::ReloadUiPending>().0 = true;
         crate::ui_script::run_pending_reload(&mut world);
 
@@ -1083,8 +1083,8 @@ mod tests {
     }
 
     /// A roster with one character picked, which keys the chat cache path.
-    fn probe_roster(name: &str) -> crate::char_select::Roster {
-        crate::char_select::Roster::with_pending_pick(
+    fn probe_roster(name: &str) -> crate::glue_session::roster::Roster {
+        crate::glue_session::roster::Roster::with_pending_pick(
             vec![benilla_protocol::Character {
                 guid: 1,
                 name: name.into(),

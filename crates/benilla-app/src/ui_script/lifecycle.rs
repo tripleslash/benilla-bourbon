@@ -1,7 +1,6 @@
-//! The UI session's lifecycle, all edges and nothing per-frame: `Startup` installs a boot VM
-//! (strings and emote tokens), or the stock glue screens' VM under `WOW_GLUE_STOCK=1`; world entry
-//! builds a fresh VM and loads the in-game UI and every addon onto it; leaving the world runs the
-//! reference's shutdown tail and installs the glue-side VM again; `ReloadUI()` is the two edges
+//! The UI session's lifecycle, all edges and nothing per-frame: `Startup` installs the glue
+//! screens' VM; world entry builds a fresh VM and loads the in-game UI and every addon onto it;
+//! leaving the world runs the reference's shutdown tail and installs the glue VM again; `ReloadUI()` is the two edges
 //! back to back without leaving the world.
 
 use bevy::prelude::*;
@@ -17,45 +16,26 @@ pub(crate) fn setup_script(world: &mut World) {
     install_glue_side_vm(world, super::glue::GlueScreen::Login.key());
 }
 
-/// Install the VM the world holds outside the world: the stock glue screens' under
-/// [`super::glue::GlueStock`], put up on the screen named `screen`, else a boot VM.
-///
-/// The IO thread's roster policy follows the VM that is up: the screen asks for its roster only
-/// when the stock glue VM was built and its character select screen loaded, so a run whose stock VM failed to build (logged as an error
-/// by [`new_vm`]) falls back to the park's own enumeration instead of waiting on a screen that
-/// never asks.
+/// Install the VM the world holds outside the world: the glue screens', put up on the screen
+/// named `screen`. A glue whose select screen did not load (logged as an error by [`new_vm`] or
+/// the load) asks for no roster, and nothing else does.
 pub(super) fn install_glue_side_vm(world: &mut World, screen: &str) {
-    let stock_asked = world
-        .get_resource::<super::glue::GlueStock>()
-        .is_some_and(|s| s.0);
-    let stock_up = if stock_asked {
-        install_glue_vm(world, screen)
-    } else {
-        install_boot_vm(world);
-        false
-    };
-    if stock_asked && !stock_up {
-        error!("ui_script: WOW_GLUE_STOCK=1 but the stock glue VM did not come up with its character select screen; the roster is fetched at the park");
-    }
-    if let Some(policy) = world.get_resource::<crate::net::RosterPolicy>() {
-        policy
-            .0
-            .store(stock_up, std::sync::atomic::Ordering::SeqCst);
+    if !install_glue_vm(world, screen) {
+        error!("ui_script: the glue VM did not come up with its character select screen");
     }
 }
 
-/// Build and install a boot VM, the one the world holds outside an in-game UI session: the
-/// strings the feeds resolve lines from and the emote tokens `/`-commands are built from
-/// (`ui_chat::commands`), no frames and no font objects. Installed at `Startup` and at every
-/// [`end_ui_session`], unless the stock glue screens stand there instead ([`install_glue_vm`]).
+/// Build and install a boot VM, the one a `ReloadUI()` holds between its teardown and its load:
+/// the strings the feeds resolve lines from and the emote tokens `/`-commands are built from
+/// (`ui_chat::commands`), no frames and no font objects.
 fn install_boot_vm(world: &mut World) {
     if let Some(script) = strings_vm(world) {
         world.insert_non_send(script);
     }
 }
 
-/// A boot VM's contents on a VM of their own: `GlobalStrings.lua` and the emote tokens, for a
-/// reader that needs them where the world holds the glue VM. `None` (the world's VM removed) when
+/// A boot VM: `GlobalStrings.lua` and the emote tokens, for a reader that needs them where the
+/// world holds the glue VM. `None` (the world's VM removed) when
 /// the VM cannot start.
 pub(crate) fn strings_vm(world: &mut World) -> Option<UiScript> {
     let script = new_vm(world, UiScript::new)?;
@@ -66,7 +46,7 @@ pub(crate) fn strings_vm(world: &mut World) -> Option<UiScript> {
 
 /// Build the glue VM, load the stock GlueXML onto it, install it and put `screen` up: the glue
 /// builder `0x46a7b0` then `SET_GLUE_SCREEN` (`0x402b65` at startup, `0x402090` back from the
-/// world). It holds what the glue state holds and nothing of the boot VM's: no `GlobalStrings.lua`,
+/// world). It holds what the glue state holds and nothing of a boot VM's: no `GlobalStrings.lua`,
 /// no emote tokens.
 fn install_glue_vm(world: &mut World, screen: &str) -> bool {
     let Some(mut script) = new_vm(world, UiScript::new_glue) else {
@@ -354,20 +334,20 @@ const ENTRY_LOAD_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_m
 /// true on the first ask.
 const ENTRY_CHAIN_WAIT_FRAMES: u32 = 600;
 
-/// The boot VM, parked between the world-entry edge and the deferred load, out of every feed's
+/// The glue VM, parked between the world-entry edge and the deferred load, out of every feed's
 /// reach: each feed takes the VM as an `Option` and returns on `None`.
 ///
 /// **The window is the whole sliced load, not just the wait before it.** The load spends itself
 /// over frames now ([`PendingEntryUiLoad`]), and a VM with half a frame tree in it is no more
 /// ready for a feed than one with none — so a slice that yields parks the VM again rather than
 /// handing it back, and only [`EntryStage::Finish`] returns it to the world.
-pub(crate) struct ParkedBootVm(UiScript);
+pub(crate) struct ParkedGlueVm(UiScript);
 
-/// `OnEnter(InWorld)`: arm the deferred entry load and park the boot VM.
+/// `OnEnter(InWorld)`: arm the deferred entry load and park the glue VM.
 pub(crate) fn arm_entry_ui_load(world: &mut World) {
     world.insert_resource(PendingEntryUiLoad::default());
     if let Some(vm) = world.remove_non_send::<UiScript>() {
-        world.insert_non_send(ParkedBootVm(vm));
+        world.insert_non_send(ParkedGlueVm(vm));
     }
 }
 
@@ -440,8 +420,8 @@ pub(crate) fn rebuild_stale_glue_vm(
 }
 
 /// Put the parked boot VM back into the world, if one is parked.
-fn unpark_boot_vm(world: &mut World) {
-    if let Some(ParkedBootVm(vm)) = world.remove_non_send::<ParkedBootVm>() {
+fn unpark_glue_vm(world: &mut World) {
+    if let Some(ParkedGlueVm(vm)) = world.remove_non_send::<ParkedGlueVm>() {
         world.insert_non_send(vm);
     }
 }
@@ -458,9 +438,10 @@ fn unpark_boot_vm(world: &mut World) {
 /// parks the VM runs at the next frame's `StateTransition`; the `InWorld` term covers that frame.
 pub(crate) fn ingame_ui_up(
     pending: Option<Res<PendingEntryUiLoad>>,
-    state: Option<Res<State<crate::char_select::ClientState>>>,
+    state: Option<Res<State<crate::client_state::ClientState>>>,
 ) -> bool {
-    pending.is_none() && state.is_some_and(|s| *s.get() == crate::char_select::ClientState::InWorld)
+    pending.is_none()
+        && state.is_some_and(|s| *s.get() == crate::client_state::ClientState::InWorld)
 }
 
 /// `PreUpdate`, after [`run_pending_reload`] so a reload never interleaves an armed entry load:
@@ -473,13 +454,13 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
         return;
     }
     let in_world = *world
-        .resource::<State<crate::char_select::ClientState>>()
+        .resource::<State<crate::client_state::ClientState>>()
         .get()
-        == crate::char_select::ClientState::InWorld;
+        == crate::client_state::ClientState::InWorld;
     if !in_world {
         // Left the world before the load ran: nothing to build a UI for.
         world.remove_resource::<PendingEntryUiLoad>();
-        unpark_boot_vm(world);
+        unpark_glue_vm(world);
         return;
     }
     let covering = world
@@ -512,7 +493,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     // between frames exactly as it did around the old single burst.
     if !ui_wanted(world) {
         world.remove_resource::<PendingEntryUiLoad>();
-        unpark_boot_vm(world);
+        unpark_glue_vm(world);
         crate::vplates::clear_at_world_entry(world);
         return;
     }
@@ -520,14 +501,14 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     // glue phase's VM goes back into the world only so its CVars can be folded, and a fresh boot
     // VM takes its place. Every later slice picks the parked, part-built one back up.
     if world.resource::<PendingEntryUiLoad>().stage == EntryStage::Armed {
-        unpark_boot_vm(world);
+        unpark_glue_vm(world);
         mint_entry_vm(world);
     }
-    // The parked VM first (`ParkedBootVm` — the ordinary path since 1978, and every slice after
+    // The parked VM first (`ParkedGlueVm` — the ordinary path since 1978, and every slice after
     // the first), then the world's own: the freshly minted entry VM on the first slice.
     let parked = world
-        .remove_non_send::<ParkedBootVm>()
-        .map(|ParkedBootVm(vm)| vm);
+        .remove_non_send::<ParkedGlueVm>()
+        .map(|ParkedGlueVm(vm)| vm);
     let Some(mut script) = parked.or_else(|| world.remove_non_send::<UiScript>()) else {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         world.remove_resource::<PendingEntryUiLoad>();
@@ -543,6 +524,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
             EntryStage::Armed => {
                 // Before the first file, as the one-shot path does ([`load_ingame_ui_on_world_entry`]).
                 crate::minimap::restore_default_mask(world);
+                crate::ui_billing::arm_at_world_entry(world);
                 // World entry: no player object yet, so the roster's record stands in.
                 let (identity, roster, version_check) =
                     entry_prepare(world, &mut script, LoadSeat::Roster);
@@ -709,7 +691,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     // Back into the park, not into the world: the tree is still part-built, and 1978's whole
     // point is that no feed sees a VM in that state. `Finish` above is the one exit that
     // publishes it.
-    world.insert_non_send(ParkedBootVm(script));
+    world.insert_non_send(ParkedGlueVm(script));
 }
 
 /// Start every chain-sourced manifest entry's pack warming, and return at once.
@@ -741,12 +723,12 @@ fn entry_prepare(
 ) -> (Option<(String, String)>, Vec<String>, bool) {
     // The character whose AddOn enable state gates which addons run.
     let identity = world
-        .get_resource::<crate::char_select::Roster>()
+        .get_resource::<crate::glue_session::roster::Roster>()
         .and_then(crate::ui_macro::identity);
     // The realm's character list is the enable store's node set: the reference keeps one
     // `ADDONSTATELIST` node per character, and an addon this one never set resolves from the rest.
     let roster: Vec<String> = world
-        .get_resource::<crate::char_select::Roster>()
+        .get_resource::<crate::glue_session::roster::Roster>()
         .map(|r| r.chars.iter().map(|c| c.name.clone()).collect())
         .unwrap_or_default();
     // The addon array before any addon file runs: `SMSG_ADDON_INFO` lands during the handshake, so
@@ -772,10 +754,14 @@ fn entry_prepare(
     // The realm before the load, since addons read `GetRealmName()` at file scope; the roster
     // carries the realm-list entry this session connected to.
     let realm = world
-        .get_resource::<crate::char_select::Roster>()
+        .get_resource::<crate::glue_session::roster::Roster>()
         .and_then(|r| r.realm.as_ref().map(|r| r.name.clone()))
         .unwrap_or_default();
     script.set_realm_name(&realm);
+    // `GetBillingTimeRested` reads the connection's word (`0x48ec59`), there for every VM.
+    if let Some(billing) = world.get_resource::<crate::net::SessionBilling>() {
+        script.set_billing_time_rested(billing.0.time_rested);
+    }
     // `CGGameUI::InitializeGame` flags these read-only before `UI_Init` loads anything
     // (`0x48f566`-`0x48f584`), so an in-game `SetCVar` of one raises, logout handlers included;
     // `ShutdownGame` clears them (`0x491240`), and here the flags die with this VM. The host's
@@ -789,7 +775,7 @@ fn entry_prepare(
     // the unit: the live player on a `/reload`, else the roster's stand-in until the descriptor
     // streams in.
     if let Some(record) = world
-        .get_resource::<crate::char_select::Roster>()
+        .get_resource::<crate::glue_session::roster::Roster>()
         .and_then(|roster| record_from_roster(roster, crate::ui_unit::world_unit_names(world)))
     {
         script.set_player_record(record);
@@ -803,12 +789,11 @@ fn entry_prepare(
             script.set_player_xp(live.xp.0, live.xp.1);
         }
         None => {
-            if let Some(seat) =
-                world
-                    .get_resource::<crate::char_select::Roster>()
-                    .and_then(|roster| {
-                        seat_from_roster(roster, crate::ui_unit::world_unit_names(world))
-                    })
+            if let Some(seat) = world
+                .get_resource::<crate::glue_session::roster::Roster>()
+                .and_then(|roster| {
+                    seat_from_roster(roster, crate::ui_unit::world_unit_names(world))
+                })
             {
                 script.set_unit("player", Some(seat));
             }
@@ -982,6 +967,8 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // Before the load, as `0x48f590` runs before `0x48fbf0`: an addon's file scope sets the mask
     // after it, and a `/reload` never takes this step.
     crate::minimap::restore_default_mask(world);
+    // `InitializeGame` arms the play-time warning before it jumps to `UI_Init` (`0x48f636`-`0x48f681`).
+    crate::ui_billing::arm_at_world_entry(world);
     load_ingame_ui_seated(world, LoadSeat::Roster);
 }
 
@@ -989,7 +976,7 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
 fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
     // The parked VM goes back into the world, where the CVar fold reads it; a reload has none
     // parked and uses the live one.
-    unpark_boot_vm(world);
+    unpark_glue_vm(world);
     if !ui_wanted(world) {
         return;
     }
@@ -1039,7 +1026,7 @@ fn roster_sex(gender: u8) -> u8 {
 /// one at `+0x108`, but its accessor (`0x5abe00`) has no caller, so `UnitLevel("player")` reads
 /// the descriptor.
 pub(crate) fn record_from_roster(
-    roster: &crate::char_select::Roster,
+    roster: &crate::glue_session::roster::Roster,
     names: crate::ui_unit::UnitNames<'_>,
 ) -> Option<benilla_ui::script::PlayerRecord> {
     let row = roster.pending_row()?;
@@ -1059,7 +1046,7 @@ pub(crate) fn record_from_roster(
 /// scope reads, the faction group chief among it. Health and power stay zero, the descriptor's
 /// to say.
 pub(crate) fn seat_from_roster(
-    roster: &crate::char_select::Roster,
+    roster: &crate::glue_session::roster::Roster,
     names: crate::ui_unit::UnitNames<'_>,
 ) -> Option<benilla_ui::script::UnitState> {
     let row = roster.pending_row()?;
@@ -1239,8 +1226,7 @@ pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String
 /// shutdown tail, then end this session's Lua state, so no frame, global or addon upvalue reaches
 /// the next login. The reference's state outlives `0x490bd0` and is replaced twice through
 /// `0x703b80`, in `ShutdownGame` (at `0x491231`) and then in the glue build (`0x46a7b0`), so the
-/// character screen runs on a state of its own. Ours is a fresh boot VM, or the stock glue's
-/// ([`install_glue_side_vm`]).
+/// character screen runs on a state of its own. Ours is a fresh glue VM ([`install_glue_side_vm`]).
 pub(crate) fn end_ui_session(world: &mut World) {
     close_ui_session(world, ShutdownRoot::WorldTeardown);
     // The session's end drops what the fold just carried, as the disconnect handler, a frame
@@ -1258,10 +1244,10 @@ pub(crate) fn end_ui_session(world: &mut World) {
     // `0x401ee0`'s glue leg: `"charselect"` after a logout, `"login"` after a disconnect
     // (`0x402084`); the state this exit enters says which.
     let screen = match world
-        .get_resource::<State<crate::char_select::ClientState>>()
+        .get_resource::<State<crate::client_state::ClientState>>()
         .map(|s| *s.get())
     {
-        Some(crate::char_select::ClientState::CharSelect) => super::glue::GlueScreen::CharSelect,
+        Some(crate::client_state::ClientState::CharSelect) => super::glue::GlueScreen::CharSelect,
         _ => super::glue::GlueScreen::Login,
     };
     install_glue_side_vm(world, screen.key());
@@ -1274,9 +1260,9 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     // to a departure owns it.
     let silenced = run_shutdown_front(world, root);
     // A VM still parked goes back into the world first.
-    unpark_boot_vm(world);
+    unpark_glue_vm(world);
     // An entry load still armed means no in-game UI was built, and the tail would overwrite the
-    // saved files with the boot VM's emptiness.
+    // saved files with the glue VM's emptiness.
     let ui_never_loaded = world.remove_resource::<PendingEntryUiLoad>().is_some();
     let identity = world
         .get_resource::<AddOnIdentity>()
@@ -1342,9 +1328,9 @@ pub(crate) fn run_pending_reload(world: &mut World) {
         return;
     }
     let in_world = *world
-        .resource::<State<crate::char_select::ClientState>>()
+        .resource::<State<crate::client_state::ClientState>>()
         .get()
-        == crate::char_select::ClientState::InWorld;
+        == crate::client_state::ClientState::InWorld;
     if !in_world {
         info!("ui_script: ReloadUI outside the world — dropped");
         return;
@@ -1386,8 +1372,8 @@ pub(crate) fn shutdown_on_exit(
         return;
     }
     let in_world = world
-        .get_resource::<State<crate::char_select::ClientState>>()
-        .is_some_and(|s| *s.get() == crate::char_select::ClientState::InWorld);
+        .get_resource::<State<crate::client_state::ClientState>>()
+        .is_some_and(|s| *s.get() == crate::client_state::ClientState::InWorld);
     // Same guard as [`end_ui_session`]: a quit inside the entry-load window has no UI to save.
     if !in_world || world.contains_resource::<PendingEntryUiLoad>() {
         return;
@@ -1544,10 +1530,10 @@ mod tests {
     /// table's names at the install's locale, and the tokens beside them.
     #[test]
     fn the_roster_seat_and_record_name_race_and_class_from_the_tables() {
-        let mut c = crate::char_select::test_character(7, "Harness");
+        let mut c = crate::glue_session::roster::test_character(7, "Harness");
         c.race = 4; // Night Elf
         c.class = 5; // Priest
-        let roster = crate::char_select::Roster::with_pending_pick(vec![c], 7);
+        let roster = crate::glue_session::roster::Roster::with_pending_pick(vec![c], 7);
         let korean = crate::ui_unit::TestNames::korean();
         let seat = seat_from_roster(&roster, korean.names()).expect("a pick seats");
         assert_eq!(seat.race.as_deref(), Some("나이트 엘프"));
@@ -1591,7 +1577,10 @@ mod tests {
         let text = |world: &World| {
             let script = world.non_send::<UiScript>();
             script
-                .run("F = CreateFrame('Frame'):CreateFontString() F:SetText('1.5')")
+                .run(
+                    "F = CreateFrame('Frame'):CreateFontString() \
+                     F:SetFont('Fonts\\\\FRIZQT__.TTF', 12) F:SetText('1.5')",
+                )
                 .unwrap();
             script.eval::<String>("return F:GetText()").unwrap()
         };
@@ -1614,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn the_entry_edge_parks_the_boot_vm_and_the_session_end_returns_it() {
+    fn the_entry_edge_parks_the_glue_vm_and_the_session_end_returns_it() {
         let mut world = World::new();
         let boot = UiScript::new().unwrap();
         let session = boot.session();
@@ -1625,14 +1614,14 @@ mod tests {
             "no VM in the deferral window"
         );
         assert!(world.get_resource::<PendingEntryUiLoad>().is_some());
-        assert!(world.get_non_send::<ParkedBootVm>().is_some());
+        assert!(world.get_non_send::<ParkedGlueVm>().is_some());
         // Left the world before the load ran: the VM comes back, untouched.
-        unpark_boot_vm(&mut world);
+        unpark_glue_vm(&mut world);
         let vm = world
             .get_non_send::<UiScript>()
             .expect("the parked VM is back");
         assert_eq!(vm.session(), session, "the same VM, no session moved");
-        assert!(world.get_non_send::<ParkedBootVm>().is_none());
+        assert!(world.get_non_send::<ParkedGlueVm>().is_none());
     }
 
     /// The plate bits clear at the world entry (`0x401639`, in the entry setup `0x401570`) and
@@ -1646,7 +1635,7 @@ mod tests {
         };
         let world_with = |on: VPlateMode| {
             let mut world = World::new();
-            world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+            world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
             world.insert_resource(crate::run_mode::CaptureMode);
             world.insert_resource(on);
             world
@@ -1672,7 +1661,7 @@ mod tests {
         use crate::net::WorldEnterCascadeMessage;
         let reload = |seated: bool| {
             let mut world = World::new();
-            world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+            world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
             world.insert_resource(crate::run_mode::CaptureMode);
             world.init_resource::<Messages<WorldEnterCascadeMessage>>();
             world.init_resource::<super::super::SweptWorlds>();
@@ -1701,35 +1690,15 @@ mod tests {
         );
     }
 
-    /// The IO thread's roster policy follows the VM that came up: the screen asks only when the
-    /// stock glue VM stands, so a boot VM leaves the park to fetch the roster.
-    #[test]
-    fn the_roster_policy_follows_the_vm_that_stands() {
-        use std::sync::atomic::Ordering;
-        for stock in [true, false] {
-            let mut world = World::new();
-            let policy = crate::net::RosterPolicy(Default::default());
-            policy.0.store(!stock, Ordering::SeqCst);
-            world.insert_resource(policy.clone());
-            world.insert_resource(super::super::glue::GlueStock(stock));
-            world.insert_resource(State::new(crate::char_select::ClientState::Login));
-            setup_script(&mut world);
-            // The stock policy needs the stock files to have loaded: no install, no screen.
-            let up = stock && benilla_formats::wow_data().is_some();
-            assert_eq!(policy.0.load(Ordering::SeqCst), up, "stock {stock}");
-        }
-    }
-
     /// The agreements are read from their CVars before the first screen is set (`0x46a400` at
     /// `0x402b36`, `SET_GLUE_SCREEN` at `0x402b65`): a returning player's login shows the boxes,
     /// not the EULA. In this fork a first launch goes there too: the TOS and EULA stand accepted.
     #[test]
     fn the_login_screen_comes_up_on_the_accepted_agreements() {
-        use crate::char_select::ClientState;
+        use crate::client_state::ClientState;
         let _ = benilla_formats::wow_data_or_skip!();
         let screens = |cvars: crate::cvars::Cvars| {
             let mut world = World::new();
-            world.insert_resource(super::super::glue::GlueStock(true));
             world.insert_resource(State::new(ClientState::Login));
             world.insert_resource(cvars);
             world.init_non_send::<super::super::glue_mgr::SharedGlueMgr>();
@@ -1756,12 +1725,12 @@ mod tests {
         );
     }
 
-    /// Under `WOW_GLUE_STOCK=1` the world holds the glue VM where it holds a boot VM, at startup
-    /// on the login screen (`0x402b65`) and back from the world on the screen the exit enters
-    /// (`0x402090`); a `ReloadUI()` never builds the glue.
+    /// The world holds the glue VM outside the world, at startup on the login screen
+    /// (`0x402b65`) and back from the world on the screen the exit enters (`0x402090`); a
+    /// `ReloadUI()` never builds the glue.
     #[test]
-    fn the_stock_glue_stands_where_the_boot_vm_does() {
-        use crate::char_select::ClientState;
+    fn the_glue_stands_outside_the_world() {
+        use crate::client_state::ClientState;
         use benilla_ui::script::VmKind;
         let shown = |world: &World, frame: &str| {
             benilla_formats::wow_data().is_none()
@@ -1771,7 +1740,6 @@ mod tests {
                     .unwrap()
         };
         let mut world = World::new();
-        world.insert_resource(super::super::glue::GlueStock(true));
         world.insert_resource(State::new(ClientState::Login));
         setup_script(&mut world);
         assert_eq!(world.non_send::<UiScript>().vm_kind(), VmKind::Glue);
@@ -2052,7 +2020,7 @@ mod tests {
     fn a_quit_at_the_character_screen_runs_nothing() {
         use bevy::ecs::system::RunSystemOnce;
         let (mut world, rx) = front_world(false, false);
-        world.insert_resource(State::new(crate::char_select::ClientState::CharSelect));
+        world.insert_resource(State::new(crate::client_state::ClientState::CharSelect));
         world.init_resource::<AddOnIdentity>();
         world.init_resource::<Messages<AppExit>>();
         world

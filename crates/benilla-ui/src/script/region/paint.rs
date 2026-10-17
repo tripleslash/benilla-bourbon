@@ -419,22 +419,22 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 impl crate::script::UiScript {
     /// Install the host's texture-path check behind the path form of `SetTexture`'s 1-or-nil
     /// answer; without one every path answers nil.
-    pub fn set_texture_probe(&mut self, probe: crate::script::TextureProbe) {
-        self.model_mut().texture_probe = Some(probe);
+    pub fn set_texture_probe(&mut self, probe: Box<dyn Fn(&str) -> bool>) {
+        self.model_mut().texture_probe = Some(probe.into());
     }
 
     /// Install the host's font-path check behind `SetFont`'s 1-or-nil answer; without one every
     /// non-empty path answers 1.
-    pub fn set_font_probe(&mut self, probe: crate::script::FontProbe) {
-        self.model_mut().font_probe = Some(probe);
+    pub fn set_font_probe(&mut self, probe: Box<dyn Fn(&str) -> bool>) {
+        self.model_mut().font_probe = Some(probe.into());
     }
 
     /// Install the host's texel-size check, which lets an axis sized 0 take its span from the art
     /// as `CSimpleTexture::GetWidth` (`0x770720`) falls back to the texels; without one such a
     /// region stays where it was.
-    pub fn set_texture_size_probe(&mut self, probe: crate::script::TextureSizeProbe) {
+    pub fn set_texture_size_probe(&mut self, probe: Box<crate::script::TextureSizeFn>) {
         let mut model = self.model_mut();
-        model.texture_size_probe = Some(probe);
+        model.texture_size_probe = Some(probe.into());
         // The reference has every art's size at hand (`0x44b3b0` loads it), so a probe installed
         // late re-resolves each texture that takes a span from its art, as if it had been there.
         let art_sized: Vec<u32> = model

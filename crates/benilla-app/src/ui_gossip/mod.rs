@@ -11,6 +11,7 @@ use benilla_ui::script::{GossipMenu, GossipOptionView, GossipQuestRow, UiScript}
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::ui_quest::{row_is_active, row_is_one_click};
 use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
 use crate::ui_session::{CoreCloses, LatchApp, LatchedWindow, NpcWindow};
@@ -278,10 +279,12 @@ fn feed_gossip(
     }
     // `GOSSIP_SHOW` carries no argument (`SignalEvent` `0x4e22b5`) and the stock window titles with
     // `UnitName("npc")` (`GossipFrame.lua:33`), so the name's landing alone re-fires it. Asked
-    // before the hold, so the name query goes out beside the text query.
+    // before the hold, so the name query goes out beside the text query; `UnitName` looks it up
+    // with a callback (`0x5171b8`), at the show a gossip packet brings.
+    let ask = Ask::at(last.is_none() || state.is_changed(), &commands);
     let npc_name = state
         .npc
-        .and_then(|g| names.resolve(&objects, g, &commands).map(str::to_string));
+        .and_then(|g| names.resolve(&objects, g, ask).map(str::to_string));
     // While the text query is out, fire nothing and keep the last snapshot: the reference returns
     // at `0x4e2068` with no write and no event, so its frame keeps what it last showed. Reading
     // the hold as a close would flash an open window.
@@ -291,7 +294,7 @@ fn feed_gossip(
     let mut fresh = snapshot(&state);
     // Expand the greeting's `$N`/`$B`/`$G`/`$<n>w` macros client-side, as the reference does.
     if let Some(greeting) = fresh.as_mut().map(|m| &mut m.greeting) {
-        let player = crate::npc_text::player_identity(&self_q, &names, &commands, unit_names.get());
+        let player = crate::npc_text::player_identity(&self_q, &names, unit_names.get());
         *greeting = crate::npc_text::substitute(
             greeting,
             &crate::npc_text::MacroContext {
@@ -395,6 +398,49 @@ mod tests {
 
     /// The one type in [`GOSSIP_ICON_TYPES`] with no art in the 1.12 install.
     const GOSSIP_ICON_TYPE_UNSHIPPED: &str = "auctioneer";
+
+    /// The stock window titles itself with `UnitName("npc")`, which looks the name up with a
+    /// callback (`0x5171b8`), at the `GOSSIP_SHOW` a menu brings; the frames between read. A
+    /// refused name is asked by no frame, and again by the next menu.
+    #[test]
+    fn a_refused_npc_name_is_asked_at_the_next_menu_never_by_a_frame() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<GossipState>()
+            .init_resource::<NameCache>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<crate::world_state::WorldStates>()
+            .add_systems(Update, feed_gossip);
+        app.insert_non_send(UiScript::new().unwrap());
+        // A creature not streamed: its name is asked by the guid's entry bits.
+        const NPC: u64 = 0xF130_0000_4500_0001;
+        let menu = |app: &mut App| {
+            let mut state = app.world_mut().resource_mut::<GossipState>();
+            state.remember_record(
+                7,
+                vec![NpcTextBlock {
+                    probability: 1.0,
+                    male: "Hello".into(),
+                    female: "Hello".into(),
+                }],
+            );
+            state.open_menu(NPC, 7, Vec::new(), Vec::new(), 0);
+        };
+        menu(&mut app);
+        app.update();
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_creature(0x45, None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(crate::query_cache::queries(&rx).is_empty());
+        menu(&mut app);
+        app.update();
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+    }
 
     #[test]
     fn snapshot_is_none_until_a_menu_opens() {

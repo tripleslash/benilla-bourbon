@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use crate::net::SelfPlayer;
 
 use super::TargetingWants;
+use crate::query_cache::Ask;
 
 /// The item guid a confirm popup stands over (`0xb4e3c0`), written by both confirm exits of
 /// `0x495d60`. The reference never clears it, since `BindTarget 0x6e5b40` re-tests the word
@@ -168,9 +169,10 @@ pub(crate) fn commit_item_cast_on_pick(
             .object(item_guid)
             .and_then(|o| o.object_entry());
         let clicked = match entry {
+            // Only read (`0x495f76`).
             Some(entry) => ladder
                 .items
-                .template(entry, item_guid, &ladder.commands)
+                .template(entry, item_guid, Ask::Read)
                 .map(|t| (t.class, t.subclass, t.inventory_type)),
             None => None,
         };

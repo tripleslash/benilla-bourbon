@@ -34,6 +34,14 @@ pub(crate) use layout::{
     FontSpec, Justify, TextSeat, UI_SEAT_NUDGE,
 };
 
+/// A glyph quad's cell in the glyph sheet's texels: the `ImageNode::rect` that draws it from a
+/// `bevy_ui` node one to one.
+pub(crate) fn glyph_texels(uv: &crate::ui_pass::UvRect) -> bevy::math::Rect {
+    let side = pack::SHEET_SIZE as f32;
+    let [tl, _, br, _] = uv.corners;
+    bevy::math::Rect::new(tl[0] * side, tl[1] * side, br[0] * side, br[1] * side)
+}
+
 /// The text size in logical px of a FontString with no font object: `GameFontNormal`'s 12.
 const DEFAULT_FONT_SIZE: f32 = 12.0;
 

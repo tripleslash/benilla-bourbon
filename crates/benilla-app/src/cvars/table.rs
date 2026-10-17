@@ -505,8 +505,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("cameraSmoothTrackingStyle", "1").checked(benilla_ui::script::check_camera_smooth_style),
     // AUTO_FOLLOW_SPEED (`UIOptionsFrame.lua:88`), deg/s, registered "180.0" (`[0xbe1070]`): it
     // sets the transition's duration (`|dyaw| / rate * factor`), an average rate, not a slew. The
-    // validator `0x50c000` refuses outside [0.1, 360]; the knob then clamps to `FOLLOW_SPEED_RANGE`,
-    // the slider's.
+    // validator `0x50c000` refuses outside [0.1, 360] and the follow reader (`0x512d75`) uses the
+    // stored value as is; 90 to 270 is only the stock slider's range.
     same("cameraYawSmoothSpeed", "180").checked(benilla_ui::script::check_camera_rate),
     // `UIOptionsFrame.lua:353` names `cameraPitchSmoothSpeed`, registered "45.0" (`0x50b90b`) with
     // the same validator, and `SetCVar` raises on a name no CVar has (`0x488c53`). `FollowRig` has
@@ -585,9 +585,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // ([`Cvars::addon_version_check`]) and live by the VM's gate.
     same("checkAddonVersion", "1"),
     // `scriptMemory` (`0x402e63`: name `0x82e81c`, "49152" `0x82e858`, category 4, record
-    // `0x882654`): the Lua heap cap in KB, shown in MB by the glue AddOns screen
-    // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`). Deviation: nothing caps the heap
-    // here; the row holds what the screen's box was set to.
+    // `0x882654`): the Lua state's limit in KB, shown in MB by the glue AddOns screen
+    // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`) and watched each frame in the
+    // world (`0x495599`), [`crate::ui_memory`].
     same("scriptMemory", "49152"),
     // `gxApi` (`0x63a833`: name `0x842a64`, default `0x864f7c` "direct3d", flags 3, callback
     // `0x63b030`, record `[0xc4ea94]`): the reference builds D3D9 unless it reads "OpenGl"
@@ -1046,8 +1046,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // `lastCharacterIndex` (`0x402d93`, "0" `0x82e570`, category 4, handle `[0x882674]`), help
     // "Last character selected": a 0-based row (the selection cell `[0x83856c]` under `"%d"`), so
-    // "0" is the first character. It mirrors [`crate::char_select::Roster::pending_index`].
-    same(crate::char_select::CVAR_LAST_CHARACTER, "0"),
+    // "0" is the first character. It mirrors
+    // [`crate::glue_session::roster::Roster::pending_index`].
+    same(crate::glue_session::roster::CVAR_LAST_CHARACTER, "0"),
     // The four user agreements the login screen walks (`0x402db6`, `0x402dd9`, `0x402dfc`,
     // `0x402e1f`; "0" `0x82e570`, category 4): "Status of the TOS" (`0x82e8e4`), "... the EULA"
     // (`0x82e8c8`), "... the Scanning notice" (`0x82e89c`) and "... the Contest notice"

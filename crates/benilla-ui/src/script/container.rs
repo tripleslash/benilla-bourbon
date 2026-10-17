@@ -59,13 +59,27 @@ pub struct ContainerSlot {
     pub consumable: bool,
     /// Current and max durability; `None` when the max is 0 or the item object has not arrived.
     pub durability: Option<(u32, u32)>,
-    /// The use cooldown, `(start_ms on the GetTime clock, duration_ms, enabled)`; `None` if cold.
+    /// The item query's answer (`GetItemCooldown`, `0x6e2ed0`), `(start_ms on the GetTime clock,
+    /// duration_ms, enabled)`. `None` is the all-zero answer, enable included: a template with no
+    /// on-use spell, a charged one with none left, or one still in flight. A cold on-use spell is
+    /// `Some((0, 0, true))`.
     pub cooldown: Option<(i64, u32, bool)>,
+    /// The template's block 0 names a spell (`+0x11c`, any trigger): `GetInventoryItemCooldown`
+    /// runs no query without one (`0x4c8b47`).
+    pub spell_0: bool,
     /// The instance carries `ITEM_FIELD_ITEM_TEXT_ID` (a mail copy): `GetContainerItemInfo`'s
     /// `readable`, which shows the Inspect cursor (`ContainerFrame.lua:638`).
     pub readable: bool,
     /// The `ITEM_FIELD_CREATOR` name for the "Written by" or "<Made by>" line, once resolved.
     pub creator: Option<String>,
+    /// The `ITEM_FIELD_GIFTCREATOR` name for a wrapped item's `ITEM_WRAPPED_BY` line, once
+    /// resolved; only a wrapped item asks for it, as the gift arm does (`0x52e29d`).
+    pub gift_creator: Option<String>,
+    /// The `ITEM_FIELD_CREATOR` guid, 0 for none: with no [`Self::creator`] yet, the name the
+    /// tooltip waits for.
+    pub creator_guid: u64,
+    /// The `ITEM_FIELD_GIFTCREATOR` guid, 0 for none, as [`Self::creator_guid`].
+    pub gift_creator_guid: u64,
     /// `ITEM_FIELD_FLAGS`; the tooltip reads UNLOCKED `0x4` and WRAPPED `0x8`.
     pub flags: u32,
     /// Bound at runtime (`0x5da2c0`): `ITEM_FIELD_FLAGS & 1`, or an enchant whose
@@ -226,6 +240,23 @@ pub struct BagAutoStore {
     pub count: Option<u32>,
 }
 
+/// What `GetContainerItemCooldown` and `GetInventoryItemCooldown` push for the item query's answer
+/// (`0x6e2ed0`), `(start, duration, enable)` in `GetTime` seconds. No answer is three zeros, the
+/// enable included (`0x4f9ae9`, `0x4c8bdf`). An answer past its end reads cold with enable 1: the
+/// query ran and found nothing left, so a re-feed cannot replay the finish flash. A held one
+/// (`enable` 0) answers the call's own now (`0x6e1517`).
+pub(super) fn item_cooldown_triple(query: Option<(f64, f64, bool)>, now: f64) -> (f64, f64, i64) {
+    match query {
+        None => (0.0, 0.0, 0),
+        Some((start, duration, enabled)) if start + duration > now || !enabled => (
+            crate::script::clock::held_start(start, enabled, now),
+            duration,
+            i64::from(enabled),
+        ),
+        Some(_) => (0.0, 0.0, 1),
+    }
+}
+
 impl super::UiScript {
     /// Drain the auto-stores `PutItemInBag`/`PutItemInBackpack` queued since the last call.
     pub fn take_bag_autostores(&mut self) -> Vec<BagAutoStore> {
@@ -256,6 +287,28 @@ impl super::UiScript {
                 model.containers.remove(&bag);
             }
         }
+    }
+
+    /// Push the use cooldowns of the worn items, `(start_ms on the GetTime clock, duration_ms,
+    /// enabled)` by live-API slot id, stored in seconds like a bag slot's. No event fires: a
+    /// cooldown moves no inventory slot.
+    pub fn set_worn_cooldowns(
+        &mut self,
+        cooldowns: std::collections::HashMap<usize, (i64, u32, bool)>,
+    ) {
+        self.model_mut().worn_cooldowns = cooldowns
+            .into_iter()
+            .map(|(slot, (start_ms, duration_ms, enabled))| {
+                (
+                    slot,
+                    (
+                        start_ms as f64 / 1000.0,
+                        f64::from(duration_ms) / 1000.0,
+                        enabled,
+                    ),
+                )
+            })
+            .collect();
     }
 
     /// Push `HasKey()`'s answer: whether the player owns a `BagFamily` key item anywhere.
@@ -754,8 +807,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // GetContainerItemCooldown(bag, slot) (`0x4f99b0`) → start, duration, enable on the `GetTime`
-    // clock, as `GetActionCooldown`; enable 0 is a held cooldown. An expired one reads cold, so a
-    // re-feed cannot replay the finish flash.
+    // clock, as `GetActionCooldown`; enable 0 is a held cooldown. No resolved slot or no item in it
+    // pushes three zeros, the enable included (`0x4f9ae9`), and so does the slot's own answer when
+    // it is all zero ([`item_cooldown_triple`]). Unlike the worn getter it asks no use-spell test
+    // of the template (`0x4f9a48`).
     lua.globals().set(
         "GetContainerItemCooldown",
         lua.create_function(|lua, (bag, slot): (Value, Value)| {
@@ -767,22 +822,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: GetContainerItemCooldown(index, slot)",
             )?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            // No resolved slot or no item in it pushes three zeros, the enable included
-            // (`0x4f9ae9`); an item with no running cooldown reads (0, 0, 1).
             let held = key.is_some_and(|k| {
                 model
                     .containers
                     .get(&k.0)
                     .is_some_and(|c| c.slots.contains_key(&k.1))
             });
-            Ok(match key.and_then(|k| model.container_cooldowns.get(&k)) {
-                _ if !held => (0.0, 0.0, 0),
-                Some(&(start, duration, enabled)) if start + duration > now || !enabled => (
-                    crate::script::clock::held_start(start, enabled, now),
-                    duration,
-                    i32::from(enabled),
-                ),
-                _ => (0.0, 0.0, 1),
+            Ok(if held {
+                item_cooldown_triple(
+                    key.and_then(|k| model.container_cooldowns.get(&k).copied()),
+                    now,
+                )
+            } else {
+                (0.0, 0.0, 0)
             })
         })?,
     )?;
@@ -1012,8 +1064,12 @@ mod tests {
                 guid: 0x10a,
                 equip_slots: Vec::new(),
                 cooldown: None,
+                spell_0: false,
                 readable: false,
                 creator: None,
+                gift_creator: None,
+                creator_guid: 0,
+                gift_creator_guid: 0,
                 flags: 0,
                 enchants: Vec::new(),
             },
@@ -1709,8 +1765,12 @@ mod tests {
                 guid: 0x10b,
                 equip_slots: Vec::new(),
                 cooldown: None,
+                spell_0: false,
                 readable: false,
                 creator: None,
+                gift_creator: None,
+                creator_guid: 0,
+                gift_creator_guid: 0,
                 flags: 0,
                 enchants: Vec::new(),
             },
@@ -2137,6 +2197,8 @@ mod tests {
         let mut state = backpack();
         // Slot 1's item is 4 s into a 10 s use-cooldown: started at GetTime 96.
         state.slots.get_mut(&1).unwrap().cooldown = Some((96_000, 10_000, true));
+        // Slot 4's on-use spell is cold: the query answers enabled.
+        state.slots.get_mut(&4).unwrap().cooldown = Some((0, 0, true));
         s.set_container(0, Some(state));
 
         assert!(s
@@ -2147,8 +2209,16 @@ mod tests {
             .unwrap());
         assert!(s
             .eval::<bool>(
-                "local s, d, e = GetContainerItemCooldown(0, 3)\n\
+                "local s, d, e = GetContainerItemCooldown(0, 4)\n\
                  return s == 0 and d == 0 and e == 1"
+            )
+            .unwrap());
+        // An item the query answered cold (`Some`) reads enabled; one it left at its zeros
+        // (`None`: no on-use spell, a spent charged template) reads enable 0 (`0x6e2f34`).
+        assert!(s
+            .eval::<bool>(
+                "local s, d, e = GetContainerItemCooldown(0, 3)\n\
+                 return s == 0 and d == 0 and e == 0"
             )
             .unwrap());
         // Past expiry, the same stored triple reads cold.

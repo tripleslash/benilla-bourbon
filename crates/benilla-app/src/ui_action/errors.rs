@@ -981,7 +981,7 @@ mod message_input_tests {
             (InputEvents::NONE, false),
         ] {
             let mut state = bevy::ecs::system::SystemState::<MessageSink>::new(&mut world);
-            let mut sink = state.get_mut(&mut world);
+            let mut sink = state.get_mut(&mut world).unwrap();
             show_messages(
                 &mut script,
                 &mut sink,

@@ -67,7 +67,7 @@ awk -F'\t' -v ref="$REF" -v show_missing="$show_missing" -v show_beyond="$show_b
       n_ref_fn["engine"], n_ref["engine"] - n_ref_fn["engine"]
     printf "  framexml  %5d functions, %5d other   <- the stock FrameXML defines these\n", \
       n_ref_fn["framexml"], n_ref["framexml"] - n_ref_fn["framexml"]
-    printf "  lua       %5d functions, %5d other   <- mlua provides these\n", \
+    printf "  lua       %5d functions, %5d other   <- benilla-lua provides these\n", \
       n_ref_fn["lua"], n_ref["lua"] - n_ref_fn["lua"]
 
     printf "\nbenilla'\''s VM — %d globals (UiScript::new(), asked at runtime)\n\n", n_ours

@@ -10,10 +10,6 @@ use super::common::script;
 
 /// Globals the engine exposes that 1.12 does not, each with its reason. The list is exact.
 const BEYOND_1_12: &[&str] = &[
-    // Our Lua runtime is 5.1 where 1.12's is 5.0: 1.12's base library does not export `_G` (an
-    // addon reaches the globals with `getfenv(0)`); ours does, as our `getglobal`/`setglobal` are
-    // written over it.
-    "_G",
     // This fork reads retail macro options (`script::macro_options`), and keeps the evaluator
     // under retail's name for `/script` lines and macro addons written against it.
     "SecureCmdOptionParse",

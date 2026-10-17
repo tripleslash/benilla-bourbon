@@ -14,6 +14,7 @@ use benilla_ui::script::{ScriptValue, UiScript};
 
 use crate::items::{Enchants, Items};
 use crate::net::Objects;
+use crate::query_cache::Ask;
 
 /// The equip arms' `item_template.bonding` (vmangos `ItemPrototype.h` `ItemBondingType`).
 pub(crate) const BIND_WHEN_EQUIPPED: u32 = benilla_ui::script::BIND_WHEN_EQUIPPED;
@@ -105,7 +106,6 @@ impl BindGate<'_> {
         script: &UiScript,
         objects: &Objects,
         items: &Items,
-        commands: &crate::net::NetCommands,
         item_guid: u64,
     ) -> bool {
         let Some(fields) = objects.object(item_guid) else {
@@ -117,7 +117,7 @@ impl BindGate<'_> {
         let Some(entry) = objects.object(item_guid).and_then(|o| o.object_entry()) else {
             return false;
         };
-        let Some(t) = items.template(entry, item_guid, commands) else {
+        let Some(t) = items.template(entry, item_guid, Ask::Read) else {
             return false;
         };
         t.bonding == BIND_WHEN_EQUIPPED && script.item_usable(entry)
@@ -126,13 +126,7 @@ impl BindGate<'_> {
     /// The use arm's predicate: `[0x5d91d3, 0x5d91f2)` holds exactly three branches to the cast,
     /// `bonding == 3`, not already bound (`0x5da2c0`) and `suppress == 0`. There is no can-use
     /// (`0x5ea930`) leg: that failure exits `0x5d8d00` before the bind arm.
-    pub(crate) fn use_binds(
-        &self,
-        objects: &Objects,
-        items: &Items,
-        commands: &crate::net::NetCommands,
-        item_guid: u64,
-    ) -> bool {
+    pub(crate) fn use_binds(&self, objects: &Objects, items: &Items, item_guid: u64) -> bool {
         let Some(fields) = objects.object(item_guid) else {
             return false;
         };
@@ -143,7 +137,7 @@ impl BindGate<'_> {
             return false;
         };
         items
-            .template(entry, item_guid, commands)
+            .template(entry, item_guid, Ask::Read)
             .is_some_and(|t| t.bonding == BIND_WHEN_USE)
     }
 

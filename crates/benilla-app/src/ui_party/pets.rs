@@ -20,6 +20,7 @@ use crate::net::{GuidIndex, NetCommands, ObjectStore};
 use crate::ui_script::gate;
 
 use super::GroupState;
+use crate::query_cache::Ask;
 
 /// Which roster a pet token counts its owner in: the two resolve the pet's guid apart
 /// (`0x4e81d0` behind the owner's online bit, `0x491960` with none).
@@ -131,9 +132,12 @@ pub(super) fn member_pet(
         // `UnitIsConnected` answers 1 for any object (`0x517daf`), as `snapshot` does. No
         // reaction: the pet frame reads none, as the `"pet"` token's.
         Some(store) => {
+            // The unit's create looked its name up with a callback (`0x5dec12`); a frame asks only
+            // a name the cache holds nothing for, as one invalidated since, and a refused one waits
+            // for the next create.
             let name = look
                 .names
-                .resolve_unit(guid, Some(store), look.commands)
+                .resolve_unit(guid, Some(store), Ask::New(look.commands))
                 .map(str::to_string);
             crate::ui_unit::snapshot(store, guid, name, 0, Default::default(), look.types)
         }

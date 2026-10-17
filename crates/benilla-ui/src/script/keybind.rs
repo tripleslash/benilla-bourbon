@@ -132,7 +132,7 @@ enum Row {
 }
 
 /// The commands, the key sets and the queued host requests; lives in [`Model`].
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct KeybindState {
     entries: Vec<Entry>,
     /// The display list, headers and commands in load order.

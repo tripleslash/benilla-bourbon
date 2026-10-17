@@ -24,6 +24,7 @@ use crate::spell::Cooldowns;
 use crate::target::Selection;
 
 use super::{PlayerActions, Spells};
+use crate::query_cache::Ask;
 use crate::spell::usable;
 use crate::spell::AutoRepeatActive;
 
@@ -209,15 +210,8 @@ pub(super) fn feed_action_state(
                         spell_mods,
                         control_lost,
                     };
-                    let (u, oom) = usable::spell_usable(
-                        button.action,
-                        d,
-                        sp,
-                        &ctx,
-                        &objects,
-                        &items,
-                        &commands,
-                    );
+                    let (u, oom) =
+                        usable::spell_usable(button.action, d, sp, &ctx, &objects, &items);
                     st.usable = u;
                     st.not_enough_mana = oom;
                 } else {
@@ -261,8 +255,10 @@ pub(super) fn feed_action_state(
             }
             ACTION_KIND_ITEM => {
                 // Only the `Copy` on-use spell, not a clone of the template per slot per frame.
+                // The getter's lookup passes a callback (`0x4e5b3f`) on the bar's events, which no
+                // event here marks: an entry is asked when it first shows.
                 let use_spell = items
-                    .template(button.action, 0, &commands)
+                    .template(button.action, 0, Ask::New(&commands))
                     .and_then(|t| t.use_spell);
                 // The count the slot holds (`0xbc6390`), which `GetActionCount` answers too: the
                 // gate reads the cache the recount wrote, never the bags (`0x4e50ab`).
@@ -303,7 +299,6 @@ pub(super) fn feed_action_state(
                         spells.as_deref(),
                         &objects,
                         &items,
-                        &commands,
                     );
                     st.usable = u;
                     st.not_enough_mana = oom;

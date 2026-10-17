@@ -5,6 +5,10 @@
 //! - A zone id change fires `ZONE_CHANGED_NEW_AREA` alone; else a text change fires
 //!   `ZONE_CHANGED_INDOORS` or `ZONE_CHANGED` by the indoor bit. The first world-enter is a zone
 //!   id change from the zeroed cache.
+//! - The leaf is the area query's answer (`0x6703a0`): on a map whose WDT holds one global WMO,
+//!   `Map.dbc` field 19 for every entity; elsewhere the down-ray's WMO row, else the terrain. The
+//!   indoor naming below still applies on such a map, as `0x67e510` takes the indoor arm by the
+//!   indoor bit alone.
 //! - The zone is the leaf's single-hop parent (AreaTable field 2, itself when 0).
 //! - The indoor bit is the faces-only down-ray (`0x6a87f0`): the surface below is a WMO face whose
 //!   group lacks MOGP `0x8` EXTERIOR.
@@ -288,13 +292,13 @@ pub(crate) struct RealmPvp(bool);
 /// Latch [`RealmPvp`] from the realm this session entered the world on.
 fn latch_realm_pvp(
     mut latch: ResMut<RealmPvp>,
-    roster: Option<Res<crate::char_select::Roster>>,
-    realms: Option<Res<crate::realm_select::Realms>>,
+    roster: Option<Res<crate::glue_session::roster::Roster>>,
+    tables: Option<Res<crate::glue_session::realm::RealmTables>>,
 ) {
     let realm_type = roster.and_then(|r| r.realm.as_ref().map(|realm| realm.realm_type));
     let row = realm_type
-        .zip(realms)
-        .and_then(|(t, realms)| realms.row_pvp(t));
+        .zip(tables)
+        .and_then(|(t, tables)| tables.row_pvp(t));
     latch.0 = latched_realm_pvp(latch.0, row);
 }
 
@@ -312,7 +316,7 @@ impl Plugin for AreaPlugin {
         app.init_resource::<RealmPvp>()
             .add_data_loaders(load_area_table)
             .add_systems(
-                OnEnter(crate::char_select::ClientState::InWorld),
+                OnEnter(crate::client_state::ClientState::InWorld),
                 latch_realm_pvp,
             )
             .add_systems(

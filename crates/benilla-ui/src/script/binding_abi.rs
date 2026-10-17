@@ -132,64 +132,11 @@ pub(crate) fn text_arg(lua: &Lua, v: Option<Value>) -> mlua::Result<Option<Strin
 }
 
 /// Lua's number-to-string as the 1.12 client compiles it: MSVC's `sprintf("%.14g")`
-/// (`luaV_tostring` `0x6f7c80`, format `0x871960`). `EditBox:SetNumber` (`0x798690`) formats
-/// through it too, being byte-identical to `SetText` (`0x7984c0`). The exponent has at least three
-/// digits: `1e20` prints `1e+020`.
-///
-/// Deviation: the result is correctly rounded, where the reference rounds to 17 digits half-up and
-/// then again to 14, differing in the last digit on about 0.05% of doubles, because no consumer
-/// reads that digit.
+/// (`luaV_tostring` `0x6f7c80`, format `0x871960`), the VM's own ([`mlua::benilla_lua::fmt_g14`]).
+/// `EditBox:SetNumber` (`0x798690`) formats through it too, being byte-identical to `SetText`
+/// (`0x7984c0`). The exponent has at least three digits: `1e20` prints `1e+020`.
 pub(crate) fn lua_number_text(v: f64) -> String {
-    if v.is_nan() {
-        // MSVC's own spellings, which are not "NaN".
-        return if v.is_sign_negative() {
-            "-1.#IND".into()
-        } else {
-            "1.#QNAN".into()
-        };
-    }
-    if v.is_infinite() {
-        return if v < 0.0 {
-            "-1.#INF".into()
-        } else {
-            "1.#INF".into()
-        };
-    }
-    if v == 0.0 {
-        // `%g` prints negative zero without the sign.
-        return "0".into();
-    }
-    const SIG: i32 = 14;
-    let exp = v.abs().log10().floor() as i32;
-    // Re-derive the exponent from the rounded form: 9.9999e2 rounds to 1e3 and changes style.
-    let exp = {
-        let probe = format!("{:.*e}", (SIG - 1) as usize, v);
-        probe
-            .rsplit('e')
-            .next()
-            .and_then(|e| e.parse::<i32>().ok())
-            .unwrap_or(exp)
-    };
-    // C's `%g` style rule verbatim: exponential when `exp < -4 || exp >= P`, else fixed.
-    if !(-4..SIG).contains(&exp) {
-        let mantissa = format!("{:.*e}", (SIG - 1) as usize, v);
-        let (m, _) = mantissa.split_once('e').unwrap_or((mantissa.as_str(), "0"));
-        let m = trim_g(m);
-        let sign = if exp < 0 { '-' } else { '+' };
-        // At least three exponent digits, more when needed.
-        format!("{m}e{sign}{:03}", exp.abs())
-    } else {
-        let decimals = (SIG - 1 - exp).max(0) as usize;
-        trim_g(&format!("{v:.decimals$}")).to_string()
-    }
-}
-
-/// Strip `%g`'s trailing zeros, and the decimal point if nothing follows it.
-fn trim_g(s: &str) -> &str {
-    if !s.contains('.') {
-        return s;
-    }
-    s.trim_end_matches('0').trim_end_matches('.')
+    mlua::benilla_lua::fmt_g14(v)
 }
 
 /// Storm's `SStrToInt` (`0x64ac60`): an optional leading `-` (and no `+`), then the decimal digits
@@ -318,22 +265,30 @@ fn scale_by_pow10(value: f64, exp: i32) -> f64 {
 /// So `"0"` is false and `"0.5"` goes by its first byte: the Interface panel passes its options
 /// the strings `"0"` and `"1"`.
 pub(crate) fn bool_or_default(v: Option<&Value>, default: bool) -> bool {
+    flag_or_default(v, i32::from(default)) != 0
+}
+
+/// `GetScriptFlagArg` (`0x6f1c10`) as its caller receives it: the same coercion as
+/// [`bool_or_default`], but the number arm returns the truncated integer itself (`0x6f1c46` calls
+/// `0x40a2b0` and returns, with no `!= 0`), so a caller that compares or stores the value sees a
+/// 2 as 2. A boolean, a string and a nil give 0 or 1, and every other type the raw `default`.
+pub(crate) fn flag_or_default(v: Option<&Value>, default: i32) -> i32 {
     let Some(v) = v else {
         return default; // LUA_TNONE
     };
     match v {
-        Value::Nil => false,
-        Value::Boolean(b) => *b,
+        Value::Nil => 0,
+        Value::Boolean(b) => i32::from(*b),
         Value::LightUserData(_) => default,
         // Truncated like `0x40a2b0` ([`ftol`]), which keeps only the low dword: 2^32 reads 0, and
         // an infinity or NaN too.
-        Value::Integer(i) => (*i as i32) != 0,
-        Value::Number(n) => ftol(*n) != 0,
+        Value::Integer(i) => *i as i32,
+        Value::Number(n) => ftol(*n),
         Value::String(s) => {
             // The keyword arm is also reached by every byte the remap table cannot index (and
             // by an empty string); a string it does not know takes `default`.
             let bytes = s.as_bytes();
-            crate::strings::keyword_bool(&bytes).unwrap_or(default)
+            crate::strings::keyword_bool(&bytes).map_or(default, i32::from)
         }
         _ => default,
     }
@@ -455,6 +410,23 @@ mod tests {
         for none in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 9.3e18, -9.3e18] {
             assert_eq!(ftol(none), 0, "{none}");
         }
+    }
+
+    /// `0x6f1c10` returns the truncated integer for a number (`0x6f1c46` returns `0x40a2b0`'s
+    /// result unchanged), 0 or 1 for a boolean or a string, and the raw default for the rest.
+    #[test]
+    fn flag_or_default_returns_the_number_itself() {
+        let lua = lua();
+        let st = |t: &str| Value::String(lua.create_string(t).unwrap());
+        assert_eq!(flag_or_default(Some(&Value::Number(2.9)), 0), 2);
+        assert_eq!(flag_or_default(Some(&Value::Number(-1.5)), 0), -1);
+        assert_eq!(flag_or_default(Some(&Value::Integer(7)), 0), 7);
+        assert_eq!(flag_or_default(Some(&Value::Boolean(true)), 0), 1);
+        assert_eq!(flag_or_default(Some(&Value::Nil), 5), 0);
+        assert_eq!(flag_or_default(None, 5), 5);
+        assert_eq!(flag_or_default(Some(&st("2")), 0), 1);
+        assert_eq!(flag_or_default(Some(&st("off")), 5), 0);
+        assert_eq!(flag_or_default(Some(&st("maybe")), 5), 5);
     }
 
     #[test]

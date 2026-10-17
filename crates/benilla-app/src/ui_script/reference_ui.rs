@@ -760,7 +760,7 @@ mod tests {
         assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
         let have: std::collections::HashSet<String> = s
             .eval::<Vec<String>>(
-                "local t = {} for k in pairs(_G) do table.insert(t, k) end return t",
+                "local t = {} for k in pairs(getfenv(0)) do table.insert(t, k) end return t",
             )
             .expect("dump _G")
             .into_iter()
@@ -1386,7 +1386,7 @@ mod tests {
         }
         let have: std::collections::HashSet<String> = s
             .eval::<Vec<String>>(
-                "local t = {} for k in pairs(_G) do table.insert(t, k) end return t",
+                "local t = {} for k in pairs(getfenv(0)) do table.insert(t, k) end return t",
             )
             .expect("dump _G")
             .into_iter()
@@ -1967,26 +1967,9 @@ mod tests {
                  `ShowFriends` too",
             ),
             (
-                "BILLING_NAG_DIALOG",
-                "UIParent.lua — the subscription-time nag; vmangos never sends it",
-            ),
-            (
-                "IGR_BILLING_NAG_DIALOG",
-                "UIParent.lua — the internet-cafe billing nag, likewise never sent",
-            ),
-            (
                 "GOSSIP_ENTER_CODE",
                 "UIParent.lua — the code-entry gossip option (a door with a combination); \
                  benilla's gossip feed carries no code-entry option kind yet",
-            ),
-            (
-                "MEMORY_EXHAUSTED",
-                "UIParent.lua — the client's own out-of-memory dialog; benilla's allocator \
-                 failure is a Rust abort, not a Lua event",
-            ),
-            (
-                "MEMORY_RECOVERED",
-                "UIParent.lua — the other half of MEMORY_EXHAUSTED",
             ),
             (
                 "PLAYER_SKINNED",

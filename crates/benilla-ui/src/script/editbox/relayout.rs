@@ -2,6 +2,7 @@
 //! `0x77b8c0` seats the FontString by the insets, and the flush's relayout `0x77d4d0` windows a
 //! single-line box's text and sizes a multi-line box to its text.
 
+use crate::script::TextMeasure as _;
 use mlua::Lua;
 
 use crate::layout::{Anchor, Anchors, Point, Rect};

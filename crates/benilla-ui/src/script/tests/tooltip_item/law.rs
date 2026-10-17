@@ -580,6 +580,7 @@ fn instance_tail_creator_and_readable() {
             ..Default::default()
         },
     );
+    s.set_lock_rows(HashMap::from([(7, Vec::new())]));
     s.set_item_template(
         2589,
         ItemTemplateView {
@@ -686,6 +687,187 @@ fn instance_tail_creator_and_readable() {
         texts,
         vec!["Small Barnacled Clam"],
         "a running cooldown suppresses ITEM_OPENABLE — the two lines are exclusive here"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// A wrapped item (`ITEM_FIELD_FLAGS & 0x8`, `0x52b789`) takes the gift arm (`0x52e1b9`): it names
+/// its giver off `ITEM_FIELD_GIFTCREATOR` in white (`0x52e2cb`) and never prints the creator's
+/// line. A giver not yet resolved adds nothing, and an unwrapped item ignores the field.
+#[test]
+fn a_wrapped_item_names_its_giver_and_hides_the_creator_line() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(r#"ITEM_WRAPPED_BY = "[WRAPPED_BY %s]""#).unwrap();
+    s.set_item_template(
+        5042,
+        ItemTemplateView {
+            name: "Gift".into(),
+            quality: 1,
+            ..Default::default()
+        },
+    );
+    let slot = |flags: u32, creator: Option<&str>, gift: Option<&str>| ContainerSlot {
+        item_id: 5042,
+        count: 1,
+        quality: Some(1),
+        creator: creator.map(str::to_string),
+        gift_creator: gift.map(str::to_string),
+        flags,
+        ..Default::default()
+    };
+    let mut slots = HashMap::new();
+    slots.insert(1, slot(0x8, Some("Geoffrey"), Some("Santa"))); // wrapped, giver known
+    slots.insert(2, slot(0x8, Some("Geoffrey"), None)); // wrapped, giver zero or in flight
+    slots.insert(3, slot(0, Some("Geoffrey"), Some("Santa"))); // unwrapped keeps its creator
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 3,
+            slots,
+        }),
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "SlotG"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+        TT:SetOwner(a, "ANCHOR_RIGHT"); TT:SetBagItem(0, 1)
+    "#,
+    )
+    .unwrap();
+    let lines = lines_of(&mut s);
+    let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(texts, vec!["Gift", "[WRAPPED_BY Santa]"]);
+    assert_eq!(lines[1].1, [1.0; 4], "ITEM_WRAPPED_BY is white");
+    for (n, want) in [
+        (2, vec!["Gift"]),
+        (3, vec!["Gift", "|cff00ff00[CREATED_BY Geoffrey]|r"]),
+    ] {
+        s.run(&format!(
+            r#"TT:SetOwner(getglobal("SlotG"), "ANCHOR_RIGHT"); TT:SetBagItem(0, {n})"#
+        ))
+        .unwrap();
+        let texts: Vec<String> = lines_of(&mut s).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(texts, want, "slot {n}");
+    }
+
+    // A worn wrapped item reaches the same arm through the doll's view.
+    let mut inv: InventorySlots = Default::default();
+    inv[16] = Some(InvSlotView {
+        item_id: 5042,
+        name: Some("Gift".into()),
+        quality: 1,
+        flags: 0x8,
+        creator: Some("Geoffrey".into()),
+        gift_creator: Some("Santa".into()),
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    s.run(r#"TT:SetOwner(getglobal("SlotG"), "ANCHOR_RIGHT"); TT:SetInventoryItem("player", 16)"#)
+        .unwrap();
+    let texts: Vec<String> = lines_of(&mut s).into_iter().map(|(t, _)| t).collect();
+    assert_eq!(texts, vec!["Gift", "[WRAPPED_BY Santa]"]);
+    assert!(s.take_errors().is_empty());
+}
+
+/// A wrapped gift in a trade names its giver on both sides. The player's slot is a live item
+/// object: its WRAPPED flag takes the gift arm (`0x52b789`) and the object's `ITEM_FIELD_GIFTCREATOR`
+/// names the giver, whether the slot came from a click or from the app. The partner's is a block:
+/// its wrapped word (`0x534559`) takes the same arm and its gift creator (`0x534574`) names the
+/// giver. A block whose wrapped word is clear ignores the giver, and an unresolved one adds nothing.
+#[test]
+fn a_wrapped_gift_in_trade_names_its_giver_on_both_sides() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(r#"ITEM_WRAPPED_BY = "[WRAPPED_BY %s]" ITEM_CREATED_BY = "[CREATED_BY %s]""#)
+        .unwrap();
+    s.set_item_template(
+        5042,
+        ItemTemplateView {
+            name: "Gift".into(),
+            quality: 1,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "SlotT"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+    "#,
+    )
+    .unwrap();
+    let row = |object_flags: Option<u32>, wrapped: bool, gift: Option<&str>| TradeSlotItem {
+        item_id: 5042,
+        name: Some("Gift".into()),
+        count: 1,
+        quality: Some(1),
+        object_flags,
+        wrapped,
+        gift_creator: gift.map(str::to_string),
+        ..Default::default()
+    };
+    let mut st = TradeState::default();
+    st.player.slots[0] = Some(row(Some(0x8), true, Some("Santa")));
+    st.player.slots[1] = Some(row(Some(0), false, Some("Santa")));
+    st.target.slots[0] = Some(row(None, true, Some("Santa")));
+    st.target.slots[1] = Some(row(None, false, Some("Santa")));
+    st.target.slots[2] = Some(row(None, true, None));
+    s.set_trade(Some(st));
+    let texts = |s: &mut UiScript, call: &str| -> Vec<String> {
+        s.run(&format!("TT:SetOwner(SlotT, 'ANCHOR_RIGHT') {call}"))
+            .unwrap();
+        lines_of(s).into_iter().map(|(t, _)| t).collect()
+    };
+    let gift = vec!["Gift".to_string(), "[WRAPPED_BY Santa]".to_string()];
+    assert_eq!(texts(&mut s, "TT:SetTradePlayerItem(1)"), gift, "player");
+    assert_eq!(texts(&mut s, "TT:SetTradeTargetItem(1)"), gift, "target");
+    assert_eq!(
+        texts(&mut s, "TT:SetTradePlayerItem(2)"),
+        vec!["Gift"],
+        "unwrapped"
+    );
+    assert_eq!(
+        texts(&mut s, "TT:SetTradeTargetItem(2)"),
+        vec!["Gift"],
+        "unwrapped block"
+    );
+    assert_eq!(
+        texts(&mut s, "TT:SetTradeTargetItem(3)"),
+        vec!["Gift"],
+        "giver unresolved"
+    );
+
+    // The player's click takes the giver from the bag record it places.
+    s.open_trade_window();
+    s.set_trade(Some(TradeState::default()));
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 1,
+            slots: HashMap::from([(
+                1,
+                ContainerSlot {
+                    item_id: 5042,
+                    guid: 0x5042,
+                    count: 1,
+                    quality: Some(1),
+                    link: Some("|cffffffff|Hitem:5042:0:0:0|h[Gift]|h|r".into()),
+                    creator: Some("Geoffrey".into()),
+                    gift_creator: Some("Santa".into()),
+                    flags: 0x8,
+                    ..Default::default()
+                },
+            )]),
+        }),
+    );
+    s.run("PickupContainerItem(0, 1) ClickTradeButton(1)")
+        .unwrap();
+    assert_eq!(
+        texts(&mut s, "TT:SetTradePlayerItem(1)"),
+        gift,
+        "placed by a click"
     );
     assert!(s.take_errors().is_empty());
 }

@@ -350,7 +350,7 @@ pub(crate) struct World {
     creates: Arc<Mutex<u8>>,
     /// How long a `CMSG_CHAR_ENUM` waits before its answer.
     enum_delay: Arc<Mutex<Duration>>,
-    /// Answer `CMSG_CHAR_ENUM` with `SMSG_WARDEN_DATA`, as a server does that wants Warden.
+    /// Send `SMSG_WARDEN_DATA` behind the authentication answer, as vmangos does with Warden on.
     warden: Arc<AtomicBool>,
     /// Close the socket on `CMSG_CHAR_ENUM` instead of answering.
     cut: Arc<AtomicBool>,
@@ -364,6 +364,8 @@ pub(crate) struct World {
     /// answer (vmangos builds it in the auth handler, so it leads: `WorldSocket.cpp:447`).
     addon_info: AddonReply,
     open: Arc<AtomicUsize>,
+    /// Every session's socket, for [`World::drop_links`].
+    links: Arc<Mutex<Vec<TcpStream>>>,
 }
 
 impl World {
@@ -405,9 +407,22 @@ impl World {
             .collect()
     }
 
-    /// Have the server demand Warden in place of the roster from now on.
-    pub(crate) fn demand_warden(&self) {
+    /// Ask every session from now on for Warden as vmangos does with it on: the session starts
+    /// Warden right behind `AUTH_OK` (`World.cpp:333-338`) and its thread sends the first request
+    /// within a second (`Anticheat.cpp:111-127`, `WardenWin.cpp:1403-1405`). No handler waits on
+    /// the answer, so the roster and the world entry are served as ever; a client that never
+    /// answers is kicked later by the server's own clock (`Warden.cpp:686-691`), which this
+    /// server leaves to [`World::drop_links`].
+    pub(crate) fn ask_warden(&self) {
         self.warden.store(true, Ordering::SeqCst);
+    }
+
+    /// Close every session's socket from the server's side, as vmangos does for a session idle at
+    /// character select (`CharacterScreenMaxIdleTime`).
+    pub(crate) fn drop_links(&self) {
+        for s in self.links.lock().unwrap().drain(..) {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
     }
 
     /// Have the server cut the connection on the next roster ask.
@@ -554,6 +569,8 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
     let addon_reply = Arc::clone(&addon_info);
     let open = Arc::new(AtomicUsize::new(0));
     let sessions = Arc::clone(&open);
+    let links = Arc::new(Mutex::new(Vec::<TcpStream>::new()));
+    let link_log = Arc::clone(&links);
     thread::spawn(move || {
         let mut last: Option<Key> = None;
         for stream in listener.incoming() {
@@ -578,6 +595,13 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
             let Some(key) = last else {
                 return;
             };
+            // Held and counted before the client can see the session open, so a drop never misses
+            // it and `open` never reads behind the client's authentication.
+            if let Ok(link) = s.try_clone() {
+                link_log.lock().unwrap().push(link);
+            }
+            let sessions = Arc::clone(&sessions);
+            sessions.fetch_add(1, Ordering::SeqCst);
             let mut crypto = HeaderCrypto::from_session_key(key);
             let reply = addon_reply.lock().unwrap().clone();
             if let Some((body, false)) = &reply {
@@ -592,6 +616,16 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
             if let Some((body, true)) = &reply {
                 send(&mut s, Some(&mut crypto), opcode::SMSG_ADDON_INFO, body);
             }
+            // An opaque body: the client hands it to its Warden module and reads none of it
+            // (`0x6ca5c0`).
+            if warden_flag.load(Ordering::SeqCst) {
+                send(
+                    &mut s,
+                    Some(&mut crypto),
+                    opcode::SMSG_WARDEN_DATA,
+                    &[0x02; 21],
+                );
+            }
             let log = Arc::clone(&log);
             let packet_log = Arc::clone(&packet_log);
             let roster_bodies = Arc::clone(&roster_bodies);
@@ -599,7 +633,6 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
             let create_answer = Arc::clone(&create_answer);
             let session_log = Arc::clone(&session_log);
             let enum_wait = Arc::clone(&enum_wait);
-            let warden_flag = Arc::clone(&warden_flag);
             let cut_flag = Arc::clone(&cut_flag);
             let refuse_flag = Arc::clone(&refuse_flag);
             let refuse_wait = Arc::clone(&refuse_wait);
@@ -609,8 +642,6 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                 all.push(Vec::new());
                 all.len() - 1
             };
-            let sessions = Arc::clone(&sessions);
-            sessions.fetch_add(1, Ordering::SeqCst);
             thread::spawn(move || {
                 while let Some(packet) = recv_packet(&mut s, Some(&mut crypto)) {
                     let op = u16::from_le_bytes([packet[2], packet[3]]);
@@ -628,10 +659,6 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                             if cut_flag.load(Ordering::SeqCst) {
                                 break;
                             }
-                            if warden_flag.load(Ordering::SeqCst) {
-                                send(&mut s, Some(&mut crypto), opcode::SMSG_WARDEN_DATA, &[]);
-                                continue;
-                            }
                             send(&mut s, Some(&mut crypto), opcode::SMSG_CHAR_ENUM, &body);
                         }
                         // A success appends the character at level 1 with the next guid.
@@ -644,7 +671,8 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
                                 let b = &body[end + 1..];
                                 for roster in roster_bodies.lock().unwrap().iter_mut() {
                                     let guid = roster.iter().map(|c| c.guid).max().unwrap_or(0) + 1;
-                                    let mut c = crate::char_select::test_character(guid, &name);
+                                    let mut c =
+                                        crate::glue_session::roster::test_character(guid, &name);
                                     (c.race, c.class, c.gender, c.skin, c.face) =
                                         (b[0], b[1], b[2], b[3], b[4]);
                                     (c.hair_style, c.hair_color, c.facial_hair) =
@@ -736,6 +764,7 @@ pub(crate) fn world(listener: TcpListener, keys: Receiver<Key>) -> World {
         trail,
         addon_info,
         open,
+        links,
     }
 }
 
@@ -767,18 +796,8 @@ pub(crate) struct Cycles {
     pub(crate) abandon: Arc<AtomicU64>,
 }
 
-/// The read thread's cycle loop and the write thread, as [`super::spawn_net`] runs them: the native
-/// screens' policy, the IO thread enumerating on reaching the character park.
+/// The read thread's cycle loop and the write thread, as [`super::spawn_net`] runs them.
 pub(crate) fn spawn_cycles() -> Cycles {
-    spawn_cycles_for(false)
-}
-
-/// [`spawn_cycles`] under the stock screen's policy: the roster comes only when it is asked for.
-pub(crate) fn spawn_cycles_asking() -> Cycles {
-    spawn_cycles_for(true)
-}
-
-fn spawn_cycles_for(screen_asks_roster: bool) -> Cycles {
     let (events_tx, events) = crossbeam_channel::unbounded();
     let (commands, cmd_rx) = crossbeam_channel::unbounded::<ClientCommand>();
     let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
@@ -788,11 +807,7 @@ fn spawn_cycles_for(screen_asks_roster: bool) -> Cycles {
     let abandon = Arc::new(AtomicU64::new(0));
     let thread_abandon = Arc::clone(&abandon);
     thread::spawn(move || {
-        let parks = Parks {
-            login_rx,
-            park_rx,
-            screen_asks_roster: Arc::new(std::sync::atomic::AtomicBool::new(screen_asks_roster)),
-        };
+        let parks = Parks { login_rx, park_rx };
         let clock = Mutex::new(PingClock::default());
         let mut tails = Default::default();
         loop {

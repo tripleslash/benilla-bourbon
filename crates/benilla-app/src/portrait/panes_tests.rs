@@ -627,6 +627,25 @@ fn each_pane_draws_its_own_subject_named_or_not() {
     assert_eq!(h.drawn().len(), 2);
 }
 
+/// The camera spawns through `Commands` with the pane, and the pass that builds the copy aims it
+/// with that spawn, so the frame the pane opens on already composites an aimed view, not the
+/// spawn pose.
+#[test]
+fn a_pane_is_aimed_on_the_frame_it_opens() {
+    let mut h =
+        Harness::new(r#"m = CreateFrame("PlayerModel", "Doll", UIParent) m:SetUnit("player")"#);
+    let pane = h.handle(Some("Doll"));
+    h.pass();
+    let world = h.app.world_mut();
+    let booth = &world.resource::<PaneBooths>().panes[&pane];
+    let (entity, aimed) = (booth.camera, booth.aimed);
+    assert!(aimed.is_some(), "the opening pass records the aim");
+    assert!(
+        matches!(world.get::<Projection>(entity), Some(Projection::Custom(_))),
+        "the camera wears the body frame on the opening frame, not its spawn pose"
+    );
+}
+
 /// The hide hook drops the copy (`0x505ce0`) and the booth with it; the show hook builds again
 /// from the stored GUID (`0x505d3c`).
 #[test]

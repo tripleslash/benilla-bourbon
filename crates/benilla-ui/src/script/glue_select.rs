@@ -112,7 +112,7 @@ struct Record {
 }
 
 /// The roster and the select screen's cells the verbs read.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct GlueRoster {
     records: Vec<Record>,
     cells: GlueSelectCells,

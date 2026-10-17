@@ -164,6 +164,11 @@ impl Loader<'_> {
                 // the ctor's CENTER (`0x212`); the justify still reaches the paint (`0x784111`).
                 self.call_region(&region, "ClearAllPoints", (), dbg);
                 self.apply_region_layout(bt, &region, self_name, dbg, font_attrs);
+                // `<ButtonText>` reads its own `inherits=` and `font=` as any FontString does
+                // (`0x6f2780` → `0x770f40`); `<NormalText>` skips them (`0x778b7b`).
+                if font_attrs == FontAttrs::Own {
+                    self.apply_fontstring_font(bt, &region, dbg);
+                }
                 self.apply_wrap_attrs(bt, &region, dbg);
                 if let Err(e) = crate::script::implicit_creation_anchor_lua(self.lua, &region) {
                     self.report.fault(format!("{dbg}: implicit anchor: {e}"));
@@ -488,14 +493,24 @@ impl Loader<'_> {
                 self.call(wrapper, "SetFontObject", (name, f.to_string()), dbg);
             }
             Some(path) => {
-                let height = children_named(el, "FontHeight").last().and_then(abs_value);
+                // As a FontString's file, `CSimpleFont::LoadXML` needs a height above 0
+                // (`0x783d6d`-`0x783d78`); else it reports `0x87a4f0` and returns (`0x783dae`)
+                // before `outline=`, `<Color>`, `<Shadow>`, the justifies and `spacing=`.
+                let height = children_named(el, "FontHeight")
+                    .last()
+                    .and_then(abs_value)
+                    .filter(|h| *h > 0.0);
+                let Some(height) = height else {
+                    self.report_missing_font_height("Font", "<unnamed>", &el.tag);
+                    return;
+                };
                 let outline = el.attr("outline").map(str::to_string);
                 if let Err(e) = crate::script::apply_simplehtml_font_parts(
                     self.lua,
                     wrapper,
                     elem,
                     Some(path.to_string()),
-                    height,
+                    Some(height),
                     outline,
                 ) {
                     self.report

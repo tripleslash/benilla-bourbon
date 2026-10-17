@@ -94,7 +94,7 @@ type Span = (Rect, String, String);
 
 /// A text frame's hyperlink buttons: the live ones in placement order, each over the span at its
 /// index, and the free list, taken from the head and released to the tail.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct LinkPool {
     live: Vec<FrameHandle>,
     free: VecDeque<FrameHandle>,

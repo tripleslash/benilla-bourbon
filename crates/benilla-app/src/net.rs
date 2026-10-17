@@ -25,7 +25,7 @@ use benilla_world::schedule::WorldStage;
 mod apply;
 pub(crate) mod handlers;
 pub(crate) mod io;
-mod motion;
+pub(crate) mod motion;
 mod objects;
 pub(crate) use objects::tear_down;
 mod session;
@@ -47,11 +47,6 @@ pub(crate) use motion::{
     grounded_y, jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
     UnitMoveModes,
 };
-// Only the ground-census probe reads these, so a build without the instruments leaves them
-// unused. Not a `cfg`: seam knowledge lives in three fixed places, and this file is not one of
-// them.
-#[allow(unused_imports)]
-pub(crate) use motion::{ground_derived, GroundClamped};
 
 /// The net subsystem: spawns the background IO threads and drives the per-frame event drain.
 pub(crate) struct NetPlugin {
@@ -104,13 +99,13 @@ impl Plugin for NetPlugin {
             .insert_resource(NetCommands(handles.commands))
             .insert_resource(CharPick(handles.pick))
             .insert_resource(RealmChoice(handles.realm))
-            .insert_resource(RosterPolicy(handles.screen_asks_roster))
             .insert_resource(LoginSubmit(handles.login))
             .insert_resource(LoginAbandon(handles.login_abandon))
             .insert_resource(PingShared(handles.ping))
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
             .init_resource::<AddonInfoReply>()
+            .init_resource::<SessionBilling>()
             .init_resource::<PendingTransfer>()
             .init_resource::<NetStatus>()
             .init_resource::<DroppedOpcodes>()
@@ -477,12 +472,11 @@ pub(crate) struct ActiveMover;
 pub(crate) struct NetEvents(Receiver<SessionEvent>);
 
 /// The outbound command channel.
-#[derive(Resource)]
+#[derive(Resource, Debug)]
 pub(crate) struct NetCommands(pub(crate) Sender<ClientCommand>);
 
 /// The character-select channel to the IO thread parked at select: create and delete are served
-/// in place, re-emitting the roster (under the native policy), until an [`CharRequest::Enter`]
-/// moves into the world.
+/// in place until an [`CharRequest::Enter`] moves into the world.
 #[derive(Resource)]
 pub(crate) struct CharPick(pub(crate) ParkSender<CharRequest>);
 
@@ -589,14 +583,6 @@ pub(crate) enum CharRequest {
     Enumerate,
 }
 
-/// Whether the screen asks for its roster (the stock glue screens' `GetCharacterListUpdate`)
-/// instead of the IO thread fetching it on reaching the character park (the native screens'). Set
-/// by the UI session as it installs the VM that runs: true with the stock glue VM up, false
-/// otherwise, so a run whose stock VM did not build still gets its roster. The IO thread reads it
-/// as each park is entered.
-#[derive(Resource, Clone)]
-pub(crate) struct RosterPolicy(pub(crate) std::sync::Arc<std::sync::atomic::AtomicBool>);
-
 /// The realm channel: the answer to each [`RealmListMessage`]. Two parks listen, the login-side
 /// one and the character one, since the reference's realm list is a dialog over either screen
 /// (`RealmList.xml` is `frameStrata="DIALOG"`).
@@ -628,7 +614,7 @@ pub(crate) enum RealmRequest {
     Leave,
 }
 
-/// The credentials channel to the IO thread's pre-logon park, sent by [`crate::login`].
+/// The credentials channel to the IO thread's pre-logon park, sent by [`crate::glue_session::login`].
 #[derive(Resource)]
 pub(crate) struct LoginSubmit(pub(crate) async_channel::Sender<io::LoginRequest>);
 
@@ -762,15 +748,32 @@ pub(crate) struct WallClockSample {
     /// The server's `time(nullptr)` at `received`.
     base_unix: u32,
     received: Instant,
+    /// The responses of the session so far, this one included.
+    count: u64,
+    /// Whether the local clock read the server's second exactly, where the reference's offset
+    /// `G = local - server` would be 0 and is stored as 1 (`0x4def00`, `0x4def02`).
+    zero_offset: bool,
 }
 
 impl ServerWallClock {
     /// Take a fresh sample; it reads about RTT/2 behind, below a countdown's one-second grain.
-    pub(crate) fn sample(&mut self, unix_time: u32) {
+    pub(crate) fn sample(&mut self, unix_time: u32, local_unix: i64) {
         self.0 = Some(WallClockSample {
             base_unix: unix_time,
             received: Instant::now(),
+            count: self.samples() + 1,
+            zero_offset: local_unix == i64::from(unix_time),
         });
+    }
+
+    /// Whether the last sample found the local clock on the server's second (`0x4def02`).
+    pub(crate) fn zero_offset(&self) -> bool {
+        self.0.is_some_and(|s| s.zero_offset)
+    }
+
+    /// The responses sampled so far.
+    pub(crate) fn samples(&self) -> u64 {
+        self.0.map_or(0, |s| s.count)
     }
 
     /// Server unix seconds now, fractional.
@@ -2287,8 +2290,7 @@ pub(crate) struct RealmListMessage {
     pub(crate) failed: bool,
 }
 
-/// The character roster (`SMSG_CHAR_ENUM`); the IO thread waits for [`crate::char_select`] to
-/// pick. `realm` is the realm this session connected to.
+/// The character roster (`SMSG_CHAR_ENUM`); the IO thread waits for the select screen to pick. `realm` is the realm this session connected to.
 #[derive(Message)]
 pub(crate) struct CharListMessage {
     pub(crate) characters: Vec<benilla_protocol::Character>,
@@ -2297,8 +2299,6 @@ pub(crate) struct CharListMessage {
     pub(crate) cause: benilla_protocol::RosterCause,
     /// The world session that sent it ([`WorldAuthMessage::epoch`]).
     pub(crate) epoch: u64,
-    /// The abandon generation of the attempt that dialed that session.
-    pub(crate) generation: u64,
 }
 
 /// The world server accepted the authentication: the world connect to `realm` is done and the IO
@@ -2344,7 +2344,7 @@ pub(crate) struct CharRenameMessage {
 }
 
 /// `SMSG_CHARACTER_LOGIN_FAILED`: the picked character was refused. `result` is the raw reason,
-/// read by [`crate::char_select::char_login_refusal_text`].
+/// read by the glue manager ([`crate::ui_script::glue_mgr`]).
 #[derive(Message, Clone, Copy)]
 pub(crate) struct CharacterLoginFailedMessage {
     pub(crate) result: u8,
@@ -2353,8 +2353,6 @@ pub(crate) struct CharacterLoginFailedMessage {
 /// We entered the world.
 #[derive(Message)]
 pub(crate) struct EnteredWorldMessage {
-    /// Rested billing minutes from `SMSG_AUTH_RESPONSE`, the only time they arrive.
-    pub(crate) billing_time_rested: u32,
     /// The tutorial flags, if `SMSG_TUTORIAL_FLAGS` came during the login handshake.
     pub(crate) tutorial_flags: Option<Vec<u8>>,
 }
@@ -2370,6 +2368,12 @@ pub(crate) struct WorldEnterCascadeMessage;
 /// rewritten on every login from the reply its link got.
 #[derive(Resource, Default)]
 pub(crate) struct AddonInfoReply(pub(crate) Option<Vec<benilla_protocol::messages::AddonRecord>>);
+
+/// The connection's billing group, from its authentication alone (`0x5b41b0`); a resource for the
+/// same reason as [`AddonInfoReply`], rewritten at every login. The in-game `GetBillingTimeRested`
+/// and [`crate::ui_billing`]'s warning read it.
+#[derive(Resource, Default, Clone, Copy)]
+pub(crate) struct SessionBilling(pub(crate) benilla_protocol::messages::Billing);
 
 /// `SMSG_TRIGGER_CINEMATIC`: a `CinematicSequences.dbc` id; [`crate::cinematic`] plays and acks it.
 #[derive(Message)]
@@ -2431,16 +2435,11 @@ impl DisconnectedMessage {
 }
 
 /// A login attempt failed before the roster; the IO thread is back at its pre-logon park.
-/// `terminal` is a failure retrying cannot fix (the server requires Warden, say): never resubmit.
 #[derive(Message, Clone)]
 pub(crate) struct LoginFailedMessage {
     /// Which server refused us, with which byte; `None` on a transport failure.
     pub(crate) refusal: Option<benilla_protocol::LoginRefusal>,
     pub(crate) reason: String,
-    pub(crate) terminal: bool,
-    /// The dial that never opened a socket, so the screen can tell an unknown name from a host
-    /// that does not answer.
-    pub(crate) dial: Option<benilla_protocol::DialFailure>,
 }
 
 /// A same-map teleport of our player: snap, then ack. Read by the controller in `Input`.

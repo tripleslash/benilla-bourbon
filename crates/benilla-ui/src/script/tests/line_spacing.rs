@@ -398,7 +398,8 @@ fn a_plain_message_frames_slots_step_by_the_raw_pitch() {
 }
 
 /// A scrolling frame charges each message its height plus the line string's spacing rounded up to
-/// a whole pixel (`0x78899e` → `0x766750`), and a wrapped message's inner gap likewise.
+/// a whole pixel (`0x78899e` → `0x766750`), and a wrapped message's inner gap likewise
+/// (`0x5c2143`-`0x5c215c`).
 #[test]
 fn a_scrolling_frame_rounds_a_fractional_spacing_up() {
     let mut s = script();
@@ -437,6 +438,73 @@ fn a_scrolling_frame_rounds_a_fractional_spacing_up() {
             "{t}: [{b}, {top}] against [{wb}, {wtop}]"
         );
     }
+}
+
+/// A scrolling frame at `scale`, spacing `spacing`, `height` tall, holding 'old', 'wrapped' (two
+/// rows) and 'new', as `(text, bottom, top)` in draw order.
+fn spaced_bands(scale: f32, spacing: f32, height: f32) -> Vec<(String, f32, f32)> {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(&format!(
+        "local f = CreateFrame('ScrollingMessageFrame', 'GapChat3')\n\
+         f:SetPoint('BOTTOMLEFT', 0, 90)\n\
+         f:SetWidth(400)\n\
+         f:SetHeight({height})\n\
+         f:SetScale({scale})\n\
+         f:SetFont('Fonts\\\\FRIZQT__.TTF', 14)\n\
+         f:SetSpacing({spacing})\n\
+         f:AddMessage('old', 1, 1, 1)\n\
+         f:AddMessage('wrapped', 1, 1, 1)\n\
+         f:AddMessage('new', 1, 1, 1)"
+    ))
+    .unwrap();
+    s.resolve();
+    let answers: Vec<(u32, u32, u16, u64)> = s
+        .message_lines_needing_measure()
+        .iter()
+        .map(|r| (r.frame, r.index, if r.index == 1 { 2 } else { 1 }, r.key))
+        .collect();
+    s.set_message_line_rows(&answers);
+    bands(&s)
+}
+
+/// The gap between messages is the unscaled spacing snapped, then scaled (`0x788954`-`0x788975`);
+/// the gap between the rows of one message is the spacing times the scale snapped up to a whole
+/// pixel (`0x5c2143`-`0x5c215c`). At 0.75 with spacing 1, that is 0.75 between messages and 1
+/// between rows, where snapping the scaled value for both gives 1 and 1.
+#[test]
+fn a_scrolling_frames_gaps_scale_rather_than_snap_scaled() {
+    let got = spaced_bands(0.75, 1.0, 100.0);
+    assert_eq!(got.len(), 3, "{got:?}");
+    let by = |t: &str| got.iter().find(|g| g.0 == t).expect(t).clone();
+    let (old, wrapped, new) = (by("old"), by("wrapped"), by("new"));
+    // 14 px type at 0.75 is 10.5 px a row: two rows and the snapped gap make 22.
+    assert!((wrapped.2 - wrapped.1 - 22.0).abs() < 0.01, "{wrapped:?}");
+    assert!(
+        (wrapped.1 - new.1 - 11.25).abs() < 0.01,
+        "{new:?} {wrapped:?}"
+    );
+    assert!(
+        (old.1 - wrapped.1 - 22.75).abs() < 0.01,
+        "{wrapped:?} {old:?}"
+    );
+}
+
+/// The fit is per message: each takes its own block height and the gap after it from what is left
+/// (`0x7889a3`-`0x7889be`). At 0.75 with spacing 1 a message costs 10.5 + 0.75 and a wrapped one
+/// 21 + 1 + 0.75, 34 together. A count of equal rows of 11.25 would hold 'wrapped' in 33.9 px, and
+/// per message it does not; in 34.2 px both do.
+#[test]
+fn a_scrolling_frames_fit_is_per_message() {
+    let texts = |height_px: f32| -> Vec<String> {
+        // The frame is at 0.75, so its set height is the screen height over the scale.
+        spaced_bands(0.75, 1.0, height_px / 0.75)
+            .into_iter()
+            .map(|g| g.0)
+            .collect()
+    };
+    assert_eq!(texts(33.9), ["new"]);
+    assert_eq!(texts(34.2), ["wrapped", "new"]);
 }
 
 /// `spacing=` is read with `atof` (`0x64aaa0`): the numeric prefix, 0 for none.

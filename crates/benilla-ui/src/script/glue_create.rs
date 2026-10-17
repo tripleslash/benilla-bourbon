@@ -185,6 +185,7 @@ struct Info {
 }
 
 /// The words the draws take.
+#[derive(Clone)]
 struct Words {
     state: u64,
     /// Words given ahead of the generator's, consumed first.
@@ -231,7 +232,7 @@ fn scale(r: u32, n: u32) -> u32 {
 }
 
 /// The name generator (`0xb420b8`): a trigram table learned from one race's `NameGen` rows.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct NameGen {
     /// Each key, one to three bytes of a lowered `_name`, and how often it was seen, sorted by key
     /// (`0x4753fb`, comparator `0x475420`).
@@ -333,6 +334,7 @@ impl NameGen {
 }
 
 /// The create screen's state.
+#[derive(Clone)]
 pub(crate) struct GlueCreate {
     catalog: Rc<GlueCreateCatalog>,
     /// `[0xb420f0]`: the name `SetCharCustomizeFrame` found.

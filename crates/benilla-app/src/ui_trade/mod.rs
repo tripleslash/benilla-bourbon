@@ -12,6 +12,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, Objects, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::target::Selection;
 use crate::ui_party::GroupState;
 use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
@@ -71,6 +72,12 @@ pub(crate) struct TradeSession {
     /// a hit, the query callback `0x5d4080` at `0x5d40ca` on a miss); the lines survive
     /// [`Self::close_window`], since that callback hangs off the name query, not the trade.
     named_lines: Vec<NamedLine>,
+    /// How many of `named_lines`, from the front, a feed has read: the rest were raised since,
+    /// each by a handler that looked the name up with a callback.
+    named_lines_asked: usize,
+    /// The pending request's ladder has looked the initiator's name up (leg 8, `0x609210`): the
+    /// frames that wait on it read.
+    request_asked: bool,
 }
 
 /// A line owed whose `%s` names a player.
@@ -105,6 +112,7 @@ impl TradeSession {
     /// [`answer_trade_request`] replies, and only [`Self::begin`] resets the session.
     pub(crate) fn request(&mut self, initiator: u64) {
         self.request = Some(initiator);
+        self.request_asked = false;
     }
 
     pub(crate) fn pending_request(&self) -> Option<u64> {
@@ -277,6 +285,7 @@ impl TradeSession {
     pub(crate) fn close_window(&mut self) {
         *self = TradeSession {
             named_lines: std::mem::take(&mut self.named_lines),
+            named_lines_asked: self.named_lines_asked,
             ..Default::default()
         };
     }
@@ -561,10 +570,11 @@ fn answer_trade_request(
     // `CGUnit` (`0x609210`); this may wait on a name query, with no timer, since vmangos cancels
     // the trade to us when the initiator leaves (`Player.cpp:11747`), which clears the request.
     if block_trades.0 {
-        let Some(name) = names
-            .resolve_player(initiator, &commands)
-            .map(str::to_string)
-        else {
+        let ask = Ask::at(
+            !std::mem::replace(&mut trade.request_asked, true),
+            &commands,
+        );
+        let Some(name) = names.resolve_player(initiator, ask).map(str::to_string) else {
             return;
         };
         info!(target: "trade", "BEGIN_TRADE from {name} refused by BlockTrades; sending CMSG_BUSY_TRADE");
@@ -585,14 +595,15 @@ fn answer_trade_request(
 
 /// A wire [`TradeItem`] as the Lua row: name and quality from the item-template cache once it
 /// answers, the icon from `display_id` via `ItemDisplayInfo.dbc`; [`resolve_side`] names slot 7's
-/// `enchantment`.
+/// `enchantment`. The template is only read: the getters' lookups ask for it
+/// ([`run_record_callbacks`]).
 fn resolve_slot(
     item: &TradeItem,
     items: &Items,
     icons: Option<&ItemDisplays>,
-    commands: &NetCommands,
+    names: &NameCache,
 ) -> TradeSlotItem {
-    let template = items.template(item.entry, 0, commands);
+    let template = items.template(item.entry, 0, Ask::Read);
     let name = template.map(|t| t.name.clone());
     let quality = template.map(|t| t.quality);
     let inventory_type = template.map_or(0, |t| t.inventory_type);
@@ -610,6 +621,12 @@ fn resolve_slot(
         (Some(n), Some(q)) => Some(crate::ui_items::item_link(item.entry, n, q)),
         _ => None,
     };
+    // Only a wrapped gift names its giver (`0x52e288`, `0x52e29d`). Only read: the slot tooltip's
+    // build asks it (`crate::ui_items::feed::ask_item_build_lookups`).
+    let gift_creator = (item.wrapped && item.gift_creator != 0)
+        .then(|| names.resolve_player(item.gift_creator, Ask::Read))
+        .flatten()
+        .map(str::to_string);
     TradeSlotItem {
         item_id: item.entry,
         name,
@@ -619,6 +636,9 @@ fn resolve_slot(
         inventory_type,
         lock_id: item.lock_id,
         object_flags: None,
+        wrapped: item.wrapped,
+        gift_creator,
+        gift_creator_guid: if item.wrapped { item.gift_creator } else { 0 },
         enchantment: None,
         link,
     }
@@ -632,28 +652,25 @@ fn own_item_at(
     store: Option<&ObjectStore>,
     objects: &Objects,
     items: &Items,
-    commands: &NetCommands,
 ) -> Option<(TradeItem, u32)> {
     let (guid, count) = crate::ui_items::slot_guid_count(store, bag, slot, objects);
     if guid == 0 {
         return None;
     }
-    own_item(guid, count, objects, items, commands)
+    own_item(guid, count, objects, items)
 }
 
 /// Our item object `guid` as a wire [`TradeItem`] of `count`, with its `ITEM_FIELD_FLAGS`.
-fn own_item(
-    guid: u64,
-    count: u32,
-    objects: &Objects,
-    items: &Items,
-    commands: &NetCommands,
-) -> Option<(TradeItem, u32)> {
+fn own_item(guid: u64, count: u32, objects: &Objects, items: &Items) -> Option<(TradeItem, u32)> {
     let fields = objects.object(guid)?;
     let entry = fields.object_entry()?;
     let flags = fields.item_flags().unwrap_or(0);
+    // The placed item's WRAPPED flag and giver, which its slot's tooltip reads off the object
+    // (`0x52b789`, `0x52e32a`).
+    let wrapped = flags & benilla_protocol::messages::ITEM_DYNFLAG_WRAPPED != 0;
+    // Read, as the placing click reads it (`0x4bfede`).
     let display_id = items
-        .template(entry, guid, commands)
+        .template(entry, guid, Ask::Read)
         .map(|t| t.display_info_id)
         .unwrap_or(0);
     Some((
@@ -661,8 +678,8 @@ fn own_item(
             entry,
             display_id,
             count,
-            wrapped: false,
-            gift_creator: 0,
+            wrapped,
+            gift_creator: fields.item_gift_creator().unwrap_or(0),
             perm_enchant: 0,
             creator: 0,
             charges: 0,
@@ -687,12 +704,12 @@ fn resolve_side(
     enchant: Option<&str>,
     items: &Items,
     icons: Option<&ItemDisplays>,
-    commands: &NetCommands,
+    names: &NameCache,
 ) -> TradeSideState {
     let mut slots: [Option<TradeSlotItem>; TRADE_SLOT_COUNT] = Default::default();
     for (i, s) in offer.slots.iter().enumerate() {
         slots[i] = s.map(|it| {
-            let mut row = resolve_slot(&it, items, icons, commands);
+            let mut row = resolve_slot(&it, items, icons, names);
             // Our items are live objects; the partner's are blocks (`0x5342ed`, `0x53456b`).
             row.object_flags = ours.then_some(offer.object_flags[i]);
             if i == ENCHANT_SLOT {
@@ -712,7 +729,7 @@ fn snapshot(
     items: &Items,
     icons: Option<&ItemDisplays>,
     spells: Option<&crate::ui_action::Spells>,
-    commands: &NetCommands,
+    names: &NameCache,
 ) -> Option<TradeState> {
     if !trade.open {
         return None;
@@ -732,7 +749,7 @@ fn snapshot(
             name(trade.their.enchant_spell_id),
             items,
             icons,
-            commands,
+            names,
         ),
         // Our window carries the spell we cast on theirs (`0x4c02b7`, side 0).
         target: resolve_side(
@@ -741,7 +758,7 @@ fn snapshot(
             name(trade.our.enchant_spell_id),
             items,
             icons,
-            commands,
+            names,
         ),
     })
 }
@@ -789,6 +806,7 @@ fn resignal_trade_items(
     objects: Objects,
     items: Res<Items>,
     icons: Option<Res<ItemDisplays>>,
+    names: Res<NameCache>,
 ) {
     use crate::item_watch::TradeTouch;
     let touches: Vec<TradeTouch> = cursor
@@ -825,7 +843,7 @@ fn resignal_trade_items(
                     .unwrap_or(1);
                 let (Some(_), Some((item, flags)), Some((wire_bag, wire_slot))) = (
                     objects.player(),
-                    own_item(guid, count, &objects, &items, &commands),
+                    own_item(guid, count, &objects, &items),
                     crate::ui_items::wire_pos(bag, bag_slot),
                 ) else {
                     continue;
@@ -839,7 +857,7 @@ fn resignal_trade_items(
                         slot: wire_slot,
                     },
                 );
-                let mut row = resolve_slot(&item, &items, icons.as_deref(), &commands);
+                let mut row = resolve_slot(&item, &items, icons.as_deref(), &names);
                 row.object_flags = Some(flags);
                 script.replace_trade_slot(slot, row);
             }
@@ -884,13 +902,7 @@ fn feed_trade(
         *last_their_gold = 0;
     }
 
-    let fresh = snapshot(
-        &trade,
-        &items,
-        icons.as_deref(),
-        spells.as_deref(),
-        &commands,
-    );
+    let fresh = snapshot(&trade, &items, icons.as_deref(), spells.as_deref(), &names);
     // A close is the core's, which shut the VM's window and left both offers in place; a
     // disconnect's clear tells it nothing.
     let opened = !*last_open && trade.is_open();
@@ -987,20 +999,24 @@ fn feed_trade(
     }
     // The owed `%s` lines, resolved here where the name cache is; a miss waits for the query it
     // started. The catalog row, read by `ui_action::feed_actions`, decides where each lands.
-    for line in trade.take_named_lines() {
+    // Taken in the frame before the interface is up too, deliberately: it marks only the ask,
+    // which goes to the server, not the VM.
+    let asked = std::mem::take(&mut trade.named_lines_asked);
+    for (i, line) in trade.take_named_lines().into_iter().enumerate() {
         // The status arms print nothing once the player is no longer an object.
         if line.needs_live_object && streamed_player(&index, &stores, line.who).is_none() {
             continue;
         }
         match names
-            .resolve_player(line.who, &commands)
+            .resolve_player(line.who, Ask::at(i >= asked, &commands))
             .map(str::to_string)
         {
             Some(name) => errors.0.push(crate::ui_action::UiError::s(line.key, name)),
-            // Not cached: `resolve` has asked, so park it and retry next frame.
+            // Not cached: the line's lookup has asked, so park it and read it again next frame.
             None => trade.owe_named_line(line),
         }
     }
+    trade.named_lines_asked = trade.named_lines.len();
     if opened {
         // `SetTradePartner`'s open leg (`0x4bf4e0`): coins held on the cursor fold into the offer
         // first and fire the two money events locally; the send goes out with the money intent.
@@ -1060,11 +1076,12 @@ fn feed_trade(
 fn run_record_callbacks(
     script: &mut UiScript,
     items: &Items,
+    commands: &NetCommands,
     notices: &mut MessageReader<crate::item_watch::ItemNotice>,
 ) {
     for entry in script.take_trade_record_asks() {
-        // An answered entry is never asked again, so nothing could run its callback.
-        if items.template_cached(entry).is_none() && !items.template_answered_unknown(entry) {
+        // The getter's lookup with the callback: a miss asks, a refused entry again.
+        if items.template(entry, 0, Ask::Event(commands)).is_none() {
             items.wait_for_trade_record(entry);
         }
     }
@@ -1092,7 +1109,7 @@ fn drain_trade(
     let Some(mut script) = script else {
         return;
     };
-    run_record_callbacks(&mut script, &items, &mut notices);
+    run_record_callbacks(&mut script, &items, &commands, &mut notices);
     // Our bag contents, for the own-column item resolve.
     let store = self_q.iter().next();
 
@@ -1141,8 +1158,7 @@ fn drain_trade(
         };
         if let Some(trade_slot) = id.checked_sub(1).and_then(|n| u8::try_from(n).ok()) {
             // vmangos echoes a placement to the partner only, so our column is filled here.
-            if let Some((item, flags)) = own_item_at(bag, slot, store, &objects, &items, &commands)
-            {
+            if let Some((item, flags)) = own_item_at(bag, slot, store, &objects, &items) {
                 trade.place_own_item(id, item, flags);
             }
             info!(target: "trade", "set item: slot {id} <- bag {bag}/{slot} (wire {wire_bag}/{wire_slot}); sending CMSG_SET_TRADE_ITEM");
@@ -1240,8 +1256,6 @@ mod tests {
     /// gates its fourth value on; an unanswered template leaves both empty.
     #[test]
     fn a_trade_row_carries_the_templates_quality_and_inventory_type() {
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let commands = NetCommands(tx);
         let mut items = Items::default();
         let mut sword = crate::items::test_template("Sword");
         sword.quality = 4;
@@ -1249,7 +1263,7 @@ mod tests {
         items.insert_template(1234, Some(sword));
         items.insert_template(1235, Some(crate::items::test_template("Linen Cloth")));
 
-        let row = resolve_slot(&wire_item(1234), &items, None, &commands);
+        let row = resolve_slot(&wire_item(1234), &items, None, &NameCache::default());
         assert_eq!((row.quality, row.inventory_type), (Some(4), 13));
         // The icon is the template's display's, the question mark when that row is missing, and
         // left to the getter while the template is unanswered.
@@ -1258,13 +1272,57 @@ mod tests {
             Some("Interface\\Icons\\INV_Misc_QuestionMark")
         );
         assert_eq!(
-            resolve_slot(&wire_item(1236), &items, None, &commands).texture,
+            resolve_slot(&wire_item(1236), &items, None, &NameCache::default(),).texture,
             None
         );
-        let row = resolve_slot(&wire_item(1235), &items, None, &commands);
+        let row = resolve_slot(&wire_item(1235), &items, None, &NameCache::default());
         assert_eq!((row.quality, row.inventory_type), (Some(1), 0));
-        let row = resolve_slot(&wire_item(1236), &items, None, &commands);
+        let row = resolve_slot(&wire_item(1236), &items, None, &NameCache::default());
         assert_eq!((row.quality, row.inventory_type), (None, 0));
+    }
+
+    /// A wrapped gift's giver rides both columns: the partner's block carries the wire's wrapped
+    /// word and gift creator (`0x534559`, `0x534574`), our placed item's object the same; only a
+    /// wrapped item names it, a zero guid names no one, and a name not yet answered is `None`.
+    #[test]
+    fn a_wrapped_gifts_giver_reaches_both_columns() {
+        let mut items = Items::default();
+        items.insert_template(1234, Some(crate::items::test_template("Gift")));
+        let mut names = NameCache::default();
+        names.insert_player(0x7, "Santa".to_string(), None);
+        let gift = |wrapped, giver| TradeItem {
+            wrapped,
+            gift_creator: giver,
+            ..wire_item(1234)
+        };
+        let mut s = TradeSession::default();
+        s.begin(0x9);
+        s.open_window();
+        s.place_own_item(1, gift(true, 0x7), 0x8);
+        s.place_own_item(2, gift(false, 0x7), 0);
+        s.place_own_item(3, gift(true, 0), 0x8);
+        s.place_own_item(4, gift(true, 0x8), 0x8);
+        s.their.slots[0] = Some(gift(true, 0x7));
+        s.their.slots[1] = Some(gift(false, 0x7));
+        let state = snapshot(&s, &items, None, None, &names).expect("open");
+        let giver = |side: &TradeSideState, i: usize| {
+            let row = side.slots[i].as_ref().expect("filled");
+            (row.wrapped, row.gift_creator.clone())
+        };
+        assert_eq!(giver(&state.target, 0), (true, Some("Santa".into())));
+        assert_eq!(
+            giver(&state.target, 1),
+            (false, None),
+            "unwrapped asks nothing"
+        );
+        assert_eq!(giver(&state.player, 0), (true, Some("Santa".into())));
+        assert_eq!(giver(&state.player, 1), (false, None));
+        assert_eq!(
+            giver(&state.player, 2),
+            (true, None),
+            "a zero guid names no one"
+        );
+        assert_eq!(giver(&state.player, 3), (true, None), "a name in flight");
     }
 
     #[test]
@@ -2650,6 +2708,90 @@ mod tests {
         );
     }
 
+    /// The slot rows only read their record; the getters' lookups ask, with the callback
+    /// `0x4c0340` (`0x4c0191`). A refused record is asked by no frame after it, only by the next
+    /// getter call.
+    #[test]
+    fn a_refused_slot_record_is_asked_by_the_next_getter_never_by_a_frame() {
+        let (mut app, rx) = feed_app();
+        app.add_systems(Update, drain_trade.after(feed_trade))
+            .init_resource::<Selection>()
+            .init_resource::<GroupState>();
+        open_with(&mut app, 0x7);
+        app.update();
+        let mut theirs = [None; TRADE_SLOT_COUNT];
+        theirs[0] = Some(wire_item(4306));
+        app.world_mut()
+            .resource_mut::<TradeSession>()
+            .set_offer(&TradeStatusExtended {
+                their_window: true,
+                sequence: 7,
+                gold: 0,
+                enchant_spell_id: 0,
+                slots: theirs,
+            });
+        app.update();
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "the row only reads"
+        );
+        let getter = |app: &mut App| {
+            app.world_mut()
+                .non_send_mut::<UiScript>()
+                .run("GetTradeTargetItemInfo(1)")
+                .unwrap();
+            app.update();
+        };
+        getter(&mut app);
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        {
+            let mut items = app.world_mut().resource_mut::<Items>();
+            items.insert_template(4306, None);
+            items.take_trade_waiters(4306);
+        }
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "no frame asks a refusal"
+        );
+        getter(&mut app);
+        assert_eq!(
+            crate::query_cache::queries(&rx).len(),
+            1,
+            "the next getter asks again"
+        );
+    }
+
+    /// A line naming a player looks the name up as it is raised (`0x5d4031`, callback `0x5d4080`)
+    /// and waits for it; the frames it waits through read. A refused name is asked by no frame
+    /// after it, only by the next line that names its player.
+    #[test]
+    fn a_refused_line_name_is_asked_by_the_next_line_never_by_a_frame() {
+        let (mut app, rx) = feed_app();
+        app.world_mut().resource_mut::<TradeSession>().initiate(0x9);
+        app.update();
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(0x9, String::new(), None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "no frame asks a refusal"
+        );
+        app.world_mut().resource_mut::<TradeSession>().initiate(0x9);
+        app.update();
+        assert_eq!(
+            crate::query_cache::queries(&rx).len(),
+            1,
+            "the next line asks again"
+        );
+    }
+
     /// `ONLY_CONJURED` invalidates the slot (`0x4bf9fd` into `0x4bfbd0`): the item unlocks and
     /// `TRADE_PLAYER_ITEM_CHANGED` fires once, not again from the repaint diff.
     #[test]
@@ -2894,6 +3036,48 @@ mod tests {
             "scanned once: {sent:?}"
         );
         assert!(seen(&mut app).is_empty());
+    }
+
+    /// The placed item is a live object: its WRAPPED flag and `ITEM_FIELD_GIFTCREATOR` reach the
+    /// slot when the watchers place it again (`0x52b789`, `0x52e32a`), the giver by name.
+    #[test]
+    fn a_wrapped_offer_placed_again_carries_its_giver() {
+        use benilla_protocol::field::FIELD_ITEM_STACK_COUNT;
+        use benilla_protocol::ObjectFields;
+        let (mut app, _rx) = resignal_app();
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(0x77, "Santa".to_string(), None);
+        let linen = app.world().resource::<GuidIndex>().0[&LINEN];
+        // ITEM_FIELD_GIFTCREATOR is the guid at fields 12 and 13, ITEM_FIELD_FLAGS field 21.
+        app.world_mut()
+            .get_mut::<ObjectStore>(linen)
+            .unwrap()
+            .0
+            .merge(ObjectFields::from_pairs(&[
+                (FIELD_ITEM_STACK_COUNT, 2),
+                (12, 0x77),
+                (13, 0),
+                (21, 0x8),
+            ]));
+        notify(
+            &mut app,
+            crate::item_watch::ItemNotice::StackCount {
+                guid: LINEN,
+                entry: 2589,
+            },
+        );
+        let slots = app
+            .world()
+            .non_send::<UiScript>()
+            .trade_player_slots()
+            .expect("open trade");
+        let row = slots[0].as_ref().expect("the slot is filled");
+        assert_eq!(row.object_flags, Some(0x8));
+        assert_eq!(
+            (row.wrapped, row.gift_creator.as_deref()),
+            (true, Some("Santa"))
+        );
     }
 
     /// `0x4bfb60` from the stack and enchantment watchers: the same item placed again from its

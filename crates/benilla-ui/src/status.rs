@@ -120,7 +120,7 @@ pub enum LogWrite {
 /// A VM's two load records and the drains they have made. `LoadAddOn` keeps its own record
 /// (`ds:0xb4e3dc`), refcounted (`ds:0xb4e3e0`) so a nested call writes one block, and drained when
 /// the count returns to zero (`0x48eab4`), even inside a UI load, whose own drain comes last.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct LoadLog {
     pub(crate) ui: Status,
     pub(crate) demand: Status,

@@ -116,7 +116,7 @@ pub(crate) enum Event {
 }
 
 /// The VM's half of the gate: how many of each input event are running, and `[0xb4e3e4]`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Flags {
     binding: u32,
     enter: u32,

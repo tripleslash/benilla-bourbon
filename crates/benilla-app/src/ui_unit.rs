@@ -16,6 +16,7 @@ use benilla_ui::script::{
 use crate::creature_type::CreatureTypeSources;
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, ObjectStore, Reputations, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::target::{ring_reaction, Factions, Selection};
 use crate::ui_script::{gate, SweepApp, UiInput};
 
@@ -27,6 +28,12 @@ mod held;
 /// interface exists; the demo override orders itself after it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UnitFeed;
+
+/// The feeds that seat a new VM with what the reference's caches hold across a `/reload`, ahead of
+/// the world-enter cascade whose handlers read it: the quest log's records, slots and creature
+/// names, and the item records.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct WorldEnterSeats;
 
 /// One `UNIT_COMBAT` over a unit, the portrait hit indicator's feed. The emitter `0x494600` fires
 /// `(token, action, descriptor, amount, type)` once per token naming the unit, with no
@@ -104,7 +111,7 @@ impl Plugin for UiUnitPlugin {
             Update,
             UnitFeed
                 .in_set(crate::ui_script::UiFeed)
-                // The whole set: a login one-shot or a per-VM memo spent on the boot VM is lost.
+                // The whole set: a login one-shot or a per-VM memo spent on the glue VM is lost.
                 .run_if(crate::ui_script::ingame_ui_up),
         )
         .init_resource::<UnitFeedState>()
@@ -131,8 +138,11 @@ impl Plugin for UiUnitPlugin {
                 // After the aura feed, whose resolver inputs it measures.
                 feed_unit_reach.after(crate::ui_aura::AuraEvents),
                 // After the reach, as `feed_units`'s `PLAYER_TARGET_CHANGED` runs
-                // `InspectUnit("target")`: `CanInspect` must answer for the new target.
-                feed_units.in_set(field_events::FieldEventPushes),
+                // `InspectUnit("target")`: `CanInspect` must answer for the new target; and after the
+                // seats the world-enter cascade's handlers read.
+                feed_units
+                    .in_set(field_events::FieldEventPushes)
+                    .after(WorldEnterSeats),
                 // After the same feed, whose guids it covers.
                 held::feed_chain_units.after(crate::ui_aura::AuraEvents),
                 // After every snapshot above is pushed, so a handler reads the new reaction.
@@ -297,7 +307,7 @@ fn load_default_languages(
 pub(crate) fn seed_default_language(world: &mut World, script: &mut UiScript) {
     let (Some(langs), Some(roster)) = (
         world.get_resource::<DefaultLanguagesRes>(),
-        world.get_resource::<crate::char_select::Roster>(),
+        world.get_resource::<crate::glue_session::roster::Roster>(),
     ) else {
         return;
     };
@@ -640,13 +650,11 @@ pub(crate) fn race_faction_group_in(race: u8, turtle: bool) -> Option<&'static s
     if !(1..=last).contains(&race) {
         return None;
     }
-    Some(
-        if crate::char_create::alliance_races(turtle).contains(&race) {
-            "Alliance"
-        } else {
-            "Horde"
-        },
-    )
+    Some(if crate::flavor::alliance_races(turtle).contains(&race) {
+        "Alliance"
+    } else {
+        "Horde"
+    })
 }
 
 /// A unit's PvP team digit, `0x5efe00`'s `0` Horde, `1` Alliance, `-1` no side, from the race and
@@ -1257,8 +1265,11 @@ fn player_snapshot(
     factions: Option<&Factions>,
     guild: &mut crate::ui_guild::GuildState,
 ) -> UnitState {
+    // The unit's create looked its name up with a callback (`0x5dec12`); a frame asks only
+    // a name the cache holds nothing for, as one invalidated since, and a refused one waits
+    // for the next create.
     let name = names
-        .resolve_unit(guid, Some(store), commands)
+        .resolve_unit(guid, Some(store), Ask::New(commands))
         .map(str::to_string);
     let mut s = snapshot(
         store,
@@ -1357,18 +1368,10 @@ fn feed_units(
     // `ResMut` because the guild-identity cache is lazy: a miss sends `CMSG_GUILD_QUERY`.
     mut guild: ResMut<crate::ui_guild::GuildState>,
     interact: Option<Res<crate::ui_session::InteractNpc>>,
-    // Rested billing minutes, sent only in `SMSG_AUTH_RESPONSE`; the reference keeps a global.
-    entered_world: Option<MessageReader<crate::net::EnteredWorldMessage>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
-    // Ahead of the gate: a login edge, with no snapshot to diff.
-    if let Some(entered) =
-        entered_world.and_then(|mut r| r.read().last().map(|m| m.billing_time_rested))
-    {
-        script.set_billing_time_rested(entered);
-    }
     let chr = tables.unit_names();
     let types = tables.types(&names);
     // One reborrow, so the memo and `warned_sideless` borrow disjointly rather than alias.
@@ -2394,7 +2397,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
-            .insert_state(crate::char_select::ClientState::InWorld)
+            .insert_state(crate::client_state::ClientState::InWorld)
             .init_resource::<Selection>()
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::net::GuidIndex>()
@@ -2535,6 +2538,34 @@ mod tests {
             c.dependencies.contains(&(aura, reach)),
             "feed_unit_reach is declared after feed_auras"
         );
+    }
+
+    /// The world-enter cascade's handlers read the quest log's seat and the item records, which a
+    /// new VM is given by their feeds: both are declared before the unit feed that fires it.
+    #[test]
+    fn the_world_entry_runs_after_the_seats_it_reads() {
+        use crate::game_plugins::schedule_tests::{census, headless_client, SyncPoints};
+
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !c.systems.values().any(|s| s.name.contains("benilla_app::")) {
+            eprintln!("skipped: this build carries no type names");
+            return;
+        }
+        let one = |suffix: &str| {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let units = one("::ui_unit::feed_units");
+        for seat in ["::ui_quest_log::feed_quest_log", "::feed::feed_item_stats"] {
+            assert!(
+                c.dependencies.contains(&(one(seat), units)),
+                "feed_units is declared after {seat}"
+            );
+        }
     }
 
     /// `UnitRace` and `UnitClass` push the table's name at the install's locale column beside the
@@ -3078,7 +3109,7 @@ mod tests {
         const BOAR: u64 = 0xF130_0000_0000_0002;
 
         let mut app = App::new();
-        app.add_message::<FieldChanged>();
+        app.add_message::<crate::net::FieldChanged>();
         app.init_resource::<Selection>()
             .init_resource::<UnitFeedState>()
             .init_resource::<NameCache>()

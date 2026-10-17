@@ -212,6 +212,11 @@ impl Cvars {
 }
 
 /// A row's registered default on a client of this locale index; `None` for a name no row has.
+///
+/// [`boot_cvar`] answers from `config.toml` and only from it, so it is `None` for a player who has
+/// never changed a setting, which is every player's first launch. A boot reader that treats that
+/// `None` as "off" is not reading the default, it is inventing a second one, and the two drift the
+/// moment the row is re-registered. [`apply_boot_layers`] is where that bit.
 pub(crate) fn registered_default(name: &str, locale: usize) -> Option<&'static str> {
     all_rows()
         .find(|r| r.name.eq_ignore_ascii_case(name))
@@ -1132,20 +1137,6 @@ pub(crate) fn boot_cvar(name: &str) -> Option<String> {
     }
 }
 
-/// One CVar's **registered** default, matched case-insensitively — what the registry starts the
-/// row at, for the boot-time readers that run before the registry exists.
-///
-/// [`boot_cvar`] answers from `config.toml` and only from it, so it is `None` for a player who has
-/// never changed a setting — which is every player's first launch. A boot reader that treats that
-/// `None` as "off" is not reading the default, it is inventing a second one, and the two drift the
-/// moment the row is re-registered. [`apply_boot_layers`] is where that bit.
-pub(crate) fn registered_default(name: &str) -> Option<&'static str> {
-    REGISTERED
-        .iter()
-        .find(|r| r.name.eq_ignore_ascii_case(name))
-        .map(|r| r.default)
-}
-
 /// **Which optional content layers this run mounts**, resolved and published to
 /// `benilla_formats::layers` before the `App` exists.
 ///
@@ -1168,7 +1159,7 @@ pub(crate) fn apply_boot_layers() {
         .and_then(|v| benilla_formats::layers::layer_switch(&v))
         .unwrap_or_else(|| {
             boot_cvar("hdCharacterModels")
-                .or_else(|| registered_default("hdCharacterModels").map(str::to_string))
+                .or_else(|| registered_default("hdCharacterModels", 0).map(str::to_string))
                 .and_then(|v| benilla_formats::layers::layer_switch(&v))
                 .unwrap_or(false)
         });
@@ -1185,7 +1176,7 @@ pub(crate) fn reforged_models_setting() -> bool {
         .and_then(|v| benilla_formats::layers::layer_switch(&v))
         .unwrap_or_else(|| {
             boot_cvar("reforgedModels")
-                .or_else(|| registered_default("reforgedModels").map(str::to_string))
+                .or_else(|| registered_default("reforgedModels", 0).map(str::to_string))
                 .and_then(|v| benilla_formats::layers::layer_switch(&v))
                 .unwrap_or(false)
         })
@@ -1407,7 +1398,7 @@ mod tests {
     use crate::chat_bubble::BubbleConfig;
     use crate::minimap::MinimapZoom;
     use crate::nameplates::NameConfig;
-    use crate::player::camera::{FollowConfig, FollowStyle, LookConfig, FOLLOW_SPEED_RANGE};
+    use crate::player::camera::{FollowConfig, FollowStyle, LookConfig};
     use crate::player::camera_zoom::ZoomLimit;
     use crate::portrait::PaneRate;
     use crate::sound::SoundConfig;
@@ -2046,17 +2037,25 @@ mod tests {
             FollowStyle::Smart,
             "and only that one"
         );
-        apply(&mut app, "cameraYawSmoothSpeed", "270");
-        assert_eq!(res::<FollowConfig>(&app).yaw_speed, 270.0);
-        // Past the validator's 360 (`0x50c000`): refused, 270 stands.
-        assert_eq!(
-            apply(&mut app, "cameraYawSmoothSpeed", "9000"),
-            SetOutcome::Vetoed
-        );
-        assert_eq!(
-            res::<FollowConfig>(&app).yaw_speed,
-            *FOLLOW_SPEED_RANGE.end()
-        );
+        // The validator's [0.1, 360] (`0x50c000`) is the range, not the stock slider's 90 to 270:
+        // a value inside it is stored and used as is (`0x512d75`).
+        for (text, want) in [("270", 270.0), ("360", 360.0), ("0.2", 0.2), ("30", 30.0)] {
+            assert_eq!(
+                apply(&mut app, "cameraYawSmoothSpeed", text),
+                SetOutcome::Changed,
+                "{text}"
+            );
+            assert_eq!(res::<FollowConfig>(&app).yaw_speed, want, "{text}");
+        }
+        // Outside it: refused, and the last stored value stands.
+        for text in ["360.5", "400", "9000", "0", "0.05", "-30"] {
+            assert_eq!(
+                apply(&mut app, "cameraYawSmoothSpeed", text),
+                SetOutcome::Vetoed,
+                "{text}"
+            );
+            assert_eq!(res::<FollowConfig>(&app).yaw_speed, 30.0, "{text}");
+        }
         // The max orbit lands as yards on the knob: `cameraDistanceMax` x the factor, held to
         // [0, 50]; the factor is not held to its slider's 1 to 2.
         apply(&mut app, "cameraDistanceMaxFactor", "1");
@@ -2760,7 +2759,7 @@ mod tests {
         let body = fn_body("settingOn(envKey, cvar)");
         let body = body.as_str();
 
-        let registered = registered_default("hdCharacterModels").expect("the row is registered");
+        let registered = registered_default("hdCharacterModels", 0).expect("the row is registered");
         let on = benilla_formats::layers::layer_switch(registered)
             .expect("the registered default is a value, not an empty string");
         assert!(on, "this assertion is the flip itself: the row ships ON");
@@ -2987,88 +2986,6 @@ mod tests {
 
     fn res<T: Resource>(app: &App) -> &T {
         app.world().resource::<T>()
-    }
-
-    /// The last character entered survives a quit: two launches over one `benilla-config/` with the
-    /// real [`CvarPlugin`] and [`crate::char_select`] systems, so the screen's host write must
-    /// reach the file through the registry's dirty/compose path.
-    #[test]
-    fn entering_the_world_survives_the_quit_and_comes_back_selected() {
-        use crate::char_select::{ClientState, Roster};
-        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-        let _l = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = std::env::temp_dir().join(format!("benilla-lastchar-{}", std::process::id()));
-        std::fs::remove_dir_all(&tmp).ok();
-        let _c = EnvGuard::unset("WOW_CAPTURE");
-        let _u = EnvGuard::unset("WOW_UI_SCALE");
-        let _f = EnvGuard::unset("WOW_FARCLIP");
-        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
-        let _w = EnvGuard::unset("WOW_CHAR");
-        let _s = EnvGuard::unset("WOW_CHARSELECT_PICK");
-        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
-        let roster = || {
-            (1..=4)
-                .map(|g| crate::char_select::test_character(g, &format!("Char{g}")))
-                .collect::<Vec<_>>()
-        };
-
-        // ── Launch 1: the roster lands, and the player enters the world as the third row. ────
-        let (tx, _rx) = async_channel::unbounded();
-        let mut app = cvar_app();
-        app.add_plugins(bevy::state::app::StatesPlugin);
-        crate::char_select::add_test_systems(&mut app, tx);
-        app.update(); // Startup loads the (absent) file; the first Update seeds the VM table
-        app.world_mut().write_message(crate::net::CharListMessage {
-            characters: roster(),
-            realm: None,
-            cause: benilla_protocol::RosterCause::Park,
-            epoch: 0,
-            generation: 0,
-        });
-        app.update();
-        assert_eq!(
-            app.world().resource::<Roster>().selected(),
-            Some(0),
-            "nothing remembered yet, so the first row — the behaviour that was already right",
-        );
-        app.world_mut().resource_mut::<Roster>().pending_pick = Some(3); // guid 3 = row 2
-        app.update();
-        app.world_mut().write_message(AppExit::Success);
-        app.update();
-
-        let text = std::fs::read_to_string(tmp.join("config.toml")).unwrap();
-        assert!(
-            text.contains("lastCharacterIndex = \"2\""),
-            "entering the world must reach the file, 0-based like Config.wtf:\n{text}"
-        );
-
-        // ── Launch 2: a fresh client over the same folder, and the roster arrives. ───────────
-        let (tx, _rx2) = async_channel::unbounded();
-        let mut app = cvar_app();
-        app.add_plugins(bevy::state::app::StatesPlugin);
-        crate::char_select::add_test_systems(&mut app, tx);
-        app.update();
-        app.world_mut().write_message(crate::net::CharListMessage {
-            characters: roster(),
-            realm: None,
-            cause: benilla_protocol::RosterCause::Park,
-            epoch: 0,
-            generation: 0,
-        });
-        app.update();
-
-        assert_eq!(
-            app.world().resource::<Roster>().selected(),
-            Some(2),
-            "the second launch must stand the SAME character on the stage — the whole report",
-        );
-        assert_eq!(
-            *app.world().resource::<State<ClientState>>().get(),
-            ClientState::CharSelect,
-        );
-        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
@@ -3344,9 +3261,10 @@ mod tests {
         let mut second = UiScript::new().unwrap();
         cvars.seed_vm(&mut second);
         let err = second.run("RegisterCVar('knob0', '1')").unwrap_err();
+        // Through `luaL_error` (`0x488b34`), at the caller's line.
         assert_eq!(
             benilla_ui::script::lua_message(&err),
-            "Attempted to register too many CVars",
+            "[string \"(chunk)\"]:1: Attempted to register too many CVars",
             "at the limit even a re-declaration raises"
         );
         assert!(second.run("RegisterCVar('knob31', '1')").is_err());

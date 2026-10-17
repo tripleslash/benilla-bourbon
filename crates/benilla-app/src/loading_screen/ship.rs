@@ -23,7 +23,6 @@ use benilla_formats::{
 use benilla_world::map_proj::{world_uv, WorldProj};
 
 use super::LoadingScreen;
-use crate::glue::art::tc_rect;
 use crate::go_templates::GameObjectTemplates;
 use crate::net::ObjectStore;
 
@@ -315,6 +314,17 @@ impl LoadingScreen {
         let route = routes.and_then(|r| r.route(path_id, from_map));
         self.show_route(route, assets, images);
     }
+}
+
+/// A texture-coordinate box `[left, right, top, bottom]` (0-1) as a pixel rect of a `size` image,
+/// the `ImageNode::rect` the route's art draws by.
+fn tc_rect(size: Vec2, tc: [f32; 4]) -> Rect {
+    Rect::new(
+        tc[0] * size.x,
+        tc[2] * size.y,
+        tc[1] * size.x,
+        tc[3] * size.y,
+    )
 }
 
 /// What the transfer's raise needs to find its route.

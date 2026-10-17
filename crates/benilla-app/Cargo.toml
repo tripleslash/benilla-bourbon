@@ -43,6 +43,9 @@ half = "2"
 include_dir = "0.7"
 # The 1.12 chat filters (`text_filter`), with one `RegexSet` for the any-match pass per line.
 regex = "1"
+# The same filters' word boundaries: `regex` has no look-around, and the client's word class is
+# its own table, not Unicode's.
+fancy-regex = { version = "0.18", default-features = false, features = ["std", "unicode", "perf"] }
 # `getrusage` for perf CPU time; `localtime_r` for the log stamp; the audio clock and render
 # thread's realtime policy on macOS.
 libc = "0.2"
@@ -89,10 +92,15 @@ mint = "0.5"
 # The gossip greeting's weighted draw, re-rolled per open as in the reference.
 rand = "0.8"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The EditBox clipboard, on the main thread as NSPasteboard requires; bevy_egui's 3.x. Native
 # only: arboard has no wasm32 backend (`textinput/clipboard.rs` has no pasteboard there).
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 arboard = "3"
+# The "no WoW install" error dialog (`no_install`): AppKit, Win32 and, on Linux, `zenity`; no GTK.
+# `xdg-portal` is the Linux backend that carries the message dialog; `wayland` is its file-dialog
+# parent handle, which a message dialog without a parent never reads. Native only: the page has
+# no native dialog to raise.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 # The audio device layer off macOS (`sound::output::cpal`); on macOS cpal cannot rebuild on a
 # lost default device and drops the IO-cycle timestamp. wasm32 is in this table too: `mixer` names

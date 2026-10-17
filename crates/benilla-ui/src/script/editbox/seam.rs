@@ -1,6 +1,7 @@
 //! The EditBox seam the host drives each frame: the advance-table round trip, the caret,
 //! selection and scroll geometry derived from it, and the clipboard pair.
 
+use crate::script::TextMeasure as _;
 use mlua::Lua;
 
 use crate::script::{types, Model, UiScript};

@@ -18,6 +18,7 @@ use benilla_ui::strings::Arg;
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::ui_items::{find_equip_slot, item_link};
 use crate::ui_script::{gate, UiFeed, UiInput};
 
@@ -353,17 +354,12 @@ fn slot_entry(store: &ObjectStore, objects: &Objects, slot0: u8) -> Option<u32> 
 
 /// The weapon-skill line for `slot0`: vmangos's subclass table (`Item.cpp:700`) for a weapon,
 /// Unarmed (162) for anything else.
-fn weapon_skill_id(
-    store: &ObjectStore,
-    objects: &Objects,
-    items: &Items,
-    commands: &NetCommands,
-    slot0: u8,
-) -> u32 {
+fn weapon_skill_id(store: &ObjectStore, objects: &Objects, items: &Items, slot0: u8) -> u32 {
     let Some(entry) = slot_entry(store, objects, slot0) else {
         return SKILL_UNARMED;
     };
-    let Some(t) = items.template(entry, 0, commands) else {
+    // A worn item's record only read: its create asked.
+    let Some(t) = items.template(entry, 0, Ask::Read) else {
         return SKILL_UNARMED; // in flight: refined when the template lands
     };
     if t.class != ITEM_CLASS_WEAPON {
@@ -462,25 +458,20 @@ pub(crate) fn unit_combat_stats(store: &ObjectStore) -> UnitCombatStats {
 }
 
 /// The player's snapshot: [`unit_combat_stats`] plus the equipment flags and the skill pairs.
-fn combat_stats(
-    store: &ObjectStore,
-    objects: &Objects,
-    items: &Items,
-    commands: &NetCommands,
-) -> UnitCombatStats {
+fn combat_stats(store: &ObjectStore, objects: &Objects, items: &Items) -> UnitCombatStats {
     // The off hand counts only as a weapon (a shield does not swing); both flags read false
     // until the template lands.
     let has_offhand = slot_entry(store, objects, SLOT_OFF_HAND)
-        .and_then(|e| items.template(e, 0, commands))
+        .and_then(|e| items.template(e, 0, Ask::Read))
         .is_some_and(|t| t.class == ITEM_CLASS_WEAPON);
     let has_wand = slot_entry(store, objects, SLOT_RANGED)
-        .and_then(|e| items.template(e, 0, commands))
+        .and_then(|e| items.template(e, 0, Ask::Read))
         .is_some_and(|t| t.class == ITEM_CLASS_WEAPON && t.subclass == SUBCLASS_WAND);
 
-    let main_skill = weapon_skill_id(store, objects, items, commands, SLOT_MAIN_HAND);
-    let offhand_skill = weapon_skill_id(store, objects, items, commands, SLOT_OFF_HAND);
+    let main_skill = weapon_skill_id(store, objects, items, SLOT_MAIN_HAND);
+    let offhand_skill = weapon_skill_id(store, objects, items, SLOT_OFF_HAND);
     let ranged_skill_id = slot_entry(store, objects, SLOT_RANGED)
-        .and_then(|e| items.template(e, 0, commands))
+        .and_then(|e| items.template(e, 0, Ask::Read))
         .filter(|t| t.class == ITEM_CLASS_WEAPON)
         .and_then(|t| weapon_subclass_skill(t.subclass));
 
@@ -510,7 +501,6 @@ fn slot_view(
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
-    commands: &NetCommands,
     names: &crate::names::NameCache,
     // `ItemSubClass.dbc`, for the count gate below; absent, every bag counts 0.
     sub_classes: Option<&crate::ui_items::ItemSubClasses>,
@@ -541,10 +531,13 @@ fn slot_view(
     // Soulbound or carrying a binding enchant (`0x5da2c0`), read off the raw descriptor, never off
     // the enchant lines below.
     let already_bound = crate::items::already_bound(obj, rolls.enchants);
+    // Only read: the tooltip build asks the creator (`crate::ui_items::feed::ask_item_build_lookups`).
     let creator = obj
         .item_creator()
         .filter(|&g| g != 0)
-        .and_then(|g| names.resolve_player(g, commands).map(str::to_string));
+        .and_then(|g| names.resolve_player(g, Ask::Read).map(str::to_string));
+    let gift_creator = crate::items::gift_creator_name(obj, names);
+    let (creator_guid, gift_creator_guid) = crate::items::creator_guids(obj);
     // All seven enchant slots: our own gear streams as item objects, where an inspected player's
     // descriptor carries only two.
     let enchants = crate::items::enchant_lines(
@@ -561,7 +554,8 @@ fn slot_view(
     // `ITEM_FIELD_RANDOM_PROPERTIES_ID`, the roll behind an "of the Bear" name; its enchants are
     // already in the slots above.
     let roll = obj.item_random_properties_id();
-    let t = items.template(entry, guid, commands);
+    // Only read, as the inventory getters read it (`0x4c8a0a`, `0x4c8d34`): the item's create asked.
+    let t = items.template(entry, guid, Ask::Read);
     let (name, quality, display, link, equip_slots, kind, bar_placeable, consumable) = match t {
         Some(t) => {
             let name = rolls.name(&t.name, roll);
@@ -604,6 +598,7 @@ fn slot_view(
         occupied_seats: is_container
             .then(|| content_guids.iter().filter(|&&g| g != 0).count() as u32),
         use_spell: t.and_then(|t| t.use_spell).map_or(0, |u| u.spell_id),
+        spell_0: t.is_some_and(benilla_protocol::ItemInfo::has_spell_0),
         use_fork: t.map_or(Default::default(), |t| {
             crate::ui_items::dispatch_fork(t, flags, obj.item_text_id().unwrap_or(0))
         }),
@@ -622,6 +617,9 @@ fn slot_view(
         bar_placeable,
         consumable,
         creator,
+        gift_creator,
+        creator_guid,
+        gift_creator_guid,
         enchants,
         duration_ms,
     })
@@ -676,7 +674,9 @@ fn inventory_slots(
     let mut inv: InventorySlots = Default::default();
     let ammo_id = store.0.player_ammo_id().unwrap_or(0);
     if ammo_id != 0 {
-        let t = items.template(ammo_id, 0, commands);
+        // An entry, not an item object, so no create asked for it; the texture getter's lookup
+        // passes a callback (`0x4c83ce`), on the doll's events, which none here marks.
+        let t = items.template(ammo_id, 0, Ask::New(commands));
         let (name, quality, display, link) = match t {
             Some(t) => (
                 Some(t.name.clone()),
@@ -712,9 +712,13 @@ fn inventory_slots(
             bar_placeable: false,
             consumable: false,
             creator: None,
+            gift_creator: None,
+            creator_guid: 0,
+            gift_creator_guid: 0,
             // No ammo instance streams, only its template id: no enchants, no countdown.
             enchants: Vec::new(),
             duration_ms: None,
+            spell_0: false,
         });
     }
     // Equipment 1..=19, then `Bag0Slot`..`Bag3Slot` (20..=23 in `PaperDollItemFrame.dbc`), the
@@ -728,7 +732,6 @@ fn inventory_slots(
             items,
             icons,
             rolls,
-            commands,
             names,
             sub_classes,
             has_relic_slot,
@@ -747,7 +750,6 @@ fn bank_bag_slots(
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
-    commands: &NetCommands,
     names: &crate::names::NameCache,
     sub_classes: Option<&crate::ui_items::ItemSubClasses>,
 ) -> BankBagSlots {
@@ -761,7 +763,6 @@ fn bank_bag_slots(
             items,
             icons,
             rolls,
-            commands,
             names,
             sub_classes,
             // A bank bag slot holds a bag; the relic flag decides INVSLOT 17 alone.
@@ -852,7 +853,7 @@ pub(crate) fn feed_char(
 
     // The paper doll's getters read this; the stat events that repaint it are field watches,
     // fired after this push (`crate::ui_unit::field_events`).
-    let stats = combat_stats(store, objects, &items, &commands);
+    let stats = combat_stats(store, objects, &items);
     if memo.last_stats.as_ref() != Some(&stats) {
         gate.audit("feed_char", "the combat-stats snapshot");
         script.set_player_combat_stats(Some(stats.clone()));
@@ -882,7 +883,6 @@ pub(crate) fn feed_char(
             enchants: enchants.as_deref(),
             props: props.as_deref(),
         },
-        &commands,
         &names,
         sub_classes.as_deref(),
     );
@@ -973,8 +973,6 @@ mod tests {
     #[test]
     fn a_worn_bag_view_counts_its_filled_seats() {
         use benilla_protocol::field::{FIELD_CONTAINER_SLOT_1, FIELD_OBJECT_ENTRY};
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let commands = NetCommands(tx);
         let mut objs = crate::ui_items::TestObjects::new();
         // `OBJECT_FIELD_TYPE` container, `CONTAINER_FIELD_NUM_SLOTS` 4, seat 2 filled.
         objs.spawn_container(
@@ -1002,7 +1000,6 @@ mod tests {
                 &items,
                 None,
                 crate::items::RollCatalogs::NONE,
-                &commands,
                 &names,
                 None,
                 false,

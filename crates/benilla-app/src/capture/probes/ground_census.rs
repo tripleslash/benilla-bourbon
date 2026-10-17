@@ -16,11 +16,10 @@ use bevy::prelude::*;
 
 use super::ProbeClock;
 use crate::names::NameCache;
+use crate::net::motion::spline::{ground_derived, GroundClamped};
 use crate::net::NetCommands;
-use crate::net::{
-    ground_derived, CreatureSwimming, Embodied, GroundClamped, Guid, NetEntity, RemoteMotion,
-    SelfPlayer, Spline,
-};
+use crate::net::{CreatureSwimming, Embodied, Guid, NetEntity, RemoteMotion, SelfPlayer, Spline};
+use crate::query_cache::Ask;
 
 /// A drop past this (yd) counts as sunk: clear of the clamp's small corrections, under a storey.
 const SUNK_YD: f32 = 0.5;
@@ -123,7 +122,7 @@ fn fire_ground_census(
         let above = lowest_surface_above(&world, t.translation);
         let wow = bevy_to_wow(t.translation);
         let name = names
-            .resolve_unit(guid.0, store, &net_commands)
+            .resolve_unit(guid.0, store, Ask::New(&net_commands))
             .unwrap_or("?")
             .to_string();
         rows.push((

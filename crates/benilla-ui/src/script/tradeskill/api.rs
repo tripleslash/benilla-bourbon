@@ -318,12 +318,13 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetTradeSkillNumMade(index) (`0x4fdc50`): 1, 1 on a header or past the rows (`0x4fdd13`).
     g.set(
         "GetTradeSkillNumMade",
         lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let (min_made, max_made) =
-                recipe_at(&model, index).map_or((0, 0), |r| (r.min_made, r.max_made));
+                recipe_at(&model, index).map_or((1, 1), |r| (r.min_made, r.max_made));
             Ok(MultiValue::from_vec(vec![
                 Value::Integer(i64::from(min_made)),
                 Value::Integer(i64::from(max_made)),
@@ -331,18 +332,26 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetTradeSkillCooldown(index): nil when ready, which the stock Lua tests for truthiness
-    // (Blizzard_TradeSkillUI.lua:215).
+    // GetTradeSkillCooldown(index) (`0x4fda20`): the start plus the duration minus the clock,
+    // scaled by 0.001, read at the call; nil when ready, which the stock Lua tests for truthiness
+    // (Blizzard_TradeSkillUI.lua:215). A held cooldown has not started, so its whole duration is
+    // left.
     g.set(
         "GetTradeSkillCooldown",
         lua.create_function(|lua, Idx(index): Idx| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(
-                match recipe_at(&model, index).and_then(|r| r.cooldown_secs) {
-                    Some(secs) => Value::Integer(secs as i64),
-                    None => Value::Nil,
-                },
-            )
+            let left = recipe_at(&model, index)
+                .and_then(|r| r.cooldown)
+                .map(|(start_ms, duration_ms, enabled)| {
+                    let duration = f64::from(duration_ms) / 1000.0;
+                    if enabled {
+                        start_ms as f64 / 1000.0 + duration - model.now
+                    } else {
+                        duration
+                    }
+                })
+                .filter(|&left| left > 0.0);
+            Ok(left.map_or(Value::Nil, Value::Number))
         })?,
     )?;
 
@@ -529,11 +538,15 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetTradeSkillInvSlots",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let bits = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                present_inv_slots(&model)
+            };
             let mut out = Vec::new();
             // A token (`0x84dd70`) missing from the string table answers "" rather than being
-            // dropped: the filter verbs index this list by position.
-            for bit in present_inv_slots(&model) {
+            // dropped: the filter verbs index this list by position. Each is a `_G` read whose
+            // `__index` may call any verb, so the Model is not borrowed.
+            for bit in bits {
                 let word = inv_slot_token(bit)
                     .and_then(|k| crate::strings::global(lua, k))
                     .unwrap_or_default();

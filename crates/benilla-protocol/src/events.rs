@@ -78,14 +78,12 @@ pub enum LoginStage {
 /// What a roster was fetched for. The screen takes a reply as its own only when it asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RosterCause {
-    /// The IO thread's own enumeration on reaching the character park, which the native screens
-    /// wait for; the stock screens ask for theirs instead.
-    Park,
+    /// A roster no ask of the screen's fetched: an `SMSG_CHAR_ENUM` the world stream carried on its
+    /// own.
+    Unasked,
     /// The reply to a roster request from the screen (`CMSG_CHAR_ENUM` for
     /// `GetCharacterListUpdate`, `0x5aabb0`).
     Asked,
-    /// A create or delete changed the roster; re-sent before the action's result.
-    Changed,
 }
 
 /// How a world session ended. On a loss the reference fires `DISCONNECTED_FROM_SERVER` and
@@ -166,12 +164,10 @@ pub enum SessionEvent {
         position: Option<u32>,
         realm: Option<String>,
     },
-    /// A login failed before the roster; `refusal` is `None` for a transport failure. A `terminal`
-    /// one ([`crate::WardenRequired`]) no retry can fix: show `reason` and stop.
+    /// A login failed before the roster; `refusal` is `None` for a transport failure.
     LoginFailed {
         refusal: Option<LoginRefusal>,
         reason: String,
-        terminal: bool,
         /// `Some` only when the socket never opened: which dial failure, and the address.
         dial: Option<crate::DialFailure>,
     },
@@ -198,8 +194,8 @@ pub enum SessionEvent {
     Connected {
         self_guid: u64,
         name: String,
-        /// Rested billing minutes for `GetBillingTimeRested()`, sent once, at auth.
-        billing_time_rested: u32,
+        /// The connection's billing group, from its authentication alone.
+        billing: crate::messages::Billing,
         /// `SMSG_TUTORIAL_FLAGS` if it came during the handshake; `None` if it comes in-world.
         tutorial_flags: Option<Vec<u8>>,
         /// The `SMSG_ADDON_INFO` records. `None` is no reply at all, where the reference's
@@ -451,16 +447,17 @@ pub enum SessionEvent {
         racial_leader: bool,
     },
     /// `SMSG_GAMEOBJECT_QUERY_RESPONSE`, keyed by template `entry`; `data` is the type-specific
-    /// raw tail. An unknown entry (the lone `entry | 0x8000_0000`) still fires, `known` false and
-    /// every other field zero or empty.
+    /// raw tail.
     GameObjectInfo {
         entry: u32,
-        known: bool,
         type_id: u32,
         display_id: u32,
         name: String,
         data: [i32; 24],
     },
+    /// `SMSG_GAMEOBJECT_QUERY_RESPONSE` for an entry the server does not know: the lone `entry`
+    /// with its top bit set, the refusal the template cache frees a node on (`0x5588e0`).
+    GameObjectUnknown { entry: u32 },
     /// `SMSG_GAMEOBJECT_CUSTOM_ANIM`: the reference arms substate `8 + anim_id`, AnimationData
     /// 153..156 (Custom0..3), and rejects `anim_id >= 4`. A fishing bobber's bite sends 0.
     GameObjectCustomAnim { guid: u64, anim_id: u32 },

@@ -4,6 +4,7 @@
 //! eligibility gate, the asleep gate, the stow, the posture, then `CMSG_TEXT_EMOTE`. Own sends are
 //! never echoed locally; the server echoes them.
 
+use crate::query_cache::Ask;
 use bevy::prelude::*;
 
 mod parse;
@@ -26,7 +27,10 @@ fn target_player_name(
     if !benilla_protocol::guid::is_player(guid) {
         return None;
     }
-    names.resolve_player(guid, commands).map(str::to_string)
+    // The command's lookup, as `UnitName`'s (`0x609210`) passes a callback.
+    names
+        .resolve_player(guid, Ask::Event(commands))
+        .map(str::to_string)
 }
 
 /// The target guid a `CMSG_TEXT_EMOTE` carries (`DoEmote`'s caller, `0x49fdb1`): the selection,

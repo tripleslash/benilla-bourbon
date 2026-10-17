@@ -74,6 +74,7 @@ pub enum ScriptCall {
         /// The gate's tag 2 allowed the cast (`0x6e4bc1`). The book leg's cancels (an active aura
         /// `0x4b3466`, a form `0x4b35da`) come before it, so a refusal stops only the cast.
         may_cast: bool,
+    },
     /// `CastSpell(id, "pet", onSelf)`, `0x4b3300`'s `CMSG_PET_ACTION` fork (`0x4b34ce`), with the
     /// same guid swap.
     CastPetSpell { spell_id: u32, on_self: bool },

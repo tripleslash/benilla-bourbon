@@ -31,7 +31,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::CharEnum { characters } => vec![SessionEvent::CharacterList {
             characters,
             realm: None,
-            cause: super::RosterCause::Park,
+            cause: super::RosterCause::Unasked,
             epoch: 0,
             generation: 0,
         }],
@@ -899,20 +899,12 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             let event = match info {
                 Some(i) => SessionEvent::GameObjectInfo {
                     entry,
-                    known: true,
                     type_id: i.type_id,
                     display_id: i.display_id,
                     name: i.name,
                     data: i.data,
                 },
-                None => SessionEvent::GameObjectInfo {
-                    entry,
-                    known: false,
-                    type_id: 0,
-                    display_id: 0,
-                    name: String::new(),
-                    data: [0; 24],
-                },
+                None => SessionEvent::GameObjectUnknown { entry },
             };
             vec![event]
         }

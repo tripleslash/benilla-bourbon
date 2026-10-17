@@ -29,6 +29,48 @@ pub mod web;
 #[cfg(target_arch = "wasm32")]
 pub use web::{Conn, ConnReader, ConnWriter};
 
+/// Wait `d` without blocking the task: the sequencer's park races it against its channels.
+/// Natively a helper thread sleeps and wakes the future (the sequencer runs under `block_on`, with
+/// no reactor to time it); on the web a `setTimeout` resolves it on the event loop.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn sleep(d: std::time::Duration) {
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::task::{Poll, Waker};
+    let state: Arc<Mutex<(bool, Option<Waker>)>> = Arc::default();
+    let timer = Arc::clone(&state);
+    std::thread::spawn(move || {
+        std::thread::sleep(d);
+        let mut s = timer.lock().unwrap_or_else(PoisonError::into_inner);
+        s.0 = true;
+        if let Some(w) = s.1.take() {
+            w.wake();
+        }
+    });
+    std::future::poll_fn(|cx| {
+        let mut s = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if s.0 {
+            Poll::Ready(())
+        } else {
+            s.1 = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+/// [`sleep`] on the page: a `setTimeout` promise. With no window it never resolves, which leaves a
+/// race to its other arms.
+#[cfg(target_arch = "wasm32")]
+pub async fn sleep(d: std::time::Duration) {
+    let ms = d.as_millis().min(i32::MAX as u128) as i32;
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(w) = web_sys::window() {
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
 /// Read exactly `buf.len()` bytes, or fail — [`std::io::Read::read_exact`]'s contract, awaited.
 ///
 /// `async fn` in a trait, so the browser body can suspend on the event loop. That makes the

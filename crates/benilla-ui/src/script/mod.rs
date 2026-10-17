@@ -1,14 +1,15 @@
 //! The Lua scripting host: the engine-free VM that runs FrameXML and addons over the frame arena,
-//! the anchor resolver and the draw order. It embeds mlua's Lua 5.1, reshaped by [`lua50`] to
-//! answer as the 1.12 client's Lua 5.0.
+//! the anchor resolver and the draw order. It embeds benilla-lua through benilla-mlua's
+//! mlua-shaped API: 5.1.5's runtime under the 1.12 grammar, reshaped by [`lua50`] to answer as
+//! the 1.12 client's Lua 5.0.
 //!
 //! A frame's Lua value is a table whose `T[0]` lightuserdata (`0x701bd0`) holds a `u32` id where
 //! the reference holds the `CScriptObject*`, with an `__index` metatable (`0x7020b0`). A handler
 //! is `pcall`ed with `this`, `event` and `arg1..argN` set as globals and restored after
 //! (`0x704d50`); it also gets `(self, event, ...)` as arguments, which 1.12 does not pass.
 //!
-//! The `LUAI_MAXCSTACK` discipline: Rust holds no persistent Lua handle, since each owned `Table`
-//! or `Function` takes a slot on mlua's reference thread, capped at the vendored 8000. Lua-side
+//! The handle discipline: Rust holds no persistent Lua handle, since each owned `Table` or
+//! `Function` is a collector root that keeps everything it reaches alive. Lua-side
 //! state lives in the registry under named keys, fetched per call; [`Model`] is plain data in
 //! `lua.app_data`, borrowed briefly and released before re-entering Lua.
 
@@ -112,6 +113,7 @@ mod item_text;
 pub mod keybind;
 mod keyboard;
 mod layer_batch;
+mod lock_check;
 mod protected;
 pub(crate) mod taint;
 pub(crate) mod texel;
@@ -171,6 +173,7 @@ mod summon;
 mod talent;
 mod taxi;
 mod tick;
+pub use tick::system_chat_args;
 mod tooltip;
 mod tooltip_item;
 mod tooltip_spell;
@@ -276,6 +279,7 @@ pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
 pub use layout_cache::{AnchorLayout, FrameLayout, LayoutPoint};
+pub use lock_check::{check_lock, LockCheck, LockOpener, LockOpeners, LockSlotView};
 pub use loot::{LootRow, LootState, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macro_options::{has_options as macro_has_options, show_directive, ShowDirective};
@@ -287,7 +291,9 @@ pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub(crate) use model::Model;
-pub use model::{FontProbe, TextureProbe, TextureSizeProbe, WorldLocProjector};
+pub use model::{
+    FontProbe, TextureProbe, TextureSizeFn, TextureSizeProbe, WorldLocFn, WorldLocProjector,
+};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{
@@ -296,7 +302,7 @@ pub use pvp::{
 pub use quest::{
     QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
 };
-pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
+pub use quest_log::{QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS};
 pub(crate) use region::{
     apply_font_parts, apply_wrap_attrs, implicit_creation_anchor_lua, install_loaded_texture,
     load_texture_file,
@@ -340,7 +346,7 @@ pub use weapon_enchant::WeaponEnchant;
 pub use who_sort::{WhoSortChain, WhoSortKey};
 pub use worldmap::{
     WorldMapContinentView, WorldMapLandmarkSource, WorldMapLandmarkView, WorldMapLevel,
-    WorldMapOverlayView, WorldMapState, WorldMapZoneView,
+    WorldMapOverlayView, WorldMapSheetRow, WorldMapState, WorldMapZoneView,
 };
 pub use worldstate::WorldStateUiView;
 pub use worn_display::WornDisplay;
@@ -352,7 +358,7 @@ use crate::layout::Rect;
 use crate::order::ZTarget;
 use crate::widget::{FrameHandle, KindState};
 
-// Registry keys, the only roots of Lua-side state (the `LUAI_MAXCSTACK` discipline).
+// Registry keys, the only roots of Lua-side state.
 const REG_FRAME_META: &str = "__benilla_frame_meta";
 const REG_REGION_META: &str = "__benilla_region_meta";
 const REG_FRAME_METHODS: &str = "__benilla_frame_methods";
@@ -585,13 +591,10 @@ pub fn addon_chunk_name(folder: &str, file: &str) -> String {
     format!("@Interface\\AddOns\\{folder}\\{}", file.replace('/', "\\"))
 }
 
-/// What both FrameScript states hold: FrameScript's Lua init (`0x7039e0`), the bare state the glue
-/// builder starts from (left by startup `0x402aee` on its first build, re-run by its reset
-/// `0x703b80` on a later one) and `UI_Init` rebuilds through its own, and the three registrars
-/// the glue registrar `0x46abb0` shares with `UI_Init`: `0x51bb20` (the clock, `ConsoleExec` and
-/// the file trio), `0x706350` (the frame factory globals and the 17 widget method tables) and
-/// `0x4587f0` (sound).
-fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
+/// The state as `0x7039e0` leaves it: benilla-lua's client-shaped opening with the host's base
+/// functions, the dialect and the stdlib layer set over it, which replace values and add no key.
+fn open_state(vm: VmKind) -> mlua::Result<Lua> {
+    // `Lua::new` sets `InitLua`'s 256 KB threshold first (`0x7039f2`), then opens the state.
     let lua = Lua::new();
     let mut model = Model::new();
     model.vm = vm;
@@ -606,6 +609,18 @@ fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
     lua50::install(&lua)?;
     taint::install(&lua)?;
     stdlib::install(&lua)?;
+
+    Ok(lua)
+}
+
+/// What both FrameScript states hold: FrameScript's Lua init (`0x7039e0`), the bare state the glue
+/// builder starts from (left by startup `0x402aee` on its first build, re-run by its reset
+/// `0x703b80` on a later one) and `UI_Init` rebuilds through its own, and the three registrars
+/// the glue registrar `0x46abb0` shares with `UI_Init`: `0x51bb20` (the clock, `ConsoleExec` and
+/// the file trio), `0x706350` (the frame factory globals and the 17 widget method tables) and
+/// `0x4587f0` (sound).
+fn install_framescript(vm: VmKind) -> mlua::Result<Lua> {
+    let lua = open_state(vm)?;
 
     // `0x51bb20` (table `0x8503f4`): `GetTime`, `GetGameTime` and `ConsoleExec`. `ReadFile`,
     // `DeleteFile` and `AppendToFile` are not built.
@@ -775,10 +790,29 @@ impl UiScript {
         self.session
     }
 
-    /// Bound how long a chunk may run: past `budget` VM instructions the hook raises a Lua error,
-    /// so a loop that never ends fails its addon and the rest still runs. The app arms it only for
-    /// the world-entry load, so a hung load reports instead of freezing the loading screen, and
-    /// disarms it ([`Self::clear_instruction_budget`]) before the session's first frame.
+    /// An independent copy of this UI, Lua and Rust sides both, as a fresh session: a built state
+    /// to start many runs from without building it again. The host's services (the text measurer,
+    /// the probes) are shared with the original; an instruction budget is not carried over.
+    pub fn fork(&self) -> UiScript {
+        let lua = self.lua.fork();
+        lua.remove_hook();
+        lua.set_app_data(self.model_ref().clone());
+        handler_prof::install(&lua);
+        UiScript {
+            lua,
+            instructions: Default::default(),
+            session: NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Bound how long a chunk may run: past `budget` VM instructions the hook aborts the chunk to
+    /// the host, past every `pcall` and `xpcall` and running no error handler
+    /// (`benilla_lua::Vm::abort`), so a loop that never ends fails its addon and the rest still
+    /// runs. The app arms it only for the world-entry load, so a hung load reports instead of
+    /// freezing the loading screen, and disarms it ([`Self::clear_instruction_budget`]) before the
+    /// session's first frame. Deviation: the client's Lua has no such bound, as nothing sets a
+    /// hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that
+    /// never ends hangs it.
     pub fn set_instruction_budget(&self, budget: u64) {
         let used = self.instructions.clone();
         used.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -973,9 +1007,10 @@ impl UiScript {
         let Some(h) = model.arena.lookup(frame) else {
             return false;
         };
+        let rows = Self::message_viewport(&model, h);
         match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
             Some(crate::widget::KindState::ScrollingMessage(smf)) => {
-                smf.add(text.to_string(), r, g, b);
+                smf.add_with_id(text.to_string(), r, g, b, 0, rows);
                 true
             }
             _ => false,
@@ -1413,7 +1448,7 @@ impl UiScript {
         diagnostics::record_load_failure(&self.lua, log);
         self.model_mut()
             .pending_error_dispatch
-            .push(handler.to_string());
+            .push(model::HandlerArg::Text(handler.to_string()));
     }
 
     /// Hand each queued script error to the Lua error handler, as the reference's catch closure
@@ -1430,8 +1465,8 @@ impl UiScript {
         let Some(handler) = stdlib::error_handler(&self.lua) else {
             return;
         };
-        for msg in pending {
-            if let Err(e) = handler.call::<()>(msg) {
+        for arg in pending {
+            if let Err(e) = arg.value(&self.lua).and_then(|v| handler.call::<()>(v)) {
                 self.model_mut()
                     .errors
                     .push(format!("error handler itself failed: {e}"));

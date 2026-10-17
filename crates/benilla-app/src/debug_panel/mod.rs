@@ -63,9 +63,14 @@ fn strip_egui_tab_focus(mut inputs: Query<&mut EguiInput>) {
     }
 }
 
-fn track_pointer_over_ui(mut contexts: EguiContexts, mut over: ResMut<EguiPointerOver>) -> Result {
+fn track_pointer_over_ui(
+    mut contexts: EguiContexts,
+    mut over: ResMut<EguiPointerOver>,
+    mut keyboard: ResMut<crate::ui_script::EguiKeyboard>,
+) -> Result {
     let ctx = contexts.ctx_mut()?;
     over.0 = ctx.is_pointer_over_egui() || ctx.egui_wants_pointer_input();
+    keyboard.0 = ctx.egui_wants_keyboard_input();
     Ok(())
 }
 
@@ -239,8 +244,12 @@ fn gate_egui_lane(
     inspect: Res<crate::ui_script::InspectMode>,
     mut cams: Query<(&mut Camera, &mut EguiContextSettings), With<PrimaryEguiContext>>,
     mut over: ResMut<EguiPointerOver>,
+    mut keyboard: ResMut<crate::ui_script::EguiKeyboard>,
 ) {
     let open = debug.open || inspect.enabled;
+    if !open && keyboard.0 {
+        keyboard.0 = false;
+    }
     for (mut cam, mut settings) in &mut cams {
         if cam.is_active != open {
             cam.is_active = open;

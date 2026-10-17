@@ -16,11 +16,11 @@ use benilla_world::schedule::WorldStage;
 pub(crate) mod addons;
 mod content;
 pub(crate) mod extract;
-/// The stock glue screens behind `WOW_GLUE_STOCK=1`.
+/// The stock glue screens as the session and the instruments see them.
 pub(crate) mod glue;
 /// The stock create screen's catalog off the host's DBC catalogs.
 pub(crate) mod glue_create;
-/// `CGlueMgr`'s screen states over the native login, for the stock glue screens.
+/// `CGlueMgr`'s screen states over benilla's login, for the stock glue screens.
 pub(crate) mod glue_mgr;
 pub(crate) mod glue_scene;
 mod input;
@@ -76,6 +76,11 @@ pub(crate) struct CapturePointerPinned(pub(crate) bool);
 /// defined here so a build without dev overlays still has the type.
 #[derive(Resource, Default)]
 pub(crate) struct EguiPointerOver(pub(crate) bool);
+
+/// Whether a dev overlay's text field has the keyboard: the UI and the bindings get no keys, as
+/// when an EditBox has focus.
+#[derive(Resource, Default)]
+pub(crate) struct EguiKeyboard(pub(crate) bool);
 
 /// Whether the dev `I` inspector's world picking is armed; `player::control` and `target::click`
 /// read it every frame, so it lives here, and the default (disarmed) is the player's.
@@ -310,7 +315,6 @@ impl Plugin for UiScriptPlugin {
         // The quit root runs in `Last`: the close button's `AppExit` is written in `PostUpdate`.
         crate::shutdown::on_app_exit(app, shutdown_on_exit.into_configs());
         app.insert_resource(UiScaleCvar(default_ui_scale()))
-            .insert_resource(glue::GlueStock::from_env())
             .init_non_send::<glue_mgr::SharedGlueMgr>()
             .init_resource::<UiAutoScaleCache>()
             .init_resource::<UiFrameCost>()
@@ -324,6 +328,7 @@ impl Plugin for UiScriptPlugin {
                     || std::env::var_os("WOW_CAPTURE_UI").is_some(),
             ))
             .init_resource::<EguiPointerOver>()
+            .init_resource::<EguiKeyboard>()
             .init_resource::<InspectMode>()
             .init_resource::<PlayerUiHover>()
             .init_resource::<UiKeyboardCapture>()
@@ -345,12 +350,12 @@ impl Plugin for UiScriptPlugin {
             // The in-game UI loads on world entry, as the reference's does, once the loading cover
             // has presented, so its ~0.5 s never stalls the cover's first frame.
             .add_systems(
-                OnEnter(crate::char_select::ClientState::InWorld),
+                OnEnter(crate::client_state::ClientState::InWorld),
                 lifecycle::arm_entry_ui_load,
             )
             // The shutdown tail: events, then writes, in the reference's order.
             .add_systems(
-                OnExit(crate::char_select::ClientState::InWorld),
+                OnExit(crate::client_state::ClientState::InWorld),
                 end_ui_session,
             )
             // `init_` here and in `UiUnitPlugin`: either plugin may be built alone in a test.
@@ -395,11 +400,11 @@ impl Plugin for UiScriptPlugin {
                 (
                     extract::tick_script,
                     input::feed_ui_input.run_if(
-                        in_state(crate::char_select::ClientState::InWorld)
+                        in_state(crate::client_state::ClientState::InWorld)
                             .or_else(glue::glue_ui_up),
                     ),
                     input::feed_ui_wheel.run_if(
-                        in_state(crate::char_select::ClientState::InWorld)
+                        in_state(crate::client_state::ClientState::InWorld)
                             .or_else(glue::glue_ui_up),
                     ),
                     // Off the walk that just ran, for the pick and the arbiter after the pass.
@@ -425,6 +430,25 @@ impl Plugin for UiScriptPlugin {
                 arbitrate_pointer_over_ui
                     .after(UiInput)
                     .before(WorldStage::Input),
+            )
+            .add_message::<server_alert::LaunchUrl>()
+            .add_message::<server_alert::LaunchAddonUrl>()
+            // The stock glue screens' frame, ahead of the login engine, so the manager's asks reach
+            // it in the frame whose Lua made them.
+            .add_systems(
+                Update,
+                (
+                    // After the tick whose Lua called its verbs.
+                    glue_mgr::drive_glue_mgr.after(UiInput),
+                    // Off the roster and the screen the manager and the tick just moved.
+                    glue_scene::feed_stock_glue_preview.in_set(crate::portrait::GluePreviewFeed),
+                    // Each reads only its message, so no state orders it but the sets.
+                    server_alert::open_launched.after(WorldStage::Stream),
+                    server_alert::open_addon_launched.after(WorldStage::Stream),
+                )
+                    .chain()
+                    .before(crate::glue_session::login::LoginPolicy)
+                    .after(WorldStage::Net),
             );
 
         // A UI capture's synthetic unit snapshots, after the real feed so they win.

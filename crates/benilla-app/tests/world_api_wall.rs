@@ -488,11 +488,7 @@ fn measure() -> BTreeMap<String, BTreeSet<String>> {
     let src = app.join("src");
     let tests = test_module_files(&src);
     for file in rs_files(&src) {
-        let rel = file
-            .strip_prefix(&src)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel = rel_to(&file, &src);
         // Without the world crate the file's module decides its side; with it, every file here
         // is on the game side.
         if (!split && is_engine(&rel)) || tests.contains(&rel) {
@@ -535,11 +531,7 @@ fn measure_back() -> BTreeMap<String, BTreeSet<String>> {
     let src = app.join("src");
     let tests = test_module_files(&src);
     for file in rs_files(&src) {
-        let rel = file
-            .strip_prefix(&src)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel = rel_to(&file, &src);
         if tests.contains(&rel) {
             continue;
         }
@@ -587,12 +579,7 @@ fn test_module_files(src: &Path) -> BTreeSet<String> {
                         dir.join(name).join("mod.rs"),
                     ] {
                         if cand.is_file() {
-                            out.insert(
-                                cand.strip_prefix(src)
-                                    .unwrap()
-                                    .to_string_lossy()
-                                    .replace('\\', "/"),
-                            );
+                            out.insert(rel_to(&cand, src));
                         }
                     }
                 }
@@ -601,6 +588,15 @@ fn test_module_files(src: &Path) -> BTreeSet<String> {
         }
     }
     out
+}
+
+/// `file` under `src`, with forward slashes whichever separator the platform uses: the key every
+/// table here uses.
+fn rel_to(file: &Path, src: &Path) -> String {
+    file.strip_prefix(src)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn is_engine(rel: &str) -> bool {

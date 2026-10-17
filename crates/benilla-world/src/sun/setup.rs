@@ -214,10 +214,16 @@ pub(super) fn setup_sun(
                 .texture
                 .as_deref()
                 .and_then(|t| texture(t, (sub.wrap_x, sub.wrap_y)));
-            let stage2 = sub.stage2.as_ref().and_then(|st| {
-                mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, st.uvs.clone());
-                texture(&st.texture, (st.wrap_x, st.wrap_y))
-            });
+            // The second stage by its own UV set; `Stars.m2` has no env-mapped stage.
+            let stage2 = sub
+                .stage1
+                .as_ref()
+                .filter(|st| !st.uvs.is_empty())
+                .and_then(|st| {
+                    let tex = texture(st.texture.as_deref()?, (st.wrap_x, st.wrap_y))?;
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, st.uvs.clone());
+                    Some(tex)
+                });
             // The batch's static transparency weight, baked as a loop; sampled at 0, as
             // `Stars.m2` plays one static sequence.
             let weight = sub

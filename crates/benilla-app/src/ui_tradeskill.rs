@@ -25,6 +25,7 @@ use crate::creature_anim::{CastEvent, CastEventKind};
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, NetHandlerApp, ObjectStore, Objects, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::spell::{cast_target, CastCommit, CastLadder};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_items::{count_of, item_icon, InventoryScope};
@@ -226,13 +227,13 @@ fn recipe_icon(
     d: &benilla_formats::SpellDisplay,
     icons: Option<&ItemDisplays>,
     items: &Items,
-    commands: &NetCommands,
+    ask: Ask<'_>,
 ) -> Option<String> {
     let item = d.effect_item_type[0];
     if item == 0 {
         return None;
     }
-    let display = items.template(item, 0, commands)?.display_info_id;
+    let display = items.template(item, 0, ask)?.display_info_id;
     item_icon(icons, display)
 }
 
@@ -248,9 +249,11 @@ fn resolve_recipe(
     store: &ObjectStore,
     objects: &Objects,
     items: &Items,
-    commands: &NetCommands,
+    ask: Ask<'_>,
     cooldowns: &crate::spell::Cooldowns,
-    now: Instant,
+    // The frame's one clock pair ([`crate::ui_script::UiClock`]): a running cooldown then pushes
+    // the same start every frame.
+    (anchor, ui_now): (Instant, f64),
 ) -> Option<TradeSkillRecipe> {
     let d = spells.catalog.get(spell_id)?;
     let sla = skill_lines.catalog.ability(spell_id)?;
@@ -260,7 +263,7 @@ fn resolve_recipe(
     let mut num_available = u32::MAX;
     for &(entry, need) in d.reagents.iter().filter(|&&(e, n)| e != 0 && n != 0) {
         let have = count_of(&store.0, objects, entry, InventoryScope::DEFAULT);
-        let (name, icon) = match items.template(entry, 0, commands) {
+        let (name, icon) = match items.template(entry, 0, ask) {
             Some(t) => (Some(t.name.clone()), item_icon(icons, t.display_info_id)),
             None => (None, None),
         };
@@ -289,14 +292,14 @@ fn resolve_recipe(
     } else {
         (0, 1, 1)
     };
-    let icon = recipe_icon(d, icons, items, commands);
+    let icon = recipe_icon(d, icons, items, ask);
     // The header key (`0x4fca20`): the product's `(class, subclass)` named from
     // `ItemSubClass.dbc`, `None` while its template is in flight, as in the client. The same
     // template gives the `InventoryType` the slot filter reads and the `ItemLevel` the sort
     // breaks ties on (`record+0x14`).
     let (group, product_inv_type, product_item_level) = (product_item != 0)
         .then(|| {
-            items.template(product_item, 0, commands).map(|t| {
+            items.template(product_item, 0, ask).map(|t| {
                 let name = subclasses
                     .and_then(|sc| sc.0.name(t.class, t.subclass))
                     .unwrap_or_default()
@@ -318,12 +321,12 @@ fn resolve_recipe(
     }
     for &t in d.totems.iter().filter(|&&t| t != 0) {
         let have = count_of(&store.0, objects, t, InventoryScope::DEFAULT) > 0;
-        if let Some(info) = items.template(t, 0, commands) {
+        if let Some(info) = items.template(t, 0, ask) {
             tools.push((info.name.clone(), have));
         }
     }
 
-    let cd = cooldowns.info(spell_id, 0, Some(d), now);
+    let cd = cooldowns.info(spell_id, 0, Some(d), anchor);
     Some(TradeSkillRecipe {
         group,
         spell_id,
@@ -333,7 +336,7 @@ fn resolve_recipe(
         icon,
         min_made,
         max_made,
-        cooldown_secs: (cd.remaining_ms > 0).then(|| u64::from(cd.remaining_ms).div_ceil(1000)),
+        cooldown: cd.ui_triple(anchor, ui_now),
         product_item,
         product_inv_type,
         product_item_level,
@@ -357,12 +360,17 @@ fn feed_trade_skill(
     items: Res<Items>,
     commands: Res<NetCommands>,
     cooldowns: Res<crate::spell::Cooldowns>,
+    clock: Res<crate::ui_script::UiClock>,
     mut last: Local<crate::ui_script::VmMemo<Option<TradeSkillState>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let last = last.get(&script);
+    // The list's build looks every record up with the callback `0x4fc8e0` (`0x4fcd4d`) at the
+    // window's show; the rebuilds between read, as the getters' lookups stand for the stock
+    // frame's calls (`0x4fdba8`), which the asks below make.
+    let ask = Ask::at(last.is_none() || open.is_changed(), &commands);
     let fresh = (|| -> Option<TradeSkillState> {
         let line = open.line?;
         let spells = spells.as_deref()?;
@@ -374,7 +382,7 @@ fn feed_trade_skill(
             .line(line)
             .map(|l| l.name.clone())
             .unwrap_or_else(|| format!("Skill {line}"));
-        let now = Instant::now();
+        let now = (clock.anchor, clock.ui_now);
         let recipes: Vec<TradeSkillRecipe> = actions
             .spells
             .iter()
@@ -397,7 +405,7 @@ fn feed_trade_skill(
                     store,
                     &objects,
                     &items,
-                    &commands,
+                    ask,
                     &cooldowns,
                     now,
                 )
@@ -551,7 +559,7 @@ mod tests {
         let icons = landed_item(&mut deps);
         let d = recipe(SPELL_EFFECT_CREATE_ITEM, 777);
         assert_eq!(
-            recipe_icon(&d, Some(&icons), &deps.items, &deps.commands),
+            recipe_icon(&d, Some(&icons), &deps.items, Ask::New(&deps.commands)),
             Some("ITEM".into()),
         );
     }
@@ -563,7 +571,7 @@ mod tests {
         let icons = landed_item(&mut deps);
         let d = recipe(SPELL_EFFECT_ENCHANT_ITEM, 777);
         assert_eq!(
-            recipe_icon(&d, Some(&icons), &deps.items, &deps.commands),
+            recipe_icon(&d, Some(&icons), &deps.items, Ask::New(&deps.commands)),
             Some("ITEM".into()),
         );
     }
@@ -577,25 +585,106 @@ mod tests {
         // EffectItemType[0] == 0: 0x55ba30 short-circuits on a zero id before hashing.
         let none = recipe(SPELL_EFFECT_ENCHANT_ITEM, 0);
         assert_eq!(
-            recipe_icon(&none, Some(&icons), &deps.items, &deps.commands),
+            recipe_icon(&none, Some(&icons), &deps.items, Ask::New(&deps.commands)),
             None,
         );
 
         // A template that never lands: nil, asked for once.
         let missing = recipe(SPELL_EFFECT_CREATE_ITEM, 999);
         assert_eq!(
-            recipe_icon(&missing, Some(&icons), &deps.items, &deps.commands),
+            recipe_icon(
+                &missing,
+                Some(&icons),
+                &deps.items,
+                Ask::New(&deps.commands)
+            ),
             None,
         );
         assert_eq!(
-            recipe_icon(&missing, Some(&icons), &deps.items, &deps.commands),
+            recipe_icon(
+                &missing,
+                Some(&icons),
+                &deps.items,
+                Ask::New(&deps.commands)
+            ),
             None,
         );
         assert_eq!(deps.queried_entries(), vec![999], "ask-once, not ask-often");
 
         // Template landed, `ItemDisplayInfo` missing: still nil.
         let d = recipe(SPELL_EFFECT_CREATE_ITEM, 777);
-        assert_eq!(recipe_icon(&d, None, &deps.items, &deps.commands), None);
+        assert_eq!(
+            recipe_icon(&d, None, &deps.items, Ask::New(&deps.commands)),
+            None
+        );
+    }
+
+    /// No `TRADE_SKILL_UPDATE` sender runs off a cooldown's clock (`0x4fd164` in the rebuild
+    /// `0x4fca20`, and the filter setters `0x4fd725`, `0x4fd745`, `0x4fd765`); the getter reads the
+    /// seconds left at its call (`0x4fda20`). So a running cooldown pushes the same recipe every
+    /// frame, and the snapshot diff, which fires the event, never sees it tick.
+    #[test]
+    fn a_running_cooldown_leaves_the_recipe_unchanged_frame_to_frame() {
+        use std::time::Duration;
+        const SPELL: u32 = 18_560; // Mooncloth, a day-long cooldown
+        let mut deps = TestDeps::new();
+        let mooncloth = || SpellDisplay {
+            name: "Mooncloth".into(),
+            recovery_ms: 86_400_000,
+            ..Default::default()
+        };
+        let d = mooncloth();
+        let spells = Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(
+                [(SPELL, mooncloth())].into_iter().collect(),
+            ),
+            ..Spells::empty_for_tests()
+        };
+        let lines = SkillLines {
+            catalog: benilla_formats::SkillLineCatalog::from_abilities([(
+                SPELL,
+                benilla_formats::SlaInfo {
+                    skill_id: 197,
+                    req_skill_value: 1,
+                    forward_spell_id: 0,
+                    trivial_low: 1,
+                    trivial_high: 2,
+                },
+            )]),
+        };
+        let t0 = Instant::now();
+        let mut cooldowns = crate::spell::Cooldowns::default();
+        cooldowns.start_spell(SPELL, &d, 0, t0, None);
+        let store = ObjectStore(benilla_protocol::ObjectFields::default());
+        let mut frame = |elapsed: Duration| {
+            deps.with_objects(|objects, items, commands| {
+                resolve_recipe(
+                    SPELL,
+                    0,
+                    &spells,
+                    &lines,
+                    None,
+                    None,
+                    None,
+                    &store,
+                    objects,
+                    items,
+                    Ask::New(commands),
+                    &cooldowns,
+                    (t0 + elapsed, 50.0 + elapsed.as_secs_f64()),
+                )
+                .expect("a recipe")
+            })
+        };
+        let first = frame(Duration::from_millis(16));
+        assert_eq!(first.cooldown, Some((50_000, 86_400_000, true)));
+        for secs in [1, 2, 61, 3_600] {
+            assert_eq!(
+                frame(Duration::from_secs(secs)),
+                first,
+                "{secs} s on: the same push"
+            );
+        }
     }
 
     /// `0x4fccfc` counts a reagent with `0x622130` and `0x4ffb10` finds a tool with `0x622270`,
@@ -686,9 +775,9 @@ mod tests {
                     &store,
                     objects,
                     items,
-                    commands,
+                    Ask::New(commands),
                     &cooldowns,
-                    Instant::now(),
+                    (Instant::now(), 0.0),
                 )
                 .expect("a recipe");
                 (r.reagents[0].have, r.tools[0].1)
@@ -712,6 +801,7 @@ mod tests {
             .init_resource::<crate::net::GuidIndex>()
             .init_resource::<Items>()
             .init_resource::<crate::spell::Cooldowns>()
+            .init_resource::<crate::ui_script::UiClock>()
             .insert_resource(crate::net::NetCommands(tx))
             .insert_resource(Spells::empty_for_tests())
             .insert_resource(SkillLines {
@@ -772,7 +862,7 @@ mod tests {
                 icon: None,
                 min_made: 1,
                 max_made: 1,
-                cooldown_secs: None,
+                cooldown: None,
                 product_item: 2996,
                 product_inv_type: 0,
                 product_item_level: 0,
@@ -876,7 +966,7 @@ mod tests {
                 icon: None,
                 min_made: 1,
                 max_made: 1,
-                cooldown_secs: None,
+                cooldown: None,
                 product_item: 2996,
                 product_inv_type: 0,
                 product_item_level: 0,
@@ -970,7 +1060,7 @@ mod tests {
                 icon: None,
                 min_made: 1,
                 max_made: 1,
-                cooldown_secs: None,
+                cooldown: None,
                 product_item: 2996,
                 product_inv_type: 0,
                 product_item_level: 0,

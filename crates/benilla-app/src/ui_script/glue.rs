@@ -1,7 +1,5 @@
-//! The stock glue screens, this fork's default ([`GlueStock`]): the player's own
-//! `GlueXML.toc` off the patch chain, run into a glue VM ([`UiScript::new_glue`]) that stands in
-//! the world while no character is in it, where the boot VM otherwise stands. The native screens
-//! stay behind `WOW_GLUE_STOCK=0` and, under the stock ones, keep driving the network unseen.
+//! The glue screens: the player's own `GlueXML.toc` off the patch chain, run into a glue VM
+//! ([`UiScript::new_glue`]) that stands in the world while no character is in it.
 //!
 //! The reference's glue builder (`0x46a7b0`) resets the Lua state on a rebuild (`0x46a87b`; the
 //! cold first build, `0x46a505`, passes 0 and skips it), registers the glue functions
@@ -33,44 +31,75 @@ use benilla_ui::script::{ScriptValue, UiScript};
 
 use super::reference_ui;
 
-/// The switch's variable.
-const SWITCH: &str = "WOW_GLUE_STOCK";
+/// The glue screens as a dev instrument reaches them, so no instrument names the VM: through
+/// [`StockVm`] the glue VM's frames and verbs.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct StockGlueProbe<'w> {
+    script: Option<NonSend<'w, UiScript>>,
+}
 
-/// Whether this run puts the stock glue screens up, read once at plugin build. In this fork they
-/// are the default, the player and browser builds included; `WOW_GLUE_STOCK=0` puts the native
-/// screens up instead, and so does an unattended run (a probe reads the native screens' rosters)
-/// unless `WOW_GLUE_STOCK=1` asks for the stock ones.
-#[derive(Resource, Default, Clone, Copy)]
-pub(crate) struct GlueStock(pub(crate) bool);
-
-impl GlueStock {
-    /// The switch as this process has it.
-    pub(crate) fn from_env() -> Self {
-        Self(match std::env::var(SWITCH).ok().as_deref() {
-            Some("1") => true,
-            Some("0") => false,
-            _ => !crate::run_mode::unattended(),
-        })
+impl StockGlueProbe<'_> {
+    /// The glue VM; with none standing (the world's VM, or a build that failed), a [`StockVm`]
+    /// that shows nothing and presses nothing.
+    pub(crate) fn vm(&self) -> StockVm<'_> {
+        StockVm(
+            self.script
+                .as_deref()
+                .filter(|s| s.vm_kind() == benilla_ui::script::VmKind::Glue),
+        )
     }
 }
 
-/// Run condition: the stock glue screens are up, the switch on and no character in the world.
-pub(crate) fn glue_ui_up(
-    stock: Option<Res<GlueStock>>,
-    state: Option<Res<State<crate::char_select::ClientState>>>,
-) -> bool {
-    stock.is_some_and(|s| s.0)
-        && state.is_none_or(|s| *s.get() != crate::char_select::ClientState::InWorld)
+/// The glue VM an instrument reads and presses.
+#[derive(Clone, Copy)]
+pub(crate) struct StockVm<'a>(Option<&'a UiScript>);
+
+impl StockVm<'_> {
+    /// The glue VM is standing.
+    pub(crate) fn is_up(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// `IsVisible()` of the frame with this global name; false with no VM.
+    pub(crate) fn frame_visible(&self, name: &str) -> bool {
+        self.0.is_some_and(|s| s.frame_visible(name))
+    }
+
+    /// A Lua chunk's string value, as a stock function's caller reads it; `None` with no VM, for
+    /// `nil`, and on a raise, which is logged.
+    pub(crate) fn text(&self, chunk: &str) -> Option<String> {
+        self.0?
+            .eval::<Option<String>>(chunk)
+            .inspect_err(|e| error!("glue probe: {chunk} raised: {e}"))
+            .ok()
+            .flatten()
+    }
+
+    /// A Lua chunk's number value; `None` with no VM and on a raise, which is logged.
+    pub(crate) fn number(&self, chunk: &str) -> Option<f64> {
+        self.0?
+            .eval::<f64>(chunk)
+            .inspect_err(|e| error!("glue probe: {chunk} raised: {e}"))
+            .ok()
+    }
+
+    /// The create screen's character as its verbs left it (`[0xb42078]`), `None` with no VM or
+    /// no character built.
+    pub(crate) fn create_look(&self) -> Option<benilla_ui::script::GlueCreateLook> {
+        self.0?.glue_create_look()
+    }
+
+    /// Run a Lua chunk, the way a button's handler calls a stock function; a raise is logged.
+    pub(crate) fn press(&self, chunk: &str) {
+        if let Some(Err(e)) = self.0.map(|s| s.run(chunk)) {
+            error!("glue probe: {chunk} raised: {e}");
+        }
+    }
 }
 
-/// Run condition: the switch is on, whether or not a character is in the world.
-pub(crate) fn stock_glue(stock: Option<Res<GlueStock>>) -> bool {
-    stock.is_some_and(|s| s.0)
-}
-
-/// Run condition: the native glue screens draw and take input, the switch off.
-pub(crate) fn native_glue(stock: Option<Res<GlueStock>>) -> bool {
-    !stock.is_some_and(|s| s.0)
+/// Run condition: the glue screens are up, no character being in the world.
+pub(crate) fn glue_ui_up(state: Option<Res<State<crate::client_state::ClientState>>>) -> bool {
+    state.is_none_or(|s| *s.get() != crate::client_state::ClientState::InWorld)
 }
 
 /// The glue screen `SET_GLUE_SCREEN` names, `GlueParent.lua`'s `GlueScreenInfo` key.
@@ -281,8 +310,8 @@ pub(crate) fn run_pending_glue_rebuild(world: &mut World) {
     }
     world.resource_mut::<GlueRebuild>().requested = false;
     let in_world = world
-        .get_resource::<State<crate::char_select::ClientState>>()
-        .is_some_and(|s| *s.get() == crate::char_select::ClientState::InWorld);
+        .get_resource::<State<crate::client_state::ClientState>>()
+        .is_some_and(|s| *s.get() == crate::client_state::ClientState::InWorld);
     let screen = world
         .get_non_send::<UiScript>()
         .filter(|s| s.vm_kind() == benilla_ui::script::VmKind::Glue)
@@ -595,8 +624,7 @@ mod tests {
             .expect("the registry");
         let mut world = World::new();
         world.insert_resource(commands);
-        world.insert_resource(GlueStock(true));
-        world.insert_resource(State::new(crate::char_select::ClientState::Login));
+        world.insert_resource(State::new(crate::client_state::ClientState::Login));
         world.init_non_send::<super::super::glue_mgr::SharedGlueMgr>();
         world.init_resource::<GlueRebuild>();
         super::super::lifecycle::setup_script(&mut world);
@@ -652,7 +680,7 @@ mod tests {
         run_pending_glue_rebuild(&mut world);
         assert_eq!(session(&world), rebuilt, "once");
 
-        world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+        world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
         world.resource_mut::<GlueRebuild>().request();
         run_pending_glue_rebuild(&mut world);
         assert_eq!(session(&world), rebuilt, "a suspended glue builds nothing");

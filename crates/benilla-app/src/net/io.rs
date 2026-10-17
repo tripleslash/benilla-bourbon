@@ -17,14 +17,14 @@
 //! A logout or a later `SMSG_CHARACTER_LOGIN_FAILED` ends the world session, announced as a
 //! [`SessionEvent::Disconnected`] with [`SessionEnd::LoggedOut`], and parks at character select
 //! again on the same link. A stream failure emits it with [`SessionEnd::Lost`] and re-parks for
-//! credentials. All policy lives in [`crate::login`] and [`crate::char_select`]; the sequencer only
+//! credentials. All policy lives in [`crate::glue_session`]; the sequencer only
 //! sequences and never sleeps.
 //!
 //! Natively one long-lived write thread drains [`ClientCommand`](super::ClientCommand)s; each world
 //! entry hands it the [`WorldWriter`] over a swap channel ([`WriterSwap`]), and a logout takes it
 //! back, so there is only ever one writer.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
@@ -38,9 +38,8 @@ use bevy::platform::time::Instant;
 use anyhow::{anyhow, Result};
 use benilla_assets::LockRecover;
 use benilla_protocol::{
-    messages::{self, SurveyAnswer},
-    AuthReject, CharAction, LoginStage, Poll, RosterCause, SessionEnd, SessionEvent,
-    WardenRequired, WorldReader, WorldSession, WorldWriter,
+    messages::SurveyAnswer, AuthReject, CharAction, LoginStage, Poll, RosterCause, SessionEnd,
+    SessionEvent, WorldReader, WorldSession, WorldWriter,
 };
 use crossbeam_channel::{Receiver, Sender};
 
@@ -106,11 +105,6 @@ pub(crate) struct LoginRequest {
 pub(super) struct Parks {
     pub(super) login_rx: async_channel::Receiver<LoginRequest>,
     pub(super) park_rx: async_channel::Receiver<ParkRequest>,
-    /// The screen asks for the roster itself ([`CharRequest::Enumerate`], the stock glue's
-    /// `GetCharacterListUpdate`); false is the native screens' policy, the sequencer enumerating
-    /// on reaching the character park and after a create or delete. Read as each world park is
-    /// entered; the app sets it as it installs the VM that runs ([`super::RosterPolicy`]).
-    pub(super) screen_asks_roster: Arc<AtomicBool>,
 }
 
 /// World sessions begun this process, each numbered from 1; the events a session sends carry its
@@ -188,6 +182,9 @@ impl PingClock {
 /// Cap on send warnings per connection, so a movement stream during an outage cannot flood the log.
 pub(super) const SEND_WARN_CAP: u32 = 8;
 
+/// How often the character park looks at the world socket for a server that dropped it.
+const PARK_LINK_CHECK: Duration = Duration::from_millis(500);
+
 /// What one wake-up at the character park asked for, so every jump out is made outside `select!`.
 enum Parked {
     /// `CMSG_PLAYER_LOGIN` with this guid.
@@ -198,9 +195,7 @@ enum Parked {
     Renamed(u8, Option<(u64, String)>),
     /// `CMSG_CHAR_ENUM` was serviced in place; the roster is re-emitted, with no result.
     Listed,
-    /// The server refused the roster to a client without Warden: the login fails for good.
-    Refused(String),
-    /// Stay parked: a realm-list refresh, or a Cancel over this screen.
+    /// Stay parked: a realm-list refresh, a Cancel over this screen, or a tick that found the link up.
     StayPut,
     /// Drop the parked world session and dial this realm under the abandon generation its ask
     /// carried.
@@ -286,7 +281,6 @@ pub(super) struct NetHandles {
     // changed shape.
     pub(super) pick: ParkSender<CharRequest>,
     pub(super) realm: ParkSender<RealmRequest>,
-    pub(super) screen_asks_roster: Arc<AtomicBool>,
     pub(super) login: async_channel::Sender<LoginRequest>,
     pub(super) login_abandon: Arc<AtomicU64>,
     pub(super) ping: Arc<Mutex<PingClock>>,
@@ -309,18 +303,13 @@ pub(super) fn spawn_net(connect: bool) -> NetHandles {
     let (events_tx, events_rx) = crossbeam_channel::unbounded();
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
     let (park_tx, park_rx) = async_channel::unbounded::<ParkRequest>();
-    let screen_asks_roster = Arc::new(AtomicBool::new(false));
     let (login_tx, login_rx) = async_channel::unbounded::<LoginRequest>();
     // The writer outlives connections; the sequencer hands it each world entry's WorldWriter
     // across here and takes it back after a logout.
     let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
     let login_abandon = Arc::new(AtomicU64::new(0));
     let ping_clock = Arc::new(Mutex::new(PingClock::default()));
-    let parks = Parks {
-        login_rx,
-        park_rx,
-        screen_asks_roster: Arc::clone(&screen_asks_roster),
-    };
+    let parks = Parks { login_rx, park_rx };
     if connect {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -369,7 +358,6 @@ pub(super) fn spawn_net(connect: bool) -> NetHandles {
         commands: cmd_tx,
         pick: ParkSender::park(park_tx.clone()),
         realm: ParkSender::park(park_tx),
-        screen_asks_roster,
         login: login_tx,
         login_abandon,
         ping: ping_clock,
@@ -515,6 +503,8 @@ enum Woke {
     Login(Option<LoginRequest>),
     Realm(Option<RealmRequest>),
     Pick(CharRequest),
+    /// The character park's tick: look at the link ([`PARK_LINK_CHECK`]).
+    LinkCheck,
 }
 
 /// One wait at a park: the credentials channel and the park channel, whose realm and character
@@ -556,7 +546,7 @@ async fn login_park(parks: &Parks, events_tx: &Sender<SessionEvent>) -> Option<L
                 }
             }
             // A dial, a close, a leave or a character request has nothing to act on.
-            Woke::Realm(Some(_)) | Woke::Pick(_) => {}
+            Woke::Realm(Some(_)) | Woke::Pick(_) | Woke::LinkCheck => {}
         }
     }
 }
@@ -587,7 +577,7 @@ async fn logon_park(
             }
             Woke::Realm(Some(RealmRequest::Close)) => return LogonAnswer::Close,
             // No world session here to leave, and no character screen to ask.
-            Woke::Realm(Some(RealmRequest::Leave)) | Woke::Pick(_) => {}
+            Woke::Realm(Some(RealmRequest::Leave)) | Woke::Pick(_) | Woke::LinkCheck => {}
             Woke::Login(Some(next)) => return LogonAnswer::Login(next),
         }
     }
@@ -653,7 +643,6 @@ async fn run(
                 let _ = events_tx.send(SessionEvent::LoginFailed {
                     refusal: if dial.is_some() { None } else { refusal },
                     reason,
-                    terminal: false,
                     dial,
                 });
                 return Ok(Cycle::Repark);
@@ -730,11 +719,7 @@ async fn world(
     ping_clock: &Mutex<PingClock>,
     tails_announced: &mut std::collections::HashSet<u16>,
 ) -> Result<WorldEnd> {
-    let Parks {
-        park_rx,
-        screen_asks_roster,
-        ..
-    } = parks;
+    let Parks { park_rx, .. } = parks;
     let stage = |s: LoginStage| {
         let _ = events_tx.send(SessionEvent::LoginStage { stage: s });
     };
@@ -746,18 +731,6 @@ async fn world(
         let _ = events_tx.send(SessionEvent::LoginFailed {
             refusal,
             reason,
-            terminal: false,
-            dial: None,
-        });
-        Ok(WorldEnd::Failed)
-    };
-    // A failure resubmitting cannot fix: the app shows it and does not retry.
-    let fail_terminal = |reason: String| {
-        say_login_failed(&format!("net: login failed (terminal) — {reason}"));
-        let _ = events_tx.send(SessionEvent::LoginFailed {
-            refusal: None,
-            reason,
-            terminal: true,
             dial: None,
         });
         Ok(WorldEnd::Failed)
@@ -813,10 +786,6 @@ async fn world(
                 if canceled() {
                     return Ok(WorldEnd::Failed);
                 }
-                // A Warden refusal is the server's answer, not a transport fault.
-                if let Some(w) = e.downcast_ref::<WardenRequired>() {
-                    return fail_terminal(w.to_string());
-                }
                 // The world server's refusal code, for the screen's `AUTH_*` string.
                 if let Some(r) = e.downcast_ref::<benilla_protocol::WorldAuthReject>() {
                     return fail(
@@ -832,40 +801,20 @@ async fn world(
             return Ok(WorldEnd::Failed);
         }
 
-        // The roster as the account holds it, an empty one included: the reference builds
-        // `CMSG_CHAR_CREATE` in one place (`0x5aac50`), reached only from the create screen.
-        // Failures here are still pre-roster.
-        //
-        // Only the native screens' policy enumerates here and after a create or delete. The stock
-        // screen asks for its roster when it shows and after each action it makes
+        // No roster here: the screen asks for it when it shows and after each action it makes
         // (`GetCharacterListUpdate`, [`CharRequest::Enumerate`], `0x46c1a7`), as the reference
         // does: the world connect completes with the authentication response (`0x5ab2b8`), and
-        // the `CMSG_CHAR_ENUM` is the screen's.
-        let mut asks = screen_asks_roster.load(Ordering::SeqCst);
-        let mut characters = if asks {
-            Vec::new()
-        } else {
-            match session.char_enum_async().await {
-                Ok(c) => c,
-                Err(e) => {
-                    if canceled() {
-                        return Ok(WorldEnd::Failed);
-                    }
-                    if let Some(w) = e.downcast_ref::<WardenRequired>() {
-                        return fail_terminal(w.to_string());
-                    }
-                    return fail(None, format!("character roster: {e:#}"));
-                }
-            }
-        };
-        if canceled() {
-            return Ok(WorldEnd::Failed);
-        }
+        // the `CMSG_CHAR_ENUM` is the screen's. The reference builds `CMSG_CHAR_CREATE` in one
+        // place (`0x5aac50`), reached only from the create screen. The last roster an ask
+        // brought names the character entered as.
+        let mut characters: Vec<benilla_protocol::Character> = Vec::new();
         // A request or realm answer queued during a dead cycle must not answer this roster: a
         // reconnect must land on the list, not bounce back in off a stale pick. The app re-sends
         // its wants.
         while park_rx.try_recv().is_ok() {}
         let epoch = WORLD_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+        // Whether this link's unanswered Warden request has been logged.
+        let mut warden_noted = false;
         // A server that sends the addon reply in front of the authentication answer (vmangos
         // builds it in the auth handler, `WorldSocket.cpp:447`) has had it read by now.
         let mut addon_news = AddonNews::default();
@@ -882,28 +831,15 @@ async fn world(
         {
             return Ok(WorldEnd::Cycle(Cycle::Exit));
         }
-        if !asks
-            && events_tx
-                .send(SessionEvent::CharacterList {
-                    characters: characters.clone(),
-                    realm: Some(realm.clone()),
-                    cause: RosterCause::Park,
-                    epoch,
-                    generation,
-                })
-                .is_err()
-        {
-            return Ok(WorldEnd::Cycle(Cycle::Exit));
-        }
 
         // The link: the character park, the world, and back to the park on the same link after a
         // logout or a refused character login (`0x5aaeb0`, `0x5aad70`: `0x401ee0` tears the world
         // down and closes nothing). Its first world entry starts the connection's ping block.
         let mut fresh_link = true;
         loop {
-            // Park at character select until the app answers. Create and delete are serviced in
-            // place. If the server kicked the parked socket meanwhile, the login below fails, the
-            // cycle restarts and the app re-sends its pick, so the park needs no keepalive.
+            // Park at character select until the app answers. Create and delete are serviced in place.
+            // The reference keeps servicing the connection here, and a drop is the disconnect
+            // handler (`0x46c540`) at once, so the park looks at the socket every tick.
             bevy::log::info!("net: parked at character select");
             let guid = loop {
                 // The realm list's requests and the character screen's share one channel, in the
@@ -916,7 +852,13 @@ async fn world(
                 // The arms answer with a [`Parked`]; what a message asks for runs here, after
                 // [`woke`]'s race, so a second channel waking cannot drop a query or a create
                 // mid-reply.
-                let answer = match woke(parks).await {
+                // The link check races the channels as upstream's ticker does: whichever comes
+                // first, and a message waking first leaves the tick for the next wait.
+                let tick = async {
+                    benilla_protocol::transport::sleep(PARK_LINK_CHECK).await;
+                    Woke::LinkCheck
+                };
+                let answer = match futures_lite::future::race(woke(parks), tick).await {
                     Woke::Realm(None) | Woke::Login(None) => Parked::Exit,
                     // `RequestRealmList`: a query on the realmd link, dialled again once Enter
                     // World has closed it (`0x5b2200`), then the list; also Change Realm's first
@@ -962,19 +904,23 @@ async fn world(
                                 characters = c;
                                 Parked::Listed
                             }
-                            Err(e) => match e.downcast_ref::<WardenRequired>() {
-                                Some(w) => Parked::Refused(w.to_string()),
-                                // The stream failed under the ask: the screen's query fails
-                                // (`0x5ab300`), and the session ends as a dropped socket does.
-                                None => {
-                                    let _ = events_tx.send(SessionEvent::RosterFailed { epoch });
-                                    return Err(e);
-                                }
-                            },
+                            // The stream failed under the ask: the screen's query fails
+                            // (`0x5ab300`), and the session ends as a dropped socket does.
+                            Err(e) => {
+                                let _ = events_tx.send(SessionEvent::RosterFailed { epoch });
+                                return Err(e);
+                            }
                         }
                     }
                     Woke::Login(Some(next)) => Parked::Login(next),
+                    // The server dropped the link (a kick among them): the session ends as a
+                    // stream failure does, `DISCONNECTED_FROM_SERVER` and the login screen.
+                    Woke::LinkCheck => match session.poll_link().await {
+                        Ok(()) => Parked::StayPut,
+                        Err(e) => return Err(e),
+                    },
                 };
+                note_warden(&session, &mut warden_noted);
                 let (action, code) = match answer {
                     Parked::Exit => return Ok(WorldEnd::Cycle(Cycle::Exit)),
                     Parked::Repark => return Ok(WorldEnd::Cycle(Cycle::Repark)),
@@ -986,7 +932,6 @@ async fn world(
                         continue 'realm;
                     }
                     Parked::Leave => return Ok(WorldEnd::Failed),
-                    Parked::Refused(reason) => return fail_terminal(reason),
                     Parked::Acted(action, code) => (action, code),
                     // The reference renames its record in place (`0x4725f0`) and asks for no
                     // roster; the park's own copy, which names the character at the world entry,
@@ -1026,28 +971,7 @@ async fn world(
                         continue;
                     }
                 };
-                // A success changed the roster: under the native policy re-emit it before the
-                // result, so the screen has the fresh list when it reacts. The stock screen asks
-                // again itself (`0x46c1a7`).
-                let changed = match action {
-                    CharAction::Create => code == messages::CHAR_CREATE_SUCCESS,
-                    CharAction::Delete => code == messages::CHAR_DELETE_SUCCESS,
-                };
-                if changed && !asks {
-                    characters = session.char_enum_async().await?;
-                    if events_tx
-                        .send(SessionEvent::CharacterList {
-                            characters: characters.clone(),
-                            realm: Some(realm.clone()),
-                            cause: RosterCause::Changed,
-                            epoch,
-                            generation,
-                        })
-                        .is_err()
-                    {
-                        return Ok(WorldEnd::Cycle(Cycle::Exit));
-                    }
-                }
+                // A success changed the roster; the screen asks for it again itself (`0x46c1a7`).
                 if events_tx
                     .send(SessionEvent::CharActionResult { action, code })
                     .is_err()
@@ -1069,7 +993,7 @@ async fn world(
             // then.
             session.player_login_async(refuse_once(guid)).await?;
 
-            let billing_time_rested = session.billing_time_rested();
+            let billing = session.billing();
             let tutorial_flags = session.take_tutorial_flags();
             // `SMSG_ADDON_INFO` carries no names, so it is paired back against the block we sent.
             // No reply means no AddOn index space at all, carried as `None`. The link's one reply
@@ -1099,7 +1023,7 @@ async fn world(
                 .send(SessionEvent::Connected {
                     self_guid: guid,
                     name,
-                    billing_time_rested,
+                    billing,
                     tutorial_flags,
                     addon_info,
                 })
@@ -1130,30 +1054,7 @@ async fn world(
             };
             session = WorldSession::rejoin(reader, writer)?;
             bevy::log::info!("net: {reason} — back at character select on the same link");
-            // The native screens wait for the park's own enumeration, as on the dial; the stock
-            // screen's `CharacterSelect_OnShow` asks for its roster itself (`0x46b880`).
-            asks = screen_asks_roster.load(Ordering::SeqCst);
-            if !asks {
-                characters = match session.char_enum_async().await {
-                    Ok(c) => c,
-                    Err(e) => match e.downcast_ref::<WardenRequired>() {
-                        Some(w) => return fail_terminal(w.to_string()),
-                        None => return Err(e),
-                    },
-                };
-                if events_tx
-                    .send(SessionEvent::CharacterList {
-                        characters: characters.clone(),
-                        realm: Some(realm.clone()),
-                        cause: RosterCause::Park,
-                        epoch,
-                        generation,
-                    })
-                    .is_err()
-                {
-                    return Ok(WorldEnd::Cycle(Cycle::Exit));
-                }
-            }
+            // The screen's `CharacterSelect_OnShow` asks for its roster itself (`0x46b880`).
         }
     } // 'realm
 }
@@ -1274,6 +1175,17 @@ async fn stream(
                 }
             }
         }
+    }
+}
+
+/// Logs, once per link, that the server asked for Warden before the world entry and was left
+/// unanswered ([`WorldSession::warden_asked`]), the deviation [`WorldSession::recv`] records.
+fn note_warden(session: &WorldSession, noted: &mut bool) {
+    if !*noted && session.warden_asked() {
+        *noted = true;
+        bevy::log::debug!(
+            "net: SMSG_WARDEN_DATA read past unanswered: benilla runs no Warden module"
+        );
     }
 }
 

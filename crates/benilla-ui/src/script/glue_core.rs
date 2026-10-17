@@ -82,6 +82,7 @@ pub(super) fn leading_int(s: &str) -> i64 {
 }
 
 /// `DefaultServerLogin`'s two strings. Never logged: the `Debug` form names the account only.
+#[derive(Clone)]
 pub struct GlueCredentials {
     pub account: String,
     pub password: String,
@@ -98,7 +99,7 @@ impl std::fmt::Debug for GlueCredentials {
 
 /// A glue verb's effect the host carries out on its next frame, drained by its glue manager: the
 /// account name's file, the glue music and the browser. None of them is anything Lua reads back.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum GlueRequest {
     /// `SetSavedAccountName(name)` (`0x46cdf0`): the `accountName` CVar's new value.
     SetSavedAccountName(String),
@@ -119,7 +120,7 @@ pub enum GlueRequest {
 /// One of the glue manager's own functions a verb calls (`CGlueMgr`, `[0x46a400, 0x476020)`), run
 /// in place by the host the VM is seated with ([`GlueHost::call`]): its screen state, its dialog
 /// and its other events land before the verb returns; only the network half waits for the host.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum GlueCall {
     /// `DefaultServerLogin(account, password)` (`0x46d160`) past the agreements (`0x46afb0`'s
     /// first two tests, `[0xb41dfc]`, `[0xb41e04]`), the rest of `CGlueMgr::Login`: the idle
@@ -499,7 +500,7 @@ pub fn launch_addon_url_allowed(url: &str) -> bool {
 }
 
 /// The glue core's slots and queue in the VM's model.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct GlueCore {
     requests: Vec<GlueRequest>,
     /// The glue manager the verbs call in place, once the host has seated this VM.
@@ -726,6 +727,8 @@ pub(super) fn global_text(lua: &Lua, key: &str) -> String {
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
+    // `Screenshot` (`0x46d3d0`): the in-game verb's capture ask, answered with the glue's events.
+    super::screenshot::install(lua)?;
     let g = lua.globals();
 
     // Both arguments `is-number-or-string` (`0x46d168`, `0x46d178`), else the usage error

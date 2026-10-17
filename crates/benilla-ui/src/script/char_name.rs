@@ -211,6 +211,7 @@ mod tests {
     use super::*;
 
     /// A list that reserves any name holding one of its words, ASCII-folded.
+    #[derive(Clone)]
     struct Words(&'static [&'static str]);
 
     impl NameLists for Words {

@@ -29,7 +29,8 @@ use benilla_ui::script::{
 
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
-use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
+use crate::net::{Guid, NetEntity, ObjectStore, Reputations, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::target::{ring_reaction, Factions, Hovered, Selection, TargetUpdate};
 use benilla_world::view::WorldCamera;
 
@@ -317,7 +318,6 @@ fn drive_vplates(
     rig: Res<crate::player::CameraControl>,
     world: PlateWorld,
     names: Res<NameCache>,
-    net_commands: Res<NetCommands>,
     // `None` in a run with no UI VM.
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     anchor_q: (
@@ -584,9 +584,10 @@ fn drive_vplates(
                 .unwrap_or(1)
                 .max(1) as f32,
             bar_colour: [tint[0], tint[1], tint[2]],
-            // A plate never shows with no name: a plate addon keys its unit cache on it.
+            // Read, never asked: this runs every frame; the unit's create asks. A plate never shows
+            // with no name: a plate addon keys its unit cache on it.
             name: names
-                .resolve_unit(guid.0, store, &net_commands)
+                .resolve_unit(guid.0, store, Ask::Read)
                 .filter(|name| !name.is_empty())
                 .map(str::to_owned)
                 .unwrap_or_else(|| unknown_object.clone()),

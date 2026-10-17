@@ -20,6 +20,7 @@ use crate::names::NameCache;
 use crate::net::{
     ClientCommand, NetCommands, ObjectStore, SelfGuid, SelfPlayer, WorldEnterCascadeMessage,
 };
+use crate::query_cache::Ask;
 use crate::ui_party::GroupState;
 use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
@@ -316,6 +317,10 @@ pub(crate) struct MeetingStone {
     notices: Vec<MeetingStoneNotice>,
     /// `0x299` guids whose name has not resolved yet.
     pending_members: Vec<u64>,
+    /// How many of `pending_members`, from the front, a feed has looked up: the rest arrived
+    /// since, each in a packet whose handler looks the name up with the callback `0x4ca510`
+    /// (`0x4ca4b2`).
+    members_asked: usize,
     /// The VM's copy of the two globals is stale.
     dirty: bool,
 }
@@ -489,10 +494,11 @@ fn feed_meeting_stone(
     }
     // `0x299`'s name-cache callback: the line when the name lands, nothing until then.
     let pending = std::mem::take(&mut stone.pending_members);
-    for guid in pending {
+    let asked = std::mem::take(&mut stone.members_asked);
+    for (i, guid) in pending.into_iter().enumerate() {
         match inputs
             .names
-            .resolve_player(guid, &inputs.commands)
+            .resolve_player(guid, Ask::at(i >= asked, &inputs.commands))
             .map(str::to_string)
         {
             Some(name) => lines.extend(crate::ui_action::keyed_line_s(
@@ -503,6 +509,7 @@ fn feed_meeting_stone(
             None => stone.pending_members.push(guid),
         }
     }
+    stone.members_asked = stone.pending_members.len();
     if !lines.is_empty() {
         crate::ui_action::show_messages(&mut script, &mut sink, "ui_dialog_verbs", lines);
     }
@@ -995,7 +1002,7 @@ impl Plugin for UiDialogVerbsPlugin {
                     close_npc_session_out_of_range::<PetUnlearnState>.before(feed_dialog_verbs),
                     // Gated on the in-game interface: vmangos can send `SMSG_RAID_GROUP_ONLY` in
                     // the login burst (`Player.cpp:18686`), and an `INSTANCE_BOOT_START` fired at
-                    // the boot VM would be lost; the queue waits instead.
+                    // the glue VM would be lost; the queue waits instead.
                     feed_dialog_verbs
                         .in_set(UiFeed)
                         .run_if(crate::ui_script::ingame_ui_up),
@@ -1005,7 +1012,7 @@ impl Plugin for UiDialogVerbsPlugin {
                     poll_area_spirit_healer
                         .after(crate::target::TargetUpdate)
                         .run_if(crate::ui_script::ingame_ui_up)
-                        .in_set(crate::char_select::InWorldGated),
+                        .in_set(crate::client_state::InWorldGated),
                     // The cascade's order: the battlefield status, then this (`0x4909fb`,
                     // `0x490a14`), so `CMSG 0x296` follows `CMSG 0x2D3` on the wire.
                     meeting_stone_enter_world
@@ -1028,7 +1035,7 @@ impl Plugin for UiDialogVerbsPlugin {
                 ),
             )
             .add_systems(
-                OnExit(crate::char_select::ClientState::InWorld),
+                OnExit(crate::client_state::ClientState::InWorld),
                 area_spirit_healer_leave_world,
             );
     }
@@ -1048,6 +1055,47 @@ fn cancel_gate_could_apply(attributes_ex: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A member-added packet looks its name up with the callback `0x4ca510` (`0x4ca4b2`); the
+    /// frames its line waits through read. A refused name is asked by no frame after it, only by
+    /// the next packet naming its member.
+    #[test]
+    fn a_refused_stone_member_is_asked_by_the_next_packet_never_by_a_frame() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<MeetingStone>()
+            .init_resource::<NameCache>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .add_message::<SpellKitFx>()
+            .add_systems(Update, feed_meeting_stone);
+        app.insert_non_send(UiScript::new().unwrap());
+        let added = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<MeetingStone>()
+                .apply_notice(MeetingStoneNotice::MemberAdded { guid: 0x9 });
+            app.update();
+        };
+        added(&mut app);
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(0x9, String::new(), None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "no frame asks a refusal"
+        );
+        added(&mut app);
+        assert_eq!(
+            crate::query_cache::queries(&rx).len(),
+            1,
+            "the next packet asks again"
+        );
+    }
 
     /// `UNIT_FIELD_LEVEL`, absolute field 34.
     const LEVEL_FIELD: u16 = 34;

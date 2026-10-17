@@ -25,11 +25,13 @@ pub(crate) struct FieldNoticeCursor(MessageCursor<FieldNotice>);
 
 /// Fire this frame's field notices in the order the packets wrote them. Under the unit feed's
 /// gate, so only while the in-game interface is up; [`drop_field_notices`] takes them otherwise.
-pub(super) fn fire_field_notices(
+pub(crate) fn fire_field_notices(
     script: Option<NonSendMut<UiScript>>,
     notices: Res<Messages<FieldNotice>>,
     mut cursor: ResMut<FieldNoticeCursor>,
     mut sink: crate::ui_action::MessageSink,
+    // The quest log's watcher reads the slots.
+    me: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
 ) {
     let fresh: Vec<FieldNotice> = cursor.0.read(&notices).copied().collect();
     // No VM, nobody to hear them: they are dropped, as below.
@@ -37,6 +39,12 @@ pub(super) fn fire_field_notices(
         return;
     };
     for notice in fresh {
+        if notice == FieldNotice::QuestLog {
+            if let Some(store) = me.iter().next() {
+                script.quest_log_changed(crate::ui_quest_log::slot_views(&store.0));
+            }
+            continue;
+        }
         fire(&mut script, &mut sink, notice);
     }
 }
@@ -106,6 +114,8 @@ fn fire(script: &mut UiScript, sink: &mut crate::ui_action::MessageSink, notice:
                 script.fire_event(global, vec![]);
             }
         }
+        // Fired by [`fire_field_notices`], which holds the slots.
+        FieldNotice::QuestLog => {}
         FieldNotice::PvpPreference { on } => {
             let (toast, verbose) = super::pvp_announcement(on);
             // The verbose sentence is no catalog row, so it goes `unkeyed` to chat:
@@ -485,14 +495,14 @@ mod tests {
         };
         // No state yet: the login screen's side of the gate.
         assert_eq!(unread(&mut app, FieldNotice::Player { id: 189 }), 0);
-        app.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+        app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
         assert_eq!(
             unread(&mut app, FieldNotice::Player { id: 189 }),
             1,
             "the interface is up: the firing's to take"
         );
         // An entry load pending is the interface not up yet.
-        app.insert_resource(crate::ui_script::PendingEntryUiLoad);
+        app.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
         assert_eq!(unread(&mut app, FieldNotice::Player { id: 406 }), 0);
     }
 
@@ -627,7 +637,7 @@ mod tests {
         let notices = crate::field_watch::values(
             &crate::field_watch::Around {
                 me: Some(ME),
-                creature_cached: &|_| false,
+                creature_lookup: &|_| false,
                 others: &Vec::new,
                 pet_bar: 0,
             },

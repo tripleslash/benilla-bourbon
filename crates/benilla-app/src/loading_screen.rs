@@ -49,9 +49,66 @@ const FILL_BOTTOM: f32 = 0.0625; // 0.075 − 0.025·0.5
 const FILL_HEIGHT: f32 = 0.025;
 const FILL_MAX_WIDTH: f32 = 0.525; // halfW; fill width = progress · FILL_MAX_WIDTH
 
-/// The glue and loading screens are authored 4:3; on a wider window the reference fits them to
-/// height and pillarboxes. The square BLP is stretched to this aspect.
-const BACKDROP_ASPECT: f32 = 4.0 / 3.0;
+/// The factor `0x41ad10` applies to the display aspect (`0x8012cc`): the picture is authored 4:3, so
+/// `a = 0.75 · width/height` is 1.0 at 4:3 and the fit below turns on it.
+const ASPECT_TO_FIT: f32 = 0.75;
+
+/// Whether the `widescreen` CVar is on: its default, and anything but an applied 0.
+pub(crate) fn widescreen(cvars: Option<&crate::cvars::Cvars>) -> bool {
+    cvars.and_then(|c| c.flag("widescreen")) != Some(false)
+}
+
+/// `a = [0x832a4c]`, the display aspect relative to 4:3 (`0x41ad10`, read by `0x406a60` at
+/// `0x406ac4` and by the tip at `0x40668c` and `0x4066b9`). A window with no size reads as 4:3.
+///
+/// Both setters (the glue's `0x46ab40` through `0x46a828`, the interface's `0x4901e0` through
+/// `0x48fe2b`) pass `gxResolution`'s width over height only while `widescreen` is on, else 4/3,
+/// and `RN24(0.75 · f32(4/3))` is exactly 1.0: with it off the picture fills the window (the
+/// `0x406b02` path) and the tip's wrap is `515·W/1024`.
+///
+/// Deviation: the live window's aspect stands in for `gxResolution`'s, as in `portrait`'s
+/// `GxAspect` (fullscreen is the monitor's own size with no mode list, where the two agree).
+pub(crate) fn scaled_aspect(window: Vec2, widescreen: bool) -> f32 {
+    if widescreen && window.x > 0.0 && window.y > 0.0 {
+        window.x / window.y * ASPECT_TO_FIT
+    } else {
+        1.0
+    }
+}
+
+/// A rectangle in the window's logical pixels, from its top left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FitRect {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+}
+
+/// The viewport the paint callback `0x406a60` installs (`0x58af60` at `0x406b3d`) for a window of
+/// this size, which the art, the bar and the tip are drawn in. Wider than 4:3 (`a > 1`,
+/// `0x406ac9`-`0x406ad4`) it is `1/a` of the width, centred; narrower (`a < 1`, `0x406af7`-
+/// `0x406b02`) it is `a` of the height, centred; at exactly 4:3, or with no usable aspect, the
+/// whole window (`0x406b02` keeps the defaults for `a == 1` and a NaN). The edges are fractions of
+/// the window, `(1 − extent) · 0.5` from the near side.
+pub(crate) fn fit_rect(window: Vec2, widescreen: bool) -> FitRect {
+    let a = scaled_aspect(window, widescreen);
+    let (mut left, mut bottom, mut across, mut up) = (0.0, 0.0, 1.0, 1.0);
+    if a > 1.0 {
+        across = 1.0 / a;
+        left = (1.0 - across) * 0.5;
+    } else if a < 1.0 {
+        up = a;
+        bottom = (1.0 - up) * 0.5;
+    }
+    // The bands above and below are equal, so the bottom edge is also the top edge's distance.
+    FitRect {
+        x: left * window.x,
+        y: bottom * window.y,
+        width: across * window.x,
+        height: up * window.y,
+    }
+}
 /// Consecutive fully resident frames before the clear: debounces the post-teleport frame where
 /// `ready` reads 0 against a nonzero `total`.
 const CLEAR_AFTER_READY_FRAMES: u32 = 3;
@@ -115,10 +172,10 @@ impl EntryCover {
 /// `First`: advance or reset the covered-frame count.
 fn count_entry_cover(
     screen: Res<LoadingScreen>,
-    state: Res<State<crate::char_select::ClientState>>,
+    state: Res<State<crate::client_state::ClientState>>,
     mut cover: ResMut<EntryCover>,
 ) {
-    let in_world = *state.get() == crate::char_select::ClientState::InWorld;
+    let in_world = *state.get() == crate::client_state::ClientState::InWorld;
     cover.tick(screen.covering() && in_world);
 }
 
@@ -268,6 +325,10 @@ impl LoadingScreen {
 struct LoadingRoot;
 #[derive(Component)]
 struct LoadingBackdrop;
+/// The content area: the viewport `0x406a60` fits to the window ([`fit_rect`]). The bar's
+/// fractions are relative to it.
+#[derive(Component)]
+pub(crate) struct LoadingArea;
 #[derive(Component)]
 struct LoadingBarFill;
 #[derive(Component)]
@@ -296,6 +357,16 @@ impl Plugin for LoadingScreenPlugin {
                 (drive_loading_screen, ship::paint_ship_route)
                     .chain()
                     .in_set(WorldStage::Present),
+            )
+            // After the drive, which sets the visibility the same nodes carry, and after the
+            // window's mode is applied, so the size it reads is this frame's.
+            .add_systems(
+                Update,
+                fit_loading_area
+                    .in_set(WorldStage::Present)
+                    .after(drive_loading_screen)
+                    .after(crate::video::apply_window_mode)
+                    .after(crate::video::apply_present_mode),
             );
         // The cover's input rule, registered here so the two cannot be registered apart.
         input::build(app);
@@ -349,7 +420,7 @@ fn setup_loading_screen(
     world_assets: Option<ResMut<WorldAssets>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // The black pillarbox root spawns unconditionally: `covering()` consumers act as covered while
+    // The black root, the bands of a pillarbox or letterbox, spawns unconditionally: `covering()` consumers act as covered while
     // the screen is active, so missing art must still leave a black cover.
     let root = commands
         .spawn((
@@ -398,14 +469,17 @@ fn setup_loading_screen(
     let fill = tex("Interface\\Glues\\LoadingBar\\Loading-BarFill.blp").unwrap_or_default();
 
     commands.entity(root).with_children(|root| {
-        // One 4:3 area fit to the viewport height and centred; the bar's fractions are relative
-        // to it. Paint order is spawn order: backdrop, tip, fill, border.
-        root.spawn(Node {
-            width: Val::Vh(100.0 * BACKDROP_ASPECT),
-            height: Val::Vh(100.0),
-            position_type: PositionType::Relative,
-            ..default()
-        })
+        // The fitted rect, centred by the root; [`fit_loading_area`] sizes it each frame. The bar's
+        // fractions are relative to it. Paint order is spawn order: backdrop, tip, fill, border.
+        root.spawn((
+            LoadingArea,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Relative,
+                ..default()
+            },
+        ))
         .with_children(|area| {
             // Tinted black until the art resolves.
             area.spawn((
@@ -423,7 +497,7 @@ fn setup_loading_screen(
                 },
             ));
             // The tip, between the backdrop and the bar as in the reference (`0x406e12`,
-            // `0x406e18`), placed in percent of this area, the space of `crate::game_tip`.
+            // `0x406e18`), placed by `crate::game_tip` in window terms, as the reference does.
             area.spawn((LoadingTip, crate::game_tip::tip_bundle()));
             // The fill art is a horizontally uniform gradient, so scaling its width is a reveal.
             area.spawn((
@@ -465,6 +539,27 @@ fn setup_loading_screen(
     });
 }
 
+/// Per frame: the content area is the window's [`fit_rect`], so a resize during a load refits the
+/// art, the bar and the tip, as the reference's per-frame paint does (`0x406a60`).
+pub(crate) fn fit_loading_area(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut area: Query<&mut Node, With<LoadingArea>>,
+    cvars: Option<Res<crate::cvars::Cvars>>,
+) {
+    let (Some(window), Ok(mut node)) = (windows.iter().next(), area.single_mut()) else {
+        return;
+    };
+    let fit = fit_rect(
+        Vec2::new(window.width(), window.height()),
+        widescreen(cvars.as_deref()),
+    );
+    let (width, height) = (Val::Px(fit.width), Val::Px(fit.height));
+    if node.width != width || node.height != height {
+        node.width = width;
+        node.height = height;
+    }
+}
+
 /// Per frame: observe the lifecycle edges, run the raise and clear rules, resolve the backdrop and
 /// set the bar.
 #[allow(clippy::type_complexity)]
@@ -499,7 +594,7 @@ fn drive_loading_screen(
     // The world-entry UI load runs behind this cover; the reference's reveal always has the UI up.
     entry_ui_pending: Option<Res<crate::ui_script::PendingEntryUiLoad>>,
     edges: (
-        Res<State<crate::char_select::ClientState>>,
+        Res<State<crate::client_state::ClientState>>,
         MessageReader<crate::net::EnteredWorldMessage>,
         MessageReader<crate::net::WorldportMessage>,
         MessageReader<crate::net::TeleportMessage>,
@@ -507,7 +602,7 @@ fn drive_loading_screen(
         MessageReader<crate::net::DisconnectedMessage>,
         MessageReader<crate::net::CharacterLoginFailedMessage>,
         Option<Res<crate::net::PendingTransfer>>,
-        Option<Res<crate::char_select::Roster>>,
+        Option<Res<crate::glue_session::roster::Roster>>,
         ship::ShipLookup,
         MessageReader<crate::transport::TransportLegMessage>,
     ),
@@ -534,7 +629,8 @@ fn drive_loading_screen(
     // --- The edges. ---
     // A glue entry (not the seamless in-world reconnect), raised on the frame the glue tears down
     // and held across the server's character load; the art comes from the roster's map.
-    if entered.read().next().is_some() && *state.get() != crate::char_select::ClientState::InWorld {
+    if entered.read().next().is_some() && *state.get() != crate::client_state::ClientState::InWorld
+    {
         let map = roster.as_ref().and_then(|r| r.pending_map());
         screen.raise("world entry", true, map, now);
         // The tip rides this edge alone: the reference's setter `0x406630` has one caller, in
@@ -622,7 +718,7 @@ fn drive_loading_screen(
             }
         );
     }
-    if screen.blackout && *state.get() != crate::char_select::ClientState::InWorld {
+    if screen.blackout && *state.get() != crate::client_state::ClientState::InWorld {
         // The glue is up (it renders above this root); the cover's job is done.
         screen.dismiss();
     }
@@ -635,7 +731,7 @@ fn drive_loading_screen(
         && !progress.focus_resident
         && focus.follows_body()
         && !player_settling
-        && *state.get() == crate::char_select::ClientState::InWorld
+        && *state.get() == crate::client_state::ClientState::InWorld
     {
         // Same map by construction: the ground under the body.
         screen.raise("focus not resident", false, map_id, now);
@@ -644,7 +740,7 @@ fn drive_loading_screen(
     // same cover, cleared by the same rule, once the hold has ended.
     if !screen.active
         && player.as_ref().is_some_and(|p| p.ground_hold)
-        && *state.get() == crate::char_select::ClientState::InWorld
+        && *state.get() == crate::client_state::ClientState::InWorld
     {
         screen.raise("ground under the body still arriving", false, map_id, now);
     }
@@ -662,7 +758,7 @@ fn drive_loading_screen(
     screen.last_pos = body;
     if relocated
         && !screen.active
-        && *state.get() == crate::char_select::ClientState::InWorld
+        && *state.get() == crate::client_state::ClientState::InWorld
         && !(progress.is_ready() && progress.presentable())
     {
         screen.raise("teleport, destination not presentable", false, map_id, now);
@@ -825,6 +921,109 @@ mod tests {
         assert!(app.world().resource::<LoadingScreen>().art_cache.is_empty());
     }
 
+    fn fit(w: f32, h: f32) -> [f32; 4] {
+        let r = fit_rect(Vec2::new(w, h), true);
+        [r.x, r.y, r.width, r.height]
+    }
+
+    fn close(got: [f32; 4], want: [f32; 4]) {
+        assert!(
+            got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.01),
+            "{got:?} != {want:?}"
+        );
+    }
+
+    /// `0x406a60`: `a > 1` is `1/a` of the width, `a < 1` is `a` of the height, each centred, and
+    /// exactly 4:3 is the whole window.
+    #[test]
+    fn the_picture_is_fit_inside_the_window_in_both_directions() {
+        // Wider than 4:3: pillarboxed, full height.
+        close(fit(1920.0, 1080.0), [240.0, 0.0, 1440.0, 1080.0]);
+        // Narrower: letterboxed, full width, 3/4 of it tall.
+        close(fit(1280.0, 1024.0), [0.0, 32.0, 1280.0, 960.0]);
+        close(fit(600.0, 1000.0), [0.0, 275.0, 600.0, 450.0]);
+        // 4:3: the window.
+        close(fit(1024.0, 768.0), [0.0, 0.0, 1024.0, 768.0]);
+        close(fit(800.0, 600.0), [0.0, 0.0, 800.0, 600.0]);
+    }
+
+    /// `widescreen` off is a 4/3 aspect (`0x46ab40`, `0x4901e0`): `a` is exactly 1.0 and the picture
+    /// fills the window, at any window shape.
+    #[test]
+    fn widescreen_off_fills_the_window() {
+        for (w, h) in [(1920.0, 1080.0), (1280.0, 1024.0), (600.0, 1000.0)] {
+            let r = fit_rect(Vec2::new(w, h), false);
+            assert_eq!(scaled_aspect(Vec2::new(w, h), false), 1.0);
+            close([r.x, r.y, r.width, r.height], [0.0, 0.0, w, h]);
+        }
+        assert!(
+            widescreen(Some(&crate::cvars::Cvars::default())),
+            "the default is on"
+        );
+        assert!(widescreen(None));
+        assert!(!widescreen(Some(&crate::cvars::Cvars::with_value(
+            "widescreen",
+            "0"
+        ))));
+    }
+
+    /// The system reads the CVar: a tall window, `widescreen` off, is not letterboxed.
+    #[test]
+    fn the_content_area_honours_widescreen_off() {
+        let mut app = App::new();
+        app.insert_resource(crate::cvars::Cvars::with_value("widescreen", "0"));
+        app.world_mut().spawn((
+            Window {
+                resolution: (1280_u32, 1024_u32).into(),
+                ..default()
+            },
+            bevy::window::PrimaryWindow,
+        ));
+        let area = app.world_mut().spawn((LoadingArea, Node::default())).id();
+        app.add_systems(Update, fit_loading_area);
+        app.update();
+        let n = app.world().get::<Node>(area).unwrap();
+        assert_eq!((n.width, n.height), (Val::Px(1280.0), Val::Px(1024.0)));
+    }
+
+    /// A window with no size has no aspect; it reads as 4:3 and fits to nothing, never a NaN.
+    #[test]
+    fn a_window_without_a_size_fits_to_nothing() {
+        close(fit(0.0, 0.0), [0.0; 4]);
+    }
+
+    /// The system sizes the node the loading screen spawns from the primary window each frame, so
+    /// a window resized tall during a load letterboxes it.
+    #[test]
+    fn the_content_area_follows_the_window() {
+        let mut app = App::new();
+        let window = app
+            .world_mut()
+            .spawn((
+                Window {
+                    resolution: (1280_u32, 1024_u32).into(),
+                    ..default()
+                },
+                bevy::window::PrimaryWindow,
+            ))
+            .id();
+        let area = app.world_mut().spawn((LoadingArea, Node::default())).id();
+        app.add_systems(Update, fit_loading_area);
+        let size = |app: &App| {
+            let n = app.world().get::<Node>(area).unwrap();
+            (n.width, n.height)
+        };
+        app.update();
+        assert_eq!(size(&app), (Val::Px(1280.0), Val::Px(960.0)));
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .resolution
+            .set(1920.0, 1080.0);
+        app.update();
+        assert_eq!(size(&app), (Val::Px(1440.0), Val::Px(1080.0)));
+    }
+
     #[test]
     fn the_cover_counts_frames_to_the_glass_and_resets_the_moment_it_drops() {
         let mut cover = EntryCover::default();
@@ -952,7 +1151,7 @@ mod tests {
         player.pos = benilla_assets::coords::wow_to_bevy(at);
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
-            .insert_state(crate::char_select::ClientState::InWorld)
+            .insert_state(crate::client_state::ClientState::InWorld)
             .add_message::<crate::net::EnteredWorldMessage>()
             .add_message::<crate::net::WorldportMessage>()
             .add_message::<crate::net::TeleportMessage>()

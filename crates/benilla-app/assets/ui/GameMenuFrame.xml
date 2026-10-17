@@ -8,7 +8,7 @@
         to end; `Quit()` and the QUIT countdown stay for `/quit`.
     -->
     <Script><![CDATA[
-        -- A rung with nothing behind it yet (Edit Mode, Support), disabled.
+        -- A rung with nothing behind it yet (Edit Mode), disabled.
         function BenillaGameMenuButton_Pending(button, text)
             button:SetText(text)
             button:Disable()
@@ -145,7 +145,16 @@
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="BenillaGameMenuButtonEditMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
-                <Scripts><OnLoad>BenillaGameMenuButton_Pending(this, "Support")</OnLoad></Scripts>
+                <!-- The era's Support opens the help window, which 1.12 opens from its "?" micro
+                     button (`MainMenuBarMicroButtons.xml:217`); closing the menu first, as Macros. -->
+                <Scripts>
+                    <OnLoad>this:SetText("Support")</OnLoad>
+                    <OnClick>
+                        PlaySound("igMainMenuOption")
+                        HideUIPanel(GameMenuFrame)
+                        ToggleHelpFrame()
+                    </OnClick>
+                </Scripts>
             </Button>
             <Button name="GameMenuButtonMacros" inherits="GameMenuButtonTemplate" text="MACROS">
                 <Anchors>

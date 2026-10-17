@@ -1,13 +1,10 @@
 //! The sandbox and the 1.12 stdlib layer on top of stock Lua 5.1.
 //!
 //! - [`sandbox`]: no filesystem, OS or native reach (`io`, `os`, `package`, `require`, `dofile`,
-//!   `loadfile`, `load`, `module`, `newproxy` and `debug` removed), the reference's `debugstack`,
-//!   and a text-only `loadstring`.
+//!   `loadfile`, `load`, `module`, `newproxy` and `debug` removed) and the reference's
+//!   `debugstack`.
 //! - [`install`]: the 1.12 bare globals (string, table and math aliases, the `debug*` family, the
-//!   error-handler pair), `time` and `date`, and a `string.format` that accepts positional `%N$`
-//!   specs as the 1.12 client's does, rewriting them into a sequential format. Mixing positional
-//!   and sequential specs raises, as in the reference, whose single argument cursor a positional
-//!   spec desyncs.
+//!   error-handler pair), `time` and `date`.
 
 use mlua::{Lua, Value, Variadic};
 
@@ -18,7 +15,7 @@ use mlua::{Lua, Value, Variadic};
 pub fn lua_message(e: &mlua::Error) -> String {
     match e {
         mlua::Error::SyntaxError { message, .. } => message.clone(),
-        mlua::Error::RuntimeError(m) => m
+        mlua::Error::RuntimeError(m) | mlua::Error::LuaValue { message: m, .. } => m
             .rfind("\nstack traceback:\n")
             .map_or(m.as_str(), |at| &m[..at])
             .to_string(),
@@ -29,18 +26,12 @@ pub fn lua_message(e: &mlua::Error) -> String {
     }
 }
 
-/// Sandbox the VM: no filesystem, OS or native reach, the reference's `debugstack`, and text-only
-/// chunk loading.
+/// Sandbox the VM: no filesystem, OS or native reach, and the reference's `debugstack`.
 pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // Set to nil explicitly, whatever mlua's safe stdlib already leaves out.
-    for name in [
-        "io", "os", "package", "require", "dofile", "loadfile", "load", "module", "newproxy",
-        "debug",
-    ] {
-        g.set(name, Value::Nil)?;
-    }
+    // The state opens without `io`, `os`, `package`, `require`, `dofile`, `loadfile`, `load`,
+    // `module`, `newproxy` or `debug`, and none is set to nil here: that would make the key.
 
     // debugstack([start [, count1 [, count2]]]): the reference's traceback, frames only, in Lua
     // 5.0's wording. There is no `stack traceback:` header and line 1 is the caller's frame:
@@ -63,41 +54,10 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // Text-only `loadstring`: a binary chunk is rejected. The BOM strip and `#`-line skip apply,
-    // as in the reference they live inside `luaL_loadbuffer`/`luaX_setinput`.
-    let loadstring = lua.create_function(
-        |lua, (src, chunkname): (mlua::String, Option<mlua::String>)| {
-            let raw = src.as_bytes();
-            let bytes = crate::source::chunk(&raw).to_vec();
-            // The chunk name is the caller's string verbatim, defaulting to the source itself
-            // (`luaB_loadstring` `0x703280`, `0x70329a`), which `luaO_chunkid` `0x6f5c40` renders
-            // as `[string "…"]`. It comes from the raw bytes: `luaL_loadbuffer` `0x6f5690` strips
-            // a BOM only after `0x703296` took the name.
-            let name = match &chunkname {
-                Some(n) => String::from_utf8_lossy(&n.as_bytes()).into_owned(),
-                None => String::from_utf8_lossy(&raw).into_owned(),
-            };
-            let chunk = lua
-                .load(bytes)
-                .set_name(name)
-                .set_mode(mlua::ChunkMode::Text);
-            match chunk.into_function() {
-                Ok(f) => Ok((Value::Function(f), Value::Nil)),
-                // The failure leg returns nil and Lua's own message, unprefixed (`0x7032c6`,
-                // `0x7032d2`).
-                Err(e) => Ok((
-                    Value::Nil,
-                    Value::String(lua.create_string(lua_message(&e))?),
-                )),
-            }
-        },
-    )?;
-    g.set("loadstring", loadstring)?;
-
     Ok(())
 }
 
-/// Install the stdlib layer: the bare globals, `time`/`date` and the positional `format`.
+/// Install the stdlib layer: the bare globals and `time`/`date`.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     install_error_handler(lua)?;
     install_time(lua)?;
@@ -259,9 +219,6 @@ do
     debugtimestamp = noop
 end
 
--- ── _G accessors (getglobal/setglobal: _G[name] get/set) ───────────────────────────────
-function getglobal(name) return _G[name] end
-function setglobal(name, value) _G[name] = value end
 
 -- ── NOT here: wipe / tostringall / strsplit / strjoin / strconcat / strtrim ────────────────────
 -- Six 2.0+ names benilla used to define. 1.12 has none of them (absent from
@@ -272,82 +229,8 @@ function setglobal(name, value) _G[name] = value end
 -- An addon reaching for one of these is reaching for a later client's API, and it should find
 -- what it would find there: nothing.
 
--- ── Blizzard's positional string.format (%N$) ──────────────────────────────────────────────────
-do
-    -- `_find`/`_sub` are captured for the same reason `_format` is: this wrapper runs on every
-    -- `format` call in the UI and must not follow an addon's later replacement of `string.*`.
-    -- They are CALLS and not method syntax because 1.12 installs no string metatable, so
-    -- `fmt:find(...)` raises there, and here too (`lua50::install` removes the metatable). No
-    -- chunk of ours may use what the reference's VM cannot resolve; the parser enforces that
-    -- for the grammar, and this is its runtime twin.
-    local _format, _find, _sub, _len = string.format, string.find, string.sub, string.len
-    local CONV = "diouxXeEfgGqscp"  -- Lua 5.1 conversion letters
-
-    local function reformat(fmt, ...)
-        if type(fmt) ~= "string" then
-            return _format(fmt, unpack(arg, 1, arg.n))
-        end
-        -- fast path: no "%<digit>" at all ⇒ definitely no positional spec.
-        if not _find(fmt, "%%%d") then
-            return _format(fmt, unpack(arg, 1, arg.n))
-        end
-
-        local args = arg
-        local pieces = {}      -- rebuilt (sequential) format fragments
-        local order = {}       -- for each real conversion: the source arg index, or false=sequential
-        local seen_pos, seen_seq = false, false
-        local npieces, norder = 0, 0
-        local i, len = 1, _len(fmt)
-
-        while i <= len do
-            local c = _sub(fmt, i, i)
-            if c ~= "%" then
-                npieces = npieces + 1; pieces[npieces] = c
-                i = i + 1
-            elseif _sub(fmt, i + 1, i + 1) == "%" then
-                npieces = npieces + 1; pieces[npieces] = "%%"
-                i = i + 2
-            else
-                local j = i + 1
-                local ds, de = _find(fmt, "^%d+%$", j)  -- optional N$
-                if ds then
-                    seen_pos = true
-                    norder = norder + 1; order[norder] = tonumber(_sub(fmt, ds, de - 1))
-                    j = de + 1
-                else
-                    seen_seq = true
-                    norder = norder + 1; order[norder] = false
-                end
-                -- copy flags/width/precision + the conversion letter
-                local ce = _find(fmt, "[" .. CONV .. "]", j)
-                if not ce then
-                    error("invalid conversion in format string", 2)
-                end
-                npieces = npieces + 1; pieces[npieces] = "%" .. _sub(fmt, j, ce)
-                i = ce + 1
-            end
-        end
-
-        if seen_pos and seen_seq then
-            error("cannot mix positional and sequential arguments in format string", 2)
-        end
-
-        local out, seq = {}, 0
-        for k = 1, norder do
-            local idx = order[k]
-            if idx == false then
-                seq = seq + 1
-                out[k] = args[seq]
-            else
-                out[k] = args[idx]
-            end
-        end
-        return _format(table.concat(pieces, "", 1, npieces), unpack(out, 1, norder))
-    end
-
-    string.format = reformat
-    format = reformat
-end
+-- `format`, the bare `string.format`.
+format = string.format
 "#;
 
 /// `time()` and `date([format [, when]])`: 1.12 engine globals (`0x7035a0`, `0x7033a0`), Lua 5.0's
@@ -375,12 +258,13 @@ fn install_time(lua: &Lua) -> mlua::Result<()> {
             if body == "*t" {
                 let c = crate::civil::from_unix(secs);
                 let t = lua.create_table()?;
-                t.set("year", c.year)?;
-                t.set("month", c.month)?;
-                t.set("day", c.day)?;
-                t.set("hour", c.hour)?;
-                t.set("min", c.min)?;
+                // The client's `date` (`0x7033a0`) sets them in this order (`0x703452`..`0x7034e2`).
                 t.set("sec", c.sec)?;
+                t.set("min", c.min)?;
+                t.set("hour", c.hour)?;
+                t.set("day", c.day)?;
+                t.set("month", c.month)?;
+                t.set("year", c.year)?;
                 // Lua counts weekdays 1..7 from Sunday; ours is the 0-based index into `DAYS`.
                 t.set("wday", c.weekday + 1)?;
                 // Already 1-based, as in Lua.

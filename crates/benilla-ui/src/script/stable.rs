@@ -81,7 +81,7 @@ pub enum StableIntent {
 }
 
 /// The window's own state beside the snapshot: the selection, the queued verbs and the close flag.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct StableModel {
     pub(crate) state: Option<StableState>,
     /// The selection as the client holds it (`[0xb72250]`): -1 the summoned pet, 0 nothing, else

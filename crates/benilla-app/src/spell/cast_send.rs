@@ -24,6 +24,7 @@ use bevy::prelude::*;
 
 use crate::items::Items;
 use crate::net::{ClientCommand, NetCommands, Objects, SelfPlayer};
+use crate::query_cache::Ask;
 
 use super::{cast_target, validator, AutoRepeatActive};
 use crate::ui_action::{reagent_totem_refusal, CastErrors, Spells};
@@ -353,7 +354,9 @@ fn record_commit(
     }
     let item_flags = match commit {
         CastCommit::Spell => None,
-        CastCommit::Item { entry, .. } => Some(items.template_cached(entry).map_or(0, |t| t.flags)),
+        CastCommit::Item { entry, .. } => {
+            Some(items.template(entry, 0, Ask::Read).map_or(0, |t| t.flags))
+        }
     };
     pending.commit(
         spell_id,
@@ -461,7 +464,7 @@ fn send_spell_cast(
     // about the weapon.
     if let Some(d) = def {
         if let Some(store) = ctx.rel.self_store {
-            if !super::usable::equipped_item_fits_cached(d, store, objects, items) {
+            if !super::usable::equipped_item_fits(d, store, objects, items) {
                 let reason = super::usable::equipped_item_reason(d);
                 debug!("ui_action: cast {spell_id} refused locally — equipped item ({reason:#x})");
                 cast_errors.push_local(spell_id, reason);
@@ -576,7 +579,7 @@ fn send_spell_cast(
     };
     // The item's own category for this spell replaces the spell's in the category leg (`0x6e1492`).
     let item_category = items
-        .template_cached(queried_item)
+        .template(queried_item, 0, Ask::Read)
         .and_then(|t| t.use_spell)
         .filter(|u| u.spell_id == spell_id)
         .map_or(0, |u| u.category);
@@ -716,10 +719,25 @@ fn send_spell_cast(
             return;
         }
     }
-    // The deferred ArmCast-false refusal (`6e5050`): every rung passed and nothing bound.
+    // Every rung passed: the attempt fills the pending record with the player as its caster
+    // (`0x6e4fb1`), ahead of the arm and whatever it decides.
+    pending.fill_record();
+    // The deferred ArmCast-false refusal (`6e5050`): every rung passed and nothing bound. Its
+    // report (`0x6e1a00`) pops the spell the attempt pushed (`0x6e5026`) through `0x6e4940(cl=1)`,
+    // whose event clears the caster word; an item without `ITEM_FLAG_PLAYERCAST` was never pushed
+    // and leaves it.
     if let Some(reason) = deferred_refusal {
         debug!("ui_action: cast {spell_id} refused locally — the cast-arm tail ({reason:#x})");
         cast_errors.push_local(spell_id, reason);
+        let pushed = match commit {
+            CastCommit::Spell => true,
+            CastCommit::Item { entry, .. } => items
+                .template(entry, 0, Ask::Read)
+                .is_some_and(|t| t.flags & benilla_protocol::messages::ITEM_FLAG_PLAYERCAST != 0),
+        };
+        if pushed {
+            pending.take_caster_event();
+        }
         return;
     }
     // The deferred cursor entry (`6e50c8`): every rung passed, the cursor waits for its click.
@@ -918,6 +936,77 @@ mod tests {
                 ladder.send_at_object(spell_id, &ctx(), go_guid);
             })
             .expect("the ladder runs as a one-shot system");
+    }
+
+    /// The attempt fills its record with the player as the caster once every rung has passed
+    /// (`0x6e4fb1`), so a sent cast and a raised cursor have the word `0x6e4940`'s events read; a
+    /// refused rung does not reach it, and an arm refusal's report (`0x6e5064` → `0x6e1a00`) pops
+    /// the spell just pushed and clears it.
+    #[test]
+    fn a_passing_attempt_fills_the_caster_word() {
+        use benilla_formats::SpellDisplay;
+        const PLAIN: u32 = 100;
+        const OTHER: u32 = 101;
+        const BLIZZARD: u32 = 10;
+        const ROCKBITER: u32 = 8017;
+        let take = |world: &mut World| {
+            world
+                .resource_mut::<crate::spell::PendingCast>()
+                .take_caster_event()
+        };
+
+        let (mut world, _rx) = world();
+        let mut spells = crate::ui_action::Spells::empty_for_tests();
+        spells.catalog = benilla_formats::SpellCatalog::from_displays(
+            [
+                (PLAIN, SpellDisplay::default()),
+                (OTHER, SpellDisplay::default()),
+                (
+                    BLIZZARD,
+                    SpellDisplay {
+                        targets: 0x40,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    ROCKBITER,
+                    SpellDisplay {
+                        targets: 0x10,
+                        attributes: 0x0005_0200,
+                        effects: [benilla_formats::SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, 0, 0],
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        world.insert_resource(spells);
+
+        send(&mut world, PLAIN, CastCommit::Spell);
+        assert!(take(&mut world), "a sent cast fills it");
+
+        // PLAIN is still in flight, so OTHER is refused at `0x6e4d97`, ahead of the fill.
+        send(&mut world, OTHER, CastCommit::Spell);
+        assert_eq!(world.resource::<CastErrors>().0.len(), 1, "refused 0x61");
+        assert!(!take(&mut world), "a refused attempt fills nothing");
+        world
+            .resource_mut::<crate::spell::PendingCast>()
+            .clear_if(PLAIN);
+
+        send(&mut world, BLIZZARD, CastCommit::Spell);
+        assert!(world.resource::<crate::spell::SpellTargeting>().active());
+        assert!(take(&mut world), "the cursor's spell has its record too");
+        world.resource_mut::<crate::spell::SpellTargeting>().clear();
+
+        world
+            .resource_mut::<crate::spell::PendingCast>()
+            .fill_record();
+        send(&mut world, ROCKBITER, CastCommit::Spell);
+        assert!(
+            !take(&mut world),
+            "the empty weapon hand's report popped the spell and spent the word"
+        );
     }
 
     /// TryCast's dead rung (`0x6e4c49`): a corpse and a ghost (health 1, the `PLAYER_FLAGS` bit)

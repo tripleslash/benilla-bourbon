@@ -58,6 +58,10 @@ pub struct MatKey {
     fog_policy: benilla_formats::FogPolicy,
     /// The batch samples the generated sphere-map coordinate, not its vertex UVs.
     env_map: bool,
+    /// The second texture stage's texture and combine preset ([`benilla_assets::Stage1`]).
+    stage1: Option<(AssetId<Image>, u8)>,
+    /// Stage 0's combine preset (`ModelSubmesh::combine`), which sets a fade twin's alpha.
+    combine: Option<u8>,
     /// The static terrain-shade selector, fixed per placement.
     shade: ShadeSel,
     /// Authored batch index + 1 (0 = unordered): the transparent sort bias of a blending batch, and
@@ -146,6 +150,8 @@ pub fn model_material(
     no_depth_test: bool,
     fog_policy: benilla_formats::FogPolicy,
     env_map: bool,
+    stage1: Option<&benilla_assets::Stage1>,
+    combine: Option<u8>,
     shade: ShadeSel,
     batch_order: u16,
     uv_anim: Option<&std::sync::Arc<benilla_formats::UvAnim>>,
@@ -172,6 +178,8 @@ pub fn model_material(
         no_depth_test,
         fog_policy,
         env_map,
+        stage1,
+        combine,
         shade,
         batch_order,
         uv_anim,
@@ -187,7 +195,8 @@ pub fn model_material(
 }
 
 /// fork: [`model_material`] for a classified tree or bush leaf batch's exile copy: the same
-/// material plus [`FOLIAGE_WIND_MARKER`], so the entity draw sways like the retained batch.
+/// material plus [`FOLIAGE_WIND_MARKER`], so the entity draw sways like the retained batch. A leaf
+/// card is one stage at the stock opaque preset, so no second stage and no combine.
 #[allow(clippy::too_many_arguments)]
 pub fn foliage_model_material(
     cache: &mut MaterialCache,
@@ -230,6 +239,8 @@ pub fn foliage_model_material(
         no_depth_test,
         fog_policy,
         env_map,
+        None,
+        None,
         shade,
         batch_order,
         uv_anim,
@@ -260,6 +271,8 @@ fn model_material_impl(
     no_depth_test: bool,
     fog_policy: benilla_formats::FogPolicy,
     env_map: bool,
+    stage1: Option<&benilla_assets::Stage1>,
+    combine: Option<u8>,
     shade: ShadeSel,
     batch_order: u16,
     uv_anim: Option<&std::sync::Arc<benilla_formats::UvAnim>>,
@@ -310,6 +323,8 @@ fn model_material_impl(
         no_depth_test,
         fog_policy,
         env_map,
+        stage1: stage1.map(|s| (s.texture.id(), s.combine)),
+        combine,
         shade,
         batch_order,
         uv_anim: uv_anim.map(|a| std::sync::Arc::as_ptr(a) as usize),
@@ -453,6 +468,8 @@ fn model_material_impl(
                 },
                 // Zero until a sampler registers this material and bakes its table slot in once.
                 anim_slots: Vec4::ZERO,
+                stage1: stage1_params(stage1, combine),
+                stage1_texture: stage1.map(|s| s.texture.clone()),
                 light_buf: light.clone(),
             },
         },
@@ -519,10 +536,16 @@ pub fn zfill_material(
     cache: &mut MaterialCache,
     materials: &mut Assets<WowModelMaterial>,
     texture: Option<Handle<Image>>,
+    env_map: bool,
+    stage1: Option<&benilla_assets::Stage1>,
     two_sided: bool,
     cutout: bool,
     light: &Buffer,
 ) -> Handle<WowModelMaterial> {
+    // Only a cutout reads the coordinates and stage 1, which shape the alpha it tests; the
+    // reference's depth-only element binds the same coordinates as the colour pass (`0x70b833`).
+    let env_map = env_map && cutout;
+    let stage1 = stage1.filter(|_| cutout);
     let key = MatKey {
         light: light.id(),
         texture: texture.as_ref().map(Handle::id),
@@ -540,7 +563,9 @@ pub fn zfill_material(
         no_depth_write: false,
         no_depth_test: false,
         fog_policy: benilla_formats::FogPolicy::Scene,
-        env_map: false,
+        env_map,
+        stage1: stage1.map(|s| (s.texture.id(), s.combine)),
+        combine: None,
         shade: ShadeSel::Lit,
         batch_order: 0,
         uv_anim: None,
@@ -578,7 +603,11 @@ pub fn zfill_material(
                 clutter_fade: Vec4::new(
                     0.0,
                     0.0,
-                    f32::from(ZFILL_MARKER | if cutout { TWIN_CUTOUT_MARKER } else { 0 }),
+                    f32::from(
+                        ZFILL_MARKER
+                            | if cutout { TWIN_CUTOUT_MARKER } else { 0 }
+                            | (u16::from(env_map) * ENV_MAP_MARKER),
+                    ),
                     0.0,
                 ),
                 // `y` stays 0: the zfill pipeline forces its own depth write.
@@ -587,12 +616,25 @@ pub fn zfill_material(
                 tint: Vec4::new(1.0, 1.0, 1.0, 0.0),
                 sidn: Vec4::ZERO,
                 anim_slots: Vec4::ZERO,
+                stage1: stage1_params(stage1, None),
+                stage1_texture: stage1.map(|s| s.texture.clone()),
                 light_buf: light.clone(),
             },
         },
     );
     cache.insert(key, handle.clone());
     handle
+}
+
+/// `WowModelExt::stage1`: `x` = stage 1 bound, `y` = its combine preset, `z` = the stage-0 preset
+/// plus one (`0` for a batch without one, which keeps the texel's alpha, the modulate).
+fn stage1_params(stage1: Option<&benilla_assets::Stage1>, combine: Option<u8>) -> Vec4 {
+    Vec4::new(
+        f32::from(u8::from(stage1.is_some())),
+        stage1.map_or(0.0, |s| f32::from(s.combine)),
+        combine.map_or(0.0, |p| f32::from(p) + 1.0),
+        0.0,
+    )
 }
 
 /// `clutter_fade.z` marker bit 11: a far-side-of-water twin, whose −4e4 sort rung `specialize`
@@ -1120,6 +1162,25 @@ mod tests {
         // No stray bits invented.
         let out2 = replace_fog_policy(f32::from(0u16), FogPolicy::Grey) as u16;
         assert_eq!(out2, (FogPolicy::Grey as u16) << 4);
+    }
+
+    /// The stage-0 combine reaches the shader as `stage1.z`, preset + 1, so a preset-0 twin and a
+    /// preset-1 twin are two uniforms (and, by `MatKey::combine`, two materials), while a batch
+    /// with no combine (WMO, clutter tuft) is the zero the shader reads as the texel's alpha.
+    #[test]
+    fn the_stage_zero_combine_rides_stage1_z() {
+        let z = |c| super::stage1_params(None, c).z;
+        assert_eq!(z(None), 0.0);
+        assert_eq!(z(Some(0)), 1.0, "opaque preset 0 is not the untagged zero");
+        assert_eq!(z(Some(1)), 2.0);
+        assert_eq!(z(Some(5)), 6.0);
+        // Stage 1's own fields do not move with it.
+        let stage = benilla_assets::Stage1 {
+            texture: Default::default(),
+            combine: 3,
+        };
+        let p = super::stage1_params(Some(&stage), Some(0));
+        assert_eq!((p.x, p.y, p.z), (1.0, 3.0, 1.0));
     }
 
     /// Too small and coplanar layers strobe; too large and effects interleave into their owner.

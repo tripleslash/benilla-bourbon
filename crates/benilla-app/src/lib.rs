@@ -51,11 +51,10 @@ mod bowstring;
 mod camera_shake;
 #[cfg(feature = "dev")]
 mod capture;
-mod char_create;
-mod char_select;
 mod chat_bubble;
 mod chr_classes;
 mod cinematic;
+mod client_state;
 mod combat_log;
 mod combat_text;
 mod console;
@@ -77,8 +76,7 @@ mod fishing_line;
 mod flavor;
 mod footprints;
 mod game_plugins;
-mod glue;
-mod glue_strings;
+mod glue_session;
 mod go_anim;
 mod go_templates;
 mod hd_models;
@@ -88,11 +86,11 @@ mod item_watch;
 mod items;
 mod loading_screen;
 mod local_state;
-mod login;
 mod minimap;
 mod nameplates;
 mod names;
 mod net;
+mod no_install;
 mod npc_text;
 /// Ships in part (the FPS journal and the clocks it reads); the rest is `dev`.
 mod perf;
@@ -109,7 +107,6 @@ mod query_cache;
 mod quest_markers;
 mod raid_marks;
 mod ranged_flex;
-mod realm_select;
 mod realmlist;
 mod run_mode;
 mod screen_fade;
@@ -136,7 +133,6 @@ mod target;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod text_filter;
-mod text_reshape;
 mod textinput;
 mod transport;
 mod tutorial;
@@ -147,6 +143,7 @@ mod ui_bank;
 mod ui_battlefield;
 mod ui_battlefield_positions;
 mod ui_battlefield_score;
+mod ui_billing;
 mod ui_bind_confirm;
 mod ui_binder;
 mod ui_cast;
@@ -172,6 +169,7 @@ mod ui_loot;
 mod ui_loot_roll;
 mod ui_macro;
 mod ui_mail;
+mod ui_memory;
 mod ui_merchant;
 mod ui_mirror;
 mod ui_models;
@@ -486,6 +484,13 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         webenv::var("WOW_OFFLOAD").as_deref() != Some("0"),
     );
 
+    // Fonts, art and the stock interface all come from the install, so without one the client
+    // ends here, before any window or plugin exists (`no_install`).
+    let data_dir = match no_install::resolve() {
+        Ok(data_dir) => data_dir,
+        Err(err) => return no_install::fail(&err, run_mode::unattended()),
+    };
+
     let mut app = App::new();
     // The panel footer and the build banner read the stamp back.
     app.insert_resource(build);
@@ -555,18 +560,13 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     crate::cvars::apply_boot_layers();
 
     // The `mpq://` source must be registered before `AssetPlugin` (in `DefaultPlugins`) builds. The
-    // install is found by `benilla_formats::wow_data`, as everywhere; without one the source is
-    // absent and terrain loads fail gracefully.
-    match benilla_formats::wow_data() {
-        Some(data_dir) => {
-            if let Err(e) = benilla_assets::register_mpq_source(&mut app, &data_dir) {
-                eprintln!("benilla-assets: mpq:// source unavailable ({e:#})");
-            }
-        }
-        None => eprintln!(
-            "benilla: no WoW install found — looked in {:?}",
-            benilla_formats::candidates()
-        ),
+    // install is found by `benilla_formats::wow_data`, as everywhere, and is required above; one
+    // whose archives will not open ends the boot the same way (`no_install`).
+    if let Err(e) = benilla_assets::register_mpq_source(&mut app, &data_dir) {
+        return no_install::fail(
+            &no_install::NoInstall::unreadable(&data_dir, &e),
+            run_mode::unattended(),
+        );
     }
 
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`

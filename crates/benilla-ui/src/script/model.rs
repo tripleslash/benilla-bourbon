@@ -15,19 +15,20 @@ use super::{
 // ── The Rust-side model ──
 
 /// The host's answer to whether a texture path resolves to a file.
-pub type TextureProbe = Box<dyn Fn(&str) -> bool>;
+pub type TextureProbe = std::rc::Rc<dyn Fn(&str) -> bool>;
 
 /// The host's world-to-map projection (`0x4a7360`): the displayed map's selection as
 /// [`super::UiScript::world_map_selection`] reads it, a map id and a world `(x, y)`, to the map UV,
 /// `None` where the reference's outputs stay at their `(0, 0)`.
-pub type WorldLocProjector =
-    Box<dyn Fn((u32, u32, Option<u32>), u32, f32, f32) -> Option<(f32, f32)>>;
+pub type WorldLocProjector = std::rc::Rc<WorldLocFn>;
+pub type WorldLocFn = dyn Fn((u32, u32, Option<u32>), u32, f32, f32) -> Option<(f32, f32)>;
 
 /// The host's answer to a texture path's size in texels.
-pub type TextureSizeProbe = Box<dyn Fn(&str) -> Option<(u32, u32)>>;
+pub type TextureSizeProbe = std::rc::Rc<TextureSizeFn>;
+pub type TextureSizeFn = dyn Fn(&str) -> Option<(u32, u32)>;
 
 /// The host's answer to whether a font path loads.
-pub type FontProbe = Box<dyn Fn(&str) -> bool>;
+pub type FontProbe = std::rc::Rc<dyn Fn(&str) -> bool>;
 
 /// Minted id to handle, indexed directly: ids are dense and every scripted call looks one up.
 #[derive(Debug, Clone)]
@@ -83,8 +84,30 @@ pub(crate) fn node_deferred(
     }
 }
 
-/// The Rust-side model behind the Lua VM, in `lua.app_data`. It holds no mlua handles, whose
-/// persistent count the vendored `LUAI_MAXCSTACK` caps.
+/// What the Lua error handler is called with for one caught error: the value an error carries,
+/// its bytes as Lua wrote them, or a host's own text.
+#[derive(Clone, Debug)]
+pub(crate) enum HandlerArg {
+    Text(String),
+    Error(mlua::Error),
+}
+
+impl HandlerArg {
+    /// The one argument, in `lua`.
+    pub(crate) fn value(self, lua: &mlua::Lua) -> mlua::Result<mlua::Value> {
+        Ok(match self {
+            HandlerArg::Text(t) => mlua::Value::String(lua.create_string(t)?),
+            HandlerArg::Error(e) => match e.lua_value(lua) {
+                Some(v) => v,
+                None => mlua::Value::String(lua.create_string(e.lua_bytes(lua))?),
+            },
+        })
+    }
+}
+
+/// The Rust-side model behind the Lua VM, in `lua.app_data`. It holds no Lua handles, each of
+/// which is a collector root.
+#[derive(Clone)]
 pub(crate) struct Model {
     /// Which FrameScript state this VM is: it picks the event table and the frame types.
     pub(crate) vm: super::glue::VmKind,
@@ -106,7 +129,7 @@ pub(crate) struct Model {
     /// The host's reader for chain-sourced addon files; without one such an addon is `MISSING`.
     pub(crate) addons_chain_reader: Option<super::addon::SharedChainReader>,
     /// The host's font engine, so a metric answers inside the asking call, not a frame later.
-    pub(crate) measurer: Option<Box<dyn super::TextMeasure>>,
+    pub(crate) measurer: Option<super::measure::SharedMeasurer>,
     /// Whether a texture path resolves (patch chain or loose addon file), so the path form of
     /// `SetTexture` returns the reference's 1 or nil inline (`0x79bb40`). `None` answers nil.
     pub(crate) texture_probe: Option<TextureProbe>,
@@ -341,7 +364,7 @@ pub(crate) struct Model {
     pub(crate) errors: Vec<String>,
     /// Errors owed to `geterrorhandler()`, which the reference calls on each caught error; one the
     /// handler itself raises skips this queue, which stops the recursion.
-    pub(crate) pending_error_dispatch: Vec<String>,
+    pub(crate) pending_error_dispatch: Vec<HandlerArg>,
     /// The session's retained diagnostic log, deduplicated and bounded; `errors` drains each frame.
     pub(crate) diagnostics: super::diagnostics::DiagnosticLog,
     /// Non-fatal warnings for the host, such as a dropped `inherits=` template.
@@ -655,6 +678,9 @@ pub(crate) struct Model {
     pub(crate) battlefield_positions: Vec<super::battlefield_positions::BattlefieldPositionView>,
     pub(crate) battlefield_flag: Option<super::battlefield_positions::BattlefieldFlagView>,
     pub(crate) battlefield_icon_scale: f32,
+    /// The 0-based rows `GetBattlefieldPosition` read with no name: each call's name lookup passes
+    /// the callback `0x4ac190` (`0x4ac118`), which the app makes.
+    pub(crate) battlefield_position_lookups: Vec<usize>,
     pub(crate) battlefield_position_requests: u32,
     /// `CancelMeetingStoneRequest()` calls; the app gates on leadership.
     pub(crate) meeting_stone_cancels: u32,
@@ -665,6 +691,8 @@ pub(crate) struct Model {
     pub(crate) tutorial_bank: Option<Vec<u8>>,
     /// `FlagTutorial(n)` calls, 0-based and in range.
     pub(crate) tutorial_flag_requests: Vec<u32>,
+    /// `TriggerTutorial(id, 0)` asks the engine made (the quest log's turn-in test), 0-based.
+    pub(crate) tutorial_triggers: Vec<u32>,
     pub(crate) tutorial_clears: u32,
     pub(crate) tutorial_resets: u32,
 
@@ -696,6 +724,10 @@ pub(crate) struct Model {
     pub(crate) containers: HashMap<i64, container::ContainerState>,
     /// Per `(bag, slot)`, `(start, duration, enabled)` in `GetTime` seconds, stamped at push.
     pub(crate) container_cooldowns: HashMap<(i64, u32), (f64, f64, bool)>,
+    /// The same triple for a worn item, by live-API slot id (1..=19); the cooldown query is keyed
+    /// by the item's entry (`0x6e2ed0`), so a worn trinket answers as a bagged one does. Kept off
+    /// the doll snapshot, whose change fires `UNIT_INVENTORY_CHANGED`.
+    pub(crate) worn_cooldowns: HashMap<usize, (f64, f64, bool)>,
     /// `HasKey()`: a keys-family item in equipment, bags, bank or keyring; gates the keyring UI.
     pub(crate) has_key: bool,
     /// What the cursor carries; nothing moves locally, the server's updates settle the bags.
@@ -981,23 +1013,42 @@ pub(crate) struct Model {
     pub(crate) quest_log: quest_log::QuestLogState,
     pub(crate) quest_log_selection: u32,
     pub(crate) quest_log_abandon_mark: u32,
-    pub(crate) quest_log_abandons: Vec<u32>,
+    /// The log slots of the confirmed abandons, for the app to send.
+    pub(crate) quest_log_abandons: Vec<u8>,
     /// `QuestLogPushQuest()` quest ids, resolved at the click so a log change cannot retarget one.
     pub(crate) quest_log_pushes: Vec<u32>,
     /// `ConfirmAcceptQuest()` calls, the escort confirm; the app holds the pending quest.
     pub(crate) quest_confirms: u32,
     /// Item id to its tooltip view.
     pub(crate) item_templates: HashMap<u32, ItemTemplateView>,
-    /// Item ids asked for and missing, for the app to answer.
+    /// Item ids asked for and missing, for the app to answer: a lookup with a callback, which
+    /// asks the server.
     pub(crate) item_stat_asks: HashSet<u32>,
+    /// Item ids `GetItemInfo` read and missing: its lookup passes no callback (`0x48e185`), so
+    /// the app answers from its cache only.
+    pub(crate) item_stat_reads: HashSet<u32>,
     /// Set id to its tooltip set block (`0x854b1c`), and the misses asked for.
     pub(crate) item_sets: HashMap<u32, super::ItemSetView>,
     pub(crate) item_set_asks: HashSet<u32>,
+    /// Guids an item build looked up in the name cache and missed, for the app to ask: the
+    /// creator's and the giver's lookups pass a callback (`0x52e204`, `0x52e29d`) at every build,
+    /// and a hovered bag or paper-doll slot's `OnUpdate` builds again each frame.
+    pub(crate) item_name_asks: HashSet<u64>,
+    /// Charter item guids whose build missed the petition record or its owner's name, for the
+    /// app to ask: both lookups pass a callback (`0x52b93b`, `0x52b9d2`) at every build.
+    pub(crate) petition_asks: HashSet<u64>,
     /// `ItemRandomProperties` id to its view, pushed whole at startup: a clicked tooltip cannot
     /// repaint on a late answer. The reference reads its loaded store `0xc0dbd4` (`0x52c991`).
     pub(crate) random_properties: HashMap<u32, super::RandomPropertyView>,
     /// The player's level, class, race and skills, for a tooltip's red requirement lines.
     pub(crate) player_req: PlayerReqState,
+    /// `Lock.dbc` by lock id, pushed whole at startup, and what the active player opens locks with
+    /// (`None` before the first push: no active player). The item tooltip's `LOCKED` colour walks
+    /// them ([`super::lock_check::check_lock`]); `LockType.dbc`'s names by index name its
+    /// `LOCKED_WITH_SPELL_KNOWN` line.
+    pub(crate) lock_rows: HashMap<u32, Vec<super::LockSlotView>>,
+    pub(crate) lock_openers: Option<super::LockOpeners>,
+    pub(crate) lock_type_names: HashMap<u32, String>,
     /// Spell id to its tooltip view, and the misses asked for.
     pub(crate) spell_tooltips: HashMap<u32, super::SpellTooltipView>,
     pub(crate) spell_tooltip_asks: HashSet<u32>,
@@ -1007,9 +1058,19 @@ pub(crate) struct Model {
     pub(crate) pet_spell_tooltip_asks: HashSet<u32>,
     /// The tooltips whose spell render missed its view, re-rendered when the app answers.
     pub(crate) spell_tooltip_waits: HashMap<FrameHandle, super::tooltip_spell::SpellWait>,
-    /// Every quest-log row as the app pushed it, each header followed by all its quests, which
+    /// Each tooltip's last item build, kept until its next clear for the rebuild a cache answer
+    /// runs (`+0x380`..`+0x440`, `0x52e530`).
+    pub(crate) item_builds: HashMap<FrameHandle, super::tooltip_item::build::ItemBuild>,
+    /// The caches each tooltip's item builds missed, the answer's cookie; an answer is taken
+    /// whether or not the tooltip still keeps a build.
+    pub(crate) item_cache_waits: HashMap<FrameHandle, Vec<super::tooltip_item::build::CacheWait>>,
+    /// The misses of the item build under way, handed to its tooltip as it ends.
+    pub(crate) item_cache_misses: Vec<super::tooltip_item::build::CacheWait>,
+    /// Every quest-log row as the rebuild made it, each header followed by all its quests, which
     /// [`quest_log::fold`] folds into the visible [`Self::quest_log`].
-    pub(crate) quest_log_rows: Vec<quest_log::QuestLogEntryView>,
+    pub(crate) quest_log_rows: Vec<quest_log::QuestLogRow>,
+    /// The slots, the quest records and the lookups in flight the quest-log verbs read.
+    pub(crate) quest_store: quest_log::QuestLogStore,
     /// The collapsed headers by title, the reference's fold mask `0xbb748c`.
     pub(crate) quest_log_collapsed: HashSet<String>,
     /// A selected quest a previous VM left, placed at the first push.
@@ -1019,6 +1080,15 @@ pub(crate) struct Model {
     /// The server's clock in Unix seconds, `None` before `SMSG_QUERY_TIME_RESPONSE`. A quest
     /// deadline is a stamp in it, and `GetQuestTimers` subtracts per call, as the reference does.
     pub(crate) server_unix_time: Option<f64>,
+    /// The local clock in Unix seconds, the reference's `time(NULL)` (`0x429580`): before the
+    /// sync its `G` is 0 (`0x4de3d3`), and the countdowns read this instead.
+    pub(crate) local_unix_time: Option<f64>,
+    /// The last sync found the clocks equal to the second, and the reference's `G` is 1, not 0
+    /// (`0x4def02`).
+    pub(crate) clock_sync_zero: bool,
+    /// Catalog chat lines a verb fired as `CHAT_MSG_SYSTEM`, by key, for the app's log files and
+    /// sound.
+    pub(crate) shown_chat_lines: Vec<(&'static str, String)>,
     /// `GetMoney()` in copper, from `PLAYER_FIELD_COINAGE`.
     pub(crate) money: u64,
 
@@ -1118,6 +1188,10 @@ pub(crate) struct Model {
     pub(crate) reputation_selected: Option<u32>,
     /// Reputation calls queued, applied locally first because none of the three sends is acked.
     pub(crate) reputation_sends: Vec<reputation::ReputationSend>,
+    /// Every faction with a reputation index under 64, by `Faction.dbc` id: the base for the
+    /// player's race and class plus the wire standing (`0x4d6370`). Unlike the pane's rows, a
+    /// faction no race/class column fits is here at base 0 (`0x4d5426`, `0x4d553c`).
+    pub(crate) faction_standings: HashMap<u32, i32>,
 
     /// Lines for the app's slash-command parser: a probe's, or a host `SlashCmdList` row's.
     pub(crate) chat_input: Vec<String>,
@@ -1187,18 +1261,13 @@ pub(crate) struct Model {
     pub(crate) summon_confirm: super::summon::SummonConfirmUiState,
     /// `ConfirmSummon()` calls, one `CMSG_SUMMON_RESPONSE` each; the app holds the summoner.
     pub(crate) summon_confirms: u32,
+    /// `GetSummonConfirmSummoner()` calls that answered no name: each call's lookup passes the
+    /// callback `0x48b710` (`0x48b6e1`), which the app makes.
+    pub(crate) summon_summoner_lookups: u32,
     /// `GetFramerate()`, pushed each tick.
     pub(crate) framerate: f64,
     /// `(shift, ctrl, alt)` for `Is*KeyDown`, pushed before the frame's mouse events.
     pub(crate) modifiers: (bool, bool, bool),
-}
-
-impl Model {
-    /// The selected quest-log row's detail, resolved per call as the reference's bindings do.
-    pub(crate) fn selected_quest_detail(&self) -> Option<&quest_log::QuestLogDetail> {
-        let index = usize::try_from(self.quest_log_selection.checked_sub(1)?).ok()?;
-        self.quest_log.entries.get(index)?.detail.as_ref()
-    }
 }
 
 impl Model {
@@ -1231,6 +1300,11 @@ impl Model {
     /// handler is called with. An error raised by the handler itself goes to `errors` directly,
     /// which stops the recursion.
     pub(crate) fn record_script_error(&mut self, log: String, handler: String) {
+        self.record_error(log, HandlerArg::Text(handler));
+    }
+
+    /// A script error whose log row is `log` and whose handler hears `handler`.
+    pub(crate) fn record_error(&mut self, log: String, handler: HandlerArg) {
         self.diagnostics
             .record(super::diagnostics::DiagnosticKind::Error, &log);
         self.pending_error_dispatch.push(handler);
@@ -1238,9 +1312,10 @@ impl Model {
     }
 
     /// [`Self::record_script_error`] for an error mlua caught: the log keeps mlua's `Display` (its
-    /// word and traceback), the handler gets the bare Lua message `lua_pcall` leaves (`0x703b40`).
+    /// word and traceback), the handler gets the error value itself, as `lua_pcall` hands its
+    /// error function the value raised (`0x703b40`).
     pub(crate) fn record_lua_error(&mut self, e: &mlua::Error) {
-        self.record_script_error(e.to_string(), super::stdlib::lua_message(e));
+        self.record_error(e.to_string(), HandlerArg::Error(e.clone()));
     }
 
     /// Records a non-fatal warning for the host's terminal and the retained diagnostic log.
@@ -1515,6 +1590,7 @@ impl Model {
             battlefield_join_requests: Vec::new(),
             battlefield_list_requests: Vec::new(),
             battlefield_positions: Vec::new(),
+            battlefield_position_lookups: Vec::new(),
             battlefield_flag: None,
             battlefield_icon_scale: 1.0,
             battlefield_position_requests: 0,
@@ -1523,6 +1599,7 @@ impl Model {
             meeting_stone_status_text: None,
             tutorial_bank: None,
             tutorial_flag_requests: Vec::new(),
+            tutorial_triggers: Vec::new(),
             tutorial_clears: 0,
             tutorial_resets: 0,
             shapeshift_forms: Vec::new(),
@@ -1537,6 +1614,7 @@ impl Model {
             pet_renames: Vec::new(),
             containers: HashMap::new(),
             container_cooldowns: HashMap::new(),
+            worn_cooldowns: HashMap::new(),
             has_key: false,
             cursor: None,
             cursor_grid: false,
@@ -1684,19 +1762,32 @@ impl Model {
             item_templates: HashMap::new(),
             item_sets: HashMap::new(),
             item_set_asks: HashSet::new(),
+            item_name_asks: HashSet::new(),
+            petition_asks: HashSet::new(),
             random_properties: HashMap::new(),
             item_stat_asks: HashSet::new(),
+            item_stat_reads: HashSet::new(),
             player_req: PlayerReqState::default(),
+            lock_rows: HashMap::new(),
+            lock_openers: None,
+            lock_type_names: HashMap::new(),
             spell_tooltips: HashMap::new(),
             spell_tooltip_asks: HashSet::new(),
             pet_spell_tooltips: HashMap::new(),
             pet_spell_tooltip_asks: HashSet::new(),
             spell_tooltip_waits: HashMap::new(),
+            item_builds: HashMap::new(),
+            item_cache_waits: HashMap::new(),
+            item_cache_misses: Vec::new(),
             quest_log_rows: Vec::new(),
+            quest_store: Default::default(),
             quest_log_collapsed: HashSet::new(),
             quest_log_selection_seed: None,
             quest_log_watched: Vec::new(),
             server_unix_time: None,
+            local_unix_time: None,
+            clock_sync_zero: false,
+            shown_chat_lines: Vec::new(),
             worldmap: super::worldmap::WorldMapState::default(),
             nameplates: super::nameplate::NamePlates::default(),
             chat_bubbles: super::chat_bubble::ChatBubbles::default(),
@@ -1722,6 +1813,7 @@ impl Model {
             binder_pending: false,
             summon_confirm: super::summon::SummonConfirmUiState::default(),
             summon_confirms: 0,
+            summon_summoner_lookups: 0,
             framerate: 0.0,
             modifiers: (false, false, false),
             money: 0,
@@ -1778,6 +1870,7 @@ impl Model {
             reputation_collapsed: HashSet::new(),
             reputation_selected: None,
             reputation_sends: Vec::new(),
+            faction_standings: HashMap::new(),
         }
     }
 

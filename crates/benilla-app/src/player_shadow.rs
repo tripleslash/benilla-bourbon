@@ -31,7 +31,7 @@ use benilla_world::model_render::{ModelKind, ModelPart, ShadowOccluder};
 use benilla_world::rig_palette::{RigPalettes, RigPart, RigSkin};
 use benilla_world::view::WorldCamera;
 
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::video::VideoConfig;
 
 /// Layer 31 is deliberately private to this feature. Bevy supports 32 render layers; the normal

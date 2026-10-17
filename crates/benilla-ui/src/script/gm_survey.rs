@@ -34,7 +34,7 @@ pub struct SurveyAnswerSend {
 }
 
 /// The survey buffer: the tables and what has been answered since the last submit.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct SurveyState {
     tables: GmSurveyTables,
     ratings: [u8; 10],

@@ -18,7 +18,7 @@ fn recipe(
         icon: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
         min_made: 1,
         max_made: 1,
-        cooldown_secs: None,
+        cooldown: None,
         product_item: spell_id + 10_000,
         product_inv_type: 20, // Robe: folds to the Chest slot bit (4)
         // 0 everywhere, so ties fall through to the name; the ItemLevel test sets it.
@@ -233,10 +233,16 @@ fn do_trade_skill_and_getters_no_op_on_a_header_index() {
     assert!(s
         .eval::<bool>("return GetTradeSkillIcon(1) == nil")
         .unwrap());
+    // But the made counts, which answer 1, 1 on a header and past the last row (`0x4fdd13`).
     assert_eq!(
         s.eval::<(i64, i64)>("return GetTradeSkillNumMade(1)")
             .unwrap(),
-        (0, 0)
+        (1, 1)
+    );
+    assert_eq!(
+        s.eval::<(i64, i64)>("return GetTradeSkillNumMade(99)")
+            .unwrap(),
+        (1, 1)
     );
     assert!(s
         .eval::<bool>("return GetTradeSkillCooldown(1) == nil")
@@ -516,7 +522,7 @@ fn no_snapshot_shapes_unknown_line_and_nil_info() {
     assert_eq!(
         s.eval::<(i64, i64)>("return GetTradeSkillNumMade(1)")
             .unwrap(),
-        (0, 0)
+        (1, 1)
     );
     assert!(s
         .eval::<bool>("return GetTradeSkillCooldown(1) == nil")
@@ -861,6 +867,34 @@ fn invslot_filter_drops_recipes_and_emptied_groups() {
     assert_eq!(s.eval::<i64>("return GetNumTradeSkills()").unwrap(), 10);
 }
 
+/// Each slot name is a `_G` read (`0x703bf0`), so an `__index` that calls a verb runs inside
+/// `GetTradeSkillInvSlots`; the Model must be free for it.
+#[test]
+fn inv_slot_names_are_read_with_the_model_free() {
+    let mut s = UiScript::new().unwrap();
+    let mut st = state();
+    st.recipes
+        .iter_mut()
+        .find(|r| r.name == "Wind Cloak")
+        .unwrap()
+        .product_inv_type = 16;
+    s.set_trade_skill(Some(st));
+    s.run(
+        r#"setmetatable(getfenv(0), { __index = function(t, k)
+               if string.find(k, "SLOT$") then
+                   CreateFrame("Frame"):SetWidth(10)
+                   return "<" .. k .. ">"
+               end
+           end })"#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<(String, String)>("return GetTradeSkillInvSlots()")
+            .unwrap(),
+        ("<CHESTSLOT>".to_string(), "<BACKSLOT>".to_string())
+    );
+}
+
 /// A one-hand weapon (InventoryType 13, `0x18000`) lists both hand slots and passes either.
 #[test]
 fn one_hand_weapon_spans_both_hand_slots() {
@@ -1149,4 +1183,41 @@ fn the_link_verbs_answer_the_clients_shapes() {
         "{err}"
     );
     assert!(s.run("GetTradeSkillItemLink('x')").is_err());
+}
+
+/// `GetTradeSkillCooldown` (`0x4fda20`) derives the seconds left at the call from the pushed
+/// start and duration: the pushed state stays put while the clock runs, and the answer turns nil
+/// once the cooldown is over.
+#[test]
+fn the_cooldown_left_is_read_off_the_clock_at_the_call() {
+    let mut s = UiScript::new().unwrap();
+    let mut state = two_recipe_state();
+    // Started at 100 s on the GetTime clock, for an hour.
+    state.recipes[0].cooldown = Some((100_000, 3_600_000, true));
+    s.set_trade_skill(Some(state));
+    // The row the bolt sorts to, and the robe's.
+    let row = |s: &UiScript, name: &str| -> i64 {
+        s.eval(&format!(
+            "for i = 1, GetNumTradeSkills() do if GetTradeSkillInfo(i) == {name:?} then return i end end"
+        ))
+        .unwrap()
+    };
+    let (bolt, robe) = (row(&s, "Bolt of Linen Cloth"), row(&s, "Simple Robe"));
+    let left = |s: &UiScript| -> f64 {
+        s.eval(&format!("return GetTradeSkillCooldown({bolt})"))
+            .unwrap()
+    };
+    s.set_now(160.0);
+    assert_eq!(left(&s), 3540.0);
+    s.set_now(160.5);
+    assert_eq!(left(&s), 3539.5);
+    s.set_now(3700.0);
+    assert!(s
+        .eval::<bool>(&format!("return GetTradeSkillCooldown({bolt}) == nil"))
+        .unwrap());
+    assert!(
+        s.eval::<bool>(&format!("return GetTradeSkillCooldown({robe}) == nil"))
+            .unwrap(),
+        "a recipe not cooling down"
+    );
 }

@@ -11,6 +11,7 @@ use benilla_ui::script::{ContainerSlot, ContainerState, ScriptValue, UiScript};
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
+use crate::query_cache::Ask;
 use crate::ui_script::gate;
 
 use super::equip_error::equip_error_key;
@@ -20,12 +21,17 @@ use super::{
     KEYRING_SLOTS, PACK_SLOTS,
 };
 
+/// The doll's equipment slots, 0-based descriptor slots 0..=18 (live-API ids 1..=19).
+const WORN_SLOTS: u8 = 19;
+
 /// What the container feed last pushed, for per-bag change events.
 #[derive(Default)]
 pub(crate) struct FeedMemory {
     pushed: HashMap<i64, ContainerState>,
     /// The last `HasKey()` pushed, so its flip is logged once.
     had_key: bool,
+    /// The worn items' cooldowns last pushed, by live-API slot id.
+    worn_cooldowns: HashMap<usize, (i64, u32, bool)>,
     /// Counters for the stores whose lazy resolves make `is_changed` always true.
     items_templates: gate::Watch,
     cooldown_epoch: gate::Watch,
@@ -284,7 +290,10 @@ pub(super) fn feed_item_sets(
     let pending = pending.get(&script);
     let mod_sensitive = mod_sensitive.get(&script);
     let me = self_q.single().ok();
-    for id in script.take_item_set_asks() {
+    // The build's asks are its lookups with a callback (`0x52bf60`): their members are asked,
+    // a refused one again; a set carried since only reads.
+    let asked: HashSet<u32> = script.take_item_set_asks().into_iter().collect();
+    for &id in &asked {
         pending.entry(id).or_default();
     }
     // The `$`-tokens follow the player's skills and gender.
@@ -320,10 +329,15 @@ pub(super) fn feed_item_sets(
         } else {
             mod_sensitive.remove(&set_id);
         }
+        let ask = if asked.contains(&set_id) {
+            Ask::Event(&commands)
+        } else {
+            Ask::Read
+        };
         let members: Vec<(u32, Option<String>)> = row
             .items
             .iter()
-            .map(|&id| (id, items.template(id, 0, &commands).map(|t| t.name.clone())))
+            .map(|&id| (id, items.template(id, 0, ask).map(|t| t.name.clone())))
             .collect();
         let view = benilla_ui::script::ItemSetView {
             name: row.name.clone(),
@@ -398,16 +412,18 @@ pub(super) fn feed_random_properties(
     *pushed.get(&script) = true;
 }
 
-/// The item-tooltip feed: every template that lands is pushed unprompted, so the first hover never
-/// misses, as the reference reads one item cache synchronously; a read of an unresolved id records
-/// a miss, which queries it here.
+/// The item-tooltip feed: every template that lands is pushed unprompted, and a new VM is seated
+/// with every cached one, so the first hover never misses, as the reference reads one item cache
+/// synchronously that a `/reload` keeps. A miss the VM asked for is the
+/// getter's lookup with a callback, which queries it here and asks a refused one again; a miss
+/// `GetItemInfo` read is served from the cache and never queried (`0x48e172`).
 pub(super) fn feed_item_stats(
     script: Option<NonSendMut<UiScript>>,
     mut items: ResMut<Items>,
     commands: Res<NetCommands>,
     spells: Option<Res<crate::ui_action::Spells>>,
     // The caster the `$`-tokens read: its spell modifiers and its skills.
-    (spell_mods, self_q, locks): CasterReads,
+    (spell_mods, self_q): CasterReads,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     // The `$z` token: the bind point's area (`SMSG_BINDPOINTUPDATE`), named through `AreaTable`.
     home_bind: Option<Res<crate::net::HomeBind>>,
@@ -425,7 +441,10 @@ pub(super) fn feed_item_stats(
     let Some(mut script) = script else {
         return;
     };
-    let pending = pending.get(&script);
+    let (pending, new_vm) = pending.get_reset(&script);
+    if new_vm {
+        pending.extend(items.cached_template_ids());
+    }
     let mod_sensitive = mod_sensitive.get(&script);
     let last_home = last_home.get(&script);
     let me = self_q.single().ok();
@@ -449,7 +468,17 @@ pub(super) fn feed_item_stats(
     }
 
     pending.extend(items.take_fresh());
-    pending.extend(script.take_item_stat_asks());
+    for id in script.take_item_stat_asks() {
+        items.template(id, 0, Ask::Event(&commands));
+        pending.insert(id);
+    }
+    // A read the cache misses has nothing to push; a later landing pushes it unprompted.
+    pending.extend(
+        script
+            .take_item_stat_reads()
+            .into_iter()
+            .filter(|&id| items.template(id, 0, Ask::Read).is_some()),
+    );
     if spell_mods.is_changed() || reads_changed {
         pending.extend(mod_sensitive.iter().copied());
     }
@@ -462,7 +491,7 @@ pub(super) fn feed_item_stats(
     let ready: Vec<u32> = pending
         .iter()
         .copied()
-        .filter(|&id| items.template(id, 0, &commands).is_some())
+        .filter(|&id| items.template(id, 0, Ask::Read).is_some())
         .collect();
     // Built first, pushed after: the lookup borrows the VM that `set_item_template` needs mutably.
     let views: Vec<(u32, benilla_ui::script::ItemTemplateView)> = {
@@ -478,13 +507,13 @@ pub(super) fn feed_item_stats(
             .into_iter()
             .filter_map(|id| {
                 pending.remove(&id);
-                let t = items.template(id, 0, &commands)?.clone();
+                let t = items.template(id, 0, Ask::Read)?.clone();
                 if item_has_mod_tokens(&t, spell_res) {
                     mod_sensitive.insert(id);
                 } else {
                     mod_sensitive.remove(&id);
                 }
-                let mut view = template_view(
+                let view = template_view(
                     &t,
                     spell_res,
                     Some(&spell_mods),
@@ -498,9 +527,6 @@ pub(super) fn feed_item_stats(
                     icons.as_deref(),
                     &get,
                 );
-                // A lock id with no `Lock.dbc` row is no lock to the builder (`0x52bd6b`..
-                // `0x52bda9`); with the catalog unloaded the id stands.
-                view.lock_id = known_lock_id(view.lock_id, locks.as_deref().map(|l| &l.0));
                 Some((id, view))
             })
             .collect()
@@ -510,23 +536,11 @@ pub(super) fn feed_item_stats(
     }
 }
 
-/// What the `$`-tokens read of the caster, and the `Lock.dbc` the LOCKED line needs a row from
-/// (`0x52bd6b`).
+/// What the `$`-tokens read of the caster.
 type CasterReads<'w, 's> = (
     Res<'w, crate::spell::SpellModifiers>,
     Query<'w, 's, &'static ObjectStore, With<SelfPlayer>>,
-    Option<Res<'w, crate::go_templates::Locks>>,
 );
-
-/// The template's lock id when `Lock.dbc` holds its row, else 0: the builder's LOCKED line starts
-/// from that row (`0x52bd57`..`0x52bd76`), and a missing one is no lock. With the catalog not
-/// loaded the id stands.
-fn known_lock_id(lock_id: u32, locks: Option<&benilla_formats::LockCatalog>) -> u32 {
-    match locks {
-        Some(l) if l.slots(lock_id).is_none() => 0,
-        _ => lock_id,
-    }
-}
 
 /// The player state the tooltip's red requirement lines check: level, class, race, skills,
 /// proficiencies (`SMSG_SET_PROFICIENCY`) and reputation ranks (the DBC base plus the
@@ -643,15 +657,13 @@ fn resolve_slot(
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
-    commands: &NetCommands,
     cooldowns: &crate::spell::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
     names: &crate::names::NameCache,
     // Mutable: reading a charter's record is what queries it.
-    petitions: &mut crate::ui_petition::PetitionState,
-    // `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this is `clock.anchor`
-    // (`crate::ui_script::UiClock`), which on wasm32 is a different type from `bevy::platform::time::Instant`
-    // (that field's own doc has the full reason).
+    petitions: &crate::ui_petition::PetitionState,
+    // `bevy::platform::time::Instant`: this is `clock.anchor` (`crate::ui_script::UiClock`), which
+    // on wasm32 is a different type from `std::time::Instant` (that field's own doc has the reason).
     now: bevy::platform::time::Instant,
     ui_now: f64,
     // The class's `ChrClasses.dbc` relic flag, which decides slot 17 for every fit-rule read.
@@ -681,11 +693,11 @@ fn resolve_slot(
         // `PageText` book does not set it.
         fields.item_text_id().is_some_and(|id| id != 0),
         // The creator's name for "<Made by %s>" and "Written by %s", `None` until the
-        // name query answers.
+        // name query answers. The tooltip build asks it ([`ask_item_build_lookups`]).
         fields
             .item_creator()
             .filter(|&g| g != 0)
-            .and_then(|g| names.resolve_player(g, commands).map(str::to_string)),
+            .and_then(|g| names.resolve_player(g, Ask::Read).map(str::to_string)),
         // The tooltip's unlocked (0x4) and wrapped (0x8) bits.
         fields.item_flags().unwrap_or(0),
         // `0x5da2c0`: soulbound, or carrying a binding enchant, off the raw descriptor.
@@ -706,6 +718,8 @@ fn resolve_slot(
             rolls.enchants,
         ),
     );
+    let gift_creator = crate::items::gift_creator_name(fields, names);
+    let (creator_guid, gift_creator_guid) = crate::items::creator_guids(fields);
     // A container's filled seats, which `ClickTradeButton` counts (`0x4bff50`).
     let occupied_seats = fields.is_container().then(|| {
         let n = fields.container_num_slots().unwrap_or(0).min(36) as u8;
@@ -720,7 +734,8 @@ fn resolve_slot(
             ..Default::default()
         });
     }
-    let template: Option<ItemInfo> = items.template(entry, guid, commands).cloned();
+    // Only read, as `GetContainerItemInfo` reads it (`0x4f978b`): the item's create asked.
+    let template: Option<ItemInfo> = items.template(entry, guid, Ask::Read).cloned();
     let Some(t) = template else {
         // Asked (or a cached negative); show the slot occupied while the answer is in flight.
         return Some(ContainerSlot {
@@ -730,6 +745,9 @@ fn resolve_slot(
             count,
             readable,
             creator,
+            gift_creator,
+            creator_guid,
+            gift_creator_guid,
             flags,
             already_bound,
             occupied_seats,
@@ -745,14 +763,14 @@ fn resolve_slot(
         use_spell: t.use_spell.map_or(0, |u| u.spell_id),
         // A charter's guild name and master, keyed by the petition id the server puts in
         // enchantment slot 0 (`PetitionsHandler.cpp:126`), where the reference reads it
-        // (`0x5ef337`) and its enchant lines skip it (`0x52c9e0`). The first hover sends the query.
+        // (`0x5ef337`) and its enchant lines skip it (`0x52c9e0`). The tooltip build asks it.
         petition: (t.flags & benilla_protocol::messages::ITEM_FLAG_CHARTER != 0)
             .then(|| {
                 let id = objects
                     .object(guid)
                     .and_then(|f| f.item_enchant(0))
                     .unwrap_or(0);
-                petitions.tooltip_view(id as u32, guid, names, commands)
+                petitions.tooltip_view(id as u32, guid, names, Ask::Read)
             })
             .flatten(),
         texture: icons
@@ -776,6 +794,9 @@ fn resolve_slot(
         guid,
         readable,
         creator,
+        gift_creator,
+        creator_guid,
+        gift_creator_guid,
         flags,
         already_bound,
         occupied_seats,
@@ -784,13 +805,75 @@ fn resolve_slot(
         equip_slots: find_equip_slot(t.inventory_type, has_relic_slot),
         bar_placeable: t.placeable_on_action_bar(),
         consumable: t.is_consumable(),
-        cooldown: t.use_spell.and_then(|u| {
-            let sd = spells.and_then(|s| s.get(u.spell_id));
-            cooldowns
-                .info_item(u.spell_id, entry, u.category, sd, now)
-                .ui_triple(now, ui_now)
-        }),
+        spell_0: t.has_spell_0(),
+        cooldown: use_cooldown(
+            &t,
+            entry,
+            fields.item_spell_charges(0).unwrap_or(0),
+            cooldowns,
+            spells,
+            now,
+            ui_now,
+        ),
     })
+}
+
+/// What the reference's item query `0x6e2ed0` hands the getters and tooltip setters, `(start_ms on
+/// the GetTime clock, duration_ms, enabled)`, for the item copy holding `charges_left`
+/// (`ITEM_FIELD_SPELL_CHARGES[0]`): by the entry and its first on-use spell, wherever the copy
+/// sits.
+///
+/// `None` is the all-zero answer, enable included: a copy with no charge left on a charged
+/// template, which skips the query (`0x5347e3`, `0x53318a`, `0x4f9a48`, `0x4c8b55`), and a
+/// template with no on-use spell, which the query leaves untouched (`0x6e2f34`). A cold on-use
+/// spell answers enabled (`0x6e1406`).
+fn use_cooldown(
+    t: &ItemInfo,
+    entry: u32,
+    charges_left: i32,
+    cooldowns: &crate::spell::Cooldowns,
+    spells: Option<&benilla_formats::SpellCatalog>,
+    now: std::time::Instant,
+    ui_now: f64,
+) -> Option<(i64, u32, bool)> {
+    if t.charges_depleted(charges_left) {
+        return None;
+    }
+    let u = t.use_spell?;
+    let sd = spells.and_then(|s| s.get(u.spell_id));
+    Some(
+        cooldowns
+            .info_item(u.spell_id, entry, u.category, sd, now)
+            .ui_triple(now, ui_now)
+            .unwrap_or((0, 0, true)),
+    )
+}
+
+/// The item query's answer for each worn item by live-API slot id (the descriptor slot plus one),
+/// for the tooltip's ITEM_COOLDOWN_TIME line and `GetInventoryItemCooldown`; a slot the query
+/// answers zeros for has no entry ([`use_cooldown`]). The doll snapshot does not carry it: a cooldown moves no
+/// inventory slot, and that snapshot's change fires `UNIT_INVENTORY_CHANGED`.
+fn worn_cooldowns(
+    store: &ObjectStore,
+    objects: &Objects,
+    items: &Items,
+    cooldowns: &crate::spell::Cooldowns,
+    spells: Option<&benilla_formats::SpellCatalog>,
+    now: std::time::Instant,
+    ui_now: f64,
+) -> HashMap<usize, (i64, u32, bool)> {
+    (0..WORN_SLOTS)
+        .filter_map(|slot0| {
+            let guid = store.0.player_inv_slot(slot0).filter(|&g| g != 0)?;
+            let fields = objects.object(guid)?;
+            let entry = fields.object_entry()?;
+            // Only read (`0x4c8b3a`).
+            let t = items.template(entry, guid, Ask::Read)?;
+            let charges_left = fields.item_spell_charges(0).unwrap_or(0);
+            let triple = use_cooldown(t, entry, charges_left, cooldowns, spells, now, ui_now)?;
+            Some((usize::from(slot0) + 1, triple))
+        })
+        .collect()
 }
 
 /// Reason 16's `%s`, the target bag's `BagFamily` name ("Only Arrows can be placed in that."), or
@@ -804,7 +887,6 @@ fn bag_family_name(
     objects: &Objects,
     items: &Items,
     families: Option<&benilla_formats::ItemBagFamilyCatalog>,
-    commands: &NetCommands,
 ) -> Option<String> {
     let store = player?;
     let families = families?;
@@ -818,8 +900,52 @@ fn bag_family_name(
     }
     .filter(|&g| g != 0)?;
     let entry = objects.object(guid)?.object_entry().filter(|&e| e != 0)?;
-    let family = items.template(entry, guid, commands)?.bag_family;
+    // Only read (`0x5da08d`).
+    let family = items.template(entry, guid, Ask::Read)?.bag_family;
     families.name(family).map(str::to_string)
+}
+
+/// The item build's own lookups, asked as it asks them. The creator's and the giver's names
+/// (`0x52e204`, `0x52e29d`) and a charter's record and owner (`0x52b93b`, `0x52b9d2`) pass a
+/// callback at every build, and a hovered bag or paper-doll slot builds again each frame
+/// (`ContainerFrameItemButton_OnUpdate`, `PaperDollItemSlotButton_OnUpdate` run their `OnEnter`
+/// while the tooltip is theirs), so a refused key is asked again about once per answer. The slot
+/// feeds only read what lands.
+pub(super) fn ask_item_build_lookups(
+    script: Option<NonSendMut<UiScript>>,
+    names: Res<crate::names::NameCache>,
+    petitions: Res<crate::ui_petition::PetitionState>,
+    objects: Objects,
+    commands: Res<NetCommands>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    // The petition id rides enchantment slot 0 (`0x5ef337`).
+    let petition_id = |item| {
+        objects
+            .object(item)
+            .and_then(|f| f.item_enchant(0))
+            .unwrap_or(0) as u32
+    };
+    let asks = (script.take_item_name_asks(), script.take_petition_asks());
+    ask_build_lookups(asks, petition_id, &names, &petitions, &commands);
+}
+
+/// One run's asks: the build's missed names, then its charters' records and owners.
+fn ask_build_lookups(
+    (name_asks, petition_asks): (Vec<u64>, Vec<u64>),
+    petition_id: impl Fn(u64) -> u32,
+    names: &crate::names::NameCache,
+    petitions: &crate::ui_petition::PetitionState,
+    commands: &NetCommands,
+) {
+    for guid in name_asks {
+        names.resolve_player(guid, Ask::Event(commands));
+    }
+    for item in petition_asks {
+        petitions.tooltip_view(petition_id(item), item, names, Ask::Event(commands));
+    }
 }
 
 #[allow(clippy::type_complexity)] // the param list is the input set
@@ -835,7 +961,6 @@ pub(crate) fn feed_containers(
         Option<Res<crate::items::RandomProperties>>,
     ),
     mut inv: crate::items::Inventory,
-    commands: Res<NetCommands>,
     cooldowns: Res<crate::spell::Cooldowns>,
     spells: Option<Res<crate::ui_action::Spells>>,
     equip: (ResMut<EquipErrors>, crate::ui_action::MessageSink),
@@ -843,10 +968,9 @@ pub(crate) fn feed_containers(
     bag_families: Option<Res<crate::ui_items::ItemBagFamilies>>,
     mut opens: ResMut<super::net::BagOpens>,
     names: Res<crate::names::NameCache>,
-    // The petition cache is mutable: a charter's hover is what queries it.
     clock_and_petitions: (
         Res<crate::ui_script::UiClock>,
-        ResMut<crate::ui_petition::PetitionState>,
+        Res<crate::ui_petition::PetitionState>,
     ),
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
 ) {
@@ -859,7 +983,7 @@ pub(crate) fn feed_containers(
         }
         return;
     };
-    let (clock, mut petitions) = clock_and_petitions;
+    let (clock, petitions) = clock_and_petitions;
     let (memory, vm_reset) = memory.get_reset(&script);
     // The snapshot is a function of these inputs; the stores' counters stand in for their
     // `is_changed`, which lazy resolves make always true. `UiClock` is not an input: a running
@@ -953,7 +1077,6 @@ pub(crate) fn feed_containers(
                     &inv.objects,
                     &items,
                     bag_families.as_deref().map(|c| &c.0),
-                    &commands,
                 )
             })
             .flatten();
@@ -1008,11 +1131,10 @@ pub(crate) fn feed_containers(
                 &items,
                 icons.as_deref(),
                 rolls,
-                &commands,
                 &cooldowns,
                 spell_catalog,
                 &names,
-                &mut petitions,
+                &petitions,
                 now,
                 ui_now,
                 has_relic_slot,
@@ -1050,8 +1172,9 @@ pub(crate) fn feed_containers(
             };
             let name = (entry != 0)
                 .then(|| {
+                    // `GetBagName` only reads (`0x4fa75e`).
                     items
-                        .template(entry, bag_guid, &commands)
+                        .template(entry, bag_guid, Ask::Read)
                         .map(|t| t.name.clone())
                 })
                 .flatten();
@@ -1063,11 +1186,10 @@ pub(crate) fn feed_containers(
                     &items,
                     icons.as_deref(),
                     rolls,
-                    &commands,
                     &cooldowns,
                     spell_catalog,
                     &names,
-                    &mut petitions,
+                    &petitions,
                     now,
                     ui_now,
                     has_relic_slot,
@@ -1096,11 +1218,10 @@ pub(crate) fn feed_containers(
                 &items,
                 icons.as_deref(),
                 rolls,
-                &commands,
                 &cooldowns,
                 spell_catalog,
                 &names,
-                &mut petitions,
+                &petitions,
                 now,
                 ui_now,
                 has_relic_slot,
@@ -1134,8 +1255,9 @@ pub(crate) fn feed_containers(
             };
             let name = (entry != 0)
                 .then(|| {
+                    // `GetBagName` only reads (`0x4fa75e`).
                     items
-                        .template(entry, bag_guid, &commands)
+                        .template(entry, bag_guid, Ask::Read)
                         .map(|t| t.name.clone())
                 })
                 .flatten();
@@ -1147,11 +1269,10 @@ pub(crate) fn feed_containers(
                     &items,
                     icons.as_deref(),
                     rolls,
-                    &commands,
                     &cooldowns,
                     spell_catalog,
                     &names,
-                    &mut petitions,
+                    &petitions,
                     now,
                     ui_now,
                     has_relic_slot,
@@ -1182,11 +1303,10 @@ pub(crate) fn feed_containers(
                 &items,
                 icons.as_deref(),
                 rolls,
-                &commands,
                 &cooldowns,
                 spell_catalog,
                 &names,
-                &mut petitions,
+                &petitions,
                 now,
                 ui_now,
                 has_relic_slot,
@@ -1205,7 +1325,7 @@ pub(crate) fn feed_containers(
 
         // `HasKey()`, which decides whether the keyring shows at all, pushed with the containers
         // so it is fresh on every `BAG_UPDATE` frame.
-        let key = has_key(&store.0, &inv.objects, &items, &commands);
+        let key = has_key(&store.0, &inv.objects, &items);
         if key != memory.had_key {
             gate.audit("feed_containers", "the HasKey() flip");
             debug!(
@@ -1215,6 +1335,22 @@ pub(crate) fn feed_containers(
             memory.had_key = key;
         }
         script.set_has_key(key);
+
+        // The worn items' use cooldowns, for the tooltip line; no event rides them.
+        let worn = worn_cooldowns(
+            store,
+            &inv.objects,
+            &items,
+            &cooldowns,
+            spell_catalog,
+            now,
+            ui_now,
+        );
+        if worn != memory.worn_cooldowns {
+            gate.audit("feed_containers", "the worn items' cooldowns");
+            script.set_worn_cooldowns(worn.clone());
+            memory.worn_cooldowns = worn;
+        }
     }
 
     if let Some(t0) = cost_t0 {
@@ -1399,26 +1535,9 @@ fn diff_and_push(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_container_source, charges_count, resolve_slot, ContainerSlot, FeedMemory, SlotGuids,
-        BANK_CONTAINER, BANK_SLOTS,
+        apply_container_source, ask_build_lookups, charges_count, resolve_slot, ContainerSlot,
+        FeedMemory, SlotGuids, BANK_CONTAINER, BANK_SLOTS,
     };
-
-    /// A lock id with no `Lock.dbc` row is no lock to the item builder (`0x52bd6b`..`0x52bda9`).
-    #[test]
-    fn a_lock_id_without_a_row_is_no_lock() {
-        use benilla_formats::{LockCatalog, LockSlot, LOCK_KEY_ITEM};
-        let mut slots = [LockSlot::default(); benilla_formats::MAX_LOCK_SLOTS];
-        slots[0].key_type = LOCK_KEY_ITEM;
-        let catalog = LockCatalog::from_rows([(7, slots)]);
-        assert_eq!(super::known_lock_id(7, Some(&catalog)), 7);
-        assert_eq!(super::known_lock_id(8, Some(&catalog)), 0);
-        assert_eq!(
-            super::known_lock_id(8, None),
-            8,
-            "no catalog, the id stands"
-        );
-        assert_eq!(super::known_lock_id(0, Some(&catalog)), 0);
-    }
 
     /// The view carries what `GetTradeSkillItemStats` reads beyond the tooltip: the item level, and
     /// the five spell slots whose id names a `Spell.dbc` row with their charges, in slot order.
@@ -1480,19 +1599,40 @@ mod tests {
         );
     }
 
+    /// The build's lookups pass a callback (`0x52e204`, `0x52b93b`): a run asks a name still in
+    /// flight no second time, and asks a refused one again at once.
+    #[test]
+    fn each_build_asks_its_missed_name_and_charter_again_once_answered() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let commands = crate::net::NetCommands(tx);
+        let mut names = crate::names::NameCache::default();
+        let petitions = crate::ui_petition::PetitionState::default();
+        let run = |names: &crate::names::NameCache| {
+            ask_build_lookups((vec![0x5], vec![0x99]), |_| 7, names, &petitions, &commands);
+            crate::query_cache::queries(&rx).len()
+        };
+        assert_eq!(
+            run(&names),
+            2,
+            "the first build asks the name and the record"
+        );
+        for _ in 0..600 {
+            assert_eq!(run(&names), 0, "in flight: no build asks again");
+        }
+        names.insert_player(0x5, String::new(), None);
+        assert_eq!(run(&names), 1, "a refused name is asked at the next build");
+    }
+
     /// A bag slot carries the template's quality and InventoryType, which `GetContainerItemInfo`
     /// gates its fourth value on (`0x4f9794`); an unanswered template leaves them empty.
     #[test]
     fn a_resolved_slot_carries_the_templates_quality_and_inventory_type() {
         use crate::items::{test_template, Items, RollCatalogs};
         use crate::names::NameCache;
-        use crate::net::NetCommands;
         use crate::ui_items::TestObjects;
         use benilla_protocol::ObjectFields;
 
         const ENTRY: u16 = 3; // OBJECT_FIELD_ENTRY
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let commands = NetCommands(tx);
         let mut objs = TestObjects::new();
         for (guid, entry) in [(0xA1_u64, 1234_u32), (0xA2, 1235), (0xA3, 1236)] {
             objs.spawn(guid, ObjectFields::from_pairs(&[(ENTRY, entry)]));
@@ -1508,7 +1648,7 @@ mod tests {
 
         let names = NameCache::default();
         let cooldowns = crate::spell::Cooldowns::default();
-        let mut petitions = crate::ui_petition::PetitionState::default();
+        let petitions = crate::ui_petition::PetitionState::default();
         let mut slot = |guid: u64| {
             resolve_slot(
                 guid,
@@ -1516,11 +1656,10 @@ mod tests {
                 &items,
                 None,
                 RollCatalogs::NONE,
-                &commands,
                 &cooldowns,
                 None,
                 &names,
-                &mut petitions,
+                &petitions,
                 std::time::Instant::now(),
                 0.0,
                 false,
@@ -1547,7 +1686,6 @@ mod tests {
     fn a_resolved_bag_counts_its_filled_seats() {
         use crate::items::{test_template, Items, RollCatalogs};
         use crate::names::NameCache;
-        use crate::net::NetCommands;
         use crate::ui_items::TestObjects;
         use benilla_protocol::field::{FIELD_CONTAINER_SLOT_1, FIELD_OBJECT_ENTRY};
         use benilla_protocol::ObjectFields;
@@ -1555,8 +1693,6 @@ mod tests {
         // `OBJECT_FIELD_TYPE` item or container, `CONTAINER_FIELD_NUM_SLOTS`.
         const TYPE: u16 = 2;
         const NUM_SLOTS: u16 = 48;
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let commands = NetCommands(tx);
         let mut objs = TestObjects::new();
         let seat = |j: u16, g: u64| {
             [
@@ -1579,7 +1715,7 @@ mod tests {
         items.insert_template(4496, Some(test_template("Small Brown Pouch")));
         let names = NameCache::default();
         let cooldowns = crate::spell::Cooldowns::default();
-        let mut petitions = crate::ui_petition::PetitionState::default();
+        let petitions = crate::ui_petition::PetitionState::default();
         let mut seats = |guid: u64| {
             resolve_slot(
                 guid,
@@ -1587,11 +1723,10 @@ mod tests {
                 &items,
                 None,
                 RollCatalogs::NONE,
-                &commands,
                 &cooldowns,
                 None,
                 &names,
-                &mut petitions,
+                &petitions,
                 std::time::Instant::now(),
                 0.0,
                 false,
@@ -1602,6 +1737,159 @@ mod tests {
         assert_eq!(seats(0xB1), Some(2));
         assert_eq!(seats(0xB2), Some(0));
         assert_eq!(seats(0xB3), None, "not a container");
+    }
+
+    /// A worn item answers the item cooldown query by its entry (`0x6e2ed0`): its answer is pushed
+    /// under the live-API slot id, one past the descriptor slot. An on-use item with none running
+    /// answers cold and enabled (`0x6e1406`); one with no use spell is absent, the query leaving
+    /// its zeros (`0x6e2f34`).
+    #[test]
+    fn a_worn_item_on_cooldown_is_keyed_by_its_live_slot_id() {
+        use super::worn_cooldowns;
+        use crate::items::{test_template, Items};
+        use crate::net::ObjectStore;
+        use crate::ui_items::TestObjects;
+        use benilla_protocol::field::{FIELD_OBJECT_ENTRY, FIELD_PLAYER_INV_SLOT_HEAD};
+        use benilla_protocol::messages::ItemUseSpell;
+        use benilla_protocol::ObjectFields;
+
+        let mut objs = TestObjects::new();
+        for (guid, entry) in [(0xA1_u64, 2000_u32), (0xA2, 2001), (0xA3, 2002)] {
+            objs.spawn(
+                guid,
+                ObjectFields::from_pairs(&[(FIELD_OBJECT_ENTRY, entry)]),
+            );
+        }
+        let use_spell = |spell_id| ItemUseSpell {
+            spell_id,
+            cooldown_ms: 120_000,
+            category: 0,
+            category_cooldown_ms: 0,
+        };
+        let mut items = Items::default();
+        for (entry, spell) in [
+            (2000, Some(use_spell(9000))),
+            (2001, Some(use_spell(9001))),
+            (2002, None),
+        ] {
+            let mut t = test_template("Trinket");
+            t.use_spell = spell;
+            items.insert_template(entry, Some(t));
+        }
+        let now = std::time::Instant::now();
+        let mut cooldowns = crate::spell::Cooldowns::default();
+        // Only 2000 was used; 2001 has a use spell and no cooldown, 2002 has no use spell.
+        cooldowns.start_item(2000, &use_spell(9000), None, now);
+        // Descriptor slots 12 (the trinket), 13 and 3 hold the three items.
+        let slot = |s: u16, guid: u64| {
+            [
+                (FIELD_PLAYER_INV_SLOT_HEAD + 2 * s, guid as u32),
+                (FIELD_PLAYER_INV_SLOT_HEAD + 2 * s + 1, 0),
+            ]
+        };
+        let pairs: Vec<(u16, u32)> = [slot(12, 0xA1), slot(13, 0xA2), slot(3, 0xA3)]
+            .into_iter()
+            .flatten()
+            .collect();
+        let store = ObjectStore(ObjectFields::from_pairs(&pairs));
+
+        let worn = worn_cooldowns(&store, &objs.get(), &items, &cooldowns, None, now, 50.0);
+        assert_eq!(
+            worn,
+            HashMap::from([(13, (50_000, 120_000, true)), (14, (0, 0, true))]),
+            "descriptor slot 12 is live id 13; 2001 is cold, enabled; 2002 has no use spell"
+        );
+    }
+
+    /// A charged template whose copy has no charge left skips the cooldown query, in a bag and on
+    /// the doll alike (`0x5347e3`-`0x5347f4`, `0x53318a`-`0x53319b`, `0x4f9a48`, `0x4c8b55`):
+    /// the test is `template+0x144 != 0` (-1 included) against `ITEM_FIELD_SPELL_CHARGES[0] == 0`.
+    #[test]
+    fn a_charged_item_with_no_charge_left_has_no_cooldown() {
+        use super::worn_cooldowns;
+        use crate::items::{test_template, Items, RollCatalogs};
+        use crate::names::NameCache;
+        use crate::net::ObjectStore;
+        use crate::ui_items::TestObjects;
+        use benilla_protocol::field::{
+            FIELD_ITEM_SPELL_CHARGES, FIELD_OBJECT_ENTRY, FIELD_PLAYER_INV_SLOT_HEAD,
+        };
+        use benilla_protocol::messages::ItemUseSpell;
+        use benilla_protocol::ObjectFields;
+
+        let use_spell = |spell_id| ItemUseSpell {
+            spell_id,
+            cooldown_ms: 120_000,
+            category: 0,
+            category_cooldown_ms: 0,
+        };
+        // (guid, entry, template charges, the copy's charges): five cases of the one test.
+        let cases: [(u64, u32, i32, i32); 5] = [
+            (0xD1, 3000, 5, 0),   // charged, spent: no cooldown
+            (0xD2, 3001, 5, 3),   // charged, 3 left: the cooldown
+            (0xD3, 3002, -1, 0),  // unlimited template, copy at 0: no cooldown (`!= 0`, not finite)
+            (0xD4, 3003, 0, 0),   // uncharged template: the cooldown
+            (0xD5, 3004, -1, -1), // unlimited and unspent: the cooldown
+        ];
+        let mut objs = TestObjects::new();
+        let mut items = Items::default();
+        let now = std::time::Instant::now();
+        let mut cooldowns = crate::spell::Cooldowns::default();
+        for &(guid, entry, template_charges, copy_charges) in &cases {
+            objs.spawn(
+                guid,
+                ObjectFields::from_pairs(&[
+                    (FIELD_OBJECT_ENTRY, entry),
+                    (FIELD_ITEM_SPELL_CHARGES, copy_charges as u32),
+                ]),
+            );
+            let mut t = test_template("Charged");
+            t.use_spell = Some(use_spell(entry + 6000));
+            t.spell_charges_0 = template_charges;
+            items.insert_template(entry, Some(t));
+            cooldowns.start_item(entry, &use_spell(entry + 6000), None, now);
+        }
+        let running = Some((50_000, 120_000, true));
+        let expected = [None, running, None, running, running];
+
+        let names = NameCache::default();
+        let petitions = crate::ui_petition::PetitionState::default();
+        for (&(guid, ..), want) in cases.iter().zip(expected) {
+            let slot = resolve_slot(
+                guid,
+                &objs.get(),
+                &items,
+                None,
+                RollCatalogs::NONE,
+                &cooldowns,
+                None,
+                &names,
+                &petitions,
+                now,
+                50.0,
+                false,
+            )
+            .expect("an occupied slot");
+            assert_eq!(slot.cooldown, want, "bag slot of {guid:#x}");
+        }
+
+        // The same five on the doll, descriptor slots 12..=16.
+        let pairs: Vec<(u16, u32)> = cases
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &(guid, ..))| {
+                let base = FIELD_PLAYER_INV_SLOT_HEAD + 2 * (12 + i as u16);
+                [(base, guid as u32), (base + 1, 0)]
+            })
+            .collect();
+        let store = ObjectStore(ObjectFields::from_pairs(&pairs));
+        let worn = worn_cooldowns(&store, &objs.get(), &items, &cooldowns, None, now, 50.0);
+        let want: HashMap<usize, (i64, u32, bool)> = expected
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| w.map(|w| (13 + i, w)))
+            .collect();
+        assert_eq!(worn, want);
     }
 
     /// No bags and an empty vault.
@@ -2068,5 +2356,95 @@ mod tests {
         let male = super::token_reads(Some(&store(4 | 1 << 8)));
         assert_ne!(super::token_reads(Some(&store(4 | 1 << 8 | 1 << 16))), male);
         assert_eq!(super::token_reads(Some(&store(1 | 2 << 8 | 1 << 24))), male);
+    }
+}
+
+#[cfg(test)]
+mod ask_tests {
+    use bevy::prelude::*;
+
+    use crate::items::Items;
+    use crate::net::NetCommands;
+
+    /// A `/reload` keeps the reference's item cache, so a new VM is seated with every cached
+    /// record its first frame, ahead of its world entry, and its first read hits.
+    #[test]
+    fn a_new_vm_is_seated_with_every_cached_template() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<Items>()
+            .init_resource::<crate::spell::SpellModifiers>()
+            .add_systems(Update, super::feed_item_stats);
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(25, Some(crate::items::test_template("Linen Cloth")));
+        let name = |app: &mut App| {
+            app.world_mut()
+                .non_send_mut::<benilla_ui::script::UiScript>()
+                .eval::<Option<String>>("return (GetItemInfo(25))")
+                .unwrap()
+        };
+        app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
+        app.update();
+        assert_eq!(name(&mut app).as_deref(), Some("Linen Cloth"));
+        app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
+        app.update();
+        assert_eq!(
+            name(&mut app).as_deref(),
+            Some("Linen Cloth"),
+            "the new VM's"
+        );
+        assert!(crate::query_cache::queries(&rx).is_empty());
+    }
+
+    /// A miss the VM asks for is the getter's lookup with a callback: it queries, a frame between
+    /// asks queries nothing, and the next ask queries a refused id again. A miss `GetItemInfo`
+    /// reads never queries (`0x48e172`).
+    #[test]
+    fn a_refused_template_is_asked_by_the_next_getter_and_never_by_get_item_info() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<Items>()
+            .init_resource::<crate::spell::SpellModifiers>()
+            .add_systems(Update, super::feed_item_stats);
+        app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
+        let run = |app: &mut App, lua: &str| {
+            app.world_mut()
+                .non_send_mut::<benilla_ui::script::UiScript>()
+                .run(lua)
+                .unwrap();
+            app.update();
+        };
+        run(&mut app, "GetItemInfo(25)");
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "a read asks nothing"
+        );
+        let ask = |app: &mut App| {
+            app.world_mut()
+                .non_send_mut::<benilla_ui::script::UiScript>()
+                .ask_item_templates([25]);
+            app.update();
+        };
+        ask(&mut app);
+        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(25, None);
+        for _ in 0..600 {
+            run(&mut app, "GetItemInfo(25)");
+        }
+        assert!(
+            crate::query_cache::queries(&rx).is_empty(),
+            "no frame or read asks a refusal"
+        );
+        ask(&mut app);
+        assert_eq!(
+            crate::query_cache::queries(&rx).len(),
+            1,
+            "the next getter asks again"
+        );
     }
 }

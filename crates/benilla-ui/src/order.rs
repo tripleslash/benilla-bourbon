@@ -433,7 +433,7 @@ pub type DrawList = std::sync::Arc<[DrawEntry]>;
 pub type PickList = std::sync::Arc<[(FrameHandle, ZKey)]>;
 
 /// [`traversal`]'s and [`pick_order`]'s memos.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct OrderCache {
     draw: Memo<DrawEntry>,
     pick: Memo<(FrameHandle, ZKey)>,

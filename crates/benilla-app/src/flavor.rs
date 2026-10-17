@@ -59,6 +59,34 @@ pub(crate) fn turtle() -> bool {
     benilla_formats::layers::turtle_mounted()
 }
 
+/// 1.12.1's playable races by side, the race-to-side split `UnitFactionGroup` answers before a
+/// player object exists: Human, Dwarf, Night Elf, Gnome; Orc, Scourge, Tauren, Troll.
+const ALLIANCE: [u8; 4] = [1, 3, 4, 7];
+const HORDE: [u8; 4] = [2, 5, 6, 8];
+/// Turtle WoW's: its High Elf (10) is Alliance and its Goblin (9) Horde, by their faction
+/// templates' group masks (1610: 3, 1609: 5).
+const TURTLE_ALLIANCE: [u8; 5] = [1, 3, 4, 7, 10];
+const TURTLE_HORDE: [u8; 5] = [2, 5, 6, 8, 9];
+
+/// The Alliance's playable races under a flavor.
+pub(crate) fn alliance_races(turtle: bool) -> &'static [u8] {
+    if turtle {
+        &TURTLE_ALLIANCE
+    } else {
+        &ALLIANCE
+    }
+}
+
+/// The Horde's playable races under a flavor.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn horde_races(turtle: bool) -> &'static [u8] {
+    if turtle {
+        &TURTLE_HORDE
+    } else {
+        &HORDE
+    }
+}
+
 /// Whether this build can play `realm` at all: a Turtle realm needs the Turtle layer, which only
 /// the web build mounts. The auto-answer skips a realm that fails this; a click on one is refused
 /// with a reason.
@@ -80,6 +108,13 @@ impl Plugin for FlavorPlugin {
             .add_systems(
                 Update,
                 settle_entry.after(benilla_world::schedule::WorldStage::Net),
+            )
+            // After a flavor switch, the glue VM off the new chain, once the manager is idle.
+            .add_systems(
+                Update,
+                crate::ui_script::rebuild_stale_glue_vm
+                    .after(crate::ui_script::glue_mgr::drive_glue_mgr)
+                    .after(settle_entry),
             );
     }
 }
@@ -228,37 +263,23 @@ fn mount(to: ClientFlavor) -> anyhow::Result<Option<LayerContains>> {
     }
 }
 
-/// A realm the client cannot play: say why over the realm list, which stays up, and leave the
-/// park unanswered so another realm can be picked. Under the stock glue screens the same words
-/// go out as a terminal login failure, which ends the connect their manager is waiting on
-/// ([`crate::ui_script::glue_mgr`]); the native dialog and list are not drawn there.
+/// A realm the client cannot play: say why, and leave the park unanswered so another realm can be
+/// picked. The words go out as a login failure, which ends the connect the stock glue screens'
+/// manager is waiting on ([`crate::ui_script::glue_mgr`]) and shows over the realm list. The run's
+/// own pick never takes such a realm ([`crate::glue_session::realm`]), so nothing resubmits it.
 fn refuse(world: &mut World, name: &str, e: anyhow::Error) {
     warn!("flavor: realm {name:?} refused — {e:#}");
     let why = format!(
         "{name} is a Turtle WoW 1.18.1 realm, and this client could not load the Turtle WoW data \
          it needs."
     );
-    if world
-        .get_resource::<crate::ui_script::glue::GlueStock>()
-        .is_some_and(|stock| stock.0)
+    if let Some(mut failures) =
+        world.get_resource_mut::<bevy::ecs::message::Messages<crate::net::LoginFailedMessage>>()
     {
-        if let Some(mut failures) =
-            world.get_resource_mut::<bevy::ecs::message::Messages<crate::net::LoginFailedMessage>>()
-        {
-            failures.write(crate::net::LoginFailedMessage {
-                refusal: None,
-                reason: why,
-                terminal: true,
-                dial: None,
-            });
-        }
-        return;
-    }
-    if let Some(mut dialog) = world.get_resource_mut::<crate::glue::dialog::GlueDialog>() {
-        dialog.open_error(&why);
-    }
-    if let Some(mut realms) = world.get_resource_mut::<crate::realm_select::Realms>() {
-        realms.reopen();
+        failures.write(crate::net::LoginFailedMessage {
+            refusal: None,
+            reason: why,
+        });
     }
 }
 
@@ -318,7 +339,7 @@ mod tests {
     /// 1.12.1's tables answer exactly as before. Their names are the mounted `ChrRaces.dbc`'s.
     #[test]
     fn turtle_races_are_turtle_only() {
-        use crate::char_create::{alliance_races, horde_races};
+        use super::{alliance_races, horde_races};
         use crate::ui_unit::{race_faction_group_in, race_pvp_team_in};
         assert_eq!(race_faction_group_in(9, false), None);
         assert_eq!(race_faction_group_in(9, true), Some("Horde"));
