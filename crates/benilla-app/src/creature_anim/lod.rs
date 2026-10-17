@@ -114,7 +114,12 @@ pub(super) fn gate_rig_animation(
                 );
                 // The room leg: only a rig the frustum leg kept can be room-parked.
                 let room_in = !sphere_in || (no_room && !cost_on) || {
-                    let ok = room_pvs_visible(room, &instances, &wmos);
+                    let ok = room_pvs_visible(
+                        room,
+                        Some((tf.translation(), r)),
+                        &instances,
+                        &wmos,
+                    );
                     if !ok {
                         room_out += 1;
                     }

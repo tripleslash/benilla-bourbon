@@ -358,9 +358,16 @@ fn apply_exterior_cull(
             // The lever: the window leg alone, in-room bodies exempt.
             in_room || gate.admits(gt, Some(bound))
         } else if in_room {
-            // The sibling producer `0x6834e0`: drawn iff its room or a one-hop neighbour is in the
-            // PVS and its box is in view; `room_pvs_visible` fails open at every resolve seam.
-            crate::wmo_portal::room_pvs_visible(room, &instances, &wmos) && in_view(gt, bound)
+            // The sibling producer `0x6834e0`: drawn iff its room is in the PVS, or a one-hop
+            // neighbour is while the body stands in their portal, and its box is in view;
+            // `room_pvs_visible` fails open at every resolve seam.
+            let sphere = (
+                gt.transform_point(Vec3::from(bound.center)),
+                Vec3::from(bound.half_extents).length()
+                    * gt.to_scale_rotation_translation().0.max_element(),
+            );
+            crate::wmo_portal::room_pvs_visible(room, Some(sphere), &instances, &wmos)
+                && in_view(gt, bound)
         } else {
             // The exterior walk: outdoors the full-screen window, indoors the portal windows,
             // already sub-frusta of the view.
