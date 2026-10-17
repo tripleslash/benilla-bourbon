@@ -288,6 +288,7 @@ impl UiScript {
                         }
                         if !data.font_explicit.outline {
                             data.outline = fo.outline;
+                            data.monochrome = fo.monochrome;
                         }
                         // The mask, not `vertex_color.is_none()`: a label linked to its font object
                         // already carries the normal object's colour.
@@ -319,6 +320,7 @@ impl UiScript {
                         }
                         if !data.font_explicit.outline {
                             data.outline = super::Outline::flags(&bf.flags);
+                            data.monochrome = bf.monochrome;
                         }
                     }
                     // The state colour repaints the label outright, even over its own colour.
@@ -372,6 +374,7 @@ impl UiScript {
                             text_height: data.text_height,
                             shadow: data.font_shadow,
                             outline: data.outline,
+                            monochrome: data.monochrome,
                             spacing,
                             alpha_gradient: data.alpha_gradient,
                             // The owner's property: an addon's strings on a plate slide with it.
