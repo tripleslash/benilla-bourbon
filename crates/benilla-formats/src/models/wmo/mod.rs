@@ -34,6 +34,10 @@ pub fn load_wmo(chain: &mut Chain, raw_path: &str) -> Result<Vec<super::RenderSu
 /// `NDOM`). As in the reference's walk (`0x6c3a60`/`0x6c3f80`), the last chunk clamps to EOF and
 /// never rejects the file: `Undercity_144.wmo`'s MOGP declares one byte more than the file holds.
 pub(crate) fn find_wmo_chunk<'a>(bytes: &'a [u8], magic: &[u8; 4]) -> Option<&'a [u8]> {
+    // MOGP runs to EOF whatever it declares (the six Shadowmoon_Slagpit01 groups declare 0x40).
+    if magic == b"PGOM" {
+        return benilla_wmo::mogp_payload(bytes);
+    }
     let mut off = 0usize;
     while off + 8 <= bytes.len() {
         let size = u32::from_le_bytes([

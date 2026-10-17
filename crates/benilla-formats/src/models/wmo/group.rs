@@ -760,6 +760,21 @@ mod tests {
         assert_eq!(colors(0x0).len(), 3, "interior: the bake is the light");
     }
 
+    /// Shadowmoon_Slagpit01_00x: MOGP declares 0x40 (short of the 0x44 header) and its sub-chunks
+    /// follow as top-level siblings to EOF — they still belong to the group.
+    #[test]
+    fn mogp_declaring_less_than_its_header_still_owns_the_sibling_chunks() {
+        let mut hdr = vec![0u8; 68];
+        hdr[8..12].copy_from_slice(&0x8u32.to_le_bytes());
+        let mut group = chunk(b"REVM", &17u32.to_le_bytes());
+        group.extend_from_slice(b"PGOM");
+        group.extend_from_slice(&64u32.to_le_bytes());
+        group.extend_from_slice(&hdr);
+        group.extend(chunk(b"RDOM", &[3, 0, 9, 0])); // MODR: doodad refs 3, 9
+        assert_eq!(wmo_group_doodad_refs(&group), vec![3, 9]);
+        assert_eq!(wmo_group_header(&group).expect("group header").flags, 0x8);
+    }
+
     /// All 13 shipped overrides are `0`, water, so the no-liquid sentinel cannot be zero.
     #[test]
     fn reads_the_whole_group_liquid_override() {
