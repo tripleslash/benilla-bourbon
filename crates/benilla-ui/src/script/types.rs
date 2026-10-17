@@ -545,17 +545,36 @@ impl RegionData {
 
     /// [`Self::measure_key`] with `text` in place of the region's own.
     pub(crate) fn measure_key_of(&self, text: &str, scale: f32) -> u64 {
+        self.measure_key_as(
+            text,
+            scale,
+            self.font_path.as_deref(),
+            self.font_height,
+            self.outline,
+        )
+    }
+
+    /// [`Self::measure_key_of`] under the font the text is drawn in, where that is not the
+    /// region's own ([`Model::label_font`]).
+    pub(crate) fn measure_key_as(
+        &self,
+        text: &str,
+        scale: f32,
+        font_path: Option<&str>,
+        font_height: Option<f32>,
+        outline: Outline,
+    ) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut hasher);
-        self.font_path.hash(&mut hasher);
-        self.font_height.map(f32::to_bits).hash(&mut hasher);
+        font_path.hash(&mut hasher);
+        font_height.map(f32::to_bits).hash(&mut hasher);
         self.text_height.map(f32::to_bits).hash(&mut hasher);
         let wrap_width = self.size.map(|s| s.0).filter(|w| *w > 0.0);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         // The outline changes the measure: a THICK one steps each glyph 1 px further
         // (`GlyphStepBase 0x5ca2b0`); so does the shadow's x offset, which seeds the line.
-        (self.outline as u8).hash(&mut hasher);
+        (outline as u8).hash(&mut hasher);
         self.line_gap().to_bits().hash(&mut hasher);
         self.shadow_x().to_bits().hash(&mut hasher);
         // The flag moves the wrap and `maxLines` the cut text the height is measured from.

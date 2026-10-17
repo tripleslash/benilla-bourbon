@@ -2128,10 +2128,10 @@ pub(super) fn measure_request_for(model: &mut Model, rh: RegionHandle) -> Option
     let d = model.region_data.get(&rh)?;
     let text = d.text.clone().filter(|t| !t.is_empty())?;
     let wrap_width = d.size.map(|s| s.0).filter(|w| *w > 0.0);
-    let font = d.font_path.clone();
-    let height = d.font_height;
+    // The font the text is drawn in: a button's label takes `Button:SetFont`'s.
+    let (font, height, outline) = model.label_font(rh, d);
+    let font = font.map(str::to_string);
     let text_height = d.text_height;
-    let outline = d.outline;
     let spacing = d.line_gap();
     let shadow_x = d.shadow_x();
     let max_lines = d.max_lines;
@@ -2172,7 +2172,7 @@ fn stale_measure_key(model: &Model, rh: RegionHandle) -> Option<(u64, f32)> {
         return None;
     }
     // The metric reads in `region.rs` check the stored measure against this same key.
-    let key = d.measure_key(scale);
+    let key = model.measure_key(rh, d, scale);
     if d.measured.map(|m| m.key) == Some(key) {
         return None;
     }

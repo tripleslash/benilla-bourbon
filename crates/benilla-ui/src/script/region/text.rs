@@ -109,7 +109,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             .map(|f| f.effective_scale)
             .unwrap_or(1.0);
         Ok(d.measured
-            .filter(|m| m.key == d.measure_key(scale))
+            .filter(|m| m.key == model.measure_key(rh, d, scale))
             .map(|m| m.natural_w)
             .unwrap_or(0.0))
     }
