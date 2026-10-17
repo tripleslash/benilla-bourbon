@@ -48,6 +48,69 @@ impl Pasteboard for arboard::Clipboard {
     }
 }
 
+/// The browser's half: `navigator.clipboard`, whose reads and writes are promises. A read cannot
+/// answer in the chord's own call, so it starts the read and answers "nothing yet"; the text lands
+/// in [`web::take_pending`] when the promise resolves, and the UI feed types it into whatever box
+/// has the focus on that frame ([`HostClipboard::take_pending_paste`]). The keydown that asked is
+/// the user gesture the API wants; the browser may ask the player once for permission to read.
+/// The DOM `paste` event is no way round it: the canvas prevents keydown's default action (so the
+/// page does not scroll under the game), which is the action that would fire it.
+#[cfg(target_arch = "wasm32")]
+mod web {
+    use std::cell::RefCell;
+
+    use super::Pasteboard;
+
+    thread_local! {
+        static PENDING: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct BrowserClipboard;
+
+    fn clipboard() -> Result<web_sys::Clipboard, String> {
+        Ok(web_sys::window()
+            .ok_or("no window")?
+            .navigator()
+            .clipboard())
+    }
+
+    impl Pasteboard for BrowserClipboard {
+        fn read_text(&mut self) -> Result<Option<String>, String> {
+            let promise = clipboard()?.read_text();
+            wasm_bindgen_futures::spawn_local(async move {
+                match wasm_bindgen_futures::JsFuture::from(promise).await {
+                    Ok(value) => {
+                        if let Some(text) = value.as_string().filter(|t| !t.is_empty()) {
+                            PENDING.with(|p| *p.borrow_mut() = Some(text));
+                        }
+                    }
+                    Err(e) => bevy::log::warn!("clipboard: readText refused — {e:?}"),
+                }
+            });
+            Ok(None)
+        }
+
+        fn write_text(&mut self, text: &str) -> Result<(), String> {
+            let promise = clipboard()?.write_text(text);
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = wasm_bindgen_futures::JsFuture::from(promise).await {
+                    bevy::log::warn!("clipboard: writeText refused — {e:?}");
+                }
+            });
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            "navigator.clipboard"
+        }
+    }
+
+    /// The text a resolved read left, once.
+    pub(super) fn take_pending() -> Option<String> {
+        PENDING.with(|p| p.borrow_mut().take())
+    }
+}
+
 /// The Wayland half; the gate must match `smithay-clipboard`'s target in `Cargo.toml`.
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
 mod wl {
@@ -150,12 +213,9 @@ impl HostClipboard {
                     None
                 }
             },
-            // No pasteboard backend on web: `wayland_display` always answers `None` here (wasm32
-            // isn't in its `unix`-and-friends cfg), and the browser's own clipboard is an async,
-            // gesture-gated API (`navigator.clipboard`) this synchronous seam can't call into —
-            // the copy/cut/paste chords silently no-op rather than fail loudly.
+            // The browser's clipboard, asynchronous: see [`web`].
             #[cfg(target_arch = "wasm32")]
-            None => None,
+            None => Some(Box::new(web::BrowserClipboard)),
         };
         if let Some(backend) = &self.backend {
             info!("clipboard: {}{}", backend.name(), session_note());
@@ -177,6 +237,15 @@ impl HostClipboard {
                 None
             }
         }
+    }
+
+    /// The text a browser paste resolved to since the last frame, once; always `None` natively,
+    /// where [`Self::read`] answers in the chord's own call.
+    pub(crate) fn take_pending_paste(&mut self) -> Option<String> {
+        #[cfg(target_arch = "wasm32")]
+        return web::take_pending();
+        #[cfg(not(target_arch = "wasm32"))]
+        None
     }
 
     /// Put `text` on the pasteboard.

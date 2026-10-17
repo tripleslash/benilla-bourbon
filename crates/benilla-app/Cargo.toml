@@ -179,6 +179,9 @@ web-sys = { version = "0.3", features = [
     "AudioBuffer",
     "BaseAudioContext",
     "OfflineAudioContext",
+    # The UI EditBoxes' copy and paste in the browser (`textinput::clipboard`'s `web`).
+    "Navigator",
+    "Clipboard",
 ] }
 # The browser's device, and the ONLY place the `cpal` feature is asked for: on wasm32 the owned
 # output layer cannot run (no render thread), so kira's own backend is what opens Web Audio.

@@ -199,6 +199,11 @@ pub(super) fn feed_ui_input(
         payload_held.0 = false;
         return;
     };
+    // The browser's paste resolves a frame or more after its chord (`navigator.clipboard` is a
+    // promise): it is typed here into the box with the focus now, as the chord's own paste types.
+    if let Some(text) = clipboard.take_pending_paste() {
+        script.paste(&text);
+    }
     let Ok((window, raw_handle)) = window.single() else {
         capture.typing = false;
         capture.arrows_fall_through = false;
