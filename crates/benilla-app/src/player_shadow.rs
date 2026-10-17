@@ -34,9 +34,12 @@ use benilla_world::view::WorldCamera;
 use crate::client_state::ClientState;
 use crate::video::VideoConfig;
 
-/// Layer 31 is deliberately private to this feature. Bevy supports 32 render layers; the normal
-/// world is layer 0 and the UI/portrait layers occupy the low numbered slots.
-pub(crate) const PLAYER_SHADOW_LAYER: usize = 31;
+/// Layer 63, private to this feature: the world is layer 0, the booth ladder takes the low slots,
+/// and the character panes grow upward from [`crate::portrait::panes::PANE_LAYER_BASE`] (29), one
+/// layer a pane, so a layer in the 30s was a pane's (the third pane's camera drew the shadow
+/// casters). `RenderLayers::layer` builds one inline block of 64 layers and panics past it, so the
+/// top of that block keeps clear of the panes for 33 of them (from Adrinalin4ik/manila d93f0d932).
+pub(crate) const PLAYER_SHADOW_LAYER: usize = 63;
 
 /// How far from the camera the shadow map RESOLVES (the single cascade's `maximum_distance`).
 /// Collection reaches farther than this: a caster's own body may stand outside the cascade

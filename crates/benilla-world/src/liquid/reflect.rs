@@ -184,11 +184,13 @@ impl ReflectionPlane {
 ///   have — legible text, upside down, floating in the lake. A reflection is not a second opinion
 ///   about a billboard; a billboard has exactly one viewer, and this layer is how the frame says so.
 ///
-/// **31 is the player shadow's and 2.. is the portrait ladder's**; this is the one layer claimed
-/// from `benilla-world` rather than from `benilla-app`'s ladder, because the camera that must not
-/// see it is spawned here. It is deliberately at the far end of the range from the app's growing
-/// ladder, and it is asserted distinct from the one fixed app layer this crate can see.
-pub const UNMIRRORED_RENDER_LAYER: usize = 30;
+/// **63 is the player shadow's and 2.. is the portrait ladder's**, whose character panes grow one
+/// layer each from 29; this is the one layer claimed from `benilla-world` rather than from
+/// `benilla-app`'s ladder, because the camera that must not see it is spawned here. It sits at the
+/// far end of `RenderLayers`' 64-layer inline block, clear of the growing panes (at 30 it was the
+/// second pane's, whose camera then drew the nameplates), and it is asserted distinct from the one
+/// fixed app layer this crate can see.
+pub const UNMIRRORED_RENDER_LAYER: usize = 62;
 
 /// The mirror's camera. One per world camera, spawned once the targets exist.
 #[derive(Component)]
@@ -1012,7 +1014,7 @@ mod tests {
     fn the_water_layer_is_clear_of_the_player_shadows() {
         // `benilla_app::player_shadow::PLAYER_SHADOW_LAYER` — restated rather than imported,
         // because the dependency runs the other way.
-        const PLAYER_SHADOW_LAYER: usize = 31;
+        const PLAYER_SHADOW_LAYER: usize = 63;
         assert_ne!(UNMIRRORED_RENDER_LAYER, PLAYER_SHADOW_LAYER);
     }
 }
