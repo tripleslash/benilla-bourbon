@@ -464,7 +464,12 @@ fn gate_doodad_anim(
                 );
             }
         }
-        if drawn == host.active {
+        // **A host's birth is an edge too.** Every spawn sets `active: false` without
+        // `AnimParked`, and the player looping, so a host never drawn since it spawned took no
+        // edge and posed every frame for ever. Journal 2026-10-17T154832, camera at the floor:
+        // 965 doodad rigs live, all 965 outside the frustum, 3 parked; `animParkAll` (which
+        // forces the park) took the frame 21.2 -> 18.0 ms.
+        if drawn == host.active && !host.is_added() {
             continue;
         }
         host.active = drawn;
@@ -1245,7 +1250,10 @@ mod tests {
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
                     then: None,
-                    active: true,
+                    // The born state every spawn site uses (`terrain_stream::spawn::assemble`).
+                    // This test once spawned `active: true`, so it passed while a host that was
+                    // never drawn was never parked either.
+                    active: false,
                     parked_at: 0.0,
                 })
                 .id()
