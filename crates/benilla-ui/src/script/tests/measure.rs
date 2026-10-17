@@ -193,7 +193,10 @@ fn a_button_label_is_measured_in_the_buttons_font() {
     assert_eq!(r.height, Some(10.0));
     assert_eq!(r.font.as_deref(), Some("Fonts\\ARIALN.TTF"));
     assert_eq!(r.outline, crate::script::Outline::Normal);
-    assert_ne!(r.key, own_key, "the measure is taken again under the drawn font");
+    assert_ne!(
+        r.key, own_key,
+        "the measure is taken again under the drawn font"
+    );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 

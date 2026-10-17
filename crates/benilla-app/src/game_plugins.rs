@@ -409,8 +409,7 @@ pub(crate) mod schedule_tests {
             for (key, system, conds) in graph.systems.iter() {
                 if let (Some(id), Some(access)) = (self_player, accesses.get(&key)) {
                     let names_it = access.filtered_accesses().iter().any(|fa| {
-                        fa.contains(id)
-                            || (!fa.access().has_read_all() && fa.access().has_read(id))
+                        fa.contains(id) || (!fa.access().has_read_all() && fa.access().has_read(id))
                     });
                     if names_it {
                         uses_self.insert(key);
@@ -565,9 +564,13 @@ pub(crate) mod schedule_tests {
                 let graph = schedule.graph();
                 let mut out = Vec::new();
                 for (key, system, conds) in graph.systems.iter() {
-                    let writes = accesses
-                        .get(&key)
-                        .is_some_and(|a| a.combined_access().has_write(id));
+                    // A write by name, not one of 0.19's whole-entity accesses (bevy's
+                    // `animate_targets` writes every component of what it animates), which
+                    // names no resource in particular.
+                    let writes = accesses.get(&key).is_some_and(|a| {
+                        let c = a.combined_access();
+                        c.has_write(id) && !c.has_write_all_components() && !c.has_write_all()
+                    });
                     if !writes {
                         continue;
                     }
@@ -930,7 +933,10 @@ pub(crate) mod schedule_tests {
     ///
     /// Upstream's character-pane `SetUnit` subjects (b727e30f3, #1352) moved its ceiling 4,463 ->
     /// 3,964 (-499); the merge of 7b608671a (the locale, the item watchers) measures 4,284.
-    const UPDATE_ACTIONABLE_CEILING: usize = 4_284;
+    ///
+    /// The merges of upstream 560d7ff6 and f55bb79b (benilla-lua, the stock glue alone, the glue
+    /// session, field-watch unit events) measure 3,644: the native glue screens' systems left.
+    const UPDATE_ACTIONABLE_CEILING: usize = 3_644;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

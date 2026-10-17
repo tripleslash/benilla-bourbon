@@ -2015,7 +2015,10 @@ mod tests {
             let mut s = UiScript::new().unwrap();
             caches(&mut s);
             seat(&mut s, &[(6001, lunaclaw.clone(), slot(6001, 3, state))]);
-            assert_eq!(s.eval::<i64>("return GetNumQuestLeaderBoards(2)").unwrap(), 2);
+            assert_eq!(
+                s.eval::<i64>("return GetNumQuestLeaderBoards(2)").unwrap(),
+                2
+            );
             assert_eq!(
                 s.eval::<String>(
                     "local t, k, f = GetQuestLogLeaderBoard(1, 2) \

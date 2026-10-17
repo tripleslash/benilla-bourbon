@@ -26,11 +26,6 @@ use crate::net::{
 /// The resubmit delay after a transport failure with pending credentials.
 const RETRY_DELAY_SECS: f32 = 3.0;
 
-/// The realmlist dialog's prompt for a value that is not an address; the typed text stays for
-/// editing.
-pub(crate) const REALMLIST_BAD: &str =
-    "That is not a server address.\nTry  logon.example.org  or  127.0.0.1:3724";
-
 /// The login engine's frame; a screen that shows what it decided runs after it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct LoginPolicy;

@@ -1411,7 +1411,13 @@ impl Model {
         scale: f32,
     ) -> u64 {
         let (font, height, outline) = self.label_font(rh, d);
-        d.measure_key_as(d.text.as_deref().unwrap_or(""), scale, font, height, outline)
+        d.measure_key_as(
+            d.text.as_deref().unwrap_or(""),
+            scale,
+            font,
+            height,
+            outline,
+        )
     }
 
     pub(crate) fn new() -> Model {

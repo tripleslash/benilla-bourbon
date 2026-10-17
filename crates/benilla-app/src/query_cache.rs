@@ -180,6 +180,7 @@ impl<K: Copy + Eq + Hash + Default, V> QueryCache<K, V> {
     }
 
     /// Whether an ask for `key` is in flight.
+    #[cfg(test)]
     pub(crate) fn is_pending(&self, key: K) -> bool {
         self.pending.lock_recover().contains(&key)
     }

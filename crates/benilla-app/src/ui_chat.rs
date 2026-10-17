@@ -107,7 +107,8 @@ impl Plugin for UiChatPlugin {
                     language::load_language_words,
                     language::feed_language_skills,
                     language::feed_default_language,
-                    language::feed_chat_language,
+                    // After the self tag, whose `SelfPlayer` it reads.
+                    language::feed_chat_language.after(benilla_world::schedule::WorldStage::Net),
                 )
                     .before(feed::feed_chat),
             )

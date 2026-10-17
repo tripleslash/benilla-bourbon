@@ -833,7 +833,7 @@ fn use_cooldown(
     charges_left: i32,
     cooldowns: &crate::spell::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
-    now: std::time::Instant,
+    now: bevy::platform::time::Instant,
     ui_now: f64,
 ) -> Option<(i64, u32, bool)> {
     if t.charges_depleted(charges_left) {
@@ -859,7 +859,7 @@ fn worn_cooldowns(
     items: &Items,
     cooldowns: &crate::spell::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
-    now: std::time::Instant,
+    now: bevy::platform::time::Instant,
     ui_now: f64,
 ) -> HashMap<usize, (i64, u32, bool)> {
     (0..WORN_SLOTS)
@@ -1660,7 +1660,7 @@ mod tests {
                 None,
                 &names,
                 &petitions,
-                std::time::Instant::now(),
+                bevy::platform::time::Instant::now(),
                 0.0,
                 false,
             )
@@ -1727,7 +1727,7 @@ mod tests {
                 None,
                 &names,
                 &petitions,
-                std::time::Instant::now(),
+                bevy::platform::time::Instant::now(),
                 0.0,
                 false,
             )
@@ -1776,7 +1776,7 @@ mod tests {
             t.use_spell = spell;
             items.insert_template(entry, Some(t));
         }
-        let now = std::time::Instant::now();
+        let now = bevy::platform::time::Instant::now();
         let mut cooldowns = crate::spell::Cooldowns::default();
         // Only 2000 was used; 2001 has a use spell and no cooldown, 2002 has no use spell.
         cooldowns.start_item(2000, &use_spell(9000), None, now);
@@ -1833,7 +1833,7 @@ mod tests {
         ];
         let mut objs = TestObjects::new();
         let mut items = Items::default();
-        let now = std::time::Instant::now();
+        let now = bevy::platform::time::Instant::now();
         let mut cooldowns = crate::spell::Cooldowns::default();
         for &(guid, entry, template_charges, copy_charges) in &cases {
             objs.spawn(
