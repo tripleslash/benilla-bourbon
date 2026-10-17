@@ -429,16 +429,12 @@ pub fn parse_m2_render_submeshes(
             }
         });
         // The vertex UV set a stage that is not env-mapped reads (`texture_unit_lookup` at
-        // `texCoordSet + 1`, set 0 or 1): `Stars.m2`'s second stage reads set 1.
+        // `texCoordSet + 1`, read on past the table as `0x70b8bd` does, set 0 or 1): `Stars.m2`'s
+        // second stage reads set 1.
         let stage1_set = stage1
             .as_ref()
             .filter(|st| !st.env_map)
-            .and_then(|_| {
-                model
-                    .texture_unit_lookup
-                    .get(batch.texture_coord_combo_index as usize + 1)
-            })
-            .copied()
+            .and_then(|_| model.stage_coord(batch, 1))
             .filter(|&set| set <= 1);
         // Render flag 0x01, unlit: full texture brightness (lamp glass, glow cards).
         let emissive = material.is_some_and(|m| m.flags.bits() & 0x01 != 0);

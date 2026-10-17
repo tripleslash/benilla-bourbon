@@ -226,6 +226,9 @@ pub struct M2Model {
     /// The texture-unit lookup (header `0x9c`), by `texture_coord_combo_index`: a UV channel or a
     /// generated environment coordinate (see [`Self::stage_is_env_mapped`]).
     pub texture_unit_lookup: Vec<u16>,
+    /// The file's u16s just past [`Self::texture_unit_lookup`], which the reference reads for an
+    /// index past its end ([`Self::stage_coord`]); empty where the file ends there.
+    pub texture_unit_lookup_past: Vec<u16>,
     /// The texture transforms, reached through [`Self::texture_transform_lookup`].
     pub texture_transforms: Vec<M2TextureTransform>,
     /// The texture combiner presets (header `0x144`, u16), read in version 0x101 alone: there a
@@ -265,15 +268,28 @@ pub struct M2Model {
 }
 
 impl M2Model {
-    /// Whether `batch`'s stage `stage` takes generated environment coordinates: a
-    /// [`Self::texture_unit_lookup`] entry above 2 (art: `0xffff`), and an out-of-range index,
-    /// gives the stage digit 2 of the vertex shader id (`0x71de50`, the test at `0x71deaa`), whose
-    /// `Shaders\Vertex\Model2.bls` program writes the sphere map `0.5 + 0.5·R.xy/|R|` of the
-    /// view-space reflection `R`, which no texture transform drives. The draw's gate `0x70b8bd`
-    /// makes the same test; the constants it then writes (`0x70b8d0`) that program does not read.
-    pub fn stage_is_env_mapped(&self, batch: &crate::SkinBatch, stage: u16) -> bool {
+    /// The coordinate source of `batch`'s stage `stage`: the [`Self::texture_unit_lookup`] entry
+    /// at `texture_coord_combo_index + stage`, which the draw's gate `0x70b8bd` reads unchecked: an
+    /// index past the table reads the file's next u16s ([`Self::texture_unit_lookup_past`]), as the
+    /// reference holds the file whole. `None` past those too.
+    pub fn stage_coord(&self, batch: &crate::SkinBatch, stage: u16) -> Option<u16> {
         let idx = batch.texture_coord_combo_index as usize + stage as usize;
-        self.texture_unit_lookup.get(idx).is_none_or(|&v| v > 2)
+        self.texture_unit_lookup.get(idx).copied().or_else(|| {
+            let past = idx - self.texture_unit_lookup.len();
+            self.texture_unit_lookup_past.get(past).copied()
+        })
+    }
+
+    /// Whether `batch`'s stage `stage` takes generated environment coordinates: a coordinate source
+    /// ([`Self::stage_coord`]) above 2 (art: `0xffff`), or none at all, gives the stage digit 2 of
+    /// the vertex shader id (`0x71de50`, the test at `0x71deaa`), whose `Shaders\Vertex\Model2.bls`
+    /// program writes the sphere map `0.5 + 0.5·R.xy/|R|` of the view-space reflection `R`, which
+    /// no texture transform drives. The draw's gate `0x70b8bd` makes the same test; the constants
+    /// it then writes (`0x70b8d0`) that program does not read. A table too short for the stage
+    /// (the OctoWoW HD pack's `UI_MainMenu.m2`: one entry, two-texture batches) reads on into the
+    /// file, where that file holds a 0: UV set 0, not the sphere map.
+    pub fn stage_is_env_mapped(&self, batch: &crate::SkinBatch, stage: u16) -> bool {
+        self.stage_coord(batch, stage).is_none_or(|v| v > 2)
     }
 
     /// The combine preset (0 to 5, gx render states `0x1f + k`) stage `stage` of `batch` binds
