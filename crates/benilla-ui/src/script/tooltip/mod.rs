@@ -127,7 +127,7 @@ pub(super) fn write_cell(
     model: &mut Model,
     rh: crate::widget::RegionHandle,
     text: &str,
-    color: [f32; 4],
+    color: crate::color::Rgba8,
 ) {
     let text = model.localized_text(text.to_string());
     let d = model.region_data.entry(rh).or_default();
@@ -409,7 +409,7 @@ fn full_alpha(model: &mut Model, h: FrameHandle) {
     if let Ok(t) = tip_mut(model, h) {
         t.fade_left = None;
     }
-    model.arena.set_alpha(h, 1.0);
+    model.arena.set_alpha(h, 255);
 }
 
 /// Shows or hides as the Lua verbs do, handlers included.
@@ -556,10 +556,15 @@ pub(super) fn append_line(
         _ => return Err(mlua::Error::runtime("not a GameTooltip")),
     };
     if !left.0.is_empty() {
-        write_cell(&mut model, lh, &left.0, left.1);
+        write_cell(
+            &mut model,
+            lh,
+            &left.0,
+            crate::color::Rgba8::from_f32(left.1),
+        );
     }
     if let Some((text, color)) = right.filter(|(text, _)| !text.is_empty()) {
-        write_cell(&mut model, rh, &text, color);
+        write_cell(&mut model, rh, &text, crate::color::Rgba8::from_f32(color));
     }
     if let Ok(t) = tip_mut(&mut model, h) {
         // The wrap flag (`0x53036f`), read by the sizer alone; the line is not sized here.
@@ -659,14 +664,14 @@ pub(in crate::script) fn update(lua: &Lua, h: FrameHandle, elapsed: f32) {
         lua.app_data_mut::<Model>()
             .expect("model app_data")
             .arena
-            .set_alpha(h, 1.0);
+            .set_alpha(h, 255);
         set_shown(lua, h, false);
     }
 }
 
-/// The fade's alpha with `left` seconds to go, in whole 255ths as the reference's `SetAlpha`
-/// takes them. The product is formed in f64, where `left × 255` is exact as in the x87 original.
-fn fade_alpha(left: f32) -> f32 {
+/// The fade's alpha byte with `left` seconds to go, as the reference hands the alpha walk whole
+/// 255ths. The product is formed in f64, where `left × 255` is exact as in the x87 original.
+fn fade_alpha(left: f32) -> u8 {
     let half = f64::from(TOOLTIP_FADE_SECS) * 0.5;
     let left = f64::from(left);
     let units = if left < half {
@@ -674,5 +679,5 @@ fn fade_alpha(left: f32) -> f32 {
     } else {
         255.0
     };
-    (units / 255.0) as f32
+    units as u8
 }

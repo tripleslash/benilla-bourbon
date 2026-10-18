@@ -6,7 +6,7 @@ use crate::script::binding_abi::bool_or_default;
 
 use crate::script::region_map::{set_shared, Side};
 
-use crate::order::Strata;
+use crate::order::{DrawLayer, Strata};
 use crate::script::{visibility, Backdrop, Insets, Model};
 use crate::widget::FrameKind;
 
@@ -418,11 +418,26 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
     m.set(
         "SetScale",
-        lua.create_function(|lua, (this, scale): (Table, f32)| {
+        lua.create_function(|lua, (this, scale): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
+            // `0x775140`: `lua_isnumber` else the usage line (`0x775250`); a scale below 0 or NaN
+            // (`fcomp 0.0; test ah,1`, `0x7751e9`, on the double) raises and stores nothing
+            // (`0x77520b`); 0 passes. The store is the f32 (`0x7751e6`).
+            let Some(scale) = lua.coerce_number(scale)? else {
+                return Err(mlua::Error::runtime(format!(
+                    "Usage: {}:SetScale(scale)",
+                    frame_name(lua, h)
+                )));
+            };
+            if scale < 0.0 || scale.is_nan() {
+                return Err(mlua::Error::runtime(format!(
+                    "{}:SetScale(): Scale must be > 0",
+                    frame_name(lua, h)
+                )));
+            }
             lua.app_data_mut::<Model>()
                 .expect("model")
-                .set_frame_scale(h, scale);
+                .set_frame_scale(h, scale as f32, false);
             Ok(())
         })?,
     )?;
@@ -436,13 +451,20 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
     m.set(
         "SetAlpha",
-        lua.create_function(|lua, (this, alpha): (Table, f32)| {
+        lua.create_function(|lua, (this, alpha): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
-            // The reference clamps to 0..1; stock fade code passing a 0..255 alpha relies on it.
+            // `0x774e90`: `lua_isnumber` else the usage line (`0x774f76`), then the clamped,
+            // truncated byte; stock fade code passing a 0..255 alpha relies on the clamp.
+            let Some(alpha) = lua.coerce_number(alpha)? else {
+                return Err(mlua::Error::runtime(format!(
+                    "Usage: {}:SetAlpha(alpha 0 to 1)",
+                    frame_name(lua, h)
+                )));
+            };
             lua.app_data_mut::<Model>()
                 .expect("model")
                 .arena
-                .set_alpha(h, alpha.clamp(0.0, 1.0));
+                .set_alpha(h, crate::color::frame_alpha_byte(alpha));
             Ok(())
         })?,
     )?;
@@ -451,7 +473,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.arena.frame(h).map(|f| f.alpha).unwrap_or(1.0))
+            Ok(model
+                .arena
+                .frame(h)
+                .map_or(1.0, |f| crate::color::alpha_f64(f.alpha)))
         })?,
     )?;
     // `SetBackdrop(table|nil)` (`0x7776e0` → `0x76a5d0`) installs or removes the tiled background
@@ -550,15 +575,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            match model.backdrops.get(&h).map(|i| &i.spec) {
-                Some(bd) => Ok((
-                    bd.bg_color[0],
-                    bd.bg_color[1],
-                    bd.bg_color[2],
-                    bd.bg_color[3],
-                )),
-                None => Ok((1.0, 1.0, 1.0, 1.0)),
-            }
+            // No backdrop pushes nothing (`0x777c68`/`0x778008`: `+0x1ac` null returns 0).
+            // With one, each byte times the float at `0x81c6b4` (`0x777c98`).
+            Ok(match model.backdrops.get(&h).map(|i| &i.spec) {
+                Some(bd) => crate::script::object::colour_values(bd.bg_color),
+                None => mlua::MultiValue::new(),
+            })
         })?,
     )?;
     m.set(
@@ -566,15 +588,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            match model.backdrops.get(&h).map(|i| &i.spec) {
-                Some(bd) => Ok((
-                    bd.border_color[0],
-                    bd.border_color[1],
-                    bd.border_color[2],
-                    bd.border_color[3],
-                )),
-                None => Ok((1.0, 1.0, 1.0, 1.0)),
-            }
+            // No backdrop pushes nothing (`0x777c68`/`0x778008`: `+0x1ac` null returns 0).
+            Ok(match model.backdrops.get(&h).map(|i| &i.spec) {
+                Some(bd) => crate::script::object::colour_values(bd.border_color),
+                None => mlua::MultiValue::new(),
+            })
         })?,
     )?;
     // Mouse interaction: `EnableMouse` gates hit-testing.
@@ -621,18 +639,18 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             ))
         })?,
     )?;
-    // EnableDrawLayer / DisableDrawLayer (`0x7755b0`/`0x775680`): the frame's layer mask. An
-    // unknown layer name is a no-op here; the reference's handling of one is untraced.
+    // EnableDrawLayer / DisableDrawLayer (`0x7755b0`/`0x775680`): the frame's layer mask. The
+    // layer starts at ARTWORK (`0x775640`) and a string naming a layer replaces it (`0x775662`
+    // writes only on a hit), so a missing, unknown or non-string argument means ARTWORK. A
+    // number passes `lua_isstring` but its text names no layer.
     for (name, disable) in [("EnableDrawLayer", false), ("DisableDrawLayer", true)] {
         m.set(
             name,
             lua.create_function(move |lua, (this, layer): (Table, Value)| {
-                let Some(l) = layer
+                let l = layer
                     .as_string()
                     .and_then(|s| s.to_str().ok().and_then(|s| draw_layer_from_str(&s)))
-                else {
-                    return Ok(());
-                };
+                    .unwrap_or(DrawLayer::Artwork);
                 let h = frame_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 if let Some(frame) = model.arena.frame_mut(h) {
@@ -815,29 +833,24 @@ fn regions_of(lua: &Lua, this: &Table) -> mlua::Result<Vec<u32>> {
     Ok(live.into_iter().map(|r| model.region_id(r)).collect())
 }
 
-/// One backdrop colour channel as `SetBackdropColor` (`0x777d30`) and `SetBackdropBorderColor`
-/// (`0x7780d0`) convert it: r, g, b through a bare `lua_tonumber` (nil is 0), alpha gated by
-/// `lua_isnumber` with 1.0 staged (`0x778220`, `0x778227`); clamped to 0..1 with NaN at 1, then
-/// stored as a byte, rounded half up (`×255 + 0.5`, `__ftol`).
-fn backdrop_channel(lua: &Lua, v: Option<Value>, gated: bool) -> f32 {
-    let x = if gated {
-        v.and_then(|v| lua.coerce_number(v).ok().flatten())
-            .unwrap_or(1.0)
-    } else {
-        crate::script::binding_abi::coerced_number(lua, v)
-    };
-    let clamped = if x.is_nan() { 1.0 } else { x.clamp(0.0, 1.0) };
-    let byte = (clamped * 255.0 + 0.5) as u8;
-    f32::from(byte) / 255.0
+/// Frame `h`'s name as the reference's usage lines print it (the frame's own name, vtable slot 1),
+/// or `<unnamed>` (`0x84c7f0`).
+fn frame_name(lua: &Lua, h: crate::widget::FrameHandle) -> String {
+    let model = lua.app_data_ref::<Model>().expect("model");
+    model
+        .arena
+        .frame(h)
+        .and_then(|f| f.name.clone())
+        .unwrap_or_else(|| "<unnamed>".to_string())
 }
 
-/// A backdrop colour setter's four channels; a missing argument and an explicit nil read alike.
-fn backdrop_color(lua: &Lua, args: mlua::MultiValue) -> [f32; 4] {
+/// A backdrop colour setter's four channels (`SetBackdropColor` `0x777d30`,
+/// `SetBackdropBorderColor` `0x7780d0`): r, g and b through a bare `lua_tonumber` (nil is 0),
+/// alpha gated by `lua_isnumber` over a staged 1.0 (`0x778220`, `0x778227`), packed as every
+/// colour setter packs ([`crate::color::Rgba8::pack`]). A missing argument and an explicit nil
+/// read alike.
+fn backdrop_color(lua: &Lua, args: mlua::MultiValue) -> crate::color::Rgba8 {
     let a: Vec<Value> = args.into_iter().collect();
-    [
-        backdrop_channel(lua, a.first().cloned(), false),
-        backdrop_channel(lua, a.get(1).cloned(), false),
-        backdrop_channel(lua, a.get(2).cloned(), false),
-        backdrop_channel(lua, a.get(3).cloned(), true),
-    ]
+    let arg = |i: usize| a.get(i).cloned().unwrap_or(Value::Nil);
+    crate::script::object::colour_args(lua, &arg(0), &arg(1), &arg(2), &arg(3))
 }

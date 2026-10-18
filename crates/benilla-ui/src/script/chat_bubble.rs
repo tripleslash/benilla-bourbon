@@ -65,8 +65,8 @@ pub struct BubbleState {
     /// The own-shown bit: a line is shown when it spawns and while it fades, hidden when an
     /// out-of-range fade ends (`0x4b0d9f`), shown again on the way back (`0x4b0ea0`).
     pub shown: bool,
-    /// The fade's frame alpha (`0x4b0d4f`, `0x4b0dc3`).
-    pub alpha: f32,
+    /// The fade's frame alpha byte, the one `0x4b0d4f` and `0x4b0dc3` hand the alpha walk.
+    pub alpha: u8,
     /// The projected speaker point the text's BOTTOM sits on, from the `WorldFrame`'s
     /// BOTTOMLEFT (`0x4b157a`).
     pub seat: (f32, f32),
@@ -400,7 +400,7 @@ fn set_line(
     let line = model.localized_text(state.text.clone());
     let data = model.region_data.entry(text).or_default();
     data.text = Some(line);
-    data.set_vertex_color(Some([c[0], c[1], c[2], 1.0]));
+    data.set_vertex_color(Some(crate::color::Rgba8::from_f32([c[0], c[1], c[2], 1.0])));
     // koKR left-justifies the text (`0x4b16e7` compares the locale with 1): the word's horizontal
     // bits set to LEFT and the same bits of its inherit mask cleared, as `SetJustifyH` does
     // (`0x4b1704`-`0x4b1717`, `0x79e776`-`0x79e788`), before the width is measured (`0x4b175d`).

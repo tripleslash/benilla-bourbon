@@ -59,7 +59,7 @@ fn say(key: u64, line: u64, text: &str) -> BubbleState {
         text: text.to_string(),
         colour: [1.0, 1.0, 1.0],
         shown: true,
-        alpha: 1.0,
+        alpha: 255,
         seat: (500.0, 300.0),
     }
 }
@@ -142,7 +142,8 @@ fn the_text_is_the_line_in_its_colour_and_the_frame_hugs_it() {
         )
         .unwrap();
     assert_eq!(text, "Well met!");
-    assert_eq!((r, g, b), (1.0, 0.25, 0.25));
+    let read = crate::color::quant::read32;
+    assert_eq!((r, g, b), (read(1.0), read(0.25), read(0.25)));
 
     let rect = |s: &UiScript, what: &str| -> (f32, f32, f32, f32) {
         s.eval(&format!(
@@ -364,7 +365,7 @@ fn a_bubble_is_reused_never_reparented_and_hidden_when_done() {
 fn bubbles_take_levels_from_two_in_list_order_and_their_fade_alpha() {
     let mut s = vm();
     let mut near = say(1, 1, "near");
-    near.alpha = 0.5;
+    near.alpha = 127;
     drive(&mut s, &[say(2, 1, "far"), near.clone()]);
     let levels = |s: &UiScript| -> (i64, i64) {
         s.eval(
@@ -375,9 +376,9 @@ fn bubbles_take_levels_from_two_in_list_order_and_their_fade_alpha() {
     };
     assert_eq!(levels(&s), (2, 3));
     assert_eq!(
-        s.eval::<f32>("local _, near = WorldFrame:GetChildren() return near:GetAlpha()")
+        s.eval::<f64>("local _, near = WorldFrame:GetChildren() return near:GetAlpha()")
             .unwrap(),
-        0.5
+        127.0 / 255.0
     );
     drive(&mut s, &[near, say(2, 1, "far")]);
     assert_eq!(
