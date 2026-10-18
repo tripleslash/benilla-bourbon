@@ -381,8 +381,7 @@ fn scene_pane(model: &Model, h: crate::widget::FrameHandle) -> Option<GlueSceneP
     Some(GlueScenePane {
         handle: h,
         rect: model
-            .resolved
-            .get(&h)
+            .frame_rect(h)
             .filter(|_| sw > 0.0 && sh > 0.0)
             .map(|r| {
                 [
@@ -1068,7 +1067,7 @@ mod tests {
         s.run("High:SetPoint('TOPLEFT', 256, -192) High:SetWidth(512) High:SetHeight(384)")
             .unwrap();
         s.resolve();
-        assert_eq!(
+        crate::assert_near!(
             s.glue_scene().unwrap().rect,
             Some([0.25, 0.75, 0.25, 0.75]),
             "the rect as screen fractions from the top-left"

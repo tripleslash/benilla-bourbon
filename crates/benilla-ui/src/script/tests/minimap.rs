@@ -957,3 +957,97 @@ fn at_sixteen_by_nine_the_children_scale_by_the_ctors_base() {
         "{p:?}"
     );
 }
+
+/// A change of cells rebuilds the interface, so the ctor (`0x4edbc0`) and
+/// `CreateWorldMapArrowFrame` (`0x4a7ad3`) run again with the new `G48`: after a 4:3 window goes
+/// 16:9, the resized minimap's children and the world map arrow hold what a build at 16:9 gives.
+#[test]
+fn a_resize_to_a_new_aspect_reseats_what_the_ctor_took_from_the_cells() {
+    let built = |s: &mut UiScript, name: &str| {
+        s.run(&format!(
+            r#"local m = CreateFrame("Minimap", "{name}")
+               m:SetWidth(140) m:SetHeight(140) m:SetPoint("CENTER", 0, 0)
+               {name}Kids = {{m:GetChildren()}}"#
+        ))
+        .unwrap();
+    };
+    let read = |s: &mut UiScript, name: &str| {
+        s.resolve();
+        let mut out = Vec::new();
+        for i in [1, 9] {
+            out.push(
+                s.eval::<(f64, f64, f64, f64)>(&format!(
+                    "local c = {name}Kids[{i}] local _, _, _, x = c:GetPoint(1)
+                     return c:GetWidth(), c:GetHeight(), x, c:GetModelScale()"
+                ))
+                .unwrap(),
+            );
+        }
+        out
+    };
+    let mut s = script();
+    s.set_window_size(1024.0, 768.0);
+    s.run(r#"WM = CreateFrame("Frame", "WM") CreateWorldMapArrowFrame(WM)"#)
+        .unwrap();
+    built(&mut s, "Resized");
+    let at_4_3 = read(&mut s, "Resized");
+    s.set_window_size(1920.0, 1080.0);
+    built(&mut s, "Fresh");
+    let resized = read(&mut s, "Resized");
+    assert_eq!(resized, read(&mut s, "Fresh"));
+    assert_ne!(resized, at_4_3, "16:9 has another G48");
+    let base = s.model_ref().layout_units().k2() * (5.0 / 3.0);
+    assert_eq!(
+        resized[1].3,
+        f64::from(base),
+        "the player arrow is scaled G48 · 5/3"
+    );
+    let bases: Vec<f32> = {
+        let model = s.model_ref();
+        model
+            .arena
+            .minimap_kinds()
+            .iter()
+            .filter_map(|&h| match model.arena.frame(h).map(|f| &f.kind_state) {
+                Some(crate::widget::KindState::Minimap(m)) => Some(m.base),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(bases, vec![base, base]);
+    let world = s
+        .eval::<f64>("local a = WM:GetChildren() return a:GetModelScale()")
+        .unwrap();
+    assert_eq!(
+        world,
+        f64::from(base),
+        "the world map arrow is G48 · 5/3 too"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The disc `[0xbc7970]` is the unstored `G48 · 5/3` times 0.11, stored once (`0x4edc42`–
+/// `0x4edcaf`), pinned bit for bit. At 16:10 it is one ulp under `0.11 · RN24(G48 · 5/3)`.
+#[test]
+fn the_disc_is_the_unrounded_base_times_its_factor_stored_once() {
+    let disc = |s: &UiScript| -> Vec<u32> {
+        let model = s.model_ref();
+        model
+            .arena
+            .minimap_kinds()
+            .iter()
+            .filter_map(|&h| match model.arena.frame(h).map(|f| &f.kind_state) {
+                Some(crate::widget::KindState::Minimap(m)) => Some(m.disc.to_bits()),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut s = script();
+    s.set_window_size(1024.0, 768.0);
+    s.run(r#"CreateFrame("Minimap", "Disc")"#).unwrap();
+    assert_eq!(disc(&s), vec![0x3de1_47ad], "4:3");
+    s.set_window_size(1920.0, 1080.0);
+    assert_eq!(disc(&s), vec![0x3db8_13a5], "16:9");
+    s.set_window_size(1920.0, 1200.0);
+    assert_eq!(disc(&s), vec![0x3dc6_ff37], "16:10");
+}

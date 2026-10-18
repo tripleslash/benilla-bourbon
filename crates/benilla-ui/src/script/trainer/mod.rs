@@ -109,7 +109,8 @@ pub struct TrainerService {
     pub spell_id: u32,
     /// The wire spell's name; `None` (before `Spell.dbc` loads) answers nil, shown as `UNKNOWN`.
     pub name: Option<String>,
-    /// The wire spell's rank text, such as "Rank 2".
+    /// The wire spell's NameSubtext, such as "Rank 2", "" for a rankless spell; `None` is no Spell
+    /// record and answers nil (`0x4d8b58`).
     pub subtext: Option<String>,
     pub texture: Option<String>,
     /// The expanded text; `None` answers nil (`0x4d9d90`).

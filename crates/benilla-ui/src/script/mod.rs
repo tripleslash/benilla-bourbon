@@ -58,6 +58,7 @@ mod addon_enable;
 pub mod addon_gate;
 mod char_name;
 mod client;
+pub use client::FrameTimeRing;
 mod clock;
 mod cvar_checks;
 mod cvars;
@@ -503,7 +504,7 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// ScrollFrame's three scroll kinds are `+0x32c`/`+0x334`/`+0x33c` (script-name map `0x786c40`).
 /// The EditBox's vtable (`0x81c910`) replaces the key and char slots: an EditBox never fires
 /// `OnKeyDown`, and fires `OnChar` only from `Insert`, with the inserted text (`0x77c13c`).
-const SCRIPT_KINDS: [&str; 44] = [
+const SCRIPT_KINDS: [&str; 45] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -545,6 +546,9 @@ const SCRIPT_KINDS: [&str; 44] = [
     "OnHyperlinkClick",
     "OnHyperlinkEnter",
     "OnHyperlinkLeave",
+    // The ScrollingMessageFrame's own (script map `0x787d90`, `+0x3bc`), fired by a relayout that
+    // moved its anchor (`0x788a9a`).
+    "OnMessageScrollChanged",
     // The GameTooltip's engine-fired scripts: money render, money clear and world-hover default
     // placement, all three wired by the stock template (`GameTooltipTemplate.xml:617-625`).
     "OnTooltipAddMoney",
@@ -880,12 +884,52 @@ impl UiScript {
     /// re-runs `UIParent_ManageFramePositions()`: the window resizes freely, and a seat computed
     /// from `GetScreenHeight()`, like the open-bag stack's column wrap, does not follow anchors.
     pub fn set_screen_size(&mut self, width: f32, height: f32) -> bool {
-        let new = Rect::new(0.0, 0.0, height, width);
+        self.set_root(Rect::new(0.0, 0.0, height, width), None)
+    }
+
+    /// Set the screen root for a window of `width` by `height` pixels: the screen-scale cells from
+    /// its aspect `a = RN24(width / height)`, as `0x41ad10` takes it, and the root `768·a` by 768
+    /// script units, whose layout extent is exactly the cells' `K1` by `K2` (`0x764284`). A window
+    /// with no area reads as 4/3. Returns whether anything moved, as [`Self::set_screen_size`].
+    ///
+    /// Deviation: the reference sets the cells only when glue or the interface is built, `0x41ad10`
+    /// from `0x46a828` (`0x46a7b0`) and `0x48fe2b` (`0x48fbf0`), and a resize reaches them only
+    /// through the rebuild it asks for. In glue `0x46abe0` sets the rebuild flag `0xb41d8c` when
+    /// the aspect moves by 0.01 or more (`fcomp` at `0x46ac66`); in game `0x492e90` reloads the
+    /// interface (`0x491380`) past 0.001 (`0x492f26`, `0x492f31`). The gate and the rebuild both
+    /// take the aspect from `gxResolution` (`0x46ab40`, `0x4901e0`; 4/3 while `widescreen` is
+    /// off), never the live window. Here every resize sets the cells from the window, because the
+    /// UI is kept live across a resize, and `widescreen` off keeps the window's aspect, as a 4:3
+    /// root over a wider window would take a seam stretched on one axis.
+    pub fn set_window_size(&mut self, width: f32, height: f32) -> bool {
+        let a = if width > 0.0 && height > 0.0 {
+            width / height
+        } else {
+            4.0 / 3.0
+        };
+        self.set_root(Rect::new(0.0, 0.0, 768.0, 768.0 * a), Some(a))
+    }
+
+    fn set_root(&mut self, new: Rect, aspect: Option<f32>) -> bool {
         let mut model = self.model_mut();
-        if model.screen == new {
+        if model.screen == new && model.aspect.map(f32::to_bits) == aspect.map(f32::to_bits) {
             return false;
         }
+        let before = model.layout_units();
         model.screen = new;
+        model.aspect = aspect;
+        let units = crate::layout::LayoutUnits::from_aspect(model.screen_aspect());
+        model.space = crate::layout::LayoutSpace::new(units, new.width(), new.height());
+        if units != before {
+            // New cells are a new interface build (`0x41ad10`): every node resolves afresh, and
+            // what the build's constructors took from the cells is taken again.
+            model.force_every_layout_node();
+            let minimaps = model.arena.minimap_kinds().to_vec();
+            for h in minimaps {
+                minimap::seat_engine_children(&mut model, h);
+            }
+            worldmap_arrow::rescale(&mut model);
+        }
         model.touch_layout();
         drop(model);
         // The implicit rects are in layout units, which follow the aspect.
@@ -1070,6 +1114,8 @@ impl UiScript {
         match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
             Some(crate::widget::KindState::ScrollingMessage(smf)) => {
                 smf.add_with_id(text.to_string(), r, g, b, 0, rows);
+                drop(model);
+                messageframe::fire_scroll_changes(&self.lua, h);
                 true
             }
             _ => false,

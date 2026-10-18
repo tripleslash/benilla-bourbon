@@ -736,12 +736,15 @@ pub struct MinimapState {
     /// The minimap's level plus 3 (`+0x334`, `0x4ede48`, again at `0x4ee1a3`), the rim arrows'
     /// level base.
     pub level_base: i32,
-    /// The ctor's `G48 · 5/3` (`0x4edc42`, `0x4edc47`), 1.0 at 4:3, every blip size's factor.
+    /// The ctor's `G48 · 5/3` (`0x4edc42`, `0x4edc47`), about 1 at 4:3, every blip size's factor.
     pub base: f32,
+    /// The disc, `[0xbc7970]` (`0x4edcaf`), in layout units: the arrow frames' size and the rim
+    /// arrows' orbit.
+    pub disc: f32,
 }
 
-/// The disc's size in layout units over [`MinimapState::base`], `[0x807a44]` (`0x4edcaf`): the
-/// eight arrow frames' width and height.
+/// `[0x807a44]`, the disc's factor on the unstored `G48 · 5/3` (`0x4edca9`); the disc itself is
+/// [`MinimapState::disc`].
 pub const MINIMAP_DISC: f32 = 0.11;
 
 /// The arrow frames' model scale, `[0x807a28]` (`0x4edeb2`).
@@ -931,14 +934,14 @@ pub const MINIMAP_DEFAULT_PLAYER_MODEL: &str = "Interface\\Minimap\\MinimapArrow
 pub struct ScrollFrameState {
     /// `SetScrollChild`'s frame, which pans within this frame's rect.
     pub child: Option<FrameHandle>,
-    /// `[+0x31c]`, `[+0x320]`: the horizontal and vertical ranges in the frame's own units, as the
-    /// last recompute stored them (`0x786eaa`, `0x786ed1`); the getters answer these.
+    /// `[+0x31c]`, `[+0x320]`: the horizontal and vertical ranges in layout units over the frame's
+    /// scale, as the last recompute stored them (`0x786eaa`, `0x786ed1`); the getters convert them.
     pub range: [f32; 2],
     /// `[+0x314]`: the ranges are out of date. `UpdateScrollChildRect`, `SetScrollChild` and a
     /// change in the frame's size set it; the frame's update recomputes and clears it.
     pub range_dirty: bool,
-    /// The frame's width and height in px when its update last ran, from which that update sees a
-    /// resize (`0x7871f0`'s mark); the ctor's empty rect until then.
+    /// The frame's width and height in layout units when its update last ran, from which that
+    /// update sees a resize (`0x7871f0`'s mark); the ctor's empty rect until then.
     pub seen_size: [f32; 2],
     /// `SetHorizontalScroll`'s offset in px, unclamped; `0x787100` anchors the child at
     /// `(+horizontal, +vertical)`, so scrolling right takes a negative offset, down a positive.

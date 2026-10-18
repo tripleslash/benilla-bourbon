@@ -128,6 +128,9 @@ benilla-srp = { path = "../benilla-srp" }
 num-bigint = "0.4.6"
 sha1.workspace = true
 
+# The UI's geometry comparisons (`benilla_ui::assert_near!`).
+benilla-ui = { path = "../benilla-ui", features = ["test-support"] }
+
 # Wayland clipboard over the standard `wl_data_device`; arboard's speaks `wlr-data-control`,
 # which GNOME does not implement.
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]

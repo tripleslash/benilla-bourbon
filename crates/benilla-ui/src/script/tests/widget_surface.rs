@@ -67,31 +67,6 @@ const NOT_YET_ANSWERED: &[(&str, &str, &str)] = &[
         "MovieFrame",
         "the same — `MovieFrame.lua:35` passes `GetMovieSubtitles()`",
     ),
-    // ── EditBox mode read-backs ──
-    (
-        "IsAutoFocus",
-        "EditBox",
-        "the mode is set and not readable back; no caller anywhere measured",
-    ),
-    ("IsMultiLine", "EditBox", "the same"),
-    ("IsNumeric", "EditBox", "the same"),
-    ("IsPassword", "EditBox", "the same"),
-    // ── ScrollingMessageFrame's line-position surface ──
-    (
-        "GetCurrentLine",
-        "ScrollingMessageFrame",
-        "the buffer's position is internal; no caller measured",
-    ),
-    ("GetCurrentScroll", "ScrollingMessageFrame", "the same"),
-    ("GetNumLinesDisplayed", "ScrollingMessageFrame", "the same"),
-    ("SetScrollFromBottom", "ScrollingMessageFrame", "the same"),
-    // ── The colour picker's HSV pair ──
-    (
-        "GetColorHSV",
-        "ColorSelect",
-        "the RGB pair is published; nothing measured asks for HSV",
-    ),
-    ("SetColorHSV", "ColorSelect", "the same"),
 ];
 
 /// Methods answered here that 1.12 does not register on that class, each with why it stays.

@@ -24,15 +24,23 @@ use super::{button, cursor, editbox, event, protected, Model, UiScript};
 /// each release only has to hit the frame.
 pub(super) const DOUBLE_CLICK_SECS: f64 = 0.300;
 
-/// Install `GetCursorPosition()` and `GetMouseFocus()`. The cursor (`0x48b820`) answers in the
-/// screen root's units, y up, with no scale divided out: a caller divides by its frame's
-/// `GetEffectiveScale()`, which carries the UI scale inside `UIParent`.
+/// The cursor as `GetCursorPosition` pushes it (`0x48b820`, the glue's `0x46dad0`): its fractions
+/// of the screen root through the reference's rounding ([`crate::layout::LayoutSpace::cursor`]), in
+/// the root's units, y up, with no scale divided out.
+pub(super) fn cursor_position(model: &super::Model) -> (f64, f64) {
+    let (x, y) = model.cursor_pos;
+    model.layout_space().cursor(x, y)
+}
+
+/// Install `GetCursorPosition()` and `GetMouseFocus()`. The cursor ([`cursor_position`]) has no
+/// scale divided out: a caller divides by its frame's `GetEffectiveScale()`, which carries the UI
+/// scale inside `UIParent`.
 pub(super) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetCursorPosition",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<super::Model>().expect("model app_data");
-            Ok(model.cursor_pos)
+            Ok(cursor_position(&model))
         })?,
     )?;
 
@@ -278,8 +286,8 @@ impl UiScript {
             .arena
             .frame(h)
             .and_then(|f| f.title_region)
-            .and_then(|rh| model.region_resolved.get(&rh))
-            .is_some_and(|r| point_in_rect(*r, x, y))
+            .and_then(|rh| model.region_rect(rh))
+            .is_some_and(|r| point_in_rect(r, x, y))
     }
 
     /// `0x765490`'s walk: strata FULLSCREEN_DIALOG down to WORLD, never TOOLTIP (the loop starts
@@ -715,9 +723,8 @@ pub(super) fn frame_contains(model: &Model, fh: FrameHandle, x: f32, y: f32) -> 
         return false;
     };
     model
-        .resolved
-        .get(&fh)
-        .is_some_and(|r| point_in_rect(hit_rect(model, fh, *r), x, y))
+        .frame_rect(fh)
+        .is_some_and(|r| point_in_rect(hit_rect(model, fh, r), x, y))
         && clip.is_none_or(|c| point_in_rect(c, x, y))
 }
 

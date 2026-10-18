@@ -34,35 +34,115 @@ pub(super) use scrolling::REG_SCROLLINGMESSAGEFRAME_METHODS;
 pub(super) fn update(model: &mut Model, h: FrameHandle, elapsed: f32) {
     let rows = UiScript::message_viewport_rows(model, h);
     let viewport = UiScript::message_viewport(model, h);
-    let layout_key = UiScript::message_layout_key(model, h);
+    let font_key = UiScript::message_font_key(model, h);
     match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
         Some(KindState::Message(mf)) => {
             mf.trim_to_viewport(rows);
             mf.tick(elapsed);
         }
         Some(KindState::ScrollingMessage(smf)) => {
-            // A resize or a font change relayouts at the current position (`0x788427`,
-            // `0x788086`), as a show does (`0x788451`, [`on_visibility`]).
-            if smf.laid.replace(layout_key) != Some(layout_key) {
+            // A font change relayouts at the anchor (`0x788086`); the resize is the resolve's.
+            if smf.laid_font.replace(font_key) != Some(font_key) {
                 smf.relayout(viewport);
             }
-            smf.tick(elapsed, viewport)
+            smf.tick(elapsed)
         }
         _ => {}
     }
 }
 
-/// A scrolling frame's show relayouts (`0x788451`): forget what it laid out against, so its next
-/// update does.
+/// `0x788310`'s size test (`0x788384`-`0x7883bd`): either dimension moved by the f32 `1e-5`
+/// (`0x80c5c8`) or more, the rects in layout units as the reference's are, a NaN counting as
+/// moved.
+fn size_moved(old: Rect, new: Rect, eps: f64) -> bool {
+    let dw =
+        (f64::from(new.right) - f64::from(new.left)) - (f64::from(old.right) - f64::from(old.left));
+    let dh =
+        (f64::from(new.top) - f64::from(new.bottom)) - (f64::from(old.top) - f64::from(old.bottom));
+    let moved = |d: f64| d.is_nan() || d.abs() >= eps;
+    moved(dh) || moved(dw)
+}
+
+/// After a resolve: a scrolling frame whose rect changed size relayouts at its anchor now, as its
+/// rect application does (`0x7882f0` → `0x788310` → `0x788427`), so a read before its next update
+/// sees the new layout. A hidden frame's layout is deferred until its show, here as in the
+/// reference, so its rect, and this, wait for the show.
+pub(super) fn after_resolve(model: &mut Model) {
+    let eps = f64::from(f32::from_bits(0x3727_c5ac));
+    let frames: Vec<(FrameHandle, Rect)> = model
+        .frame_rects
+        .iter()
+        .filter(|(fh, _)| {
+            matches!(
+                model.arena.frame(**fh).map(|f| &f.kind_state),
+                Some(KindState::ScrollingMessage(_))
+            )
+        })
+        .map(|(&fh, &r)| (fh, r))
+        .collect();
+    for (fh, rect) in frames {
+        let viewport = UiScript::message_viewport(model, fh);
+        if let Some(KindState::ScrollingMessage(smf)) =
+            model.arena.frame_mut(fh).map(|f| &mut f.kind_state)
+        {
+            if smf.laid_rect.is_none_or(|was| size_moved(was, rect, eps)) {
+                smf.laid_rect = Some(rect);
+                smf.relayout(viewport);
+            }
+        }
+    }
+}
+
+/// A scrolling frame's show (`0x788440`) runs the OnShow script and then relayouts at the anchor
+/// (`0x788451`), inside the show, with the frame already marked visible.
 pub(super) fn on_visibility(lua: &mlua::Lua, h: FrameHandle, visible: bool) {
     if !visible {
         return;
     }
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    if !matches!(
+        model.arena.frame(h).map(|f| &f.kind_state),
+        Some(KindState::ScrollingMessage(_))
+    ) {
+        return;
+    }
+    let viewport = UiScript::message_viewport(&model, h);
+    let font_key = UiScript::message_font_key(&model, h);
+    let rect = model.frame_rects.get(&h).copied();
     if let Some(KindState::ScrollingMessage(smf)) =
         model.arena.frame_mut(h).map(|f| &mut f.kind_state)
     {
-        smf.laid = None;
+        smf.laid_font = Some(font_key);
+        smf.laid_rect = rect.or(smf.laid_rect);
+        smf.relayout(viewport);
+    }
+    drop(model);
+    fire_scroll_changes(lua, h);
+}
+
+/// Fire `OnMessageScrollChanged` on the scrolling frame `h` once per relayout that moved its
+/// anchor since the last call (`0x788a9a`-`0x788aad`), with no arguments; a handler error is
+/// recorded.
+pub(super) fn fire_scroll_changes(lua: &mlua::Lua, h: FrameHandle) {
+    let (n, id) = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let n = match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+            Some(KindState::ScrollingMessage(smf)) => std::mem::take(&mut smf.scroll_changes),
+            _ => return,
+        };
+        if n == 0 {
+            return;
+        }
+        (n, model.frame_id(h))
+    };
+    for _ in 0..n {
+        if let Err(e) =
+            super::event::fire_widget_handler(lua, id, "OnMessageScrollChanged", Vec::new())
+        {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .record_lua_error(&e);
+        }
     }
 }
 
@@ -244,13 +324,14 @@ impl MessageFont {
     }
 
     /// What the scrolling class's layout fits messages into: a frame `height` tall, drawn at
-    /// `scale`.
-    fn viewport(&self, height: f32, scale: f32) -> Viewport {
+    /// `scale`, visible or not.
+    fn viewport(&self, height: f32, scale: f32, visible: bool) -> Viewport {
         Viewport {
             height,
             line_h: self.height_or_default() * scale,
             row_gap: self.row_gap(scale),
             message_gap: self.message_gap(scale),
+            visible,
         }
     }
 
@@ -298,29 +379,16 @@ pub(super) fn ensure_font_region(
 
 impl UiScript {
     pub(super) fn message_frame_font(model: &Model, fh: FrameHandle) -> MessageFont {
-        model
-            .arena
-            .frame(fh)
-            .and_then(|frame| {
-                frame
-                    .regions
-                    .iter()
-                    .find(|&&rh| {
-                        matches!(
-                            model.arena.region(rh).map(|r| r.kind),
-                            Some(crate::widget::RegionKind::FontString)
-                        )
-                    })
-                    .and_then(|rh| model.region_data.get(rh))
-                    .map(|d| MessageFont {
-                        path: d.font_path.clone(),
-                        height: d.font_height,
-                        shadow: d.font_shadow,
-                        outline: d.outline,
-                        monochrome: d.monochrome,
-                        justify_h: d.justify.paint_h(),
-                        spacing: d.spacing,
-                    })
+        Self::message_font_region(model, fh)
+            .and_then(|rh| model.region_data.get(&rh))
+            .map(|d| MessageFont {
+                path: d.font_path.clone(),
+                height: d.font_height,
+                shadow: d.font_shadow,
+                outline: d.outline,
+                monochrome: d.monochrome,
+                justify_h: d.justify.paint_h(),
+                spacing: d.spacing,
             })
             .unwrap_or(MessageFont {
                 path: None,
@@ -331,6 +399,30 @@ impl UiScript {
                 justify_h: JustifyH::Left,
                 spacing: 0.0,
             })
+    }
+
+    /// The frame font's packed text colour (`[font+0x58]`, which `SetTextColor` writes), opaque
+    /// white (the ctor's `-1`, `0x783a8e`) when the frame has no font region.
+    pub(super) fn message_frame_color(model: &Model, fh: FrameHandle) -> crate::color::Rgba8 {
+        Self::message_font_region(model, fh)
+            .and_then(|rh| model.region_data.get(&rh))
+            .map_or(crate::color::Rgba8::WHITE, |d| d.vertex_color_or_white())
+    }
+
+    /// The FontString region a message frame's font lives on, if it has one.
+    fn message_font_region(model: &Model, fh: FrameHandle) -> Option<crate::widget::RegionHandle> {
+        model.arena.frame(fh).and_then(|frame| {
+            frame
+                .regions
+                .iter()
+                .find(|&&rh| {
+                    matches!(
+                        model.arena.region(rh).map(|r| r.kind),
+                        Some(crate::widget::RegionKind::FontString)
+                    )
+                })
+                .copied()
+        })
     }
 
     /// How many rows the plain frame `fh`'s resolved rect holds at its font's pitch, its capacity
@@ -345,7 +437,7 @@ impl UiScript {
         if pitch <= 0.0 {
             return 0;
         }
-        model.resolved.get(&fh).map_or(0, |r| {
+        model.frame_rect(fh).map_or(0, |r| {
             ((r.top - r.bottom) / pitch).floor().max(0.0) as usize
         })
     }
@@ -355,23 +447,20 @@ impl UiScript {
     /// quantity scaled; no rect yet is no height, which still shows the anchored message.
     pub(super) fn message_viewport(model: &Model, fh: FrameHandle) -> Viewport {
         let font = Self::message_frame_font(model, fh);
-        let scale = model.arena.frame(fh).map_or(1.0, |f| f.effective_scale);
+        let frame = model.arena.frame(fh);
+        let scale = frame.map_or(1.0, |f| f.effective_scale);
+        let visible = frame.is_some_and(|f| f.effective_visible);
         let height = model
-            .resolved
-            .get(&fh)
+            .frame_rect(fh)
             .map_or(0.0, |r| (r.top - r.bottom).max(0.0));
-        font.viewport(height, scale)
+        font.viewport(height, scale, visible)
     }
 
-    /// What the scrolling frame `fh`'s relayout lays out against: its size and its font.
-    pub(super) fn message_layout_key(model: &Model, fh: FrameHandle) -> u64 {
+    /// The font the scrolling frame `fh`'s relayout lays out with, as a key.
+    pub(super) fn message_font_key(model: &Model, fh: FrameHandle) -> u64 {
         use std::hash::{Hash, Hasher};
         let font = Self::message_frame_font(model, fh);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        if let Some(r) = model.resolved.get(&fh) {
-            (r.right - r.left).to_bits().hash(&mut hasher);
-            (r.top - r.bottom).to_bits().hash(&mut hasher);
-        }
         font.path.hash(&mut hasher);
         font.height.map(f32::to_bits).hash(&mut hasher);
         font.spacing.to_bits().hash(&mut hasher);
@@ -388,8 +477,9 @@ impl UiScript {
         let model = &mut *model;
         let mut out = Vec::new();
         let european = model.european_numbers;
+        let space = model.layout_space();
         let frames: Vec<(FrameHandle, Rect)> = model
-            .resolved
+            .frame_rects
             .iter()
             .filter(|(&fh, _)| {
                 model
@@ -397,7 +487,7 @@ impl UiScript {
                     .frame(fh)
                     .is_some_and(|f| f.kind_state.message_lines().is_some() && f.effective_visible)
             })
-            .map(|(&fh, &fr)| (fh, fr))
+            .map(|(&fh, &fr)| (fh, space.rect_to_root(fr)))
             .collect();
         for (fh, fr) in frames {
             let wrap_width = fr.right - fr.left;
@@ -484,6 +574,7 @@ impl UiScript {
     /// The key is stored beside the rows, so a line that changed since its request re-requests.
     pub fn set_message_line_rows(&mut self, rows: &[(u32, u32, u16, u64)]) {
         let mut model = self.model_mut();
+        let mut moved: Vec<FrameHandle> = Vec::new();
         for &(frame_id, index, n, key) in rows {
             let Some(&fh) = model.id_to_frame.get(&frame_id) else {
                 continue;
@@ -495,8 +586,21 @@ impl UiScript {
                 continue;
             };
             if let Some(line) = lines.get_mut(index as usize) {
+                if line.rows != n.max(1) && !moved.contains(&fh) {
+                    moved.push(fh);
+                }
                 line.rows = n.max(1);
                 line.rows_key = key;
+            }
+        }
+        // The reference measures each line inside its relayout's walk; here the rows land after
+        // it, so a scrolling frame's cached count and at-top are re-counted from them.
+        for fh in moved {
+            let viewport = Self::message_viewport(&model, fh);
+            if let Some(KindState::ScrollingMessage(smf)) =
+                model.arena.frame_mut(fh).map(|f| &mut f.kind_state)
+            {
+                smf.recount(viewport);
             }
         }
     }
@@ -529,7 +633,7 @@ impl UiScript {
             match &frame.kind_state {
                 KindState::ScrollingMessage(smf) => (
                     &smf.lines,
-                    smf.lines.len().saturating_sub(1 + smf.scroll_offset),
+                    smf.lines.len().saturating_sub(1 + smf.scroll_offset()),
                     false,
                 ),
                 KindState::Message(mf) => (
@@ -550,7 +654,7 @@ impl UiScript {
         };
         // The resolved rect is scaled and the font is frame-local, so the height and gap scale.
         let line_h = font.height_or_default() * paint.scale;
-        let viewport = font.viewport(fr.top - fr.bottom, paint.scale);
+        let viewport = font.viewport(fr.top - fr.bottom, paint.scale, true);
         // A message's advance to the next: the scrolling class's block and snapped gap, the plain
         // class's own pitch per row.
         let advance = |rows: u16| match &frame.kind_state {
@@ -587,7 +691,7 @@ impl UiScript {
                 (fr.bottom + used, fr.bottom + used + band_h)
             };
             used += advance(line.rows);
-            if line.alpha <= 0.0 {
+            if !line.shown || line.alpha <= 0.0 {
                 continue; // faded: holds its rows, draws nothing
             }
             out.push(ExtractedQuad {
@@ -629,6 +733,8 @@ impl UiScript {
                     // A line is a FontString with the flag off and no `maxLines` (`0x7865f0`).
                     non_space_wrap: false,
                     max_lines: 0,
+                    // Only the scrolling class gives its lines link buttons (`0x788ce7`).
+                    link_owner: reverse.then_some(fh),
                 },
                 scale: paint.scale,
             });

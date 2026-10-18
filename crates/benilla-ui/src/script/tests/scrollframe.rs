@@ -122,7 +122,7 @@ fn scroll_child_top_tracks_vertical_scroll_unclamped_then_restores_on_clear() {
         "stored verbatim, the range of 400 notwithstanding"
     );
     let quads = s.extract();
-    assert_eq!(
+    crate::assert_near!(
         marker_rect(&quads, "marker:child").map(|r| r.top),
         Some(950.0),
         "applied verbatim: frame top 500 + 450"
@@ -183,20 +183,20 @@ fn the_scroll_child_holds_one_topleft_on_the_scroll_frame() {
         )
         .unwrap()
     };
-    assert_eq!(
+    crate::assert_near!(
         point(&mut s),
         (1, "TOPLEFT".into(), true, "TOPLEFT".into(), 0.0, 0.0)
     );
     s.run("sf:SetVerticalScroll(30); sf:SetHorizontalScroll(-12)")
         .unwrap();
-    assert_eq!(
+    crate::assert_near!(
         point(&mut s),
         (1, "TOPLEFT".into(), true, "TOPLEFT".into(), -12.0, 30.0),
         "scrolling moves the one point"
     );
     s.resolve();
-    assert_eq!(s.eval::<f64>("return c:GetTop()").unwrap(), 530.0);
-    assert_eq!(s.eval::<f64>("return c:GetLeft()").unwrap(), -12.0);
+    crate::assert_near!(s.eval::<f64>("return c:GetTop()").unwrap(), 530.0);
+    crate::assert_near!(s.eval::<f64>("return c:GetLeft()").unwrap(), -12.0);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -224,12 +224,43 @@ fn set_vertical_scroll_fires_on_vertical_scroll_only_on_a_change() {
     "#,
     )
     .unwrap();
+    let units = s.model_ref().layout_units();
+    let law = |v: f32| units.load(units.store(v));
     assert_eq!(
-        s.eval::<String>("return table.concat(Fires, \",\")")
-            .unwrap(),
-        "40,700,0"
+        s.eval::<Vec<f64>>("return Fires").unwrap(),
+        vec![law(40.0), law(700.0), 0.0]
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// `0x786ded`–`0x786e10` (and `0x786d6d` on the horizontal clone) fire `G` of the stored offset,
+/// not the number given: the handler sees what the getter answers, off the given value by the
+/// store's rounding.
+#[test]
+fn the_scroll_handlers_fire_the_stored_offset_through_the_getter_steps() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local frame = CreateFrame("ScrollFrame", "SF")
+        frame:SetPoint("TOPLEFT", 0, -100)
+        frame:SetWidth(300); frame:SetHeight(200)
+        frame:SetScript("OnVerticalScroll", function() V = arg1 end)
+        frame:SetScript("OnHorizontalScroll", function() H = arg1 end)
+        frame:SetVerticalScroll(40.1)
+        frame:SetHorizontalScroll(-17.3)
+    "#,
+    )
+    .unwrap();
+    let units = s.model_ref().layout_units();
+    let law = |v: f32| units.load(units.store(v));
+    let (v, h, gv, gh): (f64, f64, f64, f64) = s
+        .eval("return V, H, SF:GetVerticalScroll(), SF:GetHorizontalScroll()")
+        .unwrap();
+    assert_eq!((v, h), (law(40.1), law(-17.3)));
+    assert_eq!((v, h), (gv, gh), "the handler sees what the getter answers");
+    assert_ne!(v, f64::from(40.1f32), "not the value as given");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
 /// The recompute measures `max(0, child − frame)`, and leaves the stored range alone when the
@@ -310,7 +341,7 @@ fn vertical_scroll_range_is_local_units_on_a_scaled_frame() {
         400.0,
         "the full range is reachable, not clamped away"
     );
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f32>("return Child:GetBottom() - SF:GetBottom()")
             .unwrap(),
         0.0,
@@ -440,8 +471,8 @@ fn extract_clips_the_scroll_childs_whole_subtree_and_leaves_a_sibling_unclipped(
     let quads = s.extract();
 
     let sf_rect = Rect::new(300.0, 0.0, 500.0, 300.0);
-    assert_eq!(marker_clip(&quads, "marker:child"), Some(Some(sf_rect)));
-    assert_eq!(
+    crate::assert_near!(marker_clip(&quads, "marker:child"), Some(Some(sf_rect)));
+    crate::assert_near!(
         marker_clip(&quads, "marker:grand"),
         Some(Some(sf_rect)),
         "a descendant of the scroll child clips too, not just the child itself"
@@ -504,12 +535,12 @@ fn nested_scrollframes_intersect_their_clip_rects() {
         Some(None),
         "Outer itself is not clipped"
     );
-    assert_eq!(
+    crate::assert_near!(
         marker_clip(&quads, "marker:c1"),
         Some(Some(outer_rect)),
         "Outer's own registered child clips to Outer's rect"
     );
-    assert_eq!(
+    crate::assert_near!(
         marker_clip(&quads, "marker:inner"),
         Some(Some(outer_rect)),
         "Inner (the widget itself) lives inside C1's clipped content -> clipped by Outer too"
@@ -584,7 +615,7 @@ fn a_parentless_scroll_childs_subtree_takes_no_hit() {
     )
     .unwrap();
     s.resolve();
-    assert_eq!(
+    crate::assert_near!(
         marker_clip(&s.extract(), "marker:btn"),
         Some(Some(Rect::new(300.0, 0.0, 500.0, 300.0))),
         "it draws, clipped to the ScrollFrame"
@@ -661,7 +692,7 @@ fn the_draw_clip_is_the_scroll_frames_mouse_rect() {
     )
     .unwrap();
     s.resolve();
-    assert_eq!(
+    crate::assert_near!(
         marker_clip(&s.extract(), "marker:child"),
         Some(Some(Rect::new(340.0, 10.0, 470.0, 280.0)))
     );
@@ -802,7 +833,7 @@ fn the_recompute_measures_the_childs_text_before_it_reads_the_range() {
     .unwrap();
     s.tick(0.016);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    assert_eq!(
+    crate::assert_near!(
         s.eval::<f64>("return RANGE").unwrap(),
         6.0,
         "56px of measured text under a 50px frame: the recompute measures it, not a frame later"
@@ -1212,7 +1243,7 @@ fn an_offset_change_under_the_tolerance_is_dropped_and_nan_always_fires() {
         s.run(&format!("SF:{set}(10)")).unwrap();
         s.run(&format!("SF:{set}({})", 10.0 + eps / 2.0)).unwrap();
         assert_eq!(s.eval::<f64>(&format!("return {count}")).unwrap(), 1.0);
-        assert_eq!(
+        crate::assert_near!(
             s.eval::<f64>(&format!("return SF:{get}()")).unwrap(),
             10.0,
             "{set}: the sub-tolerance change is not stored"

@@ -43,10 +43,9 @@ fn this_minimap(lua: &Lua, this: &Value) -> mlua::Result<FrameHandle> {
 /// at its stratum and its level plus one: five party and pet arrows (`0x4ede72`), three rim
 /// arrows (`0x4edf1f`) and the player arrow (`0x4edfae`). Each is anchored CENTER on the
 /// minimap's CENTER (`0x767c70(4, minimap, 4, x, y)`): the eight at offset 0 (`0x4ede8b`,
-/// `0x4edf38`), each the disc's size (`[0xbc7970]` through slots 5 and 6, `0x4ede9e`, `0x4edeaf`),
-/// model scale 0.6 (`0x4edeba`) and hidden (`0x4edece`, `0x4edf7b`); the five relevelled to the
-/// minimap's level plus 2 (`0x4edee0`); the player arrow at offset 0.001 each way (`0x4edfd1`),
-/// sized by its file, at model scale `G48 · 5/3` (`0x4edfec`) and left shown.
+/// `0x4edf38`), model scale 0.6 (`0x4edeba`) and hidden (`0x4edece`, `0x4edf7b`); the five
+/// relevelled to the minimap's level plus 2 (`0x4edee0`); the player arrow sized by its file and
+/// left shown. What the ctor takes from the screen-scale cells is [`seat_engine_children`]'s.
 pub(crate) fn build_engine_children(lua: &Lua, minimap: FrameHandle) {
     use crate::layout::{Anchor, Point};
     let hide = {
@@ -54,11 +53,8 @@ pub(crate) fn build_engine_children(lua: &Lua, minimap: FrameHandle) {
         let Some((strata, level)) = model.arena.frame(minimap).map(|f| (f.strata, f.level)) else {
             return;
         };
-        let base = super::worldmap_arrow::g48(&model) * (5.0 / 3.0);
-        let unit = model.layout_unit();
         let units = model.layout_units();
         let minimap_id = model.frame_id(minimap);
-        let disc = crate::widget::MINIMAP_DISC * base * unit;
         let mut children = Vec::with_capacity(crate::widget::MINIMAP_ENGINE_CHILDREN);
         for i in 0..crate::widget::MINIMAP_ENGINE_CHILDREN {
             let child = model.arena.create(FrameKind::Model, None, Some(minimap));
@@ -72,25 +68,17 @@ pub(crate) fn build_engine_children(lua: &Lua, minimap: FrameHandle) {
                 .arena
                 .set_frame_level(child, level.saturating_add(lift), false);
             let player = i + 1 == crate::widget::MINIMAP_ENGINE_CHILDREN;
-            let offset = if player { 0.001 * unit } else { 0.0 };
-            let input = model.layout_inputs.entry(child).or_default();
-            input.anchors.set(
-                Anchor::new(Point::Center, minimap_id, Point::Center, offset, offset),
-                units,
-            );
             if !player {
-                input.width = disc;
-                input.height = disc;
-            }
-            model.invalidate_frame(child, true);
-            if let Some(KindState::Model(m)) =
-                model.arena.frame_mut(child).map(|f| &mut f.kind_state)
-            {
-                m.scale = if player {
-                    base
-                } else {
-                    crate::widget::MINIMAP_ARROW_SCALE
-                };
+                let input = model.layout_inputs.entry(child).or_default();
+                input.anchors.set(
+                    Anchor::new(Point::Center, minimap_id, Point::Center, 0.0, 0.0),
+                    units,
+                );
+                if let Some(KindState::Model(m)) =
+                    model.arena.frame_mut(child).map(|f| &mut f.kind_state)
+                {
+                    m.scale = crate::widget::MINIMAP_ARROW_SCALE;
+                }
             }
             children.push(child);
         }
@@ -102,13 +90,72 @@ pub(crate) fn build_engine_children(lua: &Lua, minimap: FrameHandle) {
             m.rim_arrows = arrows[crate::widget::MINIMAP_GROUP_ARROWS..].to_vec();
             m.player_arrow = player.first().copied();
             m.level_base = i32::from(level) + 3;
-            m.base = base;
         }
+        seat_engine_children(&mut model, minimap);
         arrows.to_vec()
     };
     for child in hide {
         super::visibility::set_shown(lua, child, false);
     }
+}
+
+/// What the `CMinimap` ctor takes from the screen-scale cells: `base = G48 · 5/3` (`0x4edc42`,
+/// `0x4edc47`), about 1 at 4:3; the eight arrow frames' width and height, the disc ([`disc`],
+/// through slots 5 and 6 at `0x4ede9e`, `0x4edeaf`); the player arrow's offset of
+/// 0.001 layout units each way (`0x4edfd1`) and its model scale `base` (`0x4edfec`). The reference
+/// fixes these at the build; a change of cells rebuilds the interface, so the ctor runs again
+/// with the new `G48`, and [`super::UiScript`]'s live resize re-seats them here instead.
+pub(crate) fn seat_engine_children(model: &mut Model, minimap: FrameHandle) {
+    use crate::layout::{Anchor, Point};
+    let Some(KindState::Minimap(state)) = model.arena.frame(minimap).map(|f| &f.kind_state) else {
+        return;
+    };
+    let arrows: Vec<FrameHandle> = state
+        .group_arrows
+        .iter()
+        .chain(&state.rim_arrows)
+        .copied()
+        .collect();
+    let player = state.player_arrow;
+    let units = model.layout_units();
+    let unit = model.layout_unit();
+    // The player arrow's scale is the product as stored (`0x4edfe0`, `0x4edfec`).
+    let base = units.k2() * (5.0 / 3.0);
+    let disc = disc(units);
+    let side = disc * unit;
+    for h in arrows {
+        let input = model.layout_inputs.entry(h).or_default();
+        let changed = input.width.to_bits() != side.to_bits();
+        input.width = side;
+        input.height = side;
+        model.invalidate_frame(h, changed);
+    }
+    if let Some(h) = player {
+        let minimap_id = model.frame_id(minimap);
+        let offset = 0.001 * unit;
+        let input = model.layout_inputs.entry(h).or_default();
+        let moved = input.anchors.set(
+            Anchor::new(Point::Center, minimap_id, Point::Center, offset, offset),
+            units,
+        );
+        model.invalidate_frame(h, moved);
+        if let Some(KindState::Model(m)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+            m.scale = base;
+        }
+    }
+    if let Some(KindState::Minimap(m)) = model.arena.frame_mut(minimap).map(|f| &mut f.kind_state) {
+        m.base = base;
+        m.disc = disc;
+    }
+}
+
+/// The disc, `[0xbc7970]`, in layout units: the ctor keeps `G48 · 5/3` on the x87 stack unstored
+/// (`0x4edc42`, `0x4edc47`) and multiplies it by 0.11 (`[0x807a44]`, `0x4edca9`) before the one
+/// store (`0x4edcaf`). `G48 · 5/3` of two floats is exact in a double, and the product with 0.11
+/// rounds to the 53 bits the cells are worked at, then to the float.
+pub(crate) fn disc(units: crate::layout::LayoutUnits) -> f32 {
+    let base = f64::from(units.k2()) * f64::from(5.0f32 / 3.0);
+    (base * f64::from(crate::widget::MINIMAP_DISC)) as f32
 }
 
 /// `LoadArrowModel` (`0x4ee170`): the minimap's level plus 3 becomes the rim arrows' level base
@@ -243,14 +290,19 @@ pub struct MinimapRimArrow {
 }
 
 /// An arrow frame's model position and facing for `bearing`, as the render's rotate loops set them
-/// (`0x4ed452`, `0x4ed4f7`): `(C − A·sin b, C + A·cos b, 0)` with `C` half the disc and `A` 0.8 of
-/// the half disc (`[0x807a24]`, `[0xbc8274]`), in layout units from the frame's bottom-left.
-fn place_arrow(model: &mut Model, h: FrameHandle, base: f32, bearing: f32) {
-    let c = crate::widget::MINIMAP_DISC * base * 0.5;
-    let a = 0.8 * c;
-    let (sin, cos) = bearing.sin_cos();
+/// (`0x4ed452`, `0x4ed4f7`): `(C − A·sin b, C + A·cos b, 0)` with `C` half the stored disc
+/// (`[0xbc7970] · 0.5`, `0x4ed466`, `0x4ed472`) and `A` 0.8 of the stored half disc (`[0x807a24]`,
+/// `[0xbc8274]`, `0x4ed458`), in layout units from the frame's bottom-left. `fsincos` stores its
+/// sine and cosine to floats (`0x4ed454`, `0x4ed456`); `A`, `C` and each product and sum stay on
+/// the stack, at the cells' 53 bits, until each coordinate's store (`0x4ed488`, `0x4ed497`).
+fn place_arrow(model: &mut Model, h: FrameHandle, disc: f32, bearing: f32) {
+    // Half a float is exact, so `C` is also `[0xbc8274]` as stored (`0x4edce5`).
+    let c = f64::from(disc) * 0.5;
+    let a = f64::from(0.8f32) * c;
+    let (sin, cos) = f64::from(bearing).sin_cos();
+    let (sin, cos) = (f64::from(sin as f32), f64::from(cos as f32));
     if let Some(KindState::Model(m)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
-        m.position = (c - a * sin, c + a * cos, 0.0);
+        m.position = ((c - a * sin) as f32, (c + a * cos) as f32, 0.0);
         m.facing = bearing;
     }
 }
@@ -477,12 +529,12 @@ impl super::UiScript {
                     }
                 }
                 for (i, &h) in state.rim_arrows.iter().enumerate().take(rim.len()) {
-                    place_arrow(&mut model, h, state.base, rim[i].bearing);
+                    place_arrow(&mut model, h, state.disc, rim[i].bearing);
                 }
                 for (i, &h) in state.group_arrows.iter().enumerate() {
                     shows.push((h, group[i].is_some()));
                     if let Some(bearing) = group[i] {
-                        place_arrow(&mut model, h, state.base, bearing);
+                        place_arrow(&mut model, h, state.disc, bearing);
                     }
                 }
             }
