@@ -726,6 +726,8 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // PostStartup runs at the tail of the same long first-update task the catalogs block in, so
     // this is the earliest signal the page can actually paint on.
     app.add_systems(PostStartup, webprogress::signal_startup);
+    // …and when the first glue screen is up, so the overlay lifts with it.
+    app.add_systems(Last, webprogress::signal_ready_at_glue);
 
     // A crate on top of benilla adds its plugins here ([`run_with`]).
     if let Some(extend) = extend {

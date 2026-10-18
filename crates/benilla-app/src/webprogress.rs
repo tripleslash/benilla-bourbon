@@ -18,8 +18,10 @@
 //!   catalogs run in). Sent from a `PostStartup` system; the page repaints only after the task
 //!   yields, which is precisely the moment this lands.
 //! - `"ready"`  — the first glue screen (login *or* character select: the env fast path skips
-//!   Login entirely) has spawned. The page fades its overlay here. Sent once, ever —
-//!   [`signal_ready_once`] — because both screens' `materialize_screen` run every frame.
+//!   Login entirely) is up: the stock glue VM shows its first scene pane, `AccountLogin` or
+//!   `CharacterSelect` ([`signal_ready_at_glue`]). The page fades its overlay here. Sent once,
+//!   ever — [`signal_ready_once`]. Without it the page's 20 s drift backstop lifts the overlay
+//!   instead, over a screen that has been up for most of that time.
 //!
 //! Native builds: every function is a no-op; there is no page.
 
@@ -50,6 +52,24 @@ pub(crate) fn signal_ready_once() {
     static SENT: AtomicBool = AtomicBool::new(false);
     if !SENT.swap(true, Ordering::Relaxed) {
         signal("ready");
+    }
+}
+
+/// The `"ready"` edge: the first frame the stock glue VM shows a scene pane. Both first screens
+/// are one (`AccountLogin`, `CharacterSelect`, each a `ModelFFX`), so this is the frame the first
+/// glue screen is up.
+pub(crate) fn signal_ready_at_glue(
+    script: Option<bevy::prelude::NonSend<benilla_ui::script::UiScript>>,
+    mut sent: bevy::prelude::Local<bool>,
+) {
+    if *sent {
+        return;
+    }
+    if script.is_some_and(|s| {
+        s.vm_kind() == benilla_ui::script::VmKind::Glue && s.glue_scene().is_some()
+    }) {
+        *sent = true;
+        signal_ready_once();
     }
 }
 
