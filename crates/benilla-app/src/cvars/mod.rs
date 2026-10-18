@@ -2725,11 +2725,12 @@ mod tests {
                 "TargetNearestDistance must be between 1 and 50.000000",
                 "5",
             ),
+            // fork: the floor is `farclip` + 528, on the fork's farclip default 1000.
             (
                 "horizonfarclip",
                 "800",
-                "HorizonFarClip must be in range 878.000000 - 2112.000000.",
-                "900",
+                "HorizonFarClip must be in range 1528.000000 - 2112.000000.",
+                "1600",
             ),
             (
                 "footstepBias",
@@ -3442,8 +3443,9 @@ mod tests {
         assert_eq!(res::<ViewDistance>(&app).farclip, 400.0);
         assert!(res::<Cvars>(&app).dirty);
         console_exec(&mut app, "cvar_default farclip");
-        assert_eq!(res::<Cvars>(&app).get("farclip"), Some("350"));
-        assert_eq!(res::<ViewDistance>(&app).farclip, 350.0);
+        // fork: farclip's default is 1000.
+        assert_eq!(res::<Cvars>(&app).get("farclip"), Some("1000"));
+        assert_eq!(res::<ViewDistance>(&app).farclip, 1000.0);
         assert_eq!(
             console_exec(&mut app, "cvar_reset nosuch"),
             ["No such cvar \"nosuch\""]
@@ -3522,7 +3524,7 @@ mod tests {
             ["Restoring all cvars"]
         );
         let cvars = res::<Cvars>(&app);
-        assert_eq!(cvars.get("farclip"), Some("350"));
+        assert_eq!(cvars.get("farclip"), Some("1000"), "fork: farclip's default");
         assert_eq!(cvars.get("uiScale"), Some("1.2"));
     }
 
