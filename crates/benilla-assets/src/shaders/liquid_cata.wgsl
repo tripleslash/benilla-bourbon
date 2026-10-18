@@ -184,16 +184,11 @@ struct WowLight {
 // much of the glint survives it.
 const WATER_SHADE_KEEP: f32 = 0.8;
 const WATER_GLINT_SHADE: f32 = 0.3;
-// fork: modern lighting — where the water's shadow is read: down the view ray to the bed, stopped
-// `BED_LIFT` yd short of it (so the bed does not shadow itself) and never more than `PROBE` yd in.
+// fork: modern lighting — where the water's shadow is read: on the bed down the view ray, stopped
+// `BED_LIFT` yd short of it (so the bed does not shadow itself), handing over to the surface as the
+// column under the pixel deepens from `PROBE` to twice that.
 const WATER_SHADOW_PROBE: f32 = 3.0;
 const WATER_SHADOW_BED_LIFT: f32 = 0.15;
-// fork: modern lighting — the water's shade is the sunlight scattered toward the eye along the water
-// crossed, and the light from deeper in reaches the eye dimmer: each tap's share falls by this per
-// yard of depth (tuned, no reference). The bed's tap, where the ray reaches the bed, takes this
-// much more, so the shade still lands on the bed's own shadow.
-const WATER_SHADOW_FALLOFF: f32 = 0.5;
-const WATER_SHADOW_BED_WEIGHT: f32 = 4.0;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_block: sunshadow::ModernBlock;
 @group(#{MATERIAL_BIND_GROUP}) @binding(124) var modern_fog_volume: texture_3d<f32>;
@@ -548,65 +543,6 @@ fn scene_depth_at(uv: vec2<f32>) -> f32 {
     return textureLoad(scene_depth, px, 0).x;
 }
 
-/// fork: modern lighting — whether a world point lies behind the opaque scene, as the depth copy
-/// sees it: under the bed, for a point straight below the water. Off the frame the copy cannot say,
-/// and the point counts as under it: taken as water, a point under the frame's edge fell back to
-/// the column again, and the edge, raised by the drop, cut a hard-sided dark patch into the water.
-fn behind_scene(p: vec3<f32>) -> bool {
-    let clip = view.clip_from_world * vec4<f32>(p, 1.0);
-    if (clip.w <= 0.0) {
-        return true;
-    }
-    let ndc = clip.xy / clip.w;
-    if (any(abs(ndc) > vec2<f32>(1.0))) {
-        return true;
-    }
-    let z = -(view.view_from_world * vec4<f32>(p, 1.0)).z;
-    return z > scene_depth_at((ndc * vec2<f32>(1.0, -1.0) + 1.0) * 0.5);
-}
-
-/// fork: modern lighting — how far (yd) the bed lies straight under `surface`, up to `reach`. The
-/// view ray's column only matches it over a flat bed: looking out over a beach that shelves away,
-/// the ray meets the bed further out and deeper, so a probe dropped by the column landed under the
-/// sand, which shadowed it — a dark band along every shore at a low camera. So the drop is tested
-/// against the depth copy itself and bisected up to the bed (to `reach` / 16), never past it. The
-/// surface point is on the frame, so the drop shrinks smoothly to it toward the frame's edge.
-fn bed_under(surface: vec3<f32>, reach: f32) -> f32 {
-    if (!behind_scene(surface - vec3<f32>(0.0, reach, 0.0))) {
-        return reach;
-    }
-    var lo = 0.0;
-    var hi = reach;
-    for (var i = 0u; i < 4u; i = i + 1u) {
-        let mid = 0.5 * (lo + hi);
-        if (behind_scene(surface - vec3<f32>(0.0, mid, 0.0))) {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-    return lo;
-}
-
-/// fork: modern lighting — the sun's share of the water's light over `len` yd of water from `start`
-/// along `dir`: three taps at thirds of the way, each weighted by `WATER_SHADOW_FALLOFF` for its
-/// depth, the last taking `end_weight` more. One point mid-water cut a swimmer's shadow volume at
-/// that one depth: a crisp copy of the body, yards off it. Over the column the shade starts at
-/// the body and softens with depth, as the scattered light does.
-fn water_column_sun(start: vec3<f32>, dir: vec3<f32>, len: f32, end_weight: f32) -> f32 {
-    var sum = 0.0;
-    var total = 0.0;
-    for (var k = 1u; k <= 3u; k = k + 1u) {
-        let t = len * f32(k) / 3.0;
-        let p = start + dir * t;
-        let z = -(view.view_from_world * vec4<f32>(p, 1.0)).z;
-        let weight = exp(-WATER_SHADOW_FALLOFF * t) + select(0.0, end_weight, k == 3u);
-        sum = sum + weight * sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, p, z);
-        total = total + weight;
-    }
-    return sum / total;
-}
-
 /// **`ProcMagma`** — the Cataclysm magma/slime program, ported whole.
 ///
 /// The reference routes these kinds away from the water material entirely: `LiquidType.dbc`'s
@@ -926,34 +862,31 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // own in the scene copy; a second lookup at the surface puts a second edge on the water,
         // offset from the bed's by the depth over the sun's slope (and, while it rode the waves, a
         // wobbling one). So the probe walks down the unrefracted view ray to the bed and the body's
-        // shade lands on the bed's shadow: one edge, carried across the water. Deep water stops the
-        // probe `WATER_SHADOW_PROBE` yd in, where the light that colours the body scatters, so a tree
-        // still shades a lake. From below there is no bed along the ray; the surface is the probe.
-        let probe_d = select(clamp(ray_len - WATER_SHADOW_BED_LIFT, 0.0, WATER_SHADOW_PROBE), 0.0, below);
+        // shade lands on the bed's shadow: one edge, carried across the water. The bed probe stops
+        // `BED_LIFT` yd short of the bed (so the bed does not shadow itself) and is world-fixed ground,
+        // so the shade holds still as the camera moves.
+        //
+        // Where the bed lies too deep to show (a column of `WATER_SHADOW_PROBE` to twice that), the
+        // shade hands over to the surface point itself, again world-fixed. Every point under the
+        // surface was the wrong one: a sun ray from it can be cut by what is UNDER the water — a
+        // swimmer's own legs put a crisp copy of the body on the water, yards off it — and one dropped
+        // by the column over a shelving beach landed in the sand, a dark band along the shore. From
+        // the surface the ray only rises, so only what stands out of the water shades it. From below
+        // there is no bed along the ray; the surface is the probe there too. The fade goes by the
+        // vertical column, never the ray, which is long over a hand-deep shore.
         let lifted = in.world_position.xyz + vec3<f32>(0.0, 0.05, 0.0);
-        let wp = lifted + v * probe_d;
-        // Where the ray stops short of the bed, its end hangs mid-water and the body is read over the
-        // water crossed (`water_column_sun`); where it reaches the bed, the bed's tap carries it.
-        let reaches_bed = 1.0 - smoothstep(WATER_SHADOW_PROBE, 2.0 * WATER_SHADOW_PROBE, ray_len - WATER_SHADOW_BED_LIFT);
-        water_sun = water_column_sun(lifted, v, probe_d, WATER_SHADOW_BED_WEIGHT * reaches_bed);
-        // Where the ray reaches the bed, the probe lands on world-fixed ground and the shade holds
-        // still. Where it does not, the stopped probe hangs mid-water at a point the VIEW picks, so
-        // orbiting the camera slid the lake's shade across it by up to the probe's length. Deep water
-        // reads straight down instead, `WATER_SHADOW_PROBE` yd under its own surface point — a
-        // point no camera move can shift — fading over from the bed probe across one more probe
-        // length so the hand-over has no edge of its own. The fade goes by the vertical column, never
-        // the ray, which is long over a hand-deep shore; the drop stops `BED_LIFT` short of the bed
-        // the depth copy finds under the point (`bed_under`), since a probe inside the bank is
-        // shadowed by it — a dark band along the waterline.
-        let deep = select(smoothstep(WATER_SHADOW_PROBE, 2.0 * WATER_SHADOW_PROBE, column_v), 0.0, below);
-        if (deep > 0.0) {
-            let surface = in.world_position.xyz;
-            let bed = bed_under(surface, min(column_v, WATER_SHADOW_PROBE + WATER_SHADOW_BED_LIFT));
-            let drop = clamp(bed - WATER_SHADOW_BED_LIFT, 0.0, WATER_SHADOW_PROBE);
-            let sun_deep = water_column_sun(lifted, vec3<f32>(0.0, -1.0, 0.0), drop, 0.0);
-            water_sun = mix(water_sun, sun_deep, deep);
+        let deep = select(smoothstep(WATER_SHADOW_PROBE, 2.0 * WATER_SHADOW_PROBE, column_v), 1.0, below);
+        if (deep < 1.0) {
+            let probe_d = max(ray_len - WATER_SHADOW_BED_LIFT, 0.0);
+            // The probe sits on this pixel's ray, so its planar depth scales with the distance along it.
+            let probe_z = frag_view_z * (1.0 + probe_d / max(view_len, 0.001));
+            water_sun = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, lifted + v * probe_d, probe_z);
         }
-        let wct = sunshadow::cloud_taps(modern_block.fog.cloud, wp);
+        if (deep > 0.0) {
+            let sun_surface = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, lifted, frag_view_z);
+            water_sun = mix(water_sun, sun_surface, deep);
+        }
+        let wct = sunshadow::cloud_taps(modern_block.fog.cloud, lifted);
         water_sun = water_sun * sunshadow::cloud_mix(wct, modern_block.cloud[wct.idx.x], modern_block.cloud[wct.idx.y], modern_block.cloud[wct.idx.z], modern_block.cloud[wct.idx.w]);
         // The shade keeps some of the light: skylight still reaches open water from every side.
         // Water is not a solid receiver: light scatters in the body under the shadow too, so the shade
