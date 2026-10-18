@@ -25,6 +25,8 @@
 //!
 //! Native builds: every function is a no-op; there is no page.
 
+use bevy::prelude::{Local, NonSend};
+
 /// Call `window.__wenilla_progress(stage)` if the page defined it; silently do nothing
 /// otherwise. See the module header for the stage vocabulary.
 #[cfg(target_arch = "wasm32")]
@@ -59,8 +61,8 @@ pub(crate) fn signal_ready_once() {
 /// are one (`AccountLogin`, `CharacterSelect`, each a `ModelFFX`), so this is the frame the first
 /// glue screen is up.
 pub(crate) fn signal_ready_at_glue(
-    script: Option<bevy::prelude::NonSend<benilla_ui::script::UiScript>>,
-    mut sent: bevy::prelude::Local<bool>,
+    script: Option<NonSend<benilla_ui::script::UiScript>>,
+    mut sent: Local<bool>,
 ) {
     if *sent {
         return;

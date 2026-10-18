@@ -74,8 +74,9 @@ mod tests {
                     r.read_to_end(&mut bytes).await.ok()?;
                     String::from_utf8(bytes).ok()
                 });
+                // Windows lists the embedded tree with `\`; the served path is `/`-separated.
                 if let Some(text) = text {
-                    out.push((path.to_string_lossy().into_owned(), text));
+                    out.push((path.to_string_lossy().replace('\\', "/"), text));
                 }
             }
         }
