@@ -542,6 +542,44 @@ fn scene_depth_at(uv: vec2<f32>) -> f32 {
     return textureLoad(scene_depth, px, 0).x;
 }
 
+/// fork: modern lighting — whether a world point lies behind the opaque scene, as the depth copy
+/// sees it: under the bed, for a point straight below the water. Off the frame the copy cannot say,
+/// and the point counts as in the water.
+fn behind_scene(p: vec3<f32>) -> bool {
+    let clip = view.clip_from_world * vec4<f32>(p, 1.0);
+    if (clip.w <= 0.0) {
+        return false;
+    }
+    let ndc = clip.xy / clip.w;
+    if (any(abs(ndc) > vec2<f32>(1.0))) {
+        return false;
+    }
+    let z = -(view.view_from_world * vec4<f32>(p, 1.0)).z;
+    return z > scene_depth_at((ndc * vec2<f32>(1.0, -1.0) + 1.0) * 0.5);
+}
+
+/// fork: modern lighting — how far (yd) the bed lies straight under `surface`, up to `reach`. The
+/// view ray's column only matches it over a flat bed: looking out over a beach that shelves away,
+/// the ray meets the bed further out and deeper, so a probe dropped by the column landed under the
+/// sand, which shadowed it — a dark band along every shore at a low camera. So the drop is tested
+/// against the depth copy itself and bisected up to the bed (to `reach` / 16), never past it.
+fn bed_under(surface: vec3<f32>, reach: f32) -> f32 {
+    if (!behind_scene(surface - vec3<f32>(0.0, reach, 0.0))) {
+        return reach;
+    }
+    var lo = 0.0;
+    var hi = reach;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let mid = 0.5 * (lo + hi);
+        if (behind_scene(surface - vec3<f32>(0.0, mid, 0.0))) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    return lo;
+}
+
 /// **`ProcMagma`** — the Cataclysm magma/slime program, ported whole.
 ///
 /// The reference routes these kinds away from the water material entirely: `LiquidType.dbc`'s
@@ -874,13 +912,16 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // orbiting the camera slid the lake's shade across it by up to the probe's length. Deep water
         // reads straight down instead, `WATER_SHADOW_PROBE` yd under its own surface point — a
         // point no camera move can shift — fading over from the bed probe across one more probe
-        // length so the hand-over has no edge of its own. Both the fade and the drop go by the
-        // vertical column, never the ray: a grazing ray is long over a hand-deep shore, and a drop
-        // past the bed lands inside the bank, which shadows it — a dark halo around the waterline.
+        // length so the hand-over has no edge of its own. The fade goes by the vertical column, never
+        // the ray, which is long over a hand-deep shore; the drop stops `BED_LIFT` short of the bed
+        // the depth copy finds under the point (`bed_under`), since a probe inside the bank is
+        // shadowed by it — a dark band along the waterline.
         let deep = select(smoothstep(WATER_SHADOW_PROBE, 2.0 * WATER_SHADOW_PROBE, column_v), 0.0, below);
         if (deep > 0.0) {
-            let drop = min(WATER_SHADOW_PROBE, column_v - WATER_SHADOW_BED_LIFT);
-            let wp_deep = in.world_position.xyz - vec3<f32>(0.0, drop - 0.05, 0.0);
+            let surface = in.world_position.xyz;
+            let bed = bed_under(surface, min(column_v, WATER_SHADOW_PROBE + WATER_SHADOW_BED_LIFT));
+            let drop = clamp(bed - WATER_SHADOW_BED_LIFT, 0.0, WATER_SHADOW_PROBE);
+            let wp_deep = surface - vec3<f32>(0.0, drop - 0.05, 0.0);
             let deep_z = -(view.view_from_world * vec4<f32>(wp_deep, 1.0)).z;
             let sun_deep = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, wp_deep, deep_z);
             water_sun = mix(water_sun, sun_deep, deep);
