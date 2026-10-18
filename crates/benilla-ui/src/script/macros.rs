@@ -1,7 +1,7 @@
 //! Player macros. 1.12 keeps them client-side with no opcode (`macros-cache.txt`), and
 //! `CreateMacro` must return the new index at once, so the table lives here: the app seeds it
-//! ([`UiScript::set_macros`]), saves it when [`UiScript::take_macros_dirty`] says, and pushes the
-//! icon list ([`UiScript::set_macro_icons`]).
+//! ([`UiScript::set_macros`]), saves it when [`UiScript::take_macros_dirty`] says, and installs
+//! what lists the icon chooser ([`UiScript::set_macro_icon_source`]), run on first use.
 //!
 //! Indices 1..=18 are the account macros and 19..=36 the character macros, each list dense from
 //! its base (`MacroFrame.macroBase`). A macro's bound spell (`0x4e5a50`'s macro arm returns
@@ -157,9 +157,23 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().macros_dirty)
     }
 
-    /// Push the icon chooser's texture paths in grid order, built by the app from `SpellIcon.dbc`.
+    /// Push the icon chooser's texture paths in grid order: the files under `Interface\Icons\`
+    /// that `0x4f0090` lists (`benilla_formats::load_macro_icons`), not `SpellIcon.dbc`.
     pub fn set_macro_icons(&mut self, icons: Vec<String>) {
         self.model_mut().macro_icons = icons;
+    }
+
+    /// Install what builds the icon list. `GetNumMacroIcons`, `CreateMacro` and `EditMacro` run it
+    /// while the list is empty, tested on the count `[0xbdcc1c]` (`0x4f19f6`, `0x4f162d`,
+    /// `0x4f1961`), so a VM lists nothing until a script asks; the list lives as long as the VM,
+    /// as `CGGameUI::Shutdown` frees it (`0x4effb0`, at `0x490c5f`) on logout and `ReloadUI`.
+    pub fn set_macro_icon_source(&mut self, source: Box<dyn Fn() -> Vec<String>>) {
+        self.model_mut().macro_icon_source = Some(source.into());
+    }
+
+    /// Whether this VM has a source to build the icon list from.
+    pub fn has_macro_icon_source(&self) -> bool {
+        self.model_ref().macro_icon_source.is_some()
     }
 
     /// Bumped by every seed and every change, so a per-frame reader such as the action bar compares
@@ -170,9 +184,8 @@ impl super::UiScript {
     }
 }
 
-/// `CreateMacro(name, iconIndex, body, local, perCharacter)` (usage string `0x84cb74`): the new
-/// 1-based index, or the error the client raises for the two failures (`0x84cbb4`, `0x84cbdc`), an
-/// empty name and a full tab.
+/// `CreateMacro`'s worker (`0x4f1010`): the new 1-based index, or the full-tab error
+/// (`0x84cbdc`). The verb has refused an empty name already.
 fn create_macro(
     model: &mut Model,
     name: &str,
@@ -181,12 +194,6 @@ fn create_macro(
     local_only: bool,
     per_character: bool,
 ) -> mlua::Result<usize> {
-    // Tested on the first byte (`*name == 0`): a blank name is a name.
-    if name.is_empty() {
-        return Err(mlua::Error::RuntimeError(
-            "CreateMacro() failed, no name specified".into(),
-        ));
-    }
     let name = clamp_chars(name, MAX_MACRO_NAME);
     let list = model.macros.list_mut(per_character);
     if list.len() >= MAX_MACROS {
@@ -208,13 +215,14 @@ fn create_macro(
 
 /// `EditMacro(index, name, icon, body, local)`: an omitted name, icon or body leaves its field
 /// alone, since the stock UI calls it with disjoint halves, `(sel, name, icon)` from the rename
-/// popup and `(sel, nil, nil, text)` from `MacroFrame_SaveMacro`. The `local` flag is always
-/// written (`0x4f12dc`, `[macro+0x20]`), so an omitted one clears it.
+/// popup and `(sel, nil, nil, text)` from `MacroFrame_SaveMacro`; the worker copies the icon only
+/// when it has one (`0x4f12f0`-`0x4f12fe`). The `local` flag is always written (`0x4f12dc`,
+/// `[macro+0x20]`), so an omitted one clears it.
 fn edit_macro(
     model: &mut Model,
     index: usize,
     name: Option<String>,
-    texture: Option<Option<String>>,
+    texture: Option<String>,
     body: Option<String>,
     local_only: bool,
 ) -> Option<usize> {
@@ -228,7 +236,7 @@ fn edit_macro(
         }
     }
     if let Some(texture) = texture {
-        entry.texture = texture;
+        entry.texture = Some(texture);
     }
     if let Some(body) = body {
         entry.body = clamp_chars(&body, MAX_MACRO_BODY);
@@ -272,6 +280,26 @@ fn pickup_macro(lua: &Lua, index: usize) -> bool {
         }
     };
     set_cursor(lua, true, |_| Some(CursorPayload::Macro(payload)))
+}
+
+/// Build the icon list if it is empty, as the three verbs do before they read it (`0x4f0090`
+/// behind a zero count). The source runs with no borrow of the model held. Deviation: a listing
+/// that finds no icon stays empty, to be listed again on the next ask, where the reference's
+/// dedup then reads below its null list (`0x4f0134`-`0x4f0145`) and faults.
+fn ensure_macro_icons(lua: &Lua) {
+    let source = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        if !model.macro_icons.is_empty() {
+            return;
+        }
+        model.macro_icon_source.clone()
+    };
+    if let Some(source) = source {
+        let icons = source();
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .macro_icons = icons;
+    }
 }
 
 fn opt_string(v: Option<&Value>) -> Option<String> {
@@ -341,39 +369,45 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // `GetNumMacroIcons()` (`0x4f19f0`): the list's size, built first while it is empty.
     g.set(
         "GetNumMacroIcons",
         lua.create_function(|lua, ()| {
+            ensure_macro_icons(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(model.macro_icons.len() as i64)
         })?,
     )?;
 
+    // `GetMacroIconInfo(index)` (`0x4f1a30`): an index that is no number raises the usage text
+    // (`0x4f1a41` `lua_isnumber`, `0x84cc78`); `trunc(n) - 1` is compared unsigned with the count
+    // (`0x4f1a76`), so 0, a negative and an index past the list push "" (`0x4f1ac5`, `0x882748`),
+    // never nil. It never builds the list.
     g.set(
         "GetMacroIconInfo",
-        lua.create_function(|lua, Idx(index): Idx| {
+        lua.create_function(|lua, v: Value| {
+            let index = super::binding_abi::index_arg(lua, v, "Usage: GetMacroIconInfo(index)")?;
             let path = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                index
-                    .checked_sub(1)
-                    .and_then(|i| model.macro_icons.get(i))
+                model
+                    .macro_icons
+                    .get((index as u32).wrapping_sub(1) as usize)
                     .cloned()
+                    .unwrap_or_default()
             };
-            match path {
-                Some(p) => Ok(Value::String(lua.create_string(&p)?)),
-                None => Ok(Value::Nil),
-            }
+            Ok(Value::String(lua.create_string(&path)?))
         })?,
     )?;
 
     // CreateMacro(name, iconIndex, body, local, perCharacter) (`0x4f15b0`): the name is a string
     // or number and the icon a number or numeric string, else the usage text (`0x84cb74`) raises.
     // `iconIndex` is an index into the chooser list. An empty name raises (`0x84cbb4`, tested on
-    // the first byte, so a blank one is a name), and so does a full tab (`0x84cbdc`); a made macro
-    // answers exactly its new 1-based index (`0x4f16ce`). The gate `0x494a50(7)` ahead of the body
-    // passes every context (`0x494b54` maps tag 7 to the arm that returns 1). A Turtle WoW VM also
-    // takes the icon as a texture name, which its `MacroPopupOkayButton_OnClick` passes
-    // (`MACRO_ICON_FILENAMES[selectedIcon]`, e.g. `INV_MISC_QUESTIONMARK`).
+    // the first byte, so a blank one is a name) before the list is built (`0x4f1613`, `0x4f1637`),
+    // and a full tab raises after (`0x84cbdc`); a made macro answers exactly its new 1-based index
+    // (`0x4f16ce`). The gate `0x494a50(7)` ahead of the body passes every context (`0x494b54` maps
+    // tag 7 to the arm that returns 1). A Turtle WoW VM also takes the icon as a texture name,
+    // which its `MacroPopupOkayButton_OnClick` passes (`MACRO_ICON_FILENAMES[selectedIcon]`, e.g.
+    // `INV_MISC_QUESTIONMARK`), and lists nothing for it ([`turtle_named_icon`]).
     g.set(
         "CreateMacro",
         lua.create_function(|lua, args: MultiValue| {
@@ -390,18 +424,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             )?;
             let icon_arg = a.get(1).cloned().unwrap_or(Value::Nil);
             let icon = lua.coerce_number(icon_arg.clone())?;
+            let named = match icon {
+                Some(_) => None,
+                None => Some(turtle_named_icon(lua, &icon_arg).ok_or_else(usage)?),
+            };
+            if name.is_empty() {
+                return Err(mlua::Error::RuntimeError(
+                    "CreateMacro() failed, no name specified".into(),
+                ));
+            }
+            if named.is_none() {
+                ensure_macro_icons(lua);
+            }
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // `0x4f1632`, `0x4f163c`.
             let texture = match icon {
-                // `trunc(n) - 1` against the chooser list, unsigned (`0x4f1632`, `0x4f163c`).
-                Some(n) => usize::try_from(super::binding_abi::ftol(n).wrapping_sub(1))
-                    .ok()
-                    .and_then(|i| model.macro_icons.get(i).cloned()),
-                None => match &icon_arg {
-                    Value::String(s) if model.flavor == super::UiFlavor::Turtle => {
-                        Some(named_icon(&s.to_string_lossy()))
-                    }
-                    _ => return Err(usage()),
-                },
+                Some(n) => icon_at(&model, n),
+                None => named,
             };
             let body = a
                 .get(2)
@@ -420,12 +459,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(index) = a.first().and_then(|v| v.as_integer()).map(|i| i as usize) else {
                 return Ok(Value::Nil);
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            // A nil icon leaves the icon alone: `MacroFrame_SaveMacro` passes nil on every save.
-            let texture = match a.get(2) {
-                None | Some(Value::Nil) => None,
-                other => Some(icon_path(&model, other)),
+            // The icon counts only as `lua_isnumber` reads it (`0x4f1945`): a numeric string is
+            // its number, and any other value, nil among them, leaves the icon alone. The list is
+            // built only for an index that names a macro and such an icon (`0x4f1913`,
+            // `0x4f196b`). fork: a Turtle WoW VM's icon name is taken too ([`turtle_named_icon`]).
+            let icon_arg = a.get(2).cloned().unwrap_or(Value::Nil);
+            let icon = lua.coerce_number(icon_arg.clone())?;
+            let named = match icon {
+                Some(_) => None,
+                None => turtle_named_icon(lua, &icon_arg),
             };
+            let names_macro = lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .macros
+                .get(index)
+                .is_some();
+            if names_macro && icon.is_some() {
+                ensure_macro_icons(lua);
+            }
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // `0x4f1966`-`0x4f1983`: a miss leaves the pointer null, and the macro its old icon.
+            let texture = icon.and_then(|n| icon_at(&model, n)).or(named);
             let name = opt_string(a.get(1));
             let body = opt_string(a.get(3));
             let local_only = flag(a.get(4));
@@ -461,27 +516,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 /// The icon a Turtle WoW VM reports for a macro without one.
 const TURTLE_NO_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
 
-/// An icon given by texture name (Turtle's `MACRO_ICON_FILENAMES`) to its path in the icons
-/// folder, as the macro file's icon token reads; a name with a path separator is taken whole.
-fn named_icon(name: &str) -> String {
-    if name.contains(['\\', '/']) {
-        name.to_string()
-    } else {
-        format!("Interface\\Icons\\{name}")
-    }
+/// fork: a Turtle WoW VM's icon given by texture name (its `MACRO_ICON_FILENAMES`), which is not
+/// a number: its path in the icons folder, as the macro file's icon token reads, and a name with
+/// a path separator taken whole. `None` on a 1.12.1 VM or for any other value.
+fn turtle_named_icon(lua: &Lua, v: &Value) -> Option<String> {
+    let turtle =
+        lua.app_data_ref::<Model>().expect("model app_data").flavor == super::UiFlavor::Turtle;
+    let Value::String(s) = v else {
+        return None;
+    };
+    let name = s.to_string_lossy();
+    turtle.then(|| {
+        if name.contains(['\\', '/']) {
+            name.to_string()
+        } else {
+            format!("Interface\\Icons\\{name}")
+        }
+    })
 }
 
-/// Resolve a chooser-list index to its texture path; a string is a path or an icon name.
-fn icon_path(model: &Model, v: Option<&Value>) -> Option<String> {
-    match v {
-        Some(Value::String(s)) => Some(named_icon(&s.to_string_lossy())),
-        Some(v) => {
-            let i = v.as_integer()?;
-            let i = usize::try_from(i).ok()?.checked_sub(1)?;
-            model.macro_icons.get(i).cloned()
-        }
-        None => None,
-    }
+/// The chooser entry at a 1-based icon number: `trunc(n) - 1` (`__ftol`, `0x40a2b0`) compared
+/// unsigned with the count, so 0, a negative or a number past the list is no entry.
+fn icon_at(model: &Model, n: f64) -> Option<String> {
+    let i = (super::binding_abi::ftol(n) as u32).wrapping_sub(1);
+    model.macro_icons.get(i as usize).cloned()
 }
 
 #[cfg(test)]
@@ -589,6 +647,37 @@ mod tests {
             ),
             "a body save touches neither the name nor the icon"
         );
+    }
+
+    /// The verbs store a body as text: a macro's option brackets (`run::bound_spell`'s) come
+    /// through Turtle's `CreateMacro` and its `MacroFrame_SaveMacro` `EditMacro` byte for byte.
+    #[test]
+    fn a_conditional_macro_body_is_stored_as_written() {
+        let body = "#showtooltip\n/cast [mod:shift,@player][@mouseover,help,nodead] Heal; \
+                    [stance:1/3,nocombat][] Smite";
+        for turtle in [false, true] {
+            let mut s = seeded();
+            if turtle {
+                s.set_flavor(crate::script::UiFlavor::Turtle);
+            }
+            s.run(&format!("BODY = [[{body}]]")).unwrap();
+            let icon = if turtle {
+                "\"INV_MISC_QUESTIONMARK\""
+            } else {
+                "1"
+            };
+            let index = s
+                .eval::<i64>(&format!(
+                    "return CreateMacro(\"M\", {icon}, nil, nil, true)"
+                ))
+                .unwrap();
+            s.run(&format!("EditMacro({index}, nil, nil, BODY)"))
+                .unwrap();
+            let got = s
+                .eval::<String>(&format!("local _, _, b = GetMacroInfo({index}) return b"))
+                .unwrap();
+            assert_eq!(got, body, "turtle {turtle}");
+        }
     }
 
     #[test]
@@ -755,16 +844,187 @@ mod tests {
         assert_eq!(s.cursor_payload(), ambush);
     }
 
+    /// Off the list `0x4f1a30` pushes "" (`0x4f1ac5`), for 0 and a negative too, as the unsigned
+    /// compare reads them as huge.
     #[test]
-    fn the_icon_chooser_list_is_one_based_with_a_nil_tail() {
+    fn the_icon_chooser_list_is_one_based_with_an_empty_string_tail() {
         let s = seeded();
         assert_eq!(s.eval::<i64>("return GetNumMacroIcons()").unwrap(), 3);
         assert_eq!(
             s.eval::<String>("return GetMacroIconInfo(2)").unwrap(),
             "Interface\\Icons\\Ability_BackStab"
         );
-        assert!(s.eval::<bool>("return GetMacroIconInfo(4) == nil").unwrap());
-        assert!(s.eval::<bool>("return GetMacroIconInfo(0) == nil").unwrap());
+        assert_eq!(
+            s.eval::<String>("return GetMacroIconInfo(2.9)").unwrap(),
+            "Interface\\Icons\\Ability_BackStab",
+            "the index truncates"
+        );
+        for call in [
+            "GetMacroIconInfo()",
+            "GetMacroIconInfo('x')",
+            "GetMacroIconInfo({})",
+        ] {
+            let err = s.run(call).expect_err(call).to_string();
+            assert!(
+                err.contains("Usage: GetMacroIconInfo(index)"),
+                "{call}: {err}"
+            );
+        }
+        for off in ["4", "0", "-1", "'5'"] {
+            assert_eq!(
+                s.eval::<String>(&format!(
+                    "return type(GetMacroIconInfo({off})) .. '|' .. GetMacroIconInfo({off})"
+                ))
+                .unwrap(),
+                "string|",
+                "GetMacroIconInfo({off})"
+            );
+        }
+    }
+
+    /// `EditMacro` reads its icon through `lua_isnumber` (`0x4f1945`) and truncates it
+    /// (`0x4f195a`); a string that is no number, or a number off the list, keeps the old icon
+    /// (`0x4f1983`, `0x4f12f0`).
+    #[test]
+    fn edit_macro_reads_its_icon_as_a_number_and_keeps_the_old_one_on_a_miss() {
+        let s = seeded();
+        s.run(r#"CreateMacro("m", 1, "")"#).unwrap();
+        let icon = |s: &UiScript| {
+            s.eval::<String>("local _, t = GetMacroInfo(1) return t")
+                .unwrap()
+        };
+        for kept in [
+            r#"EditMacro(1, nil, "Interface\\Icons\\Spell_Fire_FlameBolt")"#,
+            "EditMacro(1, nil, 0)",
+            "EditMacro(1, nil, -1)",
+            "EditMacro(1, nil, 4)",
+            "EditMacro(1, nil, 0.5)",
+            "EditMacro(1, nil, {})",
+        ] {
+            s.run(kept).unwrap();
+            assert_eq!(
+                icon(&s),
+                "Interface\\Icons\\Ability_Ambush",
+                "{kept} keeps the icon"
+            );
+        }
+        s.run(r#"EditMacro(1, nil, "3")"#).unwrap();
+        assert_eq!(
+            icon(&s),
+            "Interface\\Icons\\Spell_Fire_FlameBolt",
+            "a numeric string is its number"
+        );
+        s.run("EditMacro(1, nil, 2.5)").unwrap();
+        assert_eq!(
+            icon(&s),
+            "Interface\\Icons\\Ability_BackStab",
+            "the number truncates"
+        );
+        s.run(r#"EditMacro(1, nil, " 1 ")"#).unwrap();
+        assert_eq!(
+            icon(&s),
+            "Interface\\Icons\\Ability_Ambush",
+            "as Lua converts a string"
+        );
+    }
+
+    /// A VM whose icon list is built by a source that counts its runs and answers `icons`.
+    fn lazily_listed(
+        icons: &'static [&'static str],
+    ) -> (UiScript, std::rc::Rc<std::cell::Cell<u32>>) {
+        let mut s = UiScript::new().unwrap();
+        let runs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = runs.clone();
+        s.set_macro_icon_source(Box::new(move || {
+            counter.set(counter.get() + 1);
+            icons.iter().map(|i| i.to_string()).collect()
+        }));
+        (s, runs)
+    }
+
+    const TWO_ICONS: &[&str] = &[
+        "Interface\\Icons\\Ability_Ambush",
+        "Interface\\Icons\\Ability_BackStab",
+    ];
+
+    /// `GetNumMacroIcons` builds on first use (`0x4f19f6`-`0x4f1a02`) and `GetMacroIconInfo`
+    /// never does (`0x4f1a30`), so a VM lists nothing until a script asks for the count.
+    #[test]
+    fn the_icon_list_is_built_on_the_first_count_and_kept() {
+        let (s, runs) = lazily_listed(TWO_ICONS);
+        assert_eq!(runs.get(), 0, "installing the source lists nothing");
+        assert_eq!(
+            s.eval::<String>("return GetMacroIconInfo(1)").unwrap(),
+            "",
+            "before a build the list is empty"
+        );
+        assert_eq!(runs.get(), 0, "GetMacroIconInfo never builds");
+        assert_eq!(s.eval::<i64>("return GetNumMacroIcons()").unwrap(), 2);
+        assert_eq!(runs.get(), 1);
+        assert_eq!(s.eval::<i64>("return GetNumMacroIcons()").unwrap(), 2);
+        assert_eq!(runs.get(), 1, "a built list is kept");
+        assert_eq!(
+            s.eval::<String>("return GetMacroIconInfo(2)").unwrap(),
+            "Interface\\Icons\\Ability_BackStab"
+        );
+    }
+
+    /// The build is gated on the count, not on a built flag (`0x4f19fb`), so a list that comes
+    /// back empty is listed again on the next ask.
+    #[test]
+    fn an_empty_icon_list_is_listed_again() {
+        let (s, runs) = lazily_listed(&[]);
+        for _ in 0..2 {
+            assert_eq!(s.eval::<i64>("return GetNumMacroIcons()").unwrap(), 0);
+        }
+        assert_eq!(runs.get(), 2);
+    }
+
+    /// `CreateMacro` builds after its usage check and its empty-name raise (`0x4f1613`,
+    /// `0x4f1637`), then reads its icon from the built list.
+    #[test]
+    fn create_macro_builds_the_list_only_past_its_checks() {
+        let (s, runs) = lazily_listed(TWO_ICONS);
+        assert!(s.run("CreateMacro('a', 'x')").is_err());
+        assert!(s.run("CreateMacro('', 1)").is_err());
+        assert_eq!(runs.get(), 0, "a refused call lists nothing");
+        s.run("CreateMacro('a', 2, '/say hi')").unwrap();
+        assert_eq!(runs.get(), 1);
+        assert_eq!(
+            s.eval::<String>("local _, t = GetMacroInfo(1) return t")
+                .unwrap(),
+            "Interface\\Icons\\Ability_BackStab"
+        );
+    }
+
+    /// `EditMacro` builds only for an index that names a macro (`0x4f1913`) and a numeric icon
+    /// (`0x4f1945`), then reads the icon from the built list (`0x4f196b`).
+    #[test]
+    fn edit_macro_builds_the_list_only_for_a_macro_and_a_numeric_icon() {
+        let (mut s, runs) = lazily_listed(TWO_ICONS);
+        s.set_macros(MacroState {
+            account: vec![MacroView {
+                name: "m".into(),
+                ..Default::default()
+            }],
+            character: Vec::new(),
+        });
+        for call in [
+            "EditMacro(2, nil, 1)",
+            "EditMacro(1, 'n')",
+            "EditMacro(1, nil, 'x')",
+            "EditMacro(1, nil, nil, '/say x')",
+        ] {
+            s.run(call).unwrap();
+            assert_eq!(runs.get(), 0, "{call} lists nothing");
+        }
+        s.run("EditMacro(1, nil, 1)").unwrap();
+        assert_eq!(runs.get(), 1);
+        assert_eq!(
+            s.eval::<String>("local _, t = GetMacroInfo(1) return t")
+                .unwrap(),
+            "Interface\\Icons\\Ability_Ambush"
+        );
     }
 
     /// The macro setter (`0x494f80`) signals only through its inner clear (`0x494fad`): that

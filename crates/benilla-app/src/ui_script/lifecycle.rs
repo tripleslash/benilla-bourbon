@@ -363,7 +363,8 @@ pub(crate) fn arm_entry_ui_load(world: &mut World) {
 /// `GlobalStrings.lua` and `Fonts.xml` as its first rows, and `ChatFrame.lua` the emote tokens.
 fn mint_entry_vm(world: &mut World) {
     crate::cvars::fold_dying_vm_cvars(world);
-    if let Some(script) = new_vm(world, UiScript::new) {
+    if let Some(mut script) = new_vm(world, UiScript::new) {
+        crate::ui_macro::install_icon_source(world, &mut script);
         world.insert_non_send(script);
     }
 }
@@ -1843,6 +1844,23 @@ mod tests {
             VmKind::InGame,
             "the reload's VM is a boot VM, never the glue's"
         );
+    }
+
+    /// Only the in-game state registers the macro verbs (`RegisterMacroFunctions` `0x4f1b90`, from
+    /// `0x490297`), so the world-entry VM gets the icon chooser's source and the glue VM and a
+    /// reload's boot VM get none.
+    #[test]
+    fn only_the_entry_vm_gets_the_macro_icon_source() {
+        use crate::client_state::ClientState;
+        let has = |world: &World| world.non_send::<UiScript>().has_macro_icon_source();
+        let mut world = World::new();
+        world.insert_resource(State::new(ClientState::Login));
+        setup_script(&mut world);
+        assert!(!has(&world), "the glue VM");
+        install_boot_vm(&mut world);
+        assert!(!has(&world), "a boot VM");
+        mint_entry_vm(&mut world);
+        assert!(has(&world), "the world-entry VM");
     }
 
     /// The reference re-makes its Lua state inside `UI_Init` (`0x48fe97`).
