@@ -49,6 +49,7 @@ pub struct AuctionItemRow {
     pub name: Option<String>,
     pub texture: Option<String>,
     pub count: u32,
+    /// `None` while the item template query is in flight.
     pub quality: Option<u32>,
     /// `RequiredLevel`, printed red above the player's level.
     pub level: u32,
@@ -348,11 +349,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row_at(&model, &kind, index)
             };
-            // A row whose item template has not landed is an item-cache miss.
+            // A miss (unknown type, out of range, or an item template not cached: `quality` is
+            // `None` until it lands) answers twelve values, `count = 1` and `quality = -1`, through
+            // the one exit `0x4cf1ec`; the item-cache lookup `0x55ba30` returning 0 reaches it at
+            // `0x4cefa0`.
             let Some(r) = row.filter(|r| r.quality.is_some()) else {
-                // A miss (unknown type, out of range, not cached) still answers twelve values, with
-                // `count = 1` and `quality = -1` (one shared exit, `0x4cf1ec`), read unguarded:
-                // `AuctionFrameBrowse_Update` indexes `ITEM_QUALITY_COLORS[quality]` at once.
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,         // name
                     Value::Nil,         // texture
@@ -922,8 +923,10 @@ mod tests {
             .map(|&auction_id| AuctionItemRow {
                 auction_id,
                 item_id: 1000 + auction_id,
-                count: 1,
+                // A cached template: a `None` quality is a row still in the item cache's miss.
+                name: Some(format!("Item {auction_id}")),
                 quality: Some(1),
+                count: 1,
                 ..Default::default()
             })
             .collect();
@@ -1093,7 +1096,7 @@ mod tests {
 
     #[test]
     fn a_missing_row_still_answers_twelve_values() {
-        let mut s = UiScript::new().unwrap();
+        let s = UiScript::new().unwrap();
         let n = s.arity(r#"GetAuctionItemInfo("list", 99)"#).unwrap();
         assert_eq!(n, 12, "twelve, even with no session open at all");
         let (count, quality): (i64, i64) = s
@@ -1101,18 +1104,61 @@ mod tests {
             .unwrap();
         assert_eq!((count, quality), (1, -1));
 
-        // A row whose item template is still in flight takes the same exit, not a nil quality.
-        let mut state = page(&[1]);
-        state.lists[LIST].rows[0].quality = None;
-        s.set_auction(Some(state));
-        let (count, quality): (i64, i64) = s
-            .eval(r#"local _, _, c, q = GetAuctionItemInfo("list", 1) return c, q"#)
-            .unwrap();
-        assert_eq!((count, quality), (1, -1));
-
         // The link answers no values on a miss, not a nil.
         let n = s.arity(r#"GetAuctionItemLink("list", 99)"#).unwrap();
         assert_eq!(n, 0, "zero values, not one nil");
+    }
+
+    /// A row whose item template has not landed answers the client's miss shape, not a half-filled
+    /// row: `0x55ba30` returns 0, `je 0x4cefa0` -> `0x4cf1ec`, nil,nil,1,-1,nil,0,0,0,0,0,nil,nil.
+    #[test]
+    fn an_uncached_row_answers_the_miss_shape() {
+        let mut s = UiScript::new().unwrap();
+        let mut state = page(&[7]);
+        // The template query is still in flight: no name, icon or quality, a count and prices.
+        state.lists[LIST].rows[0] = AuctionItemRow {
+            auction_id: 7,
+            item_id: 1007,
+            count: 20,
+            min_bid: 100,
+            buyout_price: 200,
+            high_bidder: AuctionHighBidder::Player,
+            owner: Some("Seller".into()),
+            ..Default::default()
+        };
+        s.set_auction(Some(state));
+        let shape: String = s
+            .eval(
+                r#"local t = {GetAuctionItemInfo("list", 1)}
+                   local out = {}
+                   for i = 1, 12 do out[i] = tostring(t[i]) end
+                   return table.concat(out, ",")"#,
+            )
+            .unwrap();
+        assert_eq!(shape, "nil,nil,1,-1,nil,0,0,0,0,0,nil,nil");
+        assert_eq!(s.arity(r#"GetAuctionItemInfo("list", 1)"#).unwrap(), 12);
+
+        // The stock lines index the colour table with the quality, unguarded.
+        let r: f64 = s
+            .eval(
+                r#"ITEM_QUALITY_COLORS = { [-1] = { r = 0.5 }, [1] = { r = 1 } }
+                   local name, texture, count, quality = GetAuctionItemInfo("list", 1)
+                   local color = ITEM_QUALITY_COLORS[quality]
+                   return color.r"#,
+            )
+            .expect("the colour lookup must not throw on a miss row");
+        assert_eq!(r, 0.5);
+    }
+
+    /// The same row once its template lands answers its real values.
+    #[test]
+    fn a_cached_row_answers_its_quality() {
+        let mut s = UiScript::new().unwrap();
+        s.set_auction(Some(page(&[7])));
+        let (name, quality): (String, i64) = s
+            .eval(r#"local n, _, _, q = GetAuctionItemInfo("list", 1) return n, q"#)
+            .unwrap();
+        assert_eq!((name.as_str(), quality), ("Item 7", 1));
     }
 
     /// The eleventh value is the name, `1` or nil as the app picked it (`0x4cf12a`–`0x4cf1a0`).
