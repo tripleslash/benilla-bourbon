@@ -128,6 +128,20 @@ pub(super) enum FontKind {
     Instance,
 }
 
+impl FontKind {
+    /// The shadow colour an unset shadow reads: a FontString's own default is opaque black
+    /// (`0x770da1`), a font instance's the transparent black `CSimpleFont`'s constructor writes
+    /// (`0x783a72`; the EditBox's `0x779ba8`, the message frames' `0x785700` and `0x78778f`). The
+    /// EditBox's font and its text string share one record here, so each answers its own default
+    /// until a set, which the reference pushes to the string too.
+    fn unset_shadow(self) -> crate::color::Rgba8 {
+        match self {
+            FontKind::FontString => crate::color::Rgba8::BLACK,
+            FontKind::Instance => crate::color::Rgba8::TRANSPARENT,
+        }
+    }
+}
+
 /// A `SetFont` load's outcome.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Load {
@@ -149,10 +163,14 @@ impl Load {
 
 /// Whether the font load (`0x44d040`, the factory `0x5c1ae0`) finds `path`: never for an empty one
 /// (`0x44d059`), else the host's probe, as only the store knows the files; with no probe, any
-/// non-empty path loads.
-pub(super) fn face_loads(model: &Model, path: &str) -> bool {
+/// non-empty path loads. The XML font legs ask it too (`0x771214`, `0x783e7c`).
+pub(crate) fn face_loads(model: &Model, path: &str) -> bool {
     !path.is_empty() && model.font_probe.as_ref().is_none_or(|probe| probe(path))
 }
+
+/// The tolerance both XML font legs read a held height as unchanged within, 2⁻²² (`0x8029d4`, at
+/// the FontString's `0x77152a` and the Font's `0x783e4d`).
+pub(crate) const SAME_FONT_HEIGHT: f32 = 1.0 / 4_194_304.0;
 
 /// The shared path's verdict (`0x79f210`): no load for a height of 0 or less
 /// (`0x79f2f1`-`0x79f2ff`), else [`face_loads`]. A failure writes nothing (`0x79f30f` →
@@ -298,7 +316,7 @@ pub(super) fn install(
                 None => Value::Nil,
             };
             let height = d.and_then(|d| d.font_height).unwrap_or(0.0);
-            let flags = d.map(|d| d.outline).unwrap_or_default().as_str();
+            let flags = d.map_or("", |d| d.outline.flags_text(d.monochrome));
             Ok((path, height, flags))
         })?,
     )?;
@@ -374,7 +392,7 @@ pub(super) fn install(
                 .region_data
                 .get(&rh)
                 .and_then(|d| d.font_shadow)
-                .map_or(crate::color::Rgba8::BLACK, |s| s.color);
+                .map_or(kind.unset_shadow(), |s| s.color);
             Ok(super::object::colour_values(c))
         })?,
     )?;
@@ -385,9 +403,7 @@ pub(super) fn install(
             let rh = resolve(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
-            let color = d
-                .font_shadow
-                .map_or(crate::color::Rgba8::BLACK, |s| s.color);
+            let color = d.font_shadow.map_or(kind.unset_shadow(), |s| s.color);
             d.font_shadow = Some(FontShadow {
                 offset: [x, y],
                 color,

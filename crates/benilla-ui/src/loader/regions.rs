@@ -60,10 +60,11 @@ impl Loader<'_> {
 
     /// One `<Layer>` region on `wrapper`, created on `level` and loaded: its name (`$parent`
     /// expanded, published as a global, read from `raw` alone, `0x6f2751`), then its `LoadXML`
-    /// level by level ([`Loader::levels`]; `inherits=` may name a region template, in the frames'
-    /// one registry, `0x6ee500`), then the implicit creation anchor, run after the region's
-    /// LoadXML as the reference does (`0x7701c0`, `0x771480`); an anchored region is left alone.
-    /// `None` when the creation raised.
+    /// level by level ([`Loader::levels`], a FontString's up to a font,
+    /// [`Loader::fontstring_levels`]; `inherits=` may name a region template, in the frames' one
+    /// registry, `0x6ee500`), then the implicit creation anchor, run after the region's `LoadXML`
+    /// as the reference does (`0x7701c0`, `0x771480`); an anchored region is left alone. `None`
+    /// when the creation raised.
     fn build_region(
         &mut self,
         raw: &Element,
@@ -73,7 +74,11 @@ impl Loader<'_> {
         is_texture: bool,
         dbg: &str,
     ) -> Option<Table> {
-        let levels = self.levels(raw);
+        let levels = if is_texture {
+            self.levels(raw)
+        } else {
+            self.fontstring_levels(raw)
+        };
         let rname: Option<String> = raw
             .name()
             .map(|raw| framexml::resolve_name(raw, parent_name));
@@ -122,7 +127,7 @@ impl Loader<'_> {
             if !region.tag.eq_ignore_ascii_case("FontString") {
                 continue;
             }
-            let levels = self.levels(region);
+            let levels = self.fontstring_levels(region);
             let rname: Option<String> = region
                 .name()
                 .map(|raw| framexml::resolve_name(raw, parent_name));
@@ -212,13 +217,14 @@ impl Loader<'_> {
     }
 
     /// One level of a `<FontString>`'s `LoadXML` (`0x770f40`), after its `inherits` level: an
-    /// `inherits` font object, the geometry, `hidden`, `text`, the wrap attributes, then, when the
+    /// `inherits` font object, the geometry, `hidden`, `text`, the wrap attributes (no `alpha`,
+    /// which only the frame loader reads, `0x769a10`), then, when the
     /// string owns its font attributes ([`FontAttrs`], `0x7710db`), `font=`, `spacing`,
     /// `justifyV`, `justifyH` and the `<Color>` and `<Shadow>` children, in that order. A `font=`
     /// file needs this node's own first `<FontHeight>` above 0 (`0x77112f`-`0x771154`); without
     /// one the level reports `0x878e10` and returns (`0x771191`), so nothing after the font is
-    /// read on it, whatever height a template gave. `with_text` is false for a Button's label,
-    /// whose text the button sets.
+    /// read on it, whatever height a template gave. A file that does not load only skips the
+    /// font. `with_text` is false for a Button's label, whose text the button sets.
     pub(super) fn load_fontstring_level(
         &mut self,
         node: &Element,
@@ -230,13 +236,16 @@ impl Loader<'_> {
     ) {
         let own = attrs == FontAttrs::Own;
         // `inherits=` names a font object first (`0x770f69`), linked only when the string owns
-        // its font attributes (`0x770f72`), else a template, loaded as a level of its own. Any
-        // other name passes through and is reported: `SetFontObject("")` would clear the font
-        // object where a bad name warns.
+        // its font attributes (`0x770f72`), else a template, already loaded as a level of its own
+        // ([`Loader::fontstring_levels`]). A name that is neither is logged (`0x8786a8`,
+        // `0x770fa3`), whoever owns the font.
         if let Some(name) = node.attr("inherits").filter(|n| !n.is_empty()) {
-            let template = self.model().framexml_templates.borrow().contains(name);
-            if own && (self.is_font_object(name) || !template) {
-                self.set_font_object(wrapper, "inherits", name, dbg);
+            if self.is_font_object(name) {
+                if own {
+                    self.set_font_object(wrapper, "inherits", name, dbg);
+                }
+            } else if !self.model().framexml_templates.borrow().contains(name) {
+                self.status_warning(format!("Couldn't find inherited node: {name}"));
             }
         }
         self.apply_geometry(node, wrapper, true, parent_name, dbg);
@@ -244,12 +253,6 @@ impl Loader<'_> {
             Some(true) => self.call_region(wrapper, "Hide", (), dbg),
             Some(false) => self.call_region(wrapper, "Show", (), dbg),
             None => {}
-        }
-        if let Some(a) = node
-            .attr("alpha")
-            .and_then(|v| v.trim().parse::<f32>().ok())
-        {
-            self.call_region(wrapper, "SetAlpha", a, dbg);
         }
         // An empty `text` is skipped (`0x77101b`), so a template's text stands. The string's own
         // `SetText` (`0x77103a` → `0x771d80`), not Lua's, which raises on a string with no font
@@ -289,14 +292,17 @@ impl Loader<'_> {
                         .unwrap_or_default(),
                     node.attr("monochrome").is_some_and(|v| !v.is_empty()),
                 );
-                if let Err(e) = crate::script::apply_font_parts(
-                    self.lua,
-                    wrapper,
-                    Some(path.to_string()),
-                    Some(height),
-                    Some(flags),
-                ) {
-                    self.report.fault(format!("{dbg}: region font attrs: {e}"));
+                // A file that fails to load is logged (`0x878dc8`, `0x771226`-`0x771251`) and the
+                // level goes on to `spacing`, the string keeping the font it had.
+                match crate::script::load_xml_font_file(self.lua, wrapper, path, height, flags) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let name = self.object_name(wrapper);
+                        self.status_warning(format!(
+                            "FontString {name}: Unable to load font file {path}"
+                        ));
+                    }
+                    Err(e) => self.report.fault(format!("{dbg}: region font attrs: {e}")),
                 }
             }
             None => {}
@@ -306,11 +312,17 @@ impl Loader<'_> {
         if let Some(sp) = node.attr("spacing").filter(|v| !v.is_empty()) {
             self.call_region(wrapper, "SetSpacing", crate::framexml::atof(sp), dbg);
         }
-        if let Some(j) = node.attr("justifyV").filter(|v| !v.is_empty()) {
-            self.call_region(wrapper, "SetJustifyV", j.to_string(), dbg);
-        }
-        if let Some(j) = node.attr("justifyH").filter(|v| !v.is_empty()) {
-            self.call_region(wrapper, "SetJustifyH", j.to_string(), dbg);
+        // A justify token is matched first (`0x6f1990`) and one that matches nothing is skipped
+        // (`0x7712c3`, `0x771327`). A match writes its axis's bits of the justify word inline, none
+        // for the other axis's token, which zeroes the axis (V `0x7712e1`-`0x7712e7`, H
+        // `0x771345`-`0x77134b`), and clears the bits the Lua setter clears, so the setter stands in.
+        for (attr, setter) in [("justifyV", "SetJustifyV"), ("justifyH", "SetJustifyH")] {
+            if let Some(j) = node
+                .attr(attr)
+                .filter(|j| crate::justify::parse_bits(j).is_some())
+            {
+                self.call_region(wrapper, setter, j.to_string(), dbg);
+            }
         }
         // Each `<Color>` is the text colour (`0x77f750`) and each `<Shadow>` the shadow
         // (`0x7722a0`), both local to the string, so they outlast the font object's.
@@ -342,7 +354,8 @@ impl Loader<'_> {
     }
 
     /// One level of a `<Texture>`'s `LoadXML` (`0x76fe20`), after its `inherits` level: the
-    /// geometry, `hidden`, each child in order, then `file=` and `alphaMode`. A `<TexCoords>` sets
+    /// geometry, `hidden`, each child in order, then `file=` and `alphaMode`, and no `alpha`, which
+    /// only the frame loader reads (`0x769a10`). A `<TexCoords>` sets
     /// all eight coordinates from its own edges over 0, 1, 0, 1, so the last one applied wins whole
     /// (`0x76fef5`, `0x76ffe8`), and any edge outside [0, 1] sets the level's wrap flag, which the
     /// file load takes (`0x770071`, `0x77012d`); a later `SetTexCoord` leaves it, and `SetTexture`
@@ -361,12 +374,6 @@ impl Loader<'_> {
             Some(true) => self.call_region(wrapper, "Hide", (), dbg),
             Some(false) => self.call_region(wrapper, "Show", (), dbg),
             None => {}
-        }
-        if let Some(a) = node
-            .attr("alpha")
-            .and_then(|v| v.trim().parse::<f32>().ok())
-        {
-            self.call_region(wrapper, "SetAlpha", a, dbg);
         }
         let mut wrap = false;
         for child in &node.children {
@@ -449,14 +456,12 @@ impl Loader<'_> {
     pub(super) fn font_object_through_templates(&self, inherits: &str) -> Option<String> {
         const MAX_HOPS: usize = 8;
         let model = self.model();
-        let fonts = model.framexml_fonts.borrow();
         let templates = model.framexml_templates.borrow();
         // One name, not a comma list: 1.12's lookup has no splitter.
         for entry in [inherits] {
             let mut name = entry.to_string();
             for _ in 0..MAX_HOPS {
-                if fonts.contains_key(&name) || fonts.keys().any(|k| k.eq_ignore_ascii_case(&name))
-                {
+                if model.fonts.id(&name).is_some() {
                     return Some(name);
                 }
                 let Some(next) = templates
@@ -472,12 +477,11 @@ impl Loader<'_> {
         None
     }
 
-    /// Whether `name` is a registered font object: the reference's flat, case-insensitive lookup
-    /// (`0x783870`, `SStrCmpI`), with no template walk.
+    /// Whether `name` is a named font object, declared by `<Font>` or made by `CreateFont`: the
+    /// reference's one font table (`0x783870`, which `CreateFont` fills too, `0x706077`), looked
+    /// up flat and ignoring case, with no template walk.
     pub(super) fn is_font_object(&self, name: &str) -> bool {
-        let model = self.model();
-        let fonts = model.framexml_fonts.borrow();
-        fonts.contains_key(name) || fonts.keys().any(|k| k.eq_ignore_ascii_case(name))
+        self.model().fonts.id(name).is_some()
     }
 }
 

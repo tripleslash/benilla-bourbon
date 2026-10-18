@@ -575,7 +575,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(path) => Value::String(lua.create_string(&path)?),
                 None => Value::Nil,
             };
-            Ok((path, p.font_height, p.outline.as_str()))
+            Ok((path, p.font_height, p.outline.flags_text(false)))
         })?,
     )?;
 
@@ -623,7 +623,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let elem = take_element(&mut rest);
             let c = read_font(lua, &this, elem)?
                 .shadow
-                .map_or(crate::color::Rgba8::BLACK, |s| s.color);
+                .map_or(crate::color::Rgba8::TRANSPARENT, |s| s.color);
             Ok(crate::script::object::colour_values(c))
         })?,
     )?;
@@ -635,7 +635,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let x = f32::from_lua(arg(&rest, 0), lua)?;
             let y = f32::from_lua(arg(&rest, 1), lua)?;
             edit_font(lua, &this, elem, |ef| {
-                let color = ef.shadow.map_or(crate::color::Rgba8::BLACK, |s| s.color);
+                let color = ef
+                    .shadow
+                    .map_or(crate::color::Rgba8::TRANSPARENT, |s| s.color);
                 ef.shadow = Some(FontShadow {
                     offset: [x, y],
                     color,

@@ -572,3 +572,381 @@ fn a_font_element_reads_its_flags_only_beside_its_own_font_file() {
         "Couldn't find inherited font: LevelNoSuchFont"
     ));
 }
+
+const NOPE: &str = r"Fonts\NOPE.TTF";
+
+/// `0x770f40`, `0x783c30`: a `font=` file that fails to load writes nothing, is logged
+/// (`0x878dc8`, `0x87a4c8`) and the node goes on to `spacing`, so a FontString or a Font keeps the
+/// font it follows, and keeps following it. The font already held skips the load, keeps its
+/// spelling and clears the bit (`0x771541`, `0x783e5d` → `0x783ea9`).
+#[test]
+fn an_xml_font_file_that_fails_to_load_keeps_the_followed_font() {
+    let mut s = ui();
+    load_str(
+        &s,
+        r#"<Ui><Font name="LoadHeld" font="Fonts\HELD.TTF" virtual="true">
+            <FontHeight><AbsValue val="10"/></FontHeight>
+        </Font></Ui>"#,
+    );
+    s.set_font_probe(Box::new(|path: &str| {
+        !path.contains("NOPE") && !path.contains("HELD")
+    }));
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Font name="LoadParent" font="Fonts\FRIZQT__.TTF" outline="NORMAL" virtual="true">
+                <FontHeight><AbsValue val="12"/></FontHeight>
+            </Font>
+            <Font name="LoadChild" inherits="LoadParent" font="Fonts\NOPE.TTF" spacing="2"
+                  virtual="true">
+                <FontHeight><AbsValue val="20"/></FontHeight>
+            </Font>
+            <Font name="LoadHeldAgain" inherits="LoadHeld" font="fonts\held.ttf" virtual="true">
+                <FontHeight><AbsValue val="10"/></FontHeight>
+            </Font>
+            <Frame name="LoadHost">
+                <Layers><Layer>
+                    <FontString name="LoadMissed" inherits="LoadParent" font="Fonts\NOPE.TTF"
+                                spacing="3">
+                        <FontHeight><AbsValue val="20"/></FontHeight>
+                    </FontString>
+                    <FontString name="LoadKept" inherits="LoadHeld" font="FONTS\HELD.TTF">
+                        <FontHeight><AbsValue val="10"/></FontHeight>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#,
+    );
+    let font = |s: &UiScript, name: &str| {
+        s.eval::<String>(&format!(
+            "local f, h, flags = {name}:GetFont() \
+             return table.concat({{f, h, flags, {name}:GetSpacing()}}, ' ')"
+        ))
+        .unwrap()
+    };
+    assert_eq!(font(&s, "LoadChild"), r"Fonts\FRIZQT__.TTF 12 OUTLINE 2");
+    assert_eq!(font(&s, "LoadMissed"), r"Fonts\FRIZQT__.TTF 12 OUTLINE 3");
+    for line in [
+        format!("Font LoadChild: Unable to load font file {NOPE}"),
+        format!("FontString LoadMissed: Unable to load font file {NOPE}"),
+    ] {
+        assert!(has_line(&report, &line), "{line}: {:?}", report.warnings);
+    }
+    assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+    // Their font bit is still set, so the parent's next font reaches them; the held font's
+    // string and font cleared theirs.
+    s.run(r#"LoadParent:SetFont("Fonts\\ARIALN.TTF", 9) LoadHeld:SetFont("Fonts\\ARIALN.TTF", 9)"#)
+        .unwrap();
+    assert_eq!(font(&s, "LoadChild"), r"Fonts\ARIALN.TTF 9  2");
+    assert_eq!(font(&s, "LoadMissed"), r"Fonts\ARIALN.TTF 9  3");
+    assert!(font(&s, "LoadKept").starts_with(r"Fonts\HELD.TTF 10 "));
+    assert!(font(&s, "LoadHeldAgain").starts_with(r"Fonts\HELD.TTF 10 "));
+}
+
+/// `0x770f69`-`0x770f88`: a FontString's `inherits=` is looked up as a font first, and a hit jumps
+/// past the template lookup, so a template of the same name is never a level, on a Button's
+/// `<NormalText>` (which links nothing) too.
+#[test]
+fn a_fontstring_inheriting_a_font_loads_no_template_of_that_name() {
+    let s = ui();
+    load_str(
+        &s,
+        &format!(
+            r#"<Ui>{TEST_FONT}
+            <Font name="LevelBoth" font="Fonts\ARIALN.TTF" virtual="true">
+                <FontHeight><AbsValue val="14"/></FontHeight>
+            </Font>
+            <FontString name="LevelBoth" text="T" justifyH="LEFT" virtual="true">
+                <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+            </FontString>
+            <Frame name="BothHost">
+                <Size><AbsDimension x="64" y="64"/></Size>
+                <Layers><Layer>
+                    <FontString name="BothKid" inherits="LevelBoth"/>
+                    <FontString name="BothControl" inherits="LevelTestFont"/>
+                </Layer></Layers>
+            </Frame>
+            <Button name="BothButton">
+                <NormalText inherits="LevelBoth"/>
+            </Button>
+        </Ui>"#
+        ),
+    );
+    let got = |expr: &str| {
+        s.eval::<String>(&format!("return tostring({expr})"))
+            .unwrap()
+    };
+    assert_eq!(got("BothKid:GetText()"), "nil", "no template text");
+    assert_eq!(got("BothKid:GetFontObject() == LevelBoth"), "true");
+    assert_eq!(
+        got("BothKid:GetJustifyH()"),
+        "CENTER",
+        "no template justify"
+    );
+    assert_eq!(
+        got("BothKid:GetNumPoints() .. (BothKid:GetPoint(1))"),
+        got("BothControl:GetNumPoints() .. (BothControl:GetPoint(1))"),
+        "only the implicit anchor"
+    );
+    assert_ne!(
+        got("BothButton:GetText()"),
+        "T",
+        "<NormalText> loads no template either"
+    );
+}
+
+/// `0x783870` is the one font table, which `CreateFont` fills (`0x706077`): a FontString's
+/// `font=` and `inherits=` find a font a script made.
+#[test]
+fn a_fontstring_finds_a_font_made_by_create_font() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Script>CreateFont("LevelLuaFont"):SetFont("Fonts\\ARIALN.TTF", 15)</Script>
+            <Frame name="LuaFontHost">
+                <Layers><Layer>
+                    <FontString name="LuaFontKid" font="LevelLuaFont"/>
+                    <FontString name="LuaInheritKid" inherits="levelluafont"/>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#,
+    );
+    for name in ["LuaFontKid", "LuaInheritKid"] {
+        let (linked, path, height) = s
+            .eval::<(bool, String, f32)>(&format!(
+                "local f, h = {name}:GetFont() return {name}:GetFontObject() == LevelLuaFont, f, h"
+            ))
+            .unwrap();
+        assert!(linked, "{name} follows the font");
+        assert_eq!(
+            (path.as_str(), height),
+            (r"Fonts\ARIALN.TTF", 15.0),
+            "{name}"
+        );
+    }
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+}
+
+/// `0x770f8a`-`0x770fb1`: an `inherits=` that names neither a font nor a template is logged
+/// (`0x8786a8`) whoever owns the string's font, and links nothing. A `<NormalText>` also loads into
+/// the button's Normal font (`0x783c30`), which logs its own miss (`0x87a51c`).
+#[test]
+fn a_fontstring_inheriting_nothing_is_logged() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="NothingHost">
+                <Layers><Layer>
+                    <FontString name="NothingKid" inherits="LevelNothing"/>
+                </Layer></Layers>
+            </Frame>
+            <Button name="NothingButton">
+                <NormalText inherits="LevelNothingToo"/>
+            </Button>
+        </Ui>"#,
+    );
+    for line in [
+        "Couldn't find inherited node: LevelNothing",
+        "Couldn't find inherited node: LevelNothingToo",
+        "Couldn't find inherited font: LevelNothingToo",
+    ] {
+        assert!(has_line(&report, line), "{line}: {:?}", report.warnings);
+    }
+    assert_eq!(report.warnings.len(), 3, "{:?}", report.warnings);
+    assert!(s
+        .eval::<bool>("return NothingKid:GetFontObject() == nil")
+        .unwrap());
+}
+
+/// The one reader of `alpha` (`0x873fe8`) is the frame loader (`0x769a10`): the texture
+/// (`0x76fe20`) and FontString (`0x770f40`) loaders never read it.
+#[test]
+fn a_region_reads_no_alpha() {
+    let s = ui();
+    load_str(
+        &s,
+        &format!(
+            r#"<Ui>{TEST_FONT}
+            <Frame name="AlphaHost" alpha="0.5">
+                <Layers><Layer>
+                    <Texture name="AlphaTexture" file="Interface\Good" alpha="0.5"/>
+                    <FontString name="AlphaText" inherits="LevelTestFont" alpha="0.25"/>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#
+        ),
+    );
+    let alpha = |name: &str| s.eval::<f32>(&format!("return {name}:GetAlpha()")).unwrap();
+    assert_eq!(alpha("AlphaTexture"), 1.0);
+    assert_eq!(alpha("AlphaText"), 1.0);
+    assert!((alpha("AlphaHost") - 0.5).abs() < 0.01, "a frame reads it");
+}
+
+/// `0x783f47`-`0x783fd8`, `0x77129f`-`0x771366`: an XML justify token is matched as `0x6f1990`
+/// does. One that matches nothing is skipped and clears no bit, so the axis still follows its
+/// font; the other axis's token zeroes the axis; neither raises.
+#[test]
+fn an_xml_justify_token_is_matched_and_a_miss_skipped() {
+    let s = ui();
+    load_str(
+        &s,
+        &format!(
+            r#"<Ui>{TEST_FONT}
+            <Font name="JustParent" inherits="LevelTestFont" justifyH="LEFT" virtual="true"/>
+            <Font name="JustBogus" inherits="JustParent" justifyH="BOGUS" justifyV="NOPE"
+                  virtual="true"/>
+            <Font name="JustCross" inherits="JustParent" justifyH="TOP" justifyV="LEFT"
+                  virtual="true"/>
+            <Frame name="JustHost">
+                <Layers><Layer>
+                    <FontString name="JustString" inherits="JustParent" justifyH="BOGUS"/>
+                    <FontString name="JustStringCross" inherits="JustParent" justifyV="RIGHT"/>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#
+        ),
+    );
+    let justify = |name: &str| {
+        s.eval::<String>(&format!(
+            "return {name}:GetJustifyH() .. ' ' .. {name}:GetJustifyV()"
+        ))
+        .unwrap()
+    };
+    assert_eq!(justify("JustBogus"), "LEFT MIDDLE");
+    assert_eq!(justify("JustCross"), "UNKNOWN UNKNOWN");
+    assert_eq!(justify("JustString"), "LEFT MIDDLE");
+    assert_eq!(justify("JustStringCross"), "LEFT UNKNOWN");
+    s.run(r#"JustParent:SetJustifyH("RIGHT")"#).unwrap();
+    assert_eq!(justify("JustBogus"), "RIGHT MIDDLE", "still following");
+    assert_eq!(justify("JustString"), "RIGHT MIDDLE", "still following");
+    assert_eq!(justify("JustCross"), "UNKNOWN UNKNOWN");
+}
+
+/// `0x771502`-`0x771541`, `0x783e17`-`0x783e5d`: the held-font shortcut needs the path, the height
+/// and the flags all equal; only the flags or only the height differing goes to the load, which a
+/// refused file fails (logged, the font kept).
+#[test]
+fn a_held_font_differing_only_in_height_or_flags_reloads() {
+    let mut s = ui();
+    load_str(
+        &s,
+        r#"<Ui><Font name="ReloadHeld" font="Fonts\HELD.TTF" virtual="true">
+            <FontHeight><AbsValue val="10"/></FontHeight>
+        </Font></Ui>"#,
+    );
+    s.set_font_probe(Box::new(|path: &str| !path.contains("HELD")));
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Font name="ReloadFlags" inherits="ReloadHeld" font="Fonts\HELD.TTF" outline="NORMAL"
+                  virtual="true">
+                <FontHeight><AbsValue val="10"/></FontHeight>
+            </Font>
+            <Font name="ReloadHeight" inherits="ReloadHeld" font="Fonts\HELD.TTF" virtual="true">
+                <FontHeight><AbsValue val="11"/></FontHeight>
+            </Font>
+            <Frame name="ReloadHost">
+                <Layers><Layer>
+                    <FontString name="ReloadFlagsString" inherits="ReloadHeld"
+                                font="Fonts\HELD.TTF" monochrome="1">
+                        <FontHeight><AbsValue val="10"/></FontHeight>
+                    </FontString>
+                    <FontString name="ReloadHeightString" inherits="ReloadHeld"
+                                font="Fonts\HELD.TTF">
+                        <FontHeight><AbsValue val="11"/></FontHeight>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#,
+    );
+    for line in [
+        r"Font ReloadFlags: Unable to load font file Fonts\HELD.TTF",
+        r"Font ReloadHeight: Unable to load font file Fonts\HELD.TTF",
+        r"FontString ReloadFlagsString: Unable to load font file Fonts\HELD.TTF",
+        r"FontString ReloadHeightString: Unable to load font file Fonts\HELD.TTF",
+    ] {
+        assert!(has_line(&report, line), "{line}: {:?}", report.warnings);
+    }
+    for name in [
+        "ReloadFlags",
+        "ReloadHeight",
+        "ReloadFlagsString",
+        "ReloadHeightString",
+    ] {
+        let font = s
+            .eval::<String>(&format!(
+                "local f, h, flags = {name}:GetFont() return table.concat({{f, h, flags}}, ' ')"
+            ))
+            .unwrap();
+        assert_eq!(font, r"Fonts\HELD.TTF 10 ", "{name} keeps the held font");
+    }
+}
+
+/// `0x770f69`: each level's `inherits` is asked as a font first, so a template chain stops at the
+/// font it reaches, and a template of that font's name is never loaded, even down the chain.
+#[test]
+fn a_template_chain_stops_at_a_font_that_shares_a_templates_name() {
+    let s = ui();
+    load_str(
+        &s,
+        r#"<Ui>
+            <Font name="ChainFont" font="Fonts\ARIALN.TTF" virtual="true">
+                <FontHeight><AbsValue val="14"/></FontHeight>
+            </Font>
+            <FontString name="ChainFont" text="FROM_TEMPLATE" justifyV="TOP" virtual="true"/>
+            <FontString name="ChainMid" inherits="ChainFont" justifyH="RIGHT" virtual="true"/>
+            <Frame name="ChainHost">
+                <Layers><Layer>
+                    <FontString name="ChainKid" inherits="ChainMid"/>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#,
+    );
+    let got = |expr: &str| {
+        s.eval::<String>(&format!("return tostring({expr})"))
+            .unwrap()
+    };
+    assert_eq!(
+        got("ChainKid:GetText()"),
+        "nil",
+        "the same-named template is no level"
+    );
+    assert_eq!(got("ChainKid:GetJustifyV()"), "MIDDLE");
+    assert_eq!(
+        got("ChainKid:GetJustifyH()"),
+        "RIGHT",
+        "the middle template is"
+    );
+    assert_eq!(got("ChainKid:GetFontObject() == ChainFont"), "true");
+}
+
+/// `0x78a152`-`0x78a18f`: SimpleHTML's `font=` looks in the one font table, which `CreateFont`
+/// fills (`0x706077`), and links all four element fonts.
+#[test]
+fn a_simplehtml_font_finds_a_font_made_by_create_font() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Script>CreateFont("LevelHtmlFont"):SetFont("Fonts\\ARIALN.TTF", 15)</Script>
+            <SimpleHTML name="LevelHtml" font="LevelHtmlFont">
+                <Size><AbsDimension x="100" y="100"/></Size>
+            </SimpleHTML>
+        </Ui>"#,
+    );
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    for elem in ["P", "H1", "H2", "H3"] {
+        let (path, height) = s
+            .eval::<(String, f32)>(&format!(
+                "local f, h = LevelHtml:GetFont('{elem}') return f, h"
+            ))
+            .unwrap();
+        assert_eq!(
+            (path.as_str(), height),
+            (r"Fonts\ARIALN.TTF", 15.0),
+            "{elem}"
+        );
+    }
+}

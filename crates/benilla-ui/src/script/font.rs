@@ -608,7 +608,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(p) => Value::String(lua.create_string(&p)?),
                 None => Value::Nil,
             };
-            Ok((path, fo.height.unwrap_or(0.0), fo.outline.as_str()))
+            Ok((
+                path,
+                fo.height.unwrap_or(0.0),
+                fo.outline.flags_text(fo.monochrome),
+            ))
         })?,
     )?;
 
@@ -664,6 +668,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // ── shadow ──────────────────────────────────────────────────────────────────────────────
+    // An unset shadow is the constructor's transparent black (`0x783a72`), which `GetShadowColor`
+    // reads (`0x79f910`) and `SetShadowOffset` keeps (`0x79fa4a`-`0x79fa92`).
     m.set(
         "SetShadowColor",
         lua.create_function(
@@ -682,7 +688,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let c = read(lua, &this)?
                 .shadow
-                .map_or(crate::color::Rgba8::BLACK, |s| s.color);
+                .map_or(crate::color::Rgba8::TRANSPARENT, |s| s.color);
             Ok(super::object::colour_values(c))
         })?,
     )?;
@@ -690,7 +696,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetShadowOffset",
         lua.create_function(|lua, (this, x, y): (Table, f32, f32)| {
             edit(lua, &this, FontMask::SHADOW, |fo| {
-                let color = fo.shadow.map_or(crate::color::Rgba8::BLACK, |s| s.color);
+                let color = fo
+                    .shadow
+                    .map_or(crate::color::Rgba8::TRANSPARENT, |s| s.color);
                 fo.shadow = Some(FontShadow {
                     offset: [x, y],
                     color,
@@ -724,19 +732,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // ── justification ───────────────────────────────────────────────────────────────────────
     // Parsing is [`crate::justify`]'s, shared with the FontString pair: `SStrCmpI` over the whole
     // string, no trim. `None` means the font does not specify the axis (inheritance), not a
-    // cleared axis; a fresh object reads CENTER/MIDDLE, the constructor default `0x212`.
+    // cleared axis; a fresh object reads CENTER/MIDDLE, the constructor default `0x212`. The other
+    // axis's token is a write of no bits, zeroing the axis, with the bit cleared and the push
+    // (`0x79fc5d`-`0x79fc84`).
     m.set(
         "SetJustifyH",
         lua.create_function(|lua, (this, j): (Table, Value)| {
             id_of(lua, &this)?;
-            let parsed = binding_abi::optional_string(lua, &j).map(|j| justify::parse_h(&j));
-            let jh = match parsed {
-                Some(justify::Set::To(jh)) => jh,
-                Some(justify::Set::Clears) => return Ok(()),
+            let parsed = match binding_abi::optional_string(lua, &j).map(|j| justify::parse_h(&j)) {
+                Some(p) if p != justify::Set::NoMatch => p,
                 _ => return Err(justify::usage_h(&binding_abi::name_of(lua, &this))),
             };
             edit(lua, &this, FontMask::JUSTIFY, |fo| {
-                fo.justify.get_or_insert_with(Default::default).set_h(jh)
+                let word = fo.justify.get_or_insert_with(Default::default);
+                match parsed {
+                    justify::Set::To(jh) => word.set_h(jh),
+                    _ => word.clear_h(),
+                }
             })
         })?,
     )?;
@@ -750,14 +762,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetJustifyV",
         lua.create_function(|lua, (this, j): (Table, Value)| {
             id_of(lua, &this)?;
-            let parsed = binding_abi::optional_string(lua, &j).map(|j| justify::parse_v(&j));
-            let jv = match parsed {
-                Some(justify::Set::To(jv)) => jv,
-                Some(justify::Set::Clears) => return Ok(()),
+            let parsed = match binding_abi::optional_string(lua, &j).map(|j| justify::parse_v(&j)) {
+                Some(p) if p != justify::Set::NoMatch => p,
                 _ => return Err(justify::usage_v(&binding_abi::name_of(lua, &this))),
             };
             edit(lua, &this, FontMask::JUSTIFY, |fo| {
-                fo.justify.get_or_insert_with(Default::default).set_v(jv)
+                let word = fo.justify.get_or_insert_with(Default::default);
+                match parsed {
+                    justify::Set::To(jv) => word.set_v(jv),
+                    _ => word.clear_v(),
+                }
             })
         })?,
     )?;

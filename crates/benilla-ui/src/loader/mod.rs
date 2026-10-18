@@ -13,7 +13,8 @@ use std::collections::HashSet;
 use mlua::{Function, ObjectLike, Table, Value};
 
 use crate::framexml::{self, Element, ParsedDocument, ScriptRef, TopLevel};
-use crate::script::{JustifyH, JustifyV, Outline, UiScript};
+use crate::justify;
+use crate::script::{Outline, UiScript};
 use crate::status;
 
 mod backdrop;
@@ -557,13 +558,9 @@ impl Loader<'_> {
         let model = self.model();
         let templates = model.framexml_templates.borrow();
         // A font object in an inherit chain is skipped, not warned as an unknown template.
-        let fonts = model.framexml_fonts.borrow();
-        let font_names: std::collections::HashSet<&str> =
-            fonts.keys().map(|k| k.as_str()).collect();
+        let is_font = |name: &str| model.fonts.id(name).is_some();
         let mut warns = Vec::new();
-        let out = framexml::expand_known(el, &*templates, &font_names, &mut warns);
-        drop(font_names);
-        drop(fonts);
+        let out = framexml::expand_known(el, &*templates, &is_font, &mut warns);
         drop(templates);
         drop(model);
         self.report.warnings.extend(warns);
@@ -577,6 +574,20 @@ impl Loader<'_> {
             .framexml_templates
             .borrow()
             .inherited_levels(raw);
+        Levels {
+            inherited,
+            own: raw,
+        }
+    }
+
+    /// The nodes a FontString's `LoadXML` reads: [`Self::levels`], up to the first `inherits` that
+    /// names a font, which the string links instead of loading a template (`0x770f69`).
+    pub(super) fn fontstring_levels<'a>(&self, raw: &'a Element) -> Levels<'a> {
+        let model = self.model();
+        let inherited = model
+            .framexml_templates
+            .borrow()
+            .inherited_levels_until(raw, |name| model.fonts.id(name).is_some());
         Levels {
             inherited,
             own: raw,
@@ -604,14 +615,7 @@ impl Loader<'_> {
         let Some(name) = el.name().map(str::to_string) else {
             return;
         };
-        let id = {
-            let mut model = self.model();
-            model
-                .framexml_fonts
-                .borrow_mut()
-                .insert(name.clone(), el.clone());
-            model.fonts.named(&name)
-        };
+        let id = self.model().fonts.named(&name);
         self.load_font_node(el, id, &name);
         // In 1.12 a named `<Font>` is also a Lua global, the object `SetFontObject` takes.
         if let Err(e) = crate::script::font::publish(self.lua(), id, &name) {
@@ -625,10 +629,11 @@ impl Loader<'_> {
     /// links it to that font (`0x783ce6`; a miss is logged, `0x87a51c`), a `font=` naming a font
     /// links it there instead (`0x783d22`), and any other `font=` is a file that needs the node's
     /// own first `<FontHeight>` above 0 and sets the flags word whole from `outline=` and
-    /// `monochrome=` (`0x783db1`-`0x783ea3`); without the height the load stops (`0x783dae`). Then
-    /// `spacing=` with `atof` (`0x783ee0`), `justifyV`, `justifyH` and each `<Color>` and `<Shadow>`
-    /// child, the last of each winning. Each attribute is a setter's write, clearing its inherit bit
-    /// (`0x783ea9`-`0x784100`) and pushing to what already follows the font.
+    /// `monochrome=` (`0x783db1`-`0x783ea3`) when it loads; without the height the load stops
+    /// (`0x783dae`). Then `spacing=` with `atof` (`0x783ee0`), `justifyV`, `justifyH` and each
+    /// `<Color>` and `<Shadow>` child, the last of each winning. Each attribute is a setter's write,
+    /// clearing its inherit bit (`0x783ea9`-`0x784100`) and pushing to what already follows the
+    /// font.
     pub(super) fn load_font_node(
         &mut self,
         el: &Element,
@@ -660,12 +665,33 @@ impl Loader<'_> {
                 let outline = el.attr("outline").map(Outline::parse).unwrap_or_default();
                 // Any non-empty `monochrome=` sets the flag (`0x783e01`-`0x783e14`), even "false".
                 let monochrome = el.attr("monochrome").is_some_and(|v| !v.is_empty());
-                font::set(&mut self.model(), id, FontMask::FONT, |fo| {
-                    fo.font = Some(path.to_string());
-                    fo.height = Some(height);
-                    fo.outline = outline;
-                    fo.monochrome = monochrome;
-                });
+                // The font the node already holds (the path ignoring case, the height within 2⁻²²,
+                // the same flags) is kept as spelled and still clears the bit (`0x783e17`-`0x783e5d`
+                // → `0x783ea9`); any other loads first (`0x783e7c`). A file that fails is logged
+                // (`0x87a4c8`) and the node goes on to `spacing`, keeping what it follows.
+                let mut model = self.model();
+                let fo = &model.fonts.get(id).block;
+                let held = fo
+                    .font
+                    .as_deref()
+                    .is_some_and(|p| p.eq_ignore_ascii_case(path))
+                    && fo
+                        .height
+                        .is_some_and(|h| (h - height).abs() < crate::script::SAME_FONT_HEIGHT)
+                    && (fo.outline, fo.monochrome) == (outline, monochrome);
+                if held || crate::script::face_loads(&model, path) {
+                    font::set(&mut model, id, FontMask::FONT, |fo| {
+                        if !held {
+                            fo.font = Some(path.to_string());
+                            fo.height = Some(height);
+                            fo.outline = outline;
+                            fo.monochrome = monochrome;
+                        }
+                    });
+                } else {
+                    drop(model);
+                    self.status_warning(format!("Font {name}: Unable to load font file {path}"));
+                }
             }
             None => {}
         }
@@ -676,25 +702,16 @@ impl Loader<'_> {
                 fo.spacing = Some(sp)
             });
         }
-        // Each axis writes its bits of the one justify word (`0x783f90`, `0x783fd8`).
-        if let Some(j) = el.attr("justifyV").filter(|v| !v.is_empty()) {
-            let jv = match j.to_ascii_uppercase().as_str() {
-                "TOP" => JustifyV::Top,
-                "BOTTOM" => JustifyV::Bottom,
-                _ => JustifyV::Middle,
+        // Each axis matches its token as `0x6f1990` does and writes its own bits of the one justify
+        // word, none for the other axis's token (`0x783f75`-`0x783f7c`, `0x783fbd`-`0x783fc4`); a
+        // token that matches nothing is skipped and clears no bit (`0x783f6d`, `0x783fb5`).
+        for (attr, mask) in [("justifyV", justify::V_MASK), ("justifyH", justify::H_MASK)] {
+            let Some(bits) = el.attr(attr).and_then(justify::parse_bits) else {
+                continue;
             };
             font::set(&mut model, id, FontMask::JUSTIFY, |fo| {
-                fo.justify.get_or_insert_with(Default::default).set_v(jv)
-            });
-        }
-        if let Some(j) = el.attr("justifyH").filter(|v| !v.is_empty()) {
-            let jh = match j.to_ascii_uppercase().as_str() {
-                "LEFT" => JustifyH::Left,
-                "RIGHT" => JustifyH::Right,
-                _ => JustifyH::Center,
-            };
-            font::set(&mut model, id, FontMask::JUSTIFY, |fo| {
-                fo.justify.get_or_insert_with(Default::default).set_h(jh)
+                let word = fo.justify.get_or_insert_with(Default::default);
+                word.0 = justify::set_axis(word.0, mask, bits);
             });
         }
         for child in &el.children {

@@ -730,11 +730,39 @@ fn both_tables_speak_one_justify_law() {
             "{obj}:SetJustifyH must not trim its argument"
         );
 
-        // A cross-axis token is in the table and raises nothing. The reference then clears the
-        // axis; the FontString does too, the `<Font>` object leaves it as it was.
+        // A cross-axis token is in the table and raises nothing: it zeroes the axis on both
+        // tables (`0x79fc5d`-`0x79fc75`), which then reads "UNKNOWN".
         s.run(&format!("{obj}:SetJustifyH('TOP')")).unwrap();
         s.run(&format!("{obj}:SetJustifyV('LEFT')")).unwrap();
+        assert_eq!(
+            s.eval::<String>(&format!(
+                "return {obj}:GetJustifyH() .. ' ' .. {obj}:GetJustifyV()"
+            ))
+            .unwrap(),
+            "UNKNOWN UNKNOWN",
+            "{obj}"
+        );
     }
+}
+
+/// `SetJustifyH 0x79fc20` with the other axis's token zeroes the axis, clears the font's own bit
+/// and pushes (`0x79fc7c`, `0x79fc84`): a following string reads the cleared axis, and an inheriting
+/// font that did it no longer follows its parent's justify.
+#[test]
+fn a_fonts_cross_axis_justify_clears_the_axis_and_pushes() {
+    let s = script();
+    s.run(
+        "F = CreateFont('CrossAxisF') F:SetFont('Fonts\\FRIZQT__.TTF', 12) F:SetJustifyH('LEFT')
+         host = CreateFrame('Frame') fs = host:CreateFontString() fs:SetFontObject(F)
+         A = CreateFont('CrossAxisA') B = CreateFont('CrossAxisB') B:SetFontObject(A)
+         B:SetJustifyH('TOP') A:SetJustifyH('RIGHT')
+         F:SetJustifyH('TOP')",
+    )
+    .unwrap();
+    let got = |e: &str| s.eval::<String>(&format!("return {e}")).unwrap();
+    assert_eq!(got("F:GetJustifyH()"), "UNKNOWN");
+    assert_eq!(got("fs:GetJustifyH()"), "UNKNOWN", "pushed to the string");
+    assert_eq!(got("B:GetJustifyH()"), "UNKNOWN", "B no longer follows A");
 }
 
 /// `SetFont` is one routine (`0x79f210`) behind three entries, Font `0x7a0270`, FontString
@@ -1235,4 +1263,50 @@ fn set_font_reads_and_clears_monochrome() {
     s.resolve();
     assert_eq!(flags_of(&s, "a"), (Outline::Normal, false));
     assert_eq!(flags_of(&s, "b"), (Outline::Normal, true));
+}
+
+/// `CSimpleFont`'s constructor zeroes the shadow colour (`0x783a72`): a `CreateFont` font, an
+/// EditBox's and a message frame's read transparent black, and `SetShadowOffset` keeps it, so a
+/// following string takes an invisible shadow. Only a FontString's own default is opaque
+/// (`0x770da1`).
+#[test]
+fn a_fonts_unset_shadow_is_transparent() {
+    let s = script();
+    s.run(
+        "F = CreateFont('UnsetShadowF')
+         host = CreateFrame('Frame') fs = host:CreateFontString() plain = host:CreateFontString()
+         eb = CreateFrame('EditBox') mf = CreateFrame('MessageFrame')
+         smf = CreateFrame('ScrollingMessageFrame') html = CreateFrame('SimpleHTML')",
+    )
+    .unwrap();
+    let alpha = |obj: &str| {
+        s.eval::<Vec<f32>>(&format!("return {{ {obj}:GetShadowColor() }}"))
+            .unwrap()
+    };
+    for obj in ["F", "eb", "mf", "smf", "html"] {
+        assert_eq!(alpha(obj), vec![0.0, 0.0, 0.0, 0.0], "{obj}");
+    }
+    // SimpleHTML's four element fonts come from the same constructor (`0x789e7c`), and
+    // `SetShadowOffset` keeps their colour.
+    s.run("html:SetShadowOffset('H1', 1, -1)").unwrap();
+    for elem in ["P", "H1", "H2", "H3"] {
+        let c = s
+            .eval::<Vec<f32>>(&format!("return {{ html:GetShadowColor('{elem}') }}"))
+            .unwrap();
+        assert_eq!(c, vec![0.0, 0.0, 0.0, 0.0], "SimpleHTML {elem}");
+    }
+    assert_eq!(
+        alpha("plain")[3],
+        crate::color::quant::read32(1.0),
+        "a FontString's own shadow"
+    );
+    s.run("F:SetShadowOffset(1, -1) fs:SetFontObject(F) eb:SetShadowOffset(1, -1)")
+        .unwrap();
+    assert_eq!(alpha("F"), vec![0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(
+        alpha("fs"),
+        vec![0.0, 0.0, 0.0, 0.0],
+        "the follower's shadow"
+    );
+    assert_eq!(alpha("eb"), vec![0.0, 0.0, 0.0, 0.0]);
 }
