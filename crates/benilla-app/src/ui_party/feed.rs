@@ -131,6 +131,8 @@ pub(crate) fn feed_party(
     mut removed_stores: RemovedComponents<ObjectStore>,
     self_q: Query<(Entity, &Guid, &ObjectStore), With<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
+    // Our standings, which a member's `CanAssist` reaction reads.
+    reputations: Option<Res<crate::net::Reputations>>,
     names: pets::Names,
     areas: Option<Res<crate::area::AreaTableRes>>,
     // The area under us, through the accessor `crate::area` uses: `terrain_stream::CurrentArea`
@@ -179,7 +181,8 @@ pub(crate) fn feed_party(
             &changed_stores,
         );
     let stores_removed = !removed_stores.is_empty();
-    let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
+    let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed())
+        || reputations.as_ref().is_some_and(|r| r.is_changed());
     let areas_changed = areas.as_ref().is_some_and(|r| r.is_changed());
     let maps_changed = map_catalog.as_ref().is_some_and(|r| r.is_changed());
     gate::trace(
@@ -219,6 +222,20 @@ pub(crate) fn feed_party(
     // member has no descriptor to read one from.
     let own_group = self_pair
         .and_then(|(_, _, store)| crate::ui_unit::faction_group(store, factions.as_deref()));
+    let no_reputations = crate::net::Reputations::default();
+    let by_guid = |guid: u64| {
+        index
+            .0
+            .get(&guid)
+            .and_then(|e| stores.get(*e).ok())
+            .cloned()
+    };
+    let relations = MemberRelations {
+        factions: factions.as_deref(),
+        reputations: reputations.as_deref().unwrap_or(&no_reputations),
+        self_store: self_pair.map(|(_, _, store)| store),
+        by_guid: &by_guid,
+    };
 
     let slots: Vec<&GroupMemberEntry> = group.party_slots().collect();
 
@@ -314,15 +331,18 @@ pub(crate) fn feed_party(
     for (i, token) in PARTY_TOKENS.iter().enumerate() {
         let member = slots.get(i);
         let snap = member.map(|m| {
-            member_unit_state(
+            let store = index.0.get(&m.guid).and_then(|e| stores.get(*e).ok());
+            let mut s = member_unit_state(
                 m,
                 group.stats.get(&m.guid),
-                index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()),
+                store,
                 &group,
                 own_group.clone(),
                 chr,
                 types,
-            )
+            );
+            relations.apply(&mut s, store);
+            s
         });
         if fed.units[i] != snap {
             gate.audit("feed_party", "a party-token snapshot");
@@ -383,15 +403,18 @@ pub(crate) fn feed_party(
                 Some(s)
             } else {
                 let m = group.members.iter().find(|m| m.guid == *guid)?;
-                Some(member_unit_state(
+                let store = index.0.get(guid).and_then(|e| stores.get(*e).ok());
+                let mut s = member_unit_state(
                     m,
                     group.stats.get(guid),
-                    index.0.get(guid).and_then(|e| stores.get(*e).ok()),
+                    store,
                     &group,
                     own_group.clone(),
                     chr,
                     types,
-                ))
+                );
+                relations.apply(&mut s, store);
+                Some(s)
             }
         });
         if fed.raid_units[i] != snap {
@@ -721,6 +744,50 @@ fn raid_roster(
         ));
     }
     roster
+}
+
+/// What a member's snapshot reads to answer `UnitCanAssist` and `UnitCanAttack`.
+struct MemberRelations<'a> {
+    factions: Option<&'a crate::target::Factions>,
+    reputations: &'a crate::net::Reputations,
+    /// Our own descriptor.
+    self_store: Option<&'a ObjectStore>,
+    /// The object manager's lookup by guid (`0x468460`), which `CanAssist`'s owner leg reads.
+    by_guid: &'a dyn Fn(u64) -> Option<ObjectStore>,
+}
+
+impl MemberRelations<'_> {
+    /// The relations of a member held in the object manager, as any held unit's snapshot carries
+    /// them (`ui_unit::held`): `UnitCanAssist` resolves `partyN` to its guid and asks that
+    /// object (`CanAssist`, `0x6066f0`), so a party frame's unit answers as the same player under
+    /// `mouseover` does. An unstreamed member has no object, and answers false to both.
+    fn apply(&self, s: &mut UnitState, store: Option<&ObjectStore>) {
+        let Some(store) = store else {
+            return;
+        };
+        s.can_attack = crate::target::can_attack(
+            Some(store),
+            self.factions,
+            self.reputations,
+            self.self_store,
+        );
+        for (roles, out) in [
+            (crate::target::Assist::PlayerToUnit, &mut s.can_assist),
+            (
+                crate::target::Assist::UnitToPlayer,
+                &mut s.can_assist_player,
+            ),
+        ] {
+            *out = crate::target::can_assist(
+                Some(store),
+                self.factions,
+                self.reputations,
+                self.self_store,
+                self.by_guid,
+                roles,
+            );
+        }
+    }
 }
 
 /// One member's merged-view unit snapshot (see [`feed_party`]).
@@ -2327,5 +2394,46 @@ mod tests {
             None
         ));
         assert_eq!(group.members.len(), n - 1);
+    }
+
+    /// A held member answers `UnitCanAssist` off its descriptor, as the same player under
+    /// `mouseover` does, so a `[@mouseover,help,nodead]` macro over its party frame, which takes
+    /// the frame's `partyN`, holds; an unstreamed member has no object and is not assistable.
+    #[test]
+    fn a_held_member_is_assistable_through_its_party_token() {
+        let mut app = app();
+        app.insert_resource(crate::spell::targeting::corpse_fixture::factions());
+        // Field 35 the faction template (Human), 46 the flags (player-controlled).
+        let human_player = [(35, 1), (46, 0x8)];
+        let me = stream(&mut app, ME, &human_player);
+        app.world_mut().entity_mut(me).insert(SelfPlayer);
+        party(&mut app, 2, true);
+        stream(&mut app, member(1), &human_player);
+        frame(&mut app);
+        let s = app.world_mut().non_send_mut::<UiScript>();
+        let assist = |token: &str| {
+            s.eval::<Option<i64>>(&format!(r#"return UnitCanAssist("player", "{token}")"#))
+                .unwrap()
+        };
+        assert_eq!(assist("party1"), Some(1), "held: its descriptor answers");
+        assert_eq!(assist("party2"), None, "unstreamed: no object to ask");
+
+        s.run(
+            r#"HOVER = CreateFrame("Button")
+               GetMouseFocus = function() return HOVER end"#,
+        )
+        .unwrap();
+        let parse = |unit: &str| {
+            s.run(&format!(r#"HOVER.unit = "{unit}""#)).unwrap();
+            s.eval::<(Option<String>, Option<String>)>(
+                r#"return SecureCmdOptionParse("[@mouseover,help,nodead] Flash Heal")"#,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            parse("party1"),
+            (Some("Flash Heal".into()), Some("party1".into()))
+        );
+        assert_eq!(parse("party2"), (None, None));
     }
 }
