@@ -291,25 +291,30 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut scale: ResMut<UiSca
 
 /// `/console reloadUI` (`0x4035f0`): a glue rebuild asked for whatever the state
 /// ([`glue::run_pending_glue_rebuild`] spends it), then the same deferred rebuild `ReloadUI()` and
-/// `/reload` queue, which the world alone honours.
+/// `/reload` queue, which the world alone honours. It prints nothing in any state: the handler
+/// sets the flag `[0xb41d8c]` and calls `CGGameUI::Reload` (`0x491380`), neither of which writes
+/// a line, so a run with no interface to reload is silent too.
 fn console_reload_ui(world: &mut World, _args: &str) -> Vec<String> {
     if let Some(mut rebuild) = world.get_resource_mut::<glue::GlueRebuild>() {
         rebuild.request();
     }
-    match world.get_non_send_mut::<UiScript>() {
-        Some(mut script) => {
-            script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi);
-            Vec::new()
-        }
-        None => vec!["reloadUI: no interface to reload".to_string()],
+    if let Some(mut script) = world.get_non_send_mut::<UiScript>() {
+        script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi);
     }
+    Vec::new()
 }
 
 impl Plugin for UiScriptPlugin {
     fn build(&self, app: &mut App) {
         use crate::console::ConsoleCommandApp;
         app.add_observer(on_cvar);
-        app.console_command("reloadUI", "Reload the interface.", console_reload_ui);
+        // Category 1 with no help (`0x402ba6`-`0x402bb4`).
+        app.console_command(
+            "reloadUI",
+            crate::console::GRAPHICS,
+            None,
+            console_reload_ui,
+        );
         // The quit root runs in `Last`: the close button's `AppExit` is written in `PostUpdate`.
         crate::shutdown::on_app_exit(app, shutdown_on_exit.into_configs());
         app.insert_resource(UiScaleCvar(default_ui_scale()))

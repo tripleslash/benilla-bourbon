@@ -183,6 +183,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // the session's realm when addons load. `Ace/AceState.lua:27` trims it at
     // PLAYER_ENTERING_WORLD, so a nil breaks every Ace addon.
     same("realmName", ""),
+    // `accountName` (`0x402bd2`, record `[0x8826c8]`): registered `""`, help "Saved account
+    // name", category 4. The login screen's remembered name: `GetSavedAccountName` (`0x46cdd0`)
+    // reads it and `SetSavedAccountName` (`0x46cdf0`) sets it.
+    same("accountName", ""),
     // The logon server address (register site `0x5ab6a6`), a string row judged by
     // `realmlist::on_cvar`.
     deviates(
@@ -817,7 +821,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `lodDist` (`0x688524`, "100.0", callback `0x688ab0` into `[0x867960]`): the view depth past
     // which a chunk drops to level 2 while `lod` is on. The knob is
     // `benilla_world::horizon::HorizonCulling::lod_dist`.
-    same("lodDist", "100.0"),
+    same("lodDist", "100.0").checked(benilla_ui::script::check_lod_dist),
     // `movieSubtitle` (`0x402c18`: name `0x82e9d8`, "0", flags 0, record `[0x882640]`), Cinematic
     // Subtitles: the pre-rendered movies' subtitles, read by the glue's `GetMovieSubtitles`
     // (`0x46dbc0`). No effect here: benilla plays no pre-rendered movie.
