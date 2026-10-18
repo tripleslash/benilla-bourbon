@@ -35,6 +35,11 @@ pub(crate) struct UnitFeed;
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct WorldEnterSeats;
 
+/// `feed_units`' pushes of the token snapshots, which an event fired after them reads: the party
+/// feed's `RAID_TARGET_UPDATE`, whose TargetFrame handler asks `GetRaidTargetIndex("target")`.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct UnitSnapshots;
+
 /// One `UNIT_COMBAT` over a unit, the portrait hit indicator's feed. The emitter `0x494600` fires
 /// `(token, action, descriptor, amount, type)` once per token naming the unit, with no
 /// self-suppression and no CVar gate; `type` is the school on the melee and spell-damage paths, 0
@@ -142,6 +147,7 @@ impl Plugin for UiUnitPlugin {
                 // seats the world-enter cascade's handlers read.
                 feed_units
                     .in_set(field_events::FieldEventPushes)
+                    .in_set(UnitSnapshots)
                     .after(WorldEnterSeats),
                 // After the same feed, whose guids it covers.
                 held::feed_chain_units.after(crate::ui_aura::AuraEvents),

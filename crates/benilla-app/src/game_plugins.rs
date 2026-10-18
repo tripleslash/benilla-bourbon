@@ -1449,6 +1449,50 @@ pub(crate) mod schedule_tests {
         assert!(seen.contains(&vm), "the VM is built after the glyph cache");
     }
 
+    /// The party feed fires `RAID_TARGET_UPDATE` after the unit feed has pushed this frame's
+    /// snapshots: TargetFrame answers it with `GetRaidTargetIndex("target")`, which reads the
+    /// target snapshot's `raid_target`, so a party feed that ran first left a new mark off the
+    /// target frame until the target changed. Read off the declared graph.
+    #[test]
+    fn the_party_feed_runs_after_the_unit_snapshots() {
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let one = |suffix: &str| -> SystemKey {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+        }
+        let (units, party) = (
+            one("::ui_unit::feed_units"),
+            one("::ui_party::feed::feed_party"),
+        );
+        let mut seen = HashSet::new();
+        let mut stack = vec![units];
+        while let Some(n) = stack.pop() {
+            for m in succ.get(&n).into_iter().flatten() {
+                if seen.insert(*m) {
+                    stack.push(*m);
+                }
+            }
+        }
+        assert!(
+            seen.contains(&party),
+            "feed_party runs after feed_units, whose snapshots RAID_TARGET_UPDATE's handler reads"
+        );
+    }
+
     /// The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick must
     /// see rides `UiFeed`, chained after the net drain and before the tick; a drain of what it
     /// produced is `.after(UiInput)`. Read off the built graph. Fails a holder with no path to or
