@@ -46,10 +46,10 @@ pub(super) const REG_SIMPLEHTML_METHODS: &str = "__benilla_simplehtml_methods";
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ElementFont {
     /// `inherits=` or `SetFontObject`: the object this element resolves through.
-    pub(crate) font_object: Option<String>,
-    /// What this element set itself, the region's severance mask (`FONTINSTANCE+0x038`), which a
-    /// block inherits.
-    pub(crate) explicit: super::FontExplicit,
+    pub(crate) font_object: Option<super::font::FontId>,
+    /// The groups this element still takes from its font object, its inherit mask
+    /// (`FONTINSTANCE+0x2c`), which a block inherits.
+    pub(crate) mask: super::FontMask,
     /// `+0x3c`, empty at the ctor: the path `0x78ae30` tests for the fallback to `P`.
     pub(crate) font_path: Option<String>,
     /// `FieldBlock` height.
@@ -93,8 +93,8 @@ impl Default for SimpleHtmlState {
 /// property groups at once (`0x770d06`), with the element's own sets on top.
 #[derive(Clone, Debug, Default)]
 struct BlockPaint {
-    font_object: Option<String>,
-    explicit: super::FontExplicit,
+    font_object: Option<super::font::FontId>,
+    mask: super::FontMask,
     font_path: Option<String>,
     font_height: Option<f32>,
     outline: Outline,
@@ -106,14 +106,10 @@ struct BlockPaint {
 
 /// Flatten one element font against the (live) font object it inherits.
 fn resolve_font(model: &Model, ef: &ElementFont) -> BlockPaint {
-    let fo: Option<FontObject> = ef
-        .font_object
-        .as_deref()
-        .and_then(|n| model.font_object(n))
-        .cloned();
+    let fo: Option<FontObject> = ef.font_object.map(|id| model.fonts.get(id).block.clone());
     let mut p = BlockPaint {
-        font_object: ef.font_object.clone(),
-        explicit: ef.explicit,
+        font_object: ef.font_object,
+        mask: ef.mask,
         justify: Justify::default(),
         spacing: ef.spacing,
         ..BlockPaint::default()
@@ -124,39 +120,32 @@ fn resolve_font(model: &Model, ef: &ElementFont) -> BlockPaint {
         p.outline = fo.outline;
         p.color = fo.color;
         p.shadow = fo.shadow;
-        if let Some(j) = fo.justify_h {
-            p.justify.set_h(j);
-        }
-        if let Some(j) = fo.justify_v {
-            p.justify.set_v(j);
+        if let Some(j) = fo.justify {
+            p.justify = j;
         }
         if let Some(sp) = fo.spacing {
             p.spacing = sp;
         }
     }
-    if ef.explicit.spacing {
+    // A group the element set itself is its own, whole: the face, height and flags together, and
+    // the justify word with both axes (`0x79fc7c`, `0x79fd3c` clear the one bit).
+    use super::FontMask as G;
+    if !ef.mask.has(G::SPACING) {
         p.spacing = ef.spacing;
     }
-    if ef.explicit.face {
+    if !ef.mask.has(G::FONT) {
         p.font_path = ef.font_path.clone();
-    }
-    if ef.explicit.height {
         p.font_height = ef.font_height;
-    }
-    if ef.explicit.outline {
         p.outline = ef.outline;
     }
-    if ef.explicit.color {
+    if !ef.mask.has(G::COLOR) {
         p.color = ef.color;
     }
-    if ef.explicit.shadow {
+    if !ef.mask.has(G::SHADOW) {
         p.shadow = ef.shadow;
     }
-    if ef.explicit.justify_h {
-        p.justify.0 = justify::set_axis(p.justify.0, justify::H_MASK, ef.justify.0);
-    }
-    if ef.explicit.justify_v {
-        p.justify.0 = justify::set_axis(p.justify.0, justify::V_MASK, ef.justify.0);
+    if !ef.mask.has(G::JUSTIFY) {
+        p.justify = ef.justify;
     }
     p
 }
@@ -251,8 +240,7 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                     // trip, as the client's font engine gives it (`0x7729b0`, `0x5c2070`).
                     size: Some((width, 0.0)),
                     text: Some(text),
-                    font_object: paint.font_object.clone(),
-                    font_explicit: paint.explicit,
+                    font_mask: paint.mask,
                     font_path: paint.font_path.clone(),
                     font_height: paint.font_height,
                     outline: paint.outline,
@@ -264,11 +252,14 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                 // The tag's `align` is written after `SetFontObject` (`0x78ae78`), so it beats
                 // the font's justifyH; justifyV stays the font's, inert in a rect its text fills.
                 d.justify = Justify(justify::set_axis(paint.justify.0, justify::H_MASK, *align));
-                // Neither axis is inherited again (`0x78ae68`, `0x78ae95` clear the inherit bits),
-                // so a later font-object change never re-justifies a built block.
-                d.font_explicit.justify_h = true;
-                d.font_explicit.justify_v = true;
+                // Neither axis is inherited again: `0x78ae68` clears the horizontal bits of the
+                // per-bit mask and `0x78ae95` the group bit, so a later font-object change never
+                // re-justifies a built block.
+                d.justify_mask.0 &= !justify::H_MASK;
+                d.font_mask.clear(super::FontMask::JUSTIFY);
                 model.region_data.insert(rh, d);
+                // It follows the element's font object, which re-lands only what it inherits.
+                super::font::link_region(model, rh, paint.font_object);
                 model.touch_measure(rh); // a text block arrives with its text
                 prev_block = Some(id);
                 // The block FontString's field, which its setter clamped (`0x78aeaf`).
@@ -376,17 +367,22 @@ pub(crate) fn apply_element_font_parts(
     let fh = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model");
     let ef = &mut model.simple_html.entry(fh).or_default().fonts[elem];
+    let mut any = false;
     if let Some(p) = path.filter(|p| !p.is_empty()) {
         ef.font_path = Some(p);
-        ef.explicit.face = true;
+        any = true;
     }
     if let Some(h) = height {
         ef.font_height = Some(h);
-        ef.explicit.height = true;
+        any = true;
     }
     if let Some(f) = flags {
         ef.outline = Outline::parse(&f);
-        ef.explicit.outline = true;
+        any = true;
+    }
+    // A loaded file clears the font bit (`0x783ea9`).
+    if any {
+        ef.mask.clear(super::FontMask::FONT);
     }
     Ok(())
 }
@@ -479,15 +475,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetFontObject",
         lua.create_function(|lua, (this, mut rest): (Table, MultiValue)| {
             let elem = take_element(&mut rest);
-            let name = super::font::resolve("SetFontObject", &arg(&rest, 0))?;
-            if let Some(n) = &name {
-                let model = lua.app_data_ref::<Model>().expect("model");
-                if model.font_object(n).is_none() {
-                    return Err(mlua::Error::runtime(format!(
-                        "SetFontObject: no font object named '{n}' is registered"
-                    )));
-                }
-            }
+            let who = super::font::c_name(lua, &this);
+            let name =
+                super::font::font_arg(lua, &who, super::font::Verb::SetFontObject, rest.front())?;
             // nil severs the link and keeps the paint, as the reference stores a null parent; an
             // element font resolves its object lazily, so the standing paint is pinned here.
             let standing = name
@@ -503,18 +493,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     ef.shadow = p.shadow;
                     ef.justify = p.justify;
                     ef.spacing = p.spacing;
-                    ef.explicit = super::FontExplicit {
-                        face: ef.font_path.is_some(),
-                        height: ef.font_height.is_some(),
-                        outline: true,
-                        color: ef.color.is_some(),
-                        shadow: ef.shadow.is_some(),
-                        justify_h: true,
-                        justify_v: true,
-                        spacing: true,
-                    };
+                    use super::FontMask as G;
+                    let mut mask = G::ALL;
+                    mask.clear(G::JUSTIFY | G::SPACING);
+                    if ef.font_path.is_some() || ef.font_height.is_some() {
+                        mask.clear(G::FONT);
+                    }
+                    if ef.color.is_some() {
+                        mask.clear(G::COLOR);
+                    }
+                    if ef.shadow.is_some() {
+                        mask.clear(G::SHADOW);
+                    }
+                    ef.mask = mask;
                 }
-                // A re-point keeps the severance mask, as on a region: each local setter clears
+                // A re-point keeps the inherit mask, as on a region: each local setter clears
                 // its bit of the inherit mask (`FONTINSTANCE+0x2c`) for good.
                 ef.font_object = name;
             })
@@ -525,16 +518,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (this, mut rest): (Table, MultiValue)| {
             let elem = take_element(&mut rest);
             let h = html_handle(lua, &this)?;
-            let name = {
+            let id = {
                 let model = lua.app_data_ref::<Model>().expect("model");
                 model
                     .simple_html
                     .get(&h)
-                    .and_then(|s| s.fonts[elem].font_object.clone())
-                    .filter(|n| model.font_object(n).is_some())
+                    .and_then(|s| s.fonts[elem].font_object)
             };
-            match name {
-                Some(n) => Ok(Value::Table(super::font::wrapper(lua, &n)?)),
+            match id {
+                Some(id) => Ok(Value::Table(super::font::wrapper(lua, id)?)),
                 None => Ok(Value::Nil),
             }
         })?,
@@ -565,11 +557,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             edit_font(lua, &this, elem, |ef| {
                 ef.font_path = Some(path);
-                ef.explicit.face = true;
                 ef.outline = flags;
-                ef.explicit.outline = true;
                 ef.font_height = Some(height);
-                ef.explicit.height = true;
+                ef.mask.clear(super::FontMask::FONT);
             })?;
             Ok(Value::Number(1.0))
         })?,
@@ -596,7 +586,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let c = rgba(lua, &rest)?;
             edit_font(lua, &this, elem, |ef| {
                 ef.color = Some(c);
-                ef.explicit.color = true;
+                ef.mask.clear(super::FontMask::COLOR);
             })
         })?,
     )?;
@@ -622,7 +612,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             edit_font(lua, &this, elem, |ef| {
                 let offset = ef.shadow.map_or([0.0, 0.0], |s| s.offset);
                 ef.shadow = Some(FontShadow { offset, color: c });
-                ef.explicit.shadow = true;
+                ef.mask.clear(super::FontMask::SHADOW);
             })
         })?,
     )?;
@@ -649,7 +639,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     offset: [x, y],
                     color,
                 });
-                ef.explicit.shadow = true;
+                ef.mask.clear(super::FontMask::SHADOW);
             })
         })?,
     )?;
@@ -675,7 +665,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let n = super::font_block::spacing_arg(lua, &this, &arg(&rest, 0))?;
             edit_font(lua, &this, elem, |ef| {
                 ef.spacing = n;
-                ef.explicit.spacing = true;
+                ef.mask.clear(super::FontMask::SPACING);
             })
         })?,
     )?;
@@ -699,7 +689,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let bits = justify::parse_bits(&s).ok_or_else(|| justify::usage_h("SimpleHTML"))?;
             edit_font(lua, &this, elem, |ef| {
                 ef.justify.0 = justify::set_axis(ef.justify.0, justify::H_MASK, bits);
-                ef.explicit.justify_h = true;
+                ef.mask.clear(super::FontMask::JUSTIFY);
             })
         })?,
     )?;
@@ -719,7 +709,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let bits = justify::parse_bits(&s).ok_or_else(|| justify::usage_v("SimpleHTML"))?;
             edit_font(lua, &this, elem, |ef| {
                 ef.justify.0 = justify::set_axis(ef.justify.0, justify::V_MASK, bits);
-                ef.explicit.justify_v = true;
+                ef.mask.clear(super::FontMask::JUSTIFY);
             })
         })?,
     )?;

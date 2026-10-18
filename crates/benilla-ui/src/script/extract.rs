@@ -6,9 +6,7 @@ use crate::order::{self, ZTarget};
 use crate::widget::FrameHandle;
 
 use super::clip::DrawClips;
-use super::{
-    colorselect, layer_batch, slider, ExtractedQuad, FontObject, QuadContent, TexCoords, UiScript,
-};
+use super::{colorselect, layer_batch, slider, ExtractedQuad, QuadContent, TexCoords, UiScript};
 
 impl UiScript {
     /// Every live draw target, visible or not: each frame's slot then its regions, in arena order.
@@ -201,12 +199,10 @@ impl UiScript {
                             });
                         }
                     }
-                    // A Button's state textures draw by their shown bit like any region, and its ButtonText takes
-                    // the current state's font instance (disabled > highlighted > normal).
-                    let mut state_font: Option<&FontObject> = None;
-                    let mut state_color: Option<[f32; 4]> = None;
-                    let mut state_justify: Option<super::JustifyH> = None;
-                    let mut button_font: Option<&crate::widget::ButtonFont> = None;
+                    // A Button's state textures draw by their shown bit like any region. Its
+                    // label paints from its own fields, which the state's embedded font pushed
+                    // (`script::button`), so the draw and the measure read one font; only the
+                    // pushed text offset is the button's.
                     let mut label_offset = [0.0f32; 2];
                     if let Some(crate::widget::KindState::Button(bs)) =
                         owner_frame.map(|f| &f.kind_state)
@@ -218,38 +214,6 @@ impl UiScript {
                             continue;
                         }
                         if bs.text == Some(rh) {
-                            // The label takes one embedded font instance whole (normal `+0x33c`,
-                            // highlight `+0x3b8`, disabled `+0x434`), so font and colour pair up;
-                            // a state lacking a font object stays on normal (inferred, not traced).
-                            // A locked highlight counts: the trade-skill list blanks the highlight
-                            // texture and locks the selected row (`Blizzard_TradeSkillUI.lua:133`,
-                            // `:144`), so this swap is its white text.
-                            let highlighted = hovered || bs.locked_highlight;
-                            let (name, color, justify) = if !bs.enabled()
-                                && bs.disabled_font.is_some()
-                            {
-                                (
-                                    bs.disabled_font.as_ref(),
-                                    bs.disabled_color,
-                                    bs.disabled_justify_h,
-                                )
-                            } else if bs.enabled() && highlighted && bs.highlight_font.is_some() {
-                                (
-                                    bs.highlight_font.as_ref(),
-                                    bs.highlight_color,
-                                    bs.highlight_justify_h,
-                                )
-                            } else {
-                                (
-                                    bs.normal_font.as_ref(),
-                                    bs.normal_color,
-                                    bs.normal_justify_h,
-                                )
-                            };
-                            state_font = name.and_then(|n| model.font_object(n));
-                            button_font = bs.font.as_ref();
-                            state_color = color;
-                            state_justify = justify;
                             label_offset = bs.label_offset();
                         }
                     }
@@ -276,59 +240,6 @@ impl UiScript {
                     // `effective_alpha`, which `SetAlpha 0x76a690` already carries down the tree.
                     let alpha = owner_frame.map(|f| f.effective_alpha).unwrap_or(1.0)
                         * data.alpha.unwrap_or(1.0);
-                    if let Some(fo) = state_font {
-                        // The font object's paint, behind the severance mask (`font_explicit`) on
-                        // every axis as in `font::repaint`: an axis the label set itself stays.
-                        if !data.font_explicit.face {
-                            data.font_path = fo.font.clone().or(data.font_path);
-                        }
-                        if !data.font_explicit.height {
-                            data.font_height = fo.height.or(data.font_height);
-                        }
-                        if !data.font_explicit.shadow {
-                            data.font_shadow = fo.shadow.or(data.font_shadow);
-                        }
-                        if !data.font_explicit.outline {
-                            data.outline = fo.outline;
-                            data.monochrome = fo.monochrome;
-                        }
-                        // The mask, not `vertex_color.is_none()`: a label linked to its font object
-                        // already carries the normal object's colour.
-                        if !data.font_explicit.color {
-                            data.vertex_color = fo.color.or(data.vertex_color);
-                        }
-                        // The instance's own `justifyH`, else the object's; a hover or disable
-                        // swaps it here, as the client re-links the label (`0x779810`).
-                        if !data.font_explicit.justify_h {
-                            if let Some(j) = state_justify.or(fo.justify_h) {
-                                data.justify.set_h(j);
-                            }
-                        }
-                        if !data.font_explicit.justify_v {
-                            if let Some(j) = fo.justify_v {
-                                data.justify.set_v(j);
-                            }
-                        }
-                    }
-                    // `Button:SetFont` sits between: a local set on the embedded font outranks its
-                    // object (clearing the `inheritMask` bit, `CSimpleFontString+0xD4`, for good)
-                    // but loses to the label's own, so `font_explicit` gates it too.
-                    if let Some(bf) = button_font {
-                        if !data.font_explicit.face {
-                            data.font_path = Some(bf.path.clone());
-                        }
-                        if !data.font_explicit.height {
-                            data.font_height = Some(bf.height);
-                        }
-                        if !data.font_explicit.outline {
-                            data.outline = super::Outline::flags(&bf.flags);
-                            data.monochrome = bf.monochrome;
-                        }
-                    }
-                    // The state colour repaints the label outright, even over its own colour.
-                    if let Some(c) = state_color {
-                        data.vertex_color = Some(c);
-                    }
                     // A region draws at its resolved rect: drawable regions carry anchors
                     // (authored, or `region::implicit_creation_anchor`), so a region that never
                     // resolved draws nowhere, as in the reference. After a failed resolve
@@ -379,6 +290,7 @@ impl UiScript {
                         art
                     } else if is_text {
                         let spacing = data.line_gap();
+                        let text_height = data.text_height();
                         QuadContent::Text {
                             text: data.text,
                             color: data.vertex_color,
@@ -388,7 +300,7 @@ impl UiScript {
                             justify_v: data.justify.paint_v(),
                             font: data.font_path,
                             font_height: data.font_height,
-                            text_height: data.text_height,
+                            text_height,
                             shadow: data.font_shadow,
                             outline: data.outline,
                             monochrome: data.monochrome,

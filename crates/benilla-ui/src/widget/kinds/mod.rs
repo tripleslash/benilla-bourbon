@@ -814,18 +814,12 @@ pub struct ScrollFrameState {
     pub vertical: f32,
 }
 
-/// `Button:SetFont`'s record, one for the client's three embedded fonts (`+0x33c`, `+0x434`,
-/// `+0x3b8`), since `SetFont` (`0x780880`) sets all three alike and no Lua call parts them.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ButtonFont {
-    pub path: String,
-    /// The font height in logical px.
-    pub height: f32,
-    /// The normalized outline, `""`, `"OUTLINE"` or `"THICKOUTLINE"`, as `GetFont` answers it; an
-    /// omitted `flags` clears it, where the reference's handling is untraced.
-    pub flags: String,
-    /// The flags word's monochrome bit, written with the outline (`0x79f334`).
-    pub monochrome: bool,
+/// A Button's three embedded fonts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ButtonFonts {
+    pub(crate) normal: crate::script::font::FontId,
+    pub(crate) highlight: crate::script::font::FontId,
+    pub(crate) disabled: crate::script::font::FontId,
 }
 
 /// A button's state, `[CSimpleButton+0x328]`: 0 DISABLED, 1 NORMAL, 2 PUSHED, also the index into
@@ -890,28 +884,11 @@ pub struct ButtonState {
     pub text: Option<RegionHandle>,
     /// `RegisterForClicks`' names, the transitions that reach `OnClick`; default `"LeftButtonUp"`.
     pub registered_clicks: HashSet<String>,
-    /// The normal state's label font object (`<NormalFont>`); `None` keeps the label's own paint.
-    pub normal_font: Option<String>,
-    /// [`ButtonState::normal_font`] when highlighted; `None` keeps the normal one, colour and all.
-    pub highlight_font: Option<String>,
-    /// [`ButtonState::normal_font`] for the disabled state.
-    pub disabled_font: Option<String>,
-    /// `<NormalFont justifyH=>`, local to the normal font (`+0x33c`) and kept over
-    /// `SetTextFontObject`; `SetFontString` (`0x778d20`) anchors an unanchored label by it.
-    pub normal_justify_h: Option<crate::script::JustifyH>,
-    /// `<HighlightFont justifyH=>` (`+0x3b8`); paint only, the label anchor reads the normal one.
-    pub highlight_justify_h: Option<crate::script::JustifyH>,
-    /// `<DisabledFont justifyH=>` (`+0x434`); paint only.
-    pub disabled_justify_h: Option<crate::script::JustifyH>,
-    /// `Button:SetFont`'s face, kept on the button since `SetFont` never touches the label
-    /// (`+0x338`) and so creates none; extract applies it to whatever label there is.
-    pub font: Option<ButtonFont>,
-    /// `SetTextColor`'s label colour for the normal state, painted over the state font's own.
-    pub normal_color: Option<[f32; 4]>,
-    /// [`ButtonState::normal_color`] for the highlighted state, which never falls back to it.
-    pub highlight_color: Option<[f32; 4]>,
-    /// [`ButtonState::normal_color`] for the disabled state.
-    pub disabled_color: Option<[f32; 4]>,
+    /// The three embedded fonts the label follows by state (`0x779810`), normal `+0x33c`,
+    /// highlight `+0x3b8` and disabled `+0x434`, made on first use (`script::button::fonts`).
+    /// Each is a real font: `<NormalFont>` and kin load into it, `Set*FontObject` link it,
+    /// `SetFont` and `Set*TextColor` write it and push to the label.
+    pub(crate) fonts: Option<ButtonFonts>,
     /// `LockHighlight()`: highlighted regardless of hover, both the texture and the label font.
     pub locked_highlight: bool,
     /// `<PushedTextOffset>`/`SetPushedTextOffset` (`+0x4b0`/`+0x4b4`), x and y in layout units;
@@ -921,6 +898,8 @@ pub struct ButtonState {
     /// The label's text offset (`CSimpleFontString::SetTextOffset` `0x772100`, `+0x110`/`+0x114`)
     /// in layout units: it moves the drawn text, never the label's rect.
     label_offset: [f32; 2],
+    /// A real state change happened since the label last relinked ([`Self::take_relink`]).
+    relink_due: bool,
     /// The shown state texture (`+0x4c4`), written only by `set_state` and `set_state_slot`.
     shown: Option<RegionHandle>,
     /// The state (`+0x328`), a latch moved only by edges: the enter and leave notifies
@@ -943,19 +922,11 @@ impl Default for ButtonState {
             disabled_checked: None,
             text: None,
             registered_clicks: HashSet::from(["LeftButtonUp".to_string()]),
-            normal_font: None,
-            highlight_font: None,
-            disabled_font: None,
-            normal_justify_h: None,
-            highlight_justify_h: None,
-            disabled_justify_h: None,
-            font: None,
-            normal_color: None,
-            highlight_color: None,
-            disabled_color: None,
+            fonts: None,
             locked_highlight: false,
             pushed_text_offset: [f32::from_bits(0x3a83_126f), f32::from_bits(0xba83_126f)],
             label_offset: [0.0, 0.0],
+            relink_due: false,
             shown: None,
             state: ButtonVisualState::Normal,
         }
@@ -988,9 +959,17 @@ impl ButtonState {
             self.shown = Some(slot);
             w.show(Some(slot));
         }
-        // The label refresh closes every real change (`0x7797fc`).
+        // The label refresh closes every real change (`0x7797fc`); its font half is the model's.
         self.refresh_label();
+        self.relink_due = true;
         w
+    }
+
+    /// Whether a real state change since the last call owes the label its font relink, the half
+    /// of the refresh (`0x779878`) that needs the model; an unchanged state returns before it
+    /// (`0x7797a9`).
+    pub(crate) fn take_relink(&mut self) -> bool {
+        std::mem::take(&mut self.relink_due)
     }
 
     /// The label refresh's offset half (`0x779810`): PUSHED puts the pushed text offset on the

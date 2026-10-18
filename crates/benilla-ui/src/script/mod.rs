@@ -277,7 +277,7 @@ pub use tabard::{
 pub use video_pairs::VIDEO_PAIR_CVARS;
 pub use worldmap_arrow::ARROW_MODEL;
 
-pub(crate) use button::{set_label_font_justify_h_lua, LabelFont};
+pub(crate) use button::{refresh_label_lua, state_font_lua, LabelFont};
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
@@ -334,7 +334,7 @@ pub use trainer::{
     TrainerAbilityReq, TrainerGroup, TrainerService, TrainerServiceCategory, TrainerSkillReq,
     TrainerState, TrainerTooltip, TRAINER_GROUP_KNOWN,
 };
-pub(crate) use types::{monochrome_flag, FontExplicit, MeasuredText, RegionData};
+pub(crate) use types::{monochrome_flag, FontMask, MeasuredText, RegionData};
 pub use types::{
     BlendMode, EditAction, EditBoxAdvanceRequest, EditBoxTextUi, EditOutcome, EditUnit,
     ExtractedQuad, FontObject, FontShadow, Gradient, JustifyH, JustifyV, LineMeasureRequest,
@@ -1479,14 +1479,17 @@ impl UiScript {
         }
     }
 
-    /// Register a named [`FontObject`] (a resolved `<Font>`), replacing any of that name, and
-    /// publish it as the Lua global `name`, the same pair `Loader::do_font` performs.
+    /// Register a named [`FontObject`] (a resolved `<Font>`), its block replaced by `font` and the
+    /// change pushed to what follows it, and publish it as the Lua global `name`.
     pub fn register_font_object(&self, name: &str, font: FontObject) {
-        self.model_mut()
-            .font_objects_by_lower
-            .insert(name.to_ascii_lowercase(), font);
+        let id = {
+            let mut model = self.model_mut();
+            let id = model.fonts.named(name);
+            font::replace_block(&mut model, id, font);
+            id
+        };
         // Publishing a fresh table under a string key cannot fail; the record is in place anyway.
-        let _ = font::publish(&self.lua, name);
+        let _ = font::publish(&self.lua, id, name);
     }
 
     /// A registered [`FontObject`] by name: its resolved paint.

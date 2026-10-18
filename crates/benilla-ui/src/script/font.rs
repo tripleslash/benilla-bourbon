@@ -6,285 +6,507 @@
 //! All are here; `CopyFontObject` is the one a FontString lacks. A named font is published by `0x783870` through `SetName 0x784150` and `CreateLuaHandle
 //! 0x701bd0`, which leaves a non-nil `_G[name]` alone (`0x701cb8`).
 //!
-//! A setter repaints every FontString that inherits the font. The reference links dependents into
-//! the font's list (`+0x74`/`+0x78`) and each setter ends in `NotifyDependents 0x784180`, calling
-//! `OnFontChanged` (`0x77e4b0` on a font, `0x773530` then `0x770800` on a FontString); here each
-//! setter writes the [`FontObject`] and calls [`propagate`]. A local setter clears its property's
-//! bit in the dependent's inherit mask (`+0x2c`, FontString `+0xd4`) and nothing restores it, so a
-//! colour set on a FontString survives a later `SetFontObject`: [`RegionData::font_explicit`] is
-//! that mask. `+0x38` is not it; its high bits mark a held value, which the inheriting merge also
-//! sets (`0x7709d3`).
-//!
-//! A `<Font inherits=…>` chain is flattened at load (`Loader::do_font`) and kept linked
-//! ([`FontLink`]): a setter on a parent re-derives each font that inherits it ([`cascade`]), as the
-//! reference links them live (`LoadXML 0x783c30` calls the `SetFontObject` link `0x770c60` for
-//! `inherits=`, `0x783ce6`). pfUI restyles the client by `GameFontNormal:SetFont`, which has to
-//! reach `GameFontHighlight` and every other font declared from it.
+//! The live link. Every font follows at most one font (`+0x28`) and keeps the list of what follows
+//! it, fonts and FontStrings alike (`+0x74`). Linking (`0x770c60`) applies every group the font
+//! holds; each setter writes its group, clears its own inherit bit (`+0x2c`) and pushes what
+//! changed down the list (`PushChanges 0x784180`), a font follower merging it into its own block
+//! (`0x77e4b0` → `0x770910`) and pushing on in turn, a FontString applying it (`0x773530` →
+//! `0x770800`). Both stop at a group the follower's mask has dropped ([`FontMask`]), so a colour
+//! set on a FontString survives every later push and `SetFontObject`. A push runs only from a
+//! setter or a link, never per frame.
+
+use std::collections::HashMap;
 
 use mlua::{Lua, Table, Value};
 
 use super::binding_abi;
 use super::object::publish_global;
 use crate::justify;
+use crate::widget::RegionHandle;
 
-use super::{FontObject, FontShadow, Model, RegionData};
+use super::{FontMask, FontObject, FontShadow, Model, RegionData};
 
 /// The shared metatable of every font-object handle.
 const REG_FONT_META: &str = "__benilla_font_meta";
 /// The font-object method table, which is the metatable's `__index`.
 const REG_FONT_METHODS: &str = "__benilla_font_methods";
-/// name → handle, so `GameFontNormal == GameFontNormal` and a re-declared `<Font>` keeps identity.
+/// font id → handle, so `GameFontNormal == GameFontNormal` and a re-declared `<Font>` keeps identity.
 const REG_FONT_WRAPPERS: &str = "__benilla_font_wrappers";
+
+// ── The registry ─────────────────────────────────────────────────────────────────────────────
+
+/// One `CSimpleFont`: a named object or a widget's own (a Button's three).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct FontId(u32);
+
+/// A font, its block and its two links.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FontNode {
+    /// The name it was declared under, as typed; `None` for a widget's own font.
+    pub(crate) name: Option<String>,
+    /// The block (`+0x38`): its own groups merged over what it follows.
+    pub(crate) block: FontObject,
+    /// The font it follows (`+0x28`).
+    pub(crate) parent: Option<FontId>,
+    /// The groups it still takes from [`Self::parent`] (`+0x2c`).
+    pub(crate) mask: FontMask,
+    /// The fonts that follow it.
+    font_followers: Vec<FontId>,
+    /// The FontStrings that follow it: each region whose [`RegionData::font_object`] is this font.
+    region_followers: Vec<RegionHandle>,
+}
+
+/// Every font, by id, and the named ones by their case-folded name: the font hash `0x783870`
+/// hashes upper-cased (`SStrHashHT 0x64b3f0`) and compares with `SStrCmpI` (`0x7838c7`).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Fonts {
+    nodes: Vec<FontNode>,
+    by_lower: HashMap<String, FontId>,
+}
+
+impl Fonts {
+    /// The named font `name`, matched ignoring ASCII case.
+    pub(crate) fn id(&self, name: &str) -> Option<FontId> {
+        if name.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.by_lower.get(&name.to_ascii_lowercase()).copied()
+        } else {
+            self.by_lower.get(name).copied()
+        }
+    }
+
+    /// The named font `name`, made empty if none is (`0x783870` with its create flag); an
+    /// existing one is returned unchanged (`0x7839ab`).
+    pub(crate) fn named(&mut self, name: &str) -> FontId {
+        if let Some(id) = self.id(name) {
+            return id;
+        }
+        let id = self.push_node(Some(name.to_string()));
+        self.by_lower.insert(name.to_ascii_lowercase(), id);
+        id
+    }
+
+    /// A new unnamed font, a widget's own.
+    pub(crate) fn anonymous(&mut self) -> FontId {
+        self.push_node(None)
+    }
+
+    fn push_node(&mut self, name: Option<String>) -> FontId {
+        let id = FontId(u32::try_from(self.nodes.len()).expect("fewer than 2^32 fonts"));
+        self.nodes.push(FontNode {
+            name,
+            ..FontNode::default()
+        });
+        id
+    }
+
+    pub(crate) fn get(&self, id: FontId) -> &FontNode {
+        &self.nodes[id.0 as usize]
+    }
+
+    fn get_mut(&mut self, id: FontId) -> &mut FontNode {
+        &mut self.nodes[id.0 as usize]
+    }
+
+    /// The block of the named font `name`.
+    pub(crate) fn block_of(&self, name: &str) -> Option<&FontObject> {
+        self.id(name).map(|id| &self.get(id).block)
+    }
+
+    /// Drop `rh` from the follower list of `id`, as a dying FontString detaches (`0x773490`).
+    pub(crate) fn drop_region(&mut self, id: FontId, rh: RegionHandle) {
+        let list = &mut self.get_mut(id).region_followers;
+        if let Some(i) = list.iter().position(|&r| r == rh) {
+            list.swap_remove(i);
+        }
+    }
+}
 
 // ── The handle ───────────────────────────────────────────────────────────────────────────────
 
-/// Get or create the Lua handle for a named font object. Keyed by name, which every font has (an
-/// unnamed `<Font>` is dropped at parse), so a re-declared `<Font>` updates its record in place.
+/// Get or create the Lua handle of font `id`, the one table its every reader gets back.
 ///
-/// `T[0]` holds the name, not a frame id, so a font handle passed where a frame is wanted is
-/// rejected rather than decoded.
-pub(crate) fn wrapper(lua: &Lua, name: &str) -> mlua::Result<Table> {
+/// `T[0]` holds the font's id as an integer, never a light userdata, so a font handle passed
+/// where a frame is wanted is rejected rather than decoded.
+pub(crate) fn wrapper(lua: &Lua, id: FontId) -> mlua::Result<Table> {
     let wrappers: Table = lua.named_registry_value(REG_FONT_WRAPPERS)?;
-    if let Value::Table(t) = wrappers.get::<Value>(name)? {
+    if let Value::Table(t) = wrappers.raw_get::<Value>(i64::from(id.0))? {
         return Ok(t);
     }
     let t = lua.create_table()?;
-    t.raw_set(0, name)?;
+    t.raw_set(0, i64::from(id.0))?;
     let meta: Table = lua.named_registry_value(REG_FONT_META)?;
     t.set_metatable(Some(meta))?;
-    wrappers.set(name, t.clone())?;
+    wrappers.raw_set(i64::from(id.0), t.clone())?;
     Ok(t)
 }
 
-/// Publish the handle as `_G[name]`, leaving a non-nil global alone as [`publish_global`] does.
-pub(crate) fn publish(lua: &Lua, name: &str) -> mlua::Result<()> {
-    let t = wrapper(lua, name)?;
+/// Publish named font `id`'s handle as `_G[name]`, leaving a non-nil global alone as
+/// [`publish_global`] does.
+pub(crate) fn publish(lua: &Lua, id: FontId, name: &str) -> mlua::Result<()> {
+    let t = wrapper(lua, id)?;
     publish_global(lua, name, &t)
 }
 
-/// The name a font handle holds in `T[0]`.
-fn name_of(this: &Table) -> mlua::Result<String> {
-    match this.raw_get::<Value>(0)? {
-        Value::String(s) => Ok(s.to_str()?.to_string()),
-        _ => Err(mlua::Error::runtime(
-            "not a font object (missing T[0] name identity)",
-        )),
+/// The font a handle holds in `T[0]`; `None` for any other table.
+fn id_of_table(model: &Model, t: &Table) -> Option<FontId> {
+    match t.raw_get::<Value>(0).ok()? {
+        Value::Integer(i) => u32::try_from(i)
+            .ok()
+            .map(FontId)
+            .filter(|id| (id.0 as usize) < model.fonts.nodes.len()),
+        _ => None,
     }
 }
 
-/// A font argument as a registry name, `None` for nil: an object, a name or nil, the three forms of
-/// the reference's usage `SetFontObject(font or "font" or nil)` (`0x87c5cc`). Anything else
-/// raises, as the reference's `luaL_error 0x6f4940` does.
-pub(super) fn resolve(verb: &str, v: &Value) -> mlua::Result<Option<String>> {
-    match v {
-        Value::Nil => Ok(None),
-        Value::Table(t) => name_of(t).map(Some).map_err(|_| {
-            mlua::Error::runtime(format!(
-                "{verb}: the argument is a table but not a font object \
-                 (a frame or region cannot be a font)"
-            ))
-        }),
-        Value::String(s) => Ok(Some(s.to_str()?.to_string())),
-        other => Err(mlua::Error::runtime(format!(
-            "{verb}: expected a font object, a font name, or nil, got {}",
-            other.type_name()
-        ))),
+/// The font `this` is, for a Font method's receiver.
+fn id_of(lua: &Lua, this: &Table) -> mlua::Result<FontId> {
+    let model = lua.app_data_ref::<Model>().expect("model");
+    id_of_table(&model, this)
+        .ok_or_else(|| mlua::Error::runtime("not a font object (missing T[0] font identity)"))
+}
+
+/// The `%s` an object's error line names: its C-side name, never a Lua `GetName` an addon could
+/// override, or `<unnamed>` (`0x84c7f0`).
+pub(super) fn c_name(lua: &Lua, this: &Table) -> String {
+    let model = lua.app_data_ref::<Model>().expect("model");
+    let name = match this.raw_get::<Value>(0) {
+        Ok(Value::LightUserData(l)) => {
+            let id = l.0 as usize as u32;
+            if let Some(&h) = model.id_to_frame.get(&id) {
+                model.arena.frame(h).and_then(|f| f.name.clone())
+            } else if let Some(&rh) = model.id_to_region.get(&id) {
+                model.arena.region(rh).and_then(|r| r.name.clone())
+            } else {
+                None
+            }
+        }
+        Ok(Value::Integer(_)) => {
+            id_of_table(&model, this).and_then(|id| model.fonts.get(id).name.clone())
+        }
+        _ => None,
+    };
+    name.unwrap_or_else(|| "<unnamed>".to_string())
+}
+
+/// Which font verb an argument error names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Verb {
+    /// `SetFontObject` (`0x79ef10`, the FontString's `0x79d1a0`): nil unlinks.
+    SetFontObject,
+    /// `CopyFontObject` (`0x79f0e0`): nil is a usage error.
+    CopyFontObject,
+}
+
+/// A font argument as the reference reads it (`0x79ef10`, `0x79d1a0`, `0x79f0e0`), `who` being the
+/// receiver's [`c_name`]: a table must hold a font in `this` (`0x87c664`), not another object
+/// (`0x87c62c`); a string, and only a string (`lua_type` 4, so not a number), names a font
+/// (`0x783870`), a miss raising (`0x87c5fc`); nil is `None` for `SetFontObject`; anything else,
+/// no argument included, raises the usage line (`0x87c5cc`, `0x87c8e4`).
+pub(super) fn font_arg(
+    lua: &Lua,
+    who: &str,
+    verb: Verb,
+    arg: Option<&Value>,
+) -> mlua::Result<Option<FontId>> {
+    let v = match verb {
+        Verb::SetFontObject => "SetFontObject",
+        Verb::CopyFontObject => "CopyFontObject",
+    };
+    let model = lua.app_data_ref::<Model>().expect("model");
+    match arg {
+        Some(Value::Table(t)) => match t.raw_get::<Value>(0)? {
+            Value::Integer(_) | Value::LightUserData(_) => {
+                id_of_table(&model, t).map(Some).ok_or_else(|| {
+                    mlua::Error::runtime(format!("{who}:{v}(): Wrong object type, expected font"))
+                })
+            }
+            _ => Err(mlua::Error::runtime(format!(
+                "{who}:{v}(): Couldn't find 'this' in font object"
+            ))),
+        },
+        Some(Value::String(s)) => {
+            let name = s.to_string_lossy();
+            model.fonts.id(&name).map(Some).ok_or_else(|| {
+                mlua::Error::runtime(format!("{who}:{v}(): Couldn't find font named {name}"))
+            })
+        }
+        Some(Value::Nil) if verb == Verb::SetFontObject => Ok(None),
+        _ => Err(mlua::Error::runtime(match verb {
+            Verb::SetFontObject => format!("Usage: {who}:SetFontObject(font or \"font\" or nil)"),
+            Verb::CopyFontObject => format!("Usage: {who}:CopyFontObject(font or \"font\")"),
+        })),
     }
 }
 
-/// [`resolve`] refusing nil, for `CopyFontObject`, which has nothing to copy from (`0x7a01b0`).
-fn resolve_required(verb: &str, v: &Value) -> mlua::Result<String> {
-    resolve(verb, v)?.ok_or_else(|| {
-        mlua::Error::runtime(format!(
-            "{verb}: expected a font object or a font name, got nil"
-        ))
-    })
-}
+// ── The live link ────────────────────────────────────────────────────────────────────────────
 
-// ── The live link: a font object to the regions that inherit it ──────────────────────────────
-
-/// Copy a font object's paint onto one region, skipping each property the region set itself
-/// ([`RegionData::font_explicit`]) and each the font does not hold: the reference gates every merge
-/// on the source's held-value bits (`+0x38`, the merge `0x770910`), so an empty `CreateFont` font
-/// changes nothing.
-///
-/// The outline is always copied, as [`Outline`](super::Outline) has no unset state; only an empty
-/// `CreateFont` font on an outlined FontString differs from the reference, clearing the outline.
-pub(crate) fn repaint(d: &mut RegionData, fo: &FontObject) {
-    let ex = d.font_explicit;
-    if !ex.face {
+/// `ApplyFontBlock 0x770800`: write each of `groups` that the font holds (its set bits, `0x770826`)
+/// and the region's mask passes (`word & mask`, `0x770824`). An empty `CreateFont` font holds
+/// nothing, so it changes nothing.
+pub(crate) fn apply(d: &mut RegionData, fo: &FontObject, groups: FontMask) {
+    let g = groups & d.font_mask;
+    // Face, height and flags load together (`0x7714f0`, `0x770848`), the height into `+0xe4`.
+    if g.has(FontMask::FONT) {
         if let Some(f) = &fo.font {
             d.font_path = Some(f.clone());
+            if let Some(h) = fo.height {
+                d.font_height = Some(h);
+            }
+            d.outline = fo.outline;
+            d.monochrome = fo.monochrome;
         }
     }
-    if !ex.height {
-        if let Some(h) = fo.height {
-            d.font_height = Some(h);
+    // `(~mask & word) | (font & mask)` (`0x770868`, `0x770876`).
+    if g.has(FontMask::JUSTIFY) {
+        if let Some(j) = fo.justify {
+            let m = d.justify_mask.0;
+            d.justify.0 = (d.justify.0 & !m) | (j.0 & m);
         }
     }
-    if !ex.outline {
-        d.outline = fo.outline;
-        d.monochrome = fo.monochrome;
-    }
-    if !ex.shadow {
-        if let Some(s) = fo.shadow {
-            d.font_shadow = Some(s);
-        }
-    }
-    if !ex.color {
+    if g.has(FontMask::COLOR) {
         if let Some(c) = fo.color {
             d.set_vertex_color(Some(c));
         }
     }
-    if !ex.justify_h {
-        if let Some(j) = fo.justify_h {
-            d.justify.set_h(j);
-        }
-    }
-    if !ex.justify_v {
-        if let Some(j) = fo.justify_v {
-            d.justify.set_v(j);
+    if g.has(FontMask::SHADOW) {
+        if let Some(s) = fo.shadow {
+            d.font_shadow = Some(s);
         }
     }
     // Copied as given: a FontString's reader clamps it, as its setter `0x772240` does at the merge
     // (`0x7708fd`).
-    if !ex.spacing {
+    if g.has(FontMask::SPACING) {
         if let Some(sp) = fo.spacing {
             d.spacing = sp;
         }
     }
 }
 
-/// Repaint every region that inherits `name`, as the reference's live parent link does. Linear in
-/// regions: font-object setters are addon configuration, never per frame. Button state fonts are
-/// stored by name and re-resolved at every `extract`, so they need no push.
-pub(crate) fn propagate(model: &mut Model, name: &str) {
-    let Some(fo) = model.font_object(name).cloned() else {
-        return;
-    };
-    for d in model.region_data.values_mut() {
-        if d.font_object.as_deref() == Some(name) {
-            repaint(d, &fo);
+/// The groups `fo` holds, its set bits (`0x100`..`0x1000` of `+0x38`).
+pub(crate) fn held(fo: &FontObject) -> FontMask {
+    let mut m = FontMask::NONE;
+    for (g, on) in [
+        (FontMask::FONT, fo.font.is_some()),
+        (FontMask::JUSTIFY, fo.justify.is_some()),
+        (FontMask::COLOR, fo.color.is_some()),
+        (FontMask::SHADOW, fo.shadow.is_some()),
+        (FontMask::SPACING, fo.spacing.is_some()),
+    ] {
+        if on {
+            m.set(g);
         }
     }
-    // A fan-out cannot name its regions without a second pass, so every region is re-measured.
-    model.touch_measure_all();
+    m
 }
 
-/// A declared font's live link to the font it inherits.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct FontLink {
-    /// The parent's lowercased name.
-    pub(crate) parent: String,
-    /// What this font holds itself, declared or set since; every other property is the parent's.
-    pub(crate) own: FontObject,
-}
-
-/// `own` over `parent`: a property the font holds wins, the rest is inherited. The flags word (the
-/// outline and the monochrome bit) is one property: no outline and no monochrome is its unset
-/// state here, as [`Outline`](super::Outline) has no other.
-fn derive(parent: &FontObject, own: &FontObject) -> FontObject {
-    let flags = if own.outline == super::Outline::default() && !own.monochrome {
-        parent
-    } else {
-        own
+/// The groups of `groups` in which `a` and `b` differ: a font by name ignoring case, height and
+/// spacing by 2^-22 (`0x770973`, `0x77097c`, `0x770a84`), the rest exactly.
+fn differs(a: &FontObject, b: &FontObject, groups: FontMask) -> FontMask {
+    let close = |x: Option<f32>, y: Option<f32>| match (x, y) {
+        (Some(x), Some(y)) => (x - y).abs() < f32::from_bits(0x3480_0000),
+        (None, None) => true,
+        _ => false,
     };
-    FontObject {
-        font: own.font.clone().or_else(|| parent.font.clone()),
-        height: own.height.or(parent.height),
-        shadow: own.shadow.or(parent.shadow),
-        color: own.color.or(parent.color),
-        outline: flags.outline,
-        monochrome: flags.monochrome,
-        justify_h: own.justify_h.or(parent.justify_h),
-        justify_v: own.justify_v.or(parent.justify_v),
-        spacing: own.spacing.or(parent.spacing),
+    let mut m = FontMask::NONE;
+    let font_eq = match (&a.font, &b.font) {
+        (Some(x), Some(y)) => {
+            x.eq_ignore_ascii_case(y)
+                && close(a.height, b.height)
+                && a.outline == b.outline
+                && a.monochrome == b.monochrome
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    for (g, eq) in [
+        (FontMask::FONT, font_eq),
+        (FontMask::JUSTIFY, a.justify == b.justify),
+        (FontMask::COLOR, a.color == b.color),
+        (FontMask::SHADOW, a.shadow == b.shadow),
+        (FontMask::SPACING, close(a.spacing, b.spacing)),
+    ] {
+        if groups.has(g) && !eq {
+            m.set(g);
+        }
+    }
+    m
+}
+
+/// Copy the groups of `groups` that `src` holds into `dst`: [`differs`] picks what changed.
+fn copy_groups(dst: &mut FontObject, src: &FontObject, groups: FontMask) {
+    if groups.has(FontMask::FONT) {
+        dst.font.clone_from(&src.font);
+        dst.height = src.height;
+        dst.outline = src.outline;
+        dst.monochrome = src.monochrome;
+    }
+    if groups.has(FontMask::JUSTIFY) {
+        dst.justify = src.justify;
+    }
+    if groups.has(FontMask::COLOR) {
+        dst.color = src.color;
+    }
+    if groups.has(FontMask::SHADOW) {
+        dst.shadow = src.shadow;
+    }
+    if groups.has(FontMask::SPACING) {
+        dst.spacing = src.spacing;
     }
 }
 
-/// Re-derive every font that inherits `parent` (a lowercased name), repaint its regions, and go
-/// on down the chain. A chain deeper than any real one stops, so a declared cycle cannot spin.
-pub(crate) fn cascade(model: &mut Model, parent: &str, depth: u8) {
-    if depth > 16 {
+/// `FontBlockMergeMasked 0x770910` into font `id` from `src`: each of `groups` that `src` holds,
+/// that `id`'s mask passes, and that differs or is not yet held (`0x7709f2`-`0x7709fc`). Answers
+/// the groups taken, which `id` pushes on.
+fn merge_into(model: &mut Model, id: FontId, src: &FontObject, groups: FontMask) -> FontMask {
+    let node = model.fonts.get_mut(id);
+    let g = groups & node.mask & held(src);
+    let took = differs(&node.block, src, g);
+    copy_groups(&mut node.block, src, took);
+    took
+}
+
+/// `PushChanges 0x784180`: hand the groups of font `id` that `changed` names to every follower, a
+/// font merging and pushing on (`0x77e4b0`), a FontString applying them (`0x773530`). Nothing
+/// runs for no change, so an equal set costs one compare.
+pub(crate) fn push(model: &mut Model, id: FontId, changed: FontMask) {
+    if changed.is_empty() {
         return;
     }
-    let Some(parent_record) = model.font_objects_by_lower.get(parent).cloned() else {
-        return;
-    };
-    let children: Vec<(String, FontObject)> = model
-        .font_links
-        .iter()
-        .filter(|(_, link)| link.parent == parent)
-        .map(|(child, link)| (child.clone(), derive(&parent_record, &link.own)))
-        .collect();
-    for (child, record) in children {
-        if model.font_objects_by_lower.get(&child) == Some(&record) {
-            continue;
-        }
-        model
-            .font_objects_by_lower
-            .insert(child.clone(), record.clone());
-        for d in model.region_data.values_mut() {
-            if d.font_object
-                .as_deref()
-                .is_some_and(|name| name.eq_ignore_ascii_case(&child))
-            {
-                repaint(d, &record);
-            }
-        }
-        cascade(model, &child, depth + 1);
+    let node = model.fonts.get(id);
+    let src = node.block.clone();
+    let fonts = node.font_followers.clone();
+    let regions = node.region_followers.clone();
+    for f in fonts {
+        let took = merge_into(model, f, &src, changed);
+        push(model, f, took);
+    }
+    for rh in regions {
+        apply_to_region(model, rh, id, &src, changed);
     }
 }
 
-/// Run `f` on the named font object's record, then [`propagate`] and [`cascade`]: every setter's
-/// one write path. What the setter changed becomes the font's own, so its parent no longer
-/// supplies it.
-fn edit<R>(lua: &Lua, this: &Table, f: impl FnOnce(&mut FontObject) -> R) -> mlua::Result<R> {
-    let name = name_of(this)?;
-    let key = name.to_ascii_lowercase();
+/// [`apply`] onto follower `rh` of font `id`, then re-measure it when a measured group arrived.
+fn apply_to_region(
+    model: &mut Model,
+    rh: RegionHandle,
+    id: FontId,
+    src: &FontObject,
+    groups: FontMask,
+) {
+    let Some(d) = model.region_data.get_mut(&rh) else {
+        return;
+    };
+    if d.font_object != Some(id) {
+        return;
+    }
+    let landed = groups & d.font_mask & held(src);
+    apply(d, src, groups);
+    if !(landed & (FontMask::FONT | FontMask::SHADOW | FontMask::SPACING)).is_empty() {
+        model.touch_measure(rh);
+    }
+}
+
+/// `LinkFontFollower 0x770c60` for a FontString: follow `to` (nil only unlinks, `0x770cb8`),
+/// applying every group it holds through the region's mask. The same font again does nothing
+/// (`0x770c6a`). Answers whether the link moved.
+pub(crate) fn link_region(model: &mut Model, rh: RegionHandle, to: Option<FontId>) -> bool {
+    let d = model.region_data.entry(rh).or_default();
+    let old = d.font_object;
+    if old == to {
+        return false;
+    }
+    d.font_object = to;
+    if let Some(old) = old {
+        model.fonts.drop_region(old, rh);
+    }
+    if let Some(to) = to {
+        model.fonts.get_mut(to).region_followers.push(rh);
+        let src = model.fonts.get(to).block.clone();
+        apply_to_region(model, rh, to, &src, FontMask::ALL);
+    }
+    true
+}
+
+/// Whether font `to` is `id` or follows it, however far: linking `id` to it would close a loop
+/// (`0x79f045`).
+pub(crate) fn would_loop(model: &Model, id: FontId, to: FontId) -> bool {
+    let mut at = Some(to);
+    // Bounded by the font count: no chain can be longer without already looping.
+    for _ in 0..=model.fonts.nodes.len() {
+        match at {
+            Some(f) if f == id => return true,
+            Some(f) => at = model.fonts.get(f).parent,
+            None => return false,
+        }
+    }
+    true
+}
+
+/// [`link_region`] for a font: follow `to`, merging every group it holds through `id`'s mask
+/// (`0x77e4b0` with all five marked changed) and pushing what that changed. A caller rules out a
+/// loop first ([`would_loop`]).
+pub(crate) fn link_font(model: &mut Model, id: FontId, to: Option<FontId>) {
+    let old = model.fonts.get(id).parent;
+    if old == to {
+        return;
+    }
+    if let Some(old) = old {
+        let list = &mut model.fonts.get_mut(old).font_followers;
+        if let Some(i) = list.iter().position(|&f| f == id) {
+            list.swap_remove(i);
+        }
+    }
+    model.fonts.get_mut(id).parent = to;
+    if let Some(to) = to {
+        model.fonts.get_mut(to).font_followers.push(id);
+        let src = model.fonts.get(to).block.clone();
+        let took = merge_into(model, id, &src, FontMask::ALL);
+        push(model, id, took);
+    }
+}
+
+/// One setter's write on font `id` (`0x79f210`, `0x79f4d0` and kin): `f` writes `group`, the
+/// font's own bit of it is cleared for good (`0x79f33a`, `0x79f669`, …), and what changed is
+/// pushed. A value equal to the held one changes nothing (`0x79f65a`).
+pub(crate) fn set<R>(
+    model: &mut Model,
+    id: FontId,
+    group: FontMask,
+    f: impl FnOnce(&mut FontObject) -> R,
+) -> R {
+    let node = model.fonts.get_mut(id);
+    let before = node.block.clone();
+    let out = f(&mut node.block);
+    node.mask.clear(group);
+    let changed = differs(&before, &node.block, group);
+    push(model, id, changed);
+    out
+}
+
+/// Replace font `id`'s block whole and push what that changed; its mask and parent stay.
+pub(crate) fn replace_block(model: &mut Model, id: FontId, block: FontObject) {
+    let changed = differs(&model.fonts.get(id).block, &block, FontMask::ALL);
+    model.fonts.get_mut(id).block = block;
+    push(model, id, changed);
+}
+
+/// Run `f` on the receiver's block as [`set`] does: every setter's one write path.
+fn edit<R>(
+    lua: &Lua,
+    this: &Table,
+    group: FontMask,
+    f: impl FnOnce(&mut FontObject) -> R,
+) -> mlua::Result<R> {
+    let id = id_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model");
-    let record = model.font_objects_by_lower.entry(key.clone()).or_default();
-    let before = record.clone();
-    let out = f(record);
-    let after = record.clone();
-    if let Some(link) = model.font_links.get_mut(&key) {
-        let own = &mut link.own;
-        if before.font != after.font {
-            own.font = after.font.clone();
-        }
-        if before.height != after.height {
-            own.height = after.height;
-        }
-        if before.shadow != after.shadow {
-            own.shadow = after.shadow;
-        }
-        if before.color != after.color {
-            own.color = after.color;
-        }
-        if (before.outline, before.monochrome) != (after.outline, after.monochrome) {
-            own.outline = after.outline;
-            own.monochrome = after.monochrome;
-        }
-        if before.justify_h != after.justify_h {
-            own.justify_h = after.justify_h;
-        }
-        if before.justify_v != after.justify_v {
-            own.justify_v = after.justify_v;
-        }
-        if before.spacing != after.spacing {
-            own.spacing = after.spacing;
-        }
-    }
-    propagate(&mut model, &name);
-    cascade(&mut model, &key, 0);
-    Ok(out)
+    Ok(set(&mut model, id, group, f))
 }
 
-/// A copy of the named font object's record.
+/// A copy of the receiver's block.
 fn read(lua: &Lua, this: &Table) -> mlua::Result<FontObject> {
-    let name = name_of(this)?;
+    let id = id_of(lua, this)?;
     let model = lua.app_data_ref::<Model>().expect("model");
-    Ok(model.font_object(&name).cloned().unwrap_or_default())
+    Ok(model.fonts.get(id).block.clone())
 }
 
 // ── install: the method table, the metatable and CreateFont ──────────────────────────────────
@@ -308,35 +530,67 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(binding_abi::flag(ty.eq_ignore_ascii_case("font")))
         })?,
     )?;
+    // GetName(): the declared name, nil for a widget's own font.
     m.set(
         "GetName",
-        lua.create_function(|_, this: Table| name_of(&this))?,
+        lua.create_function(|lua, this: Table| {
+            let id = id_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(model.fonts.get(id).name.clone())
+        })?,
     )?;
 
     // ── the font-object-on-font-object pair ─────────────────────────────────────────────────
-    // SetFontObject(other): on a Font, the same copy as CopyFontObject, since Font chains are
-    // flattened (module doc); nil is a no-op, with no link to sever.
+    // SetFontObject(font | "font" | nil) (`0x7a0030` → `0x79ef10`): follow that font, raising on
+    // a loop (`0x79f045`, `0x87c8b0`); nil unlinks and keeps the block.
     m.set(
         "SetFontObject",
-        lua.create_function(|lua, (this, other): (Table, Value)| {
-            match resolve("SetFontObject", &other)? {
-                Some(_) => copy_from(lua, &this, &other, "SetFontObject"),
-                None => Ok(()),
+        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
+            let who = c_name(lua, &this);
+            let to = font_arg(lua, &who, Verb::SetFontObject, args.front())?;
+            let id = id_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            if to.is_some_and(|to| would_loop(&model, id, to)) {
+                return Err(mlua::Error::runtime(format!(
+                    "{who}:SetFontObject(): Can't create a font object loop"
+                )));
             }
+            link_font(&mut model, id, to);
+            Ok(())
         })?,
     )?;
-    // CopyFontObject(other): refuses nil (`0x7a01b0` value-copies and re-parents).
+    // CopyFontObject(font | "font") (`0x7a01b0` → `0x79f0e0`): nil is a usage error. The copy is
+    // the source's block taken whole and pushed; what `0x7841d0` does to the mask and the parent
+    // is not modelled.
     m.set(
         "CopyFontObject",
-        lua.create_function(|lua, (this, other): (Table, Value)| {
-            resolve_required("CopyFontObject", &other)?;
-            copy_from(lua, &this, &other, "CopyFontObject")
+        lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
+            let who = c_name(lua, &this);
+            let src = font_arg(lua, &who, Verb::CopyFontObject, args.front())?
+                .expect("CopyFontObject refuses nil");
+            let id = id_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let paint = model.fonts.get(src).block.clone();
+            replace_block(&mut model, id, paint);
+            Ok(())
         })?,
     )?;
-    // GetFontObject(): always nil; with Font chains flattened, a Font has no parent link.
+    // GetFontObject() (`0x7a00f0` → `0x79f090`): the font this one follows, or nil.
     m.set(
         "GetFontObject",
-        lua.create_function(|_, _this: Table| Ok(Value::Nil))?,
+        lua.create_function(|lua, this: Table| {
+            let id = id_of(lua, &this)?;
+            let parent = lua
+                .app_data_ref::<Model>()
+                .expect("model")
+                .fonts
+                .get(id)
+                .parent;
+            match parent {
+                Some(p) => Ok(Value::Table(wrapper(lua, p)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
     )?;
 
     // ── face ────────────────────────────────────────────────────────────────────────────────
@@ -357,7 +611,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 if !super::font_block::instance_loads(lua, &path, height) {
                     return Ok(Value::Nil);
                 }
-                edit(lua, &this, |fo| {
+                edit(lua, &this, FontMask::FONT, |fo| {
                     fo.font = Some(path);
                     fo.outline = flags;
                     fo.monochrome = monochrome;
@@ -395,7 +649,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 );
                 // Alpha is staged 1.0 (`0x79f59b`) and never read back, so a bare colour call
                 // resets it.
-                edit(lua, &this, |fo| fo.color = Some([r, g, b, a]))
+                edit(lua, &this, FontMask::COLOR, |fo| {
+                    fo.color = Some([r, g, b, a])
+                })
             },
         )?,
     )?;
@@ -411,7 +667,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetAlpha",
         lua.create_function(|lua, (this, a): (Table, f32)| {
-            edit(lua, &this, |fo| {
+            edit(lua, &this, FontMask::COLOR, |fo| {
                 let c = fo.color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
                 fo.color = Some([c[0], c[1], c[2], a]);
             })
@@ -434,7 +690,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     crate::script::object::tonumber_f32(lua, &g),
                     crate::script::object::tonumber_f32(lua, &b),
                 );
-                edit(lua, &this, |fo| {
+                edit(lua, &this, FontMask::SHADOW, |fo| {
                     let offset = fo.shadow.map_or([0.0, 0.0], |s| s.offset);
                     fo.shadow = Some(FontShadow {
                         offset,
@@ -456,7 +712,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetShadowOffset",
         lua.create_function(|lua, (this, x, y): (Table, f32, f32)| {
-            edit(lua, &this, |fo| {
+            edit(lua, &this, FontMask::SHADOW, |fo| {
                 let color = fo.shadow.map_or([0.0, 0.0, 0.0, 1.0], |s| s.color);
                 fo.shadow = Some(FontShadow {
                     offset: [x, y],
@@ -480,7 +736,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetSpacing",
         lua.create_function(|lua, (this, v): (Table, Value)| {
             let sp = super::font_block::spacing_arg(lua, &this, &v)?;
-            edit(lua, &this, |fo| fo.spacing = Some(sp))
+            edit(lua, &this, FontMask::SPACING, |fo| fo.spacing = Some(sp))
         })?,
     )?;
     m.set(
@@ -500,15 +756,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 justify::Set::Clears => return Ok(()),
                 justify::Set::NoMatch => return Err(justify::usage_h("Font")),
             };
-            edit(lua, &this, |fo| fo.justify_h = Some(jh))
+            edit(lua, &this, FontMask::JUSTIFY, |fo| {
+                fo.justify.get_or_insert_with(Default::default).set_h(jh)
+            })
         })?,
     )?;
     m.set(
         "GetJustifyH",
         lua.create_function(|lua, this: Table| {
-            Ok(justify::name_h(
-                read(lua, &this)?.justify_h.unwrap_or_default(),
-            ))
+            Ok(read(lua, &this)?.justify.unwrap_or_default().name_h())
         })?,
     )?;
     m.set(
@@ -519,15 +775,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 justify::Set::Clears => return Ok(()),
                 justify::Set::NoMatch => return Err(justify::usage_v("Font")),
             };
-            edit(lua, &this, |fo| fo.justify_v = Some(jv))
+            edit(lua, &this, FontMask::JUSTIFY, |fo| {
+                fo.justify.get_or_insert_with(Default::default).set_v(jv)
+            })
         })?,
     )?;
     m.set(
         "GetJustifyV",
         lua.create_function(|lua, this: Table| {
-            Ok(justify::name_v(
-                read(lua, &this)?.justify_v.unwrap_or_default(),
-            ))
+            Ok(read(lua, &this)?.justify.unwrap_or_default().name_v())
         })?,
     )?;
 
@@ -541,20 +797,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals()
         .set("CreateFont", lua.create_function(create_font)?)?;
     Ok(())
-}
-
-/// `SetFontObject`/`CopyFontObject` on a Font: take the other object's paint wholesale.
-fn copy_from(lua: &Lua, this: &Table, other: &Value, verb: &str) -> mlua::Result<()> {
-    let src = resolve_required(verb, other)?;
-    let paint = {
-        let model = lua.app_data_ref::<Model>().expect("model");
-        model.font_object(&src).cloned().ok_or_else(|| {
-            mlua::Error::runtime(format!(
-                "{verb}: no font object named '{src}' is registered"
-            ))
-        })?
-    };
-    edit(lua, this, |fo| *fo = paint)
 }
 
 /// The font a new plate or chat bubble takes: `FrameScript_GetText` on `NAMEPLATE_FONT`
@@ -573,19 +815,18 @@ pub(super) fn nameplate_font(lua: &Lua) -> Option<String> {
 /// use both. An existing name returns that object unchanged and unrepublished (`0x7839ab`).
 ///
 /// The reference's gate (`0x706048`) takes a number or any string, the empty one included, and
-/// raises on anything else. A fresh object holds nothing, so it copies nothing ([`repaint`]).
+/// raises on anything else. A fresh object holds nothing, so a link to it applies nothing
+/// ([`apply`]).
 fn create_font(lua: &Lua, name: Option<String>) -> mlua::Result<Table> {
     let name = name.ok_or_else(|| {
         mlua::Error::runtime("CreateFont: a font name is required (it becomes a global)")
     })?;
-    {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
-        model
-            .font_objects_by_lower
-            .entry(name.to_ascii_lowercase())
-            .or_default();
-    }
-    let t = wrapper(lua, &name)?;
+    let id = lua
+        .app_data_mut::<Model>()
+        .expect("model")
+        .fonts
+        .named(&name);
+    let t = wrapper(lua, id)?;
     publish_global(lua, &name, &t)?;
     Ok(t)
 }

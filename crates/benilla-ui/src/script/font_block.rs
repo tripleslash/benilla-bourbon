@@ -41,15 +41,14 @@ pub(super) fn usage_name(this: &Table) -> String {
 
 /// Whether FontString `rh` has a font, the reference's non-null `CSimpleFontString+0xe0`. A
 /// string starts with none (`0x770d30`) and gets one only from its own `SetFont` or XML `font=`,
-/// or from the font object it follows (`inherits=`, `font=`, `SetFontObject`, a Button's normal
-/// font); `SetFont` with a height of 0 frees it (`0x7715b3`). Without one, Lua's `SetText` raises
+/// or from the font it follows (`inherits=`, `font=`, `SetFontObject`, a Button's state font);
+/// `SetFont` with a height of 0 frees it (`0x7715b3`). Without one, Lua's `SetText` raises
 /// (`0x79d7e5`), the measures answer 0 (`0x772bd0`, `0x7728b6`, `0x7729d4`) and nothing is built
 /// or drawn (`0x7724f8`, `0x772e5b`).
 ///
-/// [`RegionData::font_path`](super::RegionData::font_path) is `None` exactly then, but for two
-/// labels extract paints: a Button's label follows the button's embedded normal font, which
-/// `Button:SetFont` fills (`0x780880`), and an EditBox's text string runs off the box's own font
-/// instance, whose font-less state is not modelled here.
+/// [`RegionData::font_path`](super::RegionData::font_path) is `None` exactly then, but for an
+/// EditBox's text string, which runs off the box's own font instance, whose font-less state is
+/// not modelled here.
 pub(super) fn has_font(model: &Model, rh: RegionHandle) -> bool {
     use crate::widget::KindState;
     let Some(d) = model.region_data.get(&rh) else {
@@ -65,18 +64,7 @@ pub(super) fn has_font(model: &Model, rh: RegionHandle) -> bool {
     else {
         return false;
     };
-    match &owner.kind_state {
-        KindState::Button(bs) if bs.text == Some(rh) && !d.font_explicit.face => {
-            bs.font.is_some()
-                || bs
-                    .normal_font
-                    .as_deref()
-                    .and_then(|n| model.font_object(n))
-                    .is_some_and(|fo| fo.font.is_some())
-        }
-        KindState::EditBox(eb) => eb.text_region == Some(rh),
-        _ => false,
-    }
+    matches!(&owner.kind_state, KindState::EditBox(eb) if eb.text_region == Some(rh))
 }
 
 /// `SetFont`'s three arguments as the shared implementation reads them.
@@ -194,40 +182,21 @@ pub(super) fn install(
     on_font_change: Option<FontChanged>,
 ) -> mlua::Result<()> {
     // ── the font object ──
-    // SetFontObject(font | "font" | nil) → nothing (`0x79ef10`, usage string `0x87c5cc`). Any
-    // other argument or an unknown name raises: every rejection is `luaL_error` (`0x6f4940`).
+    // SetFontObject(font | "font" | nil) → nothing (the FontString's `0x79d1a0`, the shared
+    // `0x79ef10` behind the others), linking with `0x770c60`: every group the font holds lands
+    // through the region's mask, and later changes are pushed. nil unlinks and keeps the paint.
     m.set(
         "SetFontObject",
-        lua.create_function(move |lua, (this, font): (Table, Value)| {
-            let name = super::font::resolve("SetFontObject", &font)?;
+        lua.create_function(move |lua, (this, args): (Table, mlua::MultiValue)| {
+            let who = super::font::c_name(lua, &this);
+            let to =
+                super::font::font_arg(lua, &who, super::font::Verb::SetFontObject, args.front())?;
             let rh = resolve(lua, &this)?;
             let relinked = {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                // nil severs the link and keeps the paint; the reference only nulls the parent.
-                let Some(name) = name else {
-                    model.region_data.entry(rh).or_default().font_object = None;
-                    return Ok(());
-                };
-                let Some(fo) = model.font_object(&name).cloned() else {
-                    return Err(mlua::Error::runtime(format!(
-                        "SetFontObject: no font object named '{name}' is registered"
-                    )));
-                };
-                let d = model.region_data.entry(rh).or_default();
-                // The same object again changes nothing (`0x770c6a`).
-                let relinked = d
-                    .font_object
-                    .as_deref()
-                    .is_none_or(|old| !old.eq_ignore_ascii_case(&name));
-                d.font_object = Some(name);
-                // The inherit mask stays: each local setter clears its bit (`FONTINSTANCE+0x2c`)
-                // and nothing restores it, so a property set locally survives a later
-                // `SetFontObject`.
-                super::font::repaint(d, &fo);
-                model.touch_measure(rh);
-                relinked
+                super::font::link_region(&mut model, rh, to)
             };
-            if relinked {
+            if relinked && to.is_some() {
                 if let Some(changed) = on_font_change {
                     changed(lua, &this)?;
                 }
@@ -235,21 +204,17 @@ pub(super) fn install(
             Ok(())
         })?,
     )?;
-    // GetFontObject() → the font object last set, never its name, or nil (`0x79f090`).
+    // GetFontObject() → the font object it follows, never its name, or nil (`0x79f090`).
     m.set(
         "GetFontObject",
         lua.create_function(move |lua, this: Table| {
             let rh = resolve(lua, &this)?;
-            let name = {
+            let id = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                model
-                    .region_data
-                    .get(&rh)
-                    .and_then(|d| d.font_object.clone())
-                    .filter(|n| model.font_object(n).is_some())
+                model.region_data.get(&rh).and_then(|d| d.font_object)
             };
-            match name {
-                Some(n) => Ok(Value::Table(super::font::wrapper(lua, &n)?)),
+            match id {
+                Some(id) => Ok(Value::Table(super::font::wrapper(lua, id)?)),
                 None => Ok(Value::Nil),
             }
         })?,
@@ -304,9 +269,7 @@ pub(super) fn install(
                     d.monochrome = false;
                 }
                 d.font_height = Some(height);
-                d.font_explicit.face = true;
-                d.font_explicit.outline = true;
-                d.font_explicit.height = true;
+                d.font_mask.clear(super::FontMask::FONT);
                 let after = (d.font_path.clone(), d.font_height, d.outline, d.monochrome);
                 model.touch_measure(rh);
                 // A FontString's load of another face, height or flags clears its valid bit and
@@ -371,7 +334,7 @@ pub(super) fn install(
                 let d = model.region_data.entry(rh).or_default();
                 d.set_vertex_color(Some([r, g, b, a]));
                 // Clears the colour inherit bit (`0x79dbd0`): it survives a font-object repaint.
-                d.font_explicit.color = true;
+                d.font_mask.clear(super::FontMask::COLOR);
                 Ok(())
             },
         )?,
@@ -414,7 +377,7 @@ pub(super) fn install(
                     offset,
                     color: [r, g, b, a],
                 });
-                d.font_explicit.shadow = true;
+                d.font_mask.clear(super::FontMask::SHADOW);
                 Ok(())
             },
         )?,
@@ -444,7 +407,7 @@ pub(super) fn install(
                 offset: [x, y],
                 color,
             });
-            d.font_explicit.shadow = true;
+            d.font_mask.clear(super::FontMask::SHADOW);
             // The offset seeds `GetStringWidth`'s line, so it is in the measure key.
             model.touch_measure(rh);
             Ok(())
@@ -479,7 +442,7 @@ pub(super) fn install(
                 let changed = d.spacing.to_bits() != spacing.to_bits();
                 d.spacing = spacing;
                 // Clears inherit bit `0x10` (`0x79e37b`, `0x79fbb1`).
-                d.font_explicit.spacing = true;
+                d.font_mask.clear(super::FontMask::SPACING);
                 model.touch_measure(rh);
                 // A FontString's new spacing clears its valid bit and invalidates (`0x771666`);
                 // the same one returns first (`0x77161c`).
