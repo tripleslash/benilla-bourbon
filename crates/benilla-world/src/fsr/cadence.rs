@@ -402,7 +402,7 @@ pub(super) struct FgPacing {
 /// pacer does the same on its present thread). The web presents on rAF, which paces it.
 pub(super) fn pace_held_frames(
     held: Res<FsrHeld>,
-    mut pacing: ResMut<FgPacing>,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] mut pacing: ResMut<FgPacing>,
     mut last_present: Local<Option<bevy::platform::time::Instant>>,
 ) {
     PRESENTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

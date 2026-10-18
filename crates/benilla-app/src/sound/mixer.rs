@@ -22,14 +22,13 @@ use kira::sound::FromFileError;
 use kira::track::{SendTrackBuilder, SendTrackHandle, SpatialTrackBuilder};
 use kira::{AudioManager, AudioManagerSettings, Decibels, Mix, Tween};
 
-// kira's own cpal backend — wasm32 only (see [`PlatformBackend`]). Named as `CpalBackend` rather
-// than kira's `DefaultBackend` on purpose: `DefaultBackend` *silently* becomes the mock backend
-// when the `cpal` feature is off, so a dropped feature would ship a client that plays nothing
-// rather than one that fails to build.
+// cpal on the page — wasm32 only: the page plays through `web_output::WebOutput`
+// ([`PlatformBackend`]) and reads cpal for the output device's settings
+// ([`cpal_backend_settings`]).
 #[cfg(target_arch = "wasm32")]
 use cpal::traits::{DeviceTrait, HostTrait};
 #[cfg(target_arch = "wasm32")]
-use kira::backend::cpal::{CpalBackend, CpalBackendSettings};
+use kira::backend::cpal::CpalBackendSettings;
 
 use super::limiter;
 use super::meter::{self, LevelReading, MixLevel};
