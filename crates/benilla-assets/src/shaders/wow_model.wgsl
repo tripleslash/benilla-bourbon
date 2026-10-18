@@ -342,8 +342,9 @@ struct WowVsOut {
 #ifdef WOW_MERGED_SLOT
     @location(10) @interpolate(flat) merged_slot: u32,
 #endif
-    // Stage 1's generated coordinate, (0, 0) when the material binds no stage 1.
-    @location(11) env_uv: vec2<f32>,
+    // Stage 1's generated coordinate, (0, 0) when the material binds no stage 1. Location 12: the
+    // fork's `point_sel` holds 11.
+    @location(12) env_uv: vec2<f32>,
 }
 
 // The generated environment coordinate of `Model2.bls` (its programs for a stage whose coordinate
