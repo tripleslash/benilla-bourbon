@@ -422,7 +422,8 @@ fn a_fontstring_font_file_needs_its_own_nodes_height_and_a_refusal_stops_the_lev
 }
 
 /// `0x7713ca`-`0x771454`: a FontString's own `<Shadow>` takes its first `<Color>` over opaque black
-/// and its first `<Offset>`, whose missing coordinate is 0 (`0x6f1ebe`), else (0.001, -0.001).
+/// and its first `<Offset>`, whose missing coordinate is 0 (`0x6f1ebe`), else (0.001, -0.001) in
+/// layout units (`0x7713eb`).
 #[test]
 fn a_fontstrings_own_shadow_element_is_read() {
     let s = ui();
@@ -459,10 +460,13 @@ fn a_fontstrings_own_shadow_element_is_read() {
         shadow("Shadowed"),
         vec![2.0, -3.0, read(1.0), 0.0, 0.0, read(0.5)]
     );
-    assert_eq!(
-        shadow("BareShadow"),
-        vec![0.001, -0.001, 0.0, 0.0, 0.0, read(1.0)]
+    // 0.001 layout units at the 4:3 screen: 0.001 · 768 · 5/3.
+    let bare = shadow("BareShadow");
+    assert!(
+        (bare[0] - 1.28).abs() < 1e-5 && (bare[1] + 1.28).abs() < 1e-5,
+        "{bare:?}"
     );
+    assert_eq!(bare[2..], [0.0, 0.0, 0.0, read(1.0)]);
     assert_eq!(
         shadow("HalfOffset"),
         vec![2.0, 0.0, 0.0, 0.0, 0.0, read(1.0)],
@@ -949,4 +953,679 @@ fn a_simplehtml_font_finds_a_font_made_by_create_font() {
             "{elem}"
         );
     }
+}
+
+/// `0x767800` reads `point` from every child of the first `<Anchors>`, whatever its tag (`[node+4]`,
+/// next `[child+0x1c]`, `0x7679e3`), so an `<Offset>` there with a point is an anchor too.
+#[test]
+fn every_child_of_anchors_with_a_point_is_an_anchor() {
+    let s = ui();
+    load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="Host">
+                <Size><AbsDimension x="100" y="50"/></Size>
+                <Anchors>
+                    <Anchor point="TOPLEFT"/>
+                    <Offset point="BOTTOMRIGHT"/>
+                </Anchors>
+                <Layers><Layer>
+                    <Texture name="HostTex">
+                        <Anchors><Anchor point="TOP"/><Bogus point="BOTTOM"/></Anchors>
+                    </Texture>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#,
+    );
+    let (frame, tex): (i64, i64) = s
+        .eval("return Host:GetNumPoints(), HostTex:GetNumPoints()")
+        .unwrap();
+    assert_eq!((frame, tex), (2, 2));
+}
+
+/// A bad anchor is logged at severity 1 and skipped, never raised (`0x767800`): a missing or
+/// unknown `point` and a non-empty unknown `relativePoint` log `Invalid anchor point in frame: %s`
+/// (`0x7679cf`, `0x76792d`), the missing one's null `%s` printing `(null)`; a `relativeTo` naming
+/// the object itself logs `Frame anchored to itself: %s` (`0x767982`) and one that names nothing
+/// `Couldn't find relative frame: %s` (`0x767970`), each with the value as spelled. An empty
+/// `relativePoint` is `point` and an empty `relativeTo` the parent.
+#[test]
+fn a_bad_anchor_is_logged_and_skipped() {
+    let mut s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="Host">
+                <Size><AbsDimension x="100" y="50"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Frames>
+                    <Frame name="$parentKid">
+                        <Size><AbsDimension x="10" y="10"/></Size>
+                        <Anchors>
+                            <Anchor point="NOPE"/>
+                            <Anchor/>
+                            <Anchor point="TOP" relativePoint="MIDDLE"/>
+                            <Anchor point="LEFT" relativeTo="$parentKid"/>
+                            <Anchor point="RIGHT" relativeTo="$parentMissing"/>
+                            <Anchor point="bottomleft" relativePoint="" relativeTo=""/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </Frame>
+        </Ui>"#,
+    );
+    for line in [
+        "Invalid anchor point in frame: NOPE",
+        "Invalid anchor point in frame: (null)",
+        "Invalid anchor point in frame: MIDDLE",
+        "Frame anchored to itself: $parentKid",
+        "Couldn't find relative frame: $parentMissing",
+    ] {
+        assert!(
+            has_line(&report, line),
+            "{line}: {:?}",
+            report.status.lines()
+        );
+    }
+    assert!(!report
+        .warnings
+        .iter()
+        .any(|w| w.contains("without a point")));
+    s.resolve();
+    let got: (i64, String, bool, String) = s
+        .eval(
+            "local p, rel, rp = HostKid:GetPoint(1) \
+             return HostKid:GetNumPoints(), p, rel == Host, rp",
+        )
+        .unwrap();
+    assert_eq!(got, (1, "BOTTOMLEFT".into(), true, "BOTTOMLEFT".into()));
+}
+
+/// A bare `<Shadow/>`'s offset is 0.001 layout units on both readers (`0x7713eb`, `0x784066`), so
+/// `GetShadowOffset` (`0x79fad0`) answers 0.001 · 768 · √(a² + 1): 1.28 at 4:3, 1.5665 at 16:9.
+#[test]
+fn a_bare_shadow_is_a_thousandth_of_a_layout_unit() {
+    let xml = |n: &str| {
+        format!(
+            r#"<Ui>
+            <Font name="BareFont{n}" font="Fonts\FRIZQT__.TTF" virtual="true">
+                <FontHeight><AbsValue val="12"/></FontHeight>
+                <Shadow/>
+            </Font>
+            <Frame name="BareHost{n}">
+                <Layers><Layer>
+                    <FontString name="BareString{n}" inherits="BareFont{n}"><Shadow/></FontString>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#
+        )
+    };
+    for (n, (w, h), want) in [
+        ("A", (1024.0, 768.0), 1.28_f32),
+        ("B", (1920.0, 1080.0), 1.5665),
+    ] {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(w, h);
+        load_str(&s, &xml(n));
+        for obj in [format!("BareFont{n}"), format!("BareString{n}")] {
+            let (x, y): (f32, f32) = s.eval(&format!("return {obj}:GetShadowOffset()")).unwrap();
+            assert!(
+                (x - want).abs() < 1e-4 && (y + want).abs() < 1e-4,
+                "{obj}: {x}, {y}"
+            );
+        }
+    }
+}
+
+/// An EditBox's `<HighlightColor>` (`0x77a277`) is read as a `<Color>` (`0x6f23d0`: clamped and
+/// packed) and tints the selection (`0x77e330`), the last one winning, a template's first; with
+/// none the selection keeps the constructor's `0xFF606060` (`0x779c7a`).
+#[test]
+fn an_editbox_tints_its_selection_with_its_highlight_color() {
+    let mut s = ui();
+    load_str(
+        &s,
+        r#"<Ui>
+            <EditBox name="TintTemplate" virtual="true">
+                <Size><AbsDimension x="100" y="20"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <HighlightColor r="0" g="1" b="0"/>
+            </EditBox>
+            <EditBox name="TintRed" inherits="TintTemplate">
+                <HighlightColor r="1" g="0" b="0" a="0.5"/>
+            </EditBox>
+            <EditBox name="TintClamped" inherits="TintTemplate">
+                <HighlightColor r="2" g="-1" b="0.5"/>
+            </EditBox>
+            <EditBox name="TintInherited" inherits="TintTemplate"/>
+            <EditBox name="TintNone">
+                <Size><AbsDimension x="100" y="20"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+            </EditBox>
+        </Ui>"#,
+    );
+    let mut tint = |name: &str| {
+        s.run(&format!("{name}:SetFocus()")).unwrap();
+        s.resolve();
+        if let Some(req) = s.editbox_advances_request() {
+            let cum: Vec<f32> = (0..=req.text.len()).map(|i| i as f32 * 7.0).collect();
+            s.set_editbox_advances(req.id, req.key, cum, vec![0], 0.0);
+        }
+        let c = s
+            .focused_editbox_text_ui()
+            .expect("focused")
+            .highlight_color;
+        (c.r, c.g, c.b, c.a)
+    };
+    assert_eq!(tint("TintRed"), (255, 0, 0, 128));
+    assert_eq!(tint("TintClamped"), (255, 0, 128, 255));
+    assert_eq!(tint("TintInherited"), (0, 255, 0, 255));
+    assert_eq!(tint("TintNone"), (0x60, 0x60, 0x60, 0xff));
+}
+
+/// Every XML number reads as `SStrToFloat` (`0x64aaa0`) or `SStrToInt` (`0x64ac60`) reads it: a
+/// prefix parse with no whitespace skip and no leading `+`, so `" 0.5"` and `"+5"` are 0 and
+/// `"10px"` is 10 (`<TexCoords>` `0x76ff14`, StatusBar `0x782fc6`, `<PushedTextOffset>` and
+/// `<Size>` through `0x6f1eb0`, `<FontHeight>` through `0x6f1d60`, `<HitRectInsets>` through
+/// `0x6f20a0`, model `scale` and fog `0x76cb4f`-`0x76cbee`, `id` `0x7697ae`).
+#[test]
+fn xml_numbers_read_as_the_references_prefix_parse() {
+    let mut s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="NumHost" id=" 3">
+                <Size><AbsDimension x="10px" y="+20"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <HitRectInsets><AbsInset left="5px" right=" 6" top="7" bottom="8"/></HitRectInsets>
+                <Layers><Layer>
+                    <Texture name="NumTex">
+                        <TexCoords left=" 0.5" right="0.75x" top="+0.25" bottom="1e0"/>
+                    </Texture>
+                    <FontString name="NumText" font="Fonts\FRIZQT__.TTF">
+                        <FontHeight><AbsValue val="12px"/></FontHeight>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+            <Frame name="NumNegId" id="-2"/>
+            <StatusBar name="NumBar" minValue="+5" maxValue="10" defaultValue="7x"/>
+            <Button name="NumButton">
+                <PushedTextOffset x=" 2" y="3"/>
+            </Button>
+            <Model name="NumModel" scale="2x" fogNear="2m" fogFar=" 9">
+                <FogColor r="2" g="0.5" b="-1"/>
+            </Model>
+            <Model name="NumModelZero" scale="0"/>
+            <Model name="NumModelEmpty" scale=""/>
+        </Ui>"#,
+    );
+    s.resolve();
+    let got = |code: &str| s.eval::<Vec<f32>>(&format!("return {{{code}}}")).unwrap();
+    assert_eq!(got("NumHost:GetWidth(), NumHost:GetHeight()"), [10.0, 0.0]);
+    assert_eq!(got("NumHost:GetID(), NumNegId:GetID()"), [0.0, 0.0]);
+    assert_eq!(got("NumHost:GetHitRectInsets()"), [5.0, 0.0, 7.0, 8.0]);
+    let tc = got("NumTex:GetTexCoord()");
+    assert_eq!(
+        (tc[0], tc[4], tc[1], tc[3]),
+        (0.0, 0.75, 0.0, 1.0),
+        "{tc:?}"
+    );
+    let (_, height): (String, f32) = s.eval("return NumText:GetFont()").unwrap();
+    assert_eq!(height, 12.0);
+    assert_eq!(got("NumBar:GetMinMaxValues()"), [0.0, 10.0]);
+    assert_eq!(got("NumBar:GetValue()"), [7.0]);
+    assert_eq!(got("NumButton:GetPushedTextOffset()"), [0.0, 3.0]);
+    assert_eq!(got("NumModel:GetModelScale()"), [2.0]);
+    assert_eq!(
+        got("NumModel:GetFogNear(), NumModel:GetFogFar()"),
+        [2.0, 0.0]
+    );
+    let fc = got("NumModel:GetFogColor()");
+    assert_eq!(&fc[..3], [1.0, 128.0 / 255.0, 0.0], "{fc:?}");
+    assert!(has_line(
+        &report,
+        "Frame NumModelZero: Invalid model scale: 0"
+    ));
+    assert!(!report.warnings.iter().any(|w| w.contains("NumModelEmpty")));
+}
+
+/// The EditBox and message-frame numbers: `letters` and `historyLines` through `SStrToInt`,
+/// `historyLines` and `blinkSpeed` at 0 unless above it (`0x77a046`-`0x77a18d`); `maxLines`,
+/// `displayDuration` and `fadeDuration` above 0 only (`0x787bd8`-`0x787c71`).
+#[test]
+fn widget_numbers_read_as_the_references_prefix_parse() {
+    let s = ui();
+    load_str(
+        &s,
+        r#"<Ui>
+            <EditBox name="NumBox" letters="5a" historyLines=" 3" blinkSpeed="-1"/>
+            <EditBox name="NumBoxNeg" historyLines="-4"/>
+            <ScrollingMessageFrame name="NumSmf" maxLines="5x" displayDuration="2s"
+                                   fadeDuration="+4"/>
+        </Ui>"#,
+    );
+    let got = |code: &str| s.eval::<Vec<f32>>(&format!("return {{{code}}}")).unwrap();
+    assert_eq!(
+        got("NumBox:GetMaxLetters(), NumBox:GetHistoryLines(), NumBox:GetBlinkSpeed()"),
+        [5.0, 0.0, 0.0]
+    );
+    assert_eq!(got("NumBoxNeg:GetHistoryLines()"), [0.0]);
+    assert_eq!(
+        got("NumSmf:GetMaxLines(), NumSmf:GetTimeVisible(), NumSmf:GetFadeDuration()"),
+        [5.0, 2.0, 3.0]
+    );
+}
+
+/// The XML length readers read the node's own attributes, then its first child only
+/// (`0x6f1eb0`, `0x6f1d60`, `0x6f20a0`): with no child the read needs its gate attribute (`y`,
+/// `val`, `bottom`), a `Rel` child is in layout units, and any other child is logged and fails.
+/// A `<Size>` they accept sets both axes, a missing one as 0; one they refuse sets nothing
+/// (`0x767835`-`0x76784a`). An `<Offset>` and a `<FontHeight>` keep what was read either way.
+#[test]
+fn the_xml_length_readers_read_the_first_child_only() {
+    let mut s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="LenTemplate" virtual="true">
+                <Size><AbsDimension x="100" y="100"/></Size>
+            </Frame>
+            <Frame name="LenHost">
+                <Size><AbsDimension x="400" y="300"/></Size>
+                <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                <Frames>
+                    <Frame name="LenNoY" inherits="LenTemplate"><Size x="10"/></Frame>
+                    <Frame name="LenHalf" inherits="LenTemplate">
+                        <Size><AbsDimension x="50"/></Size>
+                    </Frame>
+                    <Frame name="LenBogus" inherits="LenTemplate"><Size><Bogus x="5" y="5"/></Size></Frame>
+                    <Frame name="LenOwn" inherits="LenTemplate"><Size x="10" y="20"/></Frame>
+                    <Frame name="LenRel"><Size><RelDimension x="0.1" y="0.05"/></Size></Frame>
+                    <Frame name="LenOffset">
+                        <Size><AbsDimension x="10" y="10"/></Size>
+                        <Anchors><Anchor point="BOTTOMLEFT"><Offset x="5"/></Anchor></Anchors>
+                    </Frame>
+                    <Frame name="LenInsetNoBottom">
+                        <HitRectInsets left="5" right="6"/>
+                    </Frame>
+                    <Frame name="LenInsetEmptyBottom">
+                        <HitRectInsets left="5" bottom=""/>
+                    </Frame>
+                </Frames>
+                <Layers><Layer>
+                    <FontString name="LenFontKept" font="Fonts\FRIZQT__.TTF">
+                        <FontHeight val="14"><Bogus/></FontHeight>
+                    </FontString>
+                    <FontString name="LenFontNone" font="Fonts\FRIZQT__.TTF">
+                        <FontHeight/>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#,
+    );
+    s.resolve();
+    let got = |code: &str| s.eval::<Vec<f32>>(&format!("return {{{code}}}")).unwrap();
+    let size = |f: &str| got(&format!("{f}:GetWidth(), {f}:GetHeight()"));
+    assert_eq!(
+        size("LenNoY"),
+        [100.0, 100.0],
+        "no child, no y: nothing set"
+    );
+    assert_eq!(size("LenHalf"), [50.0, 0.0], "both axes, the missing one 0");
+    assert_eq!(
+        size("LenBogus"),
+        [100.0, 100.0],
+        "an unknown first child: nothing set"
+    );
+    assert_eq!(size("LenOwn"), [10.0, 20.0]);
+    // 0.1 and 0.05 layout units at 4:3, where one is 1280 FrameXML units.
+    let rel = size("LenRel");
+    assert!(
+        (rel[0] - 128.0).abs() < 1e-3 && (rel[1] - 64.0).abs() < 1e-3,
+        "{rel:?}"
+    );
+    assert_eq!(
+        got("LenOffset:GetLeft(), LenOffset:GetBottom()"),
+        [5.0, 0.0]
+    );
+    assert_eq!(got("LenInsetNoBottom:GetHitRectInsets()"), [0.0; 4]);
+    assert_eq!(
+        got("LenInsetEmptyBottom:GetHitRectInsets()"),
+        [5.0, 0.0, 0.0, 0.0]
+    );
+    let (_, kept): (String, f32) = s.eval("return LenFontKept:GetFont()").unwrap();
+    assert_eq!(
+        kept, 14.0,
+        "a FontHeight keeps its own val past a refused child"
+    );
+    for line in [
+        r#"No "x" or "y" attributes in element: Size"#,
+        "Unknown child node in Size element: Bogus",
+        r#"No "x" or "y" attributes in element: Offset"#,
+        r#"No "right", "left", "top", or "bottom" attributes in element: HitRectInsets"#,
+        "Unknown child node in FontHeight element: Bogus",
+        r#"No "val" attribute in element: FontHeight"#,
+        "FontString LenFontNone: Missing font height in FontString element",
+    ] {
+        assert!(
+            has_line(&report, line),
+            "{line}: {:?}",
+            report.status.lines()
+        );
+    }
+}
+
+/// `font=` on an EditBox, a MessageFrame and a ScrollingMessageFrame links the frame's font to
+/// that font object (`0x779fcb`, `0x78592b`, `0x787b3b` → `0x770c60`), so it follows later
+/// changes; a name the font table lacks logs `%s %s: Couldn't find font object named %s`
+/// (`0x879bc8`) with the frame's type and name.
+#[test]
+fn a_text_frame_links_its_font_attribute() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Font name="FrameAttrFont" font="Fonts\ARIALN.TTF">
+                <FontHeight><AbsValue val="17"/></FontHeight>
+            </Font>
+            <EditBox name="FontBox" font="FrameAttrFont"/>
+            <MessageFrame name="FontMf" font="FrameAttrFont"/>
+            <ScrollingMessageFrame name="FontSmf" font="FrameAttrFont"/>
+            <EditBox name="FontBoxMiss" font="NoSuchFont"/>
+            <ScrollingMessageFrame font="NoSuchFont"/>
+        </Ui>"#,
+    );
+    let font = |s: &UiScript, f: &str| {
+        s.eval::<(String, f32)>(&format!("local p, h = {f}:GetFont() return p, h"))
+            .unwrap()
+    };
+    for f in ["FontBox", "FontMf", "FontSmf"] {
+        assert_eq!(font(&s, f), ("Fonts\\ARIALN.TTF".into(), 17.0), "{f}");
+    }
+    s.run(r"FrameAttrFont:SetFont('Fonts\\FRIZQT__.TTF', 9)")
+        .unwrap();
+    for f in ["FontBox", "FontMf", "FontSmf"] {
+        assert_eq!(
+            font(&s, f),
+            ("Fonts\\FRIZQT__.TTF".into(), 9.0),
+            "{f} follows"
+        );
+    }
+    for line in [
+        "EditBox FontBoxMiss: Couldn't find font object named NoSuchFont",
+        "ScrollingMessageFrame <unnamed>: Couldn't find font object named NoSuchFont",
+    ] {
+        assert!(
+            has_line(&report, line),
+            "{line}: {:?}",
+            report.status.lines()
+        );
+    }
+}
+
+/// A MessageFrame's and a ScrollingMessageFrame's `<TextInsets>` (`0x785b49`, `0x787d52`) set the
+/// insets their lines keep from the frame's rect (`0x785b80`, `0x787fb0`): the lines wrap and
+/// draw in the box less the insets times the scale (`0x78833c`-`0x78837e`). An inset element the
+/// read refuses, here one with no `bottom`, sets nothing.
+#[test]
+fn a_message_frame_lays_its_lines_out_inside_its_text_insets() {
+    let mut s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Font name="InsetFont" font="Fonts\FRIZQT__.TTF">
+                <FontHeight><AbsValue val="12"/></FontHeight>
+            </Font>
+            <ScrollingMessageFrame name="InsetSmf" font="InsetFont">
+                <Size><AbsDimension x="300" y="100"/></Size>
+                <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                <TextInsets><AbsInset left="8" right="12" top="4" bottom="6"/></TextInsets>
+            </ScrollingMessageFrame>
+            <MessageFrame name="InsetMf" font="InsetFont" insertMode="BOTTOM">
+                <Size><AbsDimension x="300" y="100"/></Size>
+                <Anchors><Anchor point="BOTTOMLEFT"><Offset x="0" y="200"/></Anchor></Anchors>
+                <TextInsets left="10" right="10" top="0" bottom="5"/>
+            </MessageFrame>
+            <ScrollingMessageFrame name="InsetRefused" font="InsetFont">
+                <Size><AbsDimension x="300" y="100"/></Size>
+                <Anchors><Anchor point="BOTTOMLEFT"><Offset x="0" y="400"/></Anchor></Anchors>
+                <TextInsets left="8" right="8"/>
+            </ScrollingMessageFrame>
+        </Ui>"#,
+    );
+    for f in ["InsetSmf", "InsetMf", "InsetRefused"] {
+        s.run(&format!("{f}:AddMessage('{f} line', 1, 1, 1)"))
+            .unwrap();
+    }
+    s.resolve();
+    let reqs = s.message_lines_needing_measure();
+    let mut widths: Vec<f32> = reqs.iter().map(|r| r.wrap_width).collect();
+    widths.sort_by(f32::total_cmp);
+    assert_eq!(widths, [280.0, 280.0, 300.0], "{reqs:?}");
+    let answers: Vec<(u32, u32, u16, u64)> =
+        reqs.iter().map(|r| (r.frame, r.index, 1, r.key)).collect();
+    s.set_message_line_rows(&answers);
+    let rect = |text: &str| {
+        s.extract()
+            .into_iter()
+            .find_map(|q| match (&q.content, q.rect) {
+                (crate::script::QuadContent::Text { text: Some(t), .. }, Some(r)) if t == text => {
+                    Some((r.left, r.right, r.bottom))
+                }
+                _ => None,
+            })
+            .expect(text)
+    };
+    let near = |got: (f32, f32, f32), want: (f32, f32, f32)| {
+        let d = [got.0 - want.0, got.1 - want.1, got.2 - want.2];
+        assert!(d.iter().all(|d| d.abs() < 1e-3), "{got:?} vs {want:?}");
+    };
+    near(rect("InsetSmf line"), (8.0, 288.0, 6.0));
+    near(rect("InsetMf line"), (10.0, 290.0, 205.0));
+    near(rect("InsetRefused line"), (0.0, 300.0, 400.0));
+    let line = r#"No "right", "left", "top", or "bottom" attributes in element: TextInsets"#;
+    assert!(has_line(&report, line), "{:?}", report.status.lines());
+}
+
+/// An anchor's `<Offset>` is read only after its `relativeTo` resolves and is not the object
+/// itself (`0x767946`-`0x767992`), so a skipped anchor reads, and logs, nothing of it.
+#[test]
+fn a_skipped_anchor_reads_no_offset() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="SkipHost">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="NoSuchFrame"><Offset x="1"/></Anchor>
+                    <Anchor point="LEFT" relativeTo="SkipHost"><Offset x="2"/></Anchor>
+                </Anchors>
+            </Frame>
+        </Ui>"#,
+    );
+    let offset_lines = |r: &LoadReport| {
+        r.status
+            .lines()
+            .iter()
+            .filter(|l| l.contains(r#"No "x" or "y" attributes in element: Offset"#))
+            .count()
+    };
+    assert!(has_line(
+        &report,
+        "Couldn't find relative frame: NoSuchFrame"
+    ));
+    assert!(has_line(&report, "Frame anchored to itself: SkipHost"));
+    assert_eq!(offset_lines(&report), 0, "{:?}", report.status.lines());
+    // The same Offset on an anchor that applies is read, and logged.
+    let applied = load_str(
+        &s,
+        r#"<Ui><Frame name="SkipApplied">
+            <Anchors><Anchor point="TOP"><Offset x="1"/></Anchor></Anchors>
+        </Frame></Ui>"#,
+    );
+    assert_eq!(offset_lines(&applied), 1);
+}
+
+/// `<HitRectInsets>`, `<ResizeBounds>` (the frame's child loop, `0x769b27`-`0x769d22`), an
+/// EditBox's `<TextInsets>` (`0x77a2a9`) and a model's `<FogColor>` (`0x76cc20`) each apply every
+/// matching child in turn, so the last wins, and an instance's own one wins over its template's.
+#[test]
+fn each_child_element_applies_in_turn_and_the_instances_wins() {
+    let mut s = ui();
+    load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="EachTemplate" virtual="true">
+                <HitRectInsets><AbsInset left="0" right="-100" top="0" bottom="0"/></HitRectInsets>
+                <ResizeBounds><minResize><AbsDimension x="5" y="5"/></minResize></ResizeBounds>
+            </Frame>
+            <Frame name="EachFrame" inherits="EachTemplate">
+                <HitRectInsets><AbsInset left="1" right="0" top="2" bottom="3"/></HitRectInsets>
+                <ResizeBounds><minResize><AbsDimension x="7" y="8"/></minResize></ResizeBounds>
+            </Frame>
+            <Frame name="EachTwice">
+                <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="70"/></HitRectInsets>
+                <HitRectInsets><AbsInset left="13" right="115" top="10" bottom="13"/></HitRectInsets>
+            </Frame>
+            <EditBox name="EachBox">
+                <TextInsets><AbsInset left="1" right="1" top="1" bottom="1"/></TextInsets>
+                <TextInsets><AbsInset left="4" right="5" top="6" bottom="7"/></TextInsets>
+            </EditBox>
+            <Model name="EachModel">
+                <FogColor r="1" g="0" b="0"/>
+                <FogColor r="0" g="0" b="1"/>
+            </Model>
+        </Ui>"#,
+    );
+    s.resolve();
+    let got = |code: &str| s.eval::<Vec<f32>>(&format!("return {{{code}}}")).unwrap();
+    assert_eq!(got("EachFrame:GetHitRectInsets()"), [1.0, 0.0, 2.0, 3.0]);
+    assert_eq!(got("EachFrame:GetMinResize()"), [7.0, 8.0]);
+    assert_eq!(
+        got("EachTwice:GetHitRectInsets()"),
+        [13.0, 115.0, 10.0, 13.0]
+    );
+    assert_eq!(got("EachBox:GetTextInsets()"), [4.0, 5.0, 6.0, 7.0]);
+    assert_eq!(&got("EachModel:GetFogColor()")[..3], [0.0, 0.0, 1.0]);
+}
+
+/// A `<Backdrop>`'s children are one dispatch in document order (`0x77e757`-`0x77e895`): the last
+/// of each kind wins, and any other child logs `Unknown child node in %s element: %s`
+/// (`0x871464`) with the Backdrop's tag and its own.
+#[test]
+fn a_backdrop_takes_the_last_child_of_each_kind_and_logs_the_rest() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="BdHost">
+                <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background">
+                    <EdgeSize><AbsValue val="8"/></EdgeSize>
+                    <EdgeSz><AbsValue val="4"/></EdgeSz>
+                    <TileSize><AbsValue val="12"/></TileSize>
+                    <EdgeSize><AbsValue val="16"/></EdgeSize>
+                    <BackgroundInsets><AbsInset left="1" right="1" top="1" bottom="1"/></BackgroundInsets>
+                    <BackgroundInsets><AbsInset left="2" right="3" top="4" bottom="5"/></BackgroundInsets>
+                    <Color r="1" g="0" b="0"/>
+                    <Color r="0" g="1" b="0"/>
+                    <BorderColor r="0" g="0" b="1"/>
+                </Backdrop>
+            </Frame>
+        </Ui>"#,
+    );
+    let got = |code: &str| s.eval::<Vec<f32>>(&format!("return {{{code}}}")).unwrap();
+    let bd = "local t = BdHost:GetBackdrop() local i = t.insets \
+              return t.edgeSize, t.tileSize, i.left, i.right, i.top, i.bottom";
+    assert_eq!(
+        s.eval::<Vec<f32>>(&format!("return {{(function() {bd} end)()}}"))
+            .unwrap(),
+        [16.0, 12.0, 2.0, 3.0, 4.0, 5.0]
+    );
+    let one = crate::color::quant::read32(1.0);
+    assert_eq!(&got("BdHost:GetBackdropColor()")[..3], [0.0, one, 0.0]);
+    assert_eq!(
+        &got("BdHost:GetBackdropBorderColor()")[..3],
+        [0.0, 0.0, one]
+    );
+    assert!(has_line(
+        &report,
+        "Unknown child node in Backdrop element: EdgeSz"
+    ));
+}
+
+const TEXT_FONTS: &str = r#"
+    <Font name="TextFontA" font="Fonts\ARIALN.TTF"><FontHeight><AbsValue val="11"/></FontHeight></Font>
+    <Font name="TextFontB" font="Fonts\FRIZQT__.TTF"><FontHeight><AbsValue val="15"/></FontHeight></Font>"#;
+
+/// An EditBox's, a MessageFrame's and a ScrollingMessageFrame's `<FontString>` child loads into
+/// the frame's own font through the Font loader (`0x783c30` at `0x77a220`, `0x785af5`,
+/// `0x787cfe`): no region, no global, and the frame's font follows the child's `inherits`. A
+/// child over a font that already follows one, from `font=` or a template's child, first logs
+/// `%s: FontString element overriding font %s` (`0x879b3c`).
+#[test]
+fn a_text_frames_fontstring_child_loads_into_its_own_font() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        &format!(
+            r#"<Ui>{TEXT_FONTS}
+            <EditBox name="TfTemplate" virtual="true"><FontString inherits="TextFontA"/></EditBox>
+            <EditBox name="TfBox" inherits="TfTemplate">
+                <FontString name="$parentText" inherits="TextFontB" bytes="9"/>
+            </EditBox>
+            <EditBox name="TfPlainBox"/>
+            <MessageFrame name="TfMf" font="TextFontA">
+                <Layers><Layer>
+                    <FontString name="TfMfLabel" inherits="TextFontA"/>
+                </Layer></Layers>
+                <FontString inherits="TextFontB" justifyH="RIGHT"/>
+            </MessageFrame>
+            <ScrollingMessageFrame name="TfSmf"><FontString inherits="TextFontB"/></ScrollingMessageFrame>
+        </Ui>"#
+        ),
+    );
+    let got = |code: &str| s.eval::<mlua::Value>(code).unwrap();
+    let truthy = |code: &str| s.eval::<bool>(code).unwrap();
+    for f in ["TfBox", "TfMf", "TfSmf"] {
+        let (path, h): (String, f32) = s
+            .eval(&format!("local p, h = {f}:GetFont() return p, h"))
+            .unwrap();
+        assert_eq!((path.as_str(), h), ("Fonts\\FRIZQT__.TTF", 15.0), "{f}");
+        assert!(
+            truthy(&format!("return {f}:GetFontObject() == TextFontB")),
+            "{f}"
+        );
+    }
+    assert!(
+        matches!(got("return TfBoxText"), mlua::Value::Nil),
+        "no global"
+    );
+    assert!(truthy(
+        "return TfBox:GetNumRegions() == TfPlainBox:GetNumRegions()"
+    ));
+    assert!(truthy(
+        "return TfMf:GetNumRegions() == 1 and TfSmf:GetNumRegions() == 0"
+    ));
+    assert!(truthy("return TfMf:GetJustifyH() == 'RIGHT'"));
+    let (label, _): (String, f32) = s.eval("return TfMfLabel:GetFont()").unwrap();
+    assert_eq!(
+        label, "Fonts\\ARIALN.TTF",
+        "a <Layers> string is not the lines' font"
+    );
+    assert!(truthy("return TfBox:GetMaxBytes() == 9"));
+    s.run("TextFontB:SetFont('Fonts\\\\MORPHEUS.TTF', 13)")
+        .unwrap();
+    let (path, _): (String, f32) = s.eval("return TfSmf:GetFont()").unwrap();
+    assert_eq!(path, "Fonts\\MORPHEUS.TTF", "the frame's font follows");
+    for line in [
+        "TfBox: FontString element overriding font TextFontA",
+        "TfMf: FontString element overriding font TextFontA",
+    ] {
+        assert!(
+            has_line(&report, line),
+            "{line}: {:?}",
+            report.status.lines()
+        );
+    }
+    assert!(!report.status.lines().iter().any(|l| l.starts_with("TfSmf")));
 }

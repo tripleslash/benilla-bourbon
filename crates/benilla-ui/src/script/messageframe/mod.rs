@@ -342,27 +342,29 @@ impl MessageFont {
     }
 }
 
-/// The FontString region holding a message frame's font, made on the first font-block call when
-/// the frame declared none. It is made LEFT, not CENTER, so styling a frame never re-justifies it.
+/// The FontString holding a message frame's font, the font verbs' receiver, made on first use:
+/// detached, so it is in no layer and not in `GetRegions`, as the reference's font is no region.
+/// It is made LEFT, not CENTER, so styling a frame never re-justifies it.
 pub(super) fn ensure_font_region(
     lua: &mlua::Lua,
     fh: FrameHandle,
 ) -> Option<crate::widget::RegionHandle> {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let existing = model.arena.frame(fh).and_then(|frame| {
-        frame
-            .regions
-            .iter()
-            .find(|&&rh| {
-                matches!(
-                    model.arena.region(rh).map(|r| r.kind),
-                    Some(crate::widget::RegionKind::FontString)
-                )
-            })
-            .copied()
-    });
-    if existing.is_some() {
-        return existing;
+    ensure_font_region_in(&mut model, fh)
+}
+
+/// [`ensure_font_region`] on a borrowed model.
+pub(crate) fn ensure_font_region_in(
+    model: &mut Model,
+    fh: FrameHandle,
+) -> Option<crate::widget::RegionHandle> {
+    let slot = model
+        .arena
+        .frame_mut(fh)?
+        .kind_state
+        .message_font_region_mut()?;
+    if let Some(rh) = *slot {
+        return Some(rh);
     }
     let rh = model.arena.create_region(
         fh,
@@ -370,11 +372,65 @@ pub(super) fn ensure_font_region(
         crate::order::DrawLayer::Overlay,
         0,
     )?;
+    if let Some(r) = model.arena.region_mut(rh) {
+        r.detached = true;
+    }
+    if let Some(slot) = model
+        .arena
+        .frame_mut(fh)
+        .and_then(|f| f.kind_state.message_font_region_mut())
+    {
+        *slot = Some(rh);
+    }
     let mut data = crate::script::RegionData::default();
     data.justify.set_h(JustifyH::Left);
     model.region_data.insert(rh, data);
-    model.touch_layout_region(rh);
     Some(rh)
+}
+
+/// The holder of message frame `fh`'s font, if it has one yet.
+fn font_region_of(model: &Model, fh: FrameHandle) -> Option<crate::widget::RegionHandle> {
+    match &model.arena.frame(fh)?.kind_state {
+        KindState::ScrollingMessage(smf) => smf.font_region,
+        KindState::Message(mf) => mf.font_region,
+        _ => None,
+    }
+}
+
+/// A message frame's lines' box: the frame's rect `r` less its text insets times its scale
+/// `scale`, the left and bottom added and the right and top taken off (`0x78833c`-`0x78837e`;
+/// the plain class's `0x785eb5`-`0x785efd`).
+pub(crate) fn inner_rect(r: Rect, insets: [f32; 4], scale: f32) -> Rect {
+    let [l, rt, t, b] = insets.map(|v| v * scale);
+    Rect::new(r.bottom + b, r.left + l, r.top - t, r.right - rt)
+}
+
+/// The message frame `fh`'s lines' box ([`inner_rect`]) on its resolved rect, `None` before it
+/// resolves.
+pub(crate) fn message_rect(model: &Model, fh: FrameHandle) -> Option<Rect> {
+    let r = model.frame_rect(fh)?;
+    let frame = model.arena.frame(fh)?;
+    let insets = frame.kind_state.message_insets().unwrap_or_default();
+    Some(inner_rect(r, insets, frame.effective_scale))
+}
+
+/// XML `<TextInsets>` on a MessageFrame or a ScrollingMessageFrame (`0x785b65`, `0x787d6e`): the
+/// four insets, in FrameXML units; the next layout lays the lines out in the new box.
+pub(crate) fn set_xml_insets(
+    lua: &mlua::Lua,
+    frame: &mlua::Table,
+    insets: [f32; 4],
+) -> mlua::Result<()> {
+    let h = frame_handle_of(lua, frame)?;
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    if let Some(slot) = model
+        .arena
+        .frame_mut(h)
+        .and_then(|f| f.kind_state.message_insets_mut())
+    {
+        *slot = insets;
+    }
+    Ok(())
 }
 
 impl UiScript {
@@ -409,20 +465,9 @@ impl UiScript {
             .map_or(crate::color::Rgba8::WHITE, |d| d.vertex_color_or_white())
     }
 
-    /// The FontString region a message frame's font lives on, if it has one.
+    /// The detached holder of a message frame's font ([`ensure_font_region`]), if it has one.
     fn message_font_region(model: &Model, fh: FrameHandle) -> Option<crate::widget::RegionHandle> {
-        model.arena.frame(fh).and_then(|frame| {
-            frame
-                .regions
-                .iter()
-                .find(|&&rh| {
-                    matches!(
-                        model.arena.region(rh).map(|r| r.kind),
-                        Some(crate::widget::RegionKind::FontString)
-                    )
-                })
-                .copied()
-        })
+        font_region_of(model, fh)
     }
 
     /// How many rows the plain frame `fh`'s resolved rect holds at its font's pitch, its capacity
@@ -437,7 +482,7 @@ impl UiScript {
         if pitch <= 0.0 {
             return 0;
         }
-        model.frame_rect(fh).map_or(0, |r| {
+        message_rect(model, fh).map_or(0, |r| {
             ((r.top - r.bottom) / pitch).floor().max(0.0) as usize
         })
     }
@@ -450,9 +495,7 @@ impl UiScript {
         let frame = model.arena.frame(fh);
         let scale = frame.map_or(1.0, |f| f.effective_scale);
         let visible = frame.is_some_and(|f| f.effective_visible);
-        let height = model
-            .frame_rect(fh)
-            .map_or(0.0, |r| (r.top - r.bottom).max(0.0));
+        let height = message_rect(model, fh).map_or(0.0, |r| (r.top - r.bottom).max(0.0));
         font.viewport(height, scale, visible)
     }
 
@@ -477,7 +520,6 @@ impl UiScript {
         let model = &mut *model;
         let mut out = Vec::new();
         let european = model.european_numbers;
-        let space = model.layout_space();
         let frames: Vec<(FrameHandle, Rect)> = model
             .frame_rects
             .iter()
@@ -487,7 +529,7 @@ impl UiScript {
                     .frame(fh)
                     .is_some_and(|f| f.kind_state.message_lines().is_some() && f.effective_visible)
             })
-            .map(|(&fh, &fr)| (fh, space.rect_to_root(fr)))
+            .filter_map(|(&fh, _)| Some((fh, message_rect(model, fh)?)))
             .collect();
         for (fh, fr) in frames {
             let wrap_width = fr.right - fr.left;
@@ -628,6 +670,9 @@ impl UiScript {
         let Some(frame) = model.arena.frame(fh) else {
             return;
         };
+        // The lines' box, the frame's rect less its insets ([`inner_rect`]).
+        let insets = frame.kind_state.message_insets().unwrap_or_default();
+        let fr = inner_rect(fr, insets, paint.scale);
         // (lines, index of the message on the anchored row, which edge it hangs off).
         let (lines, top_index, from_top): (&std::collections::VecDeque<MessageLine>, usize, bool) =
             match &frame.kind_state {

@@ -1,8 +1,10 @@
 use mlua::{ObjectLike, Table};
 
 use crate::framexml::{self, Element};
+use crate::script::binding_abi::{s_str_to_float, s_str_to_int};
+use crate::script::object;
 
-use super::{abs_dim, children_named, Levels, Loader};
+use super::{children_named, color_of, Levels, Loader};
 
 impl Loader<'_> {
     /// A frame element's LoadXML attributes and simple children (`0x769820`), and a model pane's
@@ -29,14 +31,14 @@ impl Loader<'_> {
                     .push(format!("{dbg}: Unknown frame strata: {strata}"));
             }
         }
-        // `frameLevel=` per level, read with `atoi` (`0x7699c5`): above 0 it is set (`0x76a4f0`,
+        // `frameLevel=` per level, read with `SStrToInt` (`0x7699c5`): above 0 it is set (`0x76a4f0`,
         // the setter `SetFrameLevel` calls), else logged (`0x878628`) and the level kept, so an
         // instance's `"0"` leaves its template's level.
         for level in levels {
             let Some(value) = level.attr("frameLevel").filter(|v| !v.is_empty()) else {
                 continue;
             };
-            let n = framexml::atoi(value);
+            let n = s_str_to_int(value);
             if n > 0 {
                 self.call(wrapper, "SetFrameLevel", n, dbg);
             } else {
@@ -59,44 +61,40 @@ impl Loader<'_> {
                 self.call(wrapper, "SetModel", text, dbg);
             }
         }
-        // A model pane's `scale=` is the model's scale, the field `SetModelScale` writes
-        // (`0x76cb61`); a value of 0 or less is refused, never clamped (`0x76cb92`). A plain
-        // frame's `scale=` is ignored; whether `0x769820` reads one is untraced.
-        if let Some(scale) = el.attr("scale") {
+        // A model pane's non-empty `scale=` through `SStrToFloat` is the model's scale, the field
+        // `SetModelScale` writes (`0x76cb61`); a value of 0 or less is logged (`0x8788d8`), never
+        // clamped (`0x76cb92`). A plain frame's `scale=` is ignored; whether `0x769820` reads one
+        // is untraced.
+        if let Some(scale) = el.attr("scale").filter(|v| !v.is_empty()) {
             if model_kind {
-                match scale.trim().parse::<f32>() {
-                    Ok(s) if s > 0.0 => self.call(wrapper, "SetModelScale", s, dbg),
-                    _ => self.warn_once(
-                        &format!("model-scale:{dbg}"),
-                        format!("Frame {dbg}: Invalid model scale: {scale}"),
-                    ),
+                let s = s_str_to_float(scale) as f32;
+                if s > 0.0 {
+                    self.call(wrapper, "SetModelScale", s, dbg);
+                } else {
+                    let name = self.object_name(wrapper);
+                    self.status_warning(format!("Frame {name}: Invalid model scale: {scale}"));
                 }
             }
         }
-        // A model pane's fog: `fogNear`/`fogFar` clamp at 0 here only (`0x76cbbb`, `0x76cbf3`),
-        // where the Lua setters store raw; `<FogColor>` is `SetFogColor`, fog bit included.
+        // A model pane's fog: a non-empty `fogNear`/`fogFar` through `SStrToFloat`, clamped at 0
+        // here only (`0x76cbbb`, `0x76cbf3`), where the Lua setters store raw; each `<FogColor>`
+        // in the child loop (`0x76cc20`-`0x76cc5d`), the last winning, is read as a `<Color>`
+        // (`0x6f23d0`, `0x76cc43`) and set with `SetFogColor`, fog bit included.
         if model_kind {
             for (attr, verb) in [("fogNear", "SetFogNear"), ("fogFar", "SetFogFar")] {
-                if let Some(v) = el.attr(attr).and_then(|v| v.trim().parse::<f32>().ok()) {
+                if let Some(v) = el.attr(attr).filter(|v| !v.is_empty()) {
+                    let v = s_str_to_float(v) as f32;
                     self.call(wrapper, verb, v.max(0.0), dbg);
                 }
             }
-            if let Some(fc) = children_named(el, "FogColor").next() {
-                let ch = |k: &str, d: f32| {
-                    fc.attr(k)
-                        .and_then(|v| v.trim().parse::<f32>().ok())
-                        .unwrap_or(d)
-                };
-                self.call(
-                    wrapper,
-                    "SetFogColor",
-                    (ch("r", 0.0), ch("g", 0.0), ch("b", 0.0), ch("a", 1.0)),
-                    dbg,
-                );
+            for fc in children_named(el, "FogColor") {
+                self.call(wrapper, "SetFogColor", color_of(fc).fractions(), dbg);
             }
         }
-        if let Some(id) = el.attr("id") {
-            if let Ok(n) = id.parse::<i64>() {
+        // A non-empty `id` through `SStrToInt`, a negative one skipped (`0x7697ae`-`0x7697b7`).
+        if let Some(id) = el.attr("id").filter(|v| !v.is_empty()) {
+            let n = s_str_to_int(id);
+            if n >= 0 {
                 self.call(wrapper, "SetID", n, dbg);
             }
         }
@@ -107,27 +105,25 @@ impl Loader<'_> {
         if el.attr_bool("enableMouse") {
             self.call(wrapper, "EnableMouse", true, dbg);
         }
-        // `<HitRectInsets>`: the mouse rect, inset from the frame's; a side it omits is 0.
-        if let Some(ins) = children_named(el, "HitRectInsets").next() {
-            let src = children_named(ins, "AbsInset").next().unwrap_or(ins);
-            let side = |k: &str| {
-                src.attr(k)
-                    .and_then(|v| v.trim().parse::<f32>().ok())
-                    .unwrap_or(0.0)
-            };
-            self.call(
-                wrapper,
-                "SetHitRectInsets",
-                (side("left"), side("right"), side("top"), side("bottom")),
-                dbg,
-            );
+        // `<HitRectInsets>` and `<ResizeBounds>` are arms of the frame's child loop
+        // (`0x769b27`-`0x769d22`), so each one applies in turn and the last wins; the merged
+        // element holds a template's children first, so an instance's own one wins over it.
+        // `<HitRectInsets>`: the mouse rect, inset from the frame's, when the inset read succeeds
+        // (`0x769cb5`); a side it omits is 0.
+        for ins in children_named(el, "HitRectInsets") {
+            if let Some([l, r, t, b]) = self.inset(ins) {
+                self.call(wrapper, "SetHitRectInsets", (l, r, t, b), dbg);
+            }
         }
-        // `<ResizeBounds>` (`0x769baa`): both pairs are always written, an absent one as 0, so a
-        // lone `<minResize>` resets the max to unbounded. A `<Size>` outside them is not clamped.
-        if let Some(rb) = children_named(el, "ResizeBounds").next() {
+        // `<ResizeBounds>` (`0x769baa`): its first `<minResize>` and `<maxResize>`, both pairs
+        // always written, an absent one as 0, so a lone `<minResize>` resets the max to unbounded.
+        // A `<Size>` outside them is not clamped.
+        for rb in children_named(el, "ResizeBounds") {
             for (tag, verb) in [("minResize", "SetMinResize"), ("maxResize", "SetMaxResize")] {
-                let (x, y) = children_named(rb, tag).next().map_or((None, None), abs_dim);
-                self.call(wrapper, verb, (x.unwrap_or(0.0), y.unwrap_or(0.0)), dbg);
+                let [x, y] = children_named(rb, tag)
+                    .next()
+                    .map_or([0.0; 2], |d| self.dimension(d).v);
+                self.call(wrapper, verb, (x, y), dbg);
             }
         }
         // `movable`/`resizable`: flag bits 0x100/0x200, via the setter Lua uses (`0x76a3c0`).
@@ -156,19 +152,19 @@ impl Loader<'_> {
         self_name: &str,
         dbg: &str,
     ) {
-        let Some(tr) = children_named(el, "TitleRegion").next() else {
-            return;
-        };
-        let region: Table = match wrapper.call_method("CreateTitleRegion", ()) {
-            Ok(r) => r,
-            Err(e) => {
-                self.report.fault(format!("{dbg}: CreateTitleRegion: {e}"));
-                return;
-            }
-        };
-        // The title region's layout load is `0x767800` itself (`0x81c528[2]`, called at
-        // `0x769b8a`), which never re-enters `inherits`: the node alone.
-        self.apply_geometry(tr, &region, true, self_name, dbg);
+        // Each `<TitleRegion>` in the child loop (`0x769b2f`-`0x769ba5`) loads into the one region.
+        for tr in children_named(el, "TitleRegion") {
+            let region: Table = match wrapper.call_method("CreateTitleRegion", ()) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.report.fault(format!("{dbg}: CreateTitleRegion: {e}"));
+                    return;
+                }
+            };
+            // The title region's layout load is `0x767800` itself (`0x81c528[2]`, called at
+            // `0x769b8a`), which never re-enters `inherits`: the node alone.
+            self.apply_geometry(tr, &region, true, self_name, dbg);
+        }
     }
 
     /// One node's geometry, the CLayoutFrame part of every frame and region `LoadXML` (`0x767800`),
@@ -188,13 +184,13 @@ impl Loader<'_> {
         parent_name: &str,
         dbg: &str,
     ) {
+        // A `<Size>` the dimension read accepts sets both axes, a missing one as 0
+        // (`0x767835`-`0x76784a`); one it refuses sets nothing.
         if let Some(size) = children_named(node, "Size").next() {
-            let (x, y) = abs_dim(size);
-            if let Some(w) = x {
-                self.call_on(wrapper, region, "SetWidth", w, dbg);
-            }
-            if let Some(h) = y {
-                self.call_on(wrapper, region, "SetHeight", h, dbg);
+            let d = self.dimension(size);
+            if d.ok {
+                self.call_on(wrapper, region, "SetWidth", d.v[0], dbg);
+                self.call_on(wrapper, region, "SetHeight", d.v[1], dbg);
             }
         }
         let set_all_points = node.attr_is_true("setAllPoints");
@@ -207,33 +203,39 @@ impl Loader<'_> {
         if set_all_points {
             self.status_warning("SETALLPOINTS set to true in frame with anchors (ignored)".into());
         }
-        for anchor in children_named(anchors, "Anchor") {
-            let Some(point) = anchor.attr("point") else {
-                let kind = if region { "region " } else { "" };
-                self.report
-                    .warnings
-                    .push(format!("{dbg}: {kind}<Anchor> without a point; skipped"));
+        // Every child of the first `<Anchors>`, whatever its tag (`[node+4]`, then `[child+0x1c]`,
+        // `0x7679e3`): its `point` through `0x6f1840`, a whole-string match ignoring case; a missing
+        // or unknown one is logged (`0x878470`, `0x7679cf`) and the child skipped, a missing one
+        // printing `(null)`: the status's `0x41a000` formats through `0x64a8b0` and `0x64a820`
+        // to the CRT, whose `__output` (`0x742ba5`) puts `(null)` (`0x871708`) for a null `%s`
+        // (`0x742ffc`).
+        for anchor in &anchors.children {
+            let point = anchor.attr("point");
+            let Some(point) = point.filter(|p| object::point_from_str(p).is_some()) else {
+                let shown = point.unwrap_or("(null)");
+                self.status_warning(format!("Invalid anchor point in frame: {shown}"));
                 continue;
             };
-            let rel_point = anchor.attr("relativePoint").unwrap_or(point).to_string();
-            let rel_to: Option<String> = anchor
-                .attr("relativeTo")
-                .map(|r| framexml::resolve_name(r, parent_name));
-            let (x, y) = children_named(anchor, "Offset")
-                .next()
-                .map(abs_dim)
-                .unwrap_or((None, None));
-            let args = (
-                point.to_string(),
-                rel_to,
-                rel_point,
-                x.unwrap_or(0.0),
-                y.unwrap_or(0.0),
-            );
+            // A non-empty `relativePoint` must parse too (`0x76792d`); an empty or absent one is
+            // `point` (`0x767940`).
+            let rel_point = match anchor.attr("relativePoint").filter(|r| !r.is_empty()) {
+                Some(r) if object::point_from_str(r).is_none() => {
+                    self.status_warning(format!("Invalid anchor point in frame: {r}"));
+                    continue;
+                }
+                Some(r) => r,
+                None => point,
+            };
+            // An empty `relativeTo` is the layout parent, as an absent one (`0x76795c`).
+            let rel_raw = anchor.attr("relativeTo").filter(|r| !r.is_empty());
+            let rel_to = rel_raw.map(|r| framexml::resolve_name(r, parent_name));
+            let args = (point.to_string(), rel_to, rel_point.to_string());
             let d = super::DeferredAnchor {
                 wrapper: wrapper.clone(),
                 region,
                 args,
+                offset: children_named(anchor, "Offset").next().cloned(),
+                rel_raw: rel_raw.unwrap_or_default().to_string(),
                 dbg: dbg.to_string(),
             };
             // Deferred while the enclosing subtree has not built its target yet.

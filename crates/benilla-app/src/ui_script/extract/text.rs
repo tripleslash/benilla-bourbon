@@ -147,7 +147,7 @@ pub(super) fn emit(
         // A multiline box draws wrapped (its region is TOP/LEFT already); the caret and the
         // selection seat by `(row, x)` at the wrap's row pitch.
         for &(row, sx0, sx1) in &ui.selection {
-            let hc = ui.highlight_color;
+            let hc = ui.highlight_color.to_f32();
             #[allow(clippy::cast_precision_loss)]
             let ry = top + row as f32 * cell_h;
             // The engine's selection x-span is in UI units.
@@ -391,17 +391,13 @@ fn band_clip_slack(shadow_dy: Option<f32>) -> f32 {
     crate::ui_text::UI_SEAT_NUDGE + shadow_dy.map_or(0.0, |dy| dy.max(0.0))
 }
 
-/// One axis of the drop shadow's offset in the rect's px space, rounded to a whole pixel but
-/// never to zero, as the reference's shadow shows at any window size. Fill and shadow each take
-/// the client's vertical snap, `ceil(y − 0.5)`, which commutes only with an integer translate: a
-/// fractional offset makes the gap between them alternate between 1 and 2 px.
+/// One axis of the drop shadow's offset in the rect's px space, rounded half away from zero to a
+/// whole pixel (`0x5c6fa0`, `0x5c7010`, at `0x5c877e`, `0x5c878b`; the `floor` after, `0x5c8796`,
+/// is then a no-op), so an offset under half a pixel is 0 and the shadow sits under the text. Fill
+/// and shadow each take the client's vertical snap, `ceil(y − 0.5)`, which commutes only with an
+/// integer translate: a fractional offset makes the gap between them alternate between 1 and 2 px.
 fn shadow_offset_px(scaled: f32) -> f32 {
-    let rounded = scaled.round();
-    if rounded == 0.0 && scaled != 0.0 {
-        scaled.signum()
-    } else {
-        rounded
-    }
+    scaled.round()
 }
 
 /// A shadow glyph's alpha, every scalar the fill rides plus its own: `layout` (the `<Shadow>`
@@ -436,16 +432,19 @@ mod tests {
         assert_eq!(band_clip_slack(Some(2.0)), 3.0);
     }
 
-    /// `1.0546875` is a 1600×900 window's seam times the 0.9 UI scale.
+    /// `1.0546875` is a 1600×900 window's seam times the 0.9 UI scale; 0.4418 a 377-tall window's
+    /// 1-unit offset at 0.9, which 1.12.1 rounds to nothing.
     #[test]
-    fn a_shadow_offset_is_a_whole_pixel_and_never_vanishes() {
+    fn a_shadow_offset_rounds_half_away_from_zero_to_a_whole_pixel() {
         assert_eq!(shadow_offset_px(1.0), 1.0);
         assert_eq!(shadow_offset_px(1.0546875), 1.0);
         assert_eq!(shadow_offset_px(-1.0546875), -1.0);
         assert_eq!(shadow_offset_px(2.109375), 2.0);
-        // 377-tall capture window × 0.9: 0.44 px would round to nothing.
-        assert_eq!(shadow_offset_px(0.4418), 1.0);
-        assert_eq!(shadow_offset_px(-0.4418), -1.0);
+        assert_eq!(shadow_offset_px(1.5), 2.0);
+        assert_eq!(shadow_offset_px(0.5), 1.0);
+        assert_eq!(shadow_offset_px(-0.5), -1.0);
+        assert_eq!(shadow_offset_px(0.4418), 0.0);
+        assert_eq!(shadow_offset_px(-0.4418), 0.0);
         assert_eq!(shadow_offset_px(0.0), 0.0);
     }
 
@@ -511,6 +510,11 @@ mod caret_tests {
 
     /// The whole UI pass on a 1024×768 window (`s = 1`) over `script`.
     pub(super) fn app_on(script: UiScript) -> App {
+        app_sized(script, 1024, 768)
+    }
+
+    /// The whole UI pass on a `w`×`h` window over `script`.
+    fn app_sized(script: UiScript, w: u32, h: u32) -> App {
         let mut app = App::new();
         app.insert_non_send(script);
         app.insert_resource(UiFontAtlas::for_test(1.0).expect("the client faces open"));
@@ -531,7 +535,7 @@ mod caret_tests {
         app.init_resource::<crate::ui_script::UiScaleCvar>();
         app.world_mut().spawn((
             Window {
-                resolution: UVec2::new(1024, 768).into(),
+                resolution: UVec2::new(w, h).into(),
                 ..default()
             },
             PrimaryWindow,
@@ -590,6 +594,49 @@ mod caret_tests {
             .expect("the text draws")
             .clone();
         (caret(&app), glyph)
+    }
+
+    /// A bare `<Shadow/>` is 0.001 layout units (`0x7713eb`), drawn rounded half away from zero
+    /// with no floor (`0x5c6fa0`): the stock zone text's shadow is 2 px at 1920×1080 (2.20) and
+    /// 1 px at 1024×768 (1.28), at UI scale 1.
+    #[test]
+    fn a_bare_shadow_draws_its_layout_unit_offset_in_whole_pixels() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        for ((w, h), want) in [((1920, 1080), 2.0), ((1024, 768), 1.0)] {
+            let mut script = UiScript::new().unwrap();
+            script.set_screen_size(w as f32, h as f32);
+            let doc = benilla_ui::framexml::parse(
+                r#"<Ui>
+                    <Font name="BareShadowFont" font="Fonts\FRIZQT__.TTF">
+                        <FontHeight><AbsValue val="20"/></FontHeight>
+                        <Color r="1" g="1" b="1"/>
+                        <Shadow/>
+                    </Font>
+                    <Frame name="BareShadowHost" setAllPoints="true">
+                        <Layers><Layer>
+                            <FontString name="BareShadowText" inherits="BareShadowFont" text="W">
+                                <Anchors><Anchor point="CENTER"/></Anchors>
+                            </FontString>
+                        </Layer></Layers>
+                    </Frame>
+                </Ui>"#,
+            )
+            .unwrap();
+            let report = benilla_ui::loader::load(&script, &doc, &|_| None);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            let app = app_sized(script, w, h);
+            let quads = &app.world().resource::<UiQuads>().quads;
+            let glyph = |black: bool| {
+                quads
+                    .iter()
+                    .find(|q| q.texture.is_some() && (q.color[0] < 0.5) == black)
+                    .unwrap_or_else(|| panic!("{w}x{h}: a glyph, shadow {black}"))
+                    .rect
+            };
+            let (fill, shadow) = (glyph(false), glyph(true));
+            let d = (shadow.min.x - fill.min.x, shadow.min.y - fill.min.y);
+            assert_eq!(d, (want, want), "{w}x{h}");
+        }
     }
 
     /// The caret is 4 script units of the box's scale wide, `SetWidth(4)`'s value (`0x77ba2d`).

@@ -51,7 +51,10 @@ mod death;
 pub mod diagnostics;
 mod editbox;
 pub mod instance;
-pub(crate) use editbox::{adopt_text_region, apply_xml_bytes, editbox_text_region_wrapper};
+pub(crate) use editbox::{
+    adopt_text_region, apply_xml_bytes, editbox_text_region_wrapper, set_selection_color,
+};
+pub(crate) use messageframe::set_xml_insets as set_message_xml_insets;
 pub(crate) use tooltip::post_load as tooltip_post_load;
 pub(crate) mod addon;
 mod addon_enable;
@@ -286,7 +289,7 @@ pub use video_pairs::VIDEO_PAIR_CVARS;
 pub use worldmap_arrow::ARROW_MODEL;
 
 pub(crate) use button::{refresh_label_lua, state_font_lua, LabelFont};
-pub(crate) use font_block::{face_loads, SAME_FONT_HEIGHT};
+pub(crate) use font_block::{face_loads, own_font_lua, SAME_FONT_HEIGHT};
 pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;

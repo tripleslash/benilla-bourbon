@@ -1,10 +1,11 @@
 use mlua::{ObjectLike, Table};
 
 use crate::framexml::{self, Element};
+use crate::script::binding_abi::s_str_to_int;
 use crate::script::LabelFont;
 
 use super::regions::FontAttrs;
-use super::{abs_dim, abs_value, children_named, children_named_any, color_of, Levels, Loader};
+use super::{children_named, children_named_any, color_of, Levels, Loader};
 
 impl Loader<'_> {
     /// `<ScrollFrame>`'s `<ScrollChild>` (`LoadXML 0x786bc0`): after the base load (`0x769820`) it
@@ -68,14 +69,14 @@ impl Loader<'_> {
             self.call(wrapper, "SetStatusBarColor", color_of(bc).fractions(), dbg);
         }
         for level in levels {
-            // Each value with `atof`, present and non-empty: the range needs both bounds on the
+            // Each value with `SStrToFloat`, present and non-empty: the range needs both bounds on the
             // node, and `defaultValue` is read only after it (`0x782fb0`-`0x783021`). The setter
             // `0x783270` clamps a min above the max down to it.
             let value = |attr: &str| {
                 level
                     .attr(attr)
                     .filter(|v| !v.is_empty())
-                    .map(framexml::atof)
+                    .map(super::xml_float)
             };
             if let (Some(min), Some(max)) = (value("minValue"), value("maxValue")) {
                 self.call(wrapper, "SetMinMaxValues", (min, max), dbg);
@@ -230,19 +231,13 @@ impl Loader<'_> {
                 self.call(wrapper, "SetText", text, dbg);
             }
         }
-        // `<PushedTextOffset>` (`0x778aec`): the dimension read (`0x6f1eb0`) zeroes both axes, takes
-        // the element's own non-empty `x`/`y`, then its `<AbsDimension>`'s, and stores them as
-        // `SetPushedTextOffset` does (`0x778b24`).
+        // `<PushedTextOffset>` (`0x778aec`): the dimension read (`0x6f1eb0`), stored as
+        // `SetPushedTextOffset` does (`0x778b24`) only when it succeeds (`0x778b0c`).
         for el in children_named(el, "PushedTextOffset") {
-            let mut xy = [0.0f32; 2];
-            for src in std::iter::once(el).chain(children_named(el, "AbsDimension").take(1)) {
-                for (i, k) in ["x", "y"].into_iter().enumerate() {
-                    if let Some(v) = src.attr(k).filter(|v| !v.is_empty()) {
-                        xy[i] = framexml::atof(v);
-                    }
-                }
+            let d = self.dimension(el);
+            if d.ok {
+                self.call(wrapper, "SetPushedTextOffset", (d.v[0], d.v[1]), dbg);
             }
-            self.call(wrapper, "SetPushedTextOffset", (xy[0], xy[1]), dbg);
         }
         // The three embedded fonts and their colours, in document order (`0x7788c0`): each font
         // element, two spellings each, loads into its font as a `<Font>` does (`0x778baf`,
@@ -282,6 +277,79 @@ impl Loader<'_> {
         }
     }
 
+    /// `font=` on an EditBox, a MessageFrame or a ScrollingMessageFrame (`0x779fcb`, `0x78592b`,
+    /// `0x787b3b`): a non-empty name found in the font table (`0x783870`) links the frame's own
+    /// font to it (`0x770c60`); any other is logged as `%s %s: Couldn't find font object named %s`
+    /// (`0x879bc8`) with the frame's type (vtable slot 7), its name or `<unnamed>`, and the value.
+    pub(super) fn apply_frame_font(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
+        let Some(font) = el.attr("font").filter(|f| !f.is_empty()) else {
+            return;
+        };
+        let to = self.model().fonts.id(font);
+        if let Some(to) = to {
+            match crate::script::own_font_lua(self.lua, wrapper) {
+                Ok(Some(own)) => self.link_font_node(own, to, "<unnamed>"),
+                Ok(None) => {}
+                Err(e) => self.report.fault(format!("{dbg}: font=: {e}")),
+            }
+        } else {
+            let kind: String = wrapper
+                .call_method("GetObjectType", ())
+                .unwrap_or_else(|_| el.tag.clone());
+            let name = self.object_name(wrapper);
+            self.status_warning(format!(
+                "{kind} {name}: Couldn't find font object named {font}"
+            ));
+        }
+    }
+
+    /// An EditBox's, a MessageFrame's or a ScrollingMessageFrame's `<FontString>` children, each
+    /// loaded into the frame's own font by the Font loader (`0x783c30` at `0x77a220`, `0x785af5`,
+    /// `0x787cfe`), never a region: one over a font that already follows another first logs
+    /// `%s: FontString element overriding font %s` (`0x879b3c`) with the frame's name and the
+    /// followed font's. An EditBox's then caps its bytes (`0x77a225`).
+    pub(super) fn apply_text_font_children(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
+        for child in children_named(el, "FontString") {
+            let own = match crate::script::own_font_lua(self.lua, wrapper) {
+                Ok(Some(own)) => own,
+                Ok(None) => return,
+                Err(e) => {
+                    self.report.fault(format!("{dbg}: <FontString>: {e}"));
+                    return;
+                }
+            };
+            let followed = {
+                let model = self.model();
+                model.fonts.get(own).parent.map(|p| {
+                    model
+                        .fonts
+                        .get(p)
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "<unnamed>".to_string())
+                })
+            };
+            if let Some(font) = followed {
+                let name = self.object_name(wrapper);
+                self.status_warning(format!("{name}: FontString element overriding font {font}"));
+            }
+            self.load_font_node(child, own, "<unnamed>");
+            if el.tag.eq_ignore_ascii_case("EditBox") {
+                let text = crate::script::editbox_text_region_wrapper(self.lua(), wrapper);
+                if let Some(text) = text {
+                    if let Err(e) = crate::script::adopt_text_region(self.lua(), wrapper, &text) {
+                        self.report.fault(format!("{dbg}: adopt text region: {e}"));
+                    }
+                }
+                if let Some(bytes) = child.attr("bytes") {
+                    if let Err(e) = crate::script::apply_xml_bytes(self.lua(), wrapper, bytes) {
+                        self.report.fault(format!("{dbg}: FontString bytes: {e}"));
+                    }
+                }
+            }
+        }
+    }
+
     /// `<EditBox>` (`0x779fb0`). An absent flag keeps the ctor's, where `autoFocus` is on and the
     /// rest off (`0x779a29`, `0x77a0b3`), so flags are read presence-aware: `autoFocus="false"`
     /// clears. The reference also skips an empty `autoFocus` (`0x77a0b8`), which clears here.
@@ -290,33 +358,32 @@ impl Loader<'_> {
         if !el.tag.eq_ignore_ascii_case("EditBox") {
             return;
         }
-        if let Some(n) = el
-            .attr("letters")
-            .and_then(|v| v.trim().parse::<i64>().ok())
-        {
-            self.call(wrapper, "SetMaxLetters", n, dbg);
+        // Each non-empty: `letters` through `SStrToInt` (`0x77a05c`), `blinkSpeed` through
+        // `SStrToFloat` and stored as 0 unless above it (`0x77a07f`-`0x77a09f`), `historyLines`
+        // through `SStrToInt` and 0 unless above it (`0x77a175`-`0x77a18d`).
+        if let Some(v) = el.attr("letters").filter(|v| !v.is_empty()) {
+            self.call(wrapper, "SetMaxLetters", s_str_to_int(v), dbg);
         }
-        if let Some(n) = el
-            .attr("historyLines")
-            .and_then(|v| v.trim().parse::<i64>().ok())
-        {
-            self.call(wrapper, "SetHistoryLines", n, dbg);
+        if let Some(v) = el.attr("historyLines").filter(|v| !v.is_empty()) {
+            self.call(wrapper, "SetHistoryLines", s_str_to_int(v).max(0), dbg);
         }
-        if let Some(s) = el
-            .attr("blinkSpeed")
-            .and_then(|v| v.trim().parse::<f32>().ok())
-        {
-            self.call(wrapper, "SetBlinkSpeed", s, dbg);
+        if let Some(v) = el.attr("blinkSpeed").filter(|v| !v.is_empty()) {
+            let s = super::xml_float(v);
+            self.call(wrapper, "SetBlinkSpeed", if s > 0.0 { s } else { 0.0 }, dbg);
         }
-        if let Some(ins) = children_named(el, "TextInsets").next() {
-            let src = children_named(ins, "AbsInset").next().unwrap_or(ins);
-            let get = |k: &str| {
-                src.attr(k)
-                    .and_then(|v| v.trim().parse::<f32>().ok())
-                    .unwrap_or(0.0)
-            };
-            let (l, r, t, b) = (get("left"), get("right"), get("top"), get("bottom"));
-            self.call(wrapper, "SetTextInsets", (l, r, t, b), dbg);
+        // Each `<TextInsets>` in the child loop (`0x77a2a9`), the last winning, through the inset
+        // read (`0x77a2d5`), set when it succeeds (`0x77a2da`).
+        for ins in children_named(el, "TextInsets") {
+            if let Some([l, r, t, b]) = self.inset(ins) {
+                self.call(wrapper, "SetTextInsets", (l, r, t, b), dbg);
+            }
+        }
+        // Each `<HighlightColor>` in turn, the last winning (`0x77a277`): the `<Color>` reader
+        // (`0x6f23d0`, `0x77a292`), then the selection's setter (`0x77a2a2`).
+        for hc in children_named(el, "HighlightColor") {
+            if let Err(e) = crate::script::set_selection_color(self.lua, wrapper, color_of(hc)) {
+                self.report.fault(format!("{dbg}: <HighlightColor>: {e}"));
+            }
         }
         for (attr, method) in [
             ("autoFocus", "SetAutoFocus"),
@@ -370,11 +437,10 @@ impl Loader<'_> {
         if !scrolling && !plain {
             return;
         }
+        // A non-empty `maxLines` through `SStrToInt`, above 0 (`0x787c5e`-`0x787c71`).
         if scrolling {
-            if let Some(n) = el
-                .attr("maxLines")
-                .and_then(|v| v.trim().parse::<i64>().ok())
-            {
+            if let Some(v) = el.attr("maxLines").filter(|v| !v.is_empty()) {
+                let n = s_str_to_int(v);
                 if n > 0 {
                     self.call(wrapper, "SetMaxLines", n, dbg);
                 }
@@ -392,25 +458,30 @@ impl Loader<'_> {
                 self.call(wrapper, "SetInsertMode", mode, dbg);
             }
         }
-        if let Some(s) = el
-            .attr("displayDuration")
-            .and_then(|v| v.trim().parse::<f32>().ok())
-        {
-            if s > 0.0 {
-                self.call(wrapper, "SetTimeVisible", s, dbg);
-            }
-        }
-        if let Some(s) = el
-            .attr("fadeDuration")
-            .and_then(|v| v.trim().parse::<f32>().ok())
-        {
-            if s > 0.0 {
-                self.call(wrapper, "SetFadeDuration", s, dbg);
+        // Each a non-empty value through `SStrToFloat`, above 0 (`0x7859de`, `0x785a15`).
+        for (attr, verb) in [
+            ("displayDuration", "SetTimeVisible"),
+            ("fadeDuration", "SetFadeDuration"),
+        ] {
+            if let Some(v) = el.attr(attr).filter(|v| !v.is_empty()) {
+                let s = super::xml_float(v);
+                if s > 0.0 {
+                    self.call(wrapper, verb, s, dbg);
+                }
             }
         }
         // `0x6f1b30`, a missing or empty one skipped (`0x7859b2`-`0x7859bd`).
         if let Some(on) = el.attr_bool_opt("fade") {
             self.call(wrapper, "SetFading", on, dbg);
+        }
+        // Each `<TextInsets>` in the child loop, through the inset read, set when it succeeds
+        // (`0x785b49`-`0x785b65`, `0x787d52`-`0x787d6e`).
+        for ins in children_named(el, "TextInsets") {
+            if let Some(insets) = self.inset(ins) {
+                if let Err(e) = crate::script::set_message_xml_insets(self.lua, wrapper, insets) {
+                    self.report.fault(format!("{dbg}: <TextInsets>: {e}"));
+                }
+            }
         }
     }
 
@@ -569,7 +640,7 @@ impl Loader<'_> {
                 // before `outline=`, `<Color>`, `<Shadow>`, the justifies and `spacing=`.
                 let height = children_named(el, "FontHeight")
                     .last()
-                    .and_then(abs_value)
+                    .map(|h| self.value(h))
                     .filter(|h| *h > 0.0);
                 let Some(height) = height else {
                     self.report_missing_font_height("Font", "<unnamed>", &el.tag);
@@ -599,13 +670,9 @@ impl Loader<'_> {
                 let (r, g, b, a) = c.fractions();
                 self.call(wrapper, "SetShadowColor", (name, r, g, b, a), dbg);
             }
-            if let Some((x, y)) = children_named(sh, "Offset").next().map(abs_dim) {
-                self.call(
-                    wrapper,
-                    "SetShadowOffset",
-                    (name, x.unwrap_or(0.0), y.unwrap_or(0.0)),
-                    dbg,
-                );
+            if let Some(o) = children_named(sh, "Offset").next() {
+                let [x, y] = self.dimension(o).v;
+                self.call(wrapper, "SetShadowOffset", (name, x, y), dbg);
             }
         }
         if let Some(j) = el.attr("justifyH") {

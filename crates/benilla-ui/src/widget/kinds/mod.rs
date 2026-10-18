@@ -180,6 +180,35 @@ impl KindState {
         }
     }
 
+    /// The message kinds' font holder ([`ScrollingMessageState::font_region`]).
+    pub(crate) fn message_font_region_mut(
+        &mut self,
+    ) -> Option<&mut Option<crate::widget::RegionHandle>> {
+        match self {
+            KindState::ScrollingMessage(smf) => Some(&mut smf.font_region),
+            KindState::Message(mf) => Some(&mut mf.font_region),
+            _ => None,
+        }
+    }
+
+    /// The message kinds' text insets ([`ScrollingMessageState::insets`]).
+    pub fn message_insets(&self) -> Option<[f32; 4]> {
+        match self {
+            KindState::ScrollingMessage(smf) => Some(smf.insets),
+            KindState::Message(mf) => Some(mf.insets),
+            _ => None,
+        }
+    }
+
+    /// [`Self::message_insets`], mutably, for the XML `<TextInsets>`.
+    pub fn message_insets_mut(&mut self) -> Option<&mut [f32; 4]> {
+        match self {
+            KindState::ScrollingMessage(smf) => Some(&mut smf.insets),
+            KindState::Message(mf) => Some(&mut mf.insets),
+            _ => None,
+        }
+    }
+
     /// The message kinds' sweep-skip generation ([`ScrollingMessageState::lines_gen`]).
     pub fn lines_gen(&self) -> Option<u64> {
         match self {

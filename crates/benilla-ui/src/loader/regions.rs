@@ -3,7 +3,7 @@ use mlua::{ObjectLike, Table};
 use crate::framexml::{self, Element};
 use crate::status;
 
-use super::{abs_value, children_named, color_of, Loader};
+use super::{children_named, color_of, Loader};
 
 /// Whether a region reads its own font attributes, the reference's `FONTSTRING+0x12c`: set by the
 /// ctor (`0x770de7`) and cleared only on a Button's `<NormalText>` (`0x778b7b`), whose string then
@@ -109,8 +109,8 @@ impl Loader<'_> {
         Some(region_wrapper)
     }
 
-    /// A frame's direct-child `<FontString>`, its "special" string (a message frame's line font, an
-    /// EditBox's text), on the OVERLAY layer.
+    /// A frame's direct-child `<FontString>`, on the OVERLAY layer; a text frame's loads into its
+    /// own font instead ([`Loader::apply_text_font_children`]).
     pub(super) fn apply_special_fontstrings(
         &mut self,
         el: &Element,
@@ -131,58 +131,23 @@ impl Loader<'_> {
             let rname: Option<String> = region
                 .name()
                 .map(|raw| framexml::resolve_name(raw, parent_name));
-            // An EditBox's `<FontString>` declares the text string its ctor built (`0x779fb0`,
-            // `0x779bee`), so it creates nothing: a second region would also shift `GetRegions`.
-            let existing_text = el
-                .tag
-                .eq_ignore_ascii_case("EditBox")
-                .then(|| crate::script::editbox_text_region_wrapper(self.lua(), wrapper))
-                .flatten();
-            let region_wrapper: Table = match existing_text {
-                Some(w) => {
-                    if let Some(n) = rname {
-                        crate::script::region::publish_region_name(self.lua(), &n, &w);
-                        if let Err(e) = self.lua().globals().set(n.clone(), w.clone()) {
-                            self.report
-                                .warnings
-                                .push(format!("{dbg}: embedded FontString global '{n}': {e}"));
-                        }
-                    }
-                    w
+            let region_wrapper: Table = match wrapper
+                .call_method("CreateFontString", (rname, Some("OVERLAY".to_string())))
+            {
+                Ok(w) => w,
+                Err(e) => {
+                    self.report
+                        .fault(format!("{dbg}: CreateFontString (special): {e}"));
+                    continue;
                 }
-                None => match wrapper
-                    .call_method("CreateFontString", (rname, Some("OVERLAY".to_string())))
-                {
-                    Ok(w) => w,
-                    Err(e) => {
-                        self.report
-                            .fault(format!("{dbg}: CreateFontString (special): {e}"));
-                        continue;
-                    }
-                },
             };
             for node in &levels {
                 let attrs = FontAttrs::Own;
                 self.load_fontstring_level(node, &region_wrapper, parent_name, attrs, true, dbg);
             }
-            // The implicit creation anchor, as in `apply_layers`; an EditBox's adopt replaces it.
+            // The implicit creation anchor, as in `apply_layers`.
             if let Err(e) = crate::script::implicit_creation_anchor_lua(self.lua, &region_wrapper) {
                 self.report.fault(format!("{dbg}: implicit anchor: {e}"));
-            }
-            // It is the EditBox's text region by slot, never found by a search, which could take a
-            // `<Layers>` string; the box's insets anchor it.
-            if el.tag.eq_ignore_ascii_case("EditBox") {
-                if let Err(e) =
-                    crate::script::adopt_text_region(self.lua(), wrapper, &region_wrapper)
-                {
-                    self.report
-                        .fault(format!("{dbg}: adopt special FontString: {e}"));
-                }
-                if let Some(bytes) = levels.iter().rev().find_map(|l| l.attr("bytes")) {
-                    if let Err(e) = crate::script::apply_xml_bytes(self.lua(), wrapper, bytes) {
-                        self.report.fault(format!("{dbg}: FontString bytes: {e}"));
-                    }
-                }
             }
         }
     }
@@ -275,9 +240,10 @@ impl Loader<'_> {
                 self.set_font_object(wrapper, "font", name, dbg);
             }
             Some(path) => {
+                // The first `<FontHeight>`, read whatever it answers (`0x771141`), above 0.
                 let height = children_named(node, "FontHeight")
                     .next()
-                    .and_then(abs_value)
+                    .map(|h| self.value(h))
                     .filter(|h| *h > 0.0);
                 let Some(height) = height else {
                     let name = self.object_name(wrapper);
@@ -307,10 +273,10 @@ impl Loader<'_> {
             }
             None => {}
         }
-        // `spacing=` (`0x771257`) goes through the setter and clears inherit bit `0x10`
+        // `spacing=` (`0x771257`, `SStrToFloat` at `0x77126d`) goes through the setter and clears inherit bit `0x10`
         // (`0x771298`), so it outlasts the font object's.
         if let Some(sp) = node.attr("spacing").filter(|v| !v.is_empty()) {
-            self.call_region(wrapper, "SetSpacing", crate::framexml::atof(sp), dbg);
+            self.call_region(wrapper, "SetSpacing", super::xml_float(sp), dbg);
         }
         // A justify token is matched first (`0x6f1990`) and one that matches nothing is skipped
         // (`0x7712c3`, `0x771327`). A match writes its axis's bits of the justify word inline, none
@@ -331,7 +297,7 @@ impl Loader<'_> {
                 let c = color_of(child).fractions();
                 self.call_region(wrapper, "SetVertexColor", c, dbg);
             } else if child.tag.eq_ignore_ascii_case("Shadow") {
-                let sh = super::shadow_of(child);
+                let sh = self.shadow_of(child);
                 self.call_region(wrapper, "SetShadowColor", sh.color.fractions(), dbg);
                 self.call_region(
                     wrapper,

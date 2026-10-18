@@ -2195,6 +2195,69 @@ mod tests {
         assert_eq!(failed(&mut glue), Vec::<String>::new(), "the glue");
     }
 
+    /// The anchor loop (`0x767800`), the XML length readers (`0x6f1eb0`, `0x6f1d60`, `0x6f20a0`),
+    /// the Backdrop's child loop (`0x77e875`), a text frame's `font=` (`0x879bc8`) and
+    /// `<FontString>` child (`0x879b3c`) and a model's `scale` (`0x8788d8`) log a node they refuse.
+    /// The core and glue the default load reads, and benilla's layer, write none of these in
+    /// 1.12.1, so a line here is a read stricter than the reference's, or a layer file the
+    /// reference would refuse. (The one stock line among them, BrowseName's font override, is in
+    /// the load-on-demand Blizzard_AuctionUI, which `tests/auction_frame.rs` holds to it.)
+    #[test]
+    fn every_anchor_and_length_the_stock_interface_writes_reads() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let refused = |s: &mut UiScript| -> Vec<String> {
+            s.finish_ui_load_log();
+            let mut lines: Vec<String> = s.diagnostics().into_iter().map(|d| d.message).collect();
+            lines.extend(s.take_load_log_writes().iter().map(|w| format!("{w:?}")));
+            lines.retain(|l| {
+                [
+                    "Invalid anchor point in frame",
+                    "Frame anchored to itself",
+                    "Couldn't find relative frame",
+                    "attributes in element",
+                    "attribute in element",
+                    "Unknown child node in",
+                    "Couldn't find font object named",
+                    "Invalid model scale",
+                    "FontString element overriding font",
+                ]
+                .iter()
+                .any(|t| l.contains(t))
+            });
+            lines
+        };
+        let mut core = UiScript::new().expect("VM");
+        core.set_screen_size(1024.0, 768.0);
+        super::super::manifest::load_default_ui(&core);
+        assert_eq!(refused(&mut core), Vec::<String>::new(), "the core");
+
+        let mut glue = UiScript::new_glue().expect("VM");
+        glue.set_screen_size(1024.0, 768.0);
+        super::super::glue::load_glue(&mut glue);
+        assert_eq!(refused(&mut glue), Vec::<String>::new(), "the glue");
+    }
+
+    /// The frame loader's child loop applies each `<HitRectInsets>` in turn (`0x769c8c`), so the
+    /// reputation detail checkboxes' own `right="0"` wins over OptionsCheckButtonTemplate's -100,
+    /// and WorldStateScoreFrame's second element over its first.
+    #[test]
+    fn a_stock_frames_last_hit_rect_insets_win() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let core = UiScript::new().expect("VM");
+        super::super::manifest::load_default_ui(&core);
+        let insets = |f: &str| -> Vec<f32> {
+            core.eval(&format!("return {{{f}:GetHitRectInsets()}}"))
+                .unwrap_or_else(|e| panic!("{f}: {e}"))
+        };
+        for f in [
+            "ReputationDetailMainScreenCheckBox",
+            "ReputationDetailInactiveCheckBox",
+        ] {
+            assert_eq!(insets(f), [0.0; 4], "{f}");
+        }
+        assert_eq!(insets("WorldStateScoreFrame"), [13.0, 115.0, 10.0, 13.0]);
+    }
+
     fn seat_a_player(s: &mut UiScript) {
         s.set_unit(
             "player",
