@@ -13,11 +13,14 @@ use benilla_world::terrain_stream::point_light;
 /// Spawn a point light child for each casting M2 light of an entity's model. A light whose bone
 /// `joint` resolves rides that joint at `position − bone_pivot`; one without (a held item has no
 /// skeleton, a `-1` bone) hangs off `frame` in model space. As children, the lights leave with a
-/// gear change, a despawn or a mount transition.
+/// gear change, a despawn or a mount transition. `placed`: the host is a GameObject that stays
+/// where the server put it, so its lights may group with their neighbours
+/// ([`benilla_world::lighting::PlacedLight`]).
 pub(super) fn spawn_carried_lights(
     commands: &mut Commands,
     lights: &[ModelLight],
     frame: Entity,
+    placed: bool,
     joint: impl Fn(i16) -> Option<Entity>,
 ) {
     for l in lights {
@@ -63,6 +66,11 @@ pub(super) fn spawn_carried_lights(
         ) {
             commands.entity(glow).insert(flicker);
         }
+        if placed {
+            commands
+                .entity(glow)
+                .insert(benilla_world::lighting::PlacedLight);
+        }
         commands.entity(parent).add_child(glow);
     }
 }
@@ -106,7 +114,7 @@ mod tests {
         ];
         app.world_mut().commands().queue(move |world: &mut World| {
             let mut q = world.commands();
-            spawn_carried_lights(&mut q, &lights, frame, move |bone| {
+            spawn_carried_lights(&mut q, &lights, frame, false, move |bone| {
                 (bone == 3).then_some(joint)
             });
         });

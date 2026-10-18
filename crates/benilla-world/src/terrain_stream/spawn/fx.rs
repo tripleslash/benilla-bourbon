@@ -41,6 +41,8 @@ fn spawn_point_light(
     let mut e = commands.spawn((
         point_light(color, intensity_scale),
         Transform::from_translation(world),
+        // fork (perf): a world light, which the modern table may group with its neighbours.
+        crate::lighting::PlacedLight,
     ));
     if let Some(room) = room {
         e.insert(crate::lighting::LightRooms(room));

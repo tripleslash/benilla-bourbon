@@ -135,6 +135,13 @@ pub(crate) fn go_type_derives_light(type_id: i32) -> bool {
     !matches!(type_id, 6 | 12 | 13 | 16 | 17 | 18 | 22 | 30)
 }
 
+/// fork (perf): whether a GameObject of this type stays where the server placed it, so its lights
+/// may group with their neighbours (`benilla_world::lighting::PlacedLight`). TRANSPORT 11 (an
+/// elevator) and MO_TRANSPORT 15 (a ship, a zeppelin) carry their lamps away.
+pub(crate) fn go_type_stands_still(type_id: i32) -> bool {
+    !matches!(type_id, 11 | 15)
+}
+
 /// `GAMEOBJECT_TYPE_DOOR`, the one type a ghost's mover trace drops; also what an absent
 /// `GAMEOBJECT_TYPE_ID` means, since vmangos omits zero-valued fields.
 const GO_TYPE_DOOR: i32 = 0;

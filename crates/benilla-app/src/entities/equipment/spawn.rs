@@ -663,7 +663,7 @@ fn spawn_slot(
         );
     }
     // The item's own M2 point lights (a held torch's glow), riding `root` like the emitters.
-    spawn_carried_lights(commands, &dm.lights, root, |_| None);
+    spawn_carried_lights(commands, &dm.lights, root, false, |_| None);
     // The ribbons ride the item root in Stand, where a thrown weapon's flight trail is keyed dark.
     for rb in &dm.ribbons {
         benilla_world::ribbons::spawn_ribbon(

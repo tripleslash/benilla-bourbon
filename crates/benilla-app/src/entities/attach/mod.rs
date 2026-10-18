@@ -803,7 +803,12 @@ pub(super) fn attach_entity_visuals(
                         .map(|a| (l.def.bone, a))
                 })
                 .collect();
-            super::spawn_carried_lights(&mut commands, model_lights, entity, |bone| {
+            // fork (perf): a GameObject that stays put is a placed fixture to the light grouping.
+            let placed_go = net.kind == EntityKind::GameObject
+                && crate::go_anim::go_type_stands_still(
+                    stores.get(entity).map_or(0, |s| s.0.gameobject_type_id()),
+                );
+            super::spawn_carried_lights(&mut commands, model_lights, entity, placed_go, |bone| {
                 light_anchors.get(&bone).copied()
             });
             // fork: P8 — **and the GameObject brazier that authors no light at all.**
@@ -907,6 +912,11 @@ pub(super) fn attach_entity_visuals(
                                 Vec3::from(local) + Vec3::splat((entity.to_bits() % 4096) as f32),
                             ) {
                                 commands.entity(light).insert(flicker);
+                            }
+                            if placed_go {
+                                commands
+                                    .entity(light)
+                                    .insert(benilla_world::lighting::PlacedLight);
                             }
                             commands.entity(entity).add_child(light);
                         }

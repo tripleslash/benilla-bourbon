@@ -68,6 +68,9 @@ pub const CUBE_NEAR: f32 = 0.25;
 /// stands a little outside the glow it houses, so clipping exactly at the glow's extent still
 /// leaves the ironwork casting.
 const FIXTURE_CLEARANCE: f32 = 1.6;
+/// fork (perf): how far a grouped member's own fixture reaches past its light (yd), a torch's head
+/// and the top of its pole, for the group cube's near plane.
+const GROUP_FIXTURE_REACH: f32 = 0.5;
 /// Shadow bias, in yards back toward the light.
 const CUBE_BIAS_YD: f32 = 0.12;
 /// Tile border kept clear of filter taps, in texels.
@@ -909,6 +912,8 @@ fn update_lights(
     // fork: seconds since the last contested swap ([`SWAP_COOLDOWN`]).
     mut swap_clock: Local<f32>,
     time: Res<Time>,
+    // fork (perf): a group of placed lights holds one slot, at the centre the table packs it at.
+    groups: Option<Res<crate::lighting::LightGroups>>,
 ) {
     let dt = time.delta_secs().clamp(0.0, 0.1);
     let tier = lamp_levers(light_tier(active.quality));
@@ -941,8 +946,13 @@ fn update_lights(
             if spell || lava || !shadow_candidate(window, synthesized, emissive) {
                 continue;
             }
+            // fork (perf): a group ranks through its leader alone, from the group's centre.
+            let group = groups.as_deref().and_then(|g| g.of(entity));
+            if group.is_some_and(|(leader, _)| leader != entity) {
+                continue;
+            }
             // The distance first: most of the world's lights are far, and it is the cheap test.
-            let pos = gt.translation();
+            let pos = group.map_or_else(|| gt.translation(), |(_, g)| g.centroid);
             let d = pos.distance(cam);
             if d > SHADOW_RADIUS || light.range <= 0.0 {
                 continue;
@@ -970,10 +980,15 @@ fn update_lights(
                 score: lamp_score(lum, d, light.range),
                 light: ShadowLight {
                     pos: track.anchor(),
-                    range: light.range,
+                    range: light.range + group.map_or(0.0, |(_, g)| g.spread),
                     // Clear the fixture, with a margin — a card's extent is the glow, and the iron
-                    // around it sits a little outside that.
-                    near: fixture.map_or(CUBE_NEAR, |f| CUBE_NEAR.max(f.0 * FIXTURE_CLEARANCE)),
+                    // around it sits a little outside that. A group's cube clears every member's
+                    // fixture too: from the centre between two torches, their poles would cast.
+                    near: fixture
+                        .map_or(CUBE_NEAR, |f| CUBE_NEAR.max(f.0 * FIXTURE_CLEARANCE))
+                        .max(group.map_or(0.0, |(_, g)| {
+                            (g.spread + GROUP_FIXTURE_REACH) * FIXTURE_CLEARANCE
+                        })),
                     id: entity.to_bits(),
                     slack: track.reach() + MATCH_SLACK,
                 },

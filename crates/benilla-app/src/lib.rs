@@ -236,7 +236,7 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
 /// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
 fn seed_launch_env() {
-    const SEEDED: [&str; 51] = [
+    const SEEDED: [&str; 52] = [
         "WOW_MAP",
         "WOW_MODERN_FOGLOG",
         "WOW_MODERN_LOOK",
@@ -324,6 +324,8 @@ fn seed_launch_env() {
         "WOW_MIRROR_THIN",
         // …and its under-the-water cull (`?mirror_plane_cull=0`).
         "WOW_MIRROR_PLANE_CULL",
+        // …and the placed-light grouping's (`?light_group=0`).
+        "WOW_LIGHT_GROUP",
     ];
     benilla_world::launch_env::seed(
         SEEDED

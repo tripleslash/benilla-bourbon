@@ -155,6 +155,182 @@ pub const GLOWLESS_TAG: f32 = 0.375;
 #[derive(Component, Clone, Copy, Debug)]
 pub struct SpellFxLight;
 
+/// fork (perf): **a light placed with the world** — a doodad's or a WMO's, spawned by the terrain
+/// streamer and never moved. Only these group ([`LightGroups`]): a light a body carries walks away
+/// from its neighbour, and a group that broke as it did would pop.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct PlacedLight;
+
+/// fork (perf): placed lights this close to a stronger one (yd) are one light in a modern frame:
+/// one table entry, one cube slot. The tightest torch pair at Darkshore's Blackwood camps, the
+/// user's reference (2026-10-18), stands 4.36 yd apart and its two flames 4.68 yd; every other torch
+/// there is 11 yd or more from its neighbour, so the radius takes the pairs and leaves the ring.
+pub const LIGHT_GROUP_RADIUS: f32 = 5.0;
+
+/// fork (perf): one group of placed lights, keyed by its leader (its strongest member).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightGroup {
+    /// The members' strength-weighted centre: where the group's one light stands.
+    pub centroid: Vec3,
+    /// The farthest member from [`Self::centroid`] (yd): the group's range grows by it, and its cube
+    /// clears it, so the members' own fixtures cast no shadow from a point between them.
+    pub spread: f32,
+}
+
+/// fork (perf): which placed lights stand together ([`LIGHT_GROUP_RADIUS`]). A member maps to its
+/// leader and a leader to itself; a light in no group is absent. Rebuilt only when the placed set
+/// changes, since a placed light never moves.
+#[derive(Resource, Default, Debug)]
+pub struct LightGroups {
+    leader: bevy::platform::collections::HashMap<Entity, Entity>,
+    groups: bevy::platform::collections::HashMap<Entity, LightGroup>,
+}
+
+impl LightGroups {
+    /// The group `e` belongs to, as `(leader, group)`.
+    pub fn of(&self, e: Entity) -> Option<(Entity, LightGroup)> {
+        let leader = *self.leader.get(&e)?;
+        Some((leader, *self.groups.get(&leader)?))
+    }
+}
+
+/// One placed light as the grouping sees it: where, how strong, and the class a group must share.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GroupCandidate {
+    pub(crate) entity: Entity,
+    pub(crate) pos: Vec3,
+    pub(crate) strength: f32,
+    /// Window, glowless, night glow, derived from a glow: lights of different kinds never merge.
+    pub(crate) class: u8,
+}
+
+/// Greedy, strongest first: an ungrouped light leads, and takes every ungrouped light of its class
+/// within [`LIGHT_GROUP_RADIUS`] of itself. Members are measured from the leader, never from each
+/// other, so a row of torches cannot chain into one long group. A leader that took nobody is no
+/// group.
+pub(crate) fn group_lights(mut lights: Vec<GroupCandidate>) -> LightGroups {
+    lights.sort_by(|a, b| {
+        b.strength
+            .total_cmp(&a.strength)
+            .then(a.entity.cmp(&b.entity))
+    });
+    let cell = LIGHT_GROUP_RADIUS;
+    let key = |p: Vec3| {
+        (
+            (p.x / cell).floor() as i32,
+            (p.y / cell).floor() as i32,
+            (p.z / cell).floor() as i32,
+        )
+    };
+    let mut grid: bevy::platform::collections::HashMap<(i32, i32, i32), Vec<usize>> =
+        Default::default();
+    for (i, l) in lights.iter().enumerate() {
+        grid.entry(key(l.pos)).or_default().push(i);
+    }
+    let mut taken = vec![false; lights.len()];
+    let mut out = LightGroups::default();
+    for i in 0..lights.len() {
+        if taken[i] {
+            continue;
+        }
+        taken[i] = true;
+        let lead = lights[i];
+        let (cx, cy, cz) = key(lead.pos);
+        let mut members = vec![i];
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    for &j in grid.get(&(cx + dx, cy + dy, cz + dz)).into_iter().flatten() {
+                        let m = lights[j];
+                        if !taken[j]
+                            && m.class == lead.class
+                            && m.pos.distance(lead.pos) <= LIGHT_GROUP_RADIUS
+                        {
+                            taken[j] = true;
+                            members.push(j);
+                        }
+                    }
+                }
+            }
+        }
+        if members.len() < 2 {
+            continue;
+        }
+        let weight: f32 = members.iter().map(|&j| lights[j].strength.max(1e-6)).sum();
+        let centroid = members
+            .iter()
+            .map(|&j| lights[j].pos * lights[j].strength.max(1e-6))
+            .sum::<Vec3>()
+            / weight;
+        let spread = members
+            .iter()
+            .map(|&j| lights[j].pos.distance(centroid))
+            .fold(0.0, f32::max);
+        for &j in &members {
+            out.leader.insert(lights[j].entity, lead.entity);
+        }
+        out.groups
+            .insert(lead.entity, LightGroup { centroid, spread });
+    }
+    out
+}
+
+/// Rebuild [`LightGroups`] when a placed light arrives or leaves, or a server fixture's light learns
+/// its room ([`LightOwner`]'s rooms land a frame after the light): an indoor light never groups.
+#[allow(clippy::type_complexity)]
+fn group_placed_lights(
+    added: Query<(), Added<PlacedLight>>,
+    mut removed: RemovedComponents<PlacedLight>,
+    rooms_moved: Query<(), (With<PlacedLight>, Changed<LightRooms>)>,
+    mut rooms_removed: RemovedComponents<LightRooms>,
+    lights: Query<
+        (
+            Entity,
+            &WorldPointLight,
+            &GlobalTransform,
+            Has<LightRooms>,
+            Has<NightGlow>,
+            Has<WindowPane>,
+            Has<Glowless>,
+            Has<crate::modern::lights::SynthesizedLight>,
+        ),
+        With<PlacedLight>,
+    >,
+    mut groups: ResMut<LightGroups>,
+) {
+    // A unit's light crossing a doorway is no business of the groups.
+    let left =
+        removed.read().count() + rooms_removed.read().filter(|e| lights.contains(*e)).count();
+    if added.is_empty() && rooms_moved.is_empty() && left == 0 {
+        return;
+    }
+    // `$WOW_LIGHT_GROUP=0` (`?light_group=0`): every placed light stands alone, the A/B lever.
+    static GROUPING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*GROUPING.get_or_init(|| crate::launch_env::var("WOW_LIGHT_GROUP").as_deref() != Some("0"))
+    {
+        return;
+    }
+    let candidates = lights
+        .iter()
+        // An indoor light keeps its own entry: its rooms gate it frame by frame, and two rooms'
+        // lights in one group would light each other's.
+        .filter(|(_, _, _, rooms, ..)| !rooms)
+        .map(
+            |(entity, light, gt, _, night, window, glowless, synthesized)| GroupCandidate {
+                entity,
+                pos: gt.translation(),
+                strength: light.intensity
+                    * (0.2126 * light.color[0] + 0.7152 * light.color[1] + 0.0722 * light.color[2]),
+                class: u8::from(night)
+                    | u8::from(window) << 1
+                    | u8::from(glowless) << 2
+                    | u8::from(synthesized) << 3,
+            },
+        )
+        .collect();
+    *groups = group_lights(candidates);
+}
+
 /// fork: P8 — how fast a light ramps into and out of the committed table, in units of fade per
 /// second. ~4 frames at 60 Hz: long enough that no edge reads as a switch, short enough that a
 /// lamp is at full strength by the time the player has finished stepping through the door.
@@ -315,6 +491,7 @@ pub struct SharedLightBuffer(pub Buffer);
 pub(super) fn register(app: &mut App) {
     app.init_resource::<WowLightData>()
         .init_resource::<LightRank>()
+        .init_resource::<LightGroups>()
         .init_resource::<super::EnvFrame>()
         .init_resource::<super::prop_probes::PropProbeExtract>()
         .add_plugins(ExtractResourcePlugin::<WowLightData>::default())
@@ -337,6 +514,14 @@ pub(super) fn register(app: &mut App) {
         .add_systems(
             PostUpdate,
             track_entity_light_rooms.after(bevy::transform::TransformSystems::Propagate),
+        )
+        // fork (perf): the groups are this frame's before the table packs them and the cube
+        // slots (`Last`) rank them.
+        .add_systems(
+            PostUpdate,
+            group_placed_lights
+                .after(bevy::transform::TransformSystems::Propagate)
+                .before(build_light_data),
         )
         // After the spawners (PostUpdate): publish the probe table for extraction on change.
         .add_systems(PostUpdate, super::prop_probes::publish_prop_probes);
@@ -418,7 +603,12 @@ fn build_light_data(
     wmos: Option<Res<bevy::asset::Assets<benilla_assets::WmoModel>>>,
     // The blob, and the table's steady strengths beside it ([`LightRank`]; absent in a bare test
     // app, which ranks nothing).
-    (mut data, rank): (ResMut<WowLightData>, Option<ResMut<LightRank>>),
+    (mut data, rank, groups): (
+        ResMut<WowLightData>,
+        Option<ResMut<LightRank>>,
+        // fork (perf): which placed lights stand together, folded into one entry below.
+        Option<Res<LightGroups>>,
+    ),
     time: Res<Time>,
     // fork: modern lighting — row 20 `.y` tells every world shader the frame is linear.
     active: Option<Res<crate::modern::ActiveLighting>>,
@@ -542,7 +732,17 @@ fn build_light_data(
         radius
     }
     .powi(2);
-    let mut pts: Vec<(f32, Vec3, f32, [f32; 3], bool, f32, f32)> = lights_q
+    #[allow(clippy::type_complexity)]
+    let mut pts: Vec<(
+        f32,
+        Vec3,
+        f32,
+        [f32; 3],
+        bool,
+        f32,
+        f32,
+        Option<(Entity, LightGroup)>,
+    )> = lights_q
         .iter()
         .filter_map(
             |(entity, pl, gt, rooms, synthesized, night_glow, window, glowless, flame, spell)| {
@@ -626,7 +826,12 @@ fn build_light_data(
                 } else {
                     0.0
                 };
-                Some((d2, p, pl.range, rgb, indoors, tag, rank))
+                // A modern frame packs a group of placed lights as one ([`LightGroups`]).
+                let group = groups
+                    .as_deref()
+                    .filter(|_| modern_pack)
+                    .and_then(|g| g.of(entity));
+                Some((d2, p, pl.range, rgb, indoors, tag, rank, group))
             },
         )
         .collect();
@@ -647,6 +852,38 @@ fn build_light_data(
             (*pack_radius + PACK_GROW_RATE * dt).min(target)
         }
         .max(MODERN_PACK_FADE);
+    }
+    // fork (perf): a group of placed lights is one entry at its centre: the members' committed
+    // colours (each with its own fade and flicker) and strengths summed, and a range that still
+    // reaches as far as the farthest member's did.
+    if pts.iter().any(|pt| pt.7.is_some()) {
+        let mut at: bevy::platform::collections::HashMap<Entity, usize> = Default::default();
+        let mut folded = Vec::with_capacity(pts.len());
+        for mut pt in pts.drain(..) {
+            let Some((leader, group)) = pt.7 else {
+                folded.push(pt);
+                continue;
+            };
+            let reach = pt.2 + group.spread;
+            match at.get(&leader) {
+                Some(&i) => {
+                    let f = &mut folded[i];
+                    for c in 0..3 {
+                        f.3[c] += pt.3[c];
+                    }
+                    f.6 += pt.6;
+                    f.2 = f.2.max(reach);
+                }
+                None => {
+                    at.insert(leader, folded.len());
+                    pt.0 = group.centroid.distance_squared(cam_pos);
+                    pt.1 = group.centroid;
+                    pt.2 = reach;
+                    folded.push(pt);
+                }
+            }
+        }
+        pts = folded;
     }
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
     // fork: P8 — how many lights actually wanted in. Deriving a light from every glow card made
@@ -681,7 +918,7 @@ fn build_light_data(
             *rank = steady;
         }
     }
-    for (i, (_, p, range, rgb, indoors, tag, _)) in pts.iter().enumerate() {
+    for (i, (_, p, range, rgb, indoors, tag, _, _)) in pts.iter().enumerate() {
         fresh.points[2 * i] = [p.x, p.y, p.z, *range];
         // fork: modern lighting (P8) — **`w` is 1 for a light that is INDOORS**, and the surface
         // lanes' class test runs both ways off it: an interior fragment takes only indoor lights,
@@ -721,7 +958,7 @@ fn build_light_data(
             let snap = |v: f32| (((half + v) / cell).floor() + 0.5) * cell - half;
             let anchor = Vec3::new(snap(cam_pos.x), cam_pos.y, snap(cam_pos.z));
             let (mut boxed, mut sphere) = (0usize, 0usize);
-            for (_, p, _, _, _, _, _) in &pts {
+            for (_, p, _, _, _, _, _, _) in &pts {
                 let dv = *p - anchor;
                 boxed += usize::from(dv.x.abs().max(dv.z.abs()) <= 33.570_166);
                 sphere += usize::from(dv.length() <= 48.0);
@@ -737,7 +974,7 @@ fn build_light_data(
                 "[points] {} packed, cam {cam_pos:.1?} — this chunk's candidates: {boxed} (was {sphere} at the 48 yd sphere), 3 slots",
                 pts.len()
             );
-            for (d2, p, _, rgb, _, tag, _) in pts.iter().take(8) {
+            for (d2, p, _, rgb, _, tag, _, _) in pts.iter().take(8) {
                 out.push_str(&format!(
                     "\n  d {:6.2}  at [{:8.2},{:7.2},{:8.2}]  rgb [{:.3},{:.3},{:.3}]  tag {tag}",
                     d2.sqrt(),
@@ -747,6 +984,29 @@ fn build_light_data(
                     rgb[0],
                     rgb[1],
                     rgb[2]
+                ));
+            }
+            // The table's closest pairs, the evidence for how near two fixtures' lights stand.
+            let mut pairs: Vec<(f32, Vec3, Vec3)> = Vec::new();
+            for (i, a) in pts.iter().enumerate() {
+                for b in &pts[i + 1..] {
+                    let d = a.1.distance(b.1);
+                    if d < 3.0 {
+                        pairs.push((d, a.1, b.1));
+                    }
+                }
+            }
+            pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+            out.push_str(&format!(
+                "\n  {} pair(s) under 3 yd; {} placed-light group(s), {} packed as one",
+                pairs.len(),
+                groups.as_deref().map_or(0, |g| g.groups.len()),
+                pts.iter().filter(|p| p.7.is_some()).count(),
+            ));
+            for (d, a, b) in pairs.iter().take(12) {
+                out.push_str(&format!(
+                    "\n  pair {d:5.2} yd  [{:8.2},{:7.2},{:8.2}] [{:8.2},{:7.2},{:8.2}]",
+                    a.x, a.y, a.z, b.x, b.y, b.z
                 ));
             }
             bevy::log::info!("{out}");
@@ -942,6 +1202,45 @@ mod tests {
             dip[0],
             ambient[0]
         );
+    }
+
+    /// fork (perf): the camp's torch pair (4.36 yd) groups under the stronger torch, at their
+    /// strength-weighted centre; a torch 11 yd off, a glow of another class and the third of a row
+    /// stay apart, since members are measured from the leader and never chain.
+    #[test]
+    fn stacked_placed_lights_group_and_a_row_does_not_chain() {
+        let mut w = World::new();
+        let mut light = |x: f32, strength: f32, class: u8| GroupCandidate {
+            entity: w.spawn_empty().id(),
+            pos: Vec3::new(x, 0.0, 0.0),
+            strength,
+            class,
+        };
+        let a = light(0.0, 2.0, 0);
+        let b = light(4.36, 1.0, 0);
+        let far = light(15.36, 1.0, 0);
+        let glow = light(1.0, 1.0, 1);
+        // A row at 4 yd: 100, 104, 108.
+        let r0 = light(100.0, 1.0, 0);
+        let r1 = light(104.0, 1.0, 0);
+        let r2 = light(108.0, 1.0, 0);
+        let groups = group_lights(vec![a, b, far, glow, r0, r1, r2]);
+
+        let (lead, g) = groups.of(b.entity).expect("the pair groups");
+        assert_eq!(lead, a.entity, "the stronger torch leads");
+        assert_eq!(groups.of(a.entity).map(|(l, _)| l), Some(a.entity));
+        assert!((g.centroid.x - 4.36 / 3.0).abs() < 1e-4, "{:?}", g.centroid);
+        assert!((g.spread - 2.0 * 4.36 / 3.0).abs() < 1e-4, "{}", g.spread);
+        assert!(groups.of(far.entity).is_none());
+        assert!(
+            groups.of(glow.entity).is_none(),
+            "another class never merges"
+        );
+
+        let row: Vec<_> = [r0, r1, r2].iter().map(|l| groups.of(l.entity)).collect();
+        let led: Vec<_> = row.iter().flatten().map(|(l, _)| *l).collect();
+        assert_eq!(led.len(), 2, "two of the row group: {row:?}");
+        assert!(led.iter().all(|l| *l == led[0]));
     }
 
     /// A held torch, authored `(0.467, 0.290, 0.133) × 3.0`, commits its raw product through the
