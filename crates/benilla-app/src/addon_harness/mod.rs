@@ -607,17 +607,23 @@ fn drive_session_start(
             script.load_addon_row(&mut host, dependent, false, false);
         }
     }
+    enter_world(script);
+    let raised = script.errors().split_off(before);
+    raised
+        .into_iter()
+        .filter(|e| !raised_inside_another_addons_own_file(e, name, installed))
+        .collect()
+}
+
+/// The session start after the addons' own `ADDON_LOADED`: `VARIABLES_LOADED`, `PLAYER_LOGIN` and
+/// `PLAYER_ENTERING_WORLD`, then ten ticks of 0.1 s ([`drive_session_start`] says why).
+fn enter_world(script: &mut UiScript) {
     for event in ["VARIABLES_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD"] {
         script.fire_event(event, Vec::new());
     }
     for _ in 0..10 {
         script.tick(0.1);
     }
-    let raised = script.errors().split_off(before);
-    raised
-        .into_iter()
-        .filter(|e| !raised_inside_another_addons_own_file(e, name, installed))
-        .collect()
 }
 
 /// Does this raise belong to another installed addon's file? A library that fails is its own row;

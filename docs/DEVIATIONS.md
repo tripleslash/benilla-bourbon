@@ -23,6 +23,7 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 | `gxDepthBits` | `16` | `32` | as `gxColorBits` — the depth half of the same descriptive pair |
 | `gxResolution` | `640x480` | `1600x900` | narrowed to the WINDOWED size only — fullscreen is the monitor's own and we expose no mode list, and 640x480 is not a window anyone would ship a client at |
 | `realmList` | `us.logon.worldofwarcraft.com:3724` | `localhost` | that host has not resolved since 2019, so shipping it makes every first launch a DNS failure; benilla dials the machine it is running on |
+| `scriptMemory` | `49152` | `0` | The page bundles pfQuest, whose database counts past 48 MB, so on the page the limit is off by default, as pfQuest asks every vanilla player to set it; native keeps 49152. |
 | `SmallCull` | `0.04` | `0.01` | the High stop's `SetWorldDetail` value, so the pair boots consistent with `WorldDetail` "2" above and the stock window's Defaults lands on the same stop as ours |
 | `SoundReverb` | `1` | `0` | the reference's reverb is EAX-over-hardware, and that hardware has not existed since Vista, so "1" would ship audio the real client has never actually produced on any machine a player runs today |
 | `weatherDensity` | `2` | `3` | every precipitation rate in `benilla-world`'s own precipitation module was derived and graded against the reference install's own apitrace captures, and that install runs `SET weatherDensity "3"` (K = 1.0) — so 3 is the value a benilla-vs-reference side-by-side is correct at, and the registered 2 would thin every rate to 0.66 against the only client we compare with. The slider is how a player takes it back down |
@@ -32,7 +33,7 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 
 Each entry is the first sentence of a `Deviation:` comment, linking to where it lives.
 
-- [benilla-app](#benilla-app): 237
+- [benilla-app](#benilla-app): 238
 - [benilla-assets](#benilla-assets): 6
 - [benilla-blp](#benilla-blp): 2
 - [benilla-formats](#benilla-formats): 18
@@ -124,8 +125,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference's `SaveConfig` (`0x63d980`) writes only at world entry (`0x46b6f6`), at the leave-world tail (`0x490c35`-`0x490c64`) and at shutdown (`0x63daf0`), so a crash or a kill loses every change since; here a player's settings survive one. ([`src/cvars/mod.rs:1364`](../crates/benilla-app/src/cvars/mod.rs#L1364))
 - The reference clips at full scale and has no headroom mechanism (its SFX-bus duck `0x457960` is a sidechain armed only by server-pushed voice lines); benilla limits because every SFX is mastered to full scale and overlapping kits clip. ([`src/cvars/table.rs:231`](../crates/benilla-app/src/cvars/table.rs#L231))
 - Here the dial multiplies the camera's own rate, because benilla does not change the OS pointer speed, a system-wide setting. ([`src/cvars/table.rs:489`](../crates/benilla-app/src/cvars/table.rs#L489))
-- "0" raises a borderless fullscreen window instead of mode-setting the display, because Wayland and macOS offer no mode-set and X11's leaves the desktop changed after a crash (`crate::video`). ([`src/cvars/table.rs:623`](../crates/benilla-app/src/cvars/table.rs#L623))
-- Benilla, which has no exclusive mode, applies the same curve in the composite pass (`crate::ui_gamma::DisplayGamma`), because the skipped upload would make a slider that moves no pixel. ([`src/cvars/table.rs:738`](../crates/benilla-app/src/cvars/table.rs#L738))
+- "0" raises a borderless fullscreen window instead of mode-setting the display, because Wayland and macOS offer no mode-set and X11's leaves the desktop changed after a crash (`crate::video`). ([`src/cvars/table.rs:633`](../crates/benilla-app/src/cvars/table.rs#L633))
+- Benilla, which has no exclusive mode, applies the same curve in the composite pass (`crate::ui_gamma::DisplayGamma`), because the skipped upload would make a slider that moves no pixel. ([`src/cvars/table.rs:748`](../crates/benilla-app/src/cvars/table.rs#L748))
 
 #### death
 
@@ -387,6 +388,10 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 - A wrong field count is no invoice, because the reference would read the missing fields uninitialised. ([`src/ui_mail/invoice.rs:76`](../crates/benilla-app/src/ui_mail/invoice.rs#L76))
 - An open mailbox also re-lists at once, past `CheckInbox`'s 60 s throttle, because a mail announced while the player stands there should show; the reference waits for the close. ([`src/ui_mail/net.rs:232`](../crates/benilla-app/src/ui_mail/net.rs#L232))
+
+#### ui_memory
+
+- The page does not quit. A tab has no process to end, so the exit only stops the app loop and freezes the page on the popup; the popup stays and the game runs on. ([`src/ui_memory.rs:126`](../crates/benilla-app/src/ui_memory.rs#L126))
 
 #### ui_merchant
 

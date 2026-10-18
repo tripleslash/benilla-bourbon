@@ -85,7 +85,7 @@ impl VmKind {
     /// The reference compares the name with every table entry's, ASCII case folded (`0x64a4c0` →
     /// `0x414310`), and a miss returns without an error. A name two slots share registers on both,
     /// which a name-keyed listener list is one entry for.
-    pub(crate) fn event_key(self, name: &str) -> Option<&'static str> {
+    pub fn event_key(self, name: &str) -> Option<&'static str> {
         self.events()
             .iter()
             .copied()
