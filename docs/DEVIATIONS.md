@@ -23,7 +23,7 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 | `gxDepthBits` | `16` | `32` | as `gxColorBits` — the depth half of the same descriptive pair |
 | `gxResolution` | `640x480` | `1600x900` | narrowed to the WINDOWED size only — fullscreen is the monitor's own and we expose no mode list, and 640x480 is not a window anyone would ship a client at |
 | `realmList` | `us.logon.worldofwarcraft.com:3724` | `localhost` | that host has not resolved since 2019, so shipping it makes every first launch a DNS failure; benilla dials the machine it is running on |
-| `scriptMemory` | `49152` | `0` | The page bundles pfQuest, whose database counts past 48 MB, so on the page the limit is off by default, as pfQuest asks every vanilla player to set it; native keeps 49152. |
+| `scriptMemory` | `49152` | `0` | The page enforces no script memory limit, whatever is set (`ui_memory`: it cannot quit), so its AddOns screen shows 0, no limit; native keeps 49152. |
 | `SmallCull` | `0.04` | `0.01` | the High stop's `SetWorldDetail` value, so the pair boots consistent with `WorldDetail` "2" above and the stock window's Defaults lands on the same stop as ours |
 | `SoundReverb` | `1` | `0` | the reference's reverb is EAX-over-hardware, and that hardware has not existed since Vista, so "1" would ship audio the real client has never actually produced on any machine a player runs today |
 | `weatherDensity` | `2` | `3` | every precipitation rate in `benilla-world`'s own precipitation module was derived and graded against the reference install's own apitrace captures, and that install runs `SET weatherDensity "3"` (K = 1.0) — so 3 is the value a benilla-vs-reference side-by-side is correct at, and the registered 2 would thin every rate to 0.66 against the only client we compare with. The slider is how a player takes it back down |
@@ -391,7 +391,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### ui_memory
 
-- The page does not quit. A tab has no process to end, so the exit only stops the app loop and freezes the page on the popup; the popup stays and the game runs on. ([`src/ui_memory.rs:126`](../crates/benilla-app/src/ui_memory.rs#L126))
+- The page watches nothing, whatever `scriptMemory` holds. Its one remedy is the quit, and a tab has no process to end: an exit only stops the app loop and freezes the page on the popup. ([`src/ui_memory.rs:109`](../crates/benilla-app/src/ui_memory.rs#L109))
 
 #### ui_merchant
 

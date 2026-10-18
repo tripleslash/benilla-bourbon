@@ -593,8 +593,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
             "scriptMemory",
             "0",
             "49152",
-            "The page bundles pfQuest, whose database counts past 48 MB, so on the page the limit \
-             is off by default, as pfQuest asks every vanilla player to set it; native keeps 49152.",
+            "The page enforces no script memory limit, whatever is set (`ui_memory`: it cannot \
+             quit), so its AddOns screen shows 0, no limit; native keeps 49152.",
         )
     } else {
         same("scriptMemory", "49152")
