@@ -11,30 +11,61 @@ use crate::script::{MeasureRequest, TextMeasure, UiScript};
 const ADVANCE: f32 = 5.0;
 
 /// A stand-in font engine: each byte [`ADVANCE`] wide, each row as tall as the font, wrapping at
-/// spaces as the host's does; it counts the measures it answers.
+/// spaces as the host's does; it counts the measures and splits it answers.
 pub(in crate::script::tests) struct Mono(pub(in crate::script::tests) Rc<Cell<usize>>);
+
+fn width(s: &str) -> f32 {
+    s.len() as f32 * ADVANCE
+}
+
+/// `text` wrapped at spaces within `wrap`: each row's start byte and its text.
+fn mono_rows(text: &str, wrap: f32) -> Vec<(usize, String)> {
+    let mut rows: Vec<(usize, String)> = Vec::new();
+    let mut at = 0;
+    for word in text.split(' ') {
+        match rows.last_mut() {
+            Some((_, last)) if width(last) + width(" ") + width(word) <= wrap => {
+                last.push(' ');
+                last.push_str(word);
+            }
+            _ => rows.push((at, word.to_string())),
+        }
+        at += word.len() + 1;
+    }
+    rows
+}
 
 impl TextMeasure for Mono {
     fn measure(&mut self, req: &MeasureRequest) -> (f32, f32, f32) {
         self.0.set(self.0.get() + 1);
         let row = req.text_height.or(req.height).unwrap_or(12.0);
-        let width = |s: &str| s.len() as f32 * ADVANCE;
         let natural = width(&req.text);
         let Some(wrap) = req.wrap_width else {
             return (natural, row, natural);
         };
-        let mut rows: Vec<String> = Vec::new();
-        for word in req.text.split(' ') {
-            match rows.last_mut() {
-                Some(last) if width(last) + width(" ") + width(word) <= wrap => {
-                    last.push(' ');
-                    last.push_str(word);
-                }
-                _ => rows.push(word.to_string()),
-            }
-        }
-        let widest = rows.iter().map(|r| width(r)).fold(0.0, f32::max);
+        let rows = mono_rows(&req.text, wrap);
+        let widest = rows.iter().map(|(_, r)| width(r)).fold(0.0, f32::max);
         (widest, row * rows.len() as f32, natural)
+    }
+
+    /// Each piece from its row's start to the next, the space the wrap skipped and all, the last
+    /// of `max_pieces` to the text's end.
+    fn piece_width(&mut self, req: &MeasureRequest, max_pieces: usize) -> Option<f32> {
+        self.0.set(self.0.get() + 1);
+        let wrap = req.wrap_width?;
+        let starts: Vec<usize> = mono_rows(&req.text, wrap)
+            .into_iter()
+            .map(|(at, _)| at)
+            .take(max_pieces)
+            .collect();
+        let ends = starts.iter().skip(1).copied().chain([req.text.len()]);
+        Some(
+            starts
+                .iter()
+                .zip(ends)
+                .map(|(&at, end)| width(&req.text[at..end]))
+                .fold(0.0, f32::max),
+        )
     }
 }
 
@@ -216,7 +247,8 @@ fn a_wrapped_line_takes_the_widest_so_far() {
         "short: {lw}"
     );
 
-    // Long and alone: twelve 4-byte words, 295 wide, split at 230.4 into rows of 220 and 70.
+    // Long and alone: twelve 4-byte words, 295 wide, split at 230.4 into rows of 220 and 70; the
+    // first piece runs to the second row's start, its space included (`0x530884`), 225.
     let long = ["aaaa"; 12].join(" ");
     s.run(&format!(
         r#"TS:ClearLines() TS:AddLine("{long}", 1, 1, 1, 1) TS:Show()"#
@@ -225,7 +257,7 @@ fn a_wrapped_line_takes_the_widest_so_far() {
     let lw: f64 = s.eval("return TSTextLeft1:GetWidth()").unwrap();
     let (w, h) = size(&s);
     assert!(
-        close(lw, 220.0) && close(w, plate(220.0)) && close(h, plate(28.0)),
+        close(lw, 225.0) && close(w, plate(225.0)) && close(h, plate(28.0)),
         "long: {lw}, {w}x{h}"
     );
 
@@ -240,6 +272,52 @@ fn a_wrapped_line_takes_the_widest_so_far() {
     assert!(
         close(lw, 300.0) && close(w, plate(300.0)) && close(h, plate(14.0 + 2.0 + 12.0)),
         "under a wider line: {lw}, {w}x{h}"
+    );
+}
+
+/// A wrapped piece runs from its row's start to the next row's (`0x530884`-`0x5308a8`), and the
+/// next row starts past the whitespace the wrap skipped (`0x5c24fe`): a 225-wide word and a short
+/// one split at 230.4 into rows of 225 and 20, and the first piece is 230, its space a glyph.
+#[test]
+fn a_wrapped_piece_keeps_the_space_its_wrap_skipped() {
+    let (s, _) = tooltip();
+    let text = format!("{} bbbb", "a".repeat(45));
+    let w: f64 = s
+        .eval(&format!(
+            r#"TS:AddLine("{text}", 1, 1, 1, 1) TS:Show() return TS:GetWidth()"#
+        ))
+        .unwrap();
+    let lw: f64 = s.eval("return TSTextLeft1:GetWidth()").unwrap();
+    assert!(close(w, plate(230.0)) && close(lw, 230.0), "{w}, line {lw}");
+}
+
+/// The split stops at 20 pieces (`0x53083f`): the 20th runs from its row's start to the text's
+/// end and is measured unwrapped (`0x53088e`), so a line of more than 20 rows sizes to its tail.
+#[test]
+fn a_line_past_20_rows_sizes_to_its_20th_piece() {
+    let (s, _) = tooltip();
+    // Nine 4-byte words make a 220-wide row at 230.4, its piece 225 with the space after it.
+    let plate_for = |rows: usize| -> f64 {
+        let text = vec!["aaaa"; 9 * rows].join(" ");
+        s.eval(&format!(
+            r#"TS:ClearLines() TS:AddLine("{text}", 1, 1, 1, 1) TS:Show() return TS:GetWidth()"#
+        ))
+        .unwrap()
+    };
+    assert!(close(plate_for(19), plate(225.0)), "19 rows");
+    assert!(
+        close(plate_for(20), plate(225.0)),
+        "20 rows: the last row alone, narrower than the pieces before it"
+    );
+    // Rows 20 and 21: eighteen words, 89 bytes.
+    let w = plate_for(21);
+    assert!(close(w, plate(445.0)), "21 rows: {w}");
+    // Rows 20 to 25: fifty-four words, 269 bytes.
+    let w = plate_for(25);
+    let lw: f64 = s.eval("return TSTextLeft1:GetWidth()").unwrap();
+    assert!(
+        close(w, plate(1345.0)) && close(lw, 1345.0),
+        "25 rows: {w}, line {lw}"
     );
 }
 
@@ -321,16 +399,18 @@ fn minimum_width_and_padding_read_their_arguments_as_the_reference() {
 }
 
 /// The hover loops clear, rebuild and show every frame (`ContainerFrameItemButton_OnUpdate`): past
-/// the first frame the sizer measures nothing, its wrapped line's three widths answered from the
+/// the first frame the sizer measures and splits nothing, its wrapped lines answered from the
 /// memo, and solves nothing, as the clear's width reset and the sizer's restore leave the line's
 /// node where it was.
 #[test]
 fn a_steady_hover_measures_nothing_after_its_first_frame() {
     let (mut s, calls) = tooltip();
     let long = ["aaaa"; 12].join(" ");
+    let split = ["aaaa"; 225].join(" ");
     let frame = format!(
         r#"TS:SetOwner(O, "ANCHOR_RIGHT")
         TS:AddLine("Title") TS:AddLine("{long}", 1, 1, 1, 1) TS:AddDoubleLine("left", "right")
+        TS:AddLine("{split}", 1, 1, 1, 1)
         TS:Show()"#
     );
     s.run(&frame).unwrap();

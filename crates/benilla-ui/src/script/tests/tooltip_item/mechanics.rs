@@ -134,11 +134,12 @@ fn a_wrapped_description_sizes_in_the_show_and_survives_the_reenter_loop() {
     )
     .unwrap();
     // The stand-in engine's 5 per byte: the quoted description, 405 wide, splits at 230.4 into
-    // rows of 230 and 170; name 14 + gap 2 + charges 12 + gap 2 + two rows of 12 + 2·10.24.
+    // rows of 230 and 170, the first piece 235 with the space its wrap skipped (`0x530884`); name
+    // 14 + gap 2 + charges 12 + gap 2 + two rows of 12 + 2·10.24.
     let size =
         |s: &UiScript| -> (f64, f64) { s.eval("return TT:GetWidth(), TT:GetHeight()").unwrap() };
     let want = (
-        f64::from(2.0 * 10.24f32 + 0.0 + 230.0),
+        f64::from(2.0 * 10.24f32 + 0.0 + 235.0),
         f64::from(2.0 * 10.24f32 + 54.0),
     );
     let near = |(w, h): (f64, f64)| (w - want.0).abs() < 1e-4 && (h - want.1).abs() < 1e-4;
