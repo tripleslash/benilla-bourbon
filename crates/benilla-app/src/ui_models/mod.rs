@@ -528,12 +528,13 @@ struct TileState {
 }
 
 impl TileState {
-    /// Hand the engine the facts it asked for and return the keys still to load. Every ask is
+    /// Hand the engine the facts it asked for and return the files still to load, each as its key
+    /// and the path a pane named it by. Every ask is
     /// answered, whichever VM asks: `model_facts_wanted` drains and only `SetModel` re-pushes, so
     /// a skipped want keeps that VM's panes on the file off [`UiScript::visible_model_panes`].
-    fn answer_facts(&mut self, script: &mut UiScript) -> Vec<String> {
+    fn answer_facts(&mut self, script: &mut UiScript) -> Vec<(String, String)> {
         let mut to_load = Vec::new();
-        for key in script.model_facts_wanted() {
+        for (key, path) in script.model_facts_wanted() {
             if let Some((_, facts)) = self.loaded.get(&key) {
                 if trace_on() {
                     info!("tile-trace: facts for {key} answered from residency");
@@ -545,7 +546,7 @@ impl TileState {
             if self.pending_facts.contains_key(&key) {
                 continue;
             }
-            to_load.push(key);
+            to_load.push((key, path));
         }
         to_load
     }
@@ -842,14 +843,11 @@ fn sync_tiles(
     };
 
     // ── 1. Facts: answered now if the file is resident, else when it lands ───────────────────
-    for key in state.answer_facts(&mut script) {
+    for (key, path) in state.answer_facts(&mut script) {
         if trace_on() {
-            info!("tile-trace: facts for {key} wanted — loading the file");
+            info!("tile-trace: facts for {key} wanted — loading {path}");
         }
-        // A model frame's `SetModel` creates the model with flags 5 (`0x76ccf5`), so the `.m2` and
-        // its textures open loose-flagged.
-        let url = m2_url_on(MPQ_LOOSE_SOURCE, &key);
-        let handle = assets.asset_server.load::<M2Model>(url);
+        let handle = assets.asset_server.load::<M2Model>(pane_model_url(&path));
         state.pending_facts.insert(key, handle);
     }
     let landed: Vec<(String, Handle<M2Model>)> = state
@@ -1607,6 +1605,13 @@ pub(crate) fn composite_quads(bridge: &UiModelTiles) -> Vec<UiQuad> {
 }
 
 /// The engine's facts for a resident file: its sequences, header bounds and camera count.
+/// The file a model pane's path loads: a model frame's `SetModel` creates the model with flags 5
+/// (`0x76ccf5`), so the `.m2` and its textures open loose-flagged, under the model cache's name
+/// rule (`0x706a50`), which reads the path's own extension.
+fn pane_model_url(path: &str) -> String {
+    m2_url_on(MPQ_LOOSE_SOURCE, path)
+}
+
 fn facts_of(model: &M2Model) -> ModelFileFacts {
     ModelFileFacts {
         sequences: model
@@ -2213,6 +2218,26 @@ mod tests {
         s
     }
 
+    /// A pane's want loads the file its path names: the key has no extension, which the name rule
+    /// (`0x706a50`) would refuse into the error cube, so every action button's cooldown sweep
+    /// stood the cube.
+    #[test]
+    fn a_cooldown_pane_loads_the_cooldown_model_not_the_error_cube() {
+        let mut state = TileState::default();
+        let mut s = vm_with_a_cooldown_pane();
+        let wants = state.answer_facts(&mut s);
+        let urls: Vec<String> = wants.iter().map(|(_, p)| pane_model_url(p)).collect();
+        assert_eq!(
+            urls,
+            ["mpq-loose://interface/cooldown/ui-cooldown-indicator.m2"]
+        );
+        assert_eq!(
+            pane_model_url(&benilla_ui::widget::model_key(COOLDOWN_FILE)),
+            "mpq://spells/errorcube.m2",
+            "the key alone is refused"
+        );
+    }
+
     /// `model_facts_wanted` drains and only `SetModel` re-pushes, so a want skipped because the
     /// asset is resident would leave every `<Model>` pane dark for the second VM's whole life.
     #[test]
@@ -2226,7 +2251,10 @@ mod tests {
             first.visible_model_panes().is_empty(),
             "no facts yet ⇒ the pane is not on the paint list (the reference's draw gate)"
         );
-        assert_eq!(state.answer_facts(&mut first), vec![key.clone()]);
+        assert_eq!(
+            state.answer_facts(&mut first),
+            vec![(key.clone(), COOLDOWN_FILE.to_string())]
+        );
         // …the asset lands: the facts are handed over and cached beside the handle.
         state
             .loaded

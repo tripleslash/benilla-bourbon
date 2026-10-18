@@ -143,8 +143,8 @@ impl Model {
         match self.model_facts.get(&key) {
             Some(facts) => Some(facts.clone()),
             None => {
-                if !self.model_facts_wanted.contains(&key) {
-                    self.model_facts_wanted.push(key);
+                if !self.model_facts_wanted.iter().any(|(k, _)| *k == key) {
+                    self.model_facts_wanted.push((key, path.to_string()));
                 }
                 None
             }
@@ -802,7 +802,7 @@ impl crate::script::UiScript {
         let facts = Arc::new(facts);
         let mut model = self.model_mut();
         model.model_facts.insert(key.clone(), facts.clone());
-        model.model_facts_wanted.retain(|k| *k != key);
+        model.model_facts_wanted.retain(|(k, _)| *k != key);
         // The panes holding this file: the waiters the reference links on its streaming drain
         // (`0x71d640`).
         let handles: Vec<_> = model
@@ -842,9 +842,11 @@ impl crate::script::UiScript {
         }
     }
 
-    /// Drain the model files panes named with no facts yet, as [`crate::widget::model_key`]s; the
-    /// host loads each once and answers through [`Self::set_model_facts`].
-    pub fn model_facts_wanted(&mut self) -> Vec<String> {
+    /// Drain the model files panes named with no facts yet, each as its
+    /// [`crate::widget::model_key`] and the path a pane gave it: the host loads the path, whose
+    /// extension the model cache's name rule reads (the key has none), and answers through
+    /// [`Self::set_model_facts`].
+    pub fn model_facts_wanted(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.model_mut().model_facts_wanted)
     }
 

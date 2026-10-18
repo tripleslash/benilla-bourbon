@@ -119,8 +119,11 @@ fn set_model_seeds_stand_now_or_when_the_facts_land() {
     assert!(m.pending_seed && m.armed.is_none());
     assert_eq!(
         s.model_facts_wanted(),
-        vec!["interface/minimap/ping/minimapping".to_string()],
-        "one request per file, case-folded, no extension"
+        vec![(
+            "interface/minimap/ping/minimapping".to_string(),
+            PING_FILE.to_string()
+        )],
+        "one request per file, keyed case-folded with no extension, with the path as named"
     );
     assert!(s.model_facts_wanted().is_empty(), "drained");
 
