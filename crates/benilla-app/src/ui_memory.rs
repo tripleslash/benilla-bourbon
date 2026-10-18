@@ -104,6 +104,7 @@ pub(crate) fn watch_script_memory(
     entered: Res<LeavingWorldArmed>,
     mut watch: ResMut<ScriptMemoryWatch>,
     time: Res<Time<Real>>,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut, unused_variables))]
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(mut script) = script else {
@@ -122,6 +123,13 @@ pub(crate) fn watch_script_memory(
             script.fire_event("MEMORY_EXHAUSTED", vec![ScriptValue::Int(i64::from(mb))]);
         }
         Some(MemoryVerdict::Recovered) => script.fire_event("MEMORY_RECOVERED", vec![]),
+        // Deviation: the page does not quit. A tab has no process to end, so the exit only stops
+        // the app loop and freezes the page on the popup; the popup stays and the game runs on.
+        #[cfg(target_arch = "wasm32")]
+        Some(MemoryVerdict::Quit) => {
+            warn_once!("ui: still over the script memory 15 s on — the page does not quit");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         Some(MemoryVerdict::Quit) => {
             warn!("ui: still over the script memory 15 s on — quitting, as 1.12.1 does");
             exit.write(AppExit::Success);

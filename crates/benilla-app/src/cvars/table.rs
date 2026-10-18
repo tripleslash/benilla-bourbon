@@ -588,7 +588,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `0x882654`): the Lua state's limit in KB, shown in MB by the glue AddOns screen
     // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`) and watched each frame in the
     // world (`0x495599`), [`crate::ui_memory`].
-    same("scriptMemory", "49152"),
+    if cfg!(target_arch = "wasm32") {
+        deviates(
+            "scriptMemory",
+            "0",
+            "49152",
+            "The page bundles pfQuest, whose database counts past 48 MB, so on the page the limit \
+             is off by default, as pfQuest asks every vanilla player to set it; native keeps 49152.",
+        )
+    } else {
+        same("scriptMemory", "49152")
+    },
     // `gxApi` (`0x63a833`: name `0x842a64`, default `0x864f7c` "direct3d", flags 3, callback
     // `0x63b030`, record `[0xc4ea94]`): the reference builds D3D9 unless it reads "OpenGl"
     // (`0x63a3c4`, `0x842a5c`). Here it reports the wgpu backend (`wgpu::Backend::to_str`), pushed

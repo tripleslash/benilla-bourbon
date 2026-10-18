@@ -23,6 +23,13 @@ fn call_args(src: &str, n: usize) -> Option<Vec<String>> {
         {
             continue;
         }
+        // The page's own row (`if cfg!(target_arch = "wasm32") { deviates(…) } else { … }`) is a
+        // `Deviates` row only in the page build; the generator lists it either way.
+        let prev_line = src[..line_start].trim_end();
+        let prev_line = prev_line[prev_line.rfind('\n').map_or(0, |l| l + 1)..].trim();
+        if !cfg!(target_arch = "wasm32") && prev_line == r#"if cfg!(target_arch = "wasm32") {"# {
+            continue;
+        }
         if seen < n {
             seen += 1;
             continue;
