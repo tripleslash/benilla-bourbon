@@ -250,6 +250,11 @@ impl Loader<'_> {
         status::install_path(&format!("{}{path}", self.status_root))
     }
 
+    /// Mark the loader's `CreateFrame` call, the builder's creation half (`Model::xml_creating`).
+    fn set_xml_creating(&self, on: bool) {
+        self.model().xml_creating = on;
+    }
+
     /// `FrameXML_Debug` above 0, read where the reference reads it, at each close.
     fn debug(&self) -> bool {
         self.model().framexml_debug.get() > 0
@@ -824,21 +829,23 @@ impl Loader<'_> {
                 return None;
             }
         };
-        let wrapper: Table =
-            match create.call((el.tag.clone(), resolved_name.clone(), parent.cloned())) {
-                Ok(w) => w,
-                Err(e) => {
-                    self.report.fault(format!(
-                        "CreateFrame(<{}>{}): {e}",
-                        el.tag,
-                        resolved_name
-                            .as_deref()
-                            .map(|n| format!(" name=\"{n}\""))
-                            .unwrap_or_default()
-                    ));
-                    return None;
-                }
-            };
+        self.set_xml_creating(true);
+        let made = create.call::<Table>((el.tag.clone(), resolved_name.clone(), parent.cloned()));
+        self.set_xml_creating(false);
+        let wrapper: Table = match made {
+            Ok(w) => w,
+            Err(e) => {
+                self.report.fault(format!(
+                    "CreateFrame(<{}>{}): {e}",
+                    el.tag,
+                    resolved_name
+                        .as_deref()
+                        .map(|n| format!(" name=\"{n}\""))
+                        .unwrap_or_default()
+                ));
+                return None;
+            }
+        };
         self.report.frames += 1;
 
         let dbg_name = resolved_name
@@ -913,7 +920,6 @@ impl Loader<'_> {
         self.apply_editbox(el, wrapper, dbg_name);
         self.apply_messageframe(el, wrapper, dbg_name);
         self.apply_simplehtml(el, wrapper, dbg_name);
-        self.apply_minimap(el, wrapper, dbg_name);
         // 6 · <Scripts> handlers (`0x769ef0`); OnLoad is captured to fire bottom-up below.
         let onload = self.apply_scripts(el, wrapper, dbg_name);
         // 6b · a ScrollFrame's <ScrollChild> (`0x786bc0`, after the base load `0x769820`): still
@@ -938,6 +944,9 @@ impl Loader<'_> {
         }
         // 9 · and its OnShow, if it is visible now (`0x76a3b3`).
         crate::script::visibility::post_load_show(self.lua(), wrapper);
+        // 10 · a Minimap's models, which its post-load override sets after chaining to this one
+        //      (`0x4ee2b0` calls `0x76a2f0` first).
+        self.apply_minimap(el, wrapper, dbg_name);
     }
 
     /// Apply one anchor, deferring it (when `may_defer`) while its named `relativeTo` is unbuilt.

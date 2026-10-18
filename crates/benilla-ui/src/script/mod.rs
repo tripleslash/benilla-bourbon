@@ -301,6 +301,10 @@ pub use mail::{
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
+pub use minimap::{
+    MinimapRimArrow, CORPSE_ARROW as MINIMAP_CORPSE_ARROW, GROUP_ARROW as MINIMAP_GROUP_ARROW,
+    GUIDE_ARROW as MINIMAP_GUIDE_ARROW, LANDMARK_ARROW as MINIMAP_LANDMARK_ARROW,
+};
 pub(crate) use model::Model;
 pub use model::{
     FontProbe, MacroIconSource, TextureProbe, TextureSizeFn, TextureSizeProbe, WorldLocFn,
@@ -476,6 +480,15 @@ pub(crate) const REGION_MAP_METHODS: [&str; 19] = [
 ];
 const REG_WRAPPERS: &str = "__benilla_wrappers";
 const REG_SCRIPTS: &str = "__benilla_scripts";
+
+/// `MINIMAP_PING`'s arguments, `%s%f%f` (`0x4ee48d`): the unit token and the two fractions.
+pub(crate) fn ping_args(token: &str, a: f64, b: f64) -> Vec<ScriptValue> {
+    vec![
+        ScriptValue::Str(token.to_string()),
+        ScriptValue::Number(a),
+        ScriptValue::Number(b),
+    ]
+}
 
 /// The layout handle of the screen root (the client's `CSimpleTop`, not the `UIParent` frame),
 /// which a top-level `SetPoint` without `relativeTo` anchors to; frame ids, from 1, are the rest.
@@ -887,29 +900,21 @@ impl UiScript {
         model.modifiers = (shift, ctrl, alt);
     }
 
-    /// Push the player's WMO-containment state (the client's `0xceaa60`) onto every Minimap: it
-    /// picks which persisted zoom index `GetZoom`/`SetZoom` act on. Call it before the script
-    /// tick, on each inside/outside edge and whenever [`Self::minimap_widgets_created`] moves.
+    /// Push the player's WMO-containment state, the indoor byte `0xceaa60` that picks which zoom
+    /// index `GetZoom`/`SetZoom` act on. Call it before the script tick, on each inside/outside
+    /// edge and for each new VM.
     pub fn set_minimap_inside(&mut self, inside: bool) {
-        self.for_each_minimap(|m| m.inside = inside);
+        self.model_mut().minimap.inside = inside;
     }
 
-    fn for_each_minimap(&mut self, mut f: impl FnMut(&mut crate::widget::MinimapState)) {
-        let mut model = self.model_mut();
-        for h in model.arena.minimap_kinds().to_vec() {
-            if let Some(frame) = model.arena.frame_mut(h) {
-                if let KindState::Minimap(m) = &mut frame.kind_state {
-                    f(m);
-                }
-            }
-        }
-    }
-
-    /// Push the player's facing (radians) onto every Minimap's player-arrow `Model`, every frame,
-    /// raw: `CMinimap::SetPlayerFacing` (`0x4eb8e0`, fed at `0x4eb0a4`–`0x4eb0b1`) copies it into
-    /// the field `Model:SetFacing` (`0x76dce0`) writes, so the arrow's `GetFacing()` reads it.
+    /// The Minimap's per-frame update (`0x4eb040`) on every Minimap's player arrow: once its model
+    /// is loaded (`0x7103d0`), `0x4ee100` centres it on its own size, half its width and height
+    /// (slots 0x1c and 0x20) in layout units; then `CMinimap::SetPlayerFacing` (`0x4eb8e0`, fed at
+    /// `0x4eb0a4`–`0x4eb0b1`) copies the player's facing (radians) raw into the field
+    /// `Model:SetFacing` (`0x76dce0`) writes, so the arrow's `GetFacing()` reads it.
     pub fn set_minimap_player_facing(&mut self, facing: f32) {
         let mut model = self.model_mut();
+        let unit = model.layout_unit();
         let arrows: Vec<crate::widget::FrameHandle> = model
             .arena
             .minimap_kinds()
@@ -920,54 +925,94 @@ impl UiScript {
             })
             .collect();
         for h in arrows {
-            if let Some(frame) = model.arena.frame_mut(h) {
-                if let KindState::Model(state) = &mut frame.kind_state {
-                    state.facing = facing;
+            let size = model
+                .layout_inputs
+                .get(&h)
+                .map_or((0.0, 0.0), |i| (i.width, i.height));
+            let loaded = match model.arena.frame(h).map(|f| &f.kind_state) {
+                Some(KindState::Model(m)) => m
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| model.model_facts.contains_key(&crate::widget::model_key(p))),
+                _ => false,
+            };
+            if let Some(KindState::Model(state)) =
+                model.arena.frame_mut(h).map(|f| &mut f.kind_state)
+            {
+                if loaded {
+                    state.position = (size.0 / unit * 0.5, size.1 / unit * 0.5, 0.0);
                 }
+                state.facing = facing;
             }
         }
     }
 
-    /// Publish `Minimap:GetPingPosition()`'s offsets from the widget centre, as fractions of its
-    /// side (x right, y up); the app recomputes them from the ping's world point each frame.
-    pub fn set_minimap_ping(&mut self, ping: (f32, f32)) {
-        self.model_mut().minimap_ping = ping;
+    /// The minimap's view radius in yards at the live zoom (`0x6da9b0`).
+    pub fn minimap_radius_yd(&self) -> f32 {
+        self.model_ref().minimap.radius_yd()
     }
 
-    /// Drain a `Minimap:PingLocation(x, y)`: centre-relative offsets in the screen root's units,
-    /// x right, y up.
-    pub fn take_minimap_ping_request(&mut self) -> Option<(f32, f32)> {
-        self.model_mut().minimap_ping_request.take()
+    /// Push the active player's WoW world `(x, y)`, `None` with no player object, before the
+    /// script tick: the ping methods read it at the call (`0x4eecdf`, `0x4ef021`).
+    pub fn set_minimap_player(&mut self, pos: Option<(f32, f32)>) {
+        self.model_mut().minimap.player = pos;
     }
 
-    /// `Minimap:SetMaskTexture`'s value from the first Minimap (the app draws one map), `None`
-    /// until one is set, while the app keeps [`crate::widget::MINIMAP_DEFAULT_MASK`].
-    pub fn minimap_mask_texture(&self) -> Option<String> {
-        let model = self.model_ref();
-        model.arena.minimap_kinds().iter().find_map(|&h| {
-            match model.arena.frame(h).map(|f| &f.kind_state) {
-                Some(KindState::Minimap(m)) => m.mask_texture.clone(),
-                _ => None,
+    /// Seat the stored ping a new VM inherits, the reference's statics living across the reload
+    /// (`0xbc787c`, `0xbc7880`); no event.
+    pub fn set_minimap_ping_point(&mut self, world: (f32, f32)) {
+        self.model_mut().minimap.ping = world;
+    }
+
+    /// A group member's ping (`0x5e41bd` → `0x4ee330`): stored at once and `MINIMAP_PING` signalled
+    /// with the pinger's unit token, all before this returns. Nothing without a player object.
+    pub fn apply_minimap_ping(&mut self, world: (f32, f32), token: &str) {
+        let fractions = self.model_mut().minimap.apply_ping(world);
+        if let Some((a, b)) = fractions {
+            self.fire_event("MINIMAP_PING", ping_args(token, a, b));
+        }
+    }
+
+    /// Drain the world points our own `Minimap:PingLocation` pinged since the last call.
+    pub fn take_minimap_pings_sent(&mut self) -> Vec<(f32, f32)> {
+        std::mem::take(&mut self.model_mut().minimap_pings_sent)
+    }
+
+    /// What this VM's texture setter for `slot` last stored, with the call's stamp; `None` while
+    /// this VM has not set it, when the process's texture stands.
+    pub fn minimap_art(
+        &self,
+        slot: crate::widget::MinimapArtSlot,
+    ) -> Option<(u64, crate::widget::MinimapArt)> {
+        self.model_ref().minimap.art[slot as usize].clone()
+    }
+
+    /// Seed the two zoom cells from the persisted CVars before the world entry reseeds them, so a
+    /// new VM's file scope reads the live level.
+    pub fn set_minimap_zoom(&mut self, zoom: u32, inside_zoom: u32) {
+        let mut model = self.model_mut();
+        model.minimap.zoom = zoom;
+        model.minimap.inside_zoom = inside_zoom;
+    }
+
+    /// The minimap initializer every world entry runs (`0x4ed9d0`, from `0x49096f`): its blip
+    /// set-up (`0x6d8e10`) copies each zoom CVar's integer into its cell, `minimapZoom` into
+    /// `0x86f698` and `minimapInsideZoom` into `0x86f69c` (`0x6d9008`-`0x6d901f`), and signals
+    /// `MINIMAP_UPDATE_ZOOM` (`0x6d902a`), on which the stock buttons re-sync. The copy is raw, so a
+    /// negative or out-of-range level stands in the cell for `GetZoom` to answer.
+    pub(crate) fn minimap_enter_world(&mut self) {
+        let outdoor = self.cvar_int("minimapZoom");
+        let indoor = self.cvar_int("minimapInsideZoom");
+        {
+            let mut model = self.model_mut();
+            if let Some(v) = outdoor {
+                model.minimap.zoom = v as u32;
             }
-        })
-    }
-
-    /// Minimap widgets ever created in this VM: a move means a new one needs the containment state.
-    pub fn minimap_widgets_created(&self) -> u64 {
-        self.model_ref().arena.minimap_created()
-    }
-
-    /// Seed every Minimap's two zoom indices from the persisted CVars, as the client's reset path
-    /// does (`[0x86f698] ← [[0xb4b410]+0x28]`, `[0x86f69c] ← [[0xb4d90c]+0x28]`). Call it once,
-    /// when the UI and the widget exist: from then on `Minimap:SetZoom` keeps the CVar following
-    /// the widget, and a repeated seed would fight the +/- buttons.
-    pub fn set_minimap_zoom(&mut self, zoom: u8, inside_zoom: u8) {
-        let top = crate::widget::MINIMAP_ZOOM_LEVELS - 1;
-        let (zoom, inside_zoom) = (zoom.min(top), inside_zoom.min(top));
-        self.for_each_minimap(|m| {
-            m.zoom = zoom;
-            m.inside_zoom = inside_zoom;
-        });
+            if let Some(v) = indoor {
+                model.minimap.inside_zoom = v as u32;
+            }
+        }
+        self.fire_event("MINIMAP_UPDATE_ZOOM", Vec::new());
     }
 
     /// Load and run a text chunk; handler errors during events go to [`UiScript::errors`] instead.

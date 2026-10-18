@@ -674,7 +674,7 @@ pub(super) fn create_frame(
     });
 
     // Create in the arena, mint the id, seed a default layout input. All under one write borrow.
-    let id = {
+    let (id, h) = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         let h = model.arena.create(frame_kind, name, parent_handle);
         if frame_kind == FrameKind::WorldFrame {
@@ -700,8 +700,13 @@ pub(super) fn create_frame(
         model.layout_load_begin(h);
         // No handler is bound yet, so the resolve this owes fires nothing.
         let _ = model.layout_load_end(h);
-        id
+        (id, h)
     };
+    // The `CMinimap` ctor's last act, so a `CreateFrame("Minimap")` has its nine children before
+    // its `OnLoad` too.
+    if frame_kind == FrameKind::Minimap {
+        super::minimap::build_engine_children(lua, h);
+    }
 
     // The wrapper exists, published under its name, before the template's `OnLoad` runs inside
     // this call, so the handler can reach the frame by name.
@@ -717,6 +722,25 @@ pub(super) fn create_frame(
         }
     } else {
         super::tooltip_post_load(lua, &wrapper);
+    }
+    // The builder's post-load hook (`0x6ee4ea`) is `CMinimap::LoadXML` (`0x4ee2b0`) for a Minimap:
+    // after the `OnLoad`, the two model attributes, which the synthetic node never carries, so
+    // the stock models (`0x84c768`, `0x8453c0`).
+    let xml = lua
+        .app_data_ref::<Model>()
+        .expect("model app_data")
+        .xml_creating;
+    if frame_kind == FrameKind::Minimap && !xml {
+        let failed = super::minimap::apply_model_attrs(
+            lua,
+            &wrapper,
+            crate::widget::MINIMAP_DEFAULT_ARROW_MODEL,
+            crate::widget::MINIMAP_DEFAULT_PLAYER_MODEL,
+        )?;
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        for line in failed {
+            model.record_warning(line.to_string());
+        }
     }
     Ok(wrapper)
 }

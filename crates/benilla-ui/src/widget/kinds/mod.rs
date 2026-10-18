@@ -722,42 +722,78 @@ impl ModelState {
     }
 }
 
-/// The Minimap widget's state. The client keeps two zoom indices, outdoor (`0x86f698`, CVar
-/// `minimapZoom`) and indoor (`0x86f69c`, CVar `minimapInsideZoom`, radii `{150,120,90,60,40,25}`
-/// yd); the WMO-interior flag `0xceaa60` picks which one `GetZoom`/`SetZoom` use.
-#[derive(Clone, Debug, PartialEq)]
+/// A Minimap frame's own state: its engine children and the sizes its ctor froze. Everything else
+/// the minimap shows is one process-wide set of statics ([`MinimapStatics`]), as the reference
+/// keeps it.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MinimapState {
-    /// The outdoor zoom index, 0 widest to 5 tightest; `SetZoom` clamps at 5 (`0x6daa10`).
-    pub zoom: u8,
-    pub inside_zoom: u8,
-    /// Inside a WMO interior, which picks the index; pushed by the app, which owns that test.
-    pub inside: bool,
-    /// `Minimap:SetMaskTexture`'s mask, write-only from Lua; `None` is [`MINIMAP_DEFAULT_MASK`].
-    pub mask_texture: Option<String>,
+    /// The party and pet arrows (`[Minimap+0x320]`), engine children 1 to 5.
+    pub group_arrows: Vec<FrameHandle>,
+    /// The landmark and static-blip rim arrows (`[Minimap+0x314]`), engine children 6 to 8.
+    pub rim_arrows: Vec<FrameHandle>,
     /// The player-arrow `Model` (`[Minimap+0x338]`), reached by `SetPlayerFacing` (`0x4eb8e0`).
     pub player_arrow: Option<FrameHandle>,
+    /// The minimap's level plus 3 (`+0x334`, `0x4ede48`, again at `0x4ee1a3`), the rim arrows'
+    /// level base.
+    pub level_base: i32,
+    /// The ctor's `G48 · 5/3` (`0x4edc42`, `0x4edc47`), 1.0 at 4:3, every blip size's factor.
+    pub base: f32,
+}
+
+/// The disc's size in layout units over [`MinimapState::base`], `[0x807a44]` (`0x4edcaf`): the
+/// eight arrow frames' width and height.
+pub const MINIMAP_DISC: f32 = 0.11;
+
+/// The arrow frames' model scale, `[0x807a28]` (`0x4edeb2`).
+pub const MINIMAP_ARROW_SCALE: f32 = 0.6;
+
+/// The minimap's statics, one set for every Minimap frame: the zoom cells, outdoor `0x86f698`
+/// (CVar `minimapZoom`) and indoor `0x86f69c` (CVar `minimapInsideZoom`, radii
+/// `{150,120,90,60,40,25}` yd), the indoor byte `0xceaa60` that picks between them, and the mask
+/// `0xbc7968` with the icon atlases. `GetZoomLevels`, `GetZoom`, `SetZoom` and `GetPingPosition` read and write them
+/// with no `this` lookup (`0x4eebe0`, `0x4eec20`, `0x4eec60`, `0x4eefd0`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MinimapStatics {
+    /// The outdoor zoom index, 0 widest to 5 tightest; the world entry copies the CVar's integer
+    /// in raw (`0x6d9013`), so it can hold any `u32`, and `GetZoom` answers it unsigned (`0x4eec31`).
+    pub zoom: u32,
+    pub inside_zoom: u32,
+    /// Inside a WMO interior, which picks the index; pushed by the app, which owns that test.
+    pub inside: bool,
+    /// What each texture setter last left in its handle, with the call's stamp, so the host
+    /// applies a call once; `None` until this VM sets that slot.
+    pub art: [Option<(u64, MinimapArt)>; 3],
+    /// The stamp the next setter call takes.
+    pub art_stamp: u64,
+    /// The one ping, a WoW world `(x, y)` (`0xbc787c`, `0xbc7880`): zero from the static
+    /// initializer (`0x4ea1f0`), never cleared.
+    pub ping: (f32, f32),
+    /// The active player's WoW world `(x, y)`, pushed by the app every frame; `None` with no player
+    /// object, when the ping methods do nothing (`0x4eecdf`, `0x4eeff6`).
+    pub player: Option<(f32, f32)>,
 }
 
 /// Both zoom CVars register with `"3"` (`0x48fc5a`/`0x48fc76`) and the reset copies the CVar in;
 /// a higher index zooms in, 3 being a 60 yd indoor radius and a 133.3 yd outdoor half-extent.
-pub const MINIMAP_DEFAULT_ZOOM: u8 = 3;
+pub const MINIMAP_DEFAULT_ZOOM: u32 = 3;
 
-impl Default for MinimapState {
+impl Default for MinimapStatics {
     fn default() -> Self {
         Self {
             zoom: MINIMAP_DEFAULT_ZOOM,
             inside_zoom: MINIMAP_DEFAULT_ZOOM,
             inside: false,
-            mask_texture: None,
-            // Set by `WidgetArena::create` on insert, as the ctor builds its children.
-            player_arrow: None,
+            art: [None, None, None],
+            art_stamp: 0,
+            ping: (0.0, 0.0),
+            player: None,
         }
     }
 }
 
-impl MinimapState {
-    /// The index `GetZoom`/`SetZoom` act on now.
-    pub fn active_zoom(&self) -> u8 {
+impl MinimapStatics {
+    /// The index `GetZoom`/`SetZoom` act on now (`0x6da980`).
+    pub fn active_zoom(&self) -> u32 {
         if self.inside {
             self.inside_zoom
         } else {
@@ -765,13 +801,105 @@ impl MinimapState {
         }
     }
 
-    /// Writes the index the inside flag selects.
-    pub fn set_active_zoom(&mut self, zoom: u8) {
-        if self.inside {
-            self.inside_zoom = zoom;
+    /// The view radius in yards at the live zoom (`0x6da9b0`).
+    pub fn radius_yd(&self) -> f32 {
+        minimap_radius_yd(self.zoom, self.inside_zoom, self.inside)
+    }
+
+    /// The ping's offset from the player over the zoom diameter `D`, `(−dy/D, dx/D)` with `dx`,
+    /// `dy` the point less the player's position; `None` with no player.
+    fn ping_fraction(&self) -> Option<(f64, f64)> {
+        let player = self.player?;
+        let k = 1.0 / (2.0 * f64::from(self.radius_yd()));
+        let dx = f64::from(self.ping.0) - f64::from(player.0);
+        let dy = f64::from(self.ping.1) - f64::from(player.1);
+        Some((-dy * k, dx * k))
+    }
+
+    /// `GetPingPosition` (`0x4eefd0`), anew from the stored point every call: `(0, 0)` with no
+    /// player (`0x4eeff6`), the second value rounded to a float (`0x4ef05b`), the first not.
+    pub fn ping_position(&self) -> (f64, f64) {
+        self.ping_fraction()
+            .map_or((0.0, 0.0), |(a, b)| (a, f64::from(b as f32)))
+    }
+
+    /// `MinimapApplyPing` (`0x4ee330`): store the point (`0x4ee366`, `0x4ee373`) and give
+    /// `MINIMAP_PING`'s two numbers, the first rounded to a float before it is negated
+    /// (`0x4ee473`), the second a double (`0x4ee476`); `None`, nothing stored, with no player.
+    pub fn apply_ping(&mut self, world: (f32, f32)) -> Option<(f64, f64)> {
+        self.player?;
+        self.ping = world;
+        self.ping_fraction()
+            .map(|(a, b)| (-f64::from((-a) as f32), b))
+    }
+
+    /// `SetZoomIndex` (`0x6da8e0`) on the `__ftol` of a level: the cell the indoor byte picks takes
+    /// it capped by an unsigned compare against 5 (`0x6da8fd`, `0x6da902`), so a negative level is
+    /// 5. Only a change writes, and names the CVar the reference then sets with `%d`
+    /// (`minimapInsideZoom` or `minimapZoom`, `0x6da909`).
+    pub fn set_zoom_index(&mut self, level: i32) -> Option<&'static str> {
+        let index = (level as u32).min(u32::from(MINIMAP_ZOOM_LEVELS - 1));
+        let (cell, cvar) = if self.inside {
+            (&mut self.inside_zoom, "minimapInsideZoom")
         } else {
-            self.zoom = zoom;
+            (&mut self.zoom, "minimapZoom")
+        };
+        if *cell == index {
+            return None;
         }
+        *cell = index;
+        Some(cvar)
+    }
+}
+
+/// One of the minimap's three process-wide textures, each loaded at world entry (`0x4ed810`) and
+/// replaced by its setter: the disc mask (`0xbc7968`), the landmark icon atlas (`0xbc827c`) and the
+/// dot atlas (`0xbc822c`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MinimapArtSlot {
+    Mask = 0,
+    Icons = 1,
+    Blips = 2,
+}
+
+/// What a minimap texture setter left in its handle: `TextureCreate` (`0x449d90`) with a status
+/// object and file flag 1, so a loose file loads too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MinimapArt {
+    /// The file the setter named, which the host loads.
+    File(String),
+    /// A name that did not resolve: `TextureCreate`'s 8×8 solid `0xff00ff00` (`[0x90582c]`),
+    /// stored before the setter raises.
+    Missing,
+    /// An empty name: `TextureCreate` returns no texture and logs nothing (`0x449db1`).
+    Null,
+}
+
+impl MinimapStatics {
+    /// Store a setter's result in its slot under a fresh stamp.
+    pub fn set_art(&mut self, slot: MinimapArtSlot, art: MinimapArt) {
+        self.art_stamp += 1;
+        self.art[slot as usize] = Some((self.art_stamp, art));
+    }
+}
+
+/// The outdoor zoom table (`0x8116d0`): the view diameter in map chunks per zoom index.
+pub const MINIMAP_ZOOM_CHUNKS: [f32; 6] = [14.0, 12.0, 10.0, 8.0, 6.0, 4.0];
+
+/// The indoor view radius in yards per indoor zoom index, table `0x8116e8`.
+pub const MINIMAP_INDOOR_RADII: [f32; 6] = [150.0, 120.0, 90.0, 60.0, 40.0, 25.0];
+
+/// The minimap's radius in yards (`0x6da9b0`): with the indoor byte set the indoor table at the
+/// indoor index (`0x6da9bf`), else the outdoor chunk count times 0.5 and 33.333332 (`0x6da9e9`,
+/// `0x6da9ef`). The ping, the blips and the dots all use it. Deviation: an index past 5 reads the
+/// last entry, where 1.12.1 reads past both six-entry tables (`0x6da9d5`, `0x6da9c4`), a client
+/// fault a hand-edited CVar reaches.
+pub fn minimap_radius_yd(zoom: u32, inside_zoom: u32, inside: bool) -> f32 {
+    let at = |z: u32| z.min(u32::from(MINIMAP_ZOOM_LEVELS - 1)) as usize;
+    if inside {
+        MINIMAP_INDOOR_RADII[at(inside_zoom)]
+    } else {
+        MINIMAP_ZOOM_CHUNKS[at(zoom)] * 0.5 * 33.333_332
     }
 }
 
@@ -785,6 +913,12 @@ pub const MINIMAP_DEFAULT_MASK: &str = "Textures\\MinimapMask";
 /// unloadable file (`0x4ee286`): five rim and party arrows, three POI arrows, the player arrow;
 /// addons (Questie, pfQuest) read `({Minimap:GetChildren()})[9]` as the player arrow.
 pub const MINIMAP_ENGINE_CHILDREN: usize = 9;
+
+/// The `[Minimap+0x320]` group's size, the party and pet arrows.
+pub const MINIMAP_GROUP_ARROWS: usize = 5;
+
+/// The `[Minimap+0x314]` group's size, the landmark rim arrows.
+pub const MINIMAP_RIM_ARROWS: usize = 3;
 
 /// The default `minimapArrowModel` (`0x84c768`), applied to engine children 1 to 8 (`0x4ee170`).
 pub const MINIMAP_DEFAULT_ARROW_MODEL: &str = "Interface\\Minimap\\Rotating-MinimapArrow.mdx";

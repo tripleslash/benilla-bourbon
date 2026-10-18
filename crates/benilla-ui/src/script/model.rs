@@ -1160,6 +1160,9 @@ pub(crate) struct Model {
     pub(crate) tabard_intents: Vec<super::tabard::TabardIntent>,
     /// The `WorldFrame` type's one-shot record: true once the first is made.
     pub(crate) world_frame_made: bool,
+    /// Set while the XML loader's `CreateFrame` call builds a frame: the creation half only, so
+    /// `create_frame` leaves the builder's post-load hook (`0x6ee4ea`) to the loader's own steps.
+    pub(crate) xml_creating: bool,
     /// Per live-unit guid, reach for `CanInspect`/`CheckInteractDistance`; absent: nil.
     pub(crate) unit_reach: HashMap<u64, super::UnitReach>,
 
@@ -1226,13 +1229,12 @@ pub(crate) struct Model {
     /// The last cursor position in UI space (logical px, y-up), behind `GetCursorPosition()`.
     pub(crate) cursor_pos: (f32, f32),
 
-    /// A `Minimap:PingLocation(x, y)`, drained the same frame: centre-relative offsets in the screen
-    /// root's units, `GetCursorPosition`'s space, not the window pixels of the app's minimap
-    /// geometry.
-    pub(crate) minimap_ping_request: Option<(f32, f32)>,
-    /// The ping's offsets as fractions of the minimap's side, updated by the app every frame.
-    /// `GetPingPosition()` always answers both, from statics never cleared (`0x4eefd0`).
-    pub(crate) minimap_ping: (f32, f32),
+    /// The minimap's process-wide statics (zoom cells, indoor byte, mask), shared by every
+    /// Minimap frame of this VM.
+    pub(crate) minimap: crate::widget::MinimapStatics,
+    /// The world points our own `Minimap:PingLocation` calls pinged, for the host's wire send
+    /// (`0x1d5`, `0x4eef72`) and its process-wide copy of the ping.
+    pub(crate) minimap_pings_sent: Vec<(f32, f32)>,
     /// `SendChatMessage` lines, apart from chat-box input, whose drain runs the slash grammar.
     pub(crate) chat_sends: Vec<super::chat_send::ChatSend>,
     /// `SendAddonMessage` broadcasts: `LANG_ADDON`, four distributions, `prefix` TAB `message`.
@@ -1796,8 +1798,8 @@ impl Model {
             verb_events: None,
             item_locks: std::collections::HashSet::new(),
             cursor_pos: (0.0, 0.0),
-            minimap_ping_request: None,
-            minimap_ping: (0.0, 0.0),
+            minimap: crate::widget::MinimapStatics::default(),
+            minimap_pings_sent: Vec::new(),
             chat_sends: Vec::new(),
             addon_sends: Vec::new(),
             played_time_asks: 0,
@@ -1854,6 +1856,7 @@ impl Model {
             tabard_host: Default::default(),
             tabard_intents: Vec::new(),
             world_frame_made: false,
+            xml_creating: false,
             unit_reach: HashMap::new(),
             chat_input: Vec::new(),
             skills: skills::SkillsState::default(),
