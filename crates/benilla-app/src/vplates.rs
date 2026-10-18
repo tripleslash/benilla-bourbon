@@ -265,7 +265,7 @@ pub(crate) fn take_legacy_settings(cvars: &mut crate::cvars::Cvars) -> LegacyPla
     )
 }
 
-/// Seat the legacy settings over the saved-variables chunk's values, before `VARIABLES_LOADED`,
+/// Seat the legacy settings over the saved-variables file's values, before `VARIABLES_LOADED`,
 /// as the number 1 or nil (a Lua 0 is truthy). Until now the setting was the CVar, which
 /// outranked the file.
 pub(crate) fn seat_legacy_settings(
@@ -902,7 +902,7 @@ mod tests {
         );
 
         let s = benilla_ui::script::UiScript::new().unwrap();
-        // The saved-variables chunk said off; the CVar was the store, so it wins.
+        // The saved-variables file said off; the CVar was the store, so it wins.
         s.run("FRIENDNAMEPLATES_ON = nil NAMEPLATES_ON = 1")
             .unwrap();
         seat_legacy_settings(&s, &legacy);

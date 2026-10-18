@@ -65,11 +65,6 @@ pub struct M2Model {
     /// The camera table's first record, the glue scenes' `Model:SetCamera(0)`; their
     /// `cameraLookup[0]` is the `0xffff` none sentinel.
     pub camera0: Option<PortraitCamera>,
-    /// The camera table's second record, which a `<PlayerModel>` (paper doll, inspect, pet page)
-    /// renders through: raw index 1, not through `cameraLookup` (`0x505b30`, chooser `0x505890`,
-    /// frozen at `0x7acf10`). `None` with fewer than two cameras, where the reference builds a
-    /// fixed camera.
-    pub pane_camera: Option<PortraitCamera>,
     /// The whole camera table by raw index, for `SetCamera(n)`; an index past its end leaves the
     /// pane on the orthographic leg.
     pub cameras: Vec<PaneCamera>,
@@ -536,6 +531,10 @@ impl AssetLoader for M2ModelLoader {
                     let clip = ctx.add_labeled_asset(format!("clip{i}"), clip);
                     let node = graph.add_clip(clip.clone(), 1.0, root);
                     pose.set_node(node, pose_idx, 0);
+                    // The key bone's blend slot keeps the outgoing sequence on its own clock
+                    // (`0x7125ea`), and it can be the sequence the primary re-arms.
+                    let blend_node = graph.add_clip(clip.clone(), 1.0, root);
+                    pose.set_node(blend_node, pose_idx, 0);
                     // The sheath family (89/90) gets per-arm masked nodes.
                     let arm_nodes =
                         (matches!(anim.anim_id, 89 | 90) && arm_roots.is_some()).then(|| {
@@ -558,6 +557,7 @@ impl AssetLoader for M2ModelLoader {
                         anim_id: anim.anim_id,
                         seq_index: anim.seq_index,
                         node,
+                        blend_node: Some(blend_node),
                         looping: anim.looping,
                         duration: anim.duration,
                         move_speed: anim.move_speed,
@@ -668,7 +668,6 @@ impl AssetLoader for M2ModelLoader {
         };
         let portrait_camera = parse_m2_portrait_camera(&bytes).map(to_bevy);
         let camera0 = benilla_formats::parse_m2_camera(&bytes, 0).map(to_bevy);
-        let pane_camera = benilla_formats::parse_m2_camera(&bytes, 1).map(to_bevy);
         let cameras: Vec<PaneCamera> = benilla_formats::parse_m2_pane_cameras(&bytes)
             .into_iter()
             .map(|c| PaneCamera {
@@ -710,7 +709,6 @@ impl AssetLoader for M2ModelLoader {
             markers,
             portrait_camera,
             camera0,
-            pane_camera,
             cameras,
             string_anchors,
             cch_marker,

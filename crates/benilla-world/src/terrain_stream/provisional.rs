@@ -173,6 +173,12 @@ pub(super) struct ProvisionalCollision {
 }
 
 impl ProvisionalCollision {
+    /// The tiles a WDL floor stands in for right now.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(super) fn floored_tiles(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.ground.keys().copied()
+    }
+
     /// Drop every stand-in — the world they stood in for is going away (`release_world`).
     pub(super) fn release(&mut self, commands: &mut Commands) {
         for entity in self

@@ -1,6 +1,6 @@
 //! The `Button` and `CheckButton` methods (`CSimpleButton` `0x6eeab0`, `CSimpleCheckbox`
 //! `0x6eeb30`). The shown state texture latches at each state edge (`SetState` `0x779790`), not at
-//! paint. `<PushedTextOffset>` is not built: a pushed label does not shift.
+//! paint, and so does the pushed label's text offset (`0x779810`).
 //! Lookup runs CheckButton's table, then Button's, then the frame table, the client's class chain,
 //! so `SetChecked` is nil on a plain Button and `GetText` on a plain Frame.
 
@@ -123,6 +123,15 @@ fn adopt_label(model: &mut Model, owner: FrameHandle, rh: RegionHandle) {
     };
     super::region::anchor_unanchored_at(model, rh, point);
     apply_normal_font(model, owner);
+    refresh_label(model, owner);
+}
+
+/// The label refresh (`0x779810`) at the points where the reference runs it outside a state change
+/// ([`ButtonState::refresh_label`]); a no-op on any frame but a Button.
+pub(super) fn refresh_label(model: &mut Model, h: FrameHandle) {
+    if let Some(KindState::Button(bs)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+        bs.refresh_label();
+    }
 }
 
 /// Link the label to the normal font object and local justify, the reference's `0x779810` →
@@ -144,7 +153,7 @@ fn apply_normal_font(model: &mut Model, owner: FrameHandle) {
         };
         (rh, bs.normal_font.clone(), bs.normal_justify_h)
     };
-    // An unregistered name is no error here: the setter accepted it and the loader reports it.
+    // The setter refuses an unknown name; a hand-made handle naming no font is ignored here.
     let fo = name.as_deref().and_then(|n| model.font_object(n).cloned());
     let d = model.region_data.entry(rh).or_default();
     match (&name, fo) {
@@ -191,6 +200,35 @@ pub(crate) fn set_label_font_justify_h_lua(
         apply_normal_font(&mut model, owner);
     }
     Ok(())
+}
+
+/// A state font setter's argument (`0x780400`, `0x780700`, `0x780580`, all into `0x79ef10`): a
+/// font object, nil, or a name looked up at once (`0x783870`, `0x79efe1`), a miss raising
+/// `<button>:SetFontObject(): Couldn't find font named <name>` (`0x87c5fc`, the button's name or
+/// `<unnamed>`, `0x84c7f0`), so no dead name is stored.
+fn state_font_arg(
+    lua: &Lua,
+    this: &Table,
+    verb: &str,
+    font: &Value,
+) -> mlua::Result<Option<String>> {
+    let name = super::font::resolve(verb, font)?;
+    let Some(n) = name.as_deref().filter(|_| matches!(font, Value::String(_))) else {
+        return Ok(name);
+    };
+    let h = frame_handle_of(lua, this)?;
+    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    if model.font_object(n).is_some() {
+        return Ok(name);
+    }
+    let who = model
+        .arena
+        .frame(h)
+        .and_then(|f| f.name.clone())
+        .unwrap_or_else(|| "<unnamed>".to_string());
+    Err(mlua::Error::runtime(format!(
+        "{who}:SetFontObject(): Couldn't find font named {n}"
+    )))
 }
 
 /// Run `f` over a frame's Button state under one short write borrow. It moves no state, only an
@@ -273,7 +311,11 @@ pub(super) fn edge(
 /// Hyperlink and NamePlate overrides chain back (`0x7cb8a5`). The hover target still moves, so
 /// `GetMouseFocus()` answers a disabled button.
 pub(super) fn hover_notify_runs(model: &Model, h: Option<FrameHandle>) -> bool {
-    let Some(h) = h else { return true };
+    h.is_none_or(|h| is_enabled(model, h))
+}
+
+/// Whether `h` is a Button out of the DISABLED state (`+0x328`); any other frame answers true.
+pub(super) fn is_enabled(model: &Model, h: FrameHandle) -> bool {
     match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::Button(bs)) => bs.enabled(),
         _ => true,
@@ -473,6 +515,10 @@ fn set_slot_texture(
     // (`0x7702ac`). The slot's region made for this call is then destroyed without a blend or a
     // slot (`0x7790ce`, `0x7790fa`; `0x778f88`, `0x778fb7`), while an existing one (`0x77907c`) goes
     // on to the highlight's blend.
+    // Deviation: the disabled-checked leg (`0x785380`) tests and reloads the checked slot
+    // (`[+0x4e0]`, `0x785388`/`0x7853a5`), a copy of the checked leg's (`0x785270`), so in 1.12.1
+    // a check box with a checked texture repaints that one and never gets its disabled-checked
+    // texture from a path. benilla tests and reloads the slot the method names.
     let existing = with_button(lua, this, |bs| slot.get(bs))?.is_some();
     let resolvable = path.is_empty()
         || lua
@@ -498,9 +544,13 @@ fn set_slot_texture(
     }
     let data = model.region_data.entry(rh).or_default();
     // The highlight applies its blend on every path call, to the old region as to a new one
-    // (`0x779082`, `0x7790e6`), the old one even when its texture did not load.
+    // (`0x779082`, `0x7790e6`), the old one even when its texture did not load. A checked
+    // texture made here is ADD (`0x7852f8`, `0x785408`), a reloaded one keeps its blend
+    // (`0x785295`); the state textures keep the constructor's BLEND (`0x778f10`).
     if let Some(blend) = blend {
         data.blend = blend;
+    } else if !existing && matches!(slot, Slot::Checked | Slot::DisabledChecked) {
+        data.blend = crate::script::BlendMode::Add;
     }
     model.note_art(rh);
     Ok(())
@@ -695,7 +745,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetTextFontObject",
         lua.create_function(|lua, (this, font): (Table, Value)| {
-            let name = super::font::resolve("SetTextFontObject", &font)?;
+            let name = state_font_arg(lua, &this, "SetTextFontObject", &font)?;
             let owner = frame_handle_of(lua, &this)?;
             with_button(lua, &this, |bs| bs.normal_font = name)?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -706,14 +756,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetHighlightFontObject",
         lua.create_function(|lua, (this, font): (Table, Value)| {
-            let name = super::font::resolve("SetHighlightFontObject", &font)?;
+            let name = state_font_arg(lua, &this, "SetHighlightFontObject", &font)?;
             with_button(lua, &this, |bs| bs.highlight_font = name)
         })?,
     )?;
     m.set(
         "SetDisabledFontObject",
         lua.create_function(|lua, (this, font): (Table, Value)| {
-            let name = super::font::resolve("SetDisabledFontObject", &font)?;
+            let name = state_font_arg(lua, &this, "SetDisabledFontObject", &font)?;
             with_button(lua, &this, |bs| bs.disabled_font = name)
         })?,
     )?;
@@ -842,17 +892,66 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         )?,
     )?;
 
-    // LockHighlight (`0x782840`) and UnlockHighlight: the highlight shows regardless of hover.
+    // LockHighlight (`0x782840`) and UnlockHighlight: the highlight shows regardless of hover,
+    // then the label refresh (`0x495a98`).
     m.set(
         "LockHighlight",
         lua.create_function(|lua, this: Table| {
-            with_button(lua, &this, |bs| bs.locked_highlight = true)
+            with_button(lua, &this, |bs| {
+                bs.locked_highlight = true;
+                bs.refresh_label();
+            })
         })?,
     )?;
     m.set(
         "UnlockHighlight",
         lua.create_function(|lua, this: Table| {
-            with_button(lua, &this, |bs| bs.locked_highlight = false)
+            with_button(lua, &this, |bs| {
+                bs.locked_highlight = false;
+                bs.refresh_label();
+            })
+        })?,
+    )?;
+
+    // SetPushedTextOffset(x, y) (`0x782030`): two numbers (`lua_isnumber`, `0x7820c2`/`0x7820d3`),
+    // else `Usage: <name>:SetPushedTextOffset(x, y)` (`0x87a308`); each stored in layout units
+    // as an anchor offset is (`0x7820eb`-`0x78212b`). The label moves only at its next refresh.
+    m.set(
+        "SetPushedTextOffset",
+        lua.create_function(|lua, (this, x, y): (Table, Value, Value)| {
+            let num = |v: Value| lua.coerce_number(v).ok().flatten();
+            let (Some(x), Some(y)) = (num(x), num(y)) else {
+                let h = frame_handle_of(lua, &this)?;
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let who = model
+                    .arena
+                    .frame(h)
+                    .and_then(|f| f.name.clone())
+                    .unwrap_or_else(|| "<unnamed>".to_string());
+                return Err(mlua::Error::runtime(format!(
+                    "Usage: {who}:SetPushedTextOffset(x, y)"
+                )));
+            };
+            let units = lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .layout_units();
+            with_button(lua, &this, |bs| {
+                bs.pushed_text_offset = [units.store(x as f32), units.store(y as f32)];
+            })
+        })?,
+    )?;
+    // GetPushedTextOffset() (`0x782180`) → x, y, read back through the layout scale
+    // (`0x782237`-`0x78227a`): 1.28 each way on a fresh button at 4:3.
+    m.set(
+        "GetPushedTextOffset",
+        lua.create_function(|lua, this: Table| {
+            let [x, y] = with_button(lua, &this, |bs| bs.pushed_text_offset)?;
+            let units = lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .layout_units();
+            Ok((units.load(x), units.load(y)))
         })?,
     )?;
 
@@ -926,18 +1025,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // Click([button]) (`0x7826c0`): the physical click's path, toggle and `OnClick` alike.
+    // Click([button]) (`0x7826c0`): the physical click's path, toggle and `OnClick` alike, with
+    // the argument mapped to the name the click fires ([`click_arg_name`]).
     m.set(
         "Click",
-        lua.create_function(|lua, (this, button): (Table, Option<String>)| {
+        lua.create_function(|lua, (this, button): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
             let id = {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 model.frame_id(h)
             };
-            let btn = button.unwrap_or_else(|| "LeftButton".to_string());
             // A released click, flagged as scripted, which only a LootButton reads.
-            click_button(lua, id, &btn, false, true);
+            click_button(lua, id, click_arg_name(&button), false, true);
             Ok(())
         })?,
     )?;
@@ -971,6 +1070,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.set_named_registry_value(REG_CHECKBUTTON_METHODS, c)?;
 
     Ok(())
+}
+
+/// `Click`'s argument as `0x7826c0` maps it, then named as the base click names its mask
+/// (`0x779540`, table `0x77960c`). A string is compared ignoring case (`0x64a4c0`) with
+/// `LeftButton`, `MiddleButton` and `RightButton` (1, 2, 4); any other string, `""` and
+/// `"Button4"` included, is 0, which fires `UNKNOWN`. A number passes `lua_isstring` (`0x6f3510`)
+/// and its decimal text matches none, so it is `UNKNOWN` too. No argument, nil, a boolean, a
+/// table or a function is `LeftButton` (`0x782766`).
+fn click_arg_name(arg: &Value) -> &'static str {
+    match arg {
+        Value::String(s) => {
+            let b = s.as_bytes();
+            ["LeftButton", "MiddleButton", "RightButton"]
+                .into_iter()
+                .find(|n| b.eq_ignore_ascii_case(n.as_bytes()))
+                .unwrap_or("UNKNOWN")
+        }
+        Value::Integer(_) | Value::Number(_) => "UNKNOWN",
+        _ => "LeftButton",
+    }
 }
 
 /// Whether `h` fires `OnClick` for the transition `name` (e.g. `"RightButtonDown"`): a Button
@@ -1009,10 +1128,12 @@ pub(super) fn wants_press_visual(model: &Model, h: FrameHandle, button: &str) ->
     }
 }
 
-/// The click shared by the input path and `Click()`: a disabled Button fires nothing, a CheckButton
-/// toggles before `OnClick` runs (`0x785550`), then `OnClick` gets the button name alone as `arg1`
-/// (`0x779540` fires it with the format `"%s"`); `down`, true only for a click a `…ButtonDown`
-/// registration fired, reaches the nameplate's select alone. `scripted` marks a Lua `Click()`
+/// The click shared by the input path and `Click()`: a CheckButton toggles first, enabled or not
+/// (`0x785550`), a disabled Button fires nothing more, then `OnClick` gets the button name alone
+/// as `arg1` (`0x779540` fires it with the format `"%s"`); `down`, true only for a click a
+/// `…ButtonDown` registration fired, reaches the nameplate's select alone. The mouse never gets
+/// here for a disabled button: its press slot returns first (`0x77922e`), its release is gated on
+/// PUSHED. `scripted` marks a Lua `Click()`
 /// (`0x7826c0` passes 1, the mouse `0x779280`/`0x7793a4` pass 0): a LootButton then does nothing at
 /// all, not even its `OnClick` (`0x4c182b`); every other kind ignores it.
 pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripted: bool) {
@@ -1058,18 +1179,16 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
         };
         let is_check = frame.kind == FrameKind::CheckButton;
         let (fire, writes) = match &mut frame.kind_state {
-            // A Button fires only while enabled;
+            // A CheckButton's click slot (`0x785550`) toggles (`0x785566`) before the base click
+            // (`0x779540`), which runs nothing for a disabled button (`0x779552`): the toggle has
+            // no state gate, so `Click()` flips a disabled box silently.
             KindState::Button(bs) => {
-                if bs.enabled() {
-                    let writes = if is_check {
-                        bs.refresh_checked(!bs.checked, false)
-                    } else {
-                        Default::default()
-                    };
-                    (true, writes)
+                let writes = if is_check {
+                    bs.refresh_checked(!bs.checked, false)
                 } else {
-                    (false, Default::default())
-                }
+                    Default::default()
+                };
+                (bs.enabled(), writes)
             }
             // any other kind with an `OnClick` just fires.
             _ => (true, Default::default()),

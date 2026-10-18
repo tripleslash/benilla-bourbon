@@ -303,7 +303,7 @@ pub struct FontShadow {
     pub color: [f32; 4],
 }
 
-/// A named `<Font>` object's paint, flattened through its `inherits=` chain; a field the chain
+/// A named `<Font>` object's paint, its own over what its `inherits=` parent had; a field the chain
 /// never sets is `None`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FontObject {
@@ -545,8 +545,19 @@ impl RegionData {
 
     /// [`Self::measure_key`] with `text` in place of the region's own.
     pub(crate) fn measure_key_of(&self, text: &str, scale: f32) -> u64 {
+        self.measure_key_at(text, self.wrap_width(), scale)
+    }
+
+    /// The width the text wraps in: the authored width when positive, else none.
+    pub(crate) fn wrap_width(&self) -> Option<f32> {
+        self.size.map(|s| s.0).filter(|w| *w > 0.0)
+    }
+
+    /// [`Self::measure_key_of`] with `wrap_width` in place of the region's own.
+    pub(crate) fn measure_key_at(&self, text: &str, wrap_width: Option<f32>, scale: f32) -> u64 {
         self.measure_key_as(
             text,
+            wrap_width,
             scale,
             self.font_path.as_deref(),
             self.font_height,
@@ -554,11 +565,12 @@ impl RegionData {
         )
     }
 
-    /// [`Self::measure_key_of`] under the font the text is drawn in, where that is not the
+    /// [`Self::measure_key_at`] under the font the text is drawn in, where that is not the
     /// region's own ([`Model::label_font`]).
     pub(crate) fn measure_key_as(
         &self,
         text: &str,
+        wrap_width: Option<f32>,
         scale: f32,
         font_path: Option<&str>,
         font_height: Option<f32>,
@@ -570,7 +582,6 @@ impl RegionData {
         font_path.hash(&mut hasher);
         font_height.map(f32::to_bits).hash(&mut hasher);
         self.text_height.map(f32::to_bits).hash(&mut hasher);
-        let wrap_width = self.size.map(|s| s.0).filter(|w| *w > 0.0);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         // The outline changes the measure: a THICK one steps each glyph 1 px further
         // (`GlyphStepBase 0x5ca2b0`); so does the shadow's x offset, which seeds the line.

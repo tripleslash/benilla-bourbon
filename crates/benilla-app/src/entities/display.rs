@@ -155,9 +155,10 @@ pub(crate) struct DisplayModel {
     pub(super) ground_radius_local: f32,
     /// The authored portrait camera the portrait booth frames through (`0x713540`).
     pub(super) portrait_camera: Option<benilla_assets::PortraitCamera>,
-    /// Camera-table index 1, the rig a `<PlayerModel>` widget renders through (`0x505890`); without
-    /// it the reference uses its fixed fallback camera.
-    pub(super) pane_camera: Option<benilla_assets::PortraitCamera>,
+    /// The camera table by raw index, each record at rest: index 1 is the rig a `<PlayerModel>`
+    /// widget renders through (`0x505890`), else the reference's fixed fallback camera, and
+    /// `SetCamera(n)` names any (`0x76cec0`).
+    pub(super) cameras: std::sync::Arc<[benilla_assets::PortraitCamera]>,
     /// A bow display's `$WTT`/`$WTB` bowstring anchors (`0x611ff0`), captured with `parts`:
     /// `[top, bottom]`, each bone-local and model-local. The held-item attach marks the prop root
     /// with them so the string drawer can span the tips. `None` for every non-bow model.
@@ -304,7 +305,7 @@ pub(crate) fn empty_shell() -> DisplayModel {
         swim_pivot_drop_local: 0.0,
         ground_radius_local: 0.0,
         portrait_camera: None,
-        pane_camera: None,
+        cameras: std::sync::Arc::new([]),
         bbox_z_local: 0.0,
         stand_box_z_local: 0.0,
         mounted_pivot_delta_local: 0.0,
@@ -358,7 +359,7 @@ pub(super) fn build_parts(
     let mut swim_pivot_drop_local = 0.0;
     let mut ground_radius_local = 0.0;
     let mut portrait_camera = None;
-    let mut pane_camera = None;
+    let mut cameras: std::sync::Arc<[benilla_assets::PortraitCamera]> = std::sync::Arc::new([]);
     let mut bbox_z_local = 0.0;
     let mut stand_box_z_local = 0.0;
     let mut mounted_pivot_delta_local = 0.0;
@@ -413,7 +414,7 @@ pub(super) fn build_parts(
             animations = model.animations.clone();
             first_seq_span = model.first_seq_span;
             portrait_camera = model.portrait_camera;
-            pane_camera = model.pane_camera;
+            cameras = model.cameras.iter().map(|c| c.still).collect();
             if gameobject {
                 collider = model.collision.as_ref().and_then(model_local_collider);
             }
@@ -541,7 +542,7 @@ pub(super) fn build_parts(
     dm.swim_pivot_drop_local = swim_pivot_drop_local;
     dm.ground_radius_local = ground_radius_local;
     dm.portrait_camera = portrait_camera;
-    dm.pane_camera = pane_camera;
+    dm.cameras = cameras;
     dm.bbox_z_local = bbox_z_local;
     dm.stand_box_z_local = stand_box_z_local;
     dm.mounted_pivot_delta_local = mounted_pivot_delta_local;

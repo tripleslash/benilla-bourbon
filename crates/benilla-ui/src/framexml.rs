@@ -141,7 +141,8 @@ pub struct Templates {
 
 #[derive(Debug, Clone)]
 struct Template {
-    element: Element,
+    /// Shared, so a load's per-level reads hold the node without copying it.
+    element: std::rc::Rc<Element>,
     /// The context word at registration (`[entry+0x1c]`, `0x6ee6be`); `None` is the reference's 0.
     context: Option<String>,
 }
@@ -169,7 +170,7 @@ impl Templates {
         context: Option<&str>,
     ) -> Registration {
         let template = Template {
-            element,
+            element: std::rc::Rc::new(element),
             context: context.map(str::to_owned),
         };
         match self.entries.entry(name.to_ascii_lowercase()) {
@@ -192,7 +193,32 @@ impl Templates {
     pub fn get(&self, name: &str) -> Option<&Element> {
         self.entries
             .get(&name.to_ascii_lowercase())
-            .map(|t| &t.element)
+            .map(|t| &*t.element)
+    }
+
+    /// The templates `element`'s load runs before its own body, in the order the reference runs
+    /// them: each level's `inherits` template is loaded through its own recursive load first
+    /// (`0x76fe5b`), the most distant first. [`expand`] flattens the same chain into one element,
+    /// losing the boundaries that per-level state (a texture's wrap flag, `0x76fec6`) follows. A
+    /// cycle stops at the repeated name.
+    pub fn inherited_levels(&self, element: &Element) -> Vec<std::rc::Rc<Element>> {
+        let mut out: Vec<std::rc::Rc<Element>> = Vec::new();
+        let mut active: Vec<String> = Vec::new();
+        let mut name = element.attr("inherits").map(str::to_string);
+        while let Some(n) = name.filter(|n| !n.is_empty()) {
+            let key = n.to_ascii_lowercase();
+            if active.contains(&key) {
+                break;
+            }
+            let Some(t) = self.entries.get(&key) else {
+                break;
+            };
+            active.push(key);
+            name = t.element.attr("inherits").map(str::to_string);
+            out.push(t.element.clone());
+        }
+        out.reverse();
+        out
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -493,34 +519,6 @@ fn expand_inner(
     }
 }
 
-/// The elements `element`'s load runs, in the order the reference runs them: each level's
-/// `inherits` template is loaded through its own recursive load first (`0x76fe5b`), then the
-/// level's own body. [`expand`] flattens the same chain into one element, losing the boundaries
-/// that per-level state (a texture's wrap flag, `0x76fec6`) follows.
-pub fn inherit_chain<'a>(element: &'a Element, templates: &'a dyn Inheritable) -> Vec<&'a Element> {
-    fn walk<'a>(
-        el: &'a Element,
-        templates: &'a dyn Inheritable,
-        active: &mut Vec<String>,
-        out: &mut Vec<&'a Element>,
-    ) {
-        if let Some(name) = el.attr("inherits").filter(|n| !n.is_empty()) {
-            let key = name.to_ascii_lowercase();
-            if !active.contains(&key) {
-                if let Some(template) = templates.find(name) {
-                    active.push(key);
-                    walk(template, templates, active, out);
-                    active.pop();
-                }
-            }
-        }
-        out.push(el);
-    }
-    let mut out = Vec::new();
-    walk(element, templates, &mut Vec::new(), &mut out);
-    out
-}
-
 /// [`expand`]'s merge; `over`'s tag wins, and its body when it has one. `base`'s `name` and `id`
 /// are dropped: they belong to the node they are written on.
 fn merge(base: &Element, over: &Element) -> Element {
@@ -581,6 +579,27 @@ pub fn resolve_name(raw: &str, parent_name: &str) -> String {
             format!("{parent_name}{}", &raw[TOKEN.len()..])
         }
         _ => raw.to_string(),
+    }
+}
+
+/// The client's integer parse `0x64ac60`, which the frame loader reads `frameLevel=` with
+/// (`0x7699c5`): an optional `-`, then the leading digits, wrapping in 32 bits; no whitespace skip
+/// and no `+`, so `" 5"` and `"+5"` are 0 and `"5a"` is 5.
+pub(crate) fn atoi(s: &str) -> i32 {
+    let (negative, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let n = digits
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .fold(0i32, |n, b| {
+            n.wrapping_mul(10).wrapping_add(i32::from(b - b'0'))
+        });
+    if negative {
+        n.wrapping_neg()
+    } else {
+        n
     }
 }
 
@@ -970,7 +989,19 @@ print(x)</Script>
 
 #[cfg(test)]
 mod atof_tests {
-    use super::atof;
+    use super::{atof, atoi};
+
+    #[test]
+    fn atoi_takes_a_minus_and_the_leading_digits() {
+        assert_eq!(atoi("5"), 5);
+        assert_eq!(atoi("5a"), 5);
+        assert_eq!(atoi("-3"), -3);
+        assert_eq!(atoi("+5"), 0);
+        assert_eq!(atoi(" 5"), 0);
+        assert_eq!(atoi(""), 0);
+        assert_eq!(atoi("-"), 0);
+        assert_eq!(atoi("4294967297"), 1);
+    }
 
     #[test]
     fn atof_takes_the_numeric_prefix() {

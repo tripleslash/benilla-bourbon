@@ -180,23 +180,22 @@ fn a_button_label_is_measured_in_the_buttons_font() {
     )
     .unwrap();
     s.resolve();
+    // With no font on the label or the button, the label measures 0 and asks the font engine
+    // nothing (`0x772bd0`).
     let before = s.fontstrings_needing_measure();
-    let own = before.iter().find(|r| r.text == "Cancel").expect("label");
-    let (own_height, own_key) = (own.height, own.key);
+    assert!(before.iter().all(|r| r.text != "Cancel"), "no font, no ask");
     s.run(r#"FontedButton:SetFont("Fonts\\ARIALN.TTF", 10, "OUTLINE")"#)
         .unwrap();
     s.resolve();
     let after = s.fontstrings_needing_measure();
-    let r = after.iter().find(|r| r.text == "Cancel").expect("label");
-    // The label set no font of its own, so every axis is the button's now, and the key moved.
-    assert_ne!(own_height, Some(10.0));
+    let r = after
+        .iter()
+        .find(|r| r.text == "Cancel")
+        .expect("measured under the drawn font");
+    // The label set no font of its own, so every axis is the button's.
     assert_eq!(r.height, Some(10.0));
     assert_eq!(r.font.as_deref(), Some("Fonts\\ARIALN.TTF"));
     assert_eq!(r.outline, crate::script::Outline::Normal);
-    assert_ne!(
-        r.key, own_key,
-        "the measure is taken again under the drawn font"
-    );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 

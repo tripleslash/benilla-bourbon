@@ -972,7 +972,8 @@ mod tests {
     /// preset 1 by texel × fade.
     #[test]
     fn a_fade_twin_blends_by_the_stage_zero_alpha_op() {
-        let src = include_str!("shaders/wow_model.wgsl");
+        // As checked out: a Windows checkout under `core.autocrlf` ends its lines in CRLF.
+        let src = include_str!("shaders/wow_model.wgsl").replace("\r\n", "\n");
         for (line, why) in [
             (
                 "faded_alpha = stage_alpha(u32(m.stage1.z) - 1u, obj_fade, tex0_alpha);",

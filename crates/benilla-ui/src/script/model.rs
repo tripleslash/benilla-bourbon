@@ -130,6 +130,10 @@ pub(crate) struct Model {
     pub(crate) addons_chain_reader: Option<super::addon::SharedChainReader>,
     /// The host's font engine, so a metric answers inside the asking call, not a frame later.
     pub(crate) measurer: Option<super::measure::SharedMeasurer>,
+    /// The tooltip sizer's measures by key ([`super::tooltip`]): the clear's width reset and the
+    /// sizer's probes key a wrapped line three ways a frame, so the hover loops' per-frame rebuild
+    /// asks the font engine nothing after the first. Emptied with the engine's metrics.
+    pub(crate) tooltip_measures: HashMap<(u64, bool), super::MeasuredText>,
     /// Whether a texture path resolves (patch chain or loose addon file), so the path form of
     /// `SetTexture` returns the reference's 1 or nil inline (`0x79bb40`). `None` answers nil.
     pub(crate) texture_probe: Option<TextureProbe>,
@@ -309,14 +313,10 @@ pub(crate) struct Model {
     /// The model instances `SetModel` has made in this state, the last one's number.
     pub(crate) model_instances: u64,
     /// Event name to its frames in registration order, never a set: `SignalEvent` (`0x703e50`)
-    /// dispatches in that order across frames. Re-registering keeps a frame's position.
+    /// dispatches in that order across frames. Re-registering keeps a frame's position, and
+    /// `RegisterAllEvents` (`0x7023e0`) appends a frame to every event's list like a named one.
     pub(crate) event_to_frames: HashMap<String, Vec<FrameHandle>>,
     pub(crate) frame_events: HashMap<FrameHandle, HashSet<String>>,
-    /// `RegisterAllEvents` frames in registration order, dispatched after an event's own list and
-    /// cleared only by `UnregisterAllEvents`. Deviation: a flag, not the reference's append to
-    /// every event's list (`0x7023e0`, which orders by registration time and lets `UnregisterEvent`
-    /// drop one event), because events register here by name and no list of every name exists.
-    pub(crate) all_event_frames: Vec<FrameHandle>,
 
     /// The focused edit box (`0xcf4dc8`), taking all keys while visible; `None` admits `autoFocus`.
     pub(crate) focused_editbox: Option<FrameHandle>,
@@ -356,9 +356,10 @@ pub(crate) struct Model {
 
     /// Frames the last resolve resized, `(id, width, height)`, owed `OnSizeChanged` outside it.
     pub(crate) pending_size_changed: Vec<(u32, f32, f32)>,
-    /// Regions whose text emptied or filled since the last resolve, which names each one whose
-    /// node hash moved ([`Model::touch_layout_text`]).
-    pub(crate) text_flips: Vec<RegionHandle>,
+    /// Regions whose text emptied or filled ([`Model::touch_layout_text`]), or whose tooltip line
+    /// width the clear or the sizer wrote ([`Model::note_line_width`]), since the last resolve,
+    /// which names each one whose node hash moved.
+    pub(crate) content_writes: Vec<RegionHandle>,
 
     /// Script errors caught from `pcall`'d handlers, drained by the host each frame.
     pub(crate) errors: Vec<String>,
@@ -585,10 +586,13 @@ pub(crate) struct Model {
     /// `RestartGx()` calls, the video window's apply button.
     pub(crate) restart_gx_asks: u32,
 
-    /// Globals `RegisterForSave` declared, in order: written at logout and re-run at load.
+    /// Globals `RegisterForSave` declared, in order: written at logout and read back at load.
     pub(crate) saved_names: Vec<String>,
     /// Saved-variables files that failed to load; the shutdown write leaves them untouched.
     pub(crate) held_saved_files: Vec<std::path::PathBuf>,
+    /// Addon saved-variables files that ran cleanly this session: the only ones the shutdown
+    /// renames for a scope that declares no names.
+    pub(crate) loaded_saved_files: Vec<std::path::PathBuf>,
 
     /// The key-binding table the Key Bindings window edits, with its account and character sets.
     pub(crate) keybinds: super::keybind::KeybindState,
@@ -1413,6 +1417,7 @@ impl Model {
         let (font, height, outline) = self.label_font(rh, d);
         d.measure_key_as(
             d.text.as_deref().unwrap_or(""),
+            d.wrap_width(),
             scale,
             font,
             height,
@@ -1431,6 +1436,7 @@ impl Model {
             addons_root: None,
             addons_chain_reader: None,
             measurer: None,
+            tooltip_measures: HashMap::new(),
             texture_probe: None,
             world_loc_projector: None,
             texture_size_probe: None,
@@ -1488,7 +1494,6 @@ impl Model {
             model_instances: 0,
             event_to_frames: HashMap::new(),
             frame_events: HashMap::new(),
-            all_event_frames: Vec::new(),
             focused_editbox: None,
             alt_down: false,
             key_consumers: HashMap::new(),
@@ -1500,7 +1505,7 @@ impl Model {
             mouse_capture: None,
             last_click: HashMap::new(),
             pending_size_changed: Vec::new(),
-            text_flips: Vec::new(),
+            content_writes: Vec::new(),
             layout_force: Vec::new(),
             layout_pending: Vec::new(),
             layout_unsettled: HashSet::new(),
@@ -1609,6 +1614,7 @@ impl Model {
             restart_gx_asks: 0,
             saved_names: Vec::new(),
             held_saved_files: Vec::new(),
+            loaded_saved_files: Vec::new(),
             keybinds: super::keybind::KeybindState::default(),
             actions: HashMap::new(),
             action_states: HashMap::new(),
@@ -2028,8 +2034,15 @@ impl Model {
             .get(&rh)
             .is_some_and(|d| d.text.as_deref().is_some_and(|t| !t.is_empty()));
         if shown != was_shown {
-            self.text_flips.push(rh);
+            self.content_writes.push(rh);
         }
+    }
+
+    /// A tooltip line's width written by the clear (`0x5301f0`) or the sizer (`0x5308ef`), each a
+    /// `SetWidth` that invalidates (`0x7683d0`): noted as a text flip is, as the hover loops reset
+    /// and restore it every frame, so the next resolve names it only if it moved the node's hash.
+    pub(crate) fn note_line_width(&mut self, rh: RegionHandle) {
+        self.content_writes.push(rh);
     }
 
     /// Text that emptied or filled on anchored region `rh`, which moves the measure its resolve
@@ -2680,37 +2693,6 @@ impl Model {
     /// A measure-key write that names no region, such as a font object: the next sweep walks all.
     pub(crate) fn touch_measure_all(&mut self) {
         self.measure_dirty = None;
-    }
-
-    /// Names a frame without bumping the epoch, for the resolve's own tooltip pre-pass: a bump
-    /// inside a resolve would hold the gate open for good, yet an unnamed write could go stale.
-    pub(crate) fn note_layout_frame_write(&mut self, h: FrameHandle) {
-        if self.layout_touched.is_some() {
-            match self.frame_to_id.get(&h) {
-                Some(&id) => {
-                    self.layout_touched
-                        .as_mut()
-                        .expect("checked above")
-                        .push(id);
-                }
-                _ => self.give_up_naming(),
-            }
-        }
-    }
-
-    /// `note_layout_frame_write` for a region.
-    pub(crate) fn note_layout_region_write(&mut self, rh: RegionHandle) {
-        if self.layout_touched.is_some() {
-            match self.region_to_id.get(&rh) {
-                Some(&id) => {
-                    self.layout_touched
-                        .as_mut()
-                        .expect("checked above")
-                        .push(id);
-                }
-                _ => self.give_up_naming(),
-            }
-        }
     }
 
     /// Names layout id `id` as what this write moved, while naming is still on, whether or not

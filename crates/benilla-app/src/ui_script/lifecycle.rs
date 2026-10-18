@@ -7,6 +7,7 @@ use bevy::prelude::*;
 
 use benilla_assets::{LockRecover, LooseOpen};
 use benilla_ui::script::{GlueNotice, UiScript};
+use benilla_world::frame_pace::FrameStep;
 
 use super::manifest::silenced_ui_load;
 use super::{load_ingame_ui, CursorPayloadHeld, PlayerUiHover, UiClock, UiKeyboardCapture};
@@ -147,31 +148,33 @@ fn new_vm<E: std::fmt::Display>(
     // `[0x882730]`, `Wow.ini`'s `Region`, read once alike and handed to the name check.
     script.set_client_region(super::client_region());
     seed_vm_clock(world, &mut script);
+    // The reference seeds `rand` with the clock before `WinMain` (`0x5b800b`). Deviation: a
+    // capture run (`scenario_active`) keeps the CRT's default seed, 1, so its frames reproduce.
+    if crate::run_mode::scenario_active() {
+        script.lua().srand(1);
+    }
     install_addon_asset_resolvers(world, &mut script);
     info!("ui_script: new VM, session {}", script.session());
     Some(script)
 }
 
 /// Start the new VM's `GetTime()` where the process already is and re-anchor [`UiClock`] to it,
-/// both off the `Time<Real>` it anchors on. The reference's `GetTime` is `GetTickCount` × 0.001
+/// both off the [`FrameStep`] the VM ticks on, before this frame's step: every VM is built ahead
+/// of the frame's tick (`Startup`, `PreUpdate`, a state edge), which then adds the step. The reference's `GetTime` is `GetTickCount` × 0.001
 /// (`0x515ea0`, via `0x42c010` → `0x42b790`), an OS clock that never restarts; ours lives in the
 /// VM, rebuilt at every login and `ReloadUI`, and a clock back at zero puts every converted
 /// cooldown start in the past, which stock `CooldownFrame_SetTimer` hides (`Cooldown.lua:3`).
 fn seed_vm_clock(world: &mut World, script: &mut UiScript) {
-    let (anchor, elapsed) = world
-        .get_resource::<Time<bevy::time::Real>>()
-        .map_or_else(Default::default, |t| {
-            (t.last_update(), t.elapsed_secs_f64())
-        });
-    script.set_now(elapsed);
+    let (anchor, now) = world
+        .get_resource::<FrameStep>()
+        .copied()
+        .unwrap_or_default()
+        .before_step();
+    script.set_now(now);
     if let Some(mut clock) = world.get_resource_mut::<UiClock>() {
         *clock = UiClock {
-            // `bevy::platform::time::Instant`, not `std::time::Instant`: `last_update()` hands
-            // back the former, and on wasm32 the two are genuinely different types
-            // (`web_time::Instant` there), so the std spelling does not even type-check on the
-            // page — and would panic if it did. Same rule as [`UiClock::anchor`] itself.
-            anchor: anchor.unwrap_or_else(bevy::platform::time::Instant::now),
-            ui_now: elapsed,
+            anchor,
+            ui_now: now,
         };
     }
 }
@@ -491,6 +494,11 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     // One frame's slice: steps until the budget is spent (at least one), then yield. The VM
     // leaves the world for the slice and comes back at its end, so every other system sees it
     // between frames exactly as it did around the old single burst.
+    // `InitializeGame` flags the world session's read-only rows whether or not a UI then loads
+    // (`0x48f566`-`0x48f584`); `end_ui_session` is `ShutdownGame`'s clear. A `/reload` keeps them.
+    if world.resource::<PendingEntryUiLoad>().stage == EntryStage::Armed {
+        flag_world_read_only(world);
+    }
     if !ui_wanted(world) {
         world.remove_resource::<PendingEntryUiLoad>();
         unpark_glue_vm(world);
@@ -763,9 +771,10 @@ fn entry_prepare(
         script.set_billing_time_rested(billing.0.time_rested);
     }
     // `CGGameUI::InitializeGame` flags these read-only before `UI_Init` loads anything
-    // (`0x48f566`-`0x48f584`), so an in-game `SetCVar` of one raises, logout handlers included;
-    // `ShutdownGame` clears them (`0x491240`), and here the flags die with this VM. The host's
-    // own realm writes are engine writes, which the flag does not stop.
+    // (`0x48f566`-`0x48f584`), so an in-game `SetCVar` of one raises, logout handlers included,
+    // and no other write stores; `ShutdownGame` clears them (`0x491240`). The VM's flags die with
+    // it (the registry's are [`load_ingame_ui_on_world_entry`]'s). After `set_realm_name`, whose
+    // write is the world entry's own.
     for name in benilla_ui::script::IN_WORLD_READ_ONLY_CVARS {
         script.set_cvar_read_only(name, true);
     }
@@ -969,7 +978,18 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     crate::minimap::restore_default_mask(world);
     // `InitializeGame` arms the play-time warning before it jumps to `UI_Init` (`0x48f636`-`0x48f681`).
     crate::ui_billing::arm_at_world_entry(world);
+    flag_world_read_only(world);
     load_ingame_ui_seated(world, LoadSeat::Roster);
+}
+
+/// `InitializeGame`'s read-only flags on the registry's world-session rows (`0x48f566`-`0x48f584`),
+/// before the UI gate; [`end_ui_session`] clears them as `ShutdownGame` does (`0x491240`).
+fn flag_world_read_only(world: &mut World) {
+    if let Some(mut cvars) = world.get_resource_mut::<crate::cvars::Cvars>() {
+        for name in benilla_ui::script::IN_WORLD_READ_ONLY_CVARS {
+            cvars.set_read_only(name, true);
+        }
+    }
 }
 
 /// [`load_ingame_ui_on_world_entry`] under the `"player"` its edge has.
@@ -1229,6 +1249,13 @@ pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String
 /// character screen runs on a state of its own. Ours is a fresh glue VM ([`install_glue_side_vm`]).
 pub(crate) fn end_ui_session(world: &mut World) {
     close_ui_session(world, ShutdownRoot::WorldTeardown);
+    // `ShutdownGame`'s clear of the world session's read-only flags (`0x491240`-`0x49125d`); a
+    // `/reload` never comes here.
+    if let Some(mut cvars) = world.get_resource_mut::<crate::cvars::Cvars>() {
+        for name in benilla_ui::script::IN_WORLD_READ_ONLY_CVARS {
+            cvars.set_read_only(name, false);
+        }
+    }
     // The session's end drops what the fold just carried, as the disconnect handler, a frame
     // earlier, dropped the rest: only a `/reload` seats it again.
     if let Some(mut log) = world.get_resource_mut::<crate::ui_quest_log::QuestLog>() {
@@ -1409,7 +1436,7 @@ pub(crate) fn finish_ui_load(script: &mut UiScript) {
 }
 
 /// [`finish_ui_load`] with its two host seams. `host_settings` runs between the saved-variables
-/// chunk and `VARIABLES_LOADED`, carrying over a setting `config.toml` held before it moved into
+/// file and `VARIABLES_LOADED`, carrying over a setting `config.toml` held before it moved into
 /// the saved variables. `between` runs after `VARIABLES_LOADED` and before the `PLAYER_LOGIN` arm
 /// (so before the event too): the chat-cache restore's `UPDATE_CHAT_WINDOWS` +
 /// `UPDATE_CHAT_COLOR` burst, where the reference registers its reader (`0x4900d6` → `0x498a20`),
@@ -1551,6 +1578,32 @@ mod tests {
         );
     }
 
+    /// A capture's VM draws the CRT's default sequence, `srand(1)`'s 41, 18467, ..., so its
+    /// frames reproduce; a session's is seeded from the clock.
+    #[test]
+    fn a_capture_vm_draws_the_default_random_sequence() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let draws = |capture: bool| {
+            let _cap = if capture {
+                EnvGuard::set("WOW_CAPTURE", "some-scenario")
+            } else {
+                EnvGuard::unset("WOW_CAPTURE")
+            };
+            let mut world = World::new();
+            let script = new_vm(&mut world, UiScript::new).expect("a VM");
+            script
+                .eval::<Vec<i64>>(
+                    "local r = math.random return {r(32767), r(32767), r(32767), r(32767)}",
+                )
+                .unwrap()
+        };
+        assert_eq!(draws(true), [42, 18468, 6335, 26501]);
+        assert_ne!(draws(false), [42, 18468, 6335, 26501]);
+    }
+
     /// Every VM, glue and in-game, answers `GetLocale` with the install's locale (`[0xc0e080]`).
     #[test]
     fn every_new_vm_is_seated_with_the_installs_locale() {
@@ -1651,6 +1704,33 @@ mod tests {
         run_pending_reload(&mut world);
         assert!(!world.resource::<ReloadUiPending>().0, "the reload ran");
         assert_eq!(*world.resource::<VPlateMode>(), on, "a reload keeps them");
+    }
+
+    /// `InitializeGame` flags the world session's read-only rows on the registry before the UI gate
+    /// (`0x48f566`-`0x48f584`), so a capture world that builds no UI has them too; a `/reload`
+    /// keeps them, and the world's end clears them (`0x491240`).
+    #[test]
+    fn the_world_entry_flags_the_registry_read_only_with_or_without_a_ui() {
+        let mut world = World::new();
+        world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+        world.insert_resource(crate::run_mode::CaptureMode);
+        world.init_resource::<crate::cvars::Cvars>();
+        world.insert_resource(PendingEntryUiLoad::default());
+        run_pending_entry_load(&mut world);
+        let set = |world: &mut World, name: &str| {
+            world
+                .resource_mut::<crate::cvars::Cvars>()
+                .set(name, "x.example.org")
+        };
+        use crate::cvars::SetOutcome;
+        for name in benilla_ui::script::IN_WORLD_READ_ONLY_CVARS {
+            assert_eq!(set(&mut world, name), SetOutcome::ReadOnly, "{name}");
+        }
+        world.insert_resource(ReloadUiPending(true));
+        run_pending_reload(&mut world);
+        assert_eq!(set(&mut world, "realmName"), SetOutcome::ReadOnly);
+        end_ui_session(&mut world);
+        assert_eq!(set(&mut world, "realmName"), SetOutcome::Changed);
     }
 
     /// A `ReloadUI()` runs the leave-world sweep (`0x490c20`, past the armed latch) and then
@@ -1820,13 +1900,14 @@ mod tests {
 
         let mut world = World::new();
         world.init_resource::<UiClock>();
-        // The process has been up 90 s, on `Time<Real>` and on the dying VM alike.
+        // The process has been up 90 s on the dying VM, and this frame's step, which the new VM's
+        // first tick adds, takes the frame step's clock 16 ms past that.
         let startup = Instant::now() - Duration::from_secs(90);
-        let mut time = Time::<bevy::time::Real>::new(startup);
-        // `Time<Real>` measures `elapsed` from its first update, not from `startup`.
-        time.update_with_instant(startup);
-        time.update_with_instant(startup + Duration::from_secs(90));
-        world.insert_resource(time);
+        world.insert_resource(FrameStep {
+            delta: Duration::from_millis(16),
+            at: startup + Duration::from_millis(90_016),
+            elapsed: Duration::from_millis(90_016),
+        });
         let mut dying = UiScript::new().unwrap();
         dying.set_now(90.0);
         world.insert_non_send(dying);

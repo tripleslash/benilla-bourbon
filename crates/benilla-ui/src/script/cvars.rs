@@ -195,7 +195,7 @@ impl super::UiScript {
         self.model_mut()
             .cvars
             .get(&name.to_ascii_lowercase())
-            .map(|s| super::binding_abi::s_str_to_int(&s.value) as i32)
+            .map(|s| super::binding_abi::s_str_to_int(&s.value))
     }
 
     /// Snapshot the table as `(name, value, default)`; the saver writes only rows off their
@@ -246,10 +246,11 @@ impl super::UiScript {
         self.model_mut().cvar_lua_created
     }
 
-    /// Flag a CVar read-only to Lua, or clear it: `CVar::SetReadOnly` (`0x63e030`). A flagged name
-    /// makes `SetCVar` raise `"%s" is read-only` (`0x488c67`-`0x488c78`); host and engine writes,
-    /// and `ConsoleExec`, still land, as the reference's `CVar::Set` (`0x63df50`) never tests the
-    /// flag. The name need not be registered yet.
+    /// Flag a CVar read-only, or clear it: `CVar::SetReadOnly` (`0x63e030`). A flagged name makes
+    /// `SetCVar` raise `"%s" is read-only` (`0x488c67`-`0x488c78`), and every other write to it
+    /// (`ConsoleExec`, an engine write) stores nothing, as `CVar::Set` (`0x63df50`) stores through
+    /// `InternalSet`, which returns at the flag (`0x63e0ba`). The host's mirror sync
+    /// ([`Self::set_cvar_host`]) is not a write and passes. The name need not be registered yet.
     pub fn set_cvar_read_only(&mut self, name: &str, read_only: bool) {
         let key = name.to_ascii_lowercase();
         let mut model = self.model_mut();
@@ -319,7 +320,9 @@ pub(super) fn set_from_engine(model: &mut Model, name: &str, value: String) {
 /// and the change was queued. The row's check runs first and may refuse the write, as the
 /// reference's `Set 0x63df50` calls the callback before anything else (`0x63df7d`). A latched
 /// slot stages the write, as `Set` stores `latchedValue` and skips `InternalSet`; writing back the
-/// applied value unstages it.
+/// applied value unstages it. Otherwise it is `InternalSet` (`0x63e0b0`): nothing for a read-only
+/// row (`0x63e0ba`-`0x63e0c2`), nothing for text equal to the value case-blind (`SStrCmpI`,
+/// `0x63e0ec`), and any other text stored as it is, a number or not.
 fn store(model: &mut Model, key: &str, value: String) -> Option<String> {
     let slot = model.cvars.get_mut(key)?;
     if let Some(check) = slot.check {
@@ -330,7 +333,7 @@ fn store(model: &mut Model, key: &str, value: String) -> Option<String> {
         }
     }
     if slot.latched {
-        let staged = (value != slot.value).then_some(value.clone());
+        let staged = (!value.eq_ignore_ascii_case(&slot.value)).then_some(value.clone());
         if slot.pending == staged && staged.is_some() {
             return None;
         }
@@ -339,7 +342,7 @@ fn store(model: &mut Model, key: &str, value: String) -> Option<String> {
         }
         slot.pending = staged;
     } else {
-        if slot.value == value {
+        if model.cvars_read_only.contains(key) || slot.value.eq_ignore_ascii_case(&value) {
             return None;
         }
         slot.value = value.clone();
@@ -399,28 +402,6 @@ pub(super) fn format_f(v: f64) -> String {
     written
 }
 
-/// Storm's `SStrToInt` (`0x64ac60`), how a CVar record's integer (`rec+0x28`) is parsed from its
-/// value and how a change callback reads it: an optional `-`, then decimal digits up to the first
-/// other byte, with no whitespace skip, no `+` and no overflow check (`10·n + d` wraps); no digit
-/// is 0.
-pub fn sstr_to_int(s: &str) -> i32 {
-    let (neg, digits) = match s.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, s),
-    };
-    let n = digits
-        .bytes()
-        .take_while(u8::is_ascii_digit)
-        .fold(0i32, |n, d| {
-            n.wrapping_mul(10).wrapping_add(i32::from(d - b'0'))
-        });
-    if neg {
-        n.wrapping_neg()
-    } else {
-        n
-    }
-}
-
 /// What `SetCVar` and `RegisterCVar` store for a value with no string form (`0x82e570`, loaded
 /// at `0x488c98` and `0x488b6f`).
 const NO_STRING_FORM: &str = "0";
@@ -446,7 +427,7 @@ const TOO_MANY_CVARS: &str = "Attempted to register too many CVars";
 /// The CVars `CGGameUI::InitializeGame` flags read-only for the whole world session, the table
 /// at `0x83de4c` walked by `0x48f566`-`0x48f584`; `ShutdownGame` clears them again
 /// (`0x491240`-`0x49125d`). The host flags them on each in-game VM before its UI loads, as
-/// `InitializeGame` does before `UI_Init`.
+/// `InitializeGame` does before `UI_Init`, and on its own registry for the session.
 pub const IN_WORLD_READ_ONLY_CVARS: [&str; 3] = ["realmList", "realmName", "scriptMemory"];
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -722,16 +703,18 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     // `RestartGx()` restarts a resolution change twice, here as in the reference.
     lua.globals().set(
         "SetScreenResolution",
-        lua.create_function(|lua, id: Option<f64>| {
+        lua.create_function(|lua, id: Option<Value>| {
+            // `is-number` (`0x48bfe8`) false leaves the index at entry 1 (`0x48bfe6`).
+            let idx = match id {
+                Some(v) => lua.coerce_number(v)?.map_or(0, super::binding_abi::ftol),
+                None => 0,
+            };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if model.screen_resolutions.is_empty() {
                 return Ok(());
             }
-            // nil selects entry 1; a non-numeric argument has already raised in the conversion,
-            // where the reference takes entry 1. Truncate, then clamp both ends.
-            let idx = id.map_or(0.0, f64::trunc);
             let last = model.screen_resolutions.len() - 1;
-            let r = model.screen_resolutions[if idx < 1.0 {
+            let r = model.screen_resolutions[if idx < 1 {
                 0
             } else {
                 (idx as usize - 1).min(last)
@@ -1129,6 +1112,42 @@ mod tests {
         let snap = s.cvars_snapshot();
         let master = snap.iter().find(|(n, _, _)| n == "MasterVolume").unwrap();
         assert_eq!((master.1.as_str(), master.2.as_str()), ("0.25", "1.0"));
+    }
+
+    /// `SetScreenResolution` tests its argument with `is-number` (`0x48bfe8`): a false answer
+    /// leaves the index at entry 1 (`0x48bfe6`) and never raises; a numeric string counts.
+    #[test]
+    fn set_screen_resolution_takes_entry_one_for_a_non_number() {
+        let mut s = UiScript::new().unwrap();
+        s.register_cvars([("gxResolution", "1024x768")]);
+        s.set_screen_resolutions(
+            vec![
+                super::ScreenResolution {
+                    width: 800,
+                    height: 600,
+                },
+                super::ScreenResolution {
+                    width: 1024,
+                    height: 768,
+                },
+                super::ScreenResolution {
+                    width: 1280,
+                    height: 960,
+                },
+            ],
+            None,
+        );
+        let pick = |s: &UiScript, call: &str| {
+            s.eval::<String>(&format!("{call} return GetCVar('gxResolution')"))
+                .unwrap()
+        };
+        assert_eq!(pick(&s, "SetScreenResolution('3')"), "1280x960");
+        assert_eq!(pick(&s, "SetScreenResolution('abc')"), "800x600");
+        assert_eq!(pick(&s, "SetScreenResolution(' 2 ')"), "1024x768");
+        assert_eq!(pick(&s, "SetScreenResolution({})"), "800x600");
+        assert_eq!(pick(&s, "SetScreenResolution(3)"), "1280x960");
+        assert_eq!(pick(&s, "SetScreenResolution(true)"), "800x600");
+        assert!(s.take_errors().is_empty());
     }
 
     /// `0x488bd1`-`0x488bed`, `0x488c47`-`0x488c59`, `0x488d21`-`0x488d3d`: the lookup `0x63dec0`

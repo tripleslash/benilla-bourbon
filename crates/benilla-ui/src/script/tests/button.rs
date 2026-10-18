@@ -361,17 +361,63 @@ fn disabled_button_swallows_clicks_checkbutton_toggles_before_onclick() {
     assert_eq!(s.eval::<i64>("return clicks").unwrap(), 2);
     assert!(!s.eval::<bool>("return Toggler:GetChecked()").unwrap());
 
-    s.run("Toggler:Disable()").unwrap();
+    // Disabled, the mouse reaches nothing (the press slot returns, `0x77922e`), but `Click()`
+    // toggles before the base click's state gate (`0x785550`) and fires no `OnClick`; the refresh
+    // shows the disabled-checked texture.
+    s.run(
+        r#"
+        Toggler:SetCheckedTexture("Interface\\C.blp")
+        Toggler:SetDisabledCheckedTexture("Interface\\DC.blp")
+        Toggler:Disable()
+    "#,
+    )
+    .unwrap();
     s.mouse_button(50.0, 50.0, "LeftButton", true);
     s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert!(!s.eval::<bool>("return Toggler:GetChecked()").unwrap());
     s.run("Toggler:Click()").unwrap();
     assert_eq!(s.eval::<i64>("return clicks").unwrap(), 2);
-    assert!(!s.eval::<bool>("return Toggler:GetChecked()").unwrap());
+    assert!(s.eval::<bool>("return Toggler:GetChecked() == 1").unwrap());
+    assert!(s
+        .eval::<bool>("return Toggler:GetDisabledCheckedTexture():IsShown() == 1")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return not Toggler:GetCheckedTexture():IsShown()")
+        .unwrap());
 
-    s.run("Toggler:SetChecked(1)").unwrap();
-    assert!(s.eval::<bool>("return Toggler:GetChecked()").unwrap());
     s.run("Toggler:SetChecked(nil)").unwrap();
     assert!(!s.eval::<bool>("return Toggler:GetChecked()").unwrap());
+    s.run("Toggler:SetChecked(1)").unwrap();
+    assert!(s.eval::<bool>("return Toggler:GetChecked()").unwrap());
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+#[test]
+fn disabled_checkbutton_registered_for_down_ignores_the_press() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        clicks = 0
+        local cb = CreateFrame("CheckButton", "DownToggler")
+        cb:SetPoint("BOTTOMLEFT", 0, 0); cb:SetWidth(100); cb:SetHeight(100)
+        cb:RegisterForClicks("LeftButtonDown")
+        cb:SetScript("OnClick", function() clicks = clicks + 1 end)
+        cb:Disable()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert_eq!(s.eval::<i64>("return clicks").unwrap(), 0);
+    assert!(!s.eval::<bool>("return DownToggler:GetChecked()").unwrap());
+    s.run("DownToggler:Enable()").unwrap();
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    assert_eq!(s.eval::<i64>("return clicks").unwrap(), 1);
+    assert!(s
+        .eval::<bool>("return DownToggler:GetChecked() == 1")
+        .unwrap());
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
@@ -1485,4 +1531,277 @@ fn button_set_font_writes_the_monochrome_bit_over_its_font_object() {
     s.run(r#"b:SetFont("Fonts\\ARIALN.TTF", 12, "MONOCHROME")"#)
         .unwrap();
     assert!(mono(&mut s), "MONOCHROME sets it");
+}
+
+#[test]
+fn click_maps_its_argument_to_the_name_onclick_sees() {
+    let s = script();
+    s.run(
+        r#"
+        seen = {}
+        local b = CreateFrame("Button", "Mapper")
+        b:SetScript("OnClick", function() table.insert(seen, arg1) end)
+        b:Click(); b:Click(nil); b:Click(true); b:Click({})
+        b:Click("rightbutton"); b:Click("MIDDLEBUTTON"); b:Click("LeftButton")
+        b:Click("Button4"); b:Click(""); b:Click(1); b:Click("\255"); b:Click("LeftButtonUp")
+    "#,
+    )
+    .unwrap();
+    let seen: Vec<String> = s.eval("return seen").unwrap();
+    assert_eq!(
+        seen,
+        [
+            "LeftButton",
+            "LeftButton",
+            "LeftButton",
+            "LeftButton",
+            "RightButton",
+            "MiddleButton",
+            "LeftButton",
+            "UNKNOWN",
+            "UNKNOWN",
+            "UNKNOWN",
+            "UNKNOWN",
+            "UNKNOWN",
+        ]
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A checked texture made from a path is ADD (`0x7852f8`, `0x785408`); one reloaded keeps its
+/// blend (`0x785295`); one from XML keeps its own `alphaMode`, BLEND by default.
+#[test]
+fn a_checked_texture_made_from_a_path_is_additive() {
+    let mut s = script();
+    s.set_texture_probe(Box::new(|p| p != "missing"));
+    let doc = crate::framexml::parse(
+        r#"<Ui>
+            <CheckButton name="XmlCheck">
+                <CheckedTexture file="Interface\Check"/>
+                <DisabledCheckedTexture file="Interface\DisabledCheck"/>
+            </CheckButton>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_: &str| None);
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    s.run(
+        r#"
+        assert(XmlCheck:GetCheckedTexture():GetBlendMode() == "BLEND", "xml checked")
+        assert(XmlCheck:GetDisabledCheckedTexture():GetBlendMode() == "BLEND", "xml disabled")
+        local cb = CreateFrame("CheckButton", "PathCheck")
+        cb:SetCheckedTexture("missing")
+        assert(cb:GetCheckedTexture() == nil, "an unloadable path makes nothing")
+        cb:SetCheckedTexture("Interface\\Check")
+        assert(cb:GetCheckedTexture():GetBlendMode() == "ADD", "path checked")
+        cb:SetDisabledCheckedTexture("Interface\\DisabledCheck")
+        assert(cb:GetDisabledCheckedTexture():GetBlendMode() == "ADD", "path disabled")
+        cb:GetCheckedTexture():SetBlendMode("BLEND")
+        cb:SetCheckedTexture("Interface\\Check2")
+        assert(cb:GetCheckedTexture():GetBlendMode() == "BLEND", "a reload keeps its blend")
+        cb:SetNormalTexture("Interface\\Up")
+        assert(cb:GetNormalTexture():GetBlendMode() == "BLEND", "a state texture")
+        -- Deviation: 1.12.1 would repaint the checked texture with B (`0x785388`).
+        local d = CreateFrame("CheckButton", "OwnSlot")
+        d:SetCheckedTexture("A"); d:SetDisabledCheckedTexture("B")
+        assert(d:GetCheckedTexture():GetTexture() == "A", "the checked texture keeps A")
+        assert(d:GetDisabledCheckedTexture():GetTexture() == "B", "B is the disabled-checked")
+    "#,
+    )
+    .unwrap();
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A state font setter looks a name up at once and raises on a miss (`0x79efe1`, `0x87c5fc`);
+/// the loader's `<NormalFont inherits=>` warns instead (`0x87a51c`).
+#[test]
+fn state_font_setters_raise_on_an_unknown_name() {
+    let s = script();
+    s.register_font_object(
+        "KnownFont",
+        FontObject {
+            height: Some(12.0),
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local b = CreateFrame("Button", "FontMiss")
+        for _, verb in ipairs({"SetTextFontObject", "SetHighlightFontObject",
+                               "SetDisabledFontObject"}) do
+            local ok, err = pcall(b[verb], b, "NoSuchFont")
+            assert(not ok, verb)
+            assert(string.find(err, "FontMiss:SetFontObject(): Couldn't find font named NoSuchFont",
+                1, true), err)
+            b[verb](b, "knownfont")
+            b[verb](b, nil)
+        end
+        local u = CreateFrame("Button")
+        local _, err = pcall(u.SetTextFontObject, u, "NoSuchFont")
+        assert(string.find(err, "<unnamed>:SetFontObject(): Couldn't find font named NoSuchFont",
+            1, true), err)
+        b:SetTextFontObject("KnownFont")
+        pcall(b.SetTextFontObject, b, "NoSuchFont")
+        local _, height = b:GetFont()
+        assert(height == 12, "a miss keeps the old")
+    "#,
+    )
+    .unwrap();
+    let doc = crate::framexml::parse(
+        r#"<Ui>
+            <Button name="XmlFontMiss">
+                <NormalFont inherits="NoSuchFont"/>
+            </Button>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_: &str| None);
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("Couldn't find font named NoSuchFont")),
+        "{:?}",
+        report.warnings
+    );
+}
+
+/// `GetPushedTextOffset` (`0x782180`) reads the ctor's (0.001, -0.001) layout units back through
+/// the aspect (`0x778740`); `SetPushedTextOffset` (`0x782030`) stores through it and raises its
+/// usage (`0x87a308`); `<PushedTextOffset>` (`0x778aec`) zeroes, then reads its own and its
+/// `<AbsDimension>`'s axes.
+#[test]
+fn pushed_text_offset_reads_back_and_loads() {
+    let mut s = script();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        r#"
+        local function near(a, b) return math.abs(a - b) < 1e-5 end
+        local b = CreateFrame("Button", "Pusher")
+        local x, y = b:GetPushedTextOffset()
+        assert(near(x, 1.28) and near(y, -1.28), x .. " " .. y)
+        b:SetPushedTextOffset(2, "-3")
+        x, y = b:GetPushedTextOffset()
+        assert(near(x, 2) and near(y, -3), x .. " " .. y)
+        local ok, err = pcall(b.SetPushedTextOffset, b, 1)
+        assert(not ok and string.find(err, "Usage: Pusher:SetPushedTextOffset(x, y)", 1, true), err)
+        local u = CreateFrame("Button")
+        ok, err = pcall(u.SetPushedTextOffset, u, "a", 1)
+        assert(not ok and string.find(err, "Usage: <unnamed>:SetPushedTextOffset(x, y)", 1, true),
+            err)
+    "#,
+    )
+    .unwrap();
+    s.set_screen_size(1280.0, 720.0);
+    // 0.001 · 768 · √(a² + 1) at 16:9.
+    s.run(
+        r#"
+        local x, y = CreateFrame("Button"):GetPushedTextOffset()
+        assert(math.abs(x - 1.5665) < 1e-4 and math.abs(y + 1.5665) < 1e-4, x .. " " .. y)
+    "#,
+    )
+    .unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let doc = crate::framexml::parse(
+        r#"<Ui>
+            <Button name="XmlZero">
+                <PushedTextOffset><AbsDimension x="0" y="0"/></PushedTextOffset>
+            </Button>
+            <Button name="XmlAttr"><PushedTextOffset x="3"/></Button>
+            <Button name="XmlBoth">
+                <PushedTextOffset x="5" y="7"><AbsDimension y="-2"/></PushedTextOffset>
+            </Button>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_: &str| None);
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    s.run(
+        r#"
+        local function at(b, ex, ey)
+            local x, y = b:GetPushedTextOffset()
+            assert(math.abs(x - ex) < 1e-5 and math.abs(y - ey) < 1e-5,
+                b:GetName() .. " " .. x .. " " .. y)
+        end
+        at(XmlZero, 0, 0)
+        at(XmlAttr, 3, 0)
+        at(XmlBoth, 5, -2)
+    "#,
+    )
+    .unwrap();
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The pushed text offset moves the drawn label at the label refresh (`0x779810` →
+/// `0x772100`): on entering PUSHED and back at leaving it, at an enabled enter or leave and at
+/// `Lock`/`UnlockHighlight`; never the label's rect.
+#[test]
+fn a_pushed_button_shifts_its_label_text() {
+    let mut s = script();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        r#"
+        b = CreateFrame("Button", "Shifty")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetWidth(100); b:SetHeight(100)
+        b:SetFont("Fonts\\FRIZQT__.TTF", 12)
+        b:SetText("Go")
+        b:RegisterForClicks("LeftButtonUp")
+    "#,
+    )
+    .unwrap();
+    let text_rect = |s: &mut UiScript| {
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                QuadContent::Text { text: Some(t), .. } if t == "Go" => q.rect,
+                _ => None,
+            })
+            .expect("label quad")
+    };
+    let rest = text_rect(&mut s);
+    let left = s.eval::<f32>("return b:GetFontString():GetLeft()").unwrap();
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+    let shifted = |r: crate::layout::Rect, dx: f32, dy: f32| {
+        near(r.left, rest.left + dx)
+            && near(r.right, rest.right + dx)
+            && near(r.bottom, rest.bottom + dy)
+            && near(r.top, rest.top + dy)
+    };
+
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    let held = text_rect(&mut s);
+    assert!(shifted(held, 1.28, -1.28), "{held:?} vs {rest:?}");
+    assert_eq!(
+        s.eval::<f32>("return b:GetFontString():GetLeft()").unwrap(),
+        left
+    );
+    // While held: a new offset waits for the next refresh, here an unlock.
+    s.run("b:SetPushedTextOffset(4, -4)").unwrap();
+    assert!(shifted(text_rect(&mut s), 1.28, -1.28));
+    s.run("b:UnlockHighlight()").unwrap();
+    assert!(shifted(text_rect(&mut s), 4.0, -4.0));
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert!(shifted(text_rect(&mut s), 0.0, 0.0));
+
+    s.run("b:SetButtonState(\"PUSHED\")").unwrap();
+    assert!(shifted(text_rect(&mut s), 4.0, -4.0));
+    // An enabled enter and leave refresh too.
+    s.run("b:SetPushedTextOffset(2, -2)").unwrap();
+    assert!(shifted(text_rect(&mut s), 4.0, -4.0));
+    s.mouse_move(50.0, 50.0);
+    assert!(shifted(text_rect(&mut s), 2.0, -2.0));
+    s.run("b:SetPushedTextOffset(3, -3)").unwrap();
+    s.mouse_move(500.0, 500.0);
+    assert!(shifted(text_rect(&mut s), 3.0, -3.0));
+    s.run("b:SetButtonState(\"NORMAL\")").unwrap();
+    assert!(shifted(text_rect(&mut s), 0.0, 0.0));
+
+    // Disabled: the press does nothing.
+    s.run("b:Disable()").unwrap();
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    assert!(shifted(text_rect(&mut s), 0.0, 0.0));
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

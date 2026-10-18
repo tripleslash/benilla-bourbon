@@ -147,7 +147,7 @@ pub(crate) fn bindings_character_path(realm: &str, character: &str) -> Option<Pa
 }
 
 /// `benilla-config/saved-variables.lua`: the flat channel our FrameXML saves through
-/// `RegisterForSave` (the `SavedVariables.lua` analog), written whole at logout, run at UI load.
+/// `RegisterForSave` (the `SavedVariables.lua` analog), written whole at logout, read at UI load.
 pub(crate) fn saved_variables_path() -> Option<PathBuf> {
     home().map(|h| h.join("saved-variables.lua"))
 }
@@ -564,6 +564,19 @@ pub(crate) fn read(path: &Path) -> std::io::Result<Vec<u8>> {
     return web_store::get_bytes(path);
     #[cfg(not(target_arch = "wasm32"))]
     std::fs::read(path)
+}
+
+/// Rename a state file over `to`; the page's store has no rename, so there it is a copy and a
+/// remove.
+pub(crate) fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bytes = web_store::get_bytes(from)?;
+        web_store::set_bytes(to, &bytes)?;
+        return web_store::remove(from);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    std::fs::rename(from, to)
 }
 
 /// Remove a state file (a cleared saved account name). Absent is not an error.

@@ -209,7 +209,8 @@ impl KindState {
 /// A tooltip's anchor mode (`+0x318`), set by `SetOwner` (`0x5310d0`), which reads a missing or
 /// unknown mode as [`TooltipAnchor::Left`] (`0x53120d`). The ids follow `GetAnchorType`'s table
 /// (`0x5313e0`, `0x531530`), not the setter's compare order. Placement (`0x52fe90`): modes 0..5
-/// clear the anchors and point, 6 and 7 only clear, 8 does neither.
+/// clear the anchors and point, 6 and 7 only clear (7 not when the sizer places, `0x530a45`), 8
+/// does neither.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TooltipAnchor {
     /// `ANCHOR_LEFT`: the plate's right edge on the owner's left.
@@ -249,8 +250,8 @@ impl TooltipAnchor {
     }
 }
 
-/// A `GameTooltip`'s state. Its lines are FontString regions named `<name>TextLeftN`/`TextRightN`,
-/// made on demand and published as Lua globals, as the stock template's 30 pairs are.
+/// A `GameTooltip`'s state. Its lines are the FontString pairs named `<name>TextLeftN`/`TextRightN`
+/// that its template declares, Lua globals as the stock template's 30 pairs are.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TooltipState {
     /// Lines currently filled (`NumLines`). Regions past this index exist but are hidden.
@@ -263,10 +264,17 @@ pub struct TooltipState {
     pub right_lines: Vec<RegionHandle>,
     /// `SetOwner`'s frame, dropped on hide.
     pub owner: Option<FrameHandle>,
+    /// `SetOwner`'s x and y offsets (`+0x3c4`, `+0x3c8`, stored by the core at `0x53001c`), which
+    /// every anchor apply reads.
+    pub owner_offset: (f32, f32),
     /// The anchor mode (`+0x318`), read back by `GetAnchorType()`: the last `SetOwner`'s while
     /// owned, `None` (mode 7) since a hide.
     pub anchor: TooltipAnchor,
-    /// `SetMinimumWidth`: a floor on the auto-sized width, cleared with the content.
+    /// Each line's wrap flag (`+0x344`), parallel to `left_lines`: the line core stores it
+    /// (`0x53036f`) and the clear zeroes it (`0x530236`).
+    pub wrapped: Vec<bool>,
+    /// `SetMinimumWidth` (`+0x3c0`): the sizer's starting widest (`0x530665`), zeroed by the clear
+    /// (`0x530258`).
     pub min_width: f32,
     /// `FadeOut()`'s countdown in seconds (`[+0x3b4]` armed, `[+0x3b8]` left): the tooltip's own
     /// update counts it down by its elapsed, so it stands still while the tooltip is not walked.
@@ -281,26 +289,25 @@ pub struct TooltipState {
     /// (`[arg+0x18]`, not the compact `[arg+0x14]`), surviving the stock caller's `SetOwner` in
     /// between (`MerchantFrame.xml:67-72`); the reference's route to `0x52b650` is untraced.
     pub equipped_header_armed: bool,
-    /// `SetPadding`: extra width past the content (`ItemRef.xml:40` sets 16 for the close button).
+    /// `SetPadding` (`+0x3bc`): extra plate width past the content (`0x5309f4`), which the clear
+    /// keeps (`ItemRef.xml:40` sets 16 for the close button).
     pub padding: f32,
-    /// How many leading pairs the line writers have seated (anchored, justified, hidden).
-    pub seated: usize,
-    /// A relayout (`0x530640`) is owed: Show and the line writers run it with an owner, and it
-    /// ends by invalidating the plate (`0x530a52`). The layout pre-pass pays it.
+    /// Benilla-only: a sizing ran in a VM with no font engine before its lines were measured, so
+    /// the next resolve runs it again ([`crate::script::tooltip`]'s headless fallback).
     pub relayout_owed: bool,
 }
 
-/// The plate's text inset: the stock template seats `TextLeft1` at TOPLEFT (10, −10).
-pub const TOOLTIP_PAD: f32 = 10.0;
-/// The line gap: each `TextLeftN` hangs at the previous line's BOTTOMLEFT (0, −2).
+/// The plate's pad on each side of its content, `0x808e74` and `0x808e78` = 10.24 (`0x4123d70a`).
+pub const TOOLTIP_PLATE_PAD: f32 = 10.24;
+/// The gap the sizer counts between shown lines, `0x808e6c` = 2.0.
 pub const TOOLTIP_LINE_GAP: f32 = 2.0;
-/// The least double-line column gap, the stock `TextRightN` offset; the reference's is untraced.
-pub const TOOLTIP_DOUBLE_GAP: f32 = 40.0;
+/// The gap the sizer counts between a double line's texts, `0x808e70` = 38.4 (`0x4219999a`).
+pub const TOOLTIP_COLUMN_GAP: f32 = 38.4;
 /// `FadeOut`'s duration in seconds, `[0x808e7c]` = 2.0: the plate holds full alpha for the first
 /// half and ramps over the second.
 pub const TOOLTIP_FADE_SECS: f32 = 2.0;
-/// A wrap-flagged line's width, pinned when it is appended; the reference's column is untraced.
-pub const TOOLTIP_WRAP_WIDTH: f32 = 260.0;
+/// The width a wrapped line is split at when its text is wider, `0x808e80` = 230.4 (`0x43666666`).
+pub const TOOLTIP_WRAP_WIDTH: f32 = 230.4;
 
 /// One frame's advance of a model pane's scene clock in whole milliseconds: `elapsed · 1000`
 /// truncated toward zero with no `+0.5` (`0x76d846`, then `__ftol` `0x40a2b0`), where the world's
@@ -907,6 +914,13 @@ pub struct ButtonState {
     pub disabled_color: Option<[f32; 4]>,
     /// `LockHighlight()`: highlighted regardless of hover, both the texture and the label font.
     pub locked_highlight: bool,
+    /// `<PushedTextOffset>`/`SetPushedTextOffset` (`+0x4b0`/`+0x4b4`), x and y in layout units;
+    /// the ctor's (0.001, -0.001) (`0x778740`, `0x77874a`), about 1.28 UI units right and down at
+    /// 4:3. Only [`Self::refresh_label`] puts it on the label.
+    pub pushed_text_offset: [f32; 2],
+    /// The label's text offset (`CSimpleFontString::SetTextOffset` `0x772100`, `+0x110`/`+0x114`)
+    /// in layout units: it moves the drawn text, never the label's rect.
+    label_offset: [f32; 2],
     /// The shown state texture (`+0x4c4`), written only by `set_state` and `set_state_slot`.
     shown: Option<RegionHandle>,
     /// The state (`+0x328`), a latch moved only by edges: the enter and leave notifies
@@ -940,6 +954,8 @@ impl Default for ButtonState {
             highlight_color: None,
             disabled_color: None,
             locked_highlight: false,
+            pushed_text_offset: [f32::from_bits(0x3a83_126f), f32::from_bits(0xba83_126f)],
+            label_offset: [0.0, 0.0],
             shown: None,
             state: ButtonVisualState::Normal,
         }
@@ -972,7 +988,27 @@ impl ButtonState {
             self.shown = Some(slot);
             w.show(Some(slot));
         }
+        // The label refresh closes every real change (`0x7797fc`).
+        self.refresh_label();
         w
+    }
+
+    /// The label refresh's offset half (`0x779810`): PUSHED puts the pushed text offset on the
+    /// label (`0x779829`-`0x779837`), any other state zero (`0x77984f`). It runs on a state change,
+    /// an enabled enter or leave (`0x7794ab`, `0x779502`), `Lock`/`UnlockHighlight` (`0x495a98`)
+    /// and a label install (`0x778daa`), so a `SetPushedTextOffset` on a held button shows at the
+    /// next of these.
+    pub fn refresh_label(&mut self) {
+        self.label_offset = if self.state == ButtonVisualState::Pushed {
+            self.pushed_text_offset
+        } else {
+            [0.0, 0.0]
+        };
+    }
+
+    /// The offset the label's text draws at, in layout units ([`Self::refresh_label`]).
+    pub fn label_offset(&self) -> [f32; 2] {
+        self.label_offset
     }
 
     /// `SetButtonState(state, locked)` (`0x779790`), the one writer: the lock is stored before the
