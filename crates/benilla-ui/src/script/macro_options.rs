@@ -4,7 +4,8 @@
 //! the first clause that holds gives its value and the group's `@unit` (or `target=unit`), nil
 //! without one. An empty group `[]` always holds, and a clause without brackets too. A condition
 //! takes `:a/b` alternatives and a `no` prefix negates it; one 1.12 cannot answer (swimming,
-//! flying, indoors, equipped, …) never holds.
+//! indoors, …) never holds, negated or not. `flying` and `flyable` are known false, since nothing
+//! flies in 1.12, so `noflying` holds.
 //!
 //! The evaluator is Lua over the stock unit, party, form and modifier verbs, so its relations are
 //! the ones `UnitCanAssist` and the rest already answer. `CastSpellByName` reads options through
@@ -20,8 +21,9 @@ const REGISTRY_KEY: &str = "benilla.macro_options";
 
 /// The evaluator: `options -> value, unit` or nothing when no clause holds.
 const EVALUATOR: &str = r#"
--- Built over the one engine helper the stock verbs lack: whether the player is mounted.
-return function(player_mounted)
+-- Built over the engine helpers the stock verbs lack: whether the player is mounted, and
+-- whether a spell id or name is in the player's or the pet's book.
+return function(player_mounted, spell_known)
 local find, sub, lower, gsub = string.find, string.sub, string.lower, string.gsub
 
 local function trim(s)
@@ -42,11 +44,12 @@ local function split(s, sep)
     end
 end
 
+-- Retail's side-specific names read as either side: 1.12's verbs do not tell left from right.
 local function modifier(key)
     key = lower(key)
-    if key == "shift" then return IsShiftKeyDown() end
-    if key == "ctrl" then return IsControlKeyDown() end
-    if key == "alt" then return IsAltKeyDown() end
+    if key == "shift" or key == "lshift" or key == "rshift" then return IsShiftKeyDown() end
+    if key == "ctrl" or key == "lctrl" or key == "rctrl" then return IsControlKeyDown() end
+    if key == "alt" or key == "lalt" or key == "ralt" then return IsAltKeyDown() end
 end
 
 -- The active shapeshift form's index, 0 in none.
@@ -74,6 +77,23 @@ local function stealthed()
         if not icon then return false end
         for _, name in ipairs(STEALTH_ICONS) do
             if find(icon, name, 1, true) then return true end
+        end
+    end
+end
+
+-- Whether a worn item is `kind`: its `GetItemInfo` type, subtype or equip slot (`Armor`,
+-- `Shields`, `INVTYPE_SHIELD`), without case. An item the cache has not answered yet does not count.
+local function equipped(kind)
+    kind = lower(kind)
+    for slot = 0, 19 do
+        local link = GetInventoryItemLink("player", slot)
+        local _, _, id = find(link or "", "item:(%d+)")
+        id = tonumber(id)
+        if id then
+            local _, _, _, _, itype, subtype, _, loc = GetItemInfo(id)
+            for _, v in ipairs({ itype, subtype, loc }) do
+                if type(v) == "string" and lower(v) == kind then return true end
+            end
         end
     end
 end
@@ -118,8 +138,24 @@ local TESTS = {
     button = function(_, args)
         return not args or any(args, function(a) return a == "1" or a == "LeftButton" end)
     end,
+    -- `known:123456` or `known:Spell Name`: in the player's or the pet's book.
+    known = function(_, args)
+        return args and any(args, function(a) return spell_known(a) end)
+    end,
+    equipped = function(_, args)
+        return args and any(args, equipped)
+    end,
+    cursor = function() return CursorHasItem() or CursorHasSpell() end,
+    bonusbar = function(_, args)
+        local offset = GetBonusBarOffset()
+        if not args then return offset > 0 end
+        return any(args, function(a) return tonumber(a) == offset end)
+    end,
+    flying = function() return false end,
+    flyable = function() return false end,
 }
 TESTS.modifier, TESTS.stance, TESTS.bar = TESTS.mod, TESTS.form, TESTS.actionbar
+TESTS.worn = TESTS.equipped
 
 -- One condition against the group's unit; an unknown one, or one whose verb raises (a token this
 -- client has no unit for, `focus`), does not hold.
@@ -262,14 +298,39 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             .app_data_ref::<super::Model>()
             .is_some_and(|m| m.units_by_lower.get("player").is_some_and(|u| u.mounted)))
     })?;
+    // `[known:…]`: 1.12 names no spell id to Lua, so the books answer.
+    let known = lua.create_function(|lua, arg: String| {
+        Ok(lua
+            .app_data_ref::<super::Model>()
+            .is_some_and(|m| spell_known(&m, &arg)))
+    })?;
     let evaluator: Function = lua
         .load(EVALUATOR)
         .set_name("=macro_options")
         .eval::<Function>()?
-        .call(mounted)?;
+        .call((mounted, known))?;
     lua.set_named_registry_value(REGISTRY_KEY, evaluator.clone())?;
     lua.globals().set("SecureCmdOptionParse", evaluator)?;
     Ok(())
+}
+
+/// Whether `arg`, a spell id or a name (a rank in parentheses pins it, as `CastSpellByName`
+/// reads one), is in the player's book or the pet's.
+fn spell_known(model: &super::Model, arg: &str) -> bool {
+    let arg = arg.trim();
+    let pet = &model.pet_book.slots;
+    match arg.parse::<u32>() {
+        Ok(id) => model
+            .spellbook
+            .slots
+            .iter()
+            .chain(pet)
+            .any(|s| s.spell_id == id),
+        Err(_) => {
+            super::resolve_spell_by_name(&model.spellbook, arg).is_some()
+                || pet.iter().any(|s| s.name.eq_ignore_ascii_case(arg))
+        }
+    }
 }
 
 /// The value and unit `options` selects, `None` when no clause holds; text without option syntax
@@ -510,5 +571,129 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!((value.as_str(), unit.as_deref()), ("Renew", Some("player")));
+    }
+
+    /// [`vm`] with an engine model whose book holds `known` (spell 123456 "Premium") and the
+    /// verbs the state conditions read: three forms, one worn shield, the cursor, the bonus bar.
+    fn vm_with_state(known: bool) -> Lua {
+        let lua = vm();
+        let mut model = super::super::Model::new();
+        if known {
+            model.spellbook.slots.push(super::super::SpellSlotView {
+                spell_id: 123456,
+                name: "Premium".into(),
+                ..Default::default()
+            });
+        }
+        lua.set_app_data(model);
+        lua.load(
+            r#"
+            FORM = 0
+            function GetNumShapeshiftForms() return 3 end
+            function GetShapeshiftFormInfo(i) return "icon", "form" .. i, FORM == i, 1 end
+            function GetInventoryItemLink(_, slot)
+                if slot == 17 then return "|cffffffff|Hitem:2129:0:0:0|h[Large Round Shield]|h|r" end
+            end
+            function GetItemInfo(id)
+                if id == 2129 then
+                    return "Large Round Shield", "item:2129", 1, 1, "Armor", "Shields", 1, "INVTYPE_SHIELD"
+                end
+            end
+            function CursorHasItem() return CURSOR_ITEM end
+            function CursorHasSpell() return nil end
+            function GetBonusBarOffset() return BONUS or 0 end
+            "#,
+        )
+        .exec()
+        .unwrap();
+        lua
+    }
+
+    /// The heal/damage macro, clause by clause: shift heals the player, a live friendly mouseover
+    /// is healed, a known spell takes a hostile mouseover or target before the standard one, and
+    /// the target's target, or nobody, is healed last.
+    #[test]
+    fn the_heal_or_damage_macro_takes_each_clause_in_turn() {
+        let m = "[mod:shift,@player][@mouseover,help,nodead] Heilung; \
+                 [known:123456,@mouseover,harm,nodead][known:123456,harm] PremiumSchaden; \
+                 [@mouseover,harm,nodead][harm] StandardSchaden; \
+                 [@targettarget,help,nodead][] Heilung";
+        for known in [true, false] {
+            let lua = vm_with_state(known);
+            let damage = if known {
+                "PremiumSchaden"
+            } else {
+                "StandardSchaden"
+            };
+            let run = |setup: &str| {
+                lua.load(setup).exec().unwrap();
+                eval(&lua, m)
+            };
+            // A hostile target: the damage clause, at the selection.
+            assert_eq!(run(""), some(damage, None), "known {known}");
+            // Shift wins over everything, on the player.
+            assert_eq!(run("MODS.shift = 1"), some("Heilung", Some("player")));
+            lua.load("MODS.shift = nil").exec().unwrap();
+            // A live friendly mouseover is healed; a dead one falls through to the damage.
+            assert_eq!(
+                run(r#"UNITS.mouseover = "friend""#),
+                some("Heilung", Some("mouseover"))
+            );
+            assert_eq!(run(r#"UNITS.mouseover = "deadfriend""#), some(damage, None));
+            // A hostile mouseover takes the damage at the mouseover.
+            assert_eq!(
+                run(r#"UNITS.mouseover = "foe""#),
+                some(damage, Some("mouseover"))
+            );
+            // A friendly target with a living friend as its target: the last clause's unit.
+            assert_eq!(
+                run(
+                    r#"UNITS.mouseover = nil UNITS.target = "friend" UNITS.targettarget = "friend""#
+                ),
+                some("Heilung", Some("targettarget"))
+            );
+            // Nobody at all: the empty group heals with no unit.
+            assert_eq!(
+                run("UNITS.target = nil UNITS.targettarget = nil"),
+                some("Heilung", None)
+            );
+        }
+    }
+
+    /// `stance`/`form` read the active shapeshift form, `0` and `nostance` none; `known` takes an
+    /// id or a name; `equipped` a worn item's type, subtype or slot; `noflying` holds.
+    #[test]
+    fn stance_known_equipped_cursor_and_the_never_flying_conditions() {
+        let lua = vm_with_state(true);
+        let stance = "[stance:1] Battle; [stance:2/3] Other; [nostance] None";
+        assert_eq!(eval(&lua, stance), some("None", None));
+        assert_eq!(eval(&lua, "[stance:0] Caster; X"), some("Caster", None));
+        lua.load("FORM = 1").exec().unwrap();
+        assert_eq!(eval(&lua, stance), some("Battle", None));
+        lua.load("FORM = 3").exec().unwrap();
+        assert_eq!(eval(&lua, stance), some("Other", None));
+        assert_eq!(eval(&lua, "[form] In; Out"), some("In", None));
+        assert_eq!(eval(&lua, "[form:1/2] In; Out"), some("Out", None));
+
+        assert_eq!(eval(&lua, "[known:Premium] A; B"), some("A", None));
+        assert_eq!(eval(&lua, "[known:999] A; B"), some("B", None));
+        assert_eq!(eval(&lua, "[noknown:123456] A; B"), some("B", None));
+
+        assert_eq!(eval(&lua, "[equipped:Shields] Bash; X"), some("Bash", None));
+        assert_eq!(
+            eval(&lua, "[worn:INVTYPE_SHIELD] Bash; X"),
+            some("Bash", None)
+        );
+        assert_eq!(eval(&lua, "[equipped:Daggers] Stab; X"), some("X", None));
+
+        assert_eq!(eval(&lua, "[cursor] Drop; X"), some("X", None));
+        lua.load("CURSOR_ITEM = 1 BONUS = 2").exec().unwrap();
+        assert_eq!(eval(&lua, "[cursor] Drop; X"), some("Drop", None));
+        assert_eq!(eval(&lua, "[bonusbar:2] Prowl; X"), some("Prowl", None));
+
+        assert_eq!(eval(&lua, "[flying] A; [noflying] B"), some("B", None));
+        assert_eq!(eval(&lua, "[mod:lshift] A; B"), some("B", None));
+        lua.load("MODS.shift = 1").exec().unwrap();
+        assert_eq!(eval(&lua, "[mod:rshift] A; B"), some("A", None));
     }
 }
