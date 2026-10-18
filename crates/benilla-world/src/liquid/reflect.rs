@@ -720,9 +720,129 @@ fn sync_reflection_flag(
     }
 }
 
+/// fork (perf): a doodad whose world bounds reach less than this from their centre (yd) is left out
+/// of the mirror. A barrel, a crate, a bush or a lamp post is a few pixels in a rippled reflection;
+/// a tree, a rock or a building is what the water shows, and stays.
+const MIRROR_MIN_DOODAD_RADIUS: f32 = 2.5;
+
+/// fork (perf): `$WOW_MIRROR_THIN=0` (`?mirror_thin=0`) keeps everything in the mirror, the A/B
+/// lever for [`thin_mirror_view`].
+fn mirror_thinning() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| crate::launch_env::var("WOW_MIRROR_THIN").as_deref() != Some("0"))
+}
+
+/// fork (perf): `$WOW_MIRROR_PLANE_CULL=0` (`?mirror_plane_cull=0`) keeps what lies under the water
+/// in the mirror's list, the A/B lever for the plane test in [`thin_mirror_view`].
+fn mirror_plane_cull() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| crate::launch_env::var("WOW_MIRROR_PLANE_CULL").as_deref() != Some("0"))
+}
+
+/// fork (perf): how far below the mirror plane an entity's bounds must top out (yd) before the
+/// mirror drops it — float slack on a test that is otherwise exact.
+const MIRROR_PLANE_SLACK: f32 = 0.05;
+
+/// What the mirror's visible list keeps of one entity: `kind` its [`ModelPart`] kind (a twin's is
+/// its source part's), `radius` its world bounds' half diagonal.
+///
+/// [`ModelPart`]: crate::model_render::ModelPart
+fn kept_in_mirror(
+    clutter: bool,
+    kind: Option<crate::model_render::ModelKind>,
+    radius: f32,
+) -> bool {
+    use crate::model_render::ModelKind;
+    if clutter {
+        return false;
+    }
+    match kind {
+        Some(ModelKind::Creature | ModelKind::GameObject) => false,
+        Some(ModelKind::Doodad) => radius >= MIRROR_MIN_DOODAD_RADIUS,
+        Some(ModelKind::Wmo) | None => true,
+    }
+}
+
+/// fork (perf): leave ground clutter, units, GameObjects and small doodads out of the mirror.
+///
+/// The mirror re-queues and re-encodes every entity its frustum holds, and at a waterside town that
+/// second pass was ~4 ms of render-thread CPU a frame (Auberdine, 2026-10-18), which the browser
+/// pays on the one thread it draws from. What it holds that the rippled, fogged reflection cannot
+/// show is the small and the moving: grass tufts, crates, the people on the dock. They are removed
+/// from the mirror camera's own visible list after Bevy's check, and from nothing else: the world
+/// camera, the shadow casters and every other reader of the entity are unchanged. Buildings, trees
+/// and the terrain are in the retained pass or large, and still reflect.
+///
+/// **And whatever lies wholly under the water.** The mirror's oblique near plane discards every
+/// fragment below the plane, but its frustum test does not know that, so the seabed, the shore's
+/// drowned shelf and anything standing in deep water were queued, sorted and encoded for a view that
+/// clips all of it. An entity whose world bounds top out below the plane is dropped, which changes
+/// no pixel.
+///
+/// Removing entries keeps each per-class list sorted, which Bevy's visibility diff requires.
+#[allow(clippy::type_complexity)]
+fn thin_mirror_view(
+    mut mirror: Query<&mut bevy::camera::visibility::VisibleEntities, With<LiquidReflectionCamera>>,
+    plane: Res<ReflectionPlane>,
+    parts: Query<(
+        Has<crate::clutter::ClutterMesh>,
+        Option<&crate::model_render::ModelPart>,
+        Option<&crate::straddle::StraddleTwinOf>,
+        Option<&crate::zfill::ZfillTwinOf>,
+        Option<&Aabb>,
+        &GlobalTransform,
+    )>,
+    sources: Query<&crate::model_render::ModelPart>,
+) {
+    let (thin, below) = (
+        mirror_thinning(),
+        mirror_plane_cull().then(|| plane.live_plane()).flatten(),
+    );
+    if !thin && below.is_none() {
+        return;
+    }
+    for mut visible in &mut mirror {
+        for list in visible.entities.values_mut() {
+            list.retain(|&e| {
+                let Ok((clutter, part, straddle, zfill, aabb, gt)) = parts.get(e) else {
+                    return true;
+                };
+                if let (Some(plane), Some(b)) = (below, aabb) {
+                    if under_plane(gt, b, plane) {
+                        return false;
+                    }
+                }
+                if !thin {
+                    return true;
+                }
+                let kind = part.map(|p| p.kind).or_else(|| {
+                    let source = straddle.map(|t| t.0).or(zfill.map(|t| t.0))?;
+                    sources.get(source).ok().map(|p| p.kind)
+                });
+                let radius = aabb.map_or(f32::INFINITY, |b| {
+                    (gt.affine().matrix3 * Vec3::from(b.half_extents)).length()
+                });
+                kept_in_mirror(clutter, kind, radius)
+            });
+        }
+    }
+}
+
+/// Do these local bounds, placed by `gt`, top out below the mirror plane (world Y)?
+fn under_plane(gt: &GlobalTransform, b: &Aabb, plane: f32) -> bool {
+    let m = gt.affine();
+    let centre = m.transform_point3a(b.center);
+    let half_y = m.matrix3.row(1).abs().dot(b.half_extents);
+    centre.y + half_y < plane - MIRROR_PLANE_SLACK
+}
+
 /// Wire the mirror into the app. Called from [`super::LiquidPlugin`].
 pub(super) fn register(app: &mut App) {
     app.init_resource::<ReflectionPlane>()
+        .add_systems(
+            PostUpdate,
+            thin_mirror_view.after(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
+        )
         .add_systems(
             Startup,
             keep_unmirrored_on_the_world_camera.after(super::surface::setup_liquid),
@@ -748,6 +868,54 @@ pub(super) fn register(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    /// fork (perf): bounds that top out under the plane leave the mirror; bounds that reach above
+    /// it stay, scaled and rotated placements included.
+    #[test]
+    fn what_lies_wholly_under_the_water_leaves_the_mirror() {
+        use super::under_plane;
+        use bevy::camera::primitives::Aabb;
+        use bevy::prelude::*;
+        let b = Aabb::from_min_max(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0));
+        let at = |y: f32| GlobalTransform::from(Transform::from_xyz(0.0, y, 0.0));
+        assert!(under_plane(&at(-2.0), &b, 0.0), "a seabed chunk");
+        assert!(
+            !under_plane(&at(-0.5), &b, 0.0),
+            "a rock breaking the surface"
+        );
+        let tipped = GlobalTransform::from(
+            Transform::from_xyz(0.0, -2.5, 0.0)
+                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4))
+                .with_scale(Vec3::splat(2.0)),
+        );
+        // Tipped 45° and doubled, its top is 2·√2 ≈ 2.83 above its centre: above the plane.
+        assert!(!under_plane(&tipped, &b, 0.0));
+    }
+
+    /// fork (perf): the mirror keeps the terrain, WMOs and large doodads, and drops clutter, units,
+    /// GameObjects and small doodads.
+    #[test]
+    fn the_mirror_keeps_the_large_and_drops_the_small_and_the_moving() {
+        use super::{kept_in_mirror, MIRROR_MIN_DOODAD_RADIUS};
+        use crate::model_render::ModelKind;
+        assert!(
+            kept_in_mirror(false, None, 1.0),
+            "terrain and unclassified meshes"
+        );
+        assert!(kept_in_mirror(false, Some(ModelKind::Wmo), 0.5));
+        assert!(kept_in_mirror(
+            false,
+            Some(ModelKind::Doodad),
+            MIRROR_MIN_DOODAD_RADIUS
+        ));
+        assert!(
+            !kept_in_mirror(false, Some(ModelKind::Doodad), 1.0),
+            "a crate"
+        );
+        assert!(!kept_in_mirror(false, Some(ModelKind::Creature), 50.0));
+        assert!(!kept_in_mirror(false, Some(ModelKind::GameObject), 50.0));
+        assert!(!kept_in_mirror(true, None, f32::INFINITY), "clutter");
+    }
+
     /// fork (perf): the mirror's water-reach margin must clear one MCLQ surface's own extent.
     ///
     /// A `LiquidSurface`'s transform is its ORIGIN and an MCLQ surface spans a chunk, so a lake

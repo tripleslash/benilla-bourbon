@@ -26,7 +26,7 @@ pub(crate) struct ZfillTwin(Entity);
 
 /// On a twin: the part it primes, and the marker that keeps twins out of part queries.
 #[derive(Component)]
-pub(crate) struct ZfillTwinOf(Entity);
+pub(crate) struct ZfillTwinOf(pub(crate) Entity);
 
 /// One fadeable part as [`sync_zfill_twins`] sees it: twin material, live tag, mesh, and its twin
 /// if it has one.

@@ -114,7 +114,7 @@ pub(crate) struct StraddleTwin(Entity);
 
 /// On a twin: the batch it doubles, which also keeps it out of the classifier's walk.
 #[derive(Component)]
-pub(crate) struct StraddleTwinOf(Entity);
+pub(crate) struct StraddleTwinOf(pub(crate) Entity);
 
 /// The reference's side booleans for a bound centre `d` yd over its plane with slack `r`,
 /// `(d ≥ −r, d ≤ r)` (`0x7079a2`–`0x707a17`), both ties inclusive (`0x7079e2`); NaN keeps neither.

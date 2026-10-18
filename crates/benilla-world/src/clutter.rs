@@ -111,6 +111,11 @@ fn setup_clutter(mut commands: Commands, world_assets: Option<ResMut<WorldAssets
     }
 }
 
+/// fork (perf): one built clutter mesh, so the water mirror can leave the tufts out
+/// (`liquid::reflect::thin_mirror_view`).
+#[derive(Component)]
+pub(crate) struct ClutterMesh;
+
 /// The `effectId → (models, density)` catalog; absent, and no clutter, when the DBCs fail to load.
 #[derive(Resource)]
 pub(crate) struct GroundClutter {
@@ -414,7 +419,12 @@ fn build_chunk_clutter(
             );
             out.push(
                 commands
-                    .spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::IDENTITY))
+                    .spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        Transform::IDENTITY,
+                        ClutterMesh,
+                    ))
                     .id(),
             );
         }
