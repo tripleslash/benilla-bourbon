@@ -512,8 +512,20 @@ fn level_of(depth: f32, lod_depth: Option<f32>) -> usize {
     }
 }
 
+/// Everything the walk reads: when it matches the last frame's, the walk would rebuild the same
+/// [`Horizon`]. A tile's chunks are fixed per asset id, which [`ChunkBoxCache`] already relies on.
+#[derive(PartialEq)]
+struct WalkInputs {
+    culling: HorizonCulling,
+    unrestricted: bool,
+    farclip: f32,
+    eye: Option<(Mat4, Option<[f32; 4]>)>,
+    /// Resident tiles, and whether each one's asset is loaded.
+    resident: Vec<((i32, i32), AssetId<AdtTile>, bool)>,
+}
+
 /// Builds [`Horizon`] from the world camera and the resident tiles' chunks; writes only on change,
-/// so a still scene leaves the model-visibility skip armed.
+/// so a still scene leaves the model-visibility skip armed, and walks only when an input moved.
 fn build_horizon(
     culling: Res<HorizonCulling>,
     windows: Res<ExteriorWindows>,
@@ -522,8 +534,30 @@ fn build_horizon(
     streamer: Option<Res<TerrainStreamer>>,
     tiles: Option<Res<Assets<AdtTile>>>,
     mut boxes: Local<ChunkBoxCache>,
+    mut last: Local<Option<WalkInputs>>,
     mut horizon: ResMut<Horizon>,
 ) {
+    let inputs = WalkInputs {
+        culling: *culling,
+        unrestricted: matches!(*windows, ExteriorWindows::Unrestricted),
+        farclip: view_dist.farclip,
+        eye: cam.iter().next().map(|(t, p)| {
+            let lens = match p {
+                Projection::Perspective(p) => Some([p.fov, p.aspect_ratio, p.near, p.far]),
+                _ => None,
+            };
+            (t.to_matrix(), lens)
+        }),
+        resident: streamer.as_deref().map_or_else(Vec::new, |s| {
+            s.spawned_tiles()
+                .map(|(key, h)| (key, h.id(), tiles.as_deref().is_some_and(|t| t.contains(h))))
+                .collect()
+        }),
+    };
+    if last.as_ref() == Some(&inputs) {
+        return;
+    }
+    *last = Some(inputs);
     let next = (|| {
         if !culling.enabled || !matches!(*windows, ExteriorWindows::Unrestricted) {
             return None;
