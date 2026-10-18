@@ -326,7 +326,7 @@ impl CharCreateCatalog {
         rules: &Rules,
         name_gen: Result<Vec<NameGenRow>>,
     ) -> Result<Self> {
-        let (race_rows, displays, files, names, custom_tokens) = load_races(chain, rules.playable)?;
+        let (race_rows, displays, files, names, custom_tokens) = load_races(chain)?;
         let base_info = load_base_info(chain)?;
         let combos: HashSet<(u8, u8)> = base_info.iter().copied().collect();
         // NameGen feeds the random name alone, so its loss costs that and nothing else.
@@ -437,7 +437,6 @@ impl CharCreateCatalog {
 #[allow(clippy::type_complexity)] // one pass over one DBC → the catalog's race-keyed maps
 fn load_races(
     chain: &mut Chain,
-    playable: &[u8],
 ) -> Result<(
     Vec<ChrRaceRow>,
     HashMap<u8, (u32, u32)>,
@@ -471,9 +470,6 @@ fn load_races(
             flags: u32_at(r, 1).unwrap_or(0),
             faction: u32_at(r, 2).unwrap_or(0),
         });
-        if !playable.contains(&race) {
-            continue;
-        }
         if let (Some(male), Some(female)) = (u32_at(r, 4), u32_at(r, 5)) {
             displays.insert(race, (male, female));
         }

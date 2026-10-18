@@ -2070,6 +2070,11 @@ fn stock_app() -> (App, async_channel::Receiver<LoginRequest>, Arc<AtomicU64>) {
         );
     let mut s = UiScript::new_glue().unwrap();
     s.set_screen_size(1024.0, 768.0);
+    // fork: the agreements as the glue build seeds them (`seed_agreements`), all standing accepted.
+    let notices = super::super::glue_mgr::read_agreements(&crate::cvars::Cvars::default());
+    for notice in GlueNotice::ALL {
+        s.set_glue_notice(notice, notices[notice as usize]);
+    }
     let _ = super::super::glue::load_glue(&mut s);
     super::super::glue::set_glue_screen(&mut s, super::super::glue::GlueScreen::Login);
     let _ = s.take_errors();
