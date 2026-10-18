@@ -1364,3 +1364,71 @@ fn only_the_sizer_invalidates_the_tooltip() {
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+/// `AppendText` (`0x531e30`, helper `0x5305b0`): `%s%s` of line 1's left text and the argument,
+/// an empty left text printing `(null)` (`0x5305dd`), the result cut at 255 bytes (`0x64a865`), set
+/// without the cell's shown bit (`0x53060e`); a non-string raises `Usage: AppendText("text")`
+/// (`0x8551a8`) and a number appends its `%.14g` text.
+#[test]
+fn append_text_formats_line_one_without_showing_it() {
+    let s = script();
+    s.run(
+        r#"
+        local owner = CreateFrame("Button", "AppOwner")
+        AppTT = CreateFrame("GameTooltip", "AppTT", nil, "TestTooltipTemplate")
+        AppTT:SetOwner(owner, "ANCHOR_RIGHT")
+        AppTT:AddDoubleLine("", "R")
+        AppTT:AppendText("x")
+        assert(AppTTTextLeft1:GetText() == "(null)x", AppTTTextLeft1:GetText())
+        assert(not AppTTTextLeft1:IsShown(), "the left cell stays hidden")
+
+        AppTT:ClearLines()
+        AppTT:AddLine("a")
+        AppTT:AppendText(5)
+        AppTT:AppendText(1/3)
+        assert(AppTTTextLeft1:GetText() == "a50.33333333333333", AppTTTextLeft1:GetText())
+        AppTT:AppendText(string.rep("b", 300))
+        assert(string.len(AppTTTextLeft1:GetText()) == 255)
+
+        -- The colour is the cell's own, untouched (`0x53060e` is `SetText` alone).
+        AppTT:ClearLines()
+        AppTT:AddLine("red", 1, 0, 0)
+        AppTT:AppendText("!")
+        local r, g, b = AppTTTextLeft1:GetTextColor()
+        assert(r > 0.99 and g == 0 and b == 0, r .. " " .. g .. " " .. b)
+
+        -- A cut inside a UTF-8 character drops its partial bytes: 254 + 2 bytes keep 254.
+        AppTT:ClearLines()
+        AppTT:AddLine(string.rep("a", 254))
+        AppTT:AppendText("\195\169")
+        assert(string.len(AppTTTextLeft1:GetText()) == 254, string.len(AppTTTextLeft1:GetText()))
+    "#,
+    )
+    .unwrap();
+    let e = s.run("AppTT:AppendText({})").unwrap_err().to_string();
+    assert!(e.contains(r#"Usage: AppendText("text")"#), "{e}");
+    let e = s.run("AppTT:AppendText()").unwrap_err().to_string();
+    assert!(e.contains(r#"Usage: AppendText("text")"#), "{e}");
+}
+
+/// `AddLine`, `AddDoubleLine` and `SetText` read their text with `lua_isstring` then
+/// `lua_tostring` (`0x5316dc`, `0x5318ef`, `0x531c25`), so a number prints as Lua's `%.14g`.
+#[test]
+fn line_text_numbers_print_as_lua_number_text() {
+    let s = script();
+    s.run(
+        r#"
+        local owner = CreateFrame("Button", "NumOwner")
+        NumTT = CreateFrame("GameTooltip", "NumTT", nil, "TestTooltipTemplate")
+        NumTT:SetOwner(owner, "ANCHOR_RIGHT")
+        NumTT:SetText(1e15)
+        NumTT:AddLine(1/3)
+        NumTT:AddDoubleLine(2/3, 1e20)
+        assert(NumTTTextLeft1:GetText() == "1e+015", NumTTTextLeft1:GetText())
+        assert(NumTTTextLeft2:GetText() == "0.33333333333333", NumTTTextLeft2:GetText())
+        assert(NumTTTextLeft3:GetText() == "0.66666666666667", NumTTTextLeft3:GetText())
+        assert(NumTTTextRight3:GetText() == "1e+020", NumTTTextRight3:GetText())
+    "#,
+    )
+    .unwrap();
+}

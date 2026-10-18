@@ -377,14 +377,10 @@ impl Loader<'_> {
         crate::script::event::invoke_with_globals(self.lua, wrapper.clone(), func, Vec::new())
     }
 
-    /// An object's name as the reference's load lines print it: `GetName`, else `<unnamed>`
-    /// (`0x84c7f0`).
+    /// An object's name as the reference's load lines print it: its own name (vtable `+4`), else
+    /// `<unnamed>` (`0x84c7f0`).
     pub(super) fn object_name(&self, wrapper: &Table) -> String {
-        wrapper
-            .call_method::<Option<String>>("GetName", ())
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "<unnamed>".to_string())
+        crate::script::binding_abi::name_of(self.lua, wrapper)
     }
 
     /// A severity-1 line into the document's record, the status object's `+0xc` slot every
@@ -894,7 +890,7 @@ impl Loader<'_> {
         // 5b · per-kind LoadXML extras (EditBox `0x779fb0`), each gated on the element's own tag,
         //      so a Frame wearing a <Button> template skips the Button steps.
         self.apply_statusbar(el, levels, wrapper, self_name, dbg_name);
-        self.apply_slider(el, wrapper, self_name, dbg_name);
+        self.apply_slider(el, levels, wrapper, self_name, dbg_name);
         self.apply_colorselect(el, wrapper, self_name, dbg_name);
         self.apply_button(el, levels, wrapper, self_name, dbg_name);
         self.apply_editbox(el, wrapper, dbg_name);

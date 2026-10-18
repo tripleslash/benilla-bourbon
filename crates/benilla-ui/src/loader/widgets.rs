@@ -374,9 +374,16 @@ impl Loader<'_> {
                 }
             }
         }
+        // A non-empty `insertMode` is BOTTOM when it equals "BOTTOM" whole and without case, and
+        // TOP otherwise, never a raise (`0x785a46`-`0x785a68`).
         if plain {
-            if let Some(mode) = el.attr("insertMode") {
-                self.call(wrapper, "SetInsertMode", mode.trim().to_string(), dbg);
+            if let Some(mode) = el.attr("insertMode").filter(|m| !m.is_empty()) {
+                let mode = if mode.eq_ignore_ascii_case("BOTTOM") {
+                    "BOTTOM"
+                } else {
+                    "TOP"
+                };
+                self.call(wrapper, "SetInsertMode", mode, dbg);
             }
         }
         if let Some(s) = el
@@ -401,12 +408,15 @@ impl Loader<'_> {
         }
     }
 
-    /// `<Slider>` (`0x789580`), VERTICAL from the ctor: the range, `valueStep` and `defaultValue`
-    /// apply only when both bounds are present, and a reversed pair is not swapped; `drawLayer` is
+    /// `<Slider>` (`0x789580`), VERTICAL from the ctor. Its frame load (`0x769820`) first re-enters
+    /// the virtual `LoadXML` on the `inherits` node (`0x76985c`), so for each level
+    /// ([`Loader::levels`]), the template first, the range, `valueStep` and `defaultValue` apply
+    /// only when both bounds are on that node, and a reversed pair is not swapped; `drawLayer` is
     /// the thumb's layer, OVERLAY by default.
     pub(super) fn apply_slider(
         &mut self,
         el: &Element,
+        levels: &Levels,
         wrapper: &Table,
         self_name: &str,
         dbg: &str,
@@ -414,17 +424,41 @@ impl Loader<'_> {
         if !el.tag.eq_ignore_ascii_case("Slider") {
             return;
         }
-        if let Some(o) = el.attr("orientation") {
-            self.call(wrapper, "SetOrientation", o.to_string(), dbg);
-        }
-        let parse = |attr: &str| el.attr(attr).and_then(|v| v.trim().parse::<f32>().ok());
-        if let (Some(min), Some(max)) = (parse("minValue"), parse("maxValue")) {
-            self.call(wrapper, "SetMinMaxValues", (min, max), dbg);
-            if let Some(step) = parse("valueStep") {
-                self.call(wrapper, "SetValueStep", step, dbg);
+        for level in levels {
+            // Each value through `SStrToFloat` (`0x64aaa0`), present and non-empty, so `"100%"`
+            // is 100: the range needs both bounds on the node, and `valueStep` and `defaultValue`
+            // are read only after it (`0x789605`-`0x7896a2`).
+            let value = |attr: &str| {
+                level
+                    .attr(attr)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| crate::script::binding_abi::s_str_to_float(v) as f32)
+            };
+            if let (Some(min), Some(max)) = (value("minValue"), value("maxValue")) {
+                self.call(wrapper, "SetMinMaxValues", (min, max), dbg);
+                if let Some(step) = value("valueStep") {
+                    self.call(wrapper, "SetValueStep", step, dbg);
+                }
+                if let Some(v) = value("defaultValue") {
+                    self.call(wrapper, "SetValue", v, dbg);
+                }
             }
-            if let Some(v) = parse("defaultValue") {
-                self.call(wrapper, "SetValue", v, dbg);
+            // `orientation` through the token parse `0x6f1a20`: empty is skipped, a miss logged
+            // (`0x87a3c4`, `0x78970d`) and never raised, where the Lua setter raises.
+            if let Some(token) = level.attr("orientation").filter(|v| !v.is_empty()) {
+                match crate::script::region::orientation(token) {
+                    Some(vertical) => {
+                        let o = if vertical { "VERTICAL" } else { "HORIZONTAL" };
+                        self.call(wrapper, "SetOrientation", o, dbg);
+                    }
+                    None => {
+                        let name = self.object_name(wrapper);
+                        self.status_warning(format!(
+                            "Frame {name}: Unknown orientation {token} in element {}",
+                            level.tag
+                        ));
+                    }
+                }
             }
         }
         let layer = el.attr("drawLayer");

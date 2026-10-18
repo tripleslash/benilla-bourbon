@@ -719,8 +719,8 @@ fn the_hyperlink_format_shapes_the_a_splice() {
         .unwrap();
     assert_eq!(texts(&s, "Page"), ["see |cff33ff99|Hitem:1|h[this]|h|r"]);
 
-    // A non-string argument raises the reference's usage string.
-    assert!(s.run("Page:SetHyperlinkFormat(7)").is_err());
+    // A value `lua_isstring` refuses raises the reference's usage line (`0x796bcc`).
+    assert!(s.run("Page:SetHyperlinkFormat({})").is_err());
 }
 
 #[test]
@@ -946,4 +946,20 @@ fn lua_str(s: &str) -> String {
         "{s:?}"
     );
     format!("[[{s}]]")
+}
+
+/// `SetText` hands `lua_tostring(2)` to the parse (`0x796b1e`), which converts a number in place
+/// with `%.14g` (`0x6f7ca6`, `0x871960`): no f32 rounding, MSVC's three-digit exponent.
+#[test]
+fn a_number_parses_as_lua_number_text() {
+    let s = script();
+    page(&s);
+    for (code, want) in [
+        ("1/3", "0.33333333333333"),
+        ("123456789", "123456789"),
+        ("1e20", "1e+020"),
+    ] {
+        s.run(&format!("Page:SetText({code})")).unwrap();
+        assert_eq!(texts(&s, "Page"), [want], "{code}");
+    }
 }

@@ -170,6 +170,92 @@ fn a_status_bar_reads_its_range_and_orientation_per_level() {
     ));
 }
 
+/// `0x789580`: the Slider's values go through `SStrToFloat` (`0x64aaa0`), so a numeric prefix
+/// reads, empty ones are skipped, and an unknown `orientation` is logged, never raised.
+#[test]
+fn a_slider_reads_its_values_and_orientation_like_the_reference() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Slider name="SlPercent" minValue="0" maxValue="100%" valueStep="5x" defaultValue="40"/>
+            <Slider name="SlSpace" minValue=" 5" maxValue="10"/>
+            <Slider name="SlEmptyMax" minValue="5" maxValue="" defaultValue="40"/>
+            <Slider name="SlDiagonal" orientation="DIAGONAL"/>
+            <Slider name="SlBlank" orientation=""/>
+            <Slider name="SlFlat" orientation="horizontal"/>
+        </Ui>"#,
+    );
+    assert!(
+        report.errors.is_empty(),
+        "never a raise: {:?}",
+        report.errors
+    );
+    let state = |name: &str| {
+        s.eval::<(f32, f32, f32, f32)>(&format!(
+            "local lo, hi = {name}:GetMinMaxValues() \
+             return lo, hi, {name}:GetValueStep(), {name}:GetValue()"
+        ))
+        .unwrap()
+    };
+    assert_eq!(state("SlPercent"), (0.0, 100.0, 5.0, 40.0));
+    // `SStrToFloat` skips no whitespace (`0x64aad3` reads the first byte), so `" 5"` is 0.
+    let (lo, hi, _, _) = state("SlSpace");
+    assert_eq!((lo, hi), (0.0, 10.0));
+    let fresh = s
+        .eval::<(f32, f32)>("return CreateFrame('Slider'):GetMinMaxValues()")
+        .unwrap();
+    let (lo, hi, _, _) = state("SlEmptyMax");
+    assert_eq!((lo, hi), fresh, "an empty bound sets nothing");
+    let orientation = |name: &str| {
+        s.eval::<String>(&format!("return {name}:GetOrientation()"))
+            .unwrap()
+    };
+    assert_eq!(orientation("SlDiagonal"), "VERTICAL", "the ctor's stands");
+    assert_eq!(orientation("SlBlank"), "VERTICAL");
+    assert_eq!(orientation("SlFlat"), "HORIZONTAL");
+    assert!(
+        !report.warnings.iter().any(|w| w.contains("SlBlank")),
+        "an empty orientation is skipped, not logged: {:?}",
+        report.warnings
+    );
+    assert!(has_line(
+        &report,
+        "Frame SlDiagonal: Unknown orientation DIAGONAL in element Slider"
+    ));
+}
+
+/// `0x789580` runs once per level (`0x769820` re-enters `LoadXML` on the `inherits` node at
+/// `0x76985c`): an instance with one bound leaves the template's pair, and a pair of its own
+/// replaces it whole.
+#[test]
+fn a_slider_reads_its_range_per_level() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Slider name="SlRangeTemplate" minValue="0" maxValue="10" valueStep="2" defaultValue="4"
+                orientation="HORIZONTAL" virtual="true"/>
+            <Slider name="SlOneBound" inherits="SlRangeTemplate" maxValue="100"/>
+            <Slider name="SlOwnPair" inherits="SlRangeTemplate" minValue="5" maxValue="50"/>
+        </Ui>"#,
+    );
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let state = |name: &str| {
+        s.eval::<(f32, f32, f32, f32, String)>(&format!(
+            "local lo, hi = {name}:GetMinMaxValues() \
+             return lo, hi, {name}:GetValueStep(), {name}:GetValue(), {name}:GetOrientation()"
+        ))
+        .unwrap()
+    };
+    assert_eq!(
+        state("SlOneBound"),
+        (0.0, 10.0, 2.0, 4.0, "HORIZONTAL".into())
+    );
+    let (lo, hi, step, _, _) = state("SlOwnPair");
+    assert_eq!((lo, hi, step), (5.0, 50.0, 2.0));
+}
+
 /// `0x76fe20`: every `<TexCoords>` child applies in order, each over 0, 1, 0, 1 with its edges read
 /// by `atof`, and the instance's level comes after its template's, so the last one wins whole.
 #[test]

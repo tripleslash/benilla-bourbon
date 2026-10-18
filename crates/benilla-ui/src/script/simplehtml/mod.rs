@@ -23,6 +23,7 @@ use std::collections::HashMap;
 
 use mlua::{FromLua, Lua, MultiValue, Table, Value};
 
+use super::binding_abi;
 use super::object::frame_handle_of;
 use super::{FontObject, FontShadow, Model, Outline, RegionData};
 use crate::justify::{self, Justify};
@@ -475,7 +476,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetFontObject",
         lua.create_function(|lua, (this, mut rest): (Table, MultiValue)| {
             let elem = take_element(&mut rest);
-            let who = super::font::c_name(lua, &this);
+            let who = super::binding_abi::name_of(lua, &this);
             let name =
                 super::font::font_arg(lua, &who, super::font::Verb::SetFontObject, rest.front())?;
             // nil severs the link and keeps the paint, as the reference stores a null parent; an
@@ -684,9 +685,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetJustifyH",
         lua.create_function(|lua, (this, mut rest): (Table, MultiValue)| {
             let elem = take_element(&mut rest);
-            let s =
-                String::from_lua(arg(&rest, 0), lua).map_err(|_| justify::usage_h("SimpleHTML"))?;
-            let bits = justify::parse_bits(&s).ok_or_else(|| justify::usage_h("SimpleHTML"))?;
+            frame_handle_of(lua, &this)?;
+            let bits = binding_abi::optional_string(lua, &arg(&rest, 0))
+                .and_then(|s| justify::parse_bits(&s))
+                .ok_or_else(|| justify::usage_h(&binding_abi::name_of(lua, &this)))?;
             edit_font(lua, &this, elem, |ef| {
                 ef.justify.0 = justify::set_axis(ef.justify.0, justify::H_MASK, bits);
                 ef.mask.clear(super::FontMask::JUSTIFY);
@@ -704,9 +706,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetJustifyV",
         lua.create_function(|lua, (this, mut rest): (Table, MultiValue)| {
             let elem = take_element(&mut rest);
-            let s =
-                String::from_lua(arg(&rest, 0), lua).map_err(|_| justify::usage_v("SimpleHTML"))?;
-            let bits = justify::parse_bits(&s).ok_or_else(|| justify::usage_v("SimpleHTML"))?;
+            frame_handle_of(lua, &this)?;
+            let bits = binding_abi::optional_string(lua, &arg(&rest, 0))
+                .and_then(|s| justify::parse_bits(&s))
+                .ok_or_else(|| justify::usage_v(&binding_abi::name_of(lua, &this)))?;
             edit_font(lua, &this, elem, |ef| {
                 ef.justify.0 = justify::set_axis(ef.justify.0, justify::V_MASK, bits);
                 ef.mask.clear(super::FontMask::JUSTIFY);
@@ -727,31 +730,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetText",
         lua.create_function(|lua, (this, text): (Table, Value)| {
-            let raw = match &text {
-                // Bytes, lossily; never a raise.
-                Value::String(s) => s.to_string_lossy(),
-                Value::Number(n) => (*n as f32).to_string(),
-                Value::Integer(i) => (*i as f32).to_string(),
-                _ => String::new(),
-            };
+            // `lua_tostring(2)` (`0x796b1e`): bytes, lossily, a number as Lua's `%.14g` text.
+            let raw = binding_abi::optional_string(lua, &text).unwrap_or_default();
             let h = html_handle(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             set_text(&mut model, h, &raw);
             Ok(())
         })?,
     )?;
-    // SetHyperlinkFormat(s) raises its usage line (`0x87bb40`) on a non-string
-    // (`0x796bcc`-`0x796c29`); it applies from the next parse.
+    // SetHyperlinkFormat(s) takes any `lua_isstring` value (`0x796bcc`), a number as its `%.14g`
+    // text, and raises `Usage: %s:SetHyperlinkFormat("format")` (`0x87bb40`) naming the frame
+    // otherwise (`0x796bef`-`0x796c21`); it applies from the next parse.
     m.set(
         "SetHyperlinkFormat",
         lua.create_function(|lua, (this, fmt): (Table, Value)| {
-            let Value::String(s) = &fmt else {
-                return Err(mlua::Error::runtime(
-                    "Usage: <SimpleHTML>:SetHyperlinkFormat(\"format\")",
+            let h = html_handle(lua, &this)?;
+            let Some(fmt) = binding_abi::optional_string(lua, &fmt) else {
+                return Err(binding_abi::usage(
+                    lua,
+                    &this,
+                    "SetHyperlinkFormat(\"format\")",
                 ));
             };
-            let fmt = s.to_str()?.to_string();
-            let h = html_handle(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             model.simple_html.entry(h).or_default().hyperlink_format = fmt;
             Ok(())

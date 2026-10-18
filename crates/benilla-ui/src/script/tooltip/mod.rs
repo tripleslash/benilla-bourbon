@@ -78,11 +78,7 @@ pub(crate) fn post_load(lua: &Lua, wrapper: &Table) {
         ) {
             return;
         }
-        model
-            .arena
-            .frame(h)
-            .and_then(|f| f.name.clone())
-            .unwrap_or_else(|| "<unnamed>".to_string())
+        crate::script::binding_abi::frame_name(&model, h)
     };
     let mut pairs = Vec::new();
     loop {
@@ -129,14 +125,24 @@ pub(super) fn write_cell(
     text: &str,
     color: crate::color::Rgba8,
 ) {
+    // The region colour (`0x77f750`, `0x5302d0`), which clears no inherit bit: a later change to
+    // the line's font object's colour repaints it until the next write.
+    model
+        .region_data
+        .entry(rh)
+        .or_default()
+        .set_vertex_color(Some(color));
+    model.set_region_hidden(rh, false);
+    set_cell_text(model, rh, text);
+}
+
+/// A line cell's `SetText(text, 1)` alone (`0x771d80`), touching neither its colour nor its shown
+/// bit, as `AppendText`'s helper writes line 1 (`0x53060e`).
+pub(super) fn set_cell_text(model: &mut Model, rh: crate::widget::RegionHandle, text: &str) {
     let text = model.localized_text(text.to_string());
     let d = model.region_data.entry(rh).or_default();
     let was_shown = d.text.as_deref().is_some_and(|t| !t.is_empty());
     d.text = Some(text);
-    // The region colour (`0x77f750`, `0x5302d0`), which clears no inherit bit: a later change to
-    // the line's font object's colour repaints it until the next write.
-    d.set_vertex_color(Some(color));
-    model.set_region_hidden(rh, false);
     model.touch_measure(rh);
     model.touch_layout_text(rh, was_shown);
 }
@@ -509,21 +515,12 @@ fn parse_line_tail(lua: &Lua, args: &[Value]) -> ([f32; 4], bool) {
     )
 }
 
-/// A text argument as a line's string: numbers stringify as Lua does, and nil is empty.
-fn text_of(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.to_str().map(|s| s.to_string()).unwrap_or_default(),
-        Some(Value::Number(n)) => {
-            let n = *n;
-            if n == n.trunc() && n.abs() < 1e15 {
-                format!("{}", n as i64)
-            } else {
-                format!("{n}")
-            }
-        }
-        Some(Value::Integer(i)) => format!("{i}"),
-        _ => String::new(),
-    }
+/// A line's text argument as `SetText`, `AddLine` and `AddDoubleLine` read it: `lua_isstring` then
+/// `lua_tostring` (`0x531c25`, `0x5316dc`, `0x5318ef`, `0x53190f`), so a number is its `%.14g`
+/// text and the bytes of a string are kept, lossily; anything else is no text.
+fn text_of(lua: &mlua::Lua, v: Option<&Value>) -> String {
+    v.and_then(|v| crate::script::binding_abi::optional_string(lua, v))
+        .unwrap_or_default()
 }
 
 /// Appends one line, without showing the tooltip or touching a fade (`0x5303b0`): `AddLine`

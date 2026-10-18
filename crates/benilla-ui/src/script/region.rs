@@ -35,13 +35,7 @@ pub(super) fn texture_object_arg(
     arg: &Table,
     method: &str,
 ) -> mlua::Result<RegionHandle> {
-    let who = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
-        let name = super::object::frame_handle_of(lua, this)
-            .ok()
-            .and_then(|h| model.arena.frame(h).and_then(|f| f.name.clone()));
-        name.unwrap_or_else(|| "<unnamed>".to_string())
-    };
+    let who = super::binding_abi::name_of(lua, this);
     if decode_id(arg).is_err() {
         return Err(mlua::Error::runtime(format!(
             "{who}:{method}(): Couldn't find 'this' in texture"
@@ -180,14 +174,7 @@ pub(super) fn slot_arg(
         }
         _ => {}
     }
-    let who = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
-        super::object::frame_handle_of(lua, this)
-            .ok()
-            .and_then(|h| model.arena.frame(h).and_then(|f| f.name.clone()))
-            .unwrap_or_else(|| "<unnamed>".to_string())
-    };
-    Err(mlua::Error::runtime(format!("Usage: {who}:{usage}")))
+    Err(super::binding_abi::usage(lua, this, usage))
 }
 
 /// A fresh anchorless Texture region of `owner` on `layer`, as the client builds the texture a
@@ -508,17 +495,11 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         |lua, (this, want): (Table, Value)| {
             let rh = region_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            let want = match &want {
-                Value::String(s) => s.to_str()?.to_string(),
-                Value::Number(n) => n.to_string(),
-                Value::Integer(i) => i.to_string(),
-                _ => {
-                    let who = region_name_of(&model, decode_id(&this)?)
-                        .unwrap_or_else(|| "<unnamed>".to_string());
-                    return Err(mlua::Error::runtime(format!(
-                        "Usage: {who}:IsObjectType(\"TYPE\")"
-                    )));
-                }
+            let Some(want) = super::binding_abi::optional_string(lua, &want) else {
+                let who = super::binding_abi::region_name(&model, rh);
+                return Err(mlua::Error::runtime(format!(
+                    "Usage: {who}:IsObjectType(\"TYPE\")"
+                )));
             };
             let leaf = region_type_name(&model, rh);
             let hit = want.eq_ignore_ascii_case(leaf) || want.eq_ignore_ascii_case("Region");

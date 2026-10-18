@@ -3524,7 +3524,11 @@ mod tests {
             ["Restoring all cvars"]
         );
         let cvars = res::<Cvars>(&app);
-        assert_eq!(cvars.get("farclip"), Some("1000"), "fork: farclip's default");
+        assert_eq!(
+            cvars.get("farclip"),
+            Some("1000"),
+            "fork: farclip's default"
+        );
         assert_eq!(cvars.get("uiScale"), Some("1.2"));
     }
 
