@@ -188,6 +188,12 @@ const WATER_GLINT_SHADE: f32 = 0.3;
 // `BED_LIFT` yd short of it (so the bed does not shadow itself) and never more than `PROBE` yd in.
 const WATER_SHADOW_PROBE: f32 = 3.0;
 const WATER_SHADOW_BED_LIFT: f32 = 0.15;
+// fork: modern lighting — the water's shade is the sunlight scattered toward the eye along the water
+// crossed, and the light from deeper in reaches the eye dimmer: each tap's share falls by this per
+// yard of depth (tuned, no reference). The bed's tap, where the ray reaches the bed, takes this
+// much more, so the shade still lands on the bed's own shadow.
+const WATER_SHADOW_FALLOFF: f32 = 0.5;
+const WATER_SHADOW_BED_WEIGHT: f32 = 4.0;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(123) var<storage, read> modern_block: sunshadow::ModernBlock;
 @group(#{MATERIAL_BIND_GROUP}) @binding(124) var modern_fog_volume: texture_3d<f32>;
@@ -582,6 +588,25 @@ fn bed_under(surface: vec3<f32>, reach: f32) -> f32 {
     return lo;
 }
 
+/// fork: modern lighting — the sun's share of the water's light over `len` yd of water from `start`
+/// along `dir`: three taps at thirds of the way, each weighted by `WATER_SHADOW_FALLOFF` for its
+/// depth, the last taking `end_weight` more. One point mid-water cut a swimmer's shadow volume at
+/// that one depth: a crisp copy of the body, yards off it. Over the column the shade starts at
+/// the body and softens with depth, as the scattered light does.
+fn water_column_sun(start: vec3<f32>, dir: vec3<f32>, len: f32, end_weight: f32) -> f32 {
+    var sum = 0.0;
+    var total = 0.0;
+    for (var k = 1u; k <= 3u; k = k + 1u) {
+        let t = len * f32(k) / 3.0;
+        let p = start + dir * t;
+        let z = -(view.view_from_world * vec4<f32>(p, 1.0)).z;
+        let weight = exp(-WATER_SHADOW_FALLOFF * t) + select(0.0, end_weight, k == 3u);
+        sum = sum + weight * sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, p, z);
+        total = total + weight;
+    }
+    return sum / total;
+}
+
 /// **`ProcMagma`** — the Cataclysm magma/slime program, ported whole.
 ///
 /// The reference routes these kinds away from the water material entirely: `LiquidType.dbc`'s
@@ -905,10 +930,12 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // probe `WATER_SHADOW_PROBE` yd in, where the light that colours the body scatters, so a tree
         // still shades a lake. From below there is no bed along the ray; the surface is the probe.
         let probe_d = select(clamp(ray_len - WATER_SHADOW_BED_LIFT, 0.0, WATER_SHADOW_PROBE), 0.0, below);
-        let wp = in.world_position.xyz + v * probe_d + vec3<f32>(0.0, 0.05, 0.0);
-        // The probe sits on this pixel's ray, so its planar depth scales with the distance along it.
-        let probe_z = frag_view_z * (1.0 + probe_d / max(view_len, 0.001));
-        water_sun = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, wp, probe_z);
+        let lifted = in.world_position.xyz + vec3<f32>(0.0, 0.05, 0.0);
+        let wp = lifted + v * probe_d;
+        // Where the ray stops short of the bed, its end hangs mid-water and the body is read over the
+        // water crossed (`water_column_sun`); where it reaches the bed, the bed's tap carries it.
+        let reaches_bed = 1.0 - smoothstep(WATER_SHADOW_PROBE, 2.0 * WATER_SHADOW_PROBE, ray_len - WATER_SHADOW_BED_LIFT);
+        water_sun = water_column_sun(lifted, v, probe_d, WATER_SHADOW_BED_WEIGHT * reaches_bed);
         // Where the ray reaches the bed, the probe lands on world-fixed ground and the shade holds
         // still. Where it does not, the stopped probe hangs mid-water at a point the VIEW picks, so
         // orbiting the camera slid the lake's shade across it by up to the probe's length. Deep water
@@ -923,9 +950,7 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
             let surface = in.world_position.xyz;
             let bed = bed_under(surface, min(column_v, WATER_SHADOW_PROBE + WATER_SHADOW_BED_LIFT));
             let drop = clamp(bed - WATER_SHADOW_BED_LIFT, 0.0, WATER_SHADOW_PROBE);
-            let wp_deep = surface - vec3<f32>(0.0, drop - 0.05, 0.0);
-            let deep_z = -(view.view_from_world * vec4<f32>(wp_deep, 1.0)).z;
-            let sun_deep = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, wp_deep, deep_z);
+            let sun_deep = water_column_sun(lifted, vec3<f32>(0.0, -1.0, 0.0), drop, 0.0);
             water_sun = mix(water_sun, sun_deep, deep);
         }
         let wct = sunshadow::cloud_taps(modern_block.fog.cloud, wp);
