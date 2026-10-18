@@ -544,15 +544,16 @@ fn scene_depth_at(uv: vec2<f32>) -> f32 {
 
 /// fork: modern lighting — whether a world point lies behind the opaque scene, as the depth copy
 /// sees it: under the bed, for a point straight below the water. Off the frame the copy cannot say,
-/// and the point counts as in the water.
+/// and the point counts as under it: taken as water, a point under the frame's edge fell back to
+/// the column again, and the edge, raised by the drop, cut a hard-sided dark patch into the water.
 fn behind_scene(p: vec3<f32>) -> bool {
     let clip = view.clip_from_world * vec4<f32>(p, 1.0);
     if (clip.w <= 0.0) {
-        return false;
+        return true;
     }
     let ndc = clip.xy / clip.w;
     if (any(abs(ndc) > vec2<f32>(1.0))) {
-        return false;
+        return true;
     }
     let z = -(view.view_from_world * vec4<f32>(p, 1.0)).z;
     return z > scene_depth_at((ndc * vec2<f32>(1.0, -1.0) + 1.0) * 0.5);
@@ -562,7 +563,8 @@ fn behind_scene(p: vec3<f32>) -> bool {
 /// view ray's column only matches it over a flat bed: looking out over a beach that shelves away,
 /// the ray meets the bed further out and deeper, so a probe dropped by the column landed under the
 /// sand, which shadowed it — a dark band along every shore at a low camera. So the drop is tested
-/// against the depth copy itself and bisected up to the bed (to `reach` / 16), never past it.
+/// against the depth copy itself and bisected up to the bed (to `reach` / 16), never past it. The
+/// surface point is on the frame, so the drop shrinks smoothly to it toward the frame's edge.
 fn bed_under(surface: vec3<f32>, reach: f32) -> f32 {
     if (!behind_scene(surface - vec3<f32>(0.0, reach, 0.0))) {
         return reach;
