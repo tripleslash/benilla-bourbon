@@ -616,11 +616,34 @@ fn drive_session_start(
 }
 
 /// The session start after the addons' own `ADDON_LOADED`: `VARIABLES_LOADED`, `PLAYER_LOGIN` and
-/// `PLAYER_ENTERING_WORLD`, then ten ticks of 0.1 s ([`drive_session_start`] says why).
+/// `PLAYER_ENTERING_WORLD`, a target, then ten ticks of 0.1 s ([`drive_session_start`] says why).
+///
+/// The target comes after `PLAYER_ENTERING_WORLD`, with the argless `PLAYER_TARGET_CHANGED` that
+/// selecting one signals (`0x493540`): the interface is built (`0x48fbf0`) before the enter cascade
+/// (`0x4908c0`), and a selection needs its object in the world, so no load sees a target. Seated
+/// earlier, `TargetFrame_OnLoad`'s `TargetFrame_Update()` (`TargetFrame.lua:20`) indexes
+/// `TargetofTargetFrame`, which `TargetFrame.xml` declares later, before its `RegisterEvent` calls.
 fn enter_world(script: &mut UiScript) {
     for event in ["VARIABLES_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD"] {
         script.fire_event(event, Vec::new());
     }
+    script.set_unit(
+        "target",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Target Dummy".into()),
+            health: 80,
+            max_health: 100,
+            level: 60,
+            power_type: 0,
+            power: 50,
+            max_power: 100,
+            class: Some("Warrior".into()),
+            class_file: Some("WARRIOR".into()),
+            ..Default::default()
+        }),
+    );
+    script.fire_event("PLAYER_TARGET_CHANGED", Vec::new());
     for _ in 0..10 {
         script.tick(0.1);
     }
@@ -1137,7 +1160,7 @@ fn seat_a_session(script: &mut UiScript) {
     //
     // One buff, one target and one action with a running cooldown, so an addon that only draws when
     // there is content (a buff bar, a target frame, cooldown text) is separated from one that
-    // failed.
+    // failed. The target is seated at world entry ([`enter_world`]).
     // The player's guid, which a token resolves to before its aura list is read.
     script.set_unit_guids(&benilla_ui::script::UnitGuids {
         player: 1,
@@ -1152,22 +1175,6 @@ fn seat_a_session(script: &mut UiScript) {
         cancelable: true,
         ..Default::default()
     }]);
-    script.set_unit(
-        "target",
-        Some(benilla_ui::script::UnitState {
-            exists: true,
-            name: Some("Target Dummy".into()),
-            health: 80,
-            max_health: 100,
-            level: 60,
-            power_type: 0,
-            power: 50,
-            max_power: 100,
-            class: Some("Warrior".into()),
-            class_file: Some("WARRIOR".into()),
-            ..Default::default()
-        }),
-    );
     script.set_action(
         1,
         Some(benilla_ui::script::ActionSlot {
@@ -3683,6 +3690,41 @@ mod dependency_tests {
         script.set_screen_size(1024.0, 768.0);
         seat_a_session(&mut script);
         let _ = crate::ui_script::load_default_ui(&script);
+        script
+    }
+
+    /// The stock interface loads clean with no target, as 1.12 loads it before world entry, and
+    /// the target frame shows the target seated at world entry.
+    #[test]
+    fn the_target_is_seated_after_the_interface_loads() {
+        benilla_formats::wow_data_or_skip!();
+        let mut s = seated_vm_reporting_failures();
+        assert!(
+            s.eval::<bool>("return UnitExists('target') == nil")
+                .unwrap(),
+            "1.12 loads the interface before world entry, with no target"
+        );
+        assert!(!s.frame_visible("TargetFrame"));
+
+        enter_world(&mut s);
+        assert!(s.errors().is_empty(), "{:#?}", s.errors());
+        assert_eq!(
+            s.eval::<String>("return UnitName('target')").unwrap(),
+            "Target Dummy"
+        );
+        assert!(
+            s.frame_visible("TargetFrame"),
+            "the target frame registered its events at load, so world entry shows the target"
+        );
+    }
+
+    /// [`seated_vm`], failing on any load failure of the stock interface.
+    fn seated_vm_reporting_failures() -> UiScript {
+        let mut script = UiScript::new().unwrap();
+        script.set_screen_size(1024.0, 768.0);
+        seat_a_session(&mut script);
+        let failures = crate::ui_script::load_default_ui(&script);
+        assert!(failures.is_empty(), "{failures:#?}");
         script
     }
 

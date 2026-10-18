@@ -202,12 +202,14 @@ fn the_probe_fires_events_and_clicks() {
     }
 }
 
-/// The default interface loads the stock frames.
+/// The default interface loads the stock frames, clean.
 #[test]
 fn the_default_interface_probe_loads_the_stock_frames() {
     benilla_formats::wow_data_or_skip!();
     let out = probe_ui(&[Step::Eval("return MainMenuBar:IsVisible()".into())]);
     assert_eq!(out.answers[0].1, "= 1", "{:#?}", out.load_errors);
+    assert!(out.load_errors.is_empty(), "{:#?}", out.load_errors);
+    assert!(out.session_errors.is_empty(), "{:#?}", out.session_errors);
 }
 
 /// The default interface is probed with no addon folder at all.
