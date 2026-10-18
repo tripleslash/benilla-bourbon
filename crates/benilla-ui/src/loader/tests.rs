@@ -2634,19 +2634,56 @@ mod layer_blend_tests {
         let mut s = s;
         s.set_screen_size(800.0, 600.0);
         s.resolve();
-        let additive = s
+        let blend = s
             .extract()
             .iter()
             .find_map(|q| match &q.content {
                 QuadContent::Texture {
                     path: Some(p),
-                    additive,
+                    blend,
                     ..
-                } if p == "Interface\\Glow" => Some(*additive),
+                } if p == "Interface\\Glow" => Some(*blend),
                 _ => None,
             })
             .expect("the layer texture extracted");
-        assert!(additive, "alphaMode=ADD must ride into the quad blend flag");
+        assert_eq!(
+            blend,
+            crate::script::BlendMode::Add,
+            "alphaMode=ADD must ride into the quad blend"
+        );
+    }
+
+    /// `alphaMode=` (`0x770176`) skips an empty value and ignores an unknown one with no log
+    /// (`0x770185`, `0x770195`), where `SetBlendMode` raises; a known one is any case.
+    #[test]
+    fn an_unknown_alpha_mode_is_ignored_without_a_fault() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="ModeHost">
+                    <Layers><Layer level="ARTWORK">
+                        <Texture name="ModeBogus" file="Interface\Bogus" alphaMode="ADDITIVE"/>
+                        <Texture name="ModeEmpty" file="Interface\Empty" alphaMode=""/>
+                        <Texture name="ModeMod" file="Interface\Mod" alphaMode="mod"/>
+                    </Layer></Layers>
+                </Frame>
+            </Ui>"#,
+        )
+        .unwrap();
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert!(
+            report.warnings.is_empty(),
+            "warnings: {:?}",
+            report.warnings
+        );
+        let modes: (String, String, String) = s
+            .eval(
+                "return ModeBogus:GetBlendMode(), ModeEmpty:GetBlendMode(), \
+                 ModeMod:GetBlendMode()",
+            )
+            .unwrap();
+        assert_eq!(modes, ("BLEND".into(), "BLEND".into(), "MOD".into()));
     }
 }
 

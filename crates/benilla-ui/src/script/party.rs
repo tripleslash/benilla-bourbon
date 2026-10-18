@@ -529,12 +529,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // IsRaidOfficer() → always nil: its reference body (`0x4bb910`) is untraced. So the RaidFrame
-    // enables its add-member button for the leader only, where the reference also enables it for
-    // an assistant.
+    // IsRaidOfficer() → 1 or nil (`0x4bb910`): it walks the raid roster (`0xb712a8`, count
+    // `[0xb713e0]`) for the row whose guid is the local player's (`0x468550`, `edx:eax`) and pushes
+    // 1 when that row's rank (`[row+0xc]`, `GetRaidRosterInfo`'s return 2) is above 0, so for an
+    // assistant and for the leader. Outside a raid, without a player or without our row: nil. This
+    // is what lets assistants set raid target icons (`UnitPopup.lua`) and invite to the raid.
     g.set(
         "IsRaidOfficer",
-        lua.create_function(|_, ()| Ok(Value::Nil))?,
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let me = model.unit("player").map_or(0, |u| u.guid);
+            let officer = me != 0 && model.party.raid.iter().any(|m| m.guid == me && m.rank > 0);
+            Ok(if officer {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
+        })?,
     )?;
 
     // ── The raid-management verbs ────────────────────────────────────────────
@@ -1178,11 +1189,31 @@ mod tests {
         );
     }
 
-    /// Nil until `0x4bb910`'s body is traced; "rank >= 1" would be a guess.
+    /// `0x4bb910`: our own roster row, rank above 0 (assistant or leader); nil otherwise.
     #[test]
-    fn is_raid_officer_is_still_nil_and_that_is_a_missing_carve_not_a_missing_feature() {
-        let s = UiScript::new().unwrap();
-        assert!(s.eval::<bool>("return IsRaidOfficer() == nil").unwrap());
+    fn is_raid_officer_reads_our_own_roster_rank() {
+        let officer = |s: &UiScript| s.eval::<Option<i64>>("return IsRaidOfficer()").unwrap();
+        let mut s = UiScript::new().unwrap();
+        assert_eq!(officer(&s), None, "ungrouped");
+        let mut raid = ten_player_raid();
+        raid.raid[0].rank = 0; // we are a plain member
+        raid.raid[1].rank = 1; // someone else assists
+        s.set_party(raid.clone());
+        assert_eq!(officer(&s), None, "no player unit yet");
+        s.set_unit("player", Some(unit(true, 0x100)));
+        assert_eq!(
+            officer(&s),
+            None,
+            "a member, another row's rank does not count"
+        );
+        raid.raid[0].rank = 1;
+        s.set_party(raid.clone());
+        assert_eq!(officer(&s), Some(1), "assistant");
+        raid.raid[0].rank = 2;
+        s.set_party(raid);
+        assert_eq!(officer(&s), Some(1), "leader");
+        s.set_unit("player", Some(unit(true, 0x999)));
+        assert_eq!(officer(&s), None, "no row of ours");
     }
 
     // ── The identity predicates ─────────────────────────────────────────────

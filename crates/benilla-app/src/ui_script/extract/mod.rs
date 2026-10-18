@@ -1358,7 +1358,7 @@ fn convert_entry(
             path,
             color,
             gradient,
-            additive,
+            blend,
             tex_coords,
             wrap,
             circular,
@@ -1489,7 +1489,7 @@ fn convert_entry(
                 uv_clamp,
                 color,
                 corner_colors,
-                additive,
+                blend,
                 clip,
                 // `SetRotation` is counter-clockwise-positive, `UiQuad::rotation` clockwise.
                 rotation: -rotation,
@@ -1708,7 +1708,7 @@ mod cursor_quad_tests {
         assert_eq!(q.rect.height(), 32.0);
         assert_eq!(q.z_key, u128::MAX);
         assert!(q.texture.is_some());
-        assert!(!q.additive);
+        assert_eq!(q.blend, benilla_ui::script::BlendMode::Blend);
     }
 }
 

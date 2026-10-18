@@ -307,8 +307,9 @@ pub use quest::{
 };
 pub use quest_log::{QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS};
 pub(crate) use region::{
-    apply_font_parts, apply_wrap_attrs, implicit_creation_anchor_lua, install_loaded_texture,
-    load_texture_file, FileLoad,
+    apply_font_parts, apply_texture_name, apply_wrap_attrs, implicit_creation_anchor_lua,
+    install_loaded_texture, load_blend_mode, load_texture_file, load_texture_name,
+    texture_name_verdict, FileLoad,
 };
 pub use reputation::{FactionEntry, ReputationSend, ReputationState};
 pub use session::SessionRequest;
@@ -398,7 +399,7 @@ pub(crate) const REGION_LEAF_SHARED: [&str; 9] = [
 /// Texture-only, each in the client's Texture map (`0x87c128`): `GetVertexColor` though
 /// `SetVertexColor` is shared, and `SetGradientAlpha`, not FontString's `SetAlphaGradient`. 1.12
 /// has no Texture `SetSize` or `SetRotation` (PlayerModel's, `0x84f1fc`/`0x505f00`).
-pub(crate) const TEXTURE_ONLY_METHODS: [&str; 12] = [
+pub(crate) const TEXTURE_ONLY_METHODS: [&str; 13] = [
     "SetGradient",
     "SetGradientAlpha",
     "GetTexture",
@@ -410,6 +411,7 @@ pub(crate) const TEXTURE_ONLY_METHODS: [&str; 12] = [
     "SetTexCoordModifiesRect",
     "GetTexCoordModifiesRect",
     "SetDesaturated",
+    "IsDesaturated",
     "GetVertexColor",
 ];
 
