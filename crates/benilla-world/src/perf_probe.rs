@@ -57,6 +57,11 @@
 //! backstop, and a reading taken through it says `settled=no` rather than passing itself off as
 //! steady state.
 //!
+//! **Quiet is not arrived.** Before the streamer's first event its counters read zero, which is
+//! quiet: against remote packs the probe settled at frame 240 on a black screen and printed
+//! `settled=yes` over the network wait. So the scene must also be presentable with no load in
+//! flight ([`world_is_here`]), the same term the loading cover keys on.
+//!
 //! So two columns decide whether a row is a measurement at all — `settled=yes` and `railed=no` —
 //! and a row failing either is an instruction to take it again, not a number to put in a table.
 //!
@@ -483,6 +488,7 @@ fn sample(
     time: Res<Time<Real>>,
     mut run: ResMut<ProbeRun>,
     activity: Option<Res<crate::terrain_stream::StreamActivity>>,
+    progress: Option<Res<crate::terrain_stream::WorldLoadProgress>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
     // Present only where something registered bevy's render diagnostics (`WOW_GPU_PASSES`).
@@ -511,7 +517,9 @@ fn sample(
         let full = run.window.len() >= SETTLE_WINDOW_FRAMES;
         let oldest = run.window.front().copied().unwrap_or_default();
         let done_in_window = now.total().saturating_sub(oldest.total());
-        let quiet_enough = full && done_in_window <= SETTLE_TOLERANCE;
+        // No streamer at all (a test app) has nothing to wait for.
+        let here = progress.as_deref().is_none_or(world_is_here);
+        let quiet_enough = full && done_in_window <= SETTLE_TOLERANCE && here;
         let out_of_patience = run.seen >= SETTLE_MAX_FRAMES;
         if !quiet_enough && !out_of_patience {
             return;
@@ -527,9 +535,9 @@ fn sample(
         } else {
             warn!(
                 "perf probe: the streamer never went quiet in {} frames ({done_in_window} events \
-                 in the last {SETTLE_WINDOW_FRAMES}: {}) — sampling anyway, and the line says \
-                 settled=no. The number includes streaming work and is not a measurement of the \
-                 renderer.",
+                 in the last {SETTLE_WINDOW_FRAMES}: {}; scene presentable: {here}) — sampling \
+                 anyway, and the line says settled=no. The number includes streaming work and is \
+                 not a measurement of the renderer.",
                 run.seen,
                 now.moved_since(oldest),
             );
@@ -601,6 +609,12 @@ fn sample(
             run.passes.mark(store);
         }
     }
+}
+
+/// Has the world around the focus arrived? The scene presentable, as the loading cover reads it,
+/// and nothing still on the wire.
+fn world_is_here(p: &crate::terrain_stream::WorldLoadProgress) -> bool {
+    p.presentable() && p.loads_in_flight == 0
 }
 
 /// The percentile a sorted sample lands on — nearest-rank, the same convention the journal and the
@@ -767,6 +781,24 @@ mod tests {
             "a still counter is not evidence: {moved}"
         );
         assert_eq!(newer.moved_since(newer), "nothing");
+    }
+
+    /// A streamer that has not started is quiet but not here: the black-screen settle.
+    #[test]
+    fn a_world_that_has_not_arrived_is_not_settled() {
+        use crate::terrain_stream::WorldLoadProgress;
+        assert!(!world_is_here(&WorldLoadProgress::default()));
+        let here = WorldLoadProgress {
+            scene_ready: true,
+            focus_collidable: true,
+            ..default()
+        };
+        assert!(world_is_here(&here));
+        let fetching = WorldLoadProgress {
+            loads_in_flight: 3,
+            ..here
+        };
+        assert!(!world_is_here(&fetching));
     }
 
     /// The rate test, which is the fix for the gate that never fired: a drip must settle and a

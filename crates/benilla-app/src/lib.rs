@@ -673,6 +673,9 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         connect: !capturing,
         start: run_mode::start_state(),
     });
+    // fork: perf — the per-system CPU profile (`WOW_SYSTEM_PROFILE=1`), in a `trace_systems` build.
+    #[cfg(feature = "trace_systems")]
+    benilla_world::system_profile::plugin(&mut app);
 
     // A background run opens unfocused, and `WinitSettings::game()` drives an unfocused window at
     // reactive 1/60 s, so a frame-time instrument would read ~16.7 ms whatever the scene costs.

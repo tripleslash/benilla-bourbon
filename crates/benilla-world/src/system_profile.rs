@@ -111,7 +111,11 @@ fn report(mut last: Local<Option<Instant>>) {
     rows.sort_by_key(|r| std::cmp::Reverse(r.1));
     let all: f32 = rows.iter().map(|r| r.1.as_secs_f32()).sum::<f32>() * 1000.0 / secs;
     info!("SYSTEM_PROFILE total={all:.1}ms/s (nested spans double count) over {secs:.1}s");
-    for (name, d, c) in rows.iter().take(45) {
+    // `WOW_SYSTEM_PROFILE_TOP=<n>`: how many rows (45); the leaves sit under their schedules' spans.
+    let top = crate::launch_env::var("WOW_SYSTEM_PROFILE_TOP")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(45);
+    for (name, d, c) in rows.iter().take(top) {
         info!(
             "SYSTEM_PROFILE {:8.2}ms/s {:6.1}/s {name}",
             d.as_secs_f32() * 1000.0 / secs,
