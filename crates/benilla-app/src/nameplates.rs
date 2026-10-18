@@ -374,6 +374,44 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
     mesh
 }
 
+/// What `ShouldShowName` (`0x6070a0`) reads for one unit.
+struct NameGate {
+    /// `IsSelectable`: the ladder's first call, vtable `+0x58` (`0x5f1ec0`), is a jump to slot
+    /// `+0x54` (`0x60be60`), so a unit the player cannot select never shows a name.
+    selectable: bool,
+    /// A V-key plate (`+0xe60`) or a chat bubble (`+0xe64`) stands in for the name.
+    plated: bool,
+    /// The `bytes_1` byte 3 `& 3` vis-flag (`0x607101`, `0x60f62e`).
+    ghost_visual: bool,
+    is_self: bool,
+    self_faded: bool,
+    /// The current selection (`[0xb4e2d8]`).
+    targeted: bool,
+    dead_creature: bool,
+    kind: EntityKind,
+}
+
+/// The ladder: not selectable, plated or ghosted shows nothing; the own unit by `UnitNameOwn`
+/// before the target rescue; the target always; a dead creature only as the target (that leg is
+/// untraced); everyone else by the kind's CVar.
+fn should_show_name(g: &NameGate, cfg: &NameConfig) -> bool {
+    if !g.selectable || g.plated || g.ghost_visual {
+        false
+    } else if g.is_self {
+        cfg.own && !g.self_faded
+    } else if g.targeted {
+        true
+    } else if g.dead_creature {
+        false
+    } else {
+        match g.kind {
+            EntityKind::Player => cfg.player,
+            EntityKind::Unit => cfg.npc,
+            _ => false,
+        }
+    }
+}
+
 /// Drive the plates: gate, resolve lines and colour, and rebuild the plate on change, in Update
 /// where mesh churn is supported.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
@@ -405,6 +443,8 @@ pub(crate) fn drive_nameplates(
         Res<NameConfig>,
         // The rank strings, read off the current VM ([`PvpNameStrings`]).
         Res<PvpNameStrings>,
+        // The active player, whose own flagged creations stay selectable (`IsSelectable`).
+        Res<crate::net::SelfGuid>,
     ),
     names: Res<NameCache>,
     // The guild cache, the a5 line's text; `ResMut` because a miss sends `CMSG_GUILD_QUERY`.
@@ -426,7 +466,7 @@ pub(crate) fn drive_nameplates(
         Query<(), With<crate::entities::mount::MountChild>>,
     ),
 ) {
-    let (selection, flash, rig, vplates, bubbles, group, name_cfg, pvp_strings) = gates;
+    let (selection, flash, rig, vplates, bubbles, group, name_cfg, pvp_strings, self_guid) = gates;
     let (Ok(cam_tf), Some(atlas)) = (camera.single(), atlas.as_mut()) else {
         return;
     };
@@ -477,34 +517,26 @@ pub(crate) fn drive_nameplates(
         }
         // No distance cull: the name's update, cull and build (`0x6c6d40`, `0x6c6e00`,
         // `0x6c6e90`) compare none; the 20-yard cap (`0x60f600`) is the V-key frame's.
-        // ShouldShowName's order: own unit by its CVar, the target (`[0xb4e2d8]`), the kind CVar.
-        // A V-key plate or chat bubble (`+0xe64`) suppresses the name (`0x6070a0`). A dead
-        // creature shows only as the target, as in the reference; that gate leg is untraced.
-        let show = if vplates.0.contains(&entity) || bubbles.0.contains(&entity) {
-            false
-        } else if store.is_some_and(|s| s.0.unit_is_ghost_visual()) {
-            // The ghost vis-flag suppresses the name, target rescue included: `0x607101` and
-            // `0x60f62e` both test `bytes_1` byte 3 `& 3`.
-            false
-        } else if is_self {
-            // The own CVar, before the rescue; no name over a fully faded first-person avatar
-            // (our reading of `ShouldShowName`'s untraced `vtable+0x58` leg).
-            name_cfg.own
-                && rig
+        let show = should_show_name(
+            &NameGate {
+                selectable: crate::target::is_selectable(store, self_guid.0),
+                plated: vplates.0.contains(&entity) || bubbles.0.contains(&entity),
+                ghost_visual: store.is_some_and(|s| s.0.unit_is_ghost_visual()),
+                is_self,
+                // No name over a fully faded first-person avatar. Deviation: `ShouldShowName`'s
+                // first leg is `IsSelectable` (`0x60be60`), which passes our own unit; what hides
+                // the own name in first person in 1.12.1 is untraced, so the avatar's fade stands in.
+                self_faded: rig
                     .as_deref()
                     .map_or(1.0, crate::player::CameraControl::self_fade)
-                    > 0.0
-        } else if selection.target == Some(entity) {
-            true
-        } else if net.kind == EntityKind::Unit && store.is_some_and(|s| s.0.unit_is_dead()) {
-            false
-        } else {
-            match net.kind {
-                EntityKind::Player => name_cfg.player,
-                EntityKind::Unit => name_cfg.npc,
-                _ => false,
-            }
-        };
+                    <= 0.0,
+                targeted: selection.target == Some(entity),
+                dead_creature: net.kind == EntityKind::Unit
+                    && store.is_some_and(|s| s.0.unit_is_dead()),
+                kind: net.kind,
+            },
+            &name_cfg,
+        );
         if !show {
             continue;
         }
@@ -818,6 +850,41 @@ fn evict_name_meshes(
 mod tests {
     use super::*;
     use crate::target::{ring_variant, PlayerPath, SelectorInput};
+
+    /// `ShouldShowName`'s first leg is `IsSelectable`: an encounter trigger such as Naxxramas's
+    /// invisible "The Lich King" (`UNIT_FLAG_NOT_SELECTABLE`) shows no name with NPC names on, nor
+    /// as the target.
+    #[test]
+    fn a_unit_the_player_cannot_select_shows_no_name() {
+        let npc_names = NameConfig {
+            npc: true,
+            ..NameConfig::default()
+        };
+        let npc = |selectable, targeted| NameGate {
+            selectable,
+            plated: false,
+            ghost_visual: false,
+            is_self: false,
+            self_faded: false,
+            targeted,
+            dead_creature: false,
+            kind: EntityKind::Unit,
+        };
+        assert!(should_show_name(&npc(true, false), &npc_names));
+        assert!(!should_show_name(&npc(false, false), &npc_names));
+        assert!(
+            !should_show_name(&npc(false, true), &npc_names),
+            "no target rescue for it either"
+        );
+        assert!(
+            should_show_name(&npc(true, true), &NameConfig::default()),
+            "a selectable target shows with NPC names off"
+        );
+        assert!(
+            !should_show_name(&npc(true, false), &NameConfig::default()),
+            "NPC names default off"
+        );
+    }
 
     /// `>` not `>=` at the knee and `0.075*d` beyond: the jump at the knee is the reference's.
     #[test]
