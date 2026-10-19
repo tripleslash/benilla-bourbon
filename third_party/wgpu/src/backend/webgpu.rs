@@ -50,6 +50,71 @@ macro_rules! impl_send_sync {
     };
 }
 
+// benilla local patch: explicit `destroy()` for buffers, textures and query sets once nothing in Rust
+// can reach them. The browser frees a GPU object only when its JS wrapper is garbage-collected, and a
+// thread that allocates little JS (the browser build's render worker) almost never collects, so
+// dropped objects filled the GPU's memory. A `Release` guard is shared by every clone of the object
+// and held by every view and bind group made from it, so its drop means the last of them is gone. The
+// object is then queued on this thread and destroyed by [`destroy_released_resources`], which the
+// caller runs once the work recorded with it has been submitted (bevy_render: its `Cleanup` set).
+// A surface's (canvas's) texture belongs to the canvas and is never destroyed.
+#[derive(Debug)]
+pub(crate) struct Release(Option<Releasable>);
+
+#[derive(Debug)]
+enum Releasable {
+    Buffer(webgpu_sys::GpuBuffer),
+    Texture(webgpu_sys::GpuTexture),
+    QuerySet(webgpu_sys::GpuQuerySet),
+}
+
+impl Release {
+    fn new(object: Releasable) -> Rc<Self> {
+        Rc::new(Self(Some(object)))
+    }
+
+    /// The guard of an object this backend does not own.
+    fn owned_elsewhere() -> Rc<Self> {
+        Rc::new(Self(None))
+    }
+}
+
+#[cfg(std)]
+std::thread_local! {
+    static RELEASED: RefCell<Vec<Releasable>> = const { RefCell::new(Vec::new()) };
+}
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        #[cfg(std)]
+        if let Some(object) = self.0.take() {
+            // During thread teardown the list is gone; the collector frees the object then.
+            let _ = RELEASED.try_with(|list| list.borrow_mut().push(object));
+        }
+    }
+}
+
+/// benilla local patch: destroy every buffer, texture and query set whose last handle, view and
+/// bind group were dropped on this thread since the last call, and return how many. Call it only
+/// once all work recorded with them has been submitted.
+pub fn destroy_released_resources() -> usize {
+    #[cfg(std)]
+    {
+        let released = RELEASED.with(|list| core::mem::take(&mut *list.borrow_mut()));
+        let count = released.len();
+        for object in released {
+            match object {
+                Releasable::Buffer(buffer) => buffer.destroy(),
+                Releasable::Texture(texture) => texture.destroy(),
+                Releasable::QuerySet(query_set) => query_set.destroy(),
+            }
+        }
+        count
+    }
+    #[cfg(not(std))]
+    0
+}
+
 #[derive(Clone)]
 pub struct ContextWebGpu {
     /// `None` if browser does not advertise support for WebGPU.
@@ -1252,6 +1317,8 @@ pub struct WebBindGroup {
     pub(crate) inner: webgpu_sys::GpuBindGroup,
     /// Unique identifier for this BindGroup.
     ident: crate::cmp::Identifier,
+    /// benilla local patch: the guards of every buffer and texture it binds ([`Release`]).
+    _binds: Vec<Rc<Release>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1259,6 +1326,8 @@ pub struct WebTextureView {
     pub(crate) inner: webgpu_sys::GpuTextureView,
     /// Unique identifier for this TextureView.
     ident: crate::cmp::Identifier,
+    /// benilla local patch: its texture's guard ([`Release`]).
+    texture: Rc<Release>,
 }
 
 #[derive(Debug, Clone)]
@@ -1290,12 +1359,15 @@ pub struct WebBuffer {
     mapping: Rc<RefCell<WebBufferMapState>>,
     /// Unique identifier for this Buffer.
     ident: crate::cmp::Identifier,
+    /// benilla local patch: destroys the buffer once the last clone and binding is gone ([`Release`]).
+    release: Rc<Release>,
 }
 
 impl WebBuffer {
     /// Creates a new web buffer for the given Javascript object and description.
     fn new(inner: webgpu_sys::GpuBuffer, desc: &crate::BufferDescriptor<'_>) -> Self {
         Self {
+            release: Release::new(Releasable::Buffer(inner.clone())),
             inner,
             mapping: Rc::new(RefCell::new(WebBufferMapState {
                 mapped_buffer: None,
@@ -1335,6 +1407,9 @@ pub struct WebTexture {
     pub(crate) inner: webgpu_sys::GpuTexture,
     /// Unique identifier for this Texture.
     ident: crate::cmp::Identifier,
+    /// benilla local patch: destroys the texture once the last clone, view and binding is gone
+    /// ([`Release`]).
+    release: Rc<Release>,
 }
 
 #[derive(Debug, Clone)]
@@ -1360,6 +1435,8 @@ pub struct WebQuerySet {
     pub(crate) inner: webgpu_sys::GpuQuerySet,
     /// Unique identifier for this QuerySet.
     ident: crate::cmp::Identifier,
+    /// benilla local patch: destroys the query set once the last clone is gone ([`Release`]).
+    _release: Rc<Release>,
 }
 
 #[derive(Debug, Clone)]
@@ -2326,6 +2403,7 @@ impl dispatch::DeviceInterface for WebDevice {
         &self,
         desc: &crate::BindGroupDescriptor<'_>,
     ) -> dispatch::DispatchBindGroup {
+        let mut binds = Vec::new();
         let mapped_entries = desc
             .entries
             .iter()
@@ -2337,6 +2415,7 @@ impl dispatch::DeviceInterface for WebDevice {
                         size,
                     }) => {
                         let buffer = buffer.inner.as_webgpu();
+                        binds.push(buffer.release.clone());
                         let mapped_buffer_binding =
                             webgpu_sys::GpuBufferBinding::new(&buffer.inner);
                         mapped_buffer_binding.set_offset(offset as f64);
@@ -2356,8 +2435,9 @@ impl dispatch::DeviceInterface for WebDevice {
                         panic!("Web backend does not support arrays of samplers")
                     }
                     crate::BindingResource::TextureView(texture_view) => {
-                        let texture_view = &texture_view.inner.as_webgpu().inner;
-                        JsValue::from(texture_view)
+                        let texture_view = texture_view.inner.as_webgpu();
+                        binds.push(texture_view.texture.clone());
+                        JsValue::from(&texture_view.inner)
                     }
                     crate::BindingResource::TextureViewArray(..) => {
                         panic!("Web backend does not support BINDING_INDEXING extension")
@@ -2387,6 +2467,7 @@ impl dispatch::DeviceInterface for WebDevice {
         WebBindGroup {
             inner: bind_group,
             ident: crate::cmp::Identifier::create(),
+            _binds: binds,
         }
         .into()
     }
@@ -2493,6 +2574,7 @@ impl dispatch::DeviceInterface for WebDevice {
 
         let texture = self.inner.create_texture(&mapped_desc).unwrap();
         WebTexture {
+            release: Release::new(Releasable::Texture(texture.clone())),
             inner: texture,
             ident: crate::cmp::Identifier::create(),
         }
@@ -2560,6 +2642,7 @@ impl dispatch::DeviceInterface for WebDevice {
         let query_set = self.inner.create_query_set(&mapped_desc).unwrap();
 
         WebQuerySet {
+            _release: Release::new(Releasable::QuerySet(query_set.clone())),
             inner: query_set,
             ident: crate::cmp::Identifier::create(),
         }
@@ -3010,6 +3093,7 @@ impl dispatch::TextureInterface for WebTexture {
         WebTextureView {
             inner: view,
             ident: crate::cmp::Identifier::create(),
+            texture: self.release.clone(),
         }
         .into()
     }
@@ -4074,6 +4158,7 @@ impl dispatch::SurfaceInterface for WebSurface {
         let web_surface_texture = WebTexture {
             inner: surface_texture,
             ident: crate::cmp::Identifier::create(),
+            release: Release::owned_elsewhere(),
         };
 
         (

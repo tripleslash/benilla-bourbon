@@ -102,6 +102,22 @@ bridge, and `CommandEncoder::finish` read the encoder's label back out of JS to 
 a frame makes ~60 bind groups, ~30 passes and ~25 encoders (~1% of the browser frame thread).
 Pipelines, buffers, textures, samplers and layouts keep their labels in every build.
 
+## Explicit release of buffers, textures and query sets (`src/backend/webgpu.rs`, `src/lib.rs`)
+
+Upstream's `Drop` for `WebBuffer`, `WebTexture` and `WebQuerySet` is a no-op: the browser frees the
+GPU memory when the JS wrapper is garbage-collected. A thread that allocates little JS collects
+rarely, and the browser build's render worker allocates almost none, so dropped objects piled up
+until the 8 GB card paged (measured: ~10 MB/s, frames falling to 12 fps a minute into play).
+
+Each of the three now carries a `Release` guard (`Rc`), shared by every clone, held by every
+`WebTextureView` made from the texture and by every `WebBindGroup` binding the buffer or view. When
+the last of them drops, the JS object goes onto a per-thread list, and
+`wgpu::destroy_released_resources()` (re-exported at the crate root, `webgpu` only) calls
+`destroy()` on each. The caller runs it once the work recorded with them has been submitted:
+`bevy_render` does so in `RenderSystems::PostCleanup` (its `BENILLA.md`, ninth delta). A surface's
+texture gets a guard that owns nothing: it belongs to the canvas. Bind groups have no `destroy()` in
+WebGPU and are still freed by the collector.
+
 ## Removal
 
 Once a wgpu release that Bevy uses includes both mappings, with a real flag for tier 1:

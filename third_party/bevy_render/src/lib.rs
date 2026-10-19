@@ -456,6 +456,16 @@ impl Plugin for RenderPlugin {
                     reset_render_asset_bytes_per_frame.in_set(RenderSystems::Cleanup),
                 ),
             );
+            // benilla fork (BENILLA.md, ninth delta): the browser frees a dropped GPU object only
+            // when its JS wrapper is collected; destroy the frame's released ones once it is
+            // submitted, after the temporary render entities are gone.
+            #[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+            render_app.add_systems(
+                Render,
+                destroy_released_gpu_resources
+                    .in_set(RenderSystems::PostCleanup)
+                    .after(sync_world::despawn_temporary_render_entities),
+            );
         }
     }
 
@@ -501,6 +511,26 @@ fn run_render_schedule(world: &mut World) {
             let _ = world.try_run_schedule(label);
         }
     });
+}
+
+/// benilla fork (BENILLA.md, ninth delta): destroy the buffers, textures and query sets whose last
+/// handle, view and bind group were dropped since the last frame (`wgpu`'s local patch keeps the
+/// count). The frame's work is submitted by now, so nothing recorded with them is still pending.
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+fn destroy_released_gpu_resources() {
+    let destroyed = wgpu::destroy_released_resources();
+    RELEASED_GPU_OBJECTS.fetch_add(destroyed as u64, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// benilla fork: GPU objects [`destroy_released_gpu_resources`] destroyed, for a diagnostics reader
+/// (`take_released_gpu_objects`).
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+static RELEASED_GPU_OBJECTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// benilla fork: how many GPU objects were destroyed explicitly since the last call.
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+pub fn take_released_gpu_objects() -> u64 {
+    RELEASED_GPU_OBJECTS.swap(0, core::sync::atomic::Ordering::Relaxed)
 }
 
 fn send_time(time_sender: Res<TimeSender>) {
