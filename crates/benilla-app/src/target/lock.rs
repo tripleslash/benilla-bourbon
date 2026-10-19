@@ -38,6 +38,8 @@ pub(crate) struct GoLockInputs<'w, 's> {
     pub(crate) items: Res<'w, crate::items::Items>,
     /// The object index the key-item scan walks the bags through.
     pub(crate) objects: crate::net::Objects<'w, 's>,
+    /// Whether the player is in a battleground, whose objective faction term the cursor skips.
+    pub(crate) battleground: super::cursor_mode::BattlegroundMap<'w>,
 }
 
 /// The wire facts the Action gate and the requirement fallback read, gathered by the caller.

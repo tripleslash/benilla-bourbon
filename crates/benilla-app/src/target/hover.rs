@@ -549,6 +549,8 @@ pub(crate) struct GoGateInputs<'w> {
     pub(crate) factions: Option<Res<'w, super::ring::Factions>>,
     /// Absent in a net-less build, read as the reference's zeroed `[0xb72038]`: not queued.
     pub(crate) stone: Option<Res<'w, crate::ui_dialog_verbs::MeetingStone>>,
+    /// Whether the player is in a battleground, whose objective faction term the gate skips.
+    pub(crate) battleground: super::cursor_mode::BattlegroundMap<'w>,
 }
 
 impl GoGateInputs<'_> {
@@ -591,13 +593,19 @@ pub(super) fn update_hovered_object(
     // Transports (TRANSPORT 11, MAP_OBJECT 14, MO_TRANSPORT 15) never join: the reference's model
     // resolver `0x5f80e0` gives them no pick geometry and their interaction predicates are
     // constant false, so a ship's hull never swallows the pick of an NPC on deck.
+    //
+    // TRAP (6) never joins either: a trap is proximity-triggered, never clicked, so the reference
+    // registers no mouse geometry for one. Arathi Basin's visual-only aura GameObjects
+    // (180100-180102, type 6) otherwise sit at the node banner's centre and win the pick from it —
+    // their faction is hostile to everyone, so the inverted TRAP term keeps them highlightable and
+    // the banner is never reached, whatever the battleground gate does.
     if removed_parts.read().next().is_some() || !added_parts.is_empty() {
         pickable.clear();
         pickable.extend(go_parts.iter().filter(|&e| {
             // Through the hit's own resolver, so a card and its mesh siblings agree.
             !stores
                 .get(resolve_net(e))
-                .is_ok_and(|s| matches!(s.0.gameobject_type_id(), 11 | 14 | 15))
+                .is_ok_and(|s| matches!(s.0.gameobject_type_id(), 6 | 11 | 14 | 15))
         }));
     }
     hovered.target = None;
@@ -634,6 +642,41 @@ pub(super) fn update_hovered_object(
         return;
     };
     let self_store = self_q.single().ok();
+    // The mouseover-eligibility gate (`+0x54`), as a predicate over a picked entity: a GameObject
+    // the cursor will never publish must not win the pick and bury the interactable behind it. A
+    // battleground's visual-only aura GameObjects (Arathi Basin 180100-180102, type 6 TRAP, never
+    // highlightable to a friendly or neutral player) sit at the node banner's centre, so without
+    // this they take every pick and the banner is unreachable. A store not yet streamed reads
+    // eligible, the gate's own default.
+    let mouseover_ok = |net: Entity| -> bool {
+        let Ok(store) = stores.get(net) else {
+            return true;
+        };
+        let go_guid = guids.get(net).ok().map(|g| g.0);
+        let tmpl = go_gate.templates.of(&store.0);
+        let reaction = crate::target::cursor_mode::go_reaction(
+            go_gate.factions.as_deref(),
+            store.0.gameobject_faction(),
+            self_store,
+        );
+        crate::target::cursor_mode::mouseover_eligible(
+            store.0.gameobject_type_id(),
+            store.0.gameobject_flags(),
+            store.0.gameobject_dynamic_flags(),
+            tmpl.map(|t| t.highlight_column),
+            reaction,
+            crate::target::cursor_mode::GoOverrides {
+                channel_owned: crate::target::cursor_mode::fishing_channel_owned(
+                    self_store, go_guid,
+                ),
+                meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
+                    tmpl.and_then(|t| t.meeting_stone).map(|m| m.area),
+                    go_gate.queued_area(),
+                ),
+                battleground: go_gate.battleground.active(),
+            },
+        )
+    };
 
     // The probe's census, once a second: where the pickable GameObjects are on screen, so a
     // headless miss tells a pick fault from a camera looking elsewhere.
@@ -665,12 +708,16 @@ pub(super) fn update_hovered_object(
         );
     }
 
-    // Pass 1: the exact resident geometry, nearest wins.
-    let mut best: Option<(f32, Entity)> =
-        benilla_world::interact::cast_pick_ray(ray, pickable, &parts, false)
-            .into_iter()
-            .next()
-            .map(|(e, h)| (h.distance, e));
+    // Pass 1: the nearest resident geometry the eligibility gate will publish, nearest wins. Every
+    // hit is asked for, nearest-first, so an ineligible front object is skipped rather than allowed
+    // to bury the eligible one behind it.
+    let mut best: Option<(f32, Entity)> = None;
+    for (part, hit) in benilla_world::interact::cast_pick_ray(ray, pickable, &parts, true) {
+        if mouseover_ok(resolve_net(part)) {
+            best = Some((hit.distance, part));
+            break;
+        }
+    }
 
     // Pass 2, only when nothing hit anywhere, units included (one resolve in the reference): the
     // geometry pushed 1 model unit along its normals, a halo of about a yard that makes a wispy
@@ -685,6 +732,9 @@ pub(super) fn update_hovered_object(
         let mut best2: Option<(f32, u32, Entity)> = None;
         for (part, hit) in benilla_world::interact::cast_pick_ray_inflated(ray, pickable, &parts) {
             let net = resolve_net(part);
+            if !mouseover_ok(net) {
+                continue;
+            }
             let prio = if *last_pick == Some(net) {
                 u32::MAX // the sticky-hover cache outranks everything
             } else {
@@ -709,6 +759,7 @@ pub(super) fn update_hovered_object(
                                 .map(|m| m.area),
                             go_gate.queued_area(),
                         ),
+                        battleground: go_gate.battleground.active(),
                     };
                     u32::from(crate::target::cursor_mode::go_highlightable(
                         s, reaction, overrides,
@@ -743,33 +794,11 @@ pub(super) fn update_hovered_object(
         return;
     };
     // The mouseover-eligibility gate (vtable `+0x54` at `0x482982`): an ineligible object
-    // publishes the null mouseover, so no tooltip, brighten or cursor; the reference reaches
-    // `0x492890`, `0x52aa20` and `0x4945e0` only past it. Its null mouseover also hides a unit
-    // behind the object, which our split picks leave hoverable.
+    // publishes the null mouseover, so no tooltip, brighten or cursor. The pick above already skips
+    // an ineligible object, so this normally passes; it stays as the probe's report.
     if let Ok(store) = stores.get(net_entity) {
         let tmpl = go_gate.templates.of(&store.0);
-        let reaction = crate::target::cursor_mode::go_reaction(
-            go_gate.factions.as_deref(),
-            store.0.gameobject_faction(),
-            self_store,
-        );
-        if !crate::target::cursor_mode::mouseover_eligible(
-            store.0.gameobject_type_id(),
-            store.0.gameobject_flags(),
-            store.0.gameobject_dynamic_flags(),
-            tmpl.map(|t| t.highlight_column),
-            reaction,
-            crate::target::cursor_mode::GoOverrides {
-                channel_owned: crate::target::cursor_mode::fishing_channel_owned(
-                    self_store,
-                    Some(guid.0),
-                ),
-                meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
-                    tmpl.and_then(|t| t.meeting_stone).map(|m| m.area),
-                    go_gate.queued_area(),
-                ),
-            },
-        ) {
+        if !mouseover_ok(net_entity) {
             if probing {
                 cache.report.say(format!(
                     "guid {:#x} type {} at {distance:.1} yd — hover ✗ (tmpl {:?}, highlight {:?}): \
