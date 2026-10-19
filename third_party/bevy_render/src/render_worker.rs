@@ -19,15 +19,24 @@
 //! trait bound (`Resource`, `Component`), so the worker reading them is checked by the type
 //! system; a `NonSend` resource keeps bevy's own thread check.
 //!
-//! The page does not wait for a render at the end of its update. If the worker is `IDLE` it
-//! extracts there ([`renderer_extract`]); if not, the extract is *owed*, the page's callback
-//! returns to the browser, and the next update pays it before its `First` runs
-//! ([`pay_owed_extract`]), waiting only for whatever is left of the render. So every main update is
-//! still extracted exactly once and before the next one starts, as on one thread: bevy's messages
-//! (`AssetEvent`s that `extract_render_asset` reads, removed components) live two updates, and an
-//! update that was never extracted would drop them. The worker renders right after extract and
-//! returns to its event loop, which is where the browser presents an `OffscreenCanvas` and settles
-//! the promises the renderer awaits (async pipeline creation).
+//! The page never waits for the worker's event loop. A worker that has rendered can be held up
+//! between its tasks until the page's thread is free (measured in Chrome: after a task that
+//! submitted a frame, no task of the worker ran — no message, no timer — for as long as the page
+//! spun, 20 s), so a page that spun on it would wait for itself. The page spins only while the
+//! worker is provably inside an extract: it publishes the extract, and the worker *claims* it
+//! (`EXTRACT` → `TAKEN`) from inside its poll before touching the world. Unclaimed within
+//! [`CLAIM_BUDGET`], the page withdraws it and returns to the browser. After a render the worker is
+//! `SETTLING` until a fresh task of its own ([`settle`]) marks it `IDLE`, so the page does not
+//! publish into the gap where the worker waits on it.
+//!
+//! An update whose extract did not happen leaves it *owed*, and the runner does not start another
+//! update until it is paid ([`before_update`], `bevy_winit`'s `set_may_update`): it skips the
+//! update and asks for the next frame instead. So every main update is still extracted exactly
+//! once and before the next one starts, as on one thread: bevy's messages (`AssetEvent`s that
+//! `extract_render_asset` reads, removed components) live two updates, and an update that was never
+//! extracted would drop them. The worker renders right after extract and returns to its event loop,
+//! which is where the browser presents an `OffscreenCanvas` and settles the promises the renderer
+//! awaits (async pipeline creation).
 //!
 //! # The page-side seams
 //!
@@ -50,11 +59,8 @@ use std::sync::{MutexGuard, OnceLock, PoisonError};
 
 use bevy_platform::sync::Mutex;
 
-use bevy_app::{App, AppLabel, First, MainScheduleOrder, Plugin, SubApp};
-use bevy_ecs::{
-    schedule::{Schedule, ScheduleLabel},
-    world::World,
-};
+use bevy_app::{App, AppLabel, Plugin, SubApp};
+use bevy_ecs::world::World;
 use bevy_platform::time::Instant;
 use wasm_bindgen::JsValue;
 
@@ -66,12 +72,17 @@ use crate::{
 
 /// The worker has no render app yet (before `cleanup`), or this mode is off.
 const NONE: u32 = 0;
-/// The worker holds the render app and is waiting for an extract.
+/// The worker holds the render app, its event loop is free, and it is waiting for an extract.
 const IDLE: u32 = 1;
-/// The page has parked its main world in [`MAIN_WORLD`] and is spinning until this changes.
+/// The page has parked its main world in [`MAIN_WORLD`] and is waiting for the worker to claim it.
 const EXTRACT: u32 = 2;
 /// Extract is done and the page has its world back; the worker is rendering.
 const RENDERING: u32 = 3;
+/// The worker claimed the extract and is running it; the page spins until it is done.
+const TAKEN: u32 = 4;
+/// The worker has rendered and returned to its event loop; [`settle`] marks it `IDLE` from its
+/// next task.
+const SETTLING: u32 = 5;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static KICK: OnceLock<fn()> = OnceLock::new();
@@ -116,7 +127,9 @@ pub fn describe() -> String {
             NONE => "none",
             IDLE => "idle",
             EXTRACT => "extract",
+            TAKEN => "taken",
             RENDERING => "rendering",
+            SETTLING => "settling",
             _ => "?",
         },
         worker_at(),
@@ -125,10 +138,14 @@ pub fn describe() -> String {
     )
 }
 
-/// The last main update ended with the worker busy, so its extract is still to run. Page only.
+/// The last main update ended without an extract, so it is still to run. Page only.
 static OWED: AtomicBool = AtomicBool::new(false);
 
-/// How long the page waits on the worker for one extract before calling it dead. A worker that
+/// How long a published extract waits for the worker to claim it before the page withdraws it.
+/// A free worker answers a wake in well under a millisecond; one that does not is waiting for the
+/// page's thread, which spinning longer would only keep from it.
+const CLAIM_BUDGET: Duration = Duration::from_millis(4);
+/// How long the page waits for a claimed extract before calling the worker dead. A worker that
 /// panicked traps in its own agent and never answers; without a ceiling the page would spin
 /// forever with its world lent out.
 const EXTRACT_DEADLINE: Duration = Duration::from_secs(20);
@@ -271,12 +288,15 @@ pub struct RenderWorkerStats {
     /// Total and worst worker time of those updates, microseconds (extract excluded).
     pub render_us: u64,
     pub render_max_us: u64,
-    /// Updates that ended with the worker busy, their extract owed to the next update.
+    /// Updates that ended without an extract (the worker busy, or a publish withdrawn).
     pub owed: u64,
-    /// Total and worst wait at the start of an update for the worker to finish (owed extracts), µs.
-    pub late_us: u64,
-    pub late_max_us: u64,
-    /// Total and worst page-side wait for an extract (wake + extract + queued writes), µs.
+    /// Times the runner found the last update's extract still owed and could not pay it (it holds
+    /// the next update, or asks for another frame).
+    pub skipped: u64,
+    /// Published extracts the worker did not claim within [`CLAIM_BUDGET`].
+    pub withdrawn: u64,
+    /// Extracts done, and their total and worst page-side wait (wake + extract + queued writes), µs.
+    pub extracts: u64,
     pub wait_us: u64,
     pub wait_max_us: u64,
 }
@@ -285,8 +305,9 @@ static RENDERS: AtomicU64 = AtomicU64::new(0);
 static RENDER_US: AtomicU64 = AtomicU64::new(0);
 static RENDER_MAX_US: AtomicU64 = AtomicU64::new(0);
 static OWED_COUNT: AtomicU64 = AtomicU64::new(0);
-static LATE_US: AtomicU64 = AtomicU64::new(0);
-static LATE_MAX_US: AtomicU64 = AtomicU64::new(0);
+static SKIPPED: AtomicU64 = AtomicU64::new(0);
+static WITHDRAWN: AtomicU64 = AtomicU64::new(0);
+static EXTRACTS: AtomicU64 = AtomicU64::new(0);
 static WAIT_US: AtomicU64 = AtomicU64::new(0);
 static WAIT_MAX_US: AtomicU64 = AtomicU64::new(0);
 
@@ -297,8 +318,9 @@ pub fn take_stats() -> RenderWorkerStats {
         render_us: RENDER_US.swap(0, Ordering::Relaxed),
         render_max_us: RENDER_MAX_US.swap(0, Ordering::Relaxed),
         owed: OWED_COUNT.swap(0, Ordering::Relaxed),
-        late_us: LATE_US.swap(0, Ordering::Relaxed),
-        late_max_us: LATE_MAX_US.swap(0, Ordering::Relaxed),
+        skipped: SKIPPED.swap(0, Ordering::Relaxed),
+        withdrawn: WITHDRAWN.swap(0, Ordering::Relaxed),
+        extracts: EXTRACTS.swap(0, Ordering::Relaxed),
         wait_us: WAIT_US.swap(0, Ordering::Relaxed),
         wait_max_us: WAIT_MAX_US.swap(0, Ordering::Relaxed),
     }
@@ -310,56 +332,82 @@ fn micros(d: Duration) -> u64 {
 
 /// The page's half of the frame handshake, as the extract function of [`RenderWorkerExtractApp`].
 ///
-/// Never waits for a render: a busy worker leaves the extract owed to the start of the next update
-/// ([`pay_owed_extract`]), and the page's callback returns. It spins only while the worker
-/// extracts.
+/// Never waits for a render or for the worker's event loop: if the extract does not happen now
+/// ([`try_hand_over`]), it is owed, and [`before_update`] holds the next update until it is paid.
 fn renderer_extract(main_world: &mut World, _: &mut World) {
-    if STATE.load(Ordering::Acquire) != IDLE {
+    if !try_hand_over(main_world) {
         OWED.store(true, Ordering::Relaxed);
         OWED_COUNT.fetch_add(1, Ordering::Relaxed);
-        return;
     }
-    hand_over(main_world);
 }
 
-/// The main schedule's first step: an extract the last update owed, after the rest of the render.
-/// Nothing of this update has run yet, so the extract sees the last update's world and messages.
-fn pay_owed_extract(world: &mut World) {
-    if !OWED.swap(false, Ordering::Relaxed) {
-        return;
-    }
-    let start = Instant::now();
-    spin_until(
-        || STATE.load(Ordering::Acquire) == IDLE,
-        EXTRACT_DEADLINE,
-        "the worker did not finish a render",
-    );
-    let late = micros(start.elapsed());
-    LATE_US.fetch_add(late, Ordering::Relaxed);
-    LATE_MAX_US.fetch_max(late, Ordering::Relaxed);
-    hand_over(world);
+/// Whether the last main update's extract is still owed to the worker. Page only: work that must
+/// follow that extract (frame generation's run-ahead `Main`) waits for the next update.
+pub fn extract_owed() -> bool {
+    OWED.load(Ordering::Relaxed)
 }
 
-/// Lend the main world to the worker for one extract, spinning until it is back.
-fn hand_over(main_world: &mut World) {
+/// Whether the runner may start the next main update: `bevy_winit`'s `set_may_update` hook, on the
+/// page. An extract the last update owed is paid first, against the world and messages that update
+/// left; if the worker cannot take it yet, the runner skips this update and asks for the next
+/// frame, returning the page's thread to the browser meanwhile. The runner also asks between
+/// updates, so an owed extract is paid even when no update follows.
+pub fn before_update(world: &mut World) -> bool {
+    if !OWED.load(Ordering::Relaxed) {
+        return true;
+    }
+    if try_hand_over(world) {
+        OWED.store(false, Ordering::Relaxed);
+        return true;
+    }
+    SKIPPED.fetch_add(1, Ordering::Relaxed);
+    false
+}
+
+/// Lend the main world to the worker for one extract, if it is free to take it now: publish it,
+/// wake the worker, and wait at most [`CLAIM_BUDGET`] for its claim. Claimed, spin until the
+/// extract is done and return `true`. Unclaimed, withdraw it and return `false`.
+fn try_hand_over(main_world: &mut World) -> bool {
+    if STATE.load(Ordering::Acquire) != IDLE {
+        return false;
+    }
     let start = Instant::now();
     MAIN_WORLD.store(main_world, Ordering::Release);
     STATE.store(EXTRACT, Ordering::Release);
     kick();
+    let mut turns = 0u32;
+    while STATE.load(Ordering::Acquire) == EXTRACT {
+        core::hint::spin_loop();
+        turns = turns.wrapping_add(1);
+        if turns.is_multiple_of(1024)
+            && start.elapsed() > CLAIM_BUDGET
+            && STATE
+                .compare_exchange(EXTRACT, IDLE, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            MAIN_WORLD.store(core::ptr::null_mut(), Ordering::Release);
+            WITHDRAWN.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+    }
+    // Claimed: the worker is inside `poll`, which needs nothing from this thread.
     spin_until(
-        || STATE.load(Ordering::Acquire) != EXTRACT,
+        || STATE.load(Ordering::Acquire) != TAKEN,
         EXTRACT_DEADLINE,
         "the worker stopped answering an extract",
     );
     MAIN_WORLD.store(core::ptr::null_mut(), Ordering::Release);
     let waited = micros(start.elapsed());
+    EXTRACTS.fetch_add(1, Ordering::Relaxed);
     WAIT_US.fetch_add(waited, Ordering::Relaxed);
     WAIT_MAX_US.fetch_max(waited, Ordering::Relaxed);
+    true
 }
 
 /// The worker's whole loop body, run each time its event loop wakes: boot jobs first, then an
-/// extract and a render if the page asked for one.
-pub fn poll() {
+/// extract and a render if the page published one. Returns whether it rendered, in which case the
+/// worker's host must call [`settle`] from a later task.
+pub fn poll() -> bool {
     at(AT_JOBS);
     loop {
         let job = lock(&JOBS).pop_front();
@@ -368,13 +416,16 @@ pub fn poll() {
             None => break,
         }
     }
-    if STATE.load(Ordering::Acquire) == EXTRACT {
+    let claimed = STATE
+        .compare_exchange(EXTRACT, TAKEN, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    if claimed {
         RENDER_APP.with_borrow_mut(|app| {
             let app = app
                 .as_mut()
                 .expect("render worker: an extract arrived before the render app");
-            // SAFETY: the page stored this pointer from its `&mut World` and spins, touching
-            // nothing, until `STATE` leaves `EXTRACT` below.
+            // SAFETY: the page stored this pointer from its `&mut World`, and once the claim above
+            // succeeded it spins, touching nothing, until `STATE` leaves `TAKEN` below.
             let main_world = unsafe { &mut *MAIN_WORLD.load(Ordering::Acquire) };
             at(AT_EXTRACT);
             app.extract(main_world);
@@ -394,22 +445,25 @@ pub fn poll() {
             RENDERS.fetch_add(1, Ordering::Relaxed);
             RENDER_US.fetch_add(took, Ordering::Relaxed);
             RENDER_MAX_US.fetch_max(took, Ordering::Relaxed);
-            STATE.store(IDLE, Ordering::Release);
+            STATE.store(SETTLING, Ordering::Release);
         });
     } else {
         at(AT_GRAVE);
         drain_graveyard();
     }
     at(AT_LOOP);
+    claimed
+}
+
+/// The worker is free again: called by its host from the first task after a [`poll`] that
+/// rendered, once the browser has had the worker's event loop back (to present the frame).
+pub fn settle() {
+    let _ = STATE.compare_exchange(SETTLING, IDLE, Ordering::AcqRel, Ordering::Acquire);
 }
 
 /// The page-side stand-in for the render sub-app: no schedules, only the handshake as its extract.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, AppLabel)]
 pub struct RenderWorkerExtractApp;
-
-/// The main schedule's step before `First` that pays an owed extract ([`pay_owed_extract`]).
-#[derive(ScheduleLabel, Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct RenderWorkerCatchUp;
 
 /// Moves the render sub-app onto the worker at `cleanup` and leaves the handshake in its place.
 /// Added by `RenderPlugin` when [`active`].
@@ -423,13 +477,6 @@ impl Plugin for RenderWorkerPlugin {
         let mut sub_app = SubApp::new();
         sub_app.set_extract(renderer_extract);
         app.insert_sub_app(RenderWorkerExtractApp, sub_app);
-
-        let mut catch_up = Schedule::new(RenderWorkerCatchUp);
-        catch_up.add_systems(pay_owed_extract);
-        app.add_schedule(catch_up);
-        app.world_mut()
-            .resource_mut::<MainScheduleOrder>()
-            .insert_before(First, RenderWorkerCatchUp);
     }
 
     fn cleanup(&self, app: &mut App) {

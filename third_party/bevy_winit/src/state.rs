@@ -70,6 +70,9 @@ pub(crate) struct WinitAppRunnerState {
     wait_elapsed: bool,
     /// Number of "forced" updates to trigger on application start
     startup_forced_updates: u32,
+    /// benilla fork (BENILLA.md, sixth delta): the last update was held by the `may_update` hook
+    /// and is still to run.
+    update_deferred: bool,
 
     /// Current app lifecycle state.
     lifecycle: AppLifecycle,
@@ -130,6 +133,7 @@ impl WinitAppRunnerState {
             wait_elapsed: false,
             // 3 seems to be enough, 5 is a safe margin
             startup_forced_updates: 5,
+            update_deferred: false,
             bevy_window_events: Vec::new(),
             raw_winit_events: Vec::new(),
             windows_system_state,
@@ -559,6 +563,9 @@ impl WinitAppRunnerState {
             // Ensure that an update is triggered on the first iterations for app initialization
             should_update = true;
         }
+        // benilla fork (BENILLA.md, sixth delta): a held update runs at the next frame whatever
+        // the update mode, as it would have run at this one.
+        should_update |= self.update_deferred;
 
         if self.lifecycle == AppLifecycle::WillSuspend {
             self.lifecycle = AppLifecycle::Suspended;
@@ -648,7 +655,10 @@ impl WinitAppRunnerState {
             // If no windows are visible, redraw calls will never succeed, which results in no app update calls being performed.
             // This is a temporary solution, full solution is mentioned here: https://github.com/bevyengine/bevy/issues/1343#issuecomment-770091684
             if !self.ran_update_since_last_redraw || all_invisible {
-                self.run_app_update();
+                // benilla fork (BENILLA.md, sixth delta): a held update asks for the next frame.
+                if !self.run_app_update() {
+                    self.redraw_requested = true;
+                }
                 #[cfg(feature = "custom_cursor")]
                 self.update_cursors(event_loop);
                 #[cfg(not(feature = "custom_cursor"))]
@@ -684,6 +694,16 @@ impl WinitAppRunnerState {
             let (config, windows) = self.focused_windows_state.get(self.app.world()).unwrap();
             let focused = windows.iter().any(|(_, window)| window.focused);
             update_mode = config.update_mode(focused);
+        }
+
+        // benilla fork (BENILLA.md, sixth delta): what the hook holds is settled at the next frame
+        // even when no update follows: a reactive window may not update again for a long time,
+        // and the browser's render worker still needs the last update's extract to draw it.
+        if !self.update_deferred
+            && self.app.plugins_state() == PluginsState::Cleaned
+            && !crate::may_update(self.app.world_mut())
+        {
+            self.redraw_requested = true;
         }
 
         // The update mode could have been changed, so we need to redraw and force an update
@@ -794,7 +814,16 @@ impl WinitAppRunnerState {
         handle_event && self.lifecycle.is_active()
     }
 
-    fn run_app_update(&mut self) {
+    /// Runs one update, unless the `may_update` hook holds it (benilla fork, BENILLA.md, sixth
+    /// delta): then nothing of it is consumed, and `false` asks the caller for the next frame.
+    fn run_app_update(&mut self) -> bool {
+        if self.app.plugins_state() == PluginsState::Cleaned
+            && !crate::may_update(self.app.world_mut())
+        {
+            self.update_deferred = true;
+            return false;
+        }
+        self.update_deferred = false;
         self.reset_on_update();
 
         self.forward_bevy_events();
@@ -809,6 +838,7 @@ impl WinitAppRunnerState {
                 hook(self.app.world_mut());
             }
         }
+        true
     }
 
     fn forward_bevy_events(&mut self) {

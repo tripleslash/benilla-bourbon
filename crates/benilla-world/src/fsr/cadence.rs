@@ -267,6 +267,11 @@ fn run_ahead(world: &mut World) {
     if !std::mem::take(&mut ahead.owed) {
         return;
     }
+    // fork: the render worker. The held frame's extract is still owed to the worker, and a `Main`
+    // now would run before it; the world frame after it runs its own `Main` instead.
+    if render_worker_extract_owed() {
+        return;
+    }
     world.run_schedule(Main);
     world.resource_mut::<FgAhead>().ran = true;
 }
@@ -285,7 +290,7 @@ fn fg_main(
         .replace(now)
         .map(|at| now.duration_since(at).as_secs_f32())
         .filter(|_| cfg!(target_arch = "wasm32"));
-    let wanted = world.resource::<FrameGeneration>().0 && !render_worker_on();
+    let wanted = world.resource::<FrameGeneration>().0;
     let verdict = if wanted {
         let (window, in_world, epoch) = {
             let (windows, views) = lookups.get(world).expect("two queries validate");
@@ -342,13 +347,14 @@ fn fg_main(
     }
 }
 
-/// fork: the browser's render worker (`bevy::render::render_worker`). The split pair above is
-/// built for one thread, and with the render app on a worker a page update whose extract finds the
-/// worker busy is never rendered, so the alternation could settle on extracting only held frames
-/// and leave the world unrendered. While it renders on a worker, no frame is held.
-fn render_worker_on() -> bool {
+/// fork: the browser's render worker (`bevy::render::render_worker`). Every page update is still
+/// extracted once and in order there (an extract the worker cannot take yet is owed, and the next
+/// update waits for it), so held and world frames alternate as on one thread, and the split pair
+/// overlaps: the worker draws the held frame while the page runs the next `Main`. Whether the last
+/// update's extract is still owed, which [`run_ahead`] must not get ahead of.
+fn render_worker_extract_owed() -> bool {
     #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-    return bevy::render::render_worker::active();
+    return bevy::render::render_worker::extract_owed();
     #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
     false
 }

@@ -58,6 +58,22 @@ pub fn set_finish_plugins(hook: fn(&mut App)) {
     let _ = FINISH_PLUGINS.set(hook);
 }
 
+/// benilla fork — the render worker: asked before each `App::update` the runner drives, with the
+/// main world. `false` skips that update and asks for the next redraw: the browser's render worker
+/// holds the page's next update until the last one's extract is paid, and the page must return to
+/// the browser meanwhile rather than wait. Unset, every update runs, as upstream.
+static MAY_UPDATE: std::sync::OnceLock<fn(&mut World) -> bool> = std::sync::OnceLock::new();
+
+/// Install [`MAY_UPDATE`]'s hook. The first call wins; call it before `App::run`.
+pub fn set_may_update(hook: fn(&mut World) -> bool) {
+    let _ = MAY_UPDATE.set(hook);
+}
+
+/// Whether the runner may run the next update ([`MAY_UPDATE`]).
+pub(crate) fn may_update(world: &mut World) -> bool {
+    MAY_UPDATE.get().is_none_or(|hook| hook(world))
+}
+
 /// benilla fork — the render worker: the proxy [`wake_event_loop`] sends through, kept from
 /// [`WinitPlugin::build`].
 static WAKE: std::sync::OnceLock<EventLoopProxy<WinitUserEvent>> = std::sync::OnceLock::new();

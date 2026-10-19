@@ -351,12 +351,42 @@ fn close_frame(d: &mut Diag) {
     d.marks.clear();
 }
 
+/// The GPU's share of a frame, from bevy's per-pass render diagnostics (`RenderDiagnosticsPlugin`,
+/// registered by `perf::journal`): each top-level pass's smoothed time over the frames it ran,
+/// summed, and the largest. With the render app on a worker the page's frame time no longer holds
+/// the render, so a frame the GPU paces reads here and nowhere else. `None` without timestamps.
+fn gpu_line(world: &World) -> Option<String> {
+    let store = world.get_resource::<bevy::diagnostic::DiagnosticsStore>()?;
+    let mut passes: Vec<(&str, f64)> = store
+        .iter()
+        .filter_map(|d| {
+            let pass = d
+                .path()
+                .as_str()
+                .strip_prefix("render/")?
+                .strip_suffix("/elapsed_gpu")?;
+            (!pass.contains('/')).then_some(())?;
+            Some((pass, d.average()?))
+        })
+        .collect();
+    if passes.is_empty() {
+        return None;
+    }
+    let total: f64 = passes.iter().map(|p| p.1).sum();
+    passes.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut line = format!("\n[diag]   gpu avg={total:.1}ms per world frame:");
+    for (pass, ms) in passes.iter().take(TOP_PHASES) {
+        line.push_str(&format!(" {pass}={ms:.1}"));
+    }
+    Some(line)
+}
+
 /// fork: the render worker's share of the window (`bevy::render::render_worker`). With the render
 /// app on a worker, the page's residue after `Last` is no longer the render: it is the wait for the
 /// worker's extract (wake, extract, the page's queued buffer writes) and whatever the browser does
 /// before the next callback. The render itself is timed on the worker and reported here, beside
-/// the updates that ended with the worker busy (`owed`) and how long the next update then waited
-/// at its start for the render to finish (`late`).
+/// the updates that ended without an extract (`owed`), the updates the runner then held until it
+/// was paid (`skipped`), and the extracts the worker did not claim in time (`withdrawn`).
 fn render_worker_line() -> Option<String> {
     #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
     {
@@ -365,28 +395,25 @@ fn render_worker_line() -> Option<String> {
             return None;
         }
         let s = render_worker::take_stats();
-        let avg = |sum: u64| {
-            if s.renders > 0 {
-                sum as f32 / s.renders as f32 / 1000.0
+        let avg = |sum: u64, n: u64| {
+            if n > 0 {
+                sum as f32 / n as f32 / 1000.0
             } else {
                 0.0
             }
         };
-        let per_owed = if s.owed > 0 {
-            s.late_us as f32 / s.owed as f32 / 1000.0
-        } else {
-            0.0
-        };
         Some(format!(
-            "\n[diag]   render worker: renders={} avg={:.1}ms max={:.1}ms | extract wait \
-             avg={:.1}ms max={:.1}ms | owed={} late avg={per_owed:.1}ms max={:.1}ms",
+            "\n[diag]   render worker: renders={} avg={:.1}ms max={:.1}ms | extracts={} wait \
+             avg={:.1}ms max={:.1}ms | owed={} skipped={} withdrawn={}",
             s.renders,
-            avg(s.render_us),
+            avg(s.render_us, s.renders),
             s.render_max_us as f32 / 1000.0,
-            avg(s.wait_us),
+            s.extracts,
+            avg(s.wait_us, s.extracts),
             s.wait_max_us as f32 / 1000.0,
             s.owed,
-            s.late_max_us as f32 / 1000.0,
+            s.skipped,
+            s.withdrawn,
         ))
     }
     #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
@@ -419,6 +446,7 @@ fn report(world: &mut World) {
             let settled = w.0.settled.load(Ordering::Relaxed);
             (w.0.created.load(Ordering::Relaxed), settled)
         });
+    let gpu = gpu_line(world);
     let mut d = world.resource_mut::<Diag>();
     d.next_report = now + REPORT_SECS;
 
@@ -503,6 +531,17 @@ fn report(world: &mut World) {
     if let Some(worker) = render_worker_line() {
         line.push_str(&worker);
     }
+    if let Some(gpu) = gpu {
+        line.push_str(&gpu);
+    }
+    // fork: the browser frees a dropped GPU object only when its JS wrapper is collected, so the
+    // renderer destroys the released ones itself (`bevy_render`'s ninth delta); a window that
+    // creates and drops textures or buffers and reads 0 here is leaking them until a collection.
+    #[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+    line.push_str(&format!(
+        "\n[diag]   gpu objects destroyed={}",
+        bevy::render::take_released_gpu_objects()
+    ));
     // State writes are `localStorage.setItem` on this thread — synchronous, and charged to
     // whatever frame made them. A file here whose ms and bytes both climb with the session is a
     // stutter that grows, and nothing else in this report would name it (see

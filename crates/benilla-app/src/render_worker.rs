@@ -57,6 +57,8 @@ mod imp {
         // The device is made on the worker; its arrival must wake the page's event loop.
         render_worker::set_wake_page(bevy::winit::wake_event_loop);
         bevy::winit::set_finish_plugins(finish_on_worker);
+        // An update whose extract the worker could not take yet is held, not waited on.
+        bevy::winit::set_may_update(render_worker::before_update);
         web_sys::console::log_1(
             &"wenilla: rendering on a worker (?renderworker=0 to compare)".into(),
         );
@@ -108,10 +110,18 @@ mod imp {
         render_worker::describe()
     }
 
-    /// Each wake of the worker's event loop (`web/renderworker.js`). **Not for anything else to
-    /// call.**
+    /// Each wake of the worker's event loop (`web/renderworker.js`); `true` when it rendered, and
+    /// the worker then calls [`__wenilla_render_settle`] from its next task. **Not for anything
+    /// else to call.**
     #[wasm_bindgen]
-    pub fn __wenilla_render_poll() {
-        render_worker::poll();
+    pub fn __wenilla_render_poll() -> bool {
+        render_worker::poll()
+    }
+
+    /// The first task after a poll that rendered (`web/renderworker.js`): the worker is free
+    /// again. **Not for anything else to call.**
+    #[wasm_bindgen]
+    pub fn __wenilla_render_settle() {
+        render_worker::settle();
     }
 }

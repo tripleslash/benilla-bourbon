@@ -62,6 +62,17 @@ until the first click). For the same reason `new_events` treats the iteration th
 plugins as an elapsed wait: woken by an event it reads as not elapsed, and a reactive window arms its
 update timer only on an elapsed wait.
 
+## The sixth delta: an update the app holds
+
+`set_may_update` (`src/lib.rs`) installs a hook the runner asks, with the main world, before each
+update (`run_app_update`, `src/state.rs`). `false` holds that update: nothing of it is consumed, the
+runner asks for the next redraw, and the held update runs at the next frame whatever the update mode
+(`update_deferred`). The runner also asks it at the end of an iteration that held or ran no update,
+and asks for the next frame while it says `false`, so what it holds is settled even when no update
+follows (a reactive window). The browser's render worker uses it to pay an extract the last update owed
+before the next one starts, without the page's thread waiting on the worker (which, between its
+tasks, can be waiting on the page). Unset, every update runs.
+
 Search for `benilla fork` to find every hunk.
 
 ## Verifying diff
@@ -70,4 +81,4 @@ Search for `benilla fork` to find every hunk.
 diff -ru <crates.io bevy_winit-0.19.1> third_party/bevy_winit
 ```
 
-The diff shows only the `src/state.rs` hunks above, `AfterUpdate`, the finish hook and `wake_event_loop` in `src/lib.rs`, plus this file.
+The diff shows only the `src/state.rs` hunks above, `AfterUpdate`, the finish hook, `wake_event_loop` and `set_may_update` in `src/lib.rs`, plus this file.
