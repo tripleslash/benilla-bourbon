@@ -166,8 +166,8 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
                 #[cfg(not(target_arch = "wasm32"))]
                 tick_global_task_pools_on_main_thread();
             } else {
-                self.app.finish();
-                self.app.cleanup();
+                // benilla fork: through the render worker's hook when it has one (`lib.rs`).
+                crate::finish_plugins(&mut self.app);
             }
             self.redraw_requested = true;
         }
@@ -911,8 +911,8 @@ impl WinitAppRunnerState {
 /// `EventLoop`.
 pub fn winit_runner(mut app: App, event_loop: EventLoop<WinitUserEvent>) -> AppExit {
     if app.plugins_state() == PluginsState::Ready {
-        app.finish();
-        app.cleanup();
+        // benilla fork: through the render worker's hook when it has one (`lib.rs`).
+        crate::finish_plugins(&mut app);
     }
 
     let runner_state = WinitAppRunnerState::new(app);

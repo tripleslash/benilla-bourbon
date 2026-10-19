@@ -35,6 +35,14 @@ sub-apps have run. Frame generation (`benilla-world/src/fsr/cadence.rs`) uses it
 where there is no render thread: a held frame presents and then runs the next game update behind
 that present, so the world frame after it only extracts and renders. Absent, nothing changes.
 
+## The third delta: who finishes the plugins
+
+`set_finish_plugins(fn(&mut App))` (`src/lib.rs`): when installed, the runner calls it instead of
+`App::finish` + `App::cleanup` (both call sites, `new_events` and `winit_runner`, in `src/state.rs`).
+The browser's render worker (`third_party/bevy_render/BENILLA.md`, eighth delta) installs one that
+runs both on the worker owning the GPU device, since plugins' `finish` reads it and builds render
+resources. Absent, nothing changes.
+
 Search for `benilla fork` to find every hunk.
 
 ## Verifying diff
@@ -43,4 +51,4 @@ Search for `benilla fork` to find every hunk.
 diff -ru <crates.io bevy_winit-0.19.1> third_party/bevy_winit
 ```
 
-The diff shows only the `src/state.rs` hunks above, `AfterUpdate` in `src/lib.rs`, plus this file.
+The diff shows only the `src/state.rs` hunks above, `AfterUpdate` and the finish hook in `src/lib.rs`, plus this file.

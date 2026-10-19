@@ -387,18 +387,34 @@ pub fn create_surfaces(
             .surfaces
             .entry(window.entity)
             .or_insert_with(|| {
-                let surface_target = SurfaceTargetUnsafe::RawHandle {
-                    raw_display_handle: Some(window.handle.get_display_handle()),
-                    raw_window_handle: window.handle.get_window_handle(),
-                };
-                // SAFETY: The window handles in ExtractedWindows will always be valid objects to create surfaces on
-                let surface = unsafe {
-                    // NOTE: On some OSes this MUST be called from the main thread.
-                    // As of wgpu 0.15, only fallible if the given window is a HTML canvas and obtaining a WebGPU or WebGL2 context fails.
+                // **benilla fork (BENILLA.md, "The render worker").** On the worker the window's
+                // canvas is the `OffscreenCanvas` the page transferred; the raw handle names a JS
+                // object in the page's heap, which means nothing there.
+                #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+                let worker_surface = crate::render_worker::canvas().map(|canvas| {
+                    use wasm_bindgen::JsCast;
                     render_instance
-                        .create_surface_unsafe(surface_target)
-                        .expect("Failed to create wgpu surface")
-                };
+                        .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(
+                            canvas.unchecked_into(),
+                        ))
+                        .expect("Failed to create wgpu surface on the render worker")
+                });
+                #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+                let worker_surface: Option<wgpu::Surface<'static>> = None;
+                let surface = worker_surface.unwrap_or_else(|| {
+                    let surface_target = SurfaceTargetUnsafe::RawHandle {
+                        raw_display_handle: Some(window.handle.get_display_handle()),
+                        raw_window_handle: window.handle.get_window_handle(),
+                    };
+                    // SAFETY: The window handles in ExtractedWindows will always be valid objects to create surfaces on
+                    unsafe {
+                        // NOTE: On some OSes this MUST be called from the main thread.
+                        // As of wgpu 0.15, only fallible if the given window is a HTML canvas and obtaining a WebGPU or WebGL2 context fails.
+                        render_instance
+                            .create_surface_unsafe(surface_target)
+                            .expect("Failed to create wgpu surface")
+                    }
+                });
                 let caps = surface.get_capabilities(&render_adapter);
                 let present_mode = present_mode(window, &caps);
                 let formats = caps.formats;

@@ -57,6 +57,10 @@ pub mod pipelined_rendering;
 // must not hold a wgpu handle — see the module header. Upstream guards `renderer/mod.rs` the same
 // way and misses `batching::gpu_preprocessing`, which is what this exists for.
 mod wasm_serial;
+// **benilla fork.** The render sub-app on its own Web Worker, the browser build's stand-in for
+// `pipelined_rendering` — see the module header and BENILLA.md, "The render worker".
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+pub mod render_worker;
 pub mod render_asset;
 pub mod render_phase;
 pub mod render_resource;
@@ -387,11 +391,26 @@ impl Plugin for RenderPlugin {
         ));
 
         let (sender, receiver) = bevy_time::create_time_channels();
+        // benilla fork (BENILLA.md, "The render worker"): the worker renders on its own clock, at
+        // most once per main update and often less, so the main app keeps its own time; the
+        // worker's `send_time` then finds the channel closed, which it ignores.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        if !render_worker::active() {
+            app.insert_resource(receiver);
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
         app.insert_resource(receiver);
 
         let asset_server = app.world().resource::<AssetServer>().clone();
         app.init_resource::<RenderAssetBytesPerFrame>()
             .init_resource::<RenderErrorHandler>();
+        // benilla fork (BENILLA.md, "The render worker"): the handshake that replaces running the
+        // render app on this thread, added once the render app exists.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        if render_worker::active() {
+            app.add_plugins(render_worker::RenderWorkerPlugin);
+        }
+
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.init_resource::<RenderScheduleOrder>();
             render_app.init_resource::<RenderAssetBytesPerFrameLimiter>();

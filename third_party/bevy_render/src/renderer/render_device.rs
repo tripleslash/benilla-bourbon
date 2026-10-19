@@ -14,6 +14,12 @@ use wgpu::{
 #[derive(Resource, Clone)]
 pub struct RenderDevice {
     device: WgpuWrapper<wgpu::Device>,
+    // **benilla fork (BENILLA.md, "The render worker").** Read once where the device is made, so
+    // `features()`/`limits()` answer on the page too, where the device itself may not be touched.
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    features: wgpu::Features,
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    limits: wgpu::Limits,
 }
 
 impl From<wgpu::Device> for RenderDevice {
@@ -24,7 +30,13 @@ impl From<wgpu::Device> for RenderDevice {
 
 impl RenderDevice {
     pub fn new(device: WgpuWrapper<wgpu::Device>) -> Self {
-        Self { device }
+        Self {
+            #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+            features: device.features(),
+            #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+            limits: device.limits(),
+            device,
+        }
     }
 
     /// List all [`Features`](wgpu::Features) that may be used with this device.
@@ -32,6 +44,9 @@ impl RenderDevice {
     /// Functions may panic if you use unsupported features.
     #[inline]
     pub fn features(&self) -> wgpu::Features {
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        return self.features;
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
         self.device.features()
     }
 
@@ -40,6 +55,9 @@ impl RenderDevice {
     /// If any of these limits are exceeded, functions may panic.
     #[inline]
     pub fn limits(&self) -> wgpu::Limits {
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        return self.limits.clone();
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
         self.device.limits()
     }
 
@@ -202,12 +220,30 @@ impl RenderDevice {
 
     /// Creates a [`Buffer`].
     pub fn create_buffer(&self, desc: &wgpu::BufferDescriptor) -> Buffer {
+        // benilla fork (BENILLA.md, "The render worker"): on the page, a buffer made on first use.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        if !crate::render_worker::is_render_thread() {
+            return Buffer::pending(desc, None);
+        }
         let wgpu_buffer = self.device.create_buffer(desc);
         Buffer::from(wgpu_buffer)
     }
 
     /// Creates a [`Buffer`] and initializes it with the specified data.
     pub fn create_buffer_with_data(&self, desc: &wgpu::util::BufferInitDescriptor) -> Buffer {
+        // benilla fork (BENILLA.md, "The render worker"): on the page, a buffer made on first use.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        if !crate::render_worker::is_render_thread() {
+            return Buffer::pending(
+                &wgpu::BufferDescriptor {
+                    label: desc.label,
+                    size: desc.contents.len() as wgpu::BufferAddress,
+                    usage: desc.usage,
+                    mapped_at_creation: false,
+                },
+                Some(desc.contents),
+            );
+        }
         let wgpu_buffer = self.device.create_buffer_init(desc);
         Buffer::from(wgpu_buffer)
     }

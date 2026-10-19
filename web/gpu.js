@@ -147,6 +147,15 @@ export function installGpuGuard(canvas, { query = new URLSearchParams(location.s
     reset() {
       return resetTier(state, governor);
     },
+    /// The render worker's device (`web/renderworker.js`), reported through `web/threads.js`: a
+    /// device made on a worker is not one the wrapper below sees, so the worker wraps its own
+    /// `requestDevice` and forwards what it observes here.
+    deviceLost(info) {
+      onDeviceLost(canvas, state, info);
+    },
+    deviceError(kind) {
+      onUncapturedError(state, governor, kind);
+    },
   };
   // Silent at tier 0 — this page keeps the console for errors and `[diag]` lines. Above it,
   // something already went wrong on this machine and the reason the picture is softer than it was
@@ -460,12 +469,19 @@ function installDeviceWatchdog(canvas, state, governor) {
         (info) => onDeviceLost(canvas, state, info),
         () => {}
       );
-      device.addEventListener('uncapturederror', (e) => onUncapturedError(state, governor, e));
+      device.addEventListener('uncapturederror', (e) =>
+        onUncapturedError(state, governor, errorKind(e))
+      );
     } catch (_) {
       /* an implementation without `lost` or events: nothing to watch, and nothing to break */
     }
     return device;
   };
+}
+
+/// The class name of an `uncapturederror` event's error, `''` when there is none.
+function errorKind(e) {
+  return (e && e.error && e.error.constructor && e.error.constructor.name) || '';
 }
 
 /// The device is gone. Step the ladder down, say so, and either restart or hand over.
@@ -504,8 +520,7 @@ function onDeviceLost(canvas, state, info) {
 /// still alive — a validation error, by contrast, is one of our own bugs and means nothing about
 /// the machine. A burst of them is the last warning before a hang, so take the budget down a rung
 /// *without* a reload: one reallocation now against a device reset later.
-function onUncapturedError(state, governor, e) {
-  const kind = (e && e.error && e.error.constructor && e.error.constructor.name) || '';
+function onUncapturedError(state, governor, kind) {
   if (kind !== 'GPUInternalError' && kind !== 'GPUOutOfMemoryError') return;
 
   const now = Date.now();

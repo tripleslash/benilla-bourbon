@@ -43,6 +43,9 @@ pub fn install() {}
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 pub use imp::{install, spawn_detached};
+// The render worker (`crate::render_worker`) is started through the same page global.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+pub(crate) use imp::bridge;
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 mod imp {
@@ -76,7 +79,7 @@ mod imp {
     }
 
     /// Resolve one function off the page global, or `None` if the page ships no bridge.
-    fn bridge(method: &str) -> Option<(JsValue, Function)> {
+    pub(crate) fn bridge(method: &str) -> Option<(JsValue, Function)> {
         let window = web_sys::window()?;
         let obj = Reflect::get(&window, &GLOBAL.into()).ok()?;
         if !obj.is_object() {

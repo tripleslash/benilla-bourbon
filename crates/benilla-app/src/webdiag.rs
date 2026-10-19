@@ -351,6 +351,48 @@ fn close_frame(d: &mut Diag) {
     d.marks.clear();
 }
 
+/// fork: the render worker's share of the window (`bevy::render::render_worker`). With the render
+/// app on a worker, the page's residue after `Last` is no longer the render: it is the wait for the
+/// worker's extract (wake, extract, the page's queued buffer writes) and whatever the browser does
+/// before the next callback. The render itself is timed on the worker and reported here, beside
+/// the updates that ended with the worker busy (`owed`) and how long the next update then waited
+/// at its start for the render to finish (`late`).
+fn render_worker_line() -> Option<String> {
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    {
+        use bevy::render::render_worker;
+        if !render_worker::active() {
+            return None;
+        }
+        let s = render_worker::take_stats();
+        let avg = |sum: u64| {
+            if s.renders > 0 {
+                sum as f32 / s.renders as f32 / 1000.0
+            } else {
+                0.0
+            }
+        };
+        let per_owed = if s.owed > 0 {
+            s.late_us as f32 / s.owed as f32 / 1000.0
+        } else {
+            0.0
+        };
+        Some(format!(
+            "\n[diag]   render worker: renders={} avg={:.1}ms max={:.1}ms | extract wait \
+             avg={:.1}ms max={:.1}ms | owed={} late avg={per_owed:.1}ms max={:.1}ms",
+            s.renders,
+            avg(s.render_us),
+            s.render_max_us as f32 / 1000.0,
+            avg(s.wait_us),
+            s.wait_max_us as f32 / 1000.0,
+            s.owed,
+            s.late_max_us as f32 / 1000.0,
+        ))
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+    None
+}
+
 /// The report, in `Last` so the census sees the frame's finished world.
 fn report(world: &mut World) {
     let now = world.resource::<Time<Real>>().elapsed_secs();
@@ -457,6 +499,9 @@ fn report(world: &mut World) {
     // left on the frame thread now that decode is off it", and it costs one `take` per report.
     if let Some(stream) = activity.and_then(|a| stream_line(a, n)) {
         line.push_str(&stream);
+    }
+    if let Some(worker) = render_worker_line() {
+        line.push_str(&worker);
     }
     // State writes are `localStorage.setItem` on this thread — synchronous, and charged to
     // whatever frame made them. A file here whose ms and bytes both climb with the session is a

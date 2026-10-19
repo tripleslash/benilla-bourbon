@@ -108,6 +108,57 @@ The hunk adds `RenderAsset::DEFERRABLE` (default `true`), which `prepare_assets`
 deferrals, and `RenderMesh` says `false`. A mesh's bytes still count against the frame, so images
 prepared after it wait as before.
 
+## The eighth delta: the render worker (web, threaded)
+
+Everything gated `all(target_arch = "wasm32", target_feature = "atomics")`; off that target, and on
+it while the mode is off, the code paths are upstream's. `src/render_worker.rs` has the mechanism in
+its header; this is the list of seams.
+
+**The shape.** The page's one thread ran main, extract and `Render` in series. `pipelined_rendering`
+cannot split them here: it moves the render `SubApp` across threads twice a frame and its handshake
+blocks, and every wgpu handle is a `SendWrapper` around a JS object of one agent. So the render
+world never moves. `benilla_app::render_worker` starts a dedicated worker (same module, same memory,
+`web/renderworker.js`) and transfers the canvas to it as an `OffscreenCanvas`; device creation,
+every plugin `finish`/`cleanup`, extract and the render schedule run there. For extract the *main*
+world visits: the page parks a pointer, flips an atomic to `EXTRACT`, and spins for the worker's
+extract only. The main world's contents are `Send + Sync` by trait bound; `NonSend` resources keep
+bevy's own thread check. An update that ends with the worker still rendering does not wait: its
+extract is owed, the page's callback returns, and the next update pays it before `First`
+(`RenderWorkerCatchUp`), waiting only for what is left of the render. It is not skipped: bevy's
+messages (the `AssetEvent`s `extract_render_asset` reads, removed components) live two updates, so
+an update that was never extracted would lose asset changes, and every main update stays extracted
+exactly once and before the next one runs, as on one thread.
+
+| file | change |
+|---|---|
+| `src/render_worker.rs` | new — the state machine, the job queue, `run_blocking` for the runner's `finish`/`cleanup`, `RenderWorkerPlugin` (parks the `RenderApp` on the worker in `cleanup`, leaves `RenderWorkerExtractApp` and its non-blocking extract on the page, and the `RenderWorkerCatchUp` step before `First` that pays an owed extract), the page-side buffer creation and write queue, the graveyard, the stats `webdiag` prints |
+| `src/lib.rs` | `pub mod render_worker`; `RenderPlugin::build` adds `RenderWorkerPlugin` when active, and does not insert the `TimeReceiver` (the main app keeps its own clock; the worker's `send_time` then finds the channel closed, which it ignores) |
+| `src/settings.rs` | `create_render` posts `initialize_renderer` to the worker when active (no surface: the browser's adapter request has no use for one); `unpack_into` records the device for page-made buffers |
+| `src/view/window/mod.rs` | `create_surfaces` makes the surface from the worker's `OffscreenCanvas` (the window's raw handle names a page-heap object); the upstream path is wrapped in an `unwrap_or_else` and otherwise unchanged |
+| `src/renderer/wgpu_wrapper.rs` | the `SendWrapper` sits in a `ManuallyDrop`; a wrapper dropped off its thread is buried and dropped on the worker after its next render, instead of panicking. Access off-thread still panics |
+| `src/render_resource/buffer.rs` | `Buffer` holds an `Arc` of a lazy cell: a clone never touches wgpu (cloning a `SendWrapper` dereferences it), and a buffer the page creates is made on the worker at first use |
+| `src/renderer/render_device.rs` | `features()`/`limits()` cached at construction; `create_buffer[_with_data]` off the worker returns a pending buffer |
+| `src/renderer/mod.rs` | `RenderQueue::write_buffer` (an inherent method, so it shadows `wgpu::Queue`'s through `Deref`) queues a page write, applied right after the next extract; `QueueWriteTarget` takes a bevy or a wgpu buffer by any reference |
+
+**Why the page-side seams exist.** benilla's main world creates and writes buffers itself: the
+shared light buffer at `Startup` (`benilla_world::assets`) and the UI-model light pool
+(`benilla_app::ui_models`, `pane_light`), whose buffers sit in materials. Of the ~56
+`Res<RenderDevice|RenderQueue>` in benilla's crates those are the only main-world ones; the rest run
+in the render app. A write the page queues lands after the extract that closes the page update it was
+made in, before that frame's own writes and submits: the order it had on one thread.
+
+**Audited.** Every `Plugin::finish`/`cleanup` in the graph (bevy_render, bevy_pbr,
+bevy_core_pipeline, bevy_anti_alias, bevy_gltf, bevy_egui, benilla's `gpu_blp`, `fsr`, `meter`,
+`view`) reads the device or adapter, builds render resources, or writes plain main-world data, so all
+of them run correctly on the worker. `RenderStartup` and device recovery run inside `update_state`,
+which is part of extract, so on the worker. A render-world `webenv` read finds no `window` on the
+worker and reads a snapshot the page published (`benilla_app::webenv::publish_for_workers`).
+
+**What it does not do.** Frame generation's web cadence (`benilla_world::fsr::cadence`) is built for
+one thread and holds no frame while the worker renders. `web/index.html`'s two diagnostic
+`requestDevice` wrappers (the WGSL error reporter, the sampler census) see only page devices; the
+device watchdog is forwarded from the worker (`web/renderworker.js` → `gpu.js`).
+
 ## The delta, and the command that proves it
 
 **A few lines changed in five upstream files, one module added.**
@@ -120,8 +171,9 @@ prepared after it wait as before.
 | `src/batching/gpu_preprocessing.rs` | two `ComputeTaskPool::get().scope(` (0.19.1 lines ~2355 and ~2657) become `crate::wasm_serial::compute_scope(`, and the now-unused `use bevy_tasks::ComputeTaskPool;` goes |
 | `src/render_asset.rs` | `RenderAsset::DEFERRABLE`, asked by `prepare_assets` before each of its two deferrals (above) |
 | `src/mesh/mod.rs` | `RenderMesh` sets `DEFERRABLE = false` (above) |
-| `src/lib.rs` | `mod wasm_serial;` |
+| `src/lib.rs` | `mod wasm_serial;`; the render worker's lines (eighth delta) |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |
+| `src/render_worker.rs`, `src/settings.rs`, `src/view/window/mod.rs`, `src/renderer/{wgpu_wrapper,render_device,mod}.rs`, `src/render_resource/buffer.rs` | the render worker (eighth delta, its own table) |
 
 **The bodies of both systems are byte-for-byte upstream's**, which is the whole design of the fix:
 the scope object a closure receives is inferred, so `compute_scope(|scope| { … })` reads identically

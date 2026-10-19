@@ -285,7 +285,7 @@ fn fg_main(
         .replace(now)
         .map(|at| now.duration_since(at).as_secs_f32())
         .filter(|_| cfg!(target_arch = "wasm32"));
-    let wanted = world.resource::<FrameGeneration>().0;
+    let wanted = world.resource::<FrameGeneration>().0 && !render_worker_on();
     let verdict = if wanted {
         let (window, in_world, epoch) = {
             let (windows, views) = lookups.get(world).expect("two queries validate");
@@ -340,6 +340,17 @@ fn fg_main(
     } else if !ran_ahead {
         world.run_schedule(Main);
     }
+}
+
+/// fork: the browser's render worker (`bevy::render::render_worker`). The split pair above is
+/// built for one thread, and with the render app on a worker a page update whose extract finds the
+/// worker busy is never rendered, so the alternation could settle on extracting only held frames
+/// and leave the world unrendered. While it renders on a worker, no frame is held.
+fn render_worker_on() -> bool {
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    return bevy::render::render_worker::active();
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+    false
 }
 
 /// Render world, just before the render graph: on a held frame every camera that does not present

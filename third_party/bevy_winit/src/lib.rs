@@ -48,6 +48,27 @@ use crate::{
 #[derive(Resource, Clone, Copy)]
 pub struct AfterUpdate(pub fn(&mut World));
 
+/// benilla fork — the render worker (`third_party/bevy_render/BENILLA.md`): who runs the plugins'
+/// `finish` and `cleanup` once they are ready. Unset, the runner calls both itself, as upstream
+/// does. The browser's render worker sets it so they run on the worker that owns the device.
+static FINISH_PLUGINS: std::sync::OnceLock<fn(&mut App)> = std::sync::OnceLock::new();
+
+/// Install [`FINISH_PLUGINS`]'s hook. The first call wins; call it before `App::run`.
+pub fn set_finish_plugins(hook: fn(&mut App)) {
+    let _ = FINISH_PLUGINS.set(hook);
+}
+
+/// `App::finish` then `App::cleanup`, through the hook when one is installed.
+pub(crate) fn finish_plugins(app: &mut App) {
+    match FINISH_PLUGINS.get() {
+        Some(hook) => hook(app),
+        None => {
+            app.finish();
+            app.cleanup();
+        }
+    }
+}
+
 pub mod accessibility;
 pub mod converters;
 mod cursor;

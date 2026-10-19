@@ -38,6 +38,11 @@ pub fn var(name: &str) -> Option<String> {
 #[cfg(target_arch = "wasm32")]
 pub fn var(name: &str) -> Option<String> {
     let key = name.strip_prefix("WOW_").unwrap_or(name).to_lowercase();
+    // fork: the render worker has no `window`; it reads what the page published for it.
+    if web_sys::window().is_none() {
+        let (env, search) = FOR_WORKERS.get()?;
+        return lookup(env, search, &key);
+    }
     let env = page_env();
     let search = web_sys::window()
         .and_then(|w| w.location().search().ok())
@@ -87,6 +92,22 @@ pub(crate) fn config(key: &str) -> Option<String> {
         // An empty string is how the checked-in `web/config.json` ships; it means "not
         // configured", not "configure this to the empty address".
         .filter(|v| !v.trim().is_empty())
+}
+
+/// fork: the page's env object and query string, as the page read them, for code running on a
+/// worker ([`var`] there). Published by [`publish_for_workers`] before the render worker runs
+/// anything; a later `history.replaceState` does not reach it.
+#[cfg(target_arch = "wasm32")]
+static FOR_WORKERS: std::sync::OnceLock<(std::collections::HashMap<String, String>, String)> =
+    std::sync::OnceLock::new();
+
+/// fork: snapshot the page's env object and query string for [`var`] on a worker. Page only.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics", feature = "webgpu"))]
+pub(crate) fn publish_for_workers() {
+    let search = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default();
+    let _ = FOR_WORKERS.set((page_env(), search));
 }
 
 /// The keys the query string may only answer when the page opted in with `dev_query_creds`.
