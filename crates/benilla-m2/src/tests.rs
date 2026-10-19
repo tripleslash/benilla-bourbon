@@ -185,15 +185,17 @@ fn a_stage_past_the_texture_unit_table_reads_the_files_next_entry() {
     let fmt = parse(&b).expect("a one-entry texture-unit table parses");
     let m = fmt.model();
     assert_eq!(m.texture_unit_lookup, vec![0]);
-    assert_eq!(m.stage_coord(&combine_batch(), 1), Some(0));
-    assert!(!m.stage_is_env_mapped(&combine_batch(), 1), "UV set 0, as the file reads on");
-    assert!(m.stage_is_env_mapped(&combine_batch(), 2), "0xffff two past: the sphere map");
+    // tortoise: past the table a stage reads its own UV set, as the Turtle client draws it.
+    assert_eq!(m.texture_unit_lookup_past, vec![0, 0xffff], "the file's next u16s are kept");
+    assert_eq!(m.stage_coord(&combine_batch(), 0), Some(0));
+    assert_eq!(m.stage_coord(&combine_batch(), 1), Some(1));
+    assert!(!m.stage_is_env_mapped(&combine_batch(), 1), "UV set 1, not the sphere map");
 
-    // The table is the file's last bytes: nothing past it, the sphere map as before.
+    // The table is the file's last bytes: the same rule, nothing read past it.
     b.truncate(unit_ofs as usize + 2);
     let fmt = parse(&b).expect("a table at the end of the file parses");
-    assert_eq!(fmt.model().stage_coord(&combine_batch(), 1), None);
-    assert!(fmt.model().stage_is_env_mapped(&combine_batch(), 1));
+    assert_eq!(fmt.model().stage_coord(&combine_batch(), 1), Some(1));
+    assert!(!fmt.model().stage_is_env_mapped(&combine_batch(), 1));
 }
 
 /// A batch on material 0 for [`M2Model::stage_combine`]; only `material_index` is read.

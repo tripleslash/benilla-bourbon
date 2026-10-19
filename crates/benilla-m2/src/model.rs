@@ -269,15 +269,18 @@ pub struct M2Model {
 
 impl M2Model {
     /// The coordinate source of `batch`'s stage `stage`: the [`Self::texture_unit_lookup`] entry
-    /// at `texture_coord_combo_index + stage`, which the draw's gate `0x70b8bd` reads unchecked: an
-    /// index past the table reads the file's next u16s ([`Self::texture_unit_lookup_past`]), as the
-    /// reference holds the file whole. `None` past those too.
+    /// at `texture_coord_combo_index + stage`. The 1.12.1 draw's gate `0x70b8bd` reads it
+    /// unchecked, so an index past the table reads the file's next u16s
+    /// ([`Self::texture_unit_lookup_past`]).
+    ///
+    /// tortoise deviation: past the table a stage reads the UV set of its own number, as the Turtle
+    /// WoW client draws it. HD model packs (OctoWoW HD's `UI_MainMenu.m2`) ship two-texture units
+    /// over a one-entry table; on the Turtle client their stage 1 reads UV set 1, where the
+    /// clamped masks fit (the pillar swirls' `T_VFX_Border_256`, the portal's door masks). 1.12.1's
+    /// read-past gives UV set 0 there, which hides the swirls entirely.
     pub fn stage_coord(&self, batch: &crate::SkinBatch, stage: u16) -> Option<u16> {
         let idx = batch.texture_coord_combo_index as usize + stage as usize;
-        self.texture_unit_lookup.get(idx).copied().or_else(|| {
-            let past = idx - self.texture_unit_lookup.len();
-            self.texture_unit_lookup_past.get(past).copied()
-        })
+        self.texture_unit_lookup.get(idx).copied().or(Some(stage))
     }
 
     /// Whether `batch`'s stage `stage` takes generated environment coordinates: a coordinate source
