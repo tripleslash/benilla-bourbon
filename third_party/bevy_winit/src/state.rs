@@ -161,6 +161,7 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
         #[cfg(feature = "trace")]
         let _span = tracing::info_span!("winit event_handler").entered();
 
+        let mut finished = false;
         if self.app.plugins_state() != PluginsState::Cleaned {
             if self.app.plugins_state() != PluginsState::Ready {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -168,6 +169,7 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
             } else {
                 // benilla fork: through the render worker's hook when it has one (`lib.rs`).
                 crate::finish_plugins(&mut self.app);
+                finished = true;
             }
             self.redraw_requested = true;
         }
@@ -184,6 +186,11 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
             }
             _ => true,
         };
+        // benilla fork (BENILLA.md, fifth delta): the iteration that finishes the plugins counts
+        // as an elapsed wait, so a reactive window arms its timer and keeps updating. Woken by an
+        // event (the render worker's `wake_event_loop`) it would read as not elapsed, and with no
+        // timer armed while the app could not update yet, nothing would wake it again.
+        self.wait_elapsed |= finished;
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -543,7 +550,11 @@ impl WinitAppRunnerState {
         let mut update_mode = config.update_mode(focused);
         let mut should_update = self.should_update(update_mode);
 
-        if self.startup_forced_updates > 0 {
+        // benilla fork (BENILLA.md, fifth delta): spent only once the app can update. Before the
+        // plugins are cleaned up `run_app_update` does nothing, and a renderer that becomes ready
+        // after the loop has run (the browser's render worker makes the device off the page)
+        // would otherwise find every forced update gone, leaving a reactive window asleep.
+        if self.startup_forced_updates > 0 && self.app.plugins_state() == PluginsState::Cleaned {
             self.startup_forced_updates -= 1;
             // Ensure that an update is triggered on the first iterations for app initialization
             should_update = true;

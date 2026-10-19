@@ -286,13 +286,21 @@ impl RenderCreation {
                 if crate::render_worker::active() {
                     drop(primary_window);
                     crate::render_worker::post(move || {
+                        use core::sync::atomic::Ordering::Relaxed;
+                        let at = &crate::render_worker::DEVICE_AT;
+                        at.store(1, Relaxed);
                         bevy_tasks::IoTaskPool::get()
                             .spawn_local(async move {
+                                at.store(3, Relaxed);
                                 let render_resources =
                                     renderer::initialize_renderer(backends, None, &settings).await;
+                                at.store(4, Relaxed);
                                 *future_resources.lock().unwrap() = Some(render_resources);
+                                at.store(5, Relaxed);
+                                crate::render_worker::wake_page();
                             })
                             .detach();
+                        at.fetch_max(2, Relaxed);
                     });
                     return true;
                 }

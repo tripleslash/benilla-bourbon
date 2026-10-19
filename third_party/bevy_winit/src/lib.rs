@@ -58,6 +58,19 @@ pub fn set_finish_plugins(hook: fn(&mut App)) {
     let _ = FINISH_PLUGINS.set(hook);
 }
 
+/// benilla fork — the render worker: the proxy [`wake_event_loop`] sends through, kept from
+/// [`WinitPlugin::build`].
+static WAKE: std::sync::OnceLock<EventLoopProxy<WinitUserEvent>> = std::sync::OnceLock::new();
+
+/// Wake the event loop from any thread (`WinitUserEvent::WakeUp`), so the runner checks its plugins'
+/// readiness again: the browser's render worker publishes the GPU device off the page. A no-op
+/// before the plugin is built.
+pub fn wake_event_loop() {
+    if let Some(proxy) = WAKE.get() {
+        let _ = proxy.send_event(WinitUserEvent::WakeUp);
+    }
+}
+
 /// `App::finish` then `App::cleanup`, through the hook when one is installed.
 pub(crate) fn finish_plugins(app: &mut App) {
     match FINISH_PLUGINS.get() {
@@ -154,6 +167,8 @@ impl Plugin for WinitPlugin {
         let event_loop = event_loop_builder
             .build()
             .expect("Failed to build event loop");
+        // benilla fork: kept for `wake_event_loop`.
+        let _ = WAKE.set(event_loop.create_proxy());
 
         app.init_resource::<WinitMonitors>()
             .init_resource::<WinitSettings>()

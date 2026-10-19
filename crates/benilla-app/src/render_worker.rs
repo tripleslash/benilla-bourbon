@@ -54,6 +54,8 @@ mod imp {
         // Before the worker can read anything through `webenv`: it has no `window`.
         crate::webenv::publish_for_workers();
         render_worker::install(kick);
+        // The device is made on the worker; its arrival must wake the page's event loop.
+        render_worker::set_wake_page(bevy::winit::wake_event_loop);
         bevy::winit::set_finish_plugins(finish_on_worker);
         web_sys::console::log_1(
             &"wenilla: rendering on a worker (?renderworker=0 to compare)".into(),
@@ -97,6 +99,13 @@ mod imp {
     #[wasm_bindgen]
     pub fn __wenilla_render_entry(canvas: JsValue) {
         render_worker::enter(canvas);
+    }
+
+    /// The handshake's state as one line (`bevy::render::render_worker::describe`), for a console
+    /// on the page: `__wenilla_render_state()` when the client looks stuck.
+    #[wasm_bindgen]
+    pub fn __wenilla_render_state() -> String {
+        render_worker::describe()
     }
 
     /// Each wake of the worker's event loop (`web/renderworker.js`). **Not for anything else to

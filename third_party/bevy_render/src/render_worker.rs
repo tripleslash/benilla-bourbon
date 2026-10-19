@@ -75,8 +75,56 @@ const RENDERING: u32 = 3;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static KICK: OnceLock<fn()> = OnceLock::new();
+static WAKE_PAGE: OnceLock<fn()> = OnceLock::new();
 static STATE: AtomicU32 = AtomicU32::new(NONE);
 static MAIN_WORLD: AtomicPtr<World> = AtomicPtr::new(core::ptr::null_mut());
+/// Where the worker is, for the page's deadline panic: a hung worker cannot say so itself.
+static WORKER_AT: AtomicU32 = AtomicU32::new(AT_LOOP);
+const AT_LOOP: u32 = 0;
+const AT_JOBS: u32 = 1;
+const AT_EXTRACT: u32 = 2;
+const AT_WRITES: u32 = 3;
+const AT_RENDER: u32 = 4;
+const AT_GRAVE: u32 = 5;
+
+fn worker_at() -> &'static str {
+    match WORKER_AT.load(Ordering::Relaxed) {
+        AT_LOOP => "outside poll (its event loop: a microtask or another message)",
+        AT_JOBS => "running a boot job",
+        AT_EXTRACT => "in SubApp::extract",
+        AT_WRITES => "applying the page's queued writes",
+        AT_RENDER => "in the render update",
+        AT_GRAVE => "draining the graveyard",
+        _ => "unknown",
+    }
+}
+
+fn at(stage: u32) {
+    WORKER_AT.store(stage, Ordering::Relaxed);
+}
+
+/// How far device creation on the worker got: 0 not started, 1 job ran, 2 task spawned, 3 task
+/// first polled, 4 `initialize_renderer` returned, 5 resources published.
+pub(crate) static DEVICE_AT: AtomicU32 = AtomicU32::new(0);
+
+/// One line of the handshake's state, for a console on the page (`__wenilla_render_state()`): the
+/// statics are in shared memory, so the page reads what the worker wrote.
+pub fn describe() -> String {
+    alloc::format!(
+        "state={} worker={} device={} renders={}",
+        match STATE.load(Ordering::Acquire) {
+            NONE => "none",
+            IDLE => "idle",
+            EXTRACT => "extract",
+            RENDERING => "rendering",
+            _ => "?",
+        },
+        worker_at(),
+        DEVICE_AT.load(Ordering::Relaxed),
+        RENDERS.load(Ordering::Relaxed),
+    )
+}
+
 /// The last main update ended with the worker busy, so its extract is still to run. Page only.
 static OWED: AtomicBool = AtomicBool::new(false);
 
@@ -124,6 +172,20 @@ pub(crate) fn canvas() -> Option<JsValue> {
     CANVAS.with_borrow(Clone::clone)
 }
 
+/// How the worker wakes the page's event loop (winit's proxy, through `bevy_winit`). The page
+/// waits for the device in `RenderPlugin::ready`, which it checks only when its event loop runs, and
+/// a device made here settles no promise there: unwoken, an unfocused page sleeps through it (found
+/// live: a black canvas until the first click).
+pub fn set_wake_page(wake: fn()) {
+    let _ = WAKE_PAGE.set(wake);
+}
+
+pub(crate) fn wake_page() {
+    if let Some(wake) = WAKE_PAGE.get() {
+        wake();
+    }
+}
+
 fn kick() {
     if let Some(kick) = KICK.get() {
         kick();
@@ -144,7 +206,10 @@ fn spin_until(done: impl Fn() -> bool, deadline: Duration, what: &str) {
         core::hint::spin_loop();
         turns = turns.wrapping_add(1);
         if turns.is_multiple_of(4096) && start.elapsed() > deadline {
-            panic!("render worker: {what} (no answer in {deadline:?})");
+            panic!(
+                "render worker: {what} (no answer in {deadline:?}; the worker is {})",
+                worker_at()
+            );
         }
     }
 }
@@ -295,6 +360,7 @@ fn hand_over(main_world: &mut World) {
 /// The worker's whole loop body, run each time its event loop wakes: boot jobs first, then an
 /// extract and a render if the page asked for one.
 pub fn poll() {
+    at(AT_JOBS);
     loop {
         let job = lock(&JOBS).pop_front();
         match job {
@@ -310,7 +376,9 @@ pub fn poll() {
             // SAFETY: the page stored this pointer from its `&mut World` and spins, touching
             // nothing, until `STATE` leaves `EXTRACT` below.
             let main_world = unsafe { &mut *MAIN_WORLD.load(Ordering::Acquire) };
+            at(AT_EXTRACT);
             app.extract(main_world);
+            at(AT_WRITES);
             // The page's writes from the update this extract closes, before the page moves on.
             if let Some(queue) = app.world().get_resource::<RenderQueue>() {
                 drain_writes(queue);
@@ -318,7 +386,9 @@ pub fn poll() {
             STATE.store(RENDERING, Ordering::Release);
 
             let start = Instant::now();
+            at(AT_RENDER);
             app.update();
+            at(AT_GRAVE);
             drain_graveyard();
             let took = micros(start.elapsed());
             RENDERS.fetch_add(1, Ordering::Relaxed);
@@ -327,8 +397,10 @@ pub fn poll() {
             STATE.store(IDLE, Ordering::Release);
         });
     } else {
+        at(AT_GRAVE);
         drain_graveyard();
     }
+    at(AT_LOOP);
 }
 
 /// The page-side stand-in for the render sub-app: no schedules, only the handshake as its extract.

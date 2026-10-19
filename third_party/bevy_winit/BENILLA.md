@@ -43,6 +43,25 @@ The browser's render worker (`third_party/bevy_render/BENILLA.md`, eighth delta)
 runs both on the worker owning the GPU device, since plugins' `finish` reads it and builds render
 resources. Absent, nothing changes.
 
+## The fourth delta: wake the event loop from another thread
+
+`wake_event_loop()` (`src/lib.rs`) sends `WinitUserEvent::WakeUp` through a proxy kept from
+`WinitPlugin::build`. The browser's render worker makes the GPU device off the page, and the runner
+re-checks its plugins' readiness only when its event loop runs; an unfocused page sleeps through the
+device's arrival without it (a black canvas until the first click).
+
+## The fifth delta: forced startup updates wait for the app
+
+`redraw_requested` (`src/state.rs`) spends `startup_forced_updates` only once
+`plugins_state() == Cleaned`. Upstream spends one per loop iteration from the first, and before the
+plugins are cleaned up `run_app_update` does nothing, so a renderer that becomes ready after the
+loop is already running leaves none: an unfocused (reactive) window then sleeps until an input
+event. Natively the device is made by `block_on` before the loop starts, so nothing is spent early;
+the browser's render worker makes it off the page while the loop runs (found live: a black canvas
+until the first click). For the same reason `new_events` treats the iteration that finishes the
+plugins as an elapsed wait: woken by an event it reads as not elapsed, and a reactive window arms its
+update timer only on an elapsed wait.
+
 Search for `benilla fork` to find every hunk.
 
 ## Verifying diff
@@ -51,4 +70,4 @@ Search for `benilla fork` to find every hunk.
 diff -ru <crates.io bevy_winit-0.19.1> third_party/bevy_winit
 ```
 
-The diff shows only the `src/state.rs` hunks above, `AfterUpdate` and the finish hook in `src/lib.rs`, plus this file.
+The diff shows only the `src/state.rs` hunks above, `AfterUpdate`, the finish hook and `wake_event_loop` in `src/lib.rs`, plus this file.
