@@ -119,5 +119,58 @@
                 getglobal(this:GetName().."HotKey"):SetText("")
             end
         end
+
+        -- wenilla carry: TurtleWoW's arena leftovers, defined only where that chain names them, so
+        -- stock 1.12 gains no names (ported from benilla-octo 031acdd8, d729fc11, 3247bc76).
+        --
+        -- Its `CharacterFrame.lua` appends "ArenaFrame" to `CHARACTERFRAME_SUBFRAMES`, six names
+        -- where the reference has five, and no file on the chain defines the frame, so the tab
+        -- loop's Hide indexes nil. An empty hidden page, id 6, continuing PaperDoll 1 .. Honor 5.
+        if ( CHARACTERFRAME_SUBFRAMES and CHARACTERFRAME_SUBFRAMES[6] == "ArenaFrame"
+                and not ArenaFrame and CharacterFrame ) then
+            local page = CreateFrame("Frame", "ArenaFrame", CharacterFrame)
+            page:SetAllPoints(CharacterFrame)
+            page:SetID(6)
+            page:Hide()
+        end
+        -- Its `WorldStateFrame.lua:217` calls `RequestArenaScoreInfo()` on the battleground score
+        -- events; the function is native to its client and 1.12 has no arena scoreboard, so the
+        -- request is a no-op. `RequestCustomScoreInfo`, its battleground twin, marks that chain.
+        if ( RequestCustomScoreInfo and not RequestArenaScoreInfo ) then
+            RequestArenaScoreInfo = function() end
+        end
     ]]></Script>
+
+    <!--
+        wenilla carry: TurtleWoW's `Blizzard_InspectUI\InspectArenaFrame.xml` has its three team
+        buttons inherit `ArenaTeamTemplate`, which no file on that chain defines, so each OnLoad
+        raises on the missing fields. Only the names its scripts index, drawing nothing. A virtual
+        template creates no global, so stock 1.12 is unchanged (from benilla-octo d729fc11).
+    -->
+    <Button name="ArenaTeamTemplate" virtual="true">
+        <Layers>
+            <Layer level="OVERLAY">
+                <FontString name="$parentText" inherits="GameFontNormal"/>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Frame name="$parentDetails" hidden="true">
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <FontString name="$parentName" inherits="GameFontNormal"/>
+                        <FontString name="$parentRating" inherits="GameFontNormal"/>
+                        <FontString name="$parentWeekRank" inherits="GameFontNormal"/>
+                        <FontString name="$parentWeekGames" inherits="GameFontNormal"/>
+                        <FontString name="$parentWeekWins" inherits="GameFontNormal"/>
+                        <FontString name="$parentWeekLoss" inherits="GameFontNormal"/>
+                        <FontString name="$parentSeasonRank" inherits="GameFontNormal"/>
+                        <FontString name="$parentSeasonGames" inherits="GameFontNormal"/>
+                        <FontString name="$parentSeasonWins" inherits="GameFontNormal"/>
+                        <FontString name="$parentSeasonLoss" inherits="GameFontNormal"/>
+                    </Layer>
+                </Layers>
+            </Frame>
+            <Button name="$parentDetailsDisbandButton"/>
+        </Frames>
+    </Button>
 </Ui>
