@@ -502,13 +502,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
                 Row::Service(si) => {
                     let s = &t.services[si];
-                    // The rank is a `Spell.dbc` string, "" for a rankless spell and never nil:
-                    // Turtle's `ClassTrainer_SetSelection` formats it before its nil guard
-                    // (`Blizzard_TrainerUI.lua:275`).
-                    let subtext = s.subtext.as_deref().unwrap_or_default();
                     Ok(MultiValue::from_vec(vec![
                         opt_str(lua, s.name.as_ref())?,
-                        Value::String(lua.create_string(subtext)?),
+                        opt_str(lua, s.subtext.as_ref())?,
                         Value::String(lua.create_string(s.category.era_str())?),
                         Value::Integer(1),
                     ]))

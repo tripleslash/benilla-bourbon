@@ -1156,11 +1156,16 @@ fn an_unsized_texture_resolves_when_its_arts_size_lands_after_the_first_sweep() 
 
     landed.set(true);
     s.resolve();
+    // The getters answer `G` of the stored layout value (the screen-unit law), which at 800x600
+    // is the edge to within a float's rounding, not to the bit.
     assert_eq!(
         s.eval::<Vec<f64>>(
             "return { Top:GetLeft(), Top:GetRight(), Top:GetTop(), Top:GetBottom() }"
         )
-        .unwrap(),
+        .unwrap()
+        .into_iter()
+        .map(|v| (v * 1000.0).round() / 1000.0)
+        .collect::<Vec<_>>(),
         vec![256.0, 520.0, 520.0, 264.0],
         "the art's 256 texels are the height, the anchors the width"
     );

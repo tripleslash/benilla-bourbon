@@ -2311,7 +2311,16 @@ mod tests {
         party(&mut app, 2, true);
         stream(&mut app, member(1), &human_player);
         frame(&mut app);
-        let s = app.world_mut().non_send_mut::<UiScript>();
+        let mut s = app.world_mut().non_send_mut::<UiScript>();
+        // `UnitCanAssist` resolves both tokens before judging (`0x515940`), and `ui_unit`, which
+        // pushes `player` in the client, is not in this app.
+        s.set_unit(
+            "player",
+            Some(UnitState {
+                guid: ME,
+                ..Default::default()
+            }),
+        );
         let assist = |token: &str| {
             s.eval::<Option<i64>>(&format!(r#"return UnitCanAssist("player", "{token}")"#))
                 .unwrap()

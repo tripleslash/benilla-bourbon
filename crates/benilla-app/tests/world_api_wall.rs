@@ -140,6 +140,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("lighting::LavaLightGain", "wall"),
     ("lighting::LightBlob", "record"),
     ("lighting::LightOwner", "wall"),
+    ("lighting::PlacedLight", "wall"),
     ("lighting::SpellFxLight", "wall"),
     ("lighting::WorldPointLight", "wall"),
     ("lighting::WorldTime", "record"),
@@ -196,6 +197,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("sky_order::Rung", "wall"),
     ("ssilvb::IndirectLighting", "wall"),
     ("ssilvb::SSILVB_RANGE", "wall"),
+    ("system_profile::plugin", "wall"),
     ("terrain_stream::SPAWN_XY", "wall"),
     ("terrain_stream::StreamActivity", "wall"),
     ("terrain_stream::ViewFocus", "record"),
@@ -342,7 +344,9 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
 /// wind and wet surfaces' settings, the transport's prop test, the posed pick's scratch and the
 /// effect lane's motion; frame generation's cadence (`fsr::cadence::FgCadence`), the terrain
 /// horizon's culling knob and set (`horizon::*`), and the portrait's every-frame pose
-/// (`rig_anim::PoseEveryFrame`). They gate nothing; only the leaks do.
+/// (`rig_anim::PoseEveryFrame`), the placed-light marker the app's lamps carry so the modern
+/// frame can merge near lights (`lighting::PlacedLight`), and the per-system CPU profile
+/// (`system_profile::plugin`). They gate nothing; only the leaks do.
 const LEAK_CEILING: usize = 107;
 
 /// How far under [`LEAK_CEILING`] the count may sit before the test asks for the ceiling to be

@@ -281,6 +281,7 @@
 - `WOW_FX_MINUTE` — benilla-app/src/capture/mod.rs
 - `WOW_FX_MODEL` — benilla-app/src/capture/mod.rs
 - `WOW_FX_SCALE` — benilla-app/src/capture/mod.rs
+- `WOW_FX_SCENE` — benilla-app/src/capture/mod.rs
 - `WOW_FX_TURN` — benilla-app/src/capture/mod.rs
 - `WOW_FX_UP` — benilla-app/src/capture/mod.rs
 - `WOW_FX_YAW` — benilla-app/src/capture/mod.rs
@@ -327,6 +328,7 @@
 - `WOW_LIGHT_AT` — benilla-world/src/wmo_portal/audit/light_probe.rs
 - `WOW_LIGHT_DUMP` — benilla-world/src/lighting/global_light.rs, benilla-world/src/lighting/resolve.rs
 - `WOW_LIGHT_GRID` — benilla-world/src/wmo_portal/audit/light_probe.rs
+- `WOW_LIGHT_GROUP` — benilla-app/src/lib.rs, benilla-world/src/lighting/global_light.rs
 - `WOW_LIQUID_DC` — benilla-assets/src/world_assets/images.rs
 - `WOW_LIVE_` — benilla-world/src/bgwin.rs
 - `WOW_LIVE_FPS` — benilla-app/src/capture/probes/live_fps.rs, benilla-app/src/dev.rs, benilla-world/src/bgwin.rs
@@ -351,6 +353,8 @@
 - `WOW_MESH_EVENTS` — benilla-app/src/perf/mod.rs
 - `WOW_MESH_HOLDERS` — benilla-app/src/perf/mod.rs
 - `WOW_MESH_TOUCH` — benilla-app/src/perf/mod.rs
+- `WOW_MIRROR_PLANE_CULL` — benilla-app/src/lib.rs, benilla-world/src/liquid/reflect.rs
+- `WOW_MIRROR_THIN` — benilla-app/src/lib.rs, benilla-world/src/liquid/reflect.rs
 - `WOW_MIX_TAP` — benilla-app/src/sound/mix_tap.rs
 - `WOW_MM_BLIP_PROBE` — benilla-app/src/minimap/mod.rs, benilla-world/src/bgwin.rs
 - `WOW_MM_PROBE` — benilla-app/src/capture/mod.rs, benilla-app/src/minimap/mod.rs, benilla-world/src/bgwin.rs
@@ -549,6 +553,7 @@
 - `WOW_STREAM_TRACE` — benilla-app/src/perf/mod.rs
 - `WOW_SUPERSCALE` — benilla-app/src/lib.rs, benilla-world/src/perf_probe.rs
 - `WOW_SYSTEM_PROFILE` — benilla-world/src/system_profile.rs
+- `WOW_SYSTEM_PROFILE_TOP` — benilla-world/src/system_profile.rs
 - `WOW_TABHOVER` — benilla-app/src/capture/fixtures.rs
 - `WOW_TAB_TRACE` — benilla-app/src/target/scan.rs
 - `WOW_TEARDOWN_INJECT` — benilla-app/src/perf/stall.rs

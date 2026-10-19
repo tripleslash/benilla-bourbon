@@ -822,7 +822,13 @@ pub(crate) mod schedule_tests {
     /// `glue::backdrop::fit_tiled_backgrounds`'s `ImageNode` rect against bevy's private
     /// accessibility `image_changed`, which reads only the change tick for a label: either order
     /// labels the same node.
-    const POST_UPDATE_CEILING: usize = 479;
+    ///
+    /// **485 (fork: placed-light grouping, af708800b; measured at the merge of upstream
+    /// f52df3a11)** — `lighting::global_light::group_placed_lights` reads the `GlobalTransform` of
+    /// `PlacedLight` lamps against the nine transform writers `build_light_data` already pairs
+    /// with (nameplates, raid marks, billboards, the cloud dome, the camera followers), populations
+    /// it never shares an entity with: fourteen pairs in the dump; the census measures 485.
+    const POST_UPDATE_CEILING: usize = 485;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
