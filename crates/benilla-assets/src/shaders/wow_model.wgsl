@@ -904,7 +904,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let tex0_alpha = base_color.a;
     var tex1 = vec4<f32>(1.0);
     if (stage1_on) {
-        tex1 = textureSampleBias(stage1_texture, stage1_sampler, in.env_uv, view.mip_bias);
+        // tortoise: a stage on a UV set (`stage1.w` = 1 + its scroll row) moves by its own
+        // texture transform; row 0 is the identity.
+        var st1_uv = in.env_uv;
+        if (m.stage1.w > 0.5) {
+            st1_uv = st1_uv + wow_light.matanim[u32(m.stage1.w) - 1u].xy;
+        }
+        tex1 = textureSampleBias(stage1_texture, stage1_sampler, st1_uv, view.mip_bias);
         base_color.a = stage_alpha(stage1_preset, base_color.a, tex1.a);
     }
 

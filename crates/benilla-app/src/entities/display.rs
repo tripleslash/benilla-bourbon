@@ -105,6 +105,7 @@ impl EntityPart {
             single: self.uv_anim.clone(),
             rot: self.uv_rot_seq.clone(),
             scale: self.uv_scale_seq.clone(),
+            stage1: benilla_world::doodad_anim::UvLoops::stage1_of(&self.geometry),
         }
     }
 }

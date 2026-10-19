@@ -217,6 +217,16 @@ pub struct UvAnimEntry {
     /// The entity whose [`crate::rig_anim::SceneClock`] this entry runs on, `None` for the
     /// world's clock.
     clock: Option<Entity>,
+    /// tortoise: the second stage's own scroll ([`UvStage1`]), `None` without one.
+    stage1: Option<UvStage1>,
+}
+
+/// tortoise: a second texture stage's own translation loop (`textureTransform[combo + 1]`) on the
+/// entry's clocks, its row added to the stage's UV set B; the slot rides in `stage1.w` as
+/// `1 + slot`. Deviation: the stage's rotation and scaling are not applied.
+struct UvStage1 {
+    anim: std::sync::Arc<benilla_formats::UvAnim>,
+    slot: u16,
 }
 
 /// A texture transform's rotation and scaling, which the translation row cannot carry: a second
@@ -295,6 +305,34 @@ impl UvAnimEntry {
             .map_or([1.0, 1.0], |l| l.sample(l.clock(band_t, gseq)));
         Some((a.slot, crate::mat_anim_table::affine_row(q, s)))
     }
+
+    /// tortoise: this entry's stage-1 slot and scroll row, on the clocks [`Self::affine`] uses.
+    pub(crate) fn stage1_row(
+        &self,
+        now: f32,
+        gseq_now: f64,
+        playing: Option<(usize, f32)>,
+    ) -> Option<(u16, [f32; 4])> {
+        let st = self.stage1.as_ref()?;
+        let (band_t, gseq) = match &self.anim {
+            UvLoop::Shared(_) => (now, gseq_now),
+            UvLoop::PerSeq { .. } => (playing.map_or(now, |(_, t)| t), gseq_now),
+            UvLoop::Instance { attached_at, .. } => {
+                let age = now - attached_at;
+                (playing.map_or(age, |(_, t)| t), f64::from(age))
+            }
+        };
+        let uv = st.anim.sample(st.anim.clock(band_t, gseq));
+        Some((
+            st.slot,
+            [
+                benilla_assets::quantize(uv[0], 4096.0),
+                benilla_assets::quantize(uv[1], 4096.0),
+                0.0,
+                0.0,
+            ],
+        ))
+    }
 }
 
 impl UvLoop {
@@ -358,11 +396,12 @@ impl UvAnimEntry {
         now: f32,
         gseq_now: f64,
         playing: Option<(usize, f32)>,
-    ) -> ([f32; 4], Option<(u16, [f32; 4])>) {
+    ) -> ([f32; 4], Option<(u16, [f32; 4])>, Option<(u16, [f32; 4])>) {
         let (now, gseq_now) = scene.map_or((now, gseq_now), |t| (t as f32, t));
         (
             self.delta(now, gseq_now, playing),
             self.affine(now, gseq_now, playing),
+            self.stage1_row(now, gseq_now, playing),
         )
     }
 
@@ -460,11 +499,13 @@ pub fn clocked_twin(
             .affine
             .as_ref()
             .map(|a| (a.rot.clone(), a.scale.clone()));
+        let stage1 = src.stage1.as_ref().map(|st| st.anim.clone());
         if !uv.0.contains_key(&twin) {
             register_uv(uv, table, materials, twin, lane);
             if let Some((rot, scale)) = affine {
                 attach_affine(uv, table, materials, twin, rot, scale);
             }
+            attach_stage1(uv, table, materials, twin, stage1);
         }
     }
     if let Some(src) = tint.0.get(&source) {
@@ -549,6 +590,7 @@ pub(crate) fn register_uv(
             seed,
             affine: None,
             clock: None,
+            stage1: None,
         },
     );
 }
@@ -583,6 +625,41 @@ fn attach_affine(
     }
 }
 
+/// tortoise: attach a second stage's own scroll to the entry [`register_uv`] made for `id`: a
+/// table row, its slot written into `stage1.w` as `1 + slot`. Only a material whose stage 1 reads
+/// a UV set (`stage1.w` set by `model_render::stage1_params`) takes one.
+fn attach_stage1(
+    reg: &mut UvAnimMaterials,
+    table: &mut crate::mat_anim_table::MatAnimTable,
+    materials: &mut bevy::asset::Assets<benilla_assets::materials::WowModelMaterial>,
+    id: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
+    anim: Option<std::sync::Arc<benilla_formats::UvAnim>>,
+) {
+    let Some(anim) = anim else { return };
+    let Some(entry) = reg.0.get_mut(&id) else {
+        return;
+    };
+    if entry.stage1.is_some() {
+        return;
+    }
+    let uv_stage = crate::model_render::lazy::with_material_mut(materials, id, |mat| {
+        mat.extension.stage1.w > 0.5
+    })
+    .unwrap_or(false);
+    if !uv_stage {
+        return;
+    }
+    match table.alloc() {
+        Some(slot) => {
+            crate::model_render::lazy::with_material_mut(materials, id, |mat| {
+                mat.extension.stage1.w = 1.0 + f32::from(slot);
+            });
+            entry.stage1 = Some(UvStage1 { anim, slot });
+        }
+        None => bevy::log::warn_once!("mat-anim table full — a second stage's scroll stays still"),
+    }
+}
+
 /// Put one spell-effect material clone on the per-instance UV lane, whole: the [`UvLoop`] effect
 /// variant, [`register_uv`] and both table rows. `host` is the effect root whose player names the
 /// clip, `attached_at` its `Time::elapsed_secs` origin, and the clone's `sun_scale.zw` the seed.
@@ -600,6 +677,7 @@ pub fn register_fx_uv(
         single,
         rot,
         scale,
+        stage1,
     } = loops;
     let turns = rot.is_some() || scale.is_some();
     register_uv(
@@ -615,10 +693,14 @@ pub fn register_fx_uv(
         },
     );
     attach_affine(reg, table, materials, id, rot, scale);
+    attach_stage1(reg, table, materials, id, stage1);
     let Some(entry) = reg.0.get(&id) else {
         return;
     };
     let _ = turns;
+    if let Some((slot, row)) = entry.stage1_row(attached_at, 0.0, None) {
+        table.set(slot, row);
+    }
     // Both rows written now: an instance attached after this frame's tick would otherwise draw
     // its first frame on zero rows, the identity.
     let (slot, row) = (entry.slot, entry.delta(attached_at, 0.0, None));
@@ -656,6 +738,7 @@ pub fn register_entity_uv(
         loops.rot.clone(),
         loops.scale.clone(),
     );
+    attach_stage1(reg, table, materials, id, loops.stage1.clone());
 }
 
 /// The four baked channels of one batch's texture transform: the translation as a per-slot set or
@@ -666,9 +749,21 @@ pub struct UvLoops {
     pub single: Option<std::sync::Arc<benilla_formats::UvAnim>>,
     pub rot: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 4]>>>,
     pub scale: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
+    /// tortoise: the second stage's own moving scroll ([`UvStage1`]).
+    pub stage1: Option<std::sync::Arc<benilla_formats::UvAnim>>,
 }
 
 impl UvLoops {
+    /// tortoise: a submesh's second-stage scroll, when it moves.
+    pub fn stage1_of(geometry: &benilla_formats::RenderSubmesh) -> Option<std::sync::Arc<benilla_formats::UvAnim>> {
+        geometry
+            .stage1
+            .as_ref()
+            .and_then(|s| s.uv_anim.clone())
+            .filter(|a| a.period > 0.0)
+            .map(std::sync::Arc::new)
+    }
+
     /// The one place the four channels are read off a submesh, so the registration and the spawn
     /// marker cannot disagree about which batches animate.
     pub fn of(sub: &benilla_assets::ModelSubmesh) -> Self {
@@ -677,13 +772,18 @@ impl UvLoops {
             single: sub.uv_anim.clone(),
             rot: sub.uv_rot_seq.clone(),
             scale: sub.uv_scale_seq.clone(),
+            stage1: Self::stage1_of(&sub.geometry),
         }
     }
 
     /// Whether any channel is present, the effect attach's test before cloning a material: a
     /// scale-only transform or a dead slot 0 leaves `single` empty.
     pub fn any(&self) -> bool {
-        self.seqs.is_some() || self.single.is_some() || self.rot.is_some() || self.scale.is_some()
+        self.seqs.is_some()
+            || self.single.is_some()
+            || self.rot.is_some()
+            || self.scale.is_some()
+            || self.stage1.is_some()
     }
 
     /// Whether the batch moves: [`Self::any`] minus a period-0 translation, which is its seed. The
@@ -692,6 +792,7 @@ impl UvLoops {
         self.seqs.is_some()
             || self.rot.is_some()
             || self.scale.is_some()
+            || self.stage1.is_some()
             || self.single.as_ref().is_some_and(|l| l.period > 0.0)
     }
 
@@ -769,6 +870,9 @@ pub(super) fn tick_anim_materials(
             if let Some(a) = &entry.affine {
                 table.free(a.slot);
             }
+            if let Some(st) = &entry.stage1 {
+                table.free(st.slot);
+            }
             return false;
         }
         // The effect lane skips the draw gate: its parts carry no `AnimMatPart`, and an effect
@@ -776,9 +880,13 @@ pub(super) fn tick_anim_materials(
         let fx = entry.instance_lane();
         if (fx || drawn.contains(id)) && (!frozen || fx) {
             let scene = entry.clock.and_then(|e| clocks.get(e).ok()).map(|c| c.0);
-            let (row, affine) = entry.rows(scene, now, gseq_now, host_seq(&hosts, entry.host()));
+            let (row, affine, stage1) =
+                entry.rows(scene, now, gseq_now, host_seq(&hosts, entry.host()));
             table.set(entry.slot, row);
             if let Some((slot, row)) = affine {
+                table.set(slot, row);
+            }
+            if let Some((slot, row)) = stage1 {
                 table.set(slot, row);
             }
         }
@@ -1082,6 +1190,7 @@ mod delta_tests {
             seed: [0.0, 0.0],
             affine: None,
             clock: None,
+            stage1: None,
         }
     }
 
@@ -1130,6 +1239,39 @@ mod delta_tests {
         assert!(!UvLoops::default().animates());
     }
 
+    /// tortoise: a second stage's scroll writes its own row, on the entry's clock, and only when
+    /// the entry carries one.
+    #[test]
+    fn a_second_stage_scrolls_on_its_own_row() {
+        let scroll = std::sync::Arc::new(benilla_formats::UvAnim {
+            period: 2.0,
+            step: false,
+            wrap: false,
+            gseq: false,
+            keys: vec![(0.0, [0.0, 0.0]), (2.0, [1.0, 0.5])],
+        });
+        let mut e = UvAnimEntry {
+            anim: UvLoop::Shared(None),
+            slot: 4,
+            seed: [0.0, 0.0],
+            affine: None,
+            clock: None,
+            stage1: None,
+        };
+        assert_eq!(e.stage1_row(1.0, 1.0, None), None, "no stage, no row");
+        e.stage1 = Some(UvStage1 {
+            anim: scroll.clone(),
+            slot: 9,
+        });
+        let (slot, row) = e.stage1_row(1.0, 1.0, None).expect("the stage-1 row");
+        assert_eq!(slot, 9);
+        let want = scroll.sample(scroll.clock(1.0, 1.0));
+        assert_eq!((row[0], row[1]), (want[0], want[1]));
+        assert!(row[0] > 0.0, "half-way through the loop the stage has moved: {row:?}");
+        // The stage-0 row is untouched by it.
+        assert_eq!(e.delta(1.0, 1.0, None), [0.0, 0.0, 0.0, 0.0]);
+    }
+
     #[test]
     fn a_shared_entry_turns_on_the_scene_clock() {
         let e = UvAnimEntry {
@@ -1142,6 +1284,7 @@ mod delta_tests {
                 slot: 5,
             }),
             clock: None,
+            stage1: None,
         };
         // No translation channel: its row stays at zero.
         assert_eq!(e.delta(1.0, 1.0, None), [0.0, 0.0, 0.0, 0.0]);
@@ -1247,6 +1390,7 @@ mod delta_tests {
             seed,
             affine: None,
             clock: None,
+            stage1: None,
         };
         for t in [0.0_f32, 0.35, 1.0, 1.7] {
             let d = entry.delta(t, f64::from(t), None);
@@ -1295,6 +1439,7 @@ mod delta_tests {
             seed: [0.0, 0.0],
             affine: None,
             clock: None,
+            stage1: None,
         };
         // On slot 1, past its step key: the whole V flip shows.
         let d = entry.delta(0.0, 0.0, Some((1, 3.0)));
@@ -1351,6 +1496,7 @@ mod delta_tests {
                 seed: [0.0, 0.0],
                 affine: None,
                 clock: None,
+                stage1: None,
             },
         );
         let pulse = std::sync::Arc::new(benilla_formats::RgbAnim {
@@ -1375,7 +1521,7 @@ mod delta_tests {
         assert_eq!(tint.0[&id].clock, Some(scene));
 
         // The world is at 10 s, the scene's clock at 0.5 s: the rows are the scene's.
-        let (row, _) = uv.0[&id].rows(Some(0.5), 10.0, 10.0, None);
+        let (row, _, _) = uv.0[&id].rows(Some(0.5), 10.0, 10.0, None);
         assert_eq!(row, uv.0[&id].delta(0.5, 0.5, None));
         assert_ne!(row, uv.0[&id].delta(10.0, 10.0, None));
         let row = tint.0[&id].row(Some(0.5), 10.0, 10.0, None);
@@ -1389,6 +1535,7 @@ mod delta_tests {
             seed: [0.0, 0.0],
             affine: None,
             clock: None,
+            stage1: None,
         };
         assert_eq!(
             other.rows(None, 10.0, 10.0, None).0,

@@ -915,7 +915,9 @@ fn with_uv_stage1(
         return material;
     };
     let stage0 = m.extension.stage1.z;
-    m.extension.stage1 = Vec4::new(1.0, f32::from(preset), stage0, 1.0);
+    // `w` keeps a scroll row the UV lane may already have written (`1 + slot`).
+    let w = m.extension.stage1.w.max(1.0);
+    m.extension.stage1 = Vec4::new(1.0, f32::from(preset), stage0, w);
     m.extension.stage1_texture = tex1;
     mats.materials().add(m)
 }

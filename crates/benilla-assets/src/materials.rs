@@ -167,7 +167,8 @@ pub struct WowModelExt {
     /// The second texture stage: `x` = bound (1) or not (0), `y` = its combine preset 0-5
     /// (`benilla_formats::TextureStage::combine`); `z` = the stage-0 combine preset plus one
     /// (`benilla_formats::RenderSubmesh::combine`), 0 for a batch that has none; `w` = 1 for a stage
-    /// on UV set B instead of the generated coordinate (MONKEY, the glue scenes).
+    /// on UV set B instead of the generated coordinate, `1 + slot` with a scroll row in the
+    /// `matanim` table (tortoise).
     #[uniform(100)]
     pub stage1: Vec4,
     /// Stage 1's texture, sampled at the generated environment coordinate when `stage1.x` is set;
@@ -875,9 +876,10 @@ mod tests {
             "stage 1 no longer generates its coordinate in view space"
         );
         assert!(
-            src.contains(
-                "tex1 = textureSampleBias(stage1_texture, stage1_sampler, in.env_uv, view.mip_bias);"
-            ),
+            src.contains("var st1_uv = in.env_uv;")
+                && src.contains(
+                    "tex1 = textureSampleBias(stage1_texture, stage1_sampler, st1_uv, view.mip_bias);"
+                ),
             "stage 1 no longer samples its texture at the generated coordinate"
         );
 
