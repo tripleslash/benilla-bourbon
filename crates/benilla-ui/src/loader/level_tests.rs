@@ -460,13 +460,14 @@ fn a_fontstrings_own_shadow_element_is_read() {
         shadow("Shadowed"),
         vec![2.0, -3.0, read(1.0), 0.0, 0.0, read(0.5)]
     );
-    // 0.001 layout units at the 4:3 screen: 0.001 · 768 · 5/3.
-    let bare = shadow("BareShadow");
-    assert!(
-        (bare[0] - 1.28).abs() < 1e-5 && (bare[1] + 1.28).abs() < 1e-5,
-        "{bare:?}"
+    // The default is (0.001, -0.001) layout units (`0x7713eb`), read back through `G`: 1.28 each
+    // way at 4:3. `ui()` is 800 by 600, a 4:3 root, whose cells are those of the aspect 4/3.
+    let u = crate::layout::LayoutUnits::from_aspect(4.0 / 3.0);
+    let g = |l: u32| u.load(f32::from_bits(l)) as f32;
+    assert_eq!(
+        shadow("BareShadow"),
+        vec![g(0x3a83_126f), g(0xba83_126f), 0.0, 0.0, 0.0, read(1.0)]
     );
-    assert_eq!(bare[2..], [0.0, 0.0, 0.0, read(1.0)]);
     assert_eq!(
         shadow("HalfOffset"),
         vec![2.0, 0.0, 0.0, 0.0, 0.0, read(1.0)],
@@ -559,7 +560,12 @@ fn a_font_element_reads_its_flags_only_beside_its_own_font_file() {
     );
     assert_eq!(
         font("LevelOwnFile"),
-        parent.replacen("Fonts\\FRIZQT__.TTF 12 OUTLINE", "Fonts\\ARIALN.TTF 14 ", 1),
+        // The heights read back through the getter steps: `G(S(12))` and `G(S(14))` at 4:3.
+        parent.replacen(
+            "Fonts\\FRIZQT__.TTF 12.000000298023 OUTLINE",
+            "Fonts\\ARIALN.TTF 13.999999552965 ",
+            1,
+        ),
         "its own file sets the whole flags word"
     );
     assert_eq!(
@@ -628,8 +634,15 @@ fn an_xml_font_file_that_fails_to_load_keeps_the_followed_font() {
         ))
         .unwrap()
     };
-    assert_eq!(font(&s, "LoadChild"), r"Fonts\FRIZQT__.TTF 12 OUTLINE 2");
-    assert_eq!(font(&s, "LoadMissed"), r"Fonts\FRIZQT__.TTF 12 OUTLINE 3");
+    // The height and spacing read back through the getter steps, `G(S(v))` at 4:3.
+    assert_eq!(
+        font(&s, "LoadChild"),
+        r"Fonts\FRIZQT__.TTF 12.000000298023 OUTLINE 2"
+    );
+    assert_eq!(
+        font(&s, "LoadMissed"),
+        r"Fonts\FRIZQT__.TTF 12.000000298023 OUTLINE 3.0000000745058"
+    );
     for line in [
         format!("Font LoadChild: Unable to load font file {NOPE}"),
         format!("FontString LoadMissed: Unable to load font file {NOPE}"),
@@ -641,10 +654,16 @@ fn an_xml_font_file_that_fails_to_load_keeps_the_followed_font() {
     // string and font cleared theirs.
     s.run(r#"LoadParent:SetFont("Fonts\\ARIALN.TTF", 9) LoadHeld:SetFont("Fonts\\ARIALN.TTF", 9)"#)
         .unwrap();
-    assert_eq!(font(&s, "LoadChild"), r"Fonts\ARIALN.TTF 9  2");
-    assert_eq!(font(&s, "LoadMissed"), r"Fonts\ARIALN.TTF 9  3");
-    assert!(font(&s, "LoadKept").starts_with(r"Fonts\HELD.TTF 10 "));
-    assert!(font(&s, "LoadHeldAgain").starts_with(r"Fonts\HELD.TTF 10 "));
+    assert_eq!(
+        font(&s, "LoadChild"),
+        r"Fonts\ARIALN.TTF 9.0000002235174  2"
+    );
+    assert_eq!(
+        font(&s, "LoadMissed"),
+        r"Fonts\ARIALN.TTF 9.0000002235174  3.0000000745058"
+    );
+    assert!(font(&s, "LoadKept").starts_with(r"Fonts\HELD.TTF 9.9999998509884 "));
+    assert!(font(&s, "LoadHeldAgain").starts_with(r"Fonts\HELD.TTF 9.9999998509884 "));
 }
 
 /// `0x770f69`-`0x770f88`: a FontString's `inherits=` is looked up as a font first, and a hit jumps
@@ -884,8 +903,50 @@ fn a_held_font_differing_only_in_height_or_flags_reloads() {
                 "local f, h, flags = {name}:GetFont() return table.concat({{f, h, flags}}, ' ')"
             ))
             .unwrap();
-        assert_eq!(font, r"Fonts\HELD.TTF 10 ", "{name} keeps the held font");
+        // `G(S(10))` at 4:3.
+        assert_eq!(
+            font, r"Fonts\HELD.TTF 9.9999998509884 ",
+            "{name} keeps the held font"
+        );
     }
+}
+
+/// A `<Shadow>` with no `<Offset>` keeps (0.001, -0.001) layout units (`0x7713eb`), so the shadow
+/// sits further out at a wider aspect, 1.5665 script units each way at 16:9, and draws there:
+/// the stock `ZoneTextFont` and `WorldMapTextFont` are such shadows (`Fonts.xml`).
+#[test]
+fn a_bare_shadow_is_a_layout_offset() {
+    let mut s = ui();
+    s.set_window_size(1920.0, 1080.0);
+    load_str(
+        &s,
+        &format!(
+            r#"<Ui>{TEST_FONT}
+            <Frame name="Host">
+                <Size><AbsDimension x="200" y="40"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Layers><Layer>
+                    <FontString name="Bare" inherits="LevelTestFont" text="Zone"><Shadow/></FontString>
+                </Layer></Layers>
+            </Frame>
+        </Ui>"#
+        ),
+    );
+    assert_eq!(
+        s.eval::<(f64, f64)>("return Bare:GetShadowOffset()")
+            .unwrap(),
+        (1.566511890386744, -1.566511890386744)
+    );
+    s.resolve();
+    let drawn = s.extract().into_iter().find_map(|q| match q.content {
+        crate::script::QuadContent::Text {
+            text: Some(t),
+            shadow,
+            ..
+        } if t == "Zone" => shadow,
+        _ => None,
+    });
+    assert_eq!(drawn.map(|d| d.offset), Some([1.5665119, -1.5665119]));
 }
 
 /// `0x770f69`: each level's `inherits` is asked as a font first, so a template chain stops at the
@@ -1278,12 +1339,8 @@ fn the_xml_length_readers_read_the_first_child_only() {
         "an unknown first child: nothing set"
     );
     assert_eq!(size("LenOwn"), [10.0, 20.0]);
-    // 0.1 and 0.05 layout units at 4:3, where one is 1280 FrameXML units.
-    let rel = size("LenRel");
-    assert!(
-        (rel[0] - 128.0).abs() < 1e-3 && (rel[1] - 64.0).abs() < 1e-3,
-        "{rel:?}"
-    );
+    // 0.1 and 0.05 layout units at 4:3, where `G` reads them as 128 and 64.
+    assert_eq!(size("LenRel"), [128.0, 64.0]);
     assert_eq!(
         got("LenOffset:GetLeft(), LenOffset:GetBottom()"),
         [5.0, 0.0]
@@ -1499,13 +1556,22 @@ fn each_child_element_applies_in_turn_and_the_instances_wins() {
     );
     s.resolve();
     let got = |code: &str| s.eval::<Vec<f32>>(&format!("return {{{code}}}")).unwrap();
-    assert_eq!(got("EachFrame:GetHitRectInsets()"), [1.0, 0.0, 2.0, 3.0]);
-    assert_eq!(got("EachFrame:GetMinResize()"), [7.0, 8.0]);
+    // The lengths read back through the getter steps, `G(S(v))`, a hair off the numbers given.
+    let law = |v: &[f32]| -> Vec<f32> {
+        v.iter()
+            .map(|&x| crate::test_support::law43(x) as f32)
+            .collect()
+    };
+    assert_eq!(
+        got("EachFrame:GetHitRectInsets()"),
+        law(&[1.0, 0.0, 2.0, 3.0])
+    );
+    assert_eq!(got("EachFrame:GetMinResize()"), law(&[7.0, 8.0]));
     assert_eq!(
         got("EachTwice:GetHitRectInsets()"),
-        [13.0, 115.0, 10.0, 13.0]
+        law(&[13.0, 115.0, 10.0, 13.0])
     );
-    assert_eq!(got("EachBox:GetTextInsets()"), [4.0, 5.0, 6.0, 7.0]);
+    assert_eq!(got("EachBox:GetTextInsets()"), law(&[4.0, 5.0, 6.0, 7.0]));
     assert_eq!(&got("EachModel:GetFogColor()")[..3], [0.0, 0.0, 1.0]);
 }
 
@@ -1628,4 +1694,342 @@ fn a_text_frames_fontstring_child_loads_into_its_own_font() {
         );
     }
     assert!(!report.status.lines().iter().any(|l| l.starts_with("TfSmf")));
+}
+
+/// A `<SimpleHTML>`'s `font=` links all four element fonts (`0x78a17a`-`0x78a18f`) or logs its miss
+/// (`0x879bc8`), and each font child loads into its element font through the Font loader
+/// (`0x78a26e` → `0x783c30`): `inherits=` names a font, never a template (`0x87a51c`), the first
+/// `<FontHeight>` counts, `spacing=` reads with `SStrToFloat`, `monochrome=` sets its flag and a bare `<Shadow/>` is opaque black at the default offset.
+#[test]
+fn a_simplehtml_font_child_loads_as_a_font_element() {
+    let s = ui();
+    crate::test_support::install_law43(&s);
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Font name="HtmlBase" font="Fonts\FRIZQT__.TTF"><FontHeight val="12"/></Font>
+            <FontString name="HtmlTmpl" inherits="HtmlBase" virtual="true"/>
+            <Font name="HtmlShadowRef"><Shadow/></Font>
+            <SimpleHTML name="HtmlLeg">
+                <FontString inherits="HtmlTmpl" spacing="2px"/>
+                <FontStringHeader1 font="Fonts\SKURRI.TTF" monochrome="1">
+                    <FontHeight val="10"/><FontHeight val="20"/><Shadow/>
+                </FontStringHeader1>
+            </SimpleHTML>
+            <SimpleHTML name="HtmlLinked" font="HtmlBase"/>
+            <SimpleHTML name="HtmlMiss" font="NoSuchFont"/>
+        </Ui>"#,
+    );
+    let truthy = |code: &str| s.eval::<bool>(code).unwrap();
+    assert!(truthy(
+        "return HtmlLeg:GetFont() == nil and HtmlLeg:GetFontObject() == nil"
+    ));
+    assert!(truthy("return HtmlLeg:GetSpacing() == 2"));
+    assert_eq!(
+        s.eval::<(String, f32, String)>("return HtmlLeg:GetFont('H1')")
+            .unwrap(),
+        (
+            "Fonts\\SKURRI.TTF".to_string(),
+            10.0,
+            "MONOCHROME".to_string()
+        )
+    );
+    assert_eq!(
+        s.eval::<(f32, f32, f32, f32)>("return HtmlLeg:GetShadowColor('H1')")
+            .unwrap(),
+        (0.0, 0.0, 0.0, crate::color::quant::read32(1.0))
+    );
+    assert!(truthy(
+        "local x, y = HtmlLeg:GetShadowOffset('H1'); local rx, ry = HtmlShadowRef:GetShadowOffset()
+         return x == rx and y == ry and x > 0"
+    ));
+    s.run(r"HtmlBase:SetFont('Fonts\\MORPHEUS.TTF', 9)")
+        .unwrap();
+    for elem in ["P", "H1", "H2", "H3"] {
+        assert!(
+            truthy(&format!(
+                "local p, h = HtmlLinked:GetFont('{elem}'); return p == 'Fonts\\\\MORPHEUS.TTF' and h == law(9)"
+            )),
+            "{elem} follows"
+        );
+    }
+    for line in [
+        "Couldn't find inherited font: HtmlTmpl",
+        "SimpleHTML HtmlMiss: Couldn't find font object named NoSuchFont",
+    ] {
+        assert!(
+            has_line(&report, line),
+            "{line}: {:?}",
+            report.status.lines()
+        );
+    }
+}
+
+/// A SimpleHTML font child's justify token that matches nothing is skipped, with no bit cleared
+/// (`0x783f6d`, `0x783fb5`), never raised.
+#[test]
+fn a_simplehtml_font_child_skips_a_bad_justify_token() {
+    let s = ui();
+    load_str(
+        &s,
+        r#"<Ui>
+            <SimpleHTML name="HtmlJustify">
+                <FontString justifyH="BOGUS" justifyV="TOP"/>
+            </SimpleHTML>
+        </Ui>"#,
+    );
+    assert_eq!(
+        s.eval::<(String, String)>("return HtmlJustify:GetJustifyH(), HtmlJustify:GetJustifyV()")
+            .unwrap(),
+        ("CENTER".to_string(), "TOP".to_string())
+    );
+}
+
+/// The base frame loader's child loop (`0x769b27`-`0x769d22`) matches TitleRegion, ResizeBounds,
+/// Backdrop, HitRectInsets, Layers and Scripts alone, so a `<FontString>` directly under a plain
+/// frame or a Button builds no region and publishes no global (`0x769d1d`).
+#[test]
+fn a_fontstring_directly_under_a_plain_frame_builds_nothing() {
+    let s = ui();
+    load_str(
+        &s,
+        r#"<Ui>
+            <Font name="DirectFont" font="Fonts\FRIZQT__.TTF"><FontHeight val="12"/></Font>
+            <Frame name="DirectHost">
+                <FontString name="$parentLabel" inherits="DirectFont" text="hi"/>
+            </Frame>
+            <Button name="DirectButton">
+                <FontString name="$parentLabel" inherits="DirectFont"/>
+            </Button>
+        </Ui>"#,
+    );
+    assert!(s
+        .eval::<bool>(
+            "return DirectHostLabel == nil and DirectButtonLabel == nil
+                and DirectHost:GetNumRegions() == 0 and DirectButton:GetNumRegions() == 0"
+        )
+        .unwrap());
+}
+
+/// `font=` links all four element fonts first (`0x78a17a`-`0x78a18f`); a child's `inherits` then
+/// re-links its own element (`0x783ce6`), so only that one leaves the frame's font.
+#[test]
+fn a_simplehtml_child_inherits_overrides_its_element_after_font() {
+    let s = ui();
+    load_str(
+        &s,
+        r#"<Ui>
+            <Font name="HtmlAllFont" font="Fonts\FRIZQT__.TTF"><FontHeight val="12"/></Font>
+            <Font name="HtmlOneFont" font="Fonts\SKURRI.TTF"><FontHeight val="20"/></Font>
+            <SimpleHTML name="HtmlOverride" font="HtmlAllFont">
+                <FontStringHeader1 inherits="HtmlOneFont"/>
+            </SimpleHTML>
+        </Ui>"#,
+    );
+    s.run(r"HtmlAllFont:SetFont('Fonts\\MORPHEUS.TTF', 9)")
+        .unwrap();
+    assert!(s
+        .eval::<bool>(
+            "return HtmlOverride:GetFontObject('H1') == HtmlOneFont
+                and HtmlOverride:GetFont('H1') == 'Fonts\\\\SKURRI.TTF'
+                and HtmlOverride:GetFontObject('P') == HtmlAllFont
+                and HtmlOverride:GetFont('H2') == 'Fonts\\\\MORPHEUS.TTF'"
+        )
+        .unwrap());
+}
+
+/// `frameStrata=` goes through the strata lookup `0x6f17d0` (`0x769971`), which compares the whole
+/// value: a padded one is logged (`0x7699a4`) and skipped.
+#[test]
+fn a_padded_frame_strata_attribute_misses() {
+    let s = ui();
+    let report = load_str(
+        &s,
+        r#"<Ui>
+            <Frame name="PaddedStrata" frameStrata=" HIGH"/>
+            <Frame name="CasedStrata" frameStrata="high"/>
+        </Ui>"#,
+    );
+    let strata = |name: &str| {
+        s.eval::<String>(&format!("return {name}:GetFrameStrata()"))
+            .unwrap()
+    };
+    assert_eq!(strata("PaddedStrata"), "MEDIUM");
+    assert_eq!(strata("CasedStrata"), "HIGH");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.ends_with("Unknown frame strata:  HIGH")),
+        "{:?}",
+        report.warnings
+    );
+}
+
+/// A `<Rel…>` child's numbers are layout units, stored as parsed (`0x6f2037`-`0x6f2060`), so each
+/// getter answers `G` of them: at 16:9, 0.1 reads 156.651185208989, where the number scaled to
+/// FrameXML units and stored by `S` would read 156.6511677018557.
+#[test]
+fn a_rel_length_is_stored_in_layout_units() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 576.0);
+    load_str(
+        &s,
+        r#"<Ui>
+            <Button name="RelBox">
+                <Size><RelDimension x="0.1" y="0.05"/></Size>
+                <Anchors><Anchor point="BOTTOMLEFT">
+                    <Offset><RelDimension x="0.03" y="-0.0123"/></Offset>
+                </Anchor></Anchors>
+                <PushedTextOffset><RelDimension x="0.03" y="-0.0123"/></PushedTextOffset>
+                <Layers><Layer>
+                    <FontString name="RelText" font="Fonts\FRIZQT__.TTF">
+                        <FontHeight val="12"/>
+                        <Shadow><Offset><RelDimension x="0.03" y="-0.0123"/></Offset></Shadow>
+                    </FontString>
+                </Layer></Layers>
+            </Button>
+        </Ui>"#,
+    );
+    s.resolve();
+    let pair = |code: &str| s.eval::<(f64, f64)>(code).unwrap();
+    let off = (46.995_352_061_270_04, -19.268_094_870_334_718);
+    assert_eq!(
+        pair("return RelBox:GetWidth(), RelBox:GetHeight()"),
+        (156.651_185_208_989, 78.325_592_604_494_5)
+    );
+    assert_eq!(
+        pair("local _, _, _, x, y = RelBox:GetPoint(1) return x, y"),
+        off
+    );
+    assert_eq!(pair("return RelBox:GetPushedTextOffset()"), off);
+    assert_eq!(pair("return RelText:GetShadowOffset()"), off);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// New cells are a rebuild, which parses a `<Rel…>` size again in layout units: a dragged,
+/// user-placed frame that is not resizable has no size row, so after 4:3 turns 16:9 it keeps the
+/// size its XML gives, as a fresh 16:9 build seated from the same cache reads it, not the drag
+/// pin's size brought through script units.
+#[test]
+fn an_aspect_change_keeps_a_dragged_frames_rel_size() {
+    let xml = r#"<Ui>
+        <Frame name="RelMover" movable="true">
+            <Size><RelDimension x="0.1" y="0.05"/></Size>
+            <Anchors><Anchor point="BOTTOMLEFT"><Offset x="300" y="200"/></Anchor></Anchors>
+        </Frame>
+    </Ui>"#;
+    let build = |w: f32| {
+        let mut s = UiScript::new().unwrap();
+        s.set_window_size(w, 768.0);
+        load_str(&s, xml);
+        s.resolve();
+        s
+    };
+    let read = |s: &mut UiScript| {
+        s.resolve();
+        s.eval::<(f64, f64, f64, f64)>(
+            "local _, _, _, x, y = RelMover:GetPoint(1) \
+             return x, y, RelMover:GetWidth(), RelMover:GetHeight()",
+        )
+        .unwrap()
+    };
+    let mut s = build(1024.0);
+    s.mouse_move(400.0, 300.0);
+    s.run("RelMover:StartMoving()").unwrap();
+    s.mouse_move(437.25, 289.5);
+    s.run("RelMover:StopMovingOrSizing()").unwrap();
+    s.resolve();
+    let rows = s.user_placed_layouts();
+    assert_eq!(
+        (rows[0].width, rows[0].height),
+        (None, None),
+        "not resizable"
+    );
+    s.set_window_size(1366.0, 768.0);
+
+    let mut fresh = build(1366.0);
+    fresh.restore_user_placed_layouts(rows);
+    let want = read(&mut fresh);
+    assert_eq!(read(&mut s), want);
+    // 0.1 by 0.05 layout units, as `G` reads them under the 1366×768 cells.
+    let units = crate::layout::LayoutUnits::from_aspect(1366.0 / 768.0);
+    assert_eq!((want.2, want.3), (units.load(0.1), units.load(0.05)));
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// Every `<Rel…>` reader stores as parsed, with no setter steps on the path (`XmlReadDimension`
+/// `0x6f2037`-`0x6f2060`, `XmlReadValue`, `XmlReadInset` `0x6f2305`-`0x6f2388`), so each kind's
+/// getter answers `G` of the parsed number itself. At 16:9, 1, 2, 8, 16 and 0.25 are lengths a
+/// round trip through script units misses by an ulp.
+#[test]
+fn every_rel_reader_keeps_its_layout_length() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 576.0);
+    load_str(
+        &s,
+        r#"<Ui>
+            <Font name="RelFont" font="Fonts\FRIZQT__.TTF">
+                <FontHeight><RelValue val="0.25"/></FontHeight>
+            </Font>
+            <Frame name="RelKinds" resizable="true">
+                <HitRectInsets><RelInset left="1" right="2" top="8" bottom="16"/></HitRectInsets>
+                <ResizeBounds>
+                    <minResize><RelDimension x="1" y="2"/></minResize>
+                    <maxResize><RelDimension x="8" y="16"/></maxResize>
+                </ResizeBounds>
+                <Backdrop bgFile="bg" tile="true">
+                    <TileSize><RelValue val="2"/></TileSize>
+                    <BackgroundInsets><RelInset left="1" right="2" top="8" bottom="16"/></BackgroundInsets>
+                </Backdrop>
+                <Layers><Layer>
+                    <FontString name="RelKindsText" font="Fonts\FRIZQT__.TTF">
+                        <FontHeight><RelValue val="0.25"/></FontHeight>
+                    </FontString>
+                </Layer></Layers>
+            </Frame>
+            <EditBox name="RelBox">
+                <TextInsets><RelInset left="1" right="2" top="8" bottom="16"/></TextInsets>
+            </EditBox>
+        </Ui>"#,
+    );
+    let (g1, g2, g8, g16) = (
+        1_566.511_817_075_623_4,
+        3_133.023_634_151_247,
+        12_532.094_536_604_987,
+        25_064.189_073_209_975,
+    );
+    let quad = |code: &str| s.eval::<(f64, f64, f64, f64)>(code).unwrap();
+    let pair = |code: &str| s.eval::<(f64, f64)>(code).unwrap();
+    assert_eq!(
+        quad("return RelKinds:GetHitRectInsets()"),
+        (g1, g2, g8, g16)
+    );
+    assert_eq!(pair("return RelKinds:GetMinResize()"), (g1, g2));
+    assert_eq!(pair("return RelKinds:GetMaxResize()"), (g8, g16));
+    assert_eq!(quad("return RelBox:GetTextInsets()"), (g1, g2, g8, g16));
+    assert_eq!(
+        quad(
+            "local b = RelKinds:GetBackdrop() local i = b.insets \
+             return i.left, i.right, i.top, i.bottom"
+        ),
+        (g1, g2, g8, g16)
+    );
+    assert_eq!(
+        s.eval::<f64>("return RelKinds:GetBackdrop().tileSize")
+            .unwrap(),
+        g2
+    );
+    let g_quarter = 391.627_954_268_905_85;
+    assert_eq!(
+        s.eval::<f64>("local _, h = RelKindsText:GetFont() return h")
+            .unwrap(),
+        g_quarter
+    );
+    assert_eq!(
+        s.eval::<f64>("local _, h = RelFont:GetFont() return h")
+            .unwrap(),
+        g_quarter
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

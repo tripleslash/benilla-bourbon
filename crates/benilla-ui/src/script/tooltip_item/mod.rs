@@ -12,7 +12,7 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use super::binding_abi::flag;
+use super::binding_abi::{self, flag};
 use super::object::frame_handle_of;
 use super::tooltip::clear_silent;
 use super::{ItemTemplateView, Model};
@@ -399,7 +399,12 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // `GetQuestItemInfo`'s; an unknown type or index leaves the tooltip empty, as in the reference.
     m.set(
         "SetQuestItem",
-        lua.create_function(|lua, (this, kind, index): (Table, String, usize)| {
+        lua.create_function(|lua, (this, kind, index): (Table, Value, Value)| {
+            // `is-number-or-string` on the type and `is-number` on the index, else `Invalid quest
+            // item in SetQuestItem("type", index)` (`0x855338`, `0x5336c8`-`0x53373f`).
+            const LINE: &str = r#"Invalid quest item in SetQuestItem("type", index)"#;
+            let kind = binding_abi::string_arg(lua, kind, LINE)?;
+            let index = binding_abi::index_arg(lua, index, LINE)?;
             let item = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model.quest.as_ref().and_then(|q| {
@@ -413,7 +418,12 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
     m.set(
         "SetQuestLogItem",
-        lua.create_function(|lua, (this, kind, index): (Table, String, usize)| {
+        lua.create_function(|lua, (this, kind, index): (Table, Value, Value)| {
+            // As `SetQuestItem`, with `Invalid quest item in SetQuestLogItem("type", index)`
+            // (`0x85536c`, `0x533818`-`0x533894`).
+            const LINE: &str = r#"Invalid quest item in SetQuestLogItem("type", index)"#;
+            let kind = binding_abi::string_arg(lua, kind, LINE)?;
+            let index = binding_abi::index_arg(lua, index, LINE)?;
             let item = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 crate::script::quest_log::selected_quest_item(&model, &kind, index)
@@ -487,8 +497,25 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetInventoryItem",
         lua.create_function(
-            |lua, (this, unit, slot, name_only): (Table, String, usize, Value)| {
+            |lua, (this, unit, slot, name_only): (Table, Value, Value, Value)| {
                 let h = frame_handle_of(lua, &this)?;
+                // `is-number-or-string` on the unit else `Usage: SetInventoryItem(unit, slot [,
+                // nameOnly])` (`0x8552dc`, `0x532fa9`); then `is-number` on the slot, `tonumber`
+                // less 1.0 truncated (`0x532fe2`) and the slot reader's whitelist, else `Invalid
+                // inventory slot in SetInventoryItem` (`0x8552b0`, `0x53344c`).
+                let unit = super::binding_abi::string_arg(
+                    lua,
+                    unit,
+                    "Usage: SetInventoryItem(unit, slot [, nameOnly])",
+                )?;
+                let slot0 = lua
+                    .coerce_number(slot)?
+                    .map(|n| super::binding_abi::ftol(n - 1.0))
+                    .filter(|&s| super::char_stats::inventory_slot_reader_accepts(s))
+                    .ok_or_else(|| {
+                        mlua::Error::runtime("Invalid inventory slot in SetInventoryItem")
+                    })?;
+                let slot = (slot0 + 1) as usize;
                 // `nameOnly` (usage string `0x8552dc`) is set only by a number above 0
                 // (`0x533027..0x53304c`); anything else builds the ordinary tooltip, without an
                 // error. Three of the binding's four builder legs pass it on, not `0x533106`.
@@ -582,8 +609,18 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // pushed at `0x52e4a3`). repairCost is the item's cost (`0x534975`), shown in repair mode.
     m.set(
         "SetBagItem",
-        lua.create_function(|lua, (this, bag, slot): (Table, i64, u32)| {
+        lua.create_function(|lua, (this, bag, slot): (Table, Value, Value)| {
             let h = frame_handle_of(lua, &this)?;
+            // Both are `lua_isnumber`-gated (`0x5346ff`, `0x53470f`); a miss returns no value at
+            // all (`0x53476e`), the tooltip untouched.
+            let (Some(bag), Some(slot)) = (
+                crate::script::binding_abi::is_number(lua, bag),
+                crate::script::binding_abi::is_number(lua, slot),
+            ) else {
+                return Ok(MultiValue::new());
+            };
+            let bag = i64::from(crate::script::binding_abi::ftol(bag));
+            let slot = crate::script::binding_abi::ftol(slot) as u32;
             let (item_id, count, link, quality, inst, repair_cost) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 let cost = model.repair_costs.bags.get(&(bag, slot)).copied();
@@ -708,8 +745,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // `ITEM_FIELD_ENCHANTMENT`. `slot` is the 1-based row; coin and cleared rows have no tooltip.
     m.set(
         "SetLootItem",
-        lua.create_function(|lua, (this, slot): (Table, usize)| {
+        lua.create_function(|lua, (this, slot): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
+            // `is-number` else the client's `Invalid loot slot in SetInventoryItem`, its text
+            // naming the other method (`0x855310`, `0x533528`).
+            let slot = binding_abi::index_arg(lua, slot, "Invalid loot slot in SetInventoryItem")?;
             let row = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 model
@@ -740,7 +780,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // (`0x52b7bf`) is the only enchant source.
     m.set(
         "SetLootRollItem",
-        lua.create_function(|lua, (this, roll_id): (Table, u32)| {
+        lua.create_function(|lua, (this, roll_id): (Table, Value)| {
+            // `is-number` else `Usage: SetLootRollItem(id)` (`0x855650`, `0x53657b`).
+            let roll_id = binding_abi::index_arg32(lua, roll_id, "Usage: SetLootRollItem(id)")?;
             let h = frame_handle_of(lua, &this)?;
             let entry = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -950,7 +992,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // when there is one. The answer is the builder's return value, 1 or nil (`0x5356bb`).
     m.set(
         "SetInboxItem",
-        lua.create_function(|lua, (this, index): (Table, usize)| {
+        lua.create_function(|lua, (this, index): (Table, Value)| {
+            // `is-number` else `Usage: SetInboxItem(index)` (`0x855584`, `0x53559e`).
+            let index = binding_abi::index_arg(lua, index, "Usage: SetInboxItem(index)")?;
             let h = frame_handle_of(lua, &this)?;
             let (item_id, roll, name) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -990,7 +1034,13 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // builder's return value, 1 or nil; a miss answers nil.
     m.set(
         "SetAuctionItem",
-        lua.create_function(|lua, (this, kind, index): (Table, String, usize)| {
+        lua.create_function(|lua, (this, kind, index): (Table, Value, Value)| {
+            // `is-number` on arg 3, `is-number-or-string` on arg 2 else
+            // `Usage: SetAuctionItem("type", index)` (`0x8555a0`, `0x535ab6`).
+            let kind =
+                binding_abi::string_arg(lua, kind, r#"Usage: SetAuctionItem("type", index)"#)?;
+            let index =
+                binding_abi::index_arg(lua, index, r#"Usage: SetAuctionItem("type", index)"#)?;
             let h = frame_handle_of(lua, &this)?;
             let (item_id, roll, name) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -1098,7 +1148,16 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetTradeSkillItem",
         lua.create_function(
-            |lua, (this, skill_index, reagent_index): (Table, usize, Option<usize>)| {
+            |lua, (this, skill_index, reagent_index): (Table, Value, Value)| {
+                // `is-number` on the index else `Invalid trade skill item in
+                // SetTradeSkillItem(index [,reagent])` (`0x8553d8`, `0x533b78`); a non-number
+                // reagent is absent (`0x533be7`).
+                let skill_index = binding_abi::index_arg(
+                    lua,
+                    skill_index,
+                    "Invalid trade skill item in SetTradeSkillItem(index [,reagent])",
+                )?;
+                let reagent_index = binding_abi::index_or(lua, reagent_index)?.map(|i| i as usize);
                 let found = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
                     // A visible-row index, headers included (`0x4fca20`); a header is None.
@@ -1127,7 +1186,12 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetCraftItem",
         lua.create_function(
-            |lua, (this, craft_index, reagent_index): (Table, usize, usize)| {
+            |lua, (this, craft_index, reagent_index): (Table, Value, Value)| {
+                // `is-number` on both else `Invalid craft item in SetCraftItem(index, reagent)`
+                // (`0x855418`, `0x533d88`, `0x533d9c`).
+                const LINE: &str = "Invalid craft item in SetCraftItem(index, reagent)";
+                let craft_index = binding_abi::index_arg(lua, craft_index, LINE)?;
+                let reagent_index = binding_abi::index_arg(lua, reagent_index, LINE)?;
                 let found = {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
                     let Some(c) = &model.craft else {

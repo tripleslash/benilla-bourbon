@@ -1079,7 +1079,8 @@ mod loader_tests {
             .unwrap();
         assert!(ok, "XML attributes + children landed in the widget state");
 
-        s.resolve();
+        // The fill's coordinates are the bar's update (`0x7833c0`), in the tick's walk.
+        s.tick(0.0);
         let bar = s
             .extract()
             .into_iter()
@@ -1623,7 +1624,7 @@ mod loader_tests {
 
         let base = s.font_object("Base").expect("Base registered");
         assert_eq!(base.font.as_deref(), Some("Fonts\\FRIZQT__.TTF"));
-        assert_eq!(base.height, Some(12.0));
+        assert_eq!(base.height, Some(crate::layout::Len::Script(12.0)));
         assert_eq!(
             base.color,
             Some(crate::color::Rgba8::from_f32([1.0, 0.82, 0.0, 1.0]))
@@ -1633,7 +1634,7 @@ mod loader_tests {
         // no `font=` beside it, so it is never read (`0x783cf1`).
         let leaf = s.font_object("Leaf").expect("Leaf registered");
         assert_eq!(leaf.font.as_deref(), Some("Fonts\\FRIZQT__.TTF"));
-        assert_eq!(leaf.height, Some(12.0));
+        assert_eq!(leaf.height, Some(crate::layout::Len::Script(12.0)));
         assert_eq!(
             leaf.color,
             Some(crate::color::Rgba8::from_f32([1.0, 1.0, 1.0, 1.0]))
@@ -1939,7 +1940,8 @@ mod loader_tests {
         let (l, r, t, b) = s
             .eval::<(f64, f64, f64, f64)>("return Micro:GetHitRectInsets()")
             .unwrap();
-        assert_eq!((l, r, t, b), (0.0, 0.0, 18.0, 0.0));
+        let law = crate::test_support::law43;
+        assert_eq!((l, r, t, b), (law(0.0), law(0.0), law(18.0), law(0.0)));
         crate::assert_near!(s.eval::<f64>("return Micro:GetHeight()").unwrap(), 58.0);
         // A button is mouse-enabled by construction, so the hit test is live.
         assert!(
@@ -2280,6 +2282,41 @@ mod loader_tests {
         assert_eq!(s.eval::<i64>("return Gone:GetNumRegions()").unwrap(), 0);
     }
 
+    /// `0x78a130` sets the `file=` document (`0x78a2b2`) before it reads `hyperlinkFormat`
+    /// (`0x78a2d4`), so the document's links splice with the ctor's format and the XML's applies
+    /// from the next `SetText`.
+    #[test]
+    fn simplehtml_parses_its_file_before_taking_its_hyperlink_format() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Font name="LinkDocFont" font="Fonts\FRIZQT__.TTF"><FontHeight val="12"/></Font>
+                <SimpleHTML name="LinkDoc" file="doc.html" hyperlinkFormat="|H%s|h[%s]|h">
+                    <Size><AbsDimension x="270" y="304"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <FontString inherits="LinkDocFont"/>
+                </SimpleHTML>
+            </Ui>"#,
+        );
+        let files = |req: &str| -> Option<Vec<u8>> {
+            (req == "doc.html")
+                .then(|| b"<html><body><p><a href=\"x\">go</a></p></body></html>".to_vec())
+        };
+        let report = load_in(&s, &doc, "Interface/GlueXML/LinkDoc.xml", &files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        let text = "local r = LinkDoc:GetRegions(); return r:GetText()";
+        assert_eq!(s.eval::<String>(text).unwrap(), "|Hx|hgo|h");
+        assert_eq!(
+            s.eval::<String>("return LinkDoc:GetHyperlinkFormat()")
+                .unwrap(),
+            "|H%s|h[%s]|h"
+        );
+        s.run(r#"LinkDoc:SetText('<html><body><p><a href="x">go</a></p></body></html>')"#)
+            .unwrap();
+        assert_eq!(s.eval::<String>(text).unwrap(), "|Hx|h[go]|h");
+    }
+
     /// A `<SimpleHTML>` element font is loaded by `CSimpleFont::LoadXML` (`0x78a26e` → `0x783c30`),
     /// whose file needs a height above 0 (`0x783d6d`-`0x783d78`): else it reports
     /// `Font %s: Missing font height in %s element` (`0x87a4f0`) and returns (`0x783dae`) before
@@ -2407,7 +2444,7 @@ mod loader_tests {
                     .collect::<Vec<_>>(),
                 blocks
                     .iter()
-                    .map(|rh| model.region_data[rh].size)
+                    .map(|rh| model.region_data[rh].size.map(|(w, h)| (w.raw(), h.raw())))
                     .collect::<Vec<_>>(),
             )
         };

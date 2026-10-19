@@ -10,9 +10,8 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use super::binding_abi::{bool_or_default, flag};
+use super::binding_abi::{self, bool_or_default, flag};
 use super::Model;
-use crate::script::binding_abi::{Idx, Idx32};
 
 /// `CLootButton`'s own Lua method table (`0x847ce4`): one entry, per the registrar's `mov edx,1`.
 pub(super) const REG_LOOTBUTTON_METHODS: &str = "__benilla_lootbutton_methods";
@@ -156,7 +155,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // template lands, and the app holds `LOOT_OPENED` back likewise.
     g.set(
         "GetLootSlotInfo",
-        lua.create_function(|lua, Idx(slot): Idx| {
+        lua.create_function(|lua, slot: Value| {
+            // `is-number` else `Usage: GetLootSlotInfo(slot)` (`0x848004`, `0x4c2c7a`).
+            let slot = binding_abi::index_arg(lua, slot, "Usage: GetLootSlotInfo(slot)")?;
             // `Some(Some(row))` live, `Some(None)` cleared, `None` no such slot.
             let slot_state = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
@@ -198,7 +199,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `ChatFrameEditBox:Insert` (`:152`), both of which take a nil.
     g.set(
         "GetLootSlotLink",
-        lua.create_function(|lua, Idx(slot): Idx| {
+        lua.create_function(|lua, slot: Value| {
+            // `is-number` else `Usage: GetLootSlotLink(slot)` (`0x848024`, `0x4c2d3a`).
+            let slot = binding_abi::index_arg(lua, slot, "Usage: GetLootSlotLink(slot)")?;
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 model
@@ -216,7 +219,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "LootSlotIsItem",
-        lua.create_function(|lua, slot: usize| {
+        lua.create_function(|lua, slot: Value| {
+            // `is-number` else `Usage: LootSlotIsItem(slot)` (`0x848044`, `0x4c2da1`).
+            let slot = binding_abi::index_arg(lua, slot, "Usage: LootSlotIsItem(slot)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(flag(
                 slot.checked_sub(1)
@@ -228,7 +233,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "LootSlotIsCoin",
-        lua.create_function(|lua, slot: usize| {
+        lua.create_function(|lua, slot: Value| {
+            // `is-number` else `Usage: LootSlotIsCoin(slot)` (`0x848060`, `0x4c2e11`).
+            let slot = binding_abi::index_arg(lua, slot, "Usage: LootSlotIsCoin(slot)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(flag(
                 slot.checked_sub(1)
@@ -281,7 +288,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // pending confirm, `cmp edi, [0x847cec]`). On an ordinary row it does nothing.
     g.set(
         "LootSlot",
-        lua.create_function(|lua, slot: u32| {
+        lua.create_function(|lua, slot: Value| {
+            // `is-number` else `Usage: LootSlot(slot)` (`0x84807c`, `0x4c2e81`).
+            let slot = binding_abi::index_arg32(lua, slot, "Usage: LootSlot(slot)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.loot_confirms.push(slot);
             Ok(())
@@ -307,7 +316,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // as nobody (`LootFrame.lua:168-232`).
     g.set(
         "GetMasterLootCandidate",
-        lua.create_function(|lua, Idx32(index): Idx32| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: GetMasterLootCandidate(index)` (`0x848094`, `0x4c2f27`).
+            let index =
+                binding_abi::index_arg32(lua, index, "Usage: GetMasterLootCandidate(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let name = index.checked_sub(1).and_then(|i| {
                 model
@@ -326,7 +338,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `StaticPopup.lua:85-94`).
     g.set(
         "GiveMasterLoot",
-        lua.create_function(|lua, (slot, candidate): (u32, u32)| {
+        lua.create_function(|lua, (slot, candidate): (Value, Value)| {
+            // `is-number` on args 1 and 2 else `Usage: GiveMasterLoot(slot, index)` (`0x8480bc`,
+            // `0x4c3033`).
+            let slot = binding_abi::index_arg32(lua, slot, "Usage: GiveMasterLoot(slot, index)")?;
+            let candidate =
+                binding_abi::index_arg32(lua, candidate, "Usage: GiveMasterLoot(slot, index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.loot_master_gives.push((slot, candidate));
             Ok(())

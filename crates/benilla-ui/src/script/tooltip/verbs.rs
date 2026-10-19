@@ -2,7 +2,7 @@
 
 use mlua::{Lua, Table, Value, Variadic};
 
-use crate::script::binding_abi::{optional_string, string_arg};
+use crate::script::binding_abi::{self, optional_string, string_arg};
 use crate::script::object::frame_handle_of;
 use crate::script::region::region_handle_of;
 use crate::script::Model;
@@ -27,7 +27,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetOwner",
         lua.create_function(
-            |lua, (this, owner, anchor, x, y): (Table, Value, Value, Option<f32>, Option<f32>)| {
+            |lua, (this, owner, anchor, x, y): (Table, Value, Value, Value, Value)| {
                 let h = frame_handle_of(lua, &this)?;
                 set_shown(lua, h, false);
                 // The owner is read after the hide (`0x531189`), so a bad one raises on a
@@ -64,14 +64,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                         TooltipAnchor::Left
                     }
                 };
-                set_owner_core(
-                    lua,
-                    h,
-                    Some(owner_h),
-                    anchor,
-                    x.unwrap_or(0.0),
-                    y.unwrap_or(0.0),
-                );
+                // Each offset has its own `lua_isnumber` gate (`0x53134f`, `0x531388`), a miss
+                // keeping 0.
+                let offset = |v| binding_abi::is_number(lua, v).map_or(0.0, |n| n as f32);
+                set_owner_core(lua, h, Some(owner_h), anchor, offset(x), offset(y));
                 Ok(())
             },
         )?,
@@ -232,13 +228,16 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     // SetPadding(width) (`0x530f10`): extra plate width that survives a clear (ItemRefTooltip's 16
     // keeps its close button off the text, ItemRef.xml:40), read by `lua_tonumber` with no type
-    // test, so a non-number is 0 (`0x530fa0`), stored as given (`0x530630`) and read at the next
-    // sizing.
+    // test, so a non-number is 0 (`0x530fa0`), stored in layout units (`0x530fba`, `0x530630`)
+    // and read at the next sizing.
     m.set(
         "SetPadding",
         lua.create_function(|lua, (this, w): (Table, Value)| {
             let w = lua.coerce_number(w).ok().flatten().unwrap_or(0.0);
-            with_tip(lua, &this, |t| t.padding = w as f32)
+            let h = frame_handle_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let stored = model.layout_units().store(w as f32);
+            super::tip_mut(&mut model, h).map(|t| t.padding = stored)
         })?,
     )?;
     // FadeOut() (`0x531f00`): the fade request ([`super::fade_out`]).

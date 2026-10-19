@@ -173,6 +173,19 @@ pub(crate) struct Model {
     pub(crate) arena: WidgetArena,
     /// Per-frame anchors, size and scale; every live frame has one from creation on.
     pub(crate) layout_inputs: HashMap<FrameHandle, LayoutInput>,
+    /// Per dragged frame, its anchors and size as the scripts last set them: as they stood before
+    /// its first drag pin (`0x768430`), then each script `SetPoint`, `SetAllPoints`,
+    /// `ClearAllPoints`, `SetWidth` and `SetHeight` applied to it too, the engine's own writes
+    /// not. What a rebuild re-creates where the layout cache seats nothing
+    /// ([`crate::script::UiScript::reseat_user_placed`]).
+    pub(crate) drag_authored: HashMap<
+        FrameHandle,
+        (
+            crate::layout::Anchors,
+            crate::layout::Len,
+            crate::layout::Len,
+        ),
+    >,
     /// Each resolvable frame's rect from the last resolve, in layout units: the resolver's own,
     /// which its keep test, its getters and its anchors read; everything else reads
     /// [`Self::frame_rect`].
@@ -310,9 +323,8 @@ pub(crate) struct Model {
     pub(crate) on_update_model_frames: Vec<FrameHandle>,
     /// Per model file, a pane clock's sequences and bounds, read by the host off the `MD20`.
     pub(crate) model_facts: HashMap<String, std::sync::Arc<crate::widget::ModelFileFacts>>,
-    /// Model files still waiting for their facts, for the host to load, one per key: the
-    /// [`crate::widget::model_key`] and the path as the first pane named it.
-    pub(crate) model_facts_wanted: Vec<(String, String)>,
+    /// Model files still waiting for their facts, for the host to load; one per key.
+    pub(crate) model_facts_wanted: Vec<super::ModelWanted>,
     /// The model instances `SetModel` has made in this state, the last one's number.
     pub(crate) model_instances: u64,
     /// Event name to its frames in registration order, never a set: `SignalEvent` (`0x703e50`)
@@ -777,6 +789,9 @@ pub(crate) struct Model {
     /// A FrameXML cursor call ran. The mode is a write, not a level: `0xbe2c2c` keeps its value
     /// until the world or a hover handler writes it, so a handler-less frame leaves it be.
     pub(crate) ui_cursor_dirty: bool,
+    /// The name the last custom cursor loaded under (`0xbe2c70`, copied at `0x523cf5`), which
+    /// [`container::UiCursorMode::Custom`] shows; kept across every other mode.
+    pub(crate) custom_cursor_name: String,
     /// `AutoEquipCursorItem`'s `(bag, slot)` sources, sent as `CMSG_AUTOEQUIP_ITEM`.
     pub(crate) container_autoequips: Vec<(i64, u32)>,
     /// `AutoEquipCursorItem`'s bind-on-equip questions, `(bag, slot, guid)`: the item stays held.
@@ -1402,6 +1417,7 @@ impl Model {
             load_log: Default::default(),
             arena: WidgetArena::new(),
             layout_inputs: HashMap::new(),
+            drag_authored: HashMap::new(),
             solver: LayoutSolver::new(),
             layout_fingerprint: None,
             layout_epoch: 0,
@@ -1650,6 +1666,7 @@ impl Model {
             container_wraps: Vec::new(),
             ui_cursor: None,
             ui_cursor_dirty: false,
+            custom_cursor_name: String::new(),
             container_autoequips: Vec::new(),
             container_equip_asks: Vec::new(),
             bag_autostores: Vec::new(),
@@ -2574,7 +2591,7 @@ impl Model {
             return;
         };
         if self.region_data.get(&rh).is_some_and(|d| {
-            !d.anchors.is_empty() && d.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0)
+            !d.anchors.is_empty() && d.size.is_none_or(|(w, h)| w.is_zero() || h.is_zero())
         }) {
             self.layout_unsettled.insert(id);
         }

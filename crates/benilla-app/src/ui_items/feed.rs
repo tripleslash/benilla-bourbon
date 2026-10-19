@@ -1145,7 +1145,7 @@ pub(crate) fn feed_containers(
         fresh.insert(
             0,
             ContainerState {
-                name: Some("Backpack".into()),
+                name: None,
                 num_slots: u32::from(PACK_SLOTS),
                 slots,
             },
@@ -1232,7 +1232,7 @@ pub(crate) fn feed_containers(
         fresh.insert(
             BANK_CONTAINER,
             ContainerState {
-                name: Some("Bank".into()),
+                name: None,
                 num_slots: u32::from(BANK_SLOTS),
                 slots,
             },
@@ -1317,7 +1317,7 @@ pub(crate) fn feed_containers(
         fresh.insert(
             KEYRING_CONTAINER,
             ContainerState {
-                name: Some("Keyring".into()),
+                name: None,
                 num_slots: size,
                 slots,
             },
@@ -2136,7 +2136,7 @@ mod tests {
         )
         .unwrap();
         let bag0 = ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots: HashMap::new(),
         };
@@ -2200,7 +2200,7 @@ mod tests {
             HashMap::from([(
                 0,
                 ContainerState {
-                    name: Some("Backpack".into()),
+                    name: None,
                     num_slots: 16,
                     slots: HashMap::from([(
                         1,

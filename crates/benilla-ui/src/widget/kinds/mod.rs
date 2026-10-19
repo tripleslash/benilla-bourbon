@@ -1,5 +1,6 @@
 //! Widget kinds: [`FrameKind`], [`RegionKind`] and the per-kind state, [`KindState`].
 
+use crate::layout::Len;
 use std::collections::{HashSet, VecDeque};
 
 use super::{FrameHandle, RegionHandle};
@@ -68,6 +69,8 @@ pub enum KindUpdate {
     MessageFrame,
     /// `CSimpleMessageScrollFrame`'s `0x788460` (slot `0x81ce50`): the line fades.
     ScrollingMessageFrame,
+    /// `CSimpleStatusBar`'s `0x7833c0`: the bar texture's coordinates, when the fill is marked.
+    StatusBar,
     /// `CSimpleScrollFrame`'s `0x787140` (slot `0x81cd78`): a marked range's recompute.
     ScrollFrame,
 }
@@ -93,6 +96,7 @@ impl FrameKind {
             FrameKind::MessageFrame => Some(KindUpdate::MessageFrame),
             FrameKind::ScrollingMessageFrame => Some(KindUpdate::ScrollingMessageFrame),
             FrameKind::ScrollFrame => Some(KindUpdate::ScrollFrame),
+            FrameKind::StatusBar => Some(KindUpdate::StatusBar),
             k if k.is_model() => Some(KindUpdate::Model),
             _ => None,
         }
@@ -192,7 +196,7 @@ impl KindState {
     }
 
     /// The message kinds' text insets ([`ScrollingMessageState::insets`]).
-    pub fn message_insets(&self) -> Option<[f32; 4]> {
+    pub fn message_insets(&self) -> Option<[crate::layout::Len; 4]> {
         match self {
             KindState::ScrollingMessage(smf) => Some(smf.insets),
             KindState::Message(mf) => Some(mf.insets),
@@ -201,7 +205,7 @@ impl KindState {
     }
 
     /// [`Self::message_insets`], mutably, for the XML `<TextInsets>`.
-    pub fn message_insets_mut(&mut self) -> Option<&mut [f32; 4]> {
+    pub fn message_insets_mut(&mut self) -> Option<&mut [crate::layout::Len; 4]> {
         match self {
             KindState::ScrollingMessage(smf) => Some(&mut smf.insets),
             KindState::Message(mf) => Some(&mut mf.insets),
@@ -314,12 +318,15 @@ pub struct TooltipState {
     /// health watcher (`0x467e70`, registered at `0x52a0a8`) drives the bar; a `set_unit` push of
     /// that unit, under any token, re-drives it.
     pub unit_guid: Option<u64>,
+    /// The unit's health as the bar was last driven with it: the watcher's copy of the field
+    /// (`0x4667a0`), which a values update compares before calling it (`0x4655bb`).
+    pub unit_health: u32,
     /// Armed for a compare render: the next `SetInventoryItem` prepends "Currently Equipped"
     /// (`[arg+0x18]`, not the compact `[arg+0x14]`), surviving the stock caller's `SetOwner` in
     /// between (`MerchantFrame.xml:67-72`); the reference's route to `0x52b650` is untraced.
     pub equipped_header_armed: bool,
-    /// `SetPadding` (`+0x3bc`): extra plate width past the content (`0x5309f4`), which the clear
-    /// keeps (`ItemRef.xml:40` sets 16 for the close button).
+    /// `SetPadding` (`+0x3bc`), in layout units (`0x530fba`): extra plate width past the content
+    /// (`0x5309f4`), which the clear keeps (`ItemRef.xml:40` sets 16 for the close button).
     pub padding: f32,
     /// Benilla-only: a sizing ran in a VM with no font engine before its lines were measured, so
     /// the next resolve runs it again ([`crate::script::tooltip`]'s headless fallback).
@@ -378,9 +385,9 @@ pub struct ModelState {
     /// The camera index still to install (`+0x320`): the ctor's `Some(0)`, or a `SetCamera` made
     /// before the facts (`0x76cec0`). While it is `Some` the pane draws nothing (`0x76d5f0`).
     pub camera_pending: Option<i32>,
-    /// The installed camera (`+0x31c`): a raw camera-table index, never via `cameraLookup`, drawn
-    /// in perspective; `None`, the NULL camera an out-of-range index installs, draws orthographic.
-    pub camera: Option<u32>,
+    /// The installed camera (`+0x31c`), drawn in perspective; `None`, the NULL camera an
+    /// out-of-range index installs, draws orthographic.
+    pub camera: Option<InstalledCamera>,
     /// `SetPosition`: the model's offset within the pane's scene.
     pub position: (f32, f32, f32),
     pub light: ModelLight,
@@ -542,6 +549,17 @@ pub struct SequenceFacts {
     pub looping: bool,
 }
 
+/// A pane's installed camera (`+0x31c`): raw record `index` of the camera table (never via
+/// `cameraLookup`) of `file`, the file the pane held when the camera was resolved (`0x76ceef` →
+/// `0x713590`). The pane holds the camera itself, so a later `SetModel` keeps aiming through the
+/// old file's camera (`0x76cd30` leaves `+0x31c`, and the new file's ready hook installs nothing
+/// while none is pending, `0x76ce44`-`0x76ce47`) until the next `SetCamera`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstalledCamera {
+    pub file: String,
+    pub index: u32,
+}
+
 /// What a pane needs from its model file, which the reference reads off the resident `MD20`; the
 /// host hands it over (`UiScript::set_model_facts`), keyed by [`model_key`].
 #[derive(Clone, Debug, PartialEq)]
@@ -586,15 +604,16 @@ impl ModelFileFacts {
     }
 }
 
-/// A model path's key: case-folded, forward slashes, no extension, so `.mdx` and `.m2` match.
+/// A model path's key, the file the model cache opens for it: case-folded, forward slashes, the
+/// extension at the last dot made `.m2` when it is `.mdx`, `.mdl` or `.m2` (`0x706a80`-`0x706adf`),
+/// so those spellings match. A path the cache refuses keys as the error cube it stands
+/// (`0x70737f`), never as a twin with a valid extension. A key is its own key.
 pub fn model_key(path: &str) -> String {
     let p = path.to_ascii_lowercase().replace('\\', "/");
-    let stem = p
-        .strip_suffix(".mdx")
-        .or_else(|| p.strip_suffix(".mdl"))
-        .or_else(|| p.strip_suffix(".m2"))
-        .unwrap_or(&p);
-    stem.to_string()
+    match p.rsplit_once('.') {
+        Some((stem, "mdx" | "mdl" | "m2")) => format!("{stem}.m2"),
+        _ => "spells/errorcube.m2".to_string(),
+    }
 }
 
 impl ModelState {
@@ -701,11 +720,15 @@ impl ModelState {
     }
 
     /// `SetCamera` by raw index (`0x76cec0`): deferred until the facts are known, then installed
-    /// or answered with the NULL camera, either clearing the pending index (`0x76ce80`).
+    /// from the file held now (`0x713590`) or answered with the NULL camera, either clearing the
+    /// pending index (`0x76ce80`). The facts are always those of [`Self::path`].
     pub fn install_camera(&mut self, idx: i32, facts: Option<&ModelFileFacts>) {
         match facts {
             Some(f) => {
-                self.camera = f.camera_at(idx);
+                self.camera = f
+                    .camera_at(idx)
+                    .zip(self.path.clone())
+                    .map(|(index, file)| InstalledCamera { file, index });
                 self.camera_pending = None;
             }
             None => self.camera_pending = Some(idx),
@@ -1057,13 +1080,13 @@ pub struct ButtonState {
     pub(crate) fonts: Option<ButtonFonts>,
     /// `LockHighlight()`: highlighted regardless of hover, both the texture and the label font.
     pub locked_highlight: bool,
-    /// `<PushedTextOffset>`/`SetPushedTextOffset` (`+0x4b0`/`+0x4b4`), x and y in layout units;
-    /// the ctor's (0.001, -0.001) (`0x778740`, `0x77874a`), about 1.28 UI units right and down at
-    /// 4:3. Only [`Self::refresh_label`] puts it on the label.
-    pub pushed_text_offset: [f32; 2],
-    /// The label's text offset (`CSimpleFontString::SetTextOffset` `0x772100`, `+0x110`/`+0x114`)
-    /// in layout units: it moves the drawn text, never the label's rect.
-    label_offset: [f32; 2],
+    /// `<PushedTextOffset>`/`SetPushedTextOffset` (`+0x4b0`/`+0x4b4`), x and y, script numbers
+    /// stored by `S`; the ctor's (0.001, -0.001) layout units (`0x778740`, `0x77874a`), about 1.28
+    /// UI units right and down at 4:3. Only [`Self::refresh_label`] puts it on the label.
+    pub pushed_text_offset: [Len; 2],
+    /// The label's text offset (`CSimpleFontString::SetTextOffset` `0x772100`, `+0x110`/`+0x114`):
+    /// it moves the drawn text, never the label's rect.
+    label_offset: [Len; 2],
     /// A real state change happened since the label last relinked ([`Self::take_relink`]).
     relink_due: bool,
     /// The shown state texture (`+0x4c4`), written only by `set_state` and `set_state_slot`.
@@ -1090,8 +1113,11 @@ impl Default for ButtonState {
             registered_clicks: HashSet::from(["LeftButtonUp".to_string()]),
             fonts: None,
             locked_highlight: false,
-            pushed_text_offset: [f32::from_bits(0x3a83_126f), f32::from_bits(0xba83_126f)],
-            label_offset: [0.0, 0.0],
+            pushed_text_offset: [
+                Len::Layout(f32::from_bits(0x3a83_126f)),
+                Len::Layout(f32::from_bits(0xba83_126f)),
+            ],
+            label_offset: [Len::Layout(0.0); 2],
             relink_due: false,
             shown: None,
             state: ButtonVisualState::Normal,
@@ -1147,13 +1173,14 @@ impl ButtonState {
         self.label_offset = if self.state == ButtonVisualState::Pushed {
             self.pushed_text_offset
         } else {
-            [0.0, 0.0]
+            [Len::Layout(0.0); 2]
         };
     }
 
-    /// The offset the label's text draws at, in layout units ([`Self::refresh_label`]).
-    pub fn label_offset(&self) -> [f32; 2] {
-        self.label_offset
+    /// The offset the label's text draws at, in layout units under `units`
+    /// ([`Self::refresh_label`]).
+    pub fn label_offset(&self, units: crate::layout::LayoutUnits) -> [f32; 2] {
+        self.label_offset.map(|l| l.layout(units))
     }
 
     /// `SetButtonState(state, locked)` (`0x779790`), the one writer: the lock is stored before the
@@ -1316,29 +1343,125 @@ impl ButtonState {
     }
 }
 
-/// A StatusBar's value and fill texture, zero-initialized like the client's members.
+/// A StatusBar's value and fill texture (`CSimpleStatusBar`, ctor `0x782d80`). The value fields
+/// are private: every write goes through [`Self::set_min_max`] or [`Self::set_value`], which keep
+/// the flag bits the client keeps at `+0x314`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatusBarState {
-    /// `SetMinMaxValues` low bound (XML `minValue`); the loader swaps a reversed pair (`0x782ef0`).
-    pub min: f32,
-    /// `SetMinMaxValues` high bound (XML `maxValue`).
-    pub max: f32,
-    /// The current value (`SetValue`/XML `defaultValue`), clamped into `[min, max]`.
-    pub value: f32,
-    /// VERTICAL fills bottom-up; HORIZONTAL, the default, left to right (enum `0x811b00`).
-    pub vertical: bool,
-    /// The fill texture (`<BarTexture>`), cropped to [`Self::fraction`] along the orientation axis.
+    /// The low bound (`+0x318`).
+    min: f32,
+    /// The high bound (`+0x31c`).
+    max: f32,
+    /// The held value (`+0x320`), clamped into `[min, max]`.
+    value: f32,
+    /// `+0x314 & 2`, set by `SetMinMaxValues` (`0x78329a`); until then `SetValue` is a no-op.
+    range_valid: bool,
+    /// `+0x314 & 4`, set by the first stored value (`0x783347`).
+    has_value: bool,
+    /// `+0x314 & 1`, the fill to redo: set by the range (`0x78329a`), a stored value (`0x783347`),
+    /// the orientation (`0x78325c`) and a bar texture installed (`0x783230`); cleared by the
+    /// update that writes the coordinates ([`Self::take_fill`], `0x78344e`).
+    fill_dirty: bool,
+    /// `+0x328`: VERTICAL fills bottom-up; HORIZONTAL, the default, left to right (enum
+    /// `0x811b00`).
+    vertical: bool,
+    /// The fill texture (`<BarTexture>`, `+0x324`), whose coordinates the update writes.
     pub bar: Option<RegionHandle>,
 }
 
 impl StatusBarState {
-    /// The fill fraction `(value − min) / (max − min)` in `[0, 1]`; `0.0` when `max <= min`.
+    /// The range, `(min, max)`, as `GetMinMaxValues` answers it.
+    pub fn min_max(&self) -> (f32, f32) {
+        (self.min, self.max)
+    }
+
+    /// The held value, as `GetValue` answers it.
+    pub fn value(&self) -> f32 {
+        self.value
+    }
+
+    /// `CSimpleStatusBar::SetMinMaxValues` (`0x783270`), the one setter the Lua binding, the XML
+    /// loader and the engine's health watchers all call: the low bound is `max` when `min > max`
+    /// (`fcom; test ah,0x41`, so NaN keeps `min`), never a swap. With a value held it clears `& 4`
+    /// and re-sets the value (`0x7832af`, `0x7832bc`), so `OnValueChanged` fires on every call
+    /// once the bar has a value; the returned value is that fire.
+    pub fn set_min_max(&mut self, min: f32, max: f32) -> Option<f32> {
+        self.min = if min > max { max } else { min };
+        self.max = max;
+        self.range_valid = true;
+        self.fill_dirty = true;
+        if !self.has_value {
+            return None;
+        }
+        self.has_value = false;
+        self.set_value(self.value)
+    }
+
+    /// `CSimpleStatusBar::SetValue` (`0x7832d0`), op for op: nothing without a range
+    /// (`0x7832dc`); the value raised to `min` (`0x7832e8`), then lowered to `max` when `max` is
+    /// below that (`0x783303`); with a value held, an equal one returns (`0x783342`; NaN is never
+    /// equal). Otherwise it is stored and returned, the caller firing `OnValueChanged`.
+    pub fn set_value(&mut self, v: f32) -> Option<f32> {
+        if !self.range_valid {
+            return None;
+        }
+        let lo = if self.min > v { self.min } else { v };
+        let v = if self.max < lo { self.max } else { lo };
+        if self.has_value && v == self.value {
+            return None;
+        }
+        self.value = v;
+        self.has_value = true;
+        self.fill_dirty = true;
+        Some(v)
+    }
+
+    /// VERTICAL, as `GetOrientation` answers it.
+    pub fn vertical(&self) -> bool {
+        self.vertical
+    }
+
+    /// `CSimpleStatusBar::SetOrientation` (`0x783250`): stores it and marks the fill.
+    pub fn set_orientation(&mut self, vertical: bool) {
+        self.vertical = vertical;
+        self.fill_dirty = true;
+    }
+
+    /// `InstallBarTexture` (`0x7831f0`) past its same-texture return (`0x783202`): the slot takes
+    /// `bar` and the fill is marked (`0x783230`).
+    pub fn install_bar(&mut self, bar: Option<RegionHandle>) {
+        self.bar = bar;
+        self.fill_dirty = true;
+    }
+
+    /// The fill fraction `(value − min) / (max − min)` (`0x783380`), `0.0` when `max − min` is not
+    /// above 0.
     pub fn fraction(&self) -> f32 {
-        if self.max > self.min {
+        if self.max - self.min > 0.0 {
             ((self.value - self.min) / (self.max - self.min)).clamp(0.0, 1.0)
         } else {
             0.0
         }
+    }
+
+    /// The update `CSimpleStatusBar::OnFrameUpdate` (`0x7833c0`) runs after the frame's
+    /// `OnUpdate`: with the fill marked, a bar texture, a range and a value (`0x7833d8`-`0x7833ea`)
+    /// it clears the mark (`0x78344e`) and answers the coordinates it builds from scratch for
+    /// `SetTexCoordRect` (`0x770410`), `[left, right, top, bottom]`: 0 to the fill across and 0 to
+    /// 1 down when HORIZONTAL (`0x78340e`-`0x78341e`), 0 to 1 across and 0 to the fill down when
+    /// VERTICAL (`0x78342f`-`0x783436`), so a vertical bar shows the top of its art. Otherwise it
+    /// answers `None` and the texture keeps whatever coordinates it holds.
+    pub fn take_fill(&mut self) -> Option<[f32; 4]> {
+        if !(self.fill_dirty && self.bar.is_some() && self.range_valid && self.has_value) {
+            return None;
+        }
+        self.fill_dirty = false;
+        let f = self.fraction();
+        Some(if self.vertical {
+            [0.0, 1.0, 0.0, f]
+        } else {
+            [0.0, f, 0.0, 1.0]
+        })
     }
 }
 

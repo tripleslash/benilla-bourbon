@@ -5,6 +5,7 @@
 //! [`GLUE_SLOT`].
 
 use benilla_assets::M2Model;
+use benilla_ui::widget::InstalledCamera;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{OrthographicProjection, PerspectiveProjection};
 use bevy::prelude::*;
@@ -237,6 +238,10 @@ pub(crate) struct GluePreview {
     /// The pane's root inputs, which place the scene on the orthographic leg a file with no
     /// camera takes ([`ortho_scene_rig`]).
     pub(crate) root: SceneRoot,
+    /// The pane's camera, a raw index into the camera table of the file it was resolved from
+    /// ([`benilla_ui::script::GlueScenePane::camera`]), which need not be the scene's; `None`
+    /// takes the orthographic leg.
+    pub(crate) camera: Option<InstalledCamera>,
 }
 
 /// A scene pane's root inputs (`0x76d1a0`): `SetModelScale`, the frame's effective scale,
@@ -273,6 +278,7 @@ impl Default for GluePreview {
             hidden: false,
             live: Vec::new(),
             root: SceneRoot::default(),
+            camera: None,
         }
     }
 }
@@ -282,6 +288,11 @@ impl GluePreview {
     /// dialled look standing in it.
     pub(crate) fn show_create(&mut self, race: u8, look: CreateLook) {
         let (scene, fog) = stock_scene(race);
+        // `GlueParent.lua`'s `SetBackgroundModel` follows the scene with `SetCamera(0)`.
+        self.camera = Some(InstalledCamera {
+            file: scene.path().to_string(),
+            index: 0,
+        });
         self.scene = Some(scene);
         self.look = Some(GlueLook::Create(look));
         self.fog = fog;
@@ -289,16 +300,15 @@ impl GluePreview {
 }
 
 /// The glue background scene, the reference's fullscreen `ModelFFX`: `SetBackgroundModel` loads
-/// `UI_<Race>.mdx`, plays sequence 0 and shows camera 0. Its root never yaws; the character
-/// stands on its attachment 0, and its camera drives the booth camera while it shows.
+/// `UI_<Race>.mdx`, plays sequence 0 and shows the camera the pane chose, camera 0 in stock
+/// GlueXML. Its root never yaws; the character stands on its attachment 0, and its camera drives
+/// the booth camera while it shows.
 #[derive(Resource)]
 pub(crate) struct CreateScene {
     root: Entity,
     file: Option<GlueSceneFile>,
     handle: Option<Handle<M2Model>>,
     spawned: bool,
-    /// The authored camera 0, captured at spawn.
-    cam: Option<benilla_assets::PortraitCamera>,
     /// The character's stage spot, scene attachment 0 in Bevy model space (`ZERO` with no scene);
     /// the body seats on attachment 0 at select too (`0x473039`).
     char_spot: Vec3,
@@ -331,6 +341,11 @@ pub(crate) struct CreateScene {
     rev: u64,
     /// The requested stage not yet committed ([`PendingSwap`]).
     pending: Option<PendingSwap>,
+    /// The pane's installed camera and the rig resolved from its file, held as the pane holds the
+    /// camera object (`+0x31c`), across scene swaps ([`resolve_camera`]).
+    held_camera: Option<(InstalledCamera, Option<benilla_assets::PortraitCamera>)>,
+    /// The camera's file while it loads, when it is not the standing scene's.
+    camera_src: Option<(GlueSceneFile, Handle<M2Model>)>,
     /// The stage's scene clock in milliseconds, the reference's per-`ModelFFX` scene clock
     /// (`CSimpleModel+0x314`): it steps in whole milliseconds, only while the pane shows
     /// ([`pace_glue_clock`]).
@@ -353,7 +368,6 @@ struct ParkedScene {
     root: Entity,
     file: GlueSceneFile,
     handle: Handle<M2Model>,
-    cam: Option<benilla_assets::PortraitCamera>,
     char_spot: Vec3,
     char_facing: Quat,
     char_scale: f32,
@@ -372,7 +386,6 @@ impl CreateScene {
             file: None,
             handle: None,
             spawned: false,
-            cam: None,
             char_spot: Vec3::ZERO,
             char_facing: Quat::IDENTITY,
             char_scale: 1.0,
@@ -388,6 +401,8 @@ impl CreateScene {
             variants: default(),
             rev: 0,
             pending: None,
+            held_camera: None,
+            camera_src: None,
             clock_ms: 0,
             parked: Vec::new(),
             dropped: Vec::new(),
@@ -420,7 +435,6 @@ impl CreateScene {
                     root: self.root,
                     file,
                     handle,
-                    cam: self.cam,
                     char_spot: self.char_spot,
                     char_facing: self.char_facing,
                     char_scale: self.char_scale,
@@ -443,7 +457,6 @@ impl CreateScene {
             self.root = commands.spawn(stage_root(layer)).id();
         }
         self.spawned = false;
-        self.cam = None;
         self.char_spot = Vec3::ZERO;
         let Some(p) = returning else {
             // A new instance's clock starts from 0, as the widget scene's constructor zeroes it
@@ -456,7 +469,6 @@ impl CreateScene {
         self.root = p.root;
         self.file = Some(p.file);
         self.handle = Some(p.handle);
-        self.cam = p.cam;
         self.char_spot = p.char_spot;
         self.char_facing = p.char_facing;
         self.char_scale = p.char_scale;
@@ -485,7 +497,6 @@ impl CreateScene {
         self.file = None;
         self.handle = None;
         self.spawned = false;
-        self.cam = None;
         self.char_spot = Vec3::ZERO;
         self.char_facing = Quat::IDENTITY;
         self.char_scale = 1.0;
@@ -868,8 +879,8 @@ fn glue_ffx(
 }
 
 /// Drive the background scene ([`CreateScene`]): load and spawn the pane's file, size the target
-/// to the window, seat the character, and hold the booth camera on the scene's camera 0, or with
-/// none on the orthographic leg.
+/// to the window, seat the character, and hold the booth camera on the pane's camera of the
+/// scene's table, or with none on the orthographic leg.
 #[allow(clippy::type_complexity)]
 pub(super) fn sync_glue_scene(
     mut commands: Commands,
@@ -1227,7 +1238,6 @@ pub(super) fn sync_glue_scene(
         }
         scene_rig.finish(&mut commands);
         scene.spawned = true;
-        scene.cam = model.camera0;
         scene.char_spot = stage;
         scene.char_facing = stage_facing;
         scene.char_scale = stage_scale;
@@ -1245,10 +1255,10 @@ pub(super) fn sync_glue_scene(
         scene.pet_baked = None;
         scene.rev += 1; // the character re-lights onto the scene rig (sync_glue_booth's key)
         info!(
-            "create scene: {name} up — {} submeshes, camera {} stage {:?} facing {:.2}° \
+            "create scene: {name} up — {} submeshes, {} camera(s), stage {:?} facing {:.2}° \
              scale {:.3}",
             model.submeshes.len(),
-            scene.cam.is_some(),
+            model.cameras.len(),
             scene.char_spot,
             scene.char_facing.to_euler(EulerRot::YXZ).0.to_degrees(),
             scene.char_scale,
@@ -1263,14 +1273,40 @@ pub(super) fn sync_glue_scene(
             preview.yaw,
         );
     }
-    // The installed camera owns the booth camera while the scene shows, every frame: the file's
-    // camera 0, or with none the orthographic leg (`0x76ceeb` installs no camera, `0x76ce80(NULL)`),
-    // never the last scene's aim.
+    // The installed camera owns the booth camera while the scene shows, every frame: the pane's
+    // camera of the file's table, or with none the orthographic leg (`0x76ceeb` installs no
+    // camera, `0x76ce80(NULL)`), never the last scene's aim.
     let w = window.single().ok();
     let pane = w
         .zip(preview.pane)
         .and_then(|(w, pane)| stock_pane_view(w.physical_width(), w.physical_height(), pane));
-    if let Some(cam) = scene.cam {
+    let chosen = preview.camera.as_ref();
+    let standing = scene.file.clone().zip(scene.handle.clone());
+    let CreateScene {
+        held_camera,
+        camera_src,
+        ..
+    } = &mut *scene;
+    let cam = resolve_camera(held_camera, chosen, |file| {
+        // The camera's file: the standing scene's, else loaded on its own (resident since the
+        // pane's facts landed, so it answers at once).
+        let file = GlueSceneFile::new(file);
+        let handle = camera_source(&file, standing.as_ref(), camera_src, |url| {
+            asset_server.load(url.to_string())
+        });
+        let table = m2s
+            .get(&handle)
+            .map(|m| m.cameras.iter().map(|c| c.still).collect());
+        if table.is_some() {
+            *camera_src = None;
+        }
+        table
+    });
+    // A camera whose file is still loading keeps the booth on its last aim.
+    let Some(cam) = cam else {
+        return;
+    };
+    if let Some(cam) = cam {
         let aspect = w.map_or(4.0 / 3.0, |w| w.width() / w.height().max(1.0));
         let fwd = (cam.target - cam.eye).normalize_or_zero();
         let up = Quat::from_axis_angle(fwd, cam.roll) * Vec3::Y;
@@ -1302,6 +1338,51 @@ pub(super) fn sync_glue_scene(
             &ortho_scene_rig(window_px, rect, preview.root),
         );
     }
+}
+
+/// The handle a camera's `file` is read from: the standing scene's, else the one `src` holds while
+/// it names the same file, else a new load of `file`, which `src` then holds.
+fn camera_source(
+    file: &GlueSceneFile,
+    standing: Option<&(GlueSceneFile, Handle<M2Model>)>,
+    src: &mut Option<(GlueSceneFile, Handle<M2Model>)>,
+    load: impl FnOnce(&str) -> Handle<M2Model>,
+) -> Handle<M2Model> {
+    if let Some((_, h)) = standing.filter(|(f, _)| f == file) {
+        return h.clone();
+    }
+    match src {
+        Some((f, h)) if f == file => h.clone(),
+        _ => {
+            let h = load(file.url());
+            *src = Some((file.clone(), h.clone()));
+            h
+        }
+    }
+}
+
+/// The rig the pane's installed camera aims by, held once resolved: raw record `index` of the
+/// table of the file it came from (`0x713590`), which `table` answers once that file is loaded,
+/// so a scene swapped in by `SetModel` keeps the old file's camera (`0x76cd30`) until the pane
+/// installs another. `Some(None)` is the NULL camera, whose leg is orthographic: none chosen, or
+/// an index past the table (`0x76cf08`). `None` while the file is still loading.
+fn resolve_camera(
+    held: &mut Option<(InstalledCamera, Option<benilla_assets::PortraitCamera>)>,
+    chosen: Option<&InstalledCamera>,
+    table: impl FnOnce(&str) -> Option<Vec<benilla_assets::PortraitCamera>>,
+) -> Option<Option<benilla_assets::PortraitCamera>> {
+    let Some(chosen) = chosen else {
+        return Some(None);
+    };
+    if let Some((_, rig)) = held.as_ref().filter(|(c, _)| c == chosen) {
+        return Some(*rig);
+    }
+    let table = table(&chosen.file)?;
+    let rig = usize::try_from(chosen.index)
+        .ok()
+        .and_then(|i| table.get(i).copied());
+    *held = Some((chosen.clone(), rig));
+    Some(rig)
 }
 
 /// The orthographic leg of a scene pane with no camera, as a camera in the scene's own model
@@ -2463,6 +2544,83 @@ mod tests {
         clip.truncate().truncate() / clip.w
     }
 
+    /// A camera's file that is not the standing scene's loads on its own, keyed by file: a second
+    /// such file loads anew rather than reading the first's handle.
+    #[test]
+    fn a_camera_file_off_the_stage_loads_by_its_own_name() {
+        let (a, b, stage) = (
+            GlueSceneFile::new("a.mdx"),
+            GlueSceneFile::new("b.mdx"),
+            GlueSceneFile::new("s.mdx"),
+        );
+        let standing = Some((stage.clone(), Handle::<M2Model>::default()));
+        let mut src = None;
+        let mut loads = Vec::new();
+        let mut ask = |f: &GlueSceneFile, src: &mut _| {
+            camera_source(f, standing.as_ref(), src, |url| {
+                loads.push(url.to_string());
+                Handle::default()
+            });
+        };
+        ask(&a, &mut src);
+        ask(&a, &mut src);
+        ask(&b, &mut src);
+        ask(&stage, &mut src);
+        assert_eq!(loads, [a.url().to_string(), b.url().to_string()]);
+        assert_eq!(src.map(|(f, _)| f), Some(b));
+    }
+
+    /// The booth holds the camera it resolved from the file the pane installed it from: a scene
+    /// swapped in with no fresh `SetCamera` keeps aiming through the old file's camera
+    /// (`0x76cd30` leaves `+0x31c`); the next `SetCamera` resolves on the new file.
+    #[test]
+    fn a_scene_swap_without_set_camera_keeps_the_old_files_camera() {
+        let cam = |x: f32| benilla_assets::PortraitCamera {
+            eye: Vec3::new(x, 0.0, 0.0),
+            target: Vec3::ZERO,
+            roll: 0.0,
+            fov: 0.8,
+            near: 0.1,
+            far: 100.0,
+        };
+        let tables = |file: &str| match file {
+            "a.mdx" => Some(vec![cam(1.0), cam(2.0)]),
+            "b.mdx" => Some(vec![cam(10.0), cam(20.0), cam(30.0)]),
+            _ => None,
+        };
+        let on = |file: &str, index| InstalledCamera {
+            file: file.to_string(),
+            index,
+        };
+        let mut held = None;
+        let eye = |held: &mut _, chosen: Option<InstalledCamera>, loaded: &[&str]| {
+            resolve_camera(held, chosen.as_ref(), |f| {
+                loaded.contains(&f).then(|| tables(f)).flatten()
+            })
+            .map(|rig| rig.map(|c| c.eye.x))
+        };
+        assert_eq!(
+            eye(&mut held, Some(on("a.mdx", 1)), &["a.mdx"]),
+            Some(Some(2.0))
+        );
+        // `SetModel("b.mdx")`: the pane still holds a's camera 1, and so does the booth, even
+        // with a no longer loaded.
+        assert_eq!(
+            eye(&mut held, Some(on("a.mdx", 1)), &["b.mdx"]),
+            Some(Some(2.0))
+        );
+        // `SetCamera(2)` on b.
+        assert_eq!(
+            eye(&mut held, Some(on("b.mdx", 2)), &["b.mdx"]),
+            Some(Some(30.0))
+        );
+        // Past the table, or none: the NULL camera.
+        assert_eq!(eye(&mut held, Some(on("a.mdx", 2)), &["a.mdx"]), Some(None));
+        assert_eq!(eye(&mut held, None, &[]), Some(None));
+        // A file still loading answers nothing yet.
+        assert_eq!(eye(&mut held, Some(on("c.mdx", 0)), &[]), None);
+    }
+
     /// A scene file with no camera takes the orthographic leg (`0x76ceeb` → `0x76ce80(NULL)`):
     /// model (0, 0) at the pane's bottom-left, +X right, +Y up, one model unit `5/3 · modelScale
     /// · layoutScale` screen heights, a position in layout units of `√(a²+1)` screen heights, and
@@ -3497,7 +3655,6 @@ mod tests {
             root: parked_root,
             file: GlueSceneFile::new("UI_MainMenu.mdx"),
             handle: Handle::default(),
-            cam: None,
             char_spot: Vec3::ZERO,
             char_facing: Quat::IDENTITY,
             char_scale: 1.0,

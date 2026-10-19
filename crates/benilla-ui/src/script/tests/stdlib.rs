@@ -644,3 +644,65 @@ fn setglobal_sets_the_top_value_as_the_clients() {
         .unwrap();
     assert_eq!(got, ["SgOne", "6", "6"]);
 }
+
+/// `debugprofilestop` (`0x702860`) reads its counter live at the call, so a span inside one frame
+/// measures; ours answers it in milliseconds (the `Deviation:` at `install_profile`).
+#[test]
+fn debugprofilestop_measures_within_a_frame_in_milliseconds() {
+    let s = script();
+    s.run("debugprofilestart()").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let ms = s.eval::<f64>("return debugprofilestop()").unwrap();
+    assert!(
+        (20.0..2000.0).contains(&ms),
+        "no tick between, 20 ms slept: {ms}"
+    );
+    let busy = s
+        .eval::<f64>(
+            "debugprofilestart() local x = 0 for i = 1, 100000 do x = x + i end \
+             return debugprofilestop()",
+        )
+        .unwrap();
+    assert!(
+        busy > 0.0,
+        "a span of work inside one call answers above 0: {busy}"
+    );
+}
+
+/// `lua_getinfo`'s `n` falls back on a global holding the function when the calling instruction
+/// names nothing (`0x6fbe11` → `travglobals` `0x6fbf90`), as for a function a C function called:
+/// `debugstack` and `luaL_argerror` both print that global's name.
+#[test]
+fn a_frame_no_instruction_names_takes_a_globals_name() {
+    let s = script();
+    let stack = s
+        .eval::<String>(
+            r#"
+            function NamedOnlyByAGlobal() return debugstack(1, 1, 0) end
+            local _, stack = pcall(NamedOnlyByAGlobal)
+            return stack
+            "#,
+        )
+        .unwrap();
+    assert!(
+        stack.contains("in function `NamedOnlyByAGlobal'"),
+        "{stack}"
+    );
+    let e = s
+        .eval::<String>("local _, e = pcall(strfind) return e")
+        .unwrap();
+    assert!(e.contains("bad argument #1 to `strfind'"), "{e}");
+    let named = s
+        .eval::<String>(
+            r#"
+            local function unnamed() return debugstack(1, 1, 0) end
+            local _, stack = pcall(unnamed)
+            return stack
+            "#,
+        )
+        .unwrap();
+    assert!(
+        named.contains("in function <"),
+        "no global holds it: {named}"
+    );
+}

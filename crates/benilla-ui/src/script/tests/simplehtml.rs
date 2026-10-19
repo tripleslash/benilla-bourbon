@@ -54,15 +54,15 @@ fn blocks(s: &UiScript, name: &str) -> Vec<Blk> {
                         .position(|id| *id == Some(a.relative_to))
                         .map_or(Rel::Other, Rel::Block)
                 };
-                (a.point, a.relative_point, a.x_off, a.y_off, rel)
+                (a.point, a.relative_point, a.x_off.raw(), a.y_off.raw(), rel)
             });
             Blk {
                 text: d.text.clone(),
                 texture: d.tex.path().clone(),
                 justify_h: d.justify.name_h(),
                 font: d.font_path.clone(),
-                font_height: d.font_height,
-                size: d.size,
+                font_height: d.font_height.map(crate::layout::Len::raw),
+                size: d.size.map(|(w, h)| (w.raw(), h.raw())),
                 anchor,
             }
             .tap_kind(kind)
@@ -811,6 +811,155 @@ fn an_element_with_no_font_of_its_own_loses_its_own_colour_too() {
     )
     .unwrap();
     assert_eq!(block_color(&s, "Page", 0), Some([1.0, 0.0, 0.0, 1.0]));
+}
+
+/// A block follows its element font (`0x78ae54` → `LinkFontFollower 0x770c60`), so a set on the
+/// element after `SetText` reaches the blocks already built: `SetTextColor` pushes the colour
+/// (`0x79f4d0`), `SetFont` the face. An `H1` with no face of its own follows `P`'s font.
+#[test]
+fn a_built_block_follows_later_sets_on_its_element_font() {
+    let s = script();
+    page(&s);
+    s.run(r#"Page:SetText("<HTML><BODY><P>a</P><H1>t</H1></BODY></HTML>")"#)
+        .unwrap();
+    s.run(r#"Page:SetTextColor("P", 1, 0, 0)"#).unwrap();
+    for i in 0..2 {
+        assert_eq!(
+            block_color(&s, "Page", i),
+            Some([1.0, 0.0, 0.0, 1.0]),
+            "{i}"
+        );
+    }
+    s.run(r#"Page:SetFont("P", "Fonts\\SKURRI.TTF", 20, "MONOCHROME")"#)
+        .unwrap();
+    let b = blocks(&s, "Page");
+    assert_eq!(
+        (b[0].font.as_deref(), b[0].font_height),
+        (Some("Fonts\\SKURRI.TTF"), Some(20.0))
+    );
+    let mono = {
+        let lua = s.lua();
+        let model = lua.app_data_ref::<Model>().expect("model");
+        let fh = model.arena.lookup("Page").expect("frame");
+        let st = model.simple_html.get(&fh).expect("state");
+        model.region_data[&st.blocks[0]].monochrome
+    };
+    assert!(mono, "the block draws the element font's MONOCHROME");
+}
+
+/// `SetFontObject` on an element font after `SetText` re-links that font (`0x79ef10` →
+/// `0x770c60`), and the link pushes the new face to the blocks that follow it.
+#[test]
+fn a_later_element_set_font_object_reaches_the_built_blocks() {
+    let s = script();
+    page(&s);
+    s.run(
+        r#"
+        local f = CreateFont("LaterFace"); f:SetFont("Fonts\\SKURRI.TTF", 22)
+        Page:SetText("<HTML><BODY><P>a</P></BODY></HTML>")
+        Page:SetFontObject("P", LaterFace)
+    "#,
+    )
+    .unwrap();
+    let b = blocks(&s, "Page");
+    assert_eq!(
+        (b[0].font.as_deref(), b[0].font_height),
+        (Some("Fonts\\SKURRI.TTF"), Some(22.0))
+    );
+}
+
+/// The face test is made once, at the build (`0x78ae36`): an `H1` block built on `P`'s font stays
+/// on `P` when `H1` gains a face later, and follows `P`'s changes.
+#[test]
+fn an_h1_block_built_on_p_stays_on_p() {
+    let s = script();
+    page(&s);
+    s.run(
+        r#"
+        Page:SetText("<HTML><BODY><H1>t</H1></BODY></HTML>")
+        Page:SetFont("H1", "Fonts\\SKURRI.TTF", 24)
+    "#,
+    )
+    .unwrap();
+    let face = |s: &UiScript| {
+        let b = blocks(s, "Page");
+        (b[0].font.clone(), b[0].font_height)
+    };
+    assert_eq!(face(&s), (Some("Fonts\\MORPHEUS.TTF".into()), Some(15.0)));
+    s.run(r#"Page:SetFont("P", "Fonts\\FRIZQT__.TTF", 11)"#)
+        .unwrap();
+    assert_eq!(face(&s), (Some("Fonts\\FRIZQT__.TTF".into()), Some(11.0)));
+}
+
+/// Each frame makes its own four element fonts (`0x789e61`-`0x789ea3`).
+#[test]
+fn two_simplehtmls_have_their_own_element_fonts() {
+    let s = script();
+    s.run(
+        r#"
+        HtmlOne = CreateFrame("SimpleHTML"); HtmlTwo = CreateFrame("SimpleHTML")
+        HtmlOne:SetFont("P", "Fonts\\SKURRI.TTF", 20)
+        HtmlOne:SetTextColor("H2", 1, 0, 0)
+    "#,
+    )
+    .unwrap();
+    assert!(s
+        .eval::<bool>(
+            "local p = HtmlTwo:GetFont('P'); local _, g = HtmlTwo:GetTextColor('H2')
+             local _, g1 = HtmlOne:GetTextColor('H2')
+             return p == nil and g > 0.99 and g1 == 0
+                and HtmlOne:GetFont('P') == 'Fonts\\\\SKURRI.TTF'"
+        )
+        .unwrap());
+}
+
+/// An element font tells its frame of each change (`0x77e530`), and a new face or spacing raises
+/// the link-button rebuild flag (`0x78a380`, bits `0x11`); a colour does not.
+#[test]
+fn a_new_face_or_spacing_on_an_element_font_rebuilds_the_links() {
+    let s = script();
+    page(&s);
+    s.run(r#"Page:SetText("<HTML><BODY><P>a</P></BODY></HTML>")"#)
+        .unwrap();
+    let spend = |s: &UiScript| {
+        let lua = s.lua();
+        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let fh = model.arena.lookup("Page").expect("frame");
+        let st = model.simple_html.get_mut(&fh).expect("state");
+        std::mem::take(&mut st.links_dirty)
+    };
+    assert!(spend(&s), "SetText raises it");
+    s.run(r#"Page:SetTextColor("P", 1, 0, 0)"#).unwrap();
+    assert!(!spend(&s), "a colour leaves it down");
+    s.run(r#"Page:SetSpacing("P", 3)"#).unwrap();
+    assert!(spend(&s), "a spacing raises it");
+    s.run(r#"ItemTextFontNormal:SetFont("Fonts\\FRIZQT__.TTF", 11)"#)
+        .unwrap();
+    assert!(
+        spend(&s),
+        "a face pushed from the font it follows raises it"
+    );
+}
+
+/// The colour setters are the Font's shared ones (`0x7960d0` → `0x79f4d0`, `0x796270` →
+/// `0x79f730`): r, g and b that are not numbers read 0 rather than raise.
+#[test]
+fn the_element_colour_setters_read_a_non_number_as_zero() {
+    let s = script();
+    page(&s);
+    s.run(r#"Page:SetTextColor("H1", nil, 1, "x"); Page:SetShadowColor("H2", 1, nil, 0)"#)
+        .unwrap();
+    let one = crate::color::quant::read32(1.0);
+    assert_eq!(
+        s.eval::<(f32, f32, f32, f32)>("return Page:GetTextColor('H1')")
+            .unwrap(),
+        (0.0, one, 0.0, one)
+    );
+    assert_eq!(
+        s.eval::<(f32, f32, f32, f32)>("return Page:GetShadowColor('H2')")
+            .unwrap(),
+        (one, 0.0, 0.0, one)
+    );
 }
 
 /// Block `i`'s `vertex_color`, which for a FontString is the colour it draws.

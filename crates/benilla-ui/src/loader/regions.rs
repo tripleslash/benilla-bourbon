@@ -109,49 +109,6 @@ impl Loader<'_> {
         Some(region_wrapper)
     }
 
-    /// A frame's direct-child `<FontString>`, on the OVERLAY layer; a text frame's loads into its
-    /// own font instead ([`Loader::apply_text_font_children`]).
-    pub(super) fn apply_special_fontstrings(
-        &mut self,
-        el: &Element,
-        wrapper: &Table,
-        parent_name: &str,
-        dbg: &str,
-    ) {
-        // A `<SimpleHTML>`'s direct `<FontString>` declares its `P` font, not a region
-        // (`0x78a1fe`); `apply_simplehtml` owns it.
-        if el.tag.eq_ignore_ascii_case("SimpleHTML") {
-            return;
-        }
-        for region in &el.children {
-            if !region.tag.eq_ignore_ascii_case("FontString") {
-                continue;
-            }
-            let levels = self.fontstring_levels(region);
-            let rname: Option<String> = region
-                .name()
-                .map(|raw| framexml::resolve_name(raw, parent_name));
-            let region_wrapper: Table = match wrapper
-                .call_method("CreateFontString", (rname, Some("OVERLAY".to_string())))
-            {
-                Ok(w) => w,
-                Err(e) => {
-                    self.report
-                        .fault(format!("{dbg}: CreateFontString (special): {e}"));
-                    continue;
-                }
-            };
-            for node in &levels {
-                let attrs = FontAttrs::Own;
-                self.load_fontstring_level(node, &region_wrapper, parent_name, attrs, true, dbg);
-            }
-            // The implicit creation anchor, as in `apply_layers`.
-            if let Err(e) = crate::script::implicit_creation_anchor_lua(self.lua, &region_wrapper) {
-                self.report.fault(format!("{dbg}: implicit anchor: {e}"));
-            }
-        }
-    }
-
     /// `"<kind> <name>: Missing font height in <tag> element"` at severity 1 into the document's
     /// record: `0x878e10` for a FontString (`0x77117d`), `0x87a4f0` for a Font or a SimpleHTML
     /// element font (`0x783d9a`), with the object's name or `<unnamed>` (`0x84c7f0`) and the node's tag.
@@ -244,7 +201,7 @@ impl Loader<'_> {
                 let height = children_named(node, "FontHeight")
                     .next()
                     .map(|h| self.value(h))
-                    .filter(|h| *h > 0.0);
+                    .filter(|h| h.raw() > 0.0);
                 let Some(height) = height else {
                     let name = self.object_name(wrapper);
                     self.report_missing_font_height("FontString", &name, &node.tag);
@@ -299,12 +256,27 @@ impl Loader<'_> {
             } else if child.tag.eq_ignore_ascii_case("Shadow") {
                 let sh = self.shadow_of(child);
                 self.call_region(wrapper, "SetShadowColor", sh.color.fractions(), dbg);
-                self.call_region(
-                    wrapper,
-                    "SetShadowOffset",
-                    (sh.offset[0], sh.offset[1]),
-                    dbg,
-                );
+                use crate::layout::Len;
+                let script = |l: Len| match l {
+                    Len::Script(v) => v,
+                    Len::Layout(_) => 0.0,
+                };
+                let (x, y) = (script(sh.offset[0]), script(sh.offset[1]));
+                self.call_region(wrapper, "SetShadowOffset", (x, y), dbg);
+                // The default offset is layout units, stored as it is (`0x7713eb`), which no
+                // script setter can give.
+                if sh.offset != [Len::Script(x), Len::Script(y)] {
+                    if let Ok(rh) = crate::script::region::region_handle_of(self.lua, wrapper) {
+                        let mut model = self.model();
+                        if let Some(s) = model
+                            .region_data
+                            .get_mut(&rh)
+                            .and_then(|d| d.font_shadow.as_mut())
+                        {
+                            s.offset = sh.offset;
+                        }
+                    }
+                }
             }
         }
     }
@@ -415,32 +387,6 @@ impl Loader<'_> {
             ),
             dbg,
         );
-    }
-
-    /// The font object a FontString's `inherits=` names, directly or through virtual FontString
-    /// templates; `None` when the chain ends without one. Bounded, as a registry can hold a cycle.
-    pub(super) fn font_object_through_templates(&self, inherits: &str) -> Option<String> {
-        const MAX_HOPS: usize = 8;
-        let model = self.model();
-        let templates = model.framexml_templates.borrow();
-        // One name, not a comma list: 1.12's lookup has no splitter.
-        for entry in [inherits] {
-            let mut name = entry.to_string();
-            for _ in 0..MAX_HOPS {
-                if model.fonts.id(&name).is_some() {
-                    return Some(name);
-                }
-                let Some(next) = templates
-                    .get(&name)
-                    .and_then(|t| t.attr("inherits"))
-                    .map(str::to_string)
-                else {
-                    break;
-                };
-                name = next;
-            }
-        }
-        None
     }
 
     /// Whether `name` is a named font object, declared by `<Font>` or made by `CreateFont`: the

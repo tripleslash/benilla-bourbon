@@ -599,7 +599,7 @@ fn button_label_repaints_by_state_font_object() {
         FontObject {
             color: Some(crate::color::Rgba8::from_f32([1.0, 0.82, 0.0, 1.0])),
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(12.0),
+            height: Some(crate::layout::Len::Script(12.0)),
             ..Default::default()
         },
     );
@@ -608,7 +608,7 @@ fn button_label_repaints_by_state_font_object() {
         FontObject {
             color: Some(crate::color::Rgba8::from_f32([0.5, 0.5, 0.5, 1.0])),
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(12.0),
+            height: Some(crate::layout::Len::Script(12.0)),
             ..Default::default()
         },
     );
@@ -676,7 +676,7 @@ fn a_locked_or_hovered_button_wears_its_highlight_font_over_its_normal_color() {
         FontObject {
             color: Some(crate::color::Rgba8::from_f32([1.0, 0.82, 0.0, 1.0])),
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(12.0),
+            height: Some(crate::layout::Len::Script(12.0)),
             ..Default::default()
         },
     );
@@ -685,7 +685,7 @@ fn a_locked_or_hovered_button_wears_its_highlight_font_over_its_normal_color() {
         FontObject {
             color: Some(crate::color::Rgba8::from_f32([1.0, 1.0, 1.0, 1.0])),
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(12.0),
+            height: Some(crate::layout::Len::Script(12.0)),
             ..Default::default()
         },
     );
@@ -796,14 +796,14 @@ fn a_button_reports_its_labels_extent() {
         .expect("the label asks the host for its extent");
     s.set_measured_text_unwrapped(&[(req.id, 47.0, 14.0, req.key)]);
 
-    crate::assert_near!(
+    assert_eq!(
         s.eval::<f64>("return WidthBtn:GetTextWidth()").unwrap(),
-        47.0,
+        crate::test_support::law43(47.0),
         "the Button forwards to its own label"
     );
     assert_eq!(
         s.eval::<f64>("return WidthBtn:GetTextHeight()").unwrap(),
-        14.0
+        crate::test_support::law43(14.0)
     );
 
     // A label-less Button answers 0; the reference reads the label pointer (`+0x338`), null here,
@@ -1057,7 +1057,7 @@ fn a_button_labels_own_setfont_survives_the_state_font_repoint() {
         "TemplateFont",
         FontObject {
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(12.0),
+            height: Some(crate::layout::Len::Script(12.0)),
             color: Some(crate::color::Rgba8::from_f32([1.0, 0.82, 0.0, 1.0])),
             outline: Outline::None,
             ..Default::default()
@@ -1373,7 +1373,7 @@ fn button_get_text_color_answers_four_values_through_the_state_font() {
         "BtnGold",
         FontObject {
             color: Some(crate::color::Rgba8::from_f32([1.0, 0.82, 0.0, 1.0])),
-            height: Some(12.0),
+            height: Some(crate::layout::Len::Script(12.0)),
             ..Default::default()
         },
     );
@@ -1527,7 +1527,7 @@ fn button_set_font_writes_the_monochrome_bit_over_its_font_object() {
         "MonoFont",
         FontObject {
             font: Some("Fonts\\ARIALN.TTF".into()),
-            height: Some(12.0),
+            height: Some(crate::layout::Len::Script(12.0)),
             monochrome: true,
             ..Default::default()
         },
@@ -1647,11 +1647,12 @@ fn a_checked_texture_made_from_a_path_is_additive() {
 #[test]
 fn state_font_setters_raise_on_an_unknown_name() {
     let s = script();
+    crate::test_support::install_law43(&s);
     s.register_font_object(
         "KnownFont",
         FontObject {
             font: Some("Fonts\\FRIZQT__.TTF".into()),
-            height: Some(12.0),
+            height: Some(crate::layout::Len::Script(12.0)),
             ..Default::default()
         },
     );
@@ -1674,7 +1675,7 @@ fn state_font_setters_raise_on_an_unknown_name() {
         b:SetTextFontObject("KnownFont")
         pcall(b.SetTextFontObject, b, "NoSuchFont")
         local _, height = b:GetFont()
-        assert(height == 12, "a miss keeps the old")
+        assert(height == law(12), "a miss keeps the old")
     "#,
     )
     .unwrap();
@@ -1835,5 +1836,35 @@ fn a_pushed_button_shifts_its_label_text() {
     s.mouse_button(50.0, 50.0, "LeftButton", true);
     assert!(shifted(text_rect(&mut s), 0.0, 0.0));
     s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// `Button:GetFont` reads the normal font through the shared getter (`0x780a41` → `0x79f3b0`),
+/// which answers `G` of the stored height (`0x79f3e3`): at 16:9 a script 13 reads
+/// 13.000000615485154, and a font object's `<RelValue>` 0.25 reads 391.62795426890585.
+#[test]
+fn a_buttons_get_font_answers_through_the_getter_steps() {
+    let mut s = script();
+    s.set_screen_size(1024.0, 576.0);
+    let doc = crate::framexml::parse(
+        r#"<Ui>
+            <Font name="RelButtonFont" font="Fonts\FRIZQT__.TTF">
+                <FontHeight><RelValue val="0.25"/></FontHeight>
+            </Font>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_: &str| None);
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    let height = |s: &UiScript, b: &str| {
+        s.eval::<f64>(&format!("local _, h = {b}:GetFont() return h"))
+            .unwrap()
+    };
+    s.run(r#"B = CreateFrame("Button", "B") B:SetFont("Fonts\\FRIZQT__.TTF", 13)"#)
+        .unwrap();
+    assert_eq!(height(&s, "B"), 13.000_000_615_485_154);
+    s.run(r#"R = CreateFrame("Button", "R") R:SetTextFontObject(RelButtonFont)"#)
+        .unwrap();
+    assert_eq!(height(&s, "R"), 391.627_954_268_905_85);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

@@ -132,11 +132,11 @@ pub use kinds::{
     minimap_radius_yd, model_key, pane_clock_step_ms, slider_fraction, slider_grab,
     slider_set_value, ArmedSequence, ButtonState, ButtonVisualState, CharacterPane,
     ColorSelectState, CopyCamera, EditAction, EditBoxState, EditOutcome, EditUnit, FrameKind,
-    InsertMode, KindState, KindUpdate, MessageFrameState, MessageLine, MinimapArt, MinimapArtSlot,
-    MinimapState, MinimapStatics, ModelFileFacts, ModelFog, ModelLight, ModelPlayHead, ModelState,
-    PaneArm, PaneCopy, RegionKind, ScrollFrameState, ScrollingMessageState, SequenceFacts,
-    ShownWrites, SliderState, StatusBarState, TooltipAnchor, TooltipState, Viewport,
-    ANIM_SHUFFLE_LEFT, ANIM_SHUFFLE_RIGHT, ANIM_STAND, MINIMAP_ARROW_SCALE,
+    InsertMode, InstalledCamera, KindState, KindUpdate, MessageFrameState, MessageLine, MinimapArt,
+    MinimapArtSlot, MinimapState, MinimapStatics, ModelFileFacts, ModelFog, ModelLight,
+    ModelPlayHead, ModelState, PaneArm, PaneCopy, RegionKind, ScrollFrameState,
+    ScrollingMessageState, SequenceFacts, ShownWrites, SliderState, StatusBarState, TooltipAnchor,
+    TooltipState, Viewport, ANIM_SHUFFLE_LEFT, ANIM_SHUFFLE_RIGHT, ANIM_STAND, MINIMAP_ARROW_SCALE,
     MINIMAP_DEFAULT_ARROW_MODEL, MINIMAP_DEFAULT_MASK, MINIMAP_DEFAULT_PLAYER_MODEL,
     MINIMAP_DEFAULT_ZOOM, MINIMAP_DISC, MINIMAP_ENGINE_CHILDREN, MINIMAP_GROUP_ARROWS,
     MINIMAP_INDOOR_RADII, MINIMAP_RIM_ARROWS, MINIMAP_ZOOM_CHUNKS, MINIMAP_ZOOM_LEVELS,
@@ -217,7 +217,7 @@ pub struct Frame {
     pub clamped_to_screen: bool,
     /// `SetHitRectInsets` or `<HitRectInsets>`: the mouse rect's `[left, right, top, bottom]`
     /// inset. Only the hit test reads it; drawing, anchoring and `GetLeft`/`GetWidth` do not.
-    pub hit_rect_insets: [f32; 4],
+    pub hit_rect_insets: [crate::layout::Len; 4],
     /// `SetMovable`: only a guard, as `StartMoving` errors without it.
     pub movable: bool,
     /// `SetResizable`: the guard `StartSizing` checks.
@@ -225,9 +225,9 @@ pub struct Frame {
     /// `SetMinResize` (`0x776020`; `GetMinResize` `0x775f20`): the resize drag's floor, `(width,
     /// height)` in `SetWidth` units. `0.0` is unbounded per axis (ctor `0x767680`); a negative
     /// bound clamps (`0x768710`). Only the drag reads it, never `SetWidth` or the layout.
-    pub min_resize: (f32, f32),
+    pub min_resize: (crate::layout::Len, crate::layout::Len),
     /// `SetMaxResize` (`0x7762a0`; `GetMaxResize` `0x7761a0`): the ceiling, same rules.
-    pub max_resize: (f32, f32),
+    pub max_resize: (crate::layout::Len, crate::layout::Len),
     /// `SetUserPlaced`: the layout cache keeps this frame's position. Every drag (`0x7652b0`)
     /// stamps it (`0x7652e5`), so the cache also requires `movable` or `resizable`, at write and
     /// at apply.
@@ -585,11 +585,17 @@ impl WidgetArena {
             key_stamp: kb_stamp,
             wheel_stamp: kb_stamp,
             clamped_to_screen: matches!(kind, FrameKind::GameTooltip),
-            hit_rect_insets: [0.0; 4],
+            hit_rect_insets: [crate::layout::Len::Script(0.0); 4],
             movable: false,
             resizable: false,
-            min_resize: (0.0, 0.0),
-            max_resize: (0.0, 0.0),
+            min_resize: (
+                crate::layout::Len::Script(0.0),
+                crate::layout::Len::Script(0.0),
+            ),
+            max_resize: (
+                crate::layout::Len::Script(0.0),
+                crate::layout::Len::Script(0.0),
+            ),
             user_placed: false,
             toplevel: false,
             scroll_member,

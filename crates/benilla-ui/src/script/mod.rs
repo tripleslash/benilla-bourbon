@@ -52,7 +52,8 @@ pub mod diagnostics;
 mod editbox;
 pub mod instance;
 pub(crate) use editbox::{
-    adopt_text_region, apply_xml_bytes, editbox_text_region_wrapper, set_selection_color,
+    adopt_text_region, apply_xml_bytes, editbox_text_region_wrapper, set_history_lines,
+    set_selection_color,
 };
 pub(crate) use messageframe::set_xml_insets as set_message_xml_insets;
 pub(crate) use tooltip::post_load as tooltip_post_load;
@@ -200,6 +201,7 @@ mod who_sort;
 mod worldmap;
 mod worldstate;
 mod worn_display;
+pub(crate) mod xml_layout;
 mod zone_text;
 
 pub use action::{ActionSlot, ActionState, ActionUse};
@@ -217,7 +219,7 @@ pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
 pub use battlefield_queue::{BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot};
 pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
-pub use binding_abi::{s_str_to_float, s_str_to_int};
+pub use binding_abi::{ftol, s_str_to_float, s_str_to_int};
 pub use calls::{NearestMode, QueuedCall, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use channel::{ChannelCommand, RecruitmentPlan, RecruitmentRun, ZoneChannelRow};
@@ -275,7 +277,7 @@ pub use guild::{
 pub use input_verbs::{BindingInput, FiredInput, HeldInput};
 pub use lfg::LfgDungeon;
 pub use lottery::UnservedSend;
-pub use modelframe::{CharacterPaneFrame, ModelPaneFrame};
+pub use modelframe::{CharacterPaneFrame, ModelPaneFrame, ModelWanted};
 pub use petition::{
     validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
@@ -332,7 +334,7 @@ pub use reputation::{FactionEntry, ReputationSend, ReputationState};
 pub use session::SessionRequest;
 pub use shapeshift::ShapeshiftFormView;
 pub(crate) use simplehtml::{
-    apply_element_font_parts as apply_simplehtml_font_parts,
+    element_fonts_lua as simplehtml_element_fonts_lua,
     element_of_xml_tag as simplehtml_element_of_xml_tag,
 };
 pub use skills::{SkillEntry, SkillsState};
@@ -356,7 +358,7 @@ pub(crate) use types::{monochrome_flag, FontMask, MeasuredText, RegionData};
 pub use types::{
     BlendMode, EditAction, EditBoxAdvanceRequest, EditBoxTextUi, EditOutcome, EditUnit,
     ExtractedQuad, FontObject, FontShadow, Gradient, JustifyH, JustifyV, LineMeasureRequest,
-    MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords,
+    MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords, TextShadow,
 };
 pub use unit::by_name::{self, NameCandidate};
 pub use unit::{
@@ -507,7 +509,7 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// ScrollFrame's three scroll kinds are `+0x32c`/`+0x334`/`+0x33c` (script-name map `0x786c40`).
 /// The EditBox's vtable (`0x81c910`) replaces the key and char slots: an EditBox never fires
 /// `OnKeyDown`, and fires `OnChar` only from `Insert`, with the inserted text (`0x77c13c`).
-const SCRIPT_KINDS: [&str; 45] = [
+const SCRIPT_KINDS: [&str; 46] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -537,6 +539,10 @@ const SCRIPT_KINDS: [&str; 45] = [
     "OnCursorChanged",
     "OnEditFocusGained",
     "OnEditFocusLost",
+    // The EditBox's input-method slot (script map `0x77a310`, `0x77a40d`, `+0x430`), fired only
+    // when an input-method event changes the box's language (`0x77abb0`, stored at `0x77abf2`).
+    // benilla has no input method, so it is stored and never runs, as on a western layout.
+    "OnInputLanguageChanged",
     "OnHorizontalScroll",
     "OnVerticalScroll",
     "OnScrollRangeChanged",
@@ -903,7 +909,9 @@ impl UiScript {
     /// take the aspect from `gxResolution` (`0x46ab40`, `0x4901e0`; 4/3 while `widescreen` is
     /// off), never the live window. Here every resize sets the cells from the window, because the
     /// UI is kept live across a resize, and `widescreen` off keeps the window's aspect, as a 4:3
-    /// root over a wider window would take a seam stretched on one axis.
+    /// root over a wider window would take a seam stretched on one axis. A dragged frame with no
+    /// layout-cache row (unnamed, or `SetUserPlaced(false)`) keeps its drag pin in layout units,
+    /// where the rebuild would put it back where its script places it.
     pub fn set_window_size(&mut self, width: f32, height: f32) -> bool {
         let a = if width > 0.0 && height > 0.0 {
             width / height
@@ -914,11 +922,21 @@ impl UiScript {
     }
 
     fn set_root(&mut self, new: Rect, aspect: Option<f32>) -> bool {
-        let mut model = self.model_mut();
-        if model.screen == new && model.aspect.map(f32::to_bits) == aspect.map(f32::to_bits) {
+        let (same, before) = {
+            let model = self.model_ref();
+            let same =
+                model.screen == new && model.aspect.map(f32::to_bits) == aspect.map(f32::to_bits);
+            (same, model.layout_units())
+        };
+        if same {
             return false;
         }
-        let before = model.layout_units();
+        // New cells are a reload, whose teardown writes the layout cache under the cells in force
+        // (`0x490e60`) and whose build seats the user-placed frames from it under the new
+        // (`0x4905e0`): the rows are taken before anything moves.
+        let next = crate::layout::LayoutUnits::from_aspect(Model::aspect_of(new, aspect));
+        let reseat = (next != before).then(|| self.user_placed_layouts());
+        let mut model = self.model_mut();
         model.screen = new;
         model.aspect = aspect;
         let units = crate::layout::LayoutUnits::from_aspect(model.screen_aspect());
@@ -932,11 +950,15 @@ impl UiScript {
                 minimap::seat_engine_children(&mut model, h);
             }
             worldmap_arrow::rescale(&mut model);
+            backdrop::cells_changed(&mut model);
         }
         model.touch_layout();
         drop(model);
         // The implicit rects are in layout units, which follow the aspect.
         self.reapply_implicit_rects();
+        if let Some(rows) = reseat {
+            self.reseat_user_placed(rows);
+        }
         true
     }
 
@@ -972,10 +994,10 @@ impl UiScript {
             })
             .collect();
         for h in arrows {
-            let size = model
-                .layout_inputs
-                .get(&h)
-                .map_or((0.0, 0.0), |i| (i.width, i.height));
+            let size = model.layout_inputs.get(&h).map_or((0.0, 0.0), |i| {
+                let u = model.layout_units();
+                (i.width.script(u), i.height.script(u))
+            });
             let loaded = match model.arena.frame(h).map(|f| &f.kind_state) {
                 Some(KindState::Model(m)) => m
                     .path
@@ -1481,7 +1503,8 @@ impl UiScript {
     }
 
     /// Whether `name` is a registered font object, the other namespace an `inherits=` may name
-    /// (`loader::expand_region` forks on it), so a census counts no font as a missing template.
+    /// (a FontString's `inherits=` links it, `0x770f69`), so a census counts no font as a missing
+    /// template.
     pub fn has_font_object(&self, name: &str) -> bool {
         self.model_ref().font_object(name).is_some()
     }

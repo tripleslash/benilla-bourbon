@@ -86,8 +86,8 @@ impl InputFingerprint {
             self.feed(u64::from(a.point.id()));
             self.feed(u64::from(a.relative_to));
             self.feed(u64::from(a.relative_point.id()));
-            self.f32(a.x_off);
-            self.f32(a.y_off);
+            self.feed(a.x_off.bits());
+            self.feed(a.y_off.bits());
             n += 1;
         }
         self.feed(n);
@@ -96,8 +96,8 @@ impl InputFingerprint {
     #[inline]
     fn input(&mut self, i: &LayoutInput) {
         self.anchors(&i.anchors);
-        self.f32(i.width);
-        self.f32(i.height);
+        self.feed(i.width.bits());
+        self.feed(i.height.bits());
         self.f32(i.scale);
         self.feed(u64::from(i.clamp));
         self.f32(i.extent_x);
@@ -170,12 +170,12 @@ pub(super) fn region_node_hash(data: &RegionData, owner: Option<u32>) -> u64 {
     node.feed(owner.map_or(u64::MAX, u64::from));
     match data.size {
         Some((w, h)) => {
-            node.f32(w);
-            node.f32(h);
+            node.feed(w.bits());
+            node.feed(h.bits());
         }
         None => node.feed(u64::MAX),
     }
-    let unsized_axis = data.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0);
+    let unsized_axis = data.size.is_none_or(|(w, h)| w.is_zero() || h.is_zero());
     match effective_measure(data).filter(|_| unsized_axis) {
         Some(m) => {
             node.f32(m.w);
@@ -188,7 +188,7 @@ pub(super) fn region_node_hash(data: &RegionData, owner: Option<u32>) -> u64 {
 
 /// Whether an axis of `data` authored 0 takes its span from the art (`content_span`).
 fn spans_from_art(data: &RegionData) -> bool {
-    !data.anchors.is_empty() && data.size.is_none_or(|(w, h)| w == 0.0 || h == 0.0)
+    !data.anchors.is_empty() && data.size.is_none_or(|(w, h)| w.is_zero() || h.is_zero())
 }
 
 /// A texture's content-derived span in FrameXML units. `CSimpleTexture::GetWidth` (`0x770720`,
@@ -224,8 +224,12 @@ pub(super) const FONTSTRING_MIN_SPAN: f32 = 1.0;
 /// A font string's size slot (`0x772930`, height `0x772a60`) in layout units: its stored size, or
 /// when that is 0 its text's extent (`0x772890`), raised to `S(1)`, at 53 bits, when not above it or
 /// a NaN (`0x772971`, `0x77297a`), so a single anchor always fixes the opposite edge.
-fn fontstring_slot(units: layout::LayoutUnits, authored: f32, measure: Option<f32>) -> f64 {
-    let stored = units.store(authored);
+pub(in crate::script) fn fontstring_slot(
+    units: layout::LayoutUnits,
+    authored: layout::Len,
+    measure: Option<f32>,
+) -> f64 {
+    let stored = authored.layout(units);
     let candidate = if stored == 0.0 {
         measure.map_or(0.0, |m| f64::from(units.store(m)))
     } else {
@@ -242,7 +246,11 @@ fn fontstring_slot(units: layout::LayoutUnits, authored: f32, measure: Option<f3
 /// A texture's size slot (`0x770720`, height `0x770790`) in layout units: its stored size `stored`,
 /// or when that is 0 and it has art, the art's texel extent through the setter steps, returned at
 /// 53 bits (`0x77074e`); 0 with no art.
-fn texture_slot(units: layout::LayoutUnits, stored: f32, content: Option<f32>) -> f64 {
+pub(in crate::script) fn texture_slot(
+    units: layout::LayoutUnits,
+    stored: f32,
+    content: Option<f32>,
+) -> f64 {
     if stored == 0.0 {
         content.map_or(0.0, |t| units.store_wide(t))
     } else {
@@ -1557,7 +1565,8 @@ impl UiScript {
                 // in layout units. A texture reads its art only for an axis stored 0, loading it
                 // first if it must (`0x44b3b0`), so only a resolve that reaches the node reads it.
                 let units = space.units();
-                let (aw, ah) = data.size.unwrap_or((0.0, 0.0));
+                let zero = layout::Len::Script(0.0);
+                let (aw, ah) = data.size.unwrap_or((zero, zero));
                 let size = if is_fontstring {
                     let measured = effective_measure(data);
                     (
@@ -1565,7 +1574,7 @@ impl UiScript {
                         fontstring_slot(units, ah, measured.map(|m| m.h)),
                     )
                 } else {
-                    let (sw, sh) = (units.store(aw), units.store(ah));
+                    let (sw, sh) = (aw.layout(units), ah.layout(units));
                     let content = (sw == 0.0 || sh == 0.0)
                         .then(|| content_span(data, texture_size_probe.as_ref()))
                         .flatten();
@@ -2144,7 +2153,7 @@ pub(super) fn measure_request_for(model: &mut Model, rh: RegionHandle) -> Option
         super::measure::store_measured(model, rh, id, zero);
         return None;
     }
-    let wrap_width = model.region_data.get(&rh)?.wrap_width();
+    let wrap_width = model.region_data.get(&rh)?.wrap_width(model.layout_units());
     measure_request_at(model, rh, wrap_width, key, scale)
 }
 
@@ -2160,11 +2169,11 @@ pub(super) fn measure_request_at(
     let d = model.region_data.get(&rh)?;
     let text = d.text.clone().filter(|t| !t.is_empty())?;
     let font = d.font_path.clone();
-    let height = d.font_height;
-    let text_height = d.text_height();
+    let height = d.font_height_script(model.layout_units());
+    let text_height = d.text_height(model.layout_units());
     let outline = d.outline;
     let spacing = d.line_gap();
-    let shadow_x = d.shadow_x();
+    let shadow_x = d.shadow_x(model.layout_units());
     let max_lines = d.max_lines;
     let non_space_wrap = model.non_space_wrap_of(rh);
     let id = model.region_id(rh);
@@ -2203,7 +2212,7 @@ fn stale_measure_key(model: &Model, rh: RegionHandle) -> Option<(u64, f32)> {
         return None;
     }
     // The metric reads in `region.rs` check the stored measure against this same key.
-    let key = d.measure_key(scale);
+    let key = d.measure_key(scale, model.layout_units());
     if d.measured.map(|m| m.key) == Some(key) {
         return None;
     }

@@ -39,10 +39,15 @@ impl Model {
     /// [`crate::script::UiScript::set_window_size`] gave it, else the root's own width over height,
     /// else 4/3.
     pub(crate) fn screen_aspect(&self) -> f32 {
-        if let Some(a) = self.aspect {
+        Self::aspect_of(self.screen, self.aspect)
+    }
+
+    /// [`Self::screen_aspect`] for a root `screen` and a window aspect `aspect`.
+    pub(crate) fn aspect_of(screen: crate::layout::Rect, aspect: Option<f32>) -> f32 {
+        if let Some(a) = aspect {
             return a;
         }
-        let (w, h) = (self.screen.width(), self.screen.height());
+        let (w, h) = (screen.width(), screen.height());
         if h > 0.0 && w > 0.0 {
             w / h
         } else {
@@ -125,7 +130,7 @@ impl Model {
                 && self
                     .layout_inputs
                     .get(&h)
-                    .is_some_and(|i| i.width != 0.0 || i.height != 0.0);
+                    .is_some_and(|i| !i.width.is_zero() || !i.height.is_zero());
             if authored {
                 return;
             }
@@ -133,10 +138,10 @@ impl Model {
         };
         let (w, ht) = (extent.0 * unit, extent.1 * unit);
         let input = self.layout_inputs.entry(h).or_default();
-        let changed =
-            input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
-        input.width = w;
-        input.height = ht;
+        let changed = input.width.bits() != crate::layout::Len::Script(w).bits()
+            || input.height.bits() != crate::layout::Len::Script(ht).bits();
+        input.width = crate::layout::Len::Script(w);
+        input.height = crate::layout::Len::Script(ht);
         // The model-ready size write invalidates the frame (`0x76ce70`).
         self.invalidate_frame(h, changed);
         if let Some(KindState::Model(m)) = self.arena.frame_mut(h).map(|f| &mut f.kind_state) {
@@ -152,14 +157,18 @@ impl Model {
         }
     }
 
-    /// The host's facts for `path`; on a miss the path is queued, once, for the host to load.
+    /// The host's facts for `path`; on a miss the path is queued, once per key, for the host to
+    /// load.
     pub(crate) fn model_facts_for(&mut self, path: &str) -> Option<Arc<ModelFileFacts>> {
         let key = model_key(path);
         match self.model_facts.get(&key) {
             Some(facts) => Some(facts.clone()),
             None => {
-                if !self.model_facts_wanted.iter().any(|(k, _)| *k == key) {
-                    self.model_facts_wanted.push((key, path.to_string()));
+                if !self.model_facts_wanted.iter().any(|w| w.key == key) {
+                    self.model_facts_wanted.push(ModelWanted {
+                        key,
+                        path: path.to_string(),
+                    });
                 }
                 None
             }
@@ -791,7 +800,7 @@ impl crate::script::UiScript {
         let facts = Arc::new(facts);
         let mut model = self.model_mut();
         model.model_facts.insert(key.clone(), facts.clone());
-        model.model_facts_wanted.retain(|(k, _)| *k != key);
+        model.model_facts_wanted.retain(|w| w.key != key);
         // The panes holding this file: the waiters the reference links on its streaming drain
         // (`0x71d640`).
         let handles: Vec<_> = model
@@ -831,11 +840,9 @@ impl crate::script::UiScript {
         }
     }
 
-    /// Drain the model files panes named with no facts yet, each as its
-    /// [`crate::widget::model_key`] and the path a pane gave it: the host loads the path, whose
-    /// extension the model cache's name rule reads (the key has none), and answers through
-    /// [`Self::set_model_facts`].
-    pub fn model_facts_wanted(&mut self) -> Vec<(String, String)> {
+    /// Drain the model files panes named with no facts yet; the host loads each once and answers
+    /// through [`Self::set_model_facts`].
+    pub fn model_facts_wanted(&mut self) -> Vec<ModelWanted> {
         std::mem::take(&mut self.model_mut().model_facts_wanted)
     }
 
@@ -903,6 +910,15 @@ pub struct CharacterPaneFrame {
     /// The pane's light and the fog its scene draws with.
     pub light: ModelLight,
     pub fog: Option<crate::widget::ModelFog>,
+}
+
+/// A model file a pane named whose facts the host has yet to load. `key` ([`model_key`]) is only
+/// the match key, `.mdx`, `.mdl` and `.m2` spellings alike; `path` is the pane's own, as given to
+/// `SetModel` or `file=`, which the host opens through the cache's extension rule (`0x706a50`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelWanted {
+    pub key: String,
+    pub path: String,
 }
 
 /// One row of [`UiScript::visible_model_panes`].

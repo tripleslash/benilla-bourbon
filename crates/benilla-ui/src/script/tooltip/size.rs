@@ -9,8 +9,8 @@
 //! own, as the reference always measures inline.
 
 use super::{apply_anchor, tip_mut};
-use crate::layout::{Anchor, Point};
-use crate::script::layout::FONTSTRING_MIN_SPAN;
+use crate::layout::{Anchor, Len, Point};
+use crate::script::layout::fontstring_slot;
 use crate::script::{MeasuredText, Model};
 use crate::widget::{
     FrameHandle, KindState, RegionHandle, TooltipAnchor, TOOLTIP_COLUMN_GAP, TOOLTIP_LINE_GAP,
@@ -44,33 +44,40 @@ pub(in crate::script) fn size_tooltip(model: &mut Model, h: FrameHandle) {
         .collect();
     let (min_width, padding, anchor, (x, y)) = (t.min_width, t.padding, t.anchor, t.owner_offset);
     let mut pending = false;
+    // The sizer works in layout units throughout: each constant and the minimum width through the
+    // setter steps (`0x41ad70`, `0x41ae60`), each font string through its size slots (`+0x1c`,
+    // `+0x20`), each sum stored to a float (`fstp DWORD`).
+    let units = model.layout_units();
 
     // The unwrapped lines (`0x530686`): the left and right widths of the shown cells, and the
     // column gap when both show (`0x5306cf`). The minimum width is the floor (`0x530665`).
-    let mut widest = min_width;
+    let mut widest = units.store(min_width);
     for &(left, right, wrapped) in &lines {
         if wrapped {
             continue;
         }
         let (left_shown, right_shown) = (shown(model, left), shown(model, right));
         let mut w = if left_shown && right_shown {
-            TOOLTIP_COLUMN_GAP
+            units.store(TOOLTIP_COLUMN_GAP)
         } else {
             0.0
         };
         if left_shown {
-            w += get_width(model, left, &mut pending);
+            w = (get_width(model, left, &mut pending) + f64::from(w)) as f32;
         }
         if right_shown {
-            w += get_width(model, right, &mut pending);
+            w = (get_width(model, right, &mut pending) + f64::from(w)) as f32;
         }
+        // The reference adds a third width, a texture `AddTexture` (`0x5303d0`) pinned to this
+        // line (`0x530723`-`0x530755`, `+0x34c` keyed by `+0x358`); nothing calls it, so its count
+        // (`+0x364`) stays the 0 the constructor and the clear write (`0x529313`, `0x5301cf`).
         // `fcomp; test ah,5; jp` (`0x53075b`): only a larger number replaces, never a NaN.
         if widest < w {
             widest = w;
         }
     }
 
-    // The wrapped lines in order, shown or not (`0x530790`): the text's width capped at 230.4
+    // The wrapped lines in order, shown or not (`0x530790`): the text's width capped at S(230.4)
     // (`0x5307a9`-`0x5307ef`); wider than the widest so far, the text is split at its row starts
     // into at most 20 pieces, each measured to the next start (`0x530884`-`0x5308a8`) with the
     // whitespace its row's wrap skipped (`0x5c24fe`), and the widest counts. The line is then as
@@ -84,19 +91,23 @@ pub(in crate::script) fn size_tooltip(model: &mut Model, h: FrameHandle) {
             pending = true;
             continue;
         };
-        let cap = if TOOLTIP_WRAP_WIDTH > natural {
+        // The compare takes the cap at 53 bits, as `0x41ae60` leaves it in `st0` (`0x5307cb`);
+        // only the cap taken is stored (`0x5307ef`).
+        let cap = if units.store_wide(TOOLTIP_WRAP_WIDTH) > f64::from(natural) {
             natural
         } else {
-            TOOLTIP_WRAP_WIDTH
+            units.store(TOOLTIP_WRAP_WIDTH)
         };
+        // The font engine lays out in script units: the cap goes to it through the getter steps.
+        let cap_script = units.load(cap) as f32;
         let mut piece = cap;
         if cap > widest {
-            piece = match split(model, left, cap) {
-                Some(w) => w,
+            piece = match split(model, left, cap_script) {
+                Some(w) => units.store(w),
                 // An engine with no split stands in its wrapped width; headless, the cap stands in
                 // until the measure lands.
-                None => match probe(model, left, Some(cap)) {
-                    Some(m) => m.w.max(0.0),
+                None => match probe(model, left, Some(cap_script)) {
+                    Some(m) => units.store(m.w.max(0.0)),
                     None => {
                         pending = true;
                         cap
@@ -108,17 +119,18 @@ pub(in crate::script) fn size_tooltip(model: &mut Model, h: FrameHandle) {
         if widest.partial_cmp(&piece) != Some(std::cmp::Ordering::Greater) {
             widest = piece;
         }
-        set_line_width(model, left, widest);
+        // The width goes into the line's layout size slot as it is (`0x5308ef`, `+0x14`).
+        set_line_width(model, left, Len::Layout(widest));
     }
 
-    // Each shown right text at the widest line's width from its left text's LEFT (`0x53094f`).
-    let units = model.layout_units();
+    // Each shown right text at the widest line's width from its left text's LEFT, a layout
+    // offset (`0x53094f`, `0x767c70`).
     for &(left, right, _) in &lines {
         if !shown(model, right) {
             continue;
         }
         let left_id = model.region_id(left);
-        let new = Anchor::new(Point::Right, left_id, Point::Left, widest, 0.0);
+        let new = Anchor::new_layout(Point::Right, left_id, Point::Left, widest, 0.0);
         let stored = model
             .region_data
             .entry(right)
@@ -130,33 +142,37 @@ pub(in crate::script) fn size_tooltip(model: &mut Model, h: FrameHandle) {
         }
     }
 
-    // The height: the shown left texts and a 2.0 gap after the first (`0x530972`-`0x5309ca`); a
-    // right text's height never counts.
+    // The height: the shown left texts and an S(2.0) gap after the first (`0x530972`-`0x5309ca`);
+    // a right text's height never counts.
     let mut height = 0.0f32;
     for &(left, _, _) in &lines {
         if !shown(model, left) {
             continue;
         }
         if height != 0.0 {
-            height += TOOLTIP_LINE_GAP;
+            // The gap at 53 bits added to the stored sum (`0x5309aa`, `0x5309af`).
+            height = (units.store_wide(TOOLTIP_LINE_GAP) + f64::from(height)) as f32;
         }
-        height += get_height(model, left, &mut pending);
+        height = (get_height(model, left, &mut pending) + f64::from(height)) as f32;
     }
 
     if let Ok(t) = tip_mut(model, h) {
         t.relayout_owed = pending;
     }
     if !pending {
-        // `2·pad + padding + widest` by `2·pad + height` (`0x5309f4`, `0x530a0c`), through the
-        // plate's `SetWidth` and `SetHeight` (`0x530a2e`, `0x530a39`).
-        let w = 2.0 * TOOLTIP_PLATE_PAD + padding + widest;
-        let ht = 2.0 * TOOLTIP_PLATE_PAD + height;
+        // `2·S(pad) + padding + widest` by `2·S(pad) + height` (`0x5309f4`, `0x530a0c`), the pad
+        // at 53 bits and doubled in `st0` (`0x5309ed`, `0x5309f2`), through the plate's layout
+        // size slots (`0x530a2e`, `0x530a39`), so `GetWidth` answers them through the getters.
+        let pad = units.store_wide(TOOLTIP_PLATE_PAD);
+        let w =
+            crate::layout::Len::Layout((2.0 * pad + f64::from(padding) + f64::from(widest)) as f32);
+        let ht = crate::layout::Len::Layout((2.0 * pad + f64::from(height)) as f32);
         let input = model.layout_inputs.entry(h).or_default();
-        let changed = input.width.to_bits() != w.to_bits();
+        let changed = input.width.bits() != w.bits();
         input.width = w;
         model.invalidate_frame(h, changed);
         let input = model.layout_inputs.entry(h).or_default();
-        let changed = input.height.to_bits() != ht.to_bits();
+        let changed = input.height.bits() != ht.bits();
         input.height = ht;
         model.invalidate_frame(h, changed);
     }
@@ -171,9 +187,9 @@ pub(in crate::script) fn size_tooltip(model: &mut Model, h: FrameHandle) {
 
 /// A line's `SetWidth`, its height kept, through [`Model::note_line_width`]; an unmoved width
 /// invalidates only a line whose rect a resolve would not give back.
-pub(super) fn set_line_width(model: &mut Model, rh: RegionHandle, w: f32) {
+pub(super) fn set_line_width(model: &mut Model, rh: RegionHandle, w: Len) {
     let d = model.region_data.entry(rh).or_default();
-    let new = Some((w, d.size.map_or(0.0, |s| s.1)));
+    let new = Some((w, d.size.map_or(Len::Script(0.0), |s| s.1)));
     if crate::script::region::size_bits_eq(d.size, new) {
         model.invalidate_region(rh, false);
         return;
@@ -318,7 +334,7 @@ fn memo_insert(model: &mut Model, key: (u64, bool), m: MeasuredText) {
 /// `rh`'s measure at its own width, stored as its own, as a font string's getters measure in
 /// place (`0x772890`, `0x7729b0`).
 fn current(model: &mut Model, rh: RegionHandle) -> Option<MeasuredText> {
-    let wrap = model.region_data.get(&rh)?.wrap_width();
+    let wrap = model.region_data.get(&rh)?.wrap_width(model.layout_units());
     let m = probe(model, rh, wrap)?;
     let stale = model
         .region_data
@@ -336,27 +352,30 @@ fn current(model: &mut Model, rh: RegionHandle) -> Option<MeasuredText> {
 }
 
 /// The authored size of `rh` and whether its text is empty.
-fn authored(model: &Model, rh: RegionHandle) -> ((f32, f32), bool) {
-    model.region_data.get(&rh).map_or(((0.0, 0.0), true), |d| {
-        (
-            d.size.unwrap_or((0.0, 0.0)),
-            d.text.as_deref().is_none_or(str::is_empty),
-        )
-    })
+fn authored(model: &Model, rh: RegionHandle) -> ((Len, Len), bool) {
+    let zero = Len::Script(0.0);
+    model
+        .region_data
+        .get(&rh)
+        .map_or(((zero, zero), true), |d| {
+            (
+                d.size.unwrap_or((zero, zero)),
+                d.text.as_deref().is_none_or(str::is_empty),
+            )
+        })
 }
 
-/// A font string's `GetWidth` (`0x772930`): its authored width when non-zero, else its text's
-/// unwrapped width, never below one unit (`0x772957`-`0x772983`, which a NaN takes too).
-fn get_width(model: &mut Model, rh: RegionHandle, pending: &mut bool) -> f32 {
+/// A font string's width slot (`0x772930`) in layout units: its authored width when non-zero,
+/// else its text's unwrapped width, never below S(1) (`0x772957`-`0x772983`, which a NaN takes
+/// too).
+fn get_width(model: &mut Model, rh: RegionHandle, pending: &mut bool) -> f64 {
+    let units = model.layout_units();
     let ((w, _), empty) = authored(model, rh);
-    if w != 0.0 {
-        return w.max(FONTSTRING_MIN_SPAN);
-    }
-    if empty {
-        return FONTSTRING_MIN_SPAN;
+    if !w.is_zero() || empty {
+        return fontstring_slot(units, w, None);
     }
     match current(model, rh) {
-        Some(m) => m.natural_w.max(FONTSTRING_MIN_SPAN),
+        Some(m) => fontstring_slot(units, w, Some(m.natural_w)),
         None => {
             *pending = true;
             0.0
@@ -364,18 +383,16 @@ fn get_width(model: &mut Model, rh: RegionHandle, pending: &mut bool) -> f32 {
     }
 }
 
-/// A font string's `GetHeight` (`0x772a60`): its authored height when non-zero, else its text's
-/// height laid out in its width, never below one unit.
-fn get_height(model: &mut Model, rh: RegionHandle, pending: &mut bool) -> f32 {
+/// A font string's height slot (`0x772a60`) in layout units: its authored height when non-zero,
+/// else its text's height laid out in its width, never below S(1).
+fn get_height(model: &mut Model, rh: RegionHandle, pending: &mut bool) -> f64 {
+    let units = model.layout_units();
     let ((_, h), empty) = authored(model, rh);
-    if h != 0.0 {
-        return h.max(FONTSTRING_MIN_SPAN);
-    }
-    if empty {
-        return FONTSTRING_MIN_SPAN;
+    if !h.is_zero() || empty {
+        return fontstring_slot(units, h, None);
     }
     match current(model, rh) {
-        Some(m) => m.h.max(FONTSTRING_MIN_SPAN),
+        Some(m) => fontstring_slot(units, h, Some(m.h)),
         None => {
             *pending = true;
             0.0
@@ -383,9 +400,10 @@ fn get_height(model: &mut Model, rh: RegionHandle, pending: &mut bool) -> f32 {
     }
 }
 
-/// A font string's cached text width (`0x772890`): the unwrapped width, 0 with no text or font.
-/// `None` while owed.
+/// A font string's cached text width (`0x772890`) in layout units: the unwrapped width, 0 with no
+/// text or font. `None` while owed.
 fn cached_width(model: &mut Model, rh: RegionHandle) -> Option<f32> {
-    let wrap = model.region_data.get(&rh).and_then(|d| d.wrap_width());
-    probe(model, rh, wrap).map(|m| m.natural_w)
+    let units = model.layout_units();
+    let wrap = model.region_data.get(&rh).and_then(|d| d.wrap_width(units));
+    probe(model, rh, wrap).map(|m| units.store(m.natural_w))
 }

@@ -9,9 +9,9 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi;
 use super::cursor::{set_cursor, CursorMacro, CursorPayload};
 use super::Model;
-use crate::script::binding_abi::Idx;
 
 /// Macros per tab (`Blizzard_MacroUI.lua:1`), and so the character tab's base.
 pub const MAX_MACROS: usize = 18;
@@ -333,7 +333,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetMacroInfo",
-        lua.create_function(|lua, Idx(index): Idx| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: GetMacroInfo(index)` (`0x84cc0c`, `0x4f177b`).
+            let index = binding_abi::index_arg(lua, index, "Usage: GetMacroInfo(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(m) = model.macros.get(index) else {
                 // `0x4f1829`: four nils.
@@ -495,7 +497,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "DeleteMacro",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: DeleteMacro(index)` (`0x84cc28`, `0x4f1861`).
+            let index = binding_abi::index_arg(lua, index, "Usage: DeleteMacro(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             delete_macro(&mut model, index);
             Ok(())
@@ -504,7 +508,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "PickupMacro",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, index: Value| {
+            // `is-number` else `Usage: PickupMacro(index)` (`0x84cc98`, `0x4f1af1`).
+            let index = binding_abi::index_arg(lua, index, "Usage: PickupMacro(index)")?;
             pickup_macro(lua, index);
             Ok(())
         })?,

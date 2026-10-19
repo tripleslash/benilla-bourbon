@@ -72,7 +72,7 @@ pub struct ScrollingMessageState {
     pub at_bottom: bool,
     /// The text insets `(left, right, top, bottom)` the lines' box keeps from the frame's rect
     /// (`+0x37c`-`+0x388`); only XML `<TextInsets>` sets them (`0x787fb0`).
-    pub insets: [f32; 4],
+    pub insets: [crate::layout::Len; 4],
     /// The detached FontString that holds the lines' font (the frame's own `+0x338`), the font
     /// verbs' receiver; never in `GetRegions`, as the reference's font is no region.
     pub font_region: Option<crate::widget::RegionHandle>,
@@ -107,7 +107,7 @@ impl Default for ScrollingMessageState {
             lines_shown: 0,
             at_top: false,
             at_bottom: true,
-            insets: [0.0; 4],
+            insets: [crate::layout::Len::Script(0.0); 4],
             font_region: None,
             links_dirty: false,
             laid_font: None,
@@ -721,7 +721,7 @@ pub struct MessageFrameState {
     /// The text insets `(left, right, top, bottom)` the lines' box keeps from the frame's rect
     /// (`+0x330`-`+0x33c`, zeroed by the ctor at `0x785675`); only XML `<TextInsets>` sets them
     /// (`0x785b80`).
-    pub insets: [f32; 4],
+    pub insets: [crate::layout::Len; 4],
     /// The lines' font holder (`+0x320`), as [`ScrollingMessageState::font_region`].
     pub font_region: Option<crate::widget::RegionHandle>,
 }
@@ -737,13 +737,31 @@ impl Default for MessageFrameState {
             fade_duration: 3.0,
             fading_enabled: true,
             lines_gen: 0,
-            insets: [0.0; 4],
+            insets: [crate::layout::Len::Script(0.0); 4],
             font_region: None,
         }
     }
 }
 
 impl MessageFrameState {
+    /// `SetTimeVisible(s)`'s store (`0x785c20`): every line whose time left is not 0 takes `s`
+    /// (`0x785c3d`-`0x785c50`), then the frame (`0x785c65`); `s` is not clamped.
+    pub fn set_time_visible(&mut self, s: f32) {
+        for line in self.lines.iter_mut().filter(|l| l.time_left != 0.0) {
+            line.time_left = s;
+        }
+        self.time_visible = s;
+    }
+
+    /// `SetFadeDuration(s)`'s store (`0x785c80`): the same over the lines' fade time, then the
+    /// frame (`0x785cc5`).
+    pub fn set_fade_duration(&mut self, s: f32) {
+        for line in self.lines.iter_mut().filter(|l| l.fade_left != 0.0) {
+            line.fade_left = s;
+        }
+        self.fade_duration = s;
+    }
+
     /// `AddMessage(text, r, g, b, a)` (`0x795590`, `0x785d00`): the fourth number is the line's
     /// starting alpha, where the scrolling class takes an id and forces opaque.
     pub fn add(&mut self, text: String, r: f32, g: f32, b: f32, a: f32) {
@@ -768,33 +786,44 @@ impl MessageFrameState {
         self.lines.clear();
     }
 
-    /// Advance the fade by `dt` (OnUpdate, `0x786200`) in the scrolling class's two phases, with no
-    /// scroll gate, freeing a finished line (`0x786570`). The reference also gates on
-    /// `numLinesDisplayed > 0`, which this does not check. The arithmetic is `f32`: whether
-    /// `0x786200` keeps the unrounded x87 value like the scrolling tick is untraced.
+    /// Advance the fade by `dt` (OnUpdate, `0x786200`), per line as `0x7862e0` does, with no scroll
+    /// gate. A line whose time is not 0 spends it (`0x786300`); once it is no longer above 0 the
+    /// time is stored as exactly 0 (`0x786323`), or, with no fade left, the line is freed
+    /// (`0x786351`, `0x786570`). A line at time 0 spends its fade (`0x78633c`), freed when that is
+    /// no longer above 0 and otherwise re-aimed through the quantized fraction of the frame's
+    /// duration (`0x78635b`-`0x786379`); a line with no fade left stays (`0x78633a`). The reference
+    /// also gates on `numLinesDisplayed > 0`, which this does not check. The arithmetic is `f32`:
+    /// whether `0x786200` keeps the unrounded x87 value like the scrolling tick is untraced.
     pub fn tick(&mut self, dt: f32) {
         if !self.fading_enabled {
             return;
         }
-        for line in &mut self.lines {
-            if line.time_left > 0.0 {
+        let duration = self.fade_duration;
+        self.lines.retain_mut(|line| {
+            if line.time_left != 0.0 {
                 line.time_left -= dt;
-                continue;
+                // Greater, or unordered (`test ah,5; jp`), goes on.
+                if line.time_left > 0.0 || line.time_left.is_nan() {
+                    return true;
+                }
+                if line.fade_left == 0.0 {
+                    return false;
+                }
+                line.time_left = 0.0;
+                return true;
             }
-            if self.fade_duration <= 0.0 {
-                line.alpha = 0.0;
-                continue;
+            if line.fade_left == 0.0 {
+                return true;
             }
-            line.fade_left -= dt;
-            if line.fade_left <= 0.0 {
-                line.fade_left = 0.0;
-                line.alpha = 0.0;
+            let fade = line.fade_left - dt;
+            if fade > 0.0 || fade.is_nan() {
+                line.fade_left = fade;
+                line.alpha = f32::from(quantize_fade(fade / duration)) / 255.0;
+                true
             } else {
-                line.alpha = f32::from(quantize_fade(line.fade_left / self.fade_duration)) / 255.0;
+                false
             }
-        }
-        // A line past phase 1 at alpha 0 is finished, and freed.
-        self.lines.retain(|l| l.time_left > 0.0 || l.alpha > 0.0);
+        });
     }
 
     /// Evict the oldest lines until the rest fit `viewport_rows`, each costing its wrapped rows.

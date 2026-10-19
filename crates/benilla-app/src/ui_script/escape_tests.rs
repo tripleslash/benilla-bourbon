@@ -43,7 +43,7 @@ fn one_item_backpack() -> ContainerState {
         },
     );
     ContainerState {
-        name: Some("Backpack".into()),
+        name: None,
         num_slots: 16,
         slots,
     }
@@ -296,7 +296,7 @@ fn escape_closes_an_open_stack_split_frame() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }),

@@ -637,29 +637,6 @@ fn raid_name_of(
         .map(|m| m.name.clone())
 }
 
-/// A name to the guid `CMSG_GROUP_SET_LEADER` and `CMSG_GROUP_ASSISTANT_LEADER` want (UnitPopup
-/// addresses raid rows by name), matched case-insensitively like every roster name compare.
-fn raid_guid_for_name(
-    group: &GroupState,
-    self_guid: Option<u64>,
-    names: &NameCache,
-    name: &str,
-) -> Option<u64> {
-    if let Some(g) = self_guid {
-        if names
-            .resolve_unit(g, None, Ask::Read)
-            .is_some_and(|n| n.eq_ignore_ascii_case(name))
-        {
-            return Some(g);
-        }
-    }
-    group
-        .members
-        .iter()
-        .find(|m| m.name.eq_ignore_ascii_case(name))
-        .map(|m| m.guid)
-}
-
 /// `GetRaidRosterInfo`'s array (`0x4bb560`) in [`raid_row_guids`]' order: empty outside a raid,
 /// so `GetNumRaidMembers()` answers 0 in a party. The reference's array holds the local player
 /// and the wire's list does not, so our row comes from [`RaidSelf`].
@@ -938,40 +915,14 @@ pub(crate) fn drain_party(
                         .send(ClientCommand::GroupSetLeader { guid: m.guid });
                 }
             }
+            // The binding resolved the method, the master and the threshold (`0x4e92a0`).
             PartyRequest::LootMethod {
                 method,
-                master_name,
-                threshold: asked,
+                master,
+                threshold,
             } => {
-                let Some(method_id) = loot_method_id(&method) else {
-                    continue;
-                };
-                let master = if method_id == 2 {
-                    master_name
-                        .as_deref()
-                        .and_then(|n| {
-                            group
-                                .members
-                                .iter()
-                                .find(|m| m.name.eq_ignore_ascii_case(n))
-                                .map(|m| m.guid)
-                        })
-                        .or(self_guid)
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
-                // An absent threshold keeps the group's current one (at least 2), where the
-                // reference's binding defaults it to 2 (`0x4e946d`), so a method change resets it.
-                let threshold = asked.unwrap_or_else(|| {
-                    group
-                        .loot
-                        .map(|l| u32::from(l.threshold))
-                        .filter(|t| *t >= 2)
-                        .unwrap_or(2)
-                });
                 let _ = commands.0.send(ClientCommand::LootMethod {
-                    method: method_id,
+                    method,
                     master,
                     threshold,
                 });
@@ -1049,17 +1000,14 @@ pub(crate) fn drain_party(
                         .send(ClientCommand::GroupSwapSubGroup { name, other });
                 }
             }
-            PartyRequest::PromoteName(name) => {
-                if let Some(guid) = raid_guid_for_name(&group, self_guid, &names, &name) {
-                    let _ = commands.0.send(ClientCommand::GroupSetLeader { guid });
-                }
+            // The binding resolved the name (`0x48a86a`, `0x4bbd6b`, `0x4bbe3b`).
+            PartyRequest::PromoteGuid(guid) => {
+                let _ = commands.0.send(ClientCommand::GroupSetLeader { guid });
             }
-            PartyRequest::AssistantLeader { name, grant } => {
-                if let Some(guid) = raid_guid_for_name(&group, self_guid, &names, &name) {
-                    let _ = commands
-                        .0
-                        .send(ClientCommand::GroupAssistantLeader { guid, grant });
-                }
+            PartyRequest::AssistantLeader { guid, grant } => {
+                let _ = commands
+                    .0
+                    .send(ClientCommand::GroupAssistantLeader { guid, grant });
             }
             PartyRequest::UninviteRaid(index) => {
                 // Sent by name. The reference's `UninviteFromRaid` and `UninviteFromParty` share
@@ -1109,7 +1057,7 @@ fn test_apply_local(
             | PartyRequest::SetSubgroup { .. }
             | PartyRequest::SwapSubgroup { .. }
             | PartyRequest::UninviteRaid(_)
-            | PartyRequest::PromoteName(_)
+            | PartyRequest::PromoteGuid(_)
             | PartyRequest::AssistantLeader { .. }
     ) {
         group.count_list();
@@ -1148,34 +1096,14 @@ fn apply_test_intent(
         }
         PartyRequest::LootMethod {
             method,
-            master_name,
+            master,
             threshold,
         } => {
-            if let Some(method_id) = loot_method_id(method) {
-                let master = if method_id == 2 {
-                    master_name
-                        .as_deref()
-                        .and_then(|n| {
-                            group
-                                .members
-                                .iter()
-                                .find(|m| m.name.eq_ignore_ascii_case(n))
-                                .map(|m| m.guid)
-                        })
-                        .or(self_guid)
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
-                // The live drain's rule: an absent threshold keeps the current one.
-                let threshold = threshold
-                    .map_or_else(|| group.loot.map_or(2, |l| l.threshold.max(2)), |t| t as u8);
-                group.loot = Some(GroupLootInfo {
-                    method: method_id as u8,
-                    master,
-                    threshold,
-                });
-            }
+            group.loot = Some(GroupLootInfo {
+                method: *method as u8,
+                master: *master,
+                threshold: *threshold as u8,
+            });
             true
         }
         PartyRequest::LootThreshold(threshold) => {
@@ -1242,22 +1170,14 @@ fn apply_test_intent(
             }
             true
         }
-        PartyRequest::PromoteName(name) => {
-            if let Some(m) = group
-                .members
-                .iter()
-                .find(|m| m.name.eq_ignore_ascii_case(name))
-            {
-                group.leader = m.guid;
+        PartyRequest::PromoteGuid(guid) => {
+            if group.members.iter().any(|m| m.guid == *guid) {
+                group.leader = *guid;
             }
             true
         }
-        PartyRequest::AssistantLeader { name, grant } => {
-            if let Some(m) = group
-                .members
-                .iter_mut()
-                .find(|m| m.name.eq_ignore_ascii_case(name))
-            {
+        PartyRequest::AssistantLeader { guid, grant } => {
+            if let Some(m) = group.members.iter_mut().find(|m| m.guid == *guid) {
                 if *grant {
                     m.flags |= GROUP_MEMBER_ASSISTANT;
                 } else {
@@ -1309,18 +1229,6 @@ fn set_test_subgroup(group: &mut GroupState, self_guid: Option<u64>, index: u32,
     } else if let Some(m) = group.members.iter_mut().find(|m| m.guid == guid) {
         put(&mut m.flags);
     }
-}
-
-/// `SetLootMethod`'s string → the wire's `LootMethod` id.
-fn loot_method_id(method: &str) -> Option<u32> {
-    Some(match method {
-        "freeforall" => 0,
-        "roundrobin" => 1,
-        "master" => 2,
-        "group" => 3,
-        "needbeforegreed" => 4,
-        _ => return None,
-    })
 }
 
 /// The `/partytest` roster: four unstreamed synthetic members with mixed statuses and records,
@@ -2141,9 +2049,9 @@ mod tests {
         test_apply_local(
             &mut group,
             &PartyRequest::LootMethod {
-                method: "needbeforegreed".into(),
-                master_name: None,
-                threshold: None,
+                method: 4,
+                master: 0,
+                threshold: 2,
             },
             me,
             None,
@@ -2298,13 +2206,6 @@ mod tests {
             Some("Alice")
         );
         assert_eq!(raid_name_of(&group, me, &names, 0xDEAD), None);
-
-        assert_eq!(
-            raid_guid_for_name(&group, me, &names, "alice"),
-            Some(0xA11CE)
-        );
-        assert_eq!(raid_guid_for_name(&group, me, &names, "KEL"), Some(0x5E1F));
-        assert_eq!(raid_guid_for_name(&group, me, &names, "Nobody"), None);
 
         // Outside a raid all are empty, so a raid verb in a party sends nothing.
         group.group_type = 0;

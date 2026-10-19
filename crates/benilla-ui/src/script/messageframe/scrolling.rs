@@ -253,11 +253,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetMaxLines wipes the ring (`0x7938a0`).
+    // SetMaxLines wipes the ring (`0x7938a0`); a `lua_isnumber` miss, or an `_ftol`ed count not
+    // above 0 (`jle`, `0x793949`), raises `Usage: %s:SetMaxLines(maxLines)` (`0x87b8f8`,
+    // `0x793971`).
     m.set(
         "SetMaxLines",
-        lua.create_function(|lua, (this, n): (Table, i64)| {
-            with_smf(lua, &this, |smf| smf.set_max_lines(n.max(1) as usize))
+        lua.create_function(|lua, (this, n): (Table, Value)| {
+            let n = crate::script::binding_abi::ftol(crate::script::binding_abi::method_number(
+                lua,
+                &this,
+                n,
+                "SetMaxLines(maxLines)",
+            )?);
+            if n <= 0 {
+                return Err(crate::script::binding_abi::usage(
+                    lua,
+                    &this,
+                    "SetMaxLines(maxLines)",
+                ));
+            }
+            with_smf(lua, &this, |smf| smf.set_max_lines(n as usize))
         })?,
     )?;
     m.set(

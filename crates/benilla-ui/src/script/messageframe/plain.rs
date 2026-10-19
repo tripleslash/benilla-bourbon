@@ -131,10 +131,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
+    // A `lua_isnumber` miss raises `Usage: %s:SetTimeVisible(seconds)` and `...SetFadeDuration(seconds)`
+    // (`0x87b918`, `0x87b93c`; `0x79530c`, `0x7954bc`); the number is stored as it is, no clamp
+    // (`0x785c65`, `0x785cc5`), and every line whose own time is not 0 takes it (`0x785c3d`).
     m.set(
         "SetTimeVisible",
-        lua.create_function(|lua, (this, s): (Table, f32)| {
-            with_mf(lua, &this, |mf| mf.time_visible = s.max(0.0))
+        lua.create_function(|lua, (this, s): (Table, Value)| {
+            let s = crate::script::binding_abi::method_number(
+                lua,
+                &this,
+                s,
+                "SetTimeVisible(seconds)",
+            )? as f32;
+            with_mf(lua, &this, |mf| mf.set_time_visible(s))
         })?,
     )?;
     m.set(
@@ -143,8 +152,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     m.set(
         "SetFadeDuration",
-        lua.create_function(|lua, (this, s): (Table, f32)| {
-            with_mf(lua, &this, |mf| mf.fade_duration = s.max(0.0))
+        lua.create_function(|lua, (this, s): (Table, Value)| {
+            let s = crate::script::binding_abi::method_number(
+                lua,
+                &this,
+                s,
+                "SetFadeDuration(seconds)",
+            )? as f32;
+            with_mf(lua, &this, |mf| mf.set_fade_duration(s))
         })?,
     )?;
     m.set(

@@ -153,7 +153,7 @@ fn seed_items(s: &mut UiScript) {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }),
@@ -303,7 +303,7 @@ fn repair_mode_hover_shows_the_items_repair_cost() {
     s.set_container(
         0,
         Some(ContainerState {
-            name: Some("Backpack".into()),
+            name: None,
             num_slots: 16,
             slots,
         }),
@@ -459,11 +459,13 @@ fn shipped_merchant_row_raises_the_compare_plates() {
         "the epic ring's plate reads purple and keeps its flavour text — no compact cut"
     );
     // The plate's small-font ladder is 10 px; the main tooltip's header face is larger.
+    // The height through the getter steps, `G(S(10))` at 4:3.
+    benilla_ui::test_support::install_law43(&s);
     let ok: bool = s
         .eval(
             "local _, sh = ShoppingTooltip1TextLeft1:GetFont() \
              local _, mh = GameTooltipTextLeft1:GetFont() \
-             return sh == 10 and mh > sh",
+             return sh == law(10) and mh > sh",
         )
         .unwrap();
     assert!(

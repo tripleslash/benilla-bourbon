@@ -1534,10 +1534,10 @@ fn get_blend_mode_answers_one_string_and_defaults_to_the_ctors_blend() {
         .unwrap());
 }
 
-/// `Texture:GetTexCoordModifiesRect` (`0x79c120`, table `0x87c128`) answers `1` or nil. The flag is
-/// stored, not applied: on the reference it makes `SetTexCoord` re-derive the rect (`0x770462`).
+/// `Texture:GetTexCoordModifiesRect` (`0x79c120`, table `0x87c128`) answers `1` or nil. A set flag
+/// scales the drawn rect from its bottom-left by the coordinates' spans (`0x770570`).
 #[test]
-fn tex_coord_modifies_rect_is_one_slash_nil_and_moves_no_rect_yet() {
+fn tex_coord_modifies_rect_is_one_slash_nil_and_scales_the_rect() {
     let mut s = crate::script::UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     s.run(
@@ -1579,13 +1579,18 @@ fn tex_coord_modifies_rect_is_one_slash_nil_and_moves_no_rect_yet() {
         "kind number, never boolean"
     );
 
-    // The assertion that changes when the rect re-derivation is built.
     s.run("TCMTex:SetTexCoord(0, 0.25, 0, 0.5)").unwrap();
     s.resolve();
-    assert_eq!(
-        region_tex_rect(&s, "TcmArt"),
-        before,
-        "the flag does not (yet) let SetTexCoord re-derive the region's rect"
+    let r = region_tex_rect(&s, "TcmArt");
+    crate::assert_near!(
+        (r.left, r.right, r.bottom, r.top),
+        (
+            before.left,
+            before.left + before.width() * 0.25,
+            before.bottom,
+            before.bottom + before.height() * 0.5
+        ),
+        "a quarter across, half down, from the bottom-left"
     );
 
     s.run("TCMTex:SetTexCoordModifiesRect(nil)").unwrap();
@@ -1593,6 +1598,11 @@ fn tex_coord_modifies_rect_is_one_slash_nil_and_moves_no_rect_yet() {
         s.eval::<bool>("return TCMTex:GetTexCoordModifiesRect() == nil")
             .unwrap(),
         "cleared back to nil"
+    );
+    assert_eq!(
+        region_tex_rect(&s, "TcmArt"),
+        before,
+        "unflagged: the whole rect"
     );
 }
 

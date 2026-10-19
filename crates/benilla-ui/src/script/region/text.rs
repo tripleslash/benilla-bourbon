@@ -114,7 +114,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         Ok(units.load(
             units.store(
                 d.measured
-                    .filter(|m| m.key == d.measure_key(scale))
+                    .filter(|m| m.key == d.measure_key(scale, units))
                     .map(|m| m.natural_w)
                     .unwrap_or(0.0),
             ),
@@ -229,17 +229,34 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // the size magnified from the raster, uncapped. It writes the text height a font load writes
     // (`+0xe4`, `0x77163b`), so `GetFont` answers it and the next font push replaces it; a height
     // within 2^-22 of the current one changes nothing (`0x77161c`), the bit included. No inherit
-    // bit is cleared.
+    // bit is cleared. A `lua_isnumber` miss raises `Usage: %s:SetTextHeight(pixelHeight)`
+    // (`0x87c728`, `0x79e4f9`); a height that compares not above 0 (`0x79e469`, `fcomp` against
+    // `0x7ffd74` = 0.0, taken on greater or unordered only) raises `%s:SetTextHeight(): invalid
+    // text height: %f` (`0x87c750`, `0x79e49f`), the `%f` a Lua number printed `%.14g`.
     m.set(
         "SetTextHeight",
-        lua.create_function(|lua, (this, height): (Table, f32)| {
+        lua.create_function(|lua, (this, height): (Table, Value)| {
             let rh = region_handle_of(lua, &this)?;
+            let wide =
+                binding_abi::method_number(lua, &this, height, "SetTextHeight(pixelHeight)")?;
+            // The compare reads the double (`0x79e466` `fst` stores a float copy, `fcomp` tests the
+            // register), so a height too small for a float still passes; the text prints the copy.
+            let height = wide as f32;
+            if wide <= 0.0 {
+                return Err(mlua::Error::runtime(format!(
+                    "{}:SetTextHeight(): invalid text height: {}",
+                    binding_abi::name_of(lua, &this),
+                    binding_abi::lua_number_text(f64::from(height))
+                )));
+            }
             let mut model = lua.app_data_mut::<Model>().expect("model");
+            let model_units = model.layout_units();
             let d = model.region_data.entry(rh).or_default();
-            if (height - d.font_height.unwrap_or(0.0)).abs() < f32::from_bits(0x3480_0000) {
+            let held = d.font_height.map_or(0.0, |h| h.script(model_units));
+            if (height - held).abs() < f32::from_bits(0x3480_0000) {
                 return Ok(());
             }
-            d.font_height = Some(height);
+            d.font_height = Some(crate::layout::Len::Script(height));
             d.text_scaled = true;
             model.touch_measure(rh);
             Ok(())

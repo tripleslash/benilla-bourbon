@@ -2,6 +2,7 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
+use crate::layout::Len;
 use crate::script::binding_abi::{self, bool_or_default};
 
 use crate::script::region_map::{set_shared, Side};
@@ -60,6 +61,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         }
     })?;
     // GetID/SetID (`0x775280`/`0x775340`): a plain numeric label at `+0xb0` (XML `id=`), default 0.
+    // SetID tests `lua_isnumber` (`0x7753cc`), `_ftol`s the number, and a miss raises
+    // `Usage: %s:SetID(ID)` (`0x87976c`, `0x77540b`).
     m.set(
         "GetID",
         lua.create_function(|lua, this: Table| {
@@ -70,8 +73,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
     m.set(
         "SetID",
-        lua.create_function(|lua, (this, id): (Table, i64)| {
+        lua.create_function(|lua, (this, id): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
+            let id = i64::from(binding_abi::ftol(binding_abi::method_number(
+                lua,
+                &this,
+                id,
+                "SetID(ID)",
+            )?));
             let mut model = lua.app_data_mut::<Model>().expect("model");
             if let Some(f) = model.arena.frame_mut(h) {
                 f.wow_id = id;
@@ -352,9 +361,25 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
     m.set(
         "SetFrameLevel",
-        lua.create_function(|lua, (this, level): (Table, i64)| {
+        lua.create_function(|lua, (this, level): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
-            let lvl = level.clamp(0, i64::from(u16::MAX)) as u16;
+            // `lua_isnumber` (`0x7745ec`), else `Usage: %s:SetFrameLevel(level)` (`0x879608`,
+            // `0x774669`); the number is `_ftol`ed (`0x774601`), and a negative one (`jl`,
+            // `0x77460c`) raises `%s:SetFrameLevel(): Passed negative frame level: %d` (`0x879628`,
+            // `0x77463b`).
+            let level = i64::from(binding_abi::ftol(binding_abi::method_number(
+                lua,
+                &this,
+                level,
+                "SetFrameLevel(level)",
+            )?));
+            if level < 0 {
+                return Err(mlua::Error::runtime(format!(
+                    "{}:SetFrameLevel(): Passed negative frame level: {level}",
+                    binding_abi::name_of(lua, &this)
+                )));
+            }
+            let lvl = level.min(i64::from(u16::MAX)) as u16;
             // A script level change moves no children: `0x774560` calls `set_frame_level 0x76a4f0`
             // with `propagate = 0`, which stock `BonusActionButtonTemplate` relies on.
             lua.app_data_mut::<Model>()
@@ -456,17 +481,21 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
     // `GetBackdrop([table])` (`0x777370`) rebuilds the table from the stored struct: no backdrop is
     // zero values, not nil; an omitted key reads its ctor default (files `""`, `tileSize` 0,
-    // `edgeSize` 32; `0x77e5f0`); `tile` is 1 or absent, never a boolean; a table argument is
-    // filled in place, its `insets` reused (`0x77740e`). No colour keys.
+    // `edgeSize` 0.025 layout units; `0x77e5f0`); `tile` is 1 or absent, never a boolean; a table
+    // argument is filled in place, its `insets` reused (`0x77740e`). No colour keys. Each length
+    // is `G` of the stored one: `tileSize` `[+0x4c]` (`0x7774ec`), `edgeSize` `[+0x48]`
+    // (`0x77752e`) and the insets left `[+0x58]`, right `[+0x5c]`, top `[+0x50]` and bottom
+    // `[+0x54]` (`0x7775ec`..`0x7776a0`), which `SetBackdrop` stored by `S`.
     m.set(
         "GetBackdrop",
         lua.create_function(|lua, (this, target): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
             // Copied out before any Lua write: filling a caller's table can run a `__newindex` that
             // re-enters and would panic on the app-data borrow.
-            let bd = {
+            let (bd, u) = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                model.backdrops.get(&h).map(|i| i.spec.clone())
+                let u = model.layout_units();
+                (model.backdrops.get(&h).map(|i| i.spec.clone()), u)
             };
             let Some(bd) = bd else {
                 return Ok(mlua::MultiValue::new());
@@ -485,8 +514,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     Value::Nil // erases the key from a reused table
                 },
             )?;
-            t.set("tileSize", f64::from(bd.tile_size))?;
-            t.set("edgeSize", f64::from(bd.edge_size))?;
+            t.set("tileSize", bd.tile_size.get(u))?;
+            t.set("edgeSize", bd.edge_size.get(u))?;
             let insets = match t.get::<Value>("insets") {
                 Ok(Value::Table(existing)) => existing,
                 _ => {
@@ -495,10 +524,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     fresh
                 }
             };
-            insets.set("left", f64::from(bd.insets.left))?;
-            insets.set("right", f64::from(bd.insets.right))?;
-            insets.set("top", f64::from(bd.insets.top))?;
-            insets.set("bottom", f64::from(bd.insets.bottom))?;
+            insets.set("left", bd.insets.left.get(u))?;
+            insets.set("right", bd.insets.right.get(u))?;
+            insets.set("top", bd.insets.top.get(u))?;
+            insets.set("bottom", bd.insets.bottom.get(u))?;
             Ok(mlua::MultiValue::from_vec(vec![Value::Table(t)]))
         })?,
     )?;
@@ -667,15 +696,26 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
     // Hit-rect insets shrink only the mouse hit rect; geometry, drawing and anchors ignore them.
+    // `SetHitRectInsets` stores `S` of each (`0x775e38`..`0x775ee2`, through `0x76b1b0`) and
+    // `GetHitRectInsets` answers `G` of each, in the same order (`0x775caa`..`0x775d35`, through
+    // `0x76b1e0`); benilla keeps the script numbers and takes both steps at the read.
+    // All four arguments are `lua_isnumber`-gated (`0x775de2`..`0x775e1f`), else
+    // `Usage: %s:SetHitRectInsets(left, right, top, bottom)` (`0x879780`, `0x775f0f`).
     m.set(
         "SetHitRectInsets",
         lua.create_function(
-            |lua, (this, left, right, top, bottom): (Table, f32, f32, f32, f32)| {
+            |lua, (this, left, right, top, bottom): (Table, Value, Value, Value, Value)| {
                 let h = frame_handle_of(lua, &this)?;
+                let line = "SetHitRectInsets(left, right, top, bottom)";
+                let mut insets = [0.0f32; 4];
+                for (slot, v) in insets.iter_mut().zip([left, right, top, bottom]) {
+                    *slot = binding_abi::method_number(lua, &this, v, line)? as f32;
+                }
+                let [left, right, top, bottom] = insets;
                 lua.app_data_mut::<Model>()
                     .expect("model")
                     .arena
-                    .set_hit_rect_insets(h, [left, right, top, bottom]);
+                    .set_hit_rect_insets(h, [left, right, top, bottom].map(Len::Script));
                 Ok(())
             },
         )?,
@@ -686,7 +726,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let h = frame_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
             let i = model.arena.hit_rect_insets(h);
-            Ok((i[0], i[1], i[2], i[3]))
+            let u = model.layout_units();
+            Ok((i[0].get(u), i[1].get(u), i[2].get(u), i[3].get(u)))
         })?,
     )?;
     Ok(())
@@ -706,22 +747,22 @@ fn backdrop_from_table(t: &Table) -> mlua::Result<Backdrop> {
     // and `tile = 0` are off and `tile = "yes"` is on.
     bd.tile = bool_or_default(Some(&t.get::<Value>("tile").unwrap_or(Value::Nil)), false);
     if let Ok(Value::Number(n)) = t.get::<Value>("tileSize") {
-        bd.tile_size = n as f32;
+        bd.tile_size = Len::Script(n as f32);
     } else if let Ok(Value::Integer(n)) = t.get::<Value>("tileSize") {
-        bd.tile_size = n as f32;
+        bd.tile_size = Len::Script(n as f32);
     }
     if let Ok(Value::Number(n)) = t.get::<Value>("edgeSize") {
-        bd.edge_size = n as f32;
+        bd.edge_size = Len::Script(n as f32);
     } else if let Ok(Value::Integer(n)) = t.get::<Value>("edgeSize") {
-        bd.edge_size = n as f32;
+        bd.edge_size = Len::Script(n as f32);
     }
     if let Ok(Value::Table(ins)) = t.get::<Value>("insets") {
-        let num = |k: &str| -> f32 {
-            match ins.get::<Value>(k) {
+        let num = |k: &str| -> Len {
+            Len::Script(match ins.get::<Value>(k) {
                 Ok(Value::Number(n)) => n as f32,
                 Ok(Value::Integer(n)) => n as f32,
                 _ => 0.0,
-            }
+            })
         };
         bd.insets = Insets {
             left: num("left"),

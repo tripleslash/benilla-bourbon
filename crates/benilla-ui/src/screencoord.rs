@@ -72,12 +72,26 @@ impl LayoutUnits {
         f64::from(p) / f64::from(self.k1)
     }
 
+    /// `G(S(v))`: a script number a setter stored, as its getter answers it. benilla keeps the
+    /// script number and takes both steps at the read, so new cells read as a rebuild would.
+    #[inline]
+    pub fn round_trip(self, v: f32) -> f64 {
+        self.load(self.store(v))
+    }
+
     /// `E(e, s)`, a resolved edge as `GetLeft`, `GetRight`, `GetTop` and `GetBottom` push it:
     /// divided by the region's scale `[+0x7c]` at 53 bits, then the getter steps
     /// (`0x7a1a54`..`0x7a1a78`).
     #[inline]
     pub fn edge(self, e: f32, s: f32) -> f64 {
-        let p = (f64::from(e) / f64::from(s) * self.scale()) as f32;
+        self.edge_wide(f64::from(e), s)
+    }
+
+    /// [`Self::edge`] of a length the caller computed at 53 bits, as the layout cache's writer
+    /// takes a difference of two edges (`0x49102d`..`0x49103c`).
+    #[inline]
+    pub fn edge_wide(self, e: f64, s: f32) -> f64 {
+        let p = (e / f64::from(s) * self.scale()) as f32;
         f64::from(p) / f64::from(self.k1)
     }
 
@@ -96,6 +110,96 @@ impl LayoutUnits {
     #[inline]
     pub fn span(self, lo: f32, hi: f32) -> f64 {
         self.load((f64::from(hi) - f64::from(lo)) as f32)
+    }
+}
+
+/// A stored script length, as the reference keeps it in layout units: a number a script or an
+/// `<AbsValue>`/`<AbsDimension>` gave, kept as given and stored by `S` at each read, so new cells
+/// read as the rebuild they stand for would store it, or a value the engine or a `<RelValue>`
+/// wrote in layout units directly, as a constructor's default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Len {
+    /// A script number, `S` taken at the read.
+    Script(f32),
+    /// A layout length, stored as it is.
+    Layout(f32),
+}
+
+impl std::ops::Neg for Len {
+    type Output = Len;
+    /// The same length the other way, in its own unit.
+    fn neg(self) -> Len {
+        match self {
+            Len::Script(v) => Len::Script(-v),
+            Len::Layout(l) => Len::Layout(-l),
+        }
+    }
+}
+
+impl Default for Len {
+    /// A script 0, the cleared cell.
+    fn default() -> Len {
+        Len::Script(0.0)
+    }
+}
+
+impl std::hash::Hash for Len {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Len::Script(v) => (0u8, v.to_bits()).hash(state),
+            Len::Layout(l) => (1u8, l.to_bits()).hash(state),
+        }
+    }
+}
+
+impl Len {
+    /// The length in layout units, as the reference holds it.
+    #[inline]
+    pub fn layout(self, units: LayoutUnits) -> f32 {
+        match self {
+            Len::Script(v) => units.store(v),
+            Len::Layout(l) => l,
+        }
+    }
+
+    /// The length as its getter answers it, `G` of the stored value.
+    #[inline]
+    pub fn get(self, units: LayoutUnits) -> f64 {
+        units.load(self.layout(units))
+    }
+
+    /// The number held, in whichever unit it is: for a value already brought into layout units,
+    /// as the resolver's stored input is ([`crate::layout::LayoutInput::stored`]).
+    #[inline]
+    pub fn raw(self) -> f32 {
+        match self {
+            Len::Script(v) | Len::Layout(v) => v,
+        }
+    }
+
+    /// Whether it is exactly zero in either unit, the size sentinel (`0x7ffd74`).
+    #[inline]
+    pub fn is_zero(self) -> bool {
+        self.raw() == 0.0
+    }
+
+    /// Bit-exact identity, its unit included, as the layout gate's fingerprint compares.
+    #[inline]
+    pub fn bits(self) -> u64 {
+        match self {
+            Len::Script(v) => u64::from(v.to_bits()),
+            Len::Layout(l) => (1 << 32) | u64::from(l.to_bits()),
+        }
+    }
+
+    /// The length in script units for a consumer that lays out or draws in them: a script number
+    /// as given, a layout length through `G`.
+    #[inline]
+    pub fn script(self, units: LayoutUnits) -> f32 {
+        match self {
+            Len::Script(v) => v,
+            Len::Layout(l) => units.load(l) as f32,
+        }
     }
 }
 
@@ -167,6 +271,23 @@ impl LayoutSpace {
             return 0.0;
         }
         (f64::from(l) / f64::from(extent) * f64::from(root)) as f32
+    }
+
+    /// A point in the root's units as the client's cursor holds it in layout units: its fraction of
+    /// the root, stored as a float (`[root+0x1118]`), times the extent, stored again (`0x41ad80`).
+    #[inline]
+    pub fn cursor_layout(&self, x: f32, y: f32) -> (f32, f32) {
+        let to = |v: f32, root: f32, extent: f32| {
+            if root == 0.0 {
+                return 0.0;
+            }
+            let f = (f64::from(v) / f64::from(root)) as f32;
+            (f64::from(extent) * f64::from(f)) as f32
+        };
+        (
+            to(x, self.root_w, self.extent_x),
+            to(y, self.root_h, self.extent_y),
+        )
     }
 
     /// A layout rect in the root's units: the root maps onto the root, each axis by its fraction.

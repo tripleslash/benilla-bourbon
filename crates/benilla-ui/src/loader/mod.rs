@@ -14,6 +14,7 @@ use mlua::{Function, ObjectLike, Table, Value};
 
 use crate::framexml::{self, Element, ParsedDocument, ScriptRef, TopLevel};
 use crate::justify;
+use crate::layout::Len;
 use crate::script::{Outline, UiScript};
 use crate::status;
 
@@ -605,20 +606,6 @@ impl Loader<'_> {
         }
     }
 
-    /// [`Loader::expand`] for a region, only when `inherits=` names a registered element template:
-    /// a FontString's `inherits=` usually names a font object, which passes through unwarned.
-    pub(super) fn expand_region(&mut self, el: &Element) -> Element {
-        // One verbatim name, matched case-insensitively, as `framexml::expand` looks it up.
-        let hit = el.attr("inherits").is_some_and(|name| {
-            !name.is_empty() && self.model().framexml_templates.borrow().contains(name)
-        });
-        if hit {
-            self.expand(el)
-        } else {
-            el.clone()
-        }
-    }
-
     /// A top-level `<Font name=…>`: the named object, made if new and kept with its followers if
     /// re-declared (`0x783870`, `0x7839ab`), loads the node ([`Self::load_font_node`]) and is
     /// published whether or not its own font was refused.
@@ -669,7 +656,7 @@ impl Loader<'_> {
                 let height = children_named(el, "FontHeight")
                     .next()
                     .map(|h| self.value(h))
-                    .filter(|h| *h > 0.0);
+                    .filter(|h| h.raw() > 0.0);
                 let Some(height) = height else {
                     self.report_missing_font_height("Font", name, &el.tag);
                     return;
@@ -682,14 +669,15 @@ impl Loader<'_> {
                 // → `0x783ea9`); any other loads first (`0x783e7c`). A file that fails is logged
                 // (`0x87a4c8`) and the node goes on to `spacing`, keeping what it follows.
                 let mut model = self.model();
+                let u = model.layout_units();
                 let fo = &model.fonts.get(id).block;
                 let held = fo
                     .font
                     .as_deref()
                     .is_some_and(|p| p.eq_ignore_ascii_case(path))
-                    && fo
-                        .height
-                        .is_some_and(|h| (h - height).abs() < crate::script::SAME_FONT_HEIGHT)
+                    && fo.height.is_some_and(|h| {
+                        (h.script(u) - height.script(u)).abs() < crate::script::SAME_FONT_HEIGHT
+                    })
                     && (fo.outline, fo.monochrome) == (outline, monochrome);
                 if held || crate::script::face_loads(&model, path) {
                     font::set(&mut model, id, FontMask::FONT, |fo| {
@@ -921,15 +909,14 @@ impl Loader<'_> {
         }
         // 5·b · a text frame's `font=`, then its `<FontString>` children, which load into the same
         //       font (`0x779fcb` before `0x77a220`, `0x78592b` before `0x785af5`, `0x787b3b`
-        //       before `0x787cfe`); any other frame's direct `<FontString>` is a region.
+        //       before `0x787cfe`). Any other frame's direct `<FontString>` builds nothing: the base
+        //       loop (`0x769b27`-`0x769d22`) has no arm for it, and only SimpleHTML's reads one.
         if ["EditBox", "MessageFrame", "ScrollingMessageFrame"]
             .iter()
             .any(|t| el.tag.eq_ignore_ascii_case(t))
         {
             self.apply_frame_font(el, wrapper, dbg_name);
             self.apply_text_font_children(el, wrapper, dbg_name);
-        } else {
-            self.apply_special_fontstrings(el, wrapper, self_name, dbg_name);
         }
         // 5a' · <TitleRegion>: the drag handle, through the API's own CreateTitleRegion.
         self.apply_title_region(el, wrapper, self_name, dbg_name);
@@ -1022,13 +1009,15 @@ impl Loader<'_> {
         } = d;
         // The first `<Offset>`, read whatever it answers, after the target's miss and self tests
         // (`0x767946`-`0x7679ad`), so a skipped anchor reads none.
-        let [x, y] = offset.map_or([0.0; 2], |o| self.dimension(&o).v);
-        let args = (point, rel, rel_point, x, y);
+        let v = offset.map_or([Len::Script(0.0); 2], |o| self.dimension(&o).v);
+        let [x, y] = v.map(|l| l.script(self.model().layout_units()));
+        let args = (point.clone(), rel, rel_point, x, y);
         if region {
             self.call_region(&wrapper, "SetPoint", args, &dbg);
         } else {
             self.call(&wrapper, "SetPoint", args, &dbg);
         }
+        crate::script::xml_layout::offset(self.lua, &wrapper, region, &point, v);
     }
 
     /// Apply the anchors deferred since `mark`, in order; a target still missing now warns.
@@ -1062,20 +1051,28 @@ impl Loader<'_> {
 
 /// What one of the reference's XML length readers answers (`XmlReadDimension 0x6f1eb0`,
 /// `XmlReadValue 0x6f1d60`, `XmlReadInset 0x6f20a0`): the values, zeroed and then written where
-/// read, in FrameXML units, and whether the read succeeded. A failure keeps what was written
-/// before it, which a caller that ignores the answer reads (`0x7679ad`, `0x77142d`, `0x771146`).
+/// read, and whether the read succeeded. A failure keeps what was written before it, which a
+/// caller that ignores the answer reads (`0x7679ad`, `0x77142d`, `0x771146`).
 pub(super) struct XmlLength<const N: usize> {
-    pub(super) v: [f32; N],
+    pub(super) v: [Len; N],
     pub(super) ok: bool,
+}
+
+impl<const N: usize> XmlLength<N> {
+    /// The values as script numbers, for a cell benilla keeps as one: a layout length through `G`.
+    pub(super) fn script(&self, units: crate::layout::LayoutUnits) -> [f32; N] {
+        self.v.map(|l| l.script(units))
+    }
 }
 
 impl Loader<'_> {
     /// The readers' one node rule: the node's own non-empty `keys` through `SStrToFloat`, then its
     /// first child only. With none, the read succeeds when `gate` is present, else it logs
-    /// `missing` with the node's tag and fails (`0x6f1f44`-`0x6f1f55`). An `abs` child's own
-    /// non-empty `keys` overwrite; a `rel` child's are raw layout units, `layout_unit` FrameXML
-    /// units each (`0x6f2037`-`0x6f2060`, no conversion); any other child logs `0x871464` and
-    /// fails (`0x6f2070`).
+    /// `missing` with the node's tag and fails (`0x6f1f44`-`0x6f1f55`). The node's own and an
+    /// `abs` child's non-empty `keys` are script numbers the reader stores by `S` (`0x6f1ee3`-
+    /// `0x6f1f02`, `0x6f1f9f`-`0x6f1fc1`), the child's overwriting; a `rel` child's are layout
+    /// units, stored as parsed (`0x6f2037`-`0x6f2060`); any other child logs `0x871464` and fails
+    /// (`0x6f2070`).
     fn xml_length<const N: usize>(
         &mut self,
         el: &Element,
@@ -1084,15 +1081,15 @@ impl Loader<'_> {
         child: (&str, &str),
         missing: &str,
     ) -> XmlLength<N> {
-        let mut v = [0.0; N];
-        let read = |src: &Element, v: &mut [f32; N], unit: f32| {
+        let mut v = [Len::Script(0.0); N];
+        let read = |src: &Element, v: &mut [Len; N], unit: fn(f32) -> Len| {
             for (slot, key) in v.iter_mut().zip(keys) {
                 if let Some(x) = xml_float_attr(src, key) {
-                    *slot = x * unit;
+                    *slot = unit(x);
                 }
             }
         };
-        read(el, &mut v, 1.0);
+        read(el, &mut v, Len::Script);
         let ok = match el.children.first() {
             None if el.attr(gate).is_some() => true,
             None => {
@@ -1100,12 +1097,11 @@ impl Loader<'_> {
                 false
             }
             Some(c) if c.tag.eq_ignore_ascii_case(child.0) => {
-                read(c, &mut v, 1.0);
+                read(c, &mut v, Len::Script);
                 true
             }
             Some(c) if c.tag.eq_ignore_ascii_case(child.1) => {
-                let unit = self.model().layout_unit();
-                read(c, &mut v, unit);
+                read(c, &mut v, Len::Layout);
                 true
             }
             Some(c) => {
@@ -1132,14 +1128,16 @@ impl Loader<'_> {
 
     /// `XmlReadValue` (`0x6f1d60`): the `val` of a `<FontHeight>`, `<EdgeSize>` or `<TileSize>`
     /// (`0x8714a4`).
-    pub(super) fn value(&mut self, el: &Element) -> f32 {
+    /// Whatever the read answers, its unit kept, for a caller that ignores the answer.
+    pub(super) fn value(&mut self, el: &Element) -> Len {
         let missing = r#"No "val" attribute in element: "#;
         self.xml_length(el, ["val"], "val", ("AbsValue", "RelValue"), missing)
             .v[0]
     }
 
-    /// [`Self::value`] with its answer, for a caller that checks it (`0x77e779`, `0x77e7ae`).
-    pub(super) fn value_read(&mut self, el: &Element) -> Option<f32> {
+    /// [`Self::value`] with its answer and its unit, for a caller that checks it (`0x77e779`,
+    /// `0x77e7ae`).
+    pub(super) fn value_read(&mut self, el: &Element) -> Option<Len> {
         let missing = r#"No "val" attribute in element: "#;
         let r = self.xml_length(el, ["val"], "val", ("AbsValue", "RelValue"), missing);
         r.ok.then_some(r.v[0])
@@ -1147,27 +1145,28 @@ impl Loader<'_> {
 
     /// `XmlReadInset` (`0x6f20a0`): `left`, `right`, `top` and `bottom` of an insets element,
     /// gated on `bottom` alone (`0x6f21bc`, `0x871530`).
-    pub(super) fn inset(&mut self, el: &Element) -> Option<[f32; 4]> {
+    pub(super) fn inset(&mut self, el: &Element) -> Option<[Len; 4]> {
         let missing = r#"No "right", "left", "top", or "bottom" attributes in element: "#;
         let keys = ["left", "right", "top", "bottom"];
         let r = self.xml_length(el, keys, "bottom", ("AbsInset", "RelInset"), missing);
         r.ok.then_some(r.v)
     }
 
+    /// Script numbers for a verb, a layout length through `G`.
+    pub(super) fn script_of<const N: usize>(&self, v: [Len; N]) -> [f32; N] {
+        let units = self.model().layout_units();
+        v.map(|l| l.script(units))
+    }
+
     /// A `<Shadow>` element (`0x7713ca`, `0x784058`): its first `<Color>` over opaque black
     /// (`0xff000000`), and its first `<Offset>` read whatever it answers (`0x77142d`, `0x7840a8`),
-    /// else (0.001, -0.001) (`0x3a83126f`, `0xba83126f`). The default is stored raw, in layout
-    /// units, where an `<Offset>` is converted from FrameXML units (`0x6f1ee3`-`0x6f1efd`), so in
-    /// FrameXML units it is 0.001 times [`crate::script::Model::layout_unit`]. Deviation: it is
-    /// taken at load, so a later aspect change keeps it, where the reference reloads the UI on a
-    /// change above 0.001 (`0x491380`, called at `0x492f33` and `0x49303a`).
+    /// script numbers the reader stores by `S` (`0x6f1ee3`-`0x6f1efd`), else (0.001, -0.001)
+    /// layout units, stored raw (`0x3a83126f`, `0xba83126f`), which new cells read as the reload
+    /// they stand for would ([`crate::layout::Len::Layout`]).
     pub(super) fn shadow_of(&mut self, sh: &Element) -> crate::script::FontShadow {
         let offset = match children_named(sh, "Offset").next() {
             Some(o) => self.dimension(o).v,
-            None => {
-                let raw = 0.001_f32 * self.model().layout_unit();
-                [raw, -raw]
-            }
+            None => crate::script::FontShadow::DEFAULT_OFFSET,
         };
         let color = children_named(sh, "Color")
             .next()

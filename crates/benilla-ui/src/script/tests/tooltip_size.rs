@@ -431,3 +431,55 @@ fn a_steady_hover_measures_nothing_after_its_first_frame() {
     assert_eq!(calls.get(), after_first, "a steady hover re-measured");
     assert_eq!(s.layout_solves(), solves, "a steady hover re-solved");
 }
+
+/// The sizer works in layout units (`0x5309d8`-`0x530a39`): `2·S(10.24) + S(padding) +
+/// S(minimum)`, stored once by the plate's layout size slot, so `GetWidth` answers `G` of that
+/// sum, not of the script sum stored afresh. At 4:3 with padding 16 and a minimum of 177 the two
+/// differ: 213.48001161992534 against 213.4799925464393.
+#[test]
+fn the_plate_width_is_a_layout_sum() {
+    let (s, _) = tooltip();
+    s.run(r#"TS:AddLine("abcd") TS:SetMinimumWidth(177) TS:SetPadding(16) TS:Show()"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<f64>("return TS:GetWidth()").unwrap(),
+        213.480_011_619_925_34
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The plate pad goes into the sum at 53 bits, as `0x41ae60` leaves it in `st0` and the sizer
+/// doubles it there (`0x5309ed`, `0x5309f2`): at 16:9 with a line narrower than its minimum of 8
+/// the plate
+/// reads 28.48000045956225, where the pad stored first would read 28.479998271170587.
+#[test]
+fn the_plate_pad_is_added_unrounded() {
+    let (mut s, _) = tooltip();
+    s.set_screen_size(1024.0, 576.0);
+    s.run(r#"TS:AddLine("a") TS:SetMinimumWidth(8) TS:Show()"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<f64>("return TS:GetWidth()").unwrap(),
+        28.480_000_459_562_25
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A wrapped line takes the widest line's width into its layout size slot as it is (`0x5308ef`),
+/// so its `GetWidth` answers `G` of that sum: a double line of nine and nine bytes at 4:3 sums to
+/// a layout width `G` reads as 128.39999961256981, where a script number stored back would read
+/// 128.3999900758268.
+#[test]
+fn a_wrapped_line_takes_the_layout_width() {
+    let (s, _) = tooltip();
+    s.run(
+        r#"TS:AddDoubleLine("aaaaaaaaa", "bbbbbbbbb") TS:AddLine("c", 1, 1, 1, 1)
+        TS:Show()"#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<f64>("return TSTextLeft2:GetWidth()").unwrap(),
+        128.399_999_612_569_81
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

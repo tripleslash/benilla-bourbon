@@ -3733,6 +3733,7 @@ mod tests {
                     ..Default::default()
                 },
                 selectable: true,
+                assistable_alive: true,
             }),
         );
         assert_eq!(

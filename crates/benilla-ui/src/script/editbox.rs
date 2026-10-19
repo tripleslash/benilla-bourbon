@@ -421,14 +421,15 @@ fn write_region_text(model: &mut Model, rh: RegionHandle, text: String) {
 /// `SetTextInsets(l, r, t, b)` (`0x77a6e0`): store the insets and re-seat the text region by
 /// them (`0x77a707` → `0x77b8c0`).
 fn set_text_insets(lua: &Lua, h: FrameHandle, l: f32, r: f32, t: f32, b: f32) {
-    if with_eb(lua, h, |eb| eb.text_insets = [l, r, t, b]).is_none() {
+    let insets = [l, r, t, b].map(crate::layout::Len::Script);
+    if with_eb(lua, h, |eb| eb.text_insets = insets).is_none() {
         return;
     }
     reseat_text_region(lua, h);
 }
 
 /// Run `0x77b8c0` on the box's text region, creating the region's data if nothing has yet.
-fn reseat_text_region(lua: &Lua, h: FrameHandle) {
+pub(super) fn reseat_text_region(lua: &Lua, h: FrameHandle) {
     if ensure_text_region(lua, h).is_none() {
         return;
     }
@@ -479,6 +480,21 @@ pub(crate) fn apply_xml_bytes(lua: &Lua, frame: &Table, bytes: &str) -> mlua::Re
     let h = frame_handle_of(lua, frame)?;
     with_eb(lua, h, |eb| eb.max_bytes = (n > 0).then(|| n as usize - 1));
     Ok(())
+}
+
+/// The history ring's size (`0x77cd90`), which the XML `historyLines` reaches with 0 or more
+/// (`0x77a175`-`0x77a18d`) and `SetHistoryLines` only above 0 (`0x7994f7`); lines past the new size
+/// are dropped, the oldest first.
+pub(crate) fn set_history_lines(lua: &Lua, frame: &Table, n: i32) -> mlua::Result<()> {
+    let h = frame_handle_of(lua, frame)?;
+    with_eb(lua, h, |eb| {
+        eb.history_max = n.max(0) as usize;
+        let over = eb.history.len().saturating_sub(eb.history_max);
+        if over > 0 {
+            eb.history.drain(..over);
+        }
+    })
+    .ok_or_else(|| mlua::Error::runtime("not an EditBox"))
 }
 
 /// `CSimpleEditBox::SetSelectionColor` (`0x77e330`), the XML `<HighlightColor>`'s setter

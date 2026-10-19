@@ -34,26 +34,22 @@ fn target_player_name(
 }
 
 /// The target guid a `CMSG_TEXT_EMOTE` carries (`DoEmote`'s caller, `0x49fdb1`): the selection,
-/// unless the argument is a non-empty word not starting with `%`, which names a player through
-/// `named` (the `0x493aa0` player search) and sends guid 0 on a miss. Either way an emote at
-/// yourself goes out untargeted (`0x5ef611`), so 1.12 has no self-emote sentence. Compared by
-/// entity, which agrees with the guid: [`Selection`]'s one writer sets both from one streamed
-/// entity.
+/// unless the argument is a non-empty word not starting with `%` (`0x49fdd4`), which names a
+/// player through `named` (the `0x493aa0` player search, roster passes included) and sends guid 0
+/// on a miss. Either way an emote at yourself goes out untargeted (`0x5ef611`), so 1.12 has no
+/// self-emote sentence.
 pub(super) fn emote_target(
     arg: Option<&str>,
     selection: &Selection,
-    named: impl FnOnce(&str) -> Option<(Entity, u64)>,
-    me: Option<Entity>,
+    named: impl FnOnce(&str) -> Option<u64>,
+    me: Option<u64>,
 ) -> u64 {
-    let (entity, guid) = match arg.filter(|a| !a.is_empty() && !a.starts_with('%')) {
-        Some(name) => match named(name) {
-            Some((entity, guid)) => (Some(entity), Some(guid)),
-            None => (None, None),
-        },
-        None => (selection.target, selection.guid),
+    let guid = match arg.filter(|a| !a.is_empty() && !a.starts_with('%')) {
+        Some(name) => named(name),
+        None => selection.guid,
     };
     match guid {
-        Some(guid) if !(me.is_some() && entity == me) => guid,
+        Some(guid) if me != Some(guid) => guid,
         _ => 0,
     }
 }
@@ -599,27 +595,9 @@ pub(super) fn drain_chat_input(
                 if let Some(name) =
                     name.or_else(|| target_player_name(&selection, &names, &commands))
                 {
-                    // `CMSG_GROUP_SET_LEADER` takes a guid, resolved against the roster. A miss
-                    // prints the server's error wording; the reference's `PromoteByName` miss is
-                    // untraced.
-                    match group
-                        .members
-                        .iter()
-                        .find(|m| m.name.eq_ignore_ascii_case(&name))
-                    {
-                        Some(m) => {
-                            let _ = commands
-                                .0
-                                .send(ClientCommand::GroupSetLeader { guid: m.guid });
-                        }
-                        None => {
-                            // `ERR_TARGET_NOT_IN_GROUP_S` (`GlobalStrings.lua:1861`).
-                            chat_log.push_event(super::event::ChatEvent::text_only(
-                                super::event::ChatEventKind::System,
-                                format!("{name} is not in your party."),
-                            ));
-                        }
-                    }
+                    // The binding's own resolve and queue (`PromoteByName 0x48a86a`); a miss is
+                    // silent there.
+                    script.promote_by_name(&name);
                 }
             }
             // The duel verbs join the intent queue `StartDuel` and `CancelDuel` feed: the stock
@@ -628,7 +606,7 @@ pub(super) fn drain_chat_input(
                 if let Some(name) =
                     name.or_else(|| target_player_name(&selection, &names, &commands))
                 {
-                    script.queue_duel_request(benilla_ui::script::DuelRequest::StartByName(name));
+                    script.start_duel_by_name(&name);
                 }
             }
             ParsedChat::Forfeit => {
@@ -797,8 +775,8 @@ pub(super) fn drain_chat_input(
                 let target = emote_target(
                     arg.as_deref(),
                     &selection,
-                    |name| chat_out.players.find(&names, name),
-                    self_player.single().ok().map(|(entity, _, _)| entity),
+                    |name| chat_out.players.find(&names, &group, guids, name),
+                    self_guid.0,
                 );
                 match commands
                     .0
