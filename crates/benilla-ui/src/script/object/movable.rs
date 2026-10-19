@@ -423,7 +423,7 @@ fn pin_top_left(
 }
 
 /// A drag moved the frame: if it is user-placed, the layout cache owes its file a rewrite.
-fn mark_user_placed_change(model: &mut Model, h: FrameHandle) {
+pub(super) fn mark_user_placed_change(model: &mut Model, h: FrameHandle) {
     if model.arena.frame(h).is_some_and(|f| f.user_placed) {
         model.user_placed_changed = true;
     }

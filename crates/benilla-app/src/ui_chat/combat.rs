@@ -724,31 +724,47 @@ enum Arg<'a> {
     Num(i64),
 }
 
-/// `vsnprintf` over the `%s`/`%d` subset the combat-log templates use; `None` on any mismatch.
+/// The line's formatter over the `%s`/`%d` subset the combat-log templates use. `0x626850` formats
+/// through `SStrVPrintf 0x64a8b0`, which takes Storm's ordered printf (`0x6697d0`) once option
+/// `0xa` is set, as the client does at start (`0x402141`, `0x64ede9`); that printf reads `%N$`
+/// (`0x669af2`), so a numbered hole (`%2$d`, the deDE templates') names its argument in the list
+/// enUS fills in sequence (`Ihr trefft %1$s. Schaden: %2$d.`). `None` on any mismatch, an unused
+/// argument included.
 fn fill(template: &str, args: &[Arg<'_>]) -> Option<String> {
     let mut out = String::with_capacity(template.len() + 32);
-    let mut next = args.iter();
+    let mut used = vec![false; args.len()];
+    let mut cursor = 0;
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '%' {
             out.push(c);
             continue;
         }
-        match chars.next() {
-            Some('%') => out.push('%'),
-            Some('s') => match next.next()? {
-                Arg::Str(s) => out.push_str(s),
-                Arg::Num(_) => return None,
-            },
-            Some('d') => match next.next()? {
-                Arg::Num(n) => out.push_str(&n.to_string()),
-                Arg::Str(_) => return None,
-            },
+        if chars.next_if_eq(&'%').is_some() {
+            out.push('%');
+            continue;
+        }
+        let mut number = String::new();
+        while let Some(d) = chars.next_if(char::is_ascii_digit) {
+            number.push(d);
+        }
+        let index = if number.is_empty() {
+            cursor += 1;
+            cursor - 1
+        } else {
+            chars.next_if_eq(&'$')?;
+            number.parse::<usize>().ok()?.checked_sub(1)?
+        };
+        let arg = args.get(index)?;
+        used[index] = true;
+        match (chars.next(), arg) {
+            (Some('s'), Arg::Str(s)) => out.push_str(s),
+            (Some('d'), Arg::Num(n)) => out.push_str(&n.to_string()),
             // Any other conversion is a mismatch, never a half-filled sentence.
             _ => return None,
         }
     }
-    next.next().is_none().then_some(out)
+    used.iter().all(|&u| u).then_some(out)
 }
 
 /// A GlobalString off the VM's globals, `None` when absent or empty: the two tests `0x703bf0`'s

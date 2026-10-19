@@ -952,6 +952,9 @@ pub(crate) mod schedule_tests {
     /// Upstream's inner-window wait (8731395bd, #1824) moved its ceiling 3,346 -> 3,367 (+21):
     /// the stream's request and spawn halves split around the wait; the merge of cff056c3
     /// measures 3,667 (+23).
+    ///
+    /// Upstream's lent call host (c0e301eae, #1992) moved its ceiling 3,355 -> 3,133 (-222); the
+    /// fork's ceiling stays at 3,667 through the merge of abcdced19.
     const UPDATE_ACTIONABLE_CEILING: usize = 3_667;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 

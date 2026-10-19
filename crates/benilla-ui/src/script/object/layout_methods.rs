@@ -51,6 +51,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         }
         if cleared {
             model.touch_layout_frame(h);
+            #[cfg(target_arch = "wasm32")]
+            super::movable::mark_user_placed_change(&mut model, h);
         }
         Ok(())
     })?;
@@ -122,6 +124,10 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 rec.0 = pair;
             }
             model.invalidate_frame(h, changed);
+            #[cfg(target_arch = "wasm32")]
+            if changed {
+                super::movable::mark_user_placed_change(&mut model, h);
+            }
             Ok(())
         },
     )?;
@@ -353,6 +359,14 @@ fn set_point(lua: &Lua, this: &Table, args: &MultiValue) -> mlua::Result<()> {
     // An unchanged anchor stores nothing and queues no resolve (`0x767cde` → `0x767d5e`).
     if input.anchors.set(anchor, units) {
         model.invalidate_frame(h, true);
+        // Deviation (this fork): on the page an anchor write that moves a user-placed frame raises
+        // the layout cache's save cue, as a drag does. The reference raises none: its file is
+        // written whole at logout, quit and `/reload` (`0x490c79`), which is what saves a frame an
+        // addon's mover places with `ClearAllPoints` + `SetPoint` (ShaguTweaks' unit frame mover,
+        // never `StartMoving`); a page reload or a closed tab runs no such tail, so the cue hands
+        // it to the debounced autosave. A same-anchor write and the restore raise nothing.
+        #[cfg(target_arch = "wasm32")]
+        super::movable::mark_user_placed_change(&mut model, h);
     }
     Ok(())
 }

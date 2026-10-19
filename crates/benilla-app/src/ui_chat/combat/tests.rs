@@ -3,22 +3,70 @@
 
 use super::*;
 
-/// A template's `%s`/`%d` conversions in order; two templates with the same one take the same
-/// arguments.
+/// A template's `%s`/`%d` conversions by argument, a numbered hole (`%2$d`, deDE's) at its number;
+/// two templates with the same one take the same arguments.
 fn signature(template: &str) -> Vec<char> {
     let mut out = Vec::new();
+    let mut cursor = 0;
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
-        if c != '%' {
+        if c != '%' || chars.next_if_eq(&'%').is_some() {
             continue;
         }
-        match chars.next() {
-            Some('%') => {}
-            Some(k) => out.push(k),
-            None => {}
+        let mut number = String::new();
+        while let Some(d) = chars.next_if(char::is_ascii_digit) {
+            number.push(d);
+        }
+        let index = if number.is_empty() {
+            cursor += 1;
+            cursor - 1
+        } else {
+            chars.next_if_eq(&'$');
+            number
+                .parse::<usize>()
+                .map_or(usize::MAX, |n| n.saturating_sub(1))
+        };
+        let Some(k) = chars.next() else { break };
+        if index >= out.len() {
+            out.resize(index.saturating_add(1).min(64), '?');
+        }
+        if let Some(slot) = out.get_mut(index) {
+            *slot = k;
         }
     }
     out
+}
+
+/// deDE numbers its holes in the argument order enUS fills in sequence, so both read one list; a
+/// hole past the list, a wrong type or an unused argument stays a mismatch.
+#[test]
+fn numbered_holes_fill_from_the_same_argument_list() {
+    let hit = [Arg::Str("Ragnaros"), Arg::Num(1000)];
+    assert_eq!(
+        fill("You hit %s for %d.", &hit).as_deref(),
+        Some("You hit Ragnaros for 1000.")
+    );
+    assert_eq!(
+        fill("Ihr trefft %1$s. Schaden: %2$d.", &hit).as_deref(),
+        Some("Ihr trefft Ragnaros. Schaden: 1000.")
+    );
+    let reflect = [Arg::Num(50), Arg::Str("Feuer"), Arg::Str("Ragnaros")];
+    assert_eq!(
+        fill("Ihr reflektiert %1$d %2$sschaden auf %3$s.", &reflect).as_deref(),
+        Some("Ihr reflektiert 50 Feuerschaden auf Ragnaros.")
+    );
+    assert_eq!(
+        fill("%2$s von %1$s", &[Arg::Str("A"), Arg::Str("B")]).as_deref(),
+        Some("B von A")
+    );
+    assert_eq!(
+        fill("100%% %1$s", &[Arg::Str("x")]).as_deref(),
+        Some("100% x")
+    );
+    assert_eq!(fill("%3$s", &[Arg::Str("a")]), None);
+    assert_eq!(fill("%1$d", &[Arg::Str("a")]), None);
+    assert_eq!(fill("%1$s", &[Arg::Str("a"), Arg::Num(1)]), None);
+    assert_eq!(fill("%0$s", &[Arg::Str("a")]), None);
 }
 
 /// The signature a family's declared slots give for one variant; `Attacker` and `Victim` count

@@ -103,6 +103,7 @@ mod gm_ticket;
 mod gossip;
 mod guild;
 mod handler_prof;
+mod host;
 mod hyperlink;
 mod lfg;
 mod lottery;
@@ -274,6 +275,7 @@ pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
+pub use host::{CallHost, CallTail};
 pub use input_verbs::{BindingInput, FiredInput, HeldInput};
 pub use lfg::LfgDungeon;
 pub use lottery::UnservedSend;
@@ -640,8 +642,9 @@ fn open_state(vm: VmKind) -> mlua::Result<Lua> {
     model.vm = vm;
     lua.set_app_data(model);
     // Before anything can fire a handler and while no app-data borrow is held, as the
-    // profiler's slot requires.
+    // profiler's slot and the call host's require.
     handler_prof::install(&lua);
+    host::install(&lua);
 
     // `0x7039e0`: the base array `0x811e28`, the four libraries and the compat chunk `0x8722e8`.
     stdlib::sandbox(&lua)?;
@@ -802,10 +805,26 @@ impl UiScript {
     }
 
     fn host(lua: Lua) -> UiScript {
+        let session = NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(mut model) = lua.app_data_mut::<Model>() {
+            model.session = session;
+        }
         UiScript {
             lua,
             instructions: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            session: NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            session,
+        }
+    }
+
+    /// A handle on the VM `lua` belongs to, for engine code a verb reaches while the entry that
+    /// ran the script holds the VM ([`host::CallHost::apply`]). It is the same session; an
+    /// instruction budget is the entry's own.
+    pub(crate) fn reentrant(lua: &Lua) -> UiScript {
+        let session = lua.app_data_ref::<Model>().expect("model app_data").session;
+        UiScript {
+            lua: lua.clone(),
+            instructions: Default::default(),
+            session,
         }
     }
 
@@ -836,12 +855,15 @@ impl UiScript {
     pub fn fork(&self) -> UiScript {
         let lua = self.lua.fork();
         lua.remove_hook();
-        lua.set_app_data(self.model_ref().clone());
+        let session = NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut model = self.model_ref().clone();
+        model.session = session;
+        lua.set_app_data(model);
         handler_prof::install(&lua);
         UiScript {
             lua,
             instructions: Default::default(),
-            session: NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            session,
         }
     }
 

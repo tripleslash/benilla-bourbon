@@ -149,22 +149,31 @@ pub(crate) const UNNAMED: &str = "<unnamed>";
 /// override. A frame, a region or a Font object; any other table is unnamed.
 pub(crate) fn object_name(model: &Model, this: &Table) -> String {
     let name = match this.raw_get::<Value>(0) {
-        Ok(Value::LightUserData(l)) => {
-            let id = l.0 as usize as u32;
-            if let Some(&h) = model.id_to_frame.get(&id) {
-                model.arena.frame(h).and_then(|f| f.name.clone())
-            } else if let Some(&rh) = model.id_to_region.get(&id) {
-                model.arena.region(rh).and_then(|r| r.name.clone())
-            } else {
-                None
-            }
-        }
         Ok(Value::Integer(_)) => {
             super::font::id_of_table(model, this).and_then(|id| model.fonts.get(id).name.clone())
         }
-        _ => None,
+        _ => handle_name(model, this).flatten(),
     };
     name.unwrap_or_else(|| UNNAMED.to_string())
+}
+
+/// A frame's or a region's own name, by the handle in its `[0]`: `None` when `[0]` holds no
+/// handle (`lua_touserdata` NULL), `Some(None)` for an object without a name.
+pub(crate) fn handle_name(model: &Model, this: &Table) -> Option<Option<String>> {
+    let Ok(Value::LightUserData(l)) = this.raw_get::<Value>(0) else {
+        return None;
+    };
+    if l.0.is_null() {
+        return None;
+    }
+    let id = l.0 as usize as u32;
+    Some(if let Some(&h) = model.id_to_frame.get(&id) {
+        model.arena.frame(h).and_then(|f| f.name.clone())
+    } else if let Some(&rh) = model.id_to_region.get(&id) {
+        model.arena.region(rh).and_then(|r| r.name.clone())
+    } else {
+        None
+    })
 }
 
 /// [`object_name`] for a frame already resolved.

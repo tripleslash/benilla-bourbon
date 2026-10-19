@@ -16,7 +16,7 @@ use std::ffi::c_void;
 
 use mlua::{Lua, Table, Value};
 
-use super::Model;
+use super::{binding_abi, Model};
 
 /// Deviation: nesting stops at 32 where the reference recurses uncapped (its indent saturates at
 /// `0x80`), so a hostile structure cannot exhaust the stack.
@@ -64,6 +64,7 @@ impl super::UiScript {
     pub fn saved_variables_bytes_for(&self, names: &[String]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut unwritable = Vec::new();
+        let model = self.lua().app_data_ref::<Model>().expect("model");
         for name in names {
             let value: Value = match self.lua().globals().get(name.as_str()) {
                 Ok(v) => v,
@@ -73,7 +74,7 @@ impl super::UiScript {
                 }
             };
             let mut seen = HashSet::new();
-            match serialize(&value, 1, &mut seen) {
+            match serialize(&value, 1, &mut seen, &model) {
                 Some(text) => {
                     out.extend_from_slice(name.as_bytes());
                     out.extend_from_slice(b" = ");
@@ -83,6 +84,7 @@ impl super::UiScript {
                 None => unwritable.push(name.clone()),
             }
         }
+        drop(model);
         if !unwritable.is_empty() {
             self.model_mut().record_warning(format!(
                 "saved variables: not serializable, skipped: {}",
@@ -267,14 +269,30 @@ fn flat_number(value: &[u8]) -> f32 {
 /// One Lua value as Lua expression text, or `None` when it has none. `depth` is the indent of a
 /// table's contents here (1 at top level); `seen` holds the tables on the current path, so a repeat
 /// is a cycle and drops, while a shared subtable is written each time it appears.
-fn serialize(v: &Value, depth: usize, seen: &mut HashSet<*const c_void>) -> Option<Vec<u8>> {
+fn serialize(
+    v: &Value,
+    depth: usize,
+    seen: &mut HashSet<*const c_void>,
+    model: &Model,
+) -> Option<Vec<u8>> {
     match v {
         Value::Nil => Some(b"nil".to_vec()),
         Value::Boolean(b) => Some(b.to_string().into_bytes()),
         Value::Integer(i) => Some(i.to_string().into_bytes()),
         Value::Number(n) => number(*n).map(String::into_bytes),
         Value::String(s) => Some(quote(&s.as_bytes())),
-        Value::Table(t) => table(t, depth, seen),
+        // A widget writes as its name instead of its fields (`0x70463b`-`0x704666`): the reference
+        // reads `[0]` first (`0x704619`) and, for a handle, writes the object's vtable `+4` name
+        // bare through `%s`, so the chunk reloads the live frame by its global, or
+        // `nil --[[ unnamed object ]]` (`0x872e0c`) when it has none. The name comes off the
+        // model, never through a Lua `GetName` an addon can replace.
+        Value::Table(t) => match binding_abi::handle_name(model, t) {
+            Some(name) => Some(name.filter(|n| !n.is_empty()).map_or_else(
+                || b"nil --[[ unnamed object ]]".to_vec(),
+                String::into_bytes,
+            )),
+            None => table(t, depth, seen, model),
+        },
         // Functions, threads and userdata have no literal; a frame's `[0]` handle is a
         // lightuserdata (`0x701bd0`).
         _ => None,
@@ -316,7 +334,12 @@ fn quote(s: &[u8]) -> Vec<u8> {
 /// reference writes for every table shape (`[0x704607, 0x704989)`), integer keys ascending, then
 /// strings. It reloads a list as a list through the 1.12 parser: `recfield` gives a `[k] = v` field
 /// no size hint, so dense integer keys land in the array part, which `next` walks in order.
-fn table(t: &Table, depth: usize, seen: &mut HashSet<*const c_void>) -> Option<Vec<u8>> {
+fn table(
+    t: &Table,
+    depth: usize,
+    seen: &mut HashSet<*const c_void>,
+    model: &Model,
+) -> Option<Vec<u8>> {
     if depth > MAX_DEPTH || !seen.insert(t.to_pointer()) {
         return None;
     }
@@ -324,7 +347,7 @@ fn table(t: &Table, depth: usize, seen: &mut HashSet<*const c_void>) -> Option<V
     let mut strs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for pair in t.pairs::<Value, Value>() {
         let Ok((k, v)) = pair else { continue };
-        let Some(value) = serialize(&v, depth + 1, seen) else {
+        let Some(value) = serialize(&v, depth + 1, seen, model) else {
             continue; // an unserializable entry drops, like the reference's
         };
         match k {
@@ -525,6 +548,56 @@ mod tests {
         assert_eq!(warns.len(), 1, "one line, not one per name: {warns:?}");
         assert!(warns[0].contains("A_FUNCTION") && warns[0].contains("NOT_A_NUMBER"));
         UiScript::new().unwrap().run_chunk(&text).unwrap();
+    }
+
+    /// A frame kept in a saved variable (Decursive keeps `DEFAULT_CHAT_FRAME` as its output
+    /// window) writes as its name and reloads as the same frame, not as a table of its fields
+    /// without its methods; an unnamed one writes nil.
+    #[test]
+    fn a_frame_writes_its_name_and_reloads_as_itself() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            local named = CreateFrame("Frame", "SavedTestOutputFrame")
+            named.channelList = { "General" }
+            SAVED_WINDOWS = { output = named, scratch = CreateFrame("Frame") }
+        "#,
+        )
+        .unwrap();
+        let text = s.saved_variables_bytes_for(&["SAVED_WINDOWS".to_string()]);
+        assert_eq!(
+            String::from_utf8_lossy(&text),
+            "SAVED_WINDOWS = {\n\t[\"output\"] = SavedTestOutputFrame,\n\t[\"scratch\"] = nil --[[ unnamed object ]],\n}\n"
+        );
+        s.run("SAVED_WINDOWS = nil").unwrap();
+        s.run_chunk(&text).unwrap();
+        assert!(s
+            .eval::<bool>(
+                "return SAVED_WINDOWS.output == SavedTestOutputFrame \
+                 and SAVED_WINDOWS.output:GetName() == 'SavedTestOutputFrame' \
+                 and SAVED_WINDOWS.scratch == nil"
+            )
+            .unwrap());
+    }
+
+    /// The name is the object's own (vtable `+4`), so a Lua `GetName` an addon replaced changes
+    /// nothing, and a plain table whose `[0]` is a number is no object and writes its fields.
+    #[test]
+    fn a_frame_writes_its_own_name_and_a_numbered_zero_key_stays_a_table() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            local f = CreateFrame("Frame", "SavedTestRenamedFrame")
+            f.GetName = function() return "SomethingElse" end
+            SAVED_MIXED = { frame = f, list = { [0] = 5, [1] = 6 } }
+        "#,
+        )
+        .unwrap();
+        let text = s.saved_variables_bytes_for(&["SAVED_MIXED".to_string()]);
+        assert_eq!(
+            String::from_utf8_lossy(&text),
+            "SAVED_MIXED = {\n\t[\"frame\"] = SavedTestRenamedFrame,\n\t[\"list\"] = {\n\t\t[0] = 5,\n\t\t[1] = 6,\n\t},\n}\n"
+        );
     }
 
     #[test]
