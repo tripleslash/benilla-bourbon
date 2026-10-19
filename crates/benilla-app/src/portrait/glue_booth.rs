@@ -879,49 +879,6 @@ fn glue_ffx(
     }
 }
 
-/// MONKEY (glue scenes): a two-texture batch whose second stage reads its own UV set (the
-/// OctoWoW HD pack's `UI_MainMenu.m2`, whose portal fire a second, noise texture masks) takes its
-/// own copy of `material` with that stage bound on UV set B, combined by the stage-1 presets. The
-/// preset is the batch combiner's ×2 where it says so (`mod2x`, as the sky's two-texture
-/// batches), else the stage's own. The copy is made before the UV and tint loops register, so
-/// they drive it.
-fn with_uv_stage1(
-    mats: &mut benilla_world::model_render::M2BatchMaterials,
-    material: Handle<WowModelMaterial>,
-    s: &benilla_assets::ModelSubmesh,
-    asset_server: &AssetServer,
-) -> Handle<WowModelMaterial> {
-    let Some(st) = s
-        .geometry
-        .stage1
-        .as_ref()
-        .filter(|st| !st.env_map && st.uvs.len() == s.geometry.positions.len())
-    else {
-        return material;
-    };
-    let tex1 = st.texture.as_deref().map(|t| {
-        asset_server.load::<Image>(benilla_assets::texture_url_on(
-            benilla_assets::MPQ_SOURCE,
-            t,
-            (st.wrap_x, st.wrap_y),
-        ))
-    });
-    let preset = if st.mod2x { 4 } else { st.combine };
-    let Some(mut m) = benilla_world::model_render::lazy::with_material_mut(
-        mats.materials(),
-        material.id(),
-        |m| m.clone(),
-    ) else {
-        return material;
-    };
-    let stage0 = m.extension.stage1.z;
-    // `w` keeps a scroll row the UV lane may already have written (`1 + slot`).
-    let w = m.extension.stage1.w.max(1.0);
-    m.extension.stage1 = Vec4::new(1.0, f32::from(preset), stage0, w);
-    m.extension.stage1_texture = tex1;
-    mats.materials().add(m)
-}
-
 /// Drive the background scene ([`CreateScene`]): load and spawn the pane's file, size the target
 /// to the window, seat the character, and hold the booth camera on the pane's camera of the
 /// scene's table, or with none on the orthographic leg.
@@ -1192,7 +1149,6 @@ pub(super) fn sync_glue_scene(
                 // The scene's own material, never another scene's of the same file: its UV and
                 // tint rows run on this scene's clock and go with it.
                 let material = mats.off_world_for(s, s.texture.clone(), order, &light, scene_root);
-                let material = with_uv_stage1(&mut mats, material, s, &asset_server);
                 // Texture transforms and M2Color tints run live, as in the reference's
                 // per-frame animate kernel (`0x715f25`-`0x7163bc`). Every glue model's loops are
                 // shared, none per-placement, so `host: None` is exact.
