@@ -46,7 +46,9 @@ use core::{
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{MutexGuard, OnceLock, PoisonError};
+
+use bevy_platform::sync::Mutex;
 
 use bevy_app::{App, AppLabel, First, MainScheduleOrder, Plugin, SubApp};
 use bevy_ecs::{
@@ -128,16 +130,10 @@ fn kick() {
     }
 }
 
-/// `lock` without ever parking: a contended `Mutex` waits with `memory.atomic.wait32`, which traps
-/// on the page's thread. Every critical section here is a push or a swap.
+/// bevy's `Mutex`, which spins on the page (a parked page traps) and parks on the worker
+/// (`third_party/bevy_platform/BENILLA.md`). Every critical section here is a push or a swap.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    loop {
-        match m.try_lock() {
-            Ok(guard) => return guard,
-            Err(std::sync::TryLockError::Poisoned(p)) => return p.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => core::hint::spin_loop(),
-        }
-    }
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Spin until `done`, reading the clock every few thousand turns; past `deadline`, panic with `what`.

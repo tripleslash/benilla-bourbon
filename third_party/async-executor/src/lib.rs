@@ -51,18 +51,18 @@ use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use core::task::{Context, Poll, Waker};
-// **benilla fork.** The ONE line that differs from upstream, plus the module it names.
+// **benilla fork.** The ONE line that differs from upstream.
 //
-// On `wasm32` with `+atomics` these come from `wasm_spin` instead of `std::sync`, because std's
-// versions are futex-based and the browser's main thread may not execute `memory.atomic.wait32` —
-// it throws `Atomics.wait cannot be called in this context` rather than waiting. This executor is
-// shared between that thread and a pool of Web Workers, so `active`, `sleepers` and `local_queues`
-// are all contended across the boundary. Everything below is upstream's, unchanged; the spin
-// versions have the same surface and never sleep. See `src/wasm_spin.rs` for the full argument.
+// On `wasm32` with `+atomics` the locks come from `may-park` instead of `std::sync`: std's own,
+// except that on the browser's page thread they spin instead of parking. That thread may not
+// execute `memory.atomic.wait32` (it throws `Atomics.wait cannot be called in this context`), and
+// this executor is shared between it and the Web Workers, so `active`, `sleepers` and
+// `local_queues` are contended across the boundary. A worker parks as upstream intends.
+// Everything below is upstream's, unchanged. See `BENILLA.md`.
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-mod wasm_spin;
+use may_park::sync::{Mutex, MutexGuard, RwLock};
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-use wasm_spin::{Mutex, MutexGuard, PoisonError, RwLock, TryLockError};
+use std::sync::{PoisonError, TryLockError};
 
 #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, TryLockError};

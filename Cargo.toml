@@ -50,6 +50,10 @@ kira = { path = "third_party/kira" }
 # there rather than erroring. One patch entry covers the graph: every bevy crate depends on this one.
 # `third_party/bevy_tasks/BENILLA.md` has the hunk list and the verifying diff.
 bevy_tasks = { path = "third_party/bevy_tasks" }
+# bevy_platform 0.19.1, forked for one thing: on `wasm32 + atomics` its `Mutex` and `RwLock` spin
+# (its own no-std implementation) instead of parking, because a parked page traps and the render
+# worker shares bevy's locks with the page. `third_party/bevy_platform/BENILLA.md`.
+bevy_platform = { path = "third_party/bevy_platform" }
 # bevy_ecs 0.19.1, forked for the same reason and in the same shape: 13 threading gates in
 # `query/par_iter.rs` and `query/state.rs` that ask `target_arch == "wasm32"` when they mean
 # "has no threads". Left alone: `ExecutorKind`'s wasm default, which stays SingleThreaded on

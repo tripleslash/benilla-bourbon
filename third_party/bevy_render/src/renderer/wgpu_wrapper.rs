@@ -57,6 +57,12 @@ impl<T> WgpuWrapper<T> {
         return Self(core::mem::ManuallyDrop::new(Held::Shared(t)));
     }
 
+    /// **benilla fork.** Whether this holds a thread-bound value made on another thread.
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    pub(crate) fn owned_elsewhere(&self) -> bool {
+        matches!(&*self.0, Held::Local(inner) if !inner.valid())
+    }
+
     /// Unwraps the value.
     pub fn into_inner(self) -> T {
         #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]

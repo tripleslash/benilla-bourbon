@@ -103,11 +103,6 @@ mod sys;
 
 mod notify;
 
-// **benilla fork.** A spinning `Mutex` for the one target whose main thread may not block — see the
-// module header. Only compiled there; everywhere else `sync::Mutex` is `std::sync::Mutex`.
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-mod wasm_spin;
-
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 
@@ -1378,14 +1373,14 @@ mod sync {
     #[cfg(feature = "portable-atomic")]
     pub(super) use portable_atomic_util::Arc;
 
-    // **benilla fork.** The ONE line that differs from upstream, plus the module it names.
+    // **benilla fork.** The ONE line that differs from upstream.
     //
-    // On `wasm32` with `+atomics` these come from `wasm_spin` instead of `std::sync`, because std's
-    // `Mutex` is futex-based and the browser's main thread may not execute `memory.atomic.wait32` —
-    // it throws rather than waiting. `Event` is what `async-channel` and the rest of the smol family
-    // park on, so this mutex is taken on every send and receive that has to register or notify a
-    // listener; in a threaded browser build the page's main thread and a Web Worker per core are on
-    // opposite ends of those channels. See `src/wasm_spin.rs` for the full argument.
+    // On `wasm32` with `+atomics` this comes from `may-park` instead of `std::sync`: std's own
+    // `Mutex`, except that on the browser's page thread `lock` spins instead of parking. That thread
+    // may not execute `memory.atomic.wait32` (it throws rather than waiting), and `Event` is what
+    // `async-channel` and the rest of the smol family park on, so this mutex is taken on every send
+    // and receive that registers or notifies a listener, with the page and the Web Workers on
+    // opposite ends of those channels. A worker parks as upstream intends. See `BENILLA.md`.
     //
     // Note this crate ALREADY has a spinning mutex for this hazard, in `slab.rs` — but that file is
     // only compiled without `std`, so with `std` on (which is always, here) every target including
@@ -1405,7 +1400,7 @@ mod sync {
         not(loom),
         all(target_arch = "wasm32", target_feature = "atomics")
     ))]
-    pub(super) use crate::wasm_spin::{Mutex, MutexGuard};
+    pub(super) use may_park::sync::{Mutex, MutexGuard};
     #[cfg(all(feature = "std", not(target_family = "wasm"), not(loom)))]
     pub(super) use std::thread_local;
 

@@ -138,3 +138,7 @@ version = "1.16.0"
 version = "2.0.0"
 features = ["std"]
 default-features = false
+
+# benilla fork (BENILLA.md): the page-aware std locks.
+[target.'cfg(all(target_arch = "wasm32", target_feature = "atomics"))'.dependencies.may-park]
+path = "../may-park"

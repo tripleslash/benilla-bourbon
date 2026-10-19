@@ -382,7 +382,11 @@ pub static SOLO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::ne
 
 /// The present cadence since it was last taken ([`take_cadence`]): count, sum and sum of squares
 /// of the intervals between presents (s), and the longest, so evenness is read from numbers.
-static CADENCE: std::sync::Mutex<(u32, f64, f64, f64)> = std::sync::Mutex::new((0, 0.0, 0.0, 0.0));
+///
+/// bevy's `Mutex`, not std's: the browser's render worker writes it each frame and the page reads it,
+/// and a contended std lock parks, which traps on the page (bevy's spins there).
+static CADENCE: bevy::platform::sync::Mutex<(u32, f64, f64, f64)> =
+    bevy::platform::sync::Mutex::new((0, 0.0, 0.0, 0.0));
 
 /// `(mean interval ms, coefficient of variation, max interval ms)` since the last call.
 pub fn take_cadence() -> Option<(f64, f64, f64)> {

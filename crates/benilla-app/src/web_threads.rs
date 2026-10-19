@@ -178,6 +178,9 @@ mod imp {
 
     /// See [`super::install`].
     pub fn install() {
+        // This is the page's thread, which traps instead of parking on a contended lock; bevy's
+        // locks spin here and park on the workers (`third_party/bevy_platform/BENILLA.md`).
+        bevy::platform::sync::forbid_parking_on_this_thread();
         set_available_parallelism(worker_threads());
         // An `Err` here means a spawner was already installed, which can only happen if this ran
         // twice. The first one is the one in use either way, so there is nothing to report.
