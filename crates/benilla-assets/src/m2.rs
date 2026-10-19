@@ -283,20 +283,27 @@ impl AssetLoader for M2ModelLoader {
             let texture = sub.texture.as_deref().map(|t| {
                 ctx.load::<Image>(crate::texture_url_on(source, t, (sub.wrap_x, sub.wrap_y)))
             });
-            // Stage 1 at the generated coordinate, the only kind a stock unit authors. Not built: a
-            // stage 1 reading the vertex's second UV set, which the mesh does not carry; such a
-            // unit draws its stage 0 alone.
-            let stage1 = sub.stage1.as_ref().filter(|s| s.env_map).and_then(|s| {
-                let t = s.texture.as_deref()?;
-                Some(Stage1 {
-                    texture: ctx.load::<Image>(crate::texture_url_on(
-                        source,
-                        t,
-                        (s.wrap_x, s.wrap_y),
-                    )),
-                    combine: s.combine,
-                })
-            });
+            // Stage 1 at the generated coordinate, the only kind a stock unit authors, or
+            // (tortoise) on a UV set the mesh carries as UV set B (`build_submesh_mesh`).
+            let uv_stage = |s: &&benilla_formats::TextureStage| {
+                !s.env_map && s.uvs.len() == sub.positions.len()
+            };
+            let stage1 = sub
+                .stage1
+                .as_ref()
+                .filter(|s| s.env_map || uv_stage(s))
+                .and_then(|s| {
+                    let t = s.texture.as_deref()?;
+                    Some(Stage1 {
+                        texture: ctx.load::<Image>(crate::texture_url_on(
+                            source,
+                            t,
+                            (s.wrap_x, s.wrap_y),
+                        )),
+                        combine: s.combine,
+                        uv_set: !s.env_map,
+                    })
+                });
             submeshes.push(ModelSubmesh {
                 texture,
                 stage1,

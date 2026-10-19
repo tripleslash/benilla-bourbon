@@ -110,6 +110,9 @@ pub struct Stage1 {
     pub texture: Handle<Image>,
     /// The combine preset 0-5.
     pub combine: u8,
+    /// tortoise: the stage reads the mesh's UV set B (its own UV set 0 or 1, `TextureStage::uvs`)
+    /// instead of the generated coordinate.
+    pub uv_set: bool,
 }
 
 /// Bake a [`RenderSubmesh`] to a Bevy-space [`Mesh`]: authored normals, else flat ones.

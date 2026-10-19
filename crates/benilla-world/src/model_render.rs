@@ -59,7 +59,7 @@ pub struct MatKey {
     /// The batch samples the generated sphere-map coordinate, not its vertex UVs.
     env_map: bool,
     /// The second texture stage's texture and combine preset ([`benilla_assets::Stage1`]).
-    stage1: Option<(AssetId<Image>, u8)>,
+    stage1: Option<(AssetId<Image>, u8, bool)>,
     /// Stage 0's combine preset (`ModelSubmesh::combine`), which sets a fade twin's alpha.
     combine: Option<u8>,
     /// The static terrain-shade selector, fixed per placement.
@@ -323,7 +323,7 @@ fn model_material_impl(
         no_depth_test,
         fog_policy,
         env_map,
-        stage1: stage1.map(|s| (s.texture.id(), s.combine)),
+        stage1: stage1.map(|s| (s.texture.id(), s.combine, s.uv_set)),
         combine,
         shade,
         batch_order,
@@ -564,7 +564,7 @@ pub fn zfill_material(
         no_depth_test: false,
         fog_policy: benilla_formats::FogPolicy::Scene,
         env_map,
-        stage1: stage1.map(|s| (s.texture.id(), s.combine)),
+        stage1: stage1.map(|s| (s.texture.id(), s.combine, s.uv_set)),
         combine: None,
         shade: ShadeSel::Lit,
         batch_order: 0,
@@ -633,7 +633,8 @@ fn stage1_params(stage1: Option<&benilla_assets::Stage1>, combine: Option<u8>) -
         f32::from(u8::from(stage1.is_some())),
         stage1.map_or(0.0, |s| f32::from(s.combine)),
         combine.map_or(0.0, |p| f32::from(p) + 1.0),
-        0.0,
+        // tortoise: a stage on a UV set reads the mesh's UV set B (`wow_model.wgsl`).
+        f32::from(u8::from(stage1.is_some_and(|s| s.uv_set))),
     )
 }
 
@@ -1178,6 +1179,7 @@ mod tests {
         let stage = benilla_assets::Stage1 {
             texture: Default::default(),
             combine: 3,
+            uv_set: false,
         };
         let p = super::stage1_params(Some(&stage), Some(0));
         assert_eq!((p.x, p.y, p.z), (1.0, 3.0, 1.0));
