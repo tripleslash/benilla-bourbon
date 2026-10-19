@@ -37,6 +37,7 @@ fn lift(model: &Model, id: u32) -> Option<Option<CursorPayload>> {
             texture: slot.texture.clone(),
             count: slot.count,
             consumable: slot.consumable,
+            state: model.action_states.get(&id).copied(),
         })),
         ACTION_KIND_SPELL => Some(CursorPayload::Spell(CursorSpell {
             spell_id: slot.action,
@@ -95,6 +96,10 @@ pub(super) fn pickup_action(lua: &Lua, id: u32) -> bool {
     }
     verb(lua, |model| {
         model.actions.remove(&id);
+        // The state goes with the action: the reference answers `IsEquippedAction` and kin for
+        // the slot's action at call time (`0x4e74e0`), nil for an empty slot, so the handler
+        // below must not read the lifted item's green border off the emptied slot.
+        model.action_states.remove(&id);
         model.action_sets.push((id, 0));
         raise_slot_changed(model, id);
     });
@@ -120,6 +125,11 @@ fn raise_slot_changed(model: &mut Model, id: u32) {
 /// and the slot after, as `0x4e62e0` writes the slot past the setter, so the cursor's events read
 /// the slot as it was. Returns whether to repaint.
 pub(crate) fn place_action(lua: &Lua, id: u32) -> bool {
+    // A bar item's state, carried from its source slot, read before the place hops anything.
+    let state = match &lua.app_data_ref::<Model>().expect("model app_data").cursor {
+        Some(CursorPayload::Action(a)) => a.state,
+        _ => None,
+    };
     let (placed, displaced) = match verb(lua, |model| plan_place(model, id)) {
         Place::Refused => return false,
         // The held action is already the slot's: `ClearCursor(1,1)` and no write (`0x4e63d4`,
@@ -139,6 +149,16 @@ pub(crate) fn place_action(lua: &Lua, id: u32) -> bool {
     verb(lua, |model| {
         let (kind, action) = (placed.kind, placed.action);
         model.actions.insert(id, placed);
+        // The placed action's own state, a bar item's carried from its source slot; any other
+        // waits for the app's re-feed rather than reading the displaced occupant's.
+        match state {
+            Some(state) => {
+                model.action_states.insert(id, state);
+            }
+            None => {
+                model.action_states.remove(&id);
+            }
+        }
         model.action_sets.push((id, pack(kind, action)));
         // Every arm writes through `0x4e684f` into `0x4e58e0`.
         raise_slot_changed(model, id);
@@ -290,8 +310,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{pickup_action, place_action};
+    use crate::script::action::ACTION_KIND_ITEM;
     use crate::script::cursor::{CursorAction, CursorItem, CursorPayload, CursorSpell};
-    use crate::script::{ActionSlot, UiScript};
+    use crate::script::{ActionSlot, ActionState, UiScript};
 
     fn action_slot(texture: &str, kind: u8, action: u32) -> ActionSlot {
         ActionSlot {
@@ -362,6 +383,65 @@ mod tests {
         );
     }
 
+    /// `IsEquippedAction` answers for the slot's action at call time (`0x4e74e0`), so the in-place
+    /// `ACTIONBAR_SLOT_CHANGED` of a pickup reads no green border on the emptied slot, the place's
+    /// reads it on the slot the item went to, and a spell placed over the item reads none while
+    /// the item hops with its border. A state left behind kept the border on the empty slot.
+    #[test]
+    fn an_equipped_items_green_border_moves_with_it() {
+        let mut s = UiScript::new().unwrap();
+        let worn = || {
+            Some(ActionState {
+                equipped: true,
+                usable: true,
+                ..ActionState::default()
+            })
+        };
+        s.set_action(
+            1,
+            Some(action_slot(
+                "Interface\\Icons\\Trinket",
+                ACTION_KIND_ITEM,
+                19406,
+            )),
+        );
+        s.set_action_state(1, worn());
+        crate::script::tick::heard::listen(
+            &s,
+            &["ACTIONBAR_SLOT_CHANGED"],
+            Some("tostring(arg1) .. ' ' .. tostring(IsEquippedAction(arg1))"),
+        );
+        s.run("PickupAction(1)").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            ["ACTIONBAR_SLOT_CHANGED 1 nil"],
+            "the emptied slot draws no border"
+        );
+        s.run("PlaceAction(2)").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            ["ACTIONBAR_SLOT_CHANGED 2 1"],
+            "the slot the item went to draws it"
+        );
+        // A spell from the book over the item: the item hops onto the cursor with its border.
+        s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
+            spell_id: 133,
+            texture: Some("Interface\\Icons\\Spell_A".into()),
+            passive: false,
+        }));
+        s.run("PlaceAction(2)").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            ["ACTIONBAR_SLOT_CHANGED 2 nil"],
+            "the spell does not read the item's border"
+        );
+        s.run("PlaceAction(3)").unwrap();
+        assert_eq!(
+            crate::script::tick::heard::take(&s),
+            ["ACTIONBAR_SLOT_CHANGED 3 1"]
+        );
+    }
+
     #[test]
     fn pickup_action_on_an_empty_slot_is_a_no_op() {
         let mut s = UiScript::new().unwrap();
@@ -380,6 +460,7 @@ mod tests {
             texture: Some("Interface\\Icons\\Spell_A".into()),
             count: 0,
             consumable: false,
+            state: None,
         }));
 
         assert!(place_action(&s.lua, 7));
@@ -478,6 +559,7 @@ mod tests {
             texture: Some("Interface\\Icons\\Spell_A".into()),
             count: 0,
             consumable: false,
+            state: None,
         }));
         assert!(pickup_action(&s.lua, 5));
         assert!(s.cursor_payload().is_none(), "placed onto the empty slot 5");

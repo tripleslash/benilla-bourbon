@@ -752,6 +752,7 @@ mod tests {
             texture: None,
             count: 0,
             consumable: false,
+            state: None,
         }));
         assert!(!s.eval::<bool>("return CursorCanGoInSlot(1)").unwrap());
     }
@@ -1170,6 +1171,7 @@ mod tests {
                 texture: None,
                 count: 0,
                 consumable: false,
+                state: None,
             }),
             CursorPayload::Merchant(CursorMerchantItem {
                 item_id: 159,

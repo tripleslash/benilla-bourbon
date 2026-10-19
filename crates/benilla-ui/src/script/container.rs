@@ -2569,6 +2569,7 @@ mod tests {
             texture: None,
             count: 0,
             consumable: false,
+            state: None,
         }));
         s.run("PickupContainerItem(0, 1)").unwrap();
         assert!(s.cursor_payload().is_none(), "the bar item is cleared");

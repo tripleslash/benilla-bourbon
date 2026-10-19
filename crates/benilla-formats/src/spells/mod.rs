@@ -328,10 +328,17 @@ impl SpellCatalog {
         self.spells.get(&id)
     }
 
-    /// The dispel class's name, for the aura tooltip and the debuff border's `debuffType`; `None`
-    /// when `SpellDispelType.dbc`'s `[+0x28]` gate withholds it.
+    /// The dispel class's key, the `debuffType` `UnitDebuff` returns (`0x519a89`) and the debuff
+    /// border keys `DebuffTypeColor` on: `SpellDispelType.dbc` column 11, English on every locale.
+    /// `None` when the `[+0x28]` gate withholds it.
     pub fn dispel_name(&self, display: &SpellDisplay) -> Option<&str> {
         self.dispel_types.name(display.dispel)
+    }
+
+    /// The dispel class's word at the client's locale slot, the aura tooltip's right column
+    /// (`0x52f880`); `None` as for [`Self::dispel_name`].
+    pub fn dispel_label(&self, display: &SpellDisplay) -> Option<&str> {
+        self.dispel_types.label(display.dispel)
     }
 
     /// Every loaded spell, unordered.

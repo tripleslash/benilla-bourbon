@@ -361,7 +361,7 @@ pub(super) fn build_view(
         name: d.name.clone(),
         rank: d.rank.clone(),
         // The aura variant's right column (`0x52f8e5`), gated on `SpellDispelType.dbc` `[+0x28]`.
-        dispel_type: spells.catalog.dispel_name(d).map(str::to_string),
+        dispel_type: spells.catalog.dispel_label(d).map(str::to_string),
         cost,
         range,
         cast_time,

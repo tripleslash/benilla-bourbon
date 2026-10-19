@@ -83,6 +83,7 @@ impl CursorPayload {
                 texture: None,
                 count: 0,
                 consumable: false,
+                state: None,
             }),
             CursorPayload::Macro(_) => CursorPayload::Macro(CursorMacro {
                 index: 0,
@@ -228,6 +229,10 @@ pub struct CursorAction {
     /// so the slot's `ACTIONBAR_SLOT_CHANGED` handler reads them before the app's re-feed.
     pub count: u32,
     pub consumable: bool,
+    /// The source slot's per-frame state, which a place writes back with the slot for the same
+    /// handler: the reference answers `IsEquippedAction` and kin for the slot's action at call
+    /// time (`0x4e74e0`), so the moved item's green border goes with it.
+    pub(crate) state: Option<super::action::StoredActionState>,
 }
 
 /// A pet-bar payload, mode 4, from `PickupPetAction` or the pet spellbook: the packed action word
@@ -1164,6 +1169,7 @@ mod tests {
             texture: None,
             count: 0,
             consumable: false,
+            state: None,
         }));
         assert_eq!(ask(&mut s, "CursorHasItem"), NO);
         assert_eq!(ask(&mut s, "CursorHasSpell"), NO);
@@ -1455,6 +1461,7 @@ mod tests {
             texture: None,
             count: 0,
             consumable: false,
+            state: None,
         }));
         s.run("DeleteCursorItem()").unwrap();
         assert!(

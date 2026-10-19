@@ -1078,6 +1078,7 @@ mod tests {
             texture: None,
             count: 0,
             consumable: false,
+            state: None,
         }));
         assert!(pickup_spell(&s.lua, 1, "spell"));
         assert!(matches!(s.cursor_payload(), Some(CursorPayload::Spell(_))));
