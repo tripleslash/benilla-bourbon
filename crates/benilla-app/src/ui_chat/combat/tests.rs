@@ -290,51 +290,6 @@ fn the_fill_is_vsnprintf_and_refuses_a_mismatch() {
     assert_eq!(fill("%f", &[Arg::Num(1)]), None);
 }
 
-/// `0x629b60`'s arm order: a blocked swing with damage is `VSBLOCK`, and a fully absorbed one
-/// `VSABSORB`, not `MISSED`.
-#[test]
-fn the_melee_dispatcher_follows_the_reference_order() {
-    let f = |h, v, d, s| melee_family(h, v, d, s).expect("a family").stem;
-    // A plain landed swing, and its crit and school variants.
-    assert_eq!(f(0, 1, 120, 0), "COMBATHIT");
-    assert_eq!(f(0x80, 1, 120, 0), "COMBATHITCRIT");
-    assert_eq!(f(0, 1, 120, 2), "COMBATHITSCHOOL");
-    assert_eq!(f(0x80, 1, 120, 2), "COMBATHITCRITSCHOOL");
-    // MISS wins over everything, including a VictimState that would say otherwise.
-    assert_eq!(f(0x10, 2, 0, 0), "MISSED");
-    // BLOCKS wins over the damage test: a partial block still lands damage.
-    assert_eq!(f(0, 5, 90, 0), "VSBLOCK");
-    // Zero damage + the absorb/resist bits.
-    assert_eq!(f(0x20, 1, 0, 0), "VSABSORB");
-    assert_eq!(f(0x40, 1, 0, 0), "VSRESIST");
-    // ...but the same bits with damage through are a landed hit, not a full absorb.
-    assert_eq!(f(0x20, 1, 90, 0), "COMBATHIT");
-    // The VictimState words.
-    assert_eq!(f(0, 2, 0, 0), "VSDODGE");
-    assert_eq!(f(0, 3, 0, 0), "VSPARRY");
-    assert_eq!(f(0, 6, 0, 0), "VSEVADE");
-    assert_eq!(f(0, 7, 0, 0), "VSIMMUNE");
-    assert_eq!(f(0, 8, 0, 0), "VSDEFLECT");
-}
-
-/// `0x62a710` prints nothing for a VictimState whose byte in `0x8628f8`, `[0,0,1,1,0,1,1,1,1,0]`,
-/// is 0. State 1 words a hit only with damage through, in arm 5.
-#[test]
-fn the_silent_victim_states_emit_no_melee_line() {
-    for state in [0, 1, 4, 9] {
-        assert!(
-            melee_family(0, state, 0, 0).is_none(),
-            "VictimState {state} must emit no line"
-        );
-    }
-    // The same states still word normally when an earlier arm claims them: the MISS bit, and
-    // state 1 with damage through.
-    assert!(melee_family(0x10, 0, 0, 0).is_some(), "the MISS bit wins");
-    assert!(melee_family(0, 1, 120, 0).is_some(), "a landed hit wins");
-    // Index 5 of the table is a 1, and unreachable: arm 2 claims a block.
-    assert_eq!(melee_family(0, 5, 0, 0).map(|f| f.stem), Some("VSBLOCK"));
-}
-
 /// The melee msgType matrix of `0x62a0d0`/`0x62a2e0`, through the 94-entry type table at
 /// `0x804710`, whose 1-based index is the selector's return plus one.
 #[test]
@@ -552,4 +507,263 @@ fn a_set_cvar_moves_the_range_the_gate_compares_against() {
     assert!(!r.set("CombatLogRangeMe", 10.0));
     assert!(!r.set("mousespeed", 10.0));
     assert_eq!(r.class(C::Me), 100_000.0);
+}
+
+// ── the unit classifier, `0x5efea0` ─────────────────────────────────────────────────────────
+
+impl Stores for std::collections::HashMap<Entity, ObjectStore> {
+    fn store(&self, entity: Entity) -> Option<&ObjectStore> {
+        self.get(&entity)
+    }
+}
+
+/// Descriptors held by guid, each at an entity of its own, for [`classify`].
+struct Held {
+    world: World,
+    index: GuidIndex,
+    stores: std::collections::HashMap<Entity, ObjectStore>,
+}
+
+impl Held {
+    fn new() -> Self {
+        Self {
+            world: World::new(),
+            index: GuidIndex::default(),
+            stores: Default::default(),
+        }
+    }
+
+    fn hold(&mut self, guid: u64, store: ObjectStore) {
+        let e = self.world.spawn_empty().id();
+        self.index.0.insert(guid, e);
+        self.stores.insert(e, store);
+    }
+
+    fn unit(&mut self, u: &RelUnit) {
+        self.hold(u.guid, crate::target::relations::fixture::store_of(u));
+    }
+
+    /// The class of `guid` to the active player `me`, with `party` in the party slots.
+    fn class(&self, me: u64, party: &[u64], guid: u64) -> UnitClass {
+        let group = GroupState {
+            in_group: !party.is_empty(),
+            members: party
+                .iter()
+                .map(|&guid| benilla_protocol::messages::GroupMemberEntry {
+                    name: String::new(),
+                    guid,
+                    status: 1,
+                    flags: 0,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let factions = crate::target::relations::fixture::factions();
+        classify(
+            guid,
+            &SelfGuid(Some(me)),
+            Some(&group),
+            &self.index,
+            &self.stores,
+            Some(&factions),
+            &Reputations::default(),
+            None,
+        )
+    }
+}
+
+/// `0x5eff85`-`0x5effad`: a player is hostile only when each can attack the other. An enemy who is
+/// PvP-flagged while you are not is one you can attack and who cannot attack you: a friendly
+/// player's lines, 4, until you flag too.
+#[test]
+fn a_player_is_hostile_only_when_each_can_attack_the_other() {
+    use crate::target::relations::fixture::{player, with_flags, HUMAN, ORC, PVP};
+    let me = player(1, HUMAN);
+    let flagged_orc = with_flags(player(2, ORC), PVP);
+    let mut held = Held::new();
+    held.unit(&me);
+    held.unit(&flagged_orc);
+    assert_eq!(held.class(1, &[], 2), UnitClass::FriendlyPlayer);
+
+    let mut held = Held::new();
+    held.unit(&with_flags(me, PVP));
+    held.unit(&flagged_orc);
+    assert_eq!(held.class(1, &[], 2), UnitClass::HostilePlayer);
+}
+
+/// `0x5effcd` comes after the mutual `CanAttack`: a party member you are duelling is a hostile
+/// player, 6, and the same member out of the duel is a party member, 2.
+#[test]
+fn a_party_member_in_a_duel_with_you_is_a_hostile_player() {
+    use crate::target::relations::fixture::{duelling, player, HUMAN};
+    let mut held = Held::new();
+    held.unit(&duelling(player(1, HUMAN), 99, 1));
+    held.unit(&duelling(player(2, HUMAN), 99, 2));
+    assert_eq!(held.class(1, &[2], 2), UnitClass::HostilePlayer);
+
+    let mut held = Held::new();
+    held.unit(&player(1, HUMAN));
+    held.unit(&player(2, HUMAN));
+    assert_eq!(held.class(1, &[2], 2), UnitClass::Party);
+}
+
+/// `0x5f0006` is reached only for a unit that is not a player: a player you mind-control is judged
+/// as a player, never as your pet; a creature you charm is your pet, 1.
+#[test]
+fn a_charmed_player_is_never_classified_by_its_controller() {
+    use crate::target::relations::fixture::{creature, player, HUMAN, ORC};
+    let me = player(1, HUMAN);
+    let charmed = RelUnit {
+        charmed_by: 1,
+        ..player(2, ORC)
+    };
+    let charmed_mob = RelUnit {
+        charmed_by: 1,
+        ..creature(3, ORC)
+    };
+    let mut held = Held::new();
+    held.unit(&me);
+    held.unit(&charmed);
+    held.unit(&charmed_mob);
+    assert_eq!(held.class(1, &[], 2), UnitClass::FriendlyPlayer);
+    assert_eq!(held.class(1, &[], 3), UnitClass::MyPet);
+}
+
+/// `0x5f00e3`-`0x5f00fd`: another player's pet is hostile, 7, when the pet and you can each
+/// attack the other, else friendly, 5; a pet whose owner is not held is a creature, 8.
+#[test]
+fn another_players_pet_takes_the_mutual_test_on_itself() {
+    use crate::target::relations::fixture::{pet_of, player, with_flags, HUMAN, ORC, PVP};
+    let me = with_flags(player(1, HUMAN), PVP);
+    let owner = with_flags(player(2, ORC), PVP);
+    let mut held = Held::new();
+    held.unit(&me);
+    held.unit(&owner);
+    held.unit(&pet_of(3, &owner));
+    assert_eq!(held.class(1, &[], 3), UnitClass::HostilePet);
+
+    let mut held = Held::new();
+    held.unit(&player(1, HUMAN));
+    held.unit(&owner);
+    held.unit(&pet_of(3, &owner));
+    assert_eq!(held.class(1, &[], 3), UnitClass::FriendlyPet);
+
+    let mut held = Held::new();
+    held.unit(&me);
+    held.unit(&pet_of(3, &owner));
+    assert_eq!(held.class(1, &[], 3), UnitClass::Creature);
+}
+
+/// `0x5eff1e`-`0x5eff45`: a game object stands for its creator, one class up on the player arms:
+/// your own is 1, a party member's 3; a creature's object takes the creature's 8.
+#[test]
+fn a_game_object_classifies_as_its_creator_one_class_up() {
+    use crate::target::relations::fixture::{creature, player, HUMAN};
+    let object = |creator: u64| {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+            (2, 0x21),
+            (6, creator as u32),
+            (7, (creator >> 32) as u32),
+        ]))
+    };
+    let mut held = Held::new();
+    held.unit(&player(1, HUMAN));
+    held.unit(&player(2, HUMAN));
+    held.unit(&creature(3, HUMAN));
+    held.hold(10, object(1));
+    held.hold(11, object(2));
+    held.hold(12, object(3));
+    held.hold(13, object(77));
+    assert_eq!(held.class(1, &[2], 10), UnitClass::MyPet);
+    assert_eq!(held.class(1, &[2], 11), UnitClass::PartyPet);
+    assert_eq!(held.class(1, &[], 11), UnitClass::FriendlyPet);
+    assert_eq!(held.class(1, &[], 12), UnitClass::Creature);
+    assert_eq!(
+        held.class(1, &[], 13),
+        UnitClass::Unknown,
+        "no creator held"
+    );
+}
+
+/// `0x6264e0` never waits: a unit no cache names prints its miss at once, and only an item the
+/// item cache has not answered holds the line (`0x55ba30`).
+#[test]
+fn a_unit_name_never_holds_a_line_and_an_item_name_does() {
+    let mut line = queue(
+        ChatEventKind::CombatCreatureVsSelfHits,
+        COMBATHIT,
+        (7, UnitClass::Creature),
+        (1, UnitClass::Me),
+        Fills::default(),
+        Named::Ready,
+    )
+    .unwrap();
+    let named = |guid: u64| if guid == 1 { "Pat" } else { "Unknown" }.to_string();
+    assert!(line.fill_names(named, |_| ItemName::Waiting));
+    assert_eq!(
+        (line.fills.attacker.as_str(), line.fills.victim.as_str()),
+        ("Unknown", "Pat")
+    );
+
+    let mut pet = PendingCombat {
+        named: Named::Unit(9),
+        ..line.clone()
+    };
+    assert!(pet.fill_names(|_| "Unknown".into(), |_| ItemName::Waiting));
+    assert_eq!(pet.fills.named, "Unknown");
+
+    let mut made = PendingCombat {
+        named: Named::Item(2589),
+        ..line.clone()
+    };
+    assert!(!made.fill_names(named, |_| ItemName::Waiting));
+    assert!(made.fill_names(named, |_| ItemName::Named("Linen Cloth".into())));
+    assert_eq!(made.fills.named, "Linen Cloth");
+}
+
+/// A name nothing holds prints the miss of the getter `0x6264e0` went through: a held unit's
+/// `GetUnitName` (`0x626531`) falls to "Unknown Being" (`0x60933c`), anything else to
+/// `UKNOWNOBJECT` (`0x62660c`), each only once `UNKNOWNOBJECT` is missing.
+#[test]
+fn an_unnamed_held_unit_prints_the_unit_getters_miss() {
+    let script = benilla_ui::script::UiScript::new().expect("VM");
+    let names = NameCache::default();
+    let store = |kind: u32| ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(2, kind)]));
+    let name = |store: Option<&ObjectStore>| logged_name(7, store, &names, Ask::Read, &script);
+    assert_eq!(name(Some(&store(0x19))), "Unknown Being", "a held player");
+    assert_eq!(name(Some(&store(0x9))), "Unknown Being", "a held creature");
+    assert_eq!(name(Some(&store(0x21))), "UKNOWNOBJECT", "a game object");
+    assert_eq!(name(None), "UKNOWNOBJECT", "nothing held");
+
+    script
+        .lua()
+        .load("UNKNOWNOBJECT = \"Unknown\"")
+        .exec()
+        .expect("set");
+    assert_eq!(name(Some(&store(0x19))), "Unknown");
+    assert_eq!(name(None), "Unknown");
+}
+
+/// A school with no name writes no line, even where the template names none: each formatter that
+/// takes a school returns on its name first (`0x62cd99`, `0x628117`), before the line and its word.
+#[test]
+fn a_school_with_no_name_writes_no_line() {
+    let script = benilla_ui::script::UiScript::new().expect("VM");
+    script
+        .run(r#"SPELLLOGABSORBOTHERSELF = "You absorb %s's %s."; SPELL_SCHOOL2_CAP = "Fire""#)
+        .expect("strings");
+    let fills = |school| Fills {
+        attacker: "Imp".into(),
+        spell: "Firebolt".into(),
+        school: Some(school),
+        ..Default::default()
+    };
+    assert_eq!(
+        compose_line(&script, SPELLLOGABSORB, Variant::OtherSelf, &fills(2)).as_deref(),
+        Some("You absorb Imp's Firebolt.")
+    );
+    assert_eq!(
+        compose_line(&script, SPELLLOGABSORB, Variant::OtherSelf, &fills(9)),
+        None
+    );
 }

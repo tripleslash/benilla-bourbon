@@ -118,8 +118,10 @@ impl Plugin for UiMerchantPlugin {
                     feed_merchant.after(crate::ui_unit::UnitFeed).in_set(UiFeed),
                     // Before `feed_char`: the `UNIT_INVENTORY_CHANGED` a repair fires refreshes the
                     // Repair All button from this total (`PaperDollFrame.lua:717-724`).
+                    // After the roster publish, whose party slots the vendor's reaction reads.
                     feed_repair_costs
                         .in_set(UiFeed)
+                        .after(crate::spell::group_relation::publish_group_roster)
                         .before(crate::ui_char::feed_char),
                     drain_merchant.after(UiInput),
                 ),
@@ -318,6 +320,13 @@ fn repair_costs(
             .then(|| item_repair_cost(guid, objects, items, tables, discount))
             .filter(|&c| c > 0)
     };
+    // The cost before the discount (`0x5da330`), which the merchant price takes off (`0x52e44a`).
+    let own = |guid: u64| {
+        (guid != 0)
+            .then(|| item_repair_cost(guid, objects, items, tables, 0.0))
+            .filter(|&c| c > 0)
+            .map(|c| (guid, c))
+    };
     let mut costs = RepairCosts::default();
     for i in 0..19u8 {
         if let Some(c) = cost(store.player_inv_slot(i).unwrap_or(0)) {
@@ -325,16 +334,20 @@ fn repair_costs(
         }
     }
     for i in 0..16u8 {
-        if let Some(c) = cost(store.player_pack_slot(i).unwrap_or(0)) {
+        let guid = store.player_pack_slot(i).unwrap_or(0);
+        if let Some(c) = cost(guid) {
             costs.bags.insert((0, u32::from(i) + 1), c);
         }
+        costs.own.extend(own(guid));
     }
     for i in 0..crate::ui_items::BANK_SLOTS {
-        if let Some(c) = cost(store.player_bank_slot(i).unwrap_or(0)) {
+        let guid = store.player_bank_slot(i).unwrap_or(0);
+        if let Some(c) = cost(guid) {
             costs
                 .bags
                 .insert((crate::ui_items::BANK_CONTAINER, u32::from(i) + 1), c);
         }
+        costs.own.extend(own(guid));
     }
     // Bags 1-4 are inventory slots 19-22, bank bags 5-10 the bank bag slots.
     let bags = (1..=4u8)
@@ -355,9 +368,11 @@ fn repair_costs(
         };
         let n = b.container_num_slots().unwrap_or(0).min(36) as u8;
         for j in 0..n {
-            if let Some(c) = b.container_slot(j).and_then(cost) {
+            let guid = b.container_slot(j).unwrap_or(0);
+            if let Some(c) = cost(guid) {
                 costs.bags.insert((bag, u32::from(j) + 1), c);
             }
+            costs.own.extend(own(guid));
         }
     }
     costs
@@ -384,9 +399,36 @@ fn vendor_store<'a>(
     open: &MerchantOpen,
     units: &'a Query<(&Guid, &ObjectStore), Without<SelfPlayer>>,
 ) -> Option<&'a ObjectStore> {
+    vendor_unit(open, units).map(|(_, store)| store)
+}
+
+/// The open vendor's guid and descriptor, `None` with none open or its unit not streamed.
+fn vendor_unit<'a>(
+    open: &MerchantOpen,
+    units: &'a Query<(&Guid, &ObjectStore), Without<SelfPlayer>>,
+) -> Option<(u64, &'a ObjectStore)> {
     open.vendor
         .and_then(|g| units.iter().find(|(guid, _)| guid.0 == g))
-        .map(|(_, store)| store)
+        .map(|(guid, store)| (guid.0, store))
+}
+
+/// The open vendor's price discount for the player whose descriptor is `player` (`0x612b80`), 0
+/// with no vendor or no player unit.
+fn open_vendor_discount(
+    open: &MerchantOpen,
+    units: &Query<(&Guid, &ObjectStore), Without<SelfPlayer>>,
+    relations: &crate::target::RelationWorld,
+    player: &ObjectStore,
+) -> f64 {
+    let (Some((guid, vendor)), Some(me)) = (vendor_unit(open, units), relations.me()) else {
+        return 0.0;
+    };
+    crate::target::vendor_price_discount(
+        &relations.get(),
+        &relations.unit_of(guid, vendor),
+        &me,
+        player,
+    )
 }
 
 /// The open vendor's `UNIT_NPC_FLAGS`, 0 with none open or its unit not streamed.
@@ -405,7 +447,7 @@ pub(crate) struct RepairPurse<'w, 's> {
     items: Res<'w, Items>,
     tables: Option<Res<'w, RepairTables>>,
     units: Query<'w, 's, (&'static Guid, &'static ObjectStore), Without<SelfPlayer>>,
-    reactions: crate::target::ReactionInputs<'w>,
+    relations: crate::target::RelationWorld<'w, 's>,
     sink: crate::ui_action::MessageSink<'w>,
 }
 
@@ -422,14 +464,7 @@ impl RepairPurse<'_, '_> {
         guids: impl IntoIterator<Item = u64>,
     ) -> bool {
         // `0x4faf30` keeps the full price unless it resolves the vendor's unit.
-        let discount = vendor_store(open, &self.units).map_or(0.0, |vendor| {
-            crate::target::vendor_price_discount(
-                self.reactions.factions.as_deref(),
-                &self.reactions.reputations,
-                vendor,
-                player,
-            )
-        });
+        let discount = open_vendor_discount(open, &self.units, &self.relations, player);
         let cost = guids.into_iter().filter(|&g| g != 0).fold(0u32, |sum, g| {
             let item = self.tables.as_deref().map_or(0, |t| {
                 item_repair_cost(g, &self.objects, &self.items, t, discount)
@@ -464,7 +499,7 @@ fn feed_repair_costs(
     mut inv: crate::items::Inventory,
     items: Res<Items>,
     units: Query<(&Guid, &ObjectStore), Without<SelfPlayer>>,
-    reactions: crate::target::ReactionInputs,
+    relations: crate::target::RelationWorld,
     tables: Option<Res<RepairTables>>,
     mut memo: Local<crate::ui_script::VmMemo<RepairFeedMemo>>,
 ) {
@@ -478,14 +513,7 @@ fn feed_repair_costs(
     };
     let vendor = vendor_store(&open, &units);
     // The open vendor's price discount (`0x4faf8a`), 0 with none open.
-    let discount = vendor.map_or(0.0, |vendor| {
-        crate::target::vendor_price_discount(
-            reactions.factions.as_deref(),
-            &reactions.reputations,
-            vendor,
-            player,
-        )
-    });
+    let discount = open_vendor_discount(&open, &units, &relations, player);
     let repairer = vendor.is_some_and(|store| store.0.unit_npc_flags() & NPC_FLAG_REPAIR != 0);
     let objects_moved = inv.changes.moved();
     let self_changed = !inv.self_changed.is_empty();
@@ -1088,11 +1116,17 @@ mod tests {
             ]),
             false,
         );
-        // The sword in the main hand (slot 15); the current honor rank byte 8.
+        // A human warrior player, the sword in the main hand (slot 15); the current honor rank
+        // byte 8. The vendor's standing leg needs the player's type, flag `0x8` and template
+        // (`0x606576`-`0x6065b6`).
         let main_hand = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 15;
         app.world_mut().spawn((
             SelfPlayer,
+            Guid(0x10),
             ObjectStore(ObjectFields::from_pairs(&[
+                (2, 0x19), // OBJECT_FIELD_TYPE
+                (FIELD_UNIT_FACTIONTEMPLATE, 1),
+                (FIELD_UNIT_FLAGS, 0x8),
                 (BYTES_0, crate::target::HUMAN_WARRIOR),
                 (PLAYER_BYTES_3, 8 << 24),
                 (main_hand, SWORD as u32),
@@ -1118,6 +1152,34 @@ mod tests {
         let script = app.world_mut().non_send_mut::<UiScript>();
         let got = script.eval::<i64>("return (GetRepairAllCost())").unwrap();
         assert_eq!(got, i64::from(want), "the undiscounted total is {full}");
+    }
+
+    /// A carried item's own cost (`0x5da330`) rides beside the discounted one, by its guid: the
+    /// merchant price takes off the cost before the discount (`0x52e44a`).
+    #[test]
+    fn a_carried_items_own_cost_rides_beside_the_discounted_one() {
+        use bevy::ecs::system::RunSystemOnce;
+        use purse_fixture::*;
+
+        const PACK_SLOT_1: u16 = 532;
+        let (full, discounted) = sword_prices();
+        let mut app = App::new();
+        app.init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<MerchantOpen>();
+        seat(app.world_mut());
+        let store = player(PACK_SLOT_1, 0).0;
+        let steps = f64::from(0.05f32) + f64::from(0.05f32);
+        let costs = app
+            .world_mut()
+            .run_system_once(
+                move |objects: Objects, items: Res<Items>, tables: Res<RepairTables>| {
+                    repair_costs(&store, &objects, &items, &tables, steps)
+                },
+            )
+            .unwrap();
+        assert_eq!(costs.bags.get(&(0, 1)), Some(&discounted));
+        assert_eq!(costs.own.get(&SWORD), Some(&full));
     }
 
     /// `RepairAllItems()` through the feed and the drain, at [`purse_fixture`]'s vendor carrying

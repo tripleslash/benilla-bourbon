@@ -1,10 +1,11 @@
 //! Each action slot's per-frame state behind `IsUsableAction`, `IsActionInRange`,
 //! `IsCurrentAction` and `GetActionCooldown`, diff-pushed into the VM with the reference's events
 //! on each change: the cooldown trio (`0x4b31b0`, `0x4f93d0`), the usable pair (`0x4b31c0`, on a
-//! cache change only, `0x4e5c00`), the state pair (`0x4b3250`), combat enter and leave
-//! (`0x6256ff`, `0x625778`), and autorepeat start and stop (`0x6e5952`, `0x6ea170`). Usability is
-//! `IsSpellUsableNow 0x6e3d60` ([`crate::spell::usable`]), auto-repeat the `0xceac30` key, and
-//! range the squared distance against `GetMinMaxRange 0x6e3480`.
+//! cache change only, `0x4e5c00`), combat enter and leave (`0x6256ff`, `0x625778`), and
+//! autorepeat start and stop (`0x6e5952`, `0x6ea170`). `IsCurrentAction` reads the cast state
+//! live, and its pair (`0x4b3250`) is signalled where the cast changes ([`crate::ui_cast`]).
+//! Usability is `IsSpellUsableNow 0x6e3d60` ([`crate::spell::usable`]), auto-repeat the `0xceac30`
+//! key, and range the squared distance against `GetMinMaxRange 0x6e3480`.
 
 use crate::ui_items::stack_counts;
 use std::collections::HashMap;
@@ -17,7 +18,7 @@ use benilla_formats::RangeTargets;
 use benilla_protocol::messages::{ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL};
 use benilla_ui::script::{ActionState, UiScript};
 
-use crate::creature_anim::{Casting, Engaged};
+use crate::creature_anim::Engaged;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use crate::spell::Cooldowns;
@@ -70,6 +71,27 @@ fn resolve_through_macro(
     }
 }
 
+/// The profession window a profession opener opens (`Effect[0]` 47, `0x4e54fe`), which
+/// `IsCurrentAction` holds against the one open: a craft by its `EffectMiscValue[0]` (`0x4e5507`),
+/// else a trade skill by its `SkillLineAbility` line (`0x6de040`, `0x4e5522`), as the opener opens
+/// it (`0x6e4bd7`). A trade skill whose row is not loaded opens nothing, and checks nothing.
+fn profession(
+    spell_id: u32,
+    d: &benilla_formats::SpellDisplay,
+    skill_lines: Option<&crate::ui_spellbook::SkillLines>,
+) -> Option<benilla_ui::script::Profession> {
+    use benilla_ui::script::Profession;
+    if d.effects[0] != benilla_formats::SPELL_EFFECT_TRADE_SKILL {
+        return None;
+    }
+    match u32::try_from(d.effect_misc_value[0]).unwrap_or(0) {
+        0 => skill_lines
+            .and_then(|s| s.catalog.spell_to_line(spell_id))
+            .map(Profession::TradeSkill),
+        craft => Some(Profession::Craft(craft)),
+    }
+}
+
 /// Computes and diff-pushes every occupied slot's state, and fires the reference's events.
 #[allow(clippy::type_complexity)] // a Bevy system's full input set
 pub(super) fn feed_action_state(
@@ -79,27 +101,24 @@ pub(super) fn feed_action_state(
     mut cooldowns: ResMut<Cooldowns>,
     clock: Res<crate::ui_script::UiClock>,
     auto_repeat: Res<AutoRepeatActive>,
-    // One tuple for Bevy's 16-param ceiling: cast tracking, macro bindings, spell mods, the
-    // range units and the control flag.
+    // One tuple for Bevy's 16-param ceiling: macro bindings, spell mods, the range units, the
+    // control flag and the skill lines.
     cast_state: (
-        Res<crate::spell::PendingCast>,
-        Res<crate::spell::QueuedMeleeSpell>,
-        Res<crate::spell::ActiveChannel>,
-        Res<crate::spell::SpellTargeting>,
         Res<crate::ui_macro::MacroBoundSpells>,
         Res<crate::spell::SpellModifiers>,
         // The caster's and the target's reach and motion, which the range compare reads.
         crate::spell::RangeUnits,
         // `[0xb4b3e4]`, which the usable walk reads.
         Option<Res<crate::player::Player>>,
+        // A profession opener's line (`0x6de040`), which the checked test reads.
+        Option<Res<crate::ui_spellbook::SkillLines>>,
     ),
-    self_q: Query<(&ObjectStore, &Transform, Has<Engaged>, Option<&Casting>), With<SelfPlayer>>,
+    self_q: Query<(&ObjectStore, &Transform, Has<Engaged>), With<SelfPlayer>>,
     selection: Res<Selection>,
     // One param for the guid index and the item store, for the same ceiling.
     objects: crate::net::Objects,
     units: Query<(&ObjectStore, &Transform), Without<SelfPlayer>>,
-    factions: Option<Res<crate::target::Factions>>,
-    reputations: Res<crate::net::Reputations>,
+    relations: crate::target::RelationWorld,
     items: Res<Items>,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<StateMemory>>,
@@ -124,22 +143,16 @@ pub(super) fn feed_action_state(
         memory.last_cd_trace = Some(now);
     }
 
-    let (pending, queued_melee, channel, targeting, bound, spell_mods, range_units, player) =
-        &cast_state;
+    let (bound, spell_mods, range_units, player, skill_lines) = &cast_state;
     let me = self_q.iter().next();
     let control_lost = player.as_ref().is_some_and(|p| p.own_control_lost);
     // The bags, walked once per frame for every reagent and totem count below.
     let stacks = me
-        .map(|(s, _, _, _)| stack_counts(&s.0, &objects))
+        .map(|(s, _, _)| stack_counts(&s.0, &objects))
         .unwrap_or_default();
-    let engaged = me.is_some_and(|(_, _, e, _)| e);
-    let form_byte = me
-        .map(|(s, _, _, _)| s.0.unit_shapeshift_form())
-        .unwrap_or(0);
-    let casting_spell = me.and_then(|(_, _, _, c)| c.map(|c| c.spell_id));
-    let current_cast = pending.current(now).or(casting_spell);
+    let engaged = me.is_some_and(|(_, _, e)| e);
     let caster = range_units.caster();
-    let self_pos = me.map(|(_, t, _, _)| t.translation);
+    let self_pos = me.map(|(_, t, _)| t.translation);
     // The target's reach, motion and squared distance (the reference tests dx²+dy²+dz²,
     // `0x6e47b0`).
     let target_entity = selection.guid.and_then(|g| objects.entity(g));
@@ -183,28 +196,18 @@ pub(super) fn feed_action_state(
                     continue;
                 };
                 st.is_attack = d.is_melee_auto_attack();
-                // `IsCurrentAction 0x4e53a0`: Attack while engaged; a spell while in flight
-                // (`0xceca88`, which a queued on-swing strike holds), channelled (`0xceac58`), or
-                // when its form is ours (`0x4e5556`). The form arm is not the icon's aura scan:
-                // a form granted by another spell lights the check but not the icon.
-                st.current = if st.is_attack {
-                    engaged
-                } else {
-                    current_cast == Some(button.action)
-                        || queued_melee.current() == Some(button.action)
-                        || channel.current(now) == Some(button.action)
-                        // Checked while its ground click is pending (`0x4e54d0`, `0x6e48e0`).
-                        || targeting.spell() == Some(button.action)
-                        || (form_byte != 0 && d.shapeshift_form == Some(u32::from(form_byte)))
-                };
-                st.auto_repeat = auto_repeat.0 == Some(button.action);
+                // What `IsCurrentAction 0x4e53a0` and `IsAutoRepeatAction 0x4e55b0` hold against
+                // the live cast state. The form arm is not the icon's aura scan: a form granted by
+                // another spell lights the check but not the icon.
+                st.spell = Some(button.action);
+                st.form = d.shapeshift_form;
+                st.profession = profession(button.action, d, skill_lines.as_deref());
                 // The usable walk (`0x6e3d60`); only its power gate sets `notEnoughMana`.
-                if let (Some((store, _, _, _)), Some(sp)) = (me, spells.as_deref()) {
+                if let (Some((store, _, _)), Some(sp)) = (me, spells.as_deref()) {
                     let ctx = usable::UsableCtx {
                         store,
-                        target_store: target.map(|(s, _)| s),
-                        factions: factions.as_deref(),
-                        reputations: &reputations,
+                        target: selection.guid.zip(target.map(|(s, _)| s)),
+                        rel: relations.get(),
                         cooldowns: &cooldowns,
                         stacks: &stacks,
                         spell_mods,
@@ -265,7 +268,7 @@ pub(super) fn feed_action_state(
                 let count = script.action_slot(action).map_or(0, |slot| slot.count);
                 // `IsEquippedAction`, the green border: `0x622270` at mask 1 (`0x4e5377`-`0x4e5380`),
                 // the walker over the worn slots, so a broken copy is not worn.
-                st.equipped = me.is_some_and(|(s, _, _, _)| {
+                st.equipped = me.is_some_and(|(s, _, _)| {
                     crate::ui_items::find_item(
                         &s.0,
                         &objects,
@@ -280,12 +283,11 @@ pub(super) fn feed_action_state(
                 // `0x4e5050`'s item arm runs the count, `IsItemOnCooldown` and the on-use spell
                 // through the same `0x6e3d60` walk. With no player the reference answers (0, 0)
                 // (`0x4e5080`), the default state.
-                if let Some((store, _, _, _)) = me {
+                if let Some((store, _, _)) = me {
                     let ctx = usable::UsableCtx {
                         store,
-                        target_store: target.map(|(s, _)| s),
-                        factions: factions.as_deref(),
-                        reputations: &reputations,
+                        target: selection.guid.zip(target.map(|(s, _)| s)),
+                        rel: relations.get(),
                         cooldowns: &cooldowns,
                         stacks: &stacks,
                         spell_mods,
@@ -317,7 +319,6 @@ pub(super) fn feed_action_state(
     }
 
     let mut usable_changed = false;
-    let mut state_changed = false;
     let keys: Vec<u32> = fresh
         .keys()
         .chain(memory.pushed.keys())
@@ -327,16 +328,13 @@ pub(super) fn feed_action_state(
         .collect();
     for action in keys {
         let (new, old) = (fresh.get(&action), memory.pushed.get(&action));
+        let d = ActionState::default();
+        let (n, o) = (new.unwrap_or(&d), old.unwrap_or(&d));
         if new == old {
             continue;
         }
-        let d = ActionState::default();
-        let (n, o) = (new.unwrap_or(&d), old.unwrap_or(&d));
         if (n.usable, n.not_enough_mana) != (o.usable, o.not_enough_mana) {
             usable_changed = true;
-        }
-        if (n.current, n.auto_repeat) != (o.current, o.auto_repeat) {
-            state_changed = true;
         }
         if n.cooldown != o.cooldown && benilla_assets::trace::enabled() {
             benilla_assets::trace::line(
@@ -361,10 +359,6 @@ pub(super) fn feed_action_state(
     if usable_changed {
         script.fire_event("ACTIONBAR_UPDATE_USABLE", vec![]);
         script.fire_event("SPELL_UPDATE_USABLE", vec![]);
-    }
-    if state_changed {
-        script.fire_event("ACTIONBAR_UPDATE_STATE", vec![]);
-        script.fire_event("CURRENT_SPELL_CAST_CHANGED", vec![]);
     }
     if engaged != memory.engaged {
         memory.engaged = engaged;
@@ -394,6 +388,36 @@ pub(super) fn feed_action_state(
 mod tests {
     use super::*;
     use benilla_formats::SpellDisplay;
+
+    /// A profession opener (`Effect[0]` 47) names the window `IsCurrentAction` checks it against
+    /// (`0x4e54fe`): a nonzero `EffectMiscValue[0]` the craft of that type (Enchanting 3), zero
+    /// the trade skill of its `SkillLineAbility` line (Tailoring 3908, line 197); any other spell
+    /// none.
+    #[test]
+    fn a_profession_opener_names_its_window() {
+        use benilla_ui::script::Profession;
+        let lines = crate::ui_spellbook::SkillLines {
+            catalog: benilla_formats::SkillLineCatalog::from_spell_lines([(3908, 197)]),
+        };
+        let opener = |misc| SpellDisplay {
+            effects: [benilla_formats::SPELL_EFFECT_TRADE_SKILL, 0, 0],
+            effect_misc_value: [misc, 0, 0],
+            ..Default::default()
+        };
+        assert_eq!(
+            profession(7411, &opener(3), Some(&lines)),
+            Some(Profession::Craft(3))
+        );
+        assert_eq!(
+            profession(3908, &opener(0), Some(&lines)),
+            Some(Profession::TradeSkill(197))
+        );
+        assert_eq!(profession(3908, &opener(0), None), None, "no rows loaded");
+        assert_eq!(
+            profession(133, &SpellDisplay::default(), Some(&lines)),
+            None
+        );
+    }
 
     /// `[rec+0x564]`'s three values (`0x4e5a50`): a live spell, a bare macro, and grey.
     #[test]

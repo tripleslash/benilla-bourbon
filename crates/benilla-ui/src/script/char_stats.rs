@@ -200,6 +200,9 @@ pub struct InvSlotView {
     /// The template's block 0 names a spell (`+0x11c`, any trigger): `GetInventoryItemCooldown`
     /// runs no query without one (`0x4c8b47`).
     pub spell_0: bool,
+    /// The worn object's `ITEM_FIELD_SPELL_CHARGES`, per spell block (`flds+0x28`), which its
+    /// tooltip's charges lines read (`0x52d9e9`); zeros for a visible-item record.
+    pub spell_charges: [i32; 5],
     /// The arm `UseInventoryItem` takes in the dispatcher, with no equip fork; `link` is set once
     /// the template is cached, which the dispatcher needs (`0x5d8d5c`).
     pub use_fork: super::container::UseFork,
@@ -456,6 +459,24 @@ impl Model {
             .clone()
     }
 
+    /// The bag-slot item object behind the player's live id `slot` in the vault and keyring bands,
+    /// which `SetInventoryItem` resolves through the player's slot list as it does a worn item
+    /// (`0x53314e` → `0x6228a0`); `None` for every other band.
+    pub(super) fn inv_container_slot(
+        &self,
+        slot: usize,
+    ) -> Option<&super::container::ContainerSlot> {
+        let (bag, first) = if BANK_INV_SLOTS.contains(&slot) {
+            (BANK_CONTAINER, *BANK_INV_SLOTS.start())
+        } else if KEYRING_INV_SLOTS.contains(&slot) {
+            (KEYRING_CONTAINER, *KEYRING_INV_SLOTS.start())
+        } else {
+            return None;
+        };
+        let n = (slot - first + 1) as u32;
+        self.containers.get(&bag)?.slots.get(&n)
+    }
+
     /// The player's repair cost at live id `slot`, the vault and keyring bands by their container
     /// slots.
     pub(super) fn inv_repair_cost(&self, slot: usize) -> u32 {
@@ -541,6 +562,7 @@ impl InvSlotView {
             occupied_seats: slot.occupied_seats,
             use_spell: slot.use_spell,
             spell_0: slot.spell_0,
+            spell_charges: slot.spell_charges,
             link: slot.link.clone(),
             guid: slot.guid,
             creator: slot.creator.clone(),

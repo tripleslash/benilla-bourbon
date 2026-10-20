@@ -319,12 +319,17 @@ mod tests {
             spell_at(0, 21)
         }
 
-        /// A player-controlled unit of faction template 1 (`0x8`), so [`fx::factions`]' Human pair
-        /// is friendly to itself and `CanAssist` passes on its player-controlled arm. `extra`
-        /// overrides a default; health is 100 unless it says otherwise.
+        /// A player-controlled player (`OBJECT_FIELD_TYPE` 0x19, flag `0x8`) of faction template 1,
+        /// so [`fx::factions`]' Human pair is friendly to itself and `CanAssist` passes on its
+        /// player-controlled arm. `extra` overrides a default; health is 100 unless it says
+        /// otherwise.
         fn player(extra: &[(u16, u32)]) -> ObjectStore {
-            let mut fields =
-                std::collections::BTreeMap::from([(TEMPLATE, 1), (FLAGS, 0x8), (HEALTH, 100)]);
+            let mut fields = std::collections::BTreeMap::from([
+                (2, 0x19),
+                (TEMPLATE, 1),
+                (FLAGS, 0x8),
+                (HEALTH, 100),
+            ]);
             fields.extend(extra.iter().copied());
             let pairs: Vec<_> = fields.into_iter().collect();
             ObjectStore(ObjectFields::from_pairs(&pairs))
@@ -373,7 +378,11 @@ mod tests {
                     forms: None,
                     ..Default::default()
                 },
-                group: Default::default(),
+                group: crate::spell::group_relation::GroupInputs {
+                    self_guid: Some(ME),
+                    target_guid: Some(if selection_is_self { ME } else { THEM }),
+                    ..Default::default()
+                },
             };
             let candidates = CastCandidates {
                 selection: Some(if selection_is_self { ME } else { THEM }),
@@ -439,8 +448,8 @@ mod tests {
             );
         }
 
-        /// Hibernate at a unit of another type binds nothing, so the enemy word refuses locally
-        /// with "Invalid target"; a Beast binds.
+        /// Hibernate at a unit of another type binds nothing, so the enemy word is refused by the
+        /// attempt's tail with "Invalid target" (`0x6e507b`); a Beast binds.
         #[test]
         fn a_creature_type_mask_refuses_the_wrong_type_locally() {
             let hibernate = SpellDisplay {
@@ -461,7 +470,7 @@ mod tests {
             for entry in [HUMANOID_ENTRY, 999] {
                 assert_eq!(
                     press(&hibernate, &creature(entry), false, true),
-                    CastWireTarget::Refused(ERR_INVALID_TARGET),
+                    CastWireTarget::RefusedAtArm(ERR_INVALID_TARGET),
                     "entry {entry}: a Humanoid, and a creature with no cached template"
                 );
             }

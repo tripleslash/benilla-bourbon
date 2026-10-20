@@ -410,6 +410,7 @@ mod tests {
             gift_creator_guid: 0,
             enchants: Vec::new(),
             spell_0: false,
+            spell_charges: [0; 5],
         });
         slots[11] = Some(InvSlotView {
             duration_ms: None,
@@ -437,6 +438,7 @@ mod tests {
             gift_creator_guid: 0,
             enchants: Vec::new(),
             spell_0: false,
+            spell_charges: [0; 5],
         });
         slots[19] = Some(InvSlotView {
             duration_ms: None,
@@ -464,6 +466,7 @@ mod tests {
             gift_creator_guid: 0,
             enchants: Vec::new(),
             spell_0: false,
+            spell_charges: [0; 5],
         });
         slots
     }
@@ -501,6 +504,7 @@ mod tests {
                 flags: 0,
                 enchants: Vec::new(),
                 spell_0: false,
+                spell_charges: [0; 5],
             },
         );
         ContainerState {
@@ -662,6 +666,7 @@ mod tests {
             gift_creator_guid: 0,
             enchants: Vec::new(),
             spell_0: false,
+            spell_charges: [0; 5],
         });
         s.set_inventory_slots(slots);
 
@@ -711,6 +716,7 @@ mod tests {
                 flags: 0,
                 enchants: Vec::new(),
                 spell_0: false,
+                spell_charges: [0; 5],
             },
         );
         s.set_container(

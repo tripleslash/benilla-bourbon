@@ -11,8 +11,8 @@ use super::protected::{self, Tag};
 use super::Model;
 
 /// The petition lines an item tooltip prints under the name (`0x854d7c..0x854dd0`): the title and
-/// the creator, keyed `GUILD_CHARTER_*` for a charter, else `PETITION_*`. The signature-count line
-/// is not built: its source is untraced, and vmangos's write of the on-item count is commented out.
+/// the creator, keyed `GUILD_CHARTER_*` for a charter, else `PETITION_*`, then the signature
+/// count.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PetitionSlotView {
     /// The record's charter bit, also `GetPetitionInfo`'s first return.
@@ -21,6 +21,8 @@ pub struct PetitionSlotView {
     pub title: String,
     /// The owner's name from the name cache; `None`, and no line, while the query is in flight.
     pub owner: Option<String>,
+    /// The signatures, the item object's second enchantment dword (`flds+0x44`, `0x52ba51`).
+    pub signatures: u32,
 }
 
 /// One occupied bag slot, resolved by the app from the item object and its template.
@@ -67,6 +69,10 @@ pub struct ContainerSlot {
     /// The template's block 0 names a spell (`+0x11c`, any trigger): `GetInventoryItemCooldown`
     /// runs no query without one (`0x4c8b47`).
     pub spell_0: bool,
+    /// `ITEM_FIELD_SPELL_CHARGES`, the charges left on each spell block (`flds+0x28`): the
+    /// tooltip's charges lines read them (`0x52d9e9`), and the merchant price scales by block 0's
+    /// (`0x52e43d`).
+    pub spell_charges: [i32; 5],
     /// The instance carries `ITEM_FIELD_ITEM_TEXT_ID` (a mail copy): `GetContainerItemInfo`'s
     /// `readable`, which shows the Inspect cursor (`ContainerFrame.lua:638`).
     pub readable: bool,
@@ -1287,6 +1293,7 @@ mod tests {
                 equip_slots: Vec::new(),
                 cooldown: None,
                 spell_0: false,
+                spell_charges: [0; 5],
                 readable: false,
                 creator: None,
                 gift_creator: None,
@@ -2029,6 +2036,7 @@ mod tests {
                 equip_slots: Vec::new(),
                 cooldown: None,
                 spell_0: false,
+                spell_charges: [0; 5],
                 readable: false,
                 creator: None,
                 gift_creator: None,

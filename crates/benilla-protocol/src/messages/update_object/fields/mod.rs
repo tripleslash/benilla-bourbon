@@ -45,6 +45,8 @@ const FIELD_UNIT_CHARMEDBY: u16 = 10;
 /// The summoner of a pet, guardian or totem; with CREATEDBY, the "owned by me" test of `0x5efea0`.
 const FIELD_UNIT_SUMMONEDBY: u16 = 12;
 const FIELD_UNIT_CREATEDBY: u16 = 14;
+/// The unit that persuaded this one (`UpdateFields_1_12_1.h:47`), descriptor byte `0x30`.
+const FIELD_UNIT_PERSUADED: u16 = 18;
 /// The channel's target, possibly the caster (`UpdateFields_1_12_1.h:48`). Public, so another
 /// unit's channel renders from it; `MSG_CHANNEL_START`/`UPDATE` reach only the caster.
 const FIELD_UNIT_CHANNEL_OBJECT: u16 = 20;
@@ -279,6 +281,8 @@ const FIELD_PLAYER_TRACK_CREATURES: u16 = 1104;
 const FIELD_PLAYER_TRACK_RESOURCES: u16 = 1105;
 const FIELD_PLAYER_AMMO_ID: u16 = 1223; // UNIT_END+0x40B, INT: the equipped ammo item id
 const FIELD_PLAYER_SELF_RES_SPELL: u16 = 1224;
+// The medal bits an item's required medal tests: bit `n - 1` for medal `n`.
+const FIELD_PLAYER_PVP_MEDALS: u16 = 1225;
 // Bit 0x10 is PLAYER_FLAGS_GHOST (`Player.h:319`), held by the ghost aura 8326 until resurrection.
 pub const FIELD_PLAYER_FLAGS: u16 = 190;
 // The client's player block base `[player+0xe68]` is field 188: the arbiter at +0x0, PLAYER_FLAGS

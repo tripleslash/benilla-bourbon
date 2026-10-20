@@ -112,7 +112,8 @@ impl PluginGroup for GamePlugins {
             .add(QuestMarkersPlugin)
             .add(crate::pipe_warm::plugin)
             .add(EntitiesPlugin)
-            // The combat log, ahead of the animation layer, whose two shared kinds run second.
+            // The combat log, ahead of the animation layer, whose environmental-damage handler runs
+            // second; its swing handler registers ahead of the line (`net_handler_ahead`).
             .add(crate::combat_log::CombatLogPlugin)
             .add(CreatureAnimPlugin)
             // The blob shadow (`0x6d7920`), sized from the Stand box (`playableAnimationLookup[0]`,
@@ -855,7 +856,7 @@ pub(crate) mod schedule_tests {
     ///   feed reads the mailbox's guid, and the release clears only the pending queries;
     /// - `script_calls::apply_script_calls`, in the target chain, against the `.after(UiInput)`
     ///   drains of gestures that are not such script calls (the ATTACKTARGET binding, the
-    ///   item-pick commit, the GameObject openers, the chat, party, duel, trade and death drains)
+    ///   item-pick commit, the chat, party, duel, trade and death drains)
     ///   over the `CastLadder`, the selection and the unit-token resolver: the class
     ///   `drop_item_on_unit` and the world click's legs already carry, as none of those drains
     ///   orders against the target chain. Such a gesture and a script call in one frame take
@@ -896,7 +897,15 @@ pub(crate) mod schedule_tests {
     ///   (`stream_terrain`) already pairs with: the inner-window wait sits between the two, so a
     ///   pair the one system carried now counts on both; and `attach_inner_colliders` against the
     ///   other users of `PendingCollider`, `StreamActivity` and `TerrainStreamer`: it attaches
-    ///   only the held inner tiles' terrain builds, and the others never touch those.
+    ///   only the held inner tiles' terrain builds, and the others never touch those;
+    /// - the missile arrival's log leg (`combat_log::on_missile_miss`) against nine `Transform`
+    ///   writers, the disjoint-lane kind: `portrait::booth::face_booth_billboards`,
+    ///   `portrait::glue_booth::sync_glue_booth` and `sync_glue_scene`,
+    ///   `portrait::panes::sync_panes`, `portrait::sync_portraits`,
+    ///   `portrait::test_bake::sync_test_portraits`,
+    ///   `sound::emitter_pool::pump_emitters`, `sound::liquid_loop::drive_liquid_loops` and
+    ///   `ui_models::sync_tiles`. It reads its two units' poses for the display range; those move
+    ///   booth, emitter and tile entities, never a unit.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
@@ -955,6 +964,10 @@ pub(crate) mod schedule_tests {
     ///
     /// Upstream's lent call host (c0e301eae, #1992) moved its ceiling 3,355 -> 3,133 (-222); the
     /// fork's ceiling stays at 3,667 through the merge of abcdced19.
+    ///
+    /// Upstream's ceiling moved 3,133 -> 3,092 (-41) through 9950c469a (the roster, unit
+    /// relations, the cast reports, the combat log and tooltips); the merge of 9950c469a holds
+    /// the fork's at its measured count.
     const UPDATE_ACTIONABLE_CEILING: usize = 3_667;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
@@ -1655,8 +1668,8 @@ pub(crate) mod schedule_tests {
          "the outcome chain starts with the VM's own `Screenshot()` call"),
         ("tutorial.rs", "drain_tutorials", Because::FilledByVm,
          "`sends` exist only after Lua acknowledged, cleared or reset a flag, and go to the wire"),
-        ("ui_action/drain.rs", "drain_go_openers", Because::FilledByVm,
-         "filled only by a world right-click on a GameObject; the drain sends casts to the wire"),
+        ("ui_action/drain.rs", "drain_click_casts", Because::FilledByVm,
+         "filled only by a world right-click on a GameObject or a body; the drain sends casts to the wire"),
         ("ui_auction/mod.rs", "drain_auction", Because::FilledByVm,
          "VM verbs; the refresh flags act only under an open window and become wire re-asks"),
         ("ui_bank/mod.rs", "feed_bank", Because::PlayerRoundTrip,

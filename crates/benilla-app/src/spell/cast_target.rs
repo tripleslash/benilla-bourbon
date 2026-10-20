@@ -27,7 +27,7 @@ use super::group_relation::{GroupInputs, GroupRoster};
 use crate::creature_type::CreatureTypeSources;
 use crate::names::NameCache;
 use crate::net::{GuidIndex, ObjectStore, Reputations, SelfGuid, SelfPlayer};
-use crate::target::{can_assist, can_attack, Assist, Factions, Selection};
+use crate::target::{Factions, RelUnit, Relations, Selection, UnitLookup};
 use benilla_protocol::messages::OwnerFallback;
 
 /// `TARGET_FLAG_*` bits of the client's targeting flag word (`0xcecac0`).
@@ -94,7 +94,8 @@ pub(crate) enum CastWireTarget {
     Targeting(u16),
     /// Do not send; show this client error.
     Refused(u8),
-    /// A refusal the reference raises in its cast tail after `ArmCast` returns false (`0x6e5045`).
+    /// A refusal the reference raises in its cast tail after `ArmCast` returns false (`0x6e5045`):
+    /// the empty weapon hand's (`0x6e504b`) and the standing enemy word's (`0x6e507b`).
     /// That tail runs after the requirement validator `0x6094f0`, so it fires at the cursor-entry
     /// point in [`super::send_spell_cast`], not at the resolver's return.
     RefusedAtArm(u8),
@@ -140,30 +141,68 @@ pub(super) fn owner_store<'a>(
 }
 
 impl TargetRelations<'_> {
-    /// `CanAssist 0x6066f0` toward the candidate, which the caster always is for himself. The
+    /// `CanAssist 0x6066f0(caster, candidate)`, which the caster always is for himself. The
     /// binder's assist arm and the world pick's relation leg both ask it.
     pub(super) fn assistable(&self, is_self: bool) -> bool {
         is_self
-            || can_assist(
-                self.target_store,
-                self.factions,
-                self.reputations,
-                self.self_store,
-                |_| self.target_owner_store.cloned(),
-                Assist::PlayerToUnit,
-            )
+            || self
+                .pair()
+                .is_some_and(|(me, target)| self.relations().can_assist(&me, &target))
     }
 
-    /// `CanAttack 0x606980` toward the candidate, never the caster. The binder's enemy arm and the
+    /// `CanAttack 0x606980(caster, candidate)`, never the caster. The binder's enemy arm and the
     /// world pick's relation leg both ask it.
     pub(super) fn attackable(&self, is_self: bool) -> bool {
         !is_self
-            && can_attack(
-                self.target_store,
-                self.factions,
-                self.reputations,
-                self.self_store,
-            )
+            && self
+                .pair()
+                .is_some_and(|(me, target)| self.relations().can_attack(&me, &target))
+    }
+
+    /// The relation functions over the binder's units: the caster, the candidate and their owners.
+    pub(super) fn relations(&self) -> Relations<'_> {
+        Relations {
+            factions: self.factions,
+            reputations: self.reputations,
+            me: self.group.self_guid,
+            roster: self.group.roster,
+            units: self,
+        }
+    }
+
+    /// The caster and the candidate as the relation functions read them; `None` until both
+    /// have streamed and their guids are known.
+    pub(super) fn pair(&self) -> Option<(RelUnit, RelUnit)> {
+        Some((
+            self.unit_of(self.group.self_guid?, self.self_store?),
+            self.unit_of(self.group.target_guid?, self.target_store?),
+        ))
+    }
+
+    fn unit_of(&self, guid: u64, store: &ObjectStore) -> RelUnit {
+        let unit = RelUnit::of(guid, store);
+        match self.types.names {
+            Some(names) => unit.with_record(store, names),
+            None => unit,
+        }
+    }
+}
+
+/// The object manager as the binder holds it: the caster, the candidate and the charmer or
+/// creator of each, whichever have streamed.
+impl UnitLookup for TargetRelations<'_> {
+    fn unit(&self, guid: u64) -> Option<RelUnit> {
+        let owner = |s: Option<&ObjectStore>| s?.0.unit_owner(OwnerFallback::CreatedBy);
+        let held = [
+            (self.group.self_guid, self.self_store),
+            (self.group.target_guid, self.target_store),
+            (owner(self.self_store), self.group.self_owner_store),
+            (owner(self.target_store), self.target_owner_store),
+        ];
+        let store = held
+            .into_iter()
+            .find_map(|(g, store)| store.filter(|_| guid != 0 && g == Some(guid)))?;
+        store.is_unit().then(|| self.unit_of(guid, store))
     }
 }
 
@@ -270,21 +309,31 @@ pub(crate) struct CastTargeting<'w, 's> {
 impl CastTargeting<'_, '_> {
     /// This frame's [`CastContext`].
     pub(crate) fn context(&self) -> CastContext<'_> {
-        self.context_on(self.selection.guid, self.selection.target)
+        self.context_on(self.selection.target, self.selection.guid)
     }
 
-    /// The [`CastContext`] with `guid` in the selection's place: the unit a macro option's `@unit`
-    /// names (this fork; 1.12 casts at the selection or, with `onSelf`, at the caster). A guid
-    /// that streams no entity binds with no store or position, and the server judges.
-    pub(crate) fn context_at(&self, guid: u64) -> CastContext<'_> {
+    /// The context for an attempt passed a unit's guid (`0x6e4b60`'s last argument, as
+    /// `InteractWithSpell 0x5f05e0` passes the body's): the range test (`0x6e4f26` → `0x6e4440`)
+    /// and the arm's candidate (`0x6e5393`) take it in the selection's place. The arm's refusal of
+    /// an enemy word with nothing bound picks its line off the selection itself (`0x6e50a3`), which
+    /// this context no longer holds; Skinning's word (`Targets` 0x402, implicit target 25) has no
+    /// enemy bit.
+    pub(crate) fn context_at(&self, entity: Entity, guid: u64) -> CastContext<'_> {
+        self.context_on(Some(entity), Some(guid))
+    }
+
+    /// [`Self::context_at`] for a guid alone: the unit a macro option's `@unit` names (this fork;
+    /// 1.12 casts at the selection or, with `onSelf`, at the caster). A guid that streams no entity
+    /// binds with no store or position, and the server judges.
+    pub(crate) fn context_at_guid(&self, guid: u64) -> CastContext<'_> {
         let entity = self
             .index
             .as_deref()
             .and_then(|index| index.0.get(&guid).copied());
-        self.context_on(Some(guid), entity)
+        self.context_on(entity, Some(guid))
     }
 
-    fn context_on(&self, guid: Option<u64>, target: Option<Entity>) -> CastContext<'_> {
+    fn context_on(&self, target: Option<Entity>, guid: Option<u64>) -> CastContext<'_> {
         let target_store = target.and_then(|e| self.stores.get(e).ok());
         let owner_store = |store| owner_store(store, self.index.as_deref(), &self.stores);
         let self_store = self.self_store.iter().next();
@@ -504,10 +553,11 @@ pub(crate) fn resolve_cast_target(
             }
         }
     }
-    // A standing enemy word refuses locally. Every other residual unit word proceeds to
-    // `BindTarget`'s hand cursor.
+    // A standing enemy word is refused by the attempt's tail once the arm returns false
+    // (`0x6e507b`-`0x6e50a9`): "Invalid target" with a selection, else "You have no target", with
+    // the spell in flight. Every other residual unit word proceeds to `BindTarget`'s hand cursor.
     if word & TF_UNIT_ENEMY != 0 {
-        CastWireTarget::Refused(if cand.selection.is_some() {
+        CastWireTarget::RefusedAtArm(if cand.selection.is_some() {
             ERR_INVALID_TARGET
         } else {
             ERR_NO_TARGET
@@ -588,7 +638,11 @@ mod tests {
             factions: None,
             reputations: &Reputations::default(),
             types: Default::default(),
-            group: Default::default(),
+            group: GroupInputs {
+                self_guid: Some(1),
+                target_guid: Some(42),
+                ..Default::default()
+            },
         };
         let ice_armor = spell(0, 1);
         assert_eq!(
@@ -599,8 +653,8 @@ mod tests {
         let fireball = spell(0, 6);
         assert_eq!(
             resolve_cast_target(Some(&fireball), &cands(None, Some(1)), true, &rel),
-            CastWireTarget::Refused(ERR_NO_TARGET),
-            "enemy words retain the no-target refusal"
+            CastWireTarget::RefusedAtArm(ERR_NO_TARGET),
+            "enemy words retain the no-target refusal, the arm's"
         );
         // Neutral (3) is attackable by the mixed arm's `< 4` and not assistable by `>= 4`.
         assert_eq!(
@@ -630,7 +684,7 @@ mod tests {
         // A hostile-required cast never self-binds.
         assert_eq!(
             resolve_cast_target(Some(&fireball), &cands(None, Some(1)), false, &rel),
-            CastWireTarget::Refused(ERR_NO_TARGET)
+            CastWireTarget::RefusedAtArm(ERR_NO_TARGET)
         );
         // Unknown spell: the selection passes through.
         assert_eq!(
@@ -660,7 +714,11 @@ mod tests {
             factions: Some(&factions),
             reputations: &reputations,
             types: Default::default(),
-            group: Default::default(),
+            group: GroupInputs {
+                self_guid: Some(1),
+                target_guid: Some(2),
+                ..Default::default()
+            },
         };
 
         assert!(

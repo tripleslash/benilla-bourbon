@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{
-    channel_notice, ChannelNoticeTail, ChatMessage, LevelUpInfo, XpGain, MACRO_EXPANDED_TYPES,
+    channel_notice, ChannelNoticeTail, ChatMessage, LevelUpInfo, MACRO_EXPANDED_TYPES,
 };
 
 use benilla_assets::{LockRecover, WorldAssets};
@@ -43,6 +43,8 @@ pub(super) fn load_emote_texts(mut commands: Commands, assets: Option<Res<WorldA
 
 /// One queued item awaiting its turn through [`feed_chat`].
 enum Pending {
+    /// A `UNIT_COMBAT`, fired at its place among the lines its handler raised beside it.
+    UnitCombat(crate::ui_unit::UnitCombatFeedback),
     /// A decoded `SMSG_MESSAGECHAT`; the player types wait on the sender's name.
     Wire { msg: ChatMessage, tries: u16 },
     /// A channel notice with guids to name (`b_guid` is a kick's or ban's actor, 0 when absent).
@@ -70,20 +72,17 @@ enum Pending {
         guid: u64,
         tries: u16,
     },
-    /// An XP award waiting on the victim's name (0: unnamed); `bonus` is total minus base.
-    XpGain {
-        victim: u64,
-        total: u32,
-        bonus: u32,
-        tries: u16,
-    },
-    /// An honor award waiting on the victim's name; `rank` (0 none) becomes a title at the drain,
-    /// from the victim's side in the same name-query record.
+    /// An XP award; `victim` 0 is the unnamed form.
+    XpGain { victim: u64, total: u32, base: u32 },
+    /// An XP loss, `total` as the packet carries it.
+    XpLoss { total: u32 },
+    /// An honor award; `rank` (0 none) becomes a title at the drain, on the victim's `side` (0
+    /// Horde, 1 Alliance), read off its object at the packet.
     HonorGain {
         victim: u64,
         honor: i32,
         rank: u8,
-        tries: u16,
+        side: u8,
     },
     /// A text emote waiting on its performer's name: the reference's `PENDINGTEXTEMOTE` node
     /// (`0x49cc00`), queued when `0x49dbe0` finds no cached name and drained by `0x49d0d0`.
@@ -103,8 +102,8 @@ enum Pending {
         rank: u8,
         female: bool,
     },
-    /// One combat-log line, classified at the packet, waiting on its two endpoint names; the
-    /// reference's deferred queue (`0xc4e208`) waits only on an item name.
+    /// One combat-log line, classified at the packet; it waits only on an item's name, as the
+    /// reference's deferred queue (`0xc4e208`) does.
     Combat(Box<super::combat::PendingCombat>),
     /// A ready event (client-composed lines; name-carrying notices).
     Event(ChatEvent),
@@ -271,30 +270,34 @@ impl ChatLog {
         });
     }
 
-    /// Queue an XP award's line (`SMSG_LOG_XPGAIN`); a kill waits on the victim's name.
-    pub(crate) fn push_xp_gain(&mut self, x: &XpGain) {
-        // Both forks park: the template resolves at the drain; `victim: 0` is the unnamed form.
-        let named = x.kill && x.victim != 0;
+    /// Queue an XP gain's line (`SMSG_LOG_XPGAIN`); `victim` 0 is the unnamed form.
+    pub(crate) fn push_xp_gain(&mut self, victim: u64, total: u32, base: u32) {
         self.pending.push(Pending::XpGain {
-            victim: if named { x.victim } else { 0 },
-            total: x.total,
-            bonus: if named {
-                x.total.saturating_sub(x.base)
-            } else {
-                0
-            },
-            tries: 0,
+            victim,
+            total,
+            base,
         });
     }
 
+    /// Queue an XP loss's line, an `SMSG_LOG_XPGAIN` naming you as the victim (`0x637f70`).
+    pub(crate) fn push_xp_loss(&mut self, total: u32) {
+        self.pending.push(Pending::XpLoss { total });
+    }
+
+    /// Queue a `UNIT_COMBAT` behind what is already queued, so it fires in the order its handler
+    /// raised it against its lines.
+    pub(crate) fn push_unit_combat(&mut self, ev: crate::ui_unit::UnitCombatFeedback) {
+        self.pending.push(Pending::UnitCombat(ev));
+    }
+
     /// Queue an honor award's line (`SMSG_PVP_CREDIT`); victim 0 is a bonus or objective award.
-    pub(crate) fn push_pvp_credit(&mut self, honor: i32, victim: u64, rank: u8) {
+    pub(crate) fn push_pvp_credit(&mut self, honor: i32, victim: u64, rank: u8, side: u8) {
         // Both forks park: the template resolves at the drain.
         self.pending.push(Pending::HonorGain {
             victim,
             honor,
             rank,
-            tries: 0,
+            side,
         });
     }
 
@@ -342,12 +345,85 @@ impl ChatLog {
                 Pending::Addon { .. } => "addon",
                 Pending::Roll { .. } => "roll",
                 Pending::XpGain { .. } => "xp",
+                Pending::XpLoss { .. } => "xp loss",
+                Pending::UnitCombat(_) => "unit combat",
                 Pending::HonorGain { .. } => "honor",
                 Pending::TextEmote { .. } => "emote",
                 Pending::Discovery { .. } => "discovery",
                 Pending::Standing { .. } => "standing",
                 Pending::Combat(_) => "combat",
                 Pending::Event(_) => "event",
+            })
+            .collect()
+    }
+
+    /// The parked combat lines and `UNIT_COMBAT`s in queue order: a line as its family's stem, a
+    /// `UNIT_COMBAT` as `"UNIT_COMBAT <action>"`.
+    #[cfg(test)]
+    pub(crate) fn pending_combat_order(&self) -> Vec<String> {
+        self.pending
+            .iter()
+            .filter_map(|p| match p {
+                Pending::Combat(line) => Some(line.family.stem.to_string()),
+                Pending::UnitCombat(ev) => Some(format!("UNIT_COMBAT {}", ev.action)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The parked `UNIT_COMBAT`s, in order.
+    #[cfg(test)]
+    pub(crate) fn pending_unit_combat(&self) -> Vec<crate::ui_unit::UnitCombatFeedback> {
+        self.pending
+            .iter()
+            .filter_map(|p| match p {
+                Pending::UnitCombat(ev) => Some(*ev),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The parked XP lines as `(victim, total, base)`, in order; victim 0 is the unnamed form.
+    #[cfg(test)]
+    pub(crate) fn pending_xp(&self) -> Vec<(u64, u32, u32)> {
+        self.pending
+            .iter()
+            .filter_map(|p| match *p {
+                Pending::XpGain {
+                    victim,
+                    total,
+                    base,
+                } => Some((victim, total, base)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The parked honor credits as `(victim, honor, rank, side)`, in order.
+    #[cfg(test)]
+    pub(crate) fn pending_honor(&self) -> Vec<(u64, i32, u8, u8)> {
+        self.pending
+            .iter()
+            .filter_map(|p| match *p {
+                Pending::HonorGain {
+                    victim,
+                    honor,
+                    rank,
+                    side,
+                } => Some((victim, honor, rank, side)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The parked combat lines, in order.
+    #[cfg(test)]
+    pub(crate) fn pending_combat(&self) -> Vec<&super::combat::PendingCombat> {
+        self.pending
+            .iter()
+            .filter_map(|p| match p {
+                Pending::Combat(line) => Some(&**line),
+                _ => None,
             })
             .collect()
     }
@@ -422,42 +498,137 @@ fn keyed(
     (!text.is_empty()).then_some(text)
 }
 
-/// The XP line: `COMBATLOG_XPGAIN_FIRSTPERSON`, the `_UNNAMED` form, or the rested
-/// `_EXHAUSTION1`, whose last two arguments are the signed bonus and the state word.
+/// The active player's rest state (`PLAYER_BYTES_2` byte 3, `0x637b0c`-`0x637b12`) and that
+/// state's `Exhaustion.dbc` row, (name, XP factor), when the store holds one.
+pub(super) struct RestState<'a> {
+    pub state: u8,
+    pub row: Option<(&'a str, f64)>,
+}
+
+/// `|x| < 2^-22`, the XP factor tests' epsilon (`[0x8029d4]`).
+const XP_FACTOR_EPSILON: f64 = 1.0 / 4_194_304.0;
+
+/// The XP line, `0x637ac0` (a named kill) and `0x637cd0` (the plain forms). No victim is
+/// `COMBATLOG_XPGAIN_FIRSTPERSON_UNNAMED`. A named kill needs the active player (`0x637b06`;
+/// `rest` `None` writes nothing), and is plain `COMBATLOG_XPGAIN_FIRSTPERSON` unless its rest
+/// state has a row whose factor is neither 0 nor 1 (`0x637b3e`-`0x637b6a`). Then it is that
+/// state's key in the table `0x864330`, `COMBATLOG_XPGAIN_EXHAUSTION<state>`, with the signed
+/// bonus, `total - base` prefixed `+` unless negative (`0x637c07`-`0x637c25`), and the row's name
+/// as the state word (`0x637c31`). The table has no entry 0 and ends at 5: a row there writes
+/// nothing. State 3's entry names the global `NULL`, which 1.12 does not define: `GetText` answers
+/// the empty string for it (`0x703c02`) and `0x637bef` tests only for null, so the reference
+/// formats that line from an empty template, which `keyed` drops. No shipped row reaches it:
+/// `Exhaustion.dbc` gives state 3 a factor of 1, the plain form.
+///
+/// The group float the packet carries (vmangos always 1.0, `Player.cpp:3039`) picks the `_GROUP`
+/// and `_RAID` forms (`0x637b70`-`0x637bd5`, `0x637cd0`); the parser drops it, so they are not
+/// built.
 pub(super) fn xp_gain_line(
     victim: Option<&str>,
     total: u32,
-    bonus: u32,
+    base: u32,
+    rest: Option<RestState>,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
     use benilla_ui::strings::Arg;
-    match victim {
-        Some(name) if bonus > 0 => keyed(
-            get,
-            "COMBATLOG_XPGAIN_EXHAUSTION1",
-            &[
-                Arg::S(name),
-                Arg::D(i64::from(total)),
-                Arg::S(&format!("+{bonus}")),
-                Arg::S(RESTED_STATE),
-            ],
-        ),
-        Some(name) => keyed(
-            get,
-            "COMBATLOG_XPGAIN_FIRSTPERSON",
-            &[Arg::S(name), Arg::D(i64::from(total))],
-        ),
-        None => keyed(
+    let Some(name) = victim else {
+        return keyed(
             get,
             "COMBATLOG_XPGAIN_FIRSTPERSON_UNNAMED",
             &[Arg::D(i64::from(total))],
-        ),
+        );
+    };
+    let rest = rest?;
+    let plain = || {
+        keyed(
+            get,
+            "COMBATLOG_XPGAIN_FIRSTPERSON",
+            &[Arg::S(name), Arg::D(i64::from(total))],
+        )
+    };
+    let Some((state_word, factor)) = rest.row else {
+        return plain();
+    };
+    if factor.abs() < XP_FACTOR_EPSILON || (factor - 1.0).abs() < XP_FACTOR_EPSILON {
+        return plain();
+    }
+    let key = match rest.state {
+        1 => "COMBATLOG_XPGAIN_EXHAUSTION1",
+        2 => "COMBATLOG_XPGAIN_EXHAUSTION2",
+        3 => "NULL",
+        4 => "COMBATLOG_XPGAIN_EXHAUSTION4",
+        5 => "COMBATLOG_XPGAIN_EXHAUSTION5",
+        _ => return None,
+    };
+    // `sub`, `jns`: the 32-bit difference's sign.
+    let bonus = total.wrapping_sub(base) as i32;
+    let sign = if bonus >= 0 { "+" } else { "" };
+    keyed(
+        get,
+        key,
+        &[
+            Arg::S(name),
+            Arg::D(i64::from(total)),
+            Arg::S(&format!("{sign}{bonus}")),
+            Arg::S(state_word),
+        ],
+    )
+}
+
+/// The XP loss line, `COMBATLOG_XPLOSS_FIRSTPERSON_UNNAMED` with the packet's XP negated as a
+/// 32-bit signed value (`0x637f70`).
+pub(super) fn xp_loss_line(total: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    keyed(
+        get,
+        "COMBATLOG_XPLOSS_FIRSTPERSON_UNNAMED",
+        &[benilla_ui::strings::Arg::D(i64::from(
+            (total as i32).wrapping_neg(),
+        ))],
+    )
+}
+
+/// A combat line whose names are in: composed, routed, then the word its formatter raises after
+/// it. A line that does not compose (no template, no school name) writes neither.
+pub(super) fn write_combat_line(
+    script: &mut benilla_ui::script::UiScript,
+    windows: &mut ChatWindows,
+    line: &super::combat::PendingCombat,
+) {
+    let Some(text) = super::combat::compose_line(script, line.family, line.variant, &line.fills)
+    else {
+        return;
+    };
+    route(script, windows, &ChatEvent::text_only(line.kind, text));
+    if let Some(word) = &line.word {
+        crate::ui_unit::fire_combat_text(
+            script,
+            word.message_type,
+            line.word_data(word),
+            word.extra.clone(),
+        );
     }
 }
 
-/// The `_EXHAUSTION1` template's state word. 1.12 has no GlobalString for it and the reference's
-/// own table is untraced; rested is the only bonus state vmangos sets (`Player.cpp:17990-17993`).
-const RESTED_STATE: &str = "Rested";
+/// An honor credit's line, routed, then the `HONOR_GAINED` word `0x625270` raises after it
+/// (`0x62539d`, `0x6253e4`), signed: the stock handler prefixes "+" only to a positive number
+/// (`Blizzard_CombatText.lua:234`). A missing template writes neither (`0x6253ee`).
+pub(super) fn write_honor_line(
+    script: &mut benilla_ui::script::UiScript,
+    windows: &mut ChatWindows,
+    victim: Option<&str>,
+    rank_title: Option<&str>,
+    honor: i32,
+) {
+    let Some(text) = honor_gain_line(victim, rank_title, honor, &globals(script)) else {
+        return;
+    };
+    route(
+        script,
+        windows,
+        &ChatEvent::text_only(ChatEventKind::CombatHonorGain, text),
+    );
+    crate::ui_unit::fire_combat_text(script, "HONOR_GAINED", Some(honor.to_string()), None);
+}
 
 /// The honor line (`0x625270`): `COMBATLOG_HONORAWARD` with no victim, `COMBATLOG_HONORGAIN` for
 /// `honor > 0`, else `COMBATLOG_DISHONORGAIN`. No `rank_title` leaves the rank slot empty, as in
@@ -669,7 +840,8 @@ pub(super) fn feed_chat(
     commands: Res<NetCommands>,
     // The text-emote tables, and our guid for the "are you the performer?" test.
     emote_texts: Option<Res<EmoteTexts>>,
-    self_guid: Res<SelfGuid>,
+    // Our guid, and the selection: `UNIT_COMBAT`'s two tokens.
+    (self_guid, selection): (Res<SelfGuid>, Option<Res<crate::target::Selection>>),
     // The `$`-macro subject: monster and BG lines expand against their addressee's descriptors.
     guids: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
@@ -692,6 +864,18 @@ pub(super) fn feed_chat(
     let mut still = Vec::new();
     for item in pending {
         match item {
+            Pending::UnitCombat(ev) => {
+                let is_target = selection
+                    .as_ref()
+                    .and_then(|s| s.target)
+                    .is_some_and(|t| guids.0.get(&ev.guid) == Some(&t));
+                crate::ui_unit::fire_unit_combat(
+                    &mut script,
+                    &ev,
+                    self_guid.0 == Some(ev.guid),
+                    is_target,
+                );
+            }
             Pending::Event(mut event) => {
                 deliver(&mut script, &mut windows, &mut channels, &mut event);
             }
@@ -956,32 +1140,41 @@ pub(super) fn feed_chat(
             Pending::XpGain {
                 victim,
                 total,
-                bonus,
-                tries,
+                base,
             } => {
-                // `victim == 0` is the unnamed form, with no name to wait for.
-                let name = if victim == 0 {
-                    None
-                } else {
-                    let resolved = names
-                        .resolve_unit(
-                            victim,
-                            guids.0.get(&victim).and_then(|&e| stores.get(e).ok()),
-                            Ask::at(tries == 0, &commands),
-                        )
-                        .map(str::to_string);
-                    if resolved.is_none() && tries < NAME_MAX_TRIES {
-                        still.push(Pending::XpGain {
-                            victim,
-                            total,
-                            bonus,
-                            tries: tries + 1,
-                        });
-                        continue;
-                    }
-                    Some(resolved.unwrap_or_else(|| "Unknown".into()))
-                };
-                let line = xp_gain_line(name.as_deref(), total, bonus, &globals(&script));
+                // A victim's name never waits: each template names it through `GetUnitName`
+                // (`0x609210`, from `0x637ac0`), whose miss without `UNKNOWNOBJECT` is the literal
+                // "Unknown Being", where `GetObjectName`'s is `UKNOWNOBJECT`.
+                let name = (victim != 0).then(|| {
+                    super::combat::object_name(
+                        victim,
+                        guids.0.get(&victim).and_then(|e| stores.get(*e).ok()),
+                        &names,
+                        Ask::at(true, &commands),
+                    )
+                    .unwrap_or_else(|| script.unknown_object_text())
+                });
+                let state = self_guid
+                    .0
+                    .and_then(|g| guids.0.get(&g))
+                    .and_then(|e| stores.get(*e).ok())
+                    .map(|me| me.0.player_rest_state().unwrap_or(0));
+                let row = state.and_then(|s| script.exhaustion_row(s));
+                let rest = state.map(|state| RestState {
+                    state,
+                    row: row.as_ref().map(|(n, f)| (n.as_str(), *f)),
+                });
+                let line = xp_gain_line(name.as_deref(), total, base, rest, &globals(&script));
+                if let Some(text) = line {
+                    route(
+                        &mut script,
+                        &mut windows,
+                        &ChatEvent::text_only(ChatEventKind::CombatXpGain, text),
+                    );
+                }
+            }
+            Pending::XpLoss { total } => {
+                let line = xp_loss_line(total, &globals(&script));
                 if let Some(text) = line {
                     route(
                         &mut script,
@@ -994,56 +1187,36 @@ pub(super) fn feed_chat(
                 victim,
                 honor,
                 rank,
-                tries,
+                side,
             } => {
-                // `victim == 0` is the award form: no name, no rank title.
-                let name = if victim == 0 {
-                    None
-                } else {
-                    let resolved = names
-                        .resolve_unit(
-                            victim,
-                            guids.0.get(&victim).and_then(|&e| stores.get(e).ok()),
-                            Ask::at(tries == 0, &commands),
-                        )
-                        .map(str::to_string);
-                    if resolved.is_none() && tries < NAME_MAX_TRIES {
-                        still.push(Pending::HonorGain {
-                            victim,
-                            honor,
-                            rank,
-                            tries: tries + 1,
-                        });
-                        continue;
-                    }
-                    resolved
-                };
-                // The title's side is the victim's and its gender ours (`0x625270` genders against
-                // the local player). No name record means side 0: a creature, where only a racial
-                // leader is ranked (19, "Leader" either side, `HonorMgr.cpp:1075-1076`).
-                let team = names
-                    .player_traits(victim)
-                    .and_then(|(race, _, _)| crate::ui_unit::race_faction_group(race))
-                    .map_or(0, |group| u8::from(group == "Alliance"));
+                // `victim == 0` is the award form: no name, no rank title. A victim's name never
+                // waits (`GetUnitName`, `0x625387`), and its title genders against the active player
+                // (`0x612bf0`, `0x625374`), whose gender `0x5ed5b0` reads from `PLAYER_BYTES_3`
+                // byte 0; a dishonorable kill's template names no rank.
+                let name = (victim != 0).then(|| {
+                    super::combat::object_name(
+                        victim,
+                        guids.0.get(&victim).and_then(|e| stores.get(*e).ok()),
+                        &names,
+                        Ask::at(true, &commands),
+                    )
+                    .unwrap_or_else(|| script.unknown_object_text())
+                });
                 let female = self_guid
                     .0
-                    .and_then(|g| names.player_traits(g))
-                    .is_some_and(|(_, _, gender)| gender == 1);
-                let title = (victim != 0).then(|| script.pvp_rank_title(rank, team, female));
-                let name = (victim != 0).then(|| name.unwrap_or_else(|| "Unknown".into()));
-                let line = honor_gain_line(
+                    .and_then(|g| guids.0.get(&g))
+                    .and_then(|e| stores.get(*e).ok())
+                    .and_then(|me| me.0.player_gender())
+                    == Some(1);
+                let title =
+                    (victim != 0 && honor > 0).then(|| script.pvp_rank_title(rank, side, female));
+                write_honor_line(
+                    &mut script,
+                    &mut windows,
                     name.as_deref(),
                     title.flatten().as_deref(),
                     honor,
-                    &globals(&script),
                 );
-                if let Some(text) = line {
-                    route(
-                        &mut script,
-                        &mut windows,
-                        &ChatEvent::text_only(ChatEventKind::CombatHonorGain, text),
-                    );
-                }
             }
             Pending::TextEmote {
                 performer,
@@ -1093,65 +1266,35 @@ pub(super) fn feed_chat(
                 route(&mut script, &mut windows, &event);
             }
             Pending::Combat(mut line) => {
-                // Both names, looked up with a callback as the line's (`0x6265a7`, `0x6265e0`); its
-                // retries within `tries` ask only a name the cache holds nothing for. Guid 0 is
-                // already filled (`/chattest`).
+                // Names looked up with a callback as the line's (`0x6265a7`, `0x6265e0`), and
+                // asked again only on its first drain; a line waits on an item alone.
                 let ask = Ask::at(line.tries == 0, &commands);
-                let mut wait = false;
-                for (guid, slot) in [(line.subject, 0usize), (line.object, 1usize)] {
-                    if guid == 0 {
-                        continue;
-                    }
-                    match super::combat::object_name(
-                        guid,
-                        guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
-                        &names,
-                        ask,
-                    ) {
-                        Some(name) if slot == 0 => line.fills.attacker = name,
-                        Some(name) => line.fills.victim = name,
-                        None => wait = true,
-                    }
-                }
-                // An item the server answered unknown does not wait: the line composes with what
-                // the arm left in `named` (the reference falls back to `"UKNOWNOBJECT"`).
-                match line.named {
-                    super::combat::Named::Ready => {}
-                    super::combat::Named::Item(entry) => {
-                        match items.template(entry, 0, ask).map(|t| t.name.clone()) {
-                            Some(name) => line.fills.named = name,
-                            None if !items.template_answered_unknown(entry) => wait = true,
-                            None => {}
-                        }
-                    }
-                    super::combat::Named::Unit(guid) => {
-                        match super::combat::object_name(
+                let ready = line.fill_names(
+                    |guid| {
+                        super::combat::logged_name(
                             guid,
                             guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
                             &names,
                             ask,
-                        ) {
-                            Some(name) => line.fills.named = name,
-                            None => wait = true,
+                            &script,
+                        )
+                    },
+                    |entry| match items.template(entry, 0, ask).map(|t| t.name.clone()) {
+                        Some(name) => super::combat::ItemName::Named(name),
+                        None if items.template_answered_unknown(entry) => {
+                            super::combat::ItemName::Unknown
                         }
-                    }
-                }
-                if wait {
+                        None => super::combat::ItemName::Waiting,
+                    },
+                );
+                if !ready {
                     if line.tries < NAME_MAX_TRIES {
                         line.tries += 1;
                         still.push(Pending::Combat(line));
                     }
                     continue;
                 }
-                let composed =
-                    super::combat::compose_line(&script, line.family, line.variant, &line.fills);
-                if let Some(text) = composed {
-                    route(
-                        &mut script,
-                        &mut windows,
-                        &ChatEvent::text_only(line.kind, text),
-                    );
-                }
+                write_combat_line(&mut script, &mut windows, &line);
             }
             Pending::Standing {
                 faction,

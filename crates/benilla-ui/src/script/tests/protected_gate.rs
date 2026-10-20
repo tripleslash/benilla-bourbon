@@ -504,7 +504,10 @@ fn verbs_world(security: AddonSecurity) -> UiScript {
             ..Default::default()
         }),
     );
-    s.set_casting(true);
+    s.set_cast_view(crate::script::CastView {
+        slot: Some(133),
+        ..Default::default()
+    });
     s.set_spell_targeting(true);
     s
 }

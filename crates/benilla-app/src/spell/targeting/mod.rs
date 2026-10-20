@@ -29,8 +29,9 @@
 //! Cancels: ESC through `UIParent.lua:1490` ([`feed_targeting_to_vm`], [`ScriptCursor::stop_targeting`]),
 //! the right-button down edge ([`cancel_targeting_on_right_press`]), a new spell's press, which
 //! aborts and proceeds (`TryCast 0x6e4b60` at `0x6e4d62`), and the bar's re-press of the same
-//! spell (`UseAction 0x4e5ee0`). A cancel clears the word and sends nothing; movement never
-//! cancels (`0x515090`).
+//! spell (`UseAction 0x4e5ee0`). Each is `StopTargeting 0x6e4900`, the cancel with its failed flag
+//! ([`crate::spell::CastCore::stop_targeting`]): the word clears, nothing is sent, and the record's
+//! caster fires `SPELLCAST_FAILED`. Movement never cancels (`0x515090`).
 
 mod corpse;
 mod cursor;
@@ -255,7 +256,7 @@ impl CursorPicks {
 /// The targeting mode, `Some` while the flag_word is nonzero. Entered by the cast-send path
 /// ([`super::cast_target::CastWireTarget::Targeting`]), cleared by a commit or a cancel.
 #[derive(Resource, Default)]
-pub(crate) struct SpellTargeting(Option<Targeting>, u32);
+pub(crate) struct SpellTargeting(Option<Targeting>);
 
 struct Targeting {
     spell_id: u32,
@@ -264,12 +265,20 @@ struct Targeting {
     commit: super::cast_send::CastCommit,
     /// The standing flag_word `0xcecac0`; more than one seam can answer yes to it.
     word: u16,
+    /// The spell holds the in-flight slot `0xceca88`: its attempt pushed it (`0x6e5026`), which
+    /// it does for no item or one with `ITEM_FLAG_PLAYERCAST` (`0x6e500b`-`0x6e501f`).
+    in_slot: bool,
 }
 
 impl SpellTargeting {
     /// `IsTargeting 0x6e48a0`.
     pub(crate) fn active(&self) -> bool {
         self.0.is_some()
+    }
+
+    /// The cursor's spell when it holds the in-flight slot ([`super::inflight::Inflight`]).
+    pub(crate) fn in_slot(&self) -> Option<u32> {
+        self.0.as_ref().filter(|t| t.in_slot).map(|t| t.spell_id)
     }
 
     /// `GetTargetingSpellId 0x6e48e0`, whatever the word wants: for the bar's checked state, the
@@ -312,6 +321,11 @@ impl SpellTargeting {
         self.0.as_ref().map(|t| (t.spell_id, t.commit, t.word))
     }
 
+    /// The standing word and whether its spell holds the slot.
+    fn word_in_slot(&self) -> Option<(u16, bool)> {
+        self.0.as_ref().map(|t| (t.word, t.in_slot))
+    }
+
     /// The pending spell when the standing word answers `wants`. A surface that draws or binds for
     /// one seam reads this, never [`Self::spell`], or an armed lockpick gets an AoE reticle.
     pub(crate) fn spell_for(&self, wants: TargetingWants) -> Option<u32> {
@@ -321,12 +335,33 @@ impl SpellTargeting {
             .map(|t| t.spell_id)
     }
 
+    /// The cursor up for a spell its attempt pushed.
+    #[cfg(test)]
     pub(crate) fn enter(&mut self, spell_id: u32, commit: super::cast_send::CastCommit, word: u16) {
+        self.enter_as(spell_id, commit, word, true);
+    }
+
+    /// The cursor up, holding the in-flight slot or not (`in_slot`).
+    pub(crate) fn enter_as(
+        &mut self,
+        spell_id: u32,
+        commit: super::cast_send::CastCommit,
+        word: u16,
+        in_slot: bool,
+    ) {
         self.0 = Some(Targeting {
             spell_id,
             commit,
             word,
+            in_slot,
         });
+    }
+
+    /// The pop of the cursor's spell (`0x6e4b2c`); the word stays as it stands.
+    pub(super) fn leave_slot(&mut self) {
+        if let Some(t) = &mut self.0 {
+            t.in_slot = false;
+        }
     }
 
     /// The pending cast when the standing word answers `wants`, so no commit fires on a word its
@@ -352,22 +387,9 @@ impl SpellTargeting {
         }
     }
 
+    /// The word cleared, by a commit or a cancel ([`crate::spell::CastCore::cancel`]).
     pub(crate) fn clear(&mut self) {
         self.0 = None;
-    }
-
-    /// A cancel, not a commit: `StopTargeting 0x6e4900`, or `TryCast`'s supersede (`0x6e4d62`),
-    /// both the cast abort with its disarm flag (`0x6e4940(cl=1)`), counted for the tradeskill
-    /// repeat's disarm ([`Self::aborts`]). Nothing up, nothing aborts (`0x6e4907`).
-    pub(crate) fn cancel(&mut self) {
-        if self.0.take().is_some() {
-            self.1 = self.1.wrapping_add(1);
-        }
-    }
-
-    /// The cancels so far, wrapping: only a change is read.
-    pub(crate) fn aborts(&self) -> u32 {
-        self.1
     }
 }
 
@@ -379,9 +401,9 @@ impl SpellTargeting {
 pub(crate) fn cancel_targeting_on_right_press(
     mut presses: MessageReader<WorldRightPress>,
     payload_held: Res<crate::ui_script::CursorPayloadHeld>,
-    mut targeting: ResMut<SpellTargeting>,
+    mut cursor: crate::spell::CursorCancel,
 ) {
-    if !targeting.active() {
+    if !cursor.active() {
         // A press buffered while idle must not replay as a cancel once the mode turns on.
         presses.clear();
         return;
@@ -390,7 +412,7 @@ pub(crate) fn cancel_targeting_on_right_press(
         return;
     }
     debug!("ui_action: targeting cancelled (right-click)");
-    targeting.cancel();
+    cursor.stop_targeting();
 }
 
 /// [`SpellTargeting::picks_self`] as the frame began, which the world pick reads
@@ -412,14 +434,10 @@ pub(crate) fn publish_picks_self(
 }
 
 /// Push the targeting state into the VM each frame, before the input pass, so a word armed last
-/// frame stands for this frame's clicks: the ESC chain's word, the bag and doll pickup reroute's
-/// item half, and `CURRENT_SPELL_CAST_CHANGED` when the awaited spell changes. That event hides the
-/// enchant confirm popups (`UIParent.lua:449`). Its one emitter `0x4b3250` fires at each arm
-/// (`0x6e5333`), the attempt's end (`0x6e51e3`), the send (`0x6e54f0`), the bind (`0x6e5b40`) and
-/// the cancel (`0x6e4940`); here it is signalled once per change of the spell, so a cancel and an
-/// arm of another spell in one frame still count (#1986). A script call pushes the same view inside
-/// the call ([`ScriptCursor::push_view`]), and the VM holds the spell it was told, so one change
-/// signals once.
+/// frame stands for this frame's clicks: the ESC chain's word and the bag and doll pickup
+/// reroute's item half. A script call pushes the same view inside the call
+/// ([`ScriptCursor::push_view`]). The word's changes signal `CURRENT_SPELL_CAST_CHANGED` where they
+/// are made ([`crate::ui_cast::CastReport::Changed`]).
 pub(crate) fn feed_targeting_to_vm(
     targeting: Res<SpellTargeting>,
     checks: BindChecks,
@@ -427,21 +445,18 @@ pub(crate) fn feed_targeting_to_vm(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
 ) {
     if let Some(mut script) = script {
-        if push_targeting_view(&mut script, &targeting, &checks, &tokens) {
-            script.fire_event("CURRENT_SPELL_CAST_CHANGED", vec![]);
-        }
+        push_targeting_view(&mut script, &targeting, &checks, &tokens);
     }
 }
 
 /// Push what the VM reads of the targeting word: `SpellIsTargeting`, the pickup reroute's item
-/// half, `SpellCanTargetUnit`'s units and the spell awaiting its target, answering whether that
-/// spell changed since the VM was last told, which benilla signals `CURRENT_SPELL_CAST_CHANGED` on.
+/// half and `SpellCanTargetUnit`'s units.
 fn push_targeting_view(
     script: &mut benilla_ui::script::UiScript,
     targeting: &SpellTargeting,
     checks: &BindChecks,
     tokens: &crate::ui_unit::UnitTokens,
-) -> bool {
+) {
     script.set_spell_targeting(targeting.active());
     script.set_item_pick_armed(targeting.wants(TargetingWants::Item));
     // `SpellCanTargetUnit(unit)`: the VM resolves the token to a guid (`0x6e6d3a`), and
@@ -457,7 +472,6 @@ fn push_targeting_view(
         })
         .collect();
     script.set_spell_targetable_units(targetable);
-    script.tell_targeting_spell(targeting.spell())
 }
 
 /// `BindTarget 0x6e5b40`'s unit arm, for the world click (`0x493540` at `4935d5`) and
@@ -486,13 +500,18 @@ fn bind_target_unit(
 }
 
 /// `BindTarget`'s merge (`6e602c`–`6e60d7`): a bind whose mask is in `0x8202`, a unit or a corpse,
-/// runs the range test `0x6e47b0` (`6e6063`). Out of range raises "Out of range." or "Target too
-/// close" and binds nothing; otherwise the emptied word commits (`SendCast 0x6e54f0`).
+/// runs the range test `0x6e47b0` (`6e6063`). Out of range is reported (`0x6e6089`, "Out of
+/// range." or "Target too close") and binds nothing; otherwise the emptied word commits (`SendCast
+/// 0x6e54f0`).
 ///
-/// Deviation: a range failure leaves targeting armed and working. The reference's report
-/// (`0x6e6089`) also cancels the cast (`0x6e2218` → `0x6e4940`), clearing its caster, and then
-/// restores the pre-click word, so every later click fails the caster test (`0x6e5b93`) and the
-/// cursor is stranded until a cancel; that is a defect, and staying armed is what a player can use.
+/// Deviation: a range failure leaves targeting armed and working. The reference's report cancels
+/// the cast (`0x6e2218` → `0x6e4940`): its line, `SPELLCAST_FAILED` and the tradeskill disarm,
+/// which benilla keeps; with the word the bind emptied it also sends `CMSG_CANCEL_CAST` for the
+/// unsent spell (`0x6e4970`) and clears the caster, then restores the pre-click word (`0x6e6096`),
+/// so every later click fails the caster test (`0x6e5b93`) and the cursor is stranded until a
+/// cancel. That is a defect: benilla's cancel finds the cursor up, so it drops the word, with its
+/// signal (`0x6e495c`), instead of sending, and the cursor is re-armed as its attempt left it,
+/// its caster and its hold on the slot included, which is what a player can use.
 fn merge(
     ladder: &mut crate::spell::CastLadder,
     spell_id: u32,
@@ -502,7 +521,11 @@ fn merge(
 ) {
     if let Some(reason) = range {
         debug!("ui_action: cast {spell_id} not bound at {bound:x?} — range ({reason:#x})");
-        ladder.cast_errors.push_local(spell_id, reason);
+        let word = ladder.ground.word_in_slot();
+        ladder.report_local(crate::ui_action::CastFail::local(spell_id, reason));
+        if let Some((word, in_slot)) = word {
+            ladder.core().rearm_cursor(spell_id, commit, word, in_slot);
+        }
         return;
     }
     debug!("ui_action: cast {spell_id} committed at {bound:x?}");
@@ -521,16 +544,16 @@ pub(crate) struct ScriptCursor<'w, 's> {
 
 impl ScriptCursor<'_, '_> {
     /// Push the targeting view into the VM after a script call, inside the call, as the reference's
-    /// `SpellIsTargeting` (`0x6e6cd0`) reads the word the call left: whether the spell awaiting its
-    /// target changed, which the caller signals once the host is back.
-    pub(crate) fn push_view(&self, script: &mut benilla_ui::script::UiScript) -> bool {
-        push_targeting_view(script, &self.ladder.ground, &self.checks, &self.tokens)
+    /// `SpellIsTargeting` (`0x6e6cd0`) reads the word the call left.
+    pub(crate) fn push_view(&self, script: &mut benilla_ui::script::UiScript) {
+        push_targeting_view(script, &self.ladder.ground, &self.checks, &self.tokens);
     }
 
     /// `SpellTargetUnit(unit)` (`0x6e6d90`). The binding already raised the usage and
     /// unknown-token errors and dropped a call made while not targeting. Here a token that names
-    /// no unit raises "Out of range." (0x59) and ends targeting, as the reference's abort clears
-    /// the word, and a unit goes to [`bind_target_unit`].
+    /// no unit is reported as "Out of range." (0x59) for the record's spell (`0x6e6e12`-
+    /// `0x6e6e20`), whose tail cancels the cursor's spell in flight, and a unit goes to
+    /// [`bind_target_unit`].
     pub(crate) fn spell_target_unit(&mut self, token: &str) {
         // An earlier call may have bound or ended the cast: not targeting, no-op.
         let Some(spell_id) = self.ladder.ground.spell() else {
@@ -540,10 +563,10 @@ impl ScriptCursor<'_, '_> {
             Some((entity, guid)) => bind_target_unit(&mut self.ladder, &self.checks, entity, guid),
             None => {
                 debug!("ui_action: SpellTargetUnit({token}) names no unit — cast {spell_id} ends");
-                self.ladder
-                    .cast_errors
-                    .push_local(spell_id, super::validator::ERR_OUT_OF_RANGE);
-                self.ladder.ground.clear();
+                self.ladder.report_local(crate::ui_action::CastFail::local(
+                    spell_id,
+                    super::validator::ERR_OUT_OF_RANGE,
+                ));
             }
         }
     }
@@ -554,11 +577,10 @@ impl ScriptCursor<'_, '_> {
         self.picks.bind_all(&mut self.ladder, &self.checks);
     }
 
-    /// The ESC chain's `SpellStopTargeting()` (`0x6e6e30`): `StopTargeting 0x6e4900`, word
-    /// cleared, no packet.
+    /// The ESC chain's `SpellStopTargeting()` (`0x6e6e30`): `StopTargeting 0x6e4900`.
     pub(crate) fn stop_targeting(&mut self) {
         debug!("ui_action: targeting cancelled (ESC chain)");
-        self.ladder.ground.cancel();
+        self.ladder.stop_targeting();
     }
 }
 
@@ -592,7 +614,7 @@ mod tests {
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
         world.init_resource::<crate::spell::Cooldowns>();
         world.init_resource::<crate::spell::SpellModifiers>();
-        world.init_resource::<crate::ui_action::CastErrors>();
+        world.init_resource::<crate::ui_cast::CastReports>();
         world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
         world.init_resource::<SpellTargeting>();
@@ -695,7 +717,9 @@ mod tests {
     }
 
     fn errors(world: &mut World) -> Vec<crate::ui_action::CastFail> {
-        std::mem::take(&mut world.resource_mut::<crate::ui_action::CastErrors>().0)
+        world
+            .resource_mut::<crate::ui_cast::CastReports>()
+            .take_refusals()
     }
 
     /// `0x6e6d90` past the binding's checks: a token naming no unit ends the cast with "Out of
@@ -1257,11 +1281,22 @@ mod tests {
                 false,
                 false,
             ),
+            // Friendly by `UnitReaction`'s party rung (`0x6062b0`), which reads the party slots
+            // alone: a party member of the other faction binds both words, a raid member neither.
             (
                 "a party member of the other faction",
                 gf::player(2),
                 None,
                 (ALLY, Party),
+                false,
+                true,
+                true,
+            ),
+            (
+                "a raid member of the other faction",
+                gf::player(2),
+                None,
+                (ALLY, Raid),
                 false,
                 false,
                 false,
@@ -1320,6 +1355,7 @@ mod tests {
                         Party => group.members = vec![member(0)],
                         Raid => {
                             group.group_type = crate::ui_party::GROUPTYPE_RAID;
+                            group.own_raid_row = Some(ME);
                             group.members = vec![member(1)];
                         }
                     }

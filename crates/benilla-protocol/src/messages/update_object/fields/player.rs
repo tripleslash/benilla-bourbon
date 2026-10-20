@@ -55,6 +55,12 @@ impl ObjectFields {
             .map(|id| id as i32)
             .filter(|&id| id != 0)
     }
+    /// `ITEM_FIELD_ENCHANTMENT + 1` (field 23): a charter's signature count, in slot 0's duration
+    /// dword beside the petition id; the tooltip reads it at `flds+0x44` (`0x52ba51`). vmangos
+    /// leaves the write out (`PetitionsHandler.cpp:307`), so it reads 0 there.
+    pub fn item_petition_signatures(&self) -> u32 {
+        self.get_u32(FIELD_ITEM_ENCHANTMENT + 1).unwrap_or(0)
+    }
     /// `ITEM_FIELD_ENCHANTMENT + 3*slot + 2`: charges left, shown as `" (N Charges)"` if nonzero.
     /// The tooltip skips the duration; a countdown comes from `SMSG_ITEM_ENCHANT_TIME_UPDATE`.
     pub fn item_enchant_charges(&self, slot: u8) -> u32 {
@@ -313,6 +319,11 @@ impl ObjectFields {
         self.get_u32(FIELD_PLAYER_SELF_RES_SPELL)
             .filter(|&s| s != 0)
     }
+    /// `PLAYER_FIELD_PVP_MEDALS` (player block `+0x1034`): medal `n` is bit `n - 1`, which the item
+    /// tooltip (`0x52d70a`) and the usable gate (`0x5eaa89`) test.
+    pub fn player_pvp_medals(&self) -> Option<u32> {
+        self.get_u32(FIELD_PLAYER_PVP_MEDALS)
+    }
     /// `PLAYER_BYTES`: skinColor, faceType, hairStyle and hairColor, bytes 0 to 3.
     pub fn player_bytes(&self) -> Option<u32> {
         self.get_u32(FIELD_PLAYER_BYTES)
@@ -331,6 +342,11 @@ impl ObjectFields {
     /// drained 1:1 while kills pay double (`GetXPRestBonus`), so the bar's rested span is twice it.
     pub fn player_rest_state_experience(&self) -> Option<u32> {
         self.get_u32(FIELD_PLAYER_REST_STATE_EXPERIENCE)
+    }
+    /// `PLAYER_BYTES_3` byte 0: the player's gender, 1 female, which `CGPlayer_C::GetGender`
+    /// (`0x5ed5b0`) reads for the active player in place of `UNIT_FIELD_BYTES_0` byte 2.
+    pub fn player_gender(&self) -> Option<u8> {
+        self.get_u32(FIELD_PLAYER_BYTES_3).map(|v| v as u8)
     }
     /// `PLAYER_BYTES_3` byte 1: drunkenness, the high byte of `drunk & 0xFFFE` in the low half
     /// (`SetDrunkValue`); the reference clamps it to 100 and scales by 0.01 (`0x5e2a90`).

@@ -656,15 +656,13 @@ pub(crate) struct Model {
     pub(crate) macro_icon_source: Option<MacroIconSource>,
     /// `ToggleSpellAutocast` ids for `CMSG_PET_SPELL_AUTOCAST` (`0x2F3`), which names a spell.
     pub(crate) pet_spell_autocasts: Vec<u32>,
-    /// An auto-repeat or cast that `SpellStopCasting()` can stop, not a channel (`0x6e6e80`). Its
-    /// 1 or nil matters: the ESC chain (`UIParent.lua:1489`) reaches `CloseAllWindows()` on nil.
-    pub(crate) casting: bool,
+    /// The player's cast state, which `IsCurrentAction`, `IsAutoRepeatAction` and
+    /// `SpellStopCasting()` (`0x6e6e80`) read: the last's 1 or nil matters, as the ESC chain
+    /// (`UIParent.lua:1489`) reaches `CloseAllWindows()` on nil.
+    pub(crate) cast_view: super::action::CastView,
     /// Spell targeting is on (`SpellIsTargeting`, `0x6e6cd0`); it gates `SpellStopTargeting()`,
     /// whose nil the ESC chain falls through on (`UIParent.lua:1490`).
     pub(crate) spell_targeting: bool,
-    /// The spell awaiting its target as the host last told this VM (`0x6e48e0`), so the host's
-    /// pushes signal `CURRENT_SPELL_CAST_CHANGED` once per change, whichever push sees it.
-    pub(crate) targeting_spell: Option<u32>,
     /// The units, by guid, for which `SpellCanTargetUnit`'s armed unit word clears fully, which
     /// stock unit frames ask before they call `SpellTargetUnit`; a token resolves to its guid
     /// through [`Self::unit_guids`].
@@ -1076,12 +1074,20 @@ pub(crate) struct Model {
     /// creator's and the giver's lookups pass a callback (`0x52e204`, `0x52e29d`) at every build,
     /// and a hovered bag or paper-doll slot's `OnUpdate` builds again each frame.
     pub(crate) item_name_asks: HashSet<u64>,
+    /// Guids `UnitName` read off a unit with no object and missed in the name cache, for the app
+    /// to ask: the no-object leg's lookup passes a callback (`0x5171eb`, `0x517205`).
+    pub(crate) unit_name_asks: HashSet<u64>,
     /// Charter item guids whose build missed the petition record or its owner's name, for the
     /// app to ask: both lookups pass a callback (`0x52b93b`, `0x52b9d2`) at every build.
     pub(crate) petition_asks: HashSet<u64>,
     /// `ItemRandomProperties` id to its view, pushed whole at startup: a clicked tooltip cannot
     /// repaint on a late answer. The reference reads its loaded store `0xc0dbd4` (`0x52c991`).
     pub(crate) random_properties: HashMap<u32, super::RandomPropertyView>,
+    /// `SpellItemEnchantment` id to the name a tooltip's enchant line prints, pushed whole at
+    /// startup for the sources that carry a bare id, as a link's block does (`0x52c9f2`).
+    pub(crate) enchant_names: HashMap<u32, String>,
+    /// Every spell the player knows, the set `0x60c740` tests for the active player.
+    pub(crate) known_spells: HashSet<u32>,
     /// The player's level, class, race and skills, for a tooltip's red requirement lines.
     pub(crate) player_req: PlayerReqState,
     /// `Lock.dbc` by lock id, pushed whole at startup, and what the active player opens locks with
@@ -1203,6 +1209,8 @@ pub(crate) struct Model {
     pub(crate) xml_creating: bool,
     /// Per live-unit guid, reach for `CanInspect`/`CheckInteractDistance`; absent: nil.
     pub(crate) unit_reach: HashMap<u64, super::UnitReach>,
+    /// The host's relation functions the six relation verbs ask; `None` holds no unit.
+    pub(crate) unit_relations: Option<std::rc::Rc<dyn super::UnitRelations>>,
 
     /// The skills pane's snapshot and the display tree built from it.
     pub(crate) skills: skills::SkillsState,
@@ -1315,6 +1323,23 @@ pub(crate) struct Model {
 }
 
 impl Model {
+    /// The profession windows open (`[0xbde040]`, `[0xbdcfb8]`): the trade skill's line and the
+    /// craft's type while each window is open, which a close zeroes (`0x4fc870`, `0x4f5fe0`).
+    pub(crate) fn open_professions(&self) -> super::OpenProfessions {
+        super::OpenProfessions {
+            trade_skill: self
+                .trade_skill
+                .as_ref()
+                .filter(|_| self.trade_skill_open)
+                .map(|t| t.line),
+            craft: self
+                .craft
+                .as_ref()
+                .filter(|_| self.craft_open)
+                .map(|c| c.craft_type),
+        }
+    }
+
     /// The charsets the character name check holds a name to: this client's `Region` and locale.
     pub(crate) fn name_charsets(&self) -> super::NameCharsets {
         super::NameCharsets::for_client(self.client_region, self.locale)
@@ -1389,14 +1414,24 @@ impl Model {
     }
 
     /// The unit a token with a `target` hop and no push of its own names: the resolver's guid
-    /// (`0x515970`, which the getters call before their own object lookup, `0x468460`), then that
-    /// guid's snapshot. A token without a hop is the app's to push, base by base, and reads
-    /// nothing here.
+    /// (`0x515970`, which the getters call before their own object lookup, `0x468460`), then what
+    /// each getter reads for that guid. A held unit's snapshot first; with no object, the group
+    /// row naming the guid, whose own token's push carries its records (`0x496400`, `0x496420`)
+    /// and the roster's `UnitExists` (`0x491900`); off the roster, the app's no-object entry, a
+    /// name from the name cache (`0x5171eb`) and nothing more. A token without a hop is the app's
+    /// to push, base by base, and reads nothing here.
     fn chained_unit(&self, token: &str) -> Option<&UnitState> {
         match parse_unit_token(token) {
             UnitTokenParse::Unit { base, hops } if hops > 0 => {
                 let guid = self.unit_guids.resolve_unit(base, hops)?;
-                self.units_by_guid.get(&guid)
+                match self.units_by_guid.get(&guid) {
+                    Some(held) if held.has_object => Some(held),
+                    unheld => self
+                        .unit_guids
+                        .roster_token(guid)
+                        .and_then(|t| self.pushed_unit(&t))
+                        .or(unheld),
+                }
             }
             _ => None,
         }
@@ -1616,9 +1651,8 @@ impl Model {
             macro_icons: Vec::new(),
             macro_icon_source: None,
             pet_spell_autocasts: Vec::new(),
-            casting: false,
+            cast_view: Default::default(),
             spell_targeting: false,
-            targeting_spell: None,
             spell_targetable_units: HashSet::new(),
             talents: super::talent::TalentUiState::default(),
             talent_learns: Vec::new(),
@@ -1816,8 +1850,11 @@ impl Model {
             item_sets: HashMap::new(),
             item_set_asks: HashSet::new(),
             item_name_asks: HashSet::new(),
+            unit_name_asks: HashSet::new(),
             petition_asks: HashSet::new(),
             random_properties: HashMap::new(),
+            enchant_names: HashMap::new(),
+            known_spells: HashSet::new(),
             item_stat_asks: HashSet::new(),
             item_stat_reads: HashSet::new(),
             player_req: PlayerReqState::default(),
@@ -1909,6 +1946,7 @@ impl Model {
             world_frame_made: false,
             xml_creating: false,
             unit_reach: HashMap::new(),
+            unit_relations: None,
             chat_input: Vec::new(),
             skills: skills::SkillsState::default(),
             skills_groups: Vec::new(),

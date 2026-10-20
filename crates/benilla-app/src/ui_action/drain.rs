@@ -111,7 +111,7 @@ impl AttackPress<'_, '_> {
             e,
             guid,
             engaged,
-            &mut seam.queued_melee,
+            &mut seam.slots,
             &mut seam.auto_repeat,
             &mut seam.sheath,
             &mut seam.ecs,
@@ -143,11 +143,12 @@ impl AttackPress<'_, '_> {
     }
 }
 
-/// Sends the queued GameObject openers through the cast ladder. The reference reaches `TryCast`
-/// from a right-click as from a button (`0x5f35c0`, `0x6e5a90`, `0x6e4b60`), so every rung
-/// applies: a second click on a chest mid-cast is `0x6e4d43`'s silent same-spell bail.
-pub(super) fn drain_go_openers(
-    mut queue: ResMut<crate::ui_action::GoOpenerCasts>,
+/// Sends the queued right-click casts through the cast ladder. The reference reaches `TryCast`
+/// from a right-click as from a button (`0x5f35c0` and `0x5f06dc`, then `0x6e5a90`, `0x6e4b60`),
+/// so every rung applies: a second click on a chest mid-cast is `0x6e4d43`'s silent same-spell
+/// bail, and a skin while another spell is in flight `0x6e4d97`'s 0x61.
+pub(crate) fn drain_click_casts(
+    mut queue: ResMut<crate::ui_action::ClickCasts>,
     script: Option<NonSendMut<UiScript>>,
     targeting: cast_target::CastTargeting,
     mut ladder: CastLadder,
@@ -160,14 +161,26 @@ pub(super) fn drain_go_openers(
     }
     let ctx = targeting.context();
     let mut script = script;
-    for opener in std::mem::take(&mut queue.0) {
-        match opener {
-            super::GoOpener::Spell { spell_id, go_guid } => {
+    for cast in std::mem::take(&mut queue.0) {
+        match cast {
+            super::ClickCast::AtObject { spell_id, go_guid } => {
                 debug!("ui_action: gameobject opener casts {spell_id} at {go_guid:#x}");
                 ladder.send_at_object(spell_id, &ctx, go_guid);
             }
+            super::ClickCast::AtUnit {
+                spell_id,
+                entity,
+                guid,
+            } => {
+                debug!("ui_action: right-click casts {spell_id} at {guid:#x}");
+                ladder.send(
+                    spell_id,
+                    &targeting.context_at(entity, guid),
+                    crate::spell::CastCommit::Spell,
+                );
+            }
             // The key goes through the shared `CGItem::Use` fork, as a bag click does.
-            super::GoOpener::Key(it) => {
+            super::ClickCast::Key(it) => {
                 let Some(script) = script.as_deref_mut() else {
                     continue;
                 };
@@ -185,22 +198,6 @@ pub(super) fn drain_go_openers(
                     &mut ui_errors,
                 );
             }
-        }
-    }
-}
-
-impl ActionPress<'_, '_> {
-    /// How many by-key refusals are queued.
-    pub(crate) fn error_count(&self) -> usize {
-        self.ui_errors.0.len()
-    }
-
-    /// Stamp the refusals queued since `from` with the input events the call that raised them ran
-    /// under, so the feed signals `UI_ERROR_MESSAGE` for them as the reference does, inside the
-    /// press.
-    pub(crate) fn stamp_errors(&mut self, from: usize, input: benilla_ui::script::InputEvents) {
-        for e in self.ui_errors.0.iter_mut().skip(from) {
-            e.input = input;
         }
     }
 }
@@ -268,14 +265,14 @@ pub(crate) fn use_action(
         }
         Some(b) if b.kind == ACTION_KIND_SPELL => {
             // Re-pressing the spell whose targeting cursor is up cancels it before `TryCast`
-            // (`GetTargetingSpellId 0x6e48e0`, `StopTargeting 0x6e4900`), as `CastBookSpell`
+            // (`GetTargetingSpellId 0x4e60ea`, `StopTargeting 0x4e60f3`), as `CastBookSpell`
             // does for the spellbook (`0x4b3474`, [`crate::ui_spellbook::cast_spell`]).
             if ladder.ground.spell() == Some(b.action) {
                 debug!(
                     "ui_action: cast {} re-pressed — targeting toggles off",
                     b.action
                 );
-                ladder.ground.cancel();
+                ladder.stop_targeting();
                 return UseOutcome::Done;
             }
             // A live `ActiveIconID` spell re-pressed cancels its aura (`0x4e55f0`, cancel

@@ -26,8 +26,10 @@ use crate::items::Items;
 use crate::net::{ClientCommand, NetCommands, Objects, SelfPlayer};
 use crate::query_cache::Ask;
 
-use super::{cast_target, validator, AutoRepeatActive};
-use crate::ui_action::{reagent_totem_refusal, CastErrors, Spells};
+use super::inflight::Inflight;
+use super::{cast_target, validator, AutoRepeatActive, CastCore, Held};
+use crate::ui_action::{reagent_totem_refusal, CastFail, Spells};
+use crate::ui_cast::CastReports;
 
 /// What the commit sends: `SendCast 0x6e54f0` branches on whether the pending-cast guid
 /// (`0xceac48`, the item's when TryCast got one, else the caster's) is the caster's; the item arm
@@ -122,11 +124,42 @@ pub(crate) struct CastLadder<'w, 's> {
     pub(crate) cooldowns: ResMut<'w, crate::spell::Cooldowns>,
     /// The talent spell modifiers the power gate's cost goes through.
     pub(crate) spell_mods: Res<'w, crate::spell::SpellModifiers>,
-    pub(crate) cast_errors: ResMut<'w, CastErrors>,
+    /// The cast's reports, in the order they are made ([`crate::ui_cast`]).
+    pub(crate) reports: ResMut<'w, CastReports>,
     pub(crate) auto_repeat: ResMut<'w, AutoRepeatActive>,
     pub(crate) trade_skill_opens: ResMut<'w, crate::ui_tradeskill::TradeSkillOpens>,
     pub(crate) ground: ResMut<'w, super::targeting::SpellTargeting>,
     pub(crate) held_for_pick: ResMut<'w, HeldForPick>,
+}
+
+/// Whether `ReportCastFailure 0x6e1a00` reaches its tail for `fail`
+/// ([`crate::ui_action::report_reaches_pop`]), asking the item cache as its lookup does.
+pub(crate) fn reaches_tail(
+    fail: &CastFail,
+    spells: Option<&Spells>,
+    items: &Items,
+    net: &NetCommands,
+) -> bool {
+    crate::ui_action::report_reaches_pop(
+        fail.reason,
+        fail.arg,
+        spells.and_then(|s| s.catalog.get(fail.spell_id)),
+        spells.map(|s| &s.forms),
+        // The lookup with the callback `0x6e29b0` (`0x6e1ea4`).
+        |item| items.template(item, 0, Ask::Event(net)).is_some(),
+    )
+}
+
+/// The client's own refusal through the reporter: its line, then its tail.
+fn refuse(
+    core: &mut CastCore,
+    spells: Option<&Spells>,
+    items: &Items,
+    net: &NetCommands,
+    fail: CastFail,
+) {
+    let reaches = reaches_tail(&fail, spells, items, net);
+    core.report(fail, false, reaches);
 }
 
 /// What a targeting-cursor click bound: what `BindLocation 0x6e60f0` or `BindTarget 0x6e5b40`
@@ -149,6 +182,29 @@ pub(crate) enum TargetedBind {
 }
 
 impl CastLadder<'_, '_> {
+    /// The reporters' state ([`CastCore`]).
+    pub(crate) fn core(&mut self) -> CastCore<'_> {
+        CastCore {
+            pending: &mut self.pending,
+            queued_melee: &mut self.queued_melee,
+            ground: &mut self.ground,
+            reports: &mut self.reports,
+            net: &self.commands,
+        }
+    }
+
+    /// A refusal of the client's own through `ReportCastFailure 0x6e1a00`: its line, then its
+    /// tail.
+    pub(crate) fn report_local(&mut self, fail: CastFail) {
+        let reaches = reaches_tail(&fail, self.spells.as_deref(), &self.items, &self.commands);
+        self.core().report(fail, false, reaches);
+    }
+
+    /// `StopSpellTargeting 0x6e4900`; whether the cursor was up.
+    pub(crate) fn stop_targeting(&mut self) -> bool {
+        self.core().stop_targeting()
+    }
+
     /// Set what the gate's tag 2 allowed the script call about to be applied.
     pub(crate) fn permit(&mut self, may_cast: bool) {
         if let Some(permit) = self.permit.as_mut() {
@@ -212,14 +268,30 @@ impl CastLadder<'_, '_> {
                 },
             },
         };
-        let _ = self.commands.0.send(cmd);
         let now = Instant::now();
-        let def = self.spells.as_ref().and_then(|s| s.catalog.get(spell_id));
-        record_commit(&mut self.pending, &self.items, commit, spell_id, def, now);
-        if let Some(d) = def {
+        // The spell its attempt pushed stays in the slot through the send; the guard holds it from
+        // here, as for a cast sent at its attempt.
+        if self.ground.in_slot() == Some(spell_id) {
+            self.pending
+                .push(spell_id, item_flags(&self.items, commit), now);
+        }
+        // The bind emptied the word, and signals before it sends (`0x6e60cb`, `0x6e615d`).
+        self.ground.clear();
+        self.reports.changed();
+        let _ = self.commands.0.send(cmd);
+        // The send's own signal (`0x6e589d`), ungated as the attempt's send is (#1583).
+        self.reports.changed();
+        let auto_repeat = self
+            .spells
+            .as_ref()
+            .and_then(|s| s.catalog.get(spell_id))
+            .is_some_and(|d| d.auto_repeat());
+        if auto_repeat {
+            self.core().pop_if(spell_id);
+        }
+        if let Some(d) = self.spells.as_ref().and_then(|s| s.catalog.get(spell_id)) {
             self.cooldowns.start_gcd(spell_id, d, now, &self.spell_mods);
         }
-        self.ground.clear();
     }
 
     /// TryCast's dead rung alone, for the Attack button, whose short-circuit (`0x6e4c7a`) leaves
@@ -230,7 +302,11 @@ impl CastLadder<'_, '_> {
         self_store: Option<&crate::net::ObjectStore>,
     ) -> bool {
         let def = self.spells.as_ref().and_then(|s| s.catalog.get(spell_id));
-        caster_dead_refusal(spell_id, def, self_store, &mut self.cast_errors)
+        let dead = caster_dead(spell_id, def, self_store);
+        if dead {
+            self.report_local(CastFail::local(spell_id, REASON_DEAD));
+        }
+        dead
     }
 
     /// Run the ladder for `spell_id` and commit as `commit` says, with no attack pick: no 1.12
@@ -291,6 +367,13 @@ impl CastLadder<'_, '_> {
             debug!("cast {spell_id} refused by the protected-action gate, silently");
             return;
         }
+        let mut core = CastCore {
+            pending: &mut self.pending,
+            queued_melee: &mut self.queued_melee,
+            ground: &mut self.ground,
+            reports: &mut self.reports,
+            net: &self.commands,
+        };
         send_spell_cast(
             spell_id,
             ctx,
@@ -304,27 +387,26 @@ impl CastLadder<'_, '_> {
             &self.items,
             &mut self.sheath,
             &mut self.ecs,
-            &mut self.pending,
-            &mut self.queued_melee,
+            &mut core,
             &mut self.cooldowns,
             &self.spell_mods,
-            &mut self.cast_errors,
             &mut self.auto_repeat,
             &mut self.trade_skill_opens,
-            &mut self.ground,
             &mut self.held_for_pick,
         );
     }
 }
 
+/// "You are dead", TryCast's dead rung's refusal (`0x6e4c66`).
+const REASON_DEAD: u8 = 0x13;
+
 /// TryCast's dead rung (`0x6e4c49`), after the profession intercept and ahead of the Attack
 /// short-circuit (`0x6e4c7a`): a dead or ghost caster (`0x605f30`) is refused with 0x13, "You are
 /// dead", unless the spell is castable while dead (`Attributes & 0x800000`, `0x6e4c55`).
-fn caster_dead_refusal(
+fn caster_dead(
     spell_id: u32,
     def: Option<&benilla_formats::SpellDisplay>,
     self_store: Option<&crate::net::ObjectStore>,
-    cast_errors: &mut CastErrors,
 ) -> bool {
     if !self_store.is_some_and(|s| s.0.is_dead_or_ghost())
         || def.is_some_and(|d| d.attributes & benilla_formats::ATTR_CASTABLE_WHILE_DEAD != 0)
@@ -332,44 +414,49 @@ fn caster_dead_refusal(
         return false;
     }
     debug!("ui_action: cast {spell_id} refused locally — dead or a ghost (0x13)");
-    cast_errors.push_local(spell_id, 0x13);
     true
 }
 
-/// The commit's hold on the in-flight slot: the attempt's push (`0x6e5026`) and the send's pop of
-/// an auto-repeat spell ([`crate::spell::PendingCast::commit`]). An on-next-swing spell
-/// (`Attributes & 0x404`) is the queued strike's, which [`crate::spell::QueuedMeleeSpell`] holds
-/// and the refusal exempts. An item's flags come from its cached template; one not cached yet reads
-/// 0 and holds nothing, where the reference's item always has its record.
-fn record_commit(
-    pending: &mut crate::spell::PendingCast,
-    items: &Items,
-    commit: CastCommit,
-    spell_id: u32,
-    def: Option<&benilla_formats::SpellDisplay>,
-    now: Instant,
-) {
-    if def.is_some_and(|d| d.on_next_swing()) {
-        return;
-    }
-    let item_flags = match commit {
+/// The item's template flags for `commit`, `None` for no item; an item not cached yet reads 0,
+/// where the reference's item always has its record.
+fn item_flags(items: &Items, commit: CastCommit) -> Option<u32> {
+    match commit {
         CastCommit::Spell => None,
         CastCommit::Item { entry, .. } => {
             Some(items.template(entry, 0, Ask::Read).map_or(0, |t| t.flags))
         }
-    };
-    pending.commit(
-        spell_id,
-        item_flags,
-        def.is_some_and(|d| d.auto_repeat()),
-        now,
-    );
+    }
 }
 
-/// Run the ladder for one cast and commit it. The commit tail (`0x6e54f0`): a ranged spell arms the
-/// ranged stance (`0x6e5930`, `SetSheatheState(2,1,1)`; the echoed START re-requests it), an
-/// auto-repeat spell sets the sticky armed state (`0x6e593b`, `|= 0x200`, the Load/Hold idle's
-/// gate), and the packet goes out.
+/// What the attempt pushes into the in-flight slot (`0x6e4ff5`-`0x6e5026`), if anything: every
+/// spell, as the active player's cast time is never negative, but an item's only when its flags
+/// carry [`benilla_protocol::messages::ITEM_FLAG_PLAYERCAST`] (`0x6e500b`-`0x6e501f`). An
+/// on-next-swing spell (`Attributes & 0x404`) is the queued strike's, a spell that raises the
+/// cursor the cursor's.
+fn held(
+    items: &Items,
+    commit: CastCommit,
+    def: Option<&benilla_formats::SpellDisplay>,
+    cursor: bool,
+) -> Option<Held> {
+    let item_flags = item_flags(items, commit);
+    if item_flags.is_some_and(|f| f & benilla_protocol::messages::ITEM_FLAG_PLAYERCAST == 0) {
+        return None;
+    }
+    Some(if def.is_some_and(|d| d.on_next_swing()) {
+        Held::Strike
+    } else if cursor {
+        Held::Cursor
+    } else {
+        Held::Cast { item_flags }
+    })
+}
+
+/// Run the ladder for one cast and commit it. The commit tail (`0x6e54f0`): the packet goes out,
+/// then the GCD, then a ranged spell arms the ranged stance (`0x6e5930`,
+/// `SetSheatheState(2,1,1)`; the echoed START re-requests it), and an auto-repeat spell sets the
+/// sticky armed state (`0x6e593b`, `|= 0x200`, the Load/Hold idle's gate), stops the attack and
+/// leaves the slot.
 ///
 /// The `pending` guard is TryCast's IsCasting refusal (`6e4d97`, [`crate::spell::PendingCast`]):
 /// any press while a cast is in flight is refused locally. The spell awaiting its click is in
@@ -389,16 +476,20 @@ fn send_spell_cast(
     items: &Items,
     sheath: &mut MessageWriter<crate::creature_anim::SheathRequest>,
     ecs: &mut Commands,
-    pending: &mut crate::spell::PendingCast,
-    queued_melee: &mut crate::spell::QueuedMeleeSpell,
+    core: &mut CastCore,
     cooldowns: &mut crate::spell::Cooldowns,
     spell_mods: &crate::spell::SpellModifiers,
-    cast_errors: &mut CastErrors,
     auto_repeat: &mut AutoRepeatActive,
     trade_skill_opens: &mut crate::ui_tradeskill::TradeSkillOpens,
-    ground: &mut super::targeting::SpellTargeting,
     held_for_pick: &mut HeldForPick,
 ) {
+    // A refusal through the reporter, then the attempt's `xor al,al` exit.
+    macro_rules! refuse {
+        ($fail:expr) => {{
+            refuse(core, spells, items, commands, $fail);
+            return;
+        }};
+    }
     let now = Instant::now();
     let def = spells.and_then(|s| s.catalog.get(spell_id));
     // TryCast's first branch (`6e4bce`, ahead of every gate): an `Effect[0] == TRADE_SKILL` cast
@@ -416,48 +507,37 @@ fn send_spell_cast(
         crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, ecs, commands);
         return;
     }
-    if caster_dead_refusal(spell_id, def, ctx.rel.self_store, cast_errors) {
+    if caster_dead(spell_id, def, ctx.rel.self_store) {
+        refuse!(CastFail::local(spell_id, REASON_DEAD));
+    }
+    // TryCast's same-spell test (`6e4d43`): the spell in the in-flight slot bails with no red
+    // line, whether it is cast, queued on the next swing (1.12 has no re-press-to-unqueue) or
+    // awaiting its click, ahead of the IsTargeting leg.
+    if core.slot().map(Inflight::spell_id) == Some(spell_id) {
+        debug!("ui_action: cast {spell_id} suppressed — already in flight");
         return;
     }
-    // The spell awaiting its click is in flight (`0x6e5026` precedes the arm that raises the
-    // cursor), so TryCast's same-spell test (`6e4d43`) bails on it with no red line, ahead of the
-    // IsTargeting leg.
-    if ground.spell() == Some(spell_id) {
-        debug!("ui_action: cast {spell_id} suppressed — already awaiting its click");
-        return;
-    }
-    // TryCast's IsTargeting leg (`6e4d62`): a new press while the cursor is up clears the word,
-    // with no packet, and continues down the ladder.
-    if ground.active() {
+    // TryCast's IsTargeting leg (`6e4d62`): a new press while the cursor is up cancels it with its
+    // failed flag (`0x6e4d71`, `0x6e4940(1, 1, 0x1c)`), with no packet, and continues down the
+    // ladder.
+    if core.stop_targeting() {
         debug!("ui_action: cast {spell_id} supersedes the targeting cursor");
-        ground.cancel();
     }
-    // An on-next-swing spell (`Attributes & 0x404`) queues on the melee slot
-    // ([`crate::spell::QueuedMeleeSpell`]) and does not guard: `6e4dbe` exempts an in-flight
-    // record with the 0x404 bits.
-    let on_next_swing = def.is_some_and(|d| d.on_next_swing());
-    // Re-pressing the queued strike is the same-spell bail (`6e4d43`), with no red line: 1.12
-    // has no re-press-to-unqueue.
-    if on_next_swing && queued_melee.current() == Some(spell_id) {
-        debug!("ui_action: cast {spell_id} suppressed — already queued on next swing");
-        return;
-    }
-    if pending.in_flight(now) {
-        // The already-casting refusal: the same spell bails with no red line (`6e4d43`), another
-        // errors 0x61 "Another action is in progress" (`6e4d97`). The gate reads the in-flight record's
-        // `Attributes & 0x404`, never the pressed spell's, and a recorded cast is never
-        // on-next-swing, so every press class is refused here.
-        if pending.current(now) != Some(spell_id) {
-            cast_errors.push_local(spell_id, 0x61);
-        }
-        debug!("ui_action: cast {spell_id} suppressed — a cast is already in flight");
-        return;
+    // The already-casting refusal (`6e4d97`-`6e4dd4`): a spell in flight refuses every press with
+    // 0x61 "Another action is in progress", unless it is on-next-swing (`Attributes & 0x404`,
+    // `6e4dbe`), the gate reading the slot's spell, never the pressed one's.
+    if core
+        .slot()
+        .is_some_and(|top| !matches!(top, Inflight::Strike(_)))
+    {
+        debug!("ui_action: cast {spell_id} refused — another spell is in flight (0x61)");
+        refuse!(CastFail::local(spell_id, 0x61));
     }
     // `CheckReagentsAndTotems 0x6e4000` (TryCast's `0x6e4ded`, before the validator call at
     // `0x6e4f3b`): a missing tool or reagent refuses with 0x78/0x5c. Local because vmangos answers
     // a pickless cast with `ITEM_GONE`.
-    if reagent_totem_refusal(spell_id, def, ctx.rel.self_store, objects, cast_errors) {
-        return;
+    if let Some(fail) = reagent_totem_refusal(spell_id, def, ctx.rel.self_store, objects) {
+        refuse!(fail);
     }
     // The equipped-item requirement (`0x6e4e03`), the same search the button greying and tooltip
     // use. It sits above the crowd-control rung, so a stunned caster without the weapon is told
@@ -467,8 +547,7 @@ fn send_spell_cast(
             if !super::usable::equipped_item_fits(d, store, objects, items) {
                 let reason = super::usable::equipped_item_reason(d);
                 debug!("ui_action: cast {spell_id} refused locally — equipped item ({reason:#x})");
-                cast_errors.push_local(spell_id, reason);
-                return;
+                refuse!(CastFail::local(spell_id, reason));
             }
         }
     }
@@ -484,8 +563,7 @@ fn send_spell_cast(
                 0x12
             };
             debug!("ui_action: cast {spell_id} refused locally — no combo points ({reason:#x})");
-            cast_errors.push_local(spell_id, reason);
-            return;
+            refuse!(CastFail::local(spell_id, reason));
         }
     }
     // TryCast's attack pick (`6e4edf`–`6e4f02`): a spell of predicate `0x6e5200`, pressed while
@@ -542,8 +620,7 @@ fn send_spell_cast(
                     debug!(
                     "ui_action: cast {spell_id} refused locally — unbindable target ({reason:#x})"
                 );
-                    cast_errors.push_local(spell_id, reason);
-                    return;
+                    refuse!(CastFail::local(spell_id, reason));
                 }
                 // TryCast's tail after ArmCast returns false (`6e5045`–`6e507b`) runs below the
                 // validator, so this parks and fires where the cursor would come up: a mounted
@@ -563,8 +640,7 @@ fn send_spell_cast(
             let row = spells.and_then(|s| s.ranges.get(d.range_index));
             if let Some(reason) = ctx.range.refusal(d, row, spell_mods) {
                 debug!("ui_action: cast {spell_id} refused locally — range ({reason:#x})");
-                cast_errors.push_local(spell_id, reason);
-                return;
+                refuse!(CastFail::local(spell_id, reason));
             }
         }
     }
@@ -608,8 +684,7 @@ fn send_spell_cast(
                 }
             }
         }
-        cast_errors.push_local(spell_id, commit.not_ready_reason());
-        return;
+        refuse!(CastFail::local(spell_id, commit.not_ready_reason()));
     }
     // The power gate (`0x60962c`, spells only: the item fork jumps past it to `0x6096b3`): raw
     // `UNIT_FIELD_POWER[type]` (a negative PowerType reads health) signed-compared against the
@@ -619,8 +694,7 @@ fn send_spell_cast(
         if let (Some(d), Some(store)) = (def, ctx.rel.self_store) {
             if !super::usable::can_afford(d, store, spell_mods) {
                 debug!("ui_action: cast {spell_id} refused locally — not enough power (0x4d)");
-                cast_errors.push_local(spell_id, 0x4d);
-                return;
+                refuse!(CastFail::local(spell_id, 0x4d));
             }
         }
     }
@@ -660,10 +734,9 @@ fn send_spell_cast(
              mechanic {mechanic:?})"
         );
         match mechanic {
-            Some(m) => cast_errors.push_local_arg(spell_id, reason, m),
-            None => cast_errors.push_local(spell_id, reason),
+            Some(m) => refuse!(CastFail::local_arg(spell_id, reason, m)),
+            None => refuse!(CastFail::local(spell_id, reason)),
         }
-        return;
     }
     // The mounted block (`0x609c6c`): a live `UNIT_FIELD_MOUNTDISPLAYID` refuses 0x39 "You are
     // mounted" unless `Attributes & 0x01000000`. Local, because vmangos silently dismounts
@@ -675,16 +748,14 @@ fn send_spell_cast(
         def,
     ) {
         debug!("ui_action: cast {spell_id} refused locally — mounted (0x39)");
-        cast_errors.push_local(spell_id, 0x39);
-        return;
+        refuse!(CastFail::local(spell_id, 0x39));
     }
     // The water leg (`0x609d39–0x609d7b`): 0x50 "Cannot use while swimming" for mounts, Travel
     // Form and food, 0x58 "Can only use while swimming" for Aquatic Form. Local, because vmangos's
     // CheckCast has no such arm and would grant Aquatic Form on land.
     if let Some(reason) = validator::cast_water_refusal(ctx.self_move_flags, def) {
         debug!("ui_action: cast {spell_id} refused locally — water side ({reason:#x})");
-        cast_errors.push_local(spell_id, reason);
-        return;
+        refuse!(CastFail::local(spell_id, reason));
     }
     // The moving leg (`0x609de3`): a cast-time press while moving refuses 0x2e. Local, because
     // vmangos accepts the cast and then interrupts it mid-bar.
@@ -697,8 +768,7 @@ fn send_spell_cast(
         let cast_time_ms = spells.map_or(0, |s| s.cast_time_ms(d, caster_level, spell_mods));
         if validator::cast_moving_refusal(ctx.self_move_flags, cast_time_ms, def) {
             debug!("ui_action: cast {spell_id} refused locally — moving (0x2e)");
-            cast_errors.push_local(spell_id, 0x2e);
-            return;
+            refuse!(CastFail::local(spell_id, 0x2e));
         }
     }
     // The form leg (`0x609e49` → `0x612480`; `0x609ca2` is the posture gate): 0x3d "Can't do that
@@ -715,36 +785,50 @@ fn send_spell_cast(
         if let Some(refusal) = d.form_refusal(form, form_is_stance) {
             let reason = refusal.reason();
             debug!("ui_action: cast {spell_id} refused locally — the form gate ({reason:#x})");
-            cast_errors.push_local(spell_id, reason);
-            return;
+            refuse!(CastFail::local(spell_id, reason));
         }
     }
     // Every rung passed: the attempt fills the pending record with the player as its caster
     // (`0x6e4fb1`), ahead of the arm and whatever it decides.
-    pending.fill_record();
-    // The deferred ArmCast-false refusal (`6e5050`): every rung passed and nothing bound. Its
-    // report (`0x6e1a00`) pops the spell the attempt pushed (`0x6e5026`) through `0x6e4940(cl=1)`,
-    // whose event clears the caster word; an item without `ITEM_FLAG_PLAYERCAST` was never pushed
-    // and leaves it.
+    core.pending.fill_record();
+    // The push (`0x6e5026` → `0x6e4ad0`), which signals: the same spell bailed above, so the slot
+    // never holds it here. The arm signals whatever it then decides (`0x6e5333`).
+    let held = held(items, commit, def, pending_word.is_some());
+    if let Some(held) = held {
+        core.push(spell_id, held, now);
+    }
+    core.reports.changed();
+    // The deferred ArmCast-false refusal (`6e5045`-`6e50a9`): every rung passed and nothing
+    // bound. The attempt pushed the spell before the arm (`0x6e5026`), so its report finds it in
+    // flight and cancels it (`0x6e2201` → `0x6e2218` → `0x6e4940(1, 1, reason)`): the word is
+    // already zero (`0x6e5057`, `0x6e5098`), so the cancel goes on the wire (`0x6e4970`), the pop
+    // restores the save, and the record's caster fires `SPELLCAST_FAILED`. An item without
+    // `ITEM_FLAG_PLAYERCAST` was never pushed, and its report fires the event itself. The tail
+    // signals once more as it leaves (`0x6e5069`).
     if let Some(reason) = deferred_refusal {
         debug!("ui_action: cast {spell_id} refused locally — the cast-arm tail ({reason:#x})");
-        cast_errors.push_local(spell_id, reason);
-        let pushed = match commit {
-            CastCommit::Spell => true,
-            CastCommit::Item { entry, .. } => items
-                .template(entry, 0, Ask::Read)
-                .is_some_and(|t| t.flags & benilla_protocol::messages::ITEM_FLAG_PLAYERCAST != 0),
-        };
-        if pushed {
-            pending.take_caster_event();
-        }
+        refuse(
+            core,
+            spells,
+            items,
+            commands,
+            CastFail::local(spell_id, reason),
+        );
+        core.reports.changed();
         return;
     }
-    // The deferred cursor entry (`6e50c8`): every rung passed, the cursor waits for its click.
+    // The deferred cursor entry (`6e50c8`): every rung passed, the cursor waits for its click, and
+    // the attempt signals as it returns (`0x6e51e3`).
     if let Some(word) = pending_word {
         debug!("ui_action: cast {spell_id} awaits its click — targeting cursor up ({word:#06x})");
-        ground.enter(spell_id, commit, word);
+        core.ground.enter_as(spell_id, commit, word, held.is_some());
+        core.reports.changed();
         return;
+    }
+    // A candidate the arm bound goes through `BindTarget`'s merge, which signals before it sends
+    // (`0x6e60cb`); a word of 0 sends with no bind (`0x6e5349`).
+    if explicit_object.is_some() || item_target.is_some() || target.is_some() {
+        core.reports.changed();
     }
     // The wand handoff (`0x60959e`): a new cast cancels the running repeat only when it carries
     // `AttributesEx3 & 0x400000` (wand Shoot 5019), so Auto Shot survives. `CMSG_CANCEL_CAST`
@@ -762,29 +846,8 @@ fn send_spell_cast(
             crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, ecs, commands);
         }
     }
-    if let Some(d) = def {
-        if let Ok((e, engaged)) = self_player.single() {
-            if d.ranged_attack() {
-                sheath.write(crate::creature_anim::SheathRequest {
-                    entity: e,
-                    state: 2,
-                    ceremony: false,
-                });
-            }
-            if d.auto_repeat() {
-                ecs.entity(e).insert(crate::creature_anim::AutoRepeatArmed);
-                // The autorepeat key (`0xceac30`, written at `0x6e5947`) the button's checked
-                // state reads.
-                auto_repeat.0 = Some(spell_id);
-                // The commit's StopAttack (`0x6e5976` → `0x5ecac0`), gated only on the caster
-                // being the active player (`0x6e5957`–`0x6e5972`): starting a repeat ends the
-                // melee swing and its queued strike. This is where melee and auto-repeat are kept
-                // exclusive. It runs after the arm above, so it never cancels this repeat.
-                crate::creature_anim::stop_attack_local(engaged, queued_melee, commands);
-            }
-        }
-    }
-    // `SendCast 0x6e54f0`: one targets block, two opcodes.
+    // `SendCast 0x6e54f0`: one targets block, two opcodes, sent first (`0x6e5872`); everything the
+    // send does after it follows the packet.
     let _ = commands.0.send(match commit {
         CastCommit::Spell => match (explicit_object, item_target) {
             // A lock opener bound by its click; `BindTarget`'s GameObject arm fills the block.
@@ -814,13 +877,46 @@ fn send_spell_cast(
             },
         },
     });
+    // The send's own signal (`0x6e589d`), for the active player's send. The reference signals
+    // only beside the precast visual it starts there (`0x6e5898`), so not for a spell whose
+    // precast already plays (`0x6e588f`, the unit's `[+0xc8c]`, which `0x6ec220` sets through
+    // `0x60d020`); benilla starts no precast at the send (#1583), so it signals every send.
+    core.reports.changed();
+    // The GCD arms at the send (`0x6e2de0` from `0x6e58fb`), after the packet; a failed cast
+    // result clears it (`0x6e1630`).
+    if let Some(d) = def {
+        cooldowns.start_gcd(spell_id, d, now, spell_mods);
+    }
+    if let Some(d) = def {
+        if let Ok((e, engaged)) = self_player.single() {
+            // The ranged stance (`0x6e5930`, `SetSheatheState(2, 1, 1)`) for a ranged or
+            // auto-repeat spell (`0x6e591c`, `0x6e5922`).
+            if d.ranged_attack() {
+                sheath.write(crate::creature_anim::SheathRequest {
+                    entity: e,
+                    state: 2,
+                    ceremony: false,
+                });
+            }
+            if d.auto_repeat() {
+                // The sticky armed state (`0x6e593b`, `|= 0x200`) and the autorepeat key
+                // (`0xceac30`, written at `0x6e594c`) the button's checked state reads.
+                ecs.entity(e).insert(crate::creature_anim::AutoRepeatArmed);
+                auto_repeat.0 = Some(spell_id);
+                // StopAttack (`0x6e5976` → `0x5ecac0`), gated only on the caster being the active
+                // player (`0x6e5957`–`0x6e5972`): starting a repeat ends the melee swing and its
+                // queued strike, which the repeat's push moved into the save, so its cancel is
+                // the packet alone. This is where melee and auto-repeat are kept exclusive. It
+                // runs after the arm above, so it never cancels this repeat.
+                crate::creature_anim::stop_attack_local(engaged, core);
+            }
+        }
+    }
     // The in-flight slot (`0xceca88`, `0x6e5026`): every cast holds it until its result, a ranged
-    // shot included; only an auto-repeat spell is popped after the send. The item arm's window is
-    // shorter because vmangos answers some `CMSG_USE_ITEM` legs with
-    // `SMSG_INVENTORY_CHANGE_FAILURE` and no cast result.
-    record_commit(pending, items, commit, spell_id, def, now);
-    if on_next_swing {
-        queued_melee.arm(spell_id);
+    // shot included; only an auto-repeat spell is popped after the send, last, which signals
+    // (`0x6e597b`-`0x6e5989`).
+    if def.is_some_and(|d| d.auto_repeat()) {
+        core.pop_if(spell_id);
     }
     // TryCast's post-send tail (`6e51b5`): a spell that initiates auto-attack (on-next-swing
     // `0x404` or `AttributesEx & 0x200`, not the GO-deferred Ex2 bit 20) starts the swing at its
@@ -850,11 +946,8 @@ fn send_spell_cast(
             }
         }
     }
-    // The GCD arms at send (`0x6e2de0` from `0x6e58fb`); a failed cast result clears it
-    // (`0x6e1630`).
-    if let Some(d) = def {
-        cooldowns.start_gcd(spell_id, d, now, spell_mods);
-    }
+    // The attempt signals as it returns (`0x6e51e3`).
+    core.reports.changed();
 }
 
 #[cfg(test)]
@@ -911,7 +1004,7 @@ mod tests {
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
         world.init_resource::<crate::spell::Cooldowns>();
         world.init_resource::<crate::spell::SpellModifiers>();
-        world.init_resource::<CastErrors>();
+        world.init_resource::<CastReports>();
         world.init_resource::<AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
         world.init_resource::<crate::spell::SpellTargeting>();
@@ -988,7 +1081,11 @@ mod tests {
 
         // PLAIN is still in flight, so OTHER is refused at `0x6e4d97`, ahead of the fill.
         send(&mut world, OTHER, CastCommit::Spell);
-        assert_eq!(world.resource::<CastErrors>().0.len(), 1, "refused 0x61");
+        assert_eq!(
+            world.resource::<CastReports>().refusals().len(),
+            1,
+            "refused 0x61"
+        );
         assert!(!take(&mut world), "a refused attempt fills nothing");
         world
             .resource_mut::<crate::spell::PendingCast>()
@@ -1007,6 +1104,105 @@ mod tests {
             !take(&mut world),
             "the empty weapon hand's report popped the spell and spent the word"
         );
+    }
+
+    /// The arm's refusal (`0x6e5045`-`0x6e50a9`) comes after the attempt's push (`0x6e5026`), so
+    /// its report finds the spell in flight and cancels it (`0x6e2218` → `0x6e4940(1, 1,
+    /// reason)`): no word is up, so the cancel goes on the wire (`0x6e4970`), and the record's
+    /// caster fires `SPELLCAST_FAILED` after the line, then the tradeskill disarm. The slot's push
+    /// and pop and the attempt's arm and tail each signal `CURRENT_SPELL_CAST_CHANGED`.
+    #[test]
+    fn an_arm_refusal_cancels_the_spell_it_pushed_on_the_wire() {
+        use crate::ui_cast::{CastBarEdge, CastReport};
+        use benilla_formats::SpellDisplay;
+        // Rockbiter Weapon, `ENCHANT_ITEM_TEMPORARY` on the weapon hand, with none worn.
+        const ROCKBITER: u32 = 8017;
+        let (mut world, rx) = world();
+        let mut spells = crate::ui_action::Spells::empty_for_tests();
+        spells.catalog = benilla_formats::SpellCatalog::from_displays(
+            [(
+                ROCKBITER,
+                SpellDisplay {
+                    targets: 0x10,
+                    attributes: 0x0005_0200,
+                    effects: [benilla_formats::SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, 0, 0],
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        world.insert_resource(spells);
+        send(&mut world, ROCKBITER, CastCommit::Spell);
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent[..],
+                [ClientCommand::CancelCast {
+                    spell_id: ROCKBITER
+                }]
+            ),
+            "the cancel and no cast: {sent:?}"
+        );
+        let reports = &world.resource::<CastReports>().0;
+        assert!(
+            matches!(
+                reports[..],
+                [
+                    CastReport::Changed,
+                    CastReport::Changed,
+                    CastReport::Refused(CastFail {
+                        spell_id: ROCKBITER,
+                        ..
+                    }),
+                    CastReport::Changed,
+                    CastReport::Bar(CastBarEdge::Failed),
+                    CastReport::TradeSkillDisarm,
+                    CastReport::Changed,
+                ]
+            ),
+            "the push's and the arm's signals (`0x6e5026`, `0x6e5333`), the line, the pop's \
+             signal, its event, the disarm, and the tail's signal (`0x6e5069`)"
+        );
+        assert!(!world.resource::<crate::spell::PendingCast>().in_flight());
+    }
+
+    /// A standing enemy word with nothing to bind is refused by the attempt's tail after the arm
+    /// (`0x6e507b`-`0x6e50a9`, "You have no target" with no selection), so the spell was pushed:
+    /// its report cancels it on the wire and fires `SPELLCAST_FAILED`.
+    #[test]
+    fn an_enemy_spell_with_no_target_is_refused_at_the_arm() {
+        use benilla_formats::SpellDisplay;
+        const FIREBALL: u32 = 133;
+        let (mut world, rx) = world();
+        let mut spells = crate::ui_action::Spells::empty_for_tests();
+        spells.catalog = benilla_formats::SpellCatalog::from_displays(
+            [(
+                FIREBALL,
+                SpellDisplay {
+                    implicit_target_a1: 6,
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        world.insert_resource(spells);
+        send(&mut world, FIREBALL, CastCommit::Spell);
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(sent[..], [ClientCommand::CancelCast { spell_id: FIREBALL }]),
+            "{sent:?}"
+        );
+        let reports = world.resource::<CastReports>();
+        assert_eq!(
+            reports.refusals(),
+            vec![CastFail::local(FIREBALL, cast_target::ERR_NO_TARGET)]
+        );
+        assert!(matches!(
+            reports.edges()[..],
+            [crate::ui_cast::CastBarEdge::Failed]
+        ));
     }
 
     /// TryCast's dead rung (`0x6e4c49`): a corpse and a ghost (health 1, the `PLAYER_FLAGS` bit)
@@ -1083,7 +1279,7 @@ mod tests {
                 "{label}: a refused press never sends"
             );
             assert_eq!(
-                std::mem::take(&mut world.resource_mut::<CastErrors>().0),
+                world.resource_mut::<CastReports>().take_refusals(),
                 vec![CastFail::local(PLAIN, 0x13)],
                 "{label}: \"You are dead\""
             );
@@ -1094,7 +1290,7 @@ mod tests {
                 .expect("one-shot");
             assert!(refused, "{label}: the Attack button stops at the same rung");
             assert_eq!(
-                std::mem::take(&mut world.resource_mut::<CastErrors>().0),
+                world.resource_mut::<CastReports>().take_refusals(),
                 vec![CastFail::local(ATTACK, 0x13)]
             );
         }
@@ -1105,14 +1301,14 @@ mod tests {
             world.resource::<crate::ui_tradeskill::TradeSkillOpens>().0,
             vec![PROFESSION]
         );
-        assert!(world.resource::<CastErrors>().0.is_empty());
+        assert!(world.resource::<CastReports>().refusals().is_empty());
 
         press(&mut world, WHILE_DEAD, ghost);
         assert!(
             matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == WHILE_DEAD),
             "the castable-while-dead attribute waives the rung"
         );
-        assert!(world.resource::<CastErrors>().0.is_empty());
+        assert!(world.resource::<CastReports>().refusals().is_empty());
     }
 
     /// A mashed chest opener goes out once as the GameObject block; the re-click is `6e4d43`'s
@@ -1136,7 +1332,7 @@ mod tests {
         send_at_go(&mut world, OPENING, CHEST);
         assert!(rx.try_recv().is_err(), "no duplicate on the wire");
         assert!(
-            world.resource::<CastErrors>().0.is_empty(),
+            world.resource::<CastReports>().refusals().is_empty(),
             "the same spell's re-press is the reference's same-spell bail (6e4d43), not \"Another \
              action is in progress\""
         );
@@ -1145,7 +1341,7 @@ mod tests {
         send(&mut world, MOUNT, CastCommit::Spell);
         assert!(rx.try_recv().is_err());
         assert_eq!(
-            world.resource::<CastErrors>().0,
+            world.resource::<CastReports>().refusals(),
             vec![CastFail::local(MOUNT, 0x61)],
             "a different spell mid-cast still errors 0x61"
         );
@@ -1153,8 +1349,8 @@ mod tests {
 
     // ── Melee and auto-repeat exclusion ──
     //
-    // The auto-repeat commit calls StopAttack (`0x6e5976` → `0x5ecac0` → `CancelQueuedCast
-    // 0x6e6f30`), and the attack-start's tail (`0x5ecd78`–`0x5ecd95`) cancels the running repeat.
+    // The auto-repeat send calls StopAttack after its packet (`0x6e5976` → `0x5ecac0` →
+    // `CancelQueuedCast 0x6e6f30`), and the attack-start's tail (`0x5ecd78`–`0x5ecd95`) cancels the running repeat.
 
     const AUTO_SHOT: u32 = 75;
     const AIMED_SHOT: u32 = 19434;
@@ -1225,10 +1421,9 @@ mod tests {
             matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == AIMED_SHOT),
             "the shot goes out"
         );
-        let now = Instant::now();
         let pending = world.resource::<crate::spell::PendingCast>();
-        assert_eq!(pending.current(now), Some(AIMED_SHOT), "and holds the slot");
-        assert!(pending.in_flight(now));
+        assert_eq!(pending.current(), Some(AIMED_SHOT), "and holds the slot");
+        assert!(pending.in_flight());
 
         send_at(&mut world, SERPENT_STING, MOB);
         assert!(
@@ -1236,14 +1431,14 @@ mod tests {
             "a press during the cast is not sent"
         );
         assert_eq!(
-            std::mem::take(&mut world.resource_mut::<CastErrors>().0),
+            world.resource_mut::<CastReports>().take_refusals(),
             vec![CastFail::local(SERPENT_STING, 0x61)],
             "\"Another action is in progress\""
         );
         send_at(&mut world, AIMED_SHOT, MOB);
         assert!(rx.try_recv().is_err());
         assert!(
-            world.resource::<CastErrors>().0.is_empty(),
+            world.resource::<CastReports>().refusals().is_empty(),
             "the same shot again is the same-spell bail, with no red line"
         );
 
@@ -1265,9 +1460,7 @@ mod tests {
             Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == AUTO_SHOT
         ));
         assert_eq!(
-            world
-                .resource::<crate::spell::PendingCast>()
-                .current(Instant::now()),
+            world.resource::<crate::spell::PendingCast>().current(),
             None,
             "an auto-repeat spell is popped after the send"
         );
@@ -1277,7 +1470,7 @@ mod tests {
             rx.try_recv(),
             Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == SERPENT_STING
         ));
-        assert!(world.resource::<CastErrors>().0.is_empty());
+        assert!(world.resource::<CastReports>().refusals().is_empty());
 
         // A queued strike lives in its own slot, which the refusal exempts (`6e4dbe`).
         let (mut world, rx) = combat_world(false);
@@ -1287,9 +1480,7 @@ mod tests {
             Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == RAPTOR_STRIKE
         ));
         assert_eq!(
-            world
-                .resource::<crate::spell::PendingCast>()
-                .current(Instant::now()),
+            world.resource::<crate::spell::PendingCast>().current(),
             None
         );
         send_at(&mut world, SERPENT_STING, MOB);
@@ -1301,7 +1492,7 @@ mod tests {
             )),
             "a cast over a queued strike goes out: {sent:?}"
         );
-        assert!(world.resource::<CastErrors>().0.is_empty());
+        assert!(world.resource::<CastReports>().refusals().is_empty());
     }
 
     /// The chained Auto Shot passes every rung after the sting: the sting's GCD is running, but
@@ -1345,14 +1536,12 @@ mod tests {
 
         assert!(rx.try_recv().is_err(), "nothing goes out on the wire");
         assert_eq!(
-            world.resource::<CastErrors>().0,
+            world.resource::<CastReports>().refusals(),
             vec![CastFail::local(AUTO_SHOT, 0x61)],
             "a different spell mid-cast is \"Another action is in progress\", whatever its class"
         );
         assert_eq!(
-            world
-                .resource::<crate::spell::PendingCast>()
-                .current(Instant::now()),
+            world.resource::<crate::spell::PendingCast>().current(),
             Some(FROSTBOLT),
             "the Frostbolt still holds the guard"
         );
@@ -1409,7 +1598,7 @@ mod tests {
             })
         );
         assert!(rx.try_recv().is_err(), "a held press sends nothing");
-        assert!(world.resource::<CastErrors>().0.is_empty());
+        assert!(world.resource::<CastReports>().refusals().is_empty());
         assert_eq!(press(&mut world, SERPENT_STING), None, "no 0x6e5200 bit");
 
         let (mut world, _rx) = combat_world(true);
@@ -1438,7 +1627,7 @@ mod tests {
             .expect("the ladder runs as a one-shot system");
         assert_eq!(held, None, "in flight");
         assert_eq!(
-            world.resource::<CastErrors>().0,
+            world.resource::<CastReports>().refusals(),
             vec![CastFail::local(RAPTOR_STRIKE, 0x61)]
         );
         assert!(rx.try_recv().is_err());
@@ -1463,7 +1652,7 @@ mod tests {
                 .expect("the ladder runs as a one-shot system");
             assert_eq!(held, None, "class {class}: no combo points");
             assert_eq!(
-                world.resource::<CastErrors>().0,
+                world.resource::<CastReports>().refusals(),
                 vec![CastFail::local(EVISCERATE, reason)],
                 "class {class}"
             );
@@ -1471,8 +1660,10 @@ mod tests {
         }
     }
 
-    /// The commit's StopAttack (`0x6e5976`): `CMSG_ATTACKSTOP` (`0x624370`), then `CancelQueuedCast
-    /// 0x6e6f30` hands the queued strike to `CancelCast 0x6e4940(dl=1)` and its `CMSG_CANCEL_CAST`.
+    /// The send's StopAttack (`0x6e5976`), after the packet (`0x6e5872`) and the auto-repeat arm:
+    /// `CMSG_ATTACKSTOP` (`0x624370`), then `CancelQueuedCast 0x6e6f30`, whose save leg sends the
+    /// queued strike's `CMSG_CANCEL_CAST`; the pop comes last (`0x6e5989`), so the save it copies
+    /// back is already empty.
     #[test]
     fn an_auto_repeat_press_stops_the_attack_and_takes_the_queued_strike_with_it() {
         let (mut world, rx) = combat_world(true);
@@ -1483,22 +1674,28 @@ mod tests {
         send_at(&mut world, AUTO_SHOT, MOB);
 
         assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == AUTO_SHOT),
+            "the shot leaves first"
+        );
+        assert!(
             matches!(rx.try_recv(), Ok(ClientCommand::AttackStop)),
-            "the auto-repeat arm calls StopAttack before the cast leaves"
+            "then the send's StopAttack"
         );
         assert!(
             matches!(rx.try_recv(), Ok(ClientCommand::CancelCast { spell_id }) if spell_id == RAPTOR_STRIKE),
-            "the StopAttack tail cancels the queued strike by id"
+            "whose tail cancels the queued strike by id"
         );
-        assert!(
-            matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == AUTO_SHOT),
-            "and then the shot itself commits"
-        );
+        assert!(rx.try_recv().is_err(), "and nothing else");
         assert_eq!(
             world.resource::<crate::spell::QueuedMeleeSpell>().current(),
             None,
             "the queue is empty — the strike's checked ring goes dark"
         );
+        // The shot's push moved the strike into the save, whose cancel (`0x6e6f9d`-`0x6e701a`)
+        // signals nothing: the press signals as one with no strike queued.
+        let (mut bare, _rx) = combat_world(true);
+        send_at(&mut bare, AUTO_SHOT, MOB);
+        assert_eq!(stream(&mut world), stream(&mut bare));
     }
 
     /// `0x5ecac0`'s early-out (`!IsAttacking && [+0xc50] == 0`): with no swing running nothing is
@@ -1589,6 +1786,121 @@ mod tests {
             .insert_template(entry, Some(template));
     }
 
+    /// The reports queued, as names: a change, a bar edge, a refusal, the disarm.
+    fn stream(world: &mut World) -> Vec<&'static str> {
+        world
+            .resource_mut::<CastReports>()
+            .0
+            .drain(..)
+            .map(|r| match r {
+                crate::ui_cast::CastReport::Changed => "CHANGED",
+                crate::ui_cast::CastReport::Bar(crate::ui_cast::CastBarEdge::Failed) => "FAILED",
+                crate::ui_cast::CastReport::Bar(crate::ui_cast::CastBarEdge::Stop) => "STOP",
+                crate::ui_cast::CastReport::Bar(_) => "BAR",
+                crate::ui_cast::CastReport::Refused(_) => "REFUSED",
+                crate::ui_cast::CastReport::TradeSkillDisarm => "DISARM",
+            })
+            .collect()
+    }
+
+    /// An item's cursor holds the slot only when the item carries `ITEM_FLAG_PLAYERCAST`, as the
+    /// attempt pushes before the arm raises the cursor (`0x6e500b`-`0x6e5026`). Pressing a grenade
+    /// again with its cursor up is then no same-spell bail (`0x6e4d43` reads the slot): the press
+    /// supersedes the cursor (`0x6e4d71`), whose cancel signals the word's clear alone and fires
+    /// `SPELLCAST_FAILED`, and raises it again; a flagged item's cursor bails.
+    #[test]
+    fn an_item_cursor_holds_the_slot_only_with_the_flag() {
+        const BOMB: u32 = 4360;
+        const BOMB_SPELL: u32 = 4064;
+        let commit = CastCommit::Item {
+            bag_index: 255,
+            slot: 24,
+            entry: BOMB,
+            spell_index: 0,
+            on_object: None,
+        };
+        for (flags, in_slot) in [
+            (0, false),
+            (benilla_protocol::messages::ITEM_FLAG_PLAYERCAST, true),
+        ] {
+            let (mut world, rx) = world();
+            let mut spells = Spells::empty_for_tests();
+            spells.catalog = benilla_formats::SpellCatalog::from_displays(
+                [(
+                    BOMB_SPELL,
+                    benilla_formats::SpellDisplay {
+                        targets: 0x40,
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            );
+            world.insert_resource(spells);
+            cache_item(&mut world, BOMB, flags);
+
+            send(&mut world, BOMB_SPELL, commit);
+            let ground = world.resource::<crate::spell::SpellTargeting>();
+            assert_eq!(ground.spell(), Some(BOMB_SPELL), "flags {flags:#x}");
+            assert_eq!(ground.in_slot(), in_slot.then_some(BOMB_SPELL));
+            let first = stream(&mut world);
+            assert_eq!(
+                first,
+                if in_slot {
+                    vec!["CHANGED", "CHANGED", "CHANGED"]
+                } else {
+                    vec!["CHANGED", "CHANGED"]
+                },
+                "the push only with the flag, then the arm and the cursor's return"
+            );
+
+            send(&mut world, BOMB_SPELL, commit);
+            assert_eq!(
+                stream(&mut world),
+                if in_slot {
+                    vec![]
+                } else {
+                    vec!["CHANGED", "FAILED", "DISARM", "CHANGED", "CHANGED"]
+                },
+                "flags {flags:#x}"
+            );
+            assert!(world.resource::<crate::spell::SpellTargeting>().active());
+            assert!(rx.try_recv().is_err(), "a cursor sends nothing");
+        }
+    }
+
+    /// The attempt's in-flight rungs and the report's tail read one slot (`0xceca88`): a cast
+    /// running outside it (an item's without `ITEM_FLAG_PLAYERCAST`, or a guard that lapsed) is no
+    /// same-spell bail for a press of its spell (`0x6e4d43`), and that press's refusal finds
+    /// nothing in flight (`0x6e2201`): `SPELLCAST_FAILED`, and no `CMSG_CANCEL_CAST`.
+    #[test]
+    fn a_refusal_of_a_cast_outside_the_slot_sends_no_cancel() {
+        let (mut world, rx) = world();
+        let use_spell = benilla_protocol::messages::ItemUseSpell {
+            spell_id: MOUNT,
+            cooldown_ms: 60_000,
+            category: 0,
+            category_cooldown_ms: 0,
+        };
+        world.resource_mut::<crate::spell::Cooldowns>().start_item(
+            0,
+            &use_spell,
+            None,
+            Instant::now(),
+        );
+        world.spawn((
+            SelfPlayer,
+            crate::creature_anim::Casting {
+                spell_id: MOUNT,
+                until: None,
+            },
+        ));
+
+        send(&mut world, MOUNT, CastCommit::Spell);
+        assert!(rx.try_recv().is_err(), "nothing goes out");
+        assert_eq!(stream(&mut world), ["REFUSED", "FAILED"]);
+    }
+
     /// An item use whose flags carry `ITEM_FLAG_PLAYERCAST` (the Hearthstone's 64) holds the slot
     /// like a spell: a double-click bails with no red line (`6e4d43`), a different spell errors
     /// 0x61 (`6e4d97`), and nothing reaches the wire.
@@ -1606,14 +1918,14 @@ mod tests {
         send(&mut world, HEARTHSTONE, HEARTH_COMMIT);
         assert!(rx.try_recv().is_err(), "no duplicate on the wire");
         assert!(
-            world.resource::<CastErrors>().0.is_empty(),
+            world.resource::<CastReports>().refusals().is_empty(),
             "the same spell's re-press is the reference's same-spell bail (6e4d43), not a red line"
         );
 
         send(&mut world, MOUNT, HEARTH_COMMIT);
         assert!(rx.try_recv().is_err());
         assert_eq!(
-            world.resource::<CastErrors>().0,
+            world.resource::<CastReports>().refusals(),
             vec![CastFail::local(MOUNT, 0x61)],
             "a different spell mid-cast is 6e4d97's \"Another action is in progress\""
         );
@@ -1641,9 +1953,7 @@ mod tests {
             send(&mut world, POTION_SPELL, potion);
             assert!(matches!(rx.try_recv(), Ok(ClientCommand::UseItem { .. })));
             assert_eq!(
-                world
-                    .resource::<crate::spell::PendingCast>()
-                    .current(Instant::now()),
+                world.resource::<crate::spell::PendingCast>().current(),
                 None,
                 "cached={cached}: the potion pushed nothing"
             );
@@ -1653,7 +1963,7 @@ mod tests {
                 matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == MOUNT),
                 "cached={cached}: the spell goes out behind the potion"
             );
-            assert!(world.resource::<CastErrors>().0.is_empty());
+            assert!(world.resource::<CastReports>().refusals().is_empty());
         }
     }
 
@@ -1672,7 +1982,7 @@ mod tests {
         send(&mut world, HEARTHSTONE, CastCommit::Spell);
         assert!(rx.try_recv().is_err(), "nothing goes out");
         assert!(
-            world.resource::<CastErrors>().0.is_empty(),
+            world.resource::<CastReports>().refusals().is_empty(),
             "and no red line"
         );
         assert_eq!(
@@ -1687,7 +1997,7 @@ mod tests {
             rx.try_recv(),
             Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == MOUNT
         ));
-        assert!(world.resource::<CastErrors>().0.is_empty());
+        assert!(world.resource::<CastReports>().refusals().is_empty());
     }
 
     /// The not-ready rung forks at `60952b`: an item refuses 0x28 "Item is not ready yet."
@@ -1711,19 +2021,19 @@ mod tests {
         send(&mut world, HEARTHSTONE, HEARTH_COMMIT);
         assert!(rx.try_recv().is_err(), "an item on cooldown never sends");
         assert_eq!(
-            world.resource::<CastErrors>().0,
+            world.resource::<CastReports>().refusals(),
             vec![CastFail::local(HEARTHSTONE, 0x28)]
         );
 
         // The record is keyed (use-spell, entry); a spell press queries (spell, 0) and passes.
-        world.resource_mut::<CastErrors>().0.clear();
+        world.resource_mut::<CastReports>().0.clear();
         world.insert_resource(crate::spell::PendingCast::default());
         send(&mut world, HEARTHSTONE, CastCommit::Spell);
         assert!(
             matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { .. })),
             "the item-keyed record never not-readies a bare spell press"
         );
-        assert!(world.resource::<CastErrors>().0.is_empty());
+        assert!(world.resource::<CastReports>().refusals().is_empty());
     }
 
     /// The item press queries with its own spell-slot category (`0x6e1457`-`0x6e1499`): another
@@ -1761,7 +2071,7 @@ mod tests {
             "the shared category holds the press"
         );
         assert_eq!(
-            world.resource::<CastErrors>().0,
+            world.resource::<CastReports>().refusals(),
             vec![CastFail::local(HEARTHSTONE, 0x28)]
         );
     }
@@ -1860,11 +2170,11 @@ mod tests {
             .expect("one-shot");
         assert!(rx.try_recv().is_err(), "an unaffordable press never sends");
         assert_eq!(
-            world.resource::<CastErrors>().0,
+            world.resource::<CastReports>().refusals(),
             vec![CastFail::local(HEARTHSTONE, 0x4d)]
         );
 
-        world.resource_mut::<CastErrors>().0.clear();
+        world.resource_mut::<CastReports>().0.clear();
         let base = ctx();
         let with_store = cast_target::CastContext {
             rel: cast_target::TargetRelations {
@@ -1882,7 +2192,7 @@ mod tests {
             matches!(rx.try_recv(), Ok(ClientCommand::UseItem { .. })),
             "an item press is never power-gated"
         );
-        assert!(world.resource::<CastErrors>().0.is_empty());
+        assert!(world.resource::<CastReports>().refusals().is_empty());
     }
 
     /// TryCast's IsCasting refusal (`0x61`) precedes the not-ready rung.
@@ -1909,7 +2219,7 @@ mod tests {
         send(&mut world, MOUNT, CastCommit::Spell);
         assert!(rx.try_recv().is_err());
         assert_eq!(
-            world.resource::<CastErrors>().0,
+            world.resource::<CastReports>().refusals(),
             vec![CastFail::local(MOUNT, 0x61)],
             "mid-cast outranks the cooldown rung (the reference's IsCasting precedes the validator)"
         );
@@ -1947,9 +2257,7 @@ mod tests {
             "the commit clears the one word"
         );
         assert!(
-            world
-                .resource::<crate::spell::PendingCast>()
-                .in_flight(Instant::now()),
+            world.resource::<crate::spell::PendingCast>().in_flight(),
             "and arms the in-flight guard the click owes"
         );
 

@@ -818,7 +818,7 @@ mod tests {
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::Cooldowns>()
             .init_resource::<crate::spell::SpellModifiers>()
-            .init_resource::<crate::ui_action::CastErrors>()
+            .init_resource::<crate::ui_cast::CastReports>()
             .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()
@@ -1416,7 +1416,7 @@ mod tests {
             .unwrap();
         app.world_mut()
             .entity_mut(me)
-            .insert(player(slot_field, money));
+            .insert((player(slot_field, money), crate::net::Guid(0x5e1f)));
         {
             let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.take_sounds();
@@ -1768,6 +1768,7 @@ mod bind_confirm_tests {
                 flags: 0,
                 enchants: Vec::new(),
                 spell_0: false,
+                spell_charges: [0; 5],
             },
         );
         ContainerState {
@@ -2284,7 +2285,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::Cooldowns>()
             .init_resource::<crate::spell::SpellModifiers>()
-            .init_resource::<crate::ui_action::CastErrors>()
+            .init_resource::<crate::ui_cast::CastReports>()
             .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()
@@ -2472,7 +2473,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::Cooldowns>()
             .init_resource::<crate::spell::SpellModifiers>()
-            .init_resource::<crate::ui_action::CastErrors>()
+            .init_resource::<crate::ui_cast::CastReports>()
             .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()

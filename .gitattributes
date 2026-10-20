@@ -1,15 +1,10 @@
-# Binary blobs compiled into the client with `include_bytes!`.
-#
-# Without this, a checkout with `core.autocrlf=true` (the Windows default, and what this tree is
-# checked out with) rewrites any 0x0A byte that follows a 0x0D into 0x0D 0x0A on the way out — which
-# for a texture is silent corruption, and for `liquid::art`'s committed bump map is a test that
-# fails on Windows and passes everywhere else. Marking them binary is what makes the bytes in the
-# repository the bytes the compiler sees.
-*.rgba binary
+# Every text file checks out with LF on every platform: tests and `include_str!` read sources,
+# shaders, Lua and XML and match them on "\n", so a Windows checkout must read the same bytes.
+* text=auto eol=lf
 
-# Shell scripts are LF in every working copy. On Windows a bare `bash` resolves System32's WSL bash
-# before any PATH entry, which reads a CRLF script's `set -euo pipefail` as the option `pipefail\r`.
-*.sh text eol=lf
+# Binary blobs compiled into the client with `include_bytes!`: marked binary so no checkout ever
+# rewrites a byte of them (`liquid::art`'s committed bump map is one).
+*.rgba binary
 
 # The bundled third-party addons are vendored as their authors ship them, byte for byte: the
 # client reads them as files, and a checkout must not rewrite a line ending in a `.lua` or a `.tga`.
@@ -18,7 +13,5 @@ third_party/addons/** -text
 # Vendored benilla-re tables are compared and read byte for byte; no line-ending conversion.
 reference/*.tsv -text
 
-# Rust sources check out with LF on every platform: tests read their own and other sources and
-# split them on "\n". The vendored kira tree is CRLF in the index and stays byte for byte.
-*.rs text eol=lf
+# The vendored kira tree is CRLF in the index and stays byte for byte.
 third_party/kira/** -text

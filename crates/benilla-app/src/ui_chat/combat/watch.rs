@@ -23,6 +23,8 @@ pub(crate) struct WatchCtx<'w> {
     pub factions: Option<Res<'w, Factions>>,
     pub reputations: Res<'w, Reputations>,
     pub spells: Option<Res<'w, crate::ui_action::Spells>>,
+    /// The creature records, whose VISIBLE_TO_GHOSTS bit `CanAttack` reads.
+    pub names: Option<Res<'w, crate::names::NameCache>>,
     /// The live display ranges: the reference's `0x8629e0` table plus `CombatDeathLogRange`.
     pub ranges: Res<'w, CombatLogRanges>,
 }
@@ -37,20 +39,14 @@ impl WatchCtx<'_> {
             stores,
             self.factions.as_deref(),
             &self.reputations,
+            self.names.as_deref(),
         )
     }
 
-    /// The gates every spell-driven line takes, aura lines included: `Attributes & 0x180` or an
-    /// empty name drops the line.
+    /// A spell's display name, or `None` where the aura formatters write no line
+    /// ([`super::logged_spell`]).
     fn spell_name(&self, spell_id: u32) -> Option<String> {
-        let Some(display) = self.spells.as_ref().and_then(|s| s.catalog.get(spell_id)) else {
-            return Some(String::new());
-        };
-        const DO_NOT_DISPLAY_OR_LOG: u32 = 0x180;
-        if display.attributes & DO_NOT_DISPLAY_OR_LOG != 0 || display.name.is_empty() {
-            return None;
-        }
-        Some(display.name.clone())
+        super::logged_spell(self.spells.as_deref(), spell_id).map(|d| d.name.clone())
     }
 
     /// The one-sided range test 15 reference formatters run in place of the two-ended `0x626630`.
@@ -85,6 +81,7 @@ fn queue_one(
         fills,
         named,
         tries: 0,
+        word: None,
     });
 }
 
@@ -309,6 +306,7 @@ pub(crate) fn pet_loyalty_lines(
             fills: Fills::default(),
             named: Named::Ready,
             tries: 0,
+            word: None,
         });
     }
 }

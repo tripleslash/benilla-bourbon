@@ -127,22 +127,17 @@ fn bonuses_have_mod_tokens(
         .any(|&(_, spell)| spell_has_mod_tokens(spells, spell))
 }
 
-/// The tooltip's "N Charges" count, 0 for no line. The builder (`0x52d8a0`) reads a template 0 as
-/// `-1` (`0x52da01`), prints nothing for `-1` (`0x52db51`) and otherwise the absolute value
-/// (`0x52db56`): food's `-1` shows no line, a `-5` pool "5 Charges". It prints per spell slot; one
-/// line here, as no vmangos `item_template` row has two pools.
-fn charges_count(spells: &[benilla_protocol::messages::ItemSpellEntry]) -> i32 {
-    spells
-        .iter()
-        .find(|s| s.spell_id != 0 && s.charges != 0 && s.charges != -1)
-        .map(|s| s.charges.abs())
-        .unwrap_or(0)
-}
-
-/// A reputation rank (0..=7) to `FACTION_STANDING_LABEL{rank+1}`, the unsuffixed key the reference
-/// builds (`0x84b5dc`), from the player's own `GlobalStrings.lua`.
-fn standing_label(rank: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    get(&format!("FACTION_STANDING_LABEL{}", rank.min(7) + 1))
+/// The static tables a template view names its ids through, all loaded at startup.
+#[derive(Clone, Copy, Default)]
+struct ViewTables<'a> {
+    skill_lines: Option<&'a benilla_formats::SkillLineCatalog>,
+    factions: Option<&'a benilla_formats::FactionCatalog>,
+    sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
+    classes: Option<&'a benilla_formats::ItemClassCatalog>,
+    icons: Option<&'a ItemDisplays>,
+    // `AreaTable.dbc` and `Map.dbc` names, for a zone-bound item's lines.
+    areas: Option<&'a benilla_formats::QuestHeaderNames>,
+    maps: Option<&'a benilla_formats::MapCatalog>,
 }
 
 /// An item template's tooltip view: the wire fields plus the strings only the app resolves, the
@@ -152,18 +147,24 @@ fn template_view(
     spells: Option<&crate::ui_action::Spells>,
     mods: Option<&crate::spell::SpellModifiers>,
     skill: &dyn Fn(u32) -> u32,
-    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+    tables: ViewTables,
     home_area: Option<&str>,
-    // The active player's gender byte, the trigger text's `$g`/`$G` branch (`0x508214`).
+    // The active player's gender byte, the trigger text's `$g`/`$G` branch (`0x508214`) and the
+    // standing label's (`0x612bf0`).
     gender: &dyn Fn() -> u8,
-    factions: Option<&benilla_formats::FactionCatalog>,
-    sub_classes: Option<&benilla_formats::ItemSubClassCatalog>,
-    classes: Option<&benilla_formats::ItemClassCatalog>,
-    icons: Option<&ItemDisplays>,
     // The VM's own `GlobalStrings.lua`, for the reputation-requirement line and the `$`-engine's
     // keyed tokens.
     get: &dyn Fn(&str) -> Option<String>,
 ) -> benilla_ui::script::ItemTemplateView {
+    let ViewTables {
+        skill_lines,
+        factions,
+        sub_classes,
+        classes,
+        icons,
+        areas,
+        maps,
+    } = tables;
     let spell_name = |id: u32| -> Option<String> {
         spells
             .and_then(|s| s.catalog.get(id))
@@ -231,14 +232,26 @@ fn template_view(
         required_spell_name: (t.required_spell != 0)
             .then(|| spell_name(t.required_spell))
             .flatten(),
+        // Knowing the spell or a later rank of it meets the requirement (`0x60c740`,
+        // `0x60c8d0`).
+        required_spell_ranks: match (t.required_spell, skill_lines) {
+            (0, _) => Vec::new(),
+            (id, Some(c)) => c.rank_and_later(id),
+            (id, None) => vec![id],
+        },
         required_honor_rank: t.required_honor_rank,
         required_city_rank: t.required_city_rank,
         // `ITEM_REQ_REPUTATION`, the reference's key for this line (`0x854b8c`): faction, then
-        // standing; an install missing a key shows no line.
+        // standing; an install missing the key shows no line.
         required_rep_line: (t.required_rep_faction != 0)
             .then(|| {
-                let faction = factions.and_then(|c| c.faction_name(t.required_rep_faction))?;
-                let standing = standing_label(t.required_rep_rank, get)?;
+                // A faction with no row reads the literal `UNKNOWN` (`0x838044`, `0x52d800`); the
+                // label is gendered (`0x52d80f`) and an absent one is empty.
+                let faction = factions
+                    .and_then(|c| c.faction_name(t.required_rep_faction))
+                    .unwrap_or("UNKNOWN");
+                let standing =
+                    crate::ui_reputation::standing_label(get, t.required_rep_rank, gender() == 1);
                 Some(benilla_ui::strings::fill(
                     &get("ITEM_REQ_REPUTATION")?,
                     &[
@@ -251,19 +264,86 @@ fn template_view(
         required_rep_faction: t.required_rep_faction,
         required_rep_rank: t.required_rep_rank,
         lock_id: t.lock_id,
-        spell_triggers: t
+        // A block with no description has no lines (`0x52da29`..`0x52da31`).
+        spell_lines: t
             .spells
             .iter()
             .filter(|s| s.spell_id != 0)
-            .filter_map(|s| spell_text(s.spell_id).map(|n| (s.trigger, s.spell_id, n)))
+            .filter_map(|s| {
+                Some(benilla_ui::script::ItemSpellLine {
+                    trigger: s.trigger,
+                    spell_id: s.spell_id,
+                    text: spell_text(s.spell_id)?,
+                    charges: s.charges,
+                    block: s.index,
+                    recipe: recipe_of(spells, s.spell_id),
+                })
+            })
             .collect(),
-        charges: charges_count(&t.spells),
         description: t.description.clone(),
         page_text: t.page_text,
         sell_price: t.sell_price,
         item_set: t.item_set,
         random_property: t.random_property,
+        // Block 0's charges, unfiltered (`+0x144`), the sell price's charge scale (`0x52e432`).
+        spell_charges_0: t.spell_charges_0,
+        // The area and map a zone-bound item names (`0x52bac9`..`0x52bb3e`): an id above 0 with
+        // a row.
+        area_name: i32::try_from(t.area)
+            .ok()
+            .filter(|&id| id > 0)
+            .and_then(|id| areas?.resolve(id))
+            .map(str::to_string),
+        map_name: (t.map != 0 && i32::try_from(t.map).is_ok())
+            .then(|| maps?.name(t.map))
+            .flatten()
+            .map(str::to_string),
+        teaches: taught_spell(t, spells, skill_lines),
     }
+}
+
+/// A block's recipe (`0x52daf5`..`0x52db25`): its spell's Effect[0] is 36, and the spell that
+/// teaches (EffectTriggerSpell[0], `+0x1b4`) has Effect[0] 24, `SPELL_EFFECT_CREATE_ITEM`. The
+/// product is its EffectItemType[0] (`+0x19c`), the reagents its `Reagent` ids above 0 with their
+/// counts (`+0xa8`, `+0xc8`, `0x52dbf8`).
+fn recipe_of(
+    spells: Option<&crate::ui_action::Spells>,
+    spell_id: u32,
+) -> Option<benilla_ui::script::ItemRecipe> {
+    let catalog = &spells?.catalog;
+    let d = catalog.get(spell_id).filter(|d| d.effects[0] == 36)?;
+    let taught = catalog
+        .get(d.effect_trigger_spell[0])
+        .filter(|t| t.effects[0] == 24)?;
+    Some(benilla_ui::script::ItemRecipe {
+        product: taught.effect_item_type[0],
+        reagents: taught
+            .reagents
+            .iter()
+            .filter(|&&(id, _)| id as i32 > 0)
+            .map(|&(id, count)| (id, count as i32))
+            .collect(),
+    })
+}
+
+/// The spell block 0 teaches (`0x52d4fd`..`0x52d54d`): its spell's Effect[0] is 36
+/// (`SPELL_EFFECT_LEARN_SPELL`, `+0xf4`), the taught spell its EffectTriggerSpell[0] (`+0x1b4`),
+/// with every later rank of it, and a pet teach when either implicit target of effect 0 is 5
+/// (`TARGET_PET`, `+0x148`, `+0x154`).
+fn taught_spell(
+    t: &ItemInfo,
+    spells: Option<&crate::ui_action::Spells>,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+) -> Option<benilla_ui::script::TaughtSpell> {
+    let block = t.spells.iter().find(|s| s.index == 0)?;
+    let d = spells?.catalog.get(block.spell_id)?;
+    (d.effects[0] == 36).then(|| {
+        let taught = d.effect_trigger_spell[0];
+        benilla_ui::script::TaughtSpell {
+            ranks: skill_lines.map_or_else(|| vec![taught], |c| c.rank_and_later(taught)),
+            pet: d.effect_implicit_target_a[0] == 5 || d.effect_implicit_target_b[0] == 5,
+        }
+    })
 }
 
 /// Answers the engine's set-id asks from `ItemSet.dbc`: member names from the template cache, each
@@ -384,17 +464,32 @@ pub(super) fn feed_item_sets(
     }
 }
 
-/// Pushes the whole random-suffix table once per VM, when both catalogs are in: its consumers are
-/// click-driven, and a chat-link tooltip has no hover loop to repaint a late answer.
+/// Pushes the whole random-suffix table once per VM, when both catalogs are in, and the enchant
+/// names once the enchant catalog is: their consumers are click-driven, and a chat-link tooltip
+/// has no hover loop to repaint a late answer.
 pub(super) fn feed_random_properties(
     script: Option<NonSendMut<UiScript>>,
     props: Option<Res<crate::items::RandomProperties>>,
     enchants: Option<Res<crate::items::Enchants>>,
     mut pushed: Local<crate::ui_script::VmMemo<bool>>,
+    mut names_pushed: Local<crate::ui_script::VmMemo<bool>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    // The enchant names a link's bare id reads (`0x52c9f2`): every named row, as the builder's
+    // loop tests no flag before it prints the name (`0x52ca23`..`0x52ca8b`).
+    if let Some(enchants) = enchants.as_deref() {
+        if !*names_pushed.get(&script) {
+            let names: std::collections::HashMap<u32, String> = enchants
+                .0
+                .iter_names()
+                .map(|(id, name)| (id, name.to_string()))
+                .collect();
+            script.set_enchant_names(names);
+            *names_pushed.get(&script) = true;
+        }
+    }
     if *pushed.get(&script) {
         return;
     }
@@ -427,14 +522,18 @@ pub(super) fn feed_item_stats(
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     // The `$z` token: the bind point's area (`SMSG_BINDPOINTUPDATE`), named through `AreaTable`.
     home_bind: Option<Res<crate::net::HomeBind>>,
-    area_names: Option<Res<crate::ui_quest_log::QuestHeaderNamesRes>>,
+    (area_names, maps): (
+        Option<Res<crate::ui_quest_log::QuestHeaderNamesRes>>,
+        Option<Res<benilla_assets::MapCatalogRes>>,
+    ),
     factions: Option<Res<crate::target::Factions>>,
     sub_classes: Option<Res<super::ItemSubClasses>>,
     // `GetItemInfo`'s `itemType` and `itemTexture`.
     classes: Option<Res<super::ItemClasses>>,
     icons: Option<Res<ItemDisplays>>,
     mut pending: Local<crate::ui_script::VmMemo<std::collections::HashSet<u32>>>,
-    mut mod_sensitive: Local<crate::ui_script::VmMemo<HashSet<u32>>>,
+    // The views built from the player beyond the template, rebuilt when what they read moves.
+    mut reads_player: Local<crate::ui_script::VmMemo<HashSet<u32>>>,
     mut last_home: Local<crate::ui_script::VmMemo<Option<String>>>,
     mut last_reads: Local<crate::ui_script::VmMemo<Option<TokenReads>>>,
 ) {
@@ -445,7 +544,7 @@ pub(super) fn feed_item_stats(
     if new_vm {
         pending.extend(items.cached_template_ids());
     }
-    let mod_sensitive = mod_sensitive.get(&script);
+    let reads_player = reads_player.get(&script);
     let last_home = last_home.get(&script);
     let me = self_q.single().ok();
     // The `$`-tokens follow the player's skills and gender.
@@ -480,7 +579,7 @@ pub(super) fn feed_item_stats(
             .filter(|&id| items.template(id, 0, Ask::Read).is_some()),
     );
     if spell_mods.is_changed() || reads_changed {
-        pending.extend(mod_sensitive.iter().copied());
+        pending.extend(reads_player.iter().copied());
     }
     if pending.is_empty() {
         return;
@@ -508,23 +607,29 @@ pub(super) fn feed_item_stats(
             .filter_map(|id| {
                 pending.remove(&id);
                 let t = items.template(id, 0, Ask::Read)?.clone();
-                if item_has_mod_tokens(&t, spell_res) {
-                    mod_sensitive.insert(id);
+                // The standing label reads the gender too.
+                if item_has_mod_tokens(&t, spell_res) || t.required_rep_faction != 0 {
+                    reads_player.insert(id);
                 } else {
-                    mod_sensitive.remove(&id);
+                    reads_player.remove(&id);
                 }
+                let tables = ViewTables {
+                    skill_lines: skill_catalog,
+                    factions: factions.as_deref().map(|f| f.catalog()),
+                    sub_classes: sub_classes.as_deref().map(|s| &s.0),
+                    classes: classes.as_deref().map(|c| &c.0),
+                    icons: icons.as_deref(),
+                    areas: area_names.as_deref().map(|a| &a.0),
+                    maps: maps.as_deref().map(|m| &m.0),
+                };
                 let view = template_view(
                     &t,
                     spell_res,
                     Some(&spell_mods),
                     &skill,
-                    skill_catalog,
+                    tables,
                     home_area,
                     &|| gender,
-                    factions.as_deref().map(|f| f.catalog()),
-                    sub_classes.as_deref().map(|s| &s.0),
-                    classes.as_deref().map(|c| &c.0),
-                    icons.as_deref(),
                     &get,
                 );
                 Some((id, view))
@@ -543,8 +648,9 @@ type CasterReads<'w, 's> = (
 );
 
 /// The player state the tooltip's red requirement lines check: level, class, race, skills,
-/// proficiencies (`SMSG_SET_PROFICIENCY`) and reputation ranks (the DBC base plus the
-/// `SMSG_INITIALIZE_FACTIONS` standing), pushed on change.
+/// proficiencies (`SMSG_SET_PROFICIENCY`), reputation ranks (the DBC base plus the
+/// `SMSG_INITIALIZE_FACTIONS` standing), honor rank and medals, and the known spells, pushed on
+/// change.
 pub(super) fn feed_player_req(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -590,6 +696,11 @@ pub(super) fn feed_player_req(
     );
     if gate.skip() {
         return;
+    }
+    // The known-spell set the item tooltip's known-recipe line tests (`0x60c740`), the whole
+    // book: a recipe's taught craft is a spell the spellbook does not list.
+    if vm_reset || actions_changed {
+        script.set_known_spells(actions.spells.iter().copied().collect());
     }
     let Some(store) = self_q.iter().next() else {
         return;
@@ -640,6 +751,7 @@ pub(super) fn feed_player_req(
         rep_ranks,
         can_dual_wield,
         honor_rank: store.0.player_honor_rank().unwrap_or(0),
+        pvp_medals: store.0.player_pvp_medals().unwrap_or(0),
     };
     if last.as_ref() != Some(&state) {
         gate.audit("feed_player_req", "the player-requirement state");
@@ -764,13 +876,15 @@ fn resolve_slot(
         // A charter's guild name and master, keyed by the petition id the server puts in
         // enchantment slot 0 (`PetitionsHandler.cpp:126`), where the reference reads it
         // (`0x5ef337`) and its enchant lines skip it (`0x52c9e0`). The tooltip build asks it.
+        // The signature count rides beside the id (`0x52ba51`).
         petition: (t.flags & benilla_protocol::messages::ITEM_FLAG_CHARTER != 0)
             .then(|| {
-                let id = objects
-                    .object(guid)
-                    .and_then(|f| f.item_enchant(0))
-                    .unwrap_or(0);
-                petitions.tooltip_view(id as u32, guid, names, Ask::Read)
+                let id = fields.item_enchant(0).unwrap_or(0);
+                let view = petitions.tooltip_view(id as u32, guid, names, Ask::Read)?;
+                Some(benilla_ui::script::PetitionSlotView {
+                    signatures: fields.item_petition_signatures(),
+                    ..view
+                })
             })
             .flatten(),
         texture: icons
@@ -806,6 +920,9 @@ fn resolve_slot(
         bar_placeable: t.placeable_on_action_bar(),
         consumable: t.is_consumable(),
         spell_0: t.has_spell_0(),
+        // The tooltip's charges lines (`0x52d9e9`) and the sell price's charge scale
+        // (`0x52e43d`) read them (`flds+0x28`).
+        spell_charges: std::array::from_fn(|i| fields.item_spell_charges(i as u8).unwrap_or(0)),
         cooldown: use_cooldown(
             &t,
             entry,
@@ -1535,8 +1652,8 @@ fn diff_and_push(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_container_source, ask_build_lookups, charges_count, resolve_slot, ContainerSlot,
-        FeedMemory, SlotGuids, BANK_CONTAINER, BANK_SLOTS,
+        apply_container_source, ask_build_lookups, resolve_slot, ContainerSlot, FeedMemory,
+        SlotGuids, BANK_CONTAINER, BANK_SLOTS,
     };
 
     /// The view carries what `GetTradeSkillItemStats` reads beyond the tooltip: the item level, and
@@ -1583,13 +1700,9 @@ mod tests {
             Some(&spells),
             None,
             &|_| 0,
-            None,
+            Default::default(),
             None,
             &|| 0,
-            None,
-            None,
-            None,
-            None,
             &|_| None,
         );
         assert_eq!(view.item_level, 33);
@@ -1597,6 +1710,199 @@ mod tests {
             view.spell_slots,
             [("Fireball".to_string(), 3), ("Frost Nova".to_string(), -1)]
         );
+    }
+
+    /// A zone-bound template names its area through `AreaTable.dbc` and its map through
+    /// `Map.dbc` (`0x52bac9`..`0x52bb3e`); an id of 0 names nothing, though map 0 has a row.
+    #[test]
+    fn a_zone_bound_template_names_its_area_and_map() {
+        let areas = benilla_formats::QuestHeaderNames::from_zones([(3428, "Ahn'Qiraj")]);
+        let maps = benilla_formats::MapCatalog::from_rows([])
+            .with_names([(0, "Eastern Kingdoms"), (531, "Ahn'Qiraj Temple")]);
+        let tables = super::ViewTables {
+            areas: Some(&areas),
+            maps: Some(&maps),
+            ..Default::default()
+        };
+        let view = |t: &benilla_protocol::ItemInfo| {
+            let v = super::template_view(t, None, None, &|_| 0, tables, None, &|| 0, &|_| None);
+            (v.area_name, v.map_name)
+        };
+        let mut t = crate::items::test_template("Scarab Coffer Key");
+        t.area = 3428;
+        t.map = 531;
+        assert_eq!(
+            view(&t),
+            (
+                Some("Ahn'Qiraj".to_string()),
+                Some("Ahn'Qiraj Temple".to_string())
+            )
+        );
+        t.area = 0;
+        t.map = 0;
+        assert_eq!(view(&t), (None, None));
+    }
+
+    /// Block 0's spell teaches when its Effect[0] is 36: the taught spell is EffectTriggerSpell[0]
+    /// with its later ranks, a pet teach when an implicit target of effect 0 is 5
+    /// (`0x52d4fd`..`0x52d54d`). Another block, or another effect, teaches nothing.
+    #[test]
+    fn block_zeros_learn_spell_names_the_taught_spell_and_its_ranks() {
+        use benilla_formats::{SlaInfo, SpellDisplay};
+        use benilla_ui::script::TaughtSpell;
+        use std::collections::HashMap;
+
+        let learn = |taught, target_b| SpellDisplay {
+            effects: [36, 0, 0],
+            effect_trigger_spell: [taught, 0, 0],
+            effect_implicit_target_b: [target_b, 0, 0],
+            ..Default::default()
+        };
+        let mut spells = crate::ui_action::Spells::empty_for_tests();
+        spells.catalog = benilla_formats::SpellCatalog::from_displays(HashMap::from([
+            (9000, learn(2335, 0)),
+            (9001, learn(6000, 5)),
+            (
+                9002,
+                SpellDisplay {
+                    effects: [24, 36, 0],
+                    effect_trigger_spell: [0, 2335, 0],
+                    ..Default::default()
+                },
+            ),
+        ]));
+        let sla = |forward_spell_id| SlaInfo {
+            skill_id: 171,
+            req_skill_value: 0,
+            forward_spell_id,
+            trivial_low: 0,
+            trivial_high: 0,
+        };
+        let lines =
+            benilla_formats::SkillLineCatalog::from_abilities([(2335, sla(2336)), (2336, sla(0))]);
+        let mut t = crate::items::test_template("Recipe");
+        let teaches =
+            |t: &benilla_protocol::ItemInfo| super::taught_spell(t, Some(&spells), Some(&lines));
+        t.spells = vec![slot(9000, -1)];
+        assert_eq!(
+            teaches(&t),
+            Some(TaughtSpell {
+                ranks: vec![2335, 2336],
+                pet: false
+            })
+        );
+        t.spells = vec![slot(9001, -1)];
+        assert_eq!(
+            teaches(&t),
+            Some(TaughtSpell {
+                ranks: vec![6000],
+                pet: true
+            })
+        );
+        t.spells = vec![slot(9002, -1)];
+        assert_eq!(teaches(&t), None, "effect 0 is no teach");
+        t.spells = vec![ItemSpellEntry {
+            index: 1,
+            ..slot(9000, -1)
+        }];
+        assert_eq!(teaches(&t), None, "block 1 is not read");
+    }
+
+    /// A block teaching a spell that creates an item is a recipe: the product is the taught
+    /// spell's EffectItemType[0] and the reagents its ids above 0 with their counts
+    /// (`0x52daf5`..`0x52dbf8`); a teach of anything else, or no teach, is none.
+    #[test]
+    fn a_block_teaching_a_create_item_spell_is_a_recipe() {
+        use benilla_formats::SpellDisplay;
+        use std::collections::HashMap;
+
+        let mut reagents = [(0, 0); 8];
+        reagents[0] = (2452, 1);
+        reagents[1] = (2450, 2);
+        reagents[3] = (3371, 1);
+        let mut spells = crate::ui_action::Spells::empty_for_tests();
+        spells.catalog = benilla_formats::SpellCatalog::from_displays(HashMap::from([
+            (
+                2364,
+                SpellDisplay {
+                    effects: [36, 0, 0],
+                    effect_trigger_spell: [2335, 0, 0],
+                    ..Default::default()
+                },
+            ),
+            (
+                2335,
+                SpellDisplay {
+                    effects: [24, 0, 0],
+                    effect_item_type: [2459, 0, 0],
+                    reagents,
+                    ..Default::default()
+                },
+            ),
+            (
+                2366,
+                SpellDisplay {
+                    effects: [36, 0, 0],
+                    effect_trigger_spell: [2367, 0, 0],
+                    ..Default::default()
+                },
+            ),
+            (
+                2367,
+                SpellDisplay {
+                    effects: [6, 0, 0],
+                    ..Default::default()
+                },
+            ),
+        ]));
+        assert_eq!(
+            super::recipe_of(Some(&spells), 2364),
+            Some(benilla_ui::script::ItemRecipe {
+                product: 2459,
+                reagents: vec![(2452, 1), (2450, 2), (3371, 1)],
+            })
+        );
+        assert_eq!(
+            super::recipe_of(Some(&spells), 2366),
+            None,
+            "teaches an aura"
+        );
+        assert_eq!(super::recipe_of(Some(&spells), 2335), None, "no teach");
+    }
+
+    /// The requirement line's faction with no `Faction.dbc` row reads the literal `UNKNOWN`
+    /// (`0x838044`), and a female player's label is the `_FEMALE` twin (`0x52d80f`, `0x612bf0`).
+    #[test]
+    fn a_reputation_line_genders_its_label_and_names_an_unknown_faction() {
+        let strings = [
+            ("ITEM_REQ_REPUTATION", "Requires %s - %s"),
+            ("FACTION_STANDING_LABEL6", "Honored"),
+            ("FACTION_STANDING_LABEL6_FEMALE", "Honored (f)"),
+        ];
+        let get = |k: &str| {
+            strings
+                .iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, v)| v.to_string())
+        };
+        let mut t = crate::items::test_template("Argent Dawn Tabard");
+        t.required_rep_faction = 529;
+        t.required_rep_rank = 5;
+        let line = |gender: u8| {
+            super::template_view(
+                &t,
+                None,
+                None,
+                &|_| 0,
+                Default::default(),
+                None,
+                &move || gender,
+                &get,
+            )
+            .required_rep_line
+        };
+        assert_eq!(line(0).as_deref(), Some("Requires UNKNOWN - Honored"));
+        assert_eq!(line(1).as_deref(), Some("Requires UNKNOWN - Honored (f)"));
     }
 
     /// The build's lookups pass a callback (`0x52e204`, `0x52b93b`): a run asks a name still in
@@ -1634,8 +1940,18 @@ mod tests {
 
         const ENTRY: u16 = 3; // OBJECT_FIELD_ENTRY
         let mut objs = TestObjects::new();
-        for (guid, entry) in [(0xA1_u64, 1234_u32), (0xA2, 1235), (0xA3, 1236)] {
-            objs.spawn(guid, ObjectFields::from_pairs(&[(ENTRY, entry)]));
+        // The potion has 3 charges left in ITEM_FIELD_SPELL_CHARGES[0] (16), its neighbours set.
+        const CHARGES_0: u16 = 16;
+        for (guid, entry, charges) in [(0xA1_u64, 1234_u32, 0), (0xA2, 1235, -3), (0xA3, 1236, 0)] {
+            objs.spawn(
+                guid,
+                ObjectFields::from_pairs(&[
+                    (ENTRY, entry),
+                    (14, 1),
+                    (CHARGES_0, charges as u32),
+                    (17, 7),
+                ]),
+            );
         }
         let mut items = Items::default();
         let mut sword = test_template("Sword");
@@ -1672,12 +1988,61 @@ mod tests {
         assert_eq!((sword.quality, sword.inventory_type), (Some(4), 13));
         let potion = slot(0xA2).expect("an occupied slot");
         assert_eq!((potion.quality, potion.inventory_type), (Some(1), 0));
+        // The merchant price's charge scale reads the object's own (`flds+0x28`, `0x52e43d`).
+        assert_eq!((potion.spell_charges[0], sword.spell_charges[0]), (-3, 0));
         let pending = slot(0xA3).expect("an occupied slot");
         assert_eq!((pending.quality, pending.inventory_type), (None, 0));
         // The guid and the class: the lock reads the one from the first push, and the
         // auto-equip's unlock reads the other (`0x5e1704`).
         assert_eq!((sword.guid, sword.item_class), (0xA1, Some(sword_class)));
         assert_eq!((pending.guid, pending.item_class), (0xA3, None));
+    }
+
+    /// A charter's slot carries the signature count beside its petition record: the object's
+    /// slot-0 enchantment duration (`flds+0x44`, `0x52ba51`).
+    #[test]
+    fn a_charters_slot_carries_its_signature_count() {
+        use crate::items::{test_template, Items, RollCatalogs};
+        use crate::names::NameCache;
+        use crate::ui_items::TestObjects;
+        use benilla_protocol::ObjectFields;
+
+        let mut objs = TestObjects::new();
+        // OBJECT_FIELD_ENTRY 3; the petition id at 22, the count at 23, the charges at 24.
+        objs.spawn(
+            0xC1,
+            ObjectFields::from_pairs(&[(3, 5863), (22, 0x51), (23, 4), (24, 9)]),
+        );
+        let mut items = Items::default();
+        let mut charter = test_template("Guild Charter");
+        charter.flags = benilla_protocol::messages::ITEM_FLAG_CHARTER;
+        items.insert_template(5863, Some(charter));
+        let mut petitions = crate::ui_petition::PetitionState::default();
+        crate::ui_petition::net::query_response(
+            &mut petitions,
+            benilla_protocol::messages::PetitionQueryResponse {
+                petition_id: 0x51,
+                name: "Pact".into(),
+                ..Default::default()
+            },
+        );
+        let slot = resolve_slot(
+            0xC1,
+            &objs.get(),
+            &items,
+            None,
+            RollCatalogs::NONE,
+            &crate::spell::Cooldowns::default(),
+            None,
+            &NameCache::default(),
+            &petitions,
+            std::time::Instant::now(),
+            0.0,
+            false,
+        )
+        .expect("an occupied slot");
+        let petition = slot.petition.expect("the record is cached");
+        assert_eq!((petition.title.as_str(), petition.signatures), ("Pact", 4));
     }
 
     /// A bag slot holding a container says how many of its seats are filled, which
@@ -2275,21 +2640,6 @@ mod tests {
         ));
     }
 
-    /// The builder's charge gate (`0x52da01`, `0x52db51`).
-    #[test]
-    fn charge_gate_matches_the_real_builder() {
-        // Food and water carry `-1` in vmangos `item_template` (bread 4540, water 159 and 5350).
-        assert_eq!(charges_count(&[slot(433, -1)]), 0, "food's -1 = no line");
-        // A pool that uses the item up: Flame Deflector 4376 (`4057, -5`).
-        assert_eq!(charges_count(&[slot(4057, -5)]), 5, "wand-style pool");
-        assert_eq!(charges_count(&[slot(4057, 3)]), 3);
-        assert_eq!(charges_count(&[slot(433, 0)]), 0, "template 0 = sentinel");
-        assert_eq!(charges_count(&[slot(0, -5)]), 0, "no spell = no slot");
-        assert_eq!(charges_count(&[]), 0);
-        // A leading sentinel slot does not mask a later pool.
-        assert_eq!(charges_count(&[slot(433, -1), slot(4057, -10)]), 10);
-    }
-
     /// On the real Spell.dbc, an undescribed spell such as a key's `Opening` builds no trigger
     /// line (`0x52da29`-`0x52da31`), and a described one does.
     #[test]
@@ -2445,6 +2795,114 @@ mod ask_tests {
             crate::query_cache::queries(&rx).len(),
             1,
             "the next getter asks again"
+        );
+    }
+
+    /// A chat link's bare enchant id names its line through the table pushed at load: every named
+    /// `SpellItemEnchantment` row, one whose `Flags & 0x2` silences the combat log included, as
+    /// the builder's loop tests no flag before it prints the name (`0x52ca23`..`0x52ca8b`).
+    #[test]
+    fn a_links_enchant_names_its_line_from_the_table_pushed_at_load() {
+        let mut app = App::new();
+        app.insert_resource(crate::items::Enchants(
+            benilla_formats::EnchantCatalog::from_rows(
+                std::collections::HashMap::new(),
+                std::collections::HashMap::from([(29, "Rockbiter 3".to_string())]),
+                std::collections::HashMap::from([(29, 0x2)]),
+            ),
+        ))
+        .add_systems(Update, super::feed_random_properties);
+        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        crate::ui_script::test_ui::load_tooltip_template(&script);
+        script.set_item_template(
+            9300,
+            benilla_ui::script::ItemTemplateView {
+                name: "Runed Blade".into(),
+                quality: 2,
+                ..Default::default()
+            },
+        );
+        app.insert_non_send(script);
+        app.update();
+        let line: String = app
+            .world_mut()
+            .non_send_mut::<benilla_ui::script::UiScript>()
+            .eval(
+                r#"
+                local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+                tt:SetOwner(CreateFrame("Frame"), "ANCHOR_NONE")
+                tt:SetHyperlink("item:9300:29:0:0")
+                return TTTextLeft2:GetText()
+                "#,
+            )
+            .unwrap();
+        assert_eq!(line, "Rockbiter 3");
+    }
+
+    /// The requirement state carries `PLAYER_FIELD_PVP_MEDALS` and the whole known-spell book: a
+    /// held medal whites its line (`0x52d70a`), and a recipe whose craft the book holds, which the
+    /// spellbook never lists, reads already known (`0x52d54f`).
+    #[test]
+    fn the_requirement_feed_pushes_the_medals_and_the_known_spells() {
+        let mut app = App::new();
+        app.init_resource::<crate::net::Proficiencies>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<crate::ui_action::PlayerActions>()
+            .add_systems(Update, super::feed_player_req);
+        app.world_mut()
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .spells
+            .insert(2335);
+        // UNIT_FIELD_LEVEL 34 and PLAYER_FIELD_PVP_MEDALS 1225, medal 1 held.
+        app.world_mut().spawn((
+            crate::net::SelfPlayer,
+            crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (34, 60),
+                (1225, 0x1),
+            ])),
+        ));
+        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        crate::ui_script::test_ui::load_tooltip_template(&script);
+        script.set_item_template(
+            9504,
+            benilla_ui::script::ItemTemplateView {
+                name: "Recipe: Medal".into(),
+                quality: 1,
+                required_city_rank: 1,
+                teaches: Some(benilla_ui::script::TaughtSpell {
+                    ranks: vec![2335],
+                    pet: false,
+                }),
+                ..Default::default()
+            },
+        );
+        app.insert_non_send(script);
+        app.update();
+        let (known, medal, r, g, b): (String, String, f32, f32, f32) = app
+            .world_mut()
+            .non_send_mut::<benilla_ui::script::UiScript>()
+            .eval(
+                r#"
+                ITEM_SPELL_KNOWN = "Already known"
+                ITEM_REQ_SKILL = "Requires %s"
+                PVP_MEDAL1 = "Medal"
+                local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
+                tt:SetOwner(CreateFrame("Frame"), "ANCHOR_NONE")
+                tt:SetHyperlink("item:9504:0:0:0")
+                local r, g, b = TTTextLeft3:GetTextColor()
+                return TTTextLeft2:GetText(), TTTextLeft3:GetText(), r, g, b
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            (known.as_str(), medal.as_str()),
+            ("Already known", "Requires Medal")
+        );
+        // White, not the unmet red's `32/255` green and blue.
+        assert!(
+            [r, g, b].iter().all(|c| (c - 1.0).abs() < 1e-4),
+            "the medal is held: {:?}",
+            (r, g, b)
         );
     }
 }

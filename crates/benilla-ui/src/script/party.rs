@@ -1073,13 +1073,15 @@ mod tests {
         }
     }
 
+    /// Ten rows as the list writes them: the nine others as listed, the first of them leading,
+    /// then us (`0x5e6e73`).
     fn ten_player_raid() -> PartyState {
         let mut raid: Vec<crate::script::RaidMemberInfo> = (0u64..10)
             .map(|i| raider(&format!("Raider{i}"), 0x100 + i))
             .collect();
         raid[0].rank = 2; // the leader
-        raid[0].name = "Me".into();
         raid[3].subgroup = 1; // stored 0-based, exposed 2
+        raid[9].name = "Me".into();
         PartyState {
             raid,
             ..Default::default()
@@ -1147,7 +1149,7 @@ mod tests {
         ) = s
             .eval("local a,b,c,d,e,f,g,h,i = GetRaidRosterInfo(1) return a,b,c,d,e,f,g,h,i")
             .unwrap();
-        assert_eq!(name, "Me");
+        assert_eq!(name, "Raider0");
         assert_eq!(rank, 2, "as stored, no adjustment");
         assert_eq!(subgroup, 1, "stored 0 → exposed 1 (`0x4bb61a inc eax`)");
         assert_eq!(level, 60);
@@ -1198,7 +1200,7 @@ mod tests {
     fn unit_in_raid_answers_one_not_an_index() {
         let mut s = UiScript::new().unwrap();
         s.set_party(ten_player_raid());
-        s.set_unit("player", Some(unit(true, 0x100)));
+        s.set_unit("player", Some(unit(true, 0x109))); // the last row
         s.set_unit("target", Some(unit(true, 0x105))); // roster row 6
         s.set_unit("mouseover", Some(unit(true, 0xDEAD)));
 
@@ -1714,21 +1716,22 @@ mod tests {
         let officer = |s: &UiScript| s.eval::<Option<i64>>("return IsRaidOfficer()").unwrap();
         let mut s = UiScript::new().unwrap();
         assert_eq!(officer(&s), None, "ungrouped");
+        // We are the last row, a plain member under row 1's lead.
         let mut raid = ten_player_raid();
-        raid.raid[0].rank = 0; // we are a plain member
         raid.raid[1].rank = 1; // someone else assists
         s.set_party(raid.clone());
         assert_eq!(officer(&s), None, "no player unit yet");
-        s.set_unit("player", Some(unit(true, 0x100)));
+        s.set_unit("player", Some(unit(true, 0x109)));
         assert_eq!(
             officer(&s),
             None,
             "a member, another row's rank does not count"
         );
-        raid.raid[0].rank = 1;
+        raid.raid[9].rank = 1;
         s.set_party(raid.clone());
         assert_eq!(officer(&s), Some(1), "assistant");
-        raid.raid[0].rank = 2;
+        raid.raid[0].rank = 0;
+        raid.raid[9].rank = 2;
         s.set_party(raid);
         assert_eq!(officer(&s), Some(1), "leader");
         s.set_unit("player", Some(unit(true, 0x999)));
@@ -1824,50 +1827,48 @@ mod tests {
             .unwrap());
     }
 
+    /// `UnitInParty` (`0x516290`) resolves the token to a guid (`0x515970`) and asks `0x4e7f70`:
+    /// the player's own guid or one of the four slots'. No object and no group are needed.
     #[test]
-    fn unit_in_party_matches_roster_guids() {
+    fn unit_in_party_answers_for_the_guid_the_token_names() {
         let mut s = UiScript::new().unwrap();
-        s.set_party(two_member_party());
-        s.set_unit("player", Some(unit(true, 0x10)));
-        s.set_unit("party1", Some(unit(true, 0xA11CE)));
-        s.set_unit("target", Some(unit(true, 0xA11CE)));
-        assert_eq!(s.eval::<i64>(r#"return UnitInParty("target")"#).unwrap(), 1);
-        assert_eq!(s.eval::<i64>(r#"return UnitInParty("party1")"#).unwrap(), 1);
-        s.set_unit("target", Some(unit(true, 0xDEAD)));
-        assert!(s
-            .eval::<bool>(r#"return UnitInParty("target") == nil"#)
-            .unwrap());
-        // Ungrouped: everything is nil, the player included.
-        s.set_party(crate::script::PartyState::default());
-        assert!(s
-            .eval::<bool>(r#"return UnitInParty("player") == nil"#)
-            .unwrap());
-    }
+        let guids = |party: [u64; 4], target: u64| crate::script::UnitGuids {
+            player: 0x10,
+            target,
+            party,
+            ..Default::default()
+        };
+        let one =
+            |s: &UiScript, call: &str| s.eval::<bool>(&format!("return {call} == 1")).unwrap();
+        let nil =
+            |s: &UiScript, call: &str| s.eval::<bool>(&format!("return {call} == nil")).unwrap();
 
-    #[test]
-    fn unit_can_cooperate_needs_a_friendly_player() {
-        let mut s = UiScript::new().unwrap();
-        let mut friendly = unit(true, 0x30);
-        friendly.is_player = true;
-        friendly.reaction = 5;
-        s.set_unit("target", Some(friendly.clone()));
-        assert_eq!(
-            s.eval::<i64>(r#"return UnitCanCooperate("player", "target")"#)
-                .unwrap(),
-            1
-        );
-        let mut hostile = friendly.clone();
-        hostile.reaction = 2;
-        s.set_unit("target", Some(hostile));
-        assert!(s
-            .eval::<bool>(r#"return UnitCanCooperate("player", "target") == nil"#)
-            .unwrap());
-        let mut npc = friendly;
-        npc.is_player = false;
-        s.set_unit("target", Some(npc));
-        assert!(s
-            .eval::<bool>(r#"return UnitCanCooperate("player", "target") == nil"#)
-            .unwrap());
+        // The reported shape: solo, the player is in their own party.
+        s.set_unit_guids(&guids([0; 4], 0));
+        assert!(one(&s, r#"UnitInParty("player")"#), "solo");
+        assert!(nil(&s, r#"UnitInParty("party1")"#));
+        assert!(nil(&s, r#"UnitInParty("target")"#), "no target");
+
+        // party2 is out of view and has no snapshot; `target` names them too.
+        s.set_unit_guids(&guids([0xA11CE, 0xB0B, 0, 0], 0xB0B));
+        assert!(one(&s, r#"UnitInParty("party2")"#), "no object needed");
+        assert!(one(&s, r#"UnitInParty("target")"#), "by guid, not by text");
+        assert!(one(&s, r#"UnitInParty("player")"#));
+        s.set_unit_guids(&guids([0xA11CE, 0xB0B, 0, 0], 0xDEAD));
+        assert!(nil(&s, r#"UnitInParty("target")"#), "a stranger");
+
+        // Nobody is guid 0, a miss; an unrecognised token raises in the resolver.
+        for nobody in [
+            "UnitInParty()",
+            r#"UnitInParty("")"#,
+            r#"UnitInParty("party5")"#,
+        ] {
+            assert!(nil(&s, nobody), "{nobody}");
+        }
+        assert!(s.run(r#"UnitInParty("bogus")"#).is_err());
+        // With no player object `player` names nobody (`0x5159c9`).
+        s.set_unit_guids(&crate::script::UnitGuids::default());
+        assert!(nil(&s, r#"UnitInParty("player")"#));
     }
 
     #[test]

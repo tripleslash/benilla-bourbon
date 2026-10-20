@@ -276,6 +276,26 @@ fn player_self_res_spell_collapses_absent_and_zero() {
 }
 
 #[test]
+fn a_charters_signature_count_rides_enchantment_slot_0s_duration() {
+    // Petition id 22, the count 23, the slot's charges 24.
+    let f = ObjectFields::from_pairs(&[(22, 0x51), (23, 4), (24, 9)]);
+    assert_eq!(f.item_petition_signatures(), 4);
+    assert_eq!(f.item_enchant(0), Some(0x51));
+    assert_eq!(ObjectFields::default().item_petition_signatures(), 0);
+}
+
+#[test]
+fn player_pvp_medals_reads_the_field_after_self_res() {
+    // The block's `+0x1034` over field 188 is 1225, one past SELF_RES 1224 and one before the
+    // buyback prices at 1226; both neighbours set so a wrong index reads one of them.
+    assert_eq!(FIELD_PLAYER_PVP_MEDALS, 188 + 0x40D);
+    assert_eq!(FIELD_PLAYER_PVP_MEDALS + 1, FIELD_PLAYER_BUYBACK_PRICE_1);
+    let f = ObjectFields::from_pairs(&[(1224, 3026), (1225, 0x5), (1226, 77)]);
+    assert_eq!(f.player_pvp_medals(), Some(0x5));
+    assert_eq!(ObjectFields::default().player_pvp_medals(), None);
+}
+
+#[test]
 fn player_field_bytes_splits_into_combo_points_toggles_and_honor_rank() {
     // Bytes 0-3: flags 0x01, combo 2, action bars 3, highest rank 5; the client reads bytes 1-3
     // of field 1222 at `[[player+0xe68]+0x1029..0x102b]`.

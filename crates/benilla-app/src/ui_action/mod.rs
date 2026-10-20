@@ -16,9 +16,14 @@ use benilla_assets::DataLoadAppExt;
 use benilla_assets::{LockRecover, WorldAssets};
 
 mod cast_fail;
+mod cast_lines;
+pub(crate) use cast_lines::{CastFailLines, CastFailRedisplays};
 mod drain;
 // A `UseAction` press, applied in call order by `crate::script_calls`.
 pub(crate) use drain::{attack_nearest_probe, use_action, ActionPress, AttackPress, UseOutcome};
+// The right-click casts' drain, which the click's tests run after the click.
+#[cfg(test)]
+pub(crate) use drain::drain_click_casts;
 #[cfg(test)]
 mod drain_tests;
 pub(crate) mod drop_item;
@@ -43,9 +48,11 @@ mod weapon_icon;
 pub(crate) struct CooldownEvents;
 
 pub(crate) use cast_fail::report_reaches_pop;
+#[cfg(test)]
+pub(crate) use cast_fail::CAST_FAIL_KEYS;
 pub(crate) use errors::{
     attack_actor_blocked, attack_actor_refusal, keyed_line, keyed_line_s, reagent_totem_refusal,
-    show_messages, ui_error_text, CastErrors, CastFail, Caster, FillArg, MessageSink, MountErrors,
+    show_messages, ui_error_text, CastFail, Caster, FillArg, MessageSink, MountErrors,
     PetTameFailures, Shown, UiError, UiErrorKeys, UiErrorTexts,
 };
 pub(crate) use weapon_icon::{melee_auto_attack_icon, ranged_weapon_icon, substitutes_weapon_icon};
@@ -71,20 +78,28 @@ pub(crate) struct PlayerActions {
     pub dirty: bool,
 }
 
-/// The world right-click's GameObject openers, queued one frame for the cast ladder: the click
-/// system cannot also hold the ladder's resources, and only the ladder sends a cast, so a chest
-/// right-clicked mid-cast takes the reference's silent same-spell bail (`0x6e4d43`).
+/// The world right-click's casts, queued for the cast ladder later in the frame: the click system
+/// cannot also hold the ladder's resources, and only the ladder sends a cast, so a chest or a body
+/// right-clicked mid-cast meets the attempt's rungs as a button press does (`0x6e4d43`, `0x6e4d97`).
 #[derive(Resource, Default)]
-pub(crate) struct GoOpenerCasts(pub(crate) Vec<GoOpener>);
+pub(crate) struct ClickCasts(pub(crate) Vec<ClickCast>);
 
-/// A right-click's resolved opener ([`crate::target::click::resolve_go_action`]).
+/// A right-click's cast: a GameObject's opener ([`crate::target::click::resolve_go_action`]) or
+/// the spell a body is interacted with through (`0x5f05e0`).
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum GoOpener {
+pub(crate) enum ClickCast {
     /// A known `OPEN_LOCK` spell, cast with a GameObject target block.
-    Spell { spell_id: u32, go_guid: u64 },
+    AtObject { spell_id: u32, go_guid: u64 },
     /// A carried key: `CMSG_USE_ITEM` with `TARGET_FLAG_GAMEOBJECT`, the object's guid in
     /// [`crate::ui_items::ItemUse::on_object`].
     Key(crate::ui_items::ItemUse),
+    /// `InteractWithSpell 0x5f05e0`'s cast (`0x5f06dc` → `0x6e5a90`): the attempt with the body's
+    /// guid passed in, which its range test and its arm take in the selection's place.
+    AtUnit {
+        spell_id: u32,
+        entity: Entity,
+        guid: u64,
+    },
 }
 
 /// The spell DBC catalogs, absent without client data; the cast-visual router shares the catalog.
@@ -147,6 +162,15 @@ impl Spells {
             radii: Default::default(),
         }
     }
+}
+
+/// One pass of the action-state feed, for a test that reads a slot's pushed state.
+#[cfg(test)]
+pub(crate) fn run_feed_action_state_once(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(state::feed_action_state)
+        .expect("the action-state feed runs as a one-shot system");
 }
 
 /// The 5875 spell data; `None` skips where the install is absent.
@@ -258,12 +282,12 @@ impl Plugin for UiActionPlugin {
             .add_message::<crate::net::WorldEnterCascadeMessage>()
             .init_resource::<PlayerActions>()
             .init_resource::<LearnedAbilities>()
-            .init_resource::<CastErrors>()
+            .init_resource::<CastFailRedisplays>()
             .init_resource::<MountErrors>()
             .init_resource::<PetTameFailures>()
             .init_resource::<UiErrorKeys>()
             .init_resource::<UiErrorTexts>()
-            .init_resource::<GoOpenerCasts>()
+            .init_resource::<ClickCasts>()
             .add_data_loaders((load_spells, load_spell_mechanics))
             .add_systems(
                 Update,
@@ -288,8 +312,10 @@ impl Plugin for UiActionPlugin {
                         .after(crate::player::ControlRestore)
                         .after(feed::feed_actions),
                     drain::drain_action_sets.after(UiInput),
-                    // The target chain queues the openers earlier in the frame.
-                    drain::drain_go_openers.after(UiInput),
+                    // The target chain queues the right-click casts earlier in the frame.
+                    drain::drain_click_casts
+                        .after(UiInput)
+                        .after(crate::target::TargetUpdate),
                     // The latches must be current before the target chain's cursor reads them.
                     track_learned_abilities
                         .in_set(UnitFeed)

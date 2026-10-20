@@ -9,7 +9,7 @@ use benilla_ui::script::UiScript;
 use bevy::prelude::*;
 
 use super::feed::{feed_actions, MISSING_ITEM_ICON};
-use super::{CastErrors, MountErrors, PetTameFailures, PlayerActions, UiErrorKeys, UiErrorTexts};
+use super::{MountErrors, PetTameFailures, PlayerActions, UiErrorKeys, UiErrorTexts};
 use crate::entities::ItemDisplays;
 use crate::items::{test_template, Items};
 use crate::net::{ClientCommand, NetCommands};
@@ -50,7 +50,6 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
     app.insert_resource(actions)
         .init_resource::<Items>()
         .init_resource::<crate::net::GuidIndex>()
-        .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
         .init_resource::<PetTameFailures>()
         .init_resource::<UiErrorKeys>()
@@ -382,7 +381,6 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     app.insert_resource(actions)
         .init_resource::<Items>()
         .init_resource::<crate::net::GuidIndex>()
-        .init_resource::<CastErrors>()
         .init_resource::<MountErrors>()
         .init_resource::<PetTameFailures>()
         .init_resource::<UiErrorKeys>()
@@ -589,33 +587,46 @@ fn a_notice_under_the_loading_cover_fires_at_the_reveal() {
     assert!(app.world().resource::<UiErrorTexts>().0.is_empty());
 }
 
+/// The cast reports' feed ([`crate::ui_cast::feed_cast_reports`]) over a VM, with `reports`
+/// queued and `spells` as the catalog.
+fn report_feed(spells: crate::ui_action::Spells, reports: crate::ui_cast::CastReports) -> App {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut app = App::new();
+    app.add_message::<crate::net::FieldChanged>();
+    app.insert_resource(reports)
+        .insert_resource(spells)
+        .init_resource::<Items>()
+        .init_resource::<crate::net::GuidIndex>()
+        .init_resource::<super::CastFailRedisplays>()
+        .init_resource::<crate::ui_chat::ChatLog>()
+        .init_resource::<crate::sound::MessageSounds>()
+        .init_resource::<crate::spell::PendingCast>()
+        .init_resource::<crate::spell::QueuedMeleeSpell>()
+        .init_resource::<crate::spell::targeting::SpellTargeting>()
+        .init_resource::<crate::spell::ActiveChannel>()
+        .init_resource::<crate::spell::AutoRepeatActive>()
+        .insert_resource(NetCommands(tx));
+    app.insert_non_send(UiScript::new().unwrap());
+    app.add_systems(Update, crate::ui_cast::feed_cast_reports);
+    app
+}
+
 /// `HandleCastFailed 0x6e1a00` logs through `0x62c360`; `HandlePetCastFailed 0x6e8eb0` calls only
 /// the packet readers and `0x496720`, with no log line and no error sound. Both entries name the
 /// same spell, so only the caster differs.
 #[test]
 fn a_pets_refused_cast_writes_no_combat_log_line() {
-    use crate::ui_action::{CastFail, Caster, Spells};
+    use crate::ui_action::{CastFail, Spells};
     use benilla_formats::{SpellCatalog, SpellDisplay};
 
     const GROWL: u32 = 2649;
 
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let mut app = App::new();
-    let mut errors = CastErrors::default();
+    let mut reports = crate::ui_cast::CastReports::default();
     // 0x5f ROOTED has a string on both tables, so neither entry drops for want of one.
-    errors.0.push(CastFail {
-        spell_id: GROWL,
-        reason: 0x5F,
-        arg: None,
-        caster: Caster::Player,
-        redisplay: false,
-        input: benilla_ui::script::InputEvents::NONE,
-    });
-    errors.push_pet(GROWL, 0x5F);
-
-    app.insert_resource(PlayerActions::default())
-        .insert_resource(errors)
-        .insert_resource(Spells {
+    reports.refused(CastFail::server(GROWL, 0x5F, None));
+    reports.pet_refused(GROWL, 0x5F);
+    let mut app = report_feed(
+        Spells {
             catalog: SpellCatalog::from_displays(HashMap::from([(
                 GROWL,
                 SpellDisplay {
@@ -624,23 +635,14 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
                 },
             )])),
             ..Spells::empty_for_tests()
-        })
-        .init_resource::<Items>()
-        .init_resource::<crate::net::GuidIndex>()
-        .init_resource::<MountErrors>()
-        .init_resource::<PetTameFailures>()
-        .init_resource::<UiErrorKeys>()
-        .init_resource::<UiErrorTexts>()
-        .init_resource::<crate::ui_chat::ChatLog>()
-        .init_resource::<crate::sound::MessageSounds>()
-        .insert_resource(NetCommands(tx));
-    let script = UiScript::new().unwrap();
+        },
+        reports,
+    );
     // Only what the log line needs; the red line's text has its own tests.
-    script
+    app.world_mut()
+        .non_send::<UiScript>()
         .run(r#"SPELL_FAILED_ROOTED = "You are unable to move";"#)
         .unwrap();
-    app.insert_non_send(script);
-    app.add_systems(Update, feed_actions);
     app.update();
 
     assert_eq!(
@@ -650,6 +652,44 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
         1,
         "the player's failure logs and the pet's does not"
     );
+}
+
+/// `0x62c360` logs no refusal of a spell flagged `Attributes & 0x180` (`0x62c4bd`), though the
+/// red line still shows.
+#[test]
+fn a_refused_spell_flagged_not_to_log_writes_no_combat_log_line() {
+    use crate::ui_action::{CastFail, Spells};
+    use benilla_formats::{SpellCatalog, SpellDisplay};
+
+    let logged = |attributes| {
+        let mut reports = crate::ui_cast::CastReports::default();
+        reports.refused(CastFail::server(1, 0x5F, None));
+        let mut app = report_feed(
+            Spells {
+                catalog: SpellCatalog::from_displays(HashMap::from([(
+                    1,
+                    SpellDisplay {
+                        name: "Growl".into(),
+                        attributes,
+                        ..Default::default()
+                    },
+                )])),
+                ..Spells::empty_for_tests()
+            },
+            reports,
+        );
+        app.world_mut()
+            .non_send::<UiScript>()
+            .run(r#"SPELL_FAILED_ROOTED = "You are unable to move";"#)
+            .unwrap();
+        app.update();
+        app.world()
+            .resource::<crate::ui_chat::ChatLog>()
+            .pending_len()
+    };
+    assert_eq!(logged(0), 1);
+    assert_eq!(logged(0x100), 0, "SPELL_ATTR_DO_NOT_LOG");
+    assert_eq!(logged(0x80), 0, "SPELL_ATTR_DO_NOT_DISPLAY");
 }
 
 /// `0x6e6a20` resolves `PETTAME_<reason>` first and passes the string to `DisplayError(0xee)`,
@@ -719,7 +759,11 @@ fn a_tame_failure_composes_the_reason_string_into_err_tame_failed() {
 /// not.
 #[test]
 fn a_refusal_of_the_armed_craft_disarms_the_batch() {
-    let (mut app, _rx) = app_with_food_on_the_bar();
+    use crate::ui_action::CastFail;
+    let mut app = report_feed(
+        crate::ui_action::Spells::empty_for_tests(),
+        crate::ui_cast::CastReports::default(),
+    );
     {
         let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.set_trade_skill(Some(benilla_ui::script::TradeSkillState {
@@ -748,13 +792,13 @@ fn a_refusal_of_the_armed_craft_disarms_the_batch() {
     }
     let repeat = |app: &App| app.world().non_send::<UiScript>().trade_skill_repeat();
     app.world_mut()
-        .resource_mut::<CastErrors>()
-        .push_local(133, 0x0c);
+        .resource_mut::<crate::ui_cast::CastReports>()
+        .refused(CastFail::local(133, 0x0c));
     app.update();
     assert_eq!(repeat(&app), (2963, 3), "another spell's refusal");
     app.world_mut()
-        .resource_mut::<CastErrors>()
-        .push_local(2963, 0x0c);
+        .resource_mut::<crate::ui_cast::CastReports>()
+        .refused(CastFail::local(2963, 0x0c));
     app.update();
     assert_eq!(repeat(&app), (0, 3), "the armed craft's refusal disarms");
 }
@@ -901,4 +945,56 @@ fn a_charged_item_slot_shows_the_uses_left() {
         .insert_template(JERKY, Some(info));
     app.update();
     assert_eq!(jerky_count(&mut app), 2, "|-2| charges, one item");
+}
+
+/// The active player's form change (`OnShapeshiftFormChanged 0x5de010`, the `UNIT_FIELD_BYTES_1`
+/// byte 2 watcher) signals the pair (`0x5de016` → `0x4b3250`): `ACTIONBAR_UPDATE_STATE`, then
+/// `CURRENT_SPELL_CAST_CHANGED`. Another byte of the field, or another unit's form, signals
+/// nothing.
+#[test]
+fn the_players_form_change_signals_the_cast_changed_pair() {
+    use benilla_protocol::field::FIELD_UNIT_BYTES_1;
+    use benilla_protocol::messages::ObjectType;
+    let mut app = report_feed(
+        crate::ui_action::Spells::empty_for_tests(),
+        crate::ui_cast::CastReports::default(),
+    );
+    let me = app.world_mut().spawn(crate::net::SelfPlayer).id();
+    let other = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .non_send::<UiScript>()
+        .run(
+            r#"FIRED = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("ACTIONBAR_UPDATE_STATE")
+            f:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+            f:SetScript("OnEvent", function() table.insert(FIRED, event) end)"#,
+        )
+        .unwrap();
+    let edge = |entity, old: u32, new: u32| crate::net::FieldChanged {
+        entity,
+        guid: 1,
+        kind: ObjectType::Player,
+        index: FIELD_UNIT_BYTES_1,
+        old,
+        new,
+    };
+    let fired = |app: &mut App| {
+        app.world_mut()
+            .non_send::<UiScript>()
+            .eval::<Vec<String>>("local f = FIRED FIRED = {} return f")
+            .unwrap()
+    };
+    // Bear Form (1) in byte 2; byte 0 alone moving is no form change.
+    app.world_mut()
+        .write_message(edge(me, 0x0000_0001, 0x0000_0002));
+    app.world_mut().write_message(edge(other, 0, 0x0001_0000));
+    app.update();
+    assert_eq!(fired(&mut app), Vec::<String>::new());
+    app.world_mut().write_message(edge(me, 0, 0x0001_0000));
+    app.update();
+    assert_eq!(
+        fired(&mut app),
+        ["ACTIONBAR_UPDATE_STATE", "CURRENT_SPELL_CAST_CHANGED"]
+    );
 }

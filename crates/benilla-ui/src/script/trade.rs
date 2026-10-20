@@ -33,10 +33,6 @@ pub struct TradeSlotItem {
     /// The wire's `lock_id`: the trade target's tooltip draws LOCKED off it (`0x534563`,
     /// `0x52bdd2`). 0 for none; the player's side ignores it.
     pub lock_id: u32,
-    /// The player's own side only: the placed item's `ITEM_FIELD_FLAGS`. Its presence means the
-    /// slot holds a live item object, which the tooltip builder's LOCKED gate reads (`0x5342ed`);
-    /// the partner's side has none.
-    pub object_flags: Option<u32>,
     /// The wire's wrapped word: the partner's block `+0x42c` (`0x534559`), which the tooltip's
     /// wrapped gates read (`0x52c991`, `0x52cc5b`). The player's side reads its object's
     /// `ITEM_FIELD_FLAGS` instead, so this only mirrors them there.
@@ -48,9 +44,21 @@ pub struct TradeSlotItem {
     /// The giver's guid, 0 for none: with no [`Self::gift_creator`] yet, the name the tooltip
     /// waits for.
     pub gift_creator_guid: u64,
+    /// The resolved name of the item's creator (`ITEM_FIELD_CREATOR` on the player's side, the
+    /// block's `+0x410` on the partner's, `0x53453e`), the "Made by" line; `None` while unresolved
+    /// or when the guid is 0.
+    pub creator: Option<String>,
+    /// The creator's guid, 0 for none: with no [`Self::creator`] yet, the name the tooltip waits
+    /// for.
+    pub creator_guid: u64,
     /// Slot 7 only: the name of the spell being cast on the item, which stock shows in green
-    /// (`TradeFrame.lua:62`); `None` on every other slot and while nothing is cast.
+    /// (`TradeFrame.lua:62`) and the slot's tooltip proposes (`0x534397`, `0x53459a`); `None` on
+    /// every other slot and while nothing is cast.
     pub enchantment: Option<String>,
+    /// The partner's side only: the wire's charges and `(current, max)` durability, the block's
+    /// `+0x428` (`0x534595`) and `+0x438`/`+0x434` (`0x5345c0`, `0x5345b4`).
+    pub charges: i32,
+    pub durability: (u32, u32),
     /// The escaped item link the link verbs answer; `None` while the template is in flight, since
     /// it embeds the name and the quality.
     pub link: Option<String>,
@@ -486,11 +494,14 @@ fn trade_slot_item(model: &Model, item: &cursor::CursorItem) -> TradeSlotItem {
             quality: s.quality,
             inventory_type: s.inventory_type,
             lock_id: 0,
-            object_flags: Some(s.flags),
             wrapped: s.flags & 0x8 != 0,
             gift_creator: s.gift_creator.clone(),
             gift_creator_guid: s.gift_creator_guid,
+            creator: s.creator.clone(),
+            creator_guid: s.creator_guid,
             enchantment: None,
+            charges: 0,
+            durability: (0, 0),
             link: s.link.clone(),
         })
         .unwrap_or_else(|| TradeSlotItem {
@@ -790,11 +801,14 @@ mod tests {
             quality: Some(quality),
             inventory_type: 0,
             lock_id: 0,
-            object_flags: None,
             wrapped: false,
             gift_creator: None,
             gift_creator_guid: 0,
+            creator: None,
+            creator_guid: 0,
             enchantment: None,
+            charges: 0,
+            durability: (0, 0),
             link: Some(format!(
                 "|cffffffff|Hitem:{item_id}:0:0:0|h[Linen Cloth]|h|r"
             )),
@@ -837,11 +851,14 @@ mod tests {
             quality: None,
             inventory_type: 0,
             lock_id: 0,
-            object_flags: None,
             wrapped: false,
             gift_creator: None,
             gift_creator_guid: 0,
+            creator: None,
+            creator_guid: 0,
             enchantment: None,
+            charges: 0,
+            durability: (0, 0),
             link: None,
         });
         s.set_trade(Some(st));

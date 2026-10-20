@@ -648,6 +648,7 @@
 - `check.sh` — The in-loop verify: fmt everywhere, clippy and test on the changed crates and their dependents.
 - `cine.sh` — Play one cinematic on the probe and print what happened, as a timeline.
 - `doc-links.sh` — fail on a doc link whose target is declared nowhere in the workspace.
+- `doc-tests.sh` — The doctests `scripts/unit-tests.sh` leaves to `cargo test` under cargo-nextest, which runs none: those of the library packages among the ones named, …
 - `gates.sh` — The land gate chain: every gate in order, stopping at the first failure.
 - `genmap.sh` — Generate docs/MAP.md, the map of what is built, and docs/DEVIATIONS.md, where benilla differs from 1.12.1, both from what is on disk.
 - `pass-span-lint.sh` — refuse a second open `pass_span` on the same render pass (a wgpu validation error on Vulkan).
@@ -657,6 +658,7 @@
 - `soundprobe.sh` — Start the client in sound measuring mode: record the mix before and after the output limiter.
 - `stage-packs.sh` — assemble web/site/, the directory a static host serves.
 - `summon-live.sh` — Two-client live summon probe: a second account summons this checkout's character, which accepts.
+- `unit-tests.sh` — The test gates' runner: the tests of every target the cargo package and target flags it is given select, all run, a failure not stopping the rest.
 - `visual.sh` — Visual A/B harness: capture deterministic screenshots and diff them against a baseline.
 - `wasm-memory.sh` — say what a wasm module's linear memory is, and which target features it was built with.
 - `web-build-threads.sh` — the browser build WITH THREADS.
