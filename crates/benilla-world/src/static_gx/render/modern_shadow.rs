@@ -760,7 +760,7 @@ fn queue_terrain_shadow_pipelines(
         return;
     }
     *unprepared = false;
-    for (mesh_id, _, _) in &casters.cells {
+    for (mesh_id, _, _, _) in &casters.cells {
         let Some(mesh) = meshes.get(*mesh_id) else {
             *unprepared = true;
             continue;
@@ -1182,7 +1182,7 @@ pub(crate) fn gx_shadow_pass(
                     if active {
                         pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
                         if let (Some(t), Some(tp)) = (terrain, terrain_pipes) {
-                            for (mesh_id, center, half) in &t.cells {
+                            for (mesh_id, center, half, _) in &t.cells {
                                 if outside_box(&clip_from_world, *center, *half) {
                                     continue;
                                 }
@@ -2271,13 +2271,15 @@ fn layer_casters_key(
 ) -> u64 {
     use std::hash::{BuildHasher, Hash, Hasher};
     let mut acc: u64 = 0x9e37_79b9_7f4a_7c15;
-    for (mesh, center, half) in terrain.map(|t| t.cells.as_slice()).unwrap_or_default() {
+    for (mesh, center, half, lod) in terrain.map(|t| t.cells.as_slice()).unwrap_or_default() {
         if outside_box(clip_from_world, *center, *half) {
             continue;
         }
         let mut h = bevy::platform::hash::FixedHasher.build_hasher();
         mesh.hash(&mut h);
         center.to_array().map(f32::to_bits).hash(&mut h);
+        // A cell rebuilt at a new chunk level keeps its handle; its epoch says the mesh moved.
+        lod.hash(&mut h);
         acc = acc.wrapping_add(h.finish());
     }
     for (gpu, draw) in casters {

@@ -697,11 +697,11 @@ fn prepare_gi_voxels(
         .map_or(crate::modern::gi::NO_TERRAIN, |t| {
             t.cells
                 .iter()
-                .filter(|(_, c, h)| {
+                .filter(|(_, c, h, _)| {
                     (c.x - centre.x).abs() <= HEIGHT_HALF + h.x
                         && (c.z - centre.z).abs() <= HEIGHT_HALF + h.z
                 })
-                .map(|(_, c, h)| c.y + h.y + 0.5)
+                .map(|(_, c, h, _)| c.y + h.y + 0.5)
                 .fold(crate::modern::gi::NO_TERRAIN, f32::max)
         });
     let mut key = 0u64;
@@ -710,8 +710,13 @@ fn prepare_gi_voxels(
         // terrain cell.
         use std::hash::BuildHasher;
         let hasher = bevy::platform::hash::FixedHasher;
-        for (mesh_id, center, _) in &t.cells {
-            key = key.wrapping_add(hasher.hash_one((mesh_id, center.to_array().map(f32::to_bits))));
+        // The LOD epoch too: a cell rebuilt at a new chunk level keeps its mesh handle.
+        for (mesh_id, center, _, lod) in &t.cells {
+            key = key.wrapping_add(hasher.hash_one((
+                mesh_id,
+                center.to_array().map(f32::to_bits),
+                lod,
+            )));
         }
         key = key
             .wrapping_add(hasher.hash_one(clip_from_world.to_cols_array().map(f32::to_bits)))
@@ -721,7 +726,7 @@ fn prepare_gi_voxels(
         let rescan = key != state.height_key || state.height_unprepared;
         state.height_unprepared = false;
         let cells = if rescan { &t.cells[..] } else { &[][..] };
-        for (mesh_id, _, _) in cells {
+        for (mesh_id, _, _, _) in cells {
             let Some(mesh) = meshes.get(*mesh_id) else {
                 state.height_unprepared = true;
                 continue;
@@ -837,7 +842,7 @@ pub(crate) fn gi_voxel_pass(
                 });
                 let timing = diagnostics.pass_span(&mut pass, "modern_gi_heightfield");
                 pass.set_bind_group(0, bind, &[state.height_offset]);
-                for (mesh_id, _, _) in terrain.iter().flat_map(|t| t.cells.iter()) {
+                for (mesh_id, _, _, _) in terrain.iter().flat_map(|t| t.cells.iter()) {
                     let Some(mesh) = meshes.get(*mesh_id) else {
                         continue;
                     };

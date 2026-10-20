@@ -174,11 +174,14 @@ pub struct ModernCascades {
     pub sky_params: [f32; 4],
 }
 
-/// Every resident terrain cell as a caster: mesh, world-space box centre and half extents.
-/// Collected in `Last`; empty in a classic session.
+/// Every resident terrain cell as a caster: mesh, world-space box centre and half extents, and
+/// its LOD epoch (`terrain_stream::TerrainLodEpoch`), which moves when the cell's mesh is rebuilt
+/// at a new chunk level under the same handle, so the cached shadow layers and the GI height map
+/// that hold it are redrawn with the coarse terrain the camera sees. Collected in `Last`; empty in
+/// a classic session.
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct ModernTerrainCasters {
-    pub cells: Vec<(AssetId<Mesh>, Vec3, Vec3)>,
+    pub cells: Vec<(AssetId<Mesh>, Vec3, Vec3, u32)>,
     /// Bumped whenever `cells` changes, so a reader keyed on the set skips re-hashing it.
     pub rev: u64,
 }
@@ -483,9 +486,17 @@ fn update_cascades(
 /// Terrain cells are world-space meshes under an identity transform, so their `Aabb` is the box.
 fn collect_terrain_casters(
     active: Res<ActiveLighting>,
-    cells: Query<(&Mesh3d, &Aabb, &GlobalTransform), With<MeshMaterial3d<TerrainMaterial>>>,
+    cells: Query<
+        (
+            &Mesh3d,
+            &Aabb,
+            &GlobalTransform,
+            Option<&crate::terrain_stream::TerrainLodEpoch>,
+        ),
+        With<MeshMaterial3d<TerrainMaterial>>,
+    >,
     mut out: ResMut<ModernTerrainCasters>,
-    mut scratch: Local<Vec<(AssetId<Mesh>, Vec3, Vec3)>>,
+    mut scratch: Local<Vec<(AssetId<Mesh>, Vec3, Vec3, u32)>>,
 ) {
     if !active.is_modern() {
         if !out.cells.is_empty() {
@@ -495,9 +506,14 @@ fn collect_terrain_casters(
         return;
     }
     scratch.clear();
-    for (mesh, aabb, gt) in &cells {
+    for (mesh, aabb, gt, epoch) in &cells {
         let center = gt.transform_point(Vec3::from(aabb.center));
-        scratch.push((mesh.id(), center, Vec3::from(aabb.half_extents)));
+        scratch.push((
+            mesh.id(),
+            center,
+            Vec3::from(aabb.half_extents),
+            epoch.map_or(0, |e| e.0),
+        ));
     }
     // Written only when it moved: the extract copies it and the render side re-scans it on a
     // change, and the resident terrain stands still on most frames.

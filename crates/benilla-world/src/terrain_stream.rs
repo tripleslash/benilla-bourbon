@@ -31,6 +31,7 @@ use benilla_assets::{m2_url, wmo_url};
 mod collider;
 mod furnish;
 mod lod;
+pub(crate) use lod::TerrainLodEpoch;
 pub mod merge;
 mod provisional;
 mod queries;

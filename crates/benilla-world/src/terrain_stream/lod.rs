@@ -36,6 +36,11 @@ const KEY_FULL: u32 = (CHUNK_LEVEL_NEAR as u32) << 16;
 /// Each chunk's bounding sphere in Bevy space, `None` for a chunk with no vertices.
 type Spheres = Arc<[Option<(Vec3, f32)>]>;
 
+/// How many times a cell's mesh has been rebuilt at a new LOD key under the same handle: the
+/// shadow and GI caches, which key a terrain caster on its mesh, read it to know the mesh moved.
+#[derive(Component, Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct TerrainLodEpoch(pub(crate) u32);
+
 /// What the gate keeps between frames.
 #[derive(Default)]
 pub(super) struct LodState {
@@ -215,7 +220,16 @@ pub(super) fn update_terrain_lod(
         commands.queue(move |world: &mut World| {
             if let Some(mut meshes) = world.get_resource_mut::<Assets<Mesh>>() {
                 // A cell that unloaded since leaves an index nothing holds: nothing to replace.
-                let _ = meshes.insert(mesh_id, mesh);
+                if meshes.insert(mesh_id, mesh).is_err() {
+                    return;
+                }
+            }
+            // The casters' caches see the new mesh through the cell's epoch.
+            if let Ok(mut cell) = world.get_entity_mut(entity) {
+                let next = cell
+                    .get::<TerrainLodEpoch>()
+                    .map_or(1, |e| e.0.wrapping_add(1));
+                cell.insert(TerrainLodEpoch(next));
             }
         });
     }
