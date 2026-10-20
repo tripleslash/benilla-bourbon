@@ -133,8 +133,15 @@ mkdir -p "${SITE}"
 find "${SITE}" -mindepth 1 -maxdepth 1 ! -name data ! -name data-hd ! -name data-turtle ! -name data-reforged -exec rm -rf {} +
 
 # Git Bash maps `cp -l` to CreateHardLink, so this is metadata-only even for the 90 MB wasm. The
-# fallback copy is for a filesystem that refuses links (a FAT stick, a mounted share).
-cp -l "${DIST}"/* "${SITE}"/ 2>/dev/null || cp -r "${DIST}"/* "${SITE}"/
+# fallback copy is for a filesystem that refuses links (a FAT stick, a mounted share). A directory
+# (wasm-bindgen's `snippets/`, from an `inline_js`) is copied, as the .py and .ps1 twins do.
+for src in "${DIST}"/*; do
+  if [ -d "${src}" ]; then
+    cp -r "${src}" "${SITE}"/
+  else
+    cp -l "${src}" "${SITE}"/ 2>/dev/null || cp "${src}" "${SITE}"/
+  fi
+done
 
 # The bundled third-party addons (`benilla_formats::bundled_addons`), served as loose files under
 # `/addons/`, with `index.txt` naming each one: a static origin lists no directory, and the client
