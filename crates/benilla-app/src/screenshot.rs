@@ -29,6 +29,10 @@ use benilla_ui::script::UiScript;
 
 use crate::ui_script::{UiFeed, UiInput};
 
+#[cfg(target_arch = "wasm32")]
+#[path = "screenshot_web.rs"]
+mod web;
+
 /// The reference's file stem.
 const STEM: &str = "WoWScrnShot";
 
@@ -112,7 +116,33 @@ fn ask_for_captures(
 }
 
 /// Names the file and hands the encode and write to a worker, off the frame.
+// The wasm arm returns first; the native body below it stays as upstream wrote it.
+#[cfg_attr(target_arch = "wasm32", allow(unreachable_code, unused_variables))]
 fn write_capture(captured: On<ScreenshotCaptured>, mut state: ResMut<ScreenshotState>) {
+    // The browser has no folder to write into: the PNG becomes a page download (`screenshot_web`).
+    #[cfg(target_arch = "wasm32")]
+    {
+        let name = state.next_name(benilla_ui::civil::unix_seconds());
+        let outcome = match captured.image.clone().try_into_dynamic() {
+            Ok(img) => {
+                // Encoded on the frame (no threads here): the fast level keeps that hitch short.
+                use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+                let mut png = Vec::new();
+                let encoder =
+                    PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive);
+                match img.to_rgb8().write_with_encoder(encoder) {
+                    Ok(()) => {
+                        web::download(&name, &png);
+                        Outcome::Saved(name.into())
+                    }
+                    Err(e) => Outcome::Failed(format!("{name}: {e}")),
+                }
+            }
+            Err(e) => Outcome::Failed(format!("unreadable frame: {e}")),
+        };
+        let _ = state.tx.send(outcome);
+        return;
+    }
     // No folder under a `$WOW_CAPTURE` run or without an exe directory: report it as a failure.
     let Some(dir) = crate::local_state::screenshots_dir() else {
         let _ = state.tx.send(Outcome::Failed(
