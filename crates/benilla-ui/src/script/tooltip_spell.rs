@@ -108,6 +108,20 @@ impl super::UiScript {
         self.store_spell_view(false, spell_id, view);
     }
 
+    /// wenilla carry: whether every spell in the player's book has its tooltip view seated. The
+    /// reference builds a spell tooltip whole at the call (`0x52e610`); here the view is pushed by
+    /// the host a frame after it is known, so an addon that scans the book through `SetSpell` at
+    /// `PLAYER_ENTERING_WORLD` (CallOfElements' heal scan reads `TextLeft2`) found only the name.
+    /// The host holds the world-enter cascade on this (`ui_unit::feed_units`).
+    pub fn book_spell_views_ready(&self) -> bool {
+        let model = self.model_mut();
+        model
+            .spellbook
+            .slots
+            .iter()
+            .all(|s| s.spell_id == 0 || model.spell_tooltips.contains_key(&s.spell_id))
+    }
+
     /// Store or replace a spell's view built against the player's pet, the one the builder's unit
     /// selector renders (`SetPetAction`, `SetSpell` on the pet book, a pet-learn trainer service).
     pub fn set_pet_spell_tooltip(&mut self, spell_id: u32, view: SpellTooltipView) {

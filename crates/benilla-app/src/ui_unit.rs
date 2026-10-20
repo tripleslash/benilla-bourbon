@@ -72,6 +72,9 @@ struct UnitFeedState {
     warned_sideless: bool,
 }
 
+/// How long the world-enter cascade may wait for the book's spell views (see `feed_units`).
+const WORLD_ENTER_VIEW_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The per-VM half of [`UnitFeedState`]: the event-trigger diffs.
 #[derive(Default)]
 struct UnitFeedMemo {
@@ -80,6 +83,9 @@ struct UnitFeedMemo {
     guild_generation: gate::Watch,
     /// Whether the world-enter events have fired for this world entry.
     entered_world: bool,
+    /// wenilla carry: when the world-enter cascade first became due, for its bounded wait on the
+    /// book's spell views (see the cascade below).
+    enter_due_since: Option<bevy::platform::time::Instant>,
     /// Per token, the last snapshot pushed.
     last: HashMap<String, UnitState>,
     /// The descriptors the last run's snapshots read: the target's, its target's, the
@@ -1663,7 +1669,19 @@ fn feed_units(
     // re-entry fires `PLAYER_ENTERING_WORLD` alone. At world exit, re-arm the entry and forget the
     // player-global memos so the next character seeds them.
     if let Some((_, me)) = self_pair {
-        if !memo.entered_world {
+        // wenilla carry: **the cascade waits for the book's spell views, a few frames at most.**
+        // The reference builds a spell tooltip at the call, so an addon scanning the book with
+        // `SetSpell` at `PLAYER_ENTERING_WORLD` reads every line; here the views land a frame after
+        // the book (`ui_tooltip::feed_spell_tooltips`, ordered after this feed), so that scan read
+        // the name alone - CallOfElements' heal scan raised on a nil `TextLeft2` (the owner's
+        // report, 2026-10-20). Bounded by `WORLD_ENTER_VIEW_WAIT`, so a view that never comes
+        // cannot hold the world-enter events back.
+        let due = *memo
+            .enter_due_since
+            .get_or_insert_with(bevy::platform::time::Instant::now);
+        let views_ready = script.book_spell_views_ready()
+            || due.elapsed() >= WORLD_ENTER_VIEW_WAIT;
+        if !memo.entered_world && views_ready {
             gate.audit("feed_units", "the world-enter events");
             // `"player"` names us when the cascade runs, from our own create: the stock windows
             // bind their model panes to it here (`PaperDollFrame.lua:39`), so it is seated ahead
@@ -1672,9 +1690,10 @@ fn feed_units(
             script.fire_world_enter();
             memo.entered_world = true;
         }
-    } else if memo.entered_world {
+    } else if memo.entered_world || memo.enter_due_since.is_some() {
         gate.audit("feed_units", "the world-exit disarm");
         memo.entered_world = false;
+        memo.enter_due_since = None;
         memo.last_xp = None;
         memo.last_rest = None;
         memo.last_level = None;
