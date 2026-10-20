@@ -972,6 +972,7 @@ impl WorldSession {
             reader: conn_reader,
             decrypter,
             link,
+            traffic: _,
         } = reader;
         let session = WorldSession {
             conn: Conn::join(conn_reader, writer.writer),
