@@ -26,7 +26,9 @@ use crate::ui_chat::combat::{CombatLogRanges, LogPeriodicSpells};
 use crate::ui_chat::ChatLog;
 
 pub(crate) mod chat;
-mod feedback;
+#[cfg(test)]
+mod death_tests;
+pub(crate) mod feedback;
 pub(crate) mod text;
 
 /// `SMSG_ATTACKERSTATEUPDATE`'s swing as every consumer reads it: the record read runs
@@ -72,10 +74,21 @@ impl Ctx<'_> {
             names: self.names.as_deref(),
             skill_lines: self.skill_lines.as_deref().map(|s| &s.catalog),
             enchants: self.enchants.as_deref().map(|e| &e.0),
+            items: None,
+            gameobjects: None,
             ranges: &self.ranges,
             periodic: self.periodic.0,
         }
     }
+}
+
+/// The caches `LogOpenLock` reads (`0xc0e2a0`, `0xc0e318`). They stay out of [`Ctx`] because
+/// `on_missile_miss` runs in `Update` with it, and the sound systems that write the item cache run
+/// there too: a claim on a cache no line of that leg reads would only add undeclared orders.
+#[derive(SystemParam)]
+struct LockCaches<'w> {
+    items: Option<Res<'w, crate::items::Items>>,
+    gameobjects: Option<Res<'w, crate::go_templates::GameObjectTemplates>>,
 }
 
 /// What the two legs resolve endpoints through and write to.
@@ -379,9 +392,13 @@ fn on_enchantment_log(In(ev): In<SessionEvent>, c: Ctx, mut l: Sinks) {
     }
 }
 
-fn on_spell_log_execute(In(ev): In<SessionEvent>, c: Ctx, mut l: Sinks) {
+fn on_spell_log_execute(In(ev): In<SessionEvent>, c: Ctx, caches: LockCaches, mut l: Sinks) {
     if let SessionEvent::SpellLogExecute(x) = ev {
-        let ctx = c.ctx();
+        let ctx = chat::ChatCtx {
+            items: caches.items.as_deref(),
+            gameobjects: caches.gameobjects.as_deref(),
+            ..c.ctx()
+        };
         chat::spell_log_execute(&x, &ctx, &l.stores, &l.poses, &mut l.log);
     }
 }
@@ -393,7 +410,7 @@ fn on_environmental_damage_log(In(ev): In<SessionEvent>, c: Ctx, mut l: Sinks) {
     }
 }
 
-fn on_xp_gain(In(ev): In<SessionEvent>, c: Ctx, mut l: Sinks) {
+fn on_xp_gain(In(ev): In<SessionEvent>, c: Ctx, mut l: Sinks, mut commands: Commands) {
     if let SessionEvent::XpGain(x) = ev {
         text::xp_gain(
             x,
@@ -402,6 +419,7 @@ fn on_xp_gain(In(ev): In<SessionEvent>, c: Ctx, mut l: Sinks) {
             &l.stores,
             &mut l.text,
             &mut l.log,
+            &mut commands,
         );
     }
 }
@@ -860,6 +878,7 @@ mod tests {
                 total,
                 base: 40,
                 kill,
+                group: 1.0,
             });
             app.world_mut()
                 .run_system_once_with(on_xp_gain, packet)
@@ -873,21 +892,24 @@ mod tests {
                 .count();
             (lines, kinds, floats)
         };
-        assert_eq!(gain(MOB, 60, true), (vec![(MOB, 60, 40)], vec!["xp"], 1));
+        assert_eq!(
+            gain(MOB, 60, true),
+            (vec![(MOB, 60, 40, 1.0)], vec!["xp"], 1)
+        );
         assert_eq!(
             gain(77, 60, true),
-            (vec![(0, 60, 40)], vec!["xp"], 1),
+            (vec![(0, 60, 40, 1.0)], vec!["xp"], 1),
             "not held"
         );
         assert_eq!(
             gain(MOB, 60, false),
-            (vec![(0, 60, 40)], vec!["xp"], 1),
+            (vec![(0, 60, 40, 1.0)], vec!["xp"], 1),
             "no kill"
         );
         assert_eq!(gain(MOB, 0, true), (vec![], vec![], 0), "a zero kill");
         assert_eq!(
             gain(0, 0, false),
-            (vec![(0, 0, 40)], vec!["xp"], 1),
+            (vec![(0, 0, 40, 1.0)], vec!["xp"], 1),
             "a zero award"
         );
         assert_eq!(

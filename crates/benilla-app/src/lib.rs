@@ -96,6 +96,7 @@ mod npc_text;
 mod perf;
 mod pipe_warm;
 mod player;
+mod player_commands;
 mod player_shadow;
 mod poi_marker;
 mod portrait;

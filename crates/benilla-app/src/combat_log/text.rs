@@ -13,8 +13,9 @@ use benilla_protocol::messages::{
 };
 
 use crate::combat_text::{
-    damage_color, miss_word, spell_text, CombatTextSpawn, DamageSource, DamageTextGates,
+    damage_color, miss_word, spell_text, CombatTextSpawn, DamageSource, DamageTextGates, TextBody,
 };
+use crate::ui_chat::combat::watch::XpAwarded;
 use crate::ui_chat::{combat, ChatLog};
 
 use crate::net::{GuidIndex, ObjectStore, SelfGuid};
@@ -189,7 +190,7 @@ pub(super) fn damage_shield(
     if let Some(anchor) = gated_anchor(s.attacker, index, self_guid, stores) {
         text.write(CombatTextSpawn {
             anchor,
-            text: s.damage.to_string(),
+            text: TextBody::Literal(s.damage.to_string()),
             category: 0,
             color,
         });
@@ -226,14 +227,14 @@ fn miss_float(
     stores: &Query<&mut ObjectStore>,
     text: &mut MessageWriter<CombatTextSpawn>,
 ) {
-    if let (Some(color), Some(anchor), Some((word, category))) = (
+    if let (Some(color), Some(anchor), Some((key, category))) = (
         color,
         gated_anchor(guid, index, self_guid, stores),
         miss_word(code),
     ) {
         text.write(CombatTextSpawn {
             anchor,
-            text: word.to_string(),
+            text: TextBody::Word(key),
             category,
             color,
         });
@@ -302,10 +303,10 @@ pub(super) const SPELL_MISS_REFLECT: u8 = 11;
 
 /// `SMSG_LOG_XPGAIN`, as `0x637ec0` dispatches it. Your own guid as the victim is an XP loss,
 /// written with no float (`0x637f70`). A kill of a unit the client holds (type mask 8) is named:
-/// `CGUnit_C::SetPendingXP` (`0x60a0c0`) stores it and flushes it at once through `0x6251e0`,
-/// which writes and floats nothing for a zero gain (`0x625202`). Anything else is the unnamed
-/// line (`0x637f90`, victim NULL). Both gains float `"XP: %d"` over self, category 4, the one
-/// emitter that skips Gate A (`0x607260`).
+/// `CGUnit_C::SetPendingXP` (`0x60a0c0`) marks the unit ([`XpAwarded`], `0x60a0e6`), stores the
+/// gain and flushes it at once through `0x6251e0`, which writes and floats nothing for a zero
+/// gain (`0x625202`). Anything else is the unnamed line (`0x637f90`, victim NULL). Both gains
+/// float `"XP: %d"` over self, category 4, the one emitter that skips Gate A (`0x607260`).
 pub(super) fn xp_gain(
     x: XpGain,
     index: &GuidIndex,
@@ -313,6 +314,7 @@ pub(super) fn xp_gain(
     stores: &Query<&mut ObjectStore>,
     text: &mut MessageWriter<CombatTextSpawn>,
     chat_log: &mut ChatLog,
+    commands: &mut Commands,
 ) {
     // `0x468550`: the active player's guid, 0 with none.
     if x.victim == self_guid.0.unwrap_or(0) {
@@ -331,17 +333,22 @@ pub(super) fn xp_gain(
             )
         });
     if x.kill && victim_held {
+        // The mark goes on before the amount is looked at (`0x60a0e6` precedes `0x625202`).
+        if let Some(&victim) = index.0.get(&x.victim) {
+            commands.entity(victim).insert(XpAwarded);
+        }
         if x.total == 0 {
             return;
         }
-        chat_log.push_xp_gain(x.victim, x.total, x.base);
+        chat_log.push_xp_gain(x.victim, x.total, x.base, x.group);
     } else {
-        chat_log.push_xp_gain(0, x.total, x.base);
+        // The unnamed forms never see a float (`0x637f90` passes 1.0).
+        chat_log.push_xp_gain(0, x.total, x.base, 1.0);
     }
     if let Some(&me) = self_guid.0.as_ref().and_then(|g| index.0.get(g)) {
         text.write(CombatTextSpawn {
             anchor: me,
-            text: format!("XP: {}", x.total),
+            text: TextBody::Literal(format!("XP: {}", x.total)),
             category: 4,
             color: None, // row 4's own purple: XP skips the damage colour law
         });
@@ -489,7 +496,12 @@ mod tests {
             .collect();
         assert_eq!(
             spawned,
-            vec![("Immune".to_string(), 3, Some(COLOR_SPELL_GOLD), victim_e)],
+            vec![(
+                TextBody::Word("IMMUNE"),
+                3,
+                Some(COLOR_SPELL_GOLD),
+                victim_e
+            )],
             "gold, category 3, over the immune target"
         );
     }
@@ -547,7 +559,7 @@ mod tests {
             }
         }
 
-        /// Run one packet through the leg; the floats' text.
+        /// Run one packet through the leg; the floats' text, a word by its key.
         fn run(&mut self, packet: impl Packet) -> Vec<String> {
             let spells = self.spells.clone();
             let mut packet = Some(packet);
@@ -568,7 +580,10 @@ mod tests {
                 .world_mut()
                 .resource_mut::<Messages<CombatTextSpawn>>()
                 .drain()
-                .map(|t| t.text)
+                .map(|t| match t.text {
+                    TextBody::Literal(text) => text,
+                    TextBody::Word(key) => key.to_string(),
+                })
                 .collect()
         }
     }
@@ -649,8 +664,8 @@ mod tests {
     #[test]
     fn a_stopped_spell_hit_floats_its_reason() {
         let mut leg = Leg::new();
-        assert_eq!(leg.run(hit(FIREBALL, 0, 0, 30, 40)), ["Block"]);
-        assert_eq!(leg.run(hit(FIREBALL, 0, 50, 30, 40)), ["Absorb"]);
+        assert_eq!(leg.run(hit(FIREBALL, 0, 0, 30, 40)), ["BLOCK"]);
+        assert_eq!(leg.run(hit(FIREBALL, 0, 50, 30, 40)), ["ABSORB"]);
         assert!(leg.run(hit(FIREBALL, 0, 0, 0, 0)).is_empty());
         let crit = SpellDamageLog {
             hit_info: 0x2,
@@ -692,7 +707,7 @@ mod tests {
                 PeriodicTick::Heal { amount: 9 },
             ],
         };
-        assert_eq!(leg.run(tick(FIREBALL)), ["Resist"]);
+        assert_eq!(leg.run(tick(FIREBALL)), ["RESIST"]);
         assert!(leg.run(tick(HIDDEN)).is_empty());
     }
 
@@ -757,11 +772,11 @@ mod tests {
         };
         assert_eq!(
             leg.run(GoMisses(ME, FIREBALL, vec![entry(MOB, 11, 2)])),
-            ["Reflect"]
+            ["REFLECT"]
         );
         assert_eq!(
             leg.run(GoMisses(ME, FIREBALL, vec![entry(MOB, 3, 0)])),
-            ["Dodge"]
+            ["DODGE"]
         );
         assert!(leg
             .run(GoMisses(ME, HIDDEN, vec![entry(MOB, 3, 0)]))
@@ -815,7 +830,7 @@ mod tests {
         };
         assert_eq!(
             float(true),
-            [("Miss".to_string(), 3, Some(COLOR_SPELL_GOLD))]
+            [(TextBody::Word("MISS"), 3, Some(COLOR_SPELL_GOLD))]
         );
         assert!(float(false).is_empty());
     }
@@ -830,7 +845,7 @@ mod tests {
             extended: false,
             misses: vec![(MOB, code)],
         };
-        assert_eq!(leg.run(miss(FIREBALL, 7)), ["Immune"]);
+        assert_eq!(leg.run(miss(FIREBALL, 7)), ["IMMUNE"]);
         assert!(leg.run(miss(HIDDEN, 7)).is_empty());
     }
 

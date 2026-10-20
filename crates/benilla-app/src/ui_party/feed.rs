@@ -3,7 +3,8 @@
 //! into `CMSG_*` sends. The state and its lines live in the parent module.
 
 use benilla_protocol::messages::{
-    member_status, GroupLootInfo, GroupMemberEntry, PartyMemberStatsInfo, GROUP_MEMBER_ASSISTANT,
+    member_status, GroupLootInfo, GroupMemberEntry, ObjectType, PartyMemberStatsInfo,
+    GROUP_MEMBER_ASSISTANT,
 };
 use benilla_ui::script::{
     PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo, ScriptValue,
@@ -64,8 +65,9 @@ fn saved_instances_moved(saved: &[SavedInstanceInfo], answers: u32, fed: &FedPar
 /// world entry (`0x4908c0`) signals the roster only through the raid leg's fill of a zero row
 /// (`0x4ba140`, signalling at `0x4ba1a2`), and stock `RaidFrame.lua:32` reads the raid on
 /// `PLAYER_LOGIN` instead. It is benilla's seam: the in-world VM is built once the loading cover
-/// is up (`ui_script::lifecycle`), so a list can land before any VM hears it; a reload's VM is
-/// told the same.
+/// is up (`ui_script::lifecycle`), so a list can land before any VM hears it. A reload's VM is
+/// told the same, since it loads the stock frames before the feed pushes the roster and its party
+/// frames show a member only on the event.
 fn catch_up(group: &GroupState) -> Vec<GroupSignal> {
     [
         (GroupSignal::MembersChanged, group.listed),
@@ -148,7 +150,14 @@ pub(crate) fn feed_party(
     let area_moved = fed.area.moved(here.area().map_or(u64::MAX, u64::from));
     let group_changed = group.is_changed();
     let index_changed = index.is_changed();
-    let look = pets::Lookup::new(&index, &stores, &names, types);
+    let look = pets::Lookup::new(
+        &index,
+        &stores,
+        &names,
+        types,
+        tables.catalog(),
+        tables.study(),
+    );
     // Only the stores the merged view reads: a crowd's other stores change every frame. The
     // members' pets are the group's too, `partypetN` and `raidpetN` reading their descriptors.
     let stores_changed = self_q
@@ -295,10 +304,11 @@ pub(crate) fn feed_party(
         fed.pushed_party = Some(fresh);
     }
 
+    let area_names = areas.as_deref().map(|a| &a.0);
     for (i, token) in PARTY_TOKENS.iter().enumerate() {
         let member = slots.get(i);
         let snap = member.map(|m| {
-            member_unit_state(
+            let mut s = member_unit_state(
                 m,
                 group.stats.get(&m.guid),
                 index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()),
@@ -306,7 +316,9 @@ pub(crate) fn feed_party(
                 own_group.clone(),
                 chr,
                 types,
-            )
+            );
+            s.tooltip.party = party_record(&group, m.guid, area_names);
+            s
         });
         if fed.units[i] != snap {
             gate.audit("feed_party", "a party-token snapshot");
@@ -378,7 +390,7 @@ pub(crate) fn feed_party(
                 Some(s)
             } else {
                 let m = group.members.iter().find(|m| m.guid == *guid)?;
-                Some(member_unit_state(
+                let mut s = member_unit_state(
                     m,
                     group.stats.get(guid),
                     index.0.get(guid).and_then(|e| stores.get(*e).ok()),
@@ -386,7 +398,9 @@ pub(crate) fn feed_party(
                     own_group.clone(),
                     chr,
                     types,
-                ))
+                );
+                s.tooltip.party = party_record(&group, *guid, area_names);
+                Some(s)
             }
         });
         if fed.raid_units[i] != snap {
@@ -746,6 +760,28 @@ fn member_unit_state(
     s
 }
 
+/// The group record the unit tooltip finds by guid (`0x496400`): the party's (`0x4e8820`, our own
+/// party slots), else the raid roster's (`0x4bb0f0`, its 40 entries); its online bit and the name of
+/// its area (`0x67e460`, with no parent zone). The roster's records are one per member either way.
+fn party_record(
+    group: &GroupState,
+    guid: u64,
+    areas: Option<&benilla_formats::AreaTableCatalog>,
+) -> Option<benilla_ui::script::PartyRecord> {
+    let in_party = group.party_slots().any(|m| m.guid == guid);
+    if !in_party && !group.raid_rows().any(|g| g == guid) {
+        return None;
+    }
+    let record = group.stats.get(&guid)?;
+    Some(benilla_ui::script::PartyRecord {
+        online: record.is_online(),
+        area: record
+            .zone
+            .and_then(|zone| areas?.name(u32::from(zone)))
+            .map(str::to_string),
+    })
+}
+
 /// A status bit of a member's record (`+0x08`), false with no record.
 fn record_bit(stats: Option<&PartyMemberStatsInfo>, bit: u8) -> bool {
     stats.is_some_and(|s| s.status.unwrap_or(0) & bit != 0)
@@ -766,6 +802,8 @@ pub(crate) fn drain_party(
     mut group: ResMut<GroupState>,
     selection: Res<Selection>,
     names: Res<NameCache>,
+    index: Res<GuidIndex>,
+    stores: Query<&ObjectStore>,
     self_q: Query<&Guid, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
@@ -777,6 +815,7 @@ pub(crate) fn drain_party(
         return;
     };
     let self_guid = self_q.iter().next().map(|g| g.0);
+    let held = |guid: u64| index.0.get(&guid).and_then(|e| stores.get(*e).ok());
     for req in script.take_party_requests() {
         // In the sandbox the server holds no group, so the group-changing intents apply to the
         // mirror as its echo would. Invites and accept/decline stay real: a real group ends it.
@@ -828,10 +867,8 @@ pub(crate) fn drain_party(
                 }
             }
             PartyRequest::UninviteUnit(token) => {
-                if let Some(m) = member_for_token(&group, &token) {
-                    let _ = commands.0.send(ClientCommand::GroupUninvite {
-                        name: m.name.clone(),
-                    });
+                if let Some(guid) = member_for_token(&group, &token).map(|m| m.guid) {
+                    uninvite_by_guid(guid, held(guid), &names, &commands, &script);
                 }
             }
             PartyRequest::PromoteUnit(token) => {
@@ -935,14 +972,9 @@ pub(crate) fn drain_party(
                     .0
                     .send(ClientCommand::GroupAssistantLeader { guid, grant });
             }
-            PartyRequest::UninviteRaid(index) => {
-                // Sent by name. The reference's `UninviteFromRaid` and `UninviteFromParty` share
-                // the sender `0x5e9510`, which kicks by name when the target's object is present
-                // and by `CMSG_GROUP_UNINVITE_GUID` (`0x5e953e`) only when it is absent.
-                if let Some(name) = raid_guid_at(&group, index)
-                    .and_then(|g| raid_name_of(&group, self_guid, &names, g))
-                {
-                    let _ = commands.0.send(ClientCommand::GroupUninvite { name });
+            PartyRequest::UninviteRaid(row) => {
+                if let Some(guid) = raid_guid_at(&group, row) {
+                    uninvite_by_guid(guid, held(guid), &names, &commands, &script);
                 }
             }
             PartyRequest::ReadyCheckStart => {
@@ -956,6 +988,32 @@ pub(crate) fn drain_party(
             }
         }
     }
+}
+
+/// `UninviteByGuid` (`0x5e9510`), the sender `UninviteFromParty` (`0x48a560`) and
+/// `UninviteFromRaid` (`0x48a5ed`) both end in. It asks the object manager for the guid's player
+/// object (`0x5e951f`, type mask `0x10`): one held is kicked by its unit's name in
+/// `CMSG_GROUP_UNINVITE` (`0x5e95a7`-`0x5e95d0`), which `GetUnitName` (`0x609210`) reads from the
+/// player-name cache with a callback, else as `UNKNOWNOBJECT`; any other, by its guid in
+/// `CMSG_GROUP_UNINVITE_GUID` (`0x5e953e`). Only `UninviteByName` always sends the name
+/// (`0x48a62a`).
+fn uninvite_by_guid(
+    guid: u64,
+    held: Option<&ObjectStore>,
+    names: &NameCache,
+    commands: &NetCommands,
+    script: &UiScript,
+) {
+    let player = held.filter(|s| matches!(s.0.object_type(), Some(ObjectType::Player)));
+    let command = match player {
+        Some(store) => ClientCommand::GroupUninvite {
+            name: names
+                .resolve_unit(guid, Some(store), Ask::Event(commands))
+                .map_or_else(|| script.unknown_object_text(), str::to_string),
+        },
+        None => ClientCommand::GroupUninviteGuid { guid },
+    };
+    let _ = commands.0.send(command);
 }
 
 /// The sandbox half of [`drain_party`]: apply one group-changing intent to the mirror as the
@@ -1181,6 +1239,42 @@ fn set_test_subgroup(group: &mut GroupState, self_guid: Option<u64>, index: u32,
     }
 }
 
+/// A list for a sandbox, whose cache is not behind it: the loot lines name the master by the
+/// roster's own name. The stored loot cells are the real session's (`0xbc7600`...), so the
+/// sandbox compares against them and leaves them as it found them, and a real group after
+/// `/partytest off` is compared against what the real lists last carried.
+fn apply_sandbox_list(
+    group: &mut GroupState,
+    (group_type, own_flags): (u8, u8),
+    members: Vec<GroupMemberEntry>,
+    leader: u64,
+    loot: GroupLootInfo,
+    self_guid: Option<u64>,
+) -> Vec<crate::ui_action::UiError> {
+    let roster: Vec<(u64, String)> = members.iter().map(|m| (m.guid, m.name.clone())).collect();
+    let cached_name = |guid: u64| {
+        roster
+            .iter()
+            .find(|(g, _)| *g == guid)
+            .map(|(_, name)| name.clone())
+    };
+    let stored = group.loot_stored;
+    let lines = group
+        .apply_list_awaiting(
+            group_type,
+            own_flags,
+            members,
+            leader,
+            Some(loot),
+            self_guid,
+            &|_| Some(String::new()),
+            &cached_name,
+        )
+        .lines;
+    group.loot_stored = stored;
+    lines
+}
+
 /// The `/partytest` roster: four unstreamed synthetic members with mixed statuses and records,
 /// through the real apply path, so every party frame state shows with no server. `player_xy` (our
 /// live WoW position) places their minimap blips: Alice 30 yd out (dot), Bob 80 yd (dot, a rim
@@ -1215,20 +1309,18 @@ pub(crate) fn synthetic_roster(
             flags: 0,
         },
     ];
-    let lines = group
-        .apply_list(
-            0,
-            0,
-            members,
-            0xF001,
-            Some(GroupLootInfo {
-                method: 2,
-                master: 0xF003,
-                threshold: 3,
-            }),
-            None,
-        )
-        .lines;
+    let lines = apply_sandbox_list(
+        group,
+        (0, 0),
+        members,
+        0xF001,
+        GroupLootInfo {
+            method: 2,
+            master: 0xF003,
+            threshold: 3,
+        },
+        None,
+    );
     // Blip offsets from us on WoW axes (+x north, +y west), truncated to `i16` as on the wire.
     let seat = |dx: f32, dy: f32| player_xy.map(|(px, py)| ((px + dx) as i16, (py + dy) as i16));
     for (guid, hp, max, level, power_type, pos) in [
@@ -1325,20 +1417,19 @@ pub(crate) fn synthetic_raid(
     }
     // A raid we lead, so `IsRaidLeader()` is true and the leader-only controls are live.
     let leader = self_guid.unwrap_or(0);
-    let lines = group
-        .apply_list(
-            1,
-            0, // our flags: subgroup 1 (0-based 0), no assistant bit
-            members,
-            leader,
-            Some(GroupLootInfo {
-                method: 2,
-                master: leader,
-                threshold: 3,
-            }),
-            self_guid,
-        )
-        .lines;
+    let lines = apply_sandbox_list(
+        group,
+        // Raid; our flags: subgroup 1 (0-based 0), no assistant bit.
+        (1, 0),
+        members,
+        leader,
+        GroupLootInfo {
+            method: 2,
+            master: leader,
+            threshold: 3,
+        },
+        self_guid,
+    );
     // Records for every member: fake guids never stream, so the merged view shows these.
     for (i, _) in ROSTER.iter().enumerate() {
         let guid = 0xF100 + i as u64;
@@ -1453,6 +1544,41 @@ mod tests {
         );
         assert_eq!((bare.health, bare.max_health, bare.power), (0, 0, 0));
         assert!(bare.exists);
+    }
+
+    /// The tooltip's group record (`0x496400`): the party's for a member of our own slots, else the
+    /// raid roster's (`0x4bb0f0`) for one in another subgroup, and none for a guid off both.
+    #[test]
+    fn a_raid_member_off_our_party_slots_has_a_group_record() {
+        let m = |n: u64, flags: u8| GroupMemberEntry {
+            name: format!("M{n}"),
+            guid: member(n),
+            status: member_status::ONLINE,
+            flags,
+        };
+        let mut group = GroupState::default();
+        group.apply_list(
+            GROUPTYPE_RAID,
+            0,
+            vec![m(1, 0), m(2, 1)],
+            ME,
+            None,
+            Some(ME),
+        );
+        for n in [1, 2] {
+            let mut record = PartyMemberStatsInfo::default();
+            record.set_online(n == 1);
+            group.stats.insert(member(n), record);
+        }
+        assert_eq!(
+            group.party_slots().map(|e| e.guid).collect::<Vec<_>>(),
+            [member(1)],
+            "the second member sits in another subgroup"
+        );
+        let online = |guid| party_record(&group, guid, None).map(|r| r.online);
+        assert_eq!(online(member(1)), Some(true), "the party's record");
+        assert_eq!(online(member(2)), Some(false), "the raid roster's record");
+        assert_eq!(online(member(3)), None, "off the roster");
     }
 
     /// vmangos re-sends a member's status on join, login and the AFK, DND, PvP, FFA and ghost
@@ -2521,5 +2647,231 @@ mod tests {
             (Some("Flash Heal".into()), Some("party1".into()))
         );
         assert_eq!(parse("party2"), (None, None));
+    /// Hold our own player: the feed reads our guid off the `SelfPlayer` entity, and the object
+    /// manager finds a player object by its type word (`0x468460`, mask `0x10`).
+    fn seat_self(app: &mut App) -> Entity {
+        let e = app
+            .world_mut()
+            .spawn((Guid(ME), player_object(), SelfPlayer))
+            .id();
+        app.world_mut().resource_mut::<GuidIndex>().0.insert(ME, e);
+        e
+    }
+
+    /// `OBJECT_FIELD_TYPE` of a player: object, unit and player bits.
+    const PLAYER_TYPE: [(u16, u32); 1] = [(2, 0x19)];
+
+    fn player_object() -> ObjectStore {
+        ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(
+            &PLAYER_TYPE,
+        ))
+    }
+
+    fn listed(n: u64, subgroup: u8) -> GroupMemberEntry {
+        GroupMemberEntry {
+            name: format!("M{n}"),
+            guid: member(n),
+            status: member_status::ONLINE,
+            flags: subgroup,
+        }
+    }
+
+    /// `IsRaidLeader` (`0x4bb8c0`) and `IsPartyLeader` (`0x4e9130`) compare the leader cell with our
+    /// guid, whichever subgroup either of us sits in: a leader in another subgroup holds none of our
+    /// party slots and leads nobody here, and one alone in a subgroup of their own, with no slot
+    /// held at all, leads.
+    #[test]
+    fn the_leader_tests_follow_the_guid_through_a_raid_whatever_the_subgroups() {
+        let mut app = app();
+        seat_self(&mut app);
+        let raid = |app: &mut App, members: Vec<GroupMemberEntry>, leader: u64| {
+            app.world_mut().resource_mut::<GroupState>().apply_list(
+                GROUPTYPE_RAID,
+                0,
+                members,
+                leader,
+                None,
+                Some(ME),
+            );
+            frame(app);
+        };
+
+        // We sit in subgroup 0 with M2; M1 leads from subgroup 1.
+        raid(&mut app, vec![listed(1, 1), listed(2, 0)], member(1));
+        assert_eq!(flag(&mut app, "GetPartyMember(1)"), Some(1.0), "M2 is ours");
+        assert_eq!(flag(&mut app, "IsRaidLeader()"), None);
+        assert_eq!(flag(&mut app, "IsPartyLeader()"), None);
+        assert_eq!(flag(&mut app, "GetPartyLeaderIndex()"), Some(0.0));
+
+        // We lead, alone in subgroup 0.
+        raid(&mut app, vec![listed(1, 1), listed(2, 1)], ME);
+        assert_eq!(
+            flag(&mut app, "GetPartyMember(1)"),
+            None,
+            "nobody else is ours"
+        );
+        assert_eq!(flag(&mut app, "IsRaidLeader()"), Some(1.0));
+        assert_eq!(flag(&mut app, "IsPartyLeader()"), Some(1.0));
+    }
+
+    /// The drain over a group the feed has pushed, and the commands it sends.
+    fn drain_app() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        let mut app = app();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        app.init_resource::<Selection>();
+        app.add_systems(Update, drain_party.after(feed_party));
+        (app, rx)
+    }
+
+    /// The kicks among the commands sent, `name:<name>` or `guid:<guid>`, in order.
+    fn kicks(rx: &crossbeam_channel::Receiver<ClientCommand>) -> Vec<String> {
+        rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::GroupUninvite { name } => Some(format!("name:{name}")),
+                ClientCommand::GroupUninviteGuid { guid } => Some(format!("guid:{guid:#x}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn cache_names(app: &mut App, who: &[(u64, &str)]) {
+        let mut names = app.world_mut().resource_mut::<NameCache>();
+        for (guid, name) in who {
+            names.insert_player(*guid, (*name).into(), None);
+        }
+    }
+
+    /// `UninviteFromParty` (`0x48a510`) and `UninviteFromRaid` (`0x48a580`) share one sender
+    /// (`0x5e9510`): it asks the object manager for the guid's player object (`0x5e951f`, mask
+    /// `0x10`), sends `CMSG_GROUP_UNINVITE` with the unit's name when it is held (`0x5e95a7`-
+    /// `0x5e95d0`) and `CMSG_GROUP_UNINVITE_GUID` with the guid when it is not (`0x5e953e`).
+    #[test]
+    fn a_party_kick_goes_by_name_for_a_held_member_and_by_guid_for_the_rest() {
+        let (mut app, rx) = drain_app();
+        party(&mut app, 2, true);
+        cache_names(&mut app, &[(member(1), "M1"), (member(2), "M2")]);
+        stream(&mut app, member(2), &PLAYER_TYPE);
+        frame(&mut app);
+        let _ = kicks(&rx);
+
+        app.world_mut()
+            .non_send::<UiScript>()
+            .run(r#"UninviteFromParty("party1") UninviteFromParty("party2")"#)
+            .unwrap();
+        frame(&mut app);
+        assert_eq!(kicks(&rx), ["guid:0x1001", "name:M2"]);
+    }
+
+    /// The raid row's kick takes the same sender: a row out of range goes by guid, one held by
+    /// name, our own row too (our object is held).
+    #[test]
+    fn a_raid_kick_goes_by_name_for_a_held_row_and_by_guid_for_the_rest() {
+        let (mut app, rx) = drain_app();
+        seat_self(&mut app);
+        cache_names(
+            &mut app,
+            &[(ME, "Me"), (member(1), "M1"), (member(2), "M2")],
+        );
+        stream(&mut app, member(2), &PLAYER_TYPE);
+        app.world_mut().resource_mut::<GroupState>().apply_list(
+            GROUPTYPE_RAID,
+            0,
+            vec![listed(1, 0), listed(2, 1)],
+            ME,
+            None,
+            Some(ME),
+        );
+        frame(&mut app);
+        let _ = kicks(&rx);
+
+        app.world_mut()
+            .non_send::<UiScript>()
+            .run("UninviteFromRaid(1) UninviteFromRaid(2) UninviteFromRaid(3)")
+            .unwrap();
+        frame(&mut app);
+        assert_eq!(kicks(&rx), ["guid:0x1001", "name:M2", "name:Me"]);
+    }
+
+    /// A held member's name is `GetUnitName`'s (`0x609210`, from `0x5e95aa`): the cache's, else the
+    /// text of `UNKNOWNOBJECT` (`0x609324`-`0x60932e`).
+    #[test]
+    fn a_held_member_the_cache_has_no_name_for_is_kicked_as_unknown_object() {
+        let (mut app, rx) = drain_app();
+        party(&mut app, 1, true);
+        stream(&mut app, member(1), &PLAYER_TYPE);
+        let script = app.world_mut().non_send::<UiScript>();
+        script.run(r#"UNKNOWNOBJECT = "Unknown Entity""#).unwrap();
+        frame(&mut app);
+        let _ = kicks(&rx);
+
+        let script = app.world_mut().non_send::<UiScript>();
+        script.run(r#"UninviteFromParty("party1")"#).unwrap();
+        frame(&mut app);
+        assert_eq!(kicks(&rx), ["name:Unknown Entity"]);
+    }
+
+    /// A `/reload` loads the stock frames into a new VM that holds no group, and the roster is
+    /// pushed by the feed's first look after the load (`ui_script::lifecycle` seeds the player
+    /// alone): `PartyMemberFrame_OnLoad` reads `GetPartyMember` at the load (`PartyMemberFrame.lua:
+    /// 20-24`) and finds nobody, and only a `PARTY_MEMBERS_CHANGED` shows the row. The reference's
+    /// load reads the engine's group, so its reload fires none; benilla's fires the catch-up, and a
+    /// reload told nothing would leave the party frames hidden.
+    #[test]
+    fn a_reloaded_vm_has_its_party_frames_filled_by_the_catch_up() {
+        benilla_formats::wow_data_or_skip!();
+        let load = || {
+            let mut script = UiScript::new().unwrap();
+            script.set_screen_size(1024.0, 768.0);
+            let failures = crate::ui_script::load_default_ui(&script);
+            assert!(failures.is_empty(), "load failures: {failures:?}");
+            script.run("SEEN = {}").unwrap();
+            script
+        };
+        let mut app = app_with(load());
+        party(&mut app, 1, true);
+        frame(&mut app);
+        assert_eq!(flag(&mut app, "PartyMemberFrame1:IsShown()"), Some(1.0));
+
+        app.insert_non_send(load());
+        frame(&mut app);
+        assert_eq!(flag(&mut app, "PartyMemberFrame1:IsShown()"), Some(1.0));
+        assert_eq!(
+            app.world_mut()
+                .non_send::<UiScript>()
+                .eval::<Option<String>>("return PartyMemberFrame1Name:GetText()")
+                .unwrap()
+                .as_deref(),
+            Some("M1")
+        );
+    }
+
+    /// The stored loot cells (`0xbc7600`...) are the real session's: `/partytest` compares against
+    /// them and leaves them as found, so `/partytest off` and a real group after it are measured
+    /// against what the real lists last carried, never the sandbox's tail.
+    #[test]
+    fn the_sandbox_rosters_leave_the_stored_loot_cells_as_they_found_them() {
+        let real = GroupLootInfo {
+            method: 4,
+            master: 0,
+            threshold: 2,
+        };
+        let mut group = GroupState {
+            loot_stored: real,
+            ..GroupState::default()
+        };
+        let lines = synthetic_roster(&mut group, None);
+        assert!(
+            lines.iter().any(|l| l.key == "ERR_SET_LOOT_MASTER"),
+            "the sandbox still says what its tail changes"
+        );
+        assert_eq!(group.loot_stored, real);
+
+        let mut names = NameCache::default();
+        synthetic_raid(&mut group, &mut names, Some(ME));
+        assert_eq!(group.loot_stored, real);
+
+        group.clear_session();
+        assert_eq!(group.loot_stored, real, "`/partytest off`");
     }
 }

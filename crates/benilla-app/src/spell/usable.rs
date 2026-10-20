@@ -21,7 +21,7 @@ use crate::items::Items;
 use crate::net::{ObjectStore, Objects};
 use crate::query_cache::Ask;
 use crate::spell::Cooldowns;
-use crate::spell::{SpellModifiers, OP_COST};
+use crate::spell::{SpellLevel, SpellModifiers, SpellReads, UnitField, Unrecorded, OP_COST};
 use crate::target::{RelUnit, Relations};
 
 use crate::ui_action::Spells;
@@ -51,6 +51,8 @@ pub(crate) struct UsableCtx<'a> {
     /// Every entry's stack count at mask 0 for the frame ([`crate::ui_items::stack_counts`]):
     /// the reagent and totem counts of `0x6e4000`.
     pub(crate) stacks: &'a std::collections::HashMap<u32, u32>,
+    /// The skill lines leg 12's cost finds its level through ([`SpellLevel::Player`]).
+    pub(crate) skill_lines: Option<&'a benilla_formats::SkillLineCatalog>,
 }
 
 /// The search covers equipment indices `0..=22` (`0x5f0c50`'s `cmp ebx,0x17; jl`): the 19 worn
@@ -94,6 +96,7 @@ fn needs_equipped_item(d: &SpellDisplay) -> bool {
 /// The equipment slots [`equipped_item_fits`] reads for `d`, a bit each: none unless it searches,
 /// else the slots its hand restriction leaves and both hands, which the disarm ladder reads
 /// whatever the restriction (`0x5f0c69`, `0x5f0c91`).
+#[cfg(test)]
 pub(crate) fn worn_slots_read(d: &SpellDisplay) -> u32 {
     if needs_equipped_item(d) {
         (hand_mask(d) | HANDS) & EQUIPMENT_MASK
@@ -111,17 +114,22 @@ pub(crate) const EQUIPMENT_MASK: u32 = (1 << EQUIPMENT_SLOTS) - 1;
 
 /// Leg 4 (`0x6e40e0`), shared with the tooltip's requirement line and the cast ladder's rung 7:
 /// does a worn item match `EquippedItemClass` and `EquippedItemSubClassMask`? The templates are
-/// only read (`0x6e428f`): one that has not streamed counts as a match.
+/// only read (`0x6e428f`): one that has not streamed counts as a match. The search reports the
+/// slots it reads to `reads`.
 pub(crate) fn equipped_item_fits(
     d: &SpellDisplay,
     store: &ObjectStore,
     objects: &Objects,
     items: &Items,
+    reads: &mut dyn SpellReads,
 ) -> bool {
     if !needs_equipped_item(d) {
         return true;
     }
     let mut mask = hand_mask(d);
+    // The disarm ladder reads both hands whatever the restriction (`0x5f0c69`, `0x5f0c91`), then
+    // the search the slots the restriction leaves.
+    reads.item_search((mask | HANDS) & EQUIPMENT_MASK);
     if let Some(hidden) = crate::items::disarmed_equipment_slot(store, objects, items) {
         mask &= !(1u32 << hidden);
     }
@@ -343,7 +351,7 @@ pub(crate) fn spell_usable(
         }
     }
     // Leg 4 (`0x6e40e0`): some worn item matches the class and subclass mask.
-    if !equipped_item_fits(d, ctx.store, objects, items) {
+    if !equipped_item_fits(d, ctx.store, objects, items, &mut Unrecorded) {
         return (false, false);
     }
     // Leg 5 (`0x6e3e7a`..`0x6e3eb2`): a finishing move (`AttributesEx & 0x500000`, one any-of
@@ -411,7 +419,7 @@ pub(crate) fn spell_usable(
         return (false, false);
     }
     // Leg 12 (`0x6e3fba`..`0x6e3feb`): power, the only notEnoughMana writer.
-    if !can_afford(d, ctx.store, ctx.spell_mods) {
+    if !can_afford(d, ctx.store, ctx.skill_lines, ctx.spell_mods) {
         return (false, true);
     }
     (true, false)
@@ -420,42 +428,100 @@ pub(crate) fn spell_usable(
 /// The resolved power cost, `GetPowerCost 0x6e31b0`: `manaCost`, plus the signed
 /// `(level - baseLevel) * manaCostPerlevel` (only creature spells carry it), plus
 /// `ManaCostPercentage` of the reference's per-type basis (`0x612c50`): base health for health,
-/// base mana for mana, 1000 for rage, 100 for focus and energy, and 0 otherwise. Then
-/// `SPELLMOD_COST` through `0x6e6af0` (`6e32e3`), clamped at 0.
-/// The reference's per-school unit modifiers are not applied.
+/// base mana for mana, 1000 for rage, 100 for focus and energy, and 0 otherwise. Then the caster's
+/// `POWER_COST_MODIFIER` and `POWER_COST_MULTIPLIER` for the spell's school, the clamp at 0, and
+/// `SPELLMOD_COST` through `0x6e6af0` last (`0x6e32f0`), whose result is not clamped.
 ///
 /// One cost for leg 12, the press-path gate and the tooltip, as `0x6e31b0` serves all six of its
 /// callers. The press-path gate refuses an unaffordable cast without sending anything
 /// (`0x609657`), so an unmodified cost refuses casts a talented character can afford.
-pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore, mods: &SpellModifiers) -> u32 {
-    // The level term reads `baseLevel` (`+0x70`), as `0x6e31b0` does, but the reference scales a
-    // caster value / 5 there (vmangos: the level / 5); only creature spells have a per-level cost.
-    power_cost_at(d, &store.0, store.0.unit_level().unwrap_or(0), mods)
+pub(crate) fn power_cost(
+    d: &SpellDisplay,
+    store: &ObjectStore,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+    mods: &SpellModifiers,
+    reads: &mut dyn SpellReads,
+) -> i32 {
+    let level = SpellLevel::Player {
+        me: Some(store),
+        skill_lines,
+    };
+    power_cost_at(d, &store.0, level, mods, reads)
 }
 
-/// [`power_cost`] against `unit`'s fields at the level term `level`, the value `0x6e31b0` reads
+/// [`power_cost`] against `unit`'s fields at the level term's `level`, the value `0x6e31b0` reads
 /// through the caster's `[vtbl+0xa8]` over 5 (`6e3242`-`6e3254`). With the unit selector set, the
 /// tooltip's caster is the player's charm, else its summon (`6e31fe`-`6e3228`), whose own basis
-/// `0x612c50` is called (`6e327d`).
+/// `0x612c50` is called (`6e327d`). `reads` hears the level when the cost has a level term, and
+/// the fields it reads.
 pub(crate) fn power_cost_at(
     d: &SpellDisplay,
     unit: &benilla_protocol::ObjectFields,
-    level: u32,
+    level: SpellLevel,
     mods: &SpellModifiers,
-) -> u32 {
+    reads: &mut dyn SpellReads,
+) -> i32 {
     let base = match cost_basis(d) {
         CostBasis::None => 0,
-        CostBasis::BaseMana => unit.unit_base_mana().unwrap_or(0),
-        CostBasis::BaseHealth => unit.unit_base_health().unwrap_or(0),
+        CostBasis::BaseMana => {
+            reads.unit(UnitField::BaseMana);
+            unit.unit_base_mana().unwrap_or(0)
+        }
+        CostBasis::BaseHealth => {
+            reads.unit(UnitField::BaseHealth);
+            unit.unit_base_health().unwrap_or(0)
+        }
         CostBasis::Fixed(value) => value,
     };
-    let level_delta = i64::from(level) - i64::from(d.base_level);
-    let cost = i64::from(d.mana_cost)
-        + level_delta * i64::from(d.mana_cost_per_level)
-        + i64::from(base) * i64::from(d.mana_cost_pct) / 100;
-    // The talent cut applies before the clamp at 0.
-    let cost = cost.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-    u32::try_from(mods.apply(d, OP_COST, cost)).unwrap_or(0)
+    // Only a spell with a per-level cost, a creature's, reads the level. The sums are the
+    // reference's 32-bit ones (`0x6e325f`-`0x6e32a1`).
+    let level_term = if d.mana_cost_per_level != 0 {
+        level
+            .read(d, reads)
+            .wrapping_sub(d.base_level)
+            .wrapping_mul(d.mana_cost_per_level) as i32
+    } else {
+        0
+    };
+    let pct = (base as i32).wrapping_mul(d.mana_cost_pct as i32) / 100;
+    let cost = (d.mana_cost as i32)
+        .wrapping_add(level_term)
+        .wrapping_add(pct);
+    // The school's flat term (`0x6e32ad`), then its factor: `(1 + multiplier) × cost` on the x87
+    // stack, stored as an `f32`, then `fistp`, which rounds to nearest even and stores the
+    // integer indefinite for a NaN or a value out of range (`0x6e32c0`-`0x6e32d6`).
+    reads.unit(UnitField::PowerCostModifier);
+    reads.unit(UnitField::PowerCostMultiplier);
+    let cost = cost.wrapping_add(unit.unit_power_cost_modifier(d.school).unwrap_or(0));
+    let factor = f64::from(unit.unit_power_cost_multiplier(d.school).unwrap_or(0.0)) + 1.0;
+    let scaled = f64::from((factor * f64::from(cost)) as f32).round_ties_even();
+    let cost = if (f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&scaled) {
+        scaled as i32
+    } else {
+        i32::MIN
+    };
+    // The clamp at 0 (`0x6e32de`-`0x6e32ea`), then the talent modifier, which can take the cost
+    // below 0 again (`0x6e32f0`).
+    mods.apply(d, OP_COST, cost.max(0))
+}
+
+/// The per-second cost the tooltip's `_PER_TIME` cell shows, `0x6e3300`: `manaPerSecond` plus
+/// `(level - baseLevel) * manaPerSecondPerLevel` (`0x6e3323`-`0x6e3335`), in 32-bit arithmetic,
+/// `level` the value `0x6e3130` reads. `reads` hears the level when the term has a factor.
+pub(crate) fn per_second_cost(
+    d: &SpellDisplay,
+    level: SpellLevel,
+    reads: &mut dyn SpellReads,
+) -> i32 {
+    let level_term = if d.mana_per_second_per_level != 0 {
+        level
+            .read(d, reads)
+            .wrapping_sub(d.base_level)
+            .wrapping_mul(d.mana_per_second_per_level)
+    } else {
+        0
+    };
+    d.mana_per_second.wrapping_add(level_term) as i32
 }
 
 /// What [`power_cost_at`] scales `d`'s percentage cost by: `0x612c50`, a jump table on the power
@@ -472,7 +538,7 @@ pub(crate) enum CostBasis {
     Fixed(u32),
 }
 
-pub(crate) fn cost_basis(d: &SpellDisplay) -> CostBasis {
+fn cost_basis(d: &SpellDisplay) -> CostBasis {
     if d.mana_cost_pct == 0 {
         return CostBasis::None;
     }
@@ -485,22 +551,23 @@ pub(crate) fn cost_basis(d: &SpellDisplay) -> CostBasis {
     }
 }
 
-/// Whether [`power_cost_at`]'s level term moves the cost: only a spell with a per-level cost.
-pub(crate) fn cost_reads_level(d: &SpellDisplay) -> bool {
-    d.mana_cost_per_level != 0
-}
-
 /// Whether the caster can afford `d`, for leg 12 (`0x6e3fba`) and the press-path gate
 /// (`0x60962c`): `UNIT_FIELD_POWER[type]`, or `UNIT_FIELD_HEALTH` for any negative PowerType
-/// (`0x609631`; Bloodrage's -2), against [`power_cost`].
-pub(crate) fn can_afford(d: &SpellDisplay, store: &ObjectStore, mods: &SpellModifiers) -> bool {
+/// (`0x609631`; Bloodrage's -2), against [`power_cost`], both compares signed (`0x6e3fe2`,
+/// `0x60965f`), so a cost a talent took below 0 is always affordable.
+pub(crate) fn can_afford(
+    d: &SpellDisplay,
+    store: &ObjectStore,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+    mods: &SpellModifiers,
+) -> bool {
     let power_type = d.power_type as i32;
     let avail = if power_type < 0 {
         store.0.unit_health().unwrap_or(0)
     } else {
         store.0.unit_power(power_type as u8).unwrap_or(0)
     };
-    avail >= power_cost(d, store, mods)
+    avail as i32 >= power_cost(d, store, skill_lines, mods, &mut Unrecorded)
 }
 
 #[cfg(test)]
@@ -554,7 +621,7 @@ mod tests {
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
             deps.with_objects(|objects, items, _| {
-                equipped_item_fits(&needs_a_weapon, &store, objects, items)
+                equipped_item_fits(&needs_a_weapon, &store, objects, items, &mut Unrecorded)
             })
         };
 
@@ -610,7 +677,9 @@ mod tests {
                 );
             }
             let store = ObjectStore(ObjectFields::from_pairs(&pairs));
-            deps.with_objects(|objects, items, _| equipped_item_fits(d, &store, objects, items))
+            deps.with_objects(|objects, items, _| {
+                equipped_item_fits(d, &store, objects, items, &mut Unrecorded)
+            })
         };
 
         let sound = |field| (field, 0x2au64, 0u32, 0u32, 0u32);
@@ -683,6 +752,7 @@ mod tests {
                     &store,
                     objects,
                     items,
+                    &mut Unrecorded,
                 )
             })
         };
@@ -721,6 +791,7 @@ mod tests {
             stacks,
             spell_mods,
             control_lost: false,
+            skill_lines: None,
         }
     }
 
@@ -753,16 +824,22 @@ mod tests {
         };
         let mods = SpellModifiers::default();
         let with_gear = player(&[(22, 400), (28, 4_000), (163, 1_689)]);
-        assert_eq!(power_cost(&bloodrage, &with_gear, &mods), 337);
-        assert!(can_afford(&bloodrage, &with_gear, &mods));
+        assert_eq!(
+            power_cost(&bloodrage, &with_gear, None, &mods, &mut Unrecorded),
+            337
+        );
+        assert!(can_afford(&bloodrage, &with_gear, None, &mods));
         assert_eq!(walk(&bloodrage, &with_gear), (true, false));
 
         let below_cost = player(&[(22, 336), (28, 4_000), (163, 1_689)]);
-        assert!(!can_afford(&bloodrage, &below_cost, &mods));
+        assert!(!can_afford(&bloodrage, &below_cost, None, &mods));
         assert_eq!(walk(&bloodrage, &below_cost), (false, true));
 
         let without_gear = player(&[(22, 400), (28, 1_689), (163, 1_689)]);
-        assert_eq!(power_cost(&bloodrage, &without_gear, &mods), 337);
+        assert_eq!(
+            power_cost(&bloodrage, &without_gear, None, &mods, &mut Unrecorded),
+            337
+        );
     }
 
     /// `0x612c50`'s jump table (`0x612ca0`, indexed by the type plus 2): base health for -2, base
@@ -797,7 +874,11 @@ mod tests {
                 mana_cost_pct: 20,
                 ..Default::default()
             };
-            assert_eq!(power_cost(&spell, &store, &mods), cost, "type {power_type}");
+            assert_eq!(
+                power_cost(&spell, &store, None, &mods, &mut Unrecorded),
+                cost,
+                "type {power_type}"
+            );
         }
     }
 
@@ -816,19 +897,19 @@ mod tests {
         let mut mods = SpellModifiers::default();
         mods.set_class_family(3);
         assert_eq!(
-            power_cost(&d, &store, &mods),
+            power_cost(&d, &store, None, &mods, &mut Unrecorded),
             100,
             "no packet yet — the flat DBC cost"
         );
         assert!(
-            !can_afford(&d, &store, &mods),
+            !can_afford(&d, &store, None, &mods),
             "80 mana does not buy a 100 mana spell"
         );
 
         mods.set(false, 5, OP_COST, -30);
-        assert_eq!(power_cost(&d, &store, &mods), 70);
+        assert_eq!(power_cost(&d, &store, None, &mods, &mut Unrecorded), 70);
         assert!(
-            can_afford(&d, &store, &mods),
+            can_afford(&d, &store, None, &mods),
             "the talent brings it inside the pool, so TryCast must send the cast"
         );
 
@@ -837,7 +918,57 @@ mod tests {
             spell_family: 4,
             ..d
         };
-        assert_eq!(power_cost(&other_class, &store, &mods), 100);
+        assert_eq!(
+            power_cost(&other_class, &store, None, &mods, &mut Unrecorded),
+            100
+        );
+    }
+
+    /// The school's flat term and factor (`0x6e32ad`, `0x6e32c0`-`0x6e32d6`), then the clamp at
+    /// 0, then the talent modifier, which no clamp follows (`0x6e32de`-`0x6e32f0`).
+    #[test]
+    fn the_school_cost_terms_come_before_the_clamp_and_the_talent_after() {
+        // A 100-mana Fire spell (school 2) of family 3, bit 5.
+        let d = SpellDisplay {
+            school: 2,
+            spell_family: 3,
+            spell_family_flags: 1 << 5,
+            mana_cost: 100,
+            ..Default::default()
+        };
+        let cost = |fields: &[(u16, u32)], flat: i32| {
+            let mut mods = SpellModifiers::default();
+            mods.set_class_family(3);
+            mods.set(true, 5, OP_COST, flat);
+            let store = player(fields);
+            (
+                power_cost(&d, &store, None, &mods, &mut Unrecorded),
+                can_afford(&d, &store, None, &mods),
+            )
+        };
+        let f = |v: f32| v.to_bits();
+        assert_eq!(cost(&[], 0).0, 100);
+        assert_eq!(cost(&[(175, 20)], 0).0, 120, "Fire's modifier");
+        assert_eq!(cost(&[(174, 20), (181, f(1.0))], 0).0, 100, "Holy's");
+        assert_eq!(cost(&[(182, f(-0.25))], 0).0, 75, "Fire's factor");
+        assert_eq!(
+            cost(&[(175, 20), (182, f(0.5))], 0).0,
+            180,
+            "the modifier, then the factor"
+        );
+        assert_eq!(cost(&[(175, 1), (182, f(-0.5))], 0).0, 50, "50.5 to even");
+        assert_eq!(
+            cost(&[(182, f(f32::NAN))], 0).0,
+            0,
+            "indefinite, then clamped"
+        );
+        let below = (-150i32) as u32;
+        assert_eq!(cost(&[(175, below)], 0), (0, true), "clamped at 0");
+        assert_eq!(
+            cost(&[(175, below)], -10),
+            (-10, true),
+            "the talent after the clamp"
+        );
     }
 
     /// Each gate trips alone; only the power leg raises notEnoughMana (`0x6e3feb`).
@@ -989,6 +1120,7 @@ mod tests {
                 stacks: &stacks,
                 spell_mods: &SpellModifiers::default(),
                 control_lost: false,
+                skill_lines: None,
             };
             assert_eq!(
                 spell_usable(1, &friend_spell, &spells, &ctx, &objects, &items).0,
@@ -1035,6 +1167,7 @@ mod tests {
                 stacks: &stacks,
                 spell_mods: &SpellModifiers::default(),
                 control_lost: false,
+                skill_lines: None,
             };
             assert_eq!(
                 spell_usable(5308, &execute, &spells, &ctx, &objects, &items),

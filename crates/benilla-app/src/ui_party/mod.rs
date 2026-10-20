@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::ui_action::UiError;
+use crate::ui_action::{FillArg, UiError};
 use benilla_protocol::messages::{
     party_operation, party_result, patch_auras, GroupLootInfo, GroupMemberEntry,
     PartyMemberStatsInfo,
@@ -104,6 +104,10 @@ pub struct GroupState {
     pub raid_leader: u64,
     /// The loot tail, present whenever the list has members.
     pub loot: Option<GroupLootInfo>,
+    /// The loot setter's stored method, master and threshold (`0xbc7600`, `0xbc7608`,
+    /// `0xbc7610`): the last tail a list carried, which the next one is compared against. Nothing
+    /// in the reference clears them, neither the end of a group nor a new login.
+    pub loot_stored: GroupLootInfo,
     /// The inviter's name while the invite popup is up.
     pub pending_invite: Option<String>,
     /// Each member's record by guid, seated at 1/1, patched by `SMSG_PARTY_MEMBER_STATS`, and given
@@ -217,11 +221,25 @@ impl SignalLog {
     }
 }
 
+/// The message each loot method 0 to 4 shows when it changes, `0xe6` to `0xea` through the jump
+/// table `0x4e880c`.
+const LOOT_METHOD_KEYS: [&str; 5] = [
+    "ERR_SET_LOOT_FREEFORALL",
+    "ERR_SET_LOOT_ROUNDROBIN",
+    "ERR_SET_LOOT_MASTER",
+    "ERR_SET_LOOT_GROUP",
+    "ERR_SET_LOOT_NBG",
+];
+
+/// Master loot, the only method whose looter the setter names (`0x4e8773`).
+const LOOT_METHOD_MASTER: u8 = 2;
+
 impl GroupState {
     /// Apply one `SMSG_GROUP_LIST` and return what it shows, in the reference's order: the party
     /// slots' joins, the new-group line, the party slots' leaves, then the raid roster's lines.
     /// Kick, leave (`0x5e690b`) and disband lines come from their opcodes. Every name is taken as
     /// held, as the empty string: [`Self::apply_list_awaiting`] is the one that says otherwise.
+    #[cfg(test)]
     pub fn apply_list(
         &mut self,
         group_type: u8,
@@ -239,11 +257,14 @@ impl GroupState {
             loot,
             self_guid,
             &|_| Some(String::new()),
+            &|_| Some(String::new()),
         )
     }
 
     /// [`Self::apply_list`] told what the name cache holds: `lookup` is the handler's lookup with a
-    /// callback, the name the cache holds or `None` while it is still to come. Each party seat looks
+    /// callback, the name the cache holds or `None` while it is still to come, and `cached_name`
+    /// the loot master's, looked up with no callback (`0x4e878f`): the record if held, never
+    /// asking. Each party seat looks
     /// its member up (`0x4e8477`), and a raid list's rebuild each row, ours included
     /// (`0x4ba9b6`-`0x4ba9c7`); a raid row that misses holds `RAID_ROSTER_UPDATE` back
     /// (`0x4babdf`) until its answer.
@@ -256,6 +277,7 @@ impl GroupState {
         loot: Option<GroupLootInfo>,
         self_guid: Option<u64>,
         lookup: &dyn Fn(u64) -> Option<String>,
+        cached_name: &dyn Fn(u64) -> Option<String>,
     ) -> ListOutcome {
         let missed = |guid: u64| lookup(guid).is_none();
         // Every path of the handler reaches the event (`0x5e6c66`), the leave list and a party's
@@ -318,9 +340,10 @@ impl GroupState {
             }
         }
         // The loot store (`0x5e6e52` into `0x4e86f0`) runs for a list with members, the one that
-        // carries the loot tail (`0x5e6e12`), and signals whatever the tail says (`0x4e87fa`),
-        // ahead of the raid legs.
-        if loot.is_some() {
+        // carries the loot tail (`0x5e6e12`): the lines of what the tail changes, then the event,
+        // which it signals whatever the tail says (`0x4e87fa`), ahead of the raid legs.
+        if let Some(loot) = loot {
+            out.lines.extend(self.store_loot(loot, cached_name));
             self.signal(GroupSignal::LootMethodChanged);
         }
         if raid {
@@ -417,6 +440,45 @@ impl GroupState {
         // A real list ends the sandbox; `synthetic_roster` re-raises the flag after its own call.
         self.test = false;
         out
+    }
+
+    /// The loot setter `0x4e86f0`: each of the method, the master and the threshold that differs
+    /// from its stored cell shows its message, in that order, and is stored. The method has a
+    /// message for 0 to 4 (`0x4e880c`), none above. A master shows only when it is nonzero, the
+    /// method is master loot (`0x4e8773`) and the cache holds its name (`0x4e8794`); the cell is
+    /// stored either way (`0x4e87a6`).
+    fn store_loot(
+        &mut self,
+        new: GroupLootInfo,
+        cached_name: &dyn Fn(u64) -> Option<String>,
+    ) -> Vec<UiError> {
+        let old = std::mem::replace(&mut self.loot_stored, new);
+        let mut lines = Vec::new();
+        if new.method != old.method {
+            lines.extend(
+                LOOT_METHOD_KEYS
+                    .get(usize::from(new.method))
+                    .map(|k| UiError::key(k)),
+            );
+        }
+        if new.master != old.master && new.master != 0 && new.method == LOOT_METHOD_MASTER {
+            if let Some(name) = cached_name(new.master) {
+                lines.push(UiError::s("ERR_NEW_LOOT_MASTER_S", name));
+            }
+        }
+        if new.threshold != old.threshold {
+            // The word is `ITEM_QUALITY<n>_DESC` (`0x4e87c9`, read by `0x703bf0`), which the line
+            // reads from the VM that shows it: the interface's, which the reference has loaded
+            // before it reads a world packet and a login's group list can beat here.
+            lines.push(UiError::args(
+                "ERR_SET_LOOT_THRESHOLD_S",
+                vec![FillArg::Global(format!(
+                    "ITEM_QUALITY{}_DESC",
+                    new.threshold
+                ))],
+            ));
+        }
+        lines
     }
 
     /// Log one event where its handler signals it, behind every signal before it.
@@ -670,6 +732,8 @@ impl GroupState {
             // Cleared with the group. The reference's side is untraced; vmangos tells an invitee
             // nothing on a disband (`Group::RemoveAllInvites`).
             pending_invite,
+            // The reference's stored loot cells, which no ending clears.
+            loot_stored: _,
             // Session state the feed fires events off: kept until `clear_session`.
             listed: _,
             signals: _,
@@ -703,8 +767,12 @@ impl GroupState {
     pub fn clear_session(&mut self) {
         let mut signals = std::mem::take(&mut self.signals);
         signals.clear();
+        // The loot cells are the process's, not the session's: the reference's only writer
+        // (`0x4e86f0`) is the list handler, and nothing resets them.
+        let loot_stored = self.loot_stored;
         *self = GroupState {
             signals,
+            loot_stored,
             ..GroupState::default()
         };
     }
@@ -1004,9 +1072,16 @@ mod tests {
         let raid = vec![sub("Alice", 1, 0), sub("Bob", 2, 1)];
         let list = |g: &mut GroupState, group_type: u8, missing: &[u64]| {
             let missing = missing.to_vec();
-            g.apply_list_awaiting(group_type, 0, raid.clone(), 1, None, Some(ME), &|guid| {
-                (!missing.contains(&guid)).then(String::new)
-            });
+            g.apply_list_awaiting(
+                group_type,
+                0,
+                raid.clone(),
+                1,
+                None,
+                Some(ME),
+                &|guid| (!missing.contains(&guid)).then(String::new),
+                &|_| Some(String::new()),
+            );
             g.signals.take()
         };
         let answer = |g: &mut GroupState, guid: u64| {
@@ -1064,7 +1139,9 @@ mod tests {
         let mut g = GroupState::default();
         let party = vec![member("Alice", 1), sub("Bob", 2, 1)];
         let list = |g: &mut GroupState| {
-            g.apply_list_awaiting(0, 0, party.clone(), 1, None, Some(ME), &|_| None);
+            g.apply_list_awaiting(0, 0, party.clone(), 1, None, Some(ME), &|_| None, &|_| {
+                Some(String::new())
+            });
         };
         list(&mut g);
         list(&mut g);
@@ -1383,8 +1460,10 @@ mod tests {
         let removed = |name: &str| UiError::s("ERR_RAID_MEMBER_REMOVED_S", name);
         let named = |guid: u64| Some(if guid == ME { "Me" } else { "Alice" }.to_string());
         let raid = |g: &mut GroupState, members, names: &dyn Fn(u64) -> Option<String>| {
-            g.apply_list_awaiting(1, 0, members, ME, None, Some(ME), names)
-                .lines
+            g.apply_list_awaiting(1, 0, members, ME, None, Some(ME), names, &|_| {
+                Some(String::new())
+            })
+            .lines
         };
         let mut g = GroupState::default();
         raid(&mut g, vec![sub("Alice", 1, 0)], &named);
@@ -1867,6 +1946,18 @@ mod tests {
         list(&mut g, 1, &[("Alice", 1)], 1);
         list(&mut g, 1, &[("Alice", 1), ("Dave", 4)], 1);
         list(&mut g, 1, &[("Alice", 1)], 1);
+        // The loot setter, through each method's row, a master and a threshold.
+        for (method, master, threshold) in [(1, 0, 2), (2, 1, 3), (3, 1, 3), (4, 1, 3), (0, 0, 3)] {
+            let loot = GroupLootInfo {
+                method,
+                master,
+                threshold,
+            };
+            lines.extend(
+                g.apply_list(1, 0, vec![member("Alice", 1)], 1, Some(loot), None)
+                    .lines,
+            );
+        }
         lines.extend(g.apply_invited("Bob"));
         lines.extend(g.apply_declined("Carol"));
         lines.extend(g.apply_leader_changed("Alice", Some("Us")));
@@ -1891,14 +1982,21 @@ mod tests {
                 "ERR_LEFT_GROUP_S",
                 "ERR_NEW_LEADER_S",
                 "ERR_NEW_LEADER_YOU",
+                "ERR_NEW_LOOT_MASTER_S",
                 "ERR_RAID_LEADER_READY_CHECK_START_S",
                 "ERR_RAID_MEMBER_ADDED_S",
                 "ERR_RAID_MEMBER_REMOVED_S",
                 "ERR_RAID_YOU_JOINED",
                 "ERR_RAID_YOU_LEFT",
+                "ERR_SET_LOOT_FREEFORALL",
+                "ERR_SET_LOOT_GROUP",
+                "ERR_SET_LOOT_MASTER",
+                "ERR_SET_LOOT_NBG",
+                "ERR_SET_LOOT_ROUNDROBIN",
+                "ERR_SET_LOOT_THRESHOLD_S",
                 "ERR_UNINVITE_YOU",
             ],
-            "all thirteen keys this window can raise are exercised below"
+            "all twenty keys this window can raise are exercised below"
         );
 
         for msg in &lines {
@@ -1911,7 +2009,7 @@ mod tests {
             );
             assert_eq!(
                 text.contains("%s"),
-                msg.arg_s().is_some(),
+                !msg.args.is_empty(),
                 "{} vs its fill",
                 msg.key
             );
@@ -1920,6 +2018,207 @@ mod tests {
             benilla_ui::messages::by_key("ERR_DECLINE_GROUP_S").and_then(|r| r.sound),
             Some("igPlayerInviteDecline"),
             "the cue the chat-log path was dropping"
+        );
+    }
+
+    // ── The loot setter's lines (`0x4e86f0`) ────────────────────────────────────────────────────
+
+    const THRALL: u64 = 0x7A;
+
+    /// The threshold line for quality `n`: the word is the VM global's, read where it is shown.
+    fn threshold(n: u8) -> UiError {
+        UiError::args(
+            "ERR_SET_LOOT_THRESHOLD_S",
+            vec![FillArg::Global(format!("ITEM_QUALITY{n}_DESC"))],
+        )
+    }
+
+    /// A list of `loot` over a party Alice leads, whose cache names only [`THRALL`]: the lines
+    /// and the signals it raised.
+    fn loot_list(g: &mut GroupState, loot: GroupLootInfo) -> (Vec<UiError>, Vec<GroupSignal>) {
+        let cached = |guid: u64| (guid == THRALL).then(|| "Thrall".to_string());
+        let lines = g
+            .apply_list_awaiting(
+                0,
+                0,
+                vec![member("Alice", 1), member("Thrall", THRALL)],
+                1,
+                Some(loot),
+                Some(ME),
+                &|_| Some(String::new()),
+                &cached,
+            )
+            .lines;
+        let signals = g.signals.take();
+        (lines, signals)
+    }
+
+    fn tail(method: u8, master: u64, threshold: u8) -> GroupLootInfo {
+        GroupLootInfo {
+            method,
+            master,
+            threshold,
+        }
+    }
+
+    /// The cells start at zero, so a first group of group loot over green says both, in the
+    /// method's row and the threshold's (`0x4e8709`, `0x4e87b5`); the same tail again says nothing,
+    /// though the event fires all the same (`0x4e87fa`).
+    #[test]
+    fn a_tail_differing_from_the_stored_cells_says_so_before_the_event() {
+        let mut g = GroupState::default();
+        let (lines, signals) = loot_list(&mut g, tail(3, 0, 2));
+        assert_eq!(lines, [UiError::key("ERR_SET_LOOT_GROUP"), threshold(2)]);
+        assert_eq!(count(&signals, GroupSignal::LootMethodChanged), 1);
+
+        let (lines, signals) = loot_list(&mut g, tail(3, 0, 2));
+        assert_eq!(lines, []);
+        assert_eq!(count(&signals, GroupSignal::LootMethodChanged), 1);
+
+        let (lines, _) = loot_list(&mut g, tail(3, 0, 4));
+        assert_eq!(lines, [threshold(4)]);
+    }
+
+    /// The jump table `0x4e880c` gives methods 0 to 4 messages `0xe6` to `0xea`; a method above 4
+    /// is stored with none (`0x4e871c`, `0x4e8722`). Free-for-all is the cell's own start, so a
+    /// first group at it says nothing of the method.
+    #[test]
+    fn each_method_has_its_row_and_an_unknown_one_none() {
+        let keys = [
+            "ERR_SET_LOOT_FREEFORALL",
+            "ERR_SET_LOOT_ROUNDROBIN",
+            "ERR_SET_LOOT_MASTER",
+            "ERR_SET_LOOT_GROUP",
+            "ERR_SET_LOOT_NBG",
+        ];
+        for (method, key) in (0u8..).zip(keys) {
+            // From a method it differs from, at the threshold the cell already holds.
+            let mut g = GroupState {
+                loot_stored: tail(if method == 1 { 2 } else { 1 }, 0, 2),
+                ..GroupState::default()
+            };
+            let (lines, _) = loot_list(&mut g, tail(method, 0, 2));
+            assert_eq!(lines, [UiError::key(key)], "method {method}");
+        }
+
+        let mut g = GroupState::default();
+        let (lines, _) = loot_list(&mut g, tail(0, 0, 0));
+        assert_eq!(lines, [], "free-for-all over the zero cells");
+        let (lines, signals) = loot_list(&mut g, tail(5, 0, 0));
+        assert_eq!(lines, [], "a method past the table");
+        assert_eq!(count(&signals, GroupSignal::LootMethodChanged), 1);
+        let (lines, _) = loot_list(&mut g, tail(3, 0, 0));
+        assert_eq!(
+            lines,
+            [UiError::key("ERR_SET_LOOT_GROUP")],
+            "and it was stored"
+        );
+    }
+
+    /// A new nonzero master names itself only under master loot (`0x4e8773 cmp [ebp-0xc],2`) and
+    /// only when the cache holds the name (`0x4e8794`, a lookup with no callback); the cell is
+    /// stored either way (`0x4e87a6`), so a name that arrives later never prints.
+    #[test]
+    fn a_new_master_names_itself_only_under_master_loot_with_the_name_cached() {
+        let mut g = GroupState::default();
+        let (lines, _) = loot_list(&mut g, tail(2, THRALL, 2));
+        assert_eq!(
+            lines,
+            [
+                UiError::key("ERR_SET_LOOT_MASTER"),
+                UiError::s("ERR_NEW_LOOT_MASTER_S", "Thrall"),
+                threshold(2),
+            ],
+            "the method, then the master, then the threshold"
+        );
+
+        // The master moves under group loot: stored, silent.
+        let mut g = GroupState {
+            loot_stored: tail(3, 0, 2),
+            ..GroupState::default()
+        };
+        let (lines, _) = loot_list(&mut g, tail(3, THRALL, 2));
+        assert_eq!(lines, []);
+        let (lines, _) = loot_list(&mut g, tail(2, THRALL, 2));
+        assert_eq!(
+            lines,
+            [UiError::key("ERR_SET_LOOT_MASTER")],
+            "the master was already stored"
+        );
+
+        // A master the cache has no name for says nothing, now or after the name arrives.
+        let mut g = GroupState {
+            loot_stored: tail(2, 0, 2),
+            ..GroupState::default()
+        };
+        let (lines, _) = loot_list(&mut g, tail(2, 0x99, 2));
+        assert_eq!(lines, []);
+        assert_eq!(g.loot_stored.master, 0x99);
+
+        // No master is no line.
+        g.loot_stored = tail(2, THRALL, 2);
+        let (lines, _) = loot_list(&mut g, tail(2, 0, 2));
+        assert_eq!(lines, []);
+    }
+
+    /// The cells are the process's: no list that ends a group clears them (`0x4e86f0` is their
+    /// only writer), nor does a session's teardown, so a rejoin at the same settings is silent.
+    #[test]
+    fn the_stored_cells_outlive_the_group_and_the_session() {
+        let mut g = GroupState::default();
+        loot_list(&mut g, tail(2, THRALL, 3));
+        g.apply_list(0, 0, Vec::new(), 0, None, Some(ME));
+        assert!(!g.in_group);
+        let (lines, _) = loot_list(&mut g, tail(2, THRALL, 3));
+        assert_eq!(lines, [], "the same settings after the group ended");
+
+        g.clear_session();
+        let (lines, _) = loot_list(&mut g, tail(2, THRALL, 3));
+        assert_eq!(lines, [], "and after the session ended");
+        let (lines, _) = loot_list(&mut g, tail(1, THRALL, 3));
+        assert_eq!(lines, [UiError::key("ERR_SET_LOOT_ROUNDROBIN")]);
+    }
+
+    /// The setter runs after the party's leaves (`0x5e6e09`) and ahead of the raid roster's
+    /// legs (`0x5e6e52` before `0x5e6e6b`), so its lines sit between them.
+    #[test]
+    fn the_loot_lines_sit_between_the_leaves_and_the_raid_legs() {
+        let mut g = GroupState::default();
+        let list = |g: &mut GroupState, group_type: u8, members: Vec<GroupMemberEntry>, loot| {
+            g.apply_list_awaiting(
+                group_type,
+                0,
+                members,
+                1,
+                Some(loot),
+                Some(ME),
+                &|_| Some(String::new()),
+                &|_| None,
+            )
+            .lines
+        };
+        list(
+            &mut g,
+            0,
+            vec![member("Alice", 1), member("Bob", 2)],
+            tail(3, 0, 2),
+        );
+        assert_eq!(
+            list(&mut g, 0, vec![member("Alice", 1)], tail(1, 0, 2)),
+            [
+                UiError::s("ERR_LEFT_GROUP_S", "Bob"),
+                UiError::key("ERR_SET_LOOT_ROUNDROBIN"),
+            ]
+        );
+
+        let mut g = GroupState::default();
+        assert_eq!(
+            list(&mut g, 1, vec![member("Alice", 1)], tail(3, 0, 2)),
+            [
+                UiError::key("ERR_SET_LOOT_GROUP"),
+                threshold(2),
+                UiError::key("ERR_RAID_YOU_JOINED"),
+            ]
         );
     }
 }

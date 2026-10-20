@@ -85,6 +85,9 @@ pub(crate) struct CreatureRecord {
     pub(crate) rank: u32,
     /// Read bit by bit through [`type_flags`].
     pub(crate) type_flags: u32,
+    /// `CreatureSpellData.dbc` id of the abilities a tamed one brings (`[record+0x28]`), 0 for
+    /// none: the studied-creature block's ability line (`0x529d56`).
+    pub(crate) pet_spell_list: u32,
     pub(crate) civilian: bool,
     /// The tooltip's LEADER line (`0x6125c0`).
     pub(crate) racial_leader: bool,
@@ -395,9 +398,9 @@ impl crate::query_cache::AskOnce for NameCache {
 /// reference's rule for its `.wdb` header (`[FourCC | build 0x16f3 | locale | recordSize |
 /// version 1]`, no checksum, no timestamp, no TTL).
 const CACHE_MAGIC: &str = "benilla-namecache";
-/// Our record-layout version; bump it when a column changes. Version 2 holds creature records
-/// only.
-const CACHE_FORMAT: u32 = 2;
+/// Our record-layout version; bump it when a column changes. Version 3 holds creature records
+/// only, the pet spell list among them.
+const CACHE_FORMAT: u32 = 3;
 /// The client build, the reference's `0x16f3`.
 const CACHE_BUILD: u32 = 5875;
 /// The header's locale, the client's locale tag as each `.wdb` header carries it (`[0xc2a2a4]`,
@@ -432,7 +435,7 @@ impl NameCache {
         for (entry, r) in self.creatures.iter() {
             let _ = writeln!(
                 out,
-                "C\t{entry}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "C	{entry}	{}	{}	{}	{}	{}	{}	{}	{}	{}	{}",
                 r.creature_type,
                 r.pet_family,
                 r.rank,
@@ -440,6 +443,7 @@ impl NameCache {
                 u8::from(r.civilian),
                 u8::from(r.racial_leader),
                 r.display_id,
+                r.pet_spell_list,
                 r.name,
                 r.subname.as_deref().unwrap_or("")
             );
@@ -465,7 +469,7 @@ impl NameCache {
         for line in lines {
             let f: Vec<&str> = line.split('\t').collect();
             match f.first().copied() {
-                Some("C") if f.len() >= 11 => {
+                Some("C") if f.len() >= 12 => {
                     let Ok(entry) = f[1].parse::<u32>() else {
                         continue;
                     };
@@ -474,19 +478,20 @@ impl NameCache {
                     else {
                         continue;
                     };
-                    let Ok(display_id) = f[8].parse() else {
+                    let (Ok(display_id), Ok(pet_spell_list)) = (f[8].parse(), f[9].parse()) else {
                         continue;
                     };
                     cache.creatures.insert(
                         entry,
                         CreatureRecord {
-                            name: f[9].to_string(),
+                            name: f[10].to_string(),
                             // Empty is no subname, as in the wire decode.
-                            subname: (!f[10].is_empty()).then(|| f[10].to_string()),
+                            subname: (!f[11].is_empty()).then(|| f[11].to_string()),
                             creature_type,
                             pet_family,
                             rank,
                             type_flags,
+                            pet_spell_list,
                             civilian: f[6] == "1",
                             racial_leader: f[7] == "1",
                             display_id,
@@ -633,6 +638,7 @@ pub(crate) mod net {
             pet_family,
             rank,
             type_flags,
+            pet_spell_list,
             display_id,
             civilian,
             racial_leader,
@@ -647,6 +653,7 @@ pub(crate) mod net {
                 pet_family,
                 rank,
                 type_flags,
+                pet_spell_list,
                 civilian,
                 racial_leader,
                 display_id,
@@ -709,6 +716,7 @@ pub(crate) mod net {
         pet_family: u32,
         rank: u32,
         type_flags: u32,
+        pet_spell_list: u32,
         civilian: bool,
         racial_leader: bool,
         display_id: u32,
@@ -723,6 +731,7 @@ pub(crate) mod net {
                 pet_family,
                 rank,
                 type_flags,
+                pet_spell_list,
                 civilian,
                 racial_leader,
                 display_id,
@@ -787,6 +796,7 @@ pub(crate) mod net {
                 pet_family: 0,
                 rank: 0,
                 type_flags: 0,
+                pet_spell_list: 0,
                 display_id: 0,
                 civilian: false,
                 racial_leader: false,
@@ -1001,6 +1011,7 @@ mod tests {
                 pet_family: 0,
                 rank: 1,
                 type_flags: 0x10,
+                pet_spell_list: 5796,
                 civilian: true,
                 racial_leader: false,
                 display_id: 533,
@@ -1025,6 +1036,7 @@ mod tests {
         assert_eq!((rec.creature_type, rec.rank, rec.type_flags), (7, 1, 0x10));
         assert_eq!((rec.civilian, rec.racial_leader), (true, false));
         assert_eq!(rec.display_id, 533, "the model a stabled pet is drawn from");
+        assert_eq!(rec.pet_spell_list, 5796, "the studied block's abilities");
         assert!(back.creature_record(1234).is_none());
         assert_eq!(back.len(), 1);
 
@@ -1038,6 +1050,7 @@ mod tests {
                 pet_family: 5,
                 rank: 0,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 1,
@@ -1063,6 +1076,7 @@ mod tests {
                 pet_family: 0,
                 rank: 1,
                 type_flags: 0x10,
+                pet_spell_list: 0,
                 civilian: true,
                 racial_leader: false,
                 display_id: 533,
@@ -1161,7 +1175,7 @@ mod tests {
         assert!(NameCache::from_tsv("", "R").is_none());
         assert!(NameCache::from_tsv("nonsense", "R").is_none());
         let text = format!(
-            "{}\nC\tnotanumber\t1\t2\t0\tX\nc\t1234\nC\t88\t7\t0\t1\t0\t0\t0\t5\tGuard\t\n",
+            "{}\nC\tnotanumber\t1\t2\t0\tX\nc\t1234\nC\t88\t7\t0\t1\t0\t0\t0\t5\t0\tGuard\t\n",
             head
         );
         let back = NameCache::from_tsv(&text, "Hydraxian Waterlords").expect("header still good");
@@ -1232,6 +1246,7 @@ mod tests {
                 pet_family: 0,
                 rank: 0,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 0,
@@ -1406,6 +1421,7 @@ mod tests {
             pet_family: 0,
             rank: 0,
             type_flags: 0,
+            pet_spell_list: 0,
             civilian: false,
             racial_leader: false,
             display_id: 0,

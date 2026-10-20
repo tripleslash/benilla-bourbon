@@ -32,6 +32,7 @@ pub(crate) fn fire_field_notices(
     mut sink: crate::ui_action::MessageSink,
     // The quest log's watcher reads the slots.
     me: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
+    mut tutorials: Option<ResMut<crate::tutorial::Tutorials>>,
 ) {
     let fresh: Vec<FieldNotice> = cursor.0.read(&notices).copied().collect();
     // No VM, nobody to hear them: they are dropped, as below.
@@ -42,6 +43,13 @@ pub(crate) fn fire_field_notices(
         if notice == FieldNotice::QuestLog {
             if let Some(store) = me.iter().next() {
                 script.quest_log_changed(crate::ui_quest_log::slot_views(&store.0));
+            }
+            continue;
+        }
+        if let FieldNotice::Tutorial { id } = notice {
+            // `0x4b5390` with no delay, inside the watcher's run.
+            if let Some(published) = tutorials.as_mut().and_then(|t| t.fire_now(id)) {
+                crate::tutorial::fire_published(&mut script, &mut sink.sounds, published);
             }
             continue;
         }
@@ -114,8 +122,8 @@ fn fire(script: &mut UiScript, sink: &mut crate::ui_action::MessageSink, notice:
                 script.fire_event(global, vec![]);
             }
         }
-        // Fired by [`fire_field_notices`], which holds the slots.
-        FieldNotice::QuestLog => {}
+        // Fired by [`fire_field_notices`], which holds the slots and the banks.
+        FieldNotice::QuestLog | FieldNotice::Tutorial { .. } => {}
         FieldNotice::PvpPreference { on } => {
             let (toast, verbose) = super::pvp_announcement(on);
             // The verbose sentence is no catalog row, so it goes `unkeyed` to chat:
@@ -463,6 +471,35 @@ mod tests {
         );
     }
 
+    /// A watcher's tutorial fires inside its run (`0x4b5390` with delay 0): the `TutorialPopup` cue
+    /// and `TUTORIAL_TRIGGER` with the number plus one, ahead of the next notice's event, once per
+    /// fire-once bit.
+    #[test]
+    fn a_watchers_tutorial_fires_in_its_place_once() {
+        let mut app = world(seated());
+        app.init_resource::<crate::tutorial::Tutorials>();
+        app.world_mut()
+            .resource_mut::<crate::tutorial::Tutorials>()
+            .apply_flags(&[0u8; 8]);
+        assert_eq!(
+            fired(
+                &mut app,
+                &[
+                    FieldNotice::Tutorial { id: 0x1d },
+                    FieldNotice::Global { id: 405 },
+                    FieldNotice::Tutorial { id: 0x1d },
+                ]
+            ),
+            ["TUTORIAL_TRIGGER 30", "PLAYER_UPDATE_RESTING nil"]
+        );
+        assert_eq!(
+            app.world()
+                .resource::<crate::sound::MessageSounds>()
+                .queued_cues(),
+            ["TutorialPopup"]
+        );
+    }
+
     /// The two readers share one position: what the drop took, the firing never fires.
     #[test]
     fn a_dropped_notice_never_fires_later() {
@@ -644,7 +681,7 @@ mod tests {
             ME,
             benilla_protocol::messages::ObjectType::Player,
             &fields,
-            &edges,
+            &crate::field_watch::Notified::new(crate::field_watch::Sent::Fields(&[XP]), &edges),
         );
         app.world_mut()
             .resource_mut::<Messages<FieldNotice>>()

@@ -228,10 +228,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
          machine a player runs today",
     ),
     // FMOD 3's mix-ahead buffer in ms (`0x4571ca`, flags 2: read once at sound init); here it sizes
-    // the render thread's ring ahead of the IO callback (`sound::output`). `0x457520` registers
-    // "50" or "100" by a host probe (`0x835e10`/`0x835e0c`), which one on a current machine
-    // untraced; ours is the larger, since the depth has to hide a whole stalled IO cycle.
-    same("SoundBufferSize", "100").latched(),
+    // the render thread's ring ahead of the IO callback (`sound::output`). The default string is
+    // `0x457520`'s: "50" (`0x835e10`) when the detection record has processor class 1 at `+0x18`
+    // (`0x639a00`), else "100" (`0x835e0c`). Class 1 is a processor frequency above 1500 MHz
+    // (`0x6414c0`). `0x42c0e0` asks `CallNtPowerInformation` for 4 processor records (`0x60` bytes),
+    // which fails on a host with more logical CPUs; `0x42c060` then reads the calibrated counter
+    // rate (`0x884060`), above 1500 MHz on a current x86 part, so those hosts register "50". It is
+    // shipped (`sound::output::MIX_AHEAD_MS` is the same number, and a test holds the two together).
+    same("SoundBufferSize", "50").latched(),
     // benilla's own, not a 1.12 CVar. Deviation: the reference clips at full scale and has no
     // headroom mechanism (its SFX-bus duck `0x457960` is a sidechain armed only by server-pushed
     // voice lines); benilla limits because every SFX is mastered to full scale and overlapping
@@ -396,14 +400,15 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // (`OptionsFrame.lua:27`); stops 0/1/2 are `frillDensity` 16/32/48. `SetWorldDetail 0x488dd0`
     // also writes `SmallCull` {0.07, 0.04, 0.01}, and `GetWorldDetail` reads only `SmallCull`,
     // whose registered 0.04 is stop 1: the reference's slider boots at Medium. Welded to
-    // `ClutterConfig::default().density` (stop = density - 1).
-    deviates(
+    // `ClutterConfig::default().density` (stop = density - 1). Ours boots at High (the director's
+    // call, 2026-09-08), `SmallCull` with it below.
+    ours(
         "WorldDetail",
         "2",
-        "1",
-        "the reference's own boot pair is inconsistent and its own slider reads Medium; ours starts \
-         at High because ground cover is most of what the world looks like, and the stop is one \
-         drag away either way",
+        "the Environment Detail stop our Graphics page and `GetWorldDetail` read; 1.12 keeps the \
+         stop in `smallCull` and `frillDensity` and registers no CVar of this name. Ours starts at \
+         High where the reference's own slider reads Medium, because ground cover is most of what \
+         the world looks like, and the stop is one drag away either way",
     ),
     // `SmallCull` (`0x68854a`: name `0x8696f8`, default `0x869718` "0.04", flags 1, callback
     // `0x688b10`, record `[0xc7f330]`). The callback refuses outside [0.001, 2.0] and stores into
@@ -555,8 +560,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `statusBarText` (`0x48fc34`, record `[0xb4d904]`, no engine reader), read by
     // `TextStatusBar.lua:47,97`: "0" shows the numbers on hover only.
     same("statusBarText", "0"),
-    // Enhanced Tooltips (`UIOptionsFrame.lua:15`), registered "1" at `0x48fddd` (`0x82e748`); read
-    // only by the stock interface.
+    // Enhanced Tooltips (`UIOptionsFrame.lua:15`), registered "1" at `0x48fddd` (`0x82e748`): the
+    // stock interface's binding-line gate, and `SetAction` and `SetShapeshift`'s compact spell
+    // tooltip when 0 (`0x532622`, `0x532a35`).
     same("UberTooltips", "1"),
     // Registered at `0x603280`: `ChatBubbles` "1", `ChatBubblesParty` "0".
     same("ChatBubbles", "1"),
@@ -752,9 +758,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `SetDeviceGammaRamp`, except when windowed (`byte[dev+0x20b]`). Deviation: benilla, which
     // has no exclusive mode, applies the same curve in the composite pass
     // ([`crate::ui_gamma::DisplayGamma`]), because the skipped upload would make a slider that
-    // moves no pixel. Spelled "1.000000" because `SetGamma 0x4891f0` formats with `"%f"`, and
-    // Restore Defaults must compare equal to the default; [`sync_cvars`] seeds it the same way.
-    same("gamma", "1.000000"),
+    // moves no pixel. `SetGamma 0x4891f0` writes `"%f"` ("1.000000"), which `SaveConfig`
+    // (`0x63da4a`) keeps as a diff against the default "1.0", as the reference does.
+    same("gamma", "1.0"),
     // `DesktopGamma` (`0x402d4d`: name `0x82e930`, default "0" `0x82e570`, flags 0, callback
     // `0x403500`, record `[0x8826d4]`), the stock window's Use Desktop Gamma box, which it also
     // sets whenever Windowed Mode is ticked (`OptionsFrame.lua:399-408`). On 1 the callback puts

@@ -42,7 +42,15 @@ pub(crate) struct FeedMemory {
     bag_guids: [u64; 10],
     /// The last [`SlotGuids::vault`], diffed for `PLAYERBANKSLOTS_CHANGED`.
     vault_guids: [u64; BANK_SLOTS as usize],
+    /// The `BAG_UPDATE`s fired since the feed last counted them into [`BagUpdates`].
+    bag_updates: u64,
 }
+
+/// How many `BAG_UPDATE`s the bag feed has signalled. Each is a `RaiseBagUpdate 0x4f9370`, which
+/// first runs the action bar's usable refresh `0x4e5c00` (`0x4f9374`), so the action feed refreshes
+/// on its edge.
+#[derive(Resource, Default)]
+pub(crate) struct BagUpdates(pub(crate) u64);
 
 /// The item guids in the player's bag and vault slots, as the reference's watchers read them
 /// (`0x5dd8a0` installs `0x5ddcf0` over the guid fields): which item, where a pushed slot view only
@@ -251,7 +259,7 @@ fn template_view(
                     .and_then(|c| c.faction_name(t.required_rep_faction))
                     .unwrap_or("UNKNOWN");
                 let standing =
-                    crate::ui_reputation::standing_label(get, t.required_rep_rank, gender() == 1);
+                    benilla_ui::strings::standing_label(get, t.required_rep_rank, gender() == 1);
                 Some(benilla_ui::strings::fill(
                     &get("ITEM_REQ_REPUTATION")?,
                     &[
@@ -649,8 +657,8 @@ type CasterReads<'w, 's> = (
 
 /// The player state the tooltip's red requirement lines check: level, class, race, skills,
 /// proficiencies (`SMSG_SET_PROFICIENCY`), reputation ranks (the DBC base plus the
-/// `SMSG_INITIALIZE_FACTIONS` standing), honor rank and medals, and the known spells, pushed on
-/// change.
+/// `SMSG_INITIALIZE_FACTIONS` standing), honor rank and medals, the known spells, and the
+/// skinning value the unit tooltip colours by, pushed on change.
 pub(super) fn feed_player_req(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -660,8 +668,14 @@ pub(super) fn feed_player_req(
     factions: Option<Res<crate::target::Factions>>,
     actions: Res<crate::ui_action::PlayerActions>,
     spells: Option<Res<crate::ui_action::Spells>>,
+    // The skinning latch `[0xb700e4]` and the line its value scales by.
+    skinning: (
+        Res<crate::ui_action::LearnedAbilities>,
+        Option<Res<crate::ui_spellbook::SkillLines>>,
+    ),
     mut last: Local<crate::ui_script::VmMemo<Option<benilla_ui::script::PlayerReqState>>>,
 ) {
+    let (learned, skill_lines) = skinning;
     let Some(mut script) = script else {
         return;
     };
@@ -673,6 +687,8 @@ pub(super) fn feed_player_req(
     let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
     let actions_changed = actions.is_changed();
     let spells_changed = spells.as_ref().is_some_and(|r| r.is_changed());
+    let learned_changed = learned.is_changed();
+    let lines_changed = skill_lines.as_ref().is_some_and(|r| r.is_changed());
     gate::trace(
         "feed_player_req",
         &[
@@ -683,6 +699,8 @@ pub(super) fn feed_player_req(
             ("factions", factions_changed),
             ("actions", actions_changed),
             ("spells", spells_changed),
+            ("learned", learned_changed),
+            ("skill_lines", lines_changed),
         ],
     );
     let gate = gate::Gate::new(
@@ -692,7 +710,9 @@ pub(super) fn feed_player_req(
             || reps_changed
             || factions_changed
             || actions_changed
-            || spells_changed,
+            || spells_changed
+            || learned_changed
+            || lines_changed,
     );
     if gate.skip() {
         return;
@@ -742,6 +762,21 @@ pub(super) fn feed_player_req(
             .iter()
             .any(|&id| s.catalog.get(id).is_some_and(|sd| sd.effects[0] == 40))
     });
+    // The skinnable line's value (`0x529f06`-`0x529f58`): the latched spell's first `SKINNING`
+    // effect, its points at the player's skill in the spell's line, kept only above 0.
+    let skinning = learned
+        .skinning
+        .and_then(|id| {
+            let d = spells.as_deref()?.catalog.get(id)?;
+            let e = d
+                .effects
+                .iter()
+                .position(|&e| e == benilla_formats::SPELL_EFFECT_SKINNING)?;
+            let catalog = skill_lines.as_deref().map(|s| &s.catalog);
+            let skill = crate::spell::spell_skill_value(Some(store), catalog, id);
+            Some(d.effect_points_int(e, skill))
+        })
+        .filter(|&v| v > 0);
     let state = benilla_ui::script::PlayerReqState {
         level: store.0.unit_level().unwrap_or(0),
         class_id: u32::from(class),
@@ -752,6 +787,7 @@ pub(super) fn feed_player_req(
         can_dual_wield,
         honor_rank: store.0.player_honor_rank().unwrap_or(0),
         pvp_medals: store.0.player_pvp_medals().unwrap_or(0),
+        skinning,
     };
     if last.as_ref() != Some(&state) {
         gate.audit("feed_player_req", "the player-requirement state");
@@ -1089,6 +1125,7 @@ pub(crate) fn feed_containers(
         Res<crate::ui_script::UiClock>,
         Res<crate::ui_petition::PetitionState>,
     ),
+    mut bag_updates: ResMut<BagUpdates>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
 ) {
     let (mut equip_errors, mut sink) = equip;
@@ -1497,6 +1534,9 @@ pub(crate) fn feed_containers(
     ) {
         gate.audit("feed_containers", "a bag diff or a server-opened bag");
     }
+    bag_updates.0 = bag_updates
+        .0
+        .wrapping_add(std::mem::take(&mut memory.bag_updates));
 }
 
 /// Diffs `source` against the last push, pushes each changed bag and fires the reference's events:
@@ -1629,6 +1669,7 @@ fn diff_and_push(
             // listener over the vault's fields, which fire only `PLAYERBANKSLOTS_CHANGED`.
             if bag != BANK_CONTAINER && !emptied.contains(&bag) {
                 script.fire_event("BAG_UPDATE", vec![ScriptValue::Int(bag)]);
+                memory.bag_updates += 1;
             }
         }
         memory.pushed = fresh;
@@ -2848,6 +2889,7 @@ mod ask_tests {
         app.init_resource::<crate::net::Proficiencies>()
             .init_resource::<crate::net::Reputations>()
             .init_resource::<crate::ui_action::PlayerActions>()
+            .init_resource::<crate::ui_action::LearnedAbilities>()
             .add_systems(Update, super::feed_player_req);
         app.world_mut()
             .resource_mut::<crate::ui_action::PlayerActions>()

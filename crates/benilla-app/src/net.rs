@@ -23,17 +23,24 @@ use crossbeam_channel::{Receiver, Sender};
 use benilla_world::schedule::WorldStage;
 
 mod apply;
+mod game_time;
 pub(crate) mod handlers;
 pub(crate) mod io;
 pub(crate) mod motion;
 mod objects;
 pub(crate) use objects::tear_down;
+#[cfg(test)]
+pub(crate) use objects::wire;
+pub(crate) use objects::Listed;
 mod session;
 mod world;
 
 pub(crate) use apply::apply_net_updates;
 pub(crate) use apply::enter_world_on_self_create;
 use apply::tag_self_player;
+#[cfg(test)]
+pub(crate) use game_time::GameTime;
+pub(crate) use game_time::{clock_tick, ServerTime};
 pub(crate) use handlers::NetHandlerApp;
 
 pub(crate) use io::LoginRequest;
@@ -86,11 +93,7 @@ impl Plugin for NetPlugin {
                 .in_set(WorldStage::Net)
                 .before(apply_net_updates),
         );
-        // In the net stage: the lighting resolve runs after it and reads this frame's clock.
-        app.add_systems(
-            Update,
-            publish_world_time.in_set(benilla_world::schedule::WorldStage::Net),
-        );
+        game_time::register(app);
         world::register(app);
         session::register(app);
         objects::register(app);
@@ -362,9 +365,10 @@ impl ObjectStore {
     }
 }
 
-/// One descriptor dword moved on a streamed object, the reference's `CMirrorHandler` edge: the
-/// values notifier (`0x465330`) diffs live against a shadow copy and passes the old value
-/// (`0x465570`). A first create fires nothing; a re-create of a live guid fires like a delta.
+/// One descriptor dword moved on a streamed object, the reference's `CMirrorHandler` edge: an
+/// update packet's notify pass (`0x465330`) diffs the object against the copy its last write in
+/// the packet took (`0x46664b`) and passes the old value (`0x465570`). A first create fires
+/// nothing; a create of an object shown before fires every dword it moved, an omitted one cleared.
 ///
 /// `kind` is the store's class from its create block, since a raw index differs per class (`36`
 /// is a unit's `BYTES_0` and a corpse's `DYNAMIC_FLAGS`).
@@ -394,30 +398,18 @@ impl FieldChanged {
     }
 }
 
-/// Merge a descriptor update into a store and emit its [`FieldChanged`] edges; the drain and the
-/// test harness share it.
-pub(crate) fn merge_store_fields(
-    store: &mut ObjectFields,
-    delta: ObjectFields,
-    entity: Entity,
-    guid: u64,
-    mut emit: impl FnMut(FieldChanged),
-) {
-    let Some(kind) = store.created_as() else {
-        // A bare delta with no create: nothing for the reference to notify on; the fields land.
+/// A block's write into a held store (`0x466590` with its copy flag clear): a create's delta
+/// replaces the store, clearing what it omits (`0x466582`); a values delta lands on top. The
+/// dwords it moved come back as `(index, old, new)`. A store no create made has no type to
+/// notify by, and the fields land with none.
+pub(crate) fn write_fields(store: &mut ObjectFields, delta: ObjectFields) -> Vec<(u16, u32, u32)> {
+    let mut moved = Vec::new();
+    if store.created_as().is_none() {
         store.merge(delta);
-        return;
-    };
-    store.merge_diff(delta, |index, old, new| {
-        emit(FieldChanged {
-            entity,
-            guid,
-            kind,
-            index,
-            old,
-            new,
-        });
-    });
+    } else {
+        store.merge_diff(delta, |index, old, new| moved.push((index, old, new)));
+    }
+    moved
 }
 
 /// Apply a descriptor update the way the drain does. The first one must be
@@ -427,7 +419,19 @@ pub(crate) fn apply_fields_for_test(world: &mut World, entity: Entity, delta: Ob
     let guid = world.get::<Guid>(entity).map_or(0, |g| g.0);
     let mut edges = Vec::new();
     match world.get_mut::<ObjectStore>(entity) {
-        Some(mut store) => merge_store_fields(&mut store.0, delta, entity, guid, |e| edges.push(e)),
+        Some(mut store) => {
+            let moved = write_fields(&mut store.0, delta);
+            if let Some(kind) = store.0.created_as() {
+                edges.extend(moved.into_iter().map(|(index, old, new)| FieldChanged {
+                    entity,
+                    guid,
+                    kind,
+                    index,
+                    old,
+                    new,
+                }));
+            }
+        }
         None => {
             assert!(
                 delta.created_as().is_some(),
@@ -715,27 +719,6 @@ pub(crate) struct DropTally {
     pub(crate) unparseable: u64,
 }
 
-/// The in-game clock (`SMSG_LOGIN_SETTIMESPEED`), advanced by its timescale.
-#[derive(Resource, Default)]
-pub(crate) struct ServerTime(pub(crate) Option<GameTime>);
-
-/// Publish the session clock into [`benilla_world::lighting::WorldTime`] each frame; with no
-/// server, its default (noon).
-pub(crate) fn publish_world_time(
-    server: Res<ServerTime>,
-    mut world_time: ResMut<benilla_world::lighting::WorldTime>,
-) {
-    *world_time = match server.0 {
-        Some(gt) => benilla_world::lighting::WorldTime {
-            minute: gt.minute_of_day(),
-            minute_f: gt.minute_of_day_f32(),
-            day: gt.day_continuous(),
-            live: true,
-        },
-        None => benilla_world::lighting::WorldTime::default(),
-    };
-}
-
 /// The server's unix wall clock (`SMSG_QUERY_TIME_RESPONSE`), advanced monotonically. Descriptor
 /// deadlines are absolute server stamps (a timed quest's is `time(nullptr) + limitTime`, vmangos
 /// `Player::AddQuest`), so a countdown reads this, never the local clock.
@@ -875,47 +858,6 @@ pub(crate) struct PlayedTimeAnswer(pub(crate) Option<(u32, u32)>);
 /// bitmask, the client's `0xc4d4a0[class]` store.
 #[derive(Resource, Default)]
 pub(crate) struct Proficiencies(pub(crate) std::collections::HashMap<u32, u32>);
-
-/// The in-game clock from `SMSG_LOGIN_SETTIMESPEED`: the server's `localtime()`, advancing at
-/// `timescale` game-minutes per real second (vmangos about `0.01667`, real time).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct GameTime {
-    /// Minute of the game day (`0..1440`) at `received`.
-    base_minute: u32,
-    /// Day serial of the packed date, `year*372 + month*31 + day`; only differences matter.
-    base_day: u32,
-    timescale: f32,
-    received: Instant,
-}
-
-impl GameTime {
-    pub(crate) fn new(hours: u8, minutes: u8, day_serial: u32, timescale: f32) -> Self {
-        Self {
-            base_minute: hours as u32 * 60 + minutes as u32,
-            base_day: day_serial,
-            timescale,
-            received: Instant::now(),
-        }
-    }
-
-    /// Current minute of the game day (`0..1440`).
-    pub(crate) fn minute_of_day(&self) -> u32 {
-        self.minute_of_day_f32() as u32
-    }
-
-    /// Current fractional minute of the game day, so the sky bodies move without steps.
-    pub(crate) fn minute_of_day_f32(&self) -> f32 {
-        let elapsed = self.received.elapsed().as_secs_f32() * self.timescale;
-        (self.base_minute as f32 + elapsed).rem_euclid(1440.0)
-    }
-
-    /// Days and day fraction since the serial epoch, unwrapped, for the moon phase
-    /// `(dayCounter + todPhase) mod 1.7` (`0x6d41b9`); `f64` for sub-minute grain at ~12k days.
-    pub(crate) fn day_continuous(&self) -> f64 {
-        let elapsed = self.received.elapsed().as_secs_f64() * self.timescale as f64;
-        self.base_day as f64 + (self.base_minute as f64 + elapsed) / 1440.0
-    }
-}
 
 // ── Outbound commands + one-shot inbound events ──────────────────────────────────────────────────
 
@@ -2026,6 +1968,10 @@ pub(crate) enum ClientCommand {
     GroupUninvite {
         name: String,
     },
+    /// `CMSG_GROUP_UNINVITE_GUID`, leader only: the kick for a player whose object is not held.
+    GroupUninviteGuid {
+        guid: u64,
+    },
     /// `CMSG_GROUP_SET_LEADER`, leader only.
     GroupSetLeader {
         guid: u64,
@@ -2136,6 +2082,32 @@ pub(crate) enum ClientCommand {
     ToggleHelm,
     /// `CMSG_TOGGLE_CLOAK`, as [`Self::ToggleHelm`].
     ToggleCloak,
+    // ── The console's own sends ── (vmangos acts on them for administrators alone)
+    /// `MSG_MOVE_TELEPORT_CHEAT`: the `port x y` command.
+    TeleportCheat {
+        pos: [f32; 3],
+        facing: f32,
+    },
+    /// `CMSG_TELEPORT_TO_UNIT`: the `port <name>` command's whole argument text.
+    TeleportToUnit {
+        text: String,
+    },
+    /// `CMSG_MOVE_SET_RAW_POSITION`: the `setrawpos` command.
+    SetRawPosition {
+        pos: [f32; 3],
+        facing: f32,
+    },
+    /// `CMSG_WORLD_TELEPORT`: the `worldport` command, with the client's millisecond clock.
+    WorldTeleport {
+        time_ms: u32,
+        map: u32,
+        pos: [f32; 3],
+        facing: f32,
+    },
+    /// `CMSG_WHOIS`: the `whois` command's whole argument text.
+    Whois {
+        text: String,
+    },
     // ── Guild ──
     // Members by name; rank 0 is the guild master. A change is answered by a fresh
     // `SMSG_GUILD_ROSTER`, never applied at the send; a refusal by `SMSG_GUILD_COMMAND_RESULT`.
@@ -2600,7 +2572,8 @@ pub(crate) struct PetDismissSoundMessage {
 mod tests {
     use super::*;
 
-    /// A re-create of a live object notifies like a delta.
+    /// The write's edges: one per moved dword, none for a first create; a re-create replaces the
+    /// store, clearing what it omits (`0x466582`).
     #[test]
     fn the_merge_emits_one_edge_per_moved_dword_and_none_for_a_first_create() {
         use benilla_protocol::field::{FIELD_UNIT_HEALTH, FIELD_UNIT_LEVEL};

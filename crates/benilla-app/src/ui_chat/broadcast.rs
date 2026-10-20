@@ -14,6 +14,8 @@
 //! `SMSG_SERVER_MESSAGE` is one `CHAT_MSG_SYSTEM` line (`0x49e047`). `SMSG_CHAT_RESTRICTED`
 //! carries nothing and is `DisplayError` 451 (`0x5e4a09`, `0x496720`), `ERR_CHAT_RESTRICTED`, a
 //! chat row, not a red toast (`0x496822`, `0x484cac`); vmangos never sends it.
+//! `SMSG_TRANSFER_ABORTED` waits here too, its line a `GlobalStrings` text by reason
+//! ([`transfer_abort_line`]).
 
 use bevy::prelude::*;
 
@@ -41,6 +43,8 @@ pub(crate) enum Broadcast {
     Server { message_type: u32, text: String },
     /// `SMSG_CHAT_RESTRICTED`, which carries nothing.
     ChatRestricted,
+    /// `SMSG_TRANSFER_ABORTED`: the reason byte its handler reads (`0x4019aa`).
+    TransferAborted { reason: u8 },
 }
 
 /// Load `ServerMessages.dbc`; it must run after `benilla_assets::AssetSet::Open`, or it finds no
@@ -151,6 +155,19 @@ pub(super) fn feed_broadcasts(
                     log.push_event(ChatEvent::text_only(ChatEventKind::System, text));
                 }
             }
+            Broadcast::TransferAborted { reason } => {
+                let get = |key: &str| {
+                    script
+                        .lua()
+                        .globals()
+                        .get::<Option<String>>(key)
+                        .ok()
+                        .flatten()
+                };
+                if let Some(text) = transfer_abort_line(reason, get) {
+                    log.push_event(ChatEvent::text_only(ChatEventKind::System, text));
+                }
+            }
             Broadcast::Server { message_type, text } => {
                 let Some(messages) = messages.as_ref() else {
                     debug!("chat: SMSG_SERVER_MESSAGE {message_type} dropped: no catalog");
@@ -163,6 +180,24 @@ pub(super) fn feed_broadcasts(
             }
         }
     }
+}
+
+/// `SMSG_TRANSFER_ABORTED`'s system line (`0x4019a0`): reasons 1, 2, 3 and 5 name a string by the
+/// jump table at `0x401a20`, read through `get` and shown as `CHAT_MSG_SYSTEM` (`0x4019f8`); 4 and
+/// any other reason show nothing (`0x401a04`). A string the VM lacks is an empty line, as
+/// `GetText` (`0x703bf0`) answers one.
+pub(crate) fn transfer_abort_line(
+    reason: u8,
+    get: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let key = match reason {
+        1 => "TRANSFER_ABORT_MAX_PLAYERS",
+        2 => "TRANSFER_ABORT_NOT_FOUND",
+        3 => "TRANSFER_ABORT_TOO_MANY_INSTANCES",
+        5 => "TRANSFER_ABORT_ZONE_IN_COMBAT",
+        _ => return None,
+    };
+    Some(get(key).unwrap_or_default())
 }
 
 /// One `CHAT_MSG_CHANNEL` line per defense channel reached, with no sender or language: the
@@ -187,6 +222,52 @@ fn push_channel_lines(
 
 #[cfg(test)]
 mod tests {
+    /// `0x4019a0` shows reasons 1, 2, 3 and 5 by their jump table (`0x401a20`), 4 lands on the
+    /// console line with no text (`0x401a04`), and so does any reason past 5 or 0
+    /// (`0x4019b3` `dec eax; cmp eax,4; ja`).
+    #[test]
+    fn a_transfer_abort_shows_its_reasons_string() {
+        let stock = |key: &str| {
+            Some(
+                match key {
+                    "TRANSFER_ABORT_MAX_PLAYERS" => "Transfer Aborted: Instance is full",
+                    "TRANSFER_ABORT_NOT_FOUND" => "Transfer Aborted: instance not found",
+                    "TRANSFER_ABORT_TOO_MANY_INSTANCES" => {
+                        "You have entered too many instances recently."
+                    }
+                    "TRANSFER_ABORT_ZONE_IN_COMBAT" => {
+                        "Unable to zone in while an encounter is in progress."
+                    }
+                    _ => return None,
+                }
+                .to_string(),
+            )
+        };
+        let line = |reason| super::transfer_abort_line(reason, stock);
+        assert_eq!(
+            line(1).as_deref(),
+            Some("Transfer Aborted: Instance is full")
+        );
+        assert_eq!(
+            line(2).as_deref(),
+            Some("Transfer Aborted: instance not found")
+        );
+        assert_eq!(
+            line(3).as_deref(),
+            Some("You have entered too many instances recently.")
+        );
+        assert_eq!(
+            line(5).as_deref(),
+            Some("Unable to zone in while an encounter is in progress.")
+        );
+        for silent in [0, 4, 6, 255] {
+            assert_eq!(line(silent), None, "reason {silent}");
+        }
+        // `GetText` (`0x703bf0`) gives the empty string for a key the strings lack, and the line
+        // is added all the same (`0x4019ff`).
+        assert_eq!(super::transfer_abort_line(1, |_| None).as_deref(), Some(""));
+    }
+
     /// `ERR_CHAT_RESTRICTED` (451) is a chat row, so the arm above writes a system line.
     #[test]
     fn chat_restricted_is_a_chat_row() {

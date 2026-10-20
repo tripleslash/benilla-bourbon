@@ -74,17 +74,19 @@ pub struct PartyState {
     /// The other party members in `party1`..`party4` order, empty when ungrouped. The player is
     /// never in it, as in `SMSG_GROUP_LIST`; in a raid it is our own subgroup's slice.
     pub members: Vec<PartyMemberInfo>,
-    /// `GetPartyLeaderIndex`: `0` the player, `1..=4` that `members` slot.
+    /// `GetPartyLeaderIndex`: the leader's `members` slot, `1..=4`, else `0`: the player, and a
+    /// raid leader in another subgroup, who holds none of the slots (`0x84c150` is -1 then, and
+    /// the binding pushes it plus one). Not the leadership test: [`Self::leader_guid`] is.
     pub leader_index: u32,
     /// The cached group-leader guid (the reference's `[0xbc75f8]:[0xbc75fc]`), `0` when
     /// ungrouped, fed from the wire rather than derived from [`Self::leader_index`].
-    /// `UnitIsPartyLeader` (`0x516210`) compares a resolved token's guid with it and, unlike
-    /// `IsPartyLeader` (`0x4e9130`), has no zero guard, so an unresolvable token answers `1` while
-    /// solo.
+    /// `IsRaidLeader` (`0x4bb8c0`) and `IsPartyLeader` (`0x4e9130`) compare it with
+    /// [`Self::own_guid`]; `UnitIsPartyLeader` (`0x516210`) compares a resolved token's guid with
+    /// it and, unlike `IsPartyLeader`, has no zero guard, so an unresolvable token answers `1`
+    /// while solo.
     pub leader_guid: u64,
-    /// The player's own guid (`0x468550`, `[0xb41414]+0xc0`), `0` out of world. With
-    /// [`Self::leader_guid`] it is the ready-check timeout's leader gate, a bare guid compare, so a
-    /// solo player never matches.
+    /// The player's own guid (`0x468550`, `[0xb41414]+0xc0`), `0` out of world. Compared with
+    /// [`Self::leader_guid`] by the leadership tests and the ready-check timeout's leader gate.
     pub own_guid: u64,
     /// The whole raid roster, 1-based for `GetRaidRosterInfo`, empty outside a raid. It includes
     /// the player, as the reference's array does, so `UnitInRaid("player")` answers `1`;
@@ -137,8 +139,9 @@ pub enum PartyRequest {
     // ── The raid-management verbs ───────────────────────────────────────────────────────────
     /// `ConvertToRaid()`, leader only (`CMSG_GROUP_RAID_CONVERT`).
     ConvertToRaid,
-    /// `SetRaidSubgroup(index, group)`, both 1-based. The wire (`CMSG_GROUP_CHANGE_SUB_GROUP`)
-    /// takes a name and a 0-based subgroup, which the app resolves.
+    /// `SetRaidSubgroup(index, group)`, both 1-based; the binding raises for a `group` outside 1
+    /// to 8. The wire (`CMSG_GROUP_CHANGE_SUB_GROUP`) takes a name and a 0-based subgroup, which
+    /// the app resolves.
     SetSubgroup { index: u32, group: u32 },
     /// `SwapRaidSubgroup(index, other)`: trade two raid rows' subgroups
     /// (`CMSG_GROUP_SWAP_SUB_GROUP`, two names on the wire).
@@ -329,15 +332,18 @@ fn chat_error(lua: &Lua, key: &'static str, args: &[Arg<'_>]) {
     }
 }
 
-/// Whether the player leads the group. `IsRaidLeader` (`0x4bb8c0`) and `IsPartyLeader`
-/// (`0x4e9130`) both compare the cached leader guid (`[0xbc75f8]`, `[0xbc75fc]`) with the player's
-/// own (`0x468550`) and read no raid flag, so `IsRaidLeader()` is true for a party leader.
-fn leads_the_group(model: &Model) -> bool {
-    // Stand-in for that compare: `leader_index` is `0` when we lead but also when ungrouped, where
-    // the reference's zero leader guid matches nobody, hence the empty-roster guard. In a raid both
-    // cover only our subgroup: a leader elsewhere also reads `0`, and a leader alone in theirs has
-    // no `members`, so there it can differ from the guid compare.
-    !model.party.members.is_empty() && model.party.leader_index == 0
+/// `IsRaidLeader` (`0x4bb8c0`): the cached leader guid (`[0xbc75f8]`, `[0xbc75fc]`) against the
+/// player's own (`0x468550`), both words (`0x4bb8d6`-`0x4bb8dc`), and nothing else: no raid flag,
+/// so it is true for a party leader, and no subgroup slot. Unlike `IsPartyLeader` it has no zero
+/// guard, so with no active player and no group, both zero, it answers 1.
+fn is_raid_leader(party: &PartyState) -> bool {
+    party.leader_guid == party.own_guid
+}
+
+/// `IsPartyLeader` (`0x4e9130`): [`is_raid_leader`]'s compare behind a zero guard on the leader
+/// cell (`0x4e9141 or ecx,eax; je`), so an ungrouped player is nobody's leader.
+fn is_party_leader(party: &PartyState) -> bool {
+    party.leader_guid != 0 && is_raid_leader(party)
 }
 
 /// `GetRaidRosterInfo`'s values for one row, or the miss tuple for `None`. Nine on every path
@@ -433,12 +439,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // IsRaidLeader() → 1 or nil, true for a party leader too (`leads_the_group`).
+    // IsRaidLeader() → 1 or nil, true for a party leader too ([`is_raid_leader`]).
     g.set(
         "IsRaidLeader",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if leads_the_group(&model) {
+            Ok(if is_raid_leader(&model.party) {
                 Value::Integer(1)
             } else {
                 Value::Nil
@@ -476,12 +482,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // IsPartyLeader() → 1 when grouped and leading, else nil; the same predicate as IsRaidLeader.
+    // IsPartyLeader() → 1 when the leader cell holds our guid, else nil ([`is_party_leader`]).
     g.set(
         "IsPartyLeader",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if leads_the_group(&model) {
+            Ok(if is_party_leader(&model.party) {
                 Value::Integer(1)
             } else {
                 Value::Nil
@@ -708,17 +714,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    // SetRaidSubgroup(index, group) / SwapRaidSubgroup(index, other), the drag's two drops: a
-    // non-number raises the usage error rather than queueing a zero.
+    // SetRaidSubgroup(index, subgroup) / SwapRaidSubgroup(index, other), the drag's two drops. A
+    // non-number raises the usage line (`0x4bbae2`), and so does a subgroup whose truncation minus
+    // one is not below 8 (`0x4bb9f1`-`0x4bba0c`, string `0x8474e8`), before any row is looked up.
     g.set(
         "SetRaidSubgroup",
         lua.create_function(|lua, (index, group): (Value, Value)| {
-            let index = number_arg(lua, index, "Usage: SetRaidSubgroup(index, group)")?;
-            let group = number_arg(lua, group, "Usage: SetRaidSubgroup(index, group)")?;
+            const USAGE: &str = "Usage: SetRaidSubgroup(index, subgroup)";
+            let index = number_arg(lua, index, USAGE)?;
+            let group = number_arg(lua, group, USAGE)?;
+            if (group.wrapping_sub(1) as u32) >= 8 {
+                return Err(mlua::Error::runtime(USAGE));
+            }
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.party_requests.push(PartyRequest::SetSubgroup {
                 index: index.max(0) as u32,
-                group: group.max(0) as u32,
+                group: group as u32,
             });
             Ok(())
         })?,
@@ -1024,9 +1035,7 @@ mod tests {
     #[test]
     fn is_party_leader_reports_when_the_player_leads() {
         let mut s = UiScript::new().unwrap();
-        let mut party = two_member_party();
-        party.leader_index = 0; // the player leads
-        s.set_party(party);
+        s.set_party(led_party());
         assert_eq!(s.eval::<i64>("return IsPartyLeader()").unwrap(), 1);
     }
 
@@ -1235,9 +1244,7 @@ mod tests {
     #[test]
     fn is_raid_leader_is_true_for_a_party_leader() {
         let mut s = UiScript::new().unwrap();
-        let mut party = two_member_party();
-        party.leader_index = 0; // we lead a party, with no raid roster
-        s.set_party(party);
+        s.set_party(led_party()); // we lead a party, with no raid roster
         assert!(
             s.eval::<i64>("return GetNumRaidMembers()").unwrap() == 0,
             "no raid, and that is exactly the point"
@@ -1245,13 +1252,98 @@ mod tests {
         assert_eq!(s.eval::<i64>("return IsRaidLeader()").unwrap(), 1);
         assert_eq!(s.eval::<i64>("return IsPartyLeader()").unwrap(), 1);
 
-        s.set_party(two_member_party()); // leader_index 1 = Alice
+        s.set_party(two_member_party()); // Alice leads
         assert!(s.eval::<bool>("return IsRaidLeader() == nil").unwrap());
         assert!(s.eval::<bool>("return IsPartyLeader() == nil").unwrap());
 
-        // Ungrouped: the cached leader guid is 0 and matches nobody.
-        let s = UiScript::new().unwrap();
+        // Ungrouped, in the world: the cached leader guid is 0 and matches nobody.
+        s.set_party(PartyState {
+            own_guid: 0x5E1F,
+            ..PartyState::default()
+        });
         assert!(s.eval::<bool>("return IsRaidLeader() == nil").unwrap());
+    }
+
+    /// `IsRaidLeader` (`0x4bb8c0`) and `IsPartyLeader` (`0x4e9130`) compare the leader cell with
+    /// the player's own guid and read no subgroup slot. A raid leader in another subgroup holds
+    /// none of our slots (`GetPartyLeaderIndex` is `0x84c150 + 1`, so 0) and leads nobody here;
+    /// one alone in their subgroup has no slots at all and still leads.
+    #[test]
+    fn the_leader_tests_compare_guids_whatever_slots_the_subgroup_holds() {
+        let mut s = UiScript::new().unwrap();
+        s.set_party(PartyState {
+            leader_index: 0,
+            leader_guid: 0xFA2,
+            ..two_member_party()
+        });
+        assert!(s.eval::<bool>("return IsRaidLeader() == nil").unwrap());
+        assert!(s.eval::<bool>("return IsPartyLeader() == nil").unwrap());
+        assert_eq!(s.eval::<i64>("return GetPartyLeaderIndex()").unwrap(), 0);
+
+        s.set_party(PartyState {
+            leader_guid: 0x5E1F,
+            own_guid: 0x5E1F,
+            ..PartyState::default()
+        });
+        assert_eq!(s.eval::<i64>("return IsRaidLeader()").unwrap(), 1);
+        assert_eq!(s.eval::<i64>("return IsPartyLeader()").unwrap(), 1);
+    }
+
+    /// Only `IsPartyLeader` guards a zero leader cell (`0x4e9141 or ecx,eax; je`); `IsRaidLeader`
+    /// compares the two words bare (`0x4bb8d6`-`0x4bb8dc`), so with no active player and no group,
+    /// both zero (`0x468550`), it answers 1. A player in the world, grouped or not, matches only
+    /// a cell that holds their guid.
+    #[test]
+    fn only_is_party_leader_guards_a_zero_leader_cell() {
+        let mut s = UiScript::new().unwrap();
+        assert!(s.eval::<bool>("return IsPartyLeader() == nil").unwrap());
+        assert_eq!(s.eval::<i64>("return IsRaidLeader()").unwrap(), 1);
+
+        s.set_party(PartyState {
+            own_guid: 0x5E1F,
+            ..PartyState::default()
+        });
+        assert!(s.eval::<bool>("return IsPartyLeader() == nil").unwrap());
+        assert!(s.eval::<bool>("return IsRaidLeader() == nil").unwrap());
+    }
+
+    /// `SetRaidSubgroup` (`0x4bb990`) truncates its second argument and takes one off
+    /// (`0x4bb9f1`-`0x4bb9fd`); unless that is below 8 (`0x4bb9fe`) it raises its usage line
+    /// (`0x8474e8`), ahead of any row lookup, so outside a raid too. A non-number raises the same
+    /// text (`0x4bbae2`).
+    #[test]
+    fn set_raid_subgroup_raises_its_usage_line_outside_one_to_eight() {
+        const USAGE: &str = "Usage: SetRaidSubgroup(index, subgroup)";
+        let mut s = UiScript::new().unwrap();
+        for call in [
+            "SetRaidSubgroup(3, 0)",
+            "SetRaidSubgroup(3, 9)",
+            "SetRaidSubgroup(3, -1)",
+            "SetRaidSubgroup(3, 0.9)",
+            "SetRaidSubgroup(3, 9.5)",
+            "SetRaidSubgroup(0, 9)",
+            "SetRaidSubgroup(3, 'x')",
+            "SetRaidSubgroup(3)",
+            "SetRaidSubgroup('x', 3)",
+        ] {
+            let e = s.run(call).unwrap_err().to_string();
+            assert!(e.contains(USAGE), "{call}: {e}");
+        }
+        assert!(s.take_party_requests().is_empty());
+        assert!(!s
+            .eval::<bool>("return pcall(SetRaidSubgroup, 3, 9)")
+            .unwrap());
+
+        // 8.9 truncates to 8, and a numeric string is a number.
+        s.run("SetRaidSubgroup(3, 8.9) SetRaidSubgroup(4, '5')")
+            .unwrap();
+        assert_eq!(
+            s.take_party_requests(),
+            vec![
+                PartyRequest::SetSubgroup { index: 3, group: 8 },
+                PartyRequest::SetSubgroup { index: 4, group: 5 },
+            ]
+        );
     }
 
     #[test]

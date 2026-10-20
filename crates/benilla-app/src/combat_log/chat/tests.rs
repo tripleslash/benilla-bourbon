@@ -47,6 +47,8 @@ fn a_spell_with_no_record_writes_no_line() {
         names: None,
         skill_lines: None,
         enchants: None,
+        items: None,
+        gameobjects: None,
         ranges: &ranges,
         periodic: true,
     };
@@ -117,6 +119,9 @@ mod emitters {
 
     use super::super::ChatCtx;
 
+    mod lines;
+    mod words;
+
     const ME: u64 = 1;
     const MOB: u64 = 2;
     const FIREBALL: u32 = 133;
@@ -137,6 +142,8 @@ mod emitters {
     const HIDDEN: u32 = 20_001;
     /// `Attributes & 0x80` alone: no line, but its `UNIT_COMBAT` fires.
     const UNDISPLAYED: u32 = 20_002;
+    /// `Targets & 0x80`, the enemy flag: `GetSpellHostility` answers 2.
+    const HOSTILE: u32 = 20_003;
 
     /// Fireball with no duration row, the two heals with theirs, and the casts.
     fn spells() -> crate::ui_action::Spells {
@@ -183,6 +190,15 @@ mod emitters {
                     cast(PICK_LOCK, "Pick Lock", 0, 0, 33),
                     cast(HIDDEN, "Hidden", 0x100, 0, 0),
                     cast(UNDISPLAYED, "Undisplayed", 0x80, 0, 0),
+                    (
+                        HOSTILE,
+                        benilla_formats::SpellDisplay {
+                            id: HOSTILE,
+                            name: "Venom".into(),
+                            targets: 0x80,
+                            ..Default::default()
+                        },
+                    ),
                 ]
                 .into_iter()
                 .collect(),
@@ -212,6 +228,8 @@ mod emitters {
         factions: Factions,
         spells: crate::ui_action::Spells,
         enchants: benilla_formats::EnchantCatalog,
+        items: crate::items::Items,
+        gameobjects: crate::go_templates::GameObjectTemplates,
     }
 
     impl Bench {
@@ -227,6 +245,8 @@ mod emitters {
                     [(CRUSADER, "Crusader".to_string())].into(),
                     [(CRUSADER, 0), (ROCKBITER, 0x2)].into(),
                 ),
+                items: crate::items::Items::default(),
+                gameobjects: crate::go_templates::GameObjectTemplates::default(),
             };
             bench.hold(&player(ME, HUMAN));
             bench.hold(&creature(MOB, ORC));
@@ -292,6 +312,8 @@ mod emitters {
                 names: None,
                 skill_lines: None,
                 enchants: Some(&self.enchants),
+                items: Some(&self.items),
+                gameobjects: Some(&self.gameobjects),
                 ranges: &ranges,
                 periodic: true,
             };

@@ -72,8 +72,14 @@ enum Pending {
         guid: u64,
         tries: u16,
     },
-    /// An XP award; `victim` 0 is the unnamed form.
-    XpGain { victim: u64, total: u32, base: u32 },
+    /// An XP award; `victim` 0 is the unnamed form. `group` is the packet's float, 1.0 for the
+    /// forms that never read one.
+    XpGain {
+        victim: u64,
+        total: u32,
+        base: u32,
+        group: f32,
+    },
     /// An XP loss, `total` as the packet carries it.
     XpLoss { total: u32 },
     /// An honor award; `rank` (0 none) becomes a title at the drain, on the victim's `side` (0
@@ -103,7 +109,7 @@ enum Pending {
         female: bool,
     },
     /// One combat-log line, classified at the packet; it waits only on an item's name, as the
-    /// reference's deferred queue (`0xc4e208`) does.
+    /// reference's deferred queue (`0xc4e208`) does, until the cache answers.
     Combat(Box<super::combat::PendingCombat>),
     /// A ready event (client-composed lines; name-carrying notices).
     Event(ChatEvent),
@@ -271,11 +277,12 @@ impl ChatLog {
     }
 
     /// Queue an XP gain's line (`SMSG_LOG_XPGAIN`); `victim` 0 is the unnamed form.
-    pub(crate) fn push_xp_gain(&mut self, victim: u64, total: u32, base: u32) {
+    pub(crate) fn push_xp_gain(&mut self, victim: u64, total: u32, base: u32, group: f32) {
         self.pending.push(Pending::XpGain {
             victim,
             total,
             base,
+            group,
         });
     }
 
@@ -383,9 +390,10 @@ impl ChatLog {
             .collect()
     }
 
-    /// The parked XP lines as `(victim, total, base)`, in order; victim 0 is the unnamed form.
+    /// The parked XP lines as `(victim, total, base, group)`, in order; victim 0 is the unnamed
+    /// form.
     #[cfg(test)]
-    pub(crate) fn pending_xp(&self) -> Vec<(u64, u32, u32)> {
+    pub(crate) fn pending_xp(&self) -> Vec<(u64, u32, u32, f32)> {
         self.pending
             .iter()
             .filter_map(|p| match *p {
@@ -393,7 +401,8 @@ impl ChatLog {
                     victim,
                     total,
                     base,
-                } => Some((victim, total, base)),
+                    group,
+                } => Some((victim, total, base, group)),
                 _ => None,
             })
             .collect()
@@ -509,24 +518,26 @@ pub(super) struct RestState<'a> {
 const XP_FACTOR_EPSILON: f64 = 1.0 / 4_194_304.0;
 
 /// The XP line, `0x637ac0` (a named kill) and `0x637cd0` (the plain forms). No victim is
-/// `COMBATLOG_XPGAIN_FIRSTPERSON_UNNAMED`. A named kill needs the active player (`0x637b06`;
-/// `rest` `None` writes nothing), and is plain `COMBATLOG_XPGAIN_FIRSTPERSON` unless its rest
-/// state has a row whose factor is neither 0 nor 1 (`0x637b3e`-`0x637b6a`). Then it is that
-/// state's key in the table `0x864330`, `COMBATLOG_XPGAIN_EXHAUSTION<state>`, with the signed
-/// bonus, `total - base` prefixed `+` unless negative (`0x637c07`-`0x637c25`), and the row's name
-/// as the state word (`0x637c31`). The table has no entry 0 and ends at 5: a row there writes
-/// nothing. State 3's entry names the global `NULL`, which 1.12 does not define: `GetText` answers
-/// the empty string for it (`0x703c02`) and `0x637bef` tests only for null, so the reference
-/// formats that line from an empty template, which `keyed` drops. No shipped row reaches it:
-/// `Exhaustion.dbc` gives state 3 a factor of 1, the plain form.
+/// `COMBATLOG_XPGAIN_FIRSTPERSON_UNNAMED`, which no float reaches: its callers pass 1.0
+/// (`0x637f90`) or find the victim they stored the gain on. A named kill needs the active player
+/// (`0x637b06`; `rest` `None` writes nothing), and is plain `COMBATLOG_XPGAIN_FIRSTPERSON` unless
+/// its rest state has a row whose factor is neither 0 nor 1 (`0x637b3e`-`0x637b6a`). Then it is
+/// that state's key in the table `0x864330`, `COMBATLOG_XPGAIN_EXHAUSTION<state>`, with the
+/// signed bonus, `total - base` prefixed `+` unless negative (`0x637c07`-`0x637c25`), and the
+/// row's name as the state word (`0x637c31`). The table has no entry 0 and ends at 5: a row there
+/// writes nothing. State 3's entry names the global `NULL`, which 1.12 does not define: `GetText`
+/// answers the empty string for it (`0x703c02`) and `0x637bef` tests only for null, so the
+/// reference formats that line from an empty template, which `keyed` drops. No shipped row
+/// reaches it: `Exhaustion.dbc` gives state 3 a factor of 1, the plain form.
 ///
-/// The group float the packet carries (vmangos always 1.0, `Player.cpp:3039`) picks the `_GROUP`
-/// and `_RAID` forms (`0x637b70`-`0x637bd5`, `0x637cd0`); the parser drops it, so they are not
-/// built.
+/// The packet's group float ([`group_split`]) appends `_GROUP` or `_RAID` to the named key and
+/// adds the difference as the last number (`0x637b70`-`0x637bd5`, `0x637d33`-`0x637d67`); a
+/// rested kill compares on its base XP.
 pub(super) fn xp_gain_line(
     victim: Option<&str>,
     total: u32,
     base: u32,
+    group: f32,
     rest: Option<RestState>,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
@@ -540,11 +551,16 @@ pub(super) fn xp_gain_line(
     };
     let rest = rest?;
     let plain = || {
-        keyed(
-            get,
-            "COMBATLOG_XPGAIN_FIRSTPERSON",
-            &[Arg::S(name), Arg::D(i64::from(total))],
-        )
+        let (suffix, diff) = group_split(total, group);
+        let named = [Arg::S(name), Arg::D(i64::from(total))];
+        match suffix {
+            None => keyed(get, "COMBATLOG_XPGAIN_FIRSTPERSON", &named),
+            Some(suffix) => keyed(
+                get,
+                &format!("COMBATLOG_XPGAIN_FIRSTPERSON{suffix}"),
+                &[named[0], named[1], Arg::D(i64::from(diff))],
+            ),
+        }
     };
     let Some((state_word, factor)) = rest.row else {
         return plain();
@@ -563,16 +579,37 @@ pub(super) fn xp_gain_line(
     // `sub`, `jns`: the 32-bit difference's sign.
     let bonus = total.wrapping_sub(base) as i32;
     let sign = if bonus >= 0 { "+" } else { "" };
-    keyed(
-        get,
-        key,
-        &[
-            Arg::S(name),
-            Arg::D(i64::from(total)),
-            Arg::S(&format!("{sign}{bonus}")),
-            Arg::S(state_word),
-        ],
-    )
+    let bonus = format!("{sign}{bonus}");
+    let (suffix, diff) = group_split(base, group);
+    let args = [
+        Arg::S(name),
+        Arg::D(i64::from(total)),
+        Arg::S(&bonus),
+        Arg::S(state_word),
+    ];
+    match suffix {
+        None => keyed(get, key, &args),
+        Some(suffix) => keyed(
+            get,
+            &format!("{key}{suffix}"),
+            &[args[0], args[1], args[2], args[3], Arg::D(i64::from(diff))],
+        ),
+    }
+}
+
+/// How the packet's group float moves a kill's XP (`0x637cdb`-`0x637d3a`, `0x637b70`-`0x637bbc`):
+/// `__ftol(xp / group)` against `xp`, both as signed 32-bit values. Equal is no suffix; below is
+/// `_GROUP`, the bonus; above is `_RAID`, the penalty. The second number is the absolute
+/// difference (`cdq`, `xor`, `sub`), which wraps like the reference's.
+fn group_split(xp: u32, group: f32) -> (Option<&'static str>, i32) {
+    let xp = xp as i32;
+    let scaled = benilla_ui::script::ftol(f64::from(xp) / f64::from(group));
+    let diff = xp.wrapping_sub(scaled).wrapping_abs();
+    match scaled.cmp(&xp) {
+        std::cmp::Ordering::Equal => (None, 0),
+        std::cmp::Ordering::Less => (Some("_GROUP"), diff),
+        std::cmp::Ordering::Greater => (Some("_RAID"), diff),
+    }
 }
 
 /// The XP loss line, `COMBATLOG_XPLOSS_FIRSTPERSON_UNNAMED` with the packet's XP negated as a
@@ -848,8 +885,12 @@ pub(super) fn feed_chat(
     states: Res<crate::world_state::WorldStates>,
     // The language gate: the word pool, this character's fluency and the GM bit.
     langs: Res<super::language::ChatLanguages>,
-    // Item names for `TRADESKILL_LOG`, `FEEDPET_LOG`, `ITEMENCHANTMENT*`, `SPELLDURABILITYDAMAGE`.
-    items: Res<crate::items::Items>,
+    // Item names for `TRADESKILL_LOG`, `FEEDPET_LOG`, `ITEMENCHANTMENT*`, `SPELLDURABILITYDAMAGE`,
+    // and with the game object records the names of a combat line's held objects.
+    (items, gameobjects): (
+        Res<crate::items::Items>,
+        Res<crate::go_templates::GameObjectTemplates>,
+    ),
     unit_names: crate::ui_unit::NameTables,
     // The spam and profanity filters, which run in the reference's display function `0x49a870`.
     mut text_filter: crate::text_filter::ChatTextFilter,
@@ -1141,12 +1182,13 @@ pub(super) fn feed_chat(
                 victim,
                 total,
                 base,
+                group,
             } => {
                 // A victim's name never waits: each template names it through `GetUnitName`
                 // (`0x609210`, from `0x637ac0`), whose miss without `UNKNOWNOBJECT` is the literal
                 // "Unknown Being", where `GetObjectName`'s is `UKNOWNOBJECT`.
                 let name = (victim != 0).then(|| {
-                    super::combat::object_name(
+                    super::combat::unit_name(
                         victim,
                         guids.0.get(&victim).and_then(|e| stores.get(*e).ok()),
                         &names,
@@ -1164,7 +1206,8 @@ pub(super) fn feed_chat(
                     state,
                     row: row.as_ref().map(|(n, f)| (n.as_str(), *f)),
                 });
-                let line = xp_gain_line(name.as_deref(), total, base, rest, &globals(&script));
+                let line =
+                    xp_gain_line(name.as_deref(), total, base, group, rest, &globals(&script));
                 if let Some(text) = line {
                     route(
                         &mut script,
@@ -1194,7 +1237,7 @@ pub(super) fn feed_chat(
                 // (`0x612bf0`, `0x625374`), whose gender `0x5ed5b0` reads from `PLAYER_BYTES_3`
                 // byte 0; a dishonorable kill's template names no rank.
                 let name = (victim != 0).then(|| {
-                    super::combat::object_name(
+                    super::combat::unit_name(
                         victim,
                         guids.0.get(&victim).and_then(|e| stores.get(*e).ok()),
                         &names,
@@ -1267,14 +1310,22 @@ pub(super) fn feed_chat(
             }
             Pending::Combat(mut line) => {
                 // Names looked up with a callback as the line's (`0x6265a7`, `0x6265e0`), and
-                // asked again only on its first drain; a line waits on an item alone.
+                // asked again only on its first drain; a line waits on an item alone, and as long
+                // as the cache takes to answer: the reference's list has no timer or count, and
+                // only the answer or the session's end removes an entry (`0x6293a0`, `0x6294cc`,
+                // `0x629a90`).
                 let ask = Ask::at(line.tries == 0, &commands);
+                let sources = super::combat::NameSources {
+                    names: &names,
+                    gameobjects: &gameobjects,
+                    items: &items,
+                };
                 let ready = line.fill_names(
                     |guid| {
                         super::combat::logged_name(
                             guid,
                             guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
-                            &names,
+                            &sources,
                             ask,
                             &script,
                         )
@@ -1288,10 +1339,8 @@ pub(super) fn feed_chat(
                     },
                 );
                 if !ready {
-                    if line.tries < NAME_MAX_TRIES {
-                        line.tries += 1;
-                        still.push(Pending::Combat(line));
-                    }
+                    line.tries = line.tries.saturating_add(1);
+                    still.push(Pending::Combat(line));
                     continue;
                 }
                 write_combat_line(&mut script, &mut windows, &line);

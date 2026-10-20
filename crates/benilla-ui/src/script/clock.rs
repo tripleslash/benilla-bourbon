@@ -24,9 +24,11 @@ impl super::UiScript {
         self.model_mut().now = secs;
     }
 
-    /// Push the game clock `GetGameTime()` answers, `(hour, minute)`; 0:00 until the first push.
-    pub fn set_game_time(&mut self, hour: u32, minute: u32) {
-        self.model_mut().game_time = (hour, minute);
+    /// Push the game clock `GetGameTime()` answers, `(hour, minute)`; -1, -1 until the first push.
+    /// The clock holds either as the server sent it, so a field is -1 when unset and may run past
+    /// a day's end (an hour to 30, a minute to 62).
+    pub fn set_game_time(&mut self, hour: i32, minute: i32) {
+        self.model_mut().game_time = Some((hour, minute));
     }
 }
 
@@ -55,15 +57,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // and the `elapsed` handed to OnUpdate agree, as FrameXML (CastingBarFrame and kin) assumes.
     g.set("GetTime", lua.create_function(|lua, ()| Ok(now(lua)))?)?;
     // GetGameTime() (`0x515ee0`): two numbers, the hour `[0xce853c]` then the minute `[0xce8538]`,
-    // the clock `SMSG_LOGIN_SETTIMESPEED` seeds; minute resolution, no seconds.
+    // the clock the server's time messages set; minute resolution, no seconds. Read unguarded, so
+    // before the server sets the clock it answers the -1 its constructor stores in every field
+    // (`0x642300`, called at `0x643308`).
     g.set(
         "GetGameTime",
         lua.create_function(|lua, ()| {
-            let (hour, minute) = lua
+            let clock = lua
                 .app_data_ref::<Model>()
                 .expect("model app_data")
                 .game_time;
-            Ok((f64::from(hour), f64::from(minute)))
+            Ok(clock.map_or((-1.0, -1.0), |(hour, minute)| {
+                (f64::from(hour), f64::from(minute))
+            }))
         })?,
     )?;
     Ok(())

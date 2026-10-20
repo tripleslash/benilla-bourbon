@@ -85,8 +85,8 @@ pub use glue::{glue_events, VmKind};
 pub use glue_core::scanf_d;
 pub use glue_core::{
     glue_status_key, launch_addon_url, launch_addon_url_allowed, launch_url_allowed, GlueCall,
-    GlueCredentials, GlueHost, GlueNotice, GlueRequest, GlueSignal, GlueText, NoticeState,
-    GLUE_STATUS_KEYS,
+    GlueCredentials, GlueHost, GlueNotice, GlueNotices, GlueRequest, GlueSignal, GlueText,
+    NoticeState, GLUE_STATUS_KEYS,
 };
 pub use glue_create::{
     GlueCreateCatalog, GlueCreateClass, GlueCreateCounts, GlueCreateLook, GlueCreateRace,
@@ -183,13 +183,17 @@ mod taxi;
 mod tick;
 pub use tick::system_chat_args;
 mod tooltip;
+mod tooltip_aura;
 mod tooltip_item;
 mod tooltip_spell;
+mod tooltip_studied;
+mod tooltip_text;
 mod tooltip_unit;
 mod ui_errors;
 mod ui_scale;
 mod update_walk;
-pub use tooltip_unit::TooltipTint;
+pub use tooltip_studied::{PetAbility, StudiedCreature};
+pub use tooltip_unit::{OwnerTitle, OwnerTitleKind, PartyRecord, TooltipTint, UnitTooltipFacts};
 mod trade;
 mod tradeskill;
 mod trainer;
@@ -213,7 +217,7 @@ pub use auction::{
     AuctionBid, AuctionCategory, AuctionHighBidder, AuctionItemRow, AuctionListState, AuctionQuery,
     AuctionStartRequest, AuctionState, AuctionSubCategory, BIDDER, LIST, OWNER, SORT_KEYS,
 };
-pub use aura::{AuraState, TrackingState};
+pub use aura::{AuraState, TrackingState, UnitAuraList};
 pub use backdrop::{Backdrop, Insets};
 pub use bank::BankState;
 pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
@@ -233,6 +237,7 @@ pub use chat_send::{ChatGroup, ChatSend, SEND_CHAT_TOKENS};
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
 pub use client::UiFlavor;
+pub use console_exec::s_str_tokenize;
 pub use console_exec::{console_word, cvar_name_arg, no_such_cvar, set_args};
 pub use container::{
     BagAutoStore, ContainerMove, ContainerSlot, ContainerState, ContainerUse, EnchantView,
@@ -346,13 +351,15 @@ pub use skills::{SkillEntry, SkillsState};
 pub use social::{FriendInfo, SocialRequest, SocialState, WhoInfo};
 pub use sound::{MusicRequest, SoundRequest};
 pub use spellbook::{
-    resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabView,
+    resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabName, SpellTabView,
 };
 pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
 pub use summon::SummonConfirmUiState;
 pub use talent::{TalentPrereqView, TalentTabView, TalentUiState, TalentView};
 pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
-pub use tooltip_spell::SpellTooltipView;
+pub use tooltip_aura::{AuraKey, AuraTooltipView};
+pub use tooltip_spell::{ReputationRequirement, SpellTooltipView};
+pub use tooltip_text::{KeyedArg, TextPart, TooltipText};
 pub use trade::{TradeSideState, TradeSlotItem, TradeState, TRADE_SLOTS};
 pub use tradeskill::{TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState};
 pub use trainer::{

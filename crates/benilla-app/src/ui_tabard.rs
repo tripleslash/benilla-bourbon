@@ -167,7 +167,6 @@ fn feed_tabard(
     guilds: Res<GuildState>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut last_host: Local<crate::ui_script::VmMemo<Option<TabardHost>>>,
-    mut last_identity: Local<crate::ui_script::VmMemo<Option<u64>>>,
     mut sink: crate::ui_action::MessageSink,
 ) {
     let Some(mut script) = script else {
@@ -192,15 +191,8 @@ fn feed_tabard(
     for _ in 0..std::mem::take(&mut open.pending_events) {
         script.fire_event("TABARD_SAVE_PENDING", vec![]);
     }
-    // `TABARD_CANSAVE_CHANGED` on a re-fetched guild record, which refreshes each held member's
-    // tag (`0x5e2890` → `0x5e29c0` → `0x5e08e0`); here, when our identity cache moves. A guild id
-    // change and a player's first create are the field watches' (`crate::field_watch::guild_tag`).
-    let gen = guilds.identity_generation();
-    let last_gen = last_identity.get(&script);
-    if last_gen.is_some() && *last_gen != Some(gen) {
-        script.fire_event("TABARD_CANSAVE_CHANGED", vec![]);
-    }
-    *last_gen = Some(gen);
+    // `TABARD_CANSAVE_CHANGED` is `RefreshGuildTag`'s (`0x5e0902`), raised by its callers
+    // ([`crate::field_watch::guild_tag`]); a guild record landing or dropped raises nothing.
 
     let lines: Vec<_> = open
         .lines
@@ -411,6 +403,36 @@ mod tests {
             "past the table: ignored, latch untouched"
         );
         assert!(t.save_pending);
+    }
+
+    /// `TABARD_CANSAVE_CHANGED` is `RefreshGuildTag`'s alone (`0x5e0902`), from its three callers:
+    /// a guild record landing, ours or another's, and the emblem save's drop of ours (`0x5e715f`)
+    /// signal nothing.
+    #[test]
+    fn a_landed_or_dropped_guild_record_signals_no_tabard_change() {
+        use crate::ui_script::sweep_test::{seen_in, spied_vm};
+        let mut app = App::new();
+        app.init_resource::<TabardOpen>()
+            .init_resource::<TabardDesign>()
+            .init_resource::<GuildState>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .add_systems(Update, feed_tabard)
+            .insert_non_send(spied_vm(&["TABARD_CANSAVE_CHANGED"]));
+        app.update();
+        let mut guild = app.world_mut().resource_mut::<GuildState>();
+        guild.join_for_test(5);
+        guild.land_for_test(5, "Probe Guild");
+        app.update();
+        app.world_mut()
+            .resource_mut::<GuildState>()
+            .land_for_test(6, "Strangers");
+        app.update();
+        app.world_mut()
+            .resource_mut::<GuildState>()
+            .evict_own_identity();
+        app.update();
+        assert!(seen_in(&app).is_empty(), "{:?}", seen_in(&app));
     }
 
     /// The core fires only with a vendor stored, twice while the designer holds the latch, and

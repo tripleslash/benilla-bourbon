@@ -3,6 +3,8 @@
 //! windows read. The roster carries no guild or rank names: those come only from
 //! `SMSG_GUILD_QUERY_RESPONSE`, cached by guild id and filled lazily, as in the reference.
 
+use std::collections::HashMap;
+
 use benilla_formats::GuildEmblem;
 use benilla_protocol::messages::{
     guild_event, GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
@@ -79,6 +81,19 @@ impl RosterUpdate {
 #[derive(Resource, Default)]
 pub(crate) struct GuildMemberNotify(pub(crate) bool);
 
+/// A callback a guild lookup leaves on a record not yet held, added at the list's tail
+/// (`0x56100b`): the landing runs each with status 1 (`0x556f91`); a refusal, or a drop of the
+/// pending record, runs them with status 0, which both of these ignore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Waiter {
+    /// `GetGuildInfo`'s `0x4c9470` for the unit `guid` (`0x4c93b6`-`0x4c93d2`):
+    /// `PLAYER_GUILD_UPDATE` through `0x515e50` (`0x4c947c`-`0x4c9481`).
+    Info(u64),
+    /// The `PLAYER_GUILD_TIMESTAMP` watcher's `0x5e29c0` (`0x5e299d`): `RefreshGuildTag` on every
+    /// held player of the guild (`0x5e29e0`).
+    Members,
+}
+
 /// The guild session mirror: filled by the packet handlers, read by the feed, reset on disconnect.
 #[derive(Resource, Default)]
 pub(crate) struct GuildState {
@@ -92,6 +107,11 @@ pub(crate) struct GuildState {
     identities: QueryCache<u32, Identity>,
     /// Bumped when an identity lands or is evicted, never by an ask; the unit feeds watch it.
     identity_generation: u64,
+    /// The callbacks waiting on each guild's record, in the order they were left.
+    waiters: HashMap<u32, Vec<Waiter>>,
+    /// `0x5e2890`'s table of each guild's last `PLAYER_GUILD_TIMESTAMP` (`0xc4d668`, guild and
+    /// stamp), freed when the world goes (`0x5e2e60`).
+    stamps: Vec<(u32, u32)>,
     /// Apart from the roster: `GE_MOTD` sets it alone, and at login vmangos sends that event before
     /// any roster (`CharacterHandler.cpp:558`).
     motd: String,
@@ -193,6 +213,22 @@ impl GuildState {
         });
     }
 
+    /// Lands `guild_id`'s record named `name`, for a test elsewhere.
+    #[cfg(test)]
+    pub(crate) fn land_for_test(&mut self, guild_id: u32, name: &str) {
+        self.apply_query_response(GuildQueryResponse {
+            guild_id,
+            name: name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    /// Mirrors our descriptor's guild id, as the feed does, for a test elsewhere.
+    #[cfg(test)]
+    pub(crate) fn join_for_test(&mut self, guild_id: u32) {
+        self.mirror_self(guild_id, 0);
+    }
+
     /// Forgets the in-flight asks, as a world entry does, for a test elsewhere.
     #[cfg(test)]
     pub(crate) fn drop_pending_for_test(&mut self) {
@@ -227,17 +263,62 @@ impl GuildState {
     /// Drop our guild's cached record after a saved emblem (`0x5e715f`), so the next read
     /// re-fetches it and every member in sight re-dresses, as in the reference.
     pub(crate) fn evict_own_identity(&mut self) {
-        if self.identities.evict(self.guild_id) {
+        self.drop_record(self.guild_id);
+    }
+
+    /// `0x561d20`: the record goes, and a pending one's callbacks run with status 0, which
+    /// signals nothing.
+    fn drop_record(&mut self, guild_id: u32) {
+        self.waiters.remove(&guild_id);
+        if self.identities.evict(guild_id) {
             self.identity_generation = self.identity_generation.wrapping_add(1);
             self.dirty = true;
         }
     }
 
+    /// `GetGuildInfo` missed `guild_id` for the unit `guid`: the lookup with its callback
+    /// (`0x4c93d2`), asking a key not in flight, a refused one again, and leaving a waiter, with
+    /// no dedupe (`push 0`, `0x4c93b6`). A record already held takes no waiter.
+    pub(crate) fn wait_for_info(&mut self, guild_id: u32, guid: u64, commands: &NetCommands) {
+        if guild_id != 0
+            && self
+                .resolve_identity(guild_id, Ask::Event(commands))
+                .is_none()
+        {
+            self.waiters
+                .entry(guild_id)
+                .or_default()
+                .push(Waiter::Info(guid));
+        }
+    }
+
+    /// The player watcher on `PLAYER_GUILD_TIMESTAMP` (`0x5e2890`) past its lookup: a stamp equal
+    /// to the guild's last does nothing (`0x5e28fa`); any other is kept (`0x5e297e`, `0x5e298a`),
+    /// the guild's record dropped (`0x5e2994`) and asked again with `0x5e29c0` (`0x5e29ac`).
+    pub(crate) fn stamp_changed(&mut self, guild_id: u32, stamp: u32, commands: &NetCommands) {
+        match self.stamps.iter_mut().find(|(g, _)| *g == guild_id) {
+            Some((_, last)) if *last == stamp => return,
+            Some((_, last)) => *last = stamp,
+            None => self.stamps.push((guild_id, stamp)),
+        }
+        self.drop_record(guild_id);
+        // The zero key asks nothing and keeps no callback (`0x560e3d`).
+        if guild_id != 0 {
+            self.resolve_identity(guild_id, Ask::Event(commands));
+            self.waiters
+                .entry(guild_id)
+                .or_default()
+                .push(Waiter::Members);
+        }
+    }
+
     /// `SMSG_GUILD_QUERY_RESPONSE`: fill the identity cache. An empty name is a refusal: the
     /// reference frees the node and runs the callbacks with status 0 (`0x5552e1`, `0x561390`).
-    fn apply_query_response(&mut self, response: GuildQueryResponse) {
+    /// Returns the callbacks a found record runs, in order.
+    fn apply_query_response(&mut self, response: GuildQueryResponse) -> Vec<Waiter> {
         let ours = response.guild_id == self.guild_id;
         let found = !response.name.is_empty();
+        let waiters = self.waiters.remove(&response.guild_id).unwrap_or_default();
         // A refusal redisplays only an identity it took away: every guild callback ignores
         // status 0 (`0x4d1486`, `0x4c9476`, `0x5dd866`, `0x5e29c6`, the crest's `0x5e0650` at
         // `0x5e0679`, the glue's `0x472420` at `0x472435`), and the corpse's `0x5d6f90` only
@@ -269,6 +350,11 @@ impl GuildState {
             // Our rank names landed: repaint, never re-request, as the reference's cache callback
             // `0x4d1480` does for a found record only (`0x4d1486`, `0x4d148c`).
             self.note_roster_update(RosterUpdate::Applied);
+        }
+        if found {
+            waiters
+        } else {
+            Vec::new()
         }
     }
 
@@ -497,8 +583,10 @@ fn guild_emblem(guild_id: u32, guild: &GuildState, ask: Ask<'_>) -> Option<Guild
 /// whose catalog rows pick the surface and the sound; the guild events fire from the feed.
 pub(crate) mod net {
     use super::*;
+    use crate::field_watch::FieldNotice;
     use crate::ui_action::{UiError, UiErrorKeys};
     use crate::ui_social::SocialState;
+    use benilla_protocol::messages::ObjectType;
     use benilla_protocol::{SessionEvent, SessionEventKind};
 
     use crate::net::NetHandlerApp;
@@ -516,10 +604,58 @@ pub(crate) mod net {
             .net_handler(K::Disconnected, on_session_end);
     }
 
-    fn on_query_response(In(ev): In<SessionEvent>, mut guild: ResMut<GuildState>) {
+    /// Reads the held players for the timestamp's refresh ([`query_response`]).
+    fn on_query_response(
+        In(ev): In<SessionEvent>,
+        mut guild: ResMut<GuildState>,
+        index: Res<crate::net::GuidIndex>,
+        stores: Query<(&crate::net::ObjectStore, Option<&crate::net::Listed>)>,
+        mut notices: MessageWriter<FieldNotice>,
+    ) {
         if let SessionEvent::GuildQueryResponse(response) = ev {
-            query_response(&mut guild, response);
+            let guild_id = response.guild_id;
+            let waiters = query_response(&mut guild, response);
+            // The held players in object-list order, as the refresh walk meets them (`0x468380`).
+            let mut players: Vec<(Option<crate::net::Listed>, u64, u32)> = index
+                .0
+                .iter()
+                .filter_map(|(&g, &e)| {
+                    let (store, listed) = stores.get(e).ok()?;
+                    (store.0.created_as() == Some(ObjectType::Player))
+                        .then(|| (listed.copied(), g, store.0.player_guild_id()))
+                })
+                .collect();
+            players.sort_unstable();
+            let players: Vec<(u64, u32)> = players.into_iter().map(|(_, g, id)| (g, id)).collect();
+            notices.write_batch(waiter_notices(guild_id, &waiters, &players));
         }
+    }
+
+    /// The notices a found record's callbacks raise, in their order: a `GetGuildInfo` waiter's
+    /// `PLAYER_GUILD_UPDATE` for its unit (`0x4c947c`-`0x4c9481`); the timestamp's refresh walk
+    /// (`0x5e29c0` → `0x468380`), `RefreshGuildTag` for each held player, `(guid, guild)`, whose
+    /// `PLAYER_GUILDID` is the guild (`0x5e2a14`-`0x5e2a1d` → `0x5e08e0`).
+    fn waiter_notices(
+        guild_id: u32,
+        waiters: &[Waiter],
+        players: &[(u64, u32)],
+    ) -> Vec<FieldNotice> {
+        let mut out = Vec::new();
+        for waiter in waiters {
+            match *waiter {
+                Waiter::Info(guid) => out.push(FieldNotice::Signal {
+                    guid,
+                    id: crate::field_watch::id::PLAYER_GUILD_UPDATE,
+                }),
+                Waiter::Members => out.extend(
+                    players
+                        .iter()
+                        .filter(|&&(_, g)| g == guild_id)
+                        .flat_map(|&(guid, _)| crate::field_watch::guild_tag(guid)),
+                ),
+            }
+        }
+        out
     }
 
     fn on_roster(In(ev): In<SessionEvent>, mut guild: ResMut<GuildState>) {
@@ -593,9 +729,12 @@ pub(crate) mod net {
         errors.0.extend(lines);
     }
 
-    /// `SMSG_GUILD_QUERY_RESPONSE`.
-    pub(crate) fn query_response(guild: &mut GuildState, response: GuildQueryResponse) {
-        guild.apply_query_response(response);
+    /// `SMSG_GUILD_QUERY_RESPONSE`: the callbacks a found record runs.
+    pub(crate) fn query_response(
+        guild: &mut GuildState,
+        response: GuildQueryResponse,
+    ) -> Vec<Waiter> {
+        guild.apply_query_response(response)
     }
 
     /// `SMSG_GUILD_ROSTER`.
@@ -1303,6 +1442,83 @@ mod tests {
             1,
             "the next change asks again"
         );
+    }
+
+    /// `GetGuildInfo` on a guild the cache lacks asks it with the unit's guid and the callback
+    /// `0x4c9470`, dedupe off (`0x4c93b6`-`0x4c93d2`), so each missed call keeps a waiter of its
+    /// own; the landing runs each, `PLAYER_GUILD_UPDATE` (0x159) for the guid through `0x515e50`
+    /// (`0x4c947c`-`0x4c9481`). A refusal runs them with status 0, which signals nothing
+    /// (`0x4c9476`).
+    #[test]
+    fn a_missed_get_guild_info_waits_for_the_record_and_signals_its_unit() {
+        use crate::field_watch::FieldNotice;
+        use benilla_protocol::SessionEvent;
+        use benilla_ui::script::{UiScript, UnitState};
+        const MATE: u64 = 0x2001;
+        let (commands, rx) = net_commands();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<GuildState>()
+            .init_resource::<crate::net::GuidIndex>()
+            .add_message::<FieldNotice>()
+            .insert_resource(commands)
+            .add_systems(Update, feed::drain_guild);
+        net::register(&mut app);
+        let target = |guild_id: u32| UnitState {
+            exists: true,
+            has_object: true,
+            guid: MATE,
+            is_player: true,
+            guild_id,
+            ..Default::default()
+        };
+        let mut script = UiScript::new().unwrap();
+        script.set_unit("target", Some(target(5)));
+        app.insert_non_send(script);
+        let call = |app: &mut App| {
+            let name = app
+                .world_mut()
+                .non_send_mut::<UiScript>()
+                .eval::<Option<String>>("return (GetGuildInfo('target'))")
+                .unwrap();
+            assert_eq!(name, None, "the first answer of an uncached guild");
+        };
+        let drain = |app: &mut App| -> Vec<FieldNotice> {
+            app.world_mut()
+                .resource_mut::<Messages<FieldNotice>>()
+                .drain()
+                .collect()
+        };
+        let answer = |guild_id: u32, name: &str| {
+            vec![SessionEvent::GuildQueryResponse(GuildQueryResponse {
+                guild_id,
+                name: name.to_string(),
+                ..Default::default()
+            })]
+        };
+        call(&mut app);
+        call(&mut app);
+        app.update();
+        assert!(matches!(
+            crate::query_cache::queries(&rx).as_slice(),
+            [ClientCommand::GuildQuery { guild_id: 5 }]
+        ));
+        crate::net::handlers::dispatch(app.world_mut(), answer(5, "Probe Guild"));
+        let signal = FieldNotice::Signal {
+            guid: MATE,
+            id: crate::field_watch::id::PLAYER_GUILD_UPDATE,
+        };
+        assert_eq!(drain(&mut app), [signal; 2], "one per call that missed");
+        crate::net::handlers::dispatch(app.world_mut(), answer(5, "Probe Guild"));
+        assert!(drain(&mut app).is_empty(), "the waiters are spent");
+
+        app.world_mut()
+            .non_send_mut::<UiScript>()
+            .set_unit("target", Some(target(6)));
+        call(&mut app);
+        app.update();
+        crate::net::handlers::dispatch(app.world_mut(), answer(6, ""));
+        assert!(drain(&mut app).is_empty(), "a refusal signals nothing");
     }
 
     fn net_commands() -> (NetCommands, crossbeam_channel::Receiver<ClientCommand>) {

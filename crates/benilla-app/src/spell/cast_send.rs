@@ -45,6 +45,9 @@ pub(crate) enum CastCommit {
         slot: u8,
         /// The item's template entry: the not-ready rung queries the `(use_spell, entry)` record.
         entry: u32,
+        /// The item object's guid, which the in-flight slot keeps beside its spell (`0xcecab0`,
+        /// stored at `0x6e4b00`); `None` for a use with no live instance.
+        guid: Option<u64>,
         spell_index: u8,
         /// `CGItem::Use`'s own target argument, set only for a key in a lock; it bypasses the
         /// binder, as TryCast's target resolve (`6e4ef4`) takes the pair it was passed.
@@ -56,6 +59,14 @@ impl CastCommit {
     /// Whether this commit carries an item: what every forked rung reads.
     pub(crate) fn is_item(self) -> bool {
         matches!(self, CastCommit::Item { .. })
+    }
+
+    /// The used item's guid, which the attempt's push keeps in the in-flight slot (`0x6e4b00`).
+    pub(crate) fn item_guid(self) -> Option<u64> {
+        match self {
+            CastCommit::Item { guid, .. } => guid,
+            CastCommit::Spell => None,
+        }
     }
 
     /// The local not-ready reason for this commit (`0x6094f0`'s forked first rung).
@@ -126,6 +137,8 @@ pub(crate) struct CastLadder<'w, 's> {
     pub(crate) spell_mods: Res<'w, crate::spell::SpellModifiers>,
     /// The cast's reports, in the order they are made ([`crate::ui_cast`]).
     pub(crate) reports: ResMut<'w, CastReports>,
+    /// The skill lines the cost's and the cast time's level is found through (`0x5ea690`).
+    pub(crate) skill_lines: Option<Res<'w, crate::ui_spellbook::SkillLines>>,
     pub(crate) auto_repeat: ResMut<'w, AutoRepeatActive>,
     pub(crate) trade_skill_opens: ResMut<'w, crate::ui_tradeskill::TradeSkillOpens>,
     pub(crate) ground: ResMut<'w, super::targeting::SpellTargeting>,
@@ -272,8 +285,12 @@ impl CastLadder<'_, '_> {
         // The spell its attempt pushed stays in the slot through the send; the guard holds it from
         // here, as for a cast sent at its attempt.
         if self.ground.in_slot() == Some(spell_id) {
-            self.pending
-                .push(spell_id, item_flags(&self.items, commit), now);
+            self.pending.push_cast(
+                spell_id,
+                item_flags(&self.items, commit),
+                commit.item_guid(),
+                now,
+            );
         }
         // The bind emptied the word, and signals before it sends (`0x6e60cb`, `0x6e615d`).
         self.ground.clear();
@@ -390,6 +407,7 @@ impl CastLadder<'_, '_> {
             &mut core,
             &mut self.cooldowns,
             &self.spell_mods,
+            self.skill_lines.as_deref().map(|s| &s.catalog),
             &mut self.auto_repeat,
             &mut self.trade_skill_opens,
             &mut self.held_for_pick,
@@ -448,7 +466,10 @@ fn held(
     } else if cursor {
         Held::Cursor
     } else {
-        Held::Cast { item_flags }
+        Held::Cast {
+            item_flags,
+            item: commit.item_guid(),
+        }
     })
 }
 
@@ -479,6 +500,7 @@ fn send_spell_cast(
     core: &mut CastCore,
     cooldowns: &mut crate::spell::Cooldowns,
     spell_mods: &crate::spell::SpellModifiers,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
     auto_repeat: &mut AutoRepeatActive,
     trade_skill_opens: &mut crate::ui_tradeskill::TradeSkillOpens,
     held_for_pick: &mut HeldForPick,
@@ -544,7 +566,8 @@ fn send_spell_cast(
     // about the weapon.
     if let Some(d) = def {
         if let Some(store) = ctx.rel.self_store {
-            if !super::usable::equipped_item_fits(d, store, objects, items) {
+            if !super::usable::equipped_item_fits(d, store, objects, items, &mut super::Unrecorded)
+            {
                 let reason = super::usable::equipped_item_reason(d);
                 debug!("ui_action: cast {spell_id} refused locally — equipped item ({reason:#x})");
                 refuse!(CastFail::local(spell_id, reason));
@@ -692,7 +715,7 @@ fn send_spell_cast(
     // the running GCD.
     if !commit.is_item() {
         if let (Some(d), Some(store)) = (def, ctx.rel.self_store) {
-            if !super::usable::can_afford(d, store, spell_mods) {
+            if !super::usable::can_afford(d, store, skill_lines, spell_mods) {
                 debug!("ui_action: cast {spell_id} refused locally — not enough power (0x4d)");
                 refuse!(CastFail::local(spell_id, 0x4d));
             }
@@ -760,12 +783,12 @@ fn send_spell_cast(
     // The moving leg (`0x609de3`): a cast-time press while moving refuses 0x2e. Local, because
     // vmangos accepts the cast and then interrupts it mid-bar.
     if let Some(d) = def {
-        let caster_level = ctx
-            .rel
-            .self_store
-            .and_then(|s| s.0.unit_level())
-            .unwrap_or(0);
-        let cast_time_ms = spells.map_or(0, |s| s.cast_time_ms(d, caster_level, spell_mods));
+        let level = crate::spell::SpellLevel::Player {
+            me: ctx.rel.self_store,
+            skill_lines,
+        };
+        let player = ctx.rel.self_store.map(|s| &s.0);
+        let cast_time_ms = spells.map_or(0, |s| s.cast_time_ms(d, player, level, spell_mods));
         if validator::cast_moving_refusal(ctx.self_move_flags, cast_time_ms, def) {
             debug!("ui_action: cast {spell_id} refused locally — moving (0x2e)");
             refuse!(CastFail::local(spell_id, 0x2e));
@@ -965,6 +988,7 @@ mod tests {
         bag_index: 255,
         slot: 24,
         entry: 6948,
+        guid: None,
         spell_index: 0,
         on_object: None,
     };
@@ -1816,6 +1840,7 @@ mod tests {
             bag_index: 255,
             slot: 24,
             entry: BOMB,
+            guid: None,
             spell_index: 0,
             on_object: None,
         };
@@ -1942,6 +1967,7 @@ mod tests {
             bag_index: 255,
             slot: 25,
             entry: MINOR_HEALING_POTION,
+            guid: None,
             spell_index: 0,
             on_object: None,
         };
@@ -2113,6 +2139,7 @@ mod tests {
                 bag_index: 255,
                 slot: 81,
                 entry: 6948,
+                guid: None,
                 spell_index: 0,
                 on_object: Some(0xF110_000C_1F00_A3B2),
             },

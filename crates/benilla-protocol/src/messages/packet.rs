@@ -18,7 +18,7 @@ use super::{
     SpellCooldown, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellGo, SpellHealLog,
     SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, SpellStart, SplineMode,
     StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose,
-    VendorItem, WhoResults, XpGain,
+    VendorItem, WhoResults, WowTime, XpGain,
 };
 
 /// The final facing a `SMSG_MONSTER_MOVE` dictates (`moveType`), applied as a hard snap, not a
@@ -49,6 +49,9 @@ pub struct CreatureQueryInfo {
     pub rank: u32,
     /// Bit `0x10` (HIDE_FACTION_TOOLTIP) drops the tooltip's faction line (`0x612610`).
     pub type_flags: u32,
+    /// `CreatureSpellData.dbc` id of the abilities a tamed one brings, `0` for none: the
+    /// studied-creature block's ability line (`0x529d56`).
+    pub pet_spell_list: u32,
     /// The tooltip's green CIVILIAN line and the dishonorable-kill mark.
     pub civilian: bool,
     /// The tooltip's white LEADER line (`0x6125c0`).
@@ -176,12 +179,22 @@ pub enum ServerPacket {
         position: Vector3d,
         orientation: f32,
     },
+    /// `SMSG_LOGIN_SETTIMESPEED`: the date to set the clock to and the rate, as sent.
     TimeSpeed {
-        hours: u8,
-        minutes: u8,
-        /// Day count from the packed date, `year·372 + month·31 + day`; drives the moon phase.
-        day_serial: u32,
-        timescale: f32,
+        time: WowTime,
+        speed: f32,
+    },
+    /// `SMSG_GAMESPEED_SET`: the rate, as sent.
+    GameSpeedSet {
+        speed: f32,
+    },
+    /// `SMSG_GAMETIME_UPDATE`: the date to sync the clock to.
+    GameTimeUpdate {
+        time: WowTime,
+    },
+    /// `SMSG_GAMETIME_SET`: the date to set the clock to.
+    GameTimeSet {
+        time: WowTime,
     },
     /// `SMSG_QUERY_TIME_RESPONSE`: wall-clock unix seconds, the base of absolute descriptor stamps.
     QueryTimeResponse {
@@ -1296,6 +1309,9 @@ impl ServerPacket {
             ServerPacket::TransferAborted { .. } => "SMSG_TRANSFER_ABORTED".into(),
             ServerPacket::LoginVerifyWorld { .. } => "SMSG_LOGIN_VERIFY_WORLD".into(),
             ServerPacket::TimeSpeed { .. } => "SMSG_LOGIN_SETTIMESPEED".into(),
+            ServerPacket::GameSpeedSet { .. } => "SMSG_GAMESPEED_SET".into(),
+            ServerPacket::GameTimeUpdate { .. } => "SMSG_GAMETIME_UPDATE".into(),
+            ServerPacket::GameTimeSet { .. } => "SMSG_GAMETIME_SET".into(),
             ServerPacket::QueryTimeResponse { .. } => "SMSG_QUERY_TIME_RESPONSE".into(),
             ServerPacket::BindPoint { .. } => "SMSG_BINDPOINTUPDATE".into(),
             ServerPacket::GmTicketAnswer { .. } => "SMSG_GMTICKET_GETTICKET".into(),

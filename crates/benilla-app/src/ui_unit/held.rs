@@ -35,6 +35,8 @@ pub(super) struct HeldUnits<'a> {
     /// The relation functions, over the object manager, and the active player they judge from.
     pub(super) rel: Relations<'a>,
     pub(super) me: Option<RelUnit>,
+    /// What the unit tooltip's own lines read.
+    pub(super) tooltip: super::tooltip_facts::TooltipSources<'a>,
 }
 
 impl HeldUnits<'_> {
@@ -63,6 +65,7 @@ impl HeldUnits<'_> {
         s.faction_group = faction_group(store, factions);
         s.faction_group_localized = faction_group_localized(store, factions);
         enrich_unit(&mut s, guid, self.names, store, factions, self.self_store);
+        s.tooltip = super::tooltip_facts::tooltip_facts(store, s.creature_type, &self.tooltip);
         s
     }
 }
@@ -189,6 +192,10 @@ pub(super) fn feed_chain_units(
         reads.borrow_mut().looked_up(guid, entity);
         entity
     };
+    // The tooltip facts' object lookup, through the tracked one so the gate sees its reads.
+    let object = |guid: u64| {
+        stores.get(entity_of(guid)?).ok()
+    };
     let held = HeldUnits {
         names: &names,
         commands: &commands,
@@ -198,6 +205,12 @@ pub(super) fn feed_chain_units(
         types: tables.types(&names),
         rel: world.get(),
         me: world.me(),
+        tooltip: super::tooltip_facts::TooltipSources {
+            names: &names,
+            catalog: tables.catalog(),
+            object: &object,
+            study: tables.study(),
+        },
     };
     let built: HashMap<u64, UnitState> = ends
         .iter()
@@ -277,6 +290,8 @@ pub(crate) fn feed_name_candidates(
     commands: Res<NetCommands>,
     world: crate::target::RelationWorld,
     group: Res<crate::ui_party::GroupState>,
+    // The object manager's lookup, which the tooltip's owner line names an owner through.
+    index: Option<Res<crate::net::GuidIndex>>,
     mut memo: Local<VmMemo<CandidateMemo>>,
 ) {
     let Some(mut script) = script else {
@@ -285,6 +300,10 @@ pub(crate) fn feed_name_candidates(
     let (memo, vm_reset) = memo.get_reset(&script);
     let rebuild = vm_reset || group.is_changed() || world.inputs_changed();
     let me = self_q.single().ok();
+    let object = |guid: u64| {
+        let entity = *index.as_ref()?.0.get(&guid)?;
+        units.get(entity).ok()?.2.map(Ref::into_inner)
+    };
     let held = HeldUnits {
         names: &names,
         commands: &commands,
@@ -294,6 +313,12 @@ pub(crate) fn feed_name_candidates(
         types: tables.types(&names),
         rel: world.get(),
         me: world.me(),
+        tooltip: super::tooltip_facts::TooltipSources {
+            names: &names,
+            catalog: tables.catalog(),
+            object: &object,
+            study: tables.study(),
+        },
     };
     memo.seen.clear();
     let origin = me.map(|(_, tf, _)| tf.translation());
@@ -488,6 +513,7 @@ mod tests {
                         pet_family: 0,
                         rank: 0,
                         type_flags: 0,
+                        pet_spell_list: 0,
                         civilian: false,
                         racial_leader: false,
                         display_id: 0,

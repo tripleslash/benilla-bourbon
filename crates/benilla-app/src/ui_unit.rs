@@ -24,6 +24,7 @@ pub(crate) mod control_gate;
 pub(crate) mod field_events;
 mod held;
 pub(crate) mod relations;
+pub(crate) mod tooltip_facts;
 
 /// The unit-feed pass, gated so none of its login one-shots or per-VM memos runs before the in-game
 /// interface exists; the demo override orders itself after it.
@@ -97,6 +98,15 @@ struct UnitFeedMemo {
     worn_hidden: Option<(bool, bool)>,
     /// `PLAYER_FIELD_BYTES` byte 2 (`GetActionBarToggles`, `0x4e7660`); no field watch, no event.
     action_bar_toggles: Option<u8>,
+    /// The events the pushes owe, which [`fire_unit_events`] signals after the action feed.
+    pending: PendingUnitEvents,
+}
+
+/// What [`feed_units`] pushed this frame that owes an event after the usable refresh.
+#[derive(Default)]
+struct PendingUnitEvents {
+    target_changed: bool,
+    combo_points: bool,
 }
 
 /// Adds the per-frame unit feed; the `Unit*` bindings live in `benilla-ui`.
@@ -141,16 +151,25 @@ impl Plugin for UiUnitPlugin {
                     .in_set(field_events::FieldEventPushes)
                     .in_set(UnitSnapshots)
                     .after(WorldEnterSeats),
+                // After the snapshots its handlers read, and ahead of the action feed's events:
+                // `SetPlayerControl` stores the flag (`0x4958ea`) and signals its event
+                // (`0x4958f7`, `0x49590b`) before the usable refresh (`0x4958fc`, `0x495910`).
+                feed_player_control
+                    .after(crate::player::ControlRestore)
+                    .before(crate::ui_action::CooldownEvents),
+                // After the action feed, whose usable refresh precedes these events.
+                fire_unit_events.after(crate::ui_action::CooldownEvents),
                 // After the same feed, whose guids it covers.
                 held::feed_chain_units.after(crate::ui_aura::AuraEvents),
                 // After every snapshot above is pushed, so a handler reads the new reaction.
                 fire_faction_on_forced_table.after(crate::ui_aura::AuraEvents),
-                // After the pushes its handlers read and the token seat it fans out over.
+                // After the pushes its handlers read and the token seat it fans out over, and after
+                // the tutorial banks' frame, whose fire-once bank a watcher's tutorial tests.
                 field_events::fire_field_notices
                     .after(field_events::FieldEventPushes)
-                    .after(crate::ui_aura::AuraEvents),
+                    .after(crate::ui_aura::AuraEvents)
+                    .after(crate::tutorial::TutorialFeed),
                 held::feed_name_candidates,
-                feed_player_control.after(crate::player::ControlRestore),
                 // After the control edge, whose flag the exemption is asked for.
                 control_gate::feed_control_bypass,
                 feed_farsight_focus,
@@ -159,7 +178,8 @@ impl Plugin for UiUnitPlugin {
                 .in_set(UnitFeed),
         )
         // The relation functions the six relation verbs ask, ahead of every feed whose events a
-        // handler asks them in: the unit snapshots' `PLAYER_TARGET_CHANGED` and the aura feed's.
+        // handler asks them in: the usable refresh's and `PLAYER_TARGET_CHANGED`, both after the
+        // unit snapshots, and the aura feed's.
         .add_systems(
             Update,
             relations::feed_unit_relations
@@ -391,42 +411,6 @@ fn load_exhaustion_rows(
     }
 }
 
-/// Melee swing to the `UNIT_COMBAT` action (victim-state table `0x83de28`, `0x4946d0`) and
-/// descriptor, HitInfo keyed on the amount's sign: above zero CRITICAL `0x80`, GLANCING `0x4000`,
-/// CRUSHING `0x8000`; else ABSORB `0x20`, BLOCK `0x800`, RESIST `0x40`.
-fn melee_feedback(hit_info: u32, victim_state: u32, damage: u32) -> (&'static str, &'static str) {
-    match victim_state {
-        2 => ("DODGE", ""),
-        3 => ("PARRY", ""),
-        5 => ("BLOCK", ""),
-        6 => ("EVADE", ""),
-        7 => ("IMMUNE", ""),
-        8 => ("DEFLECT", ""),
-        // 0 UNAFFECTED / 1 NORMAL / 4 INTERRUPT: WOUND, descriptor by the amount-sign key.
-        _ => {
-            if damage > 0 {
-                if hit_info & 0x80 != 0 {
-                    ("WOUND", "CRITICAL")
-                } else if hit_info & 0x4000 != 0 {
-                    ("WOUND", "GLANCING")
-                } else if hit_info & 0x8000 != 0 {
-                    ("WOUND", "CRUSHING")
-                } else {
-                    ("WOUND", "")
-                }
-            } else if hit_info & 0x20 != 0 {
-                ("WOUND", "ABSORB")
-            } else if hit_info & 0x800 != 0 {
-                ("WOUND", "BLOCK") // a full block `0x625e20` did not mark
-            } else if hit_info & 0x40 != 0 {
-                ("WOUND", "RESIST")
-            } else {
-                ("MISS", "")
-            }
-        }
-    }
-}
-
 /// A swing's `UNIT_COMBAT` on its victim, as `FloatSwingResult 0x6243e0` raises it (`0x4946d0`, at
 /// `0x6244bf` and `0x624518`), queued in the chat drain where its caller stands: for a displayed
 /// swing only (`0x625e40`, which returns at `0x624414` past both the number and the event), on a
@@ -445,19 +429,13 @@ pub(crate) fn melee_unit_combat(
     let Some((guid, _)) = victim.filter(|(_, store)| crate::ui_chat::combat::is_unit(store)) else {
         return;
     };
-    let (action, flags) = melee_feedback(s.hit_info, s.victim_state, s.damage);
-    log.push_unit_combat(UnitCombatFeedback {
-        guid,
-        action,
-        flags,
-        amount: s.damage,
-        school: 0, // the reference passes sub-damage 0's school (`0x4946fc`), not carried here
-    });
+    crate::combat_log::feedback::swing(log, guid, s.victim_state, s.hit_info, s.damage);
 }
 
 /// `COMBAT_TEXT_UPDATE(messageType, data, extra)` (event `0x21e`, through the five helpers
 /// `0x626890`-`0x6269d0`): `data` and `extra` are `arg2` and `arg3`, nil when absent. Each combat-log
-/// formatter raises it right after its line, so the line's drain fires it.
+/// formatter raises it right after its line, so the line's drain fires it; the usable refresh
+/// raises `SPELL_ACTIVE` (`0x4b3226`).
 pub(crate) fn fire_combat_text(
     script: &mut UiScript,
     message_type: &str,
@@ -970,6 +948,11 @@ pub(crate) struct SnapshotTables<'w> {
     names: NameTables<'w>,
     spells: Option<Res<'w, crate::ui_action::Spells>>,
     creature_types: Option<Res<'w, crate::target::CreatureTypes>>,
+    /// The object manager's index, which the tooltip's owner line finds the owner through.
+    index: Option<Res<'w, crate::net::GuidIndex>>,
+    /// What the tooltip's studied-creature block reads.
+    study: Option<Res<'w, tooltip_facts::StudyTables>>,
+    families: Option<Res<'w, crate::ui_pet_stats::PetFamilyTables>>,
 }
 
 impl SnapshotTables<'_> {
@@ -977,6 +960,24 @@ impl SnapshotTables<'_> {
     /// reference's bounds leg.
     pub(crate) fn unit_names(&self) -> UnitNames<'_> {
         self.names.get()
+    }
+
+    /// `Spell.dbc`, absent without game data.
+    pub(crate) fn catalog(&self) -> Option<&benilla_formats::SpellCatalog> {
+        self.spells.as_deref().map(|s| &s.catalog)
+    }
+
+    /// The studied-creature block's tables.
+    pub(crate) fn study(&self) -> tooltip_facts::StudySources<'_> {
+        tooltip_facts::StudySources {
+            tables: self.study.as_deref(),
+            families: self.families.as_deref(),
+        }
+    }
+
+    /// The entity the object manager holds under `guid`.
+    pub(crate) fn entity(&self, guid: u64) -> Option<Entity> {
+        self.index.as_deref()?.0.get(&guid).copied()
     }
 
     /// The creature-type resolver's sources: the name cache, the form table and the type words.
@@ -1110,6 +1111,16 @@ pub(crate) fn snapshot(
             store.0.player_quest_log_window()
         } else {
             Default::default()
+        },
+        // `PLAYER_GUILDID`, the cache key of `GetGuildInfo` (`0x4c93a9`).
+        guild_id: store.0.player_guild_id(),
+        // `PLAYER_BYTES_3` byte 1; a creature has no PLAYER block and reads 0.
+        drunk: store.0.player_drunk_byte().unwrap_or(0),
+        tooltip: benilla_ui::script::UnitTooltipFacts {
+            // The builder's raw read (`0x52a89f`), not `UnitHealth`'s feign-death zero. The facts
+            // that read beyond the descriptor are [`tooltip_facts`]'.
+            health: store.0.unit_health().unwrap_or(0),
+            ..Default::default()
         },
         // `is_player` and the creature-record fields come from [`enrich_unit`].
         ..Default::default()
@@ -1344,13 +1355,17 @@ pub(crate) fn live_player_seat(
     })
 }
 
-/// One pass of the unit feed, for a test that follows a selection change to its event.
+/// One pass of the unit feed and its events, for a test that follows a selection change to its
+/// event.
 #[cfg(test)]
 pub(crate) fn run_feed_units_once(world: &mut World) {
     use bevy::ecs::system::RunSystemOnce;
     world
         .run_system_once(feed_units)
         .expect("the unit feed runs as a one-shot system");
+    world
+        .run_system_once(fire_unit_events)
+        .expect("the unit events run as a one-shot system");
 }
 
 fn feed_units(
@@ -1468,6 +1483,10 @@ fn feed_units(
         reads.borrow_mut().looked_up(guid, entity);
         entity
     };
+    // The tooltip facts' object lookup, through the tracked one so the gate sees its reads.
+    let object = |guid: u64| {
+        stores.all.get(entity_of(guid)?).ok()
+    };
     let held = held::HeldUnits {
         names: &names,
         commands: &commands,
@@ -1477,6 +1496,12 @@ fn feed_units(
         types,
         rel: world.get(),
         me: world.me(),
+        tooltip: tooltip_facts::TooltipSources {
+            names: &names,
+            catalog: tables.catalog(),
+            object: &object,
+            study: tables.study(),
+        },
     };
     let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
         reads.borrow_mut().held(e);
@@ -1679,17 +1704,13 @@ fn feed_units(
         }
     }
 
-    // `PLAYER_TARGET_CHANGED`, argless, when the selection changes. A `/reload`'s fresh memo finds
-    // none: the shutdown dropped the target and told the dying VM (`0x490bdf`).
+    // `PLAYER_TARGET_CHANGED`, argless, when the selection changes, owed to
+    // [`fire_unit_events`]. A `/reload`'s fresh memo finds none: the shutdown dropped the target
+    // and told the dying VM (`0x490bdf`).
     if selection.guid != memo.target_guid {
         gate.audit("feed_units", "the PLAYER_TARGET_CHANGED edge");
         memo.target_guid = selection.guid;
-        // The reference signals it inside `SetSelection`, so inside the key or click whose call
-        // moved the selection; a change that call made hears it under that call's input events.
-        let cause = script.take_selection_cause(selection.guid);
-        script.with_input_events(cause, |script| {
-            script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-        });
+        memo.pending.target_changed = true;
     }
 
     // The hide bits for `ShowingHelm()`/`ShowingCloak()`, on the edge only: the setter flips the
@@ -1704,7 +1725,7 @@ fn feed_units(
     }
 
     // The combo count and its banked target, pushed as a pair since `GetComboPoints` reads both;
-    // only the count fires `PLAYER_COMBO_POINTS` (`0x5ddff0`).
+    // only the count owes `PLAYER_COMBO_POINTS` (`0x5ddff0`), to [`fire_unit_events`].
     if let Some((store, _)) = self_q.iter().next() {
         let banked = (
             store.0.player_combo_points().unwrap_or(0),
@@ -1714,10 +1735,35 @@ fn feed_units(
             gate.audit("feed_units", "the combo-point edge");
             memo.last_combo = Some(banked);
             script.set_combo_points(banked.0, banked.1);
-            if fire {
-                script.fire_event("PLAYER_COMBO_POINTS", vec![]);
-            }
+            memo.pending.combo_points |= fire;
         }
+    }
+}
+
+/// The events [`feed_units`]' pushes owe, signalled after the action feed's usable refresh as the
+/// reference orders them: `SelectTarget` stores the target (`0x4936e2`) and refreshes (`0x493892`)
+/// before `PLAYER_TARGET_CHANGED` (`0x49389c`), and so does a release (`0x4939d3`, `0x493a69`,
+/// `0x493a73`); the combo-point watch refreshes (`0x5ddff0`) before `PLAYER_COMBO_POINTS`
+/// (`0x5ddffa`). A usable handler reads the new target and count, and hears these after it.
+fn fire_unit_events(
+    script: Option<NonSendMut<UiScript>>,
+    selection: Res<Selection>,
+    mut feed: ResMut<UnitFeedState>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let pending = std::mem::take(&mut feed.vm.get(&script).pending);
+    if pending.target_changed {
+        // The reference signals it inside `SetSelection`, so inside the key or click whose call
+        // moved the selection; a change that call made hears it under that call's input events.
+        let cause = script.take_selection_cause(selection.guid);
+        script.with_input_events(cause, |script| {
+            script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+        });
+    }
+    if pending.combo_points {
+        script.fire_event("PLAYER_COMBO_POINTS", vec![]);
     }
 }
 
@@ -1732,7 +1778,8 @@ fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
 pub(crate) use held::feed_name_candidates;
 
 /// The bare unit feed, for a test driving the stock unit frames off engine state: the pushes,
-/// then the field notices' events.
+/// the control edge, the unit events, then the field notices' events, under the plugin's sets so
+/// a test's action feed takes its place around them.
 #[cfg(test)]
 pub(crate) fn add_unit_feed(app: &mut App) {
     app.init_resource::<UnitFeedState>()
@@ -1742,7 +1789,9 @@ pub(crate) fn add_unit_feed(app: &mut App) {
             Update,
             (
                 relations::feed_unit_relations,
-                feed_units,
+                feed_units.in_set(UnitSnapshots),
+                feed_player_control.before(crate::ui_action::CooldownEvents),
+                fire_unit_events.after(crate::ui_action::CooldownEvents),
                 fire_faction_on_forced_table,
                 field_events::fire_field_notices,
             )
@@ -3454,6 +3503,7 @@ mod tests {
                 pet_family: 4, // Bear, a real tameable family
                 rank: 1,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 0,
@@ -3552,6 +3602,7 @@ mod tests {
             pet_family: 0,
             rank: 0,
             type_flags,
+            pet_spell_list: 0,
             civilian: false,
             racial_leader: false,
             display_id: 0,
@@ -3754,6 +3805,7 @@ mod tests {
                 pet_family: 0,
                 rank: 0,
                 type_flags: 0,
+                pet_spell_list: 0,
                 civilian: false,
                 racial_leader: false,
                 display_id: 0,
@@ -3854,6 +3906,7 @@ mod tests {
             pet_family: 0,
             rank: 0,
             type_flags: 0,
+            pet_spell_list: 0,
             civilian: false,
             racial_leader: false,
             display_id: 0,

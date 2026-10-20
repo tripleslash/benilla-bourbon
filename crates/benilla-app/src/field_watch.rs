@@ -5,14 +5,14 @@
 //! nothing else: not a login, not a `/reload`, not a value read for the first time, not a token
 //! that comes to name another unit.
 //!
-//! A values block runs each watch whose bytes now differ from the copy taken before the block was
-//! written, once, at the first sent field of its range (`0x465570` sets the record's countdown to
-//! 1; `repz cmpsb` at `0x4655bb`), so the notices of one block come out in field order. At one
-//! field the notify pass splices the type watchers' list ahead of the object's own (`0x46544a`,
-//! `0x465463`), each appended at the pending list's tail (`0x465a14`) behind the watches a lower
-//! field already spliced. The notify pass `0x465330` has two callers, a values block (`0x465277`)
-//! and a create of an object that already exists (`0x465d8e`); a first create runs none
-//! (`0x465d80 je 0x465d98`), and a `/reload` receives no update at all.
+//! A block's notify runs each watch whose bytes now differ from the copy its object's last write
+//! in the packet took, once, at the first field of its range the block visits (`0x465570` sets the
+//! record's countdown to 1; `repz cmpsb` at `0x4655bb`), so the notices of one block come out in
+//! field order ([`Notified`]). At one field the notify pass splices the type watchers' list ahead
+//! of the object's own (`0x46544a`, `0x465463`), each appended at the pending list's tail
+//! (`0x465a14`) behind the watches a lower field already spliced. The notify pass `0x465330` has
+//! two callers, a values block (`0x465277`) and a create of an object already shown (`0x465d8e`);
+//! a first create runs none (`0x465d80 je 0x465d98`), and a `/reload` receives no update at all.
 //!
 //! The watches here: the unit-field bridge `0x51bbb0` on every unit with token flags; the unit
 //! type watchers `0x6041f0` and the player type watchers `0x5e2510` whose callbacks signal; the
@@ -23,6 +23,8 @@
 use benilla_protocol::messages::ObjectType;
 use benilla_protocol::{ObjectFields, OwnerFallback};
 use bevy::prelude::*;
+
+use crate::tutorial::id as tutorial;
 
 /// One signal a reference callback raised, in the order the packets raised them.
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +62,10 @@ pub(crate) enum FieldNotice {
     /// `PVP_TOGGLE_OFF_VERBOSE` (`0x8606e0`, `0x8606c8`) as a chat line of type `0xa`
     /// (`0x5eeb5d`).
     PvpPreference { on: bool },
+    /// `FireTutorial(id, 0)` (`0x4b5390`) from a watcher on the active player: the number's
+    /// fire-once bit tested and set, then its `TutorialPopup` cue and `TUTORIAL_TRIGGER` at once,
+    /// in the watcher's order.
+    Tutorial { id: u32 },
 }
 
 /// The event ids the producers pass to `0x515e50`, by their event-table names.
@@ -103,6 +109,21 @@ pub(crate) fn guild_tag(guid: u64) -> [FieldNotice; 2] {
             id: id::PLAYER_GUILD_UPDATE,
         },
     ]
+}
+
+/// The player type watcher `0x5e2890` on `PLAYER_GUILD_TIMESTAMP` (player section `+0x24`,
+/// registered at `0x5e25ef`): when it runs, the player's guild id and its new stamp (`0x5e28c1`,
+/// `0x5e28c4`), for the guild cache to weigh.
+pub(crate) fn guild_timestamp(
+    block: &Notified,
+    kind: ObjectType,
+    fields: &ObjectFields,
+) -> Option<(u32, u32)> {
+    (kind == ObjectType::Player
+        && block
+            .fired(PLAYER_SECTION, GUILD_TIMESTAMP.0, GUILD_TIMESTAMP.1)
+            .is_some())
+    .then(|| (fields.player_guild_id(), fields.player_guild_timestamp()))
 }
 
 /// The first field of the object, unit and player sections: their byte offsets in the field
@@ -199,13 +220,15 @@ const ENTRY: (u16, u16) = (0xc, 4);
 /// The player type watchers of `0x5e2510` whose callbacks signal, as (byte offset, length) in the
 /// player section: `PLAYER_FLAGS` (`0x5e2850` → `0x5ee990`), `PLAYER_GUILDID` (`0x5e258f` →
 /// `0x5e2770`), `PLAYER_GUILDRANK` (`0x5e25a7` → `0x5e27b0`), `PLAYER_BYTES_3` bytes 2 and 3
-/// (`0x5e2a30`, `0x5e2a50`) and the duel team (`0x5e27d0`).
+/// (`0x5e2a30`, `0x5e2a50`) and the duel team (`0x5e27d0`); and `PLAYER_GUILD_TIMESTAMP`
+/// (`0x5e25ef` → `0x5e2890`), which acts on the guild cache ([`guild_timestamp`]).
 const PLAYER_FLAGS: (u16, u16) = (0x08, 4);
 const GUILD_ID: (u16, u16) = (0x0c, 4);
 const GUILD_RANK: (u16, u16) = (0x10, 4);
 const BYTES_3_BYTE_2: (u16, u16) = (0x1e, 1);
 const BYTES_3_BYTE_3: (u16, u16) = (0x1f, 1);
 const DUEL_TEAM: (u16, u16) = (0x20, 4);
+const GUILD_TIMESTAMP: (u16, u16) = (0x24, 4);
 
 /// The active player's own `CHARMEDBY` watch, `0x5de090` (`0x5dd9f4`): 8 bytes at the unit
 /// section's `+0x10`, refreshing its reaction (`0x5de0b5`).
@@ -232,28 +255,61 @@ pub(crate) struct Around<'a> {
     pub(crate) pet_bar: u64,
 }
 
-/// One values block's changed dwords, `(index, old, new)` ascending, as the store's merge reports
-/// them; an absent dword did not change.
-struct Block<'a>(&'a [(u16, u32, u32)]);
+/// One block as the notify pass reads it again (`0x465330`): the fields it visits against the dwords
+/// its object's last write in the packet moved, `(index, copy, now)` ascending. Every write of a
+/// held object re-copies each of its watched ranges first (`0x46664b`-`0x4666b6`, over every field
+/// below the count, sent or not), so an earlier block of the packet compares against the copy the
+/// last write took.
+#[derive(Clone, Copy)]
+pub(crate) struct Notified<'a> {
+    sent: Sent<'a>,
+    moved: &'a [(u16, u32, u32)],
+}
 
-impl Block<'_> {
-    /// The dword `index` before and after the block, when it changed.
-    fn edge(&self, index: u16) -> Option<(u32, u32)> {
-        self.0
-            .binary_search_by_key(&index, |&(i, _, _)| i)
-            .ok()
-            .map(|at| (self.0[at].1, self.0[at].2))
+/// The fields a block's notify visits: it runs the pending watches at each (`0x4654a4`).
+#[derive(Clone, Copy)]
+pub(crate) enum Sent<'a> {
+    /// The set bits of a values block's mask, ascending.
+    Fields(&'a [u16]),
+    /// Every field, set or clear: the create notify of an object already shown (`dl = 1`,
+    /// `0x465d8a`).
+    All,
+}
+
+impl<'a> Notified<'a> {
+    pub(crate) fn new(sent: Sent<'a>, moved: &'a [(u16, u32, u32)]) -> Self {
+        Self { sent, moved }
     }
 
-    /// The bits of dword `index` the block flipped.
+    /// Whether nothing a watch could compare moved.
+    pub(crate) fn is_quiet(&self) -> bool {
+        self.moved.is_empty()
+    }
+
+    /// Whether the block visits field `index`.
+    fn visits(&self, index: u16) -> bool {
+        match self.sent {
+            Sent::All => true,
+            Sent::Fields(sent) => sent.binary_search(&index).is_ok(),
+        }
+    }
+
+    /// The dword `index` in the copy and now, when it moved.
+    pub(crate) fn edge(&self, index: u16) -> Option<(u32, u32)> {
+        self.moved
+            .binary_search_by_key(&index, |&(i, _, _)| i)
+            .ok()
+            .map(|at| (self.moved[at].1, self.moved[at].2))
+    }
+
+    /// The bits of dword `index` that moved.
     fn flipped(&self, index: u16) -> u32 {
         self.edge(index).map_or(0, |(old, new)| old ^ new)
     }
 
     /// The field a watch of `len` bytes at byte `offset` of the section starting at field `base`
-    /// runs at, when any of its bytes differs from the copy taken before the block (the watch's
-    /// `repz cmpsb`, `0x4655bb`): the first sent field of its range, for which the first changed
-    /// dword stands.
+    /// runs at: the first field of its range the block visits, when any byte of the range differs
+    /// from the copy (the watch's `repz cmpsb`, `0x4655bb`).
     fn fired(&self, base: u16, offset: u16, len: u16) -> Option<u16> {
         let (start, end) = (u32::from(offset), u32::from(offset) + u32::from(len));
         let below = |n: u32| {
@@ -268,14 +324,32 @@ impl Block<'_> {
         let mut at = start & !3;
         while at < end {
             let field = base + (at / 4) as u16;
+            if first.is_none() && self.visits(field) {
+                first = Some(field);
+            }
             if let Some((old, new)) = self.edge(field) {
-                first.get_or_insert(field);
                 let mask = below(end.min(at + 4) - at) & !below(start.max(at) - at);
                 moved |= (old ^ new) & mask != 0;
             }
             at += 4;
         }
         first.filter(|_| moved)
+    }
+
+    /// Whether a watch over the whole dwords of `range` runs: the block visits one of them and
+    /// one of them moved.
+    pub(crate) fn runs(&self, range: std::ops::Range<u16>) -> bool {
+        self.moved.iter().any(|(i, _, _)| range.contains(i))
+            && range.into_iter().any(|i| self.visits(i))
+    }
+
+    /// The moved dwords the block visits, as `(index, copy, now)`: the edges
+    /// [`crate::net::FieldChanged`] carries.
+    pub(crate) fn edges(&self) -> impl Iterator<Item = (u16, u32, u32)> + '_ {
+        self.moved
+            .iter()
+            .copied()
+            .filter(|&(i, _, _)| self.visits(i))
     }
 }
 
@@ -322,17 +396,15 @@ impl Pass {
     }
 }
 
-/// The notices of one values block on `guid`, created as `kind`: `fields` is the store after the
-/// merge and `edges` the changed dwords as `(index, old, new)`, ascending.
+/// The notices of one block's notify on `guid`, created as `kind`: `fields` is the store now.
 pub(crate) fn values(
     around: &Around,
     guid: u64,
     kind: ObjectType,
     fields: &ObjectFields,
-    edges: &[(u16, u32, u32)],
+    block: &Notified,
 ) -> Vec<FieldNotice> {
-    let block = Block(edges);
-    if edges.is_empty() || !matches!(kind, ObjectType::Unit | ObjectType::Player) {
+    if block.is_quiet() || !matches!(kind, ObjectType::Unit | ObjectType::Player) {
         return Vec::new();
     }
     let at = |base: u16, (offset, len): (u16, u16), list: List| -> Option<Place> {
@@ -375,6 +447,15 @@ pub(crate) fn values(
         }
         if flipped & 0x1000 != 0 {
             pass.reaction(at, guid, fields, around);
+            // The PvP tutorial for the active player now flagged (`0x5ff732`-`0x5ff756`).
+            if around.me == Some(guid) && flags & 0x1000 != 0 {
+                pass.push(
+                    at,
+                    FieldNotice::Tutorial {
+                        id: tutorial::PVP_COMBAT,
+                    },
+                );
+            }
         }
         // 0x800 on a unit whose charmer, else summoner, is the active player (`0x5ff75e`-
         // `0x5ff784`): `PET_ATTACK_START` when now set, else `PET_ATTACK_STOP` (`0x5ff79f`).
@@ -438,8 +519,26 @@ pub(crate) fn values(
             // against the new flags.
             if around.me == Some(guid) {
                 let flags = fields.player_flags();
-                // 0x20, resting: `PLAYER_UPDATE_RESTING` on either edge (`0x5eead0`, `0x5eeaf2`).
+                // 0x10, the ghost state (`0x5eeab4` → `0x5de9c0`): its tutorial when now set.
+                if flipped & 0x10 != 0 && flags & 0x10 != 0 {
+                    pass.push(
+                        at,
+                        FieldNotice::Tutorial {
+                            id: tutorial::DEATH,
+                        },
+                    );
+                }
+                // 0x20, resting: the rest tutorial when now set (`0x5eeae6`-`0x5eeaed`), then
+                // `PLAYER_UPDATE_RESTING` on either edge (`0x5eead0`, `0x5eeaf2`).
                 if flipped & 0x20 != 0 {
+                    if flags & 0x20 != 0 {
+                        pass.push(
+                            at,
+                            FieldNotice::Tutorial {
+                                id: tutorial::RESTING,
+                            },
+                        );
+                    }
                     let id = id::PLAYER_UPDATE_RESTING;
                     pass.push(at, FieldNotice::Global { id });
                 }
@@ -491,14 +590,18 @@ pub(crate) fn values(
         if let Some(at) = at(PLAYER_SECTION, QUEST_LOG_WATCH, List::Object) {
             pass.push(at, FieldNotice::QuestLog);
         }
-        let rest = PLAYER_SECTION + REST_STATE / 4;
-        if let Some((old, new)) = block.edge(rest) {
+        if let Some(at) = at(PLAYER_SECTION, (REST_STATE, 1), List::Object) {
+            let (old, new) = block.edge(at.0).unwrap_or_default();
             let byte = |v: u32| (v >> (8 * (REST_STATE % 4))) as u8;
-            if byte(old) != byte(new) {
-                let (old, new) = (byte(old), byte(new));
+            let (old, new) = (byte(old), byte(new));
+            pass.push(at, FieldNotice::RestState { old, new });
+            // State 1's row names the rested tutorial (`0x80af50`: `0x15a`, `0x19`; `0x5de542`).
+            if new == 1 {
                 pass.push(
-                    (rest, rest, List::Object),
-                    FieldNotice::RestState { old, new },
+                    at,
+                    FieldNotice::Tutorial {
+                        id: tutorial::RESTED,
+                    },
                 );
             }
         }
@@ -572,30 +675,21 @@ mod tests {
     const ME: u64 = 0x07;
     const MOB: u64 = 0xF130_0000_0000_0001;
 
-    /// Merge `delta` into `store` and run the watches on what moved, as the object handlers do.
+    /// Merge `delta` into `store` and run the watches on what moved, as a packet of this one
+    /// values block does.
     fn block(
         store: &mut ObjectFields,
         me: Option<u64>,
         guid: u64,
         delta: &[(u16, u32)],
     ) -> Vec<FieldNotice> {
-        let mut edges = Vec::new();
-        store.merge_diff(ObjectFields::from_pairs(delta), |i, o, n| {
-            edges.push((i, o, n))
-        });
-        let kind = store.created_as().expect("created");
-        values(
-            &Around {
-                me,
-                creature_lookup: &|_| false,
-                others: &Vec::new,
-                pet_bar: 0,
-            },
-            guid,
-            kind,
-            store,
-            &edges,
-        )
+        let around = Around {
+            me,
+            creature_lookup: &|_| false,
+            others: &Vec::new,
+            pet_bar: 0,
+        };
+        block_around(store, &around, guid, delta)
     }
 
     fn player() -> ObjectFields {
@@ -812,12 +906,18 @@ mod tests {
         guid: u64,
         delta: &[(u16, u32)],
     ) -> Vec<FieldNotice> {
-        let mut edges = Vec::new();
-        store.merge_diff(ObjectFields::from_pairs(delta), |i, o, n| {
-            edges.push((i, o, n))
-        });
+        let delta = ObjectFields::from_pairs(delta);
+        let sent: Vec<u16> = delta.raw_fields().map(|(i, _)| i).collect();
+        let mut moved = Vec::new();
+        store.merge_diff(delta, |i, o, n| moved.push((i, o, n)));
         let kind = store.created_as().expect("created");
-        values(around, guid, kind, store, &edges)
+        values(
+            around,
+            guid,
+            kind,
+            store,
+            &Notified::new(Sent::Fields(&sent), &moved),
+        )
     }
 
     fn signal(guid: u64, id: u16) -> FieldNotice {
@@ -1067,14 +1167,17 @@ mod tests {
         let flags = pf(PLAYER_FLAGS.0);
         let changed = signal(ME, 407);
         let resting = FieldNotice::Global { id: 405 };
+        let rest_tutorial = FieldNotice::Tutorial {
+            id: tutorial::RESTING,
+        };
         let playtime = FieldNotice::Global { id: 530 };
         let mut me = player();
         // `PLAYER_FLAGS_HIDE_HELM`, a bit no arm tests.
         assert_eq!(block(&mut me, Some(ME), ME, &[(flags, 0x400)]), [changed]);
-        // The resting bit, both edges (`0x5eead0`).
+        // The resting bit, both edges (`0x5eead0`), its tutorial on the set one (`0x5eeae6`).
         assert_eq!(
             block(&mut me, Some(ME), ME, &[(flags, 0x420)]),
-            [changed, resting]
+            [changed, rest_tutorial, resting]
         );
         assert_eq!(
             block(&mut me, Some(ME), ME, &[(flags, 0x400)]),
@@ -1099,6 +1202,7 @@ mod tests {
             block(&mut me, Some(ME), ME, &[(flags, 0x420)]),
             [
                 changed,
+                rest_tutorial,
                 resting,
                 FieldNotice::PvpPreference { on: false },
                 playtime
@@ -1178,6 +1282,63 @@ mod tests {
         assert_eq!(
             block(&mut charmed, Some(ME), MOB, &[(46, 0x800)]),
             [FieldNotice::Global { id: 334 }, bridge(MOB, 40)]
+        );
+    }
+
+    /// The flag tutorials are the active player's watchers' own calls: the ghost state's when the
+    /// ghost bit is now set (`0x5eeabc` → `0x5de9c0`, number 0x18); the rest tutorial when the
+    /// resting bit is now set (`0x5eeae6`-`0x5eeaed`, 0x1d), ahead of `PLAYER_UPDATE_RESTING`
+    /// (`0x5eeaf7`); the PvP tutorial when the PvP bit is now set, after its reaction (`0x5ff756`,
+    /// 0x1f); and the rest state's row for state 1 (`0x80af50`: 0x19) after its line (`0x5de542`).
+    /// A cleared bit, another unit and rest state 2 raise none.
+    #[test]
+    fn the_flag_tutorials_ride_their_watchers_for_the_active_player() {
+        let flags = pf(PLAYER_FLAGS.0);
+        let changed = signal(ME, 407);
+        let resting = FieldNotice::Global { id: 405 };
+        let tutorial = |id| FieldNotice::Tutorial { id };
+        let mut me = player();
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(flags, 0x20)]),
+            [changed, tutorial(0x1d), resting]
+        );
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(flags, 0)]),
+            [changed, resting]
+        );
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(flags, 0x10)]),
+            [changed, tutorial(0x18)]
+        );
+        assert_eq!(block(&mut me, Some(ME), ME, &[(flags, 0)]), [changed]);
+        let mut other = player();
+        assert_eq!(
+            block(&mut other, Some(ME), OTHER, &[(flags, 0x30)]),
+            [signal(OTHER, 407)]
+        );
+
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(46, 0x1000)]),
+            [signal(ME, 29), tutorial(0x1f), bridge(ME, 40)]
+        );
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(46, 0)]),
+            [signal(ME, 29), bridge(ME, 40)]
+        );
+        let mut mob = unit();
+        assert_eq!(
+            block(&mut mob, Some(ME), MOB, &[(46, 0x1000)]),
+            [signal(MOB, 29), bridge(MOB, 40)]
+        );
+
+        let rest = pf(REST_STATE);
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(rest, 1 << 24)]),
+            [FieldNotice::RestState { old: 0, new: 1 }, tutorial(0x19)]
+        );
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(rest, 2 << 24)]),
+            [FieldNotice::RestState { old: 1, new: 2 }]
         );
     }
 

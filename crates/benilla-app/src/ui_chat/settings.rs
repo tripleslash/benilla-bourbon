@@ -1092,6 +1092,7 @@ mod tests {
                 class: 1, // Warrior
                 gender: 0,
                 level: 60,
+                new_character: false,
                 skin: 0,
                 face: 0,
                 hair_style: 0,

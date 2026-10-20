@@ -442,6 +442,7 @@ fn buff_hover_hangs_below_left_of_the_button() {
         name: Some("Arcane Intellect".into()),
         icon: Some("Interface\\Icons\\Spell_Holy_MagicalSentry".into()),
         count: 1,
+        level: 0,
         debuff_type: None,
         duration: 1800.0,
         expiration_time: 1800.0,
@@ -449,6 +450,7 @@ fn buff_hover_hangs_below_left_of_the_button() {
         cancelable: true,
         until_cancelled: false,
         channeled: false,
+        raid_listed: false,
     }]);
     // The event the stock buff buttons register (`BuffFrame.lua:113`).
     s.fire_event("PLAYER_AURAS_CHANGED", vec![]);

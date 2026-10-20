@@ -76,7 +76,7 @@ fn target(s: &mut UiScript, reaction: u8, auras: Vec<AuraState>) {
         target: TARGET,
         ..Default::default()
     });
-    s.set_unit_auras(TARGET, Some(auras));
+    s.set_unit_auras(TARGET, Some(auras.into()));
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
 }
 
@@ -89,6 +89,7 @@ fn debuff(spell_id: u32, name: &str, count: u8, debuff_type: Option<&str>) -> Au
         name: Some(name.into()),
         icon: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
         count,
+        level: 0,
         debuff_type: debuff_type.map(Into::into),
         // The 1.12 wire carries no duration for another unit's auras.
         duration: 0.0,
@@ -98,6 +99,7 @@ fn debuff(spell_id: u32, name: &str, count: u8, debuff_type: Option<&str>) -> Au
         // Only the player's auras carry `untilCancelled`, read by `GetPlayerBuff` alone.
         until_cancelled: false,
         channeled: false,
+        raid_listed: false,
     }
 }
 
@@ -107,6 +109,7 @@ fn buff(spell_id: u32, name: &str) -> AuraState {
         name: Some(name.into()),
         icon: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
         count: 1,
+        level: 0,
         debuff_type: None,
         duration: 0.0,
         expiration_time: 0.0,
@@ -114,6 +117,7 @@ fn buff(spell_id: u32, name: &str) -> AuraState {
         cancelable: false,
         until_cancelled: false,
         channeled: false,
+        raid_listed: false,
     }
 }
 
@@ -258,7 +262,7 @@ fn reaching_the_wrap_shrinks_the_first_row_to_17px() {
     benilla_ui::assert_near!(size(&s, "TargetFrameBuff1"), (17.0, 17.0));
 
     // Below the wrap they grow back; the feed re-fires UNIT_AURA on the change.
-    s.set_unit_auras(TARGET, Some(vec![debuff(1000, "D0", 1, None)]));
+    s.set_unit_auras(TARGET, Some(vec![debuff(1000, "D0", 1, None)].into()));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("target".into())]);
     benilla_ui::assert_near!(size(&s, "TargetFrameDebuff1"), (21.0, 21.0));
     benilla_ui::assert_near!(size(&s, "TargetFrameDebuff1Border"), (23.0, 23.0));
@@ -272,7 +276,7 @@ fn clearing_the_list_or_the_target_hides_the_buttons() {
     target(&mut s, 2, vec![debuff(589, "Pain", 1, Some("Magic"))]);
     assert!(shown(&s, "TargetFrameDebuff1"));
 
-    s.set_unit_auras(TARGET, Some(vec![]));
+    s.set_unit_auras(TARGET, Some(vec![].into()));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("target".into())]);
     assert!(
         !shown(&s, "TargetFrameDebuff1"),

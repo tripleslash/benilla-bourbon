@@ -414,11 +414,11 @@ pub(crate) struct Model {
     /// `"target"` from the committed selection, whatever its memo holds.
     pub(crate) target_view_moved: bool,
     /// The player's auras in the reference cache's insertion order (`0xbc6040`), durations joined:
-    /// the `GetPlayerBuff` family's list, and any token naming the player's.
+    /// the `GetPlayerBuff` family's list.
     pub(crate) player_auras: Vec<AuraState>,
-    /// Every other unit's auras by guid, ascending aura slot: one list per unit, whatever token
-    /// names it.
-    pub(crate) unit_auras: HashMap<u64, Vec<AuraState>>,
+    /// Every unit's auras by guid, the player's too, ascending aura slot: one list per unit,
+    /// whatever token names it.
+    pub(crate) unit_auras: HashMap<u64, super::UnitAuraList>,
     /// The unit-token resolver's inputs (`0x515970`), which the aura bindings resolve through.
     pub(crate) unit_guids: super::UnitGuids,
     /// Spell ids the cancel verbs queued (`CancelPlayerBuff`, `CancelTrackingBuff`, …), one
@@ -458,8 +458,9 @@ pub(crate) struct Model {
     /// `GetTime()`'s session seconds, which only the host moves ([`super::UiScript::tick`],
     /// [`super::UiScript::set_now`]); off `_G`, as the reference's clock is the OS tick count.
     pub(crate) now: f64,
-    /// `GetGameTime()`'s `(hour, minute)`, pushed by the host as the game clock ticks.
-    pub(crate) game_time: (u32, u32),
+    /// `GetGameTime()`'s `(hour, minute)`, pushed by the host as the game clock ticks; `None`
+    /// until the server sets it.
+    pub(crate) game_time: Option<(i32, i32)>,
     /// The zone caches the four zone-text getters and `GetZonePVPInfo` read.
     pub(crate) zone: super::ZoneTexts,
     /// The current map's `Map.dbc` `InstanceType`, all `IsInInstance()` reads; `None` for no row.
@@ -647,6 +648,9 @@ pub(crate) struct Model {
     pub(crate) macros_dirty: bool,
     /// Bumped by every seed and change, for readers that must not drain `macros_dirty`.
     pub(crate) macros_generation: u64,
+    /// Bumped by every `EditMacro` that names a macro, whose worker `0x4f1280` ends in the action
+    /// bar's usable refresh (`0x4f132e`).
+    pub(crate) macro_edits: u64,
     /// Each macro's cached cast by 1-based index, from the app; an absent macro reads unbound.
     pub(crate) macro_bindings: HashMap<u32, macros::MacroBinding>,
     /// The macro icon chooser's paths, behind `GetMacroIconInfo`: `0x4f0090`'s listing of
@@ -1104,8 +1108,11 @@ pub(crate) struct Model {
     /// selector asks for (`0x52e610`'s fourth argument).
     pub(crate) pet_spell_tooltips: HashMap<u32, super::SpellTooltipView>,
     pub(crate) pet_spell_tooltip_asks: HashSet<u32>,
-    /// The tooltips whose spell render missed its view, re-rendered when the app answers.
-    pub(crate) spell_tooltip_waits: HashMap<FrameHandle, super::tooltip_spell::SpellWait>,
+    /// Each aura's view by the aura builder's arguments, and the misses asked for.
+    pub(crate) aura_tooltips: HashMap<super::AuraKey, super::AuraTooltipView>,
+    pub(crate) aura_tooltip_asks: HashSet<super::AuraKey>,
+    /// The tooltips whose spell or aura render missed its view, re-rendered when the app answers.
+    pub(crate) spell_tooltip_waits: HashMap<FrameHandle, super::tooltip_spell::ViewWait>,
     /// Each tooltip's last item build, kept until its next clear for the rebuild a cache answer
     /// runs (`+0x380`..`+0x440`, `0x52e530`).
     pub(crate) item_builds: HashMap<FrameHandle, super::tooltip_item::build::ItemBuild>,
@@ -1142,6 +1149,8 @@ pub(crate) struct Model {
 
     /// `GetNetStats`'s third return, the average round trip in ms; 0 before any sample.
     pub(crate) net_latency_ms: u32,
+    /// `GetNetStats`'s first two returns, the KB/s received and sent since the link connected.
+    pub(crate) net_bandwidth_kbps: (f32, f32),
 
     /// `UnitXP("player")` and `UnitXPMax("player")`, from the private `PLAYER_XP` fields.
     pub(crate) player_xp: u32,
@@ -1563,7 +1572,7 @@ impl Model {
             saved_instances: Vec::new(),
             raid_selection: 0,
             now: 0.0,
-            game_time: (0, 0),
+            game_time: None,
             zone: Default::default(),
             instance_type: None,
             can_reset_instances: false,
@@ -1647,6 +1656,7 @@ impl Model {
             macros: macros::MacroState::default(),
             macros_dirty: false,
             macros_generation: 0,
+            macro_edits: 0,
             macro_bindings: HashMap::new(),
             macro_icons: Vec::new(),
             macro_icon_source: None,
@@ -1865,6 +1875,8 @@ impl Model {
             spell_tooltip_asks: HashSet::new(),
             pet_spell_tooltips: HashMap::new(),
             pet_spell_tooltip_asks: HashSet::new(),
+            aura_tooltips: HashMap::new(),
+            aura_tooltip_asks: HashSet::new(),
             spell_tooltip_waits: HashMap::new(),
             item_builds: HashMap::new(),
             item_cache_waits: HashMap::new(),
@@ -1908,6 +1920,7 @@ impl Model {
             modifiers: (false, false, false),
             money: 0,
             net_latency_ms: 0,
+            net_bandwidth_kbps: (0.0, 0.0),
             player_xp: 0,
             player_next_level_xp: 0,
             combo_points: 0,

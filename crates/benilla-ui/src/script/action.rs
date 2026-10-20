@@ -63,9 +63,17 @@ pub struct ActionState {
     pub is_attack: bool,
     /// `IsEquippedAction`: an item action currently worn.
     pub equipped: bool,
+    /// The entry an item slot holds, which `IsCurrentAction`'s item arm compares with the in-flight
+    /// cast's item (`0x4e53fc`-`0x4e5428`); `None` for any other slot.
+    pub item: Option<u32>,
     /// `(start_ms, duration_ms, enabled)`, the start absolute on the `GetTime` clock, so a running
     /// cooldown re-pushes the same triple and a re-arm a new one (`0x6e13e0` returns the start).
     pub cooldown: Option<(i64, u32, bool)>,
+    /// The slot reaches no cooldown query (`0x4e6ca0`): a macro that casts nothing or is gone
+    /// (`0x4e6cfe`), or an item with no cached on-use spell (`0x6e2f34`). Only the query writes
+    /// the enable flag (`0x6e1406`), so `GetActionCooldown` answers the binding's `(0, 0, 0)`
+    /// (`0x4e6f0d`), as for an empty slot.
+    pub no_cooldown_query: bool,
 }
 
 /// The profession window a spell opens (`Effect[0]` 47, `TRADE_SKILL`, tested at `0x4e54fe`): a
@@ -89,13 +97,17 @@ pub struct OpenProfessions {
 }
 
 impl ActionState {
-    /// `ActionSlotIsCurrent 0x4e53a0` against the cast state as it stands: the Attack slot while
-    /// attacking (`0x4e5467`), else the slot's spell when it is in flight or awaiting its target
-    /// (`0x4e54c1`, `0x4e54d0`), when it opens the profession window that is open
-    /// (`0x4e54fe`-`0x4e5549`), or when its form is the player's (`0x4e558b`). It reads no
+    /// `ActionSlotIsCurrent 0x4e53a0` against the cast state as it stands: an item slot while the
+    /// in-flight cast's item has its entry, and by that arm alone (`0x4e53c8`-`0x4e5428`); the
+    /// Attack slot while attacking (`0x4e5467`), else the slot's spell when it is in flight or
+    /// awaiting its target (`0x4e54c1`, `0x4e54d0`), when it opens the profession window that is
+    /// open (`0x4e54fe`-`0x4e5549`), or when its form is the player's (`0x4e558b`). It reads no
     /// channel: a channel leaves the in-flight slot at its cast result, so its button unchecks as
     /// it begins.
     pub fn is_current(&self, view: &CastView, open: OpenProfessions) -> bool {
+        if let Some(entry) = self.item {
+            return view.item == Some(entry);
+        }
         if self.is_attack {
             return view.attacking;
         }
@@ -135,6 +147,10 @@ pub struct CastView {
     pub attacking: bool,
     /// The player's form byte (`UNIT_FIELD_BYTES_1` byte 2).
     pub form: u8,
+    /// The entry of the item the in-flight cast came from (`0xcecab0`, read through `0x6e3d20`),
+    /// its object looked up live (`0x4e53ef`): `None` with no item cast in flight or with its
+    /// object gone.
+    pub item: Option<u32>,
 }
 
 impl CastView {
@@ -571,9 +587,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetActionCooldown(action) → start, duration, enable, in `GetTime` seconds. An absent or
-    // elapsed enabled cooldown answers `(0, 0, 1)`, or a later `CooldownFrame_SetTimer` would
-    // replay the sweep and its finish flash.
+    // GetActionCooldown(action) → start, duration, enable, in `GetTime` seconds. The enable starts
+    // at 0 (`0x4e6f0d`) and only the cooldown query writes it, to 1 before any leg (`0x6e1406`):
+    // a slot that reaches no query, an empty one included, answers `(0, 0, 0)`, and one that
+    // reaches it with nothing running `(0, 0, 1)`, so a later `CooldownFrame_SetTimer` replays no
+    // sweep and no finish flash.
     g.set(
         "GetActionCooldown",
         lua.create_function(|lua, action: Value| {
@@ -581,16 +599,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let action = binding_abi::index_arg32(lua, action, "Usage: GetActionCooldown(slot)")?;
             let now = crate::script::clock::now(lua);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(
-                match model.action_states.get(&action).and_then(|s| s.cooldown) {
-                    Some((start, duration, enabled)) if start + duration > now || !enabled => (
-                        crate::script::clock::held_start(start, enabled, now),
-                        duration,
-                        i32::from(enabled),
-                    ),
-                    _ => (0.0, 0.0, 1),
-                },
-            )
+            let Some(state) = model
+                .action_states
+                .get(&action)
+                .filter(|s| !s.state.no_cooldown_query)
+            else {
+                return Ok((0.0, 0.0, 0));
+            };
+            Ok(match state.cooldown {
+                Some((start, duration, enabled)) if start + duration > now || !enabled => (
+                    crate::script::clock::held_start(start, enabled, now),
+                    duration,
+                    i32::from(enabled),
+                ),
+                _ => (0.0, 0.0, 1),
+            })
         })?,
     )?;
 

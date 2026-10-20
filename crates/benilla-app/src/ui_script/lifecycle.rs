@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 
 use benilla_assets::{LockRecover, LooseOpen};
-use benilla_ui::script::{GlueNotice, UiScript};
+use benilla_ui::script::UiScript;
 use benilla_world::frame_pace::FrameStep;
 
 use super::manifest::silenced_ui_load;
@@ -103,17 +103,28 @@ fn start_server_alert(world: &mut World, script: &UiScript) {
     }
 }
 
-/// Read the four agreement CVars into the glue VM, which holds their flags, before any screen is
-/// set, as the reference does (`0x46a400` at `0x402b36`, then `SET_GLUE_SCREEN` at `0x402b65`):
-/// the login screen's `OnShow` asks them at once, and nothing asks again.
+/// Seat the glue VM with the four agreements' flag cells, which `0x46a400` reads off the `read*`
+/// CVars once, at the first glue build (`0x402b36`, then `SET_GLUE_SCREEN` at `0x402b65`): the
+/// login screen's `OnShow` asks them at once. Every glue build after it (`0x402090`, a size
+/// change) seats the same cells unread, and only the accepts write them.
 fn seed_agreements(world: &mut World, script: &mut UiScript) {
+    let Some(shared) = world
+        .get_non_send::<super::glue_mgr::SharedGlueMgr>()
+        .cloned()
+    else {
+        return;
+    };
     let Some(cvars) = world.get_resource::<crate::cvars::Cvars>() else {
         return;
     };
-    let notices = super::glue_mgr::read_agreements(cvars);
-    for notice in GlueNotice::ALL {
-        script.set_glue_notice(notice, notices[notice as usize]);
-    }
+    let notices = shared
+        .get_mut()
+        .notices
+        .get_or_insert_with(|| {
+            benilla_ui::script::GlueNotices::new(super::glue_mgr::read_agreements(cvars))
+        })
+        .clone();
+    script.set_glue_notices(notices);
 }
 
 /// A fresh VM from `make` on the process clock with the addon asset probes wired, or `None` (the
@@ -148,6 +159,7 @@ fn new_vm<E: std::fmt::Display>(
     // `[0x882730]`, `Wow.ini`'s `Region`, read once alike and handed to the name check.
     script.set_client_region(super::client_region());
     seed_vm_clock(world, &mut script);
+    seed_game_time(world, &mut script);
     // The reference seeds `rand` with the clock before `WinMain` (`0x5b800b`). Deviation: a
     // capture run (`scenario_active`) keeps the CRT's default seed, 1, so its frames reproduce.
     if crate::run_mode::scenario_active() {
@@ -176,6 +188,16 @@ fn seed_vm_clock(world: &mut World, script: &mut UiScript) {
             anchor,
             ui_now: now,
         };
+    }
+}
+
+/// Start the new VM's `GetGameTime()` at the game clock as it stands: the reference's clock is one
+/// object (`0xce8538`) built at start-up with every field -1 (`0x643300`, `0x642300`) and reset
+/// by no logout or `ReloadUI`, so a VM answers -1, -1 before any server time and the last known
+/// time after it, from the first line its addons run.
+fn seed_game_time(world: &World, script: &mut UiScript) {
+    if let Some(time) = world.get_resource::<crate::net::ServerTime>() {
+        script.set_game_time(time.0.hour(), time.0.minute());
     }
 }
 
@@ -1629,6 +1651,40 @@ mod tests {
         }
     }
 
+    /// The game clock is one object built at start-up with every field -1 (`0x643300`, `0x642300`)
+    /// that no logout or `ReloadUI` resets, and `GetGameTime` reads it unguarded (`0x515ee0`), so a
+    /// VM answers -1, -1 before any server time and the last known time after it, from the first
+    /// line its addons run.
+    #[test]
+    fn a_new_vm_answers_the_game_clock_as_it_stands() {
+        let mut world = World::new();
+        let answer = |world: &mut World| {
+            new_vm(world, UiScript::new)
+                .expect("a VM")
+                .eval::<(f64, f64)>("return GetGameTime()")
+                .unwrap()
+        };
+        assert_eq!(answer(&mut world), (-1.0, -1.0), "no clock resource");
+        world.init_resource::<crate::net::ServerTime>();
+        assert_eq!(answer(&mut world), (-1.0, -1.0), "no server time yet");
+        let mut clock = crate::net::GameTime::new(0);
+        clock.set(
+            benilla_protocol::WowTime {
+                minute: 45,
+                hour: 13,
+                ..benilla_protocol::WowTime::UNSET
+            },
+            0,
+        );
+        world.insert_resource(crate::net::ServerTime(clock));
+        assert_eq!(answer(&mut world), (13.0, 45.0));
+        let glue = new_vm(&mut world, UiScript::new_glue).expect("a glue VM");
+        assert_eq!(
+            glue.eval::<(f64, f64)>("return GetGameTime()").unwrap(),
+            (13.0, 45.0)
+        );
+    }
+
     /// `[0xcf4d24]` has one writer, `SetEuropeanNumbers` (`0x771c40`), and nothing resets it, so
     /// the VM that replaces a dying one (a `ReloadUI`, a logout, a login) opens with its value.
     #[test]
@@ -1812,6 +1868,62 @@ mod tests {
             screens(crate::cvars::Cvars::default()),
             (false, true, true),
             "this fork asks no first launch for the EULA"
+        );
+    }
+
+    /// `0x46a400` reads the four `read*` options into the flag cells once, at `0x402b36`; after
+    /// that only the accepts store them (`0x46aef0` and its siblings, a census of the eight
+    /// cells). A glue rebuild (`0x46a7b0`) seats the same cells: a `read*` option changed by a
+    /// console write is not read again, and an accept outlives the option it wrote.
+    #[test]
+    fn the_agreement_flags_are_seeded_once_and_a_rebuild_keeps_them() {
+        use crate::client_state::ClientState;
+        use benilla_ui::script::{GlueNotice, NoticeState};
+        let accepted = NoticeState {
+            accepted: true,
+            show_notice: false,
+        };
+        let flags = |world: &World| {
+            let script = world.non_send::<UiScript>();
+            GlueNotice::ALL.map(|n| script.glue_notice(n))
+        };
+        let mut world = World::new();
+        world.insert_resource(State::new(ClientState::Login));
+        world.insert_resource(crate::cvars::Cvars::with_value("readTOS", "1"));
+        world.init_non_send::<super::super::glue_mgr::SharedGlueMgr>();
+        setup_script(&mut world);
+        let seeded = [
+            accepted,
+            NoticeState::default(),
+            NoticeState::default(),
+            NoticeState::default(),
+        ];
+        assert_eq!(flags(&world), seeded, "the startup read");
+
+        // The options move with no accept; the next glue build does not read them.
+        {
+            let mut cvars = world.resource_mut::<crate::cvars::Cvars>();
+            cvars.set("readTOS", "0");
+            cvars.set("readEULA", "1");
+        }
+        install_glue_side_vm(&mut world, "login");
+        assert_eq!(flags(&world), seeded, "a rebuild keeps the cells");
+
+        // An accept stores its cell, and a rebuild after the option was reset keeps that too.
+        world
+            .non_send::<UiScript>()
+            .run("AcceptScanning()")
+            .unwrap();
+        world
+            .resource_mut::<crate::cvars::Cvars>()
+            .set("readScanning", "0");
+        install_glue_side_vm(&mut world, "login");
+        let mut want = seeded;
+        want[GlueNotice::Scanning as usize] = accepted;
+        assert_eq!(
+            flags(&world),
+            want,
+            "an accept outlives the option it wrote"
         );
     }
 

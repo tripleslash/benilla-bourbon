@@ -37,7 +37,10 @@ pub use ranges::{
     MOVING_BONUS_FLAGS, MOVING_RANGE_BONUS, ON_NEXT_SWING_RANGE,
 };
 pub use soft_float::modify as soft_modify;
-pub use tokens::{substitute, SpellMods, TokenContext, TokenNumber};
+pub use tokens::{
+    resolve_parts, substitute, substitute_parts, ExpandAt, SpellMods, TokenContext, TokenNumber,
+    TokenPart,
+};
 
 use std::collections::HashMap;
 
@@ -67,6 +70,7 @@ const COL_MANA_COST: usize = 32;
 const COL_MANA_COST_PCT: usize = 156;
 const COL_MANA_COST_PER_LEVEL: usize = 33;
 const COL_MANA_PER_SECOND: usize = 34;
+const COL_MANA_PER_SECOND_PER_LEVEL: usize = 35;
 /// `rangeIndex` (`+0x90`), resolved by `GetMinMaxRange` (`0x6e3480`).
 const COL_RANGE_INDEX: usize = 36;
 /// `modalNextSpell` (`+0x98`): 52 of its 57 nonzero rows are hunter shots naming Auto Shot.
@@ -171,6 +175,8 @@ const COL_PROC_CHARGES: usize = 26;
 const COL_STACK_AMOUNT: usize = 39;
 const COL_MAX_TARGET_LEVEL: usize = 159;
 const COL_MAX_AFFECTED_TARGETS: usize = 163;
+const COL_MIN_FACTION_ID: usize = 170;
+const COL_MIN_REPUTATION: usize = 171;
 const COL_DAMAGE_MULTIPLIER_1: usize = 167;
 const COL_EFFECT_POINTS_PER_COMBO_POINT_1: usize = 112;
 
@@ -568,6 +574,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 mana_cost_pct: u32_at(r, COL_MANA_COST_PCT).unwrap_or(0),
                 mana_cost_per_level: u32_at(r, COL_MANA_COST_PER_LEVEL).unwrap_or(0),
                 mana_per_second: u32_at(r, COL_MANA_PER_SECOND).unwrap_or(0),
+                mana_per_second_per_level: u32_at(r, COL_MANA_PER_SECOND_PER_LEVEL).unwrap_or(0),
                 range_index: u32_at(r, COL_RANGE_INDEX).unwrap_or(0),
                 modal_next_spell: u32_at(r, COL_MODAL_NEXT_SPELL).unwrap_or(0),
                 targets: u32_at(r, COL_TARGETS).unwrap_or(0),
@@ -616,6 +623,8 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 stack_amount: u32_at(r, COL_STACK_AMOUNT).unwrap_or(0),
                 max_target_level: u32_at(r, COL_MAX_TARGET_LEVEL).unwrap_or(0),
                 max_affected_targets: u32_at(r, COL_MAX_AFFECTED_TARGETS).unwrap_or(0),
+                min_faction_id: u32_at(r, COL_MIN_FACTION_ID).unwrap_or(0),
+                min_reputation: u32_at(r, COL_MIN_REPUTATION).unwrap_or(0),
                 effect_base_points: std::array::from_fn(|i| {
                     i32_at(r, COL_EFFECT_BASE_POINTS_1 + i).unwrap_or(0)
                 }),

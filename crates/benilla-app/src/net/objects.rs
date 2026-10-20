@@ -1,10 +1,11 @@
 //! The bridge's object layer: the streamed world's creates, deltas, moves and destroys, movers'
-//! speeds and modes, GameObject templates and anims, and items. Each packet is one handler over
-//! [`Scene`] whose commands apply before the next packet's, so a create's store and speeds are
-//! live components by the time the next packet reads them.
+//! speeds and modes, GameObject templates and anims, and items. Each event is one handler over
+//! [`Scene`] whose commands apply before the next event's, so a create's store and speeds are live
+//! components by the time the next block reads them. An `SMSG_UPDATE_OBJECT`'s blocks and its
+//! passes are [`update`]'s.
 use benilla_assets::coords::bevy_to_wow;
 use benilla_protocol::{
-    guid, EntityKind, MonsterMoveFacing, MoveSpeeds, ObjectFields, SpeedKind, SplineMode,
+    EntityKind, MonsterMoveFacing, MoveSpeeds, ObjectFields, SpeedKind, SplineMode,
 };
 use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::ecs::system::SystemParam;
@@ -14,7 +15,6 @@ use crate::go_templates::GameObjectTemplates;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::query_cache::Ask;
-use benilla_ui::script::UiScript;
 use benilla_world::model_fade::DespawnFade;
 use benilla_world::vis_chain::VisChainOnly;
 
@@ -23,10 +23,13 @@ use super::motion::{
     trace_create_spline, trace_move_snap, wire_yaw, write_pose, SplineStopped, ROOT_APPLY_WIPE,
 };
 use super::{
-    merge_store_fields, ActiveMover, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity,
-    NetHandlerApp, ObjectStore, RemoteMotion, SelfGuid, SpeedChangeMessage, Spline, UnitMoveModes,
-    UnitSpeeds,
+    ActiveMover, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity, NetHandlerApp, ObjectStore,
+    RemoteMotion, SelfGuid, SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
 };
+
+mod update;
+
+pub(crate) use update::{Listed, Released};
 
 /// `SMSG_GAMEOBJECT_CUSTOM_ANIM`, bridged to [`crate::go_anim`], which rejects `anim_id >= 4` and
 /// maps the rest to AnimationData 153..156; the fishing bobber's splash is `anim_id` 0.
@@ -44,7 +47,7 @@ fn gameobject_custom_anim(
 
 /// `SMSG_GAMEOBJECT_DESPAWN_ANIM`: AnimationData 157 on the one-shot channel (`0x5f8c50`).
 /// vmangos sends `SMSG_DESTROY_OBJECT` in the same tick, so the mark is a component queued now,
-/// ahead of the closure [`object_destroyed`] queues, not a message.
+/// ahead of the closure the destroy's handler queues, not a message.
 fn gameobject_despawn_anim(guid: u64, commands: &mut Commands, index: &GuidIndex) {
     debug!("net: gameobject {guid:#x} despawn anim");
     if let Some(&e) = index.0.get(&guid) {
@@ -57,17 +60,12 @@ fn gameobject_despawn_anim(guid: u64, commands: &mut Commands, index: &GuidIndex
 /// Registers the object layer's handlers.
 pub(super) fn register(app: &mut App) {
     use SessionEventKind as K;
-    app.net_handler(K::ObjectCreate, on_object_create)
-        .net_handler(K::ItemCreate, on_item)
-        .net_handler(K::ItemTemplate, on_item)
+    update::register(app);
+    app.net_handler(K::ItemTemplate, on_item)
         .net_handler(K::ItemTime, on_item)
         .net_handler(K::ItemEnchantTime, on_item)
-        .net_handler(K::ObjectMove, on_object_move)
         .net_handler(K::MoveTimeSkipped, on_move_time_skipped)
         .net_handler(K::UnitMove, on_unit_move)
-        .net_handler(K::ObjectValues, on_object_values)
-        .net_handler(K::ObjectDestroyed, on_object_destroyed)
-        .net_handler(K::ObjectsRemoved, on_objects_removed)
         .net_handler(K::MonsterMove, on_monster_move)
         .net_handler(K::GameObjectInfo, on_gameobject_info)
         .net_handler(K::GameObjectUnknown, on_gameobject_unknown)
@@ -93,6 +91,7 @@ pub(crate) struct Scene<'w, 's> {
     countdowns: Query<'w, 's, &'static mut crate::items::Countdowns>,
     remote: Query<'w, 's, &'static mut RemoteMotion>,
     modes: Query<'w, 's, &'static mut UnitMoveModes>,
+    xp_awarded: Query<'w, 's, (), With<crate::ui_chat::combat::watch::XpAwarded>>,
     riders: Query<'w, 's, &'static mut crate::transport::TransportRider>,
     speeds: Query<'w, 's, &'static mut UnitSpeeds>,
     field_changes: MessageWriter<'w, FieldChanged>,
@@ -108,6 +107,13 @@ pub(crate) struct Scene<'w, 's> {
     death_net: ResMut<'w, crate::death::DeathNet>,
     group: ResMut<'w, crate::ui_party::GroupState>,
     pet_bar: Option<Res<'w, crate::ui_pet::PetBar>>,
+    guilds: Option<ResMut<'w, crate::ui_guild::GuildState>>,
+    pass: ResMut<'w, update::UpdatePass>,
+    released: ResMut<'w, Released>,
+    nets: Query<'w, 's, &'static NetEntity>,
+    list: ResMut<'w, update::ObjectList>,
+    player: Option<Res<'w, crate::player::Player>>,
+    item_objects: Query<'w, 's, &'static crate::items::ItemObject>,
 }
 
 /// The item watchers' reads of the scene ([`crate::item_watch::Watch`]).
@@ -130,184 +136,11 @@ fn item_watch<'a, 'w, 's>(
     }
 }
 
-/// Run the watchers over one values block that merged into `guid`'s store: the item watchers and
-/// the field watches whose callbacks signal interface events ([`crate::field_watch`]).
-fn notify_values(sc: &mut Scene, guid: u64, edges: &[(u16, u32, u32)]) {
-    let Some(fields) = sc
-        .index
-        .0
-        .get(&guid)
-        .and_then(|&e| sc.stores.get(e).ok())
-        .map(|s| &s.0)
-    else {
-        return;
-    };
-    let Some(kind) = fields.created_as() else {
-        return;
-    };
-    let me = sc.self_guid.0;
-    let (names, index, stores, net) = (&sc.names, &sc.index, &sc.stores, &sc.net);
-    let others = || {
-        let units = index.0.iter().filter_map(|(&g, &e)| {
-            let s = stores.get(e).ok()?;
-            s.is_unit().then_some((g, &s.0))
-        });
-        me.map(|me| crate::field_watch::reaction_sweep(me, units))
-            .unwrap_or_default()
-    };
-    let around = crate::field_watch::Around {
-        me,
-        // An entry of 0 has no key (`0x556aad`).
-        creature_lookup: &|entry| {
-            names
-                .resolve_creature(entry, guid, Ask::Event(net))
-                .is_some()
-        },
-        others: &others,
-        pet_bar: sc.pet_bar.as_ref().map_or(0, |bar| bar.spells.pet_guid),
-    };
-    let fired = crate::field_watch::values(&around, guid, kind, fields, edges);
-    let notices = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items)
-        .values(guid, kind, fields, edges);
-    // An entry change that missed the cache asks and waits on the answer (`0x5d9652` asks with
-    // `0x5d96b0`).
-    for n in &notices {
-        if let crate::item_watch::ItemNotice::Entry {
-            guid,
-            new,
-            new_cached: false,
-            ..
-        } = *n
-        {
-            sc.items.template(new, guid, Ask::Event(&sc.net));
-            sc.items.wait_for_entry(guid, new);
-        }
-    }
-    sc.item_notices.write_batch(notices);
-    sc.field_notices.write_batch(fired);
-}
-
-fn on_object_create(In(ev): In<SessionEvent>, mut sc: Scene, script: Option<NonSend<UiScript>>) {
-    if let SessionEvent::ObjectCreate {
-        guid,
-        kind,
-        display_id,
-        position,
-        orientation,
-        scale,
-        speeds,
-        mover,
-        transport_progress,
-        transport,
-        spline,
-        fields,
-    } = ev
-    {
-        crate::death::net::note_corpse(guid, kind, &fields, &sc.self_guid, &mut sc.death_net);
-        let other_player =
-            (kind == EntityKind::Player && sc.self_guid.0 != Some(guid)).then(|| fields.clone());
-        // A player's first create runs `PostInit` (`0x5debe0`); a create of one already held runs
-        // its `PostUpdate` (`0x5dec90`) instead.
-        let first_player = kind == EntityKind::Player && !sc.index.0.contains_key(&guid);
-        let edges = object_create(
-            guid,
-            kind,
-            display_id,
-            position,
-            orientation,
-            scale,
-            speeds,
-            mover,
-            transport_progress,
-            transport,
-            spline,
-            fields,
-            &mut sc.commands,
-            &mut sc.index,
-            &mut sc.transforms,
-            &mut sc.stores,
-            &mut sc.field_changes,
-            &sc.names,
-            &sc.go_templates,
-            &sc.net,
-        );
-        notify_values(&mut sc, guid, &edges);
-        // `PostInit`'s guild tag (`0x5dec19`), ahead of its party record (`0x5dec5f`).
-        if first_player {
-            sc.field_notices
-                .write_batch(crate::field_watch::guild_tag(guid));
-        }
-        if let Some(fields) = other_player {
-            compare_party_record(&mut sc, guid, &fields, script.as_deref());
-        }
-    }
-}
-
-/// `CGPlayer_C::ComparePartyRecord` (`0x5f0b80`), which another player's `PostInit` runs on its
-/// create (`0x5dec5f`, the active player skipped at `0x5dec48`-`0x5dec5b`) and its reactivation
-/// on a re-create (`0x5decb7`): the stored party or raid record, an empty one off the roster
-/// (`0x5f0bfe`), against a live one built off the descriptor and the held pet (`0x5f0c0b`), the
-/// difference signalled through `0x5e5720` (`0x5f0c42`). Neither record is written back.
-fn compare_party_record(
-    sc: &mut Scene,
-    guid: u64,
-    fields: &ObjectFields,
-    script: Option<&UiScript>,
-) {
-    let old = sc.group.stats.get(&guid).cloned().unwrap_or_default();
-    let pet_guid = fields.unit_pet_guid();
-    let pet = pet_guid
-        .and_then(|g| sc.index.0.get(&g))
-        .and_then(|&e| sc.stores.get(e).ok());
-    let pet_name = pet_guid
-        .zip(pet)
-        .and_then(|(g, p)| sc.names.resolve_unit(g, Some(p), Ask::Read));
-    let pet_name = crate::ui_party::net::snapshot_pet_name(pet_name, script);
-    let mut live = old.clone();
-    live.snapshot_descriptor(fields, pet.map(|p| &p.0), &pet_name);
-    let notices = crate::ui_party::record_notices(guid, &old, &live);
-    sc.field_notices.write_batch(notices);
-}
-
-/// Items: a descriptor-only create, which asks for the item's record;
-/// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, whose refusal the next create or entry change of that entry
-/// asks again; and the lifetime and enchant countdowns, written into the item's own
-/// [`crate::items::Countdowns`].
+/// Items past their create block: `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, whose refusal the next
+/// create or entry change of that entry asks again; and the lifetime and enchant countdowns,
+/// written into the item's own [`crate::items::Countdowns`].
 fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
     match ev {
-        SessionEvent::ItemCreate {
-            guid,
-            container,
-            fields,
-        } => {
-            // A first create runs the item's create hook, the record set-up (`0x5d8400` →
-            // `0x5d8300`); a create of an object already shown (`+0xe4` bit 4, which the hook's
-            // `0x613af0` sets) runs the field watchers over every field instead (`0x465d79`).
-            let first = !sc.index.0.contains_key(&guid);
-            let hook = first
-                .then(|| {
-                    item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items)
-                        .created(guid, &fields)
-                })
-                .flatten();
-            // The set-up asks for the record of every item, whoever's, with the callback
-            // `0x5d8390` (`0x5d8300` into `0x55ba30`): the readers of a held item only read it.
-            if let Some(entry) = fields.object_entry().filter(|_| first) {
-                sc.items.template(entry, guid, Ask::Event(&sc.net));
-            }
-            let edges = item_create(
-                guid,
-                container,
-                fields,
-                &mut sc.commands,
-                &mut sc.index,
-                &mut sc.stores,
-                &mut sc.field_changes,
-                &mut sc.items,
-            );
-            sc.item_notices.write_batch(hook);
-            notify_values(&mut sc, guid, &edges);
-        }
         SessionEvent::ItemTemplate { entry, info } => {
             let info = info.map(|b| *b);
             debug!("net: item template {entry} → {info:?}");
@@ -380,25 +213,6 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
     }
 }
 
-fn on_object_move(In(ev): In<SessionEvent>, mut sc: Scene) {
-    if let SessionEvent::ObjectMove {
-        guid,
-        position,
-        orientation,
-    } = ev
-    {
-        object_move(
-            guid,
-            position,
-            orientation,
-            &mut sc.commands,
-            &sc.index,
-            &mut sc.transforms,
-            &sc.movers,
-        );
-    }
-}
-
 /// An observed mover skipped time: only its relay chain moves, as the reference's handler does
 /// (`0x603b40` → `0x61ab90`, `[CMovement+0xac] += lag`); an unknown guid is dropped, as there.
 fn on_move_time_skipped(In(ev): In<SessionEvent>, mut sc: Scene) {
@@ -451,72 +265,6 @@ fn on_unit_move(In(ev): In<SessionEvent>, mut sc: Scene) {
             &mut sc.hard_landings,
             &mut sc.self_moves,
         );
-    }
-}
-
-/// Our corpse's `CORPSE_FIELD_FLAGS` can flip to BONES under a live guid; the reclaim latch is
-/// re-asked on that edge, as the reference's `FLAGS` handler does (`0x5d6d60`).
-fn on_object_values(In(ev): In<SessionEvent>, mut sc: Scene) {
-    if let SessionEvent::ObjectValues { guid, fields } = ev {
-        crate::death::net::recheck_corpse(guid, &fields, &sc.self_guid, &mut sc.death_net);
-        let edges = object_values(
-            guid,
-            fields,
-            &mut sc.commands,
-            &sc.index,
-            &mut sc.stores,
-            &mut sc.field_changes,
-        );
-        notify_values(&mut sc, guid, &edges);
-    }
-}
-
-/// The party hook runs first: the reference's deactivate reads the descriptor about to go, as
-/// the item's does (`0x5d8660`).
-fn on_object_destroyed(In(ev): In<SessionEvent>, mut sc: Scene, script: Option<NonSend<UiScript>>) {
-    if let SessionEvent::ObjectDestroyed(guid) = ev {
-        crate::death::net::forget_corpse(guid, &mut sc.death_net);
-        let gone = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items).destroyed(guid);
-        sc.item_notices.write_batch(gone);
-        let held = |g: u64| sc.index.0.get(&g).and_then(|e| sc.stores.get(*e).ok());
-        crate::ui_party::net::member_deactivated(
-            guid,
-            &mut sc.group,
-            held(guid),
-            held,
-            &sc.names,
-            script.as_deref(),
-            &sc.net,
-        );
-        object_destroyed(guid, &mut sc.commands, &mut sc.index);
-    }
-}
-
-/// OUT_OF_RANGE takes the same deactivate as DESTROY in the reference, so a member walking out of
-/// range also gets the snapshot and `CMSG_REQUEST_PARTY_MEMBER_STATS`.
-///
-/// The active player is never released: the reference compares each listed guid with
-/// `ClntObjMgrGetActivePlayer` (`0x465f39` → `0x468550`, `0x465f3e`, `0x465f42`) and jumps past
-/// `0x464920` (`0x465f45` → `0x465f54`), the deactivate included; a player's guid is outside the
-/// second round's types (`0x465f19`, `0x465f28`), so no later pass reaches it.
-fn on_objects_removed(In(ev): In<SessionEvent>, mut sc: Scene, script: Option<NonSend<UiScript>>) {
-    if let SessionEvent::ObjectsRemoved(mut guids) = ev {
-        guids.retain(|g| sc.self_guid.0 != Some(*g));
-        for guid in &guids {
-            let gone = item_watch(&sc.index, &sc.stores, &sc.self_guid, &sc.items).destroyed(*guid);
-            sc.item_notices.write_batch(gone);
-            let held = |g: u64| sc.index.0.get(&g).and_then(|e| sc.stores.get(*e).ok());
-            crate::ui_party::net::member_deactivated(
-                *guid,
-                &mut sc.group,
-                held(*guid),
-                held,
-                &sc.names,
-                script.as_deref(),
-                &sc.net,
-            );
-        }
-        objects_removed(guids, &mut sc.commands, &mut sc.index);
     }
 }
 
@@ -634,30 +382,54 @@ fn on_speed(In(ev): In<SessionEvent>, mut sc: Scene) {
     }
 }
 
-/// An `SMSG_UPDATE_OBJECT` create block: spawns or refreshes the entity, warms the ask-once
-/// caches and seeds its descriptor store.
+/// A placed object's create block past its fields: what it is, where, and how it moves.
+pub(super) struct CreateBlock {
+    pub(super) guid: u64,
+    pub(super) kind: EntityKind,
+    pub(super) display_id: Option<u32>,
+    pub(super) position: [f32; 3],
+    pub(super) orientation: f32,
+    pub(super) scale: f32,
+    pub(super) speeds: Option<MoveSpeeds>,
+    pub(super) mover: Option<benilla_protocol::MoverState>,
+    pub(super) transport_progress: Option<u32>,
+    pub(super) transport: Option<benilla_protocol::TransportPose>,
+    pub(super) spline: Option<benilla_protocol::CreateSpline>,
+}
+
+/// Where a create block's object lands.
+pub(super) enum Landing {
+    /// A held object, refreshed in place; the caller writes its store.
+    Live(Entity),
+    /// A new entity with `store`: an object allocated now, or a released one brought back, which
+    /// keeps `kept_pose` when its type takes no position from the block.
+    New {
+        store: ObjectFields,
+        kept_pose: Option<Transform>,
+    },
+}
+
+/// An `SMSG_UPDATE_OBJECT` create block's placement: spawns or refreshes the entity and warms the
+/// ask-once caches off the block's `fields`. Returns the entity.
 fn object_create(
-    guid: u64,
-    kind: EntityKind,
-    display_id: Option<u32>,
-    position: [f32; 3],
-    orientation: f32,
-    scale: f32,
-    speeds: Option<MoveSpeeds>,
-    mover: Option<benilla_protocol::MoverState>,
-    transport_progress: Option<u32>,
-    transport: Option<benilla_protocol::TransportPose>,
-    spline: Option<benilla_protocol::CreateSpline>,
-    fields: ObjectFields,
-    commands: &mut Commands,
-    index: &mut GuidIndex,
-    transforms: &mut Query<&mut Transform>,
-    stores: &mut Query<&mut ObjectStore>,
-    edges: &mut MessageWriter<FieldChanged>,
-    names: &NameCache,
-    go_templates: &GameObjectTemplates,
-    net_commands: &NetCommands,
-) -> Vec<(u16, u32, u32)> {
+    sc: &mut Scene,
+    block: CreateBlock,
+    fields: &ObjectFields,
+    landing: Landing,
+) -> Entity {
+    let CreateBlock {
+        guid,
+        kind,
+        display_id,
+        position,
+        orientation,
+        scale,
+        speeds,
+        mover,
+        transport_progress,
+        transport,
+        spline,
+    } = block;
     let net = NetEntity {
         kind,
         display_id,
@@ -715,12 +487,12 @@ fn object_create(
     // record's field 0 (`0x60934b`). Its `CreatureCache.wdb` answers without the wire; ours lasts
     // a session.
     if matches!(kind, EntityKind::Unit | EntityKind::Player) {
-        names.lookup_fields(guid, &fields, net_commands);
+        sc.names.lookup_fields(guid, fields, &sc.net);
     }
     // Warm the template cache as a GameObject streams in: only the query carries its lockId,
     // which decides use-vs-cast on a right-click.
     if matches!(kind, EntityKind::GameObject) {
-        go_templates.request_at_create(guid, &fields, net_commands);
+        sc.go_templates.request_at_create(guid, fields, &sc.net);
         // Where and how big, under `RUST_LOG=benilla_app::net::objects=debug`.
         debug!(
             "gameobject spawn: entry {:?} display {display_id:?} type {go_type:?} \
@@ -735,114 +507,89 @@ fn object_create(
     // `WOW_CREATE_SPLINE=off` run still records what the wire offered.
     trace_create_spline(guid, spline.as_ref());
     let walk = spline.and_then(create_spline);
-    if let Some(&e) = index.0.get(&guid) {
-        // A re-create is a fresh snapshot: refresh identity and a unit's pose, drop any extrapolation.
-        commands.entity(e).insert(net).remove::<RemoteMotion>();
-        // The set is replaced whole; a `SMSG_FORCE_*_SPEED_CHANGE` in the same tick lands on top,
-        // since this insert applies before the next packet's handler (`apply::seam_tests`).
-        if let Some(s) = speeds {
-            commands.entity(e).insert(UnitSpeeds(s));
-        }
-        if let Some(anchor) = transport_anchor {
-            commands.entity(e).insert(anchor);
-        }
-        if let Some(seed) = elevator_seed {
-            commands.entity(e).insert(seed);
-        }
-        match rider {
-            Some(r) => {
-                commands.entity(e).insert(r);
+    let commands = &mut sc.commands;
+    match landing {
+        Landing::Live(e) => {
+            // A re-create is a fresh snapshot: refresh identity and a unit's pose, drop any
+            // extrapolation.
+            commands.entity(e).insert(net).remove::<RemoteMotion>();
+            // The set is replaced whole; a `SMSG_FORCE_*_SPEED_CHANGE` in the same tick lands on
+            // top, since this insert applies before the next packet's handler
+            // (`apply::seam_tests`).
+            if let Some(s) = speeds {
+                commands.entity(e).insert(UnitSpeeds(s));
             }
-            None => {
-                commands
-                    .entity(e)
-                    .remove::<crate::transport::TransportRider>();
+            if let Some(anchor) = transport_anchor {
+                commands.entity(e).insert(anchor);
             }
-        }
-        // A create without a path says the unit stands still, so a stale path goes.
-        match walk {
-            Some(s) => {
-                commands.entity(e).insert(s);
+            if let Some(seed) = elevator_seed {
+                commands.entity(e).insert(seed);
             }
-            None => {
-                commands.entity(e).remove::<Spline>();
-            }
-        }
-        // Only a unit takes the block's movement (type-mask bit 3, `0x46638c`); any other type
-        // reads the position and drops it (`0x4664c3`..`0x46656b`), so it stays where it stands.
-        if matches!(kind, EntityKind::Unit | EntityKind::Player) {
-            write_pose(commands, transforms, e, position, placement);
-        }
-        // The reference refreshes a live guid in place, notifying field watchers like any delta.
-        merge_fields(commands, stores, edges, e, guid, fields)
-    } else {
-        // A transport spawns hidden: its create pose is the spawn point, not where it is in its
-        // cycle; the transport tick unhides it at the first sampled pose.
-        let visibility = if transport_anchor.is_some() {
-            Visibility::Hidden
-        } else {
-            Visibility::default()
-        };
-        let mut entity = commands.spawn((
-            Guid(guid),
-            net,
-            pose_transform(position, placement),
-            visibility,
-        ));
-        // Chain-only visibility: the root renders nothing itself, and culling flips its
-        // `Visibility` through `Mut` writes, which do not re-add the sweep row.
-        entity.vis_chain_only();
-        if let Some(s) = speeds {
-            entity.insert(UnitSpeeds(s));
-        }
-        if let Some(anchor) = transport_anchor {
-            entity.insert(anchor);
-        }
-        if let Some(seed) = elevator_seed {
-            entity.insert(seed);
-        }
-        if let Some(r) = rider {
-            entity.insert(r);
-        }
-        if let Some(s) = walk {
-            entity.insert(s);
-        }
-        // The seed is not merged: the reference does not notify on create.
-        entity.insert(ObjectStore(fields));
-        index.0.insert(guid, entity.id());
-        Vec::new()
-    }
-}
-
-/// A descriptor-only item or container create: an indexed entity with a store and no pose or
-/// model; a re-create merges like a values delta.
-fn item_create(
-    guid: u64,
-    container: bool,
-    fields: ObjectFields,
-    commands: &mut Commands,
-    index: &mut GuidIndex,
-    stores: &mut Query<&mut ObjectStore>,
-    edges: &mut MessageWriter<FieldChanged>,
-    items: &mut Items,
-) -> Vec<(u16, u32, u32)> {
-    debug!("net: item create {guid:#x} (container: {container})");
-    if let Some(&e) = index.0.get(&guid) {
-        merge_fields(commands, stores, edges, e, guid, fields)
-    } else {
-        let e = crate::items::spawn_item(commands, index, guid, fields, container);
-        // Replay the enchant times queued while it was not held (`0x5ebde0`), as of now.
-        let queued = items.take_enchant_times(guid);
-        if !queued.is_empty() {
-            let mut countdowns = crate::items::Countdowns::default();
-            for (slot, seconds) in queued {
-                if !countdowns.set_enchant(slot, seconds) {
-                    debug!("enchant timer: queued slot {slot} for {guid:#x} is past the seventh — refused");
+            match rider {
+                Some(r) => {
+                    commands.entity(e).insert(r);
+                }
+                None => {
+                    commands
+                        .entity(e)
+                        .remove::<crate::transport::TransportRider>();
                 }
             }
-            commands.entity(e).insert(countdowns);
+            // A create without a path says the unit stands still, so a stale path goes.
+            match walk {
+                Some(s) => {
+                    commands.entity(e).insert(s);
+                }
+                None => {
+                    commands.entity(e).remove::<Spline>();
+                }
+            }
+            // Only a unit takes the block's movement (type-mask bit 3, `0x46638c`); any other type
+            // reads the position and drops it (`0x4664c3`..`0x46656b`), so it stays where it
+            // stands.
+            if matches!(kind, EntityKind::Unit | EntityKind::Player) {
+                write_pose(commands, &mut sc.transforms, e, position, placement);
+            }
+            e
         }
-        Vec::new()
+        Landing::New { store, kept_pose } => {
+            // A transport spawns hidden: its create pose is the spawn point, not where it is in
+            // its cycle; the transport tick unhides it at the first sampled pose.
+            let visibility = if transport_anchor.is_some() {
+                Visibility::Hidden
+            } else {
+                Visibility::default()
+            };
+            let mut entity = commands.spawn((
+                Guid(guid),
+                net,
+                kept_pose.unwrap_or_else(|| pose_transform(position, placement)),
+                visibility,
+                ObjectStore(store),
+                sc.list.link(),
+            ));
+            // Chain-only visibility: the root renders nothing itself, and culling flips its
+            // `Visibility` through `Mut` writes, which do not re-add the sweep row.
+            entity.vis_chain_only();
+            if let Some(s) = speeds {
+                entity.insert(UnitSpeeds(s));
+            }
+            if let Some(anchor) = transport_anchor {
+                entity.insert(anchor);
+            }
+            if let Some(seed) = elevator_seed {
+                entity.insert(seed);
+            }
+            if let Some(r) = rider {
+                entity.insert(r);
+            }
+            if let Some(s) = walk {
+                entity.insert(s);
+            }
+            let e = entity.id();
+            sc.index.0.insert(guid, e);
+            e
+        }
     }
 }
 
@@ -850,7 +597,7 @@ fn item_create(
 /// this client moves, our player or a possessed unit ([`ActiveMover`]), drops it: the reference
 /// compares the block's guid with the active mover before it looks the object up (`0x4670a5`,
 /// `0x4670ae`, `0x4670b5`), and returns on a match (`0x4670bb`).
-fn object_move(
+pub(super) fn object_move(
     guid: u64,
     position: [f32; 3],
     orientation: f32,
@@ -979,71 +726,14 @@ fn unit_move(
     }
 }
 
-/// An `SMSG_UPDATE_OBJECT` values block, merged into any object's store; an unknown guid drops.
-/// The changed dwords come back as `(index, old, new)`.
-fn object_values(
-    guid: u64,
-    fields: ObjectFields,
-    commands: &mut Commands,
-    index: &GuidIndex,
-    stores: &mut Query<&mut ObjectStore>,
-    edges: &mut MessageWriter<FieldChanged>,
-) -> Vec<(u16, u32, u32)> {
-    match index.0.get(&guid) {
-        Some(&e) => merge_fields(commands, stores, edges, e, guid, fields),
-        None => Vec::new(),
-    }
-}
-
-/// `SMSG_DESTROY_OBJECT`: corpse decay ahead of respawn, or a despawn.
-fn object_destroyed(guid: u64, commands: &mut Commands, index: &mut GuidIndex) {
-    // The object is freed now and its model fades out, as the reference's OnDeactivate
-    // (`0x6145e0`, called by `0x464920` on DESTROY and OUT_OF_RANGE alike) hands the model to the
-    // `SWModelFadeout` scheduler (`0x672df0`). The guid leaves the index at once ([`tear_down`]).
-    //
-    // A pinned object only gets its pending-destroy bit and is freed when the last pin drops
-    // (`0x464920`, `0x468410`). Our one pin is an announced `SMSG_GAMEOBJECT_DESPAWN_ANIM`, whose
-    // end runs the deferred teardown ([`crate::go_anim::release_despawn_pin`]).
-    if let Some(e) = index.0.remove(&guid) {
-        // An item has no model to fade, so it goes now with its countdown cells.
-        if guid::is_item(guid) {
-            commands.entity(e).despawn();
-            return;
-        }
-        commands.queue(move |world: &mut bevy::ecs::world::World| {
-            if world
-                .get::<crate::go_anim::DespawnAnimAnnounced>(e)
-                .is_some()
-            {
-                if let Ok(mut ent) = world.get_entity_mut(e) {
-                    ent.insert(crate::go_anim::PendingDestroy);
-                }
-            } else if let Ok(ent) = world.get_entity_mut(e) {
-                tear_down(ent);
-            }
-        });
-    }
-}
-
-/// The `OutOfRange` block: the object still exists, out of our range.
-fn objects_removed(guids: Vec<u64>, commands: &mut Commands, index: &mut GuidIndex) {
-    // Faded, not popped: OUT_OF_RANGE reaches `0x464920` like DESTROY, and the object ends now
-    // while its model fades ([`tear_down`]).
-    for g in guids {
-        if let Some(e) = index.0.remove(&g) {
-            commands.entity(e).queue(tear_down);
-        }
-    }
-}
-
-/// An object's teardown, the reference's `0x464920`: the object is freed and its detached model
-/// fades out ([`DespawnFade`]); its OnDeactivate (`0x5fbb60` → `0x493910`) clears the selection
-/// and sends `CMSG_SET_SELECTION 0` at once.
+/// An object leaving the live table, released or destroyed (`0x464920`): its detached model fades
+/// out ([`DespawnFade`]); its OnDeactivate (`0x5fbb60` → `0x493910`) clears the selection and
+/// sends `CMSG_SET_SELECTION 0` at once.
 ///
 /// The model stays on the same entity, so removing its [`Guid`] is what ends the object for every
 /// consumer; the [`NetEntity`] and [`ObjectStore`] stay so the model draws out (a decaying corpse
-/// stays lying down). The caller has already removed the guid from the [`GuidIndex`], so a
-/// same-tick re-create spawns a fresh object beside the fading model.
+/// stays lying down). The caller has already removed the guid from the [`GuidIndex`], so a block
+/// that brings the object back spawns a fresh entity beside the fading model.
 pub(crate) fn tear_down(mut ent: EntityWorldMut) {
     ent.remove::<Guid>();
     ent.insert(DespawnFade::default());
@@ -1254,31 +944,6 @@ fn gameobject_info(
     go_templates.insert(entry, type_id, name, data);
 }
 
-/// Merges a descriptor delta into an object's store and reports its [`FieldChanged`] edges. An
-/// indexed entity with no store should not happen, and is seeded from the delta.
-fn merge_fields(
-    commands: &mut Commands,
-    stores: &mut Query<&mut ObjectStore>,
-    edges: &mut MessageWriter<FieldChanged>,
-    entity: Entity,
-    guid: u64,
-    delta: ObjectFields,
-) -> Vec<(u16, u32, u32)> {
-    let mut moved = Vec::new();
-    if let Ok(mut s) = stores.get_mut(entity) {
-        merge_store_fields(&mut s.0, delta, entity, guid, |e| {
-            moved.push((e.index, e.old, e.new));
-            edges.write(e);
-        });
-    } else {
-        warn!(
-            "net: values delta for {guid:#x} found no store on its entity — seeding from the delta"
-        );
-        commands.entity(entity).insert(ObjectStore(delta));
-    }
-    moved
-}
-
 /// Writes one slot of a mover's [`UnitSpeeds`]; `false` when there is none (an untracked guid,
 /// or a create with no movement block). vmangos sends a self create and a speed change back to
 /// back (`HandleMoveWorldportAckOpcode`), and wire order holds as each handler applies in turn.
@@ -1353,6 +1018,36 @@ fn speed_changed(
     }
 }
 
+/// One update packet's events, as the protocol decodes them: its blocks, then its end.
+#[cfg(test)]
+pub(crate) fn packet(blocks: impl IntoIterator<Item = SessionEvent>) -> Vec<SessionEvent> {
+    blocks
+        .into_iter()
+        .chain([SessionEvent::ObjectUpdateEnd])
+        .collect()
+}
+
+/// `events` as the wire brings them one packet each: every update block closed as its own packet,
+/// any other event as it is.
+#[cfg(test)]
+pub(crate) fn wire(events: impl IntoIterator<Item = SessionEvent>) -> Vec<SessionEvent> {
+    events
+        .into_iter()
+        .flat_map(|ev| {
+            let block = matches!(
+                ev,
+                SessionEvent::ObjectCreate { .. }
+                    | SessionEvent::ItemCreate { .. }
+                    | SessionEvent::ObjectValues { .. }
+                    | SessionEvent::ObjectMove { .. }
+                    | SessionEvent::ObjectsRemoved(_)
+                    | SessionEvent::ObjectsNear(_)
+            );
+            std::iter::once(ev).chain(block.then_some(SessionEvent::ObjectUpdateEnd))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod update_tests;
 
@@ -1360,6 +1055,7 @@ mod update_tests;
 mod tests {
     use super::*;
     use crate::net::ClientCommand;
+    use benilla_protocol::guid;
 
     /// The object packets run the item watchers in wire order: the create hook, a values block,
     /// a seat of ours, a late record, the destroy; another player's item and a resend run none.
@@ -1405,7 +1101,7 @@ mod tests {
         let pack_1 = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 23;
         super::super::handlers::dispatch(
             world,
-            vec![
+            super::wire(vec![
                 create(POTIONS, POTION, ME),
                 create(SCROLL, SCROLL_ID, ME),
                 create(THEIRS, POTION, 0x8),
@@ -1434,7 +1130,7 @@ mod tests {
                 },
                 SessionEvent::ObjectDestroyed(POTIONS),
                 SessionEvent::ObjectDestroyed(THEIRS),
-            ],
+            ]),
         );
         let notices: Vec<ItemNotice> = world
             .resource_mut::<Messages<ItemNotice>>()
@@ -1485,7 +1181,10 @@ mod tests {
             entry,
             info: ok.then(|| Box::new(crate::items::test_template("Thing"))),
         };
-        super::super::handlers::dispatch(world, vec![answer(4306, true), answer(7777, false)]);
+        super::super::handlers::dispatch(
+            world,
+            super::wire(vec![answer(4306, true), answer(7777, false)]),
+        );
         let notices: Vec<ItemNotice> = world
             .resource_mut::<Messages<ItemNotice>>()
             .drain()
@@ -1499,14 +1198,17 @@ mod tests {
             "one per call that asked, none for the refusal"
         );
         // The callbacks are spent: a second answer, or the refused entry's later one, runs none.
-        super::super::handlers::dispatch(world, vec![answer(4306, true), answer(7777, true)]);
+        super::super::handlers::dispatch(
+            world,
+            super::wire(vec![answer(4306, true), answer(7777, true)]),
+        );
         assert!(world
             .resource_mut::<Messages<ItemNotice>>()
             .drain()
             .next()
             .is_none());
         // The one still waiting runs on its own answer.
-        super::super::handlers::dispatch(world, vec![answer(2592, true)]);
+        super::super::handlers::dispatch(world, super::wire(vec![answer(2592, true)]));
         assert_eq!(
             world
                 .resource_mut::<Messages<ItemNotice>>()
@@ -1517,8 +1219,8 @@ mod tests {
     }
 
     /// The object packets run the field watches per block in wire order: our first create none
-    /// (`0x465d80`), a values block each watch it moved once, a re-create of a live guid like a
-    /// values block (`0x465d8e`); another unit only its bridge.
+    /// (`0x465d80`), a values block each watch it moved once, a create of an object already shown
+    /// each watch it moved over every field (`0x465d8e`); another unit only its bridge.
     #[test]
     fn the_object_packets_write_the_field_watches_notices_per_block() {
         use crate::field_watch::FieldNotice;
@@ -1563,10 +1265,10 @@ mod tests {
         };
         super::super::handlers::dispatch(
             world,
-            vec![
+            super::wire(vec![
                 create(ME, EntityKind::Player, &[(STAT0, 20), (XP, 10)]),
                 create(MOB, EntityKind::Unit, &[(STAT0, 5)]),
-            ],
+            ]),
         );
         assert_eq!(
             drain(world),
@@ -1575,15 +1277,15 @@ mod tests {
         );
         super::super::handlers::dispatch(
             world,
-            vec![
+            super::wire(vec![
                 values(ME, &[(XP, 30)]),
                 values(MOB, &[(STAT0, 6), (STAT0 + 1, 2)]),
                 // Two blocks on one watch: two runs.
                 values(ME, &[(XP, 40)]),
                 values(ME, &[(STAT0, 21), (XP, 40)]),
-                // A re-create compares like a values block.
+                // A create of the shown player runs each watch it moved, over every field.
                 create(ME, EntityKind::Player, &[(STAT0, 21), (XP, 50)]),
-            ],
+            ]),
         );
         assert_eq!(
             drain(world),
@@ -1598,9 +1300,10 @@ mod tests {
         );
     }
 
-    /// A player's first create runs its guild tag (`0x5dec19`), a re-create does not; another
-    /// player's create, first or again, then compares its party record with its descriptor and
-    /// signals the difference, writing nothing back; our own create compares nothing.
+    /// A player's first create runs its `PostInit` (`0x5debe0`): its guild tag (`0x5dec19`), then,
+    /// for another player, its party record against its descriptor, the difference signalled and
+    /// nothing written back (`0x5dec5f`). A create of a live player is neither a first create nor
+    /// a reactivation, so it runs neither; our own create compares nothing.
     #[test]
     fn another_players_create_signals_its_record_against_its_descriptor() {
         use crate::field_watch::FieldNotice;
@@ -1650,21 +1353,24 @@ mod tests {
                 .collect()
         };
         let mate = [(HEALTH, 100), (MAXHEALTH, 200), (LEVEL, 60)];
-        super::super::handlers::dispatch(world, vec![create(MATE, &mate)]);
+        super::super::handlers::dispatch(world, super::wire(vec![create(MATE, &mate)]));
         let signal = |id| FieldNotice::Signal { guid: MATE, id };
         assert_eq!(
             drain(world),
             [FieldNotice::Global { id: 376 }, signal(345), signal(22)],
             "the guild tag, then the maximum differs"
         );
-        // Written back nothing, so a re-create of the same descriptor signals the same again.
-        super::super::handlers::dispatch(world, vec![create(MATE, &mate)]);
-        assert_eq!(drain(world), [signal(22)]);
+        super::super::handlers::dispatch(world, super::wire(vec![create(MATE, &mate)]));
+        assert_eq!(
+            drain(world),
+            [],
+            "a live re-create: no hook, no `PostUpdate`"
+        );
         assert_eq!(
             world.resource::<crate::ui_party::GroupState>().stats[&MATE],
             record
         );
-        super::super::handlers::dispatch(world, vec![create(ME, &mate)]);
+        super::super::handlers::dispatch(world, super::wire(vec![create(ME, &mate)]));
         assert_eq!(
             drain(world),
             crate::field_watch::guild_tag(ME),
@@ -1691,9 +1397,8 @@ mod tests {
             .insert_template(118, Some(crate::items::test_template("Potion")));
         let creates = items
             .iter()
-            .map(|&(guid, entry, container)| watched_item(guid, entry, container))
-            .collect();
-        super::super::handlers::dispatch(world, creates);
+            .map(|&(guid, entry, container)| watched_item(guid, entry, container));
+        super::super::handlers::dispatch(world, super::wire(creates));
         drain_notices(world);
         app
     }
@@ -1754,7 +1459,7 @@ mod tests {
                 .collect()
         };
         let dispatch = |app: &mut App, ev: SessionEvent| {
-            super::super::handlers::dispatch(app.world_mut(), vec![ev]);
+            super::super::handlers::dispatch(app.world_mut(), super::wire(vec![ev]));
         };
         dispatch(&mut app, watched_item(A, 955, false));
         assert_eq!(asked(&rx), [955], "the create asks");
@@ -1798,7 +1503,7 @@ mod tests {
             entry,
             info: known.then(|| Box::new(crate::items::test_template("Scroll"))),
         };
-        super::super::handlers::dispatch(world, vec![to(955), answer(955, true)]);
+        super::super::handlers::dispatch(world, super::wire(vec![to(955), answer(955, true)]));
         assert_eq!(
             drain_notices(world),
             [
@@ -1814,7 +1519,7 @@ mod tests {
                 },
             ]
         );
-        super::super::handlers::dispatch(world, vec![to(956), answer(956, false)]);
+        super::super::handlers::dispatch(world, super::wire(vec![to(956), answer(956, false)]));
         assert_eq!(
             drain_notices(world),
             [ItemNotice::Entry {
@@ -1848,7 +1553,7 @@ mod tests {
 
         super::super::handlers::dispatch(
             world,
-            vec![SessionEvent::GameObjectUnknown { entry: ENTRY }],
+            super::wire(vec![SessionEvent::GameObjectUnknown { entry: ENTRY }]),
         );
         let templates = world.resource::<GameObjectTemplates>();
         assert!(
@@ -1912,14 +1617,14 @@ mod tests {
             |counter: u64| counter | (u64::from(ENTRY) << 24) | (u64::from(guid::HIGH_UNIT) << 48);
         let (a, b) = (unit(1), unit(2));
 
-        super::super::handlers::dispatch(app.world_mut(), vec![create(a)]);
+        super::super::handlers::dispatch(app.world_mut(), super::wire(vec![create(a)]));
         assert_eq!(creature_asks(&rx), 1, "the create asks");
         app.world_mut()
             .resource_mut::<NameCache>()
             .insert_creature(ENTRY, None);
         assert_eq!(creature_asks(&rx), 0, "the refusal itself asks nothing");
 
-        super::super::handlers::dispatch(app.world_mut(), vec![create(b)]);
+        super::super::handlers::dispatch(app.world_mut(), super::wire(vec![create(b)]));
         assert_eq!(creature_asks(&rx), 1, "a new unit of it asks again");
     }
 
@@ -1935,7 +1640,7 @@ mod tests {
         let mob = (u64::from(OLD) << 24) | (u64::from(guid::HIGH_UNIT) << 48) | 1;
         super::super::handlers::dispatch(
             app.world_mut(),
-            vec![SessionEvent::ObjectCreate {
+            super::wire(vec![SessionEvent::ObjectCreate {
                 guid: mob,
                 kind: EntityKind::Unit,
                 display_id: None,
@@ -1949,15 +1654,15 @@ mod tests {
                 spline: None,
                 fields: ObjectFields::from_pairs(&[(3, OLD)])
                     .into_created(benilla_protocol::messages::ObjectType::Unit),
-            }],
+            }]),
         );
         let _ = rx.try_iter().count();
         super::super::handlers::dispatch(
             app.world_mut(),
-            vec![SessionEvent::ObjectValues {
+            super::wire(vec![SessionEvent::ObjectValues {
                 guid: mob,
                 fields: ObjectFields::from_pairs(&[(3, NEW)]),
-            }],
+            }]),
         );
         assert!(
             rx.try_iter().any(
@@ -1987,7 +1692,7 @@ mod tests {
             container: false,
             fields: fields.into_created(ObjectType::Item),
         };
-        super::super::handlers::dispatch(world, vec![again]);
+        super::super::handlers::dispatch(world, super::wire(vec![again]));
         assert_eq!(
             drain_notices(world),
             [ItemNotice::StackCount {
@@ -2007,7 +1712,7 @@ mod tests {
         let world = app.world_mut();
         super::super::handlers::dispatch(
             world,
-            vec![SessionEvent::ObjectsRemoved(vec![WATCH_ME, POTIONS])],
+            super::wire(vec![SessionEvent::ObjectsRemoved(vec![WATCH_ME, POTIONS])]),
         );
         assert_eq!(
             drain_notices(world),
@@ -2038,7 +1743,7 @@ mod tests {
         let bag_seat = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 19;
         super::super::handlers::dispatch(
             world,
-            vec![
+            super::wire(vec![
                 seat(1, POTIONS),
                 SessionEvent::ObjectValues {
                     guid: WATCH_ME,
@@ -2049,7 +1754,7 @@ mod tests {
                 },
                 seat(1, 0),
                 seat(2, POTIONS),
-            ],
+            ]),
         );
         assert_eq!(
             drain_notices(world),
@@ -2091,14 +1796,14 @@ mod tests {
         // No active player: the enchant update has nowhere to wait.
         super::super::handlers::dispatch(
             world,
-            vec![
+            super::wire(vec![
                 SessionEvent::ItemEnchantTime {
                     item_guid: STONE,
                     slot: 1,
                     seconds: 60,
                 },
                 create(STONE),
-            ],
+            ]),
         );
         assert_eq!(
             cells(world, STONE),
@@ -2112,7 +1817,7 @@ mod tests {
         world.resource_mut::<SelfGuid>().0 = Some(ME);
         super::super::handlers::dispatch(
             world,
-            vec![
+            super::wire(vec![
                 SessionEvent::ItemEnchantTime {
                     item_guid: SWORD,
                     slot: 1,
@@ -2122,10 +1827,10 @@ mod tests {
                     item_guid: SWORD,
                     seconds: 600,
                 },
-            ],
+            ]),
         );
         assert_eq!(cells(world, SWORD), None, "nothing held yet");
-        super::super::handlers::dispatch(world, vec![create(SWORD)]);
+        super::super::handlers::dispatch(world, super::wire(vec![create(SWORD)]));
         let c = cells(world, SWORD).expect("the create spawned the item with its cells");
         assert!(
             c.enchant_remaining_ms(1)
@@ -2141,7 +1846,7 @@ mod tests {
         // Held now: both arms write the cells directly; a slot past the array writes nothing.
         super::super::handlers::dispatch(
             world,
-            vec![
+            super::wire(vec![
                 SessionEvent::ItemTime {
                     item_guid: SWORD,
                     seconds: 600,
@@ -2151,7 +1856,7 @@ mod tests {
                     slot: 9,
                     seconds: 30,
                 },
-            ],
+            ]),
         );
         let c = cells(world, SWORD).unwrap();
         assert!(c.lifetime_remaining_ms().is_some());
@@ -2159,7 +1864,10 @@ mod tests {
 
         // The destroy takes the object and its cells with it.
         let e = world.resource::<GuidIndex>().0[&SWORD];
-        super::super::handlers::dispatch(world, vec![SessionEvent::ObjectDestroyed(SWORD)]);
+        super::super::handlers::dispatch(
+            world,
+            super::wire(vec![SessionEvent::ObjectDestroyed(SWORD)]),
+        );
         assert!(!world.resource::<GuidIndex>().0.contains_key(&SWORD));
         assert!(world.get_entity(e).is_err(), "the cells died with the item");
     }

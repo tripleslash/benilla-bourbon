@@ -3,8 +3,9 @@
 
 use super::*;
 
-/// A template's `%s`/`%d` conversions by argument, a numbered hole (`%2$d`, deDE's) at its number;
-/// two templates with the same one take the same arguments.
+/// A template's `%s`/`%d` conversions by argument, bound as `vsnoprintf` binds them (`0x669892`):
+/// a numbered hole (`%2$d`, deDE's) at its number, a plain one at the running index, which every
+/// hole leaves one past its own; two templates with the same one take the same arguments.
 fn signature(template: &str) -> Vec<char> {
     let mut out = Vec::new();
     let mut cursor = 0;
@@ -18,14 +19,14 @@ fn signature(template: &str) -> Vec<char> {
             number.push(d);
         }
         let index = if number.is_empty() {
-            cursor += 1;
-            cursor - 1
+            cursor
         } else {
             chars.next_if_eq(&'$');
             number
                 .parse::<usize>()
                 .map_or(usize::MAX, |n| n.saturating_sub(1))
         };
+        cursor = index.saturating_add(1);
         let Some(k) = chars.next() else { break };
         if index >= out.len() {
             out.resize(index.saturating_add(1).min(64), '?');
@@ -38,35 +39,70 @@ fn signature(template: &str) -> Vec<char> {
 }
 
 /// deDE numbers its holes in the argument order enUS fills in sequence, so both read one list; a
-/// hole past the list, a wrong type or an unused argument stays a mismatch.
+/// hole past the list or of the wrong type stays a mismatch, an argument no hole names does not.
 #[test]
 fn numbered_holes_fill_from_the_same_argument_list() {
-    let hit = [Arg::Str("Ragnaros"), Arg::Num(1000)];
+    let hit = [Arg::S("Ragnaros"), Arg::D(1000)];
     assert_eq!(
-        fill("You hit %s for %d.", &hit).as_deref(),
+        fill_exact("You hit %s for %d.", &hit).as_deref(),
         Some("You hit Ragnaros for 1000.")
     );
     assert_eq!(
-        fill("Ihr trefft %1$s. Schaden: %2$d.", &hit).as_deref(),
+        fill_exact("Ihr trefft %1$s. Schaden: %2$d.", &hit).as_deref(),
         Some("Ihr trefft Ragnaros. Schaden: 1000.")
     );
-    let reflect = [Arg::Num(50), Arg::Str("Feuer"), Arg::Str("Ragnaros")];
+    let reflect = [Arg::D(50), Arg::S("Feuer"), Arg::S("Ragnaros")];
     assert_eq!(
-        fill("Ihr reflektiert %1$d %2$sschaden auf %3$s.", &reflect).as_deref(),
+        fill_exact("Ihr reflektiert %1$d %2$sschaden auf %3$s.", &reflect).as_deref(),
         Some("Ihr reflektiert 50 Feuerschaden auf Ragnaros.")
     );
     assert_eq!(
-        fill("%2$s von %1$s", &[Arg::Str("A"), Arg::Str("B")]).as_deref(),
+        fill_exact("%2$s von %1$s", &[Arg::S("A"), Arg::S("B")]).as_deref(),
         Some("B von A")
     );
     assert_eq!(
-        fill("100%% %1$s", &[Arg::Str("x")]).as_deref(),
+        fill_exact("100%% %1$s", &[Arg::S("x")]).as_deref(),
         Some("100% x")
     );
-    assert_eq!(fill("%3$s", &[Arg::Str("a")]), None);
-    assert_eq!(fill("%1$d", &[Arg::Str("a")]), None);
-    assert_eq!(fill("%1$s", &[Arg::Str("a"), Arg::Num(1)]), None);
-    assert_eq!(fill("%0$s", &[Arg::Str("a")]), None);
+    assert_eq!(fill_exact("%3$s", &[Arg::S("a")]), None);
+    assert_eq!(fill_exact("%1$d", &[Arg::S("a")]), None);
+    assert_eq!(
+        fill_exact("%1$s", &[Arg::S("a"), Arg::D(1)]).as_deref(),
+        Some("a"),
+        "an argument no hole names is skipped"
+    );
+    assert_eq!(fill_exact("%0$s", &[Arg::S("a")]).as_deref(), Some("a"));
+}
+
+/// `vsnoprintf` prints the arguments the template names, in the template's own binding, and
+/// skips one no hole takes (`0x6698b5`-`0x669919`); a plain hole after `%N$` takes argument N + 1
+/// (`0x669892`). So a template that leaves a name out, or mixes the two hole forms, still prints.
+#[test]
+fn a_template_that_omits_an_argument_or_mixes_hole_forms_still_prints() {
+    let script = benilla_ui::script::UiScript::new().expect("VM");
+    script
+        .run(
+            r#"
+            COMBATHITSELFOTHER = "You land a blow for %2$d."
+            COMBATHITOTHERSELF = "%1$s hits you for %d."
+        "#,
+        )
+        .unwrap();
+    let fills = Fills {
+        attacker: "Ragnaros".into(),
+        victim: "Ragnaros".into(),
+        amount: 12,
+        ..Default::default()
+    };
+    let line = |variant| compose_line(&script, COMBATHIT, variant, &fills);
+    assert_eq!(
+        line(Variant::SelfOther).as_deref(),
+        Some("You land a blow for 12.")
+    );
+    assert_eq!(
+        line(Variant::OtherSelf).as_deref(),
+        Some("Ragnaros hits you for 12.")
+    );
 }
 
 /// The signature a family's declared slots give for one variant; `Attacker` and `Victim` count
@@ -270,24 +306,26 @@ fn the_reported_sentences_read_correctly() {
     );
 }
 
+/// The fill refuses a hole with nothing to print (`fill_exact`), and skips an argument no hole
+/// names (`0x6698b5`-`0x669919`).
 #[test]
-fn the_fill_is_vsnprintf_and_refuses_a_mismatch() {
+fn the_fill_is_vsnoprintf_and_refuses_a_hole_it_cannot_print() {
     fn s(v: &str) -> Arg<'_> {
-        Arg::Str(v)
+        Arg::S(v)
     }
     assert_eq!(
-        fill("%s hits %s for %d.", &[s("A"), s("B"), Arg::Num(7)]).as_deref(),
+        fill_exact("%s hits %s for %d.", &[s("A"), s("B"), Arg::D(7)]).as_deref(),
         Some("A hits B for 7.")
     );
-    assert_eq!(fill("100%% sure", &[]).as_deref(), Some("100% sure"));
+    assert_eq!(fill_exact("100%% sure", &[]).as_deref(), Some("100% sure"));
     // A `%d` where a string is queued, and vice versa.
-    assert_eq!(fill("%d", &[s("A")]), None);
-    assert_eq!(fill("%s", &[Arg::Num(1)]), None);
-    // Too few, and too many.
-    assert_eq!(fill("%s %s", &[s("A")]), None);
-    assert_eq!(fill("%s", &[s("A"), s("B")]), None);
+    assert_eq!(fill_exact("%d", &[s("A")]), None);
+    assert_eq!(fill_exact("%s", &[Arg::D(1)]), None);
+    // Too few holes' arguments is a mismatch; too many is not.
+    assert_eq!(fill_exact("%s %s", &[s("A")]), None);
+    assert_eq!(fill_exact("%s", &[s("A"), s("B")]).as_deref(), Some("A"));
     // A conversion outside the vocabulary is a mismatch, not a passthrough.
-    assert_eq!(fill("%f", &[Arg::Num(1)]), None);
+    assert_eq!(fill_exact("%f", &[Arg::D(1)]), None);
 }
 
 /// The melee msgType matrix of `0x62a0d0`/`0x62a2e0`, through the 94-entry type table at
@@ -728,8 +766,14 @@ fn a_unit_name_never_holds_a_line_and_an_item_name_does() {
 fn an_unnamed_held_unit_prints_the_unit_getters_miss() {
     let script = benilla_ui::script::UiScript::new().expect("VM");
     let names = NameCache::default();
+    let (gameobjects, items) = (GameObjectTemplates::default(), Items::default());
+    let sources = NameSources {
+        names: &names,
+        gameobjects: &gameobjects,
+        items: &items,
+    };
     let store = |kind: u32| ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(2, kind)]));
-    let name = |store: Option<&ObjectStore>| logged_name(7, store, &names, Ask::Read, &script);
+    let name = |store: Option<&ObjectStore>| logged_name(7, store, &sources, Ask::Read, &script);
     assert_eq!(name(Some(&store(0x19))), "Unknown Being", "a held player");
     assert_eq!(name(Some(&store(0x9))), "Unknown Being", "a held creature");
     assert_eq!(name(Some(&store(0x21))), "UKNOWNOBJECT", "a game object");
@@ -742,6 +786,43 @@ fn an_unnamed_held_unit_prints_the_unit_getters_miss() {
         .expect("set");
     assert_eq!(name(Some(&store(0x19))), "Unknown");
     assert_eq!(name(None), "Unknown");
+}
+
+/// `GetObjectName` (`0x6264e0`) names a held object by its type mask: a game object by the record
+/// it holds (`0x5f8100`), an item, a bag included, from the item cache without asking
+/// (`0x55ba30` with no callback). No record, or an empty name (`0x6265ef`), is the miss.
+#[test]
+fn a_held_game_object_or_item_is_named_from_its_record() {
+    let script = benilla_ui::script::UiScript::new().expect("VM");
+    let names = NameCache::default();
+    let mut gameobjects = GameObjectTemplates::default();
+    gameobjects.insert(1731, 3, "Copper Vein".into(), &[0; 24]);
+    gameobjects.insert(1732, 3, String::new(), &[0; 24]);
+    let mut items = Items::default();
+    items.insert_template(2589, Some(crate::items::test_template("Junkbox")));
+    let sources = NameSources {
+        names: &names,
+        gameobjects: &gameobjects,
+        items: &items,
+    };
+    let held = |mask: u32, entry: u32| {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+            (2, mask),
+            (benilla_protocol::field::FIELD_OBJECT_ENTRY, entry),
+        ]))
+    };
+    let name = |store: &ObjectStore| logged_name(7, Some(store), &sources, Ask::Read, &script);
+    assert_eq!(name(&held(0x21, 1731)), "Copper Vein");
+    assert_eq!(name(&held(0x3, 2589)), "Junkbox", "an item");
+    assert_eq!(name(&held(0x7, 2589)), "Junkbox", "a bag");
+    assert_eq!(name(&held(0x21, 9)), "UKNOWNOBJECT", "no record");
+    assert_eq!(name(&held(0x3, 9)), "UKNOWNOBJECT", "no record");
+    assert_eq!(name(&held(0x21, 1732)), "UKNOWNOBJECT", "an empty name");
+    assert_eq!(
+        name(&held(0x21, 2589)),
+        "UKNOWNOBJECT",
+        "an object's entry names no item"
+    );
 }
 
 /// A school with no name writes no line, even where the template names none: each formatter that

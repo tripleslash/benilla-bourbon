@@ -14,8 +14,10 @@ mod channel;
 mod chat;
 mod client;
 mod combat_log;
+mod console_commands;
 mod death;
 mod duel;
+mod game_time;
 mod gameobject;
 mod gm_ticket;
 mod gossip;
@@ -106,6 +108,7 @@ pub use combat_log::{
     PeriodicAuraLog, PeriodicTick, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellHealLog,
     SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog,
 };
+pub use console_commands::{raw_position, teleport_to_unit, whois, world_teleport};
 pub use death::{
     area_spirit_healer, reclaim_corpse, resurrect_response, spirit_healer_activate,
     AreaSpiritHealerTime, CorpseLocation, ResurrectRequestBody,
@@ -114,6 +117,7 @@ pub use duel::{
     duel_accepted, duel_cancelled, read_duel_complete, read_duel_countdown, read_duel_requested,
     read_duel_winner, DuelRequested, DuelWinner,
 };
+pub use game_time::WowTime;
 pub use gameobject::{gameobj_use, gameobject_query, GameObjectQueryInfo};
 pub use gm_ticket::{
     gm_ticket_create, gm_ticket_updatetext, GmTicket, GMTICKET_QUEUE_ENABLED,

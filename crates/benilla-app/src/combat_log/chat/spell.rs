@@ -6,7 +6,7 @@ use benilla_protocol::messages::{
     SpellHealLog, SpellLogMiss,
 };
 
-use super::{queue, queue_reported, queue_worded, to_me, ChatCtx};
+use super::{queue_reported, queue_worded, to_me, ChatCtx};
 use crate::combat_log::feedback;
 use crate::ui_chat::combat::{self, Family, Fills, LineWord, Poses, Stores, UnitClass};
 use crate::ui_chat::ChatLog;
@@ -52,9 +52,12 @@ fn spell_damage_line(
 
     // Split damage (`hit_info & 8`, to `0x62de60`) is tested first, before the periodic split: it
     // reads "%s's %s causes %s %d damage.", has no `…SELFSELF` key and no trailers, and words the
-    // split amount to its target (`0x62dfd9`).
+    // split amount to its target (`0x62dfd9`). The form with you as the source of another unit's
+    // damage is typed by the buff table (`0x627820`, from `0x62df92`); the other two by the damage
+    // table (`0x626be0`, from `0x62df69` and `0x62dfc4`).
     if s.hit_info & SPELL_HIT_TYPE_SPLIT != 0 {
-        let Some(kind) = combat::spell_kind(attacker, victim, false) else {
+        let buff = attacker == UnitClass::Me && victim != UnitClass::Me;
+        let Some(kind) = combat::spell_kind(attacker, victim, buff) else {
             return;
         };
         return queue_worded(
@@ -183,7 +186,7 @@ pub(in crate::combat_log) struct PeriodicHit {
 /// `SMSG_SPELLNONMELEEDAMAGELOG` alike. Nothing through is worded absorbed, then resisted, on the
 /// periodic types (`0x6281e5`, `0x62820e`), or not at all; damage through takes
 /// `PERIODICAURADAMAGE`, typed off the target (`0x628235`), with absorb and resist trailers
-/// (`0x628341` passes zero for blocked and HitInfo) and [`combat::periodic_hit_word`].
+/// (`0x628341` passes zero for blocked and HitInfo) and [`combat::damage_word`].
 fn periodic_damage(
     log: &mut ChatLog,
     ctx: &ChatCtx,
@@ -217,7 +220,7 @@ fn periodic_damage(
         }),
         ..Default::default()
     };
-    let word = combat::periodic_hit_word(hit.damage, hit.absorbed, hit.resisted);
+    let word = combat::damage_word(hit.damage, hit.absorbed, hit.resisted);
     queue_worded(
         log,
         ctx,
@@ -563,7 +566,7 @@ fn power_gain_line(
         return;
     };
     let amount = power_gain(power, amount);
-    let word = combat::power_gain_word(power, amount).filter(|_| !periodic);
+    let word = combat::power_amount_word(power, amount).filter(|_| !periodic);
     queue_worded(
         log,
         ctx,
@@ -810,10 +813,13 @@ fn periodic_leech_amount(power: u32, amount: u32) -> u32 {
 ///    (`0x627955`); otherwise a happiness drain words the generic line with `HAPPINESS_POINTS`.
 /// 2. `powerType >= 5`, unsigned, has no power noun (`0x6278f0`, `0x627966`): no line.
 /// 3. The spell gates, the caller's [`ChatCtx::spell_name`].
-/// 4. The resolve and range gate `0x626630`, [`queue`]'s.
+/// 4. The resolve and range gate `0x626630`, [`queue_reported`]'s.
 /// 5. The leech/drain fork, [`leech_family`].
 /// 6. The periodic flag picks the chat-type stub, `0x627d60` periodic or `0x627d30` direct.
 /// 7. `drained == 0` drops the line (`0x627ae5`), after the divide.
+///
+/// The line raises the power's word with minus the amount drained when its target is you
+/// (`0x627b94`-`0x627c5c`), [`combat::power_amount_word`], periodic or not.
 pub(super) fn power_drain_line(
     log: &mut ChatLog,
     ctx: &ChatCtx,
@@ -853,7 +859,8 @@ pub(super) fn power_drain_line(
     let Some(kind) = kind else {
         return;
     };
-    queue(
+    let word = combat::power_amount_word(power, -drained).and_then(|w| to_me(target.1, w));
+    queue_worded(
         log,
         ctx,
         poses,
@@ -869,6 +876,7 @@ pub(super) fn power_drain_line(
             amount2: gained,
             ..Default::default()
         },
+        word,
     );
 }
 

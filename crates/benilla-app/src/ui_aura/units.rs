@@ -1,4 +1,4 @@
-//! Every unit's aura list but the player's, one per guid, and the unit-token resolver's inputs
+//! Every unit's aura list, the player's too, one per guid, and the unit-token resolver's inputs
 //! (`0x515970`, [`UnitGuids`]) that `UnitBuff 0x519500` and `UnitDebuff 0x5198f0` read them through:
 //! the guid globals, the group tables, and each held unit a `target` chain can reach. A list is the
 //! live unit's slots, gated as any unit's; a group member or pet with no live object diverts to its
@@ -9,9 +9,9 @@
 use std::collections::hash_map::{Entry, HashMap};
 
 use benilla_formats::SpellCatalog;
-use benilla_ui::script::{AuraState, UiScript, UnitGuids};
+use benilla_ui::script::{UiScript, UnitAuraList, UnitGuids};
 
-use super::{aura_list, other_unit_inputs, record_inputs, AuraInput};
+use super::{aura_list, other_unit_inputs, record_inputs, AuraInput, RaidFilter};
 use crate::net::ObjectStore;
 use crate::ui_party::{raid_row_guids, GroupState};
 
@@ -46,7 +46,8 @@ fn fill_group<'a>(
 /// What [`UnitAuras::feed`] reads this frame.
 pub(super) struct Inputs<'g, 'a, H, V> {
     pub(super) group: Option<&'g GroupState>,
-    /// Our guid: a token naming us reads the player's list, which the caller pushes.
+    /// Our guid, whose slots list as any held unit's: `UnitBuff("player")` walks the fields, not
+    /// the buff cache (`0x51960f`).
     pub(super) me: u64,
     /// `pet`, `target`, `mouseover` and `npc`'s guids, 0 for none.
     pub(super) pet: u64,
@@ -60,13 +61,15 @@ pub(super) struct Inputs<'g, 'a, H, V> {
     pub(super) catalog: Option<&'a SpellCatalog>,
     /// The spell catalog was replaced, so every list is rebuilt.
     pub(super) catalog_moved: bool,
+    /// Each aura's `raidFilter` verdict.
+    pub(super) raid: &'a RaidFilter,
 }
 
 /// One guid's list, shared by every token naming it.
 struct GuidList {
     /// What the list was built from; the list is rebuilt only when these move.
     inputs: Vec<AuraInput>,
-    list: Vec<AuraState>,
+    list: UnitAuraList,
     /// Taken from [`UnitAuras::versions`] each time the list changes.
     version: u64,
     /// The frame that last read it; an entry no token can name this frame is dropped.
@@ -115,6 +118,7 @@ impl UnitAuras {
             buffs_visible,
             catalog,
             catalog_moved,
+            raid,
         } = inputs;
         self.frame += 1;
         if catalog_moved || catalog.is_some() != self.catalog_present {
@@ -143,9 +147,7 @@ impl UnitAuras {
                 g.held.insert(guid, next);
                 walk.push((next, false));
             }
-            if guid != me {
-                self.refresh(guid, store, record_ok, group, &buffs_visible, catalog);
-            }
+            self.refresh(guid, store, record_ok, group, &buffs_visible, catalog, raid);
         }
         script.set_unit_guids(&g);
         self.guids = g;
@@ -173,14 +175,14 @@ impl UnitAuras {
     }
 
     /// `guid`'s list as last built, `None` for a unit with none.
-    pub(super) fn list(&self, guid: u64) -> Option<&[AuraState]> {
-        self.by_guid.get(&guid).map(|e| e.list.as_slice())
+    pub(super) fn list(&self, guid: u64) -> Option<&UnitAuraList> {
+        self.by_guid.get(&guid).map(|e| &e.list)
     }
 
-    /// Rebuild `guid`'s list this frame if what it is built from moved: the live unit's gated
-    /// slots (`store`, the object manager's answer), else, for a guid a group token names, the
-    /// roster record's block. A guid neither held nor a group token's gets no list, as
-    /// `UnitBuff`'s roster walk finds nothing for it.
+    /// Rebuild `guid`'s list this frame if what it is built from moved: the live unit's slots
+    /// (`store`, the object manager's answer) with its unit gate, else, for a guid a group token
+    /// names, the roster record's block, which has none (`0x519735`). A guid neither held nor a
+    /// group token's gets no list, as `UnitBuff`'s roster walk finds nothing for it.
     fn refresh(
         &mut self,
         guid: u64,
@@ -189,6 +191,7 @@ impl UnitAuras {
         group: Option<&GroupState>,
         buffs_visible: &impl Fn(u64, &ObjectStore) -> bool,
         catalog: Option<&SpellCatalog>,
+        raid: &RaidFilter,
     ) {
         if self
             .by_guid
@@ -198,27 +201,34 @@ impl UnitAuras {
             return;
         }
         self.scratch.clear();
-        match store {
-            Some(store) => self.scratch.extend(other_unit_inputs(
-                store,
-                catalog,
-                buffs_visible(guid, store),
-            )),
+        let gate = match store {
+            Some(store) => {
+                self.scratch.extend(other_unit_inputs(store, catalog, raid));
+                buffs_visible(guid, store)
+            }
             None if record_ok => {
                 if let Some(group) = group {
-                    self.scratch
-                        .extend(record_inputs(group.roster_aura_slots(guid), catalog));
+                    self.scratch.extend(record_inputs(
+                        group.roster_aura_slots(guid),
+                        catalog,
+                        raid,
+                    ));
                 }
+                true
             }
             None => return,
-        }
+        };
+        let build = |inputs: &[AuraInput]| UnitAuraList {
+            auras: aura_list(catalog, inputs),
+            buffs_visible: gate,
+        };
         match self.by_guid.entry(guid) {
             Entry::Occupied(mut e) => {
                 let e = e.get_mut();
                 e.frame = self.frame;
-                if e.inputs != self.scratch {
+                if e.inputs != self.scratch || e.list.buffs_visible != gate {
                     std::mem::swap(&mut e.inputs, &mut self.scratch);
-                    let list = aura_list(catalog, &e.inputs);
+                    let list = build(&e.inputs);
                     if list != e.list {
                         e.list = list;
                         self.versions += 1;
@@ -229,7 +239,7 @@ impl UnitAuras {
             Entry::Vacant(e) => {
                 self.versions += 1;
                 let inputs = self.scratch.clone();
-                let list = aura_list(catalog, &inputs);
+                let list = build(&inputs);
                 e.insert(GuidList {
                     inputs,
                     list,
@@ -361,6 +371,101 @@ mod tests {
             .non_send::<UiScript>()
             .eval::<Vec<String>>("local s = SEEN SEEN = {} return s")
             .unwrap()
+    }
+
+    /// The player's slots list under its guid as any held unit's: `UnitBuff("player")` walks the
+    /// fields in slot order (`0x51960f`), where the buff cache keeps the order auras arrived in.
+    #[test]
+    fn the_player_token_reads_the_slots_in_slot_order() {
+        let mut app = party_app();
+        let me = app.world().resource::<GuidIndex>().0[&ME];
+        let seat = |app: &mut App, fields: &[(u16, u32)]| {
+            app.world_mut()
+                .entity_mut(me)
+                .insert(ObjectStore(ObjectFields::from_pairs(fields)));
+            app.update();
+        };
+        // Stance lands first, in slot 1; then Mark, in slot 0.
+        seat(
+            &mut app,
+            &[(FLAGS, 0x0800_0000), (AURA + 1, 2457), (AURAFLAGS, 0x90)],
+        );
+        seat(
+            &mut app,
+            &[
+                (FLAGS, 0x0800_0000),
+                (AURA, 1126),
+                (AURA + 1, 2457),
+                (AURAFLAGS, 0x99),
+            ],
+        );
+        assert_eq!(listed(&mut app, "player", false), [1126, 2457]);
+        let cache = &app
+            .world()
+            .resource::<super::super::PlayerAuraCache>()
+            .auras;
+        assert_eq!(
+            cache.iter().map(|c| c.spell_id).collect::<Vec<_>>(),
+            [2457, 1126],
+            "the cache keeps arrival order"
+        );
+    }
+
+    /// A set `raidFilter` counts the buffs the player could cast, off the books as they stand: a
+    /// spell learnt rebuilds the verdicts (`0x4b2603`).
+    #[test]
+    fn a_raid_filter_follows_the_book() {
+        let mut app = party_app();
+        let row = |id: u32| {
+            (
+                id,
+                benilla_formats::SpellDisplay {
+                    id,
+                    icon: Some(format!("Spell_{id}")),
+                    ..Default::default()
+                },
+            )
+        };
+        app.world_mut().insert_resource(crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays([row(1243), row(1126)].into()),
+            ..crate::ui_action::Spells::empty_for_tests()
+        });
+        let mut actions = crate::ui_action::PlayerActions::default();
+        actions.spells.insert(1243);
+        app.world_mut().insert_resource(actions);
+        stream(
+            &mut app,
+            MEMBER,
+            &[
+                (FLAGS, 0x0800_0000),
+                (AURA, 1126),
+                (AURA + 1, 1243),
+                (AURAFLAGS, 0x0000_0088),
+            ],
+        );
+        let kept = |app: &mut App| {
+            app.world_mut()
+                .non_send::<UiScript>()
+                .eval::<Vec<String>>(
+                    r#"local t = {}
+                       for i = 1, 32 do
+                           local icon = UnitBuff("party1", i, 1)
+                           if not icon then break end
+                           table.insert(t, icon)
+                       end
+                       return t"#,
+                )
+                .unwrap()
+        };
+        app.update();
+        assert_eq!(kept(&mut app), ["Spell_1243"]);
+        assert_eq!(listed(&mut app, "party1", false), [1126, 1243]);
+        app.world_mut()
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .spells
+            .insert(1126);
+        app.update();
+        assert_eq!(kept(&mut app), ["Spell_1126", "Spell_1243"]);
     }
 
     /// A live member reads its own `UNIT_FIELD_AURA` slots; `UnitBuff` keeps the unit gate, open

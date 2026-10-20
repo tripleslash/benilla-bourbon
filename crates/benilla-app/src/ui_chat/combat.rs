@@ -5,6 +5,10 @@
 
 use bevy::prelude::*;
 
+use benilla_ui::strings::{fill_exact, Arg};
+
+use crate::go_templates::GameObjectTemplates;
+use crate::items::Items;
 use crate::names::NameCache;
 use crate::ui_chat::event::ChatEventKind;
 
@@ -731,10 +735,10 @@ fn append_trailers(lua: &benilla_ui::script::UiScript, line: &mut String, t: Tra
             return;
         };
         let args = match arg {
-            Some(n) => vec![Arg::Num(n)],
+            Some(n) => vec![Arg::D(n)],
             None => Vec::new(),
         };
-        match fill(&template, &args) {
+        match fill_exact(&template, &args) {
             Some(text) => line.push_str(&text),
             None => warn!("combat log: {key} does not match its trailer shape"),
         }
@@ -781,7 +785,12 @@ pub(crate) struct Fills {
 
 /// Resolve a family and variant to a finished line; `None`, silently, when the key is absent,
 /// where the reference prints a not-found warning line (`0x6269f0`) for any key but a missing
-/// `…SELFSELF`. The fill is `vsnprintf` over a fixed argument list, as at `0x626850`.
+/// `…SELFSELF`. The fill is Storm's ordered printf over a fixed argument list
+/// ([`benilla_ui::strings::fill_exact`]): `0x626850` formats through `SStrVPrintf` (`0x64a8b0`),
+/// which takes `vsnoprintf` (`0x6697d0`) once option `0xa` is set, as the client does at start
+/// (`0x402141`, `0x64ede9`). It binds a numbered hole (`%2$d`, the deDE templates': `Ihr trefft
+/// %1$s. Schaden: %2$d.`) to its argument in the list enUS fills in sequence, and prints a
+/// template that leaves an argument out.
 pub(crate) fn compose_line(
     lua: &benilla_ui::script::UiScript,
     family: Family,
@@ -802,19 +811,19 @@ pub(crate) fn compose_line(
     let mut args: Vec<Arg> = Vec::with_capacity(family.slots.len());
     for slot in family.slots {
         match slot {
-            Slot::Attacker if family.names_subject(variant) => args.push(Arg::Str(&fills.attacker)),
-            Slot::Victim if family.names_object(variant) => args.push(Arg::Str(&fills.victim)),
+            Slot::Attacker if family.names_subject(variant) => args.push(Arg::S(&fills.attacker)),
+            Slot::Victim if family.names_object(variant) => args.push(Arg::S(&fills.victim)),
             Slot::Attacker | Slot::Victim => {}
-            Slot::Named => args.push(Arg::Str(&fills.named)),
-            Slot::Spell => args.push(Arg::Str(&fills.spell)),
-            Slot::School => args.push(Arg::Str(school.as_deref()?)),
-            Slot::Power => args.push(Arg::Str(power.as_deref()?)),
-            Slot::Power2 => args.push(Arg::Str(power2.as_deref()?)),
-            Slot::Amount => args.push(Arg::Num(fills.amount)),
-            Slot::Amount2 => args.push(Arg::Num(fills.amount2)),
+            Slot::Named => args.push(Arg::S(&fills.named)),
+            Slot::Spell => args.push(Arg::S(&fills.spell)),
+            Slot::School => args.push(Arg::S(school.as_deref()?)),
+            Slot::Power => args.push(Arg::S(power.as_deref()?)),
+            Slot::Power2 => args.push(Arg::S(power2.as_deref()?)),
+            Slot::Amount => args.push(Arg::D(fills.amount)),
+            Slot::Amount2 => args.push(Arg::D(fills.amount2)),
         }
     }
-    match fill(&template, &args) {
+    match fill_exact(&template, &args) {
         Some(mut line) => {
             if let Some(t) = fills.trailers {
                 append_trailers(lua, &mut line, t);
@@ -830,55 +839,6 @@ pub(crate) fn compose_line(
             None
         }
     }
-}
-
-/// One `vsnprintf` argument.
-enum Arg<'a> {
-    Str(&'a str),
-    Num(i64),
-}
-
-/// The line's formatter over the `%s`/`%d` subset the combat-log templates use. `0x626850` formats
-/// through `SStrVPrintf 0x64a8b0`, which takes Storm's ordered printf (`0x6697d0`) once option
-/// `0xa` is set, as the client does at start (`0x402141`, `0x64ede9`); that printf reads `%N$`
-/// (`0x669af2`), so a numbered hole (`%2$d`, the deDE templates') names its argument in the list
-/// enUS fills in sequence (`Ihr trefft %1$s. Schaden: %2$d.`). `None` on any mismatch, an unused
-/// argument included.
-fn fill(template: &str, args: &[Arg<'_>]) -> Option<String> {
-    let mut out = String::with_capacity(template.len() + 32);
-    let mut used = vec![false; args.len()];
-    let mut cursor = 0;
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        if chars.next_if_eq(&'%').is_some() {
-            out.push('%');
-            continue;
-        }
-        let mut number = String::new();
-        while let Some(d) = chars.next_if(char::is_ascii_digit) {
-            number.push(d);
-        }
-        let index = if number.is_empty() {
-            cursor += 1;
-            cursor - 1
-        } else {
-            chars.next_if_eq(&'$')?;
-            number.parse::<usize>().ok()?.checked_sub(1)?
-        };
-        let arg = args.get(index)?;
-        used[index] = true;
-        match (chars.next(), arg) {
-            (Some('s'), Arg::Str(s)) => out.push_str(s),
-            (Some('d'), Arg::Num(n)) => out.push_str(&n.to_string()),
-            // Any other conversion is a mismatch, never a half-filled sentence.
-            _ => return None,
-        }
-    }
-    used.iter().all(|&u| u).then_some(out)
 }
 
 /// A GlobalString off the VM's globals, `None` when absent or empty: the two tests `0x703bf0`'s
@@ -925,11 +885,11 @@ pub(crate) fn power_word(script: &benilla_ui::script::UiScript, power: u32) -> O
     global_string(script, power_key(power)?)
 }
 
-/// One endpoint's display name as `GetObjectName 0x6264e0` finds it: what the caches hold now, a
-/// lookup asked for what they do not (`0x6265a7`, `0x6265e0`, with an empty callback), and `None`
-/// for that ([`logged_name`] prints the miss). A streamed unit names through its descriptor
-/// (`GetUnitName`, `0x609210`), which is how a pet is named.
-pub(crate) fn object_name(
+/// A unit's name as `GetUnitName 0x609210` finds it: what the caches hold now, a lookup asked for
+/// what they do not (`0x6265a7`, `0x6265e0`, with an empty callback), and `None` for that. A
+/// streamed unit names through its descriptor, which is how a pet is named. The XP and honor lines
+/// name their victim here (`0x637ac0`, `0x625387`).
+pub(crate) fn unit_name(
     guid: u64,
     unit: Option<&ObjectStore>,
     names: &NameCache,
@@ -940,6 +900,49 @@ pub(crate) fn object_name(
         return None;
     }
     names.resolve_unit(guid, unit, ask).map(str::to_owned)
+}
+
+/// The caches `GetObjectName` (`0x6264e0`) reads: the name caches, the game object cache
+/// (`0xc0e318`) and the item cache (`0xc0e2a0`).
+#[derive(Clone, Copy)]
+pub(crate) struct NameSources<'a> {
+    pub names: &'a NameCache,
+    pub gameobjects: &'a GameObjectTemplates,
+    pub items: &'a Items,
+}
+
+/// One endpoint's display name as `GetObjectName 0x6264e0` finds it. A guid the client holds goes
+/// by its object's type mask (`0x626513`-`0x626557`): a unit (bit 3) through `GetUnitName`
+/// ([`unit_name`]), a game object (bit 5) by the record name it holds (`0x5f8100`, the cache by
+/// the descriptor's entry), an item (bit 1) from the item cache by its entry, read without asking
+/// (`0x55ba30` with no callback); any other object has no name. A guid not held goes to the name
+/// caches (`0x6265a7`, `0x6265e0`, with an empty callback). `None` for a miss, and for a record
+/// with an empty name (`0x6265ef`), which [`logged_name`] prints.
+pub(crate) fn object_name(
+    guid: u64,
+    held: Option<&ObjectStore>,
+    sources: &NameSources<'_>,
+    ask: Ask<'_>,
+) -> Option<String> {
+    use benilla_protocol::messages::ObjectType;
+    if guid == 0 {
+        return None;
+    }
+    let name = match held {
+        None => return unit_name(guid, None, sources.names, ask),
+        Some(store) if is_unit(store) => return unit_name(guid, Some(store), sources.names, ask),
+        Some(store) if store.0.object_type() == Some(ObjectType::GameObject) => sources
+            .gameobjects
+            .of(&store.0)
+            .map(|template| template.name.as_str()),
+        Some(store) if store.0.is_item() => store
+            .0
+            .object_entry()
+            .and_then(|entry| sources.items.template(entry, 0, Ask::Read))
+            .map(|item| item.name.as_str()),
+        Some(_) => None,
+    };
+    name.filter(|name| !name.is_empty()).map(str::to_owned)
 }
 
 /// The name `GetObjectName` prints for an object nothing names: the `UNKNOWNOBJECT` string, else
@@ -955,11 +958,11 @@ pub(crate) fn unknown_object(script: &benilla_ui::script::UiScript) -> String {
 pub(crate) fn logged_name(
     guid: u64,
     store: Option<&ObjectStore>,
-    names: &NameCache,
+    sources: &NameSources<'_>,
     ask: Ask<'_>,
     script: &benilla_ui::script::UiScript,
 ) -> String {
-    object_name(guid, store, names, ask).unwrap_or_else(|| {
+    object_name(guid, store, sources, ask).unwrap_or_else(|| {
         if store.is_some_and(is_unit) {
             script.unknown_object_text()
         } else {
@@ -985,6 +988,7 @@ pub(crate) struct PendingCombat {
     /// Everything the template needs but the names, which are filled at drain.
     pub fills: Fills,
     pub named: Named,
+    /// The drains that found the line waiting; the first asks for its names, the rest only read.
     pub tries: u16,
     /// The `COMBAT_TEXT_UPDATE` the formatter raises once the line is written, and only then: a
     /// missing template, range or spell writes neither.
@@ -1016,6 +1020,19 @@ impl LineWord {
             message_type,
             data: WordText::Text(Some(data.to_string())),
             extra: None,
+        }
+    }
+
+    /// The type, a text and a number (`0x626890`).
+    pub(crate) fn text_number(
+        message_type: &'static str,
+        text: impl ToString,
+        n: impl ToString,
+    ) -> Self {
+        Self {
+            message_type,
+            data: WordText::Text(Some(text.to_string())),
+            extra: Some(n.to_string()),
         }
     }
 

@@ -739,17 +739,10 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::TransferAborted { reason } => {
             vec![SessionEvent::TransferAborted { reason }]
         }
-        ServerPacket::TimeSpeed {
-            hours,
-            minutes,
-            day_serial,
-            timescale,
-        } => vec![SessionEvent::TimeSpeed {
-            hours,
-            minutes,
-            day_serial,
-            timescale,
-        }],
+        ServerPacket::TimeSpeed { time, speed } => vec![SessionEvent::TimeSpeed { time, speed }],
+        ServerPacket::GameSpeedSet { speed } => vec![SessionEvent::GameSpeedSet { speed }],
+        ServerPacket::GameTimeUpdate { time } => vec![SessionEvent::GameTimeUpdate { time }],
+        ServerPacket::GameTimeSet { time } => vec![SessionEvent::GameTimeSet { time }],
         ServerPacket::QueryTimeResponse { unix_time } => {
             vec![SessionEvent::ServerUnixTime { unix_time }]
         }
@@ -855,6 +848,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 pet_family,
                 rank,
                 type_flags,
+                pet_spell_list,
                 display_id,
                 civilian,
                 racial_leader,
@@ -868,11 +862,12 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                     i.pet_family,
                     i.rank,
                     i.type_flags,
+                    i.pet_spell_list,
                     i.display_id,
                     i.civilian,
                     i.racial_leader,
                 ),
-                None => (None, None, None, 0, 0, 0, 0, false, false),
+                None => (None, None, None, 0, 0, 0, 0, 0, false, false),
             };
             vec![SessionEvent::CreatureName {
                 entry,
@@ -882,6 +877,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 pet_family,
                 rank,
                 type_flags,
+                pet_spell_list,
                 display_id,
                 civilian,
                 racial_leader,
@@ -1103,7 +1099,8 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
     }
 }
 
-/// Fan an object-update list out into create/move/remove/values events, moving each mask.
+/// Fan an object-update list out into create/move/remove/values events, moving each mask, closed
+/// by [`SessionEvent::ObjectUpdateEnd`].
 fn decode_objects(objects: Vec<Object>) -> Vec<SessionEvent> {
     let mut out = Vec::new();
     for object in objects {
@@ -1155,16 +1152,15 @@ fn decode_objects(objects: Vec<Object>) -> Vec<SessionEvent> {
             Object::OutOfRange { guids } => {
                 out.push(SessionEvent::ObjectsRemoved(guids));
             }
-            // `Values`: a descriptor delta with no position.
+            // `Values`: a descriptor delta with no position. An empty one still writes: it brings
+            // a released object back and copies every watched range (`0x46720f`).
             Object::Values { guid, mask } => {
-                if !mask.is_empty() {
-                    out.push(SessionEvent::ObjectValues { guid, fields: mask });
-                }
+                out.push(SessionEvent::ObjectValues { guid, fields: mask });
             }
-            // `Near` is a guid pre-announce; no state.
-            Object::Near { .. } => {}
+            Object::Near { guids } => out.push(SessionEvent::ObjectsNear(guids)),
         }
     }
+    out.push(SessionEvent::ObjectUpdateEnd);
     out
 }
 

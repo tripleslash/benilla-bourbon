@@ -802,6 +802,7 @@ pub(crate) fn send_item_use(
                     bag_index: it.bag_index,
                     slot: it.slot,
                     entry: it.entry,
+                    guid: it.guid,
                     spell_index: it.spell_index,
                     on_object: it.on_object,
                 },
@@ -994,6 +995,7 @@ impl Plugin for UiItemsPlugin {
         net::register(app);
         // The icons come from the equipment renderer's `ItemDisplays`.
         app.init_resource::<EquipErrors>()
+            .init_resource::<feed::BagUpdates>()
             .init_resource::<crate::ui_items::locks::ItemReleases>()
             .init_resource::<crate::ui_items::locks::HeldItemLocks>()
             .init_resource::<crate::ui_items::locks::LockWatch>()
@@ -1014,8 +1016,9 @@ impl Plugin for UiItemsPlugin {
                         .in_set(crate::ui_script::UiFeed)
                         .before(feed_containers)
                         .before(crate::ui_char::feed_char),
-                    // The slot cooldowns must be in the VM before `feed_action_state`'s
-                    // synchronous `BAG_UPDATE_COOLDOWN` makes the bag handlers re-read them.
+                    // The slot cooldowns must be in the VM before the action feed's
+                    // `BAG_UPDATE_COOLDOWN` makes the bag handlers re-read them, and the action
+                    // feed counts this feed's `BAG_UPDATE`s (`crate::ui_action`'s schedule).
                     feed_containers
                         .in_set(UnitFeed)
                         .before(crate::ui_action::CooldownEvents),
@@ -1030,7 +1033,10 @@ impl Plugin for UiItemsPlugin {
                     ask_item_build_lookups.in_set(UnitFeed),
                     // The roll table, pushed whole once per VM, before the first hover.
                     feed_random_properties.in_set(UnitFeed),
-                    feed_player_req.in_set(UnitFeed),
+                    // After the latches, so a skinning spell learnt this frame colours the line now.
+                    feed_player_req
+                        .in_set(UnitFeed)
+                        .after(crate::ui_action::track_learned_abilities),
                     // The item tooltip's lock check: `Lock.dbc` once, the player's openers on change.
                     lock_openers::feed_lock_rows.in_set(UnitFeed),
                     lock_openers::feed_lock_openers.in_set(UnitFeed),

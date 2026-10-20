@@ -59,6 +59,8 @@ pub(crate) struct PendingCast {
 struct PendingCastState {
     spell_id: u32,
     deadline: Instant,
+    /// The guid of the item the cast came from (`0xcecab0`), `None` for a spell's own cast.
+    item: Option<u64>,
 }
 
 impl PendingCast {
@@ -84,10 +86,17 @@ impl PendingCast {
     /// `SetInFlightSpell(spell, item)` as the attempt calls it (`0x6e5026`). `item_flags` is the
     /// used item's template flags, `None` for a cast with no item: an item whose flags lack
     /// [`ITEM_FLAG_PLAYERCAST`] never enters the slot (a potion, food, a healthstone), so it
-    /// blocks nothing. An item's deadline is short: vmangos refuses some `CMSG_USE_ITEM`s with
+    /// blocks nothing. `item` is the item object's guid, which the slot keeps beside the spell
+    /// (`0x6e4b00`). An item's deadline is short: vmangos refuses some `CMSG_USE_ITEM`s with
     /// only `SMSG_INVENTORY_CHANGE_FAILURE` and no cast result (`HandleUseItemOpcode`), and this
     /// deadline is what reopens casting.
-    pub(crate) fn push(&mut self, spell_id: u32, item_flags: Option<u32>, now: Instant) {
+    pub(crate) fn push_cast(
+        &mut self,
+        spell_id: u32,
+        item_flags: Option<u32>,
+        item: Option<u64>,
+        now: Instant,
+    ) {
         if item_flags.is_some_and(|flags| flags & ITEM_FLAG_PLAYERCAST == 0) {
             return;
         }
@@ -98,8 +107,20 @@ impl PendingCast {
         };
         self.slot = Some(PendingCastState {
             spell_id,
+            item,
             deadline: now + window,
         });
+    }
+
+    /// [`Self::push_cast`] with no item object.
+    #[cfg(test)]
+    pub(crate) fn push(&mut self, spell_id: u32, item_flags: Option<u32>, now: Instant) {
+        self.push_cast(spell_id, item_flags, None, now);
+    }
+
+    /// The guid of the item the outstanding cast came from.
+    pub(crate) fn item(&self) -> Option<u64> {
+        self.slot.as_ref().and_then(|p| p.item)
     }
 
     /// Tighten the deadline to the server's real cast time once `SMSG_SPELL_START` names it.
@@ -251,6 +272,22 @@ pub(crate) fn inflight(
         .or_else(|| queued_melee.current().map(Inflight::Strike))
 }
 
+/// The guid of the item the in-flight slot's cast came from (`0xcecab0`, which `0x6e3d20` reads),
+/// with the slot's own precedence: the cursor's commit, else the outstanding cast's. A strike has
+/// none, and a cast pushed over one keeps its own, the strike's coming back with the pop
+/// (`0x6e4ad0`, the save at `0xcecb20`).
+fn inflight_item(
+    pending: &PendingCast,
+    queued_melee: &QueuedMeleeSpell,
+    targeting: &SpellTargeting,
+) -> Option<u64> {
+    match inflight(pending, queued_melee, targeting)? {
+        Inflight::Targeting(_) => targeting.in_slot_item(),
+        Inflight::Cast(_) => pending.item(),
+        Inflight::Strike(_) => None,
+    }
+}
+
 /// The player's cast state as the VM reads it ([`CastView`]): what the action bar's checked tests
 /// and `SpellStopCasting` hold the slots against, pushed each frame and after every script call.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -260,6 +297,10 @@ pub(crate) struct CastState<'w, 's> {
     targeting: Res<'w, SpellTargeting>,
     auto_repeat: Res<'w, AutoRepeatActive>,
     me: Query<'w, 's, SelfCastFacts, With<crate::net::SelfPlayer>>,
+    /// The in-flight item's object, found by guid as an item (`0x4e53e1`); a harness without the
+    /// index holds none.
+    index: Option<Res<'w, GuidIndex>>,
+    stores: Query<'w, 's, &'static crate::net::ObjectStore>,
 }
 
 /// The player's own cast facts: the attack flag and the form byte's store.
@@ -281,7 +322,17 @@ impl CastState<'_, '_> {
             form: me
                 .and_then(|(_, store)| store)
                 .map_or(0, |store| store.0.unit_shapeshift_form()),
+            item: self.inflight_item_entry(),
         }
+    }
+
+    /// The in-flight item's entry (`0x4e53ef`), its object looked up live with the item type mask
+    /// (`0x4e53e1`): none once the object is gone.
+    fn inflight_item_entry(&self) -> Option<u32> {
+        let guid = inflight_item(&self.pending, &self.queued_melee, &self.targeting)?;
+        let entity = *self.index.as_deref()?.0.get(&guid)?;
+        let fields = &self.stores.get(entity).ok()?.0;
+        fields.is_item().then(|| fields.object_entry()).flatten()
     }
 }
 
@@ -594,7 +645,10 @@ mod tests {
                 |mut slots: super::super::CastSlots, net: Res<NetCommands>| {
                     slots.core(&net).push(
                         FIREBALL,
-                        super::super::Held::Cast { item_flags: None },
+                        super::super::Held::Cast {
+                            item_flags: None,
+                            item: None,
+                        },
                         Instant::now(),
                     );
                 },
@@ -618,6 +672,58 @@ mod tests {
             current(&mut app, HEROIC_STRIKE),
             "popped back into the slot"
         );
+    }
+
+    /// `IsCurrentAction`'s item arm reads the in-flight item's guid (`0x6e3d20` → `0xcecab0`) and
+    /// looks it up as an item (type mask 2, `0x4e53e1`) for its entry (`0x4e53ef`): the view
+    /// carries that entry while a cast from the item is in flight, and none once the object is
+    /// gone or for a spell's own cast.
+    #[test]
+    fn the_view_carries_the_in_flight_items_entry() {
+        use benilla_protocol::ObjectFields;
+        use bevy::ecs::system::RunSystemOnce;
+        const HEARTH: u32 = 8690;
+        const HEARTHSTONE: u32 = 6948;
+        const ITEM: u64 = 0x4000_0000_0000_0042;
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<PendingCast>()
+            .init_resource::<QueuedMeleeSpell>()
+            .init_resource::<SpellTargeting>()
+            .init_resource::<ActiveChannel>()
+            .init_resource::<AutoRepeatActive>()
+            .init_resource::<CastReports>()
+            .init_resource::<crate::net::GuidIndex>()
+            .insert_resource(NetCommands(tx));
+        let item = app
+            .world_mut()
+            .spawn(crate::net::ObjectStore(ObjectFields::from_pairs(&[
+                (2, 0x3),
+                (3, HEARTHSTONE),
+            ])))
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(ITEM, item);
+        let item_of = |app: &mut App| {
+            app.world_mut()
+                .run_system_once(|state: CastState| state.view().item)
+                .unwrap()
+        };
+        app.world_mut().resource_mut::<PendingCast>().push_cast(
+            HEARTH,
+            Some(ITEM_FLAG_PLAYERCAST),
+            Some(ITEM),
+            Instant::now(),
+        );
+        assert_eq!(item_of(&mut app), Some(HEARTHSTONE));
+        app.world_mut().entity_mut(item).despawn();
+        assert_eq!(item_of(&mut app), None, "the object is gone");
+        app.world_mut()
+            .resource_mut::<PendingCast>()
+            .push(FIREBALL, None, Instant::now());
+        assert_eq!(item_of(&mut app), None, "a spell's own cast");
     }
 
     #[test]
@@ -749,7 +855,14 @@ mod tests {
                 move |mut slots: super::super::CastSlots, net: Res<NetCommands>| {
                     let mut core = slots.core(&net);
                     core.push(HEROIC_STRIKE, super::super::Held::Strike, t0);
-                    core.push(FIREBALL, super::super::Held::Cast { item_flags: None }, t0);
+                    core.push(
+                        FIREBALL,
+                        super::super::Held::Cast {
+                            item_flags: None,
+                            item: None,
+                        },
+                        t0,
+                    );
                 },
             )
             .unwrap();
@@ -1270,7 +1383,10 @@ mod tests {
             push(
                 &mut app,
                 FIREBALL,
-                crate::spell::Held::Cast { item_flags: None },
+                crate::spell::Held::Cast {
+                    item_flags: None,
+                    item: None,
+                },
             );
             mark_casting(&mut app, FIREBALL);
 

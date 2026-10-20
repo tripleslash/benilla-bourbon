@@ -100,8 +100,11 @@ pub struct SpellDisplay {
     pub mana_cost_pct: u32,
     /// `manaCostPerlevel` (column 33): the per-level cost term of `GetPowerCost` (`0x6e31b0`).
     pub mana_cost_per_level: u32,
-    /// `manaPerSecond` (column 34): the tooltip's "plus N per sec"; column 35 is 0 on every row.
+    /// `manaPerSecond` (column 34): the tooltip's "plus N per sec" (`0x6e3300`).
     pub mana_per_second: u32,
+    /// `manaPerSecondPerLevel` (column 35): the per-second cost's per-level term (`0x6e332e`), 0
+    /// on every 5875 row.
+    pub mana_per_second_per_level: u32,
     /// `rangeIndex` (column 36): the `SpellRange.dbc` row.
     pub range_index: u32,
     /// `Targets` (column 13): the `TARGET_FLAG_*` seed of the cast arm's targeting word.
@@ -168,6 +171,11 @@ pub struct SpellDisplay {
     pub max_target_level: u32,
     /// `MaxAffectedTargets` (column 163): the description expander's `$i` (`507fc3`).
     pub max_affected_targets: u32,
+    /// `MinFactionId` (column 170, `+0x2a8`): the faction whose standing the spell tooltip's
+    /// reputation line names (`0x52f2ae`); 0 for none, set on one 5875 row.
+    pub min_faction_id: u32,
+    /// `MinReputation` (column 171, `+0x2ac`): the rank that line requires, 0 Hated to 7 Exalted.
+    pub min_reputation: u32,
     /// `EffectBasePoints[3]` (columns 76-78, signed): each roll's floor; -1 on weapon damage.
     pub effect_base_points: [i32; 3],
     /// `EffectDieSides[3]` (columns 64-66, signed): with n dice, the value runs base + n to
@@ -249,6 +257,7 @@ impl Default for SpellDisplay {
             mana_cost_pct: 0,
             mana_cost_per_level: 0,
             mana_per_second: 0,
+            mana_per_second_per_level: 0,
             range_index: 0,
             targets: 0,
             target_creature_type: 0,
@@ -277,6 +286,8 @@ impl Default for SpellDisplay {
             stack_amount: 0,
             max_target_level: 0,
             max_affected_targets: 0,
+            min_faction_id: 0,
+            min_reputation: 0,
             effect_base_points: [0; 3],
             effect_die_sides: [0; 3],
             effect_base_dice: [0; 3],
@@ -318,11 +329,19 @@ impl SpellDisplay {
     }
 
     /// The lock skill this spell provides (`0x5f850f`), from the player's skill in its line:
-    /// the effect value (`0x6e3800`) with its caller's rounding (`0x6e3760`). Its level term is
-    /// that skill with its bonuses (`0x5ea690`), not the caster's level; a skill of 0 leaves only
-    /// the flat terms.
+    /// [`Self::effect_points_int`] of its open-lock effect.
     pub fn open_lock_skill(&self, skill_value: u32) -> Option<i32> {
-        let e = self.open_lock?.effect;
+        Some(self.effect_points_int(self.open_lock?.effect, skill_value))
+    }
+
+    /// Effect `e`'s minimum points as an integer, `0x6e3760` at level 0 for the player: the effect
+    /// value (`0x6e3800`) with its rounding. Its level term is `skill_value`, the player's skill in
+    /// the spell's line with its bonuses (`0x5ea690`), not the caster's level; a skill of 0 leaves
+    /// only the flat terms. `e` past the three effects reads 0.
+    pub fn effect_points_int(&self, e: usize, skill_value: u32) -> i32 {
+        if e >= self.effects.len() {
+            return 0;
+        }
         // Less baseLevel floored at 0 (read at `0x6e3854`, subtracted at `0x6e385b`-`0x6e385f`).
         let delta = self
             .skill_level(skill_value)
@@ -338,7 +357,7 @@ impl SpellDisplay {
         } else {
             v * 2.0 + 0.5
         };
-        Some((doubled.round_ties_even() as i32) >> 1)
+        (doubled.round_ties_even() as i32) >> 1
     }
 
     /// The hostility classifier `0x6ea280` reduced to "targets enemies", the gate on the victim's

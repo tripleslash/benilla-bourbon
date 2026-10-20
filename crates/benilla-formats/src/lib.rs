@@ -57,8 +57,8 @@ mod dbc;
 mod unit_blood;
 pub use camera_shakes::{load_camera_shakes, CameraShake, CameraShakeCatalog, SpellShakeGroup};
 pub use cinematics::{
-    camera_model_path, load_cinematics, CinematicCameraRow, CinematicCatalog, CinematicPath,
-    CinematicSequence, CinematicView, SEQUENCE_CAMERAS,
+    camera_model_path, first_login_eye, load_cinematics, CinematicCameraRow, CinematicCatalog,
+    CinematicPath, CinematicSequence, CinematicView, SEQUENCE_CAMERAS,
 };
 pub use creatures::{
     load_creature_catalog, CreatureCatalog, CreatureModel, FootprintParams, NpcAppearance,
@@ -116,6 +116,10 @@ mod creature_families;
 pub use creature_families::{
     load_creature_families, load_pet_food_names, CreatureFamilies, CreatureFamily, PetFoodNames,
 };
+mod creature_spell_data;
+pub use creature_spell_data::{load_creature_spell_data, CreatureSpellData};
+mod resistances;
+pub use resistances::load_armor_school;
 mod gameobjects;
 pub use gameobjects::{
     go_sound_slot, load_gameobject_catalog, load_gameobject_sounds, GameObjectCatalog,
@@ -234,11 +238,12 @@ mod spells;
 pub use spells::{
     cc_exemption, grants_immunity, load_shapeshift_forms, load_spell_cast_times,
     load_spell_catalog, load_spell_dispel_types, load_spell_durations, load_spell_radii,
-    load_spell_ranges, min_max_range, min_max_range_reads_units, soft_modify, substitute,
-    CcExemption, FormRefusal, LearnAnnouncement, LearnEffect, OpenLock, RangeTargets, RangeUnit,
-    ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
-    SpellDisplay, SpellDuration, SpellDurationCatalog, SpellMods, SpellRadius, SpellRadiusCatalog,
-    SpellRange, SpellRangeCatalog, TokenContext, TokenNumber, UnitMotion, ATTR_CASTABLE_WHILE_DEAD,
+    load_spell_ranges, min_max_range, min_max_range_reads_units, resolve_parts, soft_modify,
+    substitute, substitute_parts, CcExemption, ExpandAt, FormRefusal, LearnAnnouncement,
+    LearnEffect, OpenLock, RangeTargets, RangeUnit, ShapeshiftForm, SpellCastTime,
+    SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes, SpellDisplay, SpellDuration,
+    SpellDurationCatalog, SpellMods, SpellRadius, SpellRadiusCatalog, SpellRange,
+    SpellRangeCatalog, TokenContext, TokenNumber, TokenPart, UnitMotion, ATTR_CASTABLE_WHILE_DEAD,
     ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR,
     MOVING_BONUS_FLAGS, MOVING_RANGE_BONUS, ON_NEXT_SWING_RANGE, SPELL_ATTR_IS_TRADESKILL,
     SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY,

@@ -108,6 +108,7 @@ fn pet_buff(spell_id: u32, name: &str, count: u8) -> AuraState {
         name: Some(name.into()),
         icon: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
         count,
+        level: 0,
         debuff_type: None,
         // Only your own auras carry a duration on the 1.12 wire.
         duration: 0.0,
@@ -116,6 +117,7 @@ fn pet_buff(spell_id: u32, name: &str, count: u8) -> AuraState {
         cancelable: false,
         until_cancelled: false,
         channeled: false,
+        raid_listed: false,
     }
 }
 
@@ -291,7 +293,7 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
     });
     s.set_unit_auras(
         PET,
-        Some(vec![pet_buff(1000, "Rend", 1), pet_buff(1001, "Sunder", 3)]),
+        Some(vec![pet_buff(1000, "Rend", 1), pet_buff(1001, "Sunder", 3)].into()),
     );
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("pet".into())]);
 
@@ -318,7 +320,7 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
     );
     assert!(draws(&mut s, "Interface\\Icons\\Spell_1001"));
 
-    s.set_unit_auras(PET, Some(vec![]));
+    s.set_unit_auras(PET, Some(vec![].into()));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("pet".into())]);
     assert!(!s
         .eval::<bool>("return PetFrameDebuff1:IsVisible()")

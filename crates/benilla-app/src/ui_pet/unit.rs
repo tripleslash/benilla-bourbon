@@ -41,6 +41,11 @@ pub(crate) fn feed_pet_unit(
     // The form table, the creature-type resolver's first stage, and the type words.
     spells: Option<Res<crate::ui_action::Spells>>,
     creature_types: Option<Res<crate::target::CreatureTypes>>,
+    // The tooltip's studied-creature block.
+    study: (
+        Option<Res<crate::ui_unit::tooltip_facts::StudyTables>>,
+        Option<Res<crate::ui_pet_stats::PetFamilyTables>>,
+    ),
     mut memory: Local<crate::ui_script::VmMemo<PetUnitMemory>>,
 ) {
     let Some(mut script) = script else {
@@ -86,7 +91,20 @@ pub(crate) fn feed_pet_unit(
                 spells.as_deref(),
                 creature_types.as_deref(),
             );
-            snapshot(store, pet_guid, name, 0, Default::default(), types)
+            let mut s = snapshot(store, pet_guid, name, 0, Default::default(), types);
+            let object = |g: u64| pet.store(g);
+            let sources = crate::ui_unit::tooltip_facts::TooltipSources {
+                names: &names,
+                catalog: spells.as_deref().map(|s| &s.catalog),
+                object: &object,
+                study: crate::ui_unit::tooltip_facts::StudySources {
+                    tables: study.0.as_deref(),
+                    families: study.1.as_deref(),
+                },
+            };
+            s.tooltip =
+                crate::ui_unit::tooltip_facts::tooltip_facts(store, s.creature_type, &sources);
+            s
         });
 
     let dirty = match (&fresh, &memory.pushed) {
