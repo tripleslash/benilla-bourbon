@@ -966,9 +966,9 @@ pub(crate) mod schedule_tests {
     /// fork's ceiling stays at 3,667 through the merge of abcdced19.
     ///
     /// Upstream's ceiling moved 3,133 -> 3,092 (-41) through 9950c469a (the roster, unit
-    /// relations, the cast reports, the combat log and tooltips); the merge of 9950c469a holds
-    /// the fork's at its measured count.
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_667;
+    /// relations, the cast reports, the combat log and tooltips); with the render worker and the
+    /// terrain LOD the merge of 9950c469a measures 3,396 (-271).
+    const UPDATE_ACTIONABLE_CEILING: usize = 3_396;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

@@ -15,7 +15,7 @@ use crate::ui_script::VmMemo;
 
 /// The units [`feed_unit_relations`] last pushed into a VM.
 #[derive(Default)]
-pub(super) struct RelationMemo {
+pub(crate) struct RelationMemo {
     units: HashMap<u64, RelUnit>,
     /// The active player, whose own entity may carry no `Guid`.
     me: Option<RelUnit>,
@@ -26,7 +26,7 @@ pub(super) struct RelationMemo {
 /// `UnitCanAttack` judges this frame's units. A unit is read again only when its descriptor moved
 /// or a creature record arrived, and the copy is pushed only when a unit's relation facts, the set
 /// of units or a relation input moved.
-pub(super) fn feed_unit_relations(
+pub(crate) fn feed_unit_relations(
     script: Option<NonSendMut<UiScript>>,
     world: RelationWorld,
     units: Query<(&Guid, Ref<ObjectStore>)>,

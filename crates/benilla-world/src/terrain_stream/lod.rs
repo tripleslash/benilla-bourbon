@@ -131,6 +131,10 @@ fn cell_lists<'a>(adt: &'a AdtTile, cell: &TerrainCell, keys: &[u32; 16]) -> Vec
 
 type CellPart<'a> = (&'a ChunkMesh, &'a benilla_assets::ChunkShading, Vec<u32>);
 
+/// A cell whose keys moved: its nearest chunk's distance, the entity, the cell, its mesh and the
+/// keys to build.
+type Due = (f32, Entity, TerrainCell, AssetId<Mesh>, [u32; 16]);
+
 /// Keys every furnished cell's chunks from this frame's levels and rebuilds, nearest first and
 /// [`REBUILDS_PER_FRAME`] a frame, the cells whose keys moved. The mesh is replaced under its own
 /// handle by a queued command, so the entity, its `Aabb` and every caster list keep it.
@@ -175,7 +179,7 @@ pub(super) fn update_terrain_lod(
     state.spheres.retain(|id, _| live.contains(id));
     state.built.retain(|e, _| cells.contains(*e));
 
-    let mut due: Vec<(f32, Entity, TerrainCell, AssetId<Mesh>, [u32; 16])> = Vec::new();
+    let mut due: Vec<Due> = Vec::new();
     for (entity, cell, mesh) in &cells {
         let Some(keys) = cell_keys(&levels, cell, culling.lod) else {
             continue;

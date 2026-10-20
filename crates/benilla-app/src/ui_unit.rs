@@ -23,7 +23,7 @@ use crate::ui_script::{gate, SweepApp, UiInput};
 pub(crate) mod control_gate;
 pub(crate) mod field_events;
 mod held;
-mod relations;
+pub(crate) mod relations;
 
 /// The unit-feed pass, gated so none of its login one-shots or per-VM memos runs before the in-game
 /// interface exists; the demo override orders itself after it.
@@ -3196,11 +3196,9 @@ mod tests {
     /// `UnitRace` is nil. The plugin chains `feed_unit_reach` before `feed_units` for this.
     #[test]
     fn a_retarget_answers_can_inspect_for_the_new_target() {
-        use benilla_protocol::messages::{ObjectFields, ObjectType};
+        use crate::target::relations::fixture::{creature, factions, player, store_of, HUMAN, ORC};
         use bevy::ecs::system::RunSystemOnce;
 
-        const NON_ATTACKABLE: u32 = 1 << 1;
-        const FIELD_UNIT_FLAGS: u16 = 46;
         const ME: u64 = 0x0000_0000_0000_0001;
         const FRIEND: u64 = 0x0000_0000_0000_0003;
         const BOAR: u64 = 0xF130_0000_0000_0002;
@@ -3217,6 +3215,8 @@ mod tests {
             .init_resource::<crate::ui_guild::GuildState>();
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(NetCommands(tx));
+        // The relation model judges by faction template: a Human friend, an Orc boar.
+        app.insert_resource(factions());
         let script = UiScript::new().unwrap();
         script
             .run(
@@ -3232,15 +3232,12 @@ mod tests {
             .unwrap();
         app.insert_non_send(script);
 
-        let store = |kind, pairs: &[(u16, u32)]| {
-            ObjectStore(ObjectFields::from_pairs(pairs).into_created(kind))
-        };
         let me = app
             .world_mut()
             .spawn((
                 SelfPlayer,
                 Guid(ME),
-                store(ObjectType::Player, &[]),
+                store_of(&player(ME, HUMAN)),
                 Transform::default(),
             ))
             .id();
@@ -3248,7 +3245,7 @@ mod tests {
             .world_mut()
             .spawn((
                 Guid(FRIEND),
-                store(ObjectType::Player, &[(FIELD_UNIT_FLAGS, NON_ATTACKABLE)]),
+                store_of(&player(FRIEND, HUMAN)),
                 Transform::from_xyz(3.0, 0.0, 0.0),
             ))
             .id();
@@ -3256,7 +3253,7 @@ mod tests {
             .world_mut()
             .spawn((
                 Guid(BOAR),
-                store(ObjectType::Unit, &[]),
+                store_of(&creature(BOAR, ORC)),
                 Transform::from_xyz(0.0, 3.0, 0.0),
             ))
             .id();

@@ -268,6 +268,6 @@ fn a_pinned_addon_is_never_listed_and_never_disabled() {
     );
     s.eval::<()>("DisableAddOn('Pinned')").unwrap();
     assert!(s
-        .eval::<bool>("return (select(4, GetAddOnInfo('Pinned'))) ~= nil")
+        .eval::<bool>("local _, _, _, enabled = GetAddOnInfo('Pinned') return enabled ~= nil")
         .unwrap());
 }

@@ -995,6 +995,13 @@ fn the_mouseover_token_answers_can_assist() {
             benilla_protocol::field::FIELD_UNIT_FLAGS,
             0x8,
         )]));
+    // The relation functions the verb asks, pushed as the client's unit feed pushes them, over a
+    // self entity that carries its guid.
+    app.world_mut().entity_mut(me).insert(crate::net::Guid(ME));
+    app.add_systems(
+        Update,
+        crate::ui_unit::relations::feed_unit_relations.after(drive_mouseover_tooltip),
+    );
     let can_assist = r#"return UnitCanAssist("player", "mouseover")"#;
 
     hover_unit(&mut app, me, ME);

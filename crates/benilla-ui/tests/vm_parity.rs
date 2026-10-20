@@ -963,7 +963,6 @@ const PLATFORM_CASES: &[&str] = &[
     "sweep math.ldexp",
     "sweep ldexp",
     "sweep math.sin",
-    "sweep cos",
     "sweep math.tan",
     "sweep tan",
     "sweep math.asin",

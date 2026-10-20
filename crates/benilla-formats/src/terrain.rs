@@ -1016,7 +1016,9 @@ mod tests {
     /// Twice the signed area of each triangle on the flat grid.
     fn windings(indices: &[u32]) -> Vec<f32> {
         indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|t| {
                 let (a, b, c) = (grid_of(t[0]), grid_of(t[1]), grid_of(t[2]));
                 (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)

@@ -2478,6 +2478,8 @@ mod tests {
     fn a_held_member_is_assistable_through_its_party_token() {
         let mut app = app();
         app.insert_resource(crate::spell::targeting::corpse_fixture::factions());
+        // The relation functions the verbs ask, pushed as the client's unit feed pushes them.
+        app.add_systems(Update, crate::ui_unit::relations::feed_unit_relations);
         // Field 35 the faction template (Human), 46 the flags (player-controlled).
         let human_player = [(35, 1), (46, 0x8)];
         let me = stream(&mut app, ME, &human_player);
