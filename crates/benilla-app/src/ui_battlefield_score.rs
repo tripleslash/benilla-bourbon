@@ -388,12 +388,12 @@ mod tests {
             .init_resource::<NameCache>();
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(crate::net::NetCommands(tx));
-        app.insert_non_send_resource(harness());
+        app.insert_non_send(harness());
         app.add_systems(Update, feed_battlefield_score);
 
         let winner = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<Option<i64>>("return GetBattlefieldWinner()")
                 .expect("the VM answers")
         };
@@ -449,7 +449,7 @@ mod tests {
             .init_resource::<NameCache>();
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(crate::net::NetCommands(tx));
-        app.insert_non_send_resource(harness());
+        app.insert_non_send(harness());
         app.add_systems(Update, feed_battlefield_score);
 
         app.world_mut()
@@ -470,7 +470,7 @@ mod tests {
 
         assert!(
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<Option<i64>>("return GetBattlefieldWinner()")
                 .expect("the VM answers")
                 .is_none(),
