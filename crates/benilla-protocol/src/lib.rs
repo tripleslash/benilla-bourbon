@@ -542,6 +542,6 @@ mod dial_tests {
         assert_eq!(pick(&list, 0), Some(list[0]));
         assert_eq!(pick(&list, 5), Some(list[2]));
         assert_eq!(pick(&list, u32::MAX), Some(list[0]));
-        assert_eq!(pick(&[], 1), None);
+        assert_eq!(pick::<SocketAddr>(&[], 1), None);
     }
 }

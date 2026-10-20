@@ -426,6 +426,10 @@ pub fn parse_m2_render_submeshes(
                 env_map: model.stage_is_env_mapped(batch, 1),
                 combine: model.stage_combine(batch, 1),
                 uvs: Vec::new(),
+                uv_anim: batch
+                    .texture_transform_combo_index
+                    .checked_add(1)
+                    .and_then(|combo| tex_anim::bake_uv_anim(model, combo, seq0_slot)),
             }
         });
         // The vertex UV set a stage that is not env-mapped reads (`texture_unit_lookup` at
@@ -928,6 +932,7 @@ mod tests {
                 env_map: true,
                 combine: 1,
                 uvs: Vec::new(),
+                uv_anim: None,
             })
         );
         // One texture binds one stage, whatever the lookups past it hold.

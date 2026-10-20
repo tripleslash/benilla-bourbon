@@ -383,6 +383,9 @@ pub struct TextureStage {
     /// `texture_unit_lookup[texCoordSet + k]` names (0 or 1), parallel to
     /// [`RenderSubmesh::positions`]; empty for an env-mapped stage.
     pub uvs: Vec<[f32; 2]>,
+    /// The stage's own translation loop, `textureTransform[combo + 1]` (`0x70b740`); `None` when
+    /// it does not move or the combo is the `0xffff` no-transform sentinel.
+    pub uv_anim: Option<UvAnim>,
 }
 
 /// A flat ground-plane quad: four vertices on one horizontal plane at or just above z = 0 (hover

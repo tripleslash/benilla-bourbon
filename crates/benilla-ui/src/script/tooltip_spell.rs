@@ -981,7 +981,6 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             remaining_ms,
                             ..Default::default()
                         },
-                        None,
                     )?;
                     Ok(flag(remaining_ms > 0 && live))
                 }
