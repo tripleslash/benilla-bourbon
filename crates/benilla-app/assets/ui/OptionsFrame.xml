@@ -1759,7 +1759,8 @@
                 <HighlightFont inherits="GameFontHighlightSmall"/>
                 <DisabledFont inherits="GameFontHighlightSmall"/>
             </Button>
-            <Button name="$parentAddOnsTab">
+            <!-- Hidden: the AddOns page opens from the category list (the owner, 2026-10-20). -->
+            <Button name="$parentAddOnsTab" hidden="true">
                 <Size><AbsDimension x="87" y="37"/></Size>
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="$parentGameTab" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor>
@@ -1782,9 +1783,6 @@
                 <NormalFont inherits="GameFontNormalSmall"/>
                 <HighlightFont inherits="GameFontNormalSmall"/>
                 <DisabledFont inherits="GameFontNormalSmall"/>
-                <!-- The AddOns page below: the era's per-addon enable list. The tab opens the same
-                     page as the category tree's AddOns row (the owner, 2026-10-20: a disabled tab
-                     read as a page that does not work). -->
                 <Scripts>
                     <OnClick>BenillaOptionsFrame_SelectCategory("AddOns")</OnClick>
                 </Scripts>
