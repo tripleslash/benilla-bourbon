@@ -3,8 +3,8 @@
 use std::io::{self, Read};
 
 use crate::wire::{
-    capacity_hint, read_cstring, read_f32_le, read_packed_guid, read_u16_le, read_u32_le,
-    read_u64_le, read_u8, Vector3d,
+    capacity_hint, read_cstring, read_cstring_capped, read_f32_le, read_packed_guid, read_u16_le,
+    read_u32_le, read_u64_le, read_u8, Vector3d,
 };
 
 use super::{
@@ -238,18 +238,7 @@ fn read_char_rename(r: &mut &[u8]) -> io::Result<ServerPacket> {
         }
         let guid = u64::from_le_bytes(r[..8].try_into().expect("eight bytes"));
         *r = &r[8..];
-        let window = &r[..r.len().min(0x30)];
-        match window.iter().position(|&b| b == 0) {
-            Some(nul) => {
-                let name = String::from_utf8_lossy(&window[..nul]).into_owned();
-                *r = &r[nul + 1..];
-                (guid, name)
-            }
-            None => {
-                *r = &r[window.len()..];
-                (guid, String::new())
-            }
-        }
+        (guid, read_cstring_capped(r, 0x30).unwrap_or_default())
     });
     Ok(ServerPacket::CharRename { result, renamed })
 }
@@ -318,7 +307,16 @@ fn parse_server_body(
             // vmangos clamps `CharactersPerRealm` to 10 (`World.cpp:629`).
             let mut characters = Vec::with_capacity(capacity_hint(count, 10));
             for _ in 0..count {
-                characters.push(Character::read(&mut r)?);
+                match Character::read(&mut r)? {
+                    Some(character) => characters.push(character),
+                    // A name past its cap poisons the store: every read after it fails, and the
+                    // end check (`0x5b4523`) empties the list (`0x5b4539`-`0x5b455d`).
+                    None => {
+                        characters.clear();
+                        r = &[];
+                        break;
+                    }
+                }
             }
             ServerPacket::CharEnum { characters }
         }
@@ -332,9 +330,13 @@ fn parse_server_body(
         opcode::SMSG_CHARACTER_LOGIN_FAILED => ServerPacket::CharacterLoginFailed {
             result: read_u8(&mut r)?,
         },
-        opcode::SMSG_UPDATE_OBJECT => ServerPacket::UpdateObject {
-            objects: update_object::read_update_object(&mut r)?,
-        },
+        opcode::SMSG_UPDATE_OBJECT => {
+            let (first_pass, objects) = update_object::read_update_object(&mut r)?;
+            ServerPacket::UpdateObject {
+                first_pass,
+                objects,
+            }
+        }
         opcode::SMSG_DESTROY_OBJECT => ServerPacket::DestroyObject {
             guid: read_u64_le(&mut r)?,
         },
@@ -350,9 +352,12 @@ fn parse_server_body(
             decoder.read_to_end(&mut decompressed)?;
             drop(decoder);
             let mut dr = decompressed.as_slice();
-            let objects = update_object::read_update_object(&mut dr)?;
+            let (first_pass, objects) = update_object::read_update_object(&mut dr)?;
             *inner_tail = dr.len();
-            ServerPacket::UpdateObject { objects }
+            ServerPacket::UpdateObject {
+                first_pass,
+                objects,
+            }
         }
         opcode::SMSG_COMPRESSED_MOVES => ServerPacket::CompressedMoves {
             packets: read_compressed_moves(&mut r)?,
@@ -1086,6 +1091,10 @@ fn parse_server_body(
         opcode::MSG_CORPSE_QUERY => {
             ServerPacket::CorpseQuery(death::read_corpse_query_response(&mut r)?)
         }
+        // `0x5e7d40`: the byte (`0x418cb0`), then its truth (`0x5e7d54` `setne`).
+        opcode::SMSG_PLAYER_SKINNED => ServerPacket::PlayerSkinned {
+            free_repop: read_u8(&mut r)? != 0,
+        },
         opcode::SMSG_DURABILITY_DAMAGE_DEATH => ServerPacket::DurabilityDamageDeath,
         opcode::SMSG_CORPSE_RECLAIM_DELAY => ServerPacket::CorpseReclaimDelay {
             delay_ms: death::read_corpse_reclaim_delay(&mut r)?,
@@ -1768,12 +1777,14 @@ mod tests {
             out.extend(z.finish().unwrap());
             out
         }
-        // `u32 count = 0, u8 has_transport = 0`: a well-formed, empty object list.
+        // `u32 count = 0`, a clear header byte: a well-formed, empty object list.
         let empty = [0u8, 0, 0, 0, 0];
         let (packet, tail) =
             parse_server_with_tail(opcode::SMSG_COMPRESSED_UPDATE_OBJECT, &body(&empty))
                 .expect("an empty update object decodes");
-        assert!(matches!(packet, ServerPacket::UpdateObject { ref objects } if objects.is_empty()));
+        assert!(
+            matches!(packet, ServerPacket::UpdateObject { ref objects, .. } if objects.is_empty())
+        );
         assert_eq!(tail, 0, "the zlib bytes are consumed, not reported");
 
         let mut longer = empty.to_vec();

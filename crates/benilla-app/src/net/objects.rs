@@ -29,31 +29,20 @@ use super::{
 
 mod update;
 
-pub(crate) use update::{Listed, Released};
+pub(crate) use update::{release_unheld, Listed, ReleasePending, Released};
 
-/// `SMSG_GAMEOBJECT_CUSTOM_ANIM`, bridged to [`crate::go_anim`], which rejects `anim_id >= 4` and
-/// maps the rest to AnimationData 153..156; the fishing bobber's splash is `anim_id` 0.
-fn gameobject_custom_anim(
+/// `SMSG_GAMEOBJECT_CUSTOM_ANIM` and `SMSG_GAMEOBJECT_DESPAWN_ANIM` (`0x5f8930`, `0x5f8990`): an
+/// event on the object's one-shot channel (`0x5f8c50`), armed at the packet so the hold its play
+/// takes is there for a release in the same tick; vmangos sends `SMSG_DESTROY_OBJECT` right after
+/// the despawn. An object whose model has no state machine yet drops the event.
+fn gameobject_anim_event(
     guid: u64,
-    anim_id: u32,
-    plays: &mut MessageWriter<crate::go_anim::GoCustomAnim>,
+    index: &GuidIndex,
+    go_anims: &mut Query<&mut crate::go_anim::GoAnim>,
+    arm: impl FnOnce(&mut crate::go_anim::GoAnim),
 ) {
-    debug!("net: gameobject {guid:#x} custom anim {anim_id}");
-    plays.write(crate::go_anim::GoCustomAnim {
-        go_guid: guid,
-        anim_id,
-    });
-}
-
-/// `SMSG_GAMEOBJECT_DESPAWN_ANIM`: AnimationData 157 on the one-shot channel (`0x5f8c50`).
-/// vmangos sends `SMSG_DESTROY_OBJECT` in the same tick, so the mark is a component queued now,
-/// ahead of the closure the destroy's handler queues, not a message.
-fn gameobject_despawn_anim(guid: u64, commands: &mut Commands, index: &GuidIndex) {
-    debug!("net: gameobject {guid:#x} despawn anim");
-    if let Some(&e) = index.0.get(&guid) {
-        commands
-            .entity(e)
-            .insert(crate::go_anim::DespawnAnimAnnounced);
+    if let Some(mut go) = index.0.get(&guid).and_then(|&e| go_anims.get_mut(e).ok()) {
+        arm(&mut go);
     }
 }
 
@@ -100,7 +89,6 @@ pub(crate) struct Scene<'w, 's> {
     speed_changes: MessageWriter<'w, SpeedChangeMessage>,
     self_moves: MessageWriter<'w, super::SelfMoveMessage>,
     hard_landings: MessageWriter<'w, crate::creature_anim::HardLanding>,
-    go_custom_anims: MessageWriter<'w, crate::go_anim::GoCustomAnim>,
     names: Res<'w, NameCache>,
     items: ResMut<'w, Items>,
     go_templates: ResMut<'w, GameObjectTemplates>,
@@ -114,6 +102,12 @@ pub(crate) struct Scene<'w, 's> {
     list: ResMut<'w, update::ObjectList>,
     player: Option<Res<'w, crate::player::Player>>,
     item_objects: Query<'w, 's, &'static crate::items::ItemObject>,
+    go_anims: Query<'w, 's, &'static mut crate::go_anim::GoAnim>,
+    go_models:
+        Query<'w, 's, &'static benilla_assets::ModelAnimations, With<crate::go_anim::GoAnim>>,
+    pending: Query<'w, 's, (Entity, &'static Guid), With<update::ReleasePending>>,
+    creatures: Option<Res<'w, crate::entities::Creatures>>,
+    held_displays: Query<'w, 's, &'static mut update::HeldDisplay>,
 }
 
 /// The item watchers' reads of the scene ([`crate::item_watch::Watch`]).
@@ -162,6 +156,11 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
                     item_watch(index, stores, &sc.self_guid, &sc.items)
                         .record_landed(entry, held, &waiters)
                 };
+                for notice in &notices {
+                    if let crate::item_watch::ItemNotice::Record { guid, .. } = *notice {
+                        replay_enchant_times(&mut sc.items, &mut sc.countdowns, &sc.index, guid);
+                    }
+                }
                 sc.item_notices.write_batch(notices);
             }
             // The trade getters' callbacks run for a ready record only (`0x4c0343`).
@@ -210,6 +209,28 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
             _ => debug!("enchant timer: {item_guid:#x} unheld and no player to queue on — dropped"),
         },
         _ => {}
+    }
+}
+
+/// `CGItem_C::ApplyRecord`'s replay (`0x5ebde0` at `0x5d85b7`): the enchant times queued on the
+/// active player while the item was not held, set as of now. The record set-up reaches it only
+/// for our item while in the world (`0x5d8504`, `0x5d8521`), as [`ItemNotice::Record`] runs.
+///
+/// [`ItemNotice::Record`]: crate::item_watch::ItemNotice::Record
+fn replay_enchant_times(
+    items: &mut Items,
+    countdowns: &mut Query<&mut crate::items::Countdowns>,
+    index: &GuidIndex,
+    guid: u64,
+) {
+    let queued = items.take_enchant_times(guid);
+    let Some(mut cells) = index.0.get(&guid).and_then(|&e| countdowns.get_mut(e).ok()) else {
+        return;
+    };
+    for (slot, seconds) in queued {
+        if !cells.set_enchant(slot, seconds) {
+            debug!("enchant timer: queued slot {slot} for {guid:#x} is past the seventh — refused");
+        }
     }
 }
 
@@ -334,10 +355,12 @@ fn on_gameobject_unknown(In(ev): In<SessionEvent>, mut sc: Scene) {
 fn on_gameobject_anim(In(ev): In<SessionEvent>, mut sc: Scene) {
     match ev {
         SessionEvent::GameObjectCustomAnim { guid, anim_id } => {
-            gameobject_custom_anim(guid, anim_id, &mut sc.go_custom_anims)
+            debug!("net: gameobject {guid:#x} custom anim {anim_id}");
+            gameobject_anim_event(guid, &sc.index, &mut sc.go_anims, |go| go.custom(anim_id));
         }
         SessionEvent::GameObjectDespawnAnim { guid } => {
-            gameobject_despawn_anim(guid, &mut sc.commands, &sc.index)
+            debug!("net: gameobject {guid:#x} despawn anim");
+            gameobject_anim_event(guid, &sc.index, &mut sc.go_anims, |go| go.despawn());
         }
         _ => {}
     }
@@ -482,17 +505,7 @@ fn object_create(
             local_pos: [t.pos.x, t.pos.y, t.pos.z],
             local_orientation: t.orientation,
         });
-    // Warm the name cache as a unit streams in, the reference's timing: its create path
-    // (`0x5fb880`) looks up every creature's record (`0x60afb0`, at `0x60b15b`), whose name is the
-    // record's field 0 (`0x60934b`). Its `CreatureCache.wdb` answers without the wire; ours lasts
-    // a session.
-    if matches!(kind, EntityKind::Unit | EntityKind::Player) {
-        sc.names.lookup_fields(guid, fields, &sc.net);
-    }
-    // Warm the template cache as a GameObject streams in: only the query carries its lockId,
-    // which decides use-vs-cast on a right-click.
     if matches!(kind, EntityKind::GameObject) {
-        sc.go_templates.request_at_create(guid, fields, &sc.net);
         // Where and how big, under `RUST_LOG=benilla_app::net::objects=debug`.
         debug!(
             "gameobject spawn: entry {:?} display {display_id:?} type {go_type:?} \
@@ -734,7 +747,7 @@ fn unit_move(
 /// consumer; the [`NetEntity`] and [`ObjectStore`] stay so the model draws out (a decaying corpse
 /// stays lying down). The caller has already removed the guid from the [`GuidIndex`], so a block
 /// that brings the object back spawns a fresh entity beside the fading model.
-pub(crate) fn tear_down(mut ent: EntityWorldMut) {
+fn tear_down(mut ent: EntityWorldMut) {
     ent.remove::<Guid>();
     ent.insert(DespawnFade::default());
 }
@@ -1042,6 +1055,7 @@ pub(crate) fn wire(events: impl IntoIterator<Item = SessionEvent>) -> Vec<Sessio
                     | SessionEvent::ObjectMove { .. }
                     | SessionEvent::ObjectsRemoved(_)
                     | SessionEvent::ObjectsNear(_)
+                    | SessionEvent::ObjectNotify { .. }
             );
             std::iter::once(ev).chain(block.then_some(SessionEvent::ObjectUpdateEnd))
         })
@@ -1605,7 +1619,7 @@ mod tests {
             transport_progress: None,
             transport: None,
             spline: None,
-            fields: ObjectFields::from_pairs(&[(3, ENTRY)])
+            fields: ObjectFields::from_pairs(&[(2, 9), (3, ENTRY)])
                 .into_created(benilla_protocol::messages::ObjectType::Unit),
         };
         let creature_asks = |rx: &crossbeam_channel::Receiver<ClientCommand>| {
@@ -1670,6 +1684,236 @@ mod tests {
             ),
             "the new entry is asked for"
         );
+    }
+
+    /// A unit of `entry` and a game object of `go_entry`, created as their blocks bring them.
+    fn record_creates(unit: u64, entry: u32, go: u64, go_entry: u32) -> Vec<SessionEvent> {
+        use benilla_protocol::messages::ObjectType;
+        let create = |guid, kind, fields: ObjectFields| SessionEvent::ObjectCreate {
+            guid,
+            kind,
+            display_id: None,
+            position: [0.0; 3],
+            orientation: 0.0,
+            scale: 1.0,
+            speeds: None,
+            mover: None,
+            transport_progress: None,
+            transport: None,
+            spline: None,
+            fields,
+        };
+        vec![
+            create(
+                unit,
+                EntityKind::Unit,
+                ObjectFields::from_pairs(&[(2, 9), (3, entry)]).into_created(ObjectType::Unit),
+            ),
+            create(
+                go,
+                EntityKind::GameObject,
+                ObjectFields::from_pairs(&[(3, go_entry)]).into_created(ObjectType::GameObject),
+            ),
+        ]
+    }
+
+    /// The creature and template asks the wire saw, as `(creature, game object)` counts.
+    fn record_asks(rx: &crossbeam_channel::Receiver<ClientCommand>) -> (usize, usize) {
+        rx.try_iter().fold((0, 0), |(c, g), cmd| match cmd {
+            ClientCommand::CreatureQuery { .. } => (c + 1, g),
+            ClientCommand::GameObjectQuery { .. } => (c, g + 1),
+            _ => (c, g),
+        })
+    }
+
+    /// The record asks belong to the create hooks (`0x5fb880` → `0x60afb0`, the ask at
+    /// `0x60b15b`; `0x5f7c40`, `0x5f7d81`), which a create of an object already shown skips for
+    /// the all-fields watch (`0x465d79`, `0x465d8e`): a refused entry is not asked again by it.
+    #[test]
+    fn a_re_create_of_a_shown_object_asks_no_record() {
+        const ENTRY: u32 = 1234;
+        const GO_ENTRY: u32 = 1000;
+        const GO: u64 = 0xF110_0000_0000_0009;
+        let mob = (u64::from(ENTRY) << 24) | (u64::from(guid::HIGH_UNIT) << 48) | 1;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.world_mut().insert_resource(NetCommands(tx));
+
+        let creates = record_creates(mob, ENTRY, GO, GO_ENTRY);
+        super::super::handlers::dispatch(app.world_mut(), super::wire(creates.clone()));
+        assert_eq!(record_asks(&rx), (1, 1), "the first creates' hooks ask");
+        let world = app.world_mut();
+        world
+            .resource_mut::<NameCache>()
+            .insert_creature(ENTRY, None);
+        world.resource_mut::<GameObjectTemplates>().refuse(GO_ENTRY);
+
+        super::super::handlers::dispatch(app.world_mut(), super::wire(creates));
+        assert_eq!(record_asks(&rx), (0, 0), "shown: no hook, no ask");
+    }
+
+    /// A game object brought back asks its record when it has none (`0x5f7ed0`: `+0x214` clear,
+    /// `0x558560` at `0x5f7f31`); a unit brought back with its display unchanged asks nothing, its
+    /// slot 3's display rebuild finding the same records (`0x5fbe28` → `0x60abe0` → `0x60ae10`).
+    #[test]
+    fn a_released_game_object_brought_back_asks_its_missing_record() {
+        const ENTRY: u32 = 1234;
+        const GO_ENTRY: u32 = 1000;
+        const GO: u64 = 0xF110_0000_0000_0009;
+        let mob = (u64::from(ENTRY) << 24) | (u64::from(guid::HIGH_UNIT) << 48) | 1;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.world_mut().insert_resource(NetCommands(tx));
+
+        let creates = record_creates(mob, ENTRY, GO, GO_ENTRY);
+        super::super::handlers::dispatch(app.world_mut(), super::wire(creates.clone()));
+        let world = app.world_mut();
+        world
+            .resource_mut::<NameCache>()
+            .insert_creature(ENTRY, None);
+        world.resource_mut::<GameObjectTemplates>().refuse(GO_ENTRY);
+        super::super::handlers::dispatch(
+            app.world_mut(),
+            super::wire(vec![SessionEvent::ObjectsRemoved(vec![mob, GO])]),
+        );
+        let _ = record_asks(&rx);
+
+        super::super::handlers::dispatch(app.world_mut(), super::wire(creates));
+        assert_eq!(record_asks(&rx), (0, 1), "the game object's slot 3 asks");
+    }
+
+    /// The display tables of the display tests: 10 and 12 share model 1, whose sound is no row,
+    /// so they name the same records; 11 is model 2, with a sound row.
+    fn display_tables() -> crate::entities::Creatures {
+        crate::entities::Creatures::from_catalog(
+            benilla_formats::CreatureCatalog::from_record_rows(
+                &[(10, 1, 0, 0), (11, 2, 0, 0), (12, 1, 0, 0)],
+                &[(1, 0), (2, 50)],
+                &[50],
+            ),
+        )
+    }
+
+    /// A unit of `ENTRY` at `display`, alive, as `type_mask` (9 a creature, `0x19` a player).
+    fn displayed(guid: u64, kind: EntityKind, type_mask: u32, display: u32) -> SessionEvent {
+        use benilla_protocol::field::{FIELD_UNIT_DISPLAYID, FIELD_UNIT_HEALTH};
+        use benilla_protocol::messages::ObjectType;
+        let as_type = match kind {
+            EntityKind::Player => ObjectType::Player,
+            _ => ObjectType::Unit,
+        };
+        SessionEvent::ObjectCreate {
+            guid,
+            kind,
+            display_id: Some(display),
+            position: [0.0; 3],
+            orientation: 0.0,
+            scale: 1.0,
+            speeds: None,
+            mover: None,
+            transport_progress: None,
+            transport: None,
+            spline: None,
+            fields: ObjectFields::from_pairs(&[
+                (2, type_mask),
+                (3, 1234),
+                (FIELD_UNIT_HEALTH, 100),
+                (FIELD_UNIT_DISPLAYID, display),
+            ])
+            .into_created(as_type),
+        }
+    }
+
+    /// A creature asks its record again when its display names a new record set: the display
+    /// watcher (`0x6049b5`) runs `0x60abe0`, whose `0x60ae10` finds the records changed, and the
+    /// resolve asks (`0x60ac21` → `0x60b15b`). A display with the same records, or one with no
+    /// row (`0x60ae36`), changes nothing; a player never asks (`0x60b134`).
+    #[test]
+    fn a_new_display_record_set_asks_the_creature_record_again() {
+        use benilla_protocol::field::FIELD_UNIT_DISPLAYID;
+        const ENTRY: u32 = 1234;
+        let mob = (u64::from(ENTRY) << 24) | (u64::from(guid::HIGH_UNIT) << 48) | 1;
+        const PLAYER: u64 = 0x0000_0000_0000_0042;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.world_mut().insert_resource(NetCommands(tx));
+        app.world_mut().insert_resource(display_tables());
+        let display = |world: &mut World, guid: u64, id: u32| {
+            super::super::handlers::dispatch(
+                world,
+                super::wire(vec![SessionEvent::ObjectValues {
+                    guid,
+                    fields: ObjectFields::from_pairs(&[(FIELD_UNIT_DISPLAYID, id)]),
+                }]),
+            );
+        };
+
+        let world = app.world_mut();
+        super::super::handlers::dispatch(
+            world,
+            super::wire(vec![
+                displayed(mob, EntityKind::Unit, 9, 10),
+                displayed(PLAYER, EntityKind::Player, 0x19, 10),
+            ]),
+        );
+        assert_eq!(record_asks(&rx), (1, 0), "the creature's create hook alone");
+        // Refused: the next lookup with a callback asks at once.
+        world
+            .resource_mut::<NameCache>()
+            .insert_creature(ENTRY, None);
+
+        display(world, mob, 12);
+        assert_eq!(record_asks(&rx), (0, 0), "12 names 10's records");
+        display(world, mob, 999);
+        assert_eq!(record_asks(&rx), (0, 0), "no row: no change");
+        display(world, PLAYER, 11);
+        assert_eq!(record_asks(&rx), (0, 0), "a player resolves, never asks");
+        display(world, mob, 11);
+        assert_eq!(record_asks(&rx), (1, 0), "a new model: the records changed");
+        display(world, mob, 11);
+        assert_eq!(record_asks(&rx), (0, 0), "no edge, no watcher");
+    }
+
+    /// The health watcher rebuilds the display of a unit come back to life (`0x6047ee` →
+    /// `0x604835`), whose records the display watcher did not see change: here the display table
+    /// was not up when it did.
+    #[test]
+    fn a_unit_back_to_life_rebuilds_its_display() {
+        use benilla_protocol::field::{FIELD_UNIT_DISPLAYID, FIELD_UNIT_HEALTH};
+        const ENTRY: u32 = 1234;
+        let mob = (u64::from(ENTRY) << 24) | (u64::from(guid::HIGH_UNIT) << 48) | 1;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.world_mut().insert_resource(NetCommands(tx));
+        app.world_mut().insert_resource(display_tables());
+        let world = app.world_mut();
+        let values = |world: &mut World, pairs: &[(u16, u32)]| {
+            super::super::handlers::dispatch(
+                world,
+                super::wire(vec![SessionEvent::ObjectValues {
+                    guid: mob,
+                    fields: ObjectFields::from_pairs(pairs),
+                }]),
+            );
+        };
+        super::super::handlers::dispatch(
+            world,
+            super::wire(vec![displayed(mob, EntityKind::Unit, 9, 10)]),
+        );
+        world
+            .resource_mut::<NameCache>()
+            .insert_creature(ENTRY, None);
+        let _ = record_asks(&rx);
+
+        let tables = world
+            .remove_resource::<crate::entities::Creatures>()
+            .unwrap();
+        values(world, &[(FIELD_UNIT_DISPLAYID, 11)]);
+        world.insert_resource(tables);
+        values(world, &[(FIELD_UNIT_HEALTH, 0)]);
+        assert_eq!(record_asks(&rx), (0, 0), "dying rebuilds nothing");
+        values(world, &[(FIELD_UNIT_HEALTH, 50)]);
+        assert_eq!(record_asks(&rx), (1, 0), "coming back does");
     }
 
     /// A create block for a live item runs the watchers over what it moved, never the create's
@@ -1773,8 +2017,9 @@ mod tests {
         );
     }
 
-    /// `0x1EB` for an unheld item waits on the active player and replays at its create; `0x1EA`
-    /// for one is dropped; the destroy takes the cells.
+    /// `0x1EB` for an unheld item waits on the active player, for the item's record to replay it
+    /// ([`a_queued_enchant_time_replays_when_the_items_record_applies`]); `0x1EA` for one is
+    /// dropped; the destroy takes the cells.
     #[test]
     fn item_countdowns_live_on_the_item_and_a_queued_enchant_waits_for_it() {
         use crate::items::Countdowns;
@@ -1832,10 +2077,10 @@ mod tests {
         assert_eq!(cells(world, SWORD), None, "nothing held yet");
         super::super::handlers::dispatch(world, super::wire(vec![create(SWORD)]));
         let c = cells(world, SWORD).expect("the create spawned the item with its cells");
-        assert!(
-            c.enchant_remaining_ms(1)
-                .is_some_and(|ms| (89_000..=90_000).contains(&ms)),
-            "the queued enchant replayed as of the create"
+        assert_eq!(
+            c.enchant_remaining_ms(1),
+            None,
+            "the enchant waits on the record, which no one has sent"
         );
         assert_eq!(
             c.lifetime_remaining_ms(),
@@ -1850,6 +2095,11 @@ mod tests {
                 SessionEvent::ItemTime {
                     item_guid: SWORD,
                     seconds: 600,
+                },
+                SessionEvent::ItemEnchantTime {
+                    item_guid: SWORD,
+                    slot: 1,
+                    seconds: 30,
                 },
                 SessionEvent::ItemEnchantTime {
                     item_guid: SWORD,
@@ -1870,6 +2120,79 @@ mod tests {
         );
         assert!(!world.resource::<GuidIndex>().0.contains_key(&SWORD));
         assert!(world.get_entity(e).is_err(), "the cells died with the item");
+    }
+
+    /// A queued `0x1EB` replays from the item's record application, `0x5d8440` (`0x5ebde0` at
+    /// `0x5d85b7`): at the create hook when the record is cached, else when it lands (`0x5d8390`),
+    /// and only for the active player's item while in the world (`0x5d8504`, `0x5d8521`).
+    #[test]
+    fn a_queued_enchant_time_replays_when_the_items_record_applies() {
+        use crate::items::Countdowns;
+        use benilla_protocol::messages::ObjectType;
+        const ME: u64 = 0x0000_0000_0000_0007;
+        const SWORD: u64 = 0x4000_0000_0000_0042;
+        const THEIRS: u64 = 0x4000_0000_0000_0043;
+        const MACE: u64 = 0x4000_0000_0000_0044;
+        const ENTRY: u32 = 117;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        let me = world
+            .spawn((
+                Guid(ME),
+                ObjectStore(ObjectFields::default().into_created(ObjectType::Player)),
+            ))
+            .id();
+        world.resource_mut::<GuidIndex>().0.insert(ME, me);
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        let create = |guid: u64, owner: u64| SessionEvent::ItemCreate {
+            guid,
+            container: false,
+            fields: ObjectFields::from_pairs(&[
+                (2, 0x3),
+                (3, ENTRY),
+                (6, owner as u32),
+                (7, (owner >> 32) as u32),
+            ])
+            .into_created(ObjectType::Item),
+        };
+        let queue = |guid: u64| SessionEvent::ItemEnchantTime {
+            item_guid: guid,
+            slot: 1,
+            seconds: 90,
+        };
+        let replayed = |world: &World, guid: u64| -> bool {
+            let e = world.resource::<GuidIndex>().0[&guid];
+            world
+                .get::<Countdowns>(e)
+                .and_then(|c| c.enchant_remaining_ms(1))
+                .is_some_and(|ms| (89_000..=90_000).contains(&ms))
+        };
+
+        super::super::handlers::dispatch(
+            world,
+            super::wire(vec![
+                queue(SWORD),
+                queue(THEIRS),
+                create(SWORD, ME),
+                create(THEIRS, 0x99),
+            ]),
+        );
+        assert!(!replayed(world, SWORD), "no record yet: nothing applies");
+        super::super::handlers::dispatch(
+            world,
+            vec![SessionEvent::ItemTemplate {
+                entry: ENTRY,
+                info: Some(Box::new(crate::items::test_template("Sword"))),
+            }],
+        );
+        assert!(replayed(world, SWORD), "the record landed and applied");
+        assert!(!replayed(world, THEIRS), "another's item applies no replay");
+
+        super::super::handlers::dispatch(world, super::wire(vec![queue(MACE), create(MACE, ME)]));
+        assert!(
+            replayed(world, MACE),
+            "a cached record applies at the create hook"
+        );
     }
 
     /// The observer movement-mode family, on a bare `World` with one indexed unit.

@@ -10,8 +10,8 @@ pub mod wire;
 pub mod world;
 pub use auth::{AuthReject, LogonReply, RealmVersion};
 pub use events::{
-    decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, Poll, RosterCause,
-    SessionEnd, SessionEvent, SessionEventKind,
+    decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, NotifyBlock, Poll,
+    RosterCause, SessionEnd, SessionEvent, SessionEventKind,
 };
 pub use messages::field;
 pub use messages::{

@@ -564,24 +564,73 @@ fn a_released_unit_keeps_its_xp_mark() {
     assert!(!marked(world, MOB), "a destroyed unit's next create is new");
 }
 
-/// An out-of-range list releases only as a packet's first block (`0x4651e1`); in any other place
-/// the notify pass skips it (`0x465fd0`) and nothing is released.
+/// The out-of-range list's second round releases the first pass's guids, top nibble 6 or 8,
+/// without the active-player test of the first round (`0x465f8f`-`0x465fa6`).
 #[test]
-fn an_out_of_range_list_releases_only_as_the_first_block() {
+fn the_out_of_range_lists_second_round_spares_no_active_player() {
+    const FIRST_ME: u64 = 0x6000_0000_0000_0007;
     let mut app = client();
     let world = app.world_mut();
-    world.resource_mut::<SelfGuid>().0 = Some(ME);
-    send(world, [unit(MOB, &[(ENTRY, 299)])]);
-    send(world, [values(MOB, &[(STAT0, 1)]), out_of_range(&[MOB])]);
-    assert!(held(world, MOB), "a later block");
-    send(world, [out_of_range(&[MOB]), values(MOB, &[(STAT0, 2)])]);
-    assert!(
-        held(world, MOB),
-        "the first block released it, and the values block after it brought it back"
+    world.resource_mut::<SelfGuid>().0 = Some(FIRST_ME);
+    indexed(world, FIRST_ME);
+    indexed(world, MOB);
+
+    send(world, [out_of_range(&[FIRST_ME, MOB])]);
+    assert!(!held(world, FIRST_ME), "the second round");
+    assert!(!held(world, MOB), "the first round");
+}
+
+/// A first-pass guid's values block applies only behind a set header byte (`0x46520e`), as the
+/// packet's bytes carry it; its watch runs in the notify pass either way, against what moved.
+#[test]
+fn a_first_pass_guids_values_block_applies_behind_the_header_byte() {
+    use benilla_protocol::messages::{self, ObjectType};
+    const FIRST: u64 = 0x6000_0000_0000_0042;
+    // Values for FIRST, `OBJECT_FIELD_ENTRY` 0x13; then values for 0xAA, entry 0x12.
+    let packet = |header: &str| {
+        let body: Vec<u8> = [
+            "02000000",
+            header,
+            "00814260010800000013000000",
+            "0001aa010800000012000000",
+        ]
+        .concat()
+        .as_bytes()
+        .chunks(2)
+        .map(|h| u8::from_str_radix(std::str::from_utf8(h).unwrap(), 16).unwrap())
+        .collect();
+        benilla_protocol::decode(
+            messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap(),
+        )
+    };
+    let mut app = client();
+    let world = app.world_mut();
+    for guid in [FIRST, 0xAA] {
+        let e = world
+            .spawn((
+                Guid(guid),
+                ObjectStore(ObjectFields::default().into_created(ObjectType::GameObject)),
+            ))
+            .id();
+        world.resource_mut::<GuidIndex>().0.insert(guid, e);
+    }
+
+    super::super::handlers::dispatch(world, packet("00"));
+    assert_eq!(field(world, FIRST, ENTRY), None, "no pass wrote it");
+    assert_eq!(field(world, 0xAA, ENTRY), Some(0x12));
+    assert_eq!(edges(world), [(0xAA, ENTRY, 0, 0x12)]);
+
+    super::super::handlers::dispatch(world, packet("01"));
+    assert_eq!(
+        field(world, FIRST, ENTRY),
+        Some(0x13),
+        "the first pass wrote it"
     );
-    assert_eq!(field(world, MOB, STAT0), Some(2));
-    send(world, [out_of_range(&[MOB])]);
-    assert!(!held(world, MOB), "control: the first block");
+    assert_eq!(
+        edges(world),
+        [(FIRST, ENTRY, 0, 0x13)],
+        "its watch ran in the notify pass"
+    );
 }
 
 /// A first create runs no watch (`0x465d80`), so the active player's flag tutorials wait for a
@@ -680,5 +729,197 @@ fn a_new_guild_timestamp_asks_the_guild_again_and_refreshes_its_members() {
         notices(world),
         [tag(P2), tag(P1)].concat(),
         "every held member of the guild in list order, none of another"
+    );
+}
+
+// ── Holds ───────────────────────────────────────────────────────────────────────────────────────
+
+const DOOR: u64 = 0xF110_0000_0000_0E66;
+
+/// A gameobject, created and then held by its state machine's play (`0x5f3b27`).
+fn held_door(world: &mut World) -> Entity {
+    send(
+        world,
+        [created(
+            DOOR,
+            EntityKind::GameObject,
+            [1.0, 2.0, 3.0],
+            &[(ENTRY, 0x12)],
+        )],
+    );
+    let e = world.resource::<GuidIndex>().0[&DOOR];
+    world
+        .entity_mut(e)
+        .insert(crate::go_anim::GoAnim::holding());
+    e
+}
+
+/// The play ends and drops its hold (`0x5f4120` → `0x468410`); the unhold's release runs.
+fn end_hold(world: &mut World, e: Entity) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .get_mut::<crate::go_anim::GoAnim>(e)
+        .unwrap()
+        .end_hold();
+    world.run_system_once(crate::net::release_unheld).unwrap();
+}
+
+/// The out-of-range list's release of a held object only marks it release-pending (`0x464942` →
+/// `0x614f00`, `0x46494f`): it stays live, indexed and drawn. The unhold releases it then
+/// (`0x468410` → `0x46844a`) into the released table, so a values block brings it back.
+#[test]
+fn a_held_object_leaves_range_only_when_its_hold_drops() {
+    let mut app = client();
+    let world = app.world_mut();
+    let e = held_door(world);
+
+    send(world, [out_of_range(&[DOOR])]);
+    assert!(held(world, DOOR), "held: still live");
+    assert!(world.get::<Guid>(e).is_some());
+    assert!(world.get::<DespawnFade>(e).is_none(), "and drawn");
+
+    end_hold(world, e);
+    assert!(!held(world, DOOR), "the unhold released it");
+    assert!(world.get::<DespawnFade>(e).is_some());
+    send(world, [values(DOOR, &[])]);
+    assert!(held(world, DOOR), "out of the released table");
+    assert_eq!(field(world, DOOR, ENTRY), Some(0x12));
+}
+
+/// `SMSG_DESTROY_OBJECT` releases through the same `0x464920` (`0x4674cf`): a held object stays
+/// live, and the destroy finds no released object to free (`0x467521`). The unhold releases it
+/// into the released table, where a block still brings it back.
+#[test]
+fn a_held_object_outlives_its_destroy_until_the_hold_drops() {
+    let mut app = client();
+    let world = app.world_mut();
+    let e = held_door(world);
+
+    super::super::handlers::dispatch(world, vec![SessionEvent::ObjectDestroyed(DOOR)]);
+    assert!(held(world, DOOR), "held: still live");
+    assert!(world.get::<DespawnFade>(e).is_none());
+
+    end_hold(world, e);
+    assert!(!held(world, DOOR), "the unhold released it");
+    assert!(world.get::<DespawnFade>(e).is_some());
+    send(world, [values(DOOR, &[])]);
+    assert!(held(world, DOOR), "released, not freed");
+    assert_eq!(field(world, DOOR, ENTRY), Some(0x12));
+}
+
+/// A values or near-objects block that finds the pending object live clears its pending bit
+/// (`0x464530` → `0x4645b2`), so its unhold releases nothing.
+#[test]
+fn a_block_that_finds_a_pending_object_cancels_its_release() {
+    let mut app = client();
+    let world = app.world_mut();
+    let e = held_door(world);
+
+    send(world, [out_of_range(&[DOOR])]);
+    send(world, [values(DOOR, &[])]);
+    end_hold(world, e);
+    assert!(held(world, DOOR), "a values block");
+    assert!(world.get::<DespawnFade>(e).is_none());
+
+    world
+        .entity_mut(e)
+        .insert(crate::go_anim::GoAnim::holding());
+    send(world, [out_of_range(&[DOOR])]);
+    send(world, [SessionEvent::ObjectsNear(vec![DOOR])]);
+    end_hold(world, e);
+    assert!(held(world, DOOR), "a near-objects block");
+    assert!(world.get::<DespawnFade>(e).is_none());
+}
+
+/// A door resting on Closed whose model owns `anims`, with a second field only its first create
+/// carries.
+fn animated_door(world: &mut World, guid: u64, anims: &[u16]) -> Entity {
+    send(
+        world,
+        [created(
+            guid,
+            EntityKind::GameObject,
+            [1.0, 2.0, 3.0],
+            &[(ENTRY, 0x12), (STALE, 0x55)],
+        )],
+    );
+    let e = world.resource::<GuidIndex>().0[&guid];
+    world.entity_mut(e).insert((
+        crate::go_anim::GoAnim::resting(),
+        crate::go_anim::owned_anims(anims),
+    ));
+    e
+}
+
+/// A field the re-create below does not send.
+const STALE: u16 = 8;
+
+/// vmangos sends `SMSG_GAMEOBJECT_DESPAWN_ANIM` and then the destroy (`GameObject.cpp:860`,
+/// `:2472`). The despawn holds only when the model has 157 (`0x5f424a`): without it nothing
+/// plays, the destroy frees the object at once (`0x467521`), and a create of the guid makes a
+/// fresh one that runs its create hook, keeping nothing of the old.
+#[test]
+fn a_despawn_the_model_cannot_play_holds_nothing_from_its_destroy() {
+    const OWNED: u64 = 0xF110_0000_0000_0E67;
+    let mut app = client();
+    let world = app.world_mut();
+    animated_door(world, DOOR, &[146, 147, 148, 149]);
+    animated_door(world, OWNED, &[146, 147, 148, 149, 157]);
+
+    super::super::handlers::dispatch(
+        world,
+        vec![
+            SessionEvent::GameObjectDespawnAnim { guid: DOOR },
+            SessionEvent::ObjectDestroyed(DOOR),
+            SessionEvent::GameObjectDespawnAnim { guid: OWNED },
+            SessionEvent::ObjectDestroyed(OWNED),
+        ],
+    );
+    assert!(held(world, OWNED), "control: a play of 157 holds it");
+    assert!(!held(world, DOOR), "no 157: the destroy frees it");
+
+    send(world, [values(DOOR, &[])]);
+    assert!(
+        !held(world, DOOR),
+        "freed, not released: nothing brings it back"
+    );
+    send(
+        world,
+        [created(
+            DOOR,
+            EntityKind::GameObject,
+            [1.0, 2.0, 3.0],
+            &[(ENTRY, 0x13)],
+        )],
+    );
+    assert_eq!(field(world, DOOR, ENTRY), Some(0x13));
+    assert_eq!(field(world, DOOR, STALE), None, "a fresh object");
+}
+
+/// A `GAMEOBJECT_STATE` change to a motion the model lacks (Destroy, 150) still holds: the state
+/// arm plays and holds unchecked (`0x5f3af8`-`0x5f3b27`). The destroy behind it only marks the
+/// object pending (`0x464920`), and the unhold parks it in the released table, where a block
+/// brings back the object that left.
+#[test]
+fn a_state_change_to_a_motion_the_model_lacks_holds_through_the_destroy() {
+    use benilla_protocol::field::FIELD_GAMEOBJECT_STATE;
+    let mut app = client();
+    let world = app.world_mut();
+    let e = animated_door(world, DOOR, &[146, 147, 148, 149]);
+
+    send(world, [values(DOOR, &[(FIELD_GAMEOBJECT_STATE, 2)])]);
+    super::super::handlers::dispatch(world, vec![SessionEvent::ObjectDestroyed(DOOR)]);
+    assert!(held(world, DOOR), "held: the destroy only marks it");
+
+    use bevy::ecs::system::RunSystemOnce;
+    world.run_system_once(crate::net::release_unheld).unwrap();
+    assert!(!held(world, DOOR), "the unhold released it");
+    assert!(world.get::<DespawnFade>(e).is_some());
+    send(world, [values(DOOR, &[])]);
+    assert!(held(world, DOOR), "parked, not freed");
+    assert_eq!(
+        field(world, DOOR, STALE),
+        Some(0x55),
+        "the object that left"
     );
 }

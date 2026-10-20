@@ -212,16 +212,31 @@ impl NameCache {
     }
 
     /// A unit's create (`0x5fb880`): every cache its name comes from looked up with a callback,
-    /// the creature record by the descriptor's entry (`0x60b15b`) whatever the name key, and a
-    /// player's name by `GetUnitName` right after `PostInit` (`0x5dec09`, `0x5dec12`). A refusal
-    /// is asked again at once, as the reference's next lookup does.
+    /// a player's name by `GetUnitName` right after `PostInit` (`0x5dec09`, `0x5dec12`), and the
+    /// display resolve's creature record ([`Self::ask_creature_record`]). A refusal is asked again
+    /// at once, as the reference's next lookup does.
     pub(crate) fn lookup_fields(&self, guid_val: u64, unit: &ObjectFields, commands: &NetCommands) {
-        let ask = Ask::Event(commands);
         if let Some(NameKey::Player(_) | NameKey::Pet(_)) = NameKey::of(guid_val, Some(unit)) {
-            self.resolve_fields(guid_val, Some(unit), ask);
+            self.resolve_fields(guid_val, Some(unit), Ask::Event(commands));
+        }
+        self.ask_creature_record(guid_val, unit, commands);
+    }
+
+    /// The display resolve's ask (`0x60afb0`, at `0x60b15b`): the creature record by the
+    /// descriptor's entry, for a creature or a pet alone, type mask 9 (`0x60b134`), so never for a
+    /// player.
+    pub(crate) fn ask_creature_record(
+        &self,
+        guid_val: u64,
+        unit: &ObjectFields,
+        commands: &NetCommands,
+    ) {
+        // A descriptor with no mask reads 0, which is not 9: no ask.
+        if unit.object_type_mask() != Some(9) {
+            return;
         }
         if let Some(entry) = unit.object_entry() {
-            self.resolve_creature(entry, guid_val, ask);
+            self.resolve_creature(entry, guid_val, Ask::Event(commands));
         }
     }
 
@@ -1306,7 +1321,7 @@ mod tests {
         let mut cache = NameCache::default();
         let wolf_a = compose(guid::HIGH_UNIT, 1234, 1);
         let wolf_b = compose(guid::HIGH_UNIT, 1234, 2);
-        let store = unit(&[(ENTRY, 1234)]);
+        let store = unit(&[(TYPE, CREATURE), (ENTRY, 1234)]);
 
         cache.lookup_fields(wolf_a, &store.0, &cmds);
         assert!(matches!(
@@ -1408,6 +1423,10 @@ mod tests {
     /// `OBJECT_FIELD_ENTRY` and `UNIT_FIELD_PETNUMBER`, absolute descriptor indices.
     const ENTRY: u16 = 3;
     const PETNUMBER: u16 = 139;
+    /// `OBJECT_FIELD_TYPE` and a creature's or a pet's mask, which the display resolve's ask
+    /// needs (`0x60b134`).
+    const TYPE: u16 = 2;
+    const CREATURE: u32 = 9;
 
     fn unit(fields: &[(u16, u32)]) -> ObjectStore {
         ObjectStore(benilla_protocol::ObjectFields::from_pairs(fields))
@@ -1460,7 +1479,7 @@ mod tests {
         let (cmds, rx) = commands();
         let mut cache = NameCache::default();
         let wolf = compose(guid::HIGH_UNIT, 299, 4);
-        let store = unit(&[(ENTRY, 2_671)]);
+        let store = unit(&[(TYPE, CREATURE), (ENTRY, 2_671)]);
         cache.insert_creature(299, Some(record("Guid Bits")));
         cache.insert_creature(2_671, Some(record("Field Entry")));
         assert_eq!(
@@ -1539,12 +1558,29 @@ mod tests {
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
+    /// The display resolve asks only for mask 9 (`0x60b134`): a descriptor with no
+    /// `OBJECT_FIELD_TYPE` reads 0 and asks nothing, nor does a player's `0x19`.
+    #[test]
+    fn only_a_creatures_mask_asks_its_record() {
+        let (cmds, rx) = commands();
+        let cache = NameCache::default();
+        let wolf = compose(guid::HIGH_UNIT, 1234, 1);
+        cache.ask_creature_record(wolf, &unit(&[(ENTRY, 1234)]).0, &cmds);
+        cache.ask_creature_record(wolf, &unit(&[(TYPE, 0x19), (ENTRY, 1234)]).0, &cmds);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        cache.ask_creature_record(wolf, &unit(&[(TYPE, CREATURE), (ENTRY, 1234)]).0, &cmds);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CreatureQuery { entry: 1234, .. })
+        ));
+    }
+
     #[test]
     fn a_cold_companion_pet_is_asked_by_the_creature_query_at_its_create() {
         let (cmds, rx) = commands();
         let cache = NameCache::default();
         let squirrel = compose(guid::HIGH_PET, 5_021, 3);
-        let store = unit(&[(ENTRY, 2_671)]);
+        let store = unit(&[(TYPE, CREATURE), (ENTRY, 2_671)]);
 
         cache.lookup_fields(squirrel, &store.0, &cmds);
         assert!(matches!(

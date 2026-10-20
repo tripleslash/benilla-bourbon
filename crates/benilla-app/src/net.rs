@@ -28,10 +28,10 @@ pub(crate) mod handlers;
 pub(crate) mod io;
 pub(crate) mod motion;
 mod objects;
-pub(crate) use objects::tear_down;
 #[cfg(test)]
 pub(crate) use objects::wire;
 pub(crate) use objects::Listed;
+pub(crate) use objects::{release_unheld, ReleasePending};
 mod session;
 mod world;
 

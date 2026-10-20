@@ -33,14 +33,14 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 
 Each entry is the first sentence of a `Deviation:` comment, linking to where it lives.
 
-- [benilla-app](#benilla-app): 247
+- [benilla-app](#benilla-app): 249
 - [benilla-assets](#benilla-assets): 6
 - [benilla-blp](#benilla-blp): 2
 - [benilla-formats](#benilla-formats): 24
 - [benilla-lua](#benilla-lua): 11
-- [benilla-protocol](#benilla-protocol): 26
+- [benilla-protocol](#benilla-protocol): 28
 - [benilla-srp](#benilla-srp): 2
-- [benilla-ui](#benilla-ui): 127
+- [benilla-ui](#benilla-ui): 128
 - [benilla-world](#benilla-world): 59
 
 ### benilla-app
@@ -194,6 +194,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference paces a self move through the same replay chain as a remote's, which would only delay a correction to our own pose. ([`src/net/motion/remote.rs:84`](../crates/benilla-app/src/net/motion/remote.rs#L84))
 - \*\*a body nobody can see is stepped every `HIDDEN_STRIDE`th frame\*\*, with the time it is owed, where the reference steps every mover every frame. ([`src/net/motion/remote.rs:355`](../crates/benilla-app/src/net/motion/remote.rs#L355))
 - Its rate-limited hover climb (`0x636fa1`, 7 yd/s) is not reproduced, because the cache gate needs a pure function; it converges to this answer. ([`src/net/motion/spline.rs:586`](../crates/benilla-app/src/net/motion/spline.rs#L586))
+- A first-pass values block the clear header byte left unwritten re-fires, for a live object, its last write's edges against the watch copy (`0x465570`, `0x466686`); benilla compares against this packet's copies, which hold none for it, so a stale edge never fires twice. ([`src/net/objects/update.rs:805`](../crates/benilla-app/src/net/objects/update.rs#L805))
+- The create notify uses its lookup's result untested (`0x465c97`, `0x465d79`). ([`src/net/objects/update.rs:817`](../crates/benilla-app/src/net/objects/update.rs#L817))
 
 #### no_install
 
@@ -486,7 +488,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 - `gxWindow "0"` is borderless fullscreen, not 1.12's exclusive mode-set at `gxResolution`, because Wayland has no client mode-setting (winit ignores `Fullscreen::Exclusive` there), X11's XRandR changes the desktop's mode and a crash leaves it changed, and macOS has no exclusive mode. ([`src/video.rs:4`](../crates/benilla-app/src/video.rs#L4))
 - On Windows, NVIDIA's Vulkan driver (610.88 seen) crashes inside `vkQueuePresentKHR` on the first present after any swapchain resize while the present mode is `Fifo`, `FifoRelaxed` or `AutoVsync` (a maximize is a resize). `Mailbox`, `AutoNoVsync` and DX12 survive, so there "vsync on" is `AutoNoVsync` paced to the monitor's refresh rate (`present_choice`), which keeps the synced look without the crash. `$WOW_PRESENT=fifo` restores plain `Fifo`. ([`src/video.rs:16`](../crates/benilla-app/src/video.rs#L16))
-- Sizes are logical px, because `gxResolution` is a logical inner size here. ([`src/video.rs:692`](../crates/benilla-app/src/video.rs#L692))
+- Sizes are logical px, because `gxResolution` is a logical inner size here. ([`src/video.rs:693`](../crates/benilla-app/src/video.rs#L693))
 
 #### vplates
 
@@ -638,7 +640,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### events
 
-- `benilla::spell_mods` refuses an out-of-range pair, because the reference would overrun it. ([`src/events.rs:686`](../crates/benilla-protocol/src/events.rs#L686))
+- `benilla::spell_mods` refuses an out-of-range pair, because the reference would overrun it. ([`src/events.rs:704`](../crates/benilla-protocol/src/events.rs#L704))
+- An out-of-range list past the first block reads no body in the write passes (`0x466076`), which misread every block behind it, while the notify pass reads past it (`0x465fd0`) and stays in step; benilla reads the list and drops it, keeping the blocks behind it whole. ([`src/events/decode.rs:1121`](../crates/benilla-protocol/src/events/decode.rs#L1121))
+- The flagged pass reads a movement block's guid as 8 raw bytes (`0x467140`, `0x46714d`) where the wire packs it, so unless the packed guid happens to be 8 bytes the reference misreads the rest of that pass; benilla reads the block once, packed, as pass 0 does (`0x467080`). ([`src/events/decode.rs:1138`](../crates/benilla-protocol/src/events/decode.rs#L1138))
 
 #### examples
 
@@ -654,9 +658,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - Zone and position are kept, not set to the viewer's zone and the object's position, because nothing in benilla reads them. ([`src/messages/group.rs:256`](../crates/benilla-protocol/src/messages/group.rs#L256))
 - String reads are unbounded. The reference `0x4191b0` caps each field, counting the NUL (roster name `0x30`, notes `0x80`, MOTD `0x200`, info `0x7d0`, guild name `0x60`, rank name `0x40`), and on overflow empties it and no-ops every later read in the packet. ([`src/messages/guild.rs:4`](../crates/benilla-protocol/src/messages/guild.rs#L4))
 - A reason of 3 or more is silent, where the reference prints an uninitialized stack buffer, because 3 is the server's `INSTANCERESET_FAIL_SILENTLY`. ([`src/messages/instance.rs:70`](../crates/benilla-protocol/src/messages/instance.rs#L70))
-- 2 or more prints nothing, because the reference prints an uninitialized buffer. ([`src/messages/opcode.rs:1018`](../crates/benilla-protocol/src/messages/opcode.rs#L1018))
-- The consumer refuses 64 and up, because there the reference's store overruns its table. ([`src/messages/packet.rs:619`](../crates/benilla-protocol/src/messages/packet.rs#L619))
-- A body too short for the position gives `None` where the client redisplays a stale global, because showing a stale queue position as current is a client bug. ([`src/messages/parse.rs:296`](../crates/benilla-protocol/src/messages/parse.rs#L296))
+- 2 or more prints nothing, because the reference prints an uninitialized buffer. ([`src/messages/opcode.rs:1021`](../crates/benilla-protocol/src/messages/opcode.rs#L1021))
+- The consumer refuses 64 and up, because there the reference's store overruns its table. ([`src/messages/packet.rs:622`](../crates/benilla-protocol/src/messages/packet.rs#L622))
+- A body too short for the position gives `None` where the client redisplays a stale global, because showing a stale queue position as current is a client bug. ([`src/messages/parse.rs:285`](../crates/benilla-protocol/src/messages/parse.rs#L285))
 - A type outside 1-7 reads as nothing rather than the reference's default arm, which under-pushes its returns. ([`src/messages/pet.rs:75`](../crates/benilla-protocol/src/messages/pet.rs#L75))
 - Both are read, told apart exactly by the tail length (`12n` vs `1 + 14n`), since the 1.12 client mis-parses vmangos's. ([`src/messages/pet.rs:195`](../crates/benilla-protocol/src/messages/pet.rs#L195))
 
@@ -721,7 +725,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference's `set` registers an unknown name as a new category-5 record (`0x63d569`-`0x63d582`); benilla refuses it, because nothing would read the row and `config.toml` keeps an unknown key anyway. ([`src/script/console_exec.rs:120`](../crates/benilla-ui/src/script/console_exec.rs#L120))
 - A row the session owns (an env lever) is passed, because the env chose its value for this run and the file never holds it, so a reset would undo the lever and save nothing. ([`src/script/console_exec.rs:199`](../crates/benilla-ui/src/script/console_exec.rs#L199))
 - A row that no longer resolves is refused, as `0x4c7300` does, because this path dereferences it unchecked (`0x4f9f35`), a latent null deref. ([`src/script/container.rs:723`](../crates/benilla-ui/src/script/container.rs#L723))
-- A last `spell_id` key breaks the remaining ties (Charge's six ranks all have `spellLevel` 0), because the reference leaves them to its qsort over an array benilla does not reproduce; ascending id is ascending rank in every 1.12 pet-ability family. ([`src/script/craft.rs:103`](../crates/benilla-ui/src/script/craft.rs#L103))
+- A last `spell_id` key breaks the remaining ties (Charge's six ranks all have `spellLevel` 0), because the reference leaves them to its qsort over an array benilla does not reproduce; ascending id is ascending rank in every 1.12 pet-ability family. ([`src/script/craft.rs:104`](../crates/benilla-ui/src/script/craft.rs#L104))
+- The reference reads past the table unbounded (`0x4f6c90`), so type 5 would answer "CloseCraft"; no shipped opener carries a type past 3, and benilla answers nil rather than read past it. ([`src/script/craft.rs:430`](../crates/benilla-ui/src/script/craft.rs#L430))
 - On `Terrain` the reference keeps a spell, action, macro or pet action on the left button; we clear them, because otherwise a spell has no left-click way off the cursor. ([`src/script/cursor.rs:528`](../crates/benilla-ui/src/script/cursor.rs#L528))
 - Every lock lifts here, bag contents included. The reference's walk of a bag's contents indexes the bag by its own player-array index (`0x495528`, `0x495535`), at least 19, past a bag's slots in every case but the biggest bags, so it normally unlocks none of them; a lock it strands lasts until the item's seat or stack moves, which this does not copy. ([`src/script/cursor.rs:700`](../crates/benilla-ui/src/script/cursor.rs#L700))
 - Returns nothing. The handler ends `mov eax,1` with nothing pushed (`0x4895bc`), so Lua 5.0 hands back the stack top, the last argument or the function itself: an accident of the handler, not an API, and copying a stack-top leak would copy a bug. ([`src/script/cursor.rs:927`](../crates/benilla-ui/src/script/cursor.rs#L927))

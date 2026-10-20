@@ -72,7 +72,7 @@ pub struct CraftRecipe {
     pub tools: Vec<(String, bool)>,
     pub tooltip: CraftTooltip,
     /// `Spell.dbc` `spellLevel` (`+0x74`), the Beast Training comparator's rank key. The
-    /// reference's `requiredLevel` return comes from it; here that return is 0.
+    /// `requiredLevel` return reads the learned spell's instead (`0x4f705f` → `0x60c840`).
     pub spell_level: u32,
     /// The name of the recipe's group key, the skill line of the spell's ability (row `+0x04`,
     /// `0x4f61b1`), for `GetCraftSkillLine`; `None` when `SkillLine.dbc` has no such row.
@@ -86,8 +86,9 @@ pub struct CraftState {
     pub name: String,
     pub rank: u32,
     pub max_rank: u32,
-    /// The opener spell's `EffectMiscValue[0]`, stored at `ds:0xbdcfb8`: 1 Beast Training, 3
-    /// Enchanting. It picks the row comparator (`0x4f6765`).
+    /// The opener spell's `EffectMiscValue[0]`, stored at `ds:0xbdcfb8`: 1 Beast Training, 2
+    /// Disguise, 3 Enchanting. It picks the row comparator (`0x4f6765`) and the button token
+    /// (`0x4f6c90`).
     pub craft_type: u32,
     /// In any order; [`UiScript::set_craft`] sorts them.
     pub recipes: Vec<CraftRecipe>,
@@ -300,7 +301,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // GetCraftInfo(index) → craftName, craftSubSpellName, craftType, numAvailable, isExpanded,
     // trainingPointCost, requiredLevel (`Blizzard_CraftUI.lua:168`); a miss pushes the seven too.
-    // `isExpanded` is always nil; Beast Training's cost and level answer 0, not built.
+    // `isExpanded` is always nil. Not built: the cost and the level, which the reference reads off
+    // the pet bar's unit (`0xb714a0`) for the spell a pet-learn effect teaches (`0x4f6fe6`-
+    // `0x4f7093`); both answer 0, its answer with no pet.
     g.set(
         "GetCraftInfo",
         lua.create_function(|lua, index: Value| {
@@ -420,11 +423,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetCraftButtonToken() → "CREATE", the global naming the button's label
-    // (`Blizzard_CraftUI.lua:106`); Beast Training's "TRAIN" is not built.
+    // GetCraftButtonToken() (`0x4f6c90`): the word at the open craft type (`0xbdcfb8`) in the
+    // table at `0x84d0f4`, the global the stock window labels its button with
+    // (`Blizzard_CraftUI.lua:106`). A close zeroes the type, so a closed window answers `USE`.
+    // Type 4 reads the zero word after the table, which pushes nil.
+    // Deviation: the reference reads past the table unbounded (`0x4f6c90`), so type 5 would answer
+    // "CloseCraft"; no shipped opener carries a type past 3, and benilla answers nil rather than
+    // read past it.
     g.set(
         "GetCraftButtonToken",
-        lua.create_function(|lua, ()| Ok(Value::String(lua.create_string("CREATE")?)))?,
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let token = match model.open_professions().craft.unwrap_or(0) {
+                0 => "USE",
+                1 => "TRAIN",
+                2 => "DISGUISE",
+                3 => "ENSCRIBE",
+                _ => return Ok(Value::Nil),
+            };
+            Ok(Value::String(lua.create_string(token)?))
+        })?,
     )?;
 
     // SelectCraft(index) / GetCraftSelectionIndex(): the selection, 1-based with 0 for none; an
@@ -684,10 +702,6 @@ mod tests {
                 3
             )
         );
-        assert_eq!(
-            s.eval::<String>("return GetCraftButtonToken()").unwrap(),
-            "CREATE"
-        );
 
         assert!(s
             .eval::<bool>("local _,_,t = GetCraftInfo(1) return t ~= 'header'")
@@ -696,6 +710,37 @@ mod tests {
         s.run("ExpandCraftSkillLine(1) CollapseCraftSkillLine(1)")
             .unwrap();
         assert_eq!(s.eval::<i64>("return GetNumCrafts()").unwrap(), 2);
+    }
+
+    /// `GetCraftButtonToken` (`0x4f6c90`) pushes the word at the open craft type (`0xbdcfb8`) in
+    /// the table at `0x84d0f4`: `USE`, `TRAIN`, `DISGUISE`, `ENSCRIBE`, then a zero word, which
+    /// pushes nil. A close zeroes the type (`0x4f5fe0`), so a closed window answers `USE`.
+    #[test]
+    fn the_button_token_is_the_open_craft_types_word() {
+        let mut s = UiScript::new().unwrap();
+        let token = |s: &UiScript| {
+            s.eval::<Option<String>>("return GetCraftButtonToken()")
+                .unwrap()
+        };
+        assert_eq!(token(&s).as_deref(), Some("USE"), "no window");
+        for (craft_type, word) in [
+            (1, Some("TRAIN")),
+            (2, Some("DISGUISE")),
+            (3, Some("ENSCRIBE")),
+            (4, None),
+        ] {
+            let mut st = state();
+            st.craft_type = craft_type;
+            s.set_craft(Some(st));
+            assert_eq!(token(&s).as_deref(), word, "type {craft_type}");
+            assert_eq!(s.arity("GetCraftButtonToken()").unwrap(), 1);
+        }
+        s.set_craft(Some(state()));
+        s.run("CloseCraft()").unwrap();
+        assert_eq!(token(&s).as_deref(), Some("USE"), "closed in the verb");
+        s.set_craft(Some(state()));
+        s.set_craft(None);
+        assert_eq!(token(&s).as_deref(), Some("USE"), "closed by the app");
     }
 
     #[test]
