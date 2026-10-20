@@ -20,12 +20,13 @@
 //! keeps the synced look without the crash. `$WOW_PRESENT=fifo` restores plain `Fifo`.
 
 use benilla_ui::script::ScreenResolution;
+#[cfg(any(test, not(target_arch = "wasm32")))]
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::renderer::RenderAdapterInfo;
-use bevy::window::{
-    Monitor, MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::window::Monitor;
+use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution};
 use std::time::Duration;
 
 /// `$WOW_NOVSYNC=1`: uncap for this session only; it never reaches `config.toml` (the
