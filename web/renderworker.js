@@ -19,6 +19,7 @@ import {
   __wenilla_render_entry,
   __wenilla_render_poll,
   __wenilla_render_settle,
+  __wenilla_render_stats,
 } from './wenilla.js';
 
 /// `web/gpu.js` wraps `requestDevice` on the page to watch for a lost or failing device, and a
@@ -54,7 +55,9 @@ function startCensus(exports) {
     setInterval(() => {
       const refs = exports?.__wbindgen_externrefs?.length ?? 0;
       const mib = Math.round((exports?.memory?.buffer?.byteLength ?? 0) / 1048576);
-      self.postMessage({ census: { ...snapshot(), refs, mib } });
+      // The handshake's counters for the same window (`render_worker::take_stats`).
+      const handshake = __wenilla_render_stats();
+      self.postMessage({ census: { ...snapshot(), refs, mib, handshake } });
     }, 5000);
   });
 }

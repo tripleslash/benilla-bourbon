@@ -60,10 +60,11 @@ export function installGpuCensus() {
 /// One report as a console line: the shared linear memory, the JS values Rust holds on the
 /// reporting agent (wasm-bindgen's externref table, which only grows), and per kind the objects
 /// alive (made, less freed) with how many were made since `last`.
-export function censusLine(where, { made, freed, refs, mib, top }, last) {
+export function censusLine(where, { made, freed, refs, mib, top, handshake }, last) {
   const parts = Object.keys(made)
     .sort()
     .map((k) => `${k}=${made[k] - (freed[k] || 0)}(+${made[k] - (last?.[k] || 0)})`);
   const churn = (top || []).map(([label, n]) => `${label}×${n}`).join(' ');
-  return `[gpucensus] ${where} refs=${refs} mem=${mib}MiB alive(+made/5s): ${parts.join(' ')} | made by label: ${churn}`;
+  const hs = handshake ? ` | handshake: ${handshake}` : '';
+  return `[gpucensus] ${where} refs=${refs} mem=${mib}MiB alive(+made/5s): ${parts.join(' ')} | made by label: ${churn}${hs}`;
 }

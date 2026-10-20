@@ -110,6 +110,28 @@ mod imp {
         render_worker::describe()
     }
 
+    /// The handshake's counters since the last call (`render_worker::take_stats`), as one line, for
+    /// `?gpucensus=1` (`web/renderworker.js`), which asks every 5 s. Nothing else calls it.
+    #[wasm_bindgen]
+    pub fn __wenilla_render_stats() -> String {
+        let s = render_worker::take_stats();
+        let ms = |us: u64| us as f32 / 1000.0;
+        let avg = |sum: u64, n: u64| if n > 0 { ms(sum) / n as f32 } else { 0.0 };
+        format!(
+            "renders={} render_avg={:.2}ms render_max={:.2}ms extracts={} wait_avg={:.2}ms \
+             wait_max={:.2}ms owed={} skipped={} withdrawn={}",
+            s.renders,
+            avg(s.render_us, s.renders),
+            ms(s.render_max_us),
+            s.extracts,
+            avg(s.wait_us, s.extracts),
+            ms(s.wait_max_us),
+            s.owed,
+            s.skipped,
+            s.withdrawn,
+        )
+    }
+
     /// Each wake of the worker's event loop (`web/renderworker.js`); `true` when it rendered, and
     /// the worker then calls [`__wenilla_render_settle`] from its next task. **Not for anything
     /// else to call.**
