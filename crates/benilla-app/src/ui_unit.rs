@@ -3346,6 +3346,8 @@ mod tests {
             );
             app.world_mut().run_system_once(feed_unit_reach).unwrap();
             app.world_mut().run_system_once(feed_units).unwrap();
+            // `feed_units` owes the event; `fire_unit_events` signals it.
+            app.world_mut().run_system_once(fire_unit_events).unwrap();
             let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let out = s.eval::<Vec<String>>("return SEEN").unwrap();

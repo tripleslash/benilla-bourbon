@@ -1896,16 +1896,21 @@ mod tests {
             let script = world.non_send::<UiScript>();
             GlueNotice::ALL.map(|n| script.glue_notice(n))
         };
+        // This fork stands every agreement accepted (`glue_mgr::read_agreements`), so the read is
+        // seen through `show_notice`, which a negative option sets.
         let mut world = World::new();
         world.insert_resource(State::new(ClientState::Login));
-        world.insert_resource(crate::cvars::Cvars::with_value("readTOS", "1"));
+        world.insert_resource(crate::cvars::Cvars::with_value("readTOS", "-1"));
         world.init_non_send::<super::super::glue_mgr::SharedGlueMgr>();
         setup_script(&mut world);
         let seeded = [
+            NoticeState {
+                accepted: true,
+                show_notice: true,
+            },
             accepted,
-            NoticeState::default(),
-            NoticeState::default(),
-            NoticeState::default(),
+            accepted,
+            accepted,
         ];
         assert_eq!(flags(&world), seeded, "the startup read");
 
@@ -1913,7 +1918,7 @@ mod tests {
         {
             let mut cvars = world.resource_mut::<crate::cvars::Cvars>();
             cvars.set("readTOS", "0");
-            cvars.set("readEULA", "1");
+            cvars.set("readEULA", "-1");
         }
         install_glue_side_vm(&mut world, "login");
         assert_eq!(flags(&world), seeded, "a rebuild keeps the cells");
