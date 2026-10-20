@@ -556,14 +556,19 @@ pub(super) fn follow_stars(
                 benilla_assets::quantize(y, 4096.0),
             ))
         });
+        // A batch at alpha 0 draws nothing, so only its colour is kept current: the exposure moves
+        // on most modern frames (the auto-exposure follows the camera between lit and dark rooms),
+        // and every write re-prepares the material, a new uniform buffer and bind group each.
+        let shown = color.alpha() > 0.0;
         benilla_assets::write_gated(
             &mut star_mats,
             &mat.0,
             |m| {
                 m.base.base_color != color
-                    || m.base.uv_transform != uv
-                    || m.extension.params.z != linear
-                    || m.extension.params.w != unexpose
+                    || (shown
+                        && (m.base.uv_transform != uv
+                            || m.extension.params.z != linear
+                            || m.extension.params.w != unexpose))
             },
             |m| {
                 m.base.base_color = color;

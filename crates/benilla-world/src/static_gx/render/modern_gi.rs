@@ -187,6 +187,12 @@ fn init_gi_pipelines(
     });
 }
 
+/// What the voxel clipmap's textures and contents depend on: voxels per side, the level count and
+/// each level's voxel size.
+fn clipmap_shape(tier: &GiTier) -> (u32, usize, [f32; gi::MAX_LEVELS]) {
+    (tier.voxels, tier.levels, tier.voxel)
+}
+
 fn voxel_texture(
     device: &RenderDevice,
     label: &'static str,
@@ -364,8 +370,11 @@ fn prepare_gi_voxels(
     let tier = gi.tier;
     let n = tier.voxels as i32;
 
-    // A tier change (or the first modern frame) re-creates the clipmap, and everything in it is new.
-    let fresh = state.tier != Some(tier);
+    // A new clipmap shape (or the first modern frame) re-creates the clipmap, and everything in it is
+    // new. The probe cascades are not part of it: the interior sub-grid a room adds
+    // (`GiTier::with_interior`) leaves the voxels as they are, so a camera passing in and out of
+    // rooms keeps its textures instead of reallocating three 3D textures at every crossing.
+    let fresh = state.tier.map(|t| clipmap_shape(&t)) != Some(clipmap_shape(&tier));
     if fresh {
         state.albedo = Some(voxel_texture(
             &device,
@@ -397,7 +406,6 @@ fn prepare_gi_voxels(
         state.depth = Some(depth.create_view(&TextureViewDescriptor::default()));
         state.casters.clear();
         state.diffed_rev = None;
-        state.tier = Some(tier);
         state.store_bind = None;
         state.height_key = 0;
         info!(
@@ -408,6 +416,7 @@ fn prepare_gi_voxels(
             2.0 * HEIGHT_HALF,
         );
     }
+    state.tier = Some(tier);
     if state.height.is_none() {
         let texture = device.create_texture(&TextureDescriptor {
             label: Some("modern_gi_heightfield"),
@@ -998,6 +1007,21 @@ pub(super) fn build(render_app: &mut SubApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A room adds a probe cascade (`GiTier::with_interior`) and nothing the clipmap is built from,
+    /// so stepping in and out of rooms keeps its textures on every tier.
+    #[test]
+    fn the_interior_cascade_keeps_the_clipmap() {
+        use crate::modern::LightingQuality as Q;
+        for quality in [Q::Low, Q::Medium, Q::High, Q::Ultra, Q::Cinematic] {
+            let tier = gi::gi_tier(quality);
+            assert_eq!(
+                clipmap_shape(&tier),
+                clipmap_shape(&tier.with_interior()),
+                "{quality:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_frames_boxes_merge_to_one_union_per_level() {
