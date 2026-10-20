@@ -75,14 +75,52 @@ fn a_profession_opener_names_its_window() {
 /// `[rec+0x564]`'s three values (`0x4e5a50`): a live spell, a bare macro, and grey.
 #[test]
 fn a_macro_slot_resolves_through_its_bound_spell() {
-    use crate::ui_macro::BoundSpell;
+    use crate::ui_macro::{Bound, BoundSpell};
     use benilla_protocol::messages::ACTION_KIND_MACRO;
 
     let mut bound = crate::ui_macro::MacroBoundSpells::default();
-    bound.0.insert(3, BoundSpell::Spell(133)); // macro 3 casts Fireball
-    bound.0.insert(4, BoundSpell::None); // macro 4 is `.spawn 16032`
-    bound.0.insert(5, BoundSpell::Unresolved); // macro 5 is `/cast Pyroblast`, unknown
+    // Macro 3 casts Fireball, 4 is `.spawn 16032`, 5 is `/cast Pyroblast`, unknown, and 7 is
+    // `/cast Seduction`, out of the pet's book; 6 does not exist. The first character macro casts
+    // Fireball too.
+    for (id, spell) in [
+        (3, BoundSpell::Spell(133)),
+        (4, BoundSpell::None),
+        (5, BoundSpell::Unresolved),
+        (0x100_0001, BoundSpell::Spell(133)),
+    ] {
+        bound.0.insert(id, Bound::from(spell));
+    }
+    bound.0.insert(
+        7,
+        Bound {
+            spell: BoundSpell::Spell(6358),
+            pet_book: true,
+        },
+    );
+    // A record that lost a pet spell keeps the pet's book (`0x4b3a10` writes it on a match alone),
+    // and the selector forks only a live spell: it is a bare macro still (`0x4e50ee`).
+    bound.0.insert(
+        8,
+        Bound {
+            spell: BoundSpell::None,
+            pet_book: true,
+        },
+    );
 
+    assert_eq!(
+        resolve_through_macro(ACTION_KIND_MACRO, 7, &bound),
+        SlotResolve::PetSpell(6358),
+        "the pet's book routes the slot to the pet's legs"
+    );
+    assert_eq!(
+        resolve_through_macro(ACTION_KIND_MACRO, 8, &bound),
+        SlotResolve::BareMacro
+    );
+    assert_eq!(
+        resolve_through_macro(0x41, 1, &bound),
+        SlotResolve::Action(ACTION_KIND_SPELL, 133),
+        "a character macro's id carries bit 24, so its slot's kind byte is 0x41"
+    );
     assert_eq!(
         resolve_through_macro(ACTION_KIND_MACRO, 3, &bound),
         SlotResolve::Action(ACTION_KIND_SPELL, 133),
@@ -133,8 +171,8 @@ fn the_feed_pushes_a_bare_macro_as_usable() {
     }
     // Macro 1 is `.spawn 16032`, 2 an unknown `/cast Pyroblast`, and 3 does not exist.
     let mut bound = MacroBoundSpells::default();
-    bound.0.insert(1, BoundSpell::None);
-    bound.0.insert(2, BoundSpell::Unresolved);
+    bound.0.insert(1, BoundSpell::None.into());
+    bound.0.insert(2, BoundSpell::Unresolved.into());
     app.insert_resource(actions)
         .insert_resource(bound)
         .init_resource::<Cooldowns>()
@@ -765,7 +803,7 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
             .insert(slot, ActionButton { slot, action, kind });
     }
     let mut bound = crate::ui_macro::MacroBoundSpells::default();
-    bound.0.insert(1, crate::ui_macro::BoundSpell::None);
+    bound.0.insert(1, crate::ui_macro::BoundSpell::None.into());
     app.insert_resource(actions)
         .insert_resource(bound)
         .insert_resource(Spells {
@@ -781,6 +819,7 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
             ..Spells::empty_for_tests()
         })
         .init_resource::<crate::player::Player>()
+        .init_resource::<crate::player::OwnControlLost>()
         .init_resource::<Cooldowns>()
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
@@ -846,8 +885,8 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
     events(&mut app); // the first push's own signal
 
     app.world_mut()
-        .resource_mut::<crate::player::Player>()
-        .own_control_lost = true;
+        .resource_mut::<crate::player::OwnControlLost>()
+        .0 = true;
     app.update();
     assert_eq!(
         lit(&app),
@@ -857,8 +896,8 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
     assert_eq!(events(&mut app), 1, "the cache change signals the bar once");
 
     app.world_mut()
-        .resource_mut::<crate::player::Player>()
-        .own_control_lost = false;
+        .resource_mut::<crate::player::OwnControlLost>()
+        .0 = false;
     app.update();
     assert_eq!(lit(&app), [true, true, true], "control back, all lit again");
     assert_eq!(events(&mut app), 1);
@@ -973,6 +1012,7 @@ fn feed_app(buttons: &[(u8, u32, u8)], spells: Spells, x: f32) -> App {
         .init_resource::<crate::spell::SpellTargeting>()
         .init_resource::<crate::spell::HeldForPick>()
         .init_resource::<crate::player::Player>()
+        .init_resource::<crate::player::OwnControlLost>()
         .init_resource::<Items>()
         .insert_resource(NetCommands(tx));
     feed_inputs(&mut app);
@@ -1177,8 +1217,8 @@ fn get_action_cooldown_enables_only_the_slots_that_reach_a_query() {
         5.0,
     );
     let mut bound = crate::ui_macro::MacroBoundSpells::default();
-    bound.0.insert(1, BoundSpell::None);
-    bound.0.insert(2, BoundSpell::Unresolved);
+    bound.0.insert(1, BoundSpell::None.into());
+    bound.0.insert(2, BoundSpell::Unresolved.into());
     app.insert_resource(bound);
     let mut items = app.world_mut().resource_mut::<Items>();
     items.insert_template(
@@ -1297,8 +1337,8 @@ fn spell_update_usable_fires_from_every_usable_refresh_and_once_a_frame() {
     assert_eq!(frame(&mut app), USABLE, "the clear");
 
     app.world_mut()
-        .resource_mut::<crate::player::Player>()
-        .own_control_lost = true;
+        .resource_mut::<crate::player::OwnControlLost>()
+        .0 = true;
     assert_eq!(frame(&mut app), USABLE, "control lost");
 
     let now = Instant::now();
@@ -1331,8 +1371,8 @@ fn spell_update_usable_fires_from_every_usable_refresh_and_once_a_frame() {
     edge(&mut app, ME, Player, 23, 480, 470);
     select(&mut app, Some(OTHER));
     app.world_mut()
-        .resource_mut::<crate::player::Player>()
-        .own_control_lost = false;
+        .resource_mut::<crate::player::OwnControlLost>()
+        .0 = false;
     assert_eq!(
         frame(&mut app),
         USABLE,
@@ -1355,8 +1395,8 @@ fn a_refresh_that_changes_a_slot_signals_the_bar_then_the_spells() {
     );
     frame(&mut app);
     app.world_mut()
-        .resource_mut::<crate::player::Player>()
-        .own_control_lost = true;
+        .resource_mut::<crate::player::OwnControlLost>()
+        .0 = true;
     assert_eq!(
         frame(&mut app),
         ["ACTIONBAR_UPDATE_USABLE", "SPELL_UPDATE_USABLE"]
@@ -1400,8 +1440,8 @@ fn usable_reader_app() -> App {
 /// Sets whether the player has lost control, as `SMSG_CLIENT_CONTROL_UPDATE` reports it.
 fn set_control_lost(app: &mut App, lost: bool) {
     app.world_mut()
-        .resource_mut::<crate::player::Player>()
-        .own_control_lost = lost;
+        .resource_mut::<crate::player::OwnControlLost>()
+        .0 = lost;
 }
 
 /// `SetPlayerControl` (`0x4958e0`) stores the flag (`0x4958ea`) and signals
@@ -1892,4 +1932,104 @@ fn an_arrival_skips_a_spell_the_player_does_not_know() {
     assert!(frame(&mut app).is_empty());
     arrive(&mut app, 500);
     assert!(frame(&mut app).is_empty(), "both known: both stored");
+}
+
+/// A macro bound to a spell out of the pet's book (`[rec+0x568] != 0`, `0x4e5a50`) is read through
+/// the pet: usable only past the pet gate `0x4bcf70` and when the spell's cost, from the player's
+/// fields, is within the pet's power (`0x4e51b2`-`0x4e5216`, equal passes), its cooldown from the
+/// pet's history (`0x6e2ea0` with the pet selector), and no range at all (`0x4e5759`, `0x4e584d`).
+#[test]
+fn a_macro_bound_to_a_pet_spell_reads_the_pets_gate_power_and_history() {
+    use crate::ui_macro::{Bound, BoundSpell, MacroBoundSpells};
+    use crate::ui_pet::PetBar;
+    use benilla_protocol::ObjectFields;
+
+    const PET: u64 = 0x2A;
+    const SPELL_LOCK: u32 = 19647;
+    const MACRO_BAR: u8 = 0x40;
+    // `UNIT_FIELD_SUMMONEDBY`, `UNIT_FIELD_CREATEDBY`, health, power 1 and flags.
+    let pet_fields = |power: u32, flags: u32| {
+        ObjectStore(ObjectFields::from_pairs(&[
+            (12, ME as u32),
+            (14, ME as u32),
+            (22, 100),
+            (23, power),
+            (46, flags),
+        ]))
+    };
+    let lock = || SpellDisplay {
+        mana_cost: 100,
+        recovery_ms: 24_000,
+        range_index: 4,
+        effect_implicit_target_a: [6, 0, 0],
+        ..Default::default()
+    };
+    // One fresh client per pet state, read after its first frame, which is a refresh of the usable
+    // cache (`0x4e5c00`, the new VM's). `IsUsableAction` answers that cache (`0x4e7403` into
+    // `0x4e5230`), and the power watch refreshes it only for the active player (`0x60486b`), so
+    // what this asserts is what a refresh finds, not that the button follows the pet's power.
+    let at_a_refresh = |power: u32, flags: u32| {
+        let mut app = feed_app(
+            &[(0, 1, MACRO_BAR)],
+            catalog(vec![(SPELL_LOCK, lock())], &[(4, 0.0, 35.0)]),
+            10.0,
+        );
+        app.world_mut().resource_mut::<MacroBoundSpells>().0.insert(
+            1,
+            Bound {
+                spell: BoundSpell::Spell(SPELL_LOCK),
+                pet_book: true,
+            },
+        );
+        let pet = app
+            .world_mut()
+            .spawn((
+                crate::net::Guid(PET),
+                Transform::default(),
+                pet_fields(power, flags),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(PET, pet);
+        let mut bar = PetBar::default();
+        bar.spells.pet_guid = PET;
+        bar.cooldowns
+            .start_spell(SPELL_LOCK, &lock(), 0, Instant::now(), None);
+        app.insert_resource(bar);
+        // A hostile in range, where a player's own Spell Lock would read a range.
+        select(&mut app, Some(OTHER));
+        app.update();
+        app.world()
+            .non_send::<UiScript>()
+            .eval::<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, f64)>(
+                "local u, oom = IsUsableAction(1) \
+                 local _, d = GetActionCooldown(1) \
+                 return u, oom, ActionHasRange(1), IsActionInRange(1), d",
+            )
+            .unwrap()
+    };
+
+    let (usable, oom, has_range, in_range, duration) = at_a_refresh(150, 0);
+    assert_eq!(
+        (usable, oom),
+        (Some(1), None),
+        "150 power against a cost of 100"
+    );
+    assert_eq!((has_range, in_range), (None, None), "no range for book 1");
+    assert_eq!(
+        duration, 24.0,
+        "the pet's history, which the player's list lacks"
+    );
+    assert_eq!(at_a_refresh(100, 0).0, Some(1), "equal passes");
+    let (usable, oom, ..) = at_a_refresh(99, 0);
+    assert_eq!(
+        (usable, oom),
+        (None, Some(1)),
+        "only the power gate sets notEnoughMana"
+    );
+    // Stunned (0x40000): the gate fails before the cost is read, so nothing is out of power.
+    let (usable, oom, ..) = at_a_refresh(500, 0x4_0000);
+    assert_eq!((usable, oom), (None, None));
 }

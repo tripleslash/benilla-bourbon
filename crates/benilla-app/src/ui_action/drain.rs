@@ -4,10 +4,8 @@
 
 use bevy::prelude::*;
 
-use benilla_protocol::messages::{
-    ActionButton, ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL,
-};
-use benilla_ui::script::UiScript;
+use benilla_protocol::messages::{ActionButton, ACTION_KIND_ITEM, ACTION_KIND_SPELL};
+use benilla_ui::script::{macro_slot_id, UiScript};
 
 use crate::net::{ClientCommand, NetCommands};
 
@@ -107,10 +105,12 @@ impl AttackPress<'_, '_> {
             "attack {} at {guid:#x}",
             if engaged { "toggled off" } else { "swing" }
         );
+        let gate = seam.start_gate();
         crate::creature_anim::toggle_attack_local(
             e,
             guid,
             engaged,
+            gate,
             &mut seam.slots,
             &mut seam.auto_repeat,
             &mut seam.sheath,
@@ -407,10 +407,12 @@ pub(crate) fn use_action(
                 );
             }
         }
-        // The macro arm (`0x4e5ee0` calls `0x4f1460`): each body line goes through the chat
-        // input, as if typed, under the press's input events.
-        Some(b) if b.kind == ACTION_KIND_MACRO => return UseOutcome::Macro(b.action),
         Some(b) => {
+            // The macro arm (`0x4e5ee0` calls `0x4f1460` with the id): each body line goes through
+            // the chat input, as if typed, under the press's input events.
+            if let Some(id) = macro_slot_id(b.kind, b.action) {
+                return UseOutcome::Macro(id);
+            }
             debug!(
                 "ui_action: action {action} kind {:#04x} has no use path",
                 b.kind
@@ -423,7 +425,7 @@ pub(crate) fn use_action(
 
 /// Applies the queued `PickupAction`/`PlaceAction` writes (packed 0 clears) to the store, which
 /// the VM already mirrors, marks it dirty for the feed and sends each as `CMSG_SET_ACTION_BUTTON`.
-pub(super) fn drain_action_sets(
+pub(crate) fn drain_action_sets(
     script: Option<NonSendMut<UiScript>>,
     mut actions: ResMut<PlayerActions>,
     commands: Res<NetCommands>,

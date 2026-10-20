@@ -274,10 +274,10 @@ pub fn show_directive(body: &str) -> Option<ShowDirective<'_>> {
 
 /// The spell a `#show` macro's button shows, with whether `#showtooltip` asks for its tooltip:
 /// the macro's bound spell, which the app derives from the `#show` argument or the cast line.
-pub(super) fn shown_spell(model: &super::Model, macro_index: u32) -> Option<(u32, bool)> {
-    let body = &model.macros.get(macro_index as usize)?.body;
+pub(super) fn shown_spell(model: &super::Model, macro_id: u32) -> Option<(u32, bool)> {
+    let body = &model.macros.by_id(macro_id)?.body;
     let show = show_directive(body).filter(|s| !s.is_none())?;
-    let spell = model.macro_bindings.get(&macro_index)?.spell;
+    let spell = model.macro_bindings.get(&macro_id)?.spell;
     u32::try_from(spell)
         .ok()
         .filter(|&s| s != 0)

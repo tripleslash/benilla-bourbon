@@ -23,6 +23,8 @@ mod flash;
 mod front;
 #[cfg(test)]
 mod front_tests;
+#[cfg(test)]
+mod gate_tests;
 mod highlight;
 pub(crate) mod hover;
 mod hover_probe;
@@ -185,6 +187,13 @@ pub(crate) struct PressPick {
 }
 
 impl PressPick {
+    /// The router's pick state is an object (`[this+0x350]` 2, `0x481fb8`): a unit, a corpse, a
+    /// unit the `IsSelectable` grader refused (an object hit that selects nothing) or a
+    /// GameObject. Anything else is the ground or the sky.
+    pub(crate) fn over_object(&self) -> bool {
+        self.hovered.any().is_some() || self.hovered.refused || self.object.target.is_some()
+    }
+
     /// Whether the press was an Attack-cursor press, for `0x5ecb70`'s new-target validation.
     pub(crate) fn attack(&self) -> bool {
         self.cursor.kind == cursor_mode::CursorKind::Attack
@@ -298,6 +307,7 @@ impl Plugin for TargetPlugin {
             .add_message::<TargetByNameRequest>()
             .add_message::<AssistRequest>()
             .add_message::<click::DeselectGuid>()
+            .add_message::<click::PlateRightClick>()
             .add_message::<Interact>()
             .add_systems(Startup, (ring::setup_ring, reticle::setup_reticle))
             .add_data_loaders((ring::load_factions, scan::load_creature_types))
@@ -334,19 +344,18 @@ impl Plugin for TargetPlugin {
                     crate::spell::targeting::commit_ground_cast_on_click,
                     crate::spell::targeting::commit_object_cast_on_click,
                     // The verb a walk owes runs at its stop, ahead of this frame's click.
-                    (
-                        click::act_on_arrival,
-                        click::act_on_right_click,
-                        click::act_on_interact,
-                    )
-                        .chain(),
+                    (click::act_on_arrival, click::act_on_right_click).chain(),
                     // The loot close's guid-scoped deselect.
                     click::clear_target_requests,
                     // The script calls that touch the selection, the cast or the targeting cursor
                     // (`TargetUnit`, `/target`, `ClearTarget`, `/cast`, `UseAction`, …), applied
-                    // in the order the script made them; then `DropItemOnUnit`'s pet leg.
+                    // in the order the script made them; then the unit interact of a nameplate's
+                    // right-click and a crate's `Interact`, after the pass's head bound the
+                    // cursor's parked picks (the cast goes out ahead of the interact it came
+                    // with); then `DropItemOnUnit`'s pet leg.
                     (
                         crate::script_calls::apply_script_calls,
+                        click::act_on_interact,
                         crate::ui_action::drop_item::drop_item_on_unit,
                     )
                         .chain(),

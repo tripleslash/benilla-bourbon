@@ -1111,21 +1111,21 @@ fn macro_name_line_follows_get_action_text_through_the_xml() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
-    s.set_macros(MacroState {
-        account: vec![MacroView {
+    s.set_macros(MacroState::from_scopes(
+        vec![MacroView {
             name: "spawn".into(),
             texture: Some("Interface\\Icons\\Ability_Racial_Cannibalize".into()),
             body: ".spawn 16032".into(),
-            local_only: false,
+            ..Default::default()
         }],
-        character: Vec::new(),
-    });
+        Vec::new(),
+    ));
     s.set_action(
         1,
         Some(ActionSlot {
             texture: Some("Interface\\Icons\\Ability_Racial_Cannibalize".into()),
             kind: 0x40, // MACRO
-            action: 1,  // macro index 1
+            action: 1,  // macro id 1
             count: 0,
             consumable: false,
             use_spell: None,
@@ -1311,18 +1311,18 @@ fn shipped_bag_frame_drives_end_to_end() {
         "a pickup alone queues no move"
     );
 
-    // Right-click while holding: the right arm has no cursor test (ContainerFrame.lua:583-599),
-    // and `UseContainerItem` clears the cursor before it reads the slot (`0x4fa198`).
+    // Right-click while holding: the UI root's press handler runs the world hook first (`0x492b50`,
+    // `0x766370`), which puts the held item back and consumes the press, so the slot's right arm
+    // (ContainerFrame.lua:583-599) never sees it.
     s.mouse_button(bx, by, "RightButton", true);
     s.mouse_button(bx, by, "RightButton", false);
-    assert_eq!(
-        s.take_container_uses(),
-        vec![(0, 1)],
-        "the right arm uses the slot even with a full cursor"
+    assert!(
+        s.take_container_uses().is_empty(),
+        "no frame saw the press with a full cursor"
     );
     assert!(
         s.cursor_item().is_none(),
-        "…after putting the held item back"
+        "the press put the held item back"
     );
 
     s.mouse_button(bx, by, "RightButton", true);

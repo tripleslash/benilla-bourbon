@@ -642,6 +642,8 @@ pub(crate) struct Model {
     pub(crate) spellbook: spellbook::SpellBookState,
     /// The pet's spellbook, a second array as in the reference (`0xb700f0`, `0xb6f098`).
     pub(crate) pet_book: spellbook::PetBookState,
+    /// Bumped when `set_pet_book` changes which spells the pet's book lists.
+    pub(crate) pet_book_generation: u64,
     /// The player's macros, owned here as 1.12 macros have no server side; the app persists them.
     pub(crate) macros: macros::MacroState,
     /// A script changed the macros: the save and `UPDATE_MACROS` cue.
@@ -651,7 +653,7 @@ pub(crate) struct Model {
     /// Bumped by every `EditMacro` that names a macro, whose worker `0x4f1280` ends in the action
     /// bar's usable refresh (`0x4f132e`).
     pub(crate) macro_edits: u64,
-    /// Each macro's cached cast by 1-based index, from the app; an absent macro reads unbound.
+    /// Each macro's cached cast by id, from the app; an absent macro reads unbound.
     pub(crate) macro_bindings: HashMap<u32, macros::MacroBinding>,
     /// The macro icon chooser's paths, behind `GetMacroIconInfo`: `0x4f0090`'s listing of
     /// `Interface\Icons\`, not `SpellIcon.dbc`.
@@ -1653,6 +1655,7 @@ impl Model {
             ui_errors: Vec::new(),
             spellbook: spellbook::SpellBookState::default(),
             pet_book: spellbook::PetBookState::default(),
+            pet_book_generation: 0,
             macros: macros::MacroState::default(),
             macros_dirty: false,
             macros_generation: 0,

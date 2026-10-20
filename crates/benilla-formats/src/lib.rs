@@ -21,7 +21,7 @@ pub use layers::{hd_character_models, set_hd_character_models, HD_MODELS_ARCHIVE
 pub mod bundled_addons;
 /// Loose `.tga` art, as addon folders ship it.
 mod tga;
-pub use tga::tga_to_rgba;
+pub use tga::{tga_texture_size, tga_to_rgba, TGA_GATE_PREFIX};
 /// Where the WoW install is; [`Chain`] opens it.
 mod install;
 pub use install::{

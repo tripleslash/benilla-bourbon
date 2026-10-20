@@ -960,6 +960,10 @@ fn send_spell_cast(
                         guid,
                         engaged,
                         false,
+                        crate::creature_anim::StartGate::of(
+                            ctx.rel.self_store,
+                            ctx.self_control_lost,
+                        ),
                         auto_repeat,
                         sheath,
                         ecs,
@@ -1013,6 +1017,7 @@ mod tests {
             range: cast_target::RangeInputs::default(),
             main_hand_item: None,
             self_move_flags: 0,
+            self_control_lost: false,
         }
     }
 

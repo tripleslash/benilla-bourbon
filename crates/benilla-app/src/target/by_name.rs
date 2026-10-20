@@ -100,7 +100,7 @@ pub(crate) struct AssistRequest {
 /// | `CanCooperate` with the followee (`0x606ba0`) | `0x60ff6a` | `0x128`, the same line |
 /// | we are alive | `0x60ff7c` | `0x7e` `ERR_PLAYER_DEAD` |
 /// | we are not stunned (`UNIT_FIELD_FLAGS & 0x40000`) | `0x60ff95` | `0x191` `ERR_GENERIC_STUNNED` |
-/// | we are not casting | `0x60ffb9` | `0x134` `ERR_TOOBUSYTOFOLLOW` |
+/// | we are not channelling (`UNIT_CHANNEL_SPELL`, the unit block's `+0x228`) | `0x60ffb9` | `0x134` `ERR_TOOBUSYTOFOLLOW` |
 ///
 /// There is no followee-alive check (the per-tick death test ends a follow) and no distance check:
 /// follow's row in `0x860a58` has a `0.0` threshold, so `ERR_AUTOFOLLOW_TOO_FAR` (`0x6110a0`)
@@ -110,7 +110,7 @@ fn follow_refusal_key(
     we_cooperate: bool,
     we_are_dead: bool,
     we_are_stunned: bool,
-    we_are_casting: bool,
+    we_are_channelling: bool,
 ) -> Option<&'static str> {
     if !followee_is_player || !we_cooperate {
         return Some("ERR_INVALID_FOLLOW_TARGET");
@@ -121,7 +121,7 @@ fn follow_refusal_key(
     if we_are_stunned {
         return Some("ERR_GENERIC_STUNNED");
     }
-    if we_are_casting {
+    if we_are_channelling {
         return Some("ERR_TOOBUSYTOFOLLOW");
     }
     None
@@ -191,13 +191,14 @@ impl ByNameScan<'_, '_> {
     ///
     /// The gate's two other silent arms, a `this` that is not the active mover (`0x60fef7`) and a
     /// followee with no object (`0x60ff25`), never fire from these callers: both found those
-    /// objects first.
+    /// objects first. Its channel test reads the mover's own `UNIT_CHANNEL_SPELL` (`0x60ffb9`),
+    /// not the cast slot: a hard cast in flight does not refuse, a channel does for as long as it
+    /// lasts.
     fn follow_refusal(
         &self,
         mover: Option<(u64, &ObjectStore)>,
         followee: Option<(u64, &ObjectStore)>,
         missing: &'static str,
-        casting: bool,
     ) -> Option<FollowRefusal> {
         let Some((guid, store)) = followee else {
             return Some(FollowRefusal::Line(missing));
@@ -219,7 +220,7 @@ impl ByNameScan<'_, '_> {
             self.relations.get().can_cooperate(&mover, &unit),
             mover_store.0.unit_is_dead(),
             mover_store.0.unit_flags() & crate::player::UNIT_FLAG_STUNNED != 0,
-            casting,
+            mover_store.0.unit_channel_spell() != 0,
         )
         .map(FollowRefusal::Line)
     }
@@ -423,12 +424,13 @@ impl PlayerLookup<'_, '_> {
 /// `/target <name>` and the Lua `TargetByName(name, exactMatch)` through [`scan::commit`], the
 /// stop, select, re-swing path a click takes. `exact` is the Lua second argument, which `0x489d8e`
 /// reads with default 0 as the resolver's exact-only flag (consumed at `0x493cab`). A miss leaves
-/// the target alone, as neither failure edge in `0x489db4` calls `SetSelection`, and prints
-/// nothing; the reference prints message `0x127` `ERR_UNIT_NOT_FOUND` there, or `0xb8`
-/// `ERR_GENERIC_NO_TARGET` for an empty name.
+/// the target alone, as neither failure edge in `0x489db4` calls `SetSelection`, and shows
+/// message `0x127` `ERR_UNIT_NOT_FOUND` for a name given (`0x489dbd`, tested on the raw string's
+/// first byte, so blanks count) or `0xb8` `ERR_GENERIC_NO_TARGET` for an empty one (`0x489dcf`).
 pub(super) fn target_named(
     scan_params: &ByNameScan,
     commit: &mut SelectCommit,
+    errors: &mut crate::ui_action::UiErrorKeys,
     name: &str,
     exact: bool,
 ) {
@@ -442,6 +444,12 @@ pub(super) fn target_named(
             Match::PrefixOk
         },
     ) else {
+        let key = if name.is_empty() {
+            "ERR_GENERIC_NO_TARGET"
+        } else {
+            "ERR_UNIT_NOT_FOUND"
+        };
+        errors.0.push(crate::ui_action::UiError::key(key));
         return;
     };
     commit.commit(entity, guid);
@@ -480,9 +488,10 @@ pub(super) fn target_by_name_requests(
     mut requests: MessageReader<TargetByNameRequest>,
     scan_params: ByNameScan,
     mut commit: SelectCommit,
+    mut errors: ResMut<crate::ui_action::UiErrorKeys>,
 ) {
     for request in requests.read() {
-        target_named(&scan_params, &mut commit, &request.name, false);
+        target_named(&scan_params, &mut commit, &mut errors, &request.name, false);
     }
 }
 
@@ -511,7 +520,6 @@ pub(super) fn follow_requests(
     selection: Res<Selection>,
     tokens: crate::ui_unit::UnitTokens,
     mover: Query<(&Guid, &ObjectStore), With<crate::net::ActiveMover>>,
-    cast: Res<crate::spell::PendingCast>,
     mut errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut follow: ResMut<crate::player::FollowState>,
     mut approach: ResMut<crate::player::Approach>,
@@ -551,8 +559,7 @@ pub(super) fn follow_requests(
             Some((guid, store.filter(|s| s.is_unit())?))
         });
         let mover = mover.iter().next().map(|(guid, store)| (guid.0, store));
-        let casting = cast.in_flight();
-        match scan_params.follow_refusal(mover, followee, missing, casting) {
+        match scan_params.follow_refusal(mover, followee, missing) {
             // A refusal leaves a follow in progress alone: the gate returns before `0x611130`.
             Some(FollowRefusal::Line(key)) => {
                 info!("follow: refused — {key}");
@@ -1117,6 +1124,56 @@ mod tests {
             .entity_mut(me_entity)
             .remove::<crate::net::ActiveMover>();
         assert_eq!(drain(&mut world, unit("target")), no_target, "no mover");
+    }
+
+    /// The start gate refuses a follow with `ERR_TOOBUSYTOFOLLOW` while the mover's
+    /// `UNIT_CHANNEL_SPELL` is set (`0x60ffb9`, the unit block's word at `+0x228`): a channel
+    /// refuses it for as long as it lasts, a hard cast in flight does not.
+    #[test]
+    fn a_channel_refuses_a_follow_and_a_cast_in_flight_does_not() {
+        use crate::target::relations::fixture::{player, HUMAN};
+        /// `UNIT_CHANNEL_SPELL`.
+        const CHANNEL_SPELL: u16 = 144;
+        const DRAIN_LIFE: u32 = 689;
+
+        // (channelling, a cast in flight, followed)
+        for (channel, cast, followed) in [
+            (false, false, true),
+            (true, false, false),
+            (false, true, true),
+        ] {
+            let (mut world, t) = follow_world(player(ME, HUMAN), player(THEM, HUMAN), false);
+            select(&mut world, Some((t, THEM)));
+            if channel {
+                let me = world.resource::<GuidIndex>().0[&ME];
+                world
+                    .entity_mut(me)
+                    .get_mut::<ObjectStore>()
+                    .expect("our descriptor")
+                    .0
+                    .merge(benilla_protocol::ObjectFields::from_pairs(&[(
+                        CHANNEL_SPELL,
+                        DRAIN_LIFE,
+                    )]));
+            }
+            if cast {
+                world.resource_mut::<crate::spell::PendingCast>().push(
+                    DRAIN_LIFE,
+                    None,
+                    std::time::Instant::now(),
+                );
+            }
+            let want: (Vec<&str>, Option<u64>) = if followed {
+                (Vec::new(), Some(THEM))
+            } else {
+                (vec!["ERR_TOOBUSYTOFOLLOW"], None)
+            };
+            assert_eq!(
+                drain(&mut world, unit("target")),
+                want,
+                "channel {channel}, cast in flight {cast}"
+            );
+        }
     }
 
     /// `DoEmote`'s search (`0x49fde9`, typemask 0x10, mode 0) runs the roster passes: a groupmate

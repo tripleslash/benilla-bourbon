@@ -127,7 +127,7 @@ pub(crate) mod npc_flags {
 }
 
 pub(super) const UNIT_FLAG_SKINNABLE: u32 = 0x0400_0000;
-const UNIT_FLAG_PACIFIED: u32 = 0x0002_0000;
+pub(crate) const UNIT_FLAG_PACIFIED: u32 = 0x0002_0000;
 
 /// The hovered unit is one the unit dispatcher `0x60bea0` forks to its attack arm for (`0x60c192`):
 /// alive or feigning, refused by `CanInteract` and passed by `CanAttack`. The sword also needs the
@@ -627,8 +627,9 @@ pub(super) fn classify_cursor(
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct CursorInputs<'w, 's> {
     relations: super::RelationWorld<'w, 's>,
-    // `own_control_lost` is the attack leg's `[0xb4b3e4]` clear.
     player: Res<'w, crate::player::Player>,
+    // The attack leg's `[0xb4b3e4]` clear.
+    own_control: Res<'w, crate::player::OwnControlLost>,
     approach: Res<'w, crate::player::Approach>,
     #[allow(clippy::type_complexity)]
     units: Query<
@@ -663,6 +664,7 @@ pub(super) fn classify(
     let CursorInputs {
         relations,
         player,
+        own_control,
         approach,
         units,
         self_q,
@@ -791,7 +793,7 @@ pub(super) fn classify(
             return None;
         }
         attack_fork.set(true);
-        player_attack_legs(self_store, player.own_control_lost)
+        player_attack_legs(self_store, own_control.0)
             .then_some((CursorKind::Attack, dist_sq > ATTACK_RANGE_SQ))
     };
     // The corpse classifier `0x482740`.

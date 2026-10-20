@@ -220,6 +220,9 @@ pub(crate) struct CastContext<'a> {
     /// The caster's movement flags (the client's `[unit+0x9e8]`), read by the requirement
     /// validator's moving gate.
     pub(crate) self_move_flags: u32,
+    /// `[0xb4b3e4]` is clear: the start of melee the cast's tail makes returns at it
+    /// (`0x5ecbc0`).
+    pub(crate) self_control_lost: bool,
 }
 
 impl CastContext<'_> {
@@ -302,6 +305,8 @@ pub(crate) struct CastTargeting<'w, 's> {
     /// `Option`: the body exists only in world, and the cast-result handler must fetch this param
     /// anywhere. With no body the moving gate passes and the server decides.
     player: Option<Res<'w, crate::player::Player>>,
+    /// `[0xb4b3e4]`, for the cast tail's start of melee.
+    own_control: Option<Res<'w, crate::player::OwnControlLost>>,
     /// The caster's and the selection's reach and motion, for the range gate.
     range_units: super::RangeUnits<'w, 's>,
 }
@@ -374,6 +379,7 @@ impl CastTargeting<'_, '_> {
                 .and_then(|s| s.0.player_inv_slot(EQUIPMENT_SLOT_MAINHAND))
                 .filter(|&g| g != 0),
             self_move_flags: self.player.as_deref().map_or(0, |p| p.move_flags()),
+            self_control_lost: self.own_control.as_deref().is_some_and(|c| c.0),
         }
     }
 }
