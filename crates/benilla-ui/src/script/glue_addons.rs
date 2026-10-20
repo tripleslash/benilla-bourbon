@@ -89,7 +89,8 @@ fn gate_rows<'a>(model: &'a Model, store: &EnableStore) -> Vec<GateRow<'a>> {
         .iter()
         .map(|a| GateRow {
             name: &a.name,
-            enabled: store.enabled_for(&a.name, a.default_state, None),
+            // fork: a pinned row is the flavor's own interface, always on.
+            enabled: a.pinned || store.enabled_for(&a.name, a.default_state, None),
             interface: a.interface,
             load_on_demand: a.load_on_demand,
             banned: a.security == AddonSecurity::Banned,

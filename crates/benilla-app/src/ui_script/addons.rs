@@ -533,7 +533,18 @@ fn info_for(addon: &Addon) -> benilla_ui::script::AddOnInfo {
     // A bundled addon's `LoadAddOn` reads through the chain too, which answers its folder's paths;
     // it stays INSECURE, since only the player's own chain carries Blizzard's `.sig` files.
     info.chain = matches!(addon.source, Source::Chain | Source::Bundled);
+    // fork: Turtle WoW's own two are its interface, not an option: always on, never listed.
+    info.pinned = is_pinned(addon);
     info
+}
+
+/// fork: whether a row is one of [`TURTLE_ADDONS`] off the player's chain, which the registry
+/// pins on and keeps out of every AddOns list ([`benilla_ui::script::AddOnInfo::pinned`]).
+fn is_pinned(addon: &Addon) -> bool {
+    matches!(addon.source, Source::Chain)
+        && TURTLE_ADDONS
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&addon.name))
 }
 
 /// What the signature check `0x6f10f0` answers for an addon, modelled: 3 (the addon is SECURE,
@@ -606,6 +617,7 @@ pub(crate) fn info_from_toc(name: &str, toc: &Toc, chain: bool) -> benilla_ui::s
         // Visible to `GetAddOnInfo(index)` until `SMSG_ADDON_INFO` hides it: the server's verdict
         // on a `## Secure:` record, not a directive.
         hidden: false,
+        pinned: false,       // `info_for` pins a flavor's own
         enabled: true,       // until the enable state says otherwise
         saved_enabled: true, // re-stamped from `enabled` at registration
         loaded: false,
@@ -863,7 +875,8 @@ pub(super) fn open_third_party(
     );
     let character = identity.map(|(_, c)| c.as_str());
     for (info, addon) in infos.iter_mut().zip(addons.iter()) {
-        info.enabled = store.enabled_for(&info.name, addon.toc.default_state(), character);
+        info.enabled =
+            info.pinned || store.enabled_for(&info.name, addon.toc.default_state(), character);
     }
     script.register_addons(
         infos,
@@ -1242,6 +1255,29 @@ mod tests {
                 ("Turtle_General".to_string(), false),
             ]
         );
+    }
+
+    /// fork: Turtle WoW's own two, off the chain, are pinned: always on and never listed. The same
+    /// name in the player's folder is an ordinary addon.
+    #[test]
+    fn turtles_own_addons_are_pinned_and_a_folder_namesake_is_not() {
+        let chain = |path: &str| -> Option<Vec<u8>> {
+            matches!(
+                path,
+                "Interface/AddOns/Turtle_General/Turtle_General.toc"
+                    | "Interface/AddOns/Turtle_GroupUI/Turtle_GroupUI.toc"
+            )
+            .then(|| b"## Interface: 11200\n## Secure: 1\nx.lua\n".to_vec())
+        };
+        let rows = chain_addons_in(UiFlavor::Turtle, chain);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|a| info_for(a).pinned));
+        let folder = Addon::new(
+            "Turtle_General".into(),
+            Toc::parse("## Interface: 11200\nx.lua\n"),
+            Source::Dir(PathBuf::from("AddOns")),
+        );
+        assert!(!info_for(&folder).pinned);
     }
 
     /// Every chain row is LoadOnDemand and chain-sourced, the eight windows the interface opens
