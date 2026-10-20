@@ -9,7 +9,8 @@
     forward_io::VertexOutput,
 }
 
-// `StarExt::params`: `.x` additive, `.y` stage 2 bound, `.z` the frame is linear.
+// `StarExt::params`: `.x` additive, `.y` stage 2 bound, `.z` the frame is linear, `.w` the
+// reciprocal of the modern post's exposure (1 on a classic frame).
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> star: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var stage2_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var stage2_sampler: sampler;
@@ -45,9 +46,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
     // alpha folds in gamma first, then the product decodes, as `wow_model.wgsl` does: a linear
     // `texel × a` is far brighter than the reference's gamma one. `dst`'s share decodes likewise,
     // `(1 − a)` on gamma bytes being `(1 − a)^2.2` on linear ones.
+    // fork: and the colour leaves pre-divided by the post's exposure, which then multiplies it back
+    // to the classic level instead of lifting the night sky with the lit world.
     if star.z > 0.5 {
         let keep = pow(1.0 - a, 2.2);
-        return vec4<f32>(srgb_to_linear(rgb * a), select(1.0 - keep, 0.0, star.x > 0.5));
+        return vec4<f32>(srgb_to_linear(rgb * a) * star.w, select(1.0 - keep, 0.0, star.x > 0.5));
     }
     // Premultiplied; alpha 0 leaves `dst` whole, the additive blend.
     return vec4<f32>(rgb * a, select(a, 0.0, star.x > 0.5));

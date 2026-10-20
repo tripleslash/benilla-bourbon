@@ -65,8 +65,8 @@ pub type StarMaterial = ExtendedMaterial<StandardMaterial, StarExt>;
 #[derive(Asset, AsBindGroup, Clone, TypePath, Default)]
 pub struct StarExt {
     /// `.x` 1 for an additive batch (M2 blend 3/4), 0 for alpha blend; `.y` 1 when
-    /// [`Self::stage2`] is bound; `.z` 1 when the frame is linear (modern lighting), written per
-    /// frame.
+    /// [`Self::stage2`] is bound; `.z` 1 when the frame is linear (modern lighting) and `.w` the
+    /// reciprocal of the modern post's exposure, both written per frame.
     #[uniform(100)]
     pub(super) params: Vec4,
     /// The batch's second texture, on `UV_1`, modulated over stage 0: blend modes 1-4 set every

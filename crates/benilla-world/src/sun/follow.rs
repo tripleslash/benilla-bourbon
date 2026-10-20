@@ -520,6 +520,16 @@ pub(super) fn follow_stars(
     } else {
         0.0
     };
+    // fork: `.w` = the reciprocal of the modern post's exposure (the zone look's times the night
+    // auto-exposure lift), so the night sky reaches the screen at its classic brightness: the
+    // lift exists to make a dark lit world readable, and on the star dome it blew the nebulae out
+    // to white (up to 2.25× at night). The tonemap is the identity below its knee, where the night
+    // sky sits. 1 on a classic frame, in 1/1024 steps for the write gate.
+    let unexpose = if linear > 0.5 {
+        benilla_assets::quantize(1.0 / crate::modern::look::exposure().max(1e-3), 1024.0)
+    } else {
+        1.0
+    };
     // A capture holds the drift at its seed, as the shared-clock material lanes do.
     let gseq_now = if crate::dev_state::deterministic_run() {
         0.0
@@ -553,11 +563,13 @@ pub(super) fn follow_stars(
                 m.base.base_color != color
                     || m.base.uv_transform != uv
                     || m.extension.params.z != linear
+                    || m.extension.params.w != unexpose
             },
             |m| {
                 m.base.base_color = color;
                 m.base.uv_transform = uv;
                 m.extension.params.z = linear;
+                m.extension.params.w = unexpose;
             },
         );
     }
