@@ -580,7 +580,7 @@ mod tests {
     /// The projection the world camera actually draws with: Bevy's reverse-Z, infinite far.
     fn proj() -> Mat4 {
         Mat4::perspective_infinite_reverse_rh(
-            std::f32::consts::FRAC_PI_4,
+            benilla_world::view::CAM_FOVY,
             3200.0 / 1800.0,
             benilla_world::view::NEARCLIP_DEFAULT,
         )

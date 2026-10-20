@@ -714,9 +714,11 @@ mod tests {
                 "aspect {aspect}: cull {ty} < frustum {frustum_y}"
             );
         }
-        // At the aspects the reference ran at, the limit is its 90° cone exactly.
+        // At 4:3 the frustum lies inside the reference's 90° cone, so the limit is the cone; at
+        // 16:9 the 90° horizontal field is the cone's width, within the f32 rounding of the fov.
         assert_eq!(cull_limits(crate::view::CAM_FOVY, 4.0 / 3.0), (1.0, 1.0));
-        assert_eq!(cull_limits(crate::view::CAM_FOVY, 16.0 / 9.0), (1.0, 1.0));
+        let (tx, ty) = cull_limits(crate::view::CAM_FOVY, 16.0 / 9.0);
+        assert!((tx - 1.0).abs() < 1e-5 && ty == 1.0, "({tx}, {ty})");
         let (tx, ty) = cull_limits(crate::view::CAM_FOVY, 32.0 / 9.0);
         assert!(tx > 1.0 && ty == 1.0);
     }

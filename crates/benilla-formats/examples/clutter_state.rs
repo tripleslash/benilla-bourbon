@@ -64,8 +64,8 @@ fn main() -> anyhow::Result<()> {
         }
     }
     println!("\nbatch blend modes: {blends:?}");
-    // Mip level per distance, for benilla's 45° vertical FOV on a 1080-tall viewport.
-    let fov: f32 = std::f32::consts::PI / 4.0;
+    // Mip level per distance, for benilla's 58.7° vertical FOV on a 1080-tall viewport.
+    let fov: f32 = 1.024_779;
     let px_per_yard = |d: f32| (1080.0 / 2.0) / ((fov / 2.0).tan() * d);
     densities.sort_by(f32::total_cmp);
     if !densities.is_empty() {

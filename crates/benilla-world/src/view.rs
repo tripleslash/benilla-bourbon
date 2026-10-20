@@ -339,9 +339,13 @@ pub fn stamp_near_clip(
     }
 }
 /// The vertical field of view in radians, shared by the projection and every consumer of the near
-/// rectangle: 45°, Bevy's `PerspectiveProjection` default; the reference's follows the aspect,
-/// 44.1° at 16:9.
-pub const CAM_FOVY: f32 = std::f32::consts::FRAC_PI_4;
+/// rectangle: `2·atan(9/16)`, 58.72°, which is 90° horizontal at 16:9 and widens Hor+ with the
+/// aspect (about 106° at 21:9, 74° at 4:3).
+///
+/// Deviation: the reference's camera fov is π/2 (`0x7ac620`), but its projection divides it by
+/// the diagonal, `θ = fov / (2·√(aspect² + 1))` (`0x5c3cc0`), a vertical field of 44.1° at 16:9
+/// and 54° at 4:3; the maintainer chose a modern 90° horizontal field.
+pub const CAM_FOVY: f32 = 1.024_779;
 
 /// The world camera's pose made current within `Update`, for every viewer authority there: Bevy
 /// propagates `GlobalTransform` in `PostUpdate`, a whole jump late after a teleport snap.
@@ -404,6 +408,18 @@ fn cpu_light_clusters(settings: Option<ResMut<bevy::light::cluster::GlobalCluste
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// The vertical field is the one whose horizontal span is 90° at 16:9.
+    #[test]
+    fn the_field_of_view_is_90_degrees_across_at_16_9() {
+        assert!((CAM_FOVY - 2.0 * (9.0_f32 / 16.0).atan()).abs() < 1e-6);
+        let across = 2.0 * ((CAM_FOVY * 0.5).tan() * 16.0 / 9.0).atan();
+        assert!(
+            (across.to_degrees() - 90.0).abs() < 1e-3,
+            "{}",
+            across.to_degrees()
+        );
+    }
 
     /// `0x511bc0`'s near stamp reaches the projection, and an unchanged one stays unmarked.
     #[test]

@@ -7,7 +7,8 @@
 //! `π/2` and unlocks. The Ornate Spyglass (item 5507, spell 12883) passes 15, a 6× zoom.
 //!
 //! The ratio is applied, not the degrees: `[camera+0x40]` defaults to 90°, while our [`CAM_FOVY`]
-//! is the effective vertical field of view, 45° against the reference's measured 44.1°.
+//! is the effective vertical field of view, 58.7° (90° horizontal at 16:9) against the reference's
+//! measured 44.1°.
 
 use bevy::camera::{PerspectiveProjection, Projection};
 use bevy::prelude::*;
@@ -90,8 +91,8 @@ mod tests {
             "the spyglass is a 6x zoom off whatever our normal FOV is, not a literal 15 degrees"
         );
         assert!(
-            (fov.to_degrees() - 7.5).abs() < 1e-4,
-            "…which lands at 7.5 degrees vertical for our 45 degree default, not 15"
+            (fov.to_degrees() - 58.7155 / 6.0).abs() < 1e-3,
+            "…which lands at 9.79 degrees vertical for our 58.7 degree default, not 15"
         );
         assert!(scoped.active());
 
