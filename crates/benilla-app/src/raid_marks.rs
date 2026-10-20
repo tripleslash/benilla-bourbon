@@ -194,6 +194,11 @@ fn drive_raid_marks(
                 MeshMaterial3d(material.clone()),
                 place.unwrap_or_default(),
                 RaidMarkBillboard,
+                // Out of the water's mirror, as the names it is drawn with: a billboard aimed at
+                // the world camera has no business in a second view (`crate::nameplates`).
+                bevy::camera::visibility::RenderLayers::layer(
+                    benilla_world::liquid::UNMIRRORED_RENDER_LAYER,
+                ),
             ))
             .id();
         marks.live[slot] = Some(LiveMark { marker, unit });

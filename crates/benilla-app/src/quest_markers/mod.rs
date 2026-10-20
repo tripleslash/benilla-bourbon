@@ -44,6 +44,13 @@ use bevy::mesh::MeshTag;
 
 use crate::entities::overhead_slot;
 
+/// Out of the water's mirror, as an overhead name is (`crate::nameplates`): a `?` is a billboard
+/// aimed at the world camera, and a marker over an NPC belongs to the screen's view of it, not to
+/// the lake under it.
+fn unmirrored() -> bevy::camera::visibility::RenderLayers {
+    bevy::camera::visibility::RenderLayers::layer(benilla_world::liquid::UNMIRRORED_RENDER_LAYER)
+}
+
 /// The bobs `0x6076c0` arms: low, and raised while the unit shows a name ([`Nameplates::shows`]).
 const ANIM_MARKER_LOW: u16 = 0;
 const ANIM_MARKER_RAISED: u16 = 190;
@@ -341,6 +348,7 @@ fn build_markers(
                             BillboardCard::new(info, Transform::IDENTITY)
                                 .with_seq_translation(seq_loop(info, ANIM_MARKER_LOW), arm_ms),
                             MarkerCardPivot(BillboardCard::seat(info)),
+                            unmirrored(),
                         ))
                         .id();
                     commands.entity(root).add_child(child);
@@ -363,6 +371,7 @@ fn build_markers(
                             MeshMaterial3d(material),
                             MeshTag(spawn_tag(marker_slot, 1.0)),
                             Transform::IDENTITY,
+                            unmirrored(),
                         ))
                         .id();
                     if let Some(h) = &host {
