@@ -59,6 +59,7 @@
 <!-- The render worker (`benilla_app::render_worker`): `threads.js` starts it with the canvas
      transferred to it, and like `threadworker.js` it imports `./wenilla.js` by name. -->
 <link data-trunk rel="copy-file" href="renderworker.js" />
+<link data-trunk rel="copy-file" href="gpucensus.js" />
 <!-- The output. `audio.js` installs `window.__wenilla_audio`; `audioworklet.js` is loaded by
      `audioWorklet.addModule` at a URL resolved relative to `audio.js`, so both must land beside
      each other at the dist root. Shipped in EVERY build, like the thread pair above: a module

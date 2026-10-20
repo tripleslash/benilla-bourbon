@@ -33,6 +33,30 @@ const WORKER_URL = './threadworker.js';
 /// The render worker's script (`benilla_app::render_worker`), beside it.
 const RENDER_WORKER_URL = './renderworker.js';
 
+/// `?gpucensus=1` (`gpucensus.js`): the render worker posts its counts here, and with
+/// `?renderworker=0` the page counts its own. Without the flag the module is never loaded.
+const CENSUS = new URLSearchParams(location.search).get('gpucensus') === '1';
+const censusLast = {};
+function printCensus(where, report) {
+  import('./gpucensus.js').then(({ censusLine }) => {
+    console.log(censusLine(where, report, censusLast[where]));
+    censusLast[where] = report.made;
+  });
+}
+
+/// The page's own census, for the leg that renders here: linear memory from the first pool spawn
+/// (the page's externref table is not reachable from here, so `refs` reads 0).
+let censusMemory = null;
+function startPageCensus() {
+  import('./gpucensus.js').then(({ installGpuCensus }) => {
+    const snapshot = installGpuCensus();
+    setInterval(() => {
+      const mib = Math.round((censusMemory?.buffer?.byteLength ?? 0) / 1048576);
+      printCensus('page', { ...snapshot(), refs: 0, mib });
+    }, 5000);
+  });
+}
+
 /// Install the bridge. Call before the wasm module starts, because the pools are built during
 /// `init()` and a spawner that arrives afterwards has nothing left to spawn for.
 export function installThreads() {
@@ -51,10 +75,15 @@ export function installThreads() {
 
   let started = 0;
   let render = null;
+  // With `?renderworker=0` the page renders, so the census counts here.
+  if (CENSUS && new URLSearchParams(location.search).get('renderworker') === '0') {
+    startPageCensus();
+  }
   window.__wenilla_threads = {
     /// Start one pool thread. Returns true only if the Worker was constructed and given its work;
     /// anything else is false, and Rust takes its closure back rather than leaking it.
     spawn(name, ptr, stackSize, module, memory) {
+      if (CENSUS) censusMemory ??= memory;
       try {
         const worker = new Worker(WORKER_URL, { type: 'module', name });
         // An error here means the worker script itself failed to load or threw at top level —
@@ -109,9 +138,12 @@ export function installThreads() {
           const gpu = window.__wenilla_gpu;
           if (msg.gpu === 'lost') gpu?.deviceLost?.(msg);
           else if (msg.gpu === 'error') gpu?.deviceError?.(msg.kind || '');
+          else if (msg.census) printCensus('worker', msg.census);
         };
         const offscreen = canvas.transferControlToOffscreen();
-        worker.postMessage({ module, memory, canvas: offscreen, stackSize }, [offscreen]);
+        worker.postMessage({ module, memory, canvas: offscreen, stackSize, census: CENSUS }, [
+          offscreen,
+        ]);
       } catch (e) {
         console.error('wenilla: could not start the render worker —', e);
         worker?.terminate();

@@ -44,6 +44,21 @@ function watchDevices() {
   };
 }
 
+/// `?gpucensus=1` (the page passes it in the first message): `gpucensus.js` counts this worker's
+/// WebGPU objects, posted to the page every 5 s with the linear memory and this agent's externref
+/// table (`threads.js` prints them). Loaded only with the flag, after the module is up, so a
+/// session without it fetches and wraps nothing; objects made before it lands go uncounted.
+function startCensus(exports) {
+  import('./gpucensus.js').then(({ installGpuCensus }) => {
+    const snapshot = installGpuCensus();
+    setInterval(() => {
+      const refs = exports?.__wbindgen_externrefs?.length ?? 0;
+      const mib = Math.round((exports?.memory?.buffer?.byteLength ?? 0) / 1048576);
+      self.postMessage({ census: { ...snapshot(), refs, mib } });
+    }, 5000);
+  });
+}
+
 /// A Rust panic here is a wasm trap: the instance on this agent is left mid-call, so nothing more
 /// may run in it. The page notices when its next extract goes unanswered and says so.
 let dead = false;
@@ -69,11 +84,12 @@ function poll() {
 }
 
 self.onmessage = (event) => {
-  const { module, memory, canvas, stackSize } = event.data || {};
+  const { module, memory, canvas, stackSize, census } = event.data || {};
   self.onmessage = poll;
   watchDevices();
   try {
-    initSync({ module, memory, thread_stack_size: stackSize ?? undefined });
+    const exports = initSync({ module, memory, thread_stack_size: stackSize ?? undefined });
+    if (census) startCensus(exports);
   } catch (e) {
     dead = true;
     console.error('wenilla: the render worker failed to initialise —', e);
