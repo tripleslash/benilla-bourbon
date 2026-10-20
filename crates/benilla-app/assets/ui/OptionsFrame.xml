@@ -1184,7 +1184,8 @@
                 row.searchTag = string.upper(title or name)
                 local box = getglobal(row:GetName() .. "Check")
                 box:SetChecked(enabled)
-                box:SetScript("OnClick", BenillaOptionsAddOns_OnClick)
+                -- A 1.12 handler is called with no arguments and reads `this`.
+                box:SetScript("OnClick", function() BenillaOptionsAddOns_OnClick(this) end)
                 BenillaOptionsSearch_Place(row:GetName(), prev)
                 prev = row:GetName()
             end
