@@ -129,6 +129,9 @@ pub fn playing_seq(player: &AnimationPlayer, anims: &ModelAnimations) -> Option<
         .or_else(|| anims.idle_seq().map(|seq| (seq, 0.0)))
 }
 
+/// A table slot and the row written there, `None` when the entry has no such channel.
+type SlotRow = Option<(u16, [f32; 4])>;
+
 /// What a hosted alpha reads off its host: the rig that names its sequence and clip time, and the
 /// scene clock its global sequences run on, either absent.
 type AlphaHost = (
@@ -277,12 +280,7 @@ impl UvAnimEntry {
 
     /// This entry's affine slot and row, sampled on the clocks [`Self::delta`] uses so all three
     /// channels of one transform read one instant; `None` when the transform only translates.
-    pub(crate) fn affine(
-        &self,
-        now: f32,
-        gseq_now: f64,
-        playing: Option<(usize, f32)>,
-    ) -> Option<(u16, [f32; 4])> {
+    pub(crate) fn affine(&self, now: f32, gseq_now: f64, playing: Option<(usize, f32)>) -> SlotRow {
         let a = self.affine.as_ref()?;
         let (band_t, gseq) = match &self.anim {
             UvLoop::Shared(_) => (now, gseq_now),
@@ -312,7 +310,7 @@ impl UvAnimEntry {
         now: f32,
         gseq_now: f64,
         playing: Option<(usize, f32)>,
-    ) -> Option<(u16, [f32; 4])> {
+    ) -> SlotRow {
         let st = self.stage1.as_ref()?;
         let (band_t, gseq) = match &self.anim {
             UvLoop::Shared(_) => (now, gseq_now),
@@ -396,7 +394,7 @@ impl UvAnimEntry {
         now: f32,
         gseq_now: f64,
         playing: Option<(usize, f32)>,
-    ) -> ([f32; 4], Option<(u16, [f32; 4])>, Option<(u16, [f32; 4])>) {
+    ) -> ([f32; 4], SlotRow, SlotRow) {
         let (now, gseq_now) = scene.map_or((now, gseq_now), |t| (t as f32, t));
         (
             self.delta(now, gseq_now, playing),

@@ -174,6 +174,9 @@ pub struct ModernCascades {
     pub sky_params: [f32; 4],
 }
 
+/// One terrain caster: mesh, world-space box centre and half extents, LOD epoch.
+pub type TerrainCaster = (AssetId<Mesh>, Vec3, Vec3, u32);
+
 /// Every resident terrain cell as a caster: mesh, world-space box centre and half extents, and
 /// its LOD epoch (`terrain_stream::TerrainLodEpoch`), which moves when the cell's mesh is rebuilt
 /// at a new chunk level under the same handle, so the cached shadow layers and the GI height map
@@ -181,7 +184,7 @@ pub struct ModernCascades {
 /// a classic session.
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct ModernTerrainCasters {
-    pub cells: Vec<(AssetId<Mesh>, Vec3, Vec3, u32)>,
+    pub cells: Vec<TerrainCaster>,
     /// Bumped whenever `cells` changes, so a reader keyed on the set skips re-hashing it.
     pub rev: u64,
 }
@@ -484,6 +487,7 @@ fn update_cascades(
 }
 
 /// Terrain cells are world-space meshes under an identity transform, so their `Aabb` is the box.
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn collect_terrain_casters(
     active: Res<ActiveLighting>,
     cells: Query<
@@ -496,7 +500,7 @@ fn collect_terrain_casters(
         With<MeshMaterial3d<TerrainMaterial>>,
     >,
     mut out: ResMut<ModernTerrainCasters>,
-    mut scratch: Local<Vec<(AssetId<Mesh>, Vec3, Vec3, u32)>>,
+    mut scratch: Local<Vec<TerrainCaster>>,
 ) {
     if !active.is_modern() {
         if !out.cells.is_empty() {

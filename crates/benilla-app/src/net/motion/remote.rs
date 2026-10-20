@@ -364,7 +364,9 @@ pub(in crate::net) const HIDDEN_STRIDE: u32 = 4;
 
 /// Whether hidden body `e` takes its turn on frame `frame` (see [`HIDDEN_STRIDE`]).
 pub(in crate::net) fn hidden_turn(e: Entity, frame: u32) -> bool {
-    (e.to_bits() as u32).wrapping_add(frame) % HIDDEN_STRIDE == 0
+    (e.to_bits() as u32)
+        .wrapping_add(frame)
+        .is_multiple_of(HIDDEN_STRIDE)
 }
 
 /// Dead-reckons every remote mover each frame from its flags, then resolves the step against the
@@ -632,7 +634,7 @@ pub(in crate::net) fn extrapolate_remote_units(
         }
     }
     // Despawned movers leave the ledger.
-    if *frame % 256 == 0 {
+    if frame.is_multiple_of(256) {
         owed.retain(|e, _| q.contains(*e));
     }
 }

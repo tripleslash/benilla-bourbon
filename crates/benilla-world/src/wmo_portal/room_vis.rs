@@ -37,7 +37,10 @@ pub fn room_pvs_visible(
     let at = at.map(|(centre, radius)| {
         let local_from_world = inst.world_from_local.inverse();
         let p = local_from_world.transform_point3(centre);
-        (bevy_to_wow(p), radius * local_from_world.matrix3.x_axis.length())
+        (
+            bevy_to_wow(p),
+            radius * local_from_world.matrix3.x_axis.length(),
+        )
     });
     room_visible(
         &inst.visible,
@@ -97,7 +100,10 @@ fn room_visible(
         }
         (0..3).all(|axis| {
             let lo = verts.iter().map(|v| v[axis]).fold(f32::INFINITY, f32::min);
-            let hi = verts.iter().map(|v| v[axis]).fold(f32::NEG_INFINITY, f32::max);
+            let hi = verts
+                .iter()
+                .map(|v| v[axis])
+                .fold(f32::NEG_INFINITY, f32::max);
             p[axis] >= lo - radius && p[axis] <= hi + radius
         })
     };
@@ -174,14 +180,35 @@ mod tests {
             count: 4,
             plane: [1.0, 0.0, 0.0, 0.0],
         }];
-        let verts = [[0.0, -1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 2.0], [0.0, -1.0, 2.0]];
+        let verts = [
+            [0.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 2.0],
+            [0.0, -1.0, 2.0],
+        ];
         let pvs = [true, false];
         assert!(
-            room_visible(&pvs, &navs, &refs, &infos, &verts, 1, Some(([0.5, 0.0, 1.0], 1.0))),
+            room_visible(
+                &pvs,
+                &navs,
+                &refs,
+                &infos,
+                &verts,
+                1,
+                Some(([0.5, 0.0, 1.0], 1.0))
+            ),
             "in the doorway: still drawn"
         );
         assert!(
-            !room_visible(&pvs, &navs, &refs, &infos, &verts, 1, Some(([20.0, 0.0, 1.0], 1.0))),
+            !room_visible(
+                &pvs,
+                &navs,
+                &refs,
+                &infos,
+                &verts,
+                1,
+                Some(([20.0, 0.0, 1.0], 1.0))
+            ),
             "deep in the next room behind the wall: not drawn"
         );
     }
