@@ -937,9 +937,7 @@ fn a_held_action_polls_answer_their_own_now() {
     let first = read(&app);
     assert_eq!((first.1, first.2), (0.001, 0), "(now, 0.001, 0)");
     assert_eq!(first.0, first.3);
-    app.world_mut()
-        .non_send_mut::<UiScript>()
-        .tick(0.02);
+    app.world_mut().non_send_mut::<UiScript>().tick(0.02);
     let second = read(&app);
     assert_eq!(second.0, second.3, "the poll answers its own now");
     assert!((second.0 - first.0 - 0.02).abs() < 1e-9, "20 ms apart");

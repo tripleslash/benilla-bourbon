@@ -1490,9 +1490,7 @@ fn feed_units(
         entity
     };
     // The tooltip facts' object lookup, through the tracked one so the gate sees its reads.
-    let object = |guid: u64| {
-        stores.all.get(entity_of(guid)?).ok()
-    };
+    let object = |guid: u64| stores.all.get(entity_of(guid)?).ok();
     let held = held::HeldUnits {
         names: &names,
         commands: &commands,
@@ -1679,8 +1677,7 @@ fn feed_units(
         let due = *memo
             .enter_due_since
             .get_or_insert_with(bevy::platform::time::Instant::now);
-        let views_ready = script.book_spell_views_ready()
-            || due.elapsed() >= WORLD_ENTER_VIEW_WAIT;
+        let views_ready = script.book_spell_views_ready() || due.elapsed() >= WORLD_ENTER_VIEW_WAIT;
         if !memo.entered_world && views_ready {
             gate.audit("feed_units", "the world-enter events");
             // `"player"` names us when the cascade runs, from our own create: the stock windows

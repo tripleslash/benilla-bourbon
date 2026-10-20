@@ -241,10 +241,12 @@ mod frame_tests {
         let mut client = HeaderCrypto::from_session_key(KEY);
         let traffic = LinkTraffic::new();
         let mut r = wire.as_slice();
-        let (opcode, got) = block_on(read_frame(&mut r, Some(client.decrypter()), &traffic)).unwrap();
+        let (opcode, got) =
+            block_on(read_frame(&mut r, Some(client.decrypter()), &traffic)).unwrap();
         assert_eq!((opcode, got.len()), (SMSG_UPDATE_OBJECT, 0x7fff));
         assert_eq!(got, big);
-        let (opcode, got) = block_on(read_frame(&mut r, Some(client.decrypter()), &traffic)).unwrap();
+        let (opcode, got) =
+            block_on(read_frame(&mut r, Some(client.decrypter()), &traffic)).unwrap();
         assert_eq!((opcode, got), (SMSG_PONG, vec![1, 2, 3]));
         assert!(r.is_empty());
     }

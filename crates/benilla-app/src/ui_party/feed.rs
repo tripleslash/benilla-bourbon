@@ -2647,6 +2647,8 @@ mod tests {
             (Some("Flash Heal".into()), Some("party1".into()))
         );
         assert_eq!(parse("party2"), (None, None));
+    }
+
     /// Hold our own player: the feed reads our guid off the `SelfPlayer` entity, and the object
     /// manager finds a player object by its type word (`0x468460`, mask `0x10`).
     fn seat_self(app: &mut App) -> Entity {

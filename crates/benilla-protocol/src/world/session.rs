@@ -295,7 +295,8 @@ impl WorldSession {
 
     /// Read + decrypt + parse one server packet.
     pub async fn recv_async(&mut self) -> Result<ServerPacket> {
-        let packet = recv_packet(&mut self.conn, Some(self.crypto.decrypter()), &self.traffic).await?;
+        let packet =
+            recv_packet(&mut self.conn, Some(self.crypto.decrypter()), &self.traffic).await?;
         // **Captured here rather than in a loop arm**, because it is not one loop's business:
         // `SMSG_ADDON_INFO` lands somewhere between `CMSG_AUTH_SESSION` and the roster, and which
         // of the handshake's three read loops sees it is the server's timing, not our contract.

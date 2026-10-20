@@ -755,7 +755,9 @@ pub struct UvLoops {
 
 impl UvLoops {
     /// tortoise: a submesh's second-stage scroll, when it moves.
-    pub fn stage1_of(geometry: &benilla_formats::RenderSubmesh) -> Option<std::sync::Arc<benilla_formats::UvAnim>> {
+    pub fn stage1_of(
+        geometry: &benilla_formats::RenderSubmesh,
+    ) -> Option<std::sync::Arc<benilla_formats::UvAnim>> {
         geometry
             .stage1
             .as_ref()
@@ -1267,7 +1269,10 @@ mod delta_tests {
         assert_eq!(slot, 9);
         let want = scroll.sample(scroll.clock(1.0, 1.0));
         assert_eq!((row[0], row[1]), (want[0], want[1]));
-        assert!(row[0] > 0.0, "half-way through the loop the stage has moved: {row:?}");
+        assert!(
+            row[0] > 0.0,
+            "half-way through the loop the stage has moved: {row:?}"
+        );
         // The stage-0 row is untouched by it.
         assert_eq!(e.delta(1.0, 1.0, None), [0.0, 0.0, 0.0, 0.0]);
     }

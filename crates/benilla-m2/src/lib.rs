@@ -378,9 +378,8 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
     // What a read past the table finds (`0x70b8bd` indexes it unchecked): the next u16s of the
     // file, which the reference holds whole. Two stages read at most two entries past it.
     let past_at = texture_unit_lookup_arr.1 as usize + texture_unit_lookup.len() * 2;
-    let texture_unit_lookup_past: Vec<u16> = (0..2)
-        .map_while(|i| b.u16_at(past_at + i * 2))
-        .collect();
+    let texture_unit_lookup_past: Vec<u16> =
+        (0..2).map_while(|i| b.u16_at(past_at + i * 2)).collect();
     let tlookup_avail = b.len().saturating_sub(transparency_lookup_arr.1 as usize);
     let mut transparency_lookup =
         Vec::with_capacity(capped(transparency_lookup_arr.0 as usize, 2, tlookup_avail));

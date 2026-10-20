@@ -119,17 +119,13 @@ impl super::UiScript {
     /// The host holds the world-enter cascade on this (`ui_unit::feed_units`).
     pub fn book_spell_views_ready(&self) -> bool {
         let model = self.model_mut();
-        model
-            .spellbook
-            .slots
-            .iter()
-            .all(|s| {
-                s.spell_id == 0
-                    || model
-                        .spell_tooltips
-                        .get(&s.spell_id)
-                        .is_some_and(|v| !v.names_pending)
-            })
+        model.spellbook.slots.iter().all(|s| {
+            s.spell_id == 0
+                || model
+                    .spell_tooltips
+                    .get(&s.spell_id)
+                    .is_some_and(|v| !v.names_pending)
+        })
     }
 
     /// Store or replace a spell's view built against the player's pet, the one the builder's unit

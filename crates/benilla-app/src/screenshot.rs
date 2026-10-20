@@ -128,8 +128,11 @@ fn write_capture(captured: On<ScreenshotCaptured>, mut state: ResMut<ScreenshotS
                 // Encoded on the frame (no threads here): the fast level keeps that hitch short.
                 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
                 let mut png = Vec::new();
-                let encoder =
-                    PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive);
+                let encoder = PngEncoder::new_with_quality(
+                    &mut png,
+                    CompressionType::Fast,
+                    FilterType::Adaptive,
+                );
                 match img.to_rgb8().write_with_encoder(encoder) {
                     Ok(()) => {
                         web::download(&name, &png);

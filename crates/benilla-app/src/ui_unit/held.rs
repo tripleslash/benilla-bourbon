@@ -193,9 +193,7 @@ pub(super) fn feed_chain_units(
         entity
     };
     // The tooltip facts' object lookup, through the tracked one so the gate sees its reads.
-    let object = |guid: u64| {
-        stores.get(entity_of(guid)?).ok()
-    };
+    let object = |guid: u64| stores.get(entity_of(guid)?).ok();
     let held = HeldUnits {
         names: &names,
         commands: &commands,
