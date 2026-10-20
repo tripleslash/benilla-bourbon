@@ -33,7 +33,7 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 
 Each entry is the first sentence of a `Deviation:` comment, linking to where it lives.
 
-- [benilla-app](#benilla-app): 246
+- [benilla-app](#benilla-app): 247
 - [benilla-assets](#benilla-assets): 6
 - [benilla-blp](#benilla-blp): 2
 - [benilla-formats](#benilla-formats): 24
@@ -485,7 +485,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### video
 
 - `gxWindow "0"` is borderless fullscreen, not 1.12's exclusive mode-set at `gxResolution`, because Wayland has no client mode-setting (winit ignores `Fullscreen::Exclusive` there), X11's XRandR changes the desktop's mode and a crash leaves it changed, and macOS has no exclusive mode. ([`src/video.rs:4`](../crates/benilla-app/src/video.rs#L4))
-- Sizes are logical px, because `gxResolution` is a logical inner size here. ([`src/video.rs:580`](../crates/benilla-app/src/video.rs#L580))
+- On Windows, NVIDIA's Vulkan driver (610.88 seen) crashes inside `vkQueuePresentKHR` on the first present after any swapchain resize while the present mode is `Fifo`, `FifoRelaxed` or `AutoVsync` (a maximize is a resize). `Mailbox`, `AutoNoVsync` and DX12 survive, so there "vsync on" is `AutoNoVsync` paced to the monitor's refresh rate (`present_choice`), which keeps the synced look without the crash. `$WOW_PRESENT=fifo` restores plain `Fifo`. ([`src/video.rs:16`](../crates/benilla-app/src/video.rs#L16))
+- Sizes are logical px, because `gxResolution` is a logical inner size here. ([`src/video.rs:692`](../crates/benilla-app/src/video.rs#L692))
 
 #### vplates
 
