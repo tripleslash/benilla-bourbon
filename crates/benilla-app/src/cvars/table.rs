@@ -816,7 +816,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `lod` (`0x68848c`: name `0x8697d0`, "1", flags 1, callback `0x688920`, record `[0xc7f314]`),
     // World LOD: bit 2 of `[0xc7b2a4]`, which gates the chunk level's distance test at
     // `0x6afb11`. The knob is `benilla_world::horizon::HorizonCulling::lod`: a chunk's level
-    // sets how many vertices its horizon rows add (`0x6c15d0`); benilla draws one terrain mesh.
+    // picks its drawn mesh (`0x6beb50`) and how many vertices its horizon rows add (`0x6c15d0`).
     same("lod", "1"),
     // `lodDist` (`0x688524`, "100.0", callback `0x688ab0` into `[0x867960]`): the view depth past
     // which a chunk drops to level 2 while `lod` is on. The knob is
@@ -946,6 +946,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "frameGeneration",
         "1",
         "benilla's own — 1.12 presents every frame it draws and no frame it did not",
+    ),
+    // `rcasSharpness` — FSR 3.1's RCAS sharpening on the SDK's 0..1 dial, `2 − 2·x` stops; the
+    // knob is `benilla_world::fsr::RcasSharpness`, its default `RCAS_SHARPNESS_DEFAULT` (welded
+    // below). Applies to the next frame.
+    ours(
+        "rcasSharpness",
+        "0.875",
+        "benilla's own — 1.12 has no upscaler to sharpen",
     ),
     // ── end fork-owned block ──
     // ── fork-owned block: the Everwood port (FORK.md) ──

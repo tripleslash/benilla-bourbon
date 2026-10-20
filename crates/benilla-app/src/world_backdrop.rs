@@ -352,12 +352,21 @@ pub(crate) struct WorldBackdropPlugin;
 
 /// Render scale's change callback, clamped to [`RENDER_SCALE_RANGE`]; the backdrop and the
 /// camera's factor follow together on the next frame. fork: fsr (FORK.md) — and `frameGeneration`'s,
-/// a flag.
+/// a flag, and `rcasSharpness`'s, clamped to the SDK's `[0, 1]`.
 pub(crate) fn on_cvar(
     ev: On<crate::cvars::CvarChanged>,
     mut scale: ResMut<RenderScale>,
     mut fg: ResMut<FrameGeneration>,
+    mut rcas: ResMut<benilla_world::fsr::RcasSharpness>,
 ) {
+    if ev.is("rcasSharpness") {
+        let v = ev.num();
+        rcas.0 = if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            benilla_world::fsr::RCAS_SHARPNESS_DEFAULT
+        };
+    }
     if ev.is("renderScale") {
         scale.0 = ev
             .num()
@@ -372,8 +381,9 @@ impl Plugin for WorldBackdropPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_cvar);
         app.init_resource::<RenderScale>()
-            // fork: fsr (FORK.md) — the setting's knob; `FsrPlugin` installs it too.
+            // fork: fsr (FORK.md) — the settings' knobs; `FsrPlugin` installs them too.
             .init_resource::<FrameGeneration>()
+            .init_resource::<benilla_world::fsr::RcasSharpness>()
             .add_systems(Startup, setup_backdrop)
             .add_systems(
                 Update,

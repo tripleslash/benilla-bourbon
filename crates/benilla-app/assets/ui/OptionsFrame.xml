@@ -440,6 +440,12 @@
             .. "game draws, nearly doubling the frames you see for one frame of added latency.\n\n"
             .. "Render Scale is held at 100% or below while it is on. Applies when you click Apply."
 
+        -- fork: fsr (FORK.md) — 1.12 has no such slider.
+        BENILLA_TOOLTIP_RCAS_SHARPNESS =
+            "How strongly AMD FSR 3.1's RCAS pass sharpens the upscaled picture. Higher is "
+            .. "crisper, lower is softer; 0% leaves only the mildest sharpening. Applies when you "
+            .. "click Apply."
+
         -- fork: the Everwood port (FORK.md) -- 1.12 has no such rows.
         BENILLA_TOOLTIP_FOLIAGE_WIND =
             "Grass bends in two travelling wind waves and parts around nearby characters. "
@@ -622,6 +628,8 @@
                 -- fork: fsr (FORK.md) — how the world is presented, above how big it is drawn.
                 "RowFrameGeneration",
                 "RowRenderScale",
+                -- fork: fsr (FORK.md) -- FSR's sharpening, beside the scale it sharpens.
+                "RowRcasSharpness",
             },
             -- Guild Names and Player Titles are children of Player Names
             -- (UIOptionsFrame.lua:703-709).
@@ -2574,6 +2582,20 @@
                                                 this.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <Frame name="$parentRowRcasSharpness" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: fsr (FORK.md) -- `rcasSharpness`,
+                                                -- our own row: the SDK's 0-1 sharpness, 87.5%
+                                                -- as shipped, on a grid that stops on it.
+                                                BenillaOptionsRow_OnLoad(this, "rcasSharpness", "RCAS Sharpening",
+                                                    "BENILLA_TOOLTIP_RCAS_SHARPNESS")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.025)
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                     </Frames>
                                     <!-- Re-apply the bounds on show, as OptionsFrame_Load does, so
                                          an addon's write lands. -->
@@ -3725,6 +3747,7 @@
             BENILLA_RENDER_SCALE = "Render Scale"
             -- fork: fsr (FORK.md)
             BENILLA_FRAME_GENERATION = "Use Frame Generation"
+            BENILLA_RCAS_SHARPNESS = "RCAS Sharpening"
             -- fork: the Everwood port (FORK.md)
             BENILLA_FOLIAGE_WIND = "Foliage Wind"
             BENILLA_FOLIAGE_WIND_STRENGTH = "Foliage Wind Strength"
@@ -3915,6 +3938,10 @@
                     type = "slider", cvar = "renderScale", minval = 0.5, maxval = 2.0, step = 0.01,
                     -- fork: fsr (FORK.md) -- FSR's 0.67 and 1x, marked on the groove.
                     benillaMarks = BENILLA_RENDER_SCALE_MARKS, numberLabels = true } },
+                -- fork: fsr (FORK.md) -- FSR's sharpening, right under Render Scale.
+                { after = "BENILLA_RENDER_SCALE", row = {
+                    name = "BENILLA_RCAS_SHARPNESS", desc = BENILLA_TOOLTIP_RCAS_SHARPNESS,
+                    type = "slider", cvar = "rcasSharpness", minval = 0, maxval = 1.0, step = 0.025 } },
                 -- fork: fsr (FORK.md)
                 { category = DISPLAY, row = {
                     name = "BENILLA_FRAME_GENERATION", desc = BENILLA_TOOLTIP_FRAME_GENERATION,

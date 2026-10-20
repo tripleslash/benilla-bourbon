@@ -2769,6 +2769,7 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "BENILLA_TOOLTIP_FRAME_GENERATION",
                 "GraphicsRowFrameGeneration",
             ),
+            ("BENILLA_TOOLTIP_RCAS_SHARPNESS", "GraphicsRowRcasSharpness"),
             // fork: the Everwood port (FORK.md)
             ("BENILLA_TOOLTIP_FOLIAGE_WIND", "GraphicsRowFoliageWind"),
             (
@@ -5077,6 +5078,7 @@ fn turtle_options_carry_every_graphics_row() {
         "renderScale",
         // fork: fsr (FORK.md)
         "frameGeneration",
+        "rcasSharpness",
         // fork: the Everwood port (FORK.md)
         "foliageWind",
         "foliageWindStrength",

@@ -33,16 +33,11 @@ use bevy::render::view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget};
 use bytemuck::{Pod, Zeroable};
 
 use super::caps::Formats;
-use super::{FsrHeld, FsrShaders, FsrView};
+use super::{FsrHeld, FsrShaders, FsrView, RcasSharpness};
 
 /// Whether shading-change detection is compiled in (passes 2 and 3's detector half): the one
 /// optional part of FSR 3.1, and its most expensive. On, as the SDK ships it.
 pub const SHADING_CHANGE_DETECTION: bool = true;
-
-/// RCAS sharpness in stops, where 0 is the most; the shader receives `exp2(-stops)`. The SDK maps
-/// its `[0, 1]` `sharpness` to `2 − 2·sharpness` stops (`ffx_fsr3upscaler.cpp`), so this is
-/// physics-rs's sharpness 0.875.
-const RCAS_SHARPNESS_STOPS: f32 = 0.25;
 
 /// `ffxFsr3UpscalerSetConfiguration`'s three constants, at their SDK defaults.
 const VELOCITY_FACTOR: f32 = 1.0;
@@ -583,6 +578,7 @@ pub(super) fn prepare_fsr(
     queue: Res<RenderQueue>,
     pipelines: Option<Res<FsrPipelines>>,
     held: Res<FsrHeld>,
+    rcas: Option<Res<RcasSharpness>>,
     mut views: Query<(
         Entity,
         &ExtractedView,
@@ -711,7 +707,8 @@ pub(super) fn prepare_fsr(
             velocity_factor: VELOCITY_FACTOR,
             accumulation_added_per_frame: ACCUMULATION_ADDED_PER_FRAME,
             min_disocclusion_accumulation: MIN_DISOCCLUSION_ACCUMULATION,
-            sharpness: (-RCAS_SHARPNESS_STOPS).exp2(),
+            // RCAS's sharpness in stops, where 0 is the most; the shader takes `exp2(-stops)`.
+            sharpness: (-rcas.as_deref().copied().unwrap_or_default().stops()).exp2(),
             hdr: if modern { 1.0 } else { 0.0 },
             reactive_scale: REACTIVE_SCALE,
             _pad: [0.0; 2],

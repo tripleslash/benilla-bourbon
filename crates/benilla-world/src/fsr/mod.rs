@@ -108,6 +108,27 @@ impl FsrView {
     }
 }
 
+/// fork: the `rcasSharpness` CVar, the RCAS pass's sharpness on the SDK's `[0, 1]` scale, which
+/// `ffx_fsr3upscaler.cpp` maps to `2 − 2·sharpness` stops; [`RCAS_SHARPNESS_DEFAULT`] as shipped.
+#[derive(Resource, Clone, Copy, PartialEq, Debug, ExtractResource)]
+pub struct RcasSharpness(pub f32);
+
+/// The sharpness the upscaler shipped with, physics-rs's 0.875: a quarter stop.
+pub const RCAS_SHARPNESS_DEFAULT: f32 = 0.875;
+
+impl Default for RcasSharpness {
+    fn default() -> Self {
+        Self(RCAS_SHARPNESS_DEFAULT)
+    }
+}
+
+impl RcasSharpness {
+    /// The sharpness in stops, where 0 is the most, the SDK's mapping of its `[0, 1]` dial.
+    pub fn stops(self) -> f32 {
+        2.0 - 2.0 * self.0.clamp(0.0, 1.0)
+    }
+}
+
 /// Render-world flag: this frame is a held frame of frame generation, and no world view renders.
 /// The FSR systems stand down on it so the history advances once per rendered world frame.
 #[derive(Resource, Default, Clone, Copy, ExtractResource)]
@@ -353,12 +374,14 @@ impl Plugin for FsrPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FsrHeld>()
             .init_resource::<FgSolo>()
+            .init_resource::<RcasSharpness>()
             .init_resource::<velocity::FsrMotionParts>()
             .add_plugins((
                 ExtractComponentPlugin::<FsrView>::default(),
                 ExtractComponentPlugin::<PresentsHeldFrames>::default(),
                 ExtractResourcePlugin::<FsrHeld>::default(),
                 ExtractResourcePlugin::<FgSolo>::default(),
+                ExtractResourcePlugin::<RcasSharpness>::default(),
                 ExtractResourcePlugin::<velocity::FsrMotionParts>::default(),
             ))
             // `Last`, not `PostUpdate` (`modern/HOOKS.md`, "Scheduling rule"): after the camera's

@@ -1264,6 +1264,7 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "renderScale",
     // fork: fsr (FORK.md)
     "frameGeneration",
+    "rcasSharpness",
     // fork: the Everwood port (FORK.md)
     "foliageWind",
     "foliageWindStrength",
@@ -1789,9 +1790,9 @@ mod tests {
                 "gxColorBits",
                 "gxDepthBits",
                 "gxResolution",
-                "realmList",
                 // fork: terrain chunk LOD switches at 500 yd, the far clip being 1000.
                 "lodDist",
+                "realmList",
                 "weatherDensity",
             ],
         );
@@ -1831,6 +1832,11 @@ mod tests {
         // fork's 1000 yd horizon; the reference registers 350).
         assert_eq!(d["farclip"], 1000.0);
         assert_eq!(d["nearclip"], benilla_world::view::NEARCLIP_DEFAULT);
+        assert_eq!(d["lodDist"], benilla_world::horizon::LOD_DIST_SHIPPED);
+        assert_eq!(
+            d["rcasSharpness"],
+            benilla_world::fsr::RCAS_SHARPNESS_DEFAULT
+        );
         assert_eq!(
             d["nearclip"],
             ViewDistance::default().nearclip,
@@ -2197,6 +2203,10 @@ mod tests {
         assert!(res::<benilla_world::fsr::FrameGeneration>(&app).0);
         apply(&mut app, "framegeneration", "0");
         assert!(!res::<benilla_world::fsr::FrameGeneration>(&app).0);
+        apply(&mut app, "rcasSharpness", "0.5");
+        assert_eq!(res::<benilla_world::fsr::RcasSharpness>(&app).0, 0.5);
+        apply(&mut app, "rcassharpness", "7");
+        assert_eq!(res::<benilla_world::fsr::RcasSharpness>(&app).0, 1.0);
         assert!(!res::<crate::perf::FpsJournalSetting>(&app).0);
         apply(&mut app, "fpsJournal", "1");
         assert!(res::<crate::perf::FpsJournalSetting>(&app).0);
@@ -3292,6 +3302,7 @@ mod tests {
             .insert_resource(RenderScale(1.0))
             // fork: fsr (FORK.md)
             .init_resource::<benilla_world::fsr::FrameGeneration>()
+            .init_resource::<benilla_world::fsr::RcasSharpness>()
             // Literal for the same reason: LightingSettings::default() reads $WOW_LIGHTING /
             // $WOW_LIGHTING_QUALITY, IndirectLighting::default() $WOW_SSAO / $WOW_SSGI, and
             // WaterDetail::default() $WOW_WATER_DETAIL.
