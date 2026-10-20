@@ -262,10 +262,27 @@ pub(super) fn fire_cleared(lua: &Lua, h: FrameHandle) {
 /// such state. That plate takes the base hide, keeping its owner and its wait, so the view's
 /// arrival renders it in place.
 pub(super) fn show_or_hide_empty(lua: &Lua, h: FrameHandle) {
+    show_or_hide(lua, h, false);
+}
+
+/// [`show_or_hide_empty`] for the spell and aura builders, where a build that drew no line, an
+/// aura miss above all, also keeps its owner. CallOfElements owns its scan plate once, in
+/// `OnLoad` (`CallOfElements.xml:25`), and ends every debuff scan on a miss
+/// (`COE_TotemLogic.lua:280`, looping until `TextLeft1` reads nil); its later `SetSpell` scans
+/// (`COE_TotemData.lua:229`, `:528`) still read lines on the 1.12 client. Un-owning on the miss
+/// left every later scan empty, so every totem read "no tool" and stayed greyed. The tail traced
+/// above says the miss un-owns; the addon's working scans say the owner survives it, and the
+/// game's files win. Where the binary keeps it is unexplained. The item builder's uncached hide
+/// is a separate, traced step and still un-owns.
+pub(super) fn show_or_hide_empty_spell(lua: &Lua, h: FrameHandle) {
+    show_or_hide(lua, h, true);
+}
+
+fn show_or_hide(lua: &Lua, h: FrameHandle, keep_owner_when_empty: bool) {
     let waiting = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
         let empty = tip_mut(&mut model, h).is_ok_and(|t| t.num_lines == 0);
-        empty && model.spell_tooltip_waits.contains_key(&h)
+        empty && (keep_owner_when_empty || model.spell_tooltip_waits.contains_key(&h))
     };
     if waiting {
         visibility::set_shown_bit(lua, h, false);

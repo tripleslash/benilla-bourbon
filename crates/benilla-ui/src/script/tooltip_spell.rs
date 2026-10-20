@@ -684,7 +684,7 @@ pub(super) fn set_spell_with_talent(
             }
         }
     }
-    super::tooltip::show_or_hide_empty(lua, h);
+    super::tooltip::show_or_hide_empty_spell(lua, h);
     Ok(())
 }
 
@@ -699,7 +699,7 @@ fn set_reward_spell(
         None => {
             let h = frame_handle_of(lua, this)?;
             clear_silent(lua, h);
-            super::tooltip::show_or_hide_empty(lua, h);
+            super::tooltip::show_or_hide_empty_spell(lua, h);
             Ok(())
         }
     }
@@ -750,7 +750,7 @@ fn fill_spell(
             false
         }
     };
-    super::tooltip::show_or_hide_empty(lua, h);
+    super::tooltip::show_or_hide_empty_spell(lua, h);
     Ok(live)
 }
 
@@ -1001,7 +1001,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     if let Some(name) = name {
                         append_line(lua, &this, (name, WHITE), None, false)?;
                     }
-                    super::tooltip::show_or_hide_empty(lua, h);
+                    super::tooltip::show_or_hide_empty_spell(lua, h);
                     // The macro leg's builder return is dropped (`0x5326be`).
                     Ok(Value::Nil)
                 }

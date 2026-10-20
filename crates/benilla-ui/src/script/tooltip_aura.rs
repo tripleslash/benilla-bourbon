@@ -166,7 +166,7 @@ pub(super) fn fill_aura(
             insert_wait(lua, h, WaitFor::Aura { key, remaining }, fallback_name)?;
         }
     }
-    super::tooltip::show_or_hide_empty(lua, h);
+    super::tooltip::show_or_hide_empty_spell(lua, h);
     Ok(())
 }
 
