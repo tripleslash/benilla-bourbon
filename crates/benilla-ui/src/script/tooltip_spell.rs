@@ -73,6 +73,10 @@ pub struct SpellTooltipView {
     pub reagents: Option<TooltipText>,
     /// The player carries every reagent, which leaves the line out of a compact build.
     pub reagents_met: bool,
+    /// wenilla carry: a tool or reagent named by the spell had no streamed item name when this
+    /// view was built, so its line is short; the app re-pushes the view when the name lands. The
+    /// world-enter wait reads it (`book_spell_views_ready`).
+    pub names_pending: bool,
     /// `CHANCE_TO_DODGE` (`0x854e44`) and its siblings, by `Effect[0]`, of the player's live stat,
     /// which the app re-pushes as it moves.
     pub chance: Option<TooltipText>,
@@ -119,7 +123,13 @@ impl super::UiScript {
             .spellbook
             .slots
             .iter()
-            .all(|s| s.spell_id == 0 || model.spell_tooltips.contains_key(&s.spell_id))
+            .all(|s| {
+                s.spell_id == 0
+                    || model
+                        .spell_tooltips
+                        .get(&s.spell_id)
+                        .is_some_and(|v| !v.names_pending)
+            })
     }
 
     /// Store or replace a spell's view built against the player's pet, the one the builder's unit

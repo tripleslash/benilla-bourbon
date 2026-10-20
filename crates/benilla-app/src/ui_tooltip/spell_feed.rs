@@ -282,6 +282,8 @@ pub(super) fn build_view(
     // each the player does not carry red. One whose template has not streamed is absent until
     // `feed_spell_tooltips` re-pushes on its arrival, as the reference looks each up with a
     // callback (`0x52eda4`, `0x52f3f4`) and builds again when the last answers.
+    // wenilla carry: whether a tool or reagent line is short a name still streaming.
+    let names_pending = std::cell::Cell::new(false);
     let item_line = |head: &str, items: &mut dyn Iterator<Item = (u32, u32)>| {
         let mut parts: Vec<String> = Vec::new();
         let mut met = true;
@@ -292,6 +294,7 @@ pub(super) fn build_view(
                 .template(entry, 0, Ask::Event(vctx.commands))
                 .map(|t| t.name.clone())
             else {
+                names_pending.set(true);
                 continue;
             };
             // `"%s (%d)"` above one (`0x854b30`, `0x52f461`); a tool has no count.
@@ -354,6 +357,7 @@ pub(super) fn build_view(
         chance,
         totems,
         totems_met,
+        names_pending: names_pending.get(),
         reagents,
         reagents_met,
         use_all,
