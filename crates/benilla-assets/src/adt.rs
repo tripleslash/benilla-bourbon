@@ -98,19 +98,32 @@ pub fn chunk_to_mesh(chunk: &ChunkMesh, shading: &ChunkShading) -> Option<Mesh> 
 /// the shader reads are per vertex and the tile shares one material, so the merge draws the same
 /// pixels in one draw. `None` when every chunk is a hole.
 pub fn chunks_to_mesh(parts: &[(&ChunkMesh, &ChunkShading)]) -> Option<Mesh> {
-    let live: Vec<&(&ChunkMesh, &ChunkShading)> =
-        parts.iter().filter(|(c, _)| c.indices.len() >= 3).collect();
+    let full: Vec<(&ChunkMesh, &ChunkShading, &[u32])> = parts
+        .iter()
+        .map(|(c, s)| (*c, *s, c.indices.as_slice()))
+        .collect();
+    chunks_to_mesh_lod(&full)
+}
+
+/// [`chunks_to_mesh`] with each chunk drawn by the triangle list beside it, over its own 145
+/// vertices: its terrain level's (`benilla_formats::chunk_lod_indices`). The vertices and the
+/// chunks a cell holds are the full fan's, so a level change rewrites only which triangles draw.
+pub fn chunks_to_mesh_lod(parts: &[(&ChunkMesh, &ChunkShading, &[u32])]) -> Option<Mesh> {
+    let live: Vec<&(&ChunkMesh, &ChunkShading, &[u32])> = parts
+        .iter()
+        .filter(|(c, _, _)| c.indices.len() >= 3)
+        .collect();
     if live.is_empty() {
         return None;
     }
-    let total: usize = live.iter().map(|(c, _)| c.positions.len()).sum();
+    let total: usize = live.iter().map(|(c, _, _)| c.positions.len()).sum();
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(total);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(total);
     let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(total);
     let mut uv1: Vec<[f32; 2]> = Vec::with_capacity(total);
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(total);
-    let mut indices: Vec<u32> = Vec::with_capacity(live.iter().map(|(c, _)| c.indices.len()).sum());
-    for (chunk, shading) in live {
+    let mut indices: Vec<u32> = Vec::with_capacity(live.iter().map(|(_, _, i)| i.len()).sum());
+    for (chunk, shading, drawn) in live {
         let base = u32::try_from(positions.len()).expect("a cell's vertex count fits u32");
         let chunk_positions: Vec<[f32; 3]> = chunk
             .positions
@@ -134,7 +147,7 @@ pub fn chunks_to_mesh(parts: &[(&ChunkMesh, &ChunkShading)]) -> Option<Mesh> {
         }));
         colors.extend(std::iter::repeat_n(col, n));
         uvs.extend_from_slice(&chunk.uvs);
-        indices.extend(chunk.indices.iter().map(|i| i + base));
+        indices.extend(drawn.iter().map(|i| i + base));
         positions.extend(chunk_positions);
     }
     let mut mesh = Mesh::new(

@@ -820,8 +820,15 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("lod", "1"),
     // `lodDist` (`0x688524`, "100.0", callback `0x688ab0` into `[0x867960]`): the view depth past
     // which a chunk drops to level 2 while `lod` is on. The knob is
-    // `benilla_world::horizon::HorizonCulling::lod_dist`.
-    same("lodDist", "100.0").checked(benilla_ui::script::check_lod_dist),
+    // `benilla_world::horizon::HorizonCulling::lod_dist`; the callback's range is widened to
+    // 1000 with it.
+    deviates(
+        "lodDist",
+        "500.0",
+        "100.0",
+        "farclip default 1000 yd; 100 switches most visible relief to level 2",
+    )
+    .checked(benilla_ui::script::check_lod_dist),
     // `movieSubtitle` (`0x402c18`: name `0x82e9d8`, "0", flags 0, record `[0x882640]`), Cinematic
     // Subtitles: the pre-rendered movies' subtitles, read by the glue's `GetMovieSubtitles`
     // (`0x46dbc0`). No effect here: benilla plays no pre-rendered movie.

@@ -46,10 +46,14 @@ fn chunk<'a>(cell: u8, positions: &'a [[f32; 3]], holes: u16) -> Chunk<'a> {
 
 fn horizon_of(view: HorizonView, w: Walk) -> Horizon {
     Horizon {
-        view: Some(view),
+        walks: vec![WindowWalk {
+            view,
+            window: None,
+            snapshots: w.snapshots,
+        }],
         enforce: true,
-        snapshots: w.snapshots,
         hidden_cells: w.hidden_cells,
+        floor: 0.0,
         stats: w.stats,
     }
 }
@@ -273,4 +277,80 @@ fn a_far_chunk_past_lod_dist_adds_its_rows_at_level_2() {
     assert!(top(Some(LOD_DIST_DEFAULT)) < 0.01, "level 2 steps over it");
     // Within `lodDist` the chunk is level 3 either way.
     assert!(top(Some(1000.0)) > 0.05);
+}
+
+/// Inside a building the feed starts at the window's reach plus the margin (`0x6811a9`): the ridge
+/// short of it hides what lies behind but never occludes through the doorway.
+#[test]
+fn a_window_walk_takes_no_occluder_short_of_its_reach() {
+    let view = level_view();
+    let half = benilla_formats::CHUNK_SIZE / 2.0;
+    let ridge = flat_chunk(100.0 + benilla_formats::CHUNK_SIZE, half, 30.0);
+    let w = walk_from(
+        &view,
+        150.0 + OCCLUDER_FAR_MARGIN,
+        1000.0,
+        None,
+        [chunk(0, &ridge, 0)].into_iter(),
+        |_, _| true,
+    );
+    assert_eq!(w.stats.chunks, 1);
+    assert_eq!(w.stats.occluders, 0);
+    assert_eq!(w.shown_cells.len(), 1, "the ridge itself still draws");
+}
+
+/// An object is hidden only when every walk whose window admits it hides it.
+#[test]
+fn one_window_that_sees_an_object_shows_it() {
+    let view = level_view();
+    let wall = |slope: f32| WindowWalk {
+        view,
+        window: None,
+        snapshots: vec![[slope; HORIZON_COLS]; BANDS + 1],
+    };
+    let low = Vec3::new(0.0, 0.0, -100.0);
+    let h = |walks: Vec<WindowWalk>| Horizon {
+        walks,
+        enforce: true,
+        ..Horizon::default()
+    };
+    assert!(h(vec![wall(0.1)]).hides_sphere(low, 1.0));
+    assert!(!h(vec![wall(0.1), wall(RESET)]).hides_sphere(low, 1.0));
+    // A window that does not reach the object leaves the verdict to the others.
+    let clip_from_world = Projection::Perspective(PerspectiveProjection {
+        fov: std::f32::consts::FRAC_PI_2,
+        aspect_ratio: 1.0,
+        near: 0.1,
+        far: 1000.0,
+        ..default()
+    })
+    .get_clip_from_view();
+    let rect = [0.5, -1.0, 1.0, 1.0];
+    let right = WindowWalk {
+        window: Some(WindowVolume {
+            rect,
+            clip_from_world,
+            frustum: crate::exterior_cull::window_frustum(rect, &clip_from_world),
+        }),
+        ..wall(RESET)
+    };
+    assert!(h(vec![wall(0.1), right]).hides_sphere(low, 1.0));
+}
+
+/// The drawn level reads the same knob as the horizon rows: strict above `lodDist`, NaN near, and
+/// near everywhere with `lod` off.
+#[test]
+fn the_drawn_chunk_level_is_the_horizons() {
+    let on = HorizonCulling {
+        enabled: true,
+        enforce: true,
+        lod: true,
+        lod_dist: LOD_DIST_SHIPPED,
+    };
+    assert_eq!(on.chunk_level(LOD_DIST_SHIPPED), LEVEL_NEAR as u8);
+    assert_eq!(on.chunk_level(LOD_DIST_SHIPPED + 0.5), LEVEL_FAR as u8);
+    assert_eq!(on.chunk_level(f32::NAN), LEVEL_NEAR as u8);
+    let off = HorizonCulling { lod: false, ..on };
+    assert_eq!(off.chunk_level(1.0e6), LEVEL_NEAR as u8);
+    assert!(LOD_DIST_RANGE.contains(&LOD_DIST_SHIPPED));
 }

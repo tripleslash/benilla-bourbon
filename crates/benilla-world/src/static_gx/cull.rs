@@ -356,7 +356,9 @@ pub(super) fn cull_cells(
             ) {
                 continue;
             }
-            // The horizon, at cell grain where the reference tests each doodad (`0x683700`).
+            // Deviation: the reference tests each doodad's sphere against the horizon (`0x683700` →
+            // `0x686000`); a retained cell is one batched draw of its 4×4 chunks' doodads, so the
+            // test takes the cell's box, which only ever hides less.
             if behind(draw.origin, &draw.aabb, 0, &mut h_cells) {
                 continue;
             }

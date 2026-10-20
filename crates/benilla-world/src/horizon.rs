@@ -8,8 +8,10 @@
 //! the frame reads what the walk order gave its band. World flag 0x20 (`showCull`) and a camera
 //! forward within ±0.9 of level gate everything (`0x681b79`, `0x681b90`).
 //!
-//! Outdoors only: inside a building the reference walks once per portal window with the occluder
-//! feed at the window's plane (`0x6811a9`); a window frame here tests nothing.
+//! Inside a building the reference walks once per portal window (`0x681130`): the buffer reset, the
+//! frustum narrowed to the window and the occluder feed starting at the window's reach plus
+//! 33.333332 (`0x6811a9`), so terrain short of the doorway never occludes. Here each window keeps
+//! its own walk, and an object is hidden only when every window that admits it hides it.
 //!
 //! A chunk's occluder rows (`CMapChunk::AddHorizonRows`, `0x6c15d0`) are its outer row and column
 //! away from the eye: row 8 when the camera target's x is below the eye's (`[0xc7d118] <
@@ -28,10 +30,12 @@ use bevy::camera::primitives::Aabb;
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
+use bevy::camera::primitives::Frustum;
+
 use crate::exterior_cull::ExteriorCullSet;
 use crate::terrain_stream::{TerrainCell, TerrainStreamer};
 use crate::view::{ViewDistance, WorldCamera};
-use crate::wmo_portal::ExteriorWindows;
+use crate::wmo_portal::{ExteriorWindowReach, ExteriorWindows, Rect};
 
 /// The buffer's columns, 0x140.
 pub const HORIZON_COLS: usize = 320;
@@ -73,15 +77,22 @@ pub struct HorizonCulling {
     /// The `lod` CVar, world flag 4 (`0x688920`): a chunk past [`Self::lod_dist`] adds its rows at
     /// level 2. Registered "1".
     pub lod: bool,
-    /// The `lodDist` CVar (`0x672680`, `[0x867960]`), registered "100.0".
+    /// The `lodDist` CVar (`0x672680`, `[0x867960]`), registered "100.0", shipped
+    /// [`LOD_DIST_SHIPPED`]. The drawn chunk level and the horizon rows read this one knob.
     pub lod_dist: f32,
 }
 
 /// `lodDist`'s registered value (`0x688524`).
 pub const LOD_DIST_DEFAULT: f32 = 100.0;
+/// The `lodDist` benilla ships (the CVar table's `Deviates` row): with the far clip at 1000 yd,
+/// the reference's 100 would draw most visible relief at level 2.
+pub const LOD_DIST_SHIPPED: f32 = 500.0;
 /// The range `lodDist`'s callback (`0x688ab0`) accepts; outside it, it prints its line and stores
 /// [`LOD_DIST_FALLBACK`] (`0x688af4`).
-pub const LOD_DIST_RANGE: std::ops::RangeInclusive<f32> = 50.0..=250.0;
+///
+/// Deviation: the reference accepts 50 to 250; the top is raised to the fork's 1000 yd far clip so
+/// the shipped [`LOD_DIST_SHIPPED`] passes its own check.
+pub const LOD_DIST_RANGE: std::ops::RangeInclusive<f32> = 50.0..=1000.0;
 /// `0x429a0000`, what an out-of-range `lodDist` stores.
 pub const LOD_DIST_FALLBACK: f32 = 77.0;
 /// `[0x867964]`, `maxLOD`: a chunk's level.
@@ -94,12 +105,12 @@ const ROW_COUNT: [usize; 4] = [2, 3, 5, 9];
 const ROW_STRIDE: [usize; 4] = [8, 4, 2, 1];
 
 impl HorizonCulling {
-    /// As the reference starts: culling on and enforced, terrain LOD on at `lodDist` 100.
+    /// As the reference starts: culling on and enforced, terrain LOD on, at the shipped `lodDist`.
     const REFERENCE: Self = Self {
         enabled: true,
         enforce: true,
         lod: true,
-        lod_dist: LOD_DIST_DEFAULT,
+        lod_dist: LOD_DIST_SHIPPED,
     };
 
     /// The depth past which a chunk adds its rows at level 2, `None` while `lod` is off.
@@ -138,7 +149,7 @@ pub struct HorizonCensus {
     pub gx_groups: usize,
 }
 
-/// The chunk walk's counts.
+/// The chunk walk's counts, summed over the frame's walks.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct WalkStats {
     /// Chunks in view and not all holes.
@@ -311,22 +322,61 @@ fn sphere_hidden(view: &HorizonView, buf: &Columns, center: Vec3, radius: f32) -
     below(buf, col(cx - ry, COL_BIAS), col(ry + cx, COL_BIAS + 1), top)
 }
 
-/// The frame's horizon: the buffer as each band found it, and the terrain cells it hid.
-#[derive(Resource, Default, PartialEq)]
-pub struct Horizon {
-    /// `Some` while the gates are open.
-    view: Option<HorizonView>,
-    enforce: bool,
+/// A portal window's sub-frustum, compared by the rect and lens that built it.
+#[derive(Clone)]
+struct WindowVolume {
+    rect: Rect,
+    clip_from_world: Mat4,
+    frustum: Frustum,
+}
+
+impl PartialEq for WindowVolume {
+    fn eq(&self, other: &Self) -> bool {
+        self.rect == other.rect && self.clip_from_world == other.clip_from_world
+    }
+}
+
+/// One scene walk's horizon (`0x6811b6`): the buffer as each band found it.
+#[derive(Clone, PartialEq)]
+struct WindowWalk {
+    view: HorizonView,
+    /// The portal window the walk ran through; `None` outdoors, where the window is the view.
+    window: Option<WindowVolume>,
     /// The buffer before band `b`'s chunks went in, then after the last band (the far tiles').
     snapshots: Vec<Columns>,
+}
+
+impl WindowWalk {
+    /// Whether this walk's window admits a world box: a walk tests only what it reaches.
+    fn admits(&self, min: Vec3, max: Vec3) -> bool {
+        self.window.as_ref().is_none_or(|w| {
+            w.frustum.intersects_obb(
+                &Aabb::from_min_max(min, max),
+                &bevy::math::Affine3A::IDENTITY,
+                true,
+                true,
+            )
+        })
+    }
+}
+
+/// The frame's horizon: one walk outdoors, one per portal window inside, and the terrain cells
+/// they hid.
+#[derive(Resource, Default, PartialEq)]
+pub struct Horizon {
+    /// Empty while the gates are shut.
+    walks: Vec<WindowWalk>,
+    enforce: bool,
     hidden_cells: HashSet<((i32, i32), u8)>,
+    /// The lowest resident chunk's floor, Bevy y: no terrain the walk saw lies under it.
+    floor: f32,
     pub stats: WalkStats,
 }
 
 impl Horizon {
-    /// Whether the walk ran this frame; when not, every test answers visible.
+    /// Whether a walk ran this frame; when not, every test answers visible.
     pub fn active(&self) -> bool {
-        self.view.is_some()
+        !self.walks.is_empty()
     }
 
     /// Whether a hidden verdict is applied, not only counted.
@@ -334,42 +384,76 @@ impl Horizon {
         self.enforce && self.active()
     }
 
+    /// Hidden when at least one walk's window admits the box and every such walk hides it: the
+    /// reference draws an object from any window's walk that passes it.
+    fn every_walk_hides(&self, min: Vec3, max: Vec3, hides: impl Fn(&WindowWalk) -> bool) -> bool {
+        let mut reached = false;
+        for w in self.walks.iter().filter(|w| w.admits(min, max)) {
+            if !hides(w) {
+                return false;
+            }
+            reached = true;
+        }
+        reached
+    }
+
     /// A world bounding sphere, filed by its nearest point (`0x6816f0`, `0x681a40`).
     pub fn hides_sphere(&self, center: Vec3, radius: f32) -> bool {
-        let Some(view) = &self.view else {
-            return false;
-        };
-        let Some(band) = band_of(view.band_depth(center) - radius) else {
-            return false;
-        };
-        sphere_hidden(view, &self.snapshots[band], center, radius)
+        let r = Vec3::splat(radius.abs());
+        self.every_walk_hides(center - r, center + r, |w| {
+            band_of(w.view.band_depth(center) - radius)
+                .is_some_and(|band| sphere_hidden(&w.view, &w.snapshots[band], center, radius))
+        })
     }
 
     /// A world box, filed by its bounding sphere's nearest point. A liquid slot files by its
     /// centre (`0x681970`), a later band; the nearer band never hides more than the reference.
     pub fn hides_box(&self, min: Vec3, max: Vec3, flags: u32) -> bool {
-        let Some(view) = &self.view else {
-            return false;
-        };
         let center = (min + max) * 0.5;
         let radius = (max - min).length() * 0.5;
-        let Some(band) = band_of(view.band_depth(center) - radius) else {
-            return false;
-        };
-        box_hidden(view, &self.snapshots[band], min, max, flags)
+        self.every_walk_hides(min, max, |w| {
+            band_of(w.view.band_depth(center) - radius)
+                .is_some_and(|band| box_hidden(&w.view, &w.snapshots[band], min, max, flags))
+        })
     }
 
     /// A far-band tile's box, tested after every band with flag 8 (`0x6832c8`).
     pub fn hides_far_box(&self, min: Vec3, max: Vec3) -> bool {
-        let Some(view) = &self.view else {
-            return false;
-        };
-        box_hidden(view, &self.snapshots[BANDS], min, max, FLAG_NEAR_OK)
+        self.every_walk_hides(min, max, |w| {
+            box_hidden(&w.view, &w.snapshots[BANDS], min, max, FLAG_NEAR_OK)
+        })
     }
 
-    /// A terrain cell none of whose chunks in view survived the horizon.
+    /// A terrain cell none of whose chunks in any window's view survived the horizon.
     pub fn hides_cell(&self, cell: &TerrainCell) -> bool {
         self.hidden_cells.contains(&(cell.tile, cell.cell))
+    }
+
+    /// The lowest resident terrain, Bevy y, for a test that sweeps a box down to the ground.
+    pub fn floor(&self) -> f32 {
+        self.floor
+    }
+
+    /// A level wall at `slope` (`y/z`) in every column of every band, seen from `eye` along
+    /// `heading` through a square 90° lens, enforced. Built by tests outside this crate, which
+    /// have no terrain to walk; the frame never builds one.
+    pub fn level_wall(eye: Vec3, heading: Vec3, slope: f32) -> Self {
+        let Some(view) =
+            HorizonView::new(eye, heading, std::f32::consts::FRAC_PI_2, 1.0, 0.0, 1000.0)
+        else {
+            return Self::default();
+        };
+        Self {
+            walks: vec![WindowWalk {
+                view,
+                window: None,
+                snapshots: vec![[slope; HORIZON_COLS]; BANDS + 1],
+            }],
+            enforce: true,
+            hidden_cells: HashSet::default(),
+            floor: -1000.0,
+            stats: WalkStats::default(),
+        }
     }
 }
 
@@ -411,6 +495,7 @@ fn chunk_boxes(tile: &AdtTile) -> Arc<[Option<ChunkBox>]> {
 }
 
 /// One chunk as the walk reads it.
+#[derive(Clone, Copy)]
 struct Chunk<'a> {
     cell: ((i32, i32), u8),
     b: ChunkBox,
@@ -420,15 +505,32 @@ struct Chunk<'a> {
 
 struct Walk {
     snapshots: Vec<Columns>,
+    /// Cells with a chunk hidden and none drawn.
     hidden_cells: HashSet<((i32, i32), u8)>,
+    /// Cells with a chunk drawn, or in view and not filed: another window's walk cannot hide them.
+    shown_cells: HashSet<((i32, i32), u8)>,
     stats: WalkStats,
+}
+
+/// [`walk_from`] with the outdoor feed, which starts at the eye (`0x6811ca` stores 0).
+#[cfg(test)]
+fn walk<'a>(
+    view: &HorizonView,
+    occluder_far: f32,
+    lod_depth: Option<f32>,
+    chunks: impl Iterator<Item = Chunk<'a>>,
+    in_view: impl Fn(Vec3, Vec3) -> bool,
+) -> Walk {
+    walk_from(view, 0.0, occluder_far, lod_depth, chunks, in_view)
 }
 
 /// `CullSceneChunks` (`0x683bf0`) over every band, front to back: a chunk all holes or out of view
 /// is dropped; one the horizon hides is not drawn; a visible one without holes whose view depth
-/// lies in `[0, occluder_far)` adds its rows after its band's tests (`0x683d53`, `0x683d67`).
-fn walk<'a>(
+/// lies in `[occluder_near, occluder_far)` adds its rows after its band's tests (`0x683d53`,
+/// `0x683d67`).
+fn walk_from<'a>(
     view: &HorizonView,
+    occluder_near: f32,
     occluder_far: f32,
     lod_depth: Option<f32>,
     chunks: impl Iterator<Item = Chunk<'a>>,
@@ -471,7 +573,7 @@ fn walk<'a>(
             // The chunk's `+0x78`: its sphere's view depth, nearest point.
             let center = (ch.b.min + ch.b.max) * 0.5;
             let depth = view.view_depth(center) - (ch.b.max - ch.b.min).length() * 0.5;
-            if (0.0..occluder_far).contains(&depth) {
+            if (occluder_near..occluder_far).contains(&depth) {
                 occluders.push((ch, level_of(depth, lod_depth)));
             }
         }
@@ -490,15 +592,19 @@ fn walk<'a>(
         }
     }
     snapshots.push(buf);
-    let hidden_cells: HashSet<_> = cells
-        .into_iter()
-        .filter(|(_, (shown, hidden))| *hidden && !*shown)
-        .map(|(k, _)| k)
-        .collect();
+    let (mut hidden_cells, mut shown_cells) = (HashSet::default(), HashSet::default());
+    for (k, (shown, hidden)) in cells {
+        if shown {
+            shown_cells.insert(k);
+        } else if hidden {
+            hidden_cells.insert(k);
+        }
+    }
     stats.cells_hidden = hidden_cells.len();
     Walk {
         snapshots,
         hidden_cells,
+        shown_cells,
         stats,
     }
 }
@@ -512,12 +618,22 @@ fn level_of(depth: f32, lod_depth: Option<f32>) -> usize {
     }
 }
 
+impl HorizonCulling {
+    /// The level a chunk draws at (`0x6afad0`): 2 past `lodDist` while `lod` is on, else 3, by its
+    /// sphere's view depth `f·(centre − eye) − radius`. The horizon's occluder rows take the same
+    /// level, so the draw and the feed always agree.
+    pub fn chunk_level(&self, view_depth: f32) -> u8 {
+        level_of(view_depth, self.lod_depth()) as u8
+    }
+}
+
 /// Everything the walk reads: when it matches the last frame's, the walk would rebuild the same
 /// [`Horizon`]. A tile's chunks are fixed per asset id, which [`ChunkBoxCache`] already relies on.
 #[derive(PartialEq)]
 struct WalkInputs {
     culling: HorizonCulling,
-    unrestricted: bool,
+    windows: ExteriorWindows,
+    reach: Vec<f32>,
     farclip: f32,
     eye: Option<(Mat4, Option<[f32; 4]>)>,
     /// Resident tiles, and whether each one's asset is loaded.
@@ -529,6 +645,7 @@ struct WalkInputs {
 fn build_horizon(
     culling: Res<HorizonCulling>,
     windows: Res<ExteriorWindows>,
+    reach: Option<Res<ExteriorWindowReach>>,
     view_dist: Res<ViewDistance>,
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
     streamer: Option<Res<TerrainStreamer>>,
@@ -539,7 +656,8 @@ fn build_horizon(
 ) {
     let inputs = WalkInputs {
         culling: *culling,
-        unrestricted: matches!(*windows, ExteriorWindows::Unrestricted),
+        windows: windows.clone(),
+        reach: reach.as_deref().map_or_else(Vec::new, |r| r.0.clone()),
         farclip: view_dist.farclip,
         eye: cam.iter().next().map(|(t, p)| {
             let lens = match p {
@@ -557,9 +675,8 @@ fn build_horizon(
     if last.as_ref() == Some(&inputs) {
         return;
     }
-    *last = Some(inputs);
     let next = (|| {
-        if !culling.enabled || !matches!(*windows, ExteriorWindows::Unrestricted) {
+        if !culling.enabled {
             return None;
         }
         let (cam_t, proj) = cam.iter().next()?;
@@ -581,7 +698,31 @@ fn build_horizon(
         )?;
         let (streamer, tiles) = (streamer.as_deref()?, tiles.as_deref()?);
         let clip_from_world = proj.get_clip_from_view() * cam_t.to_matrix().inverse();
-        let frustum =
+        // Outdoors one walk from the eye on the full rect; inside, one per window from its reach
+        // plus the margin, none in a sealed room (`0x681199`). A window under the scene walk's
+        // width gate walks nothing.
+        let walks: Vec<(Option<WindowVolume>, f32)> = match &*windows {
+            ExteriorWindows::Unrestricted => vec![(None, 0.0)],
+            ExteriorWindows::Windows(rects) => rects
+                .iter()
+                .enumerate()
+                .filter_map(|(i, rect)| {
+                    let frustum =
+                        crate::exterior_cull::scene_window_frustum(*rect, &clip_from_world)?;
+                    let near = inputs.reach.get(i).copied().unwrap_or(0.0) + OCCLUDER_FAR_MARGIN;
+                    let volume = WindowVolume {
+                        rect: *rect,
+                        clip_from_world,
+                        frustum,
+                    };
+                    Some((Some(volume), near))
+                })
+                .collect(),
+        };
+        if walks.is_empty() {
+            return None;
+        }
+        let full =
             crate::exterior_cull::scene_window_frustum([-1.0, -1.0, 1.0, 1.0], &clip_from_world)?;
         let resident: Vec<((i32, i32), &AdtTile, AssetId<AdtTile>)> = streamer
             .spawned_tiles()
@@ -591,41 +732,65 @@ fn build_horizon(
         for (_, tile, id) in &resident {
             boxes.entry(*id).or_insert_with(|| chunk_boxes(tile));
         }
-        let chunks = resident.iter().flat_map(|(key, tile, id)| {
-            let b = boxes.get(id).cloned();
-            tile.chunks.iter().enumerate().filter_map(move |(i, c)| {
-                let cell = ((i / 16) / 4 * 4 + (i % 16) / 4) as u8;
-                Some(Chunk {
-                    cell: (*key, cell),
-                    b: (*b.as_ref()?.get(i)?)?,
-                    positions: &c.positions,
+        let chunks: Vec<Chunk> = resident
+            .iter()
+            .flat_map(|(key, tile, id)| {
+                let b = boxes.get(id).cloned();
+                tile.chunks.iter().enumerate().filter_map(move |(i, c)| {
+                    let cell = ((i / 16) / 4 * 4 + (i % 16) / 4) as u8;
+                    Some(Chunk {
+                        cell: (*key, cell),
+                        b: (*b.as_ref()?.get(i)?)?,
+                        positions: &c.positions,
+                    })
                 })
             })
-        });
-        let in_view = |min: Vec3, max: Vec3| {
-            frustum.intersects_obb(
-                &Aabb::from_min_max(min, max),
-                &bevy::math::Affine3A::IDENTITY,
-                true,
-                true,
-            )
-        };
-        let w = walk(
-            &view,
-            view_dist.farclip - OCCLUDER_FAR_MARGIN,
-            culling.lod_depth(),
-            chunks,
-            in_view,
-        );
-        Some(Horizon {
-            view: Some(view),
+            .collect();
+        let mut out = Horizon {
             enforce: culling.enforce,
-            snapshots: w.snapshots,
-            hidden_cells: w.hidden_cells,
-            stats: w.stats,
-        })
+            floor: chunks
+                .iter()
+                .map(|c| c.b.min.y)
+                .fold(f32::INFINITY, f32::min),
+            ..Horizon::default()
+        };
+        let mut shown: HashSet<((i32, i32), u8)> = HashSet::default();
+        for (window, near) in walks {
+            let volume = window.as_ref().map_or(&full, |w| &w.frustum);
+            let in_view = |min: Vec3, max: Vec3| {
+                volume.intersects_obb(
+                    &Aabb::from_min_max(min, max),
+                    &bevy::math::Affine3A::IDENTITY,
+                    true,
+                    true,
+                )
+            };
+            let w = walk_from(
+                &view,
+                near,
+                view_dist.farclip - OCCLUDER_FAR_MARGIN,
+                culling.lod_depth(),
+                chunks.iter().copied(),
+                in_view,
+            );
+            out.stats.chunks += w.stats.chunks;
+            out.stats.chunks_hidden += w.stats.chunks_hidden;
+            out.stats.occluders += w.stats.occluders;
+            out.hidden_cells.extend(w.hidden_cells);
+            shown.extend(w.shown_cells);
+            out.walks.push(WindowWalk {
+                view,
+                window,
+                snapshots: w.snapshots,
+            });
+        }
+        // A cell another window's walk drew is drawn.
+        out.hidden_cells.retain(|k| !shown.contains(k));
+        out.stats.cells_hidden = out.hidden_cells.len();
+        Some(out)
     })()
     .unwrap_or_default();
+    *last = Some(inputs);
     horizon.set_if_neq(next);
 }
 

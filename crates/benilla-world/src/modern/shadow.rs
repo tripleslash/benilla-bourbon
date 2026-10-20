@@ -198,6 +198,10 @@ pub struct EntityCaster {
     pub tight: f32,
     pub rig_slot: Option<u32>,
     pub cutout: Option<AssetId<Image>>,
+    /// fork: whether the part casts into the sun's cascades. False when its box swept along the
+    /// sun down to the lowest terrain lies wholly under the camera's horizon (`sun_sweep_hidden`):
+    /// every point its shadow can land on is then hidden too. The lamp atlas ignores it.
+    pub sun: bool,
 }
 
 /// Every casting entity-lane part this frame. Collected in `Last`; empty in a classic session.
@@ -521,6 +525,8 @@ fn collect_entity_casters(
     materials: Res<Assets<WowModelMaterial>>,
     lighting: Res<WowLighting>,
     cameras: Query<&GlobalTransform, With<WorldCamera>>,
+    horizon: Option<Res<crate::horizon::Horizon>>,
+    mirror: Option<Res<crate::liquid::ReflectionPlane>>,
     mut out: ResMut<ModernEntityCasters>,
 ) {
     if !active.is_modern() {
@@ -548,6 +554,17 @@ fn collect_entity_casters(
     let near_cascades = |center: Vec3, radius: f32| {
         let t = (center - cam).dot(to_light).clamp(0.0, ray_len);
         center.distance(cam + to_light * t) <= reach_radius + radius
+    };
+    // The sun lane's horizon test, only while it is enforced and no water mirror renders: the
+    // mirror's eye sees past the camera's horizon.
+    let horizon = horizon
+        .as_deref()
+        .filter(|h| h.enforced())
+        .filter(|_| mirror.as_deref().is_none_or(|m| m.live_plane().is_none()));
+    let sweep = Sweep {
+        dir: -to_light,
+        cam,
+        reach: reach_radius,
     };
     for (mesh, material, gt, part, occluder, aabb, rig) in &parts {
         if !occluder.0 || !matches!(part.blend, ModelBlend::Opaque | ModelBlend::AlphaTest) {
@@ -593,6 +610,7 @@ fn collect_entity_casters(
         if !near_cascades(center, radius) {
             continue;
         }
+        let sun = !horizon.is_some_and(|h| sun_sweep_hidden(h, &sweep, center, radius));
         out.parts.push(EntityCaster {
             mesh: mesh.id(),
             world_from_local: gt.to_matrix(),
@@ -601,9 +619,47 @@ fn collect_entity_casters(
             tight,
             rig_slot,
             cutout,
+            sun,
         });
     }
 }
+
+/// fork: the sun's path for [`sun_sweep_hidden`]: the direction light travels, the camera and the
+/// last cascade's reach about it.
+struct Sweep {
+    dir: Vec3,
+    cam: Vec3,
+    reach: f32,
+}
+
+/// fork: a sun shadow lands only along the caster's sweep away from the sun, down to the lowest
+/// terrain the horizon walked (less [`SWEEP_FLOOR_MARGIN`] for what stands below it) and no further
+/// than the cascades reach. When that whole swept box lies under the camera's horizon, every
+/// receiver the shadow could darken is hidden, so the caster is dropped from the cascades. A sun
+/// lower than [`SWEEP_MIN_DROP`] sweeps too far to bound, and never culls.
+fn sun_sweep_hidden(
+    horizon: &crate::horizon::Horizon,
+    sweep: &Sweep,
+    center: Vec3,
+    radius: f32,
+) -> bool {
+    let drop = -sweep.dir.y;
+    if drop < SWEEP_MIN_DROP {
+        return false;
+    }
+    let floor = horizon.floor() - SWEEP_FLOOR_MARGIN;
+    let length = ((center.y + radius - floor) / drop)
+        .min(center.distance(sweep.cam) + sweep.reach)
+        .max(0.0);
+    let (lo, hi) = (center - Vec3::splat(radius), center + Vec3::splat(radius));
+    let end = sweep.dir * length;
+    horizon.hides_box(lo.min(lo + end), hi.max(hi + end), 0)
+}
+
+/// fork: how far below the lowest terrain the sun's sweep still looks for a receiver, yards.
+const SWEEP_FLOOR_MARGIN: f32 = 50.0;
+/// fork: the least downward component of the sun's direction the sweep is bounded for (about 6°).
+const SWEEP_MIN_DROP: f32 = 0.1;
 
 pub struct CascadeFit {
     pub clip_from_world: Mat4,

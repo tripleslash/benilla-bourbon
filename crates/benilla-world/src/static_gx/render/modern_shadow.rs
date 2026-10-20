@@ -203,6 +203,8 @@ struct EntityDrawCmd {
     radius: f32,
     /// fork: [`crate::modern::shadow::EntityCaster::tight`].
     tight: f32,
+    /// fork: [`crate::modern::shadow::EntityCaster::sun`]: drawn into the sun's cascades.
+    sun: bool,
     /// fork: where the part is placed — its world matrix's translation and rotation. The lamp
     /// atlas's dynamic phase compares its casters by this ([`dirty_faces`]), not by `center`: an
     /// animated part's bounds are re-fitted as it animates, so a tree swaying beside a lamp moved
@@ -945,6 +947,7 @@ fn prepare_entity_shadows(
             center: part.center,
             radius: part.radius,
             tight: part.tight,
+            sun: part.sun,
             pose: {
                 let (_, rotation, translation) =
                     part.world_from_local.to_scale_rotation_translation();
@@ -1322,7 +1325,7 @@ pub(crate) fn gx_shadow_pass(
             // which is all next frame's restore puts back.
             let mut wrote = [0u32; RESTORE_TILES];
             for cmd in &entities.draws {
-                if outside_box(&clip_from_world, cmd.center, Vec3::splat(cmd.radius)) {
+                if !cmd.sun || outside_box(&clip_from_world, cmd.center, Vec3::splat(cmd.radius)) {
                     continue;
                 }
                 let footprint = box_texels(

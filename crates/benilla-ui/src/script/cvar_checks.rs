@@ -333,12 +333,14 @@ fn lod_distance(value: &str, min: f32, max: f32, line: &str) -> CvarVerdict {
 }
 
 /// `lodDist` ([`lod_distance`]).
+/// Deviation: the top is 1000, not the reference's 250, so the fork's shipped 500 (a 1000 yd far
+/// clip) is in range; `benilla_world::horizon::LOD_DIST_RANGE` is the same span.
 pub fn check_lod_dist(value: &str, _applied: &str, _rows: CvarRows<'_>) -> CvarVerdict {
     lod_distance(
         value,
         50.0,
-        250.0,
-        "Lod distance must be in range 50.0f - 250.0f.",
+        1000.0,
+        "Lod distance must be in range 50.0f - 1000.0f.",
     )
 }
 
@@ -855,7 +857,7 @@ mod tests {
         assert_eq!(check_lod_dist("100", "", &no_rows), CvarVerdict::accept());
         assert_eq!(
             check_lod_dist("9999", "", &no_rows),
-            CvarVerdict::accept_saying("Lod distance must be in range 50.0f - 250.0f.")
+            CvarVerdict::accept_saying("Lod distance must be in range 50.0f - 1000.0f.")
         );
         assert_eq!(
             check_texture_lod_dist("777", "", &no_rows),

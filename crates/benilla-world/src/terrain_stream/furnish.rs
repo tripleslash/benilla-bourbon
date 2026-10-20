@@ -19,7 +19,7 @@ const CELL_SPAWN_CAP: usize = 64;
 /// A tile's 16×16 chunks furnish as 4×4 cells of 4×4 chunks, one mesh and one draw each: every
 /// per-chunk fact is baked per vertex and the material is the tile's. The 133⅓-yd cell matches
 /// `static_gx` and the merge lanes.
-const CELL_SPAN: usize = 4;
+pub(super) const CELL_SPAN: usize = 4;
 const CELLS_PER_TILE: usize = (16 / CELL_SPAN) * (16 / CELL_SPAN);
 const CHUNKS_PER_CELL: usize = CELL_SPAN * CELL_SPAN;
 

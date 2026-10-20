@@ -1790,6 +1790,8 @@ mod tests {
                 "gxDepthBits",
                 "gxResolution",
                 "realmList",
+                // fork: terrain chunk LOD switches at 500 yd, the far clip being 1000.
+                "lodDist",
                 "weatherDensity",
             ],
         );
@@ -2787,7 +2789,7 @@ mod tests {
         assert_eq!(res::<Cvars>(&app).get("ErrorFilter"), Some("all"));
         assert_eq!(
             console_exec(&mut app, "lodDist 9999"),
-            ["Lod distance must be in range 50.0f - 250.0f."]
+            ["Lod distance must be in range 50.0f - 1000.0f."]
         );
         assert_eq!(res::<Cvars>(&app).get("lodDist"), Some("9999"));
         console_exec(&mut app, "textureLodDist 1");

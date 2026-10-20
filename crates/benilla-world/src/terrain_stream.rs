@@ -30,6 +30,7 @@ use benilla_assets::{m2_url, wmo_url};
 
 mod collider;
 mod furnish;
+mod lod;
 pub mod merge;
 mod provisional;
 mod queries;
@@ -662,6 +663,8 @@ impl Plugin for TerrainPlugin {
                     spawn_streamed_tiles,
                     attach_inner_colliders,
                     furnish_tile_cells,
+                    // A cell furnished this frame is keyed at once.
+                    lod::update_terrain_lod,
                     spawn_loaded_placements,
                     flush_hull_welds,
                     flush_static_merge,

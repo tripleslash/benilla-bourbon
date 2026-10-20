@@ -115,6 +115,13 @@ pub enum ExteriorWindows {
     Windows(Vec<Rect>),
 }
 
+/// Each exterior window's portal reach (`0x6b4680`), the fifth float of its record: the farthest
+/// view depth of the portal's vertices, never below 0. The scene driver feeds the horizon from it
+/// plus 33.333332 (`0x6811a9`), so terrain short of the doorway never occludes through it. Parallel
+/// to [`ExteriorWindows::Windows`], empty outdoors.
+#[derive(Resource, Default, Clone, PartialEq, Debug)]
+pub struct ExteriorWindowReach(pub Vec<f32>);
+
 /// Tag on every portal-culled WMO piece (a group submesh, a group's MLIQ surface, a MODD prop): its
 /// placement instance and the absolute groups that can draw it. Geometry and liquid belong to one
 /// group; a prop can be named by many, as the reference admits a prop from any visited group whose
@@ -304,6 +311,7 @@ impl Plugin for WmoPortalPlugin {
             .init_resource::<CameraRoomExtent>()
             .init_resource::<CameraInteriorClaim>()
             .init_resource::<ExteriorWindows>()
+            .init_resource::<ExteriorWindowReach>()
             .init_resource::<WmoCullProbe>()
             .add_systems(
                 Update,
@@ -338,6 +346,7 @@ fn compute_wmo_pvs(
     mut camera_room: ResMut<CameraRoomExtent>,
     mut camera_claim: ResMut<CameraInteriorClaim>,
     mut camera_windows: ResMut<ExteriorWindows>,
+    mut camera_reach: ResMut<ExteriorWindowReach>,
 ) {
     // No world camera yet: keep last frame's sets, all visible.
     let Some((cam_t, proj)) = cam.iter().next() else {
@@ -374,7 +383,7 @@ fn compute_wmo_pvs(
     let mut room_extent: Option<(Vec3, f32)> = None;
     let mut claim: Option<InteriorClaim> = None;
     // `None` is the driver's outside leg: no containing map object, one full-screen walk.
-    let mut windows: Option<Vec<Rect>> = None;
+    let mut windows: Option<(Vec<Rect>, Vec<f32>)> = None;
     for (entity, mut inst) in &mut instances {
         let Some(model) = wmos.get(&inst.handle) else {
             continue;
@@ -507,7 +516,10 @@ fn compute_wmo_pvs(
                     // the containing map object (`[0xc7b748]`) and defers that flood's windows,
                     // the list Pass 2 already used. Its push test is `0x8` alone
                     // (`opens_a_window`), not the `0x148` of `exterior_visible` above.
-                    windows = Some(std::mem::take(&mut fresh.windows));
+                    windows = Some((
+                        std::mem::take(&mut fresh.windows),
+                        std::mem::take(&mut fresh.reaches),
+                    ));
                 }
             }
         }
@@ -538,12 +550,15 @@ fn compute_wmo_pvs(
     if camera_claim.0 != claim {
         camera_claim.0 = claim;
     }
-    let want_windows = match windows {
-        Some(rects) => ExteriorWindows::Windows(rects),
-        None => ExteriorWindows::Unrestricted,
+    let (want_windows, want_reach) = match windows {
+        Some((rects, reaches)) => (ExteriorWindows::Windows(rects), reaches),
+        None => (ExteriorWindows::Unrestricted, Vec::new()),
     };
     if *camera_windows != want_windows {
         *camera_windows = want_windows;
+    }
+    if camera_reach.0 != want_reach {
+        camera_reach.0 = want_reach;
     }
     if let Some((mut text, path)) = dump_text.zip(dump_to) {
         // The frame's published verdict, after every placement: the claim and the windows.
@@ -778,6 +793,8 @@ pub(crate) struct GroupPvs {
     /// one clipped NDC rect per doorway reached onto an `0x8` group. Pass 2 and [`ExteriorWindows`]
     /// both read it, as the reference feeds both from one list (`0x681070` copies it).
     pub(crate) windows: Vec<Rect>,
+    /// Each window's portal reach ([`ExteriorWindowReach`]), parallel to `windows`.
+    pub(crate) reaches: Vec<f32>,
     /// Stack steps across every run of the walk this frame, Pass 1 and each Pass-2 replay; the dump
     /// prints it.
     pub(crate) iters: u32,
@@ -802,6 +819,8 @@ struct Flood<'a> {
     /// The deferred exterior-window worklist Pass 1 leaves: the client's `[0xcbe324]` records,
     /// reset at `0x6b3b51` and filled at `0x6b4541`.
     windows: Vec<Rect>,
+    /// Each window's portal reach, stored beside its rect (`0x6b45ab`).
+    reaches: Vec<f32>,
     /// The client's per-frame stamp on the portal record (`0x6b4505`, `[esi+0x18]` vs
     /// `[0xca8014]`): a portal adds at most one window per frame, however many paths reach it. It
     /// guards the store only, never the recursion; the first push wins.
@@ -893,6 +912,12 @@ impl Flood<'_> {
                         if !*stamp {
                             *stamp = true;
                             self.windows.push(inter);
+                            self.reaches.push(portal_reach(
+                                model,
+                                info,
+                                self.clip_from_world,
+                                self.world_from_local,
+                            ));
                         }
                     }
                 }
@@ -920,6 +945,7 @@ fn compute_pvs_traced<T: FloodTrace>(
         visible: vec![false; nav.len()],
         interior_fog: vec![false; nav.len()],
         windows: Vec::new(),
+        reaches: Vec::new(),
         portal_pushed: vec![false; model.portal_infos.len()],
         iters: 0,
     };
@@ -1012,8 +1038,27 @@ fn compute_pvs_traced<T: FloodTrace>(
         visible: flood.visible,
         interior_fog: flood.interior_fog,
         windows: flood.windows,
+        reaches: flood.reaches,
         iters: flood.iters,
     }
+}
+
+/// `0x6b4680`: the largest view depth of the portal's vertices, from 0 and replaced only by a
+/// strictly larger one (`0x6b46cf`). A perspective clip `w` is the depth along the camera's forward.
+fn portal_reach(
+    model: &WmoModel,
+    info: &WmoPortalInfo,
+    clip_from_world: &Mat4,
+    world_from_local: &Affine3A,
+) -> f32 {
+    portal_poly(&model.portal_vertices, info)
+        .into_iter()
+        .flatten()
+        .map(|v| {
+            let world = world_from_local.transform_point3(wow_to_bevy(*v));
+            (*clip_from_world * world.extend(1.0)).w
+        })
+        .fold(0.0, |m, w| if w > m { w } else { m })
 }
 
 /// A group's MOGI bounding box as a Bevy-space [`Aabb`] in the placement's local frame, the bound
