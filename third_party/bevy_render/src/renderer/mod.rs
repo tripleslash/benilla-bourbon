@@ -124,6 +124,55 @@ pub fn render_system(
 #[derive(Resource, Clone, Deref, DerefMut)]
 pub struct RenderQueue(pub Arc<WgpuWrapper<Queue>>);
 
+/// **benilla fork (BENILLA.md, "The render worker").** `write_buffer` that the page may call while
+/// the queue lives on the render worker: there it is queued and applied right after the next
+/// extract. It shadows `wgpu::Queue::write_buffer` (an inherent method wins over `Deref`), so
+/// every `queue.write_buffer(..)` call site reads as upstream's.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+impl RenderQueue {
+    /// `wgpu::Queue::write_buffer`, or queued for the render worker when called on the page.
+    pub fn write_buffer<B: QueueWriteTarget + ?Sized>(
+        &self,
+        buffer: &B,
+        offset: wgpu::BufferAddress,
+        data: &[u8],
+    ) {
+        buffer.write_through(self, offset, data);
+    }
+}
+
+/// What [`RenderQueue::write_buffer`] writes into: a bevy or a wgpu buffer, by any reference.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+pub trait QueueWriteTarget {
+    /// Write `data` at `offset` through `queue`.
+    fn write_through(&self, queue: &RenderQueue, offset: wgpu::BufferAddress, data: &[u8]);
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+impl QueueWriteTarget for wgpu::Buffer {
+    fn write_through(&self, queue: &RenderQueue, offset: wgpu::BufferAddress, data: &[u8]) {
+        queue.0.write_buffer(self, offset, data);
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+impl QueueWriteTarget for crate::render_resource::Buffer {
+    fn write_through(&self, queue: &RenderQueue, offset: wgpu::BufferAddress, data: &[u8]) {
+        if crate::render_worker::is_render_thread() {
+            queue.0.write_buffer(self, offset, data);
+        } else {
+            crate::render_worker::defer_write(self.clone(), offset, data);
+        }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+impl<T: QueueWriteTarget + ?Sized> QueueWriteTarget for &T {
+    fn write_through(&self, queue: &RenderQueue, offset: wgpu::BufferAddress, data: &[u8]) {
+        (**self).write_through(queue, offset, data);
+    }
+}
+
 /// The handle to the physical device being used for rendering.
 /// See [`Adapter`] for more info.
 #[derive(Resource, Clone, Debug, Deref, DerefMut)]
@@ -357,7 +406,8 @@ pub async fn initialize_renderer(
     RenderResources(
         RenderDevice::from(device),
         RenderQueue(Arc::new(WgpuWrapper::new(queue))),
-        RenderAdapterInfo(WgpuWrapper::new(adapter_info)),
+        // benilla fork (BENILLA.md, "The render worker"): plain data, read on the page too.
+        RenderAdapterInfo(WgpuWrapper::new_send(adapter_info)),
         RenderAdapter(Arc::new(WgpuWrapper::new(adapter))),
         RenderInstance(Arc::new(WgpuWrapper::new(instance))),
         #[cfg(feature = "raw_vulkan_init")]

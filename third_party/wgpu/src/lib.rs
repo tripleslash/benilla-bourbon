@@ -125,6 +125,9 @@ pub mod util;
 
 #[cfg(custom)]
 pub use backend::custom;
+// benilla local patch: explicit release of the browser backend's buffers, textures and query sets.
+#[cfg(webgpu)]
+pub use backend::webgpu::destroy_released_resources;
 
 pub use api::*;
 pub use wgt::{

@@ -43,6 +43,9 @@ pub fn install() {}
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 pub use imp::{install, spawn_detached};
+// The render worker (`crate::render_worker`) is started through the same page global.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+pub(crate) use imp::bridge;
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 mod imp {
@@ -76,7 +79,7 @@ mod imp {
     }
 
     /// Resolve one function off the page global, or `None` if the page ships no bridge.
-    fn bridge(method: &str) -> Option<(JsValue, Function)> {
+    pub(crate) fn bridge(method: &str) -> Option<(JsValue, Function)> {
         let window = web_sys::window()?;
         let obj = Reflect::get(&window, &GLOBAL.into()).ok()?;
         if !obj.is_object() {
@@ -175,6 +178,9 @@ mod imp {
 
     /// See [`super::install`].
     pub fn install() {
+        // This is the page's thread, which traps instead of parking on a contended lock; bevy's
+        // locks spin here and park on the workers (`third_party/bevy_platform/BENILLA.md`).
+        bevy::platform::sync::forbid_parking_on_this_thread();
         set_available_parallelism(worker_threads());
         // An `Err` here means a spawner was already installed, which can only happen if this ran
         // twice. The first one is the one in use either way, so there is nothing to report.

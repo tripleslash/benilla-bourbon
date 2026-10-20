@@ -9,7 +9,10 @@ use bevy_diagnostic::{Diagnostic, DiagnosticMeasurement, DiagnosticPath, Diagnos
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Res, ResMut};
 use bevy_platform::time::Instant;
-use std::sync::Mutex;
+// benilla fork (BENILLA.md, eighth delta): bevy_platform's lock, which spins on the browser's page
+// instead of parking. With the render worker the page's `sync_diagnostics` and the worker's
+// `finish_frame` contend for `RenderDiagnosticsMutex`, and a std lock contended on the page traps.
+use bevy_platform::sync::Mutex;
 use wgpu::{
     Buffer, BufferDescriptor, BufferSize, BufferSlice, BufferUsages, CommandEncoder, ComputePass,
     Device, Features, MapMode, PipelineStatisticsTypes, QuerySet, QuerySetDescriptor, QueryType,

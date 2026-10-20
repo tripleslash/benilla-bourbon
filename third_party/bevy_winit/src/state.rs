@@ -70,6 +70,9 @@ pub(crate) struct WinitAppRunnerState {
     wait_elapsed: bool,
     /// Number of "forced" updates to trigger on application start
     startup_forced_updates: u32,
+    /// benilla fork (BENILLA.md, sixth delta): the last update was held by the `may_update` hook
+    /// and is still to run.
+    update_deferred: bool,
 
     /// Current app lifecycle state.
     lifecycle: AppLifecycle,
@@ -130,6 +133,7 @@ impl WinitAppRunnerState {
             wait_elapsed: false,
             // 3 seems to be enough, 5 is a safe margin
             startup_forced_updates: 5,
+            update_deferred: false,
             bevy_window_events: Vec::new(),
             raw_winit_events: Vec::new(),
             windows_system_state,
@@ -161,13 +165,15 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
         #[cfg(feature = "trace")]
         let _span = tracing::info_span!("winit event_handler").entered();
 
+        let mut finished = false;
         if self.app.plugins_state() != PluginsState::Cleaned {
             if self.app.plugins_state() != PluginsState::Ready {
                 #[cfg(not(target_arch = "wasm32"))]
                 tick_global_task_pools_on_main_thread();
             } else {
-                self.app.finish();
-                self.app.cleanup();
+                // benilla fork: through the render worker's hook when it has one (`lib.rs`).
+                crate::finish_plugins(&mut self.app);
+                finished = true;
             }
             self.redraw_requested = true;
         }
@@ -184,6 +190,11 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
             }
             _ => true,
         };
+        // benilla fork (BENILLA.md, fifth delta): the iteration that finishes the plugins counts
+        // as an elapsed wait, so a reactive window arms its timer and keeps updating. Woken by an
+        // event (the render worker's `wake_event_loop`) it would read as not elapsed, and with no
+        // timer armed while the app could not update yet, nothing would wake it again.
+        self.wait_elapsed |= finished;
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -543,11 +554,18 @@ impl WinitAppRunnerState {
         let mut update_mode = config.update_mode(focused);
         let mut should_update = self.should_update(update_mode);
 
-        if self.startup_forced_updates > 0 {
+        // benilla fork (BENILLA.md, fifth delta): spent only once the app can update. Before the
+        // plugins are cleaned up `run_app_update` does nothing, and a renderer that becomes ready
+        // after the loop has run (the browser's render worker makes the device off the page)
+        // would otherwise find every forced update gone, leaving a reactive window asleep.
+        if self.startup_forced_updates > 0 && self.app.plugins_state() == PluginsState::Cleaned {
             self.startup_forced_updates -= 1;
             // Ensure that an update is triggered on the first iterations for app initialization
             should_update = true;
         }
+        // benilla fork (BENILLA.md, sixth delta): a held update runs at the next frame whatever
+        // the update mode, as it would have run at this one.
+        should_update |= self.update_deferred;
 
         if self.lifecycle == AppLifecycle::WillSuspend {
             self.lifecycle = AppLifecycle::Suspended;
@@ -637,7 +655,10 @@ impl WinitAppRunnerState {
             // If no windows are visible, redraw calls will never succeed, which results in no app update calls being performed.
             // This is a temporary solution, full solution is mentioned here: https://github.com/bevyengine/bevy/issues/1343#issuecomment-770091684
             if !self.ran_update_since_last_redraw || all_invisible {
-                self.run_app_update();
+                // benilla fork (BENILLA.md, sixth delta): a held update asks for the next frame.
+                if !self.run_app_update() {
+                    self.redraw_requested = true;
+                }
                 #[cfg(feature = "custom_cursor")]
                 self.update_cursors(event_loop);
                 #[cfg(not(feature = "custom_cursor"))]
@@ -673,6 +694,16 @@ impl WinitAppRunnerState {
             let (config, windows) = self.focused_windows_state.get(self.app.world()).unwrap();
             let focused = windows.iter().any(|(_, window)| window.focused);
             update_mode = config.update_mode(focused);
+        }
+
+        // benilla fork (BENILLA.md, sixth delta): what the hook holds is settled at the next frame
+        // even when no update follows: a reactive window may not update again for a long time,
+        // and the browser's render worker still needs the last update's extract to draw it.
+        if !self.update_deferred
+            && self.app.plugins_state() == PluginsState::Cleaned
+            && !crate::may_update(self.app.world_mut())
+        {
+            self.redraw_requested = true;
         }
 
         // The update mode could have been changed, so we need to redraw and force an update
@@ -783,7 +814,16 @@ impl WinitAppRunnerState {
         handle_event && self.lifecycle.is_active()
     }
 
-    fn run_app_update(&mut self) {
+    /// Runs one update, unless the `may_update` hook holds it (benilla fork, BENILLA.md, sixth
+    /// delta): then nothing of it is consumed, and `false` asks the caller for the next frame.
+    fn run_app_update(&mut self) -> bool {
+        if self.app.plugins_state() == PluginsState::Cleaned
+            && !crate::may_update(self.app.world_mut())
+        {
+            self.update_deferred = true;
+            return false;
+        }
+        self.update_deferred = false;
         self.reset_on_update();
 
         self.forward_bevy_events();
@@ -798,6 +838,7 @@ impl WinitAppRunnerState {
                 hook(self.app.world_mut());
             }
         }
+        true
     }
 
     fn forward_bevy_events(&mut self) {
@@ -911,8 +952,8 @@ impl WinitAppRunnerState {
 /// `EventLoop`.
 pub fn winit_runner(mut app: App, event_loop: EventLoop<WinitUserEvent>) -> AppExit {
     if app.plugins_state() == PluginsState::Ready {
-        app.finish();
-        app.cleanup();
+        // benilla fork: through the render worker's hook when it has one (`lib.rs`).
+        crate::finish_plugins(&mut app);
     }
 
     let runner_state = WinitAppRunnerState::new(app);

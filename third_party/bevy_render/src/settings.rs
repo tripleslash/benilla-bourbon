@@ -189,6 +189,11 @@ impl RenderResources {
     ) {
         let RenderResources(device, queue, adapter_info, render_adapter, instance, ..) = self;
 
+        // benilla fork (BENILLA.md, "The render worker"): the device page-made buffers are created
+        // on, at first use on the worker.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        crate::render_worker::set_device(&device);
+
         let compressed_image_format_support =
             CompressedImageFormatSupport(CompressedImageFormats::from_features(device.features()));
 
@@ -272,6 +277,33 @@ impl RenderCreation {
                     return false;
                 };
                 let settings = render_creation.clone();
+
+                // **benilla fork (BENILLA.md, "The render worker").** The device is made on the
+                // worker that will use it: a WebGPU object belongs to the agent that created it.
+                // The surface comes from the worker's `OffscreenCanvas` later, in
+                // `create_surfaces`; the browser's adapter request has no use for one.
+                #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+                if crate::render_worker::active() {
+                    drop(primary_window);
+                    crate::render_worker::post(move || {
+                        use core::sync::atomic::Ordering::Relaxed;
+                        let at = &crate::render_worker::DEVICE_AT;
+                        at.store(1, Relaxed);
+                        bevy_tasks::IoTaskPool::get()
+                            .spawn_local(async move {
+                                at.store(3, Relaxed);
+                                let render_resources =
+                                    renderer::initialize_renderer(backends, None, &settings).await;
+                                at.store(4, Relaxed);
+                                *future_resources.lock().unwrap() = Some(render_resources);
+                                at.store(5, Relaxed);
+                                crate::render_worker::wake_page();
+                            })
+                            .detach();
+                        at.fetch_max(2, Relaxed);
+                    });
+                    return true;
+                }
 
                 let async_renderer = async move {
                     let render_resources = renderer::initialize_renderer(

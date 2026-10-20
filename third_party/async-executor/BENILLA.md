@@ -39,42 +39,40 @@ frame it drew.
 
 ## The delta, and the command that proves it
 
-**One line changed, one file added. No logic is touched.**
+**One import changed. No logic is touched.**
 
 | file | change |
 |---|---|
-| `src/lib.rs` | the `use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, TryLockError};` at line 54 becomes a two-arm `cfg`: `wasm_spin` on `wasm32 + atomics`, `std::sync` everywhere else |
-| `src/wasm_spin.rs` | new — spinning `Mutex`/`RwLock` with the same surface. Has its own header |
+| `src/lib.rs` | the `use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, TryLockError};` becomes a two-arm `cfg`: on `wasm32 + atomics` the locks come from `third_party/may-park` (and the error types from `std::sync`), `std::sync` everywhere else |
+| `Cargo.toml` | the `may-park` path dependency, on that target only |
 
-Every call site — `.lock().unwrap_or_else(PoisonError::into_inner)`, `.try_read()`, the `Debug`
-impls matching `TryLockError::WouldBlock` — is upstream's, unmodified. That is the whole point of
-swapping the import rather than the code: the executor's algorithm, its unbounded queue, its
-work-stealing and its sleeper bookkeeping are exactly the ones upstream ships and tests.
+`may-park`'s `Mutex`/`RwLock` are std's own locks with std's own guards; only `lock`, `read` and
+`write` ask first whether the calling thread may park, and loop on `try_*` on the one that may not:
+the browser page's, which says so once (`benilla_app::web_threads::install`). Every call site —
+`.lock().unwrap_or_else(PoisonError::into_inner)`, `.try_read()`, the `Debug` impls matching
+`TryLockError::WouldBlock` — is upstream's, unmodified, and the executor's algorithm, queues,
+work-stealing and sleeper bookkeeping are exactly the ones upstream ships and tests.
 
 **Native is bit-for-bit upstream.** The `cfg` is false on every target that is not a shared-memory
 wasm build, so `std::sync` is used and this fork is inert.
 
-## Why spinning is the right trade here, and not in general
+## Spin only where parking is illegal
 
-Every critical section guarded by these locks is a handful of instructions — a `Slab` insert or
-remove, a `Vec` push, a few field updates — with no allocation under the lock and no nesting. The
-worst case is a holder being descheduled mid-section, and the cost of that is a *spinning* waiter
-rather than a *trapped* one. **A stall is recoverable; a trap is not.**
+The first version of this fork (2026-09) shipped its own spin locks (`src/wasm_spin.rs`) on *every*
+thread. That kept the page alive, and it also made every Web Worker spin on these locks instead of
+parking: a pool thread, and since 2026-10 the render worker, burned its core for as long as the
+holder ran, including a holder descheduled mid-section. A worker may park, and std's futex lock
+already spins briefly before it does, so parking is the right shape there. The page is the only
+thread for which a trap is the alternative, and it is the only one that spins now.
 
-Two precedents, both of which this fork is deliberately imitating:
+Precedent for the page's half: Rust's own wasm allocator (`library/std/src/sys/alloc/wasm.rs`)
+spins on its global lock because *"the main thread in a web browser cannot ever block, no
+exceptions"*. `event-listener`'s `slab.rs` spin lock is the `no_std` path only (see
+`third_party/event-listener`).
 
-- **Rust's own wasm allocator does it**, and its comment is the clearest statement of the
-  constraint anywhere: `library/std/src/sys/alloc/wasm.rs` spins on the global `dlmalloc` lock
-  because *"the main thread in a web browser cannot ever block, no exceptions"*. Without that, every
-  `malloc` racing a worker would fail the way this fork fixes.
-- **`event-listener` has the same spin lock in `slab.rs`** — written for this hazard. Read that and
-  it looks as though the smol stack is already safe here. **It is not**, and this is the trap: that
-  file is the `no_std` path. With `std` on, the crate compiles `intrusive.rs` and a real
-  `std::sync::Mutex` on every target, wasm included. `third_party/event-listener` fixes that
-  separately, and `third_party/parking` a third instance in `Unparker::unpark`.
 ## What this does NOT fix
 
-It does not make blocking legal — it removes it from *this* crate. Anything else the main thread
+It does not make blocking legal on the page — it removes it from *this* crate. Anything else the main thread
 shares with a worker has to satisfy the same rule, and **three separate crates turned out to need
 the same treatment** before the client stopped throwing:
 
@@ -102,8 +100,8 @@ thread may touch, so its locks are never contended).
 diff -r third_party/async-executor ~/.cargo/registry/src/*/async-executor-1.14.0
 ```
 
-That must print exactly a `diff` for `src/lib.rs` (the import), `Only in
-third_party/async-executor/src: wasm_spin.rs`, `Only in third_party/async-executor: BENILLA.md`, and
+That must print exactly a `diff` for `src/lib.rs` (the import) and `Cargo.toml` (the dependency),
+`Only in third_party/async-executor: BENILLA.md`, and
 `Only in <registry>: .cargo-ok`, `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig` — cargo's
 packaging metadata, dropped here the same way the other `third_party` forks drop it. Anything else
 crept in, and in this crate especially, anything else is a change to concurrent code that nobody

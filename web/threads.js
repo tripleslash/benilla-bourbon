@@ -30,6 +30,8 @@
 
 /// Where the worker script lives, relative to the page, exactly as `packs.js` names `packworker.js`.
 const WORKER_URL = './threadworker.js';
+/// The render worker's script (`benilla_app::render_worker`), beside it.
+const RENDER_WORKER_URL = './renderworker.js';
 
 /// Install the bridge. Call before the wasm module starts, because the pools are built during
 /// `init()` and a spawner that arrives afterwards has nothing left to spawn for.
@@ -48,6 +50,7 @@ export function installThreads() {
   }
 
   let started = 0;
+  let render = null;
   window.__wenilla_threads = {
     /// Start one pool thread. Returns true only if the Worker was constructed and given its work;
     /// anything else is false, and Rust takes its closure back rather than leaking it.
@@ -77,6 +80,52 @@ export function installThreads() {
         console.error('wenilla: could not start a thread worker —', e);
         return false;
       }
+    },
+
+    /// Start the render worker: the render sub-app moves there (`bevy::render::render_worker`),
+    /// and so does the canvas, as an `OffscreenCanvas`. True only if the worker exists and the
+    /// canvas went to it; anything else is false and Rust renders on this thread as before.
+    ///
+    /// The worker is made first and the canvas transferred last: a transferred canvas can never
+    /// again have a context on this page, so it moves only once nothing can fail after it.
+    startRender(module, memory, selector, stackSize) {
+      if (render) return false;
+      const canvas = document.querySelector(selector);
+      if (!canvas || typeof canvas.transferControlToOffscreen !== 'function') return false;
+      let worker = null;
+      try {
+        worker = new Worker(RENDER_WORKER_URL, { type: 'module', name: 'render' });
+        worker.onerror = (e) => {
+          const mib = Math.round(memory.buffer.byteLength / 1048576);
+          console.error(
+            `wenilla: the render worker failed (linear memory ${mib} MiB) —`,
+            e.message || e,
+          );
+        };
+        // The worker's device is not one `gpu.js` wrapped, so the worker reports its own losses
+        // and errors here, and the guard acts on them as on its own.
+        worker.onmessage = (e) => {
+          const msg = e.data || {};
+          const gpu = window.__wenilla_gpu;
+          if (msg.gpu === 'lost') gpu?.deviceLost?.(msg);
+          else if (msg.gpu === 'error') gpu?.deviceError?.(msg.kind || '');
+        };
+        const offscreen = canvas.transferControlToOffscreen();
+        worker.postMessage({ module, memory, canvas: offscreen, stackSize }, [offscreen]);
+      } catch (e) {
+        console.error('wenilla: could not start the render worker —', e);
+        worker?.terminate();
+        return false;
+      }
+      render = worker;
+      started += 1;
+      return true;
+    },
+
+    /// Wake the render worker's event loop: an extract is waiting (`render_worker::poll`).
+    /// Called once per extracted frame, so it carries nothing.
+    kickRender() {
+      render?.postMessage(0);
     },
 
     /// How many workers were handed out. Read by nothing; here because "did threads actually

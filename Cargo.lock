@@ -385,6 +385,7 @@ dependencies = [
  "concurrent-queue",
  "fastrand",
  "futures-lite",
+ "may-park",
  "pin-project-lite",
  "slab",
 ]
@@ -1790,8 +1791,6 @@ dependencies = [
 [[package]]
 name = "bevy_platform"
 version = "0.19.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd610a417e7b4a3b9602cf11264d16cbbff8eabe689c5fed8be4e84c6a2680a3"
 dependencies = [
  "critical-section",
  "foldhash 0.2.0",
@@ -1799,6 +1798,7 @@ dependencies = [
  "futures-lite",
  "hashbrown 0.16.1",
  "js-sys",
+ "may-park",
  "portable-atomic",
  "portable-atomic-util",
  "serde",
@@ -1806,7 +1806,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2102,6 +2102,7 @@ dependencies = [
  "derive_more",
  "futures-lite",
  "heapless 0.9.3",
+ "may-park",
  "web-task",
 ]
 
@@ -3431,6 +3432,7 @@ name = "event-listener"
 version = "5.4.1"
 dependencies = [
  "concurrent-queue",
+ "may-park",
  "parking",
  "pin-project-lite",
 ]
@@ -4878,6 +4880,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "may-park"
+version = "0.1.0"
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5640,6 +5646,9 @@ dependencies = [
 [[package]]
 name = "parking"
 version = "2.2.1"
+dependencies = [
+ "may-park",
+]
 
 [[package]]
 name = "parking_lot"

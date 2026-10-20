@@ -48,6 +48,56 @@ use crate::{
 #[derive(Resource, Clone, Copy)]
 pub struct AfterUpdate(pub fn(&mut World));
 
+/// benilla fork — the render worker (`third_party/bevy_render/BENILLA.md`): who runs the plugins'
+/// `finish` and `cleanup` once they are ready. Unset, the runner calls both itself, as upstream
+/// does. The browser's render worker sets it so they run on the worker that owns the device.
+static FINISH_PLUGINS: std::sync::OnceLock<fn(&mut App)> = std::sync::OnceLock::new();
+
+/// Install [`FINISH_PLUGINS`]'s hook. The first call wins; call it before `App::run`.
+pub fn set_finish_plugins(hook: fn(&mut App)) {
+    let _ = FINISH_PLUGINS.set(hook);
+}
+
+/// benilla fork — the render worker: asked before each `App::update` the runner drives, with the
+/// main world. `false` skips that update and asks for the next redraw: the browser's render worker
+/// holds the page's next update until the last one's extract is paid, and the page must return to
+/// the browser meanwhile rather than wait. Unset, every update runs, as upstream.
+static MAY_UPDATE: std::sync::OnceLock<fn(&mut World) -> bool> = std::sync::OnceLock::new();
+
+/// Install [`MAY_UPDATE`]'s hook. The first call wins; call it before `App::run`.
+pub fn set_may_update(hook: fn(&mut World) -> bool) {
+    let _ = MAY_UPDATE.set(hook);
+}
+
+/// Whether the runner may run the next update ([`MAY_UPDATE`]).
+pub(crate) fn may_update(world: &mut World) -> bool {
+    MAY_UPDATE.get().is_none_or(|hook| hook(world))
+}
+
+/// benilla fork — the render worker: the proxy [`wake_event_loop`] sends through, kept from
+/// [`WinitPlugin::build`].
+static WAKE: std::sync::OnceLock<EventLoopProxy<WinitUserEvent>> = std::sync::OnceLock::new();
+
+/// Wake the event loop from any thread (`WinitUserEvent::WakeUp`), so the runner checks its plugins'
+/// readiness again: the browser's render worker publishes the GPU device off the page. A no-op
+/// before the plugin is built.
+pub fn wake_event_loop() {
+    if let Some(proxy) = WAKE.get() {
+        let _ = proxy.send_event(WinitUserEvent::WakeUp);
+    }
+}
+
+/// `App::finish` then `App::cleanup`, through the hook when one is installed.
+pub(crate) fn finish_plugins(app: &mut App) {
+    match FINISH_PLUGINS.get() {
+        Some(hook) => hook(app),
+        None => {
+            app.finish();
+            app.cleanup();
+        }
+    }
+}
+
 pub mod accessibility;
 pub mod converters;
 mod cursor;
@@ -133,6 +183,8 @@ impl Plugin for WinitPlugin {
         let event_loop = event_loop_builder
             .build()
             .expect("Failed to build event loop");
+        // benilla fork: kept for `wake_event_loop`.
+        let _ = WAKE.set(event_loop.create_proxy());
 
         app.init_resource::<WinitMonitors>()
             .init_resource::<WinitSettings>()

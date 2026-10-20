@@ -30,21 +30,21 @@ out. On the main thread it throws instead.
 
 ## The delta, and the command that proves it
 
-**One function, and only its `PARKED` arm.**
+**One import.**
 
 | file | change |
 |---|---|
-| `src/lib.rs` | in `Inner::unpark`, the `drop(self.lock.lock().unwrap())` becomes a spin on `try_lock` under `wasm32 + atomics`; the original line stays for every other target |
+| `src/lib.rs` | `Mutex` comes from `may_park::sync` (`third_party/may-park`) on `wasm32 + atomics`, `sync::Mutex` everywhere else; every call site is upstream's |
+| `Cargo.toml` | the `may-park` path dependency, on that target only |
 
-`try_lock` never blocks, so the semantics are identical — acquire, immediately release, purely to
-wait out the window — and only the wake-a-sleeping-worker path reaches it at all: the `EMPTY` and
-`NOTIFIED` arms return before the lock, so an uncontended `unpark` never touches it.
+`may-park`'s `Mutex` is std's own with std's guard; only `lock` asks whether the calling thread may
+park, and loops on `try_lock` on the one that may not, the browser page's. So `unpark`'s
+acquire-and-release, which closes the window before a parker's `Condvar::wait`, spins when the page
+wakes a worker and parks as upstream's does when a worker wakes one, and `park`'s `cvar.wait(guard)`
+is unchanged.
 
-**`park` is untouched, deliberately.** It is worker-side, a worker may block, and a worker that spun
-instead would burn a core doing nothing.
-
-A poisoned lock breaks the spin rather than looping forever: a poisoned parker has panicked, there
-is nothing left to wait for, and notifying anyway is what the window-closing step was protecting.
+The first version of this fork (2026-09) spun on `try_lock` in `unpark` on every thread instead;
+a worker may park, and parking is the cheaper wait for it.
 
 ## Verifying against upstream
 
@@ -53,5 +53,6 @@ is nothing left to wait for, and notifying anyway is what the window-closing ste
 diff -r third_party/parking ~/.cargo/registry/src/*/parking-2.2.1
 ```
 
-That must print exactly a `diff` for `src/lib.rs` and `Only in third_party/parking: BENILLA.md`,
+That must print exactly a `diff` for `src/lib.rs` and `Cargo.toml`, `Only in third_party/parking:
+BENILLA.md`,
 plus `Only in <registry>: .cargo-ok`, `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`.

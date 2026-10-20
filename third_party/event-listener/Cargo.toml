@@ -137,3 +137,7 @@ version = "0.3"
 level = "warn"
 priority = 0
 check-cfg = ["cfg(loom)"]
+
+# benilla fork (BENILLA.md): the page-aware std locks.
+[target.'cfg(all(target_arch = "wasm32", target_feature = "atomics"))'.dependencies.may-park]
+path = "../may-park"

@@ -223,6 +223,8 @@ mod webprogress;
 // `bevy_tasks`'s thread-spawner hook. Inert on every other target, and inert on a browser build
 // without shared memory.
 mod web_threads;
+// fork: the browser build's render thread — the render sub-app on its own Web Worker.
+mod render_worker;
 mod world_backdrop;
 mod world_state;
 mod world_state_ui;
@@ -341,6 +343,7 @@ fn seed_launch_env() {
 /// loading overlay's `ready` edge, which the viewer has no glue screen to send.
 pub fn run_worldview(build: BuildId) -> AppExit {
     web_threads::install();
+    render_worker::install();
     seed_launch_env();
     // fork: modern lighting — dev tuning knobs follow the live query string.
     benilla_world::launch_env::set_live_reader(webenv::var);
@@ -477,6 +480,9 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // `Plugin::build`, so the spawner and the thread count have to be in place ahead of
     // `add_plugins`, not merely early. Compiles to nothing off a shared-memory browser build.
     web_threads::install();
+    // fork: before the plugins build, since `RenderPlugin::build` reads whether the render app
+    // moves to a worker.
+    render_worker::install();
     // Before any resource reads `launch_env` (`LightingSettings`, `WaterDetail`, …).
     seed_launch_env();
 

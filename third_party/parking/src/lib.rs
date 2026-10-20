@@ -67,7 +67,15 @@ use std::time::Instant;
 
 use sync::atomic::AtomicUsize;
 use sync::atomic::Ordering::SeqCst;
-use sync::{Condvar, Mutex};
+use sync::Condvar;
+#[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+use sync::Mutex;
+// **benilla fork.** The ONE line that differs from upstream (BENILLA.md): std's `Mutex`, whose
+// `lock` spins instead of parking on the browser's page thread. That thread may not execute
+// `memory.atomic.wait32`, and it is routinely the one calling `Unparker::unpark` (spawning work wakes
+// a sleeping worker). Its guard is std's, so `park`'s `Condvar::wait` is upstream's.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+use may_park::sync::Mutex;
 
 /// Creates a parker and an associated unparker.
 ///
@@ -430,36 +438,6 @@ impl Inner {
         //
         // Releasing `lock` before the call to `notify_one` means that when the parked thread wakes
         // it doesn't get woken only to have to wait for us to release `lock`.
-        // **benilla fork.** `try_lock` in a spin, not `lock`, on the one target whose main thread
-        // may not block.
-        //
-        // This is the ONLY blocking call an *unparking* thread makes, and on `wasm32 + atomics` the
-        // unparking thread is routinely the browser's page thread: `async-executor` wakes a
-        // sleeping worker from whichever thread just spawned work, and `memory.atomic.wait32` is
-        // forbidden on the main thread — it throws `Atomics.wait cannot be called in this context`
-        // rather than waiting, killing whatever was running.
-        //
-        // The semantics are unchanged: acquire and immediately release, purely to wait out the
-        // window described above. Only the `PARKED` arm reaches here — `EMPTY` and `NOTIFIED`
-        // return before it — so this is the wake-a-sleeping-worker path, and the parker holds the
-        // lock only between setting `PARKED` and calling `cvar.wait`. Spinning across that is
-        // nanoseconds. `park` itself is untouched: a worker may block, and should.
-        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-        {
-            loop {
-                match self.lock.try_lock() {
-                    Ok(guard) => {
-                        drop(guard);
-                        break;
-                    }
-                    // A poisoned lock means the parker panicked; there is nothing to wait for and
-                    // notifying anyway is the same thing upstream's `.unwrap()`-free path would do.
-                    Err(std::sync::TryLockError::Poisoned(_)) => break,
-                    Err(std::sync::TryLockError::WouldBlock) => core::hint::spin_loop(),
-                }
-            }
-        }
-        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
         drop(self.lock.lock().unwrap());
         self.cvar.notify_one();
         true

@@ -79,13 +79,29 @@ impl Default for RenderContextState {
 }
 
 impl RenderContextState {
+    /// **benilla fork (BENILLA.md, "The render worker").** A system's state is built when its
+    /// schedule initializes, which a plugin can trigger during `build` (`remove_systems_in_set`
+    /// initializes a changed schedule), and on the browser's render worker `build` runs on the page.
+    /// Such a state is still empty there, so the worker replaces it with one of its own at first use.
+    #[inline]
+    fn rebind(&mut self) {
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        if self.0.owned_elsewhere() {
+            let page = core::mem::replace(self, Self::default());
+            // Empty, so nothing is lost; and its own thread is not this one, so it is not dropped.
+            core::mem::forget(page);
+        }
+    }
+
     fn flush_encoder(&mut self) {
+        self.rebind();
         if let Some(encoder) = self.0.command_encoder.take() {
             self.0.command_buffers.push(encoder.finish());
         }
     }
 
     fn command_encoder(&mut self) -> &mut CommandEncoder {
+        self.rebind();
         let render_device = self
             .0
             .render_device
@@ -98,6 +114,7 @@ impl RenderContextState {
     }
 
     pub fn finish(&mut self) -> Vec<CommandBuffer> {
+        self.rebind();
         self.flush_encoder();
         core::mem::take(&mut self.0.command_buffers)
     }
@@ -109,6 +126,7 @@ impl SystemBuffer for RenderContextState {
         let _span =
             info_span!("RenderContextState::apply", system = %_system_meta.name()).entered();
 
+        self.rebind();
         let inner = &mut *self.0;
 
         // flush to ensure correct submission order
@@ -137,6 +155,7 @@ pub struct RenderContext<'w, 's> {
 
 impl<'w, 's> RenderContext<'w, 's> {
     fn ensure_device(&mut self) {
+        self.state.rebind();
         if self.state.0.render_device.is_none() {
             self.state.0.render_device = Some(self.render_device.clone());
         }

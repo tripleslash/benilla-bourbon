@@ -124,22 +124,33 @@ cfg::multi_threaded! {
     }
 }
 
-// **benilla fork.** wasm takes the spinning implementation, and this is a correctness fix rather
-// than a tuning choice.
+// **benilla fork.** On the browser's page thread `block_on` spins, and this is a correctness fix
+// rather than a tuning choice.
 //
 // `futures_lite`'s `block_on` parks the calling thread through `Mutex`/`Condvar`, which on wasm
-// lowers to `memory.atomic.wait32`. The browser's MAIN thread is not allowed to execute that
+// lowers to `memory.atomic.wait32`. The browser's page thread is not allowed to execute that
 // instruction: it does not throw a catchable error, it **traps**, and a trap takes the whole module
-// down. `TaskPool::scope` calls `block_on` on whatever thread entered the scope, and on the web
-// that is always the thread that draws — so the parking implementation is not merely slow there,
-// it is a crash waiting for the first `par_iter_mut` that has to wait on a worker.
+// down. `TaskPool::scope` calls `block_on` on whatever thread entered the scope, which is the page
+// for every main-world `par_iter_mut`, so there it spins: a fork-join wait the page could do nothing
+// else in anyway, measured in a fraction of a frame.
 //
-// Spinning is the right shape for the case it is actually in: a fork-join `scope` where the main
-// thread has nothing to do until the workers finish, measured in a fraction of a frame. Worker
-// threads never come through here — `task_pool.rs`'s worker loop names `futures_lite`'s parking
-// `block_on` directly, because a worker MAY block and a spinning worker would burn a core.
-#[cfg(target_arch = "wasm32")]
+// A Web Worker may park, and one that spun would burn a core: the pool's worker loop (which names
+// `futures_lite`'s `block_on` directly, `task_pool.rs`) and the render worker, whose render systems
+// enter `scope` too (`third_party/bevy_render/BENILLA.md`, "The render worker"). On the threaded
+// build `may_park` (`third_party/may-park`) says which thread this is. Without threads nothing can
+// wake a parked thread, so plain wasm always spins.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
 pub use crate::spin_block_on as block_on;
+
+/// Blocks on `future`: parking where the thread may (`may_park`), spinning on the browser's page.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+pub fn block_on<T>(future: impl Future<Output = T>) -> T {
+    if may_park::may_park() {
+        futures_lite::future::block_on(future)
+    } else {
+        spin_block_on(future)
+    }
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub use bevy_platform::future::block_on;
 

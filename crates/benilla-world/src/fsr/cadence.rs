@@ -267,6 +267,11 @@ fn run_ahead(world: &mut World) {
     if !std::mem::take(&mut ahead.owed) {
         return;
     }
+    // fork: the render worker. The held frame's extract is still owed to the worker, and a `Main`
+    // now would run before it; the world frame after it runs its own `Main` instead.
+    if render_worker_extract_owed() {
+        return;
+    }
     world.run_schedule(Main);
     world.resource_mut::<FgAhead>().ran = true;
 }
@@ -342,6 +347,18 @@ fn fg_main(
     }
 }
 
+/// fork: the browser's render worker (`bevy::render::render_worker`). Every page update is still
+/// extracted once and in order there (an extract the worker cannot take yet is owed, and the next
+/// update waits for it), so held and world frames alternate as on one thread, and the split pair
+/// overlaps: the worker draws the held frame while the page runs the next `Main`. Whether the last
+/// update's extract is still owed, which [`run_ahead`] must not get ahead of.
+fn render_worker_extract_owed() -> bool {
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    return bevy::render::render_worker::extract_owed();
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+    false
+}
+
 /// Render world, just before the render graph: on a held frame every camera that does not present
 /// runs the empty [`HeldFrame`] schedule instead of its own, and so does every auxiliary view (a
 /// point or spot light's shadow map). Extraction re-inserts both next frame, so there is nothing
@@ -371,7 +388,11 @@ pub static SOLO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::ne
 
 /// The present cadence since it was last taken ([`take_cadence`]): count, sum and sum of squares
 /// of the intervals between presents (s), and the longest, so evenness is read from numbers.
-static CADENCE: std::sync::Mutex<(u32, f64, f64, f64)> = std::sync::Mutex::new((0, 0.0, 0.0, 0.0));
+///
+/// bevy's `Mutex`, not std's: the browser's render worker writes it each frame and the page reads it,
+/// and a contended std lock parks, which traps on the page (bevy's spins there).
+static CADENCE: bevy::platform::sync::Mutex<(u32, f64, f64, f64)> =
+    bevy::platform::sync::Mutex::new((0, 0.0, 0.0, 0.0));
 
 /// `(mean interval ms, coefficient of variation, max interval ms)` since the last call.
 pub fn take_cadence() -> Option<(f64, f64, f64)> {

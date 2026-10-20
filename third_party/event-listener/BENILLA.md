@@ -31,27 +31,28 @@ login that opened its WebSocket and then never wrote a byte.
 
 ## The delta, and the command that proves it
 
-**One `use` line changed, one file added. No logic is touched.**
+**One `use` line changed. No logic is touched.**
 
 | file | change |
 |---|---|
-| `src/lib.rs` | `mod sync`'s `pub(super) use std::sync::{Mutex, MutexGuard};` becomes a two-arm `cfg` — `crate::wasm_spin` on `wasm32 + atomics`, `std::sync` everywhere else — plus `mod wasm_spin;` |
-| `src/wasm_spin.rs` | new — a spinning `Mutex` with the slice of the surface `intrusive.rs` uses. Has its own header |
+| `src/lib.rs` | `mod sync`'s `pub(super) use std::sync::{Mutex, MutexGuard};` becomes a two-arm `cfg`: `may_park::sync` (`third_party/may-park`) on `wasm32 + atomics`, `std::sync` everywhere else |
+| `Cargo.toml` | the `may-park` path dependency, on that target only |
 
-`intrusive.rs` is untouched: its `.lock().unwrap_or_else(|e| e.into_inner())`, its `try_lock().ok()`
-and its `MutexGuard<'a, Inner<T>>` all still compile because the stand-in keeps that shape.
+`may-park`'s `Mutex` is std's own with std's guard; only `lock` asks whether the calling thread may
+park, and loops on `try_lock` on the one that may not, the browser page's. `intrusive.rs` is
+untouched: its `.lock().unwrap_or_else(|e| e.into_inner())`, its `try_lock().ok()` and its
+`MutexGuard<'a, Inner<T>>` are std's.
 
 **Native is bit-for-bit upstream** — the `cfg` is false anywhere that is not a shared-memory wasm
 build.
 
 ## The trade
 
-Spinning instead of sleeping. The critical sections here are a linked-list insert, remove or walk —
-no allocation under the lock, no nesting, no I/O — so a waiter spins for nanoseconds. The worst case
-is a holder descheduled mid-section, costing a spinning waiter rather than a trapped one. **A stall
-is recoverable; a trap is not.** Rust's own wasm allocator makes the same trade for the same reason
-(`library/std/src/sys/alloc/wasm.rs`: *"the main thread in a web browser cannot ever block, no
-exceptions"*).
+The page spins, every other thread parks. The first version of this fork (`src/wasm_spin.rs`,
+2026-09) spun on every thread; a Web Worker may park, and one that spins burns its core while the
+holder runs (or is descheduled). On the page a stall is recoverable and a trap is not, which is the
+trade Rust's own wasm allocator makes (`library/std/src/sys/alloc/wasm.rs`: *"the main thread in a
+web browser cannot ever block, no exceptions"*).
 
 ## Verifying against upstream
 
@@ -60,7 +61,7 @@ exceptions"*).
 diff -r third_party/event-listener ~/.cargo/registry/src/*/event-listener-5.4.1
 ```
 
-That must print exactly a `diff` for `src/lib.rs`, `Only in third_party/event-listener/src:
-wasm_spin.rs`, `Only in third_party/event-listener: BENILLA.md`, and `Only in <registry>:
+That must print exactly a `diff` for `src/lib.rs` and `Cargo.toml`, `Only in
+third_party/event-listener: BENILLA.md`, and `Only in <registry>:
 .cargo-ok`, `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`. Anything else crept in — and in
 this crate, anything else is a change to concurrent code nobody reviewed.

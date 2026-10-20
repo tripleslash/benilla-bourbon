@@ -57,3 +57,7 @@ version = "3.0.0"
 [target."cfg(loom)".dependencies.loom]
 version = "0.7"
 optional = true
+
+# benilla fork (BENILLA.md): the page-aware std locks.
+[target.'cfg(all(target_arch = "wasm32", target_feature = "atomics"))'.dependencies.may-park]
+path = "../may-park"

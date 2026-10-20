@@ -57,6 +57,10 @@ pub mod pipelined_rendering;
 // must not hold a wgpu handle — see the module header. Upstream guards `renderer/mod.rs` the same
 // way and misses `batching::gpu_preprocessing`, which is what this exists for.
 mod wasm_serial;
+// **benilla fork.** The render sub-app on its own Web Worker, the browser build's stand-in for
+// `pipelined_rendering` — see the module header and BENILLA.md, "The render worker".
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+pub mod render_worker;
 pub mod render_asset;
 pub mod render_phase;
 pub mod render_resource;
@@ -387,11 +391,26 @@ impl Plugin for RenderPlugin {
         ));
 
         let (sender, receiver) = bevy_time::create_time_channels();
+        // benilla fork (BENILLA.md, "The render worker"): the worker renders on its own clock, at
+        // most once per main update and often less, so the main app keeps its own time; the
+        // worker's `send_time` then finds the channel closed, which it ignores.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        if !render_worker::active() {
+            app.insert_resource(receiver);
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
         app.insert_resource(receiver);
 
         let asset_server = app.world().resource::<AssetServer>().clone();
         app.init_resource::<RenderAssetBytesPerFrame>()
             .init_resource::<RenderErrorHandler>();
+        // benilla fork (BENILLA.md, "The render worker"): the handshake that replaces running the
+        // render app on this thread, added once the render app exists.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        if render_worker::active() {
+            app.add_plugins(render_worker::RenderWorkerPlugin);
+        }
+
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.init_resource::<RenderScheduleOrder>();
             render_app.init_resource::<RenderAssetBytesPerFrameLimiter>();
@@ -436,6 +455,16 @@ impl Plugin for RenderPlugin {
                         .in_set(RenderSystems::Render),
                     reset_render_asset_bytes_per_frame.in_set(RenderSystems::Cleanup),
                 ),
+            );
+            // benilla fork (BENILLA.md, ninth delta): the browser frees a dropped GPU object only
+            // when its JS wrapper is collected; destroy the frame's released ones once it is
+            // submitted, after the temporary render entities are gone.
+            #[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+            render_app.add_systems(
+                Render,
+                destroy_released_gpu_resources
+                    .in_set(RenderSystems::PostCleanup)
+                    .after(sync_world::despawn_temporary_render_entities),
             );
         }
     }
@@ -482,6 +511,26 @@ fn run_render_schedule(world: &mut World) {
             let _ = world.try_run_schedule(label);
         }
     });
+}
+
+/// benilla fork (BENILLA.md, ninth delta): destroy the buffers, textures and query sets whose last
+/// handle, view and bind group were dropped since the last frame (`wgpu`'s local patch keeps the
+/// count). The frame's work is submitted by now, so nothing recorded with them is still pending.
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+fn destroy_released_gpu_resources() {
+    let destroyed = wgpu::destroy_released_resources();
+    RELEASED_GPU_OBJECTS.fetch_add(destroyed as u64, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// benilla fork: GPU objects [`destroy_released_gpu_resources`] destroyed, for a diagnostics reader
+/// (`take_released_gpu_objects`).
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+static RELEASED_GPU_OBJECTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// benilla fork: how many GPU objects were destroyed explicitly since the last call.
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+pub fn take_released_gpu_objects() -> u64 {
+    RELEASED_GPU_OBJECTS.swap(0, core::sync::atomic::Ordering::Relaxed)
 }
 
 fn send_time(time_sender: Res<TimeSender>) {
