@@ -1782,9 +1782,11 @@
                 <NormalFont inherits="GameFontNormalSmall"/>
                 <HighlightFont inherits="GameFontNormalSmall"/>
                 <DisabledFont inherits="GameFontNormalSmall"/>
-                <!-- The AddOns page below: the era's per-addon enable list. -->
+                <!-- The AddOns page below: the era's per-addon enable list. The tab opens the same
+                     page as the category tree's AddOns row (the owner, 2026-10-20: a disabled tab
+                     read as a page that does not work). -->
                 <Scripts>
-                    <OnLoad>this:Disable()</OnLoad>
+                    <OnClick>BenillaOptionsFrame_SelectCategory("AddOns")</OnClick>
                 </Scripts>
             </Button>
 
