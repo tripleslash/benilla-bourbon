@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "The BENPACK container — a range-optional, streaming-friendly repackaging of the 1.12.1 MPQ chain for static hosting"
 
+[lints]
+workspace = true
+
 [features]
 # The writer half. Native only (it pulls the C zstd encoder); the browser reader needs none of it,
 # and keeping it off by default is what lets this crate compile to wasm32 unchanged.

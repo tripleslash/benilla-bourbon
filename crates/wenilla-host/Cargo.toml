@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Native web host for the browser build: serves the wasm bundle, answers /data/* from the real MPQ chain, and proxies /ws/{port} to the world/login TCP sockets"
 
+[lints]
+workspace = true
+
 # Never built for wasm32 — it's a native bin nobody depends on (Lane H note). `benilla-formats`
 # is taken with `default-features = false` for the same reason `benilla` takes it that way: the
 # `dev` feature bakes this source tree's absolute path into `install::candidates`' probe, and a

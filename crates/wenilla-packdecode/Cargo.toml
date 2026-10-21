@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "The pack Web Worker's other half: BENPACK header checks and zstd/deflate decoding, compiled to its own small wasm module so a pack is decoded off the frame thread (web/packworker.js)"
 
+[lints]
+workspace = true
+
 [lib]
 # The cargo artifact's name. The files Trunk emits are `wenilla-packdecode.js` /
 # `wenilla-packdecode_bg.wasm` — it names the pair after the PACKAGE, not after this — and
