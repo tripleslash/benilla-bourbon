@@ -1177,10 +1177,10 @@ fn interact(
                     swung: outcome.swung || second.swung,
                 };
                 debug!("right-click attack: {guid:#x}");
-                // `0x5ecb70`'s body through the seam; `swung` means the commit already asked it
-                // for its re-swing, which `0x5eccda` keeps from sending twice.
+                // `0x5ecb70`'s body through the seam. A commit that stopped and re-swung left
+                // `[+0xc54]` set, so this swing goes out a second time (`0x5eccda`).
                 let engaged = me.is_some_and(|(_, _, e)| e);
-                dispatch.seam.start(guid, engaged || outcome.swung, false);
+                dispatch.seam.start(guid, engaged || outcome.swung);
             }
         }
         UnitBranch::Dead(DeadUnitLeg::Loot) => {
@@ -1866,12 +1866,12 @@ pub(super) fn clear(
     if let Some(old) = selection.guid.take() {
         selection.target = None;
         selection.lit = None;
-        // The teardown `0x493910` closes the old target's loot before its own send.
+        // The teardown `0x493910` closes the old target's loot, then stops our attack
+        // (`0x493a08 call 0x5ecac0`, which also un-queues an on-next-swing strike), then sends
+        // (`0x493a2a`).
         seam.close_loot_on(old);
-        let _ = seam.net.0.send(ClientCommand::SetSelection { guid: 0 });
-        // `SetSelection 0x493540`'s own `0x493a08 call 0x5ecac0`, the real StopAttack, which
-        // also un-queues a pending on-next-swing strike.
         seam.stop(engaged);
+        let _ = seam.net.0.send(ClientCommand::SetSelection { guid: 0 });
     }
 }
 
@@ -2362,6 +2362,7 @@ mod tests {
             world.init_resource::<crate::spell::PendingCast>();
             world.init_resource::<crate::ui_cast::CastReports>();
             world.init_resource::<crate::spell::AutoRepeatActive>();
+            world.init_resource::<crate::creature_anim::AttackStopInFlight>();
             world.init_resource::<crate::creature_anim::UnitEdits>();
             world.init_resource::<crate::ui_loot::LootState>();
             world.init_resource::<crate::ui_loot::LootLatch>();
@@ -2445,6 +2446,7 @@ mod tests {
         world.init_resource::<crate::spell::targeting::EnchantConfirmItem>();
         world.init_resource::<crate::spell::QueuedMeleeSpell>();
         world.init_resource::<crate::spell::AutoRepeatActive>();
+        world.init_resource::<crate::creature_anim::AttackStopInFlight>();
         world.init_resource::<crate::creature_anim::UnitEdits>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<Messages<crate::player::StandStateRequest>>();
@@ -3170,7 +3172,9 @@ mod tests {
         assert_eq!(world.resource::<Selection>().guid, Some(WOLF));
     }
 
-    /// Mid-combat on another target the select is the click's: stop, select, swing.
+    /// Mid-combat on another target the select is the click's: stop, select, swing, and then
+    /// StartAttack's own swing, since the stop's word (`[+0xc54]`, set at `0x6243b2`) is still
+    /// set when `0x5eccda` reads it and nothing clears it short of the echo or a death.
     #[test]
     fn an_interaction_switching_targets_mid_combat_stops_selects_and_swings() {
         const OLD: u64 = 0xF130_0000_0000_0111;
@@ -3196,7 +3200,7 @@ mod tests {
                 _ => "other",
             })
             .collect();
-        assert_eq!(sent, ["stop", "select", "swing"]);
+        assert_eq!(sent, ["stop", "select", "swing", "swing"]);
         assert_eq!(world.resource::<Selection>().guid, Some(WOLF));
     }
 

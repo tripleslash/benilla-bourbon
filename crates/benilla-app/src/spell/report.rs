@@ -23,6 +23,10 @@ pub(crate) const REASON_ERROR: u8 = 0x1c;
 /// The reason the inventory refusal's cancel passes (`0x5e3aad`): `SPELL_FAILED_DONT_REPORT`.
 pub(crate) const REASON_DONT_REPORT: u8 = 0x17;
 
+/// The reason a unit's death cancels the cast bound to it with (`0x6058dc`):
+/// `SPELL_FAILED_TARGETS_DEAD`.
+pub(crate) const REASON_TARGETS_DEAD: u8 = 0x65;
+
 /// The failure the reporter fires no event for: `SPELL_FAILED_SPELL_IN_PROGRESS` (`0x6e2234`).
 const REASON_IN_PROGRESS: u8 = 0x61;
 
@@ -109,10 +113,11 @@ impl CastCore<'_> {
         self.reports.changed();
     }
 
-    /// The send's pop of an auto-repeat spell once its packet is out (`0x6e597d`-`0x6e5989`): only
-    /// while the slot holds it, so a ranged shot that is not auto-repeat (Aimed Shot, Arcane Shot,
-    /// Throw) stays in flight until its result. The send's other pop (`0x6e58a2`-`0x6e58bd`) is for
-    /// a record the push did not make or another caster's (the pet bar), neither in this slot.
+    /// The pop of an auto-repeat spell while the slot holds it: the send's once its packet is out
+    /// (`0x6e597d`-`0x6e5989`), so a ranged shot that is not auto-repeat (Aimed Shot, Arcane Shot,
+    /// Throw) stays in flight until its result, and the repeat stop's (`0x6ea154`-`0x6ea160`). The
+    /// send's other pop (`0x6e58a2`-`0x6e58bd`) is for a record the push did not make or another
+    /// caster's (the pet bar), neither in this slot.
     pub(crate) fn pop_if(&mut self, spell_id: u32) {
         let slot = self.slot();
         if slot.map(Inflight::spell_id) == Some(spell_id) {
@@ -362,6 +367,8 @@ mod tests {
                     CastReport::Bar(_) => "BAR".into(),
                     CastReport::Refused(f) => format!("REFUSED {:#04x}", f.reason),
                     CastReport::TradeSkillDisarm => "DISARM".into(),
+                    CastReport::AutoRepeat(true) => "START_AUTOREPEAT".into(),
+                    CastReport::AutoRepeat(false) => "STOP_AUTOREPEAT".into(),
                 })
                 .collect()
         }

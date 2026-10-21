@@ -162,6 +162,9 @@ pub(crate) enum SpellKitFx {
         entity: Entity,
         spell_id: u32,
         class: FxClass,
+        /// `0x614150`'s `force`: the cast edges stop unforced, sparing the spell's state effects
+        /// (kind 2), which the aura's removal and the channel's change stop forced.
+        force: bool,
     },
 }
 
@@ -650,7 +653,8 @@ fn play_impact(
 ///   the GO's targets play their impacts inline when `Spell.dbc` Speed is 0 (`0x6e8bf0`), else
 ///   fly a [`MissileSpawn`] (`0x6e8a50`).
 /// - Impact: a missile arrived on this unit ([`play_impact`]).
-/// - Fail: the hold drops silently.
+/// - Fail, and the auto-repeat stop's reap (`0x614150(spell, 0)` at `0x6ea139`): that spell's hold
+///   drops silently, with its own loop and models.
 /// - Channel: `UNIT_CHANNEL_SPELL` polled per frame (`0x612a30`); observers have no packet. A set
 ///   field holds the channel kit's anim and rings its sound once, a cleared one drops it.
 pub(super) fn route_cast_visuals(
@@ -742,6 +746,7 @@ pub(super) fn route_cast_visuals(
                         entity: ev.entity,
                         spell_id: prior,
                         class: FxClass::Hold,
+                        force: true,
                     });
                 }
                 // A ranged-attribute START draws the ranged weapon (`0x6e78f3`); vmangos sends
@@ -803,22 +808,35 @@ pub(super) fn route_cast_visuals(
                 }
             }
             CastEventKind::Go => {
-                // Spell-id-keyed (`0x614150(spellId, 0)`): a proc's GO keeps another spell's hold.
-                if held_spell(&pending, ev.entity) == Some(ev.spell_id) {
-                    commands.entity(ev.entity).try_remove::<CastHold>();
-                    pending.insert(ev.entity, None);
+                // The go's own stop is skipped for a channelled spell (`AttributesEx & 0x4`) while
+                // the caster channels (`UNIT_CHANNEL_SPELL` nonzero), `0x6e7fca`-`0x6e7fde`.
+                let channelling = spells
+                    .catalog
+                    .get(ev.spell_id)
+                    .is_some_and(|d| d.attributes_ex & 0x4 != 0)
+                    && units
+                        .get(ev.entity)
+                        .is_ok_and(|(_, store)| store.0.unit_channel_spell() != 0);
+                if !channelling {
+                    // Spell-id-keyed (`0x614150(spellId, 0)` at `0x6e7fe8`): a proc's GO keeps
+                    // another spell's hold.
+                    if held_spell(&pending, ev.entity) == Some(ev.spell_id) {
+                        commands.entity(ev.entity).try_remove::<CastHold>();
+                        pending.insert(ev.entity, None);
+                    }
+                    // The spell's own loop, whatever the hold: a precast kit with no anim still
+                    // starts a loop.
+                    out.sounds.write(SpellKitSound::StopHold {
+                        entity: ev.entity,
+                        spell_id: Some(ev.spell_id),
+                    });
+                    out.fx.write(SpellKitFx::Reap {
+                        entity: ev.entity,
+                        spell_id: ev.spell_id,
+                        class: FxClass::Hold,
+                        force: false,
+                    });
                 }
-                // The spell's own loop (`0x614150(spellId, 0)`), whatever the hold: a precast kit
-                // with no anim still starts a loop.
-                out.sounds.write(SpellKitSound::StopHold {
-                    entity: ev.entity,
-                    spell_id: Some(ev.spell_id),
-                });
-                out.fx.write(SpellKitFx::Reap {
-                    entity: ev.entity,
-                    spell_id: ev.spell_id,
-                    class: FxClass::Hold,
-                });
                 // Then the running auto-repeat spell's on the same unit, `0x614150([0xceac30], 0)`
                 // whenever it is set (`0x6e7fed`-`0x6e7ffb`), whoever casts the go: the gate of
                 // the go's own stop (`0x6e7fca`) does not reach it.
@@ -835,6 +853,7 @@ pub(super) fn route_cast_visuals(
                         entity: ev.entity,
                         spell_id: repeat,
                         class: FxClass::Hold,
+                        force: false,
                     });
                 }
                 // A ranged-slot GO redraws ranged before the cast kit (`0x60f34c`, gate
@@ -899,7 +918,7 @@ pub(super) fn route_cast_visuals(
                     out.shakes.write(SpellKitShake::PlayAt { pos, group });
                 }
             }
-            CastEventKind::Fail => {
+            CastEventKind::Fail | CastEventKind::Reap => {
                 if held_spell(&pending, ev.entity) == Some(ev.spell_id) {
                     commands.entity(ev.entity).try_remove::<CastHold>();
                     pending.insert(ev.entity, None);
@@ -914,23 +933,25 @@ pub(super) fn route_cast_visuals(
                     entity: ev.entity,
                     spell_id: ev.spell_id,
                     class: FxClass::Hold,
+                    force: false,
                 });
             }
         }
     }
 
-    // Speed 0 plays every impact now (`0x6e8bf0`), Speed > 0 flies one projectile per target.
-    // Misses fly too; the reference deflects them off the target, which is not built.
+    // Speed 0 plays every impact now (`0x6e8bf0`), with or without a caster unit (`0x6e816b`);
+    // Speed > 0 flies one projectile per target from a caster unit. Misses fly too; the reference deflects them off the target, which is not built.
     for go in go_targets.read() {
         let Some(display) = spells.catalog.get(go.spell_id) else {
             continue;
         };
-        // Resolved once per GO (`0x6e802e`); every consumer below reads the merged row.
-        let wv = weapon_src.caster(go.caster);
+        // Resolved once per GO (`0x6e802e`); every consumer below reads the merged row. A caster
+        // that is no unit we hold reads the spell's own row (`0x6e8038`).
+        let wv = go.caster.and_then(|caster| weapon_src.caster(caster));
         let stages = resolve_stages(spells, &visuals.0, go.spell_id, || wv);
         // The dest one-shot (`0x6e8088`): field 12's model once at the dest point when field 6 is
-        // 0, fired at GO whatever the hit list.
-        if let Some(dest) = go.dest {
+        // 0, fired at GO whatever the hit list, for a caster unit only (`0x6e8082`).
+        if let (Some(dest), Some(_)) = (go.dest, go.caster) {
             if let Some(stages) = stages {
                 if stages.missile_gate == 0 && stages.area_effect != 0 {
                     if let Some(path) = visuals.0.effect_path(stages.area_effect) {
@@ -959,8 +980,9 @@ pub(super) fn route_cast_visuals(
                     &mut out,
                 );
             }
-        } else {
-            // The spawn gate is Speed alone (`0x60a3d0`): basic shots have no visual row.
+        } else if let Some(caster) = go.caster {
+            // No caster unit flies nothing (`0x6e8219`). The spawn gate is Speed alone
+            // (`0x60a3d0`): basic shots have no visual row.
             let path = stages.and_then(|s| {
                 (s.missile_model >= 1).then(|| {
                     visuals
@@ -990,7 +1012,7 @@ pub(super) fn route_cast_visuals(
                     .and_then(|s| visuals.0.kit(s.cast))
                     .is_some_and(|k| k.positive_anim().is_some());
                 missiles.write(MissileSpawn {
-                    caster: go.caster,
+                    caster,
                     spell_id: go.spell_id,
                     path,
                     ammo_display_id: go.ammo_display_id,
@@ -1026,6 +1048,7 @@ pub(super) fn route_cast_visuals(
                     entity,
                     spell_id: prev,
                     class: FxClass::Hold,
+                    force: true,
                 });
             }
             // No ranged fallback on the channel poll (`0x612a30`).
@@ -1088,6 +1111,7 @@ pub(super) fn route_cast_visuals(
                 entity,
                 spell_id: prev,
                 class: FxClass::Hold,
+                force: true,
             });
         }
     }
@@ -1171,6 +1195,7 @@ pub(crate) fn arm_aura_state_fx(
                     entity,
                     spell_id,
                     class: FxClass::AuraState,
+                    force: true,
                 });
                 procs.write(AuraProc::Reap { entity, spell_id });
                 // The forced stop takes the 0x1000 effect too (`0x614179`).
@@ -1337,6 +1362,7 @@ pub(super) fn arm_loot_fx(
                 entity,
                 spell_id: LOOT_FX_KEY,
                 class: FxClass::Hold,
+                force: true,
             });
         }
     }

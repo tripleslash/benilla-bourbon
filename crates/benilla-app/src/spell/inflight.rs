@@ -43,6 +43,7 @@ pub(crate) struct PendingCast {
     slot: Option<PendingCastState>,
     caster_is_player: bool,
     record_spell: u32,
+    record_target: Option<u64>,
 }
 
 struct PendingCastState {
@@ -107,12 +108,14 @@ impl PendingCast {
     /// `ITEM_FLAG_PLAYERCAST` and a queued strike included, though neither holds this slot.
     pub(crate) fn fill_record(&mut self) {
         self.caster_is_player = true;
+        self.record_target = None;
     }
 
     /// [`Self::fill_record`] for a caster other than the active player (the pet bar's presses
     /// through `0x6e4b60`, `0x4bd385`): the caster word names that unit, so no cancel event fires.
     pub(crate) fn fill_unit_record(&mut self) {
         self.caster_is_player = false;
+        self.record_target = None;
     }
 
     /// The gate of `AbortCast 0x6e4940`'s events: `SPELLCAST_STOP`, `_FAILED` or `_INTERRUPTED`
@@ -132,6 +135,19 @@ impl PendingCast {
     /// precast (`0x6e79af`), its send having done so.
     pub(crate) fn record_spell(&self) -> u32 {
         self.record_spell
+    }
+
+    /// The record's bound object (`0xceac48 + 0x18`, `0xceac60`), which `0x6e3d50` hands the
+    /// death handler (`0x6058c7`). Each fill zeroes the whole record (`rep stos` at `0x6e4f80`
+    /// and `0x6e746a`).
+    pub(crate) fn record_target(&self) -> Option<u64> {
+        self.record_target
+    }
+
+    /// `BindTarget 0x6e5b40`'s write of the bound unit, game object or corpse (`0x6e5cdc`,
+    /// `0x6e5f77`, `0x6e5fbe`), or the arm's parked guid (`0x6e5454`); an item goes to `+0x20`.
+    pub(crate) fn bind_target(&mut self, guid: u64) {
+        self.record_target = Some(guid);
     }
 }
 
@@ -483,11 +499,27 @@ impl SelfCancel<'_> {
             if *crate::net::CAST_TRACE {
                 info!("cast-trace: LOCAL auto-repeat self-cancel (esc), CMSG_CANCEL_AUTO_REPEAT_SPELL");
             }
+            let Self {
+                pending,
+                queued_melee,
+                ground,
+                reports,
+                net,
+                auto_repeat,
+                edits,
+                ..
+            } = self;
             crate::creature_anim::cancel_auto_repeat_local(
                 self_e,
-                &mut self.auto_repeat,
-                &self.edits,
-                &self.net,
+                auto_repeat,
+                edits,
+                &mut super::CastCore {
+                    pending,
+                    queued_melee,
+                    ground,
+                    reports,
+                    net,
+                },
             );
             false // the press is spent
         } else {
@@ -1108,8 +1140,11 @@ mod tests {
                 "the send guard still holds — one press stopped one thing"
             );
             assert!(
-                app.world().resource::<CastReports>().0.is_empty(),
-                "an auto-repeat cancel paints no bar edge"
+                matches!(
+                    app.world().resource::<CastReports>().0[..],
+                    [crate::ui_cast::CastReport::AutoRepeat(false)]
+                ),
+                "an auto-repeat cancel paints no bar edge, only its `STOP_AUTOREPEAT_SPELL`"
             );
 
             // Press 2 cancels the cast.

@@ -503,9 +503,10 @@ pub(super) fn commit(
     let _ = seam.net.0.send(ClientCommand::SetSelection { guid });
     let swung = stop_and_repoint && new_attackable && self_guid != Some(guid);
     if swung {
-        // `0x4938c8`: the swing goes out despite the lock, and cancels auto-repeat (`0x6ea080`),
-        // unless StartAttack's gate returns first.
-        seam.start(guid, engaged, true);
+        // `0x4938c8`: the swing goes out despite the lock, the stop just set `[+0xc54]`
+        // (`0x5eccda`), and cancels auto-repeat (`0x6ea080`), unless StartAttack's gate returns
+        // first.
+        seam.start(guid, engaged);
     }
     CommitOutcome {
         changed: true,
@@ -761,8 +762,8 @@ pub(crate) struct LastEnemy(pub(crate) Option<u64>);
 
 /// Stamp [`LastEnemy`] behind the five-conjunct gate `0x49372f`–`0x493778`, on the object
 /// `SetSelection` found and lit (`0x4936f3`-`0x493701`, [`Selection::lit`]): one that streams in
-/// later under the selected guid was never selected, so it is never stamped. Runs before
-/// `ring::update_ring`'s death-clear: a hostile that dies while selected stays remembered.
+/// later under the selected guid was never selected, so it is never stamped. Runs before the death
+/// handler's deselect (`super::died`): a hostile that dies while selected stays remembered.
 ///
 /// Deviation: sampled each frame, not stamped in `SetSelection`, so every selection writer is
 /// covered; a selected unit that turns hostile is remembered, where the reference's is not.
@@ -942,6 +943,7 @@ mod tests {
         world.init_resource::<crate::spell::SpellTargeting>();
         world.init_resource::<crate::ui_cast::CastReports>();
         world.init_resource::<crate::spell::AutoRepeatActive>();
+        world.init_resource::<crate::creature_anim::AttackStopInFlight>();
         world.init_resource::<crate::creature_anim::UnitEdits>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<Messages<crate::player::StandStateRequest>>();
@@ -1075,12 +1077,14 @@ mod tests {
             None,
             "the switch un-queued Heroic Strike"
         );
-        // `CancelQueuedCast`'s cancel (`0x6e6f68`): the pop's signal, then `SPELLCAST_STOP`.
+        // `CancelQueuedCast`'s cancel (`0x6e6f68`): the pop's signal, then `SPELLCAST_STOP`; the
+        // re-swing's repeat stop signals `STOP_AUTOREPEAT_SPELL` as the key clears (`0x6ea16a`).
         assert!(matches!(
             world.resource::<crate::ui_cast::CastReports>().0[..],
             [
                 crate::ui_cast::CastReport::Changed,
-                crate::ui_cast::CastReport::Bar(crate::ui_cast::CastBarEdge::Stop)
+                crate::ui_cast::CastReport::Bar(crate::ui_cast::CastBarEdge::Stop),
+                crate::ui_cast::CastReport::AutoRepeat(false)
             ]
         ));
         assert_eq!(

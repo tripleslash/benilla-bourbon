@@ -97,28 +97,15 @@ impl AttackPress<'_, '_> {
     /// [`Self::attack_target`]'s second half, the toggle at the validated target.
     pub(crate) fn start_attack(&mut self, guid: u64) {
         let Self { pick, seam, .. } = self;
-        let Ok(e) = seam.me.single() else {
+        if seam.me.single().is_err() {
             return;
-        };
+        }
         let engaged = pick.engaged();
         debug!(
             "attack {} at {guid:#x}",
             if engaged { "toggled off" } else { "swing" }
         );
-        let gate = seam.start_gate();
-        crate::creature_anim::toggle_attack_local(
-            e,
-            guid,
-            engaged,
-            gate,
-            &mut seam.slots,
-            &mut seam.auto_repeat,
-            &mut seam.sheath,
-            &mut seam.stand,
-            &seam.edits,
-            seam.spells.as_deref(),
-            &seam.net,
-        );
+        seam.toggle(guid, engaged);
     }
 
     /// TryCast's attack pick (`0x6e4efb`) for a spell press held there
@@ -274,17 +261,6 @@ pub(crate) fn use_action(
             return UseOutcome::Attack;
         }
         Some(b) if b.kind == ACTION_KIND_SPELL => {
-            // Re-pressing the spell whose targeting cursor is up cancels it before `TryCast`
-            // (`GetTargetingSpellId 0x4e60ea`, `StopTargeting 0x4e60f3`), as `CastBookSpell`
-            // does for the spellbook (`0x4b3474`, [`crate::ui_spellbook::cast_spell`]).
-            if ladder.ground.spell() == Some(b.action) {
-                debug!(
-                    "ui_action: cast {} re-pressed — targeting toggles off",
-                    b.action
-                );
-                ladder.stop_targeting();
-                return UseOutcome::Done;
-            }
             // A live `ActiveIconID` spell re-pressed cancels its aura (`0x4e55f0`, cancel
             // `0x4e60c1`). The form-match toggle is `CastSpell`'s alone, not `UseAction`'s.
             if let Some(d) = ladder.spells.as_ref().and_then(|s| s.catalog.get(b.action)) {
@@ -298,6 +274,26 @@ pub(crate) fn use_action(
                         return UseOutcome::Done;
                     }
                 }
+            }
+            // Then the running auto-repeat spell stops (`0x4e60d1`-`0x4e60da`), a toggle no
+            // `CastSpellByName` has: `TryCast` never reads the key.
+            if ladder.stop_auto_repeat_of(b.action) {
+                debug!(
+                    "ui_action: cast {} re-pressed — auto-repeat toggles off",
+                    b.action
+                );
+                return UseOutcome::Done;
+            }
+            // Then the spell whose targeting cursor is up cancels it before `TryCast`
+            // (`GetTargetingSpellId 0x4e60ea`, `StopTargeting 0x4e60f3`), as `CastBookSpell`
+            // does for the spellbook (`0x4b3474`, [`crate::ui_spellbook::cast_spell`]).
+            if ladder.ground.spell() == Some(b.action) {
+                debug!(
+                    "ui_action: cast {} re-pressed — targeting toggles off",
+                    b.action
+                );
+                ladder.stop_targeting();
+                return UseOutcome::Done;
             }
             debug!(
                 "ui_action: cast {} (target {:?}{})",

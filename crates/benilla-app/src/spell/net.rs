@@ -116,6 +116,8 @@ pub(crate) struct Scene<'w, 's> {
     stand: MessageWriter<'w, crate::player::StandStateRequest>,
     /// The auto-repeat clear and the precast's changes, applied after this handler.
     edits: Res<'w, crate::creature_anim::UnitEdits>,
+    /// Our stop in flight (`[+0xc54]`), which the GO-deferred swing reads (`0x5eccda`).
+    stop_word: Res<'w, crate::creature_anim::AttackStopInFlight>,
 }
 
 /// `SMSG_INITIAL_SPELLS`, once at login, into the action store the UI feed reads.
@@ -313,10 +315,15 @@ fn on_spell_go(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
         dest,
         ammo_display_id,
         item_caster,
-        ..
+        unit_caster,
     } = ev
     {
         let engaged = !sc.engaged_self.is_empty();
+        let stop_in_flight = l
+            .self_guid
+            .0
+            .and_then(|guid| l.index.0.get(&guid))
+            .is_some_and(|&me| sc.stop_word.of(me));
         let own = l
             .self_guid
             .0
@@ -337,6 +344,7 @@ fn on_spell_go(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
             dest,
             ammo_display_id,
             item_caster,
+            unit_caster,
             &mut sc.commands,
             &l.index,
             &sc.casting,
@@ -358,7 +366,7 @@ fn on_spell_go(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
                 &mut sc.sheaths,
                 &mut sc.stand,
                 &sc.edits,
-                engaged,
+                (engaged, stop_in_flight),
                 start_gate,
                 &mut super::CastCore {
                     pending: &mut l.pending,
@@ -413,7 +421,13 @@ fn on_cancel_auto_repeat(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) 
             &l.self_guid,
             &l.index,
             &sc.edits,
-            &l.net,
+            &mut super::CastCore {
+                pending: &mut l.pending,
+                queued_melee: &mut l.queued_melee,
+                ground: &mut l.ground,
+                reports: &mut l.reports,
+                net: &l.net,
+            },
         );
     }
 }
@@ -834,7 +848,7 @@ fn cast_result(
             }
         }
         if auto_repeat.0 == Some(spell_id) && !dont_report {
-            crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, net);
+            crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, core);
         }
         if !dont_report {
             cooldowns.clear_gcd(spell_id, now);
@@ -1080,6 +1094,7 @@ const GO_TYPE_CHEST: i32 = 3;
 /// `SMSG_SPELL_GO`: the cast launched. The server schedules damage off `Spell.dbc` Speed; the
 /// packet carries the hit and miss lists and the ammo display id, and the flight is rebuilt from
 /// the same Speed column ([`SpellGoTargets`]).
+#[allow(clippy::type_complexity)] // the handler's write sets, grouped by the leg that writes them
 fn spell_go(
     caster: u64,
     spell_id: u32,
@@ -1091,6 +1106,8 @@ fn spell_go(
     dest: Option<[f32; 3]>,
     ammo_display_id: Option<u32>,
     item_caster: Option<u64>,
+    // The packet's second guid as written, the caster slot `0x6e7f8b` looks up as a unit.
+    unit_caster: u64,
     commands: &mut Commands,
     index: &GuidIndex,
     casting: &Query<&Casting>,
@@ -1111,14 +1128,14 @@ fn spell_go(
         &crate::spell::SpellModifiers,
     ),
     // The GO-deferred auto-attack start's writes (`0x6e83c0`), the attack lock it gates on
-    // (`Engaged`, the reference's `[player+0xc48]`) and StartAttack's own gate (`0x5ecbaa`,
-    // `0x5ecbc0`).
+    // (`Engaged`, the reference's `[player+0xc48]`) with the stop in flight StartAttack reads
+    // (`[+0xc54]`, `0x5eccda`), and StartAttack's own gate (`0x5ecbaa`, `0x5ecbc0`).
     attack_ctx: (
         &mut crate::spell::AutoRepeatActive,
         &mut MessageWriter<crate::creature_anim::SheathRequest>,
         &mut MessageWriter<crate::player::StandStateRequest>,
         &crate::creature_anim::UnitEdits,
-        bool,
+        (bool, bool),
         crate::creature_anim::StartGate,
         &mut super::CastCore,
     ),
@@ -1131,9 +1148,10 @@ fn spell_go(
         hits.len(),
         misses.len()
     );
-    // The `use` trace's third link, after `target::click`: a caster we never streamed drops every
-    // visual below. A SPELLCASTER GameObject (type 22) is its own caster; vmangos writes that guid
-    // as 0 and the decode resolves it (`benilla_protocol::events`' `spell_caster`).
+    // The `use` trace's third link, after `target::click`: a caster we never streamed plays only
+    // its instant impacts below (`0x6e816b`). A SPELLCASTER GameObject (type 22) is its own caster: vmangos writes the caster slot as 0,
+    // which the decode resolves to the first guid (`benilla_protocol::events`' `spell_caster`),
+    // and it plays as a cast with no caster unit (`0x6e7f8b`).
     if benilla_assets::trace::enabled_for("use") {
         benilla_assets::trace::line(
             "use",
@@ -1158,7 +1176,8 @@ fn spell_go(
     }
     // The item leg held the cooldown for its record ([`item_go_cooldown`]).
     let mut pended = false;
-    let (auto_repeat, sheath, stand, edits, engaged, start_gate, core) = attack_ctx;
+    let (auto_repeat, sheath, stand, edits, (engaged, stop_in_flight), start_gate, core) =
+        attack_ctx;
     let now = Instant::now();
     // A chest becomes the loot target at this packet, not at the loot response: `HandleSpellGo
     // 0x6e7a70` reaches `0x6e831b call SetLootTarget 0x5ed5f0`, which writes `[player+0x1d28]` and
@@ -1208,7 +1227,7 @@ fn spell_go(
                     me,
                     guid,
                     engaged,
-                    false,
+                    stop_in_flight,
                     start_gate,
                     auto_repeat,
                     sheath,
@@ -1280,56 +1299,78 @@ fn spell_go(
     }
     // The miss list's lines, words and `UNIT_COMBAT` are the combat log's
     // (`crate::combat_log`, `0x6e7d65`-`0x6e7e71`).
-    // Keyed by spell id, like the reap `0x614150(spellId, 0)`: a proc's GO must not clear another
-    // spell's precast state.
-    if let Some(&e) = index.0.get(&caster) {
-        if casting.get(e).is_ok_and(|c| c.spell_id == spell_id) {
-            commands.entity(e).remove::<Casting>();
-        }
-        // The precast ends with its own spell's GO (`0x60d040` at `0x6e7fc5`), its tail run as
-        // `0x6e4870` answers for the record and the cast flags (`0x6e7fa1`, pushed at `0x6e7fbd`).
-        edits.push(crate::creature_anim::UnitEdit::EndPrecast {
-            entity: e,
-            spell_id: Some(spell_id),
-            tail: display.test_attributes_and_flags(u32::from(cast_flags)),
-        });
-        // The GO's chain-hop fill (`0x6e800d`), the producer for non-channelled chain spells. It
-        // must precede the CastEvent: the cast kit's chain proc consumes it the same frame. The
-        // reference gates it on the attribute predicate `0x6e4870`, whose role here is untraced;
-        // this fills unconditionally, harmless since consumption needs a chain proc and every fill
-        // clears.
-        fill_chain_hops(caster, e, &hits, commands, index);
-        cast_events.write(CastEvent {
-            entity: e,
-            spell_id,
-            kind: CastEventKind::Go,
-            cast_flags,
-            item_cast: item_caster.is_some(),
-            seq,
-        });
-        // Targets not streamed to us drop out. The miss code picks the victim's dodge or block
-        // clip on the missile's arrival.
-        let hits: Vec<Entity> = hits
-            .iter()
-            .filter_map(|g| index.0.get(g).copied())
-            .collect();
-        let misses: Vec<(Entity, u8)> = misses
-            .iter()
-            .filter_map(|m| index.0.get(&m.target).map(|&e| (e, m.info)))
-            .collect();
-        // A pure dest cast (ground AoE, empty lists) rides the same message: the point is a target.
-        let dest = dest.map(benilla_assets::coords::wow_to_bevy);
-        if !hits.is_empty() || !misses.is_empty() || dest.is_some() {
+    // Targets not streamed to us drop out. The miss code picks the victim's dodge or block clip on
+    // the missile's arrival.
+    let hits: Vec<(u64, Entity)> = hits
+        .iter()
+        .filter_map(|&g| index.0.get(&g).map(|&e| (g, e)))
+        .collect();
+    let misses: Vec<(Entity, u8)> = misses
+        .iter()
+        .filter_map(|m| index.0.get(&m.target).map(|&e| (e, m.info)))
+        .collect();
+    // The caster slot is the second guid looked up as a unit (`0x6e7f8b`, mask 8): a game object's
+    // cast writes it 0, so it finds none and skips every leg that needs one.
+    let unit = index
+        .0
+        .get(&unit_caster)
+        .copied()
+        .filter(|&e| stores.get(e).is_ok_and(|s| s.is_unit()));
+    let Some(e) = unit else {
+        // The instant impacts run on the hit list with no caster unit (`0x6e816b` → `0x6e8bf0`),
+        // whether or not the packet's caster is streamed; the cast kit (`0x6e8066`), the dest
+        // effect (`0x6e8082`) and the missiles (`0x6e8219`) need one.
+        if display.speed <= 0.0 && !hits.is_empty() {
             go_targets.write(SpellGoTargets {
-                caster: e,
+                caster: None,
                 spell_id,
-                hits,
+                hits: hits.into_iter().map(|(_, e)| e).collect(),
                 misses,
-                dest,
+                dest: None,
                 ammo_display_id,
                 seq,
             });
         }
+        return;
+    };
+    // Keyed by spell id, like the reap `0x614150(spellId, 0)`: a proc's GO must not clear another
+    // spell's precast state.
+    if casting.get(e).is_ok_and(|c| c.spell_id == spell_id) {
+        commands.entity(e).remove::<Casting>();
+    }
+    // The precast ends with its own spell's GO (`0x60d040` at `0x6e7fc5`), its tail run as
+    // `0x6e4870` answers for the record and the cast flags (`0x6e7fa1`, pushed at `0x6e7fbd`).
+    edits.push(crate::creature_anim::UnitEdit::EndPrecast {
+        entity: e,
+        spell_id: Some(spell_id),
+        tail: display.test_attributes_and_flags(u32::from(cast_flags)),
+    });
+    // The GO's chain-hop fill (`0x6e800d`), the producer for non-channelled chain spells. It must
+    // precede the CastEvent: the cast kit's chain proc consumes it the same frame. The reference
+    // gates it on the attribute predicate `0x6e4870`, whose role here is untraced; this fills
+    // unconditionally, harmless since consumption needs a chain proc and every fill clears.
+    let hit_guids: Vec<u64> = hits.iter().map(|&(g, _)| g).collect();
+    fill_chain_hops(unit_caster, e, &hit_guids, commands, index);
+    cast_events.write(CastEvent {
+        entity: e,
+        spell_id,
+        kind: CastEventKind::Go,
+        cast_flags,
+        item_cast: item_caster.is_some(),
+        seq,
+    });
+    // A pure dest cast (ground AoE, empty lists) rides the same message: the point is a target.
+    let dest = dest.map(benilla_assets::coords::wow_to_bevy);
+    if !hits.is_empty() || !misses.is_empty() || dest.is_some() {
+        go_targets.write(SpellGoTargets {
+            caster: Some(e),
+            spell_id,
+            hits: hits.into_iter().map(|(_, e)| e).collect(),
+            misses,
+            dest,
+            ammo_display_id,
+            seq,
+        });
     }
 }
 
@@ -1387,26 +1428,28 @@ fn spell_delayed(caster: u64, delay_ms: u32, self_guid: &SelfGuid, reports: &mut
     }
 }
 
-/// `SMSG_CANCEL_AUTO_REPEAT`: the handler (`0x6e99d0` → `0x6ea080`) clears the autorepeat key
-/// `0xceac30`, which the button's checked state reads (`STOP_AUTOREPEAT_SPELL`), the auto-repeat
-/// bit `[+0xd58] & 0x200`, so the Load/Hold idle drops ([`crate::creature_anim::AutoRepeatArmed`]),
-/// and the repeat spell's precast ([`crate::creature_anim::Precast`]). Nothing sheathes.
+/// `SMSG_CANCEL_AUTO_REPEAT`: the handler (`0x6e99d0`) runs `StopAutoRepeatSpell 0x6ea080` whole
+/// ([`crate::creature_anim::cancel_auto_repeat_local`]): the auto-repeat bit `[+0xd58] & 0x200`,
+/// so the Load/Hold idle drops ([`crate::creature_anim::AutoRepeatArmed`]), the repeat spell's
+/// precast and kits, its slot, and the key `0xceac30` the button's checked state reads, with
+/// `STOP_AUTOREPEAT_SPELL`. Nothing sheathes.
 ///
 /// vmangos sends it on every player autorepeat interrupt (`SpellCaster.cpp:1826`), which is how
-/// target death stops a volley (`Unit::_UpdateAutoRepeatSpell` → `CheckCast(true)` fails →
-/// `InterruptSpell`). Moving interrupts only Category 351, the wand, so Auto Shot stays armed
-/// across a run.
+/// the server stops a volley whose target died (`Unit::_UpdateAutoRepeatSpell` →
+/// `CheckCast(true)` fails → `InterruptSpell`); the client stops it itself when its selection
+/// dies (`0x605906`), so this one finds the key clear. Moving interrupts only Category 351, the
+/// wand, so Auto Shot stays armed across a run.
 fn cancel_auto_repeat(
     auto_repeat: &mut AutoRepeatActive,
     self_guid: &SelfGuid,
     index: &GuidIndex,
     edits: &crate::creature_anim::UnitEdits,
-    net: &crate::net::NetCommands,
+    core: &mut super::CastCore,
 ) {
     debug!("net: cancel auto-repeat");
     // The same cancel `0x6ea080` as every local trigger, its unconditional CMSG ack included.
     let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
-    crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, net);
+    crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, core);
 }
 
 /// The go's item leg, for a cast whose first guid is not the caster's: the item's entry off its
@@ -2255,6 +2298,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            Self::SELF,
                             &mut commands,
                             &index,
                             &casting,
@@ -2276,7 +2320,7 @@ mod tests {
                                 &mut sheath,
                                 &mut stand,
                                 &edits,
-                                false,
+                                (false, false),
                                 crate::creature_anim::StartGate::default(),
                                 &mut crate::spell::CastCore {
                                     pending: &mut Default::default(),
@@ -3186,6 +3230,7 @@ mod tests {
                         None,
                         None,
                         item_caster,
+                        caster,
                         &mut commands,
                         &index,
                         &casting,
@@ -3207,7 +3252,7 @@ mod tests {
                             &mut sheath,
                             &mut stand,
                             &edits,
-                            false,
+                            (false, false),
                             crate::creature_anim::StartGate::default(),
                             &mut crate::spell::CastCore {
                                 pending: &mut Default::default(),
@@ -3336,12 +3381,11 @@ mod tests {
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
-        // A caster and two streamed victims; guid 40 is never streamed to us.
+        // A caster and two streamed victims, units (`OBJECT_FIELD_TYPE` 0x9) as the go's caster
+        // slot finds them (`0x6e7f8b`); guid 40 is never streamed to us.
         let mut spawn = |guid: u64| {
-            let e = app
-                .world_mut()
-                .spawn((Guid(guid), ObjectStore::default()))
-                .id();
+            let unit = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(2, 0x9)]));
+            let e = app.world_mut().spawn((Guid(guid), unit)).id();
             app.world_mut()
                 .resource_mut::<GuidIndex>()
                 .0
@@ -3389,6 +3433,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        10,
                         &mut commands,
                         &index,
                         &casting,
@@ -3410,7 +3455,7 @@ mod tests {
                             &mut sheath,
                             &mut stand,
                             &edits,
-                            false,
+                            (false, false),
                             crate::creature_anim::StartGate::default(),
                             &mut crate::spell::CastCore {
                                 pending: &mut Default::default(),
@@ -3777,6 +3822,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            caster,
                             &mut commands,
                             &index,
                             &casting,
@@ -3798,7 +3844,7 @@ mod tests {
                                 &mut sheath,
                                 &mut stand,
                                 &edits,
-                                engaged,
+                                (engaged, false),
                                 gate,
                                 &mut crate::spell::CastCore {
                                     pending: &mut Default::default(),
