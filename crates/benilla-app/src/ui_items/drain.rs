@@ -145,8 +145,7 @@ pub(crate) struct ScriptItemUse<'w, 's> {
     equip_sound: MessageWriter<'w, crate::sound::AutoEquipSound>,
     item_text: ResMut<'w, crate::ui_item_text::ItemTextOpen>,
     targeting: crate::spell::cast_target::CastTargeting<'w, 's>,
-    // The loot latch the open arm sets, so `SMSG_LOOT_RESPONSE` admits an item loot, is the
-    // ladder's (`CastLadder::loot_latch`).
+    // The item use's casts and sends.
     ladder: crate::spell::CastLadder<'w, 's>,
     ui_errors: Res<'w, crate::ui_action::UiErrorKeys>,
     gate: crate::ui_bind_confirm::BindGate<'w>,
@@ -212,8 +211,13 @@ impl ScriptItemUse<'_, '_> {
     }
 
     /// `UseContainerItem(bag, slot)` outside repair mode: the arm the call took, sent. The call
-    /// chose it and took its lock ([`benilla_ui::script::UseArm`]), so this only sends.
-    pub(crate) fn use_container_item(&mut self, script: &mut UiScript, call: ContainerUse) {
+    /// chose it and took its lock ([`benilla_ui::script::UseArm`]), so this only sends; an item
+    /// that opens is handed back for the loot window's `OpenItem` ([`crate::ui_loot::OpenItem`]).
+    pub(crate) fn use_container_item(
+        &mut self,
+        script: &mut UiScript,
+        call: ContainerUse,
+    ) -> Option<crate::ui_loot::OpenItem> {
         let Self {
             self_q,
             merchant,
@@ -246,7 +250,7 @@ impl ScriptItemUse<'_, '_> {
                     guid: item_guid,
                 },
             );
-            return;
+            return None;
         }
         let slot0 = u8::try_from(slot.saturating_sub(1)).ok();
         // The slot must still hold the item the call resolved (`0x4fa1a6`). The reference sends
@@ -265,7 +269,7 @@ impl ScriptItemUse<'_, '_> {
             if arm_locked(arm) {
                 script.unlock_item(item_guid);
             }
-            return;
+            return None;
         };
         let fork = match arm {
             UseArm::Withdraw => {
@@ -274,7 +278,7 @@ impl ScriptItemUse<'_, '_> {
                     bag: bag_index,
                     slot: wire_slot,
                 });
-                return;
+                return None;
             }
             UseArm::Deposit => {
                 debug!("ui_items: deposit (lua bag {bag} → wire {bag_index}/{wire_slot})");
@@ -282,14 +286,14 @@ impl ScriptItemUse<'_, '_> {
                     bag: bag_index,
                     slot: wire_slot,
                 });
-                return;
+                return None;
             }
             // The whole stack sells (`CMSG_SELL_ITEM`, count 0).
             UseArm::Sell => {
                 let Some(vendor) = merchant.vendor else {
                     debug!("ui_items: sale of {item_guid:#x} with no vendor open — let go");
                     script.unlock_item(item_guid);
-                    return;
+                    return None;
                 };
                 debug!("ui_items: sell lua bag {bag} slot {slot} (item {item_guid:#x})");
                 let _ = ladder.commands.0.send(ClientCommand::SellItem {
@@ -297,7 +301,7 @@ impl ScriptItemUse<'_, '_> {
                     item_guid,
                     count: 0,
                 });
-                return;
+                return None;
             }
             UseArm::Item(fork) => fork,
         };
@@ -400,21 +404,18 @@ impl ScriptItemUse<'_, '_> {
                     );
                 }
             }
-            // The server answers with a loot window on the item (`SpellHandler.cpp:227`). The send
-            // tests neither the lock id nor the unlocked bit, so a locked box sends and the
-            // server's `EQUIP_ERR_ITEM_LOCKED` is the "Item is locked" line. The loot latch on the
-            // item's guid goes up before the send (`0x5edcc0`), as the call's lock did
-            // (`0x5edcd9`); the admission gate refuses the type-1 `SMSG_LOOT_RESPONSE` without it.
-            // No kneel (`0x612710`).
+            // `OpenItem 0x5edc80`, whose auto-loot byte, loot target and send are the loot
+            // window's. The server answers with a loot window on the item
+            // (`SpellHandler.cpp:227`). The send tests neither the lock id nor the unlocked bit,
+            // so a locked box sends and the server's `EQUIP_ERR_ITEM_LOCKED` is the "Item is
+            // locked" line. No kneel (`0x612710`).
             (UseFork::Open, Some(c)) => {
                 debug!(
                     "ui_items: open item {:#x} (lua bag {bag} → wire {bag_index}/{wire_slot})",
                     c.guid
                 );
-                if let Some(latch) = ladder.loot_latch.as_deref_mut() {
-                    latch.0 = Some(c.guid);
-                }
-                let _ = ladder.commands.0.send(ClientCommand::OpenItem {
+                return Some(crate::ui_loot::OpenItem {
+                    guid: c.guid,
                     bag_index,
                     slot: wire_slot,
                 });
@@ -427,7 +428,7 @@ impl ScriptItemUse<'_, '_> {
                     if arm_locked(arm) {
                         script.unlock_item(item_guid);
                     }
-                    return;
+                    return None;
                 }
                 debug!("ui_items: use item (lua bag {bag} → wire {bag_index}/{wire_slot})");
                 super::send_item_use(
@@ -451,6 +452,7 @@ impl ScriptItemUse<'_, '_> {
                 );
             }
         }
+        None
     }
 }
 
@@ -459,10 +461,7 @@ impl ScriptItemUse<'_, '_> {
 fn arm_locked(arm: UseArm) -> bool {
     matches!(
         arm,
-        UseArm::Withdraw
-            | UseArm::Deposit
-            | UseArm::Sell
-            | UseArm::Item(UseFork::Equip | UseFork::Open)
+        UseArm::Withdraw | UseArm::Deposit | UseArm::Sell | UseArm::Item(UseFork::Equip)
     )
 }
 
@@ -765,19 +764,23 @@ pub(super) fn drain_container_destroys(
 }
 
 /// The bag clicks of a harness's VM ([`UiScript::keep_calls`]): the repair-mode drain, then the
-/// kept `UseContainerItem` calls through their applier, as the app's host applies each inside its
-/// verb.
+/// kept `UseContainerItem` calls through their applier and an open through the loot window's, as
+/// the app's host applies each inside its verb.
 #[cfg(test)]
 fn run_container_clicks(world: &mut World) {
     use benilla_ui::script::ScriptCall;
-    use bevy::ecs::system::RunSystemOnce;
+    use bevy::ecs::system::{ParamSet, RunSystemOnce};
+    crate::ui_loot::seat_loot_steps(world);
     world.run_system_once(drain_container_repairs).unwrap();
     world
         .run_system_once(
-            |mut script: NonSendMut<UiScript>, mut items: ScriptItemUse| {
+            |mut script: NonSendMut<UiScript>,
+             mut set: ParamSet<(ScriptItemUse, crate::ui_loot::LootSteps)>| {
                 for call in script.take_script_calls() {
                     if let ScriptCall::UseContainerItem(call) = call {
-                        items.use_container_item(&mut script, call);
+                        if let Some(open) = set.p0().use_container_item(&mut script, call) {
+                            let _ = set.p1().open_item(&mut script, open);
+                        }
                     }
                 }
             },
@@ -808,6 +811,14 @@ mod tests {
 
     /// Right-clicks backpack slot 1, holding a lootable template, and runs the click dispatcher.
     fn open_the_clam() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+        open_the_clam_with(false, |_| {})
+    }
+
+    /// [`open_the_clam`] with Shift held as `shift` says, after `setup`.
+    fn open_the_clam_with(
+        shift: bool,
+        setup: impl FnOnce(&mut App),
+    ) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.add_message::<crate::sound::AutoEquipSound>()
@@ -848,11 +859,12 @@ mod tests {
                 (F_PACK_SLOT_1 + 1, (CLAM >> 32) as u32),
             ])),
         ));
-        // The item object and its lootable template, so the open arm claims the click.
+        // The item object (`OBJECT_FIELD_TYPE` an item's) and its lootable template, so the open
+        // arm claims the click.
         crate::items::test_spawn_item(
             app.world_mut(),
             CLAM,
-            ObjectFields::from_pairs(&[(F_OBJECT_ENTRY, CLAM_ENTRY)]),
+            ObjectFields::from_pairs(&[(2, 0x3), (F_OBJECT_ENTRY, CLAM_ENTRY)]),
             false,
         );
         let mut items = app.world_mut().resource_mut::<Items>();
@@ -866,6 +878,11 @@ mod tests {
 
         app.insert_non_send(harness_vm());
         feed_clam(&mut app);
+        crate::ui_loot::seat_loot_steps(app.world_mut());
+        app.world_mut()
+            .non_send_mut::<UiScript>()
+            .set_modifiers(shift, false, false);
+        setup(&mut app);
         app.world_mut()
             .non_send_mut::<UiScript>()
             .run("UseContainerItem(0, 1)")
@@ -947,6 +964,80 @@ mod tests {
         assert!(
             app.world().non_send::<UiScript>().item_locked(CLAM),
             "the slot greys at the click"
+        );
+    }
+
+    /// `OpenItem` stores whether Shift is down through `SetAutoLoot` (`0x5edca7`-`0x5edcb6`) before
+    /// it holds the item as the loot target (`0x5edcc0`), locks it (`0x5edcd9`) and sends
+    /// `CMSG_OPEN_ITEM`: alone the byte waits for the item's answer; with a window open on another
+    /// source the store sweeps it at once (`0x5df470` → `0x5df480`), its rows and its
+    /// `LOOT_OPENED` ahead of the lock and the open.
+    #[test]
+    fn a_shift_open_stores_the_byte_and_sweeps_an_open_window_first() {
+        const CORPSE: u64 = 0xF130_0000_0000_00AB;
+        const LINEN: u32 = 2589;
+        let (app, rx) = open_the_clam_with(true, |_| {});
+        assert!(matches!(
+            rx.try_iter().collect::<Vec<_>>()[..],
+            [ClientCommand::OpenItem { .. }]
+        ));
+        assert!(app.world().resource::<crate::ui_loot::AutoLootByte>().0);
+
+        let (app, rx) = open_the_clam_with(true, |app| {
+            let corpse = app
+                .world_mut()
+                .spawn(ObjectStore(ObjectFields::from_pairs(&[(2, 0x9)])))
+                .id();
+            let world = app.world_mut();
+            world
+                .resource_mut::<crate::net::GuidIndex>()
+                .0
+                .insert(CORPSE, corpse);
+            world
+                .resource_mut::<Items>()
+                .insert_template(LINEN, Some(crate::items::test_template("Linen Cloth")));
+            world.resource_mut::<crate::ui_loot::LootState>().open(
+                CORPSE,
+                1,
+                0,
+                vec![benilla_protocol::messages::LootItem {
+                    slot: 0,
+                    item_id: LINEN,
+                    count: 1,
+                    display_info_id: 0,
+                    random_property_id: 0,
+                    slot_type: benilla_protocol::messages::slot_type::ALLOW_LOOT,
+                }],
+            );
+            world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(CORPSE);
+            app.world()
+                .non_send::<UiScript>()
+                .run(
+                    "SEEN = {} local f = CreateFrame('Frame') \
+                     f:RegisterEvent('LOOT_OPENED') f:RegisterEvent('ITEM_LOCK_CHANGED') \
+                     f:SetScript('OnEvent', function() tinsert(SEEN, event) end)",
+                )
+                .unwrap();
+        });
+        let seen: String = app
+            .world()
+            .non_send::<UiScript>()
+            .eval("return table.concat(SEEN, ',')")
+            .unwrap();
+        assert_eq!(
+            seen, "LOOT_OPENED,ITEM_LOCK_CHANGED",
+            "the sweep, then the lock"
+        );
+        let sent: Vec<ClientCommand> = rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent[..],
+                [
+                    ClientCommand::AutostoreLootItem { slot: 0 },
+                    ClientCommand::OpenItem { .. }
+                ]
+            ),
+            "the sweep, then the open: {sent:?}"
         );
     }
 
@@ -1085,23 +1176,27 @@ mod tests {
         );
     }
 
-    /// The open arm locks the item inside the call (`0x5edcd9`), so a second right-click in the
-    /// same frame stops at the lock (`0x4fa1cd`) and one `CMSG_OPEN_ITEM` goes out.
+    /// The open arm locks the item inside the call, past its `SetAutoLoot` (`0x5edcd9`), so a
+    /// second right-click in the same frame, each applied as its call returns, stops at the lock
+    /// (`0x4fa1cd`) and one `CMSG_OPEN_ITEM` goes out.
     #[test]
     fn two_opens_in_one_frame_send_once() {
         let (mut app, rx) = open_the_clam();
         while rx.try_recv().is_ok() {} // drain the clam's own send
-        {
-            let mut script = app.world_mut().non_send_mut::<UiScript>();
-            script.unlock_item(CLAM);
-            script.run("UseContainerItem(0, 1)").unwrap();
-            assert!(
-                script.item_locked(CLAM),
-                "locked in the call, before any send"
-            );
-            script.run("UseContainerItem(0, 1)").unwrap();
-        }
-        run_container_clicks(app.world_mut());
+        let click = |app: &mut App| {
+            app.world_mut()
+                .non_send_mut::<UiScript>()
+                .run("UseContainerItem(0, 1)")
+                .unwrap();
+            run_container_clicks(app.world_mut());
+        };
+        app.world_mut().non_send_mut::<UiScript>().unlock_item(CLAM);
+        click(&mut app);
+        assert!(
+            app.world().non_send::<UiScript>().item_locked(CLAM),
+            "locked in the call, before any send"
+        );
+        click(&mut app);
         assert_eq!(rx.try_iter().count(), 1);
     }
 

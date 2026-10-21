@@ -313,7 +313,7 @@ pub use item_stats::{
 pub use item_text::ItemTextState;
 pub use layout_cache::{AnchorLayout, FrameLayout, LayoutPoint};
 pub use lock_check::{check_lock, LockCheck, LockOpener, LockOpeners, LockSlotView};
-pub use loot::{LootRow, LootState, LootTake, LOOT_PORTRAIT_UNIT};
+pub use loot::{LootCall, LootRow, LootState, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macro_options::{has_options as macro_has_options, show_directive, ShowDirective};
 pub use macros::{

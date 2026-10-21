@@ -869,6 +869,7 @@ fn a_looted_roll_shows_its_lines_and_never_the_placeholder() {
     s.set_loot(Some(LootState {
         source_unit: false,
         master_candidates: Vec::new(),
+        has_money: false,
         rows: vec![Some(LootRow {
             name: Some("Bloodrazor of the Monkey".into()),
             texture: None,
@@ -880,7 +881,6 @@ fn a_looted_roll_shows_its_lines_and_never_the_placeholder() {
             // The row carries the roll id; the engine resolves it, as the reference reads `+0x424`.
             random_property_id: 584,
         })],
-        fishing: false,
     }));
     s.set_random_properties(
         [(
@@ -951,6 +951,7 @@ fn a_looted_item_with_no_roll_shows_neither_line_nor_placeholder() {
     s.set_loot(Some(LootState {
         source_unit: false,
         master_candidates: Vec::new(),
+        has_money: false,
         rows: vec![Some(LootRow {
             name: Some("Bloodrazor".into()),
             quantity: 1,
@@ -958,7 +959,6 @@ fn a_looted_item_with_no_roll_shows_neither_line_nor_placeholder() {
             item_id: 8888,
             ..Default::default()
         })],
-        fishing: false,
     }));
     s.run(
         r#"
