@@ -126,7 +126,7 @@ session here:
   much as in the conflicts; it never leaves both standing. An upstream change that contradicts a
   decision the fork made is listed for the maintainer, never merged in silently. The steps are
   the `merge-upstream` skill.
-- **A full disk is cleared of stale incremental build artifacts, and of nothing else.** When a
-  build fails for want of space, remove the `incremental/` entries under `target/` that no build
+- **A full disk is cleared of stale build artifacts, and of nothing else.** When a build fails
+  for want of space, remove the build artifacts under `target/`'s profile folders that no build
   touched today and run it again. Free space is read with `df`, never `du`, which walks the whole
   tree.
