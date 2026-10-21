@@ -239,7 +239,7 @@ pub use benilla_world::build_id::BuildId;
 /// `benilla_world::launch_env`, which is how the engine reads them in the browser. Both entry
 /// points call it: the client used to skip it, so `?lighting=modern` only reached the world view.
 fn seed_launch_env() {
-    const SEEDED: [&str; 52] = [
+    const SEEDED: [&str; 54] = [
         "WOW_MAP",
         "WOW_MODERN_FOGLOG",
         "WOW_MODERN_LOOK",
@@ -329,6 +329,10 @@ fn seed_launch_env() {
         "WOW_MIRROR_PLANE_CULL",
         // …and the placed-light grouping's (`?light_group=0`).
         "WOW_LIGHT_GROUP",
+        // fork: perf — the per-system CPU profile's row count and spike threshold in ms
+        // (`?system_profile_top=`, `?system_profile_spike=`, `trace_systems` builds).
+        "WOW_SYSTEM_PROFILE_TOP",
+        "WOW_SYSTEM_PROFILE_SPIKE",
     ];
     benilla_world::launch_env::seed(
         SEEDED
@@ -686,9 +690,15 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         connect: !capturing,
         start: run_mode::start_state(),
     });
-    // fork: perf — the per-system CPU profile (`WOW_SYSTEM_PROFILE=1`), in a `trace_systems` build.
+    // fork: perf — the per-system CPU profile, always on in a `trace_systems` build.
     #[cfg(feature = "trace_systems")]
-    benilla_world::system_profile::plugin(&mut app);
+    {
+        // fork: web — the report goes to the console (no `LogPlugin` there), and spikes are
+        // stamped on the wall clock every thread shares.
+        #[cfg(target_arch = "wasm32")]
+        benilla_world::system_profile::set_web_hooks(webdiag::out, js_sys::Date::now);
+        benilla_world::system_profile::plugin(&mut app);
+    }
 
     // A background run opens unfocused, and `WinitSettings::game()` drives an unfocused window at
     // reactive 1/60 s, so a frame-time instrument would read ~16.7 ms whatever the scene costs.

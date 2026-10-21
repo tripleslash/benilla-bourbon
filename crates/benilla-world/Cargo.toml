@@ -20,9 +20,10 @@ dev = ["benilla-formats/dev", "benilla-assets/dev", "bevy/debug"]
 # the world needs WebGPU; WebGL2 stays selectable for the glue screens and as the census baseline.
 # Mutually exclusive — bevy asserts if both are on.
 webgl2 = ["bevy/webgl2"]
-# fork: perf — Bevy's per-system spans, summed by `system_profile` (`WOW_SYSTEM_PROFILE=1`). Off in
-# every shipped build; `cargo build -p benilla-worldview --features trace_systems` for a profile.
-trace_systems = ["bevy/trace"]
+# fork: perf — Bevy's per-system spans, summed and printed by `system_profile` whenever built in. Off
+# in every shipped build; `cargo build -p benilla-worldview --features trace_systems` for a profile.
+# `bevy/debug` keeps the system names the spans carry; without it every system is one unnamed row.
+trace_systems = ["bevy/trace", "bevy/debug"]
 # Tuning only: every embedded shader (`embedded_asset!`, `load_shader_library!`) is re-read from the
 # source tree when its file is saved, and the pipelines that use it recompile in the running app.
 # Native dev builds only, in no default set; `cargo build -p benilla-worldview --features shader_reload`.

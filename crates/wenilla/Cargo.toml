@@ -16,6 +16,9 @@ workspace = true
 # hosted page is `webgpu` — the world needs storage buffers.
 webgl2 = ["benilla-app/webgl2"]
 webgpu = ["benilla-app/webgpu"]
+# fork: perf — the per-system CPU profile (`benilla-world`'s `system_profile`), always on where built
+# in; off in the hosted page, on for a profiling build through `web/index.html`'s feature list.
+trace_systems = ["benilla-app/trace_systems"]
 
 [lib]
 crate-type = ["cdylib"]
