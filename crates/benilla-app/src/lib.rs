@@ -38,6 +38,17 @@
 #[global_allocator]
 static ALLOC: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
+/// fork: web — the threaded browser build's allocator: per-shard class lists over a lock that lets
+/// no waiter starve, so the page thread is never starved by workers on std's one spin-locked
+/// `dlmalloc`.
+#[cfg(all(
+    target_arch = "wasm32",
+    target_feature = "atomics",
+    not(debug_assertions)
+))]
+#[global_allocator]
+static ALLOC: wasm_alloc::ShardedAlloc = wasm_alloc::ShardedAlloc;
+
 pub mod addon_harness;
 mod area;
 mod area_poi;
@@ -208,6 +219,15 @@ mod ui_world_map;
 mod video;
 mod vm_pass;
 mod vplates;
+#[cfg(any(
+    test,
+    all(
+        target_arch = "wasm32",
+        target_feature = "atomics",
+        not(debug_assertions)
+    )
+))]
+mod wasm_alloc;
 mod weapon_trail;
 /// The web build's env-var stand-in (a browser tab has no process environment) — see the
 /// module doc. `pub` because the plan's "Env/config on web" interface names it as
