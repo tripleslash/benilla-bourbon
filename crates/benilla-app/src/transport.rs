@@ -46,9 +46,9 @@ impl Plugin for TransportPlugin {
             .add_systems(
                 Update,
                 // After the net drain and before input, so the deck is posed before the mover
-                // reads the world. avian refreshes collider AABBs in `FixedPostUpdate`, before
-                // `Update`, so without [`republish_moved_collider_aabbs`] the mover's casts see the
-                // deck's previous-frame box, above its rider after one long frame. It writes no
+                // reads the world. avian refreshes collider AABBs in `PostUpdate`, after `Update`,
+                // so without [`republish_moved_collider_aabbs`] the mover's casts see the deck's
+                // previous-frame box, above its rider after one long frame. It writes no
                 // tick resource, so a second run is idempotent; it sweeps every collider.
                 (
                     arm_transports,

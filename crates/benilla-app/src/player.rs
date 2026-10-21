@@ -199,8 +199,8 @@ pub(super) type BodyQuery<'w, 's> = Query<
 >;
 
 /// The armed transports, for the deck carry ([`ride`]). `ColliderAabb` is for the ride trace:
-/// avian refreshes it in `FixedPostUpdate`, before `tick_transports` moves the deck in `Update`, so
-/// the broad-phase box lags its deck by a frame.
+/// avian refreshes it in `PostUpdate`, after `tick_transports` moved the deck in `Update`, so the
+/// next frame's move leaves the broad-phase box a frame behind its deck.
 pub(super) type TransportQuery<'w, 's> = Query<
     'w,
     's,

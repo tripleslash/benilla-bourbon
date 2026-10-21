@@ -240,8 +240,9 @@ pub(super) fn update_attachment(
                 .inverse()
                 .mul_vec3(feet - bpos);
             // The deck's broad-phase box, which the mover probes' candidate query tests, trails the
-            // deck by a frame: avian refreshes it in `FixedPostUpdate`, before `tick_transports`
-            // moves the deck in `Update`. A positive `gap` hides the deck from the down-probe.
+            // deck by a frame: avian refreshes it in `PostUpdate`, after `tick_transports` moved
+            // the deck in `Update`, so the next frame's move runs ahead of it. A positive `gap`
+            // hides the deck from the down-probe.
             let aabb_col = match baabb {
                 Some(a) => format!(
                     " | aabbY[{:8.2},{:8.2}] gap{:+7.2}",

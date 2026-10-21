@@ -19,7 +19,11 @@ impl PluginGroup for WorldPlugins {
             .add(MaterialPlugin::<TerrainMaterial>::default())
             .add(MaterialPlugin::<WowModelMaterial>::default())
             // Physics (avian3d): colliders, their BVH and the shape-casts of controller and picker.
-            .add_group(PhysicsPlugins::default())
+            // Once a frame in `PostUpdate` on the frame's own delta, not avian's fixed-step
+            // `FixedPostUpdate`: with no dynamics (below) a step's length changes nothing, and
+            // the fixed loop ran every step a long frame owed, up to sixteen after a stall, so the
+            // next frame ran long too and stalls chained.
+            .add_group(PhysicsPlugins::new(bevy::app::PostUpdate))
             // No contact pipeline: nothing reads a contact (the player is a shape-cast controller,
             // units carry no colliders), and trimesh pairs against terrain tiles cost whole ticks.
             // The collider BVH the shape-casts ride is `ColliderTreePlugin`'s, kept.
@@ -180,14 +184,6 @@ impl Plugin for WorldFoundation {
                 propagate_before_physics: false,
                 ..Default::default()
             });
-        }
-        // `WOW_PHYS_HZ=<hz>`: the fixed loop's rate, a measurement lever and never a setting (at
-        // 8 Hz streamed colliders reach the spatial trees up to 125 ms late).
-        if let Some(hz) = std::env::var("WOW_PHYS_HZ")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-        {
-            app.insert_resource(bevy::time::Time::<bevy::time::Fixed>::from_hz(hz));
         }
         // Static transform tracking always on: movers are 1–3% of the world, so the adaptive
         // check's two full scans a frame could only ever conclude "track".
