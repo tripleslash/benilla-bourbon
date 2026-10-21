@@ -180,10 +180,8 @@ struct WowLight {
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
 // fork: modern lighting (FORK.md, P4) — water fogs itself from the froxel volume.
-// fork: modern lighting — the sun shadow on water: how much of the lit colour the shade keeps, and how
-// much of the glint survives it.
+// fork: modern lighting — the sun shadow on water: how much of the lit colour the shade keeps.
 const WATER_SHADE_KEEP: f32 = 0.8;
-const WATER_GLINT_SHADE: f32 = 0.3;
 // fork: modern lighting — where the water's shadow is read: on the bed down the view ray, stopped
 // `BED_LIFT` yd short of it (so the bed does not shadow itself), handing over to the surface as the
 // column under the pixel deepens from `PROBE` to twice that.
@@ -853,7 +851,8 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // shore into colours the surface does not have.
     let ramp = swatch(in.depth_v + abs(grad.y) * 0.1);
     // fork: modern lighting — the sun's share of the water's light falls under the cascades and the
-    // cloud shadow, so water in a tree's or a cliff's shade reads shaded.
+    // cloud shadow, so water in a tree's or a cliff's shade reads shaded. `water_sun` is the sun's
+    // reach at the surface, which the highlights take; `water_lit` the body's shaded light.
     var water_sun = 1.0;
     var water_lit = in.lit_color;
     if (modern) {
@@ -874,26 +873,28 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // the surface the ray only rises, so only what stands out of the water shades it. From below
         // there is no bed along the ray; the surface is the probe there too. The fade goes by the
         // vertical column, never the ray, which is long over a hand-deep shore.
+        //
+        // The sun's highlights (glare, specular, glint) are the sun mirrored off the surface itself, so
+        // they take the surface point's visibility whatever the depth, and none of it in full shade.
         let lifted = in.world_position.xyz + vec3<f32>(0.0, 0.05, 0.0);
+        let sun_surface = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, lifted, frag_view_z);
         let deep = select(smoothstep(WATER_SHADOW_PROBE, 2.0 * WATER_SHADOW_PROBE, column_v), 1.0, below);
+        var body_sun = sun_surface;
         if (deep < 1.0) {
             let probe_d = max(ray_len - WATER_SHADOW_BED_LIFT, 0.0);
             // The probe sits on this pixel's ray, so its planar depth scales with the distance along it.
             let probe_z = frag_view_z * (1.0 + probe_d / max(view_len, 0.001));
-            water_sun = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, lifted + v * probe_d, probe_z);
-        }
-        if (deep > 0.0) {
-            let sun_surface = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, lifted, frag_view_z);
-            water_sun = mix(water_sun, sun_surface, deep);
+            let sun_bed = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, lifted + v * probe_d, probe_z);
+            body_sun = mix(sun_bed, sun_surface, deep);
         }
         let wct = sunshadow::cloud_taps(modern_block.fog.cloud, lifted);
-        water_sun = water_sun * sunshadow::cloud_mix(wct, modern_block.cloud[wct.idx.x], modern_block.cloud[wct.idx.y], modern_block.cloud[wct.idx.z], modern_block.cloud[wct.idx.w]);
+        let cloud = sunshadow::cloud_mix(wct, modern_block.cloud[wct.idx.x], modern_block.cloud[wct.idx.y], modern_block.cloud[wct.idx.z], modern_block.cloud[wct.idx.w]);
         // The shade keeps some of the light: skylight still reaches open water from every side.
         // Water is not a solid receiver: light scatters in the body under the shadow too, so the shade
-        // keeps most of the lit colour, and the glints only dim under it.
+        // keeps most of the lit colour.
         let shade = max(min(in.lit_color, wow_light.light_ambient.rgb), in.lit_color * WATER_SHADE_KEEP);
-        water_lit = mix(shade, in.lit_color, water_sun);
-        water_sun = mix(WATER_GLINT_SHADE, 1.0, water_sun);
+        water_lit = mix(shade, in.lit_color, body_sun * cloud);
+        water_sun = sun_surface * cloud;
     }
     let body = ramp.rgb * water_lit;
 
