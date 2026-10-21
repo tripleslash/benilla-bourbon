@@ -195,7 +195,7 @@ pub(in crate::entities) fn resolve_equipment(
         Option<&Wielded>,
         Option<&Equipment>,
         Option<&VisualSheath>,
-        Option<&crate::creature_anim::AnimDriver>,
+        Option<&crate::creature_anim::CommittedSheath>,
         Option<&NockedAmmo>,
         Has<NockLatch>,
         Option<&ResolveKey>,
@@ -246,7 +246,7 @@ pub(in crate::entities) fn resolve_equipment(
         current_wielded,
         current_equipment,
         visual_sheath,
-        driver,
+        committed_sheath,
         nocked,
         nock_latched,
         current_key,
@@ -261,8 +261,8 @@ pub(in crate::entities) fn resolve_equipment(
         }
         let s = &store.0;
         // The anim layer's committed sheath state, else the raw byte until the driver runs.
-        let committed = driver
-            .and_then(|d| d.sheath_state())
+        let committed = committed_sheath
+            .and_then(|c| c.state())
             .or_else(|| s.unit_sheath_state())
             .unwrap_or(0);
         let key = ResolveKey {

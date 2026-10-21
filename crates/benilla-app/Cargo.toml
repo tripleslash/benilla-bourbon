@@ -133,6 +133,10 @@ sha1.workspace = true
 # The UI's geometry comparisons (`benilla_ui::assert_near!`).
 benilla-ui = { path = "../benilla-ui", features = ["test-support"] }
 
+# The schedule census keeps the build's own graph, sync points included, through a build pass,
+# whose signature names the `IndexSet` bevy already builds (`game_plugins::schedule_tests`).
+indexmap = "2.14.0"
+
 # Wayland clipboard over the standard `wl_data_device`; arboard's speaks `wlr-data-control`,
 # which GNOME does not implement.
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]

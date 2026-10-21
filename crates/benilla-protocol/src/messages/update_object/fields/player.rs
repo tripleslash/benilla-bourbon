@@ -13,6 +13,11 @@ impl ObjectFields {
     pub fn item_owner(&self) -> Option<u64> {
         self.get_guid(6)
     }
+    /// `ITEM_FIELD_CONTAINED` (field 8): the bag holding the item, or its owner for an item in
+    /// one of the player's own seats.
+    pub fn item_contained(&self) -> Option<u64> {
+        self.get_guid(8)
+    }
     /// `OBJECT_FIELD_TYPE` itself, the type mask: 9 for a creature or a pet, `0x19` for a player.
     /// The display resolve asks the creature cache only for 9 (`0x60b134`).
     pub fn object_type_mask(&self) -> Option<u32> {
@@ -127,6 +132,14 @@ impl ObjectFields {
             .unwrap_or(0)
             & 0xffff
     }
+    /// The high half of slot `i`'s `PLAYER_VISIBLE_ITEM_<slot>_PROPERTIES` dword (block `+0x2a`):
+    /// `GetVirtualItem 0x5ec240` takes bit 0 set as no weapon in the hand (`0x5ec2ee`).
+    pub fn player_visible_item_flags(&self, i: u8) -> u16 {
+        (i < 19)
+            .then(|| self.get_u32(FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 10 + 12 * u16::from(i)))
+            .flatten()
+            .map_or(0, |v| (v >> 16) as u16)
+    }
     /// `PLAYER_FIELD_INV_SLOT_HEAD + 2i`: our equipment (0-18) and equipped-bag (19-22) guids.
     pub fn player_inv_slot(&self, i: u8) -> Option<u64> {
         (i < 23).then(|| self.get_guid(FIELD_PLAYER_INV_SLOT_HEAD + 2 * u16::from(i)))?
@@ -205,6 +218,11 @@ impl ObjectFields {
     /// every creep-flagged unit then gets a minimap dot (`0x5ed210`, the `+0x1028` read).
     pub fn player_track_stealthed(&self) -> bool {
         self.get_u32(FIELD_PLAYER_FIELD_BYTES).unwrap_or(0) & 0x2 != 0
+    }
+    /// `PLAYER_FIELD_BYTES` byte 0 bit `0x4` (vmangos `PLAYER_FIELD_BYTE_LOGGING_OUT`): the cast
+    /// validator refuses a living player with it `0x61` (`0x60982b`, `[+0xe68]+0x1028`).
+    pub fn player_logging_out(&self) -> bool {
+        self.get_u32(FIELD_PLAYER_FIELD_BYTES).unwrap_or(0) & 0x4 != 0
     }
     /// `PLAYER_QUEST_LOG_<slot+1>_*`: one quest-log slot, `quest_id == 0` when the server cleared
     /// it; the count-state and timer are written with the id (`Player.h:1094-1099`).

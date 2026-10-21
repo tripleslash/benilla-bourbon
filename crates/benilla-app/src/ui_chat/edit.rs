@@ -209,14 +209,6 @@ impl ChannelState {
         }
     }
 
-    /// `SendChatMessage`'s channel target (`0x49f4d9`-`0x49f4ea`): `SStrToInt` straight into
-    /// `0x49be50`, with no name leg, so only a number naming a confirmed slot sends, and the
-    /// packet carries that slot's name. Anything else, a name included, sends nothing.
-    pub(crate) fn send_target(&self, arg: &str) -> Option<String> {
-        self.confirmed_slot_name(s_str_to_int(arg))
-            .map(str::to_string)
-    }
-
     /// The by-number getter `0x49be50`: slot `n`'s name when it is in range, not a hole, and in
     /// state 0 (here [`SlotState::Joined`]); below 1, past the end, a hole or another state is
     /// `None`.
@@ -273,12 +265,25 @@ impl ChannelState {
             .map(|s| s.state)
     }
 
-    /// The names for the VM's mirror, holes kept so `/N` addresses the right channel.
-    pub(crate) fn names(&self) -> Vec<Option<String>> {
+    /// The slots for the VM's mirror, holes kept so `/N` addresses the right channel, each with
+    /// whether it is in state 0, which `SendChatMessage`'s lookup `0x49be50` requires.
+    pub(crate) fn names(&self) -> Vec<Option<benilla_ui::script::JoinedChannel>> {
         self.joined
             .iter()
-            .map(|s| s.as_ref().map(|s| s.name.clone()))
+            .map(|s| {
+                s.as_ref().map(|s| benilla_ui::script::JoinedChannel {
+                    name: s.name.clone(),
+                    confirmed: s.state == SlotState::Joined,
+                })
+            })
             .collect()
+    }
+
+    /// Push the slots into the VM's mirror, which `SendChatMessage`'s channel target and the
+    /// channel verbs read where the reference reads the slot array itself. Every step that writes
+    /// a slot's name or state ends with this, so the mirror never lags the slot it copies.
+    pub(crate) fn mirror_into(&self, script: &mut benilla_ui::script::UiScript) {
+        script.set_joined_channels(self.names());
     }
 
     /// Every joined channel's name, holes skipped.

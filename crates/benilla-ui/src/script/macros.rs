@@ -55,7 +55,7 @@ pub struct MacroView {
     pub id: u32,
     pub name: String,
     /// The icon's texture path, kept by name because the reference saves the icon by name
-    /// (`MACRO %d "%s" %s`, `0x44cb60`).
+    /// (`MACRO %d "%s" %s`, `0x84cb60`).
     pub texture: Option<String>,
     /// The macro's lines, `\n`-separated.
     pub body: String,
@@ -943,9 +943,12 @@ mod tests {
             .contains("Usage: CreateMacro"));
         // An index past the chooser leaves no icon: Turtle answers the question mark, which its
         // `MacroFrame_Update` can `strupper`, where 1.12.1 answers nil.
-        s.run(r#"CreateMacro("Bare", 99, "")"#).unwrap();
+        // The tab sorts by name (`0x4f0d30`), so the index is the one the call answers.
+        let bare = s
+            .eval::<i64>(r#"return CreateMacro("Bare", 99, "")"#)
+            .unwrap();
         assert_eq!(
-            s.eval::<String>("local _, t = GetMacroInfo(2) return t")
+            s.eval::<String>(&format!("local _, t = GetMacroInfo({bare}) return t"))
                 .unwrap(),
             TURTLE_NO_ICON
         );

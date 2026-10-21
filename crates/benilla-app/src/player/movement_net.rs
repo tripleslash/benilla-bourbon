@@ -81,11 +81,31 @@ pub(super) struct ArcEdges {
     pub(super) fall_time: u32,
 }
 
+/// Whether a move message ends the mover's precast: the send `0x60e0a0` clears it (`0x60e15d`)
+/// ahead of every opcode but those it sends at once, which for our moves are the stops
+/// (0xb7, 0xba), the turns (0xbc to 0xbe) and the facing (0xda), class 0 of its table
+/// `0x60e408`. The heartbeat (0xee) and the landing (0xc9) never pass it: their sends call
+/// `0x600a30` directly (`0x616755`, `0x615e47`, `0x617162`, `0x5e221e`; `0x602e13`).
+fn ends_precast(kind: MoveKind) -> bool {
+    !matches!(
+        kind,
+        MoveKind::Stop
+            | MoveKind::StopStrafe
+            | MoveKind::StartTurnLeft
+            | MoveKind::StartTurnRight
+            | MoveKind::StopTurn
+            | MoveKind::SetFacing
+            | MoveKind::Heartbeat
+            | MoveKind::FallLand
+    )
+}
+
 /// Streams this frame's movement as the reference does: a `MSG_MOVE_*` per axis transition (its
 /// broadcaster `0x61a820` picks the opcode from the flag delta, `0x619f00`), a `SET_FACING` each
 /// frame the facing changes off the turn axis, and a heartbeat every 500 ms while moving. Airborne,
 /// the forward, back and strafe transitions go silent and their live bits ride the packets that do
 /// go out. Sends are fire-and-forget; updates `player`'s last-sent flags, facing and heartbeat.
+/// Returns whether a message sent ended the mover's precast ([`ends_precast`]).
 pub(super) fn stream_self_movement(
     sender: &Sender<ClientCommand>,
     player: &mut Player,
@@ -97,7 +117,7 @@ pub(super) fn stream_self_movement(
     knock_ack: Option<super::state::PendingKnockback>,
     transport: Option<TransportPose>,
     skip: SkipClock,
-) {
+) -> bool {
     let ArcEdges {
         jumped,
         wire_launch,
@@ -153,7 +173,8 @@ pub(super) fn stream_self_movement(
     // applies the launch and then sends (`0x61624d` call `0x6179c0`, then `0x616261` push `0xf0`).
     // `launch` is echoed bit for bit, as the reference copies its live fields: vmangos matches the
     // four floats within 0.01 (`Unit.cpp:7097-7100`), and a re-derived quad has no direction at
-    // `xy_speed == 0`.
+    // `xy_speed == 0`. Its send ends the precast: 0xf0 is no opcode `0x60e0a0` exempts.
+    let mut precast_ended = knock_ack.is_some();
     if let Some(k) = knock_ack {
         let _ = sender.send(ClientCommand::KnockBackAck {
             guid: k.guid,
@@ -173,6 +194,7 @@ pub(super) fn stream_self_movement(
     let mut sent = false;
     macro_rules! send_move {
         ($kind:expr) => {{
+            precast_ended |= ends_precast($kind);
             if *crate::net::CAST_TRACE {
                 bevy::log::info!(
                     "cast-trace: SEND move {:?} flags={:#x} pos=[{:.3},{:.3},{:.3}] o={:.3}",
@@ -294,6 +316,7 @@ pub(super) fn stream_self_movement(
     // leaves no catch-up `SET_FACING` behind.
     player.last_facing = facing;
     player.move_flags = wire_flags;
+    precast_ended
 }
 
 /// `CMSG_MOVE_TIME_SKIPPED`: the milliseconds the mover advanced through without integrating. The
@@ -1459,6 +1482,99 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "no Stop is sent when we were already reported stopped"
+        );
+    }
+
+    /// `0x60e0a0` ends the mover's precast (`0x60e15d`) ahead of each move it does not send at
+    /// once (`0x60e408` class 0): a start, the jump and the knockback ack do; a stop, a turn and a
+    /// facing change do not. Nor do the heartbeats and the landing, which go to `0x600a30` without
+    /// passing it (`0x616755`, `0x615e47`, `0x617162`, `0x5e221e`; `0x602e13`).
+    #[test]
+    fn the_moves_the_send_does_not_exempt_end_the_precast() {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Edge {
+            None,
+            Knock,
+            Jump,
+            Land,
+        }
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut player = Player::default();
+        let frame = |player: &mut Player, flags: u32, now: f32, edge: Edge| {
+            let knock = edge == Edge::Knock;
+            let ended = stream_self_movement(
+                &tx,
+                player,
+                flags,
+                0.0,
+                ArcEdges {
+                    jumped: edge == Edge::Jump,
+                    wire_launch: knock,
+                    air_nudged: false,
+                    landed: edge == Edge::Land,
+                    fall_time: 0,
+                },
+                now,
+                &[],
+                knock.then_some(super::super::state::PendingKnockback {
+                    guid: 0x1234,
+                    counter: 1,
+                    launch: benilla_protocol::JumpInfo {
+                        zspeed: -12.0,
+                        cos_angle: 1.0,
+                        sin_angle: 0.0,
+                        xy_speed: 25.0,
+                    },
+                }),
+                None,
+                no_skip(),
+            );
+            let sent: Vec<String> = rx.try_iter().map(|c| format!("{c:?}")).collect();
+            assert!(!sent.is_empty(), "the frame at {now} sends something");
+            ended
+        };
+        let falling = move_flags::FALLING;
+        assert!(
+            frame(&mut player, move_flags::FORWARD, 0.0, Edge::None),
+            "start forward"
+        );
+        assert!(!frame(&mut player, 0, 0.1, Edge::None), "the stop");
+        assert!(
+            !frame(&mut player, move_flags::TURN_LEFT, 0.2, Edge::None),
+            "a turn"
+        );
+        assert!(!frame(&mut player, 0, 0.3, Edge::None), "the turn's stop");
+        assert!(
+            frame(&mut player, move_flags::FORWARD, 1.0, Edge::None),
+            "start again"
+        );
+        assert!(
+            !frame(&mut player, move_flags::FORWARD, 1.6, Edge::None),
+            "the running heartbeat (0x616755)"
+        );
+        assert!(!frame(&mut player, 0, 2.0, Edge::None), "the stop");
+        player.face_yaw += 0.5;
+        assert!(!frame(&mut player, 0, 2.1, Edge::None), "a facing change");
+        player.pos.x += 0.01;
+        assert!(
+            !frame(&mut player, 0, 2.2, Edge::None),
+            "the at-rest position report"
+        );
+        assert!(
+            frame(&mut player, falling, 3.0, Edge::Jump),
+            "the jump (0xbb, 0x615ed1)"
+        );
+        assert!(
+            !frame(&mut player, falling, 3.6, Edge::None),
+            "the falling heartbeat"
+        );
+        assert!(
+            !frame(&mut player, 0, 3.8, Edge::Land),
+            "the landing (0xc9, 0x602e13)"
+        );
+        assert!(
+            frame(&mut player, 0, 4.0, Edge::Knock),
+            "the knockback ack (0xf0)"
         );
     }
 }

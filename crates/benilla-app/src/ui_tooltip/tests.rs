@@ -5,6 +5,7 @@ use super::*;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
 use crate::ui_action::{real_spells, PlayerActions, Spells};
+use benilla_ui::script::UiScript;
 
 /// The view alone, read through the shipped strings, for the cell tests; the feed keeps what it
 /// read beside it.
@@ -1276,6 +1277,7 @@ pub(super) fn mouseover_app() -> (App, Entity, Entity) {
         .init_resource::<crate::go_templates::GameObjectTemplates>()
         .init_resource::<Items>()
         .init_resource::<PlayerActions>()
+        .init_resource::<crate::ui_guild::GuildState>()
         .add_systems(Update, drive_mouseover_tooltip);
     app.world_mut()
         .spawn((SelfPlayer, ObjectStore(ObjectFields::default())));
@@ -1394,6 +1396,125 @@ fn the_mouseover_token_answers_can_assist() {
     );
     hover(&mut app, Hovered::default(), HoveredObject::default());
     assert_eq!(eval(&mut app, can_assist), None, "no mouseover");
+}
+
+/// `GetGuildInfo("mouseover")` (`0x4c9330`) reads the hovered player's guild from the cache
+/// (`0x4c93d2`), as any token does, from the frame the record lands.
+#[test]
+fn the_mouseover_answers_get_guild_info_from_the_cache() {
+    use benilla_protocol::ObjectFields;
+    let (mut app, _, boar) = mouseover_app();
+    // A player now, in guild 7 at rank 2 (`OBJECT_FIELD_TYPE`, `PLAYER_GUILDID`, `_GUILDRANK`).
+    app.world_mut()
+        .get_mut::<ObjectStore>(boar)
+        .unwrap()
+        .0
+        .merge(ObjectFields::from_pairs(&[(2, 0x19), (191, 7), (192, 2)]));
+    let info = |app: &mut App| -> (Option<String>, i64) {
+        app.world_mut()
+            .non_send::<UiScript>()
+            .eval::<(Option<String>, Option<String>, i64)>(r#"return GetGuildInfo("mouseover")"#)
+            .map(|(name, _, rank)| (name, rank))
+            .unwrap()
+    };
+    hover_unit(&mut app, boar, BOAR);
+    assert_eq!(info(&mut app), (None, 0), "not cached");
+    app.world_mut()
+        .resource_mut::<crate::ui_guild::GuildState>()
+        .land_for_test(7, "Probe Guild");
+    hover_unit(&mut app, boar, BOAR);
+    assert_eq!(info(&mut app), (Some("Probe Guild".to_string()), 2));
+}
+
+/// A player hovered for the first time answers inside its own `UPDATE_MOUSEOVER_UNIT`: the
+/// publisher writes the mouseover pair (`0x492890`) before it signals (`0x4929b3`), and
+/// `CanInspect` (`0x48a1b0`), `CheckInteractDistance` (`0x48ba00`) and the slot getters
+/// (`0x4c8328`) read the object it names at once. The hover twin of the target's case.
+#[test]
+fn a_fresh_hovers_reach_and_slots_answer_inside_its_mouseover_event() {
+    use crate::net::{Guid, GuidIndex};
+    use crate::target::relations::fixture::{factions, HUMAN};
+    use benilla_protocol::field::FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR;
+    use benilla_protocol::ObjectFields;
+    const OTHER: u64 = 0x1002;
+    const HELM: u32 = 7366;
+    /// `OBJECT_FIELD_TYPE` and `UNIT_FIELD_FACTIONTEMPLATE`.
+    const OBJECT_TYPE: u16 = 2;
+    const TEMPLATE: u16 = 35;
+    let (mut app, _, _) = mouseover_app();
+    app.insert_resource(factions())
+        .insert_resource(crate::net::SelfGuid(Some(ME)));
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(HELM, Some(crate::items::test_template("Helm")));
+    let me = app
+        .world_mut()
+        .query_filtered::<Entity, With<SelfPlayer>>()
+        .single(app.world())
+        .unwrap();
+    app.world_mut().entity_mut(me).insert((
+        Guid(ME),
+        ObjectStore(ObjectFields::from_pairs(&[
+            (OBJECT_TYPE, 0x19),
+            (TEMPLATE, HUMAN),
+        ])),
+        Transform::default(),
+    ));
+    // A Human 3 yards off wearing the helm, whom no token names.
+    let other = app
+        .world_mut()
+        .spawn((
+            Guid(OTHER),
+            ObjectStore(ObjectFields::from_pairs(&[
+                (OBJECT_TYPE, 0x19),
+                (TEMPLATE, HUMAN),
+                (FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 2, HELM),
+            ])),
+            Transform::from_xyz(3.0, 0.0, 0.0),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<GuidIndex>()
+        .0
+        .insert(OTHER, other);
+    {
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
+        script.set_unit_guids(&benilla_ui::script::UnitGuids {
+            player: ME,
+            held: [(ME, 0)].into_iter().collect(),
+            ..Default::default()
+        });
+        crate::ui_script::test_ui::load_tooltip_template(&script);
+        script
+            .run(
+                r#"
+                UIParent = CreateFrame("Frame", "UIParent"); UIParent:SetAllPoints()
+                local tt = CreateFrame("GameTooltip", "GameTooltip", UIParent, "TestTooltipTemplate")
+                tt:Hide()
+                tt:SetScript("OnTooltipSetDefaultAnchor", function()
+                    GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+                end)
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
+                f:SetScript("OnEvent", function()
+                    table.insert(SEEN, tostring(CanInspect("mouseover")) .. " "
+                        .. tostring(CheckInteractDistance("mouseover", 1)) .. " "
+                        .. tostring(GetInventoryItemLink("mouseover", 1)))
+                end)
+            "#,
+            )
+            .unwrap();
+        script.resolve();
+    }
+    hover_unit(&mut app, other, OTHER);
+    let mut s = app.world_mut().non_send_mut::<UiScript>();
+    s.resolve();
+    let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
+    assert!(
+        matches!(seen.as_slice(), [one] if one.starts_with("1 1 ") && one.contains("[Helm]")),
+        "{seen:?}"
+    );
 }
 
 /// `UnitCreatureType("mouseover")` goes through the resolver `0x605570` for a hovered player as

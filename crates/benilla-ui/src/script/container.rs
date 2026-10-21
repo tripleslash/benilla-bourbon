@@ -44,7 +44,7 @@ pub struct ContainerSlot {
     /// The template's class (`[rec+0x0]`, read by `0x5d9f30`), `None` while unresolved: a
     /// projectile (6) auto-equips by entry and unlocks as it goes (`0x5e1704`).
     pub item_class: Option<u32>,
-    /// The item's template entry; 0 while unresolved.
+    /// The item object's template entry, 0 until the object carries one.
     pub item_id: u32,
     /// An `|Hitem:…|h[Name]|h` link once the name is known.
     pub link: Option<String>,
@@ -107,6 +107,13 @@ pub struct ContainerSlot {
 }
 
 impl ContainerSlot {
+    /// An item object whose record the cache does not hold yet, which the feed pushes with its
+    /// entry and no quality: a cooldown query on it asks the record with the callback `0x6e2f70`
+    /// (`0x6e2efb`), whose arrival runs it.
+    pub fn record_pending(&self) -> bool {
+        self.item_id != 0 && self.quality.is_none()
+    }
+
     /// The whole stack of this slot as a cursor payload, as a pickup sets it.
     pub(crate) fn cursor_item(&self, bag: i64, slot: u32) -> CursorItem {
         CursorItem {
@@ -347,6 +354,12 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().container_equip_asks)
     }
 
+    /// Drain the item entries whose record a cooldown query found missing since the last call, each
+    /// asked with the callback `0x6e2f70`.
+    pub fn take_cooldown_record_asks(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.model_mut().cooldown_record_asks)
+    }
+
     /// Drain the `(bag, slot)` clicks repair mode queued, for `CMSG_REPAIR_ITEM`.
     pub fn take_container_repairs(&mut self) -> Vec<(i64, u32)> {
         std::mem::take(&mut self.model_mut().container_repairs)
@@ -546,7 +559,14 @@ fn use_cleared(
 /// `AutoEquipCursorItem` (`0x4fa3ff`), then the item locks unless it is a projectile
 /// (`0x4fa40b`, `0x4fa418`), whose clear unlocked it instead (`0x5e1711`). A bind-on-equip item
 /// sends nothing: it stays held and locked under the question.
-fn use_equip_arm(lua: &Lua, bag: i64, slot: u32, item: CursorItem, on_self: bool, may_cast: bool) {
+fn use_equip_arm(
+    lua: &Lua,
+    bag: i64,
+    slot: u32,
+    item: CursorItem,
+    on_self: bool,
+    may_cast: bool,
+) -> mlua::Result<()> {
     let guid = item.guid;
     let projectile = item.item_class == Some(cursor::ITEM_CLASS_PROJECTILE);
     let step = cursor::equip::auto_equip_from(lua, item, false);
@@ -571,8 +591,9 @@ fn use_equip_arm(lua: &Lua, bag: i64, slot: u32, item: CursorItem, on_self: bool
                 on_self,
                 may_cast,
             }),
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// The wrap arm `0x5edea0`: the paper at `(bag, slot)` locks, the cursor takes mode 2 (the cast
@@ -911,13 +932,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 slot,
                 "Usage: GetContainerItemCooldown(index, slot)",
             )?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let held = key.is_some_and(|k| {
-                model
-                    .containers
-                    .get(&k.0)
-                    .is_some_and(|c| c.slots.contains_key(&k.1))
-            });
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let slot = key.and_then(|k| model.containers.get(&k.0)?.slots.get(&k.1));
+            let held = slot.is_some();
+            // The query asks a missing record with the callback `0x6e2f70` (`0x6e2efb`).
+            if let Some(entry) = slot.filter(|s| s.record_pending()).map(|s| s.item_id) {
+                model.cooldown_record_asks.push(entry);
+            }
             Ok(if held {
                 item_cooldown_triple(
                     key.and_then(|k| model.container_cooldowns.get(&k).copied()),
@@ -1034,10 +1055,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 use_cleared(model, bag, slot, on_self, may_cast, &mut call)
             });
             if let Some(call) = call {
-                super::calls::submit(lua, call);
+                super::calls::submit(lua, call)?;
             }
             if let Some(item) = equip {
-                use_equip_arm(lua, bag, slot, item, on_self, may_cast);
+                use_equip_arm(lua, bag, slot, item, on_self, may_cast)?;
             }
             Ok(())
         })?,
@@ -1628,6 +1649,7 @@ mod tests {
                 .collect()
         };
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack()));
         s.run("UseContainerItem(0, 1)").unwrap();
         s.run(r#"RunScript("UseContainerItem(0, 1)")"#).unwrap();
@@ -1656,6 +1678,7 @@ mod tests {
     #[test]
     fn use_container_item_queues_intents() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack()));
         s.run("UseContainerItem(0, 1)").unwrap();
         s.run("UseContainerItem(0, 4, 'target')").unwrap();
@@ -1670,6 +1693,7 @@ mod tests {
     #[test]
     fn use_container_item_takes_its_arm_and_the_arms_lock_in_the_call() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let arm = |s: &mut UiScript, bag: i64| {
             s.run(&format!("UseContainerItem({bag}, 1)")).unwrap();
             let calls = s.take_script_calls();
@@ -1728,6 +1752,7 @@ mod tests {
     #[test]
     fn the_equip_arm_needs_control_or_a_taxi() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(forked_bag(super::UseFork::Equip)));
         s.set_player_control(false);
         s.run("UseContainerItem(0, 1)").unwrap();
@@ -1753,6 +1778,7 @@ mod tests {
     #[test]
     fn the_open_arm_runs_the_requirement_and_control_gates_before_its_lock() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(forked_bag(super::UseFork::Open)));
 
         s.set_player_control(false);
@@ -1800,6 +1826,7 @@ mod tests {
         use super::UseFork::{Equip, Letter, Open, Plain, Quest, Read, Unwrap, WrapPaper};
         let refusals = |fork, level_ok: bool, control: bool| {
             let mut s = UiScript::new().unwrap();
+            s.keep_calls();
             s.set_container(0, Some(forked_bag(fork)));
             s.set_player_control(control);
             s.set_player_req_state(crate::script::PlayerReqState {
@@ -1856,6 +1883,7 @@ mod tests {
         let mut slot = forked_bag(super::UseFork::Plain);
         slot.slots.get_mut(&1).unwrap().use_spell = 7744;
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(slot.clone()));
         s.set_player_control(false);
 
@@ -1915,6 +1943,7 @@ mod tests {
     #[test]
     fn use_container_item_skips_an_empty_slot_and_a_locked_item() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack()));
         s.lock_item(0x10a); // slot 1, a send's lock
         s.run("UseContainerItem(0, 1) UseContainerItem(0, 3)")
@@ -1937,6 +1966,7 @@ mod tests {
     #[test]
     fn right_click_puts_a_held_item_back_then_uses_the_clicked_one() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack()));
         s.run("PickupContainerItem(0, 1)").unwrap();
         assert!(s.cursor_item().is_some());
@@ -1957,6 +1987,7 @@ mod tests {
     #[test]
     fn right_click_cancels_an_armed_gift_wrap_then_uses_the_clicked_one() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack()));
         s.arm_gift_wrap(0, 1);
         s.run("UseContainerItem(0, 4)").unwrap();
@@ -2170,7 +2201,7 @@ mod tests {
         );
         s.set_container(0, Some(state));
 
-        assert!(split_container_item(&s.lua, 0, 1, 3));
+        assert!(split_container_item(&s.lua, 0, 1, 3).unwrap());
         let held = s.cursor_item().expect("the split carry");
         assert_eq!(
             (held.bag, held.slot, held.item_id, held.count),
@@ -2192,7 +2223,7 @@ mod tests {
 
         // The source stays locked until the server's answer, its stack-count write (`0x5d9400`).
         assert!(
-            !split_container_item(&s.lua, 0, 1, 3),
+            !split_container_item(&s.lua, 0, 1, 3).unwrap(),
             "locked for the answer"
         );
         s.unlock_item(0x10a);
@@ -2219,8 +2250,9 @@ mod tests {
     #[test]
     fn split_of_the_whole_stack_is_a_plain_pickup_and_an_oversized_count_is_refused() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_container(0, Some(backpack())); // slot 1: a 5-stack
-        assert!(split_container_item(&s.lua, 0, 1, 5));
+        assert!(split_container_item(&s.lua, 0, 1, 5).unwrap());
         assert_eq!(s.cursor_item().unwrap().count, None);
         // A count above the stack, or below 1, is refused before the clear (`0x4fa06f`,
         // `0x4fa064`): a held macro stays held.
@@ -2232,13 +2264,16 @@ mod tests {
             });
         s.set_cursor_for_test(macro_payload.clone());
         for count in [6, 99, 0, -1] {
-            assert!(!split_container_item(&s.lua, 0, 1, count), "{count}");
+            assert!(
+                !split_container_item(&s.lua, 0, 1, count).unwrap(),
+                "{count}"
+            );
         }
         assert_eq!(s.cursor_payload(), Some(macro_payload));
         // Past the gates the split stops spell targeting (`0x4fa07d`).
         s.run("ClearCursor()").unwrap();
         s.set_spell_targeting(true);
-        assert!(split_container_item(&s.lua, 0, 1, 2));
+        assert!(split_container_item(&s.lua, 0, 1, 2).unwrap());
         assert!(s.take_stop_targeting());
     }
 

@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// Free-flies until the server places us, then drives the avatar and streams its movement as the
 /// mover; the dev chord with `F` toggles free fly.
 #[allow(clippy::type_complexity)]
@@ -66,6 +69,10 @@ pub(super) fn control(
         Res<crate::loading_screen::LoadingScreen>,
         // Our own `[0xb4b3e4]`, which a control verdict on our character writes.
         ResMut<super::OwnControlLost>,
+        // The body's precast spell, which the posture verbs refuse on.
+        Query<Has<crate::creature_anim::Precast>, (With<Embodied>, Without<FlyCam>)>,
+        // `ChrClasses.dbc`, whose relic flag the sheath toggle's ranged candidate reads.
+        Option<Res<crate::chr_classes::ChrClassTable>>,
     ),
     mut commands: Commands,
     mut player: ResMut<Player>,
@@ -81,11 +88,13 @@ pub(super) fn control(
         Local<Option<camera::PressGesture>>,
         Local<Option<camera::PressGesture>>,
     ),
-    // The liquid query, the transports, and the parent chain from a deck collider to its transport.
+    // The liquid query, the transports, the parent chain from a deck collider to its transport,
+    // and the active mover `0xc4da98`, as whether it is our own character.
     world_q: (
         benilla_world::world_point::WorldPoint,
         TransportQuery,
         Query<&ChildOf>,
+        Query<Has<crate::net::SelfPlayer>, With<crate::net::ActiveMover>>,
     ),
 ) {
     let (world, transports, child_of) = (&world_q.0, &world_q.1, &world_q.2);
@@ -279,7 +288,7 @@ pub(super) fn control(
 
     // The server's movement edges and their acks. Speed changes come back unacked while we drive,
     // for the movement stream to ack with the live pose.
-    let speed_acks = wire_in::apply_server_moves(
+    let server_moves = wire_in::apply_server_moves(
         &time,
         &mut commands,
         &mut player,
@@ -299,6 +308,10 @@ pub(super) fn control(
             .ok()
             .map(|(_, t, ..)| (t.translation, server_ride::yaw_of(t.rotation))),
     );
+    let speed_acks = server_moves.speed_acks;
+    if let (true, Ok((e, ..))) = (server_moves.precast_ended, body.single()) {
+        crate::creature_anim::end_precast(&mut commands, e, crate::creature_anim::PrecastTail::Run);
+    }
 
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
 
@@ -306,6 +319,25 @@ pub(super) fn control(
     ride::carry(&mut player, &mut cam, transports);
 
     if player.active && !player.detached {
+        // The cast bar's self-cancel, at the command press ([`input::cancels_cast`]) and ahead of
+        // the mover: between the press `0x5150a7` and the cancel `0x51512a` stands only the taint
+        // test `0x494a50`, so it runs whoever drives the body. It reads the commands, never the
+        // streamed word, which a root empties of direction bits. The cast cancel tests no mover
+        // (`0x5150f2`); the channel's compares the player with the active mover
+        // (`0x51517b`-`0x515191`), which possession sets to the creature and lost control zeroes
+        // (`0x5fa600`), so steering a possessed creature, or pressing while feared, ends a cast but
+        // not a channel.
+        let active_mover = world_q.3.iter().next();
+        let autorun_on = input::toggle_autorun(binds, &mut player);
+        if input::cancels_cast(
+            binds,
+            autorun_on,
+            input::both_engaged(binds, &rig, both_buttons),
+            active_mover.is_some(),
+        ) {
+            net.7.pressed = true;
+            net.7.mover_is_player = active_mover == Some(true);
+        }
         // Not driving, while the camera stays on the body and input, physics and the stream yield:
         // - `server_riding`: a server spline (Charge, knockback, taxi, a flee path) owns the body;
         //   `drive_self_ride` has mirrored it into `Player`, reporting FORWARD on purpose.
@@ -315,6 +347,13 @@ pub(super) fn control(
         //   carry no guid, so driving would write one body's pose onto another.
         // Possession is none of these: it runs the ordinary path below, on the creature.
         if player.server_riding || player.control_lost || player.reseat {
+            // The latch outlives the yield: lost control and an unresolved reseat leave the tick
+            // no unit (`0x51466e`), but a ride keeps the mover and fails `0x5144e0`, so the tick
+            // the ride's monster move runs (`0x602053`), and each press's, clears the bit
+            // (`0x514748`).
+            if player.server_riding && active_mover.is_some() {
+                player.autorun = false;
+            }
             // The moving body's transform is the truth; without this the camera stays behind
             // during a fear. Not while reseating, when `Player` still holds the body let go.
             if player.control_lost && !player.reseat {
@@ -390,7 +429,6 @@ pub(super) fn control(
             mouselook,
             turning,
             translating,
-            autorun_armed,
             turn_left,
             turn_right,
             ..
@@ -465,14 +503,22 @@ pub(super) fn control(
         // mover reads `CMovement+0x40` after the input phase.
         walk::update(&mut player, &body, binds);
         // The stand state and the sheath toggle, which interlock; returns the committed stand.
+        let reads = posture::PlayerReads {
+            control_lost: speed_capsule.10 .0,
+            precast: speed_capsule.11.single().unwrap_or(false),
+        };
         let stand_now = posture::update(
             &mut player,
             &body,
             binds,
             &net.0,
+            &mut commands,
             &mut net.3,
+            &mut net.14,
             &mut net.10,
             &mut net.15,
+            reads,
+            speed_capsule.12.as_deref().map(|t| &t.0),
             moving,
             turned,
         );
@@ -757,19 +803,7 @@ pub(super) fn control(
             &dynamics,
         );
 
-        // The cast bar's self-cancel: a new directional start, a jump, or autorun's on edge (the
-        // interrupt mask `0x10f0` at `0x5150ce` is forward, back, strafe and autorun, and a clear
-        // edge returns early at `0x5150c8`); turning and pitch never cancel. Only our own
-        // character's moves count: vmangos breaks a channel on the caster's own movement
-        // (`Spell::update`), so a possessed creature's steps must not end Mind Control.
         let steering_ourselves = player.foreign_mover.is_none();
-        if steering_ourselves
-            && (move_flags_now & move_flags::ANY_MOVE & !player.move_flags != 0
-                || jumped
-                || autorun_armed)
-        {
-            net.7 .0 = true;
-        }
         // The loot window's walk-away, the movement-start guard `0x60e990`: forward, back, strafe,
         // keyboard turn, pitch and jump close it, mouse-look facing does not, and only for our
         // own character.
@@ -793,7 +827,7 @@ pub(super) fn control(
             gated,
             mover: player.foreign_mover.or(self_guid),
         };
-        movement_net::stream_self_movement(
+        let precast_ended = movement_net::stream_self_movement(
             &net.0 .0,
             &mut player,
             move_flags_now,
@@ -814,6 +848,13 @@ pub(super) fn control(
             wire_transport,
             skip,
         );
+        if let (true, Ok((e, ..))) = (precast_ended, body.single()) {
+            crate::creature_anim::end_precast(
+                &mut commands,
+                e,
+                crate::creature_anim::PrecastTail::Run,
+            );
+        }
     } else {
         // Free fly. Park the mover first, so a detach mid-move leaves no stale flags for observers
         // to extrapolate; a no-op once stopped.

@@ -1531,6 +1531,11 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             packed,
             target_guid,
         } => w.pet_action(pet_guid, packed, target_guid),
+        ClientCommand::PetCastSpell {
+            caster_guid,
+            spell_id,
+            target,
+        } => w.pet_cast_spell(caster_guid, spell_id, target),
         ClientCommand::PetSetAction { pet_guid, entries } => w.pet_set_action(pet_guid, &entries),
         ClientCommand::PetStopAttack { pet_guid } => w.pet_stop_attack(pet_guid),
         ClientCommand::PetCancelAura { pet_guid, spell_id } => {

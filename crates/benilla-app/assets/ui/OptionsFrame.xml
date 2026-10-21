@@ -3078,7 +3078,12 @@
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- Saved globals in 1.12; the mode greys with its switch
-                                             (UIOptionsFrame.lua:697-701). -->
+                                             (UIOptionsFrame.lua:697-701). Neither row applies anything:
+                                             1.12's options only write the uvars (UIOptionsFrame.lua:65),
+                                             and the target frames' OnUpdates show or hide the frame on
+                                             the next frame (TargetFrame.lua:492-501). Called from a row,
+                                             TargetofTarget_Update would refresh the row's debuffs
+                                             (RefreshBuffs(this, ...), TargetFrame.lua:538). -->
                                         <Frame name="$parentRowTargetOfTarget" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowStatusText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
@@ -3087,7 +3092,6 @@
                                             <Scripts><OnLoad>
                                                 BenillaOptionsGlobalRow_OnLoad(this, "SHOW_TARGET_OF_TARGET",
                                                     "Show Target of Target", "OPTION_TOOLTIP_SHOW_TARGET_OF_TARGET")
-                                                this.applyFunc = "TargetofTarget_Update"
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- The label is ours, since 1.12 never sets this
@@ -3107,7 +3111,6 @@
                                                     { text = "Party or Raid", value = "4", tip = "OPTION_TOOLTIP_TARGETOFTARGET4" },
                                                     { text = "Always", value = "5", tip = "OPTION_TOOLTIP_TARGETOFTARGET5" },
                                                 })
-                                                this.applyFunc = "TargetofTarget_Update"
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- PLAYER_FLAGS bits, API rows

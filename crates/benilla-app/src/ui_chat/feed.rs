@@ -151,8 +151,16 @@ pub(super) fn text_emote_event(
 /// The chat items the feeds queue and [`feed_chat`] drains. World broadcasts wait apart, as their
 /// resolve needs more than [`feed_chat`] can hold at Bevy's `SystemParam` limit;
 /// `feed_broadcasts` resolves them onto `pending` earlier in the same frame.
+///
+/// An append-only sink shared through `&self`: a system that lends the call host appends here
+/// while a call the host applies inside its Lua appends a refusal's line too, as the reference's
+/// verb writes the chat frame in the call. One lock keeps every append in the order it was made.
 #[derive(Resource, Default)]
-pub(crate) struct ChatLog {
+pub(crate) struct ChatLog(std::sync::Mutex<ChatQueue>);
+
+/// What [`ChatLog`] holds.
+#[derive(Default)]
+struct ChatQueue {
     pending: Vec<Pending>,
     broadcasts: Vec<super::broadcast::Broadcast>,
     /// A level-up's gains for `ui_unit`'s `PLAYER_LEVEL_UP` fire, matched by level: the fire
@@ -161,55 +169,83 @@ pub(crate) struct ChatLog {
 }
 
 impl ChatLog {
+    /// The queue, held for one step; a poisoned lock still holds whole items.
+    fn q(&self) -> std::sync::MutexGuard<'_, ChatQueue> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Drop everything queued: the session's end.
+    pub(crate) fn reset(&self) {
+        *self.q() = ChatQueue::default();
+    }
+
+    /// Take what is parked, for the drain.
+    fn take_pending(&self) -> Vec<Pending> {
+        std::mem::take(&mut self.q().pending)
+    }
+
+    /// Park `still` again ahead of what was queued while the drain ran: the lines a call its
+    /// handlers made appended meanwhile.
+    fn park_again(&self, mut still: Vec<Pending>) {
+        let mut q = self.q();
+        still.append(&mut q.pending);
+        q.pending = still;
+    }
+}
+
+impl ChatLog {
     /// Queue one world broadcast for [`super::broadcast::feed_broadcasts`]'s resolve pass.
-    pub(crate) fn push_broadcast(&mut self, b: super::broadcast::Broadcast) {
-        self.broadcasts.push(b);
+    pub(crate) fn push_broadcast(&self, b: super::broadcast::Broadcast) {
+        self.q().broadcasts.push(b);
     }
 
     /// How many broadcasts are waiting, the drain's early-out.
     pub(crate) fn broadcasts_pending(&self) -> usize {
-        self.broadcasts.len()
+        self.q().broadcasts.len()
     }
 
     /// Take the parked broadcasts, leaving the queue empty.
-    pub(crate) fn take_broadcasts(&mut self) -> Vec<super::broadcast::Broadcast> {
-        std::mem::take(&mut self.broadcasts)
+    pub(crate) fn take_broadcasts(&self) -> Vec<super::broadcast::Broadcast> {
+        std::mem::take(&mut self.q().broadcasts)
     }
 
     /// Park a level-up's gains for the `PLAYER_LEVEL_UP` fire.
-    pub(crate) fn push_level_up_gains(&mut self, info: &LevelUpInfo, talent_points: u32) {
-        self.level_up_gains.push((*info, talent_points));
+    pub(crate) fn push_level_up_gains(&self, info: &LevelUpInfo, talent_points: u32) {
+        self.q().level_up_gains.push((*info, talent_points));
     }
 
     /// Take the parked gains for `level`; with none (a GM's level write), the caller fires zeros.
-    pub(crate) fn take_level_up_gains(&mut self, level: u32) -> Option<(LevelUpInfo, u32)> {
-        let i = self
+    pub(crate) fn take_level_up_gains(&self, level: u32) -> Option<(LevelUpInfo, u32)> {
+        let mut q = self.q();
+        let i = q
             .level_up_gains
             .iter()
             .position(|(l, _)| l.level == level)?;
-        Some(self.level_up_gains.remove(i))
+        Some(q.level_up_gains.remove(i))
     }
 }
 
 impl ChatLog {
     /// Queue a decoded wire line (`SMSG_MESSAGECHAT`).
-    pub(crate) fn push_wire(&mut self, msg: ChatMessage) {
-        self.pending.push(Pending::Wire { msg, tries: 0 });
+    pub(crate) fn push_wire(&self, msg: ChatMessage) {
+        self.q().pending.push(Pending::Wire { msg, tries: 0 });
     }
 
     /// Queue a client-composed event: loot, quest and system lines, the `/played` answer.
-    pub(crate) fn push_event(&mut self, event: ChatEvent) {
-        self.pending.push(Pending::Event(event));
+    pub(crate) fn push_event(&self, event: ChatEvent) {
+        self.q().pending.push(Pending::Event(event));
     }
 
     /// Queue one combat-log line, classified at the packet by [`super::combat`], for its names.
-    pub(crate) fn push_combat(&mut self, line: super::combat::PendingCombat) {
-        self.pending.push(Pending::Combat(Box::new(line)));
+    pub(crate) fn push_combat(&self, line: super::combat::PendingCombat) {
+        self.q().pending.push(Pending::Combat(Box::new(line)));
     }
 
     /// Queue a decoded `SMSG_CHANNEL_NOTIFY`; a guid tail waits for its names.
     pub(crate) fn push_channel_notice(
-        &mut self,
+        &self,
         notice_byte: u8,
         channel: String,
         tail: &ChannelNoticeTail,
@@ -222,7 +258,7 @@ impl ChatLog {
             ChannelNoticeTail::ModeChange { .. } => return, // silent in the 1.12 UI (no string)
         };
         if a_guid != 0 {
-            self.pending.push(Pending::Notice {
+            self.q().pending.push(Pending::Notice {
                 notice: notice_byte,
                 channel,
                 a_guid,
@@ -231,7 +267,7 @@ impl ChatLog {
             });
         } else {
             if let Some(event) = notice_event(notice_byte, channel, name, None) {
-                self.pending.push(Pending::Event(event));
+                self.q().pending.push(Pending::Event(event));
             }
         }
     }
@@ -239,7 +275,7 @@ impl ChatLog {
     /// Queue an inbound addon line for its sender's name. The text splits on its first tab, and
     /// with none it is all prefix (`0x49a8d0`); `distribution` names PARTY, RAID, GUILD and
     /// BATTLEGROUND, any other type `"UNKNOWN"` (`0x49aff4`).
-    pub(crate) fn push_addon(&mut self, text: &str, chat_type: u8, guid: u64) {
+    pub(crate) fn push_addon(&self, text: &str, chat_type: u8, guid: u64) {
         let (prefix, message) = match text.find('\t') {
             Some(i) => (text[..i].to_string(), text[i + 1..].to_string()),
             None => (text.to_string(), String::new()),
@@ -256,7 +292,7 @@ impl ChatLog {
             }
         }
         .to_string();
-        self.pending.push(Pending::Addon {
+        self.q().pending.push(Pending::Addon {
             prefix,
             message,
             distribution,
@@ -266,8 +302,8 @@ impl ChatLog {
     }
 
     /// Queue a `/random` broadcast (`MSG_RANDOM_ROLL`) for the roller-name resolve.
-    pub(crate) fn push_roll(&mut self, min: u32, max: u32, roll: u32, guid: u64) {
-        self.pending.push(Pending::Roll {
+    pub(crate) fn push_roll(&self, min: u32, max: u32, roll: u32, guid: u64) {
+        self.q().pending.push(Pending::Roll {
             min,
             max,
             roll,
@@ -277,8 +313,8 @@ impl ChatLog {
     }
 
     /// Queue an XP gain's line (`SMSG_LOG_XPGAIN`); `victim` 0 is the unnamed form.
-    pub(crate) fn push_xp_gain(&mut self, victim: u64, total: u32, base: u32, group: f32) {
-        self.pending.push(Pending::XpGain {
+    pub(crate) fn push_xp_gain(&self, victim: u64, total: u32, base: u32, group: f32) {
+        self.q().pending.push(Pending::XpGain {
             victim,
             total,
             base,
@@ -287,20 +323,20 @@ impl ChatLog {
     }
 
     /// Queue an XP loss's line, an `SMSG_LOG_XPGAIN` naming you as the victim (`0x637f70`).
-    pub(crate) fn push_xp_loss(&mut self, total: u32) {
-        self.pending.push(Pending::XpLoss { total });
+    pub(crate) fn push_xp_loss(&self, total: u32) {
+        self.q().pending.push(Pending::XpLoss { total });
     }
 
     /// Queue a `UNIT_COMBAT` behind what is already queued, so it fires in the order its handler
     /// raised it against its lines.
-    pub(crate) fn push_unit_combat(&mut self, ev: crate::ui_unit::UnitCombatFeedback) {
-        self.pending.push(Pending::UnitCombat(ev));
+    pub(crate) fn push_unit_combat(&self, ev: crate::ui_unit::UnitCombatFeedback) {
+        self.q().pending.push(Pending::UnitCombat(ev));
     }
 
     /// Queue an honor award's line (`SMSG_PVP_CREDIT`); victim 0 is a bonus or objective award.
-    pub(crate) fn push_pvp_credit(&mut self, honor: i32, victim: u64, rank: u8, side: u8) {
+    pub(crate) fn push_pvp_credit(&self, honor: i32, victim: u64, rank: u8, side: u8) {
         // Both forks park: the template resolves at the drain.
-        self.pending.push(Pending::HonorGain {
+        self.q().pending.push(Pending::HonorGain {
             victim,
             honor,
             rank,
@@ -309,8 +345,8 @@ impl ChatLog {
     }
 
     /// Queue a text emote (`SMSG_TEXT_EMOTE`) for its performer's name, then its sentence.
-    pub(crate) fn push_text_emote(&mut self, performer: u64, text_id: u32, target: String) {
-        self.pending.push(Pending::TextEmote {
+    pub(crate) fn push_text_emote(&self, performer: u64, text_id: u32, target: String) {
+        self.q().pending.push(Pending::TextEmote {
             performer,
             text_id,
             target,
@@ -320,16 +356,16 @@ impl ChatLog {
 
     /// Queue an area discovery: the `ERR_ZONE_EXPLORED` toast on every packet, never chat, and the
     /// `ERR_ZONE_EXPLORED_XP` system line when `xp > 0`.
-    pub(crate) fn push_exploration(&mut self, area_name: &str, xp: u32) {
-        self.pending.push(Pending::Discovery {
+    pub(crate) fn push_exploration(&self, area_name: &str, xp: u32) {
+        self.q().pending.push(Pending::Discovery {
             area: area_name.to_string(),
             xp,
         });
     }
 
     /// Queue a reputation rank line (`FACTION_STANDING_CHANGED`) for the drain to fill.
-    pub(crate) fn push_standing(&mut self, faction: &str, rank: u8, female: bool) {
-        self.pending.push(Pending::Standing {
+    pub(crate) fn push_standing(&self, faction: &str, rank: u8, female: bool) {
+        self.q().pending.push(Pending::Standing {
             faction: faction.to_string(),
             rank,
             female,
@@ -337,14 +373,15 @@ impl ChatLog {
     }
 
     /// Drop every pending item on disconnect.
-    pub(crate) fn clear_session(&mut self) {
-        self.pending.clear();
+    pub(crate) fn clear_session(&self) {
+        self.q().pending.clear();
     }
 
     /// What is parked, in order, by kind: the order a packet batch left the lines in.
     #[cfg(test)]
     pub(crate) fn pending_kinds(&self) -> Vec<&'static str> {
-        self.pending
+        self.q()
+            .pending
             .iter()
             .map(|p| match p {
                 Pending::Wire { .. } => "wire",
@@ -368,7 +405,8 @@ impl ChatLog {
     /// `UNIT_COMBAT` as `"UNIT_COMBAT <action>"`.
     #[cfg(test)]
     pub(crate) fn pending_combat_order(&self) -> Vec<String> {
-        self.pending
+        self.q()
+            .pending
             .iter()
             .filter_map(|p| match p {
                 Pending::Combat(line) => Some(line.family.stem.to_string()),
@@ -381,7 +419,8 @@ impl ChatLog {
     /// The parked `UNIT_COMBAT`s, in order.
     #[cfg(test)]
     pub(crate) fn pending_unit_combat(&self) -> Vec<crate::ui_unit::UnitCombatFeedback> {
-        self.pending
+        self.q()
+            .pending
             .iter()
             .filter_map(|p| match p {
                 Pending::UnitCombat(ev) => Some(*ev),
@@ -394,7 +433,8 @@ impl ChatLog {
     /// form.
     #[cfg(test)]
     pub(crate) fn pending_xp(&self) -> Vec<(u64, u32, u32, f32)> {
-        self.pending
+        self.q()
+            .pending
             .iter()
             .filter_map(|p| match *p {
                 Pending::XpGain {
@@ -411,7 +451,8 @@ impl ChatLog {
     /// The parked honor credits as `(victim, honor, rank, side)`, in order.
     #[cfg(test)]
     pub(crate) fn pending_honor(&self) -> Vec<(u64, i32, u8, u8)> {
-        self.pending
+        self.q()
+            .pending
             .iter()
             .filter_map(|p| match *p {
                 Pending::HonorGain {
@@ -427,11 +468,12 @@ impl ChatLog {
 
     /// The parked combat lines, in order.
     #[cfg(test)]
-    pub(crate) fn pending_combat(&self) -> Vec<&super::combat::PendingCombat> {
-        self.pending
+    pub(crate) fn pending_combat(&self) -> Vec<super::combat::PendingCombat> {
+        self.q()
+            .pending
             .iter()
             .filter_map(|p| match p {
-                Pending::Combat(line) => Some(&**line),
+                Pending::Combat(line) => Some((**line).clone()),
                 _ => None,
             })
             .collect()
@@ -440,7 +482,8 @@ impl ChatLog {
     /// The parked rank lines as `(faction, rank, female)`, in order.
     #[cfg(test)]
     pub(crate) fn pending_standing(&self) -> Vec<(String, u8, bool)> {
-        self.pending
+        self.q()
+            .pending
             .iter()
             .filter_map(|p| match p {
                 Pending::Standing {
@@ -456,7 +499,8 @@ impl ChatLog {
     /// The parked addon lines as `(prefix, message, distribution)`.
     #[cfg(test)]
     pub(crate) fn pending_addons(&self) -> Vec<(String, String, String)> {
-        self.pending
+        self.q()
+            .pending
             .iter()
             .filter_map(|p| match p {
                 Pending::Addon {
@@ -473,7 +517,8 @@ impl ChatLog {
     /// How many parked items will render in a chat window; addon lines never do.
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
-        self.pending
+        self.q()
+            .pending
             .iter()
             .filter(|p| !matches!(p, Pending::Addon { .. }))
             .count()
@@ -482,7 +527,8 @@ impl ChatLog {
     /// The text of every composed line waiting to render, in order.
     #[cfg(test)]
     pub(crate) fn pending_lines(&self) -> Vec<String> {
-        self.pending
+        self.q()
+            .pending
             .iter()
             .filter_map(|p| match p {
                 Pending::Event(e) => Some(e.text.clone()),
@@ -778,7 +824,7 @@ pub(super) fn notice_event(
 /// Forest]") and a handler's `GetChannelName` still finds it. The reference flags the teardown
 /// (`0x49c115`), fires the event (`0x49c5b0` calling `0x49a870`), then drops the record
 /// (`0x49c5b5`, `0x49c5c2` calling `0x49bbd0`); its suspended leg (`0x49c0e9`) skips the flag.
-/// Both arms mirror the list into the VM for `GetChannelName`.
+/// Both arms mirror the slots into the VM, whose `GetChannelName` and `SendChatMessage` read them.
 pub(super) fn deliver(
     script: &mut benilla_ui::script::UiScript,
     windows: &mut ChatWindows,
@@ -807,25 +853,26 @@ pub(super) fn deliver(
         channels.note_custom_channel_joined(&event.channel);
         // A slot the walk renamed is numbered already, but its state must return to `Joined`.
         channels.confirm_slot(&event.channel);
-    }
-    if notice == Some(channel_notice::YOU_JOINED) && channels.number_of(&event.channel).is_none() {
-        match channels.claim_slot(&event.channel) {
-            Some(slot) => {
-                debug!(
+        if channels.number_of(&event.channel).is_none() {
+            match channels.claim_slot(&event.channel) {
+                Some(slot) => debug!(
                     "chat: server confirms channel {:?} joined (slot {slot})",
                     event.channel
-                );
-                script.set_joined_channels(channels.names());
+                ),
+                // All ten slots taken: no number, as in the reference, whose slot allocator also
+                // prints `ERR_TOO_MANY_CHAT_CHANNELS` (`0x199` at `0x49b9c5`); here it is only
+                // logged.
+                None => warn!(
+                    "chat: server confirms channel {:?} joined but all {} slots are taken — it \
+                     has no number, so /N cannot reach it",
+                    event.channel,
+                    super::edit::MAX_CHANNELS
+                ),
             }
-            // All ten slots taken: no number, as in the reference, whose slot allocator also
-            // prints `ERR_TOO_MANY_CHAT_CHANNELS` (`0x199` at `0x49b9c5`); here it is only logged.
-            None => warn!(
-                "chat: server confirms channel {:?} joined but all {} slots are taken — it has no \
-                 number, so /N cannot reach it",
-                event.channel,
-                super::edit::MAX_CHANNELS
-            ),
         }
+        // The confirm and the claim both write the slot's state (`0x49bb20`), which a handler's
+        // `SendChatMessage` to it reads from this event on.
+        channels.mirror_into(script);
     }
     // The wire name, kept before `stamp_channel` decorates arg4 with the slot number.
     let leaving = (notice == Some(channel_notice::YOU_LEFT)).then(|| event.channel.clone());
@@ -841,7 +888,7 @@ pub(super) fn deliver(
             // Cleared in place, never compacted: slot 3 stays 3 when slot 2 empties.
             let freed = channels.free_slot(&name);
             debug!("chat: server confirms channel {name:?} left (slot {freed:?} now free)");
-            script.set_joined_channels(channels.names());
+            channels.mirror_into(script);
         }
     }
 }
@@ -868,8 +915,10 @@ pub(super) fn gesture_prevented(tries: u16, speaker_flags: Option<u32>) -> bool 
 
 /// Drain [`ChatLog`]: resolve names (ask-once, bounded), build the events and [`route`] them.
 pub(super) fn feed_chat(
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
-    mut log: ResMut<ChatLog>,
+    // The VM, and the host its calls apply through, whose selection `UNIT_COMBAT`'s `"target"`
+    // token reads between the queue's items.
+    mut hosted_vm: crate::script_calls::HostedVm,
+    log: Res<ChatLog>,
     mut windows: ResMut<ChatWindows>,
     mut channels: ResMut<ChannelState>,
     names: Res<NameCache>,
@@ -877,8 +926,8 @@ pub(super) fn feed_chat(
     commands: Res<NetCommands>,
     // The text-emote tables, and our guid for the "are you the performer?" test.
     emote_texts: Option<Res<EmoteTexts>>,
-    // Our guid, and the selection: `UNIT_COMBAT`'s two tokens.
-    (self_guid, selection): (Res<SelfGuid>, Option<Res<crate::target::Selection>>),
+    // Our guid: `UNIT_COMBAT`'s `"player"` token.
+    self_guid: Res<SelfGuid>,
     // The `$`-macro subject: monster and BG lines expand against their addressee's descriptors.
     guids: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
@@ -895,499 +944,519 @@ pub(super) fn feed_chat(
     // The spam and profanity filters, which run in the reference's display function `0x49a870`.
     mut text_filter: crate::text_filter::ChatTextFilter,
 ) {
-    let Some(mut script) = script else {
+    let (Some(script), mut host) = hosted_vm.parts() else {
         return;
     };
-    if log.pending.is_empty() {
+    let pending = log.take_pending();
+    if pending.is_empty() {
         return;
     }
-    let pending = std::mem::take(&mut log.pending);
     let mut still = Vec::new();
     for item in pending {
-        match item {
-            Pending::UnitCombat(ev) => {
-                let is_target = selection
-                    .as_ref()
-                    .and_then(|s| s.target)
-                    .is_some_and(|t| guids.0.get(&ev.guid) == Some(&t));
-                crate::ui_unit::fire_unit_combat(
-                    &mut script,
-                    &ev,
-                    self_guid.0 == Some(ev.guid),
-                    is_target,
-                );
-            }
-            Pending::Event(mut event) => {
-                deliver(&mut script, &mut windows, &mut channels, &mut event);
-            }
-            Pending::Wire { msg, tries } => {
-                let kind = kind_of_wire(msg.chat_type);
-                if kind.is_none() {
-                    warn!(
-                        "chat: unmodeled wire type {:#04x} dropped: {:?}",
-                        msg.chat_type, msg.text
+        // The token lister runs as `SignalUnitCombat` (`0x494600`) signals: a handler earlier in
+        // the queue may have moved the target, its call applied inside the verb.
+        let is_target = match &item {
+            Pending::UnitCombat(ev) => host
+                .as_deref_mut()
+                .and_then(|h| h.target())
+                .is_some_and(|t| guids.0.get(&ev.guid) == Some(&t)),
+            _ => false,
+        };
+        crate::script_calls::lent(script, host.as_deref_mut(), |script| {
+            match item {
+                Pending::UnitCombat(ev) => {
+                    crate::ui_unit::fire_unit_combat(
+                        script,
+                        &ev,
+                        self_guid.0 == Some(ev.guid),
+                        is_target,
                     );
-                    continue;
                 }
-                // A monster line carries its name inline; a player line resolves its guid.
-                let name = match &msg.sender_name {
-                    Some(n) => Some(n.clone()),
-                    None if needs_name(msg.chat_type) && msg.sender_guid != 0 => names
-                        .resolve_player(msg.sender_guid, Ask::at(tries == 0, &commands))
-                        .map(str::to_string),
-                    _ => None,
-                };
-                if name.is_none()
-                    && needs_name(msg.chat_type)
-                    && msg.sender_guid != 0
-                    && tries < NAME_MAX_TRIES
-                {
-                    still.push(Pending::Wire {
-                        msg,
-                        tries: tries + 1,
-                    });
-                    continue;
+                Pending::Event(mut event) => {
+                    deliver(script, &mut windows, &mut channels, &mut event);
                 }
-                // The base name; `stamp_channel` adds arg4's number and arg7-arg9 below.
-                let channel_base = msg.channel.clone().unwrap_or_default();
-                // `$`-macros expand for the monster, boss and BG system types only, against the
-                // addressee. A failed expansion (`0x49dac2`-`0x49db1e`, `0x49d9c9`) with a zero
-                // subject or a known name drops the line, one with an unknown name holds it for
-                // the name query (`tries`), and only a second failure shows the raw text.
-                let expanded = if MACRO_EXPANDED_TYPES.contains(&msg.chat_type) {
-                    // The addressee, else the sender: the BG system lines carry one guid only.
-                    let subject_guid = if msg.target_guid != 0 {
-                        msg.target_guid
-                    } else {
-                        msg.sender_guid
-                    };
-                    let subject = crate::npc_text::subject_for_guid(
-                        subject_guid,
-                        &guids,
-                        &stores,
-                        &names,
-                        Ask::at(tries == 0, &commands),
-                        unit_names.get(),
-                    );
-                    let (text, clean) = crate::npc_text::substitute_checked(
-                        &msg.text,
-                        &crate::npc_text::MacroContext {
-                            subject: subject.as_ref(),
-                            states: &states,
-                        },
-                    );
-                    if clean {
-                        Some(text)
-                    } else if subject_guid == 0
-                        || names.resolve_unit(subject_guid, None, Ask::Read).is_some()
-                    {
-                        debug!(
-                            "chat: dropping unexpandable [{:#04x}] {:?} (subject {subject_guid:#x})",
+                Pending::Wire { msg, tries } => {
+                    let kind = kind_of_wire(msg.chat_type);
+                    if kind.is_none() {
+                        warn!(
+                            "chat: unmodeled wire type {:#04x} dropped: {:?}",
                             msg.chat_type, msg.text
                         );
-                        continue; // the reference prints no line
-                    } else if tries < NAME_MAX_TRIES {
-                        // `subject_for_guid` sent the name query: hold the raw line until it lands.
+                        return;
+                    }
+                    // A monster line carries its name inline; a player line resolves its guid.
+                    let name = match &msg.sender_name {
+                        Some(n) => Some(n.clone()),
+                        None if needs_name(msg.chat_type) && msg.sender_guid != 0 => names
+                            .resolve_player(msg.sender_guid, Ask::at(tries == 0, &commands))
+                            .map(str::to_string),
+                        _ => None,
+                    };
+                    if name.is_none()
+                        && needs_name(msg.chat_type)
+                        && msg.sender_guid != 0
+                        && tries < NAME_MAX_TRIES
+                    {
                         still.push(Pending::Wire {
                             msg,
                             tries: tries + 1,
                         });
-                        continue;
-                    } else {
-                        None // the second failure: show the raw text
+                        return;
                     }
-                } else {
-                    None
-                };
-                let plain = expanded.unwrap_or_else(|| msg.text.clone());
-                // The language gate: the garble writes the one buffer the line, `arg1` and the
-                // bubble read, as `0x49a870` fills `[ebp-0xd0c]` once (`0x49a9f0` copy, `0x49aa7c`
-                // garble) and never reads the wire text again.
-                let language = langs.effective_language(msg.chat_type, msg.language);
-                let mut text = langs.garble(language, &plain);
-
-                // The text filters, on the garbled buffer as in `0x49a870`: spam first, then the
-                // mask, so a dropped line consumes no mask indices (the phase is global).
-                if text_filter.should_drop(msg.chat_type, msg.chat_tag, langs.is_gm(), &text) {
-                    // Nothing shows in its place: the not-a-whisper leg (`0x49ab33`) jumps to the
-                    // epilogue `0x49afd7`. A whisper with a non-zero report guid also sends
-                    // `CMSG_CHAT_FILTERED` (`0x331`, the `u64` guid, `0x49ab50`) in the reference;
-                    // not sent here, as vmangos leaves the opcode unhandled (`Opcodes.cpp:932`).
-                    debug!(
-                        "chat: spam filter dropped [{:#04x}] {:?}",
-                        msg.chat_type, text
-                    );
-                    continue;
-                }
-                text_filter.mask_chat(msg.chat_type, &mut text);
-                let text = text;
-                let mut event = ChatEvent {
-                    kind,
-                    text: text.clone(),
-                    sender: name.unwrap_or_else(|| {
-                        if needs_name(msg.chat_type) && msg.sender_guid != 0 {
-                            "Unknown".to_string()
+                    // The base name; `stamp_channel` adds arg4's number and arg7-arg9 below.
+                    let channel_base = msg.channel.clone().unwrap_or_default();
+                    // `$`-macros expand for the monster, boss and BG system types only, against the
+                    // addressee. A failed expansion (`0x49dac2`-`0x49db1e`, `0x49d9c9`) with a zero
+                    // subject or a known name drops the line, one with an unknown name holds it for
+                    // the name query (`tries`), and only a second failure shows the raw text.
+                    let expanded = if MACRO_EXPANDED_TYPES.contains(&msg.chat_type) {
+                        // The addressee, else the sender: the BG system lines carry one guid only.
+                        let subject_guid = if msg.target_guid != 0 {
+                            msg.target_guid
                         } else {
-                            String::new()
+                            msg.sender_guid
+                        };
+                        let subject = crate::npc_text::subject_for_guid(
+                            subject_guid,
+                            &guids,
+                            &stores,
+                            &names,
+                            Ask::at(tries == 0, &commands),
+                            unit_names.get(),
+                        );
+                        let (text, clean) = crate::npc_text::substitute_checked(
+                            &msg.text,
+                            &crate::npc_text::MacroContext {
+                                subject: subject.as_ref(),
+                                states: &states,
+                            },
+                        );
+                        if clean {
+                            Some(text)
+                        } else if subject_guid == 0
+                            || names.resolve_unit(subject_guid, None, Ask::Read).is_some()
+                        {
+                            debug!(
+                                "chat: dropping unexpandable [{:#04x}] {:?} (subject \
+                                 {subject_guid:#x})",
+                                msg.chat_type, msg.text
+                            );
+                            return; // the reference prints no line
+                        } else if tries < NAME_MAX_TRIES {
+                            // `subject_for_guid` sent the name query: hold the raw line until it
+                            // lands.
+                            still.push(Pending::Wire {
+                                msg,
+                                tries: tries + 1,
+                            });
+                            return;
+                        } else {
+                            None // the second failure: show the raw text
                         }
-                    }),
-                    // The effective language, not the wire's: narration types and GM mode force
-                    // 0, which also drops the `[Language]` header.
-                    language: language_name(language).to_string(),
-                    channel: channel_base,
-                    flag: flag_of_tag(msg.chat_tag).to_string(),
-                    ..Default::default()
-                };
-                channels.stamp_channel(&mut event);
-                route(&mut script, &mut windows, &event);
-                // The bubble gets the same text: the reference spawns it in this path (`0x49acd9`).
-                if let Some(kind) = event.kind {
-                    speaker
-                        .bubbles
-                        .push(&speaker.bubble_cfg, msg.sender_guid, kind, &text);
+                    } else {
+                        None
+                    };
+                    let plain = expanded.unwrap_or_else(|| msg.text.clone());
+                    // The language gate: the garble writes the one buffer the line, `arg1` and the
+                    // bubble read, as `0x49a870` fills `[ebp-0xd0c]` once (`0x49a9f0` copy,
+                    // `0x49aa7c` garble) and never reads the wire text again.
+                    let language = langs.effective_language(msg.chat_type, msg.language);
+                    let mut text = langs.garble(language, &plain);
+
+                    // The text filters, on the garbled buffer as in `0x49a870`: spam first, then
+                    // the mask, so a dropped line consumes no mask indices (the phase is global).
+                    if text_filter.should_drop(msg.chat_type, msg.chat_tag, langs.is_gm(), &text) {
+                        // Nothing shows in its place: the not-a-whisper leg (`0x49ab33`) jumps to
+                        // the epilogue `0x49afd7`. A whisper with a non-zero report guid also sends
+                        // `CMSG_CHAT_FILTERED` (`0x331`, the `u64` guid, `0x49ab50`) in the
+                        // reference; not sent here, as vmangos leaves the opcode unhandled
+                        // (`Opcodes.cpp:932`).
+                        debug!(
+                            "chat: spam filter dropped [{:#04x}] {:?}",
+                            msg.chat_type, text
+                        );
+                        return;
+                    }
+                    text_filter.mask_chat(msg.chat_type, &mut text);
+                    let text = text;
+                    let mut event = ChatEvent {
+                        kind,
+                        text: text.clone(),
+                        sender: name.unwrap_or_else(|| {
+                            if needs_name(msg.chat_type) && msg.sender_guid != 0 {
+                                "Unknown".to_string()
+                            } else {
+                                String::new()
+                            }
+                        }),
+                        // The effective language, not the wire's: narration types and GM mode force
+                        // 0, which also drops the `[Language]` header.
+                        language: language_name(language).to_string(),
+                        channel: channel_base,
+                        flag: flag_of_tag(msg.chat_tag).to_string(),
+                        ..Default::default()
+                    };
+                    channels.stamp_channel(&mut event);
+                    route(script, &mut windows, &event);
+                    // The bubble gets the same text: the reference spawns it in this path
+                    // (`0x49acd9`).
+                    if let Some(kind) = event.kind {
+                        speaker
+                            .bubbles
+                            .push(&speaker.bubble_cfg, msg.sender_guid, kind, &text);
+                    }
+                    // The gesture reads the raw type and `plain`, not the garbled text: the
+                    // selector is in the parser (`0x49d560`, `0x49d820`-`0x49d8ae`) on the buffer
+                    // `0x49dbc2` hands `0x49a870`, so a Horde `lol` laughs for every observer. The
+                    // immediate path alone refuses a speaker that cannot animate (`0x49d7f7`).
+                    let speaker_flags = guids
+                        .0
+                        .get(&msg.sender_guid)
+                        .and_then(|e| stores.get(*e).ok())
+                        .map(|s| s.0.unit_flags());
+                    if let Some(gesture) =
+                        crate::creature_anim::select_gesture(msg.chat_type, &plain, |n| {
+                            script
+                                .lua()
+                                .globals()
+                                .get::<String>(format!("LAUGH_WORD{n}"))
+                                .ok()
+                        })
+                        .filter(|_| !gesture_prevented(tries, speaker_flags))
+                    {
+                        speaker.gestures.push(msg.sender_guid, gesture);
+                    }
                 }
-                // The gesture reads the raw type and `plain`, not the garbled text: the selector is
-                // in the parser (`0x49d560`, `0x49d820`-`0x49d8ae`) on the buffer `0x49dbc2` hands
-                // `0x49a870`, so a Horde `lol` laughs for every observer.
-                // The immediate path alone refuses a speaker that cannot animate (`0x49d7f7`).
-                let speaker_flags = guids
-                    .0
-                    .get(&msg.sender_guid)
-                    .and_then(|e| stores.get(*e).ok())
-                    .map(|s| s.0.unit_flags());
-                if let Some(gesture) =
-                    crate::creature_anim::select_gesture(msg.chat_type, &plain, |n| {
-                        script
-                            .lua()
-                            .globals()
-                            .get::<String>(format!("LAUGH_WORD{n}"))
-                            .ok()
-                    })
-                    .filter(|_| !gesture_prevented(tries, speaker_flags))
-                {
-                    speaker.gestures.push(msg.sender_guid, gesture);
-                }
-            }
-            Pending::Notice {
-                notice,
-                channel,
-                a_guid,
-                b_guid,
-                tries,
-            } => {
-                let ask = Ask::at(tries == 0, &commands);
-                let a = names.resolve_player(a_guid, ask).map(str::to_string);
-                let b = if b_guid != 0 {
-                    names.resolve_player(b_guid, ask).map(str::to_string)
-                } else {
-                    Some(String::new())
-                };
-                if (a.is_none() || b.is_none()) && tries < NAME_MAX_TRIES {
-                    still.push(Pending::Notice {
-                        notice,
-                        channel,
-                        a_guid,
-                        b_guid,
-                        tries: tries + 1,
-                    });
-                    continue;
-                }
-                // Stamped against the channel list as it stands at delivery: the reference hands
-                // the composer `0x49a870` the notice's channel name, directly when the names are
-                // cached (`0x49c59f`-`0x49c5b0`), else from the queued line's node (`+0x2c`) in
-                // the name-query callback (`0x49cfb4`-`0x49cfc1`), and the composer looks it up
-                // among the joined channels (`0x49aa1e`-`0x49aa31`). Unstamped, arg7-arg9 are
-                // empty and the stock filter (`ChatFrame.lua:1374-1392`) drops the line.
-                if let Some(mut event) = notice_event(
+                Pending::Notice {
                     notice,
                     channel,
-                    Some(a.unwrap_or_else(|| "Unknown".into())),
-                    b,
-                ) {
-                    deliver(&mut script, &mut windows, &mut channels, &mut event);
+                    a_guid,
+                    b_guid,
+                    tries,
+                } => {
+                    let ask = Ask::at(tries == 0, &commands);
+                    let a = names.resolve_player(a_guid, ask).map(str::to_string);
+                    let b = if b_guid != 0 {
+                        names.resolve_player(b_guid, ask).map(str::to_string)
+                    } else {
+                        Some(String::new())
+                    };
+                    if (a.is_none() || b.is_none()) && tries < NAME_MAX_TRIES {
+                        still.push(Pending::Notice {
+                            notice,
+                            channel,
+                            a_guid,
+                            b_guid,
+                            tries: tries + 1,
+                        });
+                        return;
+                    }
+                    // Stamped against the channel list as it stands at delivery: the reference
+                    // hands the composer `0x49a870` the notice's channel name, directly when the
+                    // names are cached (`0x49c59f`-`0x49c5b0`), else from the queued line's node
+                    // (`+0x2c`) in the name-query callback (`0x49cfb4`-`0x49cfc1`), and the
+                    // composer looks it up among the joined channels (`0x49aa1e`-`0x49aa31`).
+                    // Unstamped, arg7-arg9 are empty and the stock filter
+                    // (`ChatFrame.lua:1374-1392`) drops the line.
+                    if let Some(mut event) = notice_event(
+                        notice,
+                        channel,
+                        Some(a.unwrap_or_else(|| "Unknown".into())),
+                        b,
+                    ) {
+                        deliver(script, &mut windows, &mut channels, &mut event);
+                    }
                 }
-            }
-            Pending::Addon {
-                prefix,
-                message,
-                distribution,
-                guid,
-                tries,
-            } => {
-                let name = names
-                    .resolve_player(guid, Ask::at(tries == 0, &commands))
-                    .map(str::to_string);
-                if name.is_none() && tries < NAME_MAX_TRIES {
-                    still.push(Pending::Addon {
-                        prefix,
-                        message,
-                        distribution,
-                        guid,
-                        tries: tries + 1,
-                    });
-                    continue;
-                }
-                fire_addon_message(
-                    &mut script,
+                Pending::Addon {
                     prefix,
                     message,
                     distribution,
-                    name.unwrap_or_else(|| "Unknown".into()),
-                );
-            }
-            Pending::Roll {
-                min,
-                max,
-                roll,
-                guid,
-                tries,
-            } => {
-                let name = names
-                    .resolve_player(guid, Ask::at(tries == 0, &commands))
-                    .map(str::to_string);
-                if name.is_none() && tries < NAME_MAX_TRIES {
-                    still.push(Pending::Roll {
-                        min,
-                        max,
-                        roll,
-                        guid,
-                        tries: tries + 1,
-                    });
-                    continue;
-                }
-                // `RANDOM_ROLL_RESULT`, "%s rolls %d (%d-%d)" (`GlobalStrings.lua:3290`).
-                let name = name.unwrap_or_else(|| "Unknown".into());
-                let line = {
-                    use benilla_ui::strings::Arg;
-                    keyed(
-                        &globals(&script),
-                        "RANDOM_ROLL_RESULT",
-                        &[
-                            Arg::S(&name),
-                            Arg::D(i64::from(roll)),
-                            Arg::D(i64::from(min)),
-                            Arg::D(i64::from(max)),
-                        ],
-                    )
-                };
-                if let Some(text) = line {
-                    route(
-                        &mut script,
-                        &mut windows,
-                        &ChatEvent::text_only(ChatEventKind::System, text),
-                    );
-                }
-            }
-            Pending::XpGain {
-                victim,
-                total,
-                base,
-                group,
-            } => {
-                // A victim's name never waits: each template names it through `GetUnitName`
-                // (`0x609210`, from `0x637ac0`), whose miss without `UNKNOWNOBJECT` is the literal
-                // "Unknown Being", where `GetObjectName`'s is `UKNOWNOBJECT`.
-                let name = (victim != 0).then(|| {
-                    super::combat::unit_name(
-                        victim,
-                        guids.0.get(&victim).and_then(|e| stores.get(*e).ok()),
-                        &names,
-                        Ask::at(true, &commands),
-                    )
-                    .unwrap_or_else(|| script.unknown_object_text())
-                });
-                let state = self_guid
-                    .0
-                    .and_then(|g| guids.0.get(&g))
-                    .and_then(|e| stores.get(*e).ok())
-                    .map(|me| me.0.player_rest_state().unwrap_or(0));
-                let row = state.and_then(|s| script.exhaustion_row(s));
-                let rest = state.map(|state| RestState {
-                    state,
-                    row: row.as_ref().map(|(n, f)| (n.as_str(), *f)),
-                });
-                let line =
-                    xp_gain_line(name.as_deref(), total, base, group, rest, &globals(&script));
-                if let Some(text) = line {
-                    route(
-                        &mut script,
-                        &mut windows,
-                        &ChatEvent::text_only(ChatEventKind::CombatXpGain, text),
-                    );
-                }
-            }
-            Pending::XpLoss { total } => {
-                let line = xp_loss_line(total, &globals(&script));
-                if let Some(text) = line {
-                    route(
-                        &mut script,
-                        &mut windows,
-                        &ChatEvent::text_only(ChatEventKind::CombatXpGain, text),
-                    );
-                }
-            }
-            Pending::HonorGain {
-                victim,
-                honor,
-                rank,
-                side,
-            } => {
-                // `victim == 0` is the award form: no name, no rank title. A victim's name never
-                // waits (`GetUnitName`, `0x625387`), and its title genders against the active player
-                // (`0x612bf0`, `0x625374`), whose gender `0x5ed5b0` reads from `PLAYER_BYTES_3`
-                // byte 0; a dishonorable kill's template names no rank.
-                let name = (victim != 0).then(|| {
-                    super::combat::unit_name(
-                        victim,
-                        guids.0.get(&victim).and_then(|e| stores.get(*e).ok()),
-                        &names,
-                        Ask::at(true, &commands),
-                    )
-                    .unwrap_or_else(|| script.unknown_object_text())
-                });
-                let female = self_guid
-                    .0
-                    .and_then(|g| guids.0.get(&g))
-                    .and_then(|e| stores.get(*e).ok())
-                    .and_then(|me| me.0.player_gender())
-                    == Some(1);
-                let title =
-                    (victim != 0 && honor > 0).then(|| script.pvp_rank_title(rank, side, female));
-                write_honor_line(
-                    &mut script,
-                    &mut windows,
-                    name.as_deref(),
-                    title.flatten().as_deref(),
-                    honor,
-                );
-            }
-            Pending::TextEmote {
-                performer,
-                text_id,
-                target,
-                tries,
-            } => {
-                // Both names, looked up as the packet's (`0x49dc59`): the performer's, and ours for
-                // the "is the target me?" test.
-                let ask = Ask::at(tries == 0, &commands);
-                let performer_name = names.resolve_player(performer, ask).map(str::to_string);
-                let your_name = self_guid
-                    .0
-                    .and_then(|g| names.resolve_player(g, ask).map(str::to_string));
-                if (performer_name.is_none() || your_name.is_none()) && tries < NAME_MAX_TRIES {
-                    still.push(Pending::TextEmote {
-                        performer,
-                        text_id,
-                        target,
-                        tries: tries + 1,
-                    });
-                    continue;
-                }
-                // No performer name, no line (not "Unknown"): the reference bails when its
-                // player-only name cache misses (`0x49b28c`); the animation rode `EmoteMessage`.
-                let (Some(performer_name), Some(cat)) = (performer_name, emote_texts.as_deref())
-                else {
-                    debug!("chat: text emote {text_id} from {performer:#x} has no sentence source");
-                    continue;
-                };
-                let event = text_emote_event(
-                    &cat.0,
-                    text_id,
-                    &EmoteLine {
-                        performer: &performer_name,
-                        performer_is_you: self_guid.0 == Some(performer),
-                        // Sex 1 is female, where the reference reads it (`record+0x13c`).
-                        performer_female: names
-                            .player_traits(performer)
-                            .is_some_and(|(_, _, sex)| sex == 1),
-                        target: &target,
-                        your_name: your_name.as_deref().unwrap_or_default(),
-                    },
-                );
-                // No sentence is a real outcome: `/sit` prints nothing.
-                let Some(event) = event else { continue };
-                route(&mut script, &mut windows, &event);
-            }
-            Pending::Combat(mut line) => {
-                // Names looked up with a callback as the line's (`0x6265a7`, `0x6265e0`), and
-                // asked again only on its first drain; a line waits on an item alone, and as long
-                // as the cache takes to answer: the reference's list has no timer or count, and
-                // only the answer or the session's end removes an entry (`0x6293a0`, `0x6294cc`,
-                // `0x629a90`).
-                let ask = Ask::at(line.tries == 0, &commands);
-                let sources = super::combat::NameSources {
-                    names: &names,
-                    gameobjects: &gameobjects,
-                    items: &items,
-                };
-                let ready = line.fill_names(
-                    |guid| {
-                        super::combat::logged_name(
+                    guid,
+                    tries,
+                } => {
+                    let name = names
+                        .resolve_player(guid, Ask::at(tries == 0, &commands))
+                        .map(str::to_string);
+                    if name.is_none() && tries < NAME_MAX_TRIES {
+                        still.push(Pending::Addon {
+                            prefix,
+                            message,
+                            distribution,
                             guid,
-                            guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
-                            &sources,
-                            ask,
-                            &script,
+                            tries: tries + 1,
+                        });
+                        return;
+                    }
+                    fire_addon_message(
+                        script,
+                        prefix,
+                        message,
+                        distribution,
+                        name.unwrap_or_else(|| "Unknown".into()),
+                    );
+                }
+                Pending::Roll {
+                    min,
+                    max,
+                    roll,
+                    guid,
+                    tries,
+                } => {
+                    let name = names
+                        .resolve_player(guid, Ask::at(tries == 0, &commands))
+                        .map(str::to_string);
+                    if name.is_none() && tries < NAME_MAX_TRIES {
+                        still.push(Pending::Roll {
+                            min,
+                            max,
+                            roll,
+                            guid,
+                            tries: tries + 1,
+                        });
+                        return;
+                    }
+                    // `RANDOM_ROLL_RESULT`, "%s rolls %d (%d-%d)" (`GlobalStrings.lua:3290`).
+                    let name = name.unwrap_or_else(|| "Unknown".into());
+                    let line = {
+                        use benilla_ui::strings::Arg;
+                        keyed(
+                            &globals(script),
+                            "RANDOM_ROLL_RESULT",
+                            &[
+                                Arg::S(&name),
+                                Arg::D(i64::from(roll)),
+                                Arg::D(i64::from(min)),
+                                Arg::D(i64::from(max)),
+                            ],
                         )
-                    },
-                    |entry| match items.template(entry, 0, ask).map(|t| t.name.clone()) {
-                        Some(name) => super::combat::ItemName::Named(name),
-                        None if items.template_answered_unknown(entry) => {
-                            super::combat::ItemName::Unknown
-                        }
-                        None => super::combat::ItemName::Waiting,
-                    },
-                );
-                if !ready {
-                    line.tries = line.tries.saturating_add(1);
-                    still.push(Pending::Combat(line));
-                    continue;
+                    };
+                    if let Some(text) = line {
+                        route(
+                            script,
+                            &mut windows,
+                            &ChatEvent::text_only(ChatEventKind::System, text),
+                        );
+                    }
                 }
-                write_combat_line(&mut script, &mut windows, &line);
-            }
-            Pending::Standing {
-                faction,
-                rank,
-                female,
-            } => {
-                let line =
-                    crate::ui_reputation::standing_text(&globals(&script), rank, female, &faction);
-                if let Some(text) = line {
-                    route(
-                        &mut script,
+                Pending::XpGain {
+                    victim,
+                    total,
+                    base,
+                    group,
+                } => {
+                    // A victim's name never waits: each template names it through `GetUnitName`
+                    // (`0x609210`, from `0x637ac0`), whose miss without `UNKNOWNOBJECT` is the
+                    // literal "Unknown Being", where `GetObjectName`'s is `UKNOWNOBJECT`.
+                    let name = (victim != 0).then(|| {
+                        super::combat::unit_name(
+                            victim,
+                            guids.0.get(&victim).and_then(|e| stores.get(*e).ok()),
+                            &names,
+                            Ask::at(true, &commands),
+                        )
+                        .unwrap_or_else(|| script.unknown_object_text())
+                    });
+                    let state = self_guid
+                        .0
+                        .and_then(|g| guids.0.get(&g))
+                        .and_then(|e| stores.get(*e).ok())
+                        .map(|me| me.0.player_rest_state().unwrap_or(0));
+                    let row = state.and_then(|s| script.exhaustion_row(s));
+                    let rest = state.map(|state| RestState {
+                        state,
+                        row: row.as_ref().map(|(n, f)| (n.as_str(), *f)),
+                    });
+                    let line =
+                        xp_gain_line(name.as_deref(), total, base, group, rest, &globals(script));
+                    if let Some(text) = line {
+                        route(
+                            script,
+                            &mut windows,
+                            &ChatEvent::text_only(ChatEventKind::CombatXpGain, text),
+                        );
+                    }
+                }
+                Pending::XpLoss { total } => {
+                    let line = xp_loss_line(total, &globals(script));
+                    if let Some(text) = line {
+                        route(
+                            script,
+                            &mut windows,
+                            &ChatEvent::text_only(ChatEventKind::CombatXpGain, text),
+                        );
+                    }
+                }
+                Pending::HonorGain {
+                    victim,
+                    honor,
+                    rank,
+                    side,
+                } => {
+                    // `victim == 0` is the award form: no name, no rank title. A victim's name
+                    // never waits (`GetUnitName`, `0x625387`), and its title genders against the
+                    // active player (`0x612bf0`, `0x625374`), whose gender `0x5ed5b0` reads from
+                    // `PLAYER_BYTES_3` byte 0; a dishonorable kill's template names no rank.
+                    let name = (victim != 0).then(|| {
+                        super::combat::unit_name(
+                            victim,
+                            guids.0.get(&victim).and_then(|e| stores.get(*e).ok()),
+                            &names,
+                            Ask::at(true, &commands),
+                        )
+                        .unwrap_or_else(|| script.unknown_object_text())
+                    });
+                    let female = self_guid
+                        .0
+                        .and_then(|g| guids.0.get(&g))
+                        .and_then(|e| stores.get(*e).ok())
+                        .and_then(|me| me.0.player_gender())
+                        == Some(1);
+                    let title = (victim != 0 && honor > 0)
+                        .then(|| script.pvp_rank_title(rank, side, female));
+                    write_honor_line(
+                        script,
                         &mut windows,
-                        &ChatEvent::text_only(ChatEventKind::System, text),
+                        name.as_deref(),
+                        title.flatten().as_deref(),
+                        honor,
                     );
+                }
+                Pending::TextEmote {
+                    performer,
+                    text_id,
+                    target,
+                    tries,
+                } => {
+                    // Both names, looked up as the packet's (`0x49dc59`): the performer's, and ours
+                    // for the "is the target me?" test.
+                    let ask = Ask::at(tries == 0, &commands);
+                    let performer_name = names.resolve_player(performer, ask).map(str::to_string);
+                    let your_name = self_guid
+                        .0
+                        .and_then(|g| names.resolve_player(g, ask).map(str::to_string));
+                    if (performer_name.is_none() || your_name.is_none()) && tries < NAME_MAX_TRIES {
+                        still.push(Pending::TextEmote {
+                            performer,
+                            text_id,
+                            target,
+                            tries: tries + 1,
+                        });
+                        return;
+                    }
+                    // No performer name, no line (not "Unknown"): the reference bails when its
+                    // player-only name cache misses (`0x49b28c`); the animation rode
+                    // `EmoteMessage`.
+                    let (Some(performer_name), Some(cat)) =
+                        (performer_name, emote_texts.as_deref())
+                    else {
+                        debug!(
+                            "chat: text emote {text_id} from {performer:#x} has no sentence source"
+                        );
+                        return;
+                    };
+                    let event = text_emote_event(
+                        &cat.0,
+                        text_id,
+                        &EmoteLine {
+                            performer: &performer_name,
+                            performer_is_you: self_guid.0 == Some(performer),
+                            // Sex 1 is female, where the reference reads it (`record+0x13c`).
+                            performer_female: names
+                                .player_traits(performer)
+                                .is_some_and(|(_, _, sex)| sex == 1),
+                            target: &target,
+                            your_name: your_name.as_deref().unwrap_or_default(),
+                        },
+                    );
+                    // No sentence is a real outcome: `/sit` prints nothing.
+                    let Some(event) = event else { return };
+                    route(script, &mut windows, &event);
+                }
+                Pending::Combat(mut line) => {
+                    // Names looked up with a callback as the line's (`0x6265a7`, `0x6265e0`), and
+                    // asked again only on its first drain; a line waits on an item alone, and as
+                    // long as the cache takes to answer: the reference's list has no timer or
+                    // count, and only the answer or the session's end removes an entry
+                    // (`0x6293a0`, `0x6294cc`, `0x629a90`).
+                    let ask = Ask::at(line.tries == 0, &commands);
+                    let sources = super::combat::NameSources {
+                        names: &names,
+                        gameobjects: &gameobjects,
+                        items: &items,
+                    };
+                    let ready = line.fill_names(
+                        |guid| {
+                            super::combat::logged_name(
+                                guid,
+                                guids.0.get(&guid).and_then(|e| stores.get(*e).ok()),
+                                &sources,
+                                ask,
+                                script,
+                            )
+                        },
+                        |entry| match items.template(entry, 0, ask).map(|t| t.name.clone()) {
+                            Some(name) => super::combat::ItemName::Named(name),
+                            None if items.template_answered_unknown(entry) => {
+                                super::combat::ItemName::Unknown
+                            }
+                            None => super::combat::ItemName::Waiting,
+                        },
+                    );
+                    if !ready {
+                        line.tries = line.tries.saturating_add(1);
+                        still.push(Pending::Combat(line));
+                        return;
+                    }
+                    write_combat_line(script, &mut windows, &line);
+                }
+                Pending::Standing {
+                    faction,
+                    rank,
+                    female,
+                } => {
+                    let line = crate::ui_reputation::standing_text(
+                        &globals(script),
+                        rank,
+                        female,
+                        &faction,
+                    );
+                    if let Some(text) = line {
+                        route(
+                            script,
+                            &mut windows,
+                            &ChatEvent::text_only(ChatEventKind::System, text),
+                        );
+                    }
+                }
+                Pending::Discovery { area, xp } => {
+                    // The toast fires every time; the chat line only rides XP.
+                    let (toast, line) = {
+                        let get = globals(script);
+                        (
+                            exploration_toast(&area, &get),
+                            (xp > 0)
+                                .then(|| exploration_line(&area, xp, &get))
+                                .flatten(),
+                        )
+                    };
+                    if let Some(toast) = toast {
+                        script.fire_event(
+                            "UI_INFO_MESSAGE",
+                            vec![benilla_ui::script::ScriptValue::Str(toast)],
+                        );
+                    }
+                    if let Some(text) = line {
+                        route(
+                            script,
+                            &mut windows,
+                            &ChatEvent::text_only(ChatEventKind::System, text),
+                        );
+                    }
                 }
             }
-            Pending::Discovery { area, xp } => {
-                // The toast fires every time; the chat line only rides XP.
-                let (toast, line) = {
-                    let get = globals(&script);
-                    (
-                        exploration_toast(&area, &get),
-                        (xp > 0)
-                            .then(|| exploration_line(&area, xp, &get))
-                            .flatten(),
-                    )
-                };
-                if let Some(toast) = toast {
-                    script.fire_event(
-                        "UI_INFO_MESSAGE",
-                        vec![benilla_ui::script::ScriptValue::Str(toast)],
-                    );
-                }
-                if let Some(text) = line {
-                    route(
-                        &mut script,
-                        &mut windows,
-                        &ChatEvent::text_only(ChatEventKind::System, text),
-                    );
-                }
-            }
-        }
+        });
     }
-    log.pending = still;
+    log.park_again(still);
 }
 
 /// Whether a wire chat type carries a player guid to name (not a monster's inline name).
@@ -1420,26 +1489,28 @@ fn needs_name(chat_type: u8) -> bool {
 /// `TIME_PLAYED_TOTAL` and `TIME_PLAYED_LEVEL` lines (`ChatFrame.lua:1279`), so the English lines
 /// `ui_chat::net::played_time` also prints are a duplicate.
 pub(crate) fn played_time_bridge(
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     commands: Res<NetCommands>,
     answer: Option<ResMut<crate::net::PlayedTimeAnswer>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    for _ in 0..script.take_played_time_asks() {
-        let _ = commands.0.send(crate::net::ClientCommand::PlayedTime);
-    }
-    let Some(mut answer) = answer else {
-        return;
-    };
-    if let Some((total, level)) = answer.0.take() {
-        script.fire_event(
-            "TIME_PLAYED_MSG",
-            vec![
-                benilla_ui::script::ScriptValue::Int(i64::from(total)),
-                benilla_ui::script::ScriptValue::Int(i64::from(level)),
-            ],
-        );
-    }
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        for _ in 0..script.take_played_time_asks() {
+            let _ = commands.0.send(crate::net::ClientCommand::PlayedTime);
+        }
+        let Some(mut answer) = answer else {
+            return;
+        };
+        if let Some((total, level)) = answer.0.take() {
+            script.fire_event(
+                "TIME_PLAYED_MSG",
+                vec![
+                    benilla_ui::script::ScriptValue::Int(i64::from(total)),
+                    benilla_ui::script::ScriptValue::Int(i64::from(level)),
+                ],
+            );
+        }
+    })
 }

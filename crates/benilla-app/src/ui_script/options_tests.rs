@@ -3305,8 +3305,9 @@ fn the_interface_page_writes_the_three_stock_globals() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The picker is dead while the switch is off (`UIOptionsFrame.lua:697-701`), both rows run
-/// `TargetofTarget_Update` on a write, and the five entries are the reference's, in its order.
+/// The picker is dead while the switch is off (`UIOptionsFrame.lua:697-701`), both rows only write
+/// their globals, as 1.12's options do (`UIOptionsFrame.lua:65`), and the five entries are the
+/// reference's, in its order.
 #[test]
 fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     benilla_formats::wow_data_or_skip!();
@@ -3361,13 +3362,11 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
     );
     assert!(
         s.eval::<bool>(
-            "return BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTarget.applyFunc \
-                 == \"TargetofTarget_Update\" \
-             and BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetMode.applyFunc \
-                 == \"TargetofTarget_Update\""
+            "return BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTarget.applyFunc == nil \
+             and BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetMode.applyFunc == nil"
         )
         .unwrap(),
-        "both rows re-decide the frame when they are written"
+        "the frames' own OnUpdates re-decide the frame, as in 1.12"
     );
 
     s.run("BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetModeDropdownButton:Click()")
@@ -3399,6 +3398,53 @@ fn the_target_of_target_rows_gate_each_other_and_write_their_globals() {
         s.take_cvar_changes().is_empty(),
         "still nothing in the CVar table"
     );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// With a target's target up, the switch raises nothing and the frame follows on the next frame,
+/// from `TargetFrame_OnUpdate` and `TargetofTarget_OnUpdate` (`TargetFrame.lua:492-501`). Run from
+/// the row, `TargetofTarget_Update` refreshed the row's own debuffs (`RefreshBuffs(this, …)`,
+/// `TargetFrame.lua:538`) and raised `BuffFrame.lua:281: attempt to index local 'debuffBorder'`.
+#[test]
+fn the_target_of_target_switch_leaves_the_frame_to_its_own_updates() {
+    use benilla_ui::script::UnitState;
+    benilla_formats::wow_data_or_skip!();
+    let mut s = interface_harness();
+    let unit = |name: &str, guid: u64| UnitState {
+        exists: true,
+        is_connected: true,
+        name: Some(name.into()),
+        guid,
+        health: 80,
+        max_health: 100,
+        level: 60,
+        ..UnitState::default()
+    };
+    s.set_unit("player", Some(unit("Tri", 0x100)));
+    s.set_unit("target", Some(unit("Kobold Miner", 0x200)));
+    s.set_unit("targettarget", Some(unit("Tri", 0x100)));
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+    let shown = |s: &mut UiScript| {
+        s.eval::<bool>("return TargetofTargetFrame:IsShown() and true or false")
+            .unwrap()
+    };
+
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetCheck:Click()")
+        .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    s.tick(0.016);
+    assert!(
+        shown(&mut s),
+        "on: the target frame's OnUpdate brings it up"
+    );
+
+    s.run("BenillaOptionsFrameContainerBodyInterfaceRowTargetOfTargetCheck:Click()")
+        .unwrap();
+    s.tick(0.016);
+    assert!(!shown(&mut s), "off: its own OnUpdate takes it down");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

@@ -35,12 +35,15 @@ pub(crate) mod camera_dynamics;
 pub(crate) mod camera_zoom;
 mod controller;
 mod world_focus;
+#[cfg(test)]
+pub(crate) use world_focus::insert_test_room;
+pub(crate) use world_focus::{publish_caster_outdoors, BarUnitOutdoors, PlayerOutdoors};
 // The remembered camera pose, inside `player/` to read the rig's `pub(super)` fields.
 mod camera_saved;
 mod camera_water;
 // The five named camera views, inside `player/` to write the rig's `pub(super)` fields.
 pub(crate) mod camera_view;
-mod drunk;
+pub(crate) mod drunk;
 mod edge;
 mod embody;
 mod flags;
@@ -177,7 +180,11 @@ pub(super) type BodyQuery<'w, 's> = Query<
         &'static mut Transform,
         Option<&'static mut MovementState>,
         Option<&'static CameraPivot>,
-        Option<&'static crate::creature_anim::AnimDriver>,
+        // The driver and the unit's committed sheath state, which it requires.
+        Option<(
+            &'static crate::creature_anim::AnimDriver,
+            &'static crate::creature_anim::CommittedSheath,
+        )>,
         Option<&'static crate::net::ObjectStore>,
         Has<crate::creature_anim::Engaged>,
         Option<&'static crate::net::UnitSpeeds>,
@@ -209,6 +216,11 @@ pub(super) type TransportQuery<'w, 's> = Query<
     ),
 >;
 
+/// The stream focus's publish and the post-snap hold's release, which write the player's settle
+/// state: a reader of it this frame runs after the set.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct WorldFocusSet;
+
 /// The controller's ordering handle, for anything that writes the aim or the camera rig before
 /// `control` reads them (`capture::probe_look`, `capture::probe_cam`).
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -228,22 +240,34 @@ impl Plugin for PlayerPlugin {
         // The stream focus is published after `control`'s teleport snap and before the stream
         // stage, and the settle hold armed mid-run and released after it. Both edges are needed:
         // without `.after(Input)` the focus can precede the snap, the world streams around the
-        // departure, and the hold releases at once.
+        // departure, and the hold releases at once. All run among the VM pass's hosts, which read
+        // the player's settle state, so a host after them reads this frame's.
         app.add_systems(
             Update,
-            (world_focus::publish_viewer, world_focus::publish_view_focus)
-                .after(benilla_world::schedule::WorldStage::Input)
-                .before(benilla_world::schedule::WorldStage::Stream),
-        )
-        .add_systems(
-            Update,
             (
-                world_focus::hold_unsupported_body,
-                world_focus::release_post_snap_hold,
+                (world_focus::publish_viewer, world_focus::publish_view_focus)
+                    .after(benilla_world::schedule::WorldStage::Input)
+                    .before(benilla_world::schedule::WorldStage::Stream),
+                (
+                    world_focus::hold_unsupported_body,
+                    world_focus::release_post_snap_hold,
+                )
+                    .chain()
+                    .after(benilla_world::schedule::WorldStage::Stream),
             )
-                .chain()
-                .after(benilla_world::schedule::WorldStage::Stream),
+                .in_set(WorldFocusSet)
+                .in_set(crate::vm_pass::VmPass::Member),
         );
+        // The casters' outdoors answers, once this frame's re-place has put the body where it
+        // stands; the cast validator's place rungs read them, so it runs among the VM pass's hosts.
+        app.init_resource::<PlayerOutdoors>()
+            .init_resource::<BarUnitOutdoors>()
+            .add_systems(
+                Update,
+                publish_caster_outdoors
+                    .after(WorldFocusSet)
+                    .in_set(crate::vm_pass::VmPass::Member),
+            );
         app.add_observer(camera::on_cvar);
         app.add_observer(camera_dynamics::on_cvar);
         app.init_resource::<camera::LookConfig>();
@@ -276,10 +300,10 @@ impl Plugin for PlayerPlugin {
         )
         // The world camera renders only in world or under the loading screen, whose covered
         // render compiles the world's pipelines before the first visible frame.
-        // Before the input pass, whose script calls read the cameras: the gate is settled first.
+        // Before the VM pass, whose script calls read the cameras: the gate is settled first.
         .add_systems(
             Update,
-            setup::gate_world_camera.before(crate::script_calls::CallHosts),
+            setup::gate_world_camera.before(crate::vm_pass::VmPass::Start),
         )
         // Off in capture mode, where the harness pins the camera, and in world only, so the glue
         // screens keep the cursor and send no movement.

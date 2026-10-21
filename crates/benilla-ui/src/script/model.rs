@@ -5,11 +5,11 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
     auction, backdrop, bank, bind_confirm, camera_view, char_stats, chat_window, colorselect,
-    container, craft, cursor, death, duel, follow, gossip, guild, inspect, item_text, loot,
-    loot_roll, macros, mail, merchant, parse_unit_token, party, petition, pvp, quest, quest_log,
-    reputation, session, simplehtml, skills, slider, social, spellbook, stable, taxi, trade,
-    tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView,
-    MusicRequest, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState, UnitTokenParse,
+    container, craft, cursor, death, duel, follow, gossip, guild, item_text, loot, loot_roll,
+    macros, mail, merchant, parse_unit_token, party, petition, pvp, quest, quest_log, reputation,
+    session, simplehtml, skills, slider, social, spellbook, stable, taxi, trade, tradeskill,
+    trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest,
+    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState, UnitTokenParse,
 };
 
 // ── The Rust-side model ──
@@ -426,13 +426,17 @@ pub(crate) struct Model {
     pub(crate) cancel_aura_requests: Vec<u32>,
     /// The player's active tracking aura, behind `GetTrackingTexture`.
     pub(crate) tracking: Option<super::aura::TrackingState>,
-    /// The calls that touch the selection, the cast or the targeting cursor, in call order.
+    /// The calls that touch the selection, the cast or the targeting cursor made while the host
+    /// was out, in call order, for it to apply as soon as it is back.
     pub(crate) script_calls: Vec<super::calls::QueuedCall>,
     /// How many drains of [`Self::script_calls`] are running, each inside a call the one outside
     /// it applied ([`super::calls::submit`]).
     pub(crate) call_depth: u8,
-    /// Calls made past the nesting bound, for the next frame's drain.
-    pub(crate) deferred_calls: Vec<super::calls::QueuedCall>,
+    /// A harness's VM keeps the calls made with no host lent here
+    /// ([`super::UiScript::keep_calls`]); `None` refuses them.
+    pub(crate) kept_calls: Option<Vec<super::ScriptCall>>,
+    /// What the host raised in its calls' verbs ([`super::UiScript::raise_in_call`]).
+    pub(crate) call_raises: super::calls::CallRaises,
     /// The binding functions' queue and mouselook state.
     pub(crate) input: super::input_verbs::InputState,
     /// The selection change a script call made and the input events it ran under, for the event
@@ -443,8 +447,8 @@ pub(crate) struct Model {
     /// `DropItemOnUnit` tokens (`0x48d960`), gated by the app; a refusal silently keeps the item.
     pub(crate) drop_item_on_unit: Vec<String>,
 
-    /// Channels the server confirmed, in join order: the numbers `GetChannelName` answers.
-    pub(crate) joined_channels: Vec<Option<String>>,
+    /// The joined channels, in join order: the numbers `GetChannelName` answers.
+    pub(crate) joined_channels: Vec<Option<super::channel::JoinedChannel>>,
     /// The party or raid roster the app pushes; the default is not in a group.
     pub(crate) party: party::PartyState,
     /// Party and loot-method calls (`AcceptGroup`, `InviteToParty`, `SetLootMethod`, …) queued.
@@ -516,8 +520,6 @@ pub(crate) struct Model {
     pub(crate) guild_recruitment_changed: bool,
     /// `DoEmote` calls queued.
     pub(crate) emote_requests: Vec<super::chat_misc::EmoteRequest>,
-    /// `RandomRoll` calls queued.
-    pub(crate) roll_requests: Vec<(u32, u32)>,
     /// `UninviteByName` calls queued.
     pub(crate) uninvite_requests: Vec<String>,
     /// `ConsoleExec` lines that were not CVar writes.
@@ -769,8 +771,12 @@ pub(crate) struct Model {
     pub(crate) container_cooldowns: HashMap<(i64, u32), (f64, f64, bool)>,
     /// The same triple for a worn item, by live-API slot id (1..=19); the cooldown query is keyed
     /// by the item's entry (`0x6e2ed0`), so a worn trinket answers as a bagged one does. Kept off
-    /// the doll snapshot, whose change fires `UNIT_INVENTORY_CHANGED`.
+    /// the doll snapshot, which is pushed on change.
     pub(crate) worn_cooldowns: HashMap<usize, (f64, f64, bool)>,
+    /// The entries whose record `GetContainerItemCooldown`, `SetBagItem` or `SetInventoryItem`
+    /// found missing, which their query asks with the callback `0x6e2f70`
+    /// ([`crate::script::UiScript::take_cooldown_record_asks`]).
+    pub(crate) cooldown_record_asks: Vec<u32>,
     /// `HasKey()`: a keys-family item in equipment, bags, bank or keyring; gates the keyring UI.
     pub(crate) has_key: bool,
     /// What the cursor carries; nothing moves locally, the server's updates settle the bags.
@@ -1188,8 +1194,10 @@ pub(crate) struct Model {
 
     /// The paper doll's combat stats, `None` until the first push.
     pub(crate) player_combat_stats: Option<char_stats::UnitCombatStats>,
-    /// The pet's combat stats, which the reference's pet sheet reads as `UnitStat("pet", …)`.
-    pub(crate) pet_combat_stats: Option<char_stats::UnitCombatStats>,
+    /// The ammunition entry each `GetInventoryItemTexture` or `GetInventoryItemQuality` call on
+    /// the ammo slot looked up and missed, one callback `0x4c84f0` per call (`0x4c83bc`,
+    /// `0x4c89cf`), for the host to register with the item cache.
+    pub(crate) ammo_record_asks: Vec<u32>,
     pub(crate) inventory_slots: char_stats::InventorySlots,
     /// The six bank-bag slots, ids 64..=69, fed from the player descriptor's guids.
     pub(crate) bank_bag_slots: char_stats::BankBagSlots,
@@ -1200,8 +1208,10 @@ pub(crate) struct Model {
     /// Main- and off-hand temporary enchants in `GetWeaponEnchantInfo`'s order, pushed each frame.
     pub(crate) weapon_enchants: [Option<weapon_enchant::WeaponEnchant>; 2],
 
-    /// The inspected unit's gear, from its public `PLAYER_VISIBLE_ITEM_*` fields.
-    pub(crate) inspect: Option<inspect::InspectView>,
+    /// Another player's visible items by guid, from its public `PLAYER_VISIBLE_ITEM_*` fields,
+    /// slots 1..=19 as the doll numbers them: the slot getters' other-unit leg (`0x4c8420` →
+    /// `0x5f0d60`).
+    pub(crate) visible_equipment: HashMap<u64, char_stats::InventorySlots>,
     /// `NotifyInspect` unit tokens, sent as `CMSG_INSPECT`.
     pub(crate) inspect_notifies: Vec<String>,
     /// `ClearInspectPlayer` ran; the app drops its inspect target.
@@ -1292,8 +1302,6 @@ pub(crate) struct Model {
     /// The world points our own `Minimap:PingLocation` calls pinged, for the host's wire send
     /// (`0x1d5`, `0x4eef72`) and its process-wide copy of the ping.
     pub(crate) minimap_pings_sent: Vec<(f32, f32)>,
-    /// `SendChatMessage` lines, apart from chat-box input, whose drain runs the slash grammar.
-    pub(crate) chat_sends: Vec<super::chat_send::ChatSend>,
     /// `SendAddonMessage` broadcasts: `LANG_ADDON`, four distributions, `prefix` TAB `message`.
     pub(crate) addon_sends: Vec<super::addon_message::AddonSend>,
     /// `RequestTimePlayed()` calls, one empty `CMSG_PLAYED_TIME` each.
@@ -1562,7 +1570,8 @@ impl Model {
             tracking: None,
             script_calls: Vec::new(),
             call_depth: 0,
-            deferred_calls: Vec::new(),
+            kept_calls: None,
+            call_raises: Default::default(),
             input: Default::default(),
             protected: Default::default(),
             selection_cause: None,
@@ -1604,7 +1613,6 @@ impl Model {
             guild_recruitment_runs: Vec::new(),
             guild_recruitment_changed: false,
             emote_requests: Vec::new(),
-            roll_requests: Vec::new(),
             uninvite_requests: Vec::new(),
             console_lines: Vec::new(),
             logging_chat: false,
@@ -1714,6 +1722,7 @@ impl Model {
             containers: HashMap::new(),
             container_cooldowns: HashMap::new(),
             worn_cooldowns: HashMap::new(),
+            cooldown_record_asks: Vec::new(),
             has_key: false,
             cursor: None,
             cursor_grid: false,
@@ -1903,7 +1912,6 @@ impl Model {
             cursor_pos: (0.0, 0.0),
             minimap: crate::widget::MinimapStatics::default(),
             minimap_pings_sent: Vec::new(),
-            chat_sends: Vec::new(),
             addon_sends: Vec::new(),
             played_time_asks: 0,
             opening_cinematic_asks: 0,
@@ -1945,13 +1953,13 @@ impl Model {
             .into_iter()
             .collect(),
             player_combat_stats: None,
-            pet_combat_stats: None,
+            ammo_record_asks: Vec::new(),
             inventory_slots: Default::default(),
             bank_bag_slots: Default::default(),
             inventory_alerts: [0; 12],
             inventory_repairs: Vec::new(),
             weapon_enchants: [None; 2],
-            inspect: None,
+            visible_equipment: HashMap::new(),
             inspect_notifies: Vec::new(),
             inspect_clear: false,
             dressup_intents: Vec::new(),

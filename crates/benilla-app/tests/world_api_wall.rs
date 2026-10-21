@@ -220,6 +220,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("weather::wetness::RainSurfaces", "wall"),
     ("wind::FoliageWind", "wall"),
     ("wind::FoliageWindStrength", "wall"),
+    ("wmo_portal::EntityOutdoors", "record"),
     ("wmo_portal::room_pvs_visible", "record"),
     ("world_census::CensusReport", "record"),
     ("world_census::WorldCensus", "record"),

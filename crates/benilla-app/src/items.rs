@@ -107,7 +107,7 @@ impl Countdowns {
     }
 
     /// [`Self::enchant_remaining_ms`] floored to the second, for the snapshot feeds: a per-ms read
-    /// would fire `UNIT_INVENTORY_CHANGED` every frame while a timer runs.
+    /// would push a new snapshot every frame while a timer runs.
     pub(crate) fn enchant_remaining_display_ms(&self, slot: u32) -> Option<u64> {
         self.enchant_remaining_ms(slot).map(|ms| ms - ms % 1000)
     }
@@ -431,6 +431,9 @@ pub(crate) struct Items {
     /// callback `0x4c0340` per call, with no dedupe (`0x4c017f`, `0x4c0582`). A lookup registers
     /// it, so it is locked like the in-flight asks and registering takes `&self`.
     trade_waiters: std::sync::Mutex<Vec<u32>>,
+    /// The ammunition entry each ammo-slot getter call that missed asked for, in call order: one
+    /// callback `0x4c84f0` per call (`0x4c83bc`, `0x4c89cf`), registered after the script's tick.
+    ammo_waiters: std::sync::Mutex<Vec<u32>>,
 }
 
 impl Items {
@@ -469,6 +472,23 @@ impl Items {
     pub(crate) fn take_trade_waiters(&mut self, entry: u32) -> usize {
         let waiters = self
             .trade_waiters
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner());
+        let before = waiters.len();
+        waiters.retain(|&e| e != entry);
+        before - waiters.len()
+    }
+
+    /// An ammo-slot getter missed the cache on `entry` and asked with the callback `0x4c84f0`.
+    pub(crate) fn wait_for_ammo_record(&self, entry: u32) {
+        self.ammo_waiters.lock_recover().push(entry);
+    }
+
+    /// The answer for `entry` landed, or refused it: how many ammo-slot getter calls were
+    /// waiting on it, whose callbacks are spent either way.
+    pub(crate) fn take_ammo_waiters(&mut self, entry: u32) -> usize {
+        let waiters = self
+            .ammo_waiters
             .get_mut()
             .unwrap_or_else(|e| e.into_inner());
         let before = waiters.len();
@@ -566,6 +586,10 @@ impl Items {
             .get_mut()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.ammo_waiters
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.templates.clear_pending();
     }
 
@@ -658,9 +682,10 @@ pub(crate) fn test_spawn_object(world: &mut World, guid: u64, fields: ObjectFiel
     e
 }
 
-/// `EQUIPMENT_SLOT_MAINHAND` / `_OFFHAND` (vmangos `EquipmentSlots`).
+/// `EQUIPMENT_SLOT_MAINHAND` / `_OFFHAND` / `_RANGED` (vmangos `EquipmentSlots`).
 pub(crate) const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
 pub(crate) const EQUIPMENT_SLOT_OFFHAND: u8 = 16;
+pub(crate) const EQUIPMENT_SLOT_RANGED: u8 = 17;
 
 /// Whether the disarm flag is up (`UNIT_FIELD_FLAGS & UNIT_FLAG_DISARMED`), which hides one hand
 /// from the equipped-item search.

@@ -36,7 +36,7 @@ pub(super) fn hit_flags(crit: bool, absorb: u32, resist: i32, blocked: u32) -> u
 }
 
 /// `0x4946b0(guid, amount, school, flags)`: `WOUND`, its descriptor off the flags.
-pub(super) fn wound(log: &mut ChatLog, guid: u64, amount: u32, flags: u32, school: u32) {
+pub(super) fn wound(log: &ChatLog, guid: u64, amount: u32, flags: u32, school: u32) {
     log.push_unit_combat(UnitCombatFeedback {
         guid,
         action: "WOUND",
@@ -47,7 +47,7 @@ pub(super) fn wound(log: &mut ChatLog, guid: u64, amount: u32, flags: u32, schoo
 }
 
 /// `0x494740(guid, amount, crit)`: `HEAL`, `CRITICAL` for a crit (mark `0x80`).
-pub(super) fn heal(log: &mut ChatLog, guid: u64, amount: u32, crit: bool) {
+pub(super) fn heal(log: &ChatLog, guid: u64, amount: u32, crit: bool) {
     log.push_unit_combat(UnitCombatFeedback {
         guid,
         action: "HEAL",
@@ -74,7 +74,7 @@ const SWING_ACTIONS: [&str; 9] = [
 /// descriptor off the damage and hit info like every wrapper's. The table index has no bound: a
 /// state past it, which no server sends (vmangos `VictimState` ends at 8,
 /// `Objects/UnitDefines.h:247`), signals nothing here.
-pub(crate) fn swing(log: &mut ChatLog, guid: u64, victim_state: u32, hit_info: u32, damage: u32) {
+pub(crate) fn swing(log: &ChatLog, guid: u64, victim_state: u32, hit_info: u32, damage: u32) {
     let Some(&action) = SWING_ACTIONS.get(victim_state as usize) else {
         return;
     };
@@ -108,7 +108,7 @@ fn miss_action(code: u8) -> Option<&'static str> {
 }
 
 /// `0x494720(guid, code)`: a miss's `UNIT_COMBAT`, amount, school and flags all 0.
-pub(super) fn miss(log: &mut ChatLog, guid: u64, code: u8) {
+pub(super) fn miss(log: &ChatLog, guid: u64, code: u8) {
     if let Some(action) = miss_action(code) {
         log.push_unit_combat(UnitCombatFeedback {
             guid,
@@ -126,7 +126,7 @@ mod tests {
 
     /// A displayed swing on a held player, as `(action, descriptor)` of its `UNIT_COMBAT`.
     fn swing(victim_state: u32, hit_info: u32, damage: u32) -> Vec<(&'static str, &'static str)> {
-        let mut log = ChatLog::default();
+        let log = ChatLog::default();
         let s = crate::creature_anim::SwingMessage {
             attacker: bevy::prelude::Entity::PLACEHOLDER,
             victim: None,
@@ -138,7 +138,7 @@ mod tests {
         };
         let player =
             crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(2, 0x19)]));
-        crate::ui_unit::melee_unit_combat(&mut log, &s, Some((1, &player)));
+        crate::ui_unit::melee_unit_combat(&log, &s, Some((1, &player)));
         log.pending_unit_combat()
             .into_iter()
             .map(|f| (f.action, f.flags))

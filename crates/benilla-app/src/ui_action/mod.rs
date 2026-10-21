@@ -227,6 +227,16 @@ pub(crate) fn run_feed_action_state_once(world: &mut World) {
         .expect("the action-state feed runs as a one-shot system");
 }
 
+/// One pass of the action-state feed and the events it owes, for a test that hears them.
+#[cfg(test)]
+pub(crate) fn run_action_events_once(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    run_feed_action_state_once(world);
+    world
+        .run_system_once(state::fire_action_events)
+        .expect("the action events run as a one-shot system");
+}
+
 /// The 5875 spell data; `None` skips where the install is absent.
 #[cfg(test)]
 pub(crate) fn real_spells() -> Option<Spells> {
@@ -390,7 +400,7 @@ impl Plugin for UiActionPlugin {
                         .after(crate::ui_unit::UnitSnapshots)
                         .before(crate::ui_unit::field_events::fire_field_notices)
                         .before(crate::ui_cast::feed_cast_reports),
-                    drain::drain_action_sets.after(UiInput),
+                    drain::drain_action_sets.in_set(crate::ui_script::UiDrain),
                     // The target chain queues the right-click casts earlier in the frame.
                     drain::drain_click_casts
                         .after(UiInput)

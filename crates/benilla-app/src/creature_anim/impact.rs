@@ -48,7 +48,7 @@ pub(crate) struct SwingImpact {
 #[derive(SystemParam)]
 pub(crate) struct ImpactSinks<'w, 's> {
     out: MessageWriter<'w, SwingImpact>,
-    log: ResMut<'w, ChatLog>,
+    log: Res<'w, ChatLog>,
     guids: Query<'w, 's, &'static Guid>,
     pub(crate) stores: Query<'w, 's, &'static ObjectStore>,
 }
@@ -60,7 +60,7 @@ impl ImpactSinks<'_, '_> {
             .swing
             .victim
             .and_then(|v| Some((self.guids.get(v).ok()?.0, self.stores.get(v).ok()?)));
-        crate::ui_unit::melee_unit_combat(&mut self.log, &impact.swing, victim);
+        crate::ui_unit::melee_unit_combat(&self.log, &impact.swing, victim);
         self.out.write(impact);
     }
 }

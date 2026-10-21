@@ -32,9 +32,6 @@ mod frames;
 /// The idle handler: the 5-minute auto-sit and auto-AFK, and the 30-minute camp.
 pub(crate) mod idle;
 mod input;
-/// The `SendChatMessage` drain, for the tests that feed it a real group.
-#[cfg(test)]
-pub(crate) use input::drain_addon_chat_sends;
 /// The language gate: the exemptions and fluency lookup behind the chat garble.
 mod language;
 /// `LoggingChat`/`LoggingCombat`: the two log files `/chatlog` and `/combatlog` toggle.
@@ -62,6 +59,21 @@ pub(crate) use edit::ChannelState;
 pub(crate) use event::event_name;
 pub(crate) use event::{default_color, ChatEvent, ChatEventKind};
 pub(crate) use feed::ChatLog;
+/// The host's chat applier ([`crate::script_calls::ScriptCallHost`]).
+pub(crate) use input::ChatSender;
+/// The chat applier off a bare world, for the tests that send through it.
+#[cfg(test)]
+pub(crate) use input::{chat_world, run_chat};
+
+/// The chat feed once, for a test over the whole client: the `CHAT_MSG_*` fan-out of what the
+/// log holds, with the call host the world lends.
+#[cfg(test)]
+pub(crate) fn feed_chat_once(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(feed::feed_chat)
+        .expect("the chat feeds");
+}
 /// Test-only: the quest log's rig tees the lines its timers show.
 #[cfg(test)]
 pub(crate) use frames::{tee_shown_lines, ChatWindows};
@@ -174,13 +186,12 @@ impl Plugin for UiChatPlugin {
                     // settled before the idle timer reads it.
                     idle::idle_handler,
                     input::drain_chat_input.in_set(ChatDrain),
-                    // After the box's drain, so a `SendChatMessage` or `SendAddonMessage` from a
-                    // slash handler it just ran goes out this frame.
-                    input::drain_addon_chat_sends,
+                    // After the box's drain, so a `SendAddonMessage` from a slash handler it just
+                    // ran goes out this frame.
                     input::drain_addon_message_sends,
                 )
                     .chain()
-                    .after(UiInput)
+                    .in_set(crate::ui_script::UiDrain)
                     // Before the zone-channel walk renumbers or renames a slot, so a `/N` resolves
                     // against the roster the script's `GetChannelName` read this frame.
                     .before(channels::end_session_channels_on_disconnect)
@@ -188,8 +199,9 @@ impl Plugin for UiChatPlugin {
             )
             // The zone-channel auto-join, which vmangos leaves to the client. The disconnect clear
             // runs first, so a same-frame drop cannot leave the walk diffing stale membership.
-            // After `AreaAuthoritySet`, since a stale area joins and leaves the wrong channels. The
-            // guild-recruitment cascade follows the walk: it is the tail of `ZoneChannelRefresh`.
+            // After `AreaAuthoritySet`, since a stale area joins and leaves the wrong channels, and
+            // after the settle state's release, which the walk's gate reads. The guild-recruitment
+            // cascade follows the walk: it is the tail of `ZoneChannelRefresh`.
             .add_systems(
                 Update,
                 (
@@ -199,7 +211,8 @@ impl Plugin for UiChatPlugin {
                         .in_set(crate::client_state::InWorldGated),
                 )
                     .chain()
-                    .after(benilla_world::terrain_stream::AreaAuthoritySet),
+                    .after(benilla_world::terrain_stream::AreaAuthoritySet)
+                    .after(crate::player::WorldFocusSet),
             )
             .add_systems(
                 OnExit(crate::client_state::ClientState::InWorld),
@@ -216,19 +229,15 @@ impl Plugin for UiChatPlugin {
 ///
 /// Deviation: not run on benilla's same-character reconnect, which the reference lacks (it
 /// returns to the login screen), so the window keeps its scrollback there.
-fn end_session_chat(
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
-    mut log: ResMut<ChatLog>,
-) {
-    end_chat_session(script.map(NonSendMut::into_inner), &mut log);
+fn end_session_chat(mut hosted_vm: crate::script_calls::HostedVm, log: Res<ChatLog>) {
+    hosted_vm.run(|script| {
+        end_chat_session(script, &log);
+    })
 }
 
 /// [`end_session_chat`]'s body, callable without a `World`.
-pub(crate) fn end_chat_session(
-    script: Option<&mut benilla_ui::script::UiScript>,
-    log: &mut ChatLog,
-) {
-    *log = ChatLog::default();
+pub(crate) fn end_chat_session(script: Option<&mut benilla_ui::script::UiScript>, log: &ChatLog) {
+    log.reset();
     if let Some(script) = script {
         for frame in ["ChatFrame1", "ChatFrame2"] {
             crate::ui_script::run_or_warn(script, &format!("{frame}:Clear()"));

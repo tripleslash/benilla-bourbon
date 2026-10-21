@@ -16,13 +16,13 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
 use benilla_protocol::messages::PvpLogData;
-use benilla_ui::script::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn, UiScript};
+use benilla_ui::script::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::query_cache::Ask;
 use crate::ui_dialog_verbs::BattlefieldQueue;
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiFeed;
 use crate::world_state_ui::WorldStateUiRes;
 
 /// `RequestBattlefieldScoreData`'s throttle (`0x4aa170`).
@@ -100,7 +100,7 @@ fn resolve_board(
 }
 
 pub(crate) fn feed_battlefield_score(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut board: ResMut<BattlefieldScoreboard>,
     mut queue: ResMut<BattlefieldQueue>,
     catalog: Option<Res<WorldStateUiRes>>,
@@ -109,82 +109,86 @@ pub(crate) fn feed_battlefield_score(
     unit_names: crate::ui_unit::NameTables,
     mut last: Local<crate::ui_script::VmMemo<Option<BattlefieldScores>>>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let now = Instant::now();
-    script.set_battlefield_run_time_ms(queue.run_time_ms(now));
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let now = Instant::now();
+        script.set_battlefield_run_time_ms(queue.run_time_ms(now));
 
-    // Leaving the battleground ends the board, and `SMSG_BATTLEFIELD_STATUS` is the packet that
-    // says so: the active slot's map to zero, or that same slot losing its instance. The queue
-    // handler already zeroes the run-time clocks on both, so the winner goes with them. Left set,
-    // `GetBattlefieldWinner()` answers the finished battleground's winner in the open world, the
-    // stock frame shows the end-of-battleground panel again on the next score event
-    // (`WorldStateFrame.lua:351-355`), and `LeaveBattlefield` targets a map nobody is in — the
-    // button that cannot leave anything.
-    let left = queue.take_board_cleared();
-    if left {
-        *board = BattlefieldScoreboard::default();
-    }
+        // Leaving the battleground ends the board, and `SMSG_BATTLEFIELD_STATUS` is the packet that
+        // says so: the active slot's map to zero, or that same slot losing its instance. The queue
+        // handler already zeroes the run-time clocks on both, so the winner goes with them. Left set,
+        // `GetBattlefieldWinner()` answers the finished battleground's winner in the open world, the
+        // stock frame shows the end-of-battleground panel again on the next score event
+        // (`WorldStateFrame.lua:351-355`), and `LeaveBattlefield` targets a map nobody is in — the
+        // button that cannot leave anything.
+        let left = queue.take_board_cleared();
+        if left {
+            *board = BattlefieldScoreboard::default();
+        }
 
-    let ask = Ask::at(board.is_changed(), &commands);
-    let fresh = if left {
-        // The empty board has to be pushed, not just withheld: the VM keeps whatever board it was
-        // last handed, so a clear the feed does not push leaves `GetBattlefieldWinner()` standing.
-        Some(BattlefieldScores::default())
-    } else {
-        board.log.as_ref().and_then(|log| {
-            let rows = resolve_board(log, &names, ask, unit_names.get())?;
-            let columns = queue
-                .active_map()
-                .zip(catalog.as_deref())
-                .map(|(map, cat)| score_columns(cat, map))
-                .unwrap_or_default();
-            Some(BattlefieldScores {
-                rows,
-                ended: log.ended,
-                winner: log.winner.unwrap_or(0),
-                columns,
+        let ask = Ask::at(board.is_changed(), &commands);
+        let fresh = if left {
+            // The empty board has to be pushed, not just withheld: the VM keeps whatever board it was
+            // last handed, so a clear the feed does not push leaves `GetBattlefieldWinner()` standing.
+            Some(BattlefieldScores::default())
+        } else {
+            board.log.as_ref().and_then(|log| {
+                let rows = resolve_board(log, &names, ask, unit_names.get())?;
+                let columns = queue
+                    .active_map()
+                    .zip(catalog.as_deref())
+                    .map(|(map, cat)| score_columns(cat, map))
+                    .unwrap_or_default();
+                Some(BattlefieldScores {
+                    rows,
+                    ended: log.ended,
+                    winner: log.winner.unwrap_or(0),
+                    columns,
+                })
             })
-        })
-    };
-    let last = last.get(&script);
-    // A held-back board is the reference's pending names: the VM's rebuild waits on it.
-    script.set_battlefield_score_names_pending(board.log.is_some() && fresh.is_none());
-    if queue.take_score_dirty() {
-        script.reset_battlefield_score_filter();
-    }
-    if fresh.is_some() && fresh != *last {
-        script.set_battlefield_scores(fresh.clone().expect("checked"));
-        *last = fresh;
-        script.fire_event("UPDATE_BATTLEFIELD_SCORE", vec![]);
-    }
+        };
+        let last = last.get(script);
+        // A held-back board is the reference's pending names: the VM's rebuild waits on it.
+        script.set_battlefield_score_names_pending(board.log.is_some() && fresh.is_none());
+        if queue.take_score_dirty() {
+            script.reset_battlefield_score_filter();
+        }
+        if fresh.is_some() && fresh != *last {
+            script.set_battlefield_scores(fresh.clone().expect("checked"));
+            *last = fresh;
+            script.fire_event("UPDATE_BATTLEFIELD_SCORE", vec![]);
+        }
+    })
 }
 
 fn drain_battlefield_score(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut board: ResMut<BattlefieldScoreboard>,
     queue: Res<BattlefieldQueue>,
     commands: Res<NetCommands>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    if script.take_battlefield_score_requests() > 0 {
-        let now = Instant::now();
-        let throttled = board
-            .last_request
-            .is_some_and(|t| now.duration_since(t) < REQUEST_THROTTLE);
-        if !throttled {
-            board.last_request = Some(now);
-            let _ = commands.0.send(ClientCommand::RequestBattlefieldScoreData);
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        if script.take_battlefield_score_requests() > 0 {
+            let now = Instant::now();
+            let throttled = board
+                .last_request
+                .is_some_and(|t| now.duration_since(t) < REQUEST_THROTTLE);
+            if !throttled {
+                board.last_request = Some(now);
+                let _ = commands.0.send(ClientCommand::RequestBattlefieldScoreData);
+            }
         }
-    }
-    if script.take_battlefield_leave_requests() > 0 {
-        let _ = commands.0.send(ClientCommand::LeaveBattlefield {
-            map_id: queue.active_map().unwrap_or(0),
-        });
-    }
+        if script.take_battlefield_leave_requests() > 0 {
+            let _ = commands.0.send(ClientCommand::LeaveBattlefield {
+                map_id: queue.active_map().unwrap_or(0),
+            });
+        }
+    })
 }
 
 /// The scoreboard's packet handlers.
@@ -225,7 +229,7 @@ impl Plugin for BattlefieldScorePlugin {
                 feed_battlefield_score
                     .before(crate::ui_dialog_verbs::feed_dialog_verbs)
                     .in_set(UiFeed),
-                drain_battlefield_score.after(UiInput),
+                drain_battlefield_score.in_set(crate::ui_script::UiDrain),
             ),
         );
     }
@@ -236,6 +240,7 @@ mod tests {
     use super::*;
     use benilla_formats::{WorldStateUiCatalog, WorldStateUiRow};
     use benilla_protocol::messages::BattlefieldStatus;
+    use benilla_ui::script::UiScript;
 
     /// The log packet looks each row's name up with the callback `0x4a9ef0` (`0x4aac79`); the
     /// frames its board waits through read. A refused name is asked by no frame after it, only by

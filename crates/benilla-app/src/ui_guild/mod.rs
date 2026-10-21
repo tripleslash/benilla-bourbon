@@ -16,7 +16,7 @@ use bevy::prelude::*;
 
 use crate::net::{ClientCommand, NetCommands};
 use crate::query_cache::{Ask, QueryCache, Refused};
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiFeed;
 
 mod feed;
 mod lines;
@@ -516,20 +516,30 @@ pub(crate) fn last_online(days: f32) -> LastOnline {
     }
 }
 
-/// `GetGuildInfo(unit)`: the unit's public guild fields joined against the identity cache, asking
-/// on a miss. `None` for a guildless unit, a creature or an unanswered query, one nil path in the
-/// reference (`0x4c93d7`, `0x4c943c`). The getter's lookup passes the callback `0x4c9470`
-/// (`0x4c93d2`) on the stock frames' events, which no event here marks: a guild is asked when it
-/// first shows, and a refused one again at the guild id's next change (the equipment resolver's
-/// lookup, `0x5e078f`).
+/// `GetGuildInfo("player")`'s leg: our public guild fields joined against the identity cache,
+/// asking on a miss. `None` for a guildless unit, a creature or an unanswered query, one nil path
+/// in the reference (`0x4c93d7`, `0x4c943c`). The getter's own lookup asks with the callback
+/// `0x4c9470` (`0x4c93d2`); this one asks when the guild first shows, and a refused one again at
+/// the guild id's next change (the equipment resolver's lookup, `0x5e078f`).
 pub(crate) fn unit_guild(
     fields: &ObjectFields,
     guild: &mut GuildState,
     commands: &NetCommands,
 ) -> Option<UnitGuild> {
+    guild_of(fields, guild, Ask::New(commands))
+}
+
+/// [`unit_guild`] from the cache alone, asking nothing: the guild leg of a held unit's snapshot,
+/// whose `GetGuildInfo` asks a miss itself, with a waiter of its own (`0x4c93d2`,
+/// [`benilla_ui::script::GuildRequest::InfoMiss`]).
+pub(crate) fn cached_unit_guild(fields: &ObjectFields, guild: &GuildState) -> Option<UnitGuild> {
+    guild_of(fields, guild, Ask::Read)
+}
+
+fn guild_of(fields: &ObjectFields, guild: &GuildState, ask: Ask<'_>) -> Option<UnitGuild> {
     let guild_id = fields.player_guild_id();
     let rank_index = fields.player_guild_rank();
-    let identity = guild.resolve_identity(guild_id, Ask::New(commands))?;
+    let identity = guild.resolve_identity(guild_id, ask)?;
     Some(UnitGuild {
         name: identity.name.clone(),
         rank_name: identity.rank_name(rank_index).to_string(),
@@ -668,46 +678,39 @@ pub(crate) mod net {
     fn on_event(
         In(ev): In<SessionEvent>,
         mut guild: ResMut<GuildState>,
-        mut errors: ResMut<UiErrorKeys>,
+        errors: Res<UiErrorKeys>,
         social: Res<SocialState>,
         notify: Res<GuildMemberNotify>,
         self_guid: Res<crate::net::SelfGuid>,
     ) {
         if let SessionEvent::GuildEvent(notice) = ev {
-            event(
-                &mut guild,
-                &mut errors,
-                &social,
-                &notify,
-                self_guid.0,
-                notice,
-            );
+            event(&mut guild, &errors, &social, &notify, self_guid.0, notice);
         }
     }
 
     fn on_command_result(
         In(ev): In<SessionEvent>,
         mut guild: ResMut<GuildState>,
-        mut errors: ResMut<UiErrorKeys>,
+        errors: Res<UiErrorKeys>,
     ) {
         if let SessionEvent::GuildCommandResult(result) = ev {
-            command_result(&mut guild, &mut errors, result);
+            command_result(&mut guild, &errors, result);
         }
     }
 
     fn on_invite(
         In(ev): In<SessionEvent>,
         mut guild: ResMut<GuildState>,
-        mut errors: ResMut<UiErrorKeys>,
+        errors: Res<UiErrorKeys>,
     ) {
         if let SessionEvent::GuildInvite { inviter, guild: g } = ev {
-            invite(&mut guild, &mut errors, inviter, g);
+            invite(&mut guild, &errors, inviter, g);
         }
     }
 
-    fn on_decline(In(ev): In<SessionEvent>, mut errors: ResMut<UiErrorKeys>) {
+    fn on_decline(In(ev): In<SessionEvent>, errors: Res<UiErrorKeys>) {
         if let SessionEvent::GuildDecline { name } = ev {
-            decline(&mut errors, &name);
+            decline(&errors, &name);
         }
     }
 
@@ -725,8 +728,8 @@ pub(crate) mod net {
     }
 
     /// Queue the message ids [`lines`] named.
-    fn push_lines(errors: &mut UiErrorKeys, lines: impl IntoIterator<Item = UiError>) {
-        errors.0.extend(lines);
+    fn push_lines(errors: &UiErrorKeys, lines: impl IntoIterator<Item = UiError>) {
+        errors.extend(lines);
     }
 
     /// `SMSG_GUILD_QUERY_RESPONSE`: the callbacks a found record runs.
@@ -753,7 +756,7 @@ pub(crate) mod net {
     ///    check), since `SMSG_FRIEND_STATUS` prints the same line ungated (`0x5acde6`, `0x5ace08`).
     pub(crate) fn event(
         guild: &mut GuildState,
-        errors: &mut UiErrorKeys,
+        errors: &UiErrorKeys,
         social: &SocialState,
         notify: &GuildMemberNotify,
         self_guid: Option<u64>,
@@ -785,7 +788,7 @@ pub(crate) mod net {
     /// `SMSG_GUILD_COMMAND_RESULT`.
     pub(crate) fn command_result(
         guild: &mut GuildState,
-        errors: &mut UiErrorKeys,
+        errors: &UiErrorKeys,
         result: GuildCommandResult,
     ) {
         guild.apply_command_result(&result);
@@ -795,7 +798,7 @@ pub(crate) mod net {
     /// `SMSG_GUILD_INVITE`: the popup's show edge and the notice line printed beside it.
     pub(crate) fn invite(
         guild: &mut GuildState,
-        errors: &mut UiErrorKeys,
+        errors: &UiErrorKeys,
         inviter: String,
         guild_name: String,
     ) {
@@ -804,7 +807,7 @@ pub(crate) mod net {
     }
 
     /// `SMSG_GUILD_DECLINE`: a line, no state.
-    pub(crate) fn decline(errors: &mut UiErrorKeys, name: &str) {
+    pub(crate) fn decline(errors: &UiErrorKeys, name: &str) {
         push_lines(errors, [lines::decline_line(name)]);
     }
 
@@ -844,7 +847,7 @@ impl Plugin for UiGuildPlugin {
                         .in_set(UiFeed)
                         .in_set(GuildFeed)
                         .in_set(crate::ui_unit::field_events::FieldEventPushes),
-                    feed::drain_guild.after(UiInput),
+                    feed::drain_guild.in_set(crate::ui_script::UiDrain),
                 )
                     // Never against the glue VM: the feed's edge memo survives the entry load, so
                     // an edge spent on a VM with no frames, such as the login MOTD, is lost.

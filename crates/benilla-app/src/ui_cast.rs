@@ -330,7 +330,7 @@ impl CastReporter<'_, '_> {
 #[derive(SystemParam)]
 pub(crate) struct CallReports<'w, 's> {
     reports: ResMut<'w, CastReports>,
-    ui_errors: ResMut<'w, crate::ui_action::UiErrorKeys>,
+    ui_errors: Res<'w, crate::ui_action::UiErrorKeys>,
     reporter: CastReporter<'w, 's>,
 }
 
@@ -340,14 +340,14 @@ pub(crate) struct ReportMark(usize, usize);
 
 impl CallReports<'_, '_> {
     pub(crate) fn mark(&self) -> ReportMark {
-        ReportMark(self.ui_errors.0.len(), self.reports.0.len())
+        ReportMark(self.ui_errors.len(), self.reports.0.len())
     }
 
     /// The reports queued since `mark`, taken off their queues and readied.
     pub(crate) fn ready_since(&mut self, script: &UiScript, mark: ReportMark) -> Vec<Ready> {
         let ReportMark(errors, reports) = mark;
-        let start = errors.min(self.ui_errors.0.len());
-        let errors: Vec<_> = self.ui_errors.0.drain(start..).collect();
+        let start = errors.min(self.ui_errors.len());
+        let errors = self.ui_errors.take_from(start);
         let mut ready: Vec<Ready> = errors
             .iter()
             .filter_map(|e| {
@@ -372,10 +372,12 @@ impl CallReports<'_, '_> {
 /// player's form change is signalled here too, off its descriptor edge (`OnShapeshiftFormChanged
 /// 0x5de010` → `0x5de016`), after the book's push, whose checked ring it lights.
 pub(crate) fn feed_cast_reports(
-    script: Option<NonSendMut<UiScript>>,
-    mut reports: ResMut<CastReports>,
-    mut reporter: CastReporter,
-    cast_state: CastState,
+    // The reports and the cast state, which the host's casts write.
+    mut vm: crate::script_calls::VmWith<(
+        ResMut<'static, CastReports>,
+        CastReporter<'static, 'static>,
+        CastState<'static, 'static>,
+    )>,
     mut edges: MessageReader<crate::net::FieldChanged>,
     me: Query<Entity, With<crate::net::SelfPlayer>>,
 ) {
@@ -385,16 +387,26 @@ pub(crate) fn feed_cast_reports(
             && Some(e.entity) == me
             && (e.old >> 16) as u8 != (e.new >> 16) as u8
     });
-    if form_changed {
-        reports.0.insert(0, CastReport::Changed);
-    }
-    let Some(mut script) = script else {
+    // The view and the reports read as an engine turn, then signalled with the host lent: a
+    // refusal's handler may cast again.
+    let ready = vm.turn(|script, (mut reports, mut reporter, cast_state)| {
+        if form_changed {
+            reports.0.insert(0, CastReport::Changed);
+        }
+        let script = script?;
+        script.set_cast_view(cast_state.view());
+        let mut ready = reporter.redisplays(script);
+        ready.extend(reporter.ready(script, std::mem::take(&mut reports.0)));
+        Some(ready)
+    });
+    let Some(ready) = ready else {
         return;
     };
-    script.set_cast_view(cast_state.view());
-    let mut ready = reporter.redisplays(&script);
-    ready.extend(reporter.ready(&script, std::mem::take(&mut reports.0)));
-    fire(&mut script, ready);
+    vm.run(|script| {
+        if let Some(script) = script {
+            fire(script, ready);
+        }
+    });
 }
 
 /// The report feed, drained before the VM ticks so an edge and its first `OnUpdate` share a

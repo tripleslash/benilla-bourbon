@@ -478,20 +478,36 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 // (`0x533027..0x53304c`); anything else builds the ordinary tooltip, without an
                 // error. Three of the binding's four builder legs pass it on, not `0x533106`.
                 let name_only = super::binding_abi::positive_number_flag(lua, name_only)?;
+                // The token's resolve (`0x533061`), which raises for one it does not know, then
+                // `CanReadUnitInventory` (`0x53306a`), through `Model::inv_slot`.
+                super::unit::check_unit_token(&Some(unit.clone()))?;
                 let (item_id, name, quality, inst, count, repair_cost, currently_equipped) = {
                     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    // Only the active player's slots hold item objects; another player's item is
+                    // a block (`0x533354`).
+                    let player =
+                        model.inventory_reader(&unit) == Some(super::char_stats::InvReader::Own);
                     let armed = match super::tooltip::tip_mut(&mut model, h) {
                         Ok(t) => std::mem::take(&mut t.equipped_header_armed),
                         Err(_) => false,
                     };
+                    // The player's item object answers the cooldown query, which asks a missing
+                    // record with the callback `0x6e2f70` (`0x533188` → `0x5331ec`, `0x6e2efb`);
+                    // the ammo slot passes an entry and queries nothing (`0x53307d`).
+                    if slot0 != -1 && unit.eq_ignore_ascii_case("player") {
+                        if let Some(entry) = model
+                            .inv_slot("player", slot)
+                            .filter(|s| s.record_pending())
+                            .map(|s| s.item_id)
+                        {
+                            model.cooldown_record_asks.push(entry);
+                        }
+                    }
                     let view = model
                         .inv_slot(&unit, slot)
                         .filter(|s| s.item_id != 0)
                         .map(|s| {
                             (s.item_id, s.name.clone(), s.quality, s.count.max(1), {
-                                // Only the player's own slots hold item objects; an inspected
-                                // unit's item is a block (`0x533354`).
-                                let player = unit.eq_ignore_ascii_case("player");
                                 // The player's own item answers the cooldown query
                                 // (`0x5331ec`), unless it is charged and spent
                                 // (`0x53318a`-`0x53319b`, the feed's `None`); an inspected
@@ -521,7 +537,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 inst
                             })
                         });
-                    let cost = if unit.eq_ignore_ascii_case("player") {
+                    let cost = if player {
                         model.inv_repair_cost(slot)
                     } else {
                         0
@@ -598,7 +614,18 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let bag = i64::from(crate::script::binding_abi::ftol(bag));
             let slot = crate::script::binding_abi::ftol(slot) as u32;
             let (item_id, count, link, quality, inst, repair_cost) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                // The cooldown query asks a missing record with the callback `0x6e2f70`
+                // (`0x53483a`, `0x6e2efb`).
+                if let Some(entry) = model
+                    .containers
+                    .get(&bag)
+                    .and_then(|c| c.slots.get(&slot))
+                    .filter(|s| s.record_pending())
+                    .map(|s| s.item_id)
+                {
+                    model.cooldown_record_asks.push(entry);
+                }
                 let cost = model.repair_costs.bags.get(&(bag, slot)).copied();
                 match model
                     .containers

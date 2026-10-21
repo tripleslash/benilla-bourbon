@@ -13,7 +13,10 @@ use benilla_protocol::messages::{ActionButton, SpellCooldown};
 use bevy::prelude::*;
 
 use super::cast_target::CastTargeting;
-use super::{ActiveChannel, AutoRepeatActive, CastCommit, CastLadder, Cooldowns, PendingCast};
+use super::{
+    ActiveChannel, AutoRepeatActive, CastCommit, CastLadder, Cooldowns, PendingCast,
+    QueuedMeleeSpell,
+};
 use crate::creature_anim::{CastEvent, CastEventKind, Casting, SpellGoTargets};
 use crate::ui_action::{PlayerActions, Spells, UiError, UiErrorKeys};
 use crate::ui_aura::AuraDurations;
@@ -46,6 +49,7 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::ClearCooldown, on_cooldown_packet)
         .net_handler(K::CooldownCheat, on_cooldown_packet)
         .net_handler(K::ItemCooldown, on_item_cooldown)
+        .net_handler(K::ItemTemplate, on_item_record)
         .net_handler(K::ChannelStart, on_channel)
         .net_handler(K::ChannelUpdate, on_channel)
         .net_handler(K::AuraDuration, on_aura_duration)
@@ -65,6 +69,10 @@ pub(crate) struct Lifecycle<'w> {
     learned_in_tab: ResMut<'w, LearnedInTab>,
     reports: ResMut<'w, CastReports>,
     pending: ResMut<'w, PendingCast>,
+    /// With `pending`, `reports` and `net`, the in-flight slot the GO-deferred attack start's
+    /// cancel reads (`0x5ecc85`).
+    queued_melee: ResMut<'w, QueuedMeleeSpell>,
+    ground: ResMut<'w, super::SpellTargeting>,
     cooldowns: ResMut<'w, Cooldowns>,
     auto_repeat: ResMut<'w, AutoRepeatActive>,
     channel: ResMut<'w, ActiveChannel>,
@@ -92,17 +100,42 @@ pub(crate) struct Scene<'w, 's> {
     sheaths: MessageWriter<'w, crate::creature_anim::SheathRequest>,
     /// `[0xb4b3e4]`, for the GO-deferred swing's gate.
     own_control: Option<Res<'w, crate::player::OwnControlLost>>,
+    /// The stand-up the GO-deferred attack start asks (`0x5ecc9b`).
+    stand: MessageWriter<'w, crate::player::StandStateRequest>,
+    /// The auto-repeat clear and the precast's changes, applied after this handler.
+    edits: Res<'w, crate::creature_anim::UnitEdits>,
 }
 
 /// `SMSG_INITIAL_SPELLS`, once at login, into the action store the UI feed reads.
-fn on_spell_book(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+fn on_spell_book(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) {
     if let SessionEvent::SpellBook {
         spell_ids,
         cooldowns,
     } = ev
     {
-        spell_book(spell_ids, cooldowns, &mut l.actions, &mut l.cooldowns);
+        let player = active_player(&l.self_guid, &l.index, &sc.stores);
+        let pad = crate::spell::CategoryPad::for_list(false, player);
+        spell_book(
+            spell_ids,
+            cooldowns,
+            &mut l.actions,
+            &mut l.cooldowns,
+            (l.spells.as_deref(), &sc.items, &l.spell_mods, pad),
+        );
     }
+}
+
+/// The active player's object (`0x468460` with type mask `0x10` on `0x468550`'s guid), when
+/// streamed.
+fn active_player<'a>(
+    self_guid: &SelfGuid,
+    index: &GuidIndex,
+    stores: &'a Query<&mut ObjectStore>,
+) -> Option<&'a ObjectStore> {
+    self_guid
+        .0
+        .and_then(|g| index.0.get(&g))
+        .and_then(|&e| stores.get(e).ok())
 }
 
 fn on_action_buttons(In(ev): In<SessionEvent>, mut l: Lifecycle) {
@@ -111,29 +144,25 @@ fn on_action_buttons(In(ev): In<SessionEvent>, mut l: Lifecycle) {
     }
 }
 
-fn on_spell_learned(In(ev): In<SessionEvent>, mut l: Lifecycle, mut errors: ResMut<UiErrorKeys>) {
+fn on_spell_learned(In(ev): In<SessionEvent>, mut l: Lifecycle, errors: Res<UiErrorKeys>) {
     if let SessionEvent::SpellLearned { spell_id } = ev {
         learned_spell(
             spell_id,
             &mut l.actions,
             l.spells.as_deref(),
-            &mut errors,
+            &errors,
             &mut l.learned_in_tab,
         );
     }
 }
 
-fn on_spell_removed(In(ev): In<SessionEvent>, mut l: Lifecycle, mut errors: ResMut<UiErrorKeys>) {
+fn on_spell_removed(In(ev): In<SessionEvent>, mut l: Lifecycle, errors: Res<UiErrorKeys>) {
     if let SessionEvent::SpellRemoved { spell_id } = ev {
-        removed_spell(spell_id, &mut l.actions, l.spells.as_deref(), &mut errors);
+        removed_spell(spell_id, &mut l.actions, l.spells.as_deref(), &errors);
     }
 }
 
-fn on_spell_superceded(
-    In(ev): In<SessionEvent>,
-    mut l: Lifecycle,
-    mut errors: ResMut<UiErrorKeys>,
-) {
+fn on_spell_superceded(In(ev): In<SessionEvent>, mut l: Lifecycle, errors: Res<UiErrorKeys>) {
     if let SessionEvent::SpellSuperceded {
         old_spell_id,
         new_spell_id,
@@ -144,7 +173,7 @@ fn on_spell_superceded(
             new_spell_id,
             &mut l.actions,
             l.spells.as_deref(),
-            &mut errors,
+            &errors,
             &mut l.learned_in_tab,
         );
     }
@@ -193,7 +222,7 @@ fn on_cast_result(
             success,
             reason,
             arg,
-            &mut ladder.ecs,
+            &ladder.edits,
             &r.self_guid,
             &r.index,
             &r.casting,
@@ -213,7 +242,12 @@ fn on_cast_result(
     }
 }
 
-fn on_spell_start(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+fn on_spell_start(
+    In(ev): In<SessionEvent>,
+    mut l: Lifecycle,
+    mut sc: Scene,
+    precast: crate::creature_anim::PrecastTables,
+) {
     if let SessionEvent::SpellStart {
         caster,
         spell_id,
@@ -237,6 +271,16 @@ fn on_spell_start(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
             &mut l.reports,
             &mut l.pending,
             l.spells.as_deref(),
+            &sc.edits,
+            &|e, spell_id| {
+                precast.resolves(
+                    l.spells.as_deref(),
+                    &sc.items,
+                    e,
+                    sc.stores.get(e).ok(),
+                    spell_id,
+                )
+            },
             l.play_seq.next(),
         );
     }
@@ -291,11 +335,24 @@ fn on_spell_go(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
                 &mut l.cooldowns,
                 l.spells.as_deref(),
                 &mut sc.items,
-                &l.net,
                 &mut l.pet_bar,
                 &l.spell_mods,
             ),
-            (&mut l.auto_repeat, &mut sc.sheaths, engaged, start_gate),
+            (
+                &mut l.auto_repeat,
+                &mut sc.sheaths,
+                &mut sc.stand,
+                &sc.edits,
+                engaged,
+                start_gate,
+                &mut super::CastCore {
+                    pending: &mut l.pending,
+                    queued_melee: &mut l.queued_melee,
+                    ground: &mut l.ground,
+                    reports: &mut l.reports,
+                    net: &l.net,
+                },
+            ),
             l.play_seq.next(),
         );
     }
@@ -322,6 +379,7 @@ fn on_spell_failed_other(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Sce
             &sc.casting,
             &mut sc.cast_events,
             &l.self_guid,
+            &sc.edits,
             l.play_seq.next(),
         );
     }
@@ -339,25 +397,27 @@ fn on_spell_delayed(In(ev): In<SessionEvent>, mut l: Lifecycle) {
     }
 }
 
-fn on_cancel_auto_repeat(In(ev): In<SessionEvent>, mut l: Lifecycle, mut sc: Scene) {
+fn on_cancel_auto_repeat(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) {
     if let SessionEvent::CancelAutoRepeat = ev {
         cancel_auto_repeat(
             &mut l.auto_repeat,
             &l.self_guid,
             &l.index,
-            &mut sc.commands,
+            &sc.edits,
             &l.net,
         );
     }
 }
 
 /// The four cooldown packets, each routed through [`addressed_store`] by the caster guid.
-fn on_cooldown_packet(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+fn on_cooldown_packet(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) {
+    let player = active_player(&l.self_guid, &l.index, &sc.stores);
     let Lifecycle {
         self_guid,
         spells,
         cooldowns,
         pet_bar,
+        spell_mods,
         ..
     } = &mut l;
     match ev {
@@ -365,8 +425,10 @@ fn on_cooldown_packet(In(ev): In<SessionEvent>, mut l: Lifecycle) {
             caster,
             cooldowns: pairs,
         } => {
+            let pet = self_guid.0 != Some(caster);
             if let Some(store) = addressed_store(caster, self_guid, cooldowns, pet_bar) {
-                spell_cooldowns(caster, pairs, spells.as_deref(), store);
+                let pad = crate::spell::CategoryPad::for_list(pet, player);
+                spell_cooldowns(caster, pairs, spells.as_deref(), store, spell_mods, pad);
             }
         }
         SessionEvent::CooldownEvent { spell_id, caster } => {
@@ -385,6 +447,16 @@ fn on_cooldown_packet(In(ev): In<SessionEvent>, mut l: Lifecycle) {
             }
         }
         _ => {}
+    }
+}
+
+/// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, the item cache's callbacks of the cooldown list: a held
+/// item cooldown's `0x6e8830`.
+fn on_item_record(In(ev): In<SessionEvent>, mut l: Lifecycle) {
+    if let SessionEvent::ItemTemplate { entry, info } = ev {
+        let spells = l.spells.as_deref();
+        l.cooldowns
+            .item_record_landed(entry, info.as_deref(), |id| spells?.catalog.get(id));
     }
 }
 
@@ -453,12 +525,19 @@ fn addressed_store<'a>(
 }
 
 /// `SMSG_INITIAL_SPELLS`: the book into the action store, and the active cooldowns, whose wire
-/// value is remaining ms, into the cooldown store ([`Cooldowns::seed_initial`]).
+/// value is remaining ms, into the cooldown store ([`Cooldowns::seed_initial`]). `seed` is what
+/// the seed reads: the catalog, the item cache, the modifiers and the category pad.
 fn spell_book(
     spell_ids: Vec<u32>,
     initial_cooldowns: Vec<SpellCooldown>,
     actions: &mut PlayerActions,
     cooldowns: &mut Cooldowns,
+    seed: (
+        Option<&Spells>,
+        &crate::items::Items,
+        &crate::spell::SpellModifiers,
+        crate::spell::CategoryPad,
+    ),
 ) {
     debug!(
         "net: spell book — {} spells, {} active cooldown(s)",
@@ -467,9 +546,17 @@ fn spell_book(
     );
     actions.spells = spell_ids.into_iter().collect();
     actions.dirty = true;
+    let (spells, items, mods, pad) = seed;
     let now = Instant::now();
     for cd in &initial_cooldowns {
-        cooldowns.seed_initial(cd, now);
+        let spell_id = u32::from(cd.spell_id);
+        let spell = spells.and_then(|s| s.catalog.get(spell_id));
+        // `0x6e2c60` reads the item's record with no callback (`0x6e2ce0`) and takes its first
+        // slot naming the spell (`0x6e2cf4`).
+        let block = items
+            .template(u32::from(cd.item_id), 0, Ask::Read)
+            .and_then(|t| t.spells.iter().find(|b| b.spell_id == spell_id));
+        cooldowns.seed_initial(cd, spell, block, mods, pad, now);
     }
 }
 
@@ -487,7 +574,7 @@ fn learned_spell(
     spell_id: u32,
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
-    errors: &mut UiErrorKeys,
+    errors: &UiErrorKeys,
     tab_flash: &mut LearnedInTab,
 ) {
     debug!("net: learned spell {spell_id}");
@@ -503,7 +590,7 @@ fn learned_spell(
 /// [`benilla_formats::SpellDisplay::learn_announcement`]'s. Ids `0x37`/`0x38`/`0x39` are chat
 /// type 10 rows, so all three land on the system channel. An unknown id says nothing, the
 /// registrar's bail at `0x4b25c6`/`0x4b25d2`/`0x4b25e0`.
-fn announce_learn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKeys) {
+fn announce_learn(spell_id: u32, spells: Option<&Spells>, errors: &UiErrorKeys) {
     let Some(display) = spells.and_then(|s| s.catalog.get(spell_id)) else {
         return;
     };
@@ -516,7 +603,7 @@ fn announce_learn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKe
         // The recipe arm pushes the bare name: it returns before the rank composer.
         LearnAnnouncement::Recipe => ("ERR_LEARN_RECIPE_S", display.name.clone()),
     };
-    errors.0.push(UiError::s(key, arg));
+    errors.push(UiError::s(key, arg));
 }
 
 /// `SMSG_REMOVED_SPELL`: the spell leaves the book. A talent wipe arrives as these (vmangos
@@ -533,7 +620,7 @@ fn removed_spell(
     spell_id: u32,
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
-    errors: &mut UiErrorKeys,
+    errors: &UiErrorKeys,
 ) {
     debug!("net: removed spell {spell_id}");
     if actions.spells.remove(&spell_id) {
@@ -545,16 +632,14 @@ fn removed_spell(
 /// `ERR_SPELL_UNLEARNED_S` (`0x5ea2ab push 0x14a`) with the bare name: `0x5ea2a3` pushes
 /// `SpellRec+0x1e0` and this path has no rank composer. Which spells say it is
 /// [`benilla_formats::SpellDisplay::announces_unlearn`]'s.
-fn announce_unlearn(spell_id: u32, spells: Option<&Spells>, errors: &mut UiErrorKeys) {
+fn announce_unlearn(spell_id: u32, spells: Option<&Spells>, errors: &UiErrorKeys) {
     let Some(display) = spells.and_then(|s| s.catalog.get(spell_id)) else {
         return;
     };
     if !display.announces_unlearn() {
         return;
     }
-    errors
-        .0
-        .push(UiError::s("ERR_SPELL_UNLEARNED_S", display.name.clone()));
+    errors.push(UiError::s("ERR_SPELL_UNLEARNED_S", display.name.clone()));
 }
 
 /// `SMSG_SUPERCEDED_SPELL`: the new rank replaces the old in the book. The bar follows from the
@@ -565,7 +650,7 @@ fn superceded_spell(
     new_spell_id: u32,
     actions: &mut PlayerActions,
     spells: Option<&Spells>,
-    errors: &mut UiErrorKeys,
+    errors: &UiErrorKeys,
     tab_flash: &mut LearnedInTab,
 ) {
     debug!("net: superceded spell {old_spell_id} -> {new_spell_id}");
@@ -591,7 +676,7 @@ fn cast_result(
     success: bool,
     reason: Option<u8>,
     arg: Option<u32>,
-    commands: &mut Commands,
+    edits: &crate::creature_anim::UnitEdits,
     self_guid: &SelfGuid,
     index: &GuidIndex,
     casting: &Query<&Casting>,
@@ -619,8 +704,18 @@ fn cast_result(
         // spell still in flight. vmangos sends 0x17 for real aborts.
         let dont_report = reason == Some(0x17);
         let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
+        // NOT_READY with a first dword of 0, the server holding no cooldown of its own
+        // (`0x6e1af1`): a held record of the spell on our list (`0x6e1690`, `0x6e1b02`) goes with
+        // all its records (`0x6e3050(spell, 0, 0, 1)`, `0x6e1b13`). An absent dword reads -1.
+        if reason == Some(0x3c) && arg == Some(0) {
+            if let Some(d) = spells.and_then(|s| s.catalog.get(spell_id)) {
+                if cooldowns.has_on_hold_record(spell_id, 0, d.category) {
+                    cooldowns.clear_spell(spell_id);
+                }
+            }
+        }
         if auto_repeat.0 == Some(spell_id) && !dont_report {
-            crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, commands, net);
+            crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, net);
         }
         if !dont_report {
             cooldowns.clear_gcd(spell_id, now);
@@ -654,8 +749,18 @@ fn cast_result(
         // state and precast hold, keyed by spell id.
         if let Some(e) = self_e {
             if casting.get(e).is_ok_and(|c| c.spell_id == spell_id) {
-                commands.entity(e).remove::<Casting>();
+                edits.push(crate::creature_anim::UnitEdit::ReapCasting {
+                    entity: e,
+                    spell_id,
+                });
             }
+            // The report's player cleanup ends the precast of the failed spell (`0x6e1c7f`,
+            // `0x6e1c8e`), with its tail.
+            edits.push(crate::creature_anim::UnitEdit::EndPrecast {
+                entity: e,
+                spell_id: Some(spell_id),
+                tail: true,
+            });
             cast_events.write(CastEvent {
                 entity: e,
                 spell_id,
@@ -717,6 +822,7 @@ fn cast_result(
         {
             if Some(next) == auto_repeat.0 {
                 core.pending.fill_record();
+                core.pending.fill_record_spell(next);
             } else {
                 debug!("net: cast result {spell_id} chains modalNextSpell {next}");
                 return Some(next);
@@ -741,6 +847,9 @@ fn spell_start(
     reports: &mut CastReports,
     pending: &mut PendingCast,
     spells: Option<&crate::ui_action::Spells>,
+    edits: &crate::creature_anim::UnitEdits,
+    // Whether a spell resolves a visual for a caster, which its precast needs (`0x6ec220`).
+    precasts: &dyn Fn(Entity, u32) -> bool,
     seq: u64,
 ) {
     // A nonzero cast time marks the caster `Casting`; an instant gets none, its GO follows at once.
@@ -813,6 +922,20 @@ fn spell_start(
                 ),
             });
         }
+        // `0x6ec220`'s precast: another unit's unless the packet's flag bit 0 is set (`0x6e78f8`,
+        // vmangos's `CAST_FLAG_HIDDEN_COMBATLOG`), ours unless the spell is the pending record's
+        // (`0x6e79af`), whose send started it.
+        let starts = if self_guid.0 == Some(caster) {
+            pending.record_spell() != spell_id
+        } else {
+            cast_flags & 0x1 == 0
+        };
+        if starts && precasts(e, spell_id) {
+            edits.push(crate::creature_anim::UnitEdit::StartPrecast {
+                entity: e,
+                spell_id,
+            });
+        }
         // The precast edge, instants included: their GO follows at once and reaps the hold.
         cast_events.write(CastEvent {
             entity: e,
@@ -859,7 +982,6 @@ fn spell_go(
         &mut Cooldowns,
         Option<&Spells>,
         &mut crate::items::Items,
-        &crate::net::NetCommands,
         &mut crate::ui_pet::PetBar,
         &crate::spell::SpellModifiers,
     ),
@@ -869,8 +991,11 @@ fn spell_go(
     attack_ctx: (
         &mut crate::spell::AutoRepeatActive,
         &mut MessageWriter<crate::creature_anim::SheathRequest>,
+        &mut MessageWriter<crate::player::StandStateRequest>,
+        &crate::creature_anim::UnitEdits,
         bool,
         crate::creature_anim::StartGate,
+        &mut super::CastCore,
     ),
     seq: u64,
 ) {
@@ -900,8 +1025,10 @@ fn spell_go(
     if let Some(go_guid) = go_target {
         go_lid.write(crate::go_anim::GoLidOpen { go_guid, spell_id });
     }
-    let (cooldowns, spells, items, net_commands, pet_bar, spell_mods) = cooldown_ctx;
-    let (auto_repeat, sheath, engaged, start_gate) = attack_ctx;
+    let (cooldowns, spells, items, pet_bar, spell_mods) = cooldown_ctx;
+    // The item leg held the cooldown for its record ([`item_go_cooldown`]).
+    let mut pended = false;
+    let (auto_repeat, sheath, stand, edits, engaged, start_gate, core) = attack_ctx;
     let now = Instant::now();
     let display = spells.and_then(|s| s.catalog.get(spell_id));
     // A chest becomes the loot target at this packet, not at the loot response: `HandleSpellGo
@@ -956,19 +1083,20 @@ fn spell_go(
                     start_gate,
                     auto_repeat,
                     sheath,
-                    commands,
-                    net_commands,
+                    stand,
+                    edits,
+                    spells,
+                    core,
                 );
             }
         }
 
         // Our launch starts the cast's cooldown here, at the GO receive time. The self-insert
-        // forks on itemCaster == caster: the spell leg (`0x6e8498`: RecoveryTime, Category,
-        // CategoryRecoveryTime, on-hold from Attributes bit 25) or the item leg (`0x6e8566`,
-        // per-slot values with SpellRec fallbacks; a non-resident row pends via `0x6e8660` →
-        // `0x6e8830`). `SMSG_SPELL_COOLDOWN` is the server's override; vmangos sends none for a
-        // plain cast. A ranged-slot cast folds `UNIT_FIELD_RANGEDATTACKTIME` into the category
-        // recovery (`0x6e2b60`).
+        // forks on the first guid against the caster's (`0x6e8441`): the spell leg
+        // (`0x6e8498`: RecoveryTime, Category, CategoryRecoveryTime, on-hold from Attributes bit
+        // 25) or the item leg ([`item_go_cooldown`]). `SMSG_SPELL_COOLDOWN` is the server's
+        // override; vmangos sends none for a plain cast. A ranged-slot cast folds
+        // `UNIT_FIELD_RANGEDATTACKTIME` into the category recovery (`0x6e2b60`).
         let ranged_ms = display
             .filter(|d| d.ranged_speed_cooldown())
             .and_then(|_| {
@@ -976,26 +1104,11 @@ fn spell_go(
                 stores.get(*e).ok()?.0.unit_ranged_attack_time()
             })
             .unwrap_or(0);
-        // The item's entry, off its own store.
-        match item_caster.and_then(|g| stores.get(*index.0.get(&g)?).ok()?.0.object_entry()) {
-            Some(entry) => {
-                // The item's record, which its create asked.
-                let use_spell = items
-                    .template(entry, 0, Ask::Read)
-                    .and_then(|t| t.use_spell)
-                    .filter(|u| u.spell_id == spell_id);
-                match use_spell {
-                    Some(u) => cooldowns.start_item(entry, &u, display, now),
-                    // Template not streamed, or naming another spell: the spell-keyed record,
-                    // unmodified, as the item leg never applies op 11 (`0x6e8566`, `0x6e8830`).
-                    None => {
-                        if let Some(d) = display {
-                            cooldowns.start_spell(spell_id, d, ranged_ms, now, None);
-                        }
-                    }
-                }
-                // The item leg's pair, with or without an insert (`0x6e8500`, `0x6e856b`).
-                cooldowns.flush_item_leg();
+        match item_caster {
+            Some(item) => {
+                pended = item_go_cooldown(
+                    item, spell_id, display, now, index, stores, items, core.net, cooldowns,
+                );
             }
             None => {
                 if let Some(d) = display {
@@ -1016,17 +1129,20 @@ fn spell_go(
             }
         }
     }
-    // The pet leg of the same insert: an independent `if`, not an else.
-    if let Some(d) = display.filter(|_| pet_go_cooldown(caster, self_guid, index, stores)) {
+    // The pet leg of the same insert: an independent `if`, not an else, which a held item cooldown
+    // skips, as it ends the handler (`0x6e84dd`).
+    if let Some(d) =
+        display.filter(|_| !pended && pet_go_cooldown(caster, self_guid, index, stores))
+    {
         // No ranged pad: `0x6e2b60` is called on the self leg only (`0x6e845d`). Op 11 still
         // applies to both columns (`0x6e85c5`, `0x6e85d1`) off the player's tables, which gate
         // on the spell's family and never the caster (`0x6e6b30`).
         pet_bar
             .cooldowns
             .start_spell(spell_id, d, 0, now, Some(spell_mods));
-        // The flush that follows (`0x6e85fc` `0x4b31b0`, `0x6e8601` `0x4bce90`) fires off the
-        // list's generation, which the insert bumped: `ACTIONBAR_UPDATE_COOLDOWN`,
-        // `SPELL_UPDATE_COOLDOWN`, `PET_BAR_UPDATE_COOLDOWN`, and no `PET_BAR_UPDATE`.
+        // Its flush follows, inserted or not (`0x6e85fc` `0x4b31b0`, `0x6e8601` `0x4bce90`):
+        // `ACTIONBAR_UPDATE_COOLDOWN`, `SPELL_UPDATE_COOLDOWN`, `PET_BAR_UPDATE_COOLDOWN`, and no
+        // `PET_BAR_UPDATE`.
         if benilla_assets::trace::enabled() {
             let (recovery_ms, category_ms) = spell_mods.spell_cooldowns(d, 0);
             benilla_assets::trace::line(
@@ -1045,6 +1161,16 @@ fn spell_go(
     if let Some(&e) = index.0.get(&caster) {
         if casting.get(e).is_ok_and(|c| c.spell_id == spell_id) {
             commands.entity(e).remove::<Casting>();
+        }
+        // The precast ends with its own spell's GO (`0x60d040` at `0x6e7fc5`), its tail run as
+        // `0x6e4870` answers for the record and the cast flags (`0x6e7fa1`, pushed at `0x6e7fbd`).
+        // A spell with no record returns long before (`0x6e7cd7`-`0x6e7cf7`).
+        if let Some(d) = display {
+            edits.push(crate::creature_anim::UnitEdit::EndPrecast {
+                entity: e,
+                spell_id: Some(spell_id),
+                tail: d.test_attributes_and_flags(u32::from(cast_flags)),
+            });
         }
         // The GO's chain-hop fill (`0x6e800d`), the producer for non-channelled chain spells. It
         // must precede the CastEvent: the cast kit's chain proc consumes it the same frame. The
@@ -1096,11 +1222,12 @@ fn spell_failed_other(
     casting: &Query<&Casting>,
     cast_events: &mut MessageWriter<CastEvent>,
     self_guid: &SelfGuid,
+    edits: &crate::creature_anim::UnitEdits,
     seq: u64,
 ) {
     debug!("net: spell failed (other) {spell_id} by {caster:#x}");
-    // No event and no slot: the handler (`0x6e8e40`) stops the visual (`0x60d040`) and reaps
-    // (`0x614150`). Our bar's red "Interrupted" and a queued strike's pop are the failing
+    // No event and no slot: the handler (`0x6e8e40`) ends the precast (`0x60d040` at `0x6e8e8c`)
+    // and reaps (`0x614150`). Our bar's red "Interrupted" and a queued strike's pop are the failing
     // `SMSG_CAST_RESULT`'s report, which vmangos sends after it (`Spell::cancel`).
     if self_guid.0 == Some(caster) && *crate::net::CAST_TRACE {
         info!("cast-trace: RECV SPELL_FAILED_OTHER — spell {spell_id} (self)");
@@ -1110,6 +1237,11 @@ fn spell_failed_other(
         if casting.get(e).is_ok_and(|c| c.spell_id == spell_id) {
             commands.entity(e).remove::<Casting>();
         }
+        edits.push(crate::creature_anim::UnitEdit::EndPrecast {
+            entity: e,
+            spell_id: Some(spell_id),
+            tail: true,
+        });
         cast_events.write(CastEvent {
             entity: e,
             spell_id,
@@ -1143,9 +1275,9 @@ fn spell_delayed(
 }
 
 /// `SMSG_CANCEL_AUTO_REPEAT`: the handler (`0x6e99d0` → `0x6ea080`) clears the autorepeat key
-/// `0xceac30`, which the button's checked state reads (`STOP_AUTOREPEAT_SPELL`), and both
-/// shooting-idle bits of `[+0xd58]`, so the Load/Hold idle drops
-/// ([`crate::creature_anim::AutoRepeatArmed`] and `RangedHold`). Nothing sheathes.
+/// `0xceac30`, which the button's checked state reads (`STOP_AUTOREPEAT_SPELL`), the auto-repeat
+/// bit `[+0xd58] & 0x200`, so the Load/Hold idle drops ([`crate::creature_anim::AutoRepeatArmed`]),
+/// and the repeat spell's precast ([`crate::creature_anim::Precast`]). Nothing sheathes.
 ///
 /// vmangos sends it on every player autorepeat interrupt (`SpellCaster.cpp:1826`), which is how
 /// target death stops a volley (`Unit::_UpdateAutoRepeatSpell` → `CheckCast(true)` fails →
@@ -1155,13 +1287,62 @@ fn cancel_auto_repeat(
     auto_repeat: &mut AutoRepeatActive,
     self_guid: &SelfGuid,
     index: &GuidIndex,
-    commands: &mut Commands,
+    edits: &crate::creature_anim::UnitEdits,
     net: &crate::net::NetCommands,
 ) {
     debug!("net: cancel auto-repeat");
     // The same cancel `0x6ea080` as every local trigger, its unconditional CMSG ack included.
     let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
-    crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, commands, net);
+    crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, edits, net);
+}
+
+/// The go's item leg, for a cast whose first guid is not the caster's: the item's entry off its
+/// object (`0x6e8425`, type mask 2), with none inserting and flushing nothing (`0x6e84a9`); then its
+/// record, asked with the callback `0x6e8830` (`0x6e84c2`).
+/// - Not cached: the cooldown is held for the record ([`Cooldowns::pend_item`], `0x6e84d8`) and
+///   the handler ends (`0x6e84dd`); returns `true`.
+/// - Cached: the spell is searched among all five blocks, whatever their trigger (`0x6e84f0`). The
+///   block naming it inserts, keyed by the item ([`Cooldowns::start_item`]); none inserts nothing
+///   and flushes the pair and the bags (`0x6e84fd`-`0x6e8505`).
+fn item_go_cooldown(
+    item: u64,
+    spell_id: u32,
+    display: Option<&benilla_formats::SpellDisplay>,
+    now: Instant,
+    index: &GuidIndex,
+    stores: &Query<&mut ObjectStore>,
+    items: &crate::items::Items,
+    net: &crate::net::NetCommands,
+    cooldowns: &mut Cooldowns,
+) -> bool {
+    let entry = index
+        .0
+        .get(&item)
+        .and_then(|&e| stores.get(e).ok())
+        .filter(|s| s.0.is_item())
+        .and_then(|s| s.0.object_entry())
+        .filter(|&entry| entry != 0);
+    let Some(entry) = entry else {
+        return false;
+    };
+    let Some(record) = items.template(entry, item, Ask::Event(net)) else {
+        let on_hold = display.is_some_and(|d| d.cooldown_on_event());
+        cooldowns.pend_item(entry, spell_id, now, on_hold);
+        return true;
+    };
+    match record.spells.iter().find(|b| b.spell_id == spell_id) {
+        Some(block) => {
+            let block = benilla_protocol::messages::ItemUseSpell {
+                spell_id,
+                cooldown_ms: block.cooldown_ms,
+                category: block.category,
+                category_cooldown_ms: block.category_cooldown_ms,
+            };
+            cooldowns.start_item(entry, &block, display, now);
+        }
+        None => cooldowns.flush_item_leg(),
+    }
+    false
 }
 
 /// Whether this `SMSG_SPELL_GO` arms the pet's cooldown bank (`0x6e857a`–`0x6e85ad`). The GO
@@ -1199,16 +1380,17 @@ fn spell_cooldowns(
     pairs: Vec<(u32, u32)>,
     spells: Option<&Spells>,
     cooldowns: &mut Cooldowns,
+    mods: &crate::spell::SpellModifiers,
+    pad: crate::spell::CategoryPad,
 ) {
     debug!(
         "net: spell cooldowns for {caster:#x} — {} pair(s)",
         pairs.len()
     );
-    let now = Instant::now();
-    for (spell_id, cooldown_ms) in pairs {
-        let display = spells.and_then(|s| s.catalog.get(spell_id));
-        cooldowns.apply_wire_cooldown(spell_id, cooldown_ms, display, now);
-    }
+    let pairs = pairs
+        .into_iter()
+        .map(|(id, ms)| (id, ms, spells.and_then(|s| s.catalog.get(id))));
+    cooldowns.apply_spell_cooldowns(pairs, mods, pad, Instant::now());
 }
 
 /// `SMSG_ITEM_COOLDOWN` (`0x6e95d0`): the fixed 30 s use cooldown, keyed on the item instance's
@@ -1339,6 +1521,8 @@ mod tests {
     use crate::spell::QueuedMeleeSpell;
     use benilla_protocol::messages::ACTION_KIND_SPELL;
 
+    mod cooldown_sites;
+
     /// `SMSG_COOLDOWN_EVENT` (`0x6e9670`): the event moves the held record's one start, which the
     /// GCD leg reads (`0x6e15d8`), so the global cooldown runs again from the packet.
     #[test]
@@ -1419,13 +1603,13 @@ mod tests {
             },
         );
         let mut actions = PlayerActions::default();
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         let mut flash = LearnedInTab::default();
-        learned_spell(78, &mut actions, Some(&spells), &mut errors, &mut flash);
+        learned_spell(78, &mut actions, Some(&spells), &errors, &mut flash);
 
-        assert_eq!(errors.0.len(), 1, "one line, once");
-        assert_eq!(errors.0[0].key, "ERR_LEARN_ABILITY_S");
-        assert_eq!(errors.0[0].arg_s(), Some("Heroic Strike (Rank 1)"));
+        assert_eq!(errors.len(), 1, "one line, once");
+        assert_eq!(errors.snapshot()[0].key, "ERR_LEARN_ABILITY_S");
+        assert_eq!(errors.snapshot()[0].arg_s(), Some("Heroic Strike (Rank 1)"));
         // The same live-learn flag gates the tab flash.
         assert_eq!(flash.0, vec![78], "queued for LEARNED_SPELL_IN_TAB");
     }
@@ -1443,16 +1627,16 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         learned_spell(
             133,
             &mut PlayerActions::default(),
             Some(&spells),
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
-        assert_eq!(errors.0[0].key, "ERR_LEARN_SPELL_S");
-        assert_eq!(errors.0[0].arg_s(), Some("Fireball (Rank 1)"));
+        assert_eq!(errors.snapshot()[0].key, "ERR_LEARN_SPELL_S");
+        assert_eq!(errors.snapshot()[0].arg_s(), Some("Fireball (Rank 1)"));
 
         let spells = catalog_with(
             2550,
@@ -1463,17 +1647,17 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         learned_spell(
             2550,
             &mut PlayerActions::default(),
             Some(&spells),
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
-        assert_eq!(errors.0[0].key, "ERR_LEARN_RECIPE_S");
+        assert_eq!(errors.snapshot()[0].key, "ERR_LEARN_RECIPE_S");
         assert_eq!(
-            errors.0[0].arg_s(),
+            errors.snapshot()[0].arg_s(),
             Some("Cooking"),
             "the recipe arm pushes the bare name"
         );
@@ -1510,25 +1694,18 @@ mod tests {
         );
         let mut actions = PlayerActions::default();
         actions.spells.insert(78);
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         let mut flash = LearnedInTab::default();
-        superceded_spell(
-            78,
-            284,
-            &mut actions,
-            Some(&spells),
-            &mut errors,
-            &mut flash,
-        );
+        superceded_spell(78, 284, &mut actions, Some(&spells), &errors, &mut flash);
 
-        assert_eq!(errors.0.len(), 1, "one line for a rank-up, not two");
+        assert_eq!(errors.len(), 1, "one line for a rank-up, not two");
         assert_eq!(
             flash.0,
             vec![284],
             "the NEW rank's tab flashes, not the old one's"
         );
-        assert_eq!(errors.0[0].key, "ERR_LEARN_ABILITY_S");
-        assert_eq!(errors.0[0].arg_s(), Some("Heroic Strike (Rank 2)"));
+        assert_eq!(errors.snapshot()[0].key, "ERR_LEARN_ABILITY_S");
+        assert_eq!(errors.snapshot()[0].arg_s(), Some("Heroic Strike (Rank 2)"));
     }
 
     /// A `DO_NOT_DISPLAY` row (languages, weapon proficiencies) and an unknown id are silent.
@@ -1542,23 +1719,23 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         learned_spell(
             668,
             &mut PlayerActions::default(),
             Some(&spells),
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
         learned_spell(
             99999,
             &mut PlayerActions::default(),
             Some(&spells),
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
         assert!(
-            errors.0.is_empty(),
+            errors.is_empty(),
             "PASSIVE|DO_NOT_DISPLAY is silent, and so is an id with no record"
         );
     }
@@ -1566,12 +1743,12 @@ mod tests {
     #[test]
     fn learned_spell_adds_to_the_book_once() {
         let mut actions = PlayerActions::default();
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         learned_spell(
             6603,
             &mut actions,
             None,
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
         assert!(actions.spells.contains(&6603));
@@ -1582,7 +1759,7 @@ mod tests {
             6603,
             &mut actions,
             None,
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
         assert!(
@@ -1610,7 +1787,7 @@ mod tests {
             284,
             &mut actions,
             None,
-            &mut UiErrorKeys::default(),
+            &UiErrorKeys::default(),
             &mut LearnedInTab::default(),
         );
 
@@ -1661,6 +1838,7 @@ mod tests {
                 .init_resource::<super::super::SpellTargeting>()
                 .init_resource::<ActiveChannel>()
                 .init_resource::<AutoRepeatActive>()
+                .init_resource::<crate::creature_anim::UnitEdits>()
                 .init_resource::<Cooldowns>()
                 .init_resource::<crate::spell::SpellModifiers>()
                 .init_resource::<crate::ui_pet::PetBar>()
@@ -1704,6 +1882,9 @@ mod tests {
             );
             let world = self.app.world_mut();
             world.resource_mut::<PendingCast>().fill_record();
+            world
+                .resource_mut::<PendingCast>()
+                .fill_record_spell(spell_id);
             if pushes {
                 let before = world.resource::<CastReports>().0.len();
                 world
@@ -1724,6 +1905,11 @@ mod tests {
         }
 
         fn start(&mut self, spell_id: u32, cast_time_ms: u32) {
+            self.start_by(Self::SELF, spell_id, cast_time_ms, 0);
+        }
+
+        /// `SMSG_SPELL_START` by `caster` with the packet's `cast_flags`.
+        fn start_by(&mut self, caster: u64, spell_id: u32, cast_time_ms: u32, cast_flags: u16) {
             self.app
                 .world_mut()
                 .run_system_once(
@@ -1732,11 +1918,13 @@ mod tests {
                           mut cast_events: MessageWriter<CastEvent>,
                           self_guid: Res<SelfGuid>,
                           mut reports: ResMut<CastReports>,
-                          mut pending: ResMut<PendingCast>| {
+                          mut pending: ResMut<PendingCast>,
+                          edits: Res<crate::creature_anim::UnitEdits>,
+                          visuals: crate::creature_anim::PrecastVisuals| {
                         spell_start(
-                            Self::SELF,
+                            caster,
                             spell_id,
-                            0,
+                            cast_flags,
                             cast_time_ms,
                             None,
                             None,
@@ -1747,11 +1935,48 @@ mod tests {
                             &mut reports,
                             &mut pending,
                             None,
+                            &edits,
+                            &|e, spell_id| visuals.resolves(e, spell_id),
                             1,
                         );
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(self.app.world_mut());
+        }
+
+        /// A unit `guid` streamed beside us.
+        fn other_unit(&mut self, guid: u64) -> Entity {
+            let e = self
+                .app
+                .world_mut()
+                .spawn((crate::net::Guid(guid), ObjectStore::default()))
+                .id();
+            self.app
+                .world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(guid, e);
+            e
+        }
+
+        /// The spell `entity` precasts, and whether its bit is set.
+        fn precast(&self, entity: Entity) -> Option<(u32, bool)> {
+            self.app
+                .world()
+                .get::<crate::creature_anim::Precast>(entity)
+                .map(|p| (p.spell_id, p.busy))
+        }
+
+        /// `entity` precasting `spell_id`.
+        fn give_precast(&mut self, entity: Entity, spell_id: u32) {
+            self.app
+                .world_mut()
+                .entity_mut(entity)
+                .insert(crate::creature_anim::Precast {
+                    spell_id,
+                    busy: true,
+                });
         }
 
         /// `fail` is `None` for status 0, else the status-2 reason.
@@ -1759,7 +1984,7 @@ mod tests {
             self.app
                 .world_mut()
                 .run_system_once(
-                    move |mut commands: Commands,
+                    move |edits: Res<crate::creature_anim::UnitEdits>,
                           self_guid: Res<SelfGuid>,
                           index: Res<GuidIndex>,
                           casting: Query<&Casting>,
@@ -1774,7 +1999,7 @@ mod tests {
                             fail.is_none(),
                             fail,
                             None,
-                            &mut commands,
+                            &edits,
                             &self_guid,
                             &index,
                             &casting,
@@ -1790,6 +2015,7 @@ mod tests {
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(self.app.world_mut());
         }
 
         /// `SMSG_SPELL_FAILED_OTHER` for our own spell.
@@ -1801,7 +2027,8 @@ mod tests {
                           index: Res<GuidIndex>,
                           casting: Query<&Casting>,
                           mut cast_events: MessageWriter<CastEvent>,
-                          self_guid: Res<SelfGuid>| {
+                          self_guid: Res<SelfGuid>,
+                          edits: Res<crate::creature_anim::UnitEdits>| {
                         spell_failed_other(
                             Self::SELF,
                             spell_id,
@@ -1810,14 +2037,21 @@ mod tests {
                             &casting,
                             &mut cast_events,
                             &self_guid,
+                            &edits,
                             1,
                         );
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(self.app.world_mut());
         }
 
         fn go(&mut self, spell_id: u32) {
+            self.go_flagged(spell_id, 0);
+        }
+
+        /// The GO with its cast flags, read against the world's spell records if it has any.
+        fn go_flagged(&mut self, spell_id: u32, cast_flags: u16) {
             use crate::go_anim::GoLidOpen;
             let (tx, _rx) = crossbeam_channel::unbounded();
             self.app
@@ -1834,12 +2068,15 @@ mod tests {
                           mut cooldowns: ResMut<Cooldowns>,
                           mut pet_bar: ResMut<crate::ui_pet::PetBar>,
                           mut items: ResMut<crate::items::Items>,
-                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
+                          mut stand: MessageWriter<crate::player::StandStateRequest>,
+                          edits: Res<crate::creature_anim::UnitEdits>,
+                          spells: Option<Res<Spells>>| {
                         let net_commands = crate::net::NetCommands(tx.clone());
                         spell_go(
                             Self::SELF,
                             spell_id,
-                            0,
+                            cast_flags,
                             vec![],
                             vec![],
                             None,
@@ -1858,23 +2095,32 @@ mod tests {
                             &mut crate::ui_loot::LootLatch::default(),
                             (
                                 &mut cooldowns,
-                                None,
+                                spells.as_deref(),
                                 &mut items,
-                                &net_commands,
                                 &mut pet_bar,
                                 &crate::spell::SpellModifiers::default(),
                             ),
                             (
                                 &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
+                                &mut stand,
+                                &edits,
                                 false,
                                 crate::creature_anim::StartGate::default(),
+                                &mut crate::spell::CastCore {
+                                    pending: &mut Default::default(),
+                                    queued_melee: &mut Default::default(),
+                                    ground: &mut Default::default(),
+                                    reports: &mut Default::default(),
+                                    net: &net_commands,
+                                },
                             ),
                             1,
                         );
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(self.app.world_mut());
         }
 
         /// `MSG_CHANNEL_START`, or `MSG_CHANNEL_UPDATE` with `start` false.
@@ -1942,12 +2188,175 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     const FIREBALL: u32 = 133;
+    const FROSTBOLT: u32 = 116;
     const FORTITUDE: u32 = 1243;
     const ARCANE_MISSILES: u32 = 5143;
     /// Hearthstone's spell; the item's template carries `ITEM_FLAG_PLAYERCAST`.
     const HEARTHSTONE: u32 = 8690;
     /// Minor Healing Potion's spell; the item's template does not.
     const MINOR_HEALING: u32 = 439;
+
+    /// Our own `SMSG_SPELL_START` starts no precast for the pending record's spell (`0x6e79af`
+    /// skips `0x6e79be`), its send having started it; one the record does not hold, a spell the
+    /// server cast for us, starts it there.
+    #[test]
+    fn our_start_precasts_only_a_spell_the_record_does_not_hold() {
+        let mut s = CastSeq::new();
+        crate::creature_anim::install_visuals_for_tests(
+            s.app.world_mut(),
+            &[FIREBALL, FROSTBOLT],
+            &[],
+        );
+        s.commit(FIREBALL, None);
+        s.start(FIREBALL, 3_000);
+        assert_eq!(s.precast(s.self_e), None, "the record's spell");
+        s.start(FROSTBOLT, 0);
+        assert_eq!(
+            s.precast(s.self_e),
+            Some((FROSTBOLT, true)),
+            "another spell"
+        );
+    }
+
+    /// The auto-repeat re-arm refills the record with the repeat spell (`0x6e7472`), whose own
+    /// `SMSG_SPELL_START` then starts no precast.
+    #[test]
+    fn the_auto_repeat_re_arm_records_the_repeat_spell() {
+        const SERPENT_STING: u32 = 1978;
+        const AUTO_SHOT: u32 = 75;
+        let mut s = CastSeq::new();
+        s.app.insert_resource(Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(
+                [(
+                    SERPENT_STING,
+                    benilla_formats::SpellDisplay {
+                        modal_next_spell: AUTO_SHOT,
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ..Spells::empty_for_tests()
+        });
+        s.app.world_mut().resource_mut::<AutoRepeatActive>().0 = Some(AUTO_SHOT);
+        s.commit(SERPENT_STING, None);
+        s.result(SERPENT_STING, None);
+        assert_eq!(
+            s.app.world().resource::<PendingCast>().record_spell(),
+            AUTO_SHOT
+        );
+    }
+
+    /// Another unit's `SMSG_SPELL_START` starts its precast unless the packet's flag bit 0 is set
+    /// (`0x6e78f8` skips `0x6e7908`).
+    #[test]
+    fn another_units_start_precasts_unless_its_first_flag_is_set() {
+        const OTHER: u64 = 20;
+        let mut s = CastSeq::new();
+        crate::creature_anim::install_visuals_for_tests(s.app.world_mut(), &[FIREBALL], &[]);
+        let other = s.other_unit(OTHER);
+        s.start_by(OTHER, FIREBALL, 3_000, 0x1);
+        assert_eq!(s.precast(other), None, "flag bit 0");
+        s.start_by(OTHER, FIREBALL, 3_000, 0x2);
+        assert_eq!(s.precast(other), Some((FIREBALL, true)));
+    }
+
+    /// `0x60d040` with the packet's spell: the GO (`0x6e7fc5`), `SMSG_SPELL_FAILED_OTHER`
+    /// (`0x6e8e8c`) and our failed cast's report (`0x6e1c8e`) each end the precast of their own
+    /// spell only.
+    #[test]
+    fn the_go_and_the_failures_end_the_precast_of_their_own_spell() {
+        let mut s = CastSeq::new();
+        let me = s.self_e;
+        s.app.world_mut().insert_resource(Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(std::collections::HashMap::from(
+                [
+                    (FIREBALL, Default::default()),
+                    (FROSTBOLT, Default::default()),
+                ],
+            )),
+            ..Spells::empty_for_tests()
+        });
+        s.give_precast(me, FIREBALL);
+        s.go(FROSTBOLT);
+        assert!(s.precast(me).is_some(), "another spell's GO");
+        s.go(FIREBALL);
+        assert_eq!(s.precast(me), None, "its GO");
+        s.give_precast(me, FIREBALL);
+        s.failed_other(FROSTBOLT);
+        assert!(s.precast(me).is_some(), "another spell's failure");
+        s.failed_other(FIREBALL);
+        assert_eq!(s.precast(me), None, "its failure");
+        s.give_precast(me, FIREBALL);
+        s.result(FROSTBOLT, Some(0x23));
+        assert!(s.precast(me).is_some(), "another spell's failed result");
+        s.result(FIREBALL, Some(0x23));
+        assert_eq!(s.precast(me), None, "its failed result");
+    }
+
+    /// A GO whose spell has no record returns before anything (`0x6e7cd7`-`0x6e7cf7` →
+    /// `0x6e8647`), so it ends no precast (`0x60d040` is at `0x6e7fc5`).
+    #[test]
+    fn a_go_with_no_spell_record_ends_no_precast() {
+        let mut s = CastSeq::new();
+        let me = s.self_e;
+        s.app.world_mut().insert_resource(Spells::empty_for_tests());
+        s.give_precast(me, FIREBALL);
+        s.go(FIREBALL);
+        assert_eq!(s.precast(me), Some((FIREBALL, true)));
+    }
+
+    /// The GO's end runs its tail as `0x6e4870` answers for the record and the cast flags
+    /// (`0x6e7fa1`, pushed at `0x6e7fbd`), its last step our loot's release; a failure's always
+    /// runs it (`0x6e8e8c` and `0x6e1c8e` push `b` 1).
+    #[test]
+    fn the_go_releases_our_loot_as_its_attribute_test_answers_and_a_failure_always() {
+        use benilla_formats::{SpellCatalog, SpellDisplay};
+        let mut s = CastSeq::new();
+        let me = s.self_e;
+        let world = s.app.world_mut();
+        world.insert_resource(Spells {
+            catalog: SpellCatalog::from_displays(std::collections::HashMap::from([
+                (FIREBALL, SpellDisplay::default()),
+                (
+                    FROSTBOLT,
+                    SpellDisplay {
+                        attributes_ex: 0x400,
+                        ..Default::default()
+                    },
+                ),
+            ])),
+            ..Spells::empty_for_tests()
+        });
+        world.insert_resource(crate::player::Player::with_move_flags(0));
+        world.init_resource::<crate::ui_loot::LootMoveStart>();
+        world.init_resource::<crate::ui_loot::LootCloseAtRest>();
+        let owed = |s: &mut CastSeq| {
+            let world = s.app.world_mut();
+            assert!(
+                !world.resource::<crate::ui_loot::LootMoveStart>().0,
+                "at rest"
+            );
+            std::mem::take(&mut world.resource_mut::<crate::ui_loot::LootCloseAtRest>().0)
+        };
+        s.give_precast(me, FIREBALL);
+        s.go_flagged(FIREBALL, 0x100);
+        assert!(owed(&mut s), "a plain record's GO");
+        s.give_precast(me, FROSTBOLT);
+        s.go_flagged(FROSTBOLT, 0x100);
+        assert_eq!(s.precast(me), None, "an `AttributesEx & 0x400` GO ends it");
+        assert!(!owed(&mut s), "with no tail");
+        s.give_precast(me, FIREBALL);
+        s.go_flagged(FIREBALL, 0x1);
+        assert!(!owed(&mut s), "flag bit 0");
+        s.give_precast(me, FIREBALL);
+        s.failed_other(FIREBALL);
+        assert!(owed(&mut s), "its failure");
+        s.give_precast(me, FIREBALL);
+        s.result(FIREBALL, Some(0x23));
+        assert!(owed(&mut s), "its failed result");
+    }
 
     /// vmangos sends, for every non-triggered cast, `SMSG_SPELL_START` at `Spell::prepare`
     /// (`Spell.cpp:3439`), then at the cast's end `Spell::cast` sends `SMSG_CAST_RESULT`
@@ -2341,7 +2750,8 @@ mod tests {
             .init_resource::<CastReports>()
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
-            .init_resource::<ActiveChannel>();
+            .init_resource::<ActiveChannel>()
+            .init_resource::<crate::creature_anim::UnitEdits>();
         let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();
         app.world_mut()
             .resource_mut::<GuidIndex>()
@@ -2377,7 +2787,8 @@ mod tests {
                       index: Res<GuidIndex>,
                       casting: Query<&Casting>,
                       mut cast_events: MessageWriter<CastEvent>,
-                      self_guid: Res<SelfGuid>| {
+                      self_guid: Res<SelfGuid>,
+                      edits: Res<crate::creature_anim::UnitEdits>| {
                     spell_failed_other(
                         10,
                         BLIZZARD,
@@ -2386,6 +2797,7 @@ mod tests {
                         &casting,
                         &mut cast_events,
                         &self_guid,
+                        &edits,
                         1,
                     );
                 },
@@ -2454,6 +2866,7 @@ mod tests {
             .add_message::<GoLidOpen>()
             .add_message::<crate::creature_anim::SheathRequest>()
             .add_message::<crate::player::StandStateRequest>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
             .init_resource::<CastReports>()
@@ -2502,7 +2915,9 @@ mod tests {
                       mut cooldowns: ResMut<Cooldowns>,
                       mut pet_bar: ResMut<crate::ui_pet::PetBar>,
                       mut items: ResMut<crate::items::Items>,
-                      mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                      mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
+                      mut stand: MessageWriter<crate::player::StandStateRequest>,
+                      edits: Res<crate::creature_anim::UnitEdits>| {
                     let net_commands = crate::net::NetCommands(tx.clone());
                     spell_go(
                         caster,
@@ -2514,7 +2929,7 @@ mod tests {
                         None,
                         None,
                         None,
-                        item_caster.or(Some(caster)),
+                        item_caster,
                         &mut commands,
                         &index,
                         &casting,
@@ -2528,21 +2943,30 @@ mod tests {
                             &mut cooldowns,
                             Some(&spells),
                             &mut items,
-                            &net_commands,
                             &mut pet_bar,
                             &mods,
                         ),
                         (
                             &mut crate::spell::AutoRepeatActive::default(),
                             &mut sheath,
+                            &mut stand,
+                            &edits,
                             false,
                             crate::creature_anim::StartGate::default(),
+                            &mut crate::spell::CastCore {
+                                pending: &mut Default::default(),
+                                queued_melee: &mut Default::default(),
+                                ground: &mut Default::default(),
+                                reports: &mut Default::default(),
+                                net: &net_commands,
+                            },
                         ),
                         1,
                     );
                 },
             )
             .unwrap();
+        crate::creature_anim::apply_unit_edits(app.world_mut());
         let now = Instant::now();
         let armed = |c: &Cooldowns| c.info(SPELL, 0, Some(&display()), now).duration_ms;
         let world = app.world();
@@ -2605,10 +3029,9 @@ mod tests {
     }
 
     /// Op 11 on the GO insert: the self leg (`0x6e846f`, and `0x6e2b60`'s tail) and the pet leg
-    /// (`0x6e85c5`) apply the player's table; the item leg inserts the DBC values (`0x6e8566`),
-    /// here through its not-streamed fallback.
+    /// (`0x6e85c5`) apply the player's table.
     #[test]
-    fn op_11_shortens_the_self_and_pet_inserts_and_never_the_item_one() {
+    fn op_11_shortens_the_self_and_pet_inserts() {
         fn display() -> benilla_formats::SpellDisplay {
             benilla_formats::SpellDisplay {
                 spell_family: 9,
@@ -2626,15 +3049,6 @@ mod tests {
         assert_eq!(go_cooldowns(10, own, None, display, mods()).0, 3000);
         let pet = go_cooldowns(20, owned(SUMMONEDBY, 10), None, display, mods());
         assert_eq!(pet.1, 3000, "the pet leg takes the player's op 11");
-        let item = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(3, 6948)]));
-        let used = go_cooldowns(
-            10,
-            ObjectStore::default(),
-            Some((50, item)),
-            display,
-            mods(),
-        );
-        assert_eq!(used.0, 5000, "the item leg applies no modifier");
     }
 
     /// Both producers of the chain-hop array, the GO's hit list and the 816 packet, drop the
@@ -2655,6 +3069,7 @@ mod tests {
             .add_message::<GoLidOpen>()
             .add_message::<crate::creature_anim::SheathRequest>()
             .add_message::<crate::player::StandStateRequest>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
             .init_resource::<CastReports>()
@@ -2702,7 +3117,9 @@ mod tests {
                       mut cooldowns: ResMut<Cooldowns>,
                       mut pet_bar: ResMut<crate::ui_pet::PetBar>,
                       mut items: ResMut<crate::items::Items>,
-                      mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                      mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
+                      mut stand: MessageWriter<crate::player::StandStateRequest>,
+                      edits: Res<crate::creature_anim::UnitEdits>| {
                     let net_commands = crate::net::NetCommands(tx.clone());
                     spell_go(
                         10,
@@ -2728,21 +3145,30 @@ mod tests {
                             &mut cooldowns,
                             None,
                             &mut items,
-                            &net_commands,
                             &mut pet_bar,
                             &crate::spell::SpellModifiers::default(),
                         ),
                         (
                             &mut crate::spell::AutoRepeatActive::default(),
                             &mut sheath,
+                            &mut stand,
+                            &edits,
                             false,
                             crate::creature_anim::StartGate::default(),
+                            &mut crate::spell::CastCore {
+                                pending: &mut Default::default(),
+                                queued_melee: &mut Default::default(),
+                                ground: &mut Default::default(),
+                                reports: &mut Default::default(),
+                                net: &net_commands,
+                            },
                         ),
                         1,
                     );
                 },
             )
             .unwrap();
+        crate::creature_anim::apply_unit_edits(app.world_mut());
         assert_eq!(
             hops(&app),
             Some(vec![t1, t2]),
@@ -2782,7 +3208,9 @@ mod tests {
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
             .init_resource::<crate::spell::SpellModifiers>()
-            .init_resource::<AutoRepeatActive>();
+            .init_resource::<AutoRepeatActive>()
+            .add_message::<crate::player::StandStateRequest>()
+            .init_resource::<crate::creature_anim::UnitEdits>();
 
         let self_e = app
             .world_mut()
@@ -2805,7 +3233,7 @@ mod tests {
             let tx = tx.clone();
             app.world_mut()
                 .run_system_once(
-                    move |mut commands: Commands,
+                    move |edits: Res<crate::creature_anim::UnitEdits>,
                           self_guid: Res<SelfGuid>,
                           index: Res<GuidIndex>,
                           casting: Query<&Casting>,
@@ -2819,7 +3247,7 @@ mod tests {
                             false,
                             Some(reason),
                             None,
-                            &mut commands,
+                            &edits,
                             &self_guid,
                             &index,
                             &casting,
@@ -2835,6 +3263,7 @@ mod tests {
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(app.world_mut());
         };
 
         // Reason 0x17 is the one skip (`6e1ce1 cmp cl,0x17; je`): armed stays armed.
@@ -2882,13 +3311,13 @@ mod tests {
         let mut actions = PlayerActions::default();
         actions.spells.extend([14522, 14788, 14789]);
 
-        let mut errors = UiErrorKeys::default();
-        removed_spell(14788, &mut actions, None, &mut errors);
+        let errors = UiErrorKeys::default();
+        removed_spell(14788, &mut actions, None, &errors);
         assert!(!actions.spells.contains(&14788));
         assert!(actions.dirty);
 
         actions.dirty = false;
-        removed_spell(14788, &mut actions, None, &mut errors);
+        removed_spell(14788, &mut actions, None, &errors);
         assert!(!actions.dirty, "a spell we never knew is not a repaint");
     }
 
@@ -2903,17 +3332,17 @@ mod tests {
             ..Default::default()
         };
 
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         removed_spell(
             11069,
             &mut PlayerActions::default(),
             Some(&catalog_with(11069, row(0, 0))),
-            &mut errors,
+            &errors,
         );
-        assert_eq!(errors.0.len(), 1);
-        assert_eq!(errors.0[0].key, "ERR_SPELL_UNLEARNED_S");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors.snapshot()[0].key, "ERR_SPELL_UNLEARNED_S");
         assert_eq!(
-            errors.0[0].arg_s(),
+            errors.snapshot()[0].arg_s(),
             Some("Improved Fireball"),
             "no rank on the unlearn path"
         );
@@ -2932,25 +3361,25 @@ mod tests {
             ),
             (0x80, 0, "DO_NOT_DISPLAY — the sign test at 0x5ea29b"),
         ] {
-            let mut errors = UiErrorKeys::default();
+            let errors = UiErrorKeys::default();
             removed_spell(
                 11069,
                 &mut PlayerActions::default(),
                 Some(&catalog_with(11069, row(attributes, cast_ui))),
-                &mut errors,
+                &errors,
             );
-            assert!(errors.0.is_empty(), "{why}");
+            assert!(errors.is_empty(), "{why}");
         }
 
         // An unknown id says nothing, like every other display path here.
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         removed_spell(
             99999,
             &mut PlayerActions::default(),
             Some(&catalog_with(11069, row(0, 0))),
-            &mut errors,
+            &errors,
         );
-        assert!(errors.0.is_empty());
+        assert!(errors.is_empty());
     }
 
     /// `castUI` gates the unlearn line but not the learn line, which reads it only afterwards, at
@@ -2966,25 +3395,20 @@ mod tests {
             },
         );
 
-        let mut errors = UiErrorKeys::default();
+        let errors = UiErrorKeys::default();
         learned_spell(
             1234,
             &mut PlayerActions::default(),
             Some(&spells),
-            &mut errors,
+            &errors,
             &mut LearnedInTab::default(),
         );
-        assert_eq!(errors.0.len(), 1, "the learn block never reads castUI");
-        assert_eq!(errors.0[0].key, "ERR_LEARN_SPELL_S");
+        assert_eq!(errors.len(), 1, "the learn block never reads castUI");
+        assert_eq!(errors.snapshot()[0].key, "ERR_LEARN_SPELL_S");
 
-        let mut errors = UiErrorKeys::default();
-        removed_spell(
-            1234,
-            &mut PlayerActions::default(),
-            Some(&spells),
-            &mut errors,
-        );
-        assert!(errors.0.is_empty(), "…but the unlearn block does");
+        let errors = UiErrorKeys::default();
+        removed_spell(1234, &mut PlayerActions::default(), Some(&spells), &errors);
+        assert!(errors.is_empty(), "…but the unlearn block does");
     }
     /// The GO-deferred auto-attack start (`0x6e83c0`):
     /// - an Ex2 bit-20 spell's own GO swings at its first hit target (`0x6e83e9`);
@@ -3037,6 +3461,7 @@ mod tests {
                 .add_message::<GoLidOpen>()
                 .add_message::<crate::creature_anim::SheathRequest>()
                 .add_message::<crate::player::StandStateRequest>()
+                .init_resource::<crate::creature_anim::UnitEdits>()
                 .init_resource::<GuidIndex>()
                 .init_resource::<SelfGuid>()
                 .init_resource::<CastReports>()
@@ -3079,7 +3504,9 @@ mod tests {
                           mut cooldowns: ResMut<Cooldowns>,
                           mut pet_bar: ResMut<crate::ui_pet::PetBar>,
                           mut items: ResMut<crate::items::Items>,
-                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>| {
+                          mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
+                          mut stand: MessageWriter<crate::player::StandStateRequest>,
+                          edits: Res<crate::creature_anim::UnitEdits>| {
                         let net_commands = crate::net::NetCommands(tx.clone());
                         spell_go(
                             caster,
@@ -3106,21 +3533,30 @@ mod tests {
                                 &mut cooldowns,
                                 Some(&spells),
                                 &mut items,
-                                &net_commands,
                                 &mut pet_bar,
                                 &crate::spell::SpellModifiers::default(),
                             ),
                             (
                                 &mut crate::spell::AutoRepeatActive::default(),
                                 &mut sheath,
+                                &mut stand,
+                                &edits,
                                 engaged,
                                 gate,
+                                &mut crate::spell::CastCore {
+                                    pending: &mut Default::default(),
+                                    queued_melee: &mut Default::default(),
+                                    ground: &mut Default::default(),
+                                    reports: &mut Default::default(),
+                                    net: &net_commands,
+                                },
                             ),
                             1,
                         );
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(app.world_mut());
             rx.try_iter().collect()
         };
 
@@ -3279,7 +3715,9 @@ mod tests {
                 .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<Cooldowns>()
                 .init_resource::<crate::spell::SpellModifiers>()
-                .init_resource::<AutoRepeatActive>();
+                .init_resource::<AutoRepeatActive>()
+                .add_message::<crate::player::StandStateRequest>()
+                .init_resource::<crate::creature_anim::UnitEdits>();
             let self_e = app.world_mut().spawn((Guid(10), SelfPlayer)).id();
             app.world_mut()
                 .resource_mut::<GuidIndex>()
@@ -3307,7 +3745,7 @@ mod tests {
             let chained = app
                 .world_mut()
                 .run_system_once(
-                    move |mut commands: Commands,
+                    move |edits: Res<crate::creature_anim::UnitEdits>,
                           self_guid: Res<SelfGuid>,
                           index: Res<GuidIndex>,
                           casting: Query<&Casting>,
@@ -3321,7 +3759,7 @@ mod tests {
                             r.fail.is_none(),
                             r.fail,
                             r.arg,
-                            &mut commands,
+                            &edits,
                             &self_guid,
                             &index,
                             &casting,
@@ -3337,6 +3775,7 @@ mod tests {
                     },
                 )
                 .unwrap();
+            crate::creature_anim::apply_unit_edits(app.world_mut());
             let armed = app.world().resource::<PendingCast>().in_flight();
             let queued = app.world().resource::<QueuedMeleeSpell>().current();
             (chained, armed, queued)

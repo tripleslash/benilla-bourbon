@@ -146,15 +146,21 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
             // A negative answer releases the waiters with nothing run (`0x5d96bb`).
             let waiters = sc.items.take_entry_waiters(entry);
             let trade_waiters = sc.items.take_trade_waiters(entry);
+            let ammo_waiters = sc.items.take_ammo_waiters(entry);
             if landed {
-                let notices = {
+                let (notices, signals) = {
                     let (index, stores) = (&sc.index, &sc.stores);
-                    let held = index
-                        .0
-                        .iter()
-                        .filter_map(|(&g, &e)| stores.get(e).ok().map(|s| (g, &s.0)));
-                    item_watch(index, stores, &sc.self_guid, &sc.items)
-                        .record_landed(entry, held, &waiters)
+                    let held = || {
+                        index
+                            .0
+                            .iter()
+                            .filter_map(|(&g, &e)| stores.get(e).ok().map(|s| (g, &s.0)))
+                    };
+                    let watch = item_watch(index, stores, &sc.self_guid, &sc.items);
+                    (
+                        watch.record_landed(entry, held(), &waiters),
+                        watch.landed_signals(entry, held(), &waiters),
+                    )
                 };
                 for notice in &notices {
                     if let crate::item_watch::ItemNotice::Record { guid, .. } = *notice {
@@ -162,12 +168,20 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
                     }
                 }
                 sc.item_notices.write_batch(notices);
+                sc.field_notices.write_batch(signals);
             }
-            // The trade getters' callbacks run for a ready record only (`0x4c0343`).
+            // The trade getters' and the ammo getters' callbacks run for a ready record only
+            // (`0x4c0343`, `0x4c84f6`).
             if answered {
                 sc.item_notices.write_batch(std::iter::repeat_n(
                     crate::item_watch::ItemNotice::TradeRecord { entry },
                     trade_waiters,
+                ));
+                sc.field_notices.write_batch(std::iter::repeat_n(
+                    crate::field_watch::FieldNotice::Player {
+                        id: crate::field_watch::id::UNIT_INVENTORY_CHANGED,
+                    },
+                    ammo_waiters,
                 ));
             }
         }
@@ -857,13 +871,19 @@ fn monster_move(
                 }
             }
         }
-        // Every spline move un-nocks and drops the weapon hold here. The handler `0x6018f0`
-        // (opcodes 0xDD, 0x2AE) ends through `0x60d040` (clear `0x400`) and `0x60f530` (un-nock) on
-        // every path but one: a stop within 3 yd of the stop point jumps past both (`0x6019e4`).
-        commands.entity(e).remove::<(
-            crate::creature_anim::NockLatch,
-            crate::creature_anim::RangedHold,
-        )>();
+        // Every spline move un-nocks and ends the precast here. The handler `0x6018f0` (opcodes
+        // 0xDD, 0x2AE) ends through `0x60d040` with the unit's own `+0xc8c` (`0x6020e8`) and
+        // `0x60f530` (un-nock) on every path but one: a stop within 3 yd of the stop point jumps
+        // past both (`0x6019e4`). The end's loot release reads the flags the path just wrote: a
+        // path's install starts the move (`0x7c6ad4`), a refused one stops it (`0x6187b1`).
+        commands
+            .entity(e)
+            .remove::<crate::creature_anim::NockLatch>();
+        crate::creature_anim::end_precast(
+            commands,
+            e,
+            crate::creature_anim::PrecastTail::Moving(!rooted),
+        );
         // A rooted unit takes no path: `0x6187a0`, the only route into the spline installer
         // `0x7c6a50`, returns on ROOT (`0x6187c2`). Only the path is refused: the un-nock tail runs
         // on every path (`0x6020ef`), and the rest for a rooted unit is untraced.
@@ -1229,6 +1249,137 @@ mod tests {
                 .drain()
                 .collect::<Vec<_>>(),
             [ItemNotice::TradeRecord { entry: 2592 }]
+        );
+    }
+
+    /// The item paths' `UNIT_INVENTORY_CHANGED`, in wire order: a create's record set-up for its
+    /// owner, whoever's (`0x5d85fe`); a worn item's restack (`0x5d950e` → `0x4c72e0`); the late
+    /// record of an item of ours; the worn item's destroy (`0x5d87c1`). A backpack restack is none.
+    #[test]
+    fn the_object_packets_write_the_item_paths_inventory_signals_in_wire_order() {
+        use crate::field_watch::FieldNotice;
+        use benilla_protocol::field::{
+            FIELD_ITEM_STACK_COUNT, FIELD_OBJECT_ENTRY, FIELD_PLAYER_INV_SLOT_HEAD,
+        };
+        use benilla_protocol::messages::ObjectType;
+        const ME: u64 = 0x0000_0000_0000_0007;
+        const HELM: u64 = 0x4000_0000_0000_0042;
+        const POTIONS: u64 = 0x4000_0000_0000_0043;
+        const THEIRS: u64 = 0x4000_0000_0000_0044;
+        const HELM_ID: u32 = 7366;
+        const POTION: u32 = 118;
+        let create = |guid: u64, entry: u32, owner: u64| SessionEvent::ItemCreate {
+            guid,
+            container: false,
+            fields: ObjectFields::from_pairs(&[
+                (2, 0x3),
+                (FIELD_OBJECT_ENTRY, entry),
+                (6, owner as u32),
+                (7, 0),
+                (8, owner as u32),
+                (9, 0),
+                (FIELD_ITEM_STACK_COUNT, 1),
+            ])
+            .into_created(ObjectType::Item),
+        };
+        let seat = |n: u16, guid: u64| {
+            let lo = FIELD_PLAYER_INV_SLOT_HEAD + 2 * n;
+            [(lo, guid as u32), (lo + 1, (guid >> 32) as u32)]
+        };
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        let pairs: Vec<(u16, u32)> = seat(0, HELM).into_iter().chain(seat(23, POTIONS)).collect();
+        let me = world
+            .spawn((
+                Guid(ME),
+                ObjectStore(ObjectFields::from_pairs(&pairs).into_created(ObjectType::Player)),
+            ))
+            .id();
+        world.resource_mut::<GuidIndex>().0.insert(ME, me);
+        world.resource_mut::<SelfGuid>().0 = Some(ME);
+        world
+            .resource_mut::<Items>()
+            .insert_template(POTION, Some(crate::items::test_template("Potion")));
+        let restack = |guid: u64| SessionEvent::ObjectValues {
+            guid,
+            fields: ObjectFields::from_pairs(&[(FIELD_ITEM_STACK_COUNT, 2)]),
+        };
+        super::super::handlers::dispatch(
+            world,
+            super::wire(vec![
+                create(POTIONS, POTION, ME),
+                create(HELM, HELM_ID, ME),
+                create(THEIRS, POTION, 0x8),
+                restack(POTIONS),
+                restack(HELM),
+                SessionEvent::ItemTemplate {
+                    entry: HELM_ID,
+                    info: Some(Box::new(crate::items::test_template("Helm"))),
+                },
+                SessionEvent::ObjectDestroyed(HELM),
+            ]),
+        );
+        let inventory: Vec<FieldNotice> = world
+            .resource_mut::<Messages<FieldNotice>>()
+            .drain()
+            .filter(|n| match *n {
+                FieldNotice::Unit { id, .. }
+                | FieldNotice::Signal { id, .. }
+                | FieldNotice::Player { id } => {
+                    id == crate::field_watch::id::UNIT_INVENTORY_CHANGED
+                }
+                _ => false,
+            })
+            .collect();
+        let owner = |guid| FieldNotice::Signal {
+            guid,
+            id: crate::field_watch::id::UNIT_INVENTORY_CHANGED,
+        };
+        let slot = FieldNotice::Player {
+            id: crate::field_watch::id::UNIT_INVENTORY_CHANGED,
+        };
+        assert_eq!(
+            inventory,
+            [owner(ME), owner(0x8), slot, owner(ME), slot],
+            "the potions' set-up, theirs, the helm's restack, its late record, its destroy"
+        );
+    }
+
+    /// The ammunition getters' record callback `0x4c84f0`: each call that missed runs once on a
+    /// ready answer, `UNIT_INVENTORY_CHANGED` with `"player"` (`0x4c8509`); a refusal frees them.
+    #[test]
+    fn an_item_answer_runs_each_waiting_ammo_getters_callback_once() {
+        use crate::field_watch::FieldNotice;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let world = app.world_mut();
+        {
+            let items = world.resource::<Items>();
+            for entry in [2512, 2512, 3030] {
+                items.wait_for_ammo_record(entry);
+            }
+        }
+        let answer = |entry: u32, ok: bool| SessionEvent::ItemTemplate {
+            entry,
+            info: ok.then(|| Box::new(crate::items::test_template("Arrow"))),
+        };
+        super::super::handlers::dispatch(
+            world,
+            super::wire(vec![
+                answer(2512, true),
+                answer(3030, false),
+                answer(3030, true),
+            ]),
+        );
+        let notices: Vec<FieldNotice> = world
+            .resource_mut::<Messages<FieldNotice>>()
+            .drain()
+            .collect();
+        assert_eq!(
+            notices,
+            [FieldNotice::Player {
+                id: crate::field_watch::id::UNIT_INVENTORY_CHANGED
+            }; 2],
+            "one per call that asked, none for the refusal or after it"
         );
     }
 
@@ -2404,6 +2555,77 @@ mod tests {
                     w.entity(e).get::<Spline>().is_some(),
                     expect_spline,
                     "rooted={rooted}: a pinned body takes no path, an unpinned one does"
+                );
+            }
+        }
+
+        /// `0x6020e8`: a spline move ends the unit's precast whatever it is, a rooted unit's too
+        /// (the tail `0x6020db`-`0x6020ef` runs on every path). On our own player the end's loot
+        /// release reads the flags the path just wrote: an installed path is moving
+        /// (`0x7c6ad4`), a refused one has stopped (`0x6187b1`), whatever we last sent.
+        #[test]
+        fn a_spline_move_ends_the_precast() {
+            for (rooted, ours) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut w = World::new();
+                w.init_resource::<crate::ui_loot::LootMoveStart>();
+                w.init_resource::<crate::ui_loot::LootCloseAtRest>();
+                let moving = crate::creature_anim::move_flags::FORWARD;
+                w.insert_resource(crate::player::Player::with_move_flags(if rooted {
+                    moving
+                } else {
+                    0
+                }));
+                let e = w
+                    .spawn((
+                        Transform::default(),
+                        crate::creature_anim::Precast {
+                            spell_id: 133,
+                            busy: true,
+                        },
+                    ))
+                    .id();
+                if ours {
+                    w.entity_mut(e).insert(crate::net::SelfPlayer);
+                }
+                let mut index = GuidIndex::default();
+                index.0.insert(MOB, e);
+                w.insert_resource(index);
+                w.run_system_once(
+                    move |mut commands: Commands,
+                          index: Res<GuidIndex>,
+                          mut transforms: Query<&mut Transform>,
+                          mut riders: Query<&mut crate::transport::TransportRider>| {
+                        monster_move(
+                            MOB,
+                            None,
+                            [0.0, 0.0, 0.0],
+                            7,
+                            vec![[0.0, 0.0, 0.0], [30.0, 0.0, 0.0]],
+                            MonsterMoveFacing::None,
+                            false,
+                            3000,
+                            false,
+                            true,
+                            rooted,
+                            &mut commands,
+                            &index,
+                            &mut transforms,
+                            &mut riders,
+                        );
+                    },
+                )
+                .unwrap();
+                assert!(
+                    w.entity(e).get::<crate::creature_anim::Precast>().is_none(),
+                    "rooted={rooted}: the precast ends"
+                );
+                assert_eq!(
+                    (
+                        w.resource::<crate::ui_loot::LootMoveStart>().0,
+                        w.resource::<crate::ui_loot::LootCloseAtRest>().0,
+                    ),
+                    (ours && !rooted, ours && rooted),
+                    "rooted={rooted}, ours={ours}: the loot release"
                 );
             }
         }

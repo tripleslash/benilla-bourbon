@@ -34,7 +34,7 @@ use crate::client_state::ClientState;
 use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, SelfPlayer};
 use crate::player::Player;
 use crate::query_cache::Ask;
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiFeed;
 
 /// The popup cue `0x4b5390` plays on both legs (`0x846b68`).
 const TUTORIAL_POPUP_SOUND: &str = "TutorialPopup";
@@ -281,72 +281,74 @@ const KEYRING_SLOTS: std::ops::RangeInclusive<u32> = 0x51..=0x70;
 /// Before the script tick: the sites' asks, the descriptor edges, the timers, the cue and the
 /// event, and the acknowledged bank's push to whichever VM is live.
 fn feed_tutorials(
-    mut script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut tutorials: ResMut<Tutorials>,
     mut asks: MessageReader<TutorialEvent>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     items: Res<crate::items::Items>,
-    mut sounds: ResMut<crate::sound::MessageSounds>,
+    sounds: Res<crate::sound::MessageSounds>,
     mut told: Local<crate::ui_script::VmMemo<Option<Vec<u8>>>>,
 ) {
-    let now = Instant::now();
-    for ask in asks.read() {
-        match *ask {
-            TutorialEvent::Trigger { id, delay_ms } => tutorials.trigger(id, delay_ms, now),
-            TutorialEvent::Acknowledge { id } => tutorials.acknowledge(id),
-        }
-    }
-    // The engine's sites: Quest Completion, a turn-in test that passed (`0x4df792`).
-    if let Some(script) = script.as_mut() {
-        for id in script.take_tutorial_triggers() {
-            tutorials.trigger(id, 0, now);
-        }
-    }
-
-    // The item-received sites: Backpack always; Equippable Items for any non-zero inventory type
-    // (the reference's 23-bit mask `0x809200` is not decoded); Hearthstones by entry; Ranged
-    // Weapons for a ranged type on a non-hunter; Keyrings by the slot band.
-    let pushes = std::mem::take(&mut tutorials.pushes);
-    let class = self_q.single().ok().and_then(|s| s.0.unit_class());
-    for (entry, bag, slot) in pushes {
-        tutorials.trigger(id::BACKPACK, 0, now);
-        if let Some(info) = items.template(entry, 0, Ask::Read) {
-            if info.inventory_type != 0 {
-                tutorials.trigger(id::EQUIPPABLE_ITEMS, 0, now);
-            }
-            if info.inventory_type == INVTYPE_RANGED && class != Some(CLASS_HUNTER) {
-                tutorials.trigger(id::RANGED_WEAPONS, 0, now);
+    hosted_vm.run(|mut script| {
+        let now = Instant::now();
+        for ask in asks.read() {
+            match *ask {
+                TutorialEvent::Trigger { id, delay_ms } => tutorials.trigger(id, delay_ms, now),
+                TutorialEvent::Acknowledge { id } => tutorials.acknowledge(id),
             }
         }
-        if entry == HEARTHSTONE {
-            tutorials.trigger(id::HEARTHSTONES, 0, now);
+        // The engine's sites: Quest Completion, a turn-in test that passed (`0x4df792`).
+        if let Some(script) = script.as_mut() {
+            for id in script.take_tutorial_triggers() {
+                tutorials.trigger(id, 0, now);
+            }
         }
-        if bag == KEYRING_BAG && KEYRING_SLOTS.contains(&slot) {
-            tutorials.trigger(id::KEYRINGS, 0, now);
+
+        // The item-received sites: Backpack always; Equippable Items for any non-zero inventory
+        // type (the reference's 23-bit mask `0x809200` is not decoded); Hearthstones by entry;
+        // Ranged Weapons for a ranged type on a non-hunter; Keyrings by the slot band.
+        let pushes = std::mem::take(&mut tutorials.pushes);
+        let class = self_q.single().ok().and_then(|s| s.0.unit_class());
+        for (entry, bag, slot) in pushes {
+            tutorials.trigger(id::BACKPACK, 0, now);
+            if let Some(info) = items.template(entry, 0, Ask::Read) {
+                if info.inventory_type != 0 {
+                    tutorials.trigger(id::EQUIPPABLE_ITEMS, 0, now);
+                }
+                if info.inventory_type == INVTYPE_RANGED && class != Some(CLASS_HUNTER) {
+                    tutorials.trigger(id::RANGED_WEAPONS, 0, now);
+                }
+            }
+            if entry == HEARTHSTONE {
+                tutorials.trigger(id::HEARTHSTONES, 0, now);
+            }
+            if bag == KEYRING_BAG && KEYRING_SLOTS.contains(&slot) {
+                tutorials.trigger(id::KEYRINGS, 0, now);
+            }
         }
-    }
 
-    tutorials.tick(now);
+        tutorials.tick(now);
 
-    let Some(mut script) = script else {
-        return;
-    };
-    for published in std::mem::take(&mut tutorials.fired) {
-        fire_published(&mut script, &mut sounds, published);
-    }
-    // The bank is owed to every VM: what it has been told is per VM, so a `/reload`'s fresh VM
-    // is told again.
-    let told = told.get(&script);
-    if *told != tutorials.acknowledged {
-        told.clone_from(&tutorials.acknowledged);
-        script.set_tutorial_bank(tutorials.acknowledged.clone());
-    }
+        let Some(script) = script else {
+            return;
+        };
+        for published in std::mem::take(&mut tutorials.fired) {
+            fire_published(script, &sounds, published);
+        }
+        // The bank is owed to every VM: what it has been told is per VM, so a `/reload`'s fresh VM
+        // is told again.
+        let told = told.get(script);
+        if *told != tutorials.acknowledged {
+            told.clone_from(&tutorials.acknowledged);
+            script.set_tutorial_bank(tutorials.acknowledged.clone());
+        }
+    })
 }
 
 /// `0x4b5390`'s firing of a published id: the `TutorialPopup` cue, then `TUTORIAL_TRIGGER`.
 pub(crate) fn fire_published(
     script: &mut UiScript,
-    sounds: &mut crate::sound::MessageSounds,
+    sounds: &crate::sound::MessageSounds,
     published: u32,
 ) {
     sounds.push_cue(TUTORIAL_POPUP_SOUND);
@@ -393,29 +395,31 @@ fn watch_self(
 
 /// After the script tick: the four verbs' writes, then every send.
 fn drain_tutorials(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut tutorials: ResMut<Tutorials>,
     commands: Res<NetCommands>,
 ) {
-    if let Some(mut script) = script {
-        for id in script.take_tutorial_flag_requests() {
-            tutorials.acknowledge(id);
+    hosted_vm.run(|script| {
+        if let Some(script) = script {
+            for id in script.take_tutorial_flag_requests() {
+                tutorials.acknowledge(id);
+            }
+            for _ in 0..script.take_tutorial_clears() {
+                tutorials.clear();
+            }
+            for _ in 0..script.take_tutorial_resets() {
+                tutorials.reset();
+            }
         }
-        for _ in 0..script.take_tutorial_clears() {
-            tutorials.clear();
+        for send in std::mem::take(&mut tutorials.sends) {
+            let command = match send {
+                TutorialSend::Flag(id) => ClientCommand::TutorialFlag { id },
+                TutorialSend::Clear => ClientCommand::TutorialClear,
+                TutorialSend::Reset => ClientCommand::TutorialReset,
+            };
+            let _ = commands.0.send(command);
         }
-        for _ in 0..script.take_tutorial_resets() {
-            tutorials.reset();
-        }
-    }
-    for send in std::mem::take(&mut tutorials.sends) {
-        let command = match send {
-            TutorialSend::Flag(id) => ClientCommand::TutorialFlag { id },
-            TutorialSend::Clear => ClientCommand::TutorialClear,
-            TutorialSend::Reset => ClientCommand::TutorialReset,
-        };
-        let _ = commands.0.send(command);
-    }
+    })
 }
 
 /// The world-enter bring-up: the banks zeroed, then the bank captured during the login handshake
@@ -565,7 +569,7 @@ impl Plugin for TutorialPlugin {
                         .in_set(UiFeed)
                         .in_set(TutorialFeed)
                         .run_if(crate::ui_script::ingame_ui_up),
-                    drain_tutorials.after(UiInput),
+                    drain_tutorials.in_set(crate::ui_script::UiDrain),
                 ),
             )
             .add_systems(OnExit(ClientState::InWorld), on_world_leave);

@@ -69,6 +69,7 @@ fn inventory_with_head_item() -> InventorySlots {
         count: 1,
         contents_count: None,
         quality: 2,
+        inventory_type: Some(1),
         name: Some("Test Helm".into()),
         link: Some("|cff1eff00|Hitem:1234:0:0:0|h[Test Helm]|h|r".into()),
         guid: 0x70e,
@@ -260,7 +261,8 @@ fn shipped_character_frame_drives_end_to_end() {
         "N/A"
     );
 
-    // The app follows a snapshot push with this event; the slots repaint on the event.
+    // The equipment's producers fire this after the push ([`crate::field_watch`],
+    // [`crate::item_watch`]); the slots repaint on the event.
     s.fire_event(
         "UNIT_INVENTORY_CHANGED",
         vec![ScriptValue::Str("player".into())],

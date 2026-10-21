@@ -8,7 +8,7 @@
 //! delays the popup rather than dropping it; the reference reads it off the streamed player and
 //! fires nothing without one (`0x4d4a72`).
 
-use benilla_ui::script::{DuelRequest, ScriptValue, UiScript};
+use benilla_ui::script::{DuelRequest, ScriptValue};
 use bevy::prelude::*;
 
 use crate::names::NameCache;
@@ -16,7 +16,7 @@ use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, SelfPlayer};
 use crate::query_cache::Ask;
 use crate::target::Selection;
 use crate::ui_action::Spells;
-use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
+use crate::ui_script::{SweepApp, SweepLeg, UiFeed};
 
 /// The `Effect[0]` that marks the duel spell (7266 on 1.12 data): the reference's spell-learned
 /// walk stores any learned spell with `SpellRec+0xf4 == 0x53` in `[0xb71130]` (`0x4b2605`), which
@@ -145,7 +145,7 @@ pub(crate) mod net {
     fn on_requested(
         In(ev): In<SessionEvent>,
         mut duel: ResMut<DuelState>,
-        mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+        errors: Res<crate::ui_action::UiErrorKeys>,
         commands: Res<NetCommands>,
         self_guid: Res<crate::net::SelfGuid>,
         social: Res<crate::ui_social::SocialState>,
@@ -157,7 +157,7 @@ pub(crate) mod net {
         {
             requested(
                 &mut duel,
-                &mut errors,
+                &errors,
                 &commands,
                 arbiter,
                 challenger,
@@ -178,10 +178,10 @@ pub(crate) mod net {
     fn on_complete(
         In(ev): In<SessionEvent>,
         mut duel: ResMut<DuelState>,
-        mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+        errors: Res<crate::ui_action::UiErrorKeys>,
     ) {
         if let SessionEvent::DuelComplete { started } = ev {
-            complete(&mut duel, &mut errors, started);
+            complete(&mut duel, &errors, started);
         }
     }
 
@@ -212,7 +212,7 @@ pub(crate) mod net {
     /// `CMSG_DUEL_CANCELLED` and shows nothing (`0x4d4a33`).
     pub(crate) fn requested(
         duel: &mut DuelState,
-        errors: &mut crate::ui_action::UiErrorKeys,
+        errors: &crate::ui_action::UiErrorKeys,
         commands: &NetCommands,
         arbiter: u64,
         challenger: u64,
@@ -224,22 +224,18 @@ pub(crate) mod net {
             return;
         }
         if duel.apply_requested(arbiter, challenger, own) {
-            errors
-                .0
-                .push(crate::ui_action::UiError::key("ERR_DUEL_REQUESTED"));
+            errors.push(crate::ui_action::UiError::key("ERR_DUEL_REQUESTED"));
             let _ = commands.0.send(ClientCommand::DuelAccepted { arbiter });
         }
     }
 
     pub(crate) fn complete(
         duel: &mut DuelState,
-        errors: &mut crate::ui_action::UiErrorKeys,
+        errors: &crate::ui_action::UiErrorKeys,
         started: bool,
     ) {
         if duel.apply_complete(started) {
-            errors
-                .0
-                .push(crate::ui_action::UiError::key("ERR_DUEL_CANCELLED"));
+            errors.push(crate::ui_action::UiError::key("ERR_DUEL_CANCELLED"));
         }
     }
 
@@ -272,7 +268,7 @@ fn clear_duel_on_leave_world(mut duel: ResMut<DuelState>) {
 
 /// Fire the four duel events on [`DuelState`]'s edges.
 fn feed_duel(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut duel: ResMut<DuelState>,
     names: Res<NameCache>,
     commands: Res<NetCommands>,
@@ -281,55 +277,57 @@ fn feed_duel(
     // Apart from the bounds: the leave-world sweep drops the arbiter with no `DUEL_FINISHED`.
     mut fed_held: crate::ui_script::WindowMemo<bool>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let fed = fed.get(&script);
-    let fed_held = fed_held.get(&script);
-
-    // Lines before events: a line describes the transition its event announces.
-    let owed = std::mem::take(&mut duel.owed);
-    let lines: Vec<crate::ui_action::Shown> = {
-        let get = |key: &str| script.lua().globals().get::<String>(key).ok();
-        owed.iter()
-            .filter_map(|line| {
-                owed_text(line, &get).map(|text| {
-                    crate::ui_action::Shown::unkeyed(benilla_ui::messages::MsgKind::Chat, text)
-                })
-            })
-            .collect()
-    };
-    crate::ui_action::show_messages(&mut script, &mut sink, "ui_duel", lines);
-
-    // `DUEL_REQUESTED(name)`, held until the name resolves (the module's deviation).
-    if let Some(guid) = duel.challenger {
-        let ask = Ask::at(
-            !std::mem::replace(&mut duel.challenger_asked, true),
-            &commands,
-        );
-        if let Some(name) = names.resolve_player(guid, ask).map(str::to_string) {
-            script.fire_event("DUEL_REQUESTED", vec![ScriptValue::Str(name)]);
-            duel.challenger = None;
-        }
-    }
-
-    // `DUEL_FINISHED` when the arbiter clears (`0x4d4b51`).
-    let held = duel.arbiter != 0;
-    if *fed_held && !held {
-        script.fire_event("DUEL_FINISHED", Vec::new());
-    }
-    *fed_held = held;
-
-    // The bounds pair (`0x4d4aa0`, `0x4d4ac0`).
-    if fed.out_of_bounds != duel.out_of_bounds {
-        fed.out_of_bounds = duel.out_of_bounds;
-        let event = if duel.out_of_bounds {
-            "DUEL_OUTOFBOUNDS"
-        } else {
-            "DUEL_INBOUNDS"
+    hosted_vm.run(|script| {
+        let Some(script) = script else {
+            return;
         };
-        script.fire_event(event, Vec::new());
-    }
+        let fed = fed.get(script);
+        let fed_held = fed_held.get(script);
+
+        // Lines before events: a line describes the transition its event announces.
+        let owed = std::mem::take(&mut duel.owed);
+        let lines: Vec<crate::ui_action::Shown> = {
+            let get = |key: &str| script.lua().globals().get::<String>(key).ok();
+            owed.iter()
+                .filter_map(|line| {
+                    owed_text(line, &get).map(|text| {
+                        crate::ui_action::Shown::unkeyed(benilla_ui::messages::MsgKind::Chat, text)
+                    })
+                })
+                .collect()
+        };
+        crate::ui_action::show_messages(script, &mut sink, "ui_duel", lines);
+
+        // `DUEL_REQUESTED(name)`, held until the name resolves (the module's deviation).
+        if let Some(guid) = duel.challenger {
+            let ask = Ask::at(
+                !std::mem::replace(&mut duel.challenger_asked, true),
+                &commands,
+            );
+            if let Some(name) = names.resolve_player(guid, ask).map(str::to_string) {
+                script.fire_event("DUEL_REQUESTED", vec![ScriptValue::Str(name)]);
+                duel.challenger = None;
+            }
+        }
+
+        // `DUEL_FINISHED` when the arbiter clears (`0x4d4b51`).
+        let held = duel.arbiter != 0;
+        if *fed_held && !held {
+            script.fire_event("DUEL_FINISHED", Vec::new());
+        }
+        *fed_held = held;
+
+        // The bounds pair (`0x4d4aa0`, `0x4d4ac0`).
+        if fed.out_of_bounds != duel.out_of_bounds {
+            fed.out_of_bounds = duel.out_of_bounds;
+            let event = if duel.out_of_bounds {
+                "DUEL_OUTOFBOUNDS"
+            } else {
+                "DUEL_INBOUNDS"
+            };
+            script.fire_event(event, Vec::new());
+        }
+    })
 }
 
 /// What [`feed_duel`] last announced.
@@ -366,55 +364,60 @@ fn tick_countdown(time: Res<Time>, mut duel: ResMut<DuelState>, mut started: Loc
 
 /// Drain the duel verbs' intents into their sends.
 fn drain_duel(
-    script: Option<NonSendMut<UiScript>>,
+    // What the host also reaches, read before the VM runs with the host lent.
+    mut hosted: ParamSet<(Res<Selection>, crate::script_calls::HostedVm)>,
     duel: Res<DuelState>,
     spells: Option<Res<Spells>>,
     actions: Res<crate::ui_action::PlayerActions>,
-    selection: Res<Selection>,
     index: Res<GuidIndex>,
     self_q: Query<&Guid, With<SelfPlayer>>,
     commands: Res<NetCommands>,
 ) {
-    let Some(mut script) = script else {
-        return;
-    };
-    let requests = script.take_duel_requests();
-    if requests.is_empty() {
-        return;
-    }
-    let self_guid = self_q.iter().next().map(|g| g.0);
-    for req in requests {
-        match req {
-            DuelRequest::Accept => {
-                if duel.arbiter != 0 {
-                    let _ = commands.0.send(ClientCommand::DuelAccepted {
-                        arbiter: duel.arbiter,
-                    });
+    let p = hosted.p0();
+    let selection = *p;
+    hosted.p1().run(|script| {
+        let Some(script) = script else {
+            return;
+        };
+        let requests = script.take_duel_requests();
+        if requests.is_empty() {
+            return;
+        }
+        let self_guid = self_q.iter().next().map(|g| g.0);
+        for req in requests {
+            match req {
+                DuelRequest::Accept => {
+                    if duel.arbiter != 0 {
+                        let _ = commands.0.send(ClientCommand::DuelAccepted {
+                            arbiter: duel.arbiter,
+                        });
+                    }
                 }
-            }
-            DuelRequest::Cancel => {
-                if duel.arbiter != 0 {
-                    let _ = commands.0.send(ClientCommand::DuelCancelled {
-                        arbiter: duel.arbiter,
-                    });
+                DuelRequest::Cancel => {
+                    if duel.arbiter != 0 {
+                        let _ = commands.0.send(ClientCommand::DuelCancelled {
+                            arbiter: duel.arbiter,
+                        });
+                    }
                 }
-            }
-            DuelRequest::StartByUnit(token) => {
-                // `StartDuelUnit` (`0x4d4c90`) resolves the token through `0x515970`, with no
-                // player gate; these are the tokens the unit popup passes.
-                let guid = match token.as_str() {
-                    "target" => selection.guid,
-                    "player" => self_guid,
-                    _ => None,
-                };
-                challenge(guid, self_guid, &index, &spells, &actions, &commands);
-            }
-            DuelRequest::StartByGuid(guid) => {
-                // `/duel <name>`: the binding resolved the name through `0x493aa0` (`0x4d4c6d`).
-                challenge(Some(guid), self_guid, &index, &spells, &actions, &commands);
+                DuelRequest::StartByUnit(token) => {
+                    // `StartDuelUnit` (`0x4d4c90`) resolves the token through `0x515970`, with no
+                    // player gate; these are the tokens the unit popup passes.
+                    let guid = match token.as_str() {
+                        "target" => selection.guid,
+                        "player" => self_guid,
+                        _ => None,
+                    };
+                    challenge(guid, self_guid, &index, &spells, &actions, &commands);
+                }
+                DuelRequest::StartByGuid(guid) => {
+                    // `/duel <name>`: the binding resolved the name through `0x493aa0`
+                    // (`0x4d4c6d`).
+                    challenge(Some(guid), self_guid, &index, &spells, &actions, &commands);
+                }
             }
         }
-    }
+    })
 }
 
 /// A streamed player by name, case-insensitive, for a typed `/duel` argument.
@@ -490,7 +493,7 @@ impl Plugin for UiDuelPlugin {
                     // each "Duel starting: N" lands a frame late.
                     tick_countdown.before(feed_duel),
                     feed_duel.in_set(UiFeed),
-                    drain_duel.after(UiInput),
+                    drain_duel.in_set(crate::ui_script::UiDrain),
                 ),
             );
     }
@@ -499,6 +502,7 @@ impl Plugin for UiDuelPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_ui::script::UiScript;
 
     /// The challenge looks its challenger's name up once, as its packet's; the frames the popup
     /// waits through read. A refused name is asked by no frame after it, only by the next

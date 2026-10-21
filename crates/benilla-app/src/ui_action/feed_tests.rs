@@ -605,6 +605,8 @@ fn report_feed(spells: crate::ui_action::Spells, reports: crate::ui_cast::CastRe
         .init_resource::<crate::spell::targeting::SpellTargeting>()
         .init_resource::<crate::spell::ActiveChannel>()
         .init_resource::<crate::spell::AutoRepeatActive>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .add_message::<crate::player::StandStateRequest>()
         .insert_resource(NetCommands(tx));
     app.insert_non_send(UiScript::new().unwrap());
     app.add_systems(Update, crate::ui_cast::feed_cast_reports);
@@ -690,6 +692,61 @@ fn a_refused_spell_flagged_not_to_log_writes_no_combat_log_line() {
     assert_eq!(logged(0), 1);
     assert_eq!(logged(0x100), 0, "SPELL_ATTR_DO_NOT_LOG");
     assert_eq!(logged(0x80), 0, "SPELL_ATTR_DO_NOT_DISPLAY");
+}
+
+/// `DisplayError` formats the default errorId through `ERR_SPELL_FAILED_S` (`0x4967d7`); an empty
+/// one shows nothing (`0x4945b0` drops an empty text), and the log still writes the reason
+/// (`0x6e21e2`-`0x6e21fc` run whatever was shown).
+#[test]
+fn an_empty_default_format_shows_nothing_and_still_logs() {
+    use crate::ui_action::{CastFail, Spells};
+    use benilla_formats::{SpellCatalog, SpellDisplay};
+
+    let lines = |format: &str| {
+        let mut reports = crate::ui_cast::CastReports::default();
+        reports.refused(CastFail::server(1, 0x5F, None));
+        let mut app = report_feed(
+            Spells {
+                catalog: SpellCatalog::from_displays(HashMap::from([(
+                    1,
+                    SpellDisplay {
+                        name: "Growl".into(),
+                        ..Default::default()
+                    },
+                )])),
+                ..Spells::empty_for_tests()
+            },
+            reports,
+        );
+        app.world_mut()
+            .non_send::<UiScript>()
+            .run(&format!(
+                r#"SPELL_FAILED_ROOTED = "You are unable to move"
+                ERR_SPELL_FAILED_S = "{format}"
+                SEEN = {{}}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UI_ERROR_MESSAGE")
+                f:SetScript("OnEvent", function() table.insert(SEEN, arg1) end)"#
+            ))
+            .unwrap();
+        app.update();
+        let seen = app
+            .world_mut()
+            .non_send::<UiScript>()
+            .eval::<Vec<String>>("return SEEN")
+            .unwrap();
+        let logged = app
+            .world()
+            .resource::<crate::ui_chat::ChatLog>()
+            .pending_len();
+        (seen, logged)
+    };
+    assert_eq!(lines("%s"), (vec!["You are unable to move".to_string()], 1));
+    assert_eq!(
+        lines("Failed: %s"),
+        (vec!["Failed: You are unable to move".to_string()], 1)
+    );
+    assert_eq!(lines(""), (vec![], 1));
 }
 
 /// `0x6e6a20` resolves `PETTAME_<reason>` first and passes the string to `DisplayError(0xee)`,

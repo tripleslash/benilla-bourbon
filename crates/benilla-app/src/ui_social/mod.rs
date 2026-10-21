@@ -13,7 +13,7 @@ use benilla_protocol::messages::{friend_result, friend_status, FriendEntry, Frie
 use bevy::prelude::*;
 
 use crate::console::ConsoleCommandApp;
-use crate::ui_script::{UiFeed, UiInput};
+use crate::ui_script::UiFeed;
 
 mod feed;
 mod query;
@@ -312,7 +312,7 @@ impl Plugin for UiSocialPlugin {
                 Update,
                 (
                     feed::feed_social.in_set(UiFeed),
-                    feed::drain_social.after(UiInput),
+                    feed::drain_social.in_set(crate::ui_script::UiDrain),
                 ),
             );
     }

@@ -32,6 +32,17 @@ fn player_record_arm<T>(
     Some(f(&model.player_record))
 }
 
+/// `SStrCmpI(a, b, 0x7fffffff) == 0` (`0x64a4c0` through `__strnicmp`, `0x414310`): `A` to `Z`
+/// fold, every other byte exact, and a NUL in either string ends the compare.
+fn c_str_eq_ignore_case(a: &str, b: &str) -> bool {
+    fn c_str(s: &str) -> &[u8] {
+        let bytes = s.as_bytes();
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        &bytes[..end]
+    }
+    c_str(a).eq_ignore_ascii_case(c_str(b))
+}
+
 /// The class ids `GetComboPoints` (`0x51a190`) accepts: it compares the class, `UNIT_FIELD_BYTES_0`
 /// byte 1, with 4 and 0xb.
 const CLASS_ROGUE: u32 = 4;
@@ -349,35 +360,38 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitIsUnit(a, b): both units exist and are the same token or share a nonzero GUID.
+    // UnitIsUnit(a, b) (`0x516070`): two strings equal without regard to case answer 1 before
+    // either is resolved (`SStrCmpI`, `0x5160c4`; `0x5160cd`); otherwise both resolve
+    // (`0x5160e8`, `0x5160f4`) and a shared nonzero GUID answers 1 (`0x516100`), held or not.
     g.set(
         "UnitIsUnit",
         lua.create_function(|lua, (a, b): (Value, Value)| {
             // Both arguments are `lua_isstring`-gated, so either one nil raises.
-            let a = Some(crate::script::binding_abi::string_arg(
+            let a = crate::script::binding_abi::string_arg(
                 lua,
                 a,
                 r#"Usage: UnitIsUnit("unit", "otherUnit")"#,
-            )?);
-            let b = Some(crate::script::binding_abi::string_arg(
+            )?;
+            let b = crate::script::binding_abi::string_arg(
                 lua,
                 b,
                 r#"Usage: UnitIsUnit("unit", "otherUnit")"#,
-            )?);
+            )?;
+            if c_str_eq_ignore_case(&a, &b) {
+                return Ok(flag(true));
+            }
+            let (a, b) = (Some(a), Some(b));
             // Both go through the resolver, so either one unrecognised raises.
             check_unit_token(&a)?;
             check_unit_token(&b)?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let (Some(a), Some(b)) = (a, b) else {
-                return Ok(Value::Nil);
+            let guid = |t: &Option<String>| {
+                t.as_deref()
+                    .and_then(|t| model.unit(t))
+                    .map_or(0, |u| u.guid)
             };
-            let (Some(ua), Some(ub)) = (model.unit(&a), model.unit(&b)) else {
-                return Ok(Value::Nil);
-            };
-            if !ua.exists || !ub.exists {
-                return Ok(Value::Nil);
-            }
-            Ok(flag(a == b || (ua.guid != 0 && ua.guid == ub.guid)))
+            let (ga, gb) = (guid(&a), guid(&b));
+            Ok(flag(ga != 0 && ga == gb))
         })?,
     )?;
 
@@ -760,19 +774,22 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitXP/UnitXPMax(unit): `PLAYER_XP` is a private field, so only `"player"` has a value and
-    // any other token answers 0.
-    let is_player = |token: &Option<String>| token.as_deref() == Some("player");
+    // UnitXP/UnitXPMax(unit): the token resolved (`0x51738e`), then the active player's private
+    // `PLAYER_XP` pair for its object by whatever token names it (`0x5173ad`-`0x5173c9`), 0 for
+    // any other unit or none.
+    fn names_self(model: &Model, token: &str) -> bool {
+        token.eq_ignore_ascii_case("player")
+            || (model.unit_guids.player != 0
+                && model.unit_guids.resolve(token).ok().flatten() == Some(model.unit_guids.player))
+    }
     g.set(
         "UnitXP",
-        lua.create_function(move |lua, token: Value| {
-            let token = Some(crate::script::binding_abi::string_arg(
-                lua,
-                token,
-                r#"Usage: UnitXP("unit")"#,
-            )?);
+        lua.create_function(|lua, token: Value| {
+            let token =
+                crate::script::binding_abi::string_arg(lua, token, r#"Usage: UnitXP("unit")"#)?;
+            check_unit_token(&Some(token.clone()))?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if is_player(&token) {
+            Ok(if names_self(&model, &token) {
                 i64::from(model.player_xp)
             } else {
                 0
@@ -781,14 +798,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     g.set(
         "UnitXPMax",
-        lua.create_function(move |lua, token: Value| {
-            let token = Some(crate::script::binding_abi::string_arg(
-                lua,
-                token,
-                r#"Usage: UnitXPMax("unit")"#,
-            )?);
+        lua.create_function(|lua, token: Value| {
+            let token =
+                crate::script::binding_abi::string_arg(lua, token, r#"Usage: UnitXPMax("unit")"#)?;
+            check_unit_token(&Some(token.clone()))?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if is_player(&token) {
+            Ok(if names_self(&model, &token) {
                 i64::from(model.player_next_level_xp)
             } else {
                 0
@@ -927,7 +942,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                         request: SelectionRequest::Unit(token),
                         may_cast,
                     },
-                );
+                )?;
             }
             Ok(())
         })?,
@@ -949,7 +964,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                         request: SelectionRequest::Assist(token),
                         may_cast,
                     },
-                );
+                )?;
             }
             Ok(())
         })?,
@@ -967,7 +982,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     request: SelectionRequest::LastEnemy,
                     may_cast,
                 },
-            );
+            )?;
             Ok(())
         })?,
     )?;
@@ -981,8 +996,8 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // shows `0x127` ERR_UNIT_NOT_FOUND, or `0xb8` ERR_GENERIC_NO_TARGET for an empty name
     // (`0x489dbd`, `0x489dcf`), from the app's commit. The pick is shown as `"target"` at once,
     // from the app's candidates (`by_name`), so `UnitName("target")` on the next line names it,
-    // unless it is not selectable and `SetSelection` returns (`0x4935ee`); the queued call still
-    // commits it.
+    // unless it is not selectable and `SetSelection` returns (`0x4935ee`); the call still commits
+    // it.
     g.set(
         "TargetByName",
         lua.create_function(|lua, (name, exact): (Value, Option<Value>)| {
@@ -1009,7 +1024,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     exact,
                     may_cast,
                 },
-            );
+            )?;
             Ok(())
         })?,
     )?;
@@ -1058,7 +1073,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             }
             check_unit_token(&Some(token.clone()))?;
-            submit(lua, ScriptCall::SpellTargetUnit(token));
+            submit(lua, ScriptCall::SpellTargetUnit(token))?;
             Ok(())
         })?,
     )?;
@@ -1080,7 +1095,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
                 had
             };
-            submit(lua, ScriptCall::ClearTarget);
+            submit(lua, ScriptCall::ClearTarget)?;
             Ok(flag(had))
         })?,
     )?;

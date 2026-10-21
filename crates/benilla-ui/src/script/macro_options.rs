@@ -326,10 +326,8 @@ fn spell_known(model: &super::Model, arg: &str) -> bool {
             .iter()
             .chain(pet)
             .any(|s| s.spell_id == id),
-        Err(_) => {
-            super::resolve_spell_by_name(&model.spellbook, arg).is_some()
-                || pet.iter().any(|s| s.name.eq_ignore_ascii_case(arg))
-        }
+        // Both books by `CastSpellByName`'s own search (`0x4b3a10`).
+        Err(_) => super::resolve_spell_in_books(&model.spellbook, &model.pet_book, arg).is_some(),
     }
 }
 

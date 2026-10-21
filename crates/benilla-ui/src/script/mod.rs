@@ -230,13 +230,16 @@ pub use bind_confirm::PendingEquipAnswer;
 pub use binding_abi::{ftol, s_str_to_float, s_str_to_int};
 pub use calls::{NearestMode, QueuedCall, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
-pub use channel::{ChannelCommand, RecruitmentPlan, RecruitmentRun, ZoneChannelRow};
+pub use channel::{ChannelCommand, JoinedChannel, RecruitmentPlan, RecruitmentRun, ZoneChannelRow};
 pub use char_stats::{
     weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, UnitCombatStats,
     BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_misc::EmoteRequest;
-pub use chat_send::{ChatGroup, ChatSend, SEND_CHAT_TOKENS};
+pub use chat_send::{
+    expand_target_tokens, validate_escapes, ChatGroup, ChatSend, InvalidEscape, INVALID_ESCAPE,
+    SEND_CHAT_TOKENS,
+};
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
 pub use client::UiFlavor;
@@ -302,7 +305,7 @@ pub use worldmap_arrow::ARROW_MODEL;
 
 pub(crate) use button::{refresh_label_lua, state_font_lua, LabelFont};
 pub(crate) use font_block::{face_loads, own_font_lua, SAME_FONT_HEIGHT};
-pub use inspect::{InspectView, UnitReach};
+pub use inspect::UnitReach;
 pub use item_stats::{
     item_usable, ItemRecipe, ItemSetView, ItemSpellLine, ItemTemplateView, PlayerReqState,
     TaughtSpell,
@@ -357,8 +360,8 @@ pub use skills::{SkillEntry, SkillsState};
 pub use social::{FriendInfo, SocialRequest, SocialState, WhoInfo};
 pub use sound::{MusicRequest, SoundRequest};
 pub use spellbook::{
-    resolve_spell_by_name, resolve_spell_in_books, NamedSpell, PetBookState, SpellBookState,
-    SpellSlotView, SpellTabName, SpellTabView,
+    resolve_spell_in_books, NamedSpell, PetBookState, SpellBookState, SpellSlotView, SpellTabName,
+    SpellTabView,
 };
 pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
 pub use summon::SummonConfirmUiState;
@@ -658,8 +661,8 @@ fn open_state(vm: VmKind) -> mlua::Result<Lua> {
     let mut model = Model::new();
     model.vm = vm;
     lua.set_app_data(model);
-    // Before anything can fire a handler and while no app-data borrow is held, as the
-    // profiler's slot and the call host's require.
+    // Before anything can fire a handler: every VM carries the profiler's slot and the call
+    // host's.
     handler_prof::install(&lua);
     host::install(&lua);
 

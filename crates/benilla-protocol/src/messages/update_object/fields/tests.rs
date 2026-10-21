@@ -251,6 +251,14 @@ fn player_skill_unpacks_the_three_dword_triplet() {
 }
 
 #[test]
+fn item_contained_reads_the_guid_after_the_owner() {
+    // `ITEM_FIELD_OWNER` 6-7 set too, so a wrong index reads the owner.
+    let f = ObjectFields::from_pairs(&[(6, 0x07), (7, 0), (8, 0xabc), (9, 0x4000_0000)]);
+    assert_eq!(f.item_contained(), Some(0x4000_0000_0000_0abc));
+    assert_eq!(ObjectFields::default().item_contained(), None);
+}
+
+#[test]
 fn player_ammo_id_reads_the_field() {
     let f = ObjectFields::from_pairs(&[(1223, 2512)]);
     assert_eq!(f.player_ammo_id(), Some(2512));
@@ -314,6 +322,10 @@ fn player_field_bytes_splits_into_combo_points_toggles_and_honor_rank() {
     assert_eq!(ObjectFields::default().player_honor_rank(), None);
     assert_eq!(ObjectFields::default().player_action_bar_toggles(), None);
     assert_eq!(ObjectFields::default().player_combo_points(), None);
+    // Byte 0's flags: 0x4 is the logging-out bit the cast validator reads (`0x60982b`).
+    assert!(ObjectFields::from_pairs(&[(1222, 0x04)]).player_logging_out());
+    assert!(!f.player_logging_out(), "0x01 alone is not logging out");
+    assert!(!ObjectFields::from_pairs(&[(1222, 0x0400)]).player_logging_out());
 }
 
 /// The nonzero drunk byte catches a wrong shift; the current rank (field 195) and the highest

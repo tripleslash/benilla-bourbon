@@ -430,7 +430,7 @@ impl PlayerLookup<'_, '_> {
 pub(super) fn target_named(
     scan_params: &ByNameScan,
     commit: &mut SelectCommit,
-    errors: &mut crate::ui_action::UiErrorKeys,
+    errors: &crate::ui_action::UiErrorKeys,
     name: &str,
     exact: bool,
 ) {
@@ -449,7 +449,7 @@ pub(super) fn target_named(
         } else {
             "ERR_UNIT_NOT_FOUND"
         };
-        errors.0.push(crate::ui_action::UiError::key(key));
+        errors.push(crate::ui_action::UiError::key(key));
         return;
     };
     commit.commit(entity, guid);
@@ -488,10 +488,10 @@ pub(super) fn target_by_name_requests(
     mut requests: MessageReader<TargetByNameRequest>,
     scan_params: ByNameScan,
     mut commit: SelectCommit,
-    mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+    errors: Res<crate::ui_action::UiErrorKeys>,
 ) {
     for request in requests.read() {
-        target_named(&scan_params, &mut commit, &mut errors, &request.name, false);
+        target_named(&scan_params, &mut commit, &errors, &request.name, false);
     }
 }
 
@@ -520,7 +520,7 @@ pub(super) fn follow_requests(
     selection: Res<Selection>,
     tokens: crate::ui_unit::UnitTokens,
     mover: Query<(&Guid, &ObjectStore), With<crate::net::ActiveMover>>,
-    mut errors: ResMut<crate::ui_action::UiErrorKeys>,
+    errors: Res<crate::ui_action::UiErrorKeys>,
     mut follow: ResMut<crate::player::FollowState>,
     mut approach: ResMut<crate::player::Approach>,
 ) {
@@ -563,7 +563,7 @@ pub(super) fn follow_requests(
             // A refusal leaves a follow in progress alone: the gate returns before `0x611130`.
             Some(FollowRefusal::Line(key)) => {
                 info!("follow: refused — {key}");
-                errors.0.push(crate::ui_action::UiError::key(key));
+                errors.push(crate::ui_action::UiError::key(key));
             }
             Some(FollowRefusal::Silent) => info!("follow: the mover itself — nothing"),
             None => {
@@ -969,7 +969,9 @@ mod tests {
         world
             .run_system_cached(follow_requests)
             .expect("the drain runs");
-        let keys = std::mem::take(&mut world.resource_mut::<crate::ui_action::UiErrorKeys>().0)
+        let keys = world
+            .resource_mut::<crate::ui_action::UiErrorKeys>()
+            .take()
             .into_iter()
             .map(|e| e.key)
             .collect();

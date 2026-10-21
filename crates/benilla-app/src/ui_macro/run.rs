@@ -206,7 +206,7 @@ mod tests {
             cast_name(&t, "/spell Frostbolt"),
             Some((CastArm::Slash, "Frostbolt".into()))
         );
-        // The whole argument, rank included; `resolve_spell_by_name` parses it.
+        // The whole argument, rank included; `resolve_spell_in_books` parses it.
         assert_eq!(
             cast_name(&t, "/cast Fireball(Rank 1)"),
             Some((CastArm::Slash, "Fireball(Rank 1)".into()))
@@ -366,14 +366,15 @@ mod tests {
         let t = table();
         // No subtext -> the highest known rank.
         assert_eq!(bound(&t, "/cast Fireball", &book), BoundSpell::Spell(145));
-        // A pinned subtext -> that rank, both spacings.
+        // A pinned subtext -> that rank. The spaced form keeps its space in the name
+        // (`0x4b3950` trims nothing), so it names no spell and the bar greys the slot.
         assert_eq!(
             bound(&t, "/cast Fireball(Rank 1)", &book),
             BoundSpell::Spell(133)
         );
         assert_eq!(
             bound(&t, "/cast Fireball (Rank 1)", &book),
-            BoundSpell::Spell(133)
+            BoundSpell::Unresolved
         );
     }
 

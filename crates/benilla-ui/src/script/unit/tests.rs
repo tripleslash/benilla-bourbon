@@ -27,6 +27,7 @@ fn player() -> UnitState {
 #[test]
 fn spell_target_unit_checks_in_the_references_order() {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     let usage = |s: &mut UiScript, call: &str| {
         let err = s.run(call).expect_err(call).to_string();
         assert!(
@@ -328,6 +329,7 @@ fn unit_is_trivial_is_the_grey_test_and_never_a_player() {
 fn target_unit_queues_the_token_for_the_app_to_resolve() {
     use crate::script::SelectionRequest;
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     assert!(s.take_selection_requests().is_empty());
     // A nil token is not queued.
     s.eval::<()>(r#"TargetUnit("player")"#).unwrap();
@@ -348,6 +350,7 @@ fn target_unit_queues_the_token_for_the_app_to_resolve() {
 fn the_selection_queue_carries_all_three_verbs_in_call_order() {
     use crate::script::SelectionRequest;
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.eval::<()>(r#"TargetUnit("party1")"#).unwrap();
     s.eval::<()>(r#"AssistUnit("target")"#).unwrap();
     s.eval::<()>(r#"AssistUnit(nil)"#).unwrap();
@@ -369,6 +372,7 @@ fn the_selection_queue_carries_all_three_verbs_in_call_order() {
 fn target_nearest_queues_its_mode_and_reverse_flag() {
     use crate::script::NearestMode::{Enemy, Friend, PartyMember, RaidMember};
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     assert!(s.take_target_nearest_requests().is_empty());
     s.eval::<()>("TargetNearestFriend()").unwrap();
     s.eval::<()>("TargetNearestFriend(1)").unwrap();
@@ -566,7 +570,7 @@ fn get_money_reads_the_pushed_purse() {
 }
 
 #[test]
-fn unit_xp_reads_the_player_globals_only_for_the_player_token() {
+fn unit_xp_reads_the_player_globals() {
     let mut s = UiScript::new().unwrap();
     assert_eq!(s.eval::<i64>(r#"return UnitXP("player")"#).unwrap(), 0);
     assert_eq!(s.eval::<i64>(r#"return UnitXPMax("player")"#).unwrap(), 0);
@@ -578,6 +582,45 @@ fn unit_xp_reads_the_player_globals_only_for_the_player_token() {
     );
     assert_eq!(s.eval::<i64>(r#"return UnitXP("target")"#).unwrap(), 0);
     assert_eq!(s.eval::<i64>(r#"return UnitXPMax("target")"#).unwrap(), 0);
+}
+
+/// `UnitXP` and `UnitXPMax` resolve their token (`0x51738e`) and answer for the active player's
+/// object by whatever token names it (`0x5173ad`-`0x5173c9`): `"target"` on yourself and
+/// `"PLAYER"` read the experience, another unit 0, and a token the resolver does not know raises
+/// (`0x515c14`).
+#[test]
+fn unit_xp_answers_any_token_naming_the_active_player() {
+    const ME: u64 = 0x10;
+    const OTHER: u64 = 0x20;
+    let mut s = UiScript::new().unwrap();
+    s.set_player_xp(4200, 6000);
+    let seat = |s: &mut UiScript, target: u64| {
+        s.set_unit_guids(&UnitGuids {
+            player: ME,
+            target,
+            held: [(ME, 0), (OTHER, 0)].into_iter().collect(),
+            ..Default::default()
+        });
+    };
+    seat(&mut s, ME);
+    for token in ["target", "PLAYER"] {
+        assert_eq!(
+            s.eval::<(i64, i64)>(&format!("return UnitXP({token:?}), UnitXPMax({token:?})"))
+                .unwrap(),
+            (4200, 6000),
+            "{token}"
+        );
+    }
+    seat(&mut s, OTHER);
+    assert_eq!(
+        s.eval::<(i64, i64)>(r#"return UnitXP("target"), UnitXPMax("target")"#)
+            .unwrap(),
+        (0, 0)
+    );
+    for call in [r#"UnitXP("bogus")"#, r#"UnitXPMax("npctarget")"#] {
+        let err = s.run(call).unwrap_err().to_string();
+        assert!(err.contains("Unknown unit name"), "{call}: {err}");
+    }
 }
 
 #[test]
@@ -839,6 +882,7 @@ fn unit_affecting_combat_raises_on_a_bad_argument() {
 #[test]
 fn target_by_name_queues_the_name_and_the_exact_flag() {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     assert!(s.take_target_by_name_requests().is_empty());
 
     s.run(r#"TargetByName("Rag")"#).unwrap();
@@ -900,6 +944,7 @@ fn unselectable(guid: u64, name: &str, dist2: f32) -> crate::script::NameCandida
 fn target_by_name_shows_its_pick_to_the_rest_of_the_chunk() {
     const OLD: u64 = 0x21;
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_unit(
         "target",
         Some(UnitState {
@@ -982,6 +1027,7 @@ fn target_by_name_shows_its_pick_to_the_rest_of_the_chunk() {
 #[test]
 fn clear_target_and_target_unit_show_their_outcome_to_the_rest_of_the_chunk() {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_unit_guids(&UnitGuids {
         player: 0x10,
         party: [0x22, 0x23, 0, 0],
@@ -1038,6 +1084,7 @@ fn clear_target_and_target_unit_show_their_outcome_to_the_rest_of_the_chunk() {
 fn target_unit_and_by_name_leave_the_view_while_the_cursor_is_up() {
     let script = |targeting| {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_unit_guids(&UnitGuids {
             player: 0x10,
             party: [0x22, 0, 0, 0],
@@ -1077,6 +1124,7 @@ fn target_unit_and_by_name_leave_the_view_while_the_cursor_is_up() {
 fn the_selection_verbs_leave_the_view_for_a_charmed_player() {
     let script = |charmed| {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_unit_guids(&UnitGuids {
             player: 0x10,
             party: [0x22, 0, 0, 0],
@@ -1118,6 +1166,7 @@ fn the_selection_verbs_leave_the_view_for_a_charmed_player() {
 fn target_by_name_leaves_the_view_when_its_pick_is_not_selectable() {
     const OLD: u64 = 0x21;
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     let old = candidate(OLD, "Old Mob", 1.0).state;
     s.set_unit("target", Some(old));
     s.set_name_candidate(0x31, Some(unselectable(0x31, "Red Affinity", 4.0)));
@@ -1147,6 +1196,7 @@ fn target_by_name_leaves_the_view_when_its_pick_is_not_selectable() {
 #[test]
 fn target_unit_leaves_the_view_when_the_held_unit_is_not_selectable() {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_unit_guids(&UnitGuids {
         player: 0x10,
         party: [0x22, 0, 0, 0],
@@ -1976,9 +2026,10 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
                 ..Default::default()
             },
         ),
+        // The GUID leg: the mouseover, seated on both legs, shares the live target's GUID.
         (
             "UnitIsUnit",
-            r#"UnitIsUnit("target", "target")"#,
+            r#"UnitIsUnit("target", "mouseover")"#,
             UnitState {
                 exists: true,
                 guid: 42,
@@ -1987,9 +2038,15 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
         ),
     ];
 
+    let mouseover = || UnitState {
+        exists: true,
+        guid: 42,
+        ..Default::default()
+    };
     for (name, call, live) in table {
         let mut s = UiScript::new().unwrap();
         s.set_unit("player", Some(player()));
+        s.set_unit("mouseover", Some(mouseover()));
         s.set_unit("target", Some(live));
 
         assert_eq!(
@@ -2019,6 +2076,7 @@ fn every_unit_predicate_is_one_or_nil_and_never_a_boolean() {
         // The false leg: nil, one value. Clearing the token also covers the absent-unit arm.
         let mut s = UiScript::new().unwrap();
         s.set_unit("player", Some(player()));
+        s.set_unit("mouseover", Some(mouseover()));
         s.set_unit("target", None);
 
         assert!(

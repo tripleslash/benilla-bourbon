@@ -3,6 +3,7 @@
 use super::*;
 use crate::target::Selection;
 use benilla_formats::SpellDisplay;
+use benilla_ui::script::UiScript;
 
 /// A player (`OBJECT_FIELD_TYPE` 0x19) under its own control (`UNIT_FIELD_FLAGS` 0x8), alive, with
 /// mana: the relation functions' attacker.
@@ -179,6 +180,8 @@ fn the_feed_pushes_a_bare_macro_as_usable() {
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
         .init_resource::<AutoRepeatActive>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .add_message::<crate::player::StandStateRequest>()
         .init_resource::<crate::spell::PendingCast>()
         .init_resource::<crate::spell::QueuedMeleeSpell>()
         .init_resource::<crate::spell::ActiveChannel>()
@@ -273,6 +276,8 @@ fn a_ranged_button_pads_its_range_by_the_selected_target_alone() {
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
+            .add_message::<crate::player::StandStateRequest>()
             .init_resource::<crate::spell::PendingCast>()
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::ActiveChannel>()
@@ -392,6 +397,8 @@ fn a_melee_button_reaches_the_moving_bonus_while_both_units_run() {
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
+            .add_message::<crate::player::StandStateRequest>()
             .init_resource::<crate::spell::PendingCast>()
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::ActiveChannel>()
@@ -527,6 +534,8 @@ fn food_on_the_bar_greys_while_the_player_is_in_combat() {
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
+            .add_message::<crate::player::StandStateRequest>()
             .init_resource::<crate::spell::PendingCast>()
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::ActiveChannel>()
@@ -621,6 +630,8 @@ fn an_item_slot_is_held_by_its_stored_count_not_the_bags() {
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
+            .add_message::<crate::player::StandStateRequest>()
             .init_resource::<crate::spell::PendingCast>()
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::ActiveChannel>()
@@ -707,6 +718,8 @@ fn a_broken_worn_weapon_draws_no_equipped_border() {
             .init_resource::<crate::spell::SpellModifiers>()
             .init_resource::<crate::ui_script::UiClock>()
             .init_resource::<AutoRepeatActive>()
+            .init_resource::<crate::creature_anim::UnitEdits>()
+            .add_message::<crate::player::StandStateRequest>()
             .init_resource::<crate::spell::PendingCast>()
             .init_resource::<crate::spell::QueuedMeleeSpell>()
             .init_resource::<crate::spell::ActiveChannel>()
@@ -760,6 +773,77 @@ fn a_broken_worn_weapon_draws_no_equipped_border() {
         !equipped(486 + 2 * 23, 12),
         "a copy in the pack is not worn"
     );
+}
+
+/// The bar's usable walk hands the ammo leg of `0x6e40e0` the `ItemSubClass.dbc` flags
+/// (`0x6e4264`): a ranged weapon whose subclass row carries `0x10` (Thrown) fires without ammo,
+/// so its shot lights with nothing loaded, and the same weapon under a row without the flag greys.
+#[test]
+fn the_bars_ammo_leg_reads_the_subclass_flags() {
+    use benilla_protocol::messages::ItemInfo;
+    use benilla_protocol::ObjectFields;
+    // Player slot 17, the ranged seat.
+    const INV_RANGED: u16 = 486 + 2 * 17;
+    const KNIFE: u64 = 0xF0;
+    const KNIFE_ENTRY: u32 = 2946;
+    const THROW: u32 = 2764;
+
+    let lit = |flags: u32| {
+        let throw = SpellDisplay {
+            equipped_item_class: 2,
+            equipped_item_subclass_mask: 1 << 16,
+            ..Default::default()
+        };
+        let mut app = feed_app(
+            &[(0, THROW, ACTION_KIND_SPELL)],
+            catalog(vec![(THROW, throw)], &[]),
+            5.0,
+        );
+        app.insert_resource(crate::ui_items::ItemSubClasses(
+            benilla_formats::ItemSubClassCatalog::from_rows([(
+                (2, 16),
+                benilla_formats::ItemSubClassInfo {
+                    prerequisite_proficiency: -1,
+                    postrequisite_proficiency: -1,
+                    flags,
+                    display_flags: 0,
+                    weapon_swing_size: 0,
+                },
+            )]),
+        ));
+        // A Thrown weapon whose record names an ammo type, and no ammo loaded or carried.
+        app.world_mut().resource_mut::<Items>().insert_template(
+            KNIFE_ENTRY,
+            Some(ItemInfo {
+                class: 2,
+                subclass: 16,
+                ammo_type: 2,
+                ..crate::items::test_template("Throwing Knife")
+            }),
+        );
+        crate::items::test_spawn_item(
+            app.world_mut(),
+            KNIFE,
+            ObjectFields::from_pairs(&[(3, KNIFE_ENTRY)]),
+            false,
+        );
+        let me = app.world().resource::<crate::net::GuidIndex>().0[&ME];
+        app.world_mut()
+            .get_mut::<ObjectStore>(me)
+            .unwrap()
+            .0
+            .merge_diff(
+                ObjectFields::from_pairs(&[(INV_RANGED, KNIFE as u32)]),
+                |_, _, _| {},
+            );
+        app.update();
+        app.world()
+            .non_send::<UiScript>()
+            .eval::<bool>("return (IsUsableAction(1)) and true or false")
+            .unwrap()
+    };
+    assert!(lit(0x10), "a subclass that fires no ammo");
+    assert!(!lit(0), "the same weapon, needing its ammo");
 }
 
 /// `SMSG_CLIENT_CONTROL_UPDATE` clears `[0xb4b3e4]` (`0x4958e0`), and `IsUsableAction` answers
@@ -824,6 +908,8 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
         .init_resource::<AutoRepeatActive>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .add_message::<crate::player::StandStateRequest>()
         .init_resource::<crate::spell::PendingCast>()
         .init_resource::<crate::spell::QueuedMeleeSpell>()
         .init_resource::<crate::spell::ActiveChannel>()
@@ -939,6 +1025,8 @@ fn a_held_action_polls_answer_their_own_now() {
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
         .init_resource::<AutoRepeatActive>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .add_message::<crate::player::StandStateRequest>()
         .init_resource::<crate::spell::PendingCast>()
         .init_resource::<crate::spell::QueuedMeleeSpell>()
         .init_resource::<crate::spell::ActiveChannel>()
@@ -1006,6 +1094,8 @@ fn feed_app(buttons: &[(u8, u32, u8)], spells: Spells, x: f32) -> App {
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
         .init_resource::<AutoRepeatActive>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .add_message::<crate::player::StandStateRequest>()
         .init_resource::<crate::spell::PendingCast>()
         .init_resource::<crate::spell::QueuedMeleeSpell>()
         .init_resource::<crate::spell::ActiveChannel>()
@@ -1544,7 +1634,12 @@ fn bag_update_cooldown_fires_from_the_item_legs_alone() {
 
     cds(&mut app).start_gcd(133, &fireball, now, &mods);
     assert_eq!(frame(&mut app), PAIR, "a cast's global cooldown");
-    cds(&mut app).apply_wire_cooldown(133, 8000, Some(&fireball), now);
+    cds(&mut app).apply_spell_cooldowns(
+        [(133, 8000, Some(&fireball))],
+        &mods,
+        crate::spell::CategoryPad::NoPlayer,
+        now,
+    );
     assert_eq!(frame(&mut app), PAIR, "SMSG_SPELL_COOLDOWN");
     cds(&mut app).apply_wire_item_cooldown(6948, 8690, now);
     assert_eq!(
@@ -1653,6 +1748,95 @@ fn an_item_slots_record_landing_flushes_its_running_cooldown() {
         frame(&mut app).is_empty(),
         "a record landing with nothing running"
     );
+}
+
+/// The three events a record callback `0x6e2f70` fires (`0x6e2f89`, `0x6e2f8e`).
+const RECORD_FLUSH: [&str; 3] = [
+    "ACTIONBAR_UPDATE_COOLDOWN",
+    "SPELL_UPDATE_COOLDOWN",
+    "BAG_UPDATE_COOLDOWN",
+];
+
+/// Hearthstone's record, its on-use spell 8690.
+fn hearthstone_record() -> benilla_protocol::messages::ItemInfo {
+    benilla_protocol::messages::ItemInfo {
+        use_spell: Some(benilla_protocol::messages::ItemUseSpell {
+            spell_id: 8690,
+            cooldown_ms: -1,
+            category: 0,
+            category_cooldown_ms: -1,
+        }),
+        ..crate::items::test_template("Hearthstone")
+    }
+}
+
+/// The callback `0x6e2f70` is the item cache's, not the asking slot's: a record that lands after
+/// the slot was cleared still flushes its running cooldown (`0x6e2f80`-`0x6e2f8e`).
+#[test]
+fn a_record_landing_after_its_slot_was_cleared_still_flushes() {
+    const HEARTHSTONE: u32 = 6948;
+    let mut app = feed_app(
+        &[(0, HEARTHSTONE, ACTION_KIND_ITEM)],
+        Spells::empty_for_tests(),
+        5.0,
+    );
+    record(&mut app, &RECORD_FLUSH);
+    app.world_mut()
+        .resource_mut::<Cooldowns>()
+        .apply_wire_item_cooldown(HEARTHSTONE, 8690, Instant::now());
+    frame(&mut app);
+    app.world_mut()
+        .resource_mut::<PlayerActions>()
+        .buttons
+        .clear();
+    assert!(
+        frame(&mut app).is_empty(),
+        "the slot is gone, its ask is not"
+    );
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(HEARTHSTONE, Some(hearthstone_record()));
+    assert_eq!(frame(&mut app), RECORD_FLUSH);
+}
+
+/// `GetContainerItemCooldown` on a bag slot whose record is missing asks it with the callback
+/// `0x6e2f70` (`0x4f9a7f` → `0x6e2efb`), whose landing on a running cooldown fires the pair and
+/// `BAG_UPDATE_COOLDOWN` (`0x6e2f89`, `0x6e2f8e`).
+#[test]
+fn a_bag_query_on_a_missing_record_flushes_when_the_record_lands() {
+    use benilla_ui::script::{ContainerSlot, ContainerState};
+    const HEARTHSTONE: u32 = 6948;
+    let mut app = feed_app(&[], Spells::empty_for_tests(), 5.0);
+    record(&mut app, &RECORD_FLUSH);
+    app.world_mut().non_send_mut::<UiScript>().set_container(
+        0,
+        Some(ContainerState {
+            name: None,
+            num_slots: 16,
+            slots: std::collections::HashMap::from([(
+                1,
+                ContainerSlot {
+                    item_id: HEARTHSTONE,
+                    count: 1,
+                    ..Default::default()
+                },
+            )]),
+        }),
+    );
+    app.world_mut()
+        .resource_mut::<Cooldowns>()
+        .apply_wire_item_cooldown(HEARTHSTONE, 8690, Instant::now());
+    frame(&mut app);
+    app.world()
+        .non_send::<UiScript>()
+        .run("GetContainerItemCooldown(0, 1)")
+        .unwrap();
+    assert!(frame(&mut app).is_empty(), "asked, and waiting");
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(HEARTHSTONE, Some(hearthstone_record()));
+    assert_eq!(frame(&mut app), RECORD_FLUSH);
+    assert!(frame(&mut app).is_empty(), "once");
 }
 
 /// The feed's two halves sit around the unit snapshots, and its signals come ahead of the events

@@ -558,6 +558,9 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     };
     let frame_start = bevy::platform::time::Instant::now();
     world.resource_mut::<PendingEntryUiLoad>().frames += 1;
+    // Every step that runs Lua is an engine turn, as the one-shot load is one: a call a file or a
+    // handler makes waits on the VM, parked with it between slices, and applies once at `Finish`,
+    // as the one-shot load's apply as it returns.
     let done_at_start = world.resource::<PendingEntryUiLoad>().done;
     loop {
         let stage = world.resource::<PendingEntryUiLoad>().stage;
@@ -568,7 +571,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 crate::ui_billing::arm_at_world_entry(world);
                 // World entry: no player object yet, so the roster's record stands in.
                 let (identity, roster, version_check) =
-                    entry_prepare(world, &mut script, LoadSeat::Roster);
+                    script.host_out(|script| entry_prepare(world, script, LoadSeat::Roster));
                 // fork: upstream's load-edge sound bracket ([`silenced_ui_load`]), held open across
                 // the slices: pushed here, before the first file, and popped at `Finish` after the
                 // saved variables and the `PLAYER_LOGIN` arm. The depth lives on the VM, which is
@@ -617,11 +620,13 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                     let toc = pending.core_toc.take().unwrap_or_default();
                     let has_core = pending.core_rows.is_some();
                     pending.waited = 0;
-                    let _ = if has_core {
-                        super::manifest::close_core(&script, toc)
-                    } else {
-                        super::manifest::load_core_bindings(&script)
-                    };
+                    let _ = script.host_out(|script| {
+                        if has_core {
+                            super::manifest::close_core(script, toc)
+                        } else {
+                            super::manifest::load_core_bindings(script)
+                        }
+                    });
                     continue;
                 }
                 if next < pending.files.len() {
@@ -645,7 +650,8 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                         .core_toc
                         .take()
                         .unwrap_or_default();
-                    let _ = super::manifest::load_entry(&script, &entry, &mut toc);
+                    let _ = script
+                        .host_out(|script| super::manifest::load_entry(script, &entry, &mut toc));
                     let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                     if next < pending.core_rows.unwrap_or(0) {
                         pending.core_toc = Some(toc);
@@ -659,7 +665,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 }
             }
             EntryStage::Positions => {
-                let _ = super::manifest::bootstrap_positions(&script);
+                let _ = script.host_out(|script| super::manifest::bootstrap_positions(script));
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                 pending.done += 1;
                 pending.stage = EntryStage::ThirdParty { next: 0 };
@@ -670,12 +676,9 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                         let p = world.resource::<PendingEntryUiLoad>();
                         (p.identity.clone(), p.roster.clone(), p.version_check)
                     };
-                    let walk = addons::open_third_party(
-                        &mut script,
-                        identity.as_ref(),
-                        &roster,
-                        version_check,
-                    );
+                    let walk = script.host_out(|script| {
+                        addons::open_third_party(script, identity.as_ref(), &roster, version_check)
+                    });
                     let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                     // The bar counted the addons as one step; it counts each now.
                     pending.total += walk.len().saturating_sub(1);
@@ -683,7 +686,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 }
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();
                 let mut walk = pending.addons.take().expect("opened above");
-                addons::load_one_addon(&mut walk, &mut script, next);
+                script.host_out(|script| addons::load_one_addon(&mut walk, script, next));
                 pending.done += 1;
                 if next + 1 < walk.len() {
                     pending.addons = Some(walk);
@@ -697,8 +700,9 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
                 let pending = world
                     .remove_resource::<PendingEntryUiLoad>()
                     .unwrap_or_default();
-                entry_finish(world, &mut script, pending.identity.clone());
+                script.host_out(|script| entry_finish(world, script, pending.identity.clone()));
                 script.pop_sound_suppression();
+                crate::script_calls::apply_waiting(world, &mut script);
                 world.insert_non_send(script);
                 arm_leaving_world(world);
                 // The world entry's own step after the UI load, which a `ReloadUI()` never takes.
@@ -1052,10 +1056,16 @@ fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
     // `PLAYER_LOGIN` arm, the span `0x48fbf0` brackets itself across (`0x48fbfa` → `0x49016d`); see
     // [`silenced_ui_load`]. fork: the sliced load ([`run_pending_entry_load`]) holds the same
     // bracket open across its frames instead.
-    silenced_ui_load(&mut script, |script| {
-        let _ = load_ingame_ui(script, identity.as_ref(), &roster, version_check);
-        entry_finish(world, script, identity);
+    // The load is an engine turn: it holds the world, so it cannot lend the host meanwhile, and a
+    // call a file or an `ADDON_LOADED`, `VARIABLES_LOADED` or `PLAYER_LOGIN` handler makes applies
+    // as the load returns, through a host built off the world.
+    script.host_out(|script| {
+        silenced_ui_load(script, |script| {
+            let _ = load_ingame_ui(script, identity.as_ref(), &roster, version_check);
+            entry_finish(world, script, identity);
+        });
     });
+    crate::script_calls::apply_waiting(world, &mut script);
     world.insert_non_send(script);
     arm_leaving_world(world);
 }
@@ -1063,12 +1073,10 @@ fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
 /// The live player's seat off the world, through the unit feed's own builder; `None` before our
 /// own create. A world without the feed's resources (a bare test world) has none to read.
 fn live_player_seat(world: &mut World) -> Option<crate::ui_unit::LivePlayerSeat> {
-    world
-        .run_system_cached(crate::ui_unit::live_player_seat)
-        .unwrap_or_else(|e| {
-            warn!("ui_script: no live player to seat for the load ({e}); the roster stands in");
-            None
-        })
+    crate::script_calls::run_cached(world, crate::ui_unit::live_player_seat).unwrap_or_else(|e| {
+        warn!("ui_script: no live player to seat for the load ({e}); the roster stands in");
+        None
+    })
 }
 
 /// The wire's gender byte (0 male, 1 female) on `UnitSex`'s 2/3 scale, as `ui_unit::snapshot`
@@ -1223,9 +1231,9 @@ fn run_ui_shutdown_head(world: &mut World, loud: bool) {
             .get_resource::<crate::ui_loot::LootState>()
             .and_then(crate::ui_loot::LootState::source);
         // A harness without the target stack has no selection to drop.
-        let deselected = world
-            .run_system_cached(crate::target::deselect_on_ui_shutdown)
-            .unwrap_or(false);
+        let deselected =
+            crate::script_calls::run_cached(world, crate::target::deselect_on_ui_shutdown)
+                .unwrap_or(false);
         // The teardown's own loot close, on a window looting the target (`0x493959`-`0x493974`).
         let loot_closed = looting.is_some()
             && world
@@ -1233,17 +1241,22 @@ fn run_ui_shutdown_head(world: &mut World, loud: bool) {
                 .and_then(crate::ui_loot::LootState::source)
                 .is_none();
         if loot_closed {
-            let _ = world.run_system_cached(crate::ui_loot::tell_loot_closed);
+            let _ = crate::script_calls::run_cached(world, crate::ui_loot::tell_loot_closed);
         }
         if deselected {
-            if let Some(mut script) = world.get_non_send_mut::<UiScript>() {
-                script.set_unit("target", None);
-                script.set_unit("targettarget", None);
-                script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-            }
+            crate::script_calls::with_hosted_vm(world, |script| {
+                if let Some(script) = script {
+                    script.set_unit("target", None);
+                    script.set_unit("targettarget", None);
+                    script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+                }
+            });
         }
     } else {
-        let _ = world.run_system_cached(crate::target::clear_selection_on_world_teardown);
+        let _ = crate::script_calls::run_cached(
+            world,
+            crate::target::clear_selection_on_world_teardown,
+        );
     }
     if let Some(net) = world.get_resource::<crate::net::NetCommands>() {
         let _ = net.0.send(crate::net::ClientCommand::CancelTrade);
@@ -1254,13 +1267,15 @@ fn run_ui_shutdown_head(world: &mut World, loud: bool) {
 /// Click to Move walk in flight is cancelled and the mover stopped, a follow telling the VM
 /// `AUTOFOLLOW_END` (`0x60fb84`), so the new VM starts with none.
 fn cancel_move_action(world: &mut World) {
-    let followed = world
-        .run_system_cached(crate::player::cancel_move_action_on_ui_shutdown)
-        .unwrap_or(false);
+    let followed =
+        crate::script_calls::run_cached(world, crate::player::cancel_move_action_on_ui_shutdown)
+            .unwrap_or(false);
     if followed {
-        if let Some(mut script) = world.get_non_send_mut::<UiScript>() {
-            script.fire_event("AUTOFOLLOW_END", vec![]);
-        }
+        crate::script_calls::with_hosted_vm(world, |script| {
+            if let Some(script) = script {
+                script.fire_event("AUTOFOLLOW_END", vec![]);
+            }
+        });
     }
 }
 
@@ -1337,9 +1352,11 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
         .get_resource::<AddOnIdentity>()
         .and_then(|id| id.0.clone());
     if !ui_never_loaded {
-        if let Some(mut script) = world.get_non_send_mut::<UiScript>() {
-            shutdown_ui_state(&mut script, identity.as_ref());
-        }
+        crate::script_calls::with_hosted_vm(world, |script| {
+            if let Some(script) = script {
+                shutdown_ui_state(script, identity.as_ref());
+            }
+        });
     }
     if silenced {
         unsilence_ui_shutdown(world);
@@ -1451,9 +1468,11 @@ pub(crate) fn shutdown_on_exit(
     let identity = world
         .get_resource::<AddOnIdentity>()
         .and_then(|id| id.0.clone());
-    if let Some(mut script) = world.get_non_send_mut::<UiScript>() {
-        shutdown_ui_state(&mut script, identity.as_ref());
-    }
+    crate::script_calls::with_hosted_vm(world, |script| {
+        if let Some(script) = script {
+            shutdown_ui_state(script, identity.as_ref());
+        }
+    });
     if silenced {
         unsilence_ui_shutdown(world);
     }
@@ -2129,6 +2148,8 @@ mod tests {
         world.init_resource::<crate::spell::SpellTargeting>();
         world.init_resource::<crate::ui_cast::CastReports>();
         world.init_resource::<crate::spell::AutoRepeatActive>();
+        world.init_resource::<crate::creature_anim::UnitEdits>();
+        world.init_resource::<bevy::ecs::message::Messages<crate::player::StandStateRequest>>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<crate::ui_loot::LootLatch>();
         world.init_resource::<crate::net::GuidIndex>();
@@ -2277,6 +2298,59 @@ mod tests {
                 .eval::<i64>("return SEEN_LOGOUT")
                 .unwrap(),
             0
+        );
+    }
+
+    /// A one-shot the shutdown runs from its exclusive edge applies the unit edits it queued as it
+    /// returns, as it applies its commands. The `/reload` head's loot close fires `LOOT_CLOSED`,
+    /// whose handler stops a running auto-repeat (`SpellStopCasting`, `0x6e6e80` → `0x6ea080`):
+    /// the arm is off our player before the head's next step.
+    #[test]
+    fn a_shutdown_one_shot_applies_its_unit_edits_as_it_returns() {
+        const ME: u64 = 0x10;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+        let world = app.world_mut();
+        let me = world
+            .spawn((
+                crate::net::SelfPlayer,
+                crate::net::Guid(ME),
+                crate::creature_anim::AutoRepeatArmed,
+            ))
+            .id();
+        world
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(ME, me);
+        world.resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
+        // Auto Shot.
+        world.resource_mut::<crate::spell::AutoRepeatActive>().0 = Some(75);
+        let mut script = UiScript::new().expect("a VM");
+        // The view the cast state pushed after the call that armed it.
+        script.set_cast_view(benilla_ui::script::CastView {
+            auto_repeat: Some(75),
+            ..Default::default()
+        });
+        script
+            .run(
+                "local f = CreateFrame('Frame') f:RegisterEvent('LOOT_CLOSED') \
+                 f:SetScript('OnEvent', function() SpellStopCasting() end)",
+            )
+            .unwrap();
+        world.insert_non_send(script);
+        crate::script_calls::run_cached(world, crate::ui_loot::tell_loot_closed)
+            .expect("the loot close runs");
+        assert_eq!(
+            world.resource::<crate::spell::AutoRepeatActive>().0,
+            None,
+            "the handler's call applied"
+        );
+        assert!(
+            !world
+                .entity(me)
+                .contains::<crate::creature_anim::AutoRepeatArmed>(),
+            "and its edit, before the one-shot returned"
         );
     }
 }

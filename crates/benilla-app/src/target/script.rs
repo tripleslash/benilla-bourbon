@@ -22,7 +22,7 @@ pub(crate) struct ScriptSelect<'w, 's> {
     commit: SelectCommit<'w, 's>,
     by_name: ByNameScan<'w, 's>,
     /// Where a name that finds nobody shows its line.
-    errors: ResMut<'w, crate::ui_action::UiErrorKeys>,
+    errors: Res<'w, crate::ui_action::UiErrorKeys>,
     /// The TAB cycler's inputs, for the `TargetNearest*` calls.
     scan: scan::TargetScan<'w, 's>,
     history: ResMut<'w, scan::TabHistory>,
@@ -33,6 +33,11 @@ impl ScriptSelect<'_, '_> {
     /// The guid selected now.
     pub(crate) fn selected(&self) -> Option<u64> {
         self.commit.selection.guid
+    }
+
+    /// The unit selected now.
+    pub(crate) fn target(&self) -> Option<Entity> {
+        self.commit.selection.target
     }
 
     /// `TargetUnit` (`0x4899d0`), `AssistUnit` (`0x489b80`) and `TargetLastEnemy` share the
@@ -78,13 +83,7 @@ impl ScriptSelect<'_, '_> {
 
     /// `TargetByName(name, exactMatch)` (`0x489d60`), the stock `/target`.
     pub(crate) fn target_by_name(&mut self, name: &str, exact: bool) {
-        by_name::target_named(
-            &self.by_name,
-            &mut self.commit,
-            &mut self.errors,
-            name,
-            exact,
-        );
+        by_name::target_named(&self.by_name, &mut self.commit, &self.errors, name, exact);
     }
 
     /// `TargetNearest*([reverse])` (`0x489a80`/`0x489aa0`/`0x489ac0`/`0x489ae0` →
@@ -141,6 +140,8 @@ mod tests {
         world.init_resource::<crate::ui_cast::CastReports>();
         world.init_resource::<crate::ui_action::UiErrorKeys>();
         world.init_resource::<crate::spell::AutoRepeatActive>();
+        world.init_resource::<crate::creature_anim::UnitEdits>();
+        world.init_resource::<bevy::ecs::message::Messages<crate::player::StandStateRequest>>();
         world.init_resource::<crate::ui_loot::LootState>();
         world.init_resource::<crate::ui_loot::LootLatch>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
@@ -155,7 +156,10 @@ mod tests {
         world.init_resource::<crate::names::NameCache>();
         world.init_resource::<scan::TabHistory>();
         world.init_resource::<Time>();
-        world.insert_non_send(UiScript::new().expect("a bare VM"));
+        // No engine behind it: the VM keeps its calls for the test to apply.
+        let mut script = UiScript::new().expect("a bare VM");
+        script.keep_calls();
+        world.insert_non_send(script);
         world
     }
 
@@ -555,7 +559,9 @@ mod tests {
         let unit = || ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(2, 0x09)]));
 
         let mut world = script_world();
-        world.insert_non_send(crate::ui_script::chat_tests::chat_frame());
+        let mut chat = crate::ui_script::chat_tests::chat_frame();
+        chat.keep_calls();
+        world.insert_non_send(chat);
         world.spawn((SelfPlayer, Guid(ME), unit()));
         let vendor = world.spawn((Guid(VENDOR), unit())).id();
         world

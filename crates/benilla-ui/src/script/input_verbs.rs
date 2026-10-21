@@ -3,8 +3,9 @@
 //! `0x50c089`) and the targeting and posture verbs of the main table `0x83de68` (loop
 //! `0x49027c`). A key and its Lua function share one path: a held command's Start and Stop are the
 //! key's press and release ([`HeldInput`]), a one-shot command fires as its key does
-//! ([`FiredInput`]), and the targeting and attack calls go through the call queue
-//! ([`ScriptCall`]), so a macro's `TargetNearestEnemy()` then `/cast` casts at the new target.
+//! ([`FiredInput`]), and the targeting and attack calls are script calls ([`ScriptCall`]),
+//! applied inside the verb, so a macro's `TargetNearestEnemy()` then `/cast` casts at the new
+//! target.
 //!
 //! Every movement function but the mouselook three opens on the protected-action gate `0x494a50`
 //! with tag 0 ([`protected`]), which is all twenty-three of its tag-0 callers. The four
@@ -124,8 +125,8 @@ fn push(lua: &Lua, input: BindingInput) {
     model.input.queue.push(input);
 }
 
-fn push_call(lua: &Lua, call: ScriptCall) {
-    super::calls::submit(lua, call);
+fn push_call(lua: &Lua, call: ScriptCall) -> mlua::Result<()> {
+    super::calls::submit(lua, call)
 }
 
 /// A zoom's optional amount: `0x6f34d0` (is-number, a numeric string passes) then `0x6f3620`,
@@ -338,7 +339,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         reverse,
                         may_cast,
                     },
-                );
+                )?;
                 Ok(())
             })?,
         )?;
@@ -348,7 +349,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "TargetLastTarget",
         lua.create_function(|lua, _: MultiValue| {
             let may_cast = protected::select_may_cast(lua);
-            push_call(lua, ScriptCall::TargetLastTarget { may_cast });
+            push_call(lua, ScriptCall::TargetLastTarget { may_cast })?;
             Ok(())
         })?,
     )?;
@@ -359,7 +360,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // of the attack has no gate.
             let may_pick = protected::gate(lua, Tag::TARGET);
             let may_cast = protected::select_may_cast(lua);
-            push_call(lua, ScriptCall::AttackTarget { may_pick, may_cast });
+            push_call(lua, ScriptCall::AttackTarget { may_pick, may_cast })?;
             Ok(())
         })?,
     )?;
@@ -439,7 +440,8 @@ mod tests {
 
     #[test]
     fn every_binding_function_is_a_global_that_answers() {
-        let s = UiScript::new().unwrap();
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         for name in NAMES {
             let kind: String = s.eval(&format!("return type({name})")).unwrap();
             assert_eq!(kind, "function", "{name}");
@@ -547,10 +549,11 @@ mod tests {
         assert_eq!(looking(&s), None);
     }
 
-    /// `TargetLastTarget` and `AttackTarget` join the call queue, in call order with the rest.
+    /// `TargetLastTarget` and `AttackTarget` are script calls, made in call order with the rest.
     #[test]
     fn the_targeting_calls_join_the_call_queue_in_order() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run(r#"TargetNearestEnemy(1) TargetLastTarget() AttackTarget() ClearTarget()"#)
             .unwrap();
         assert_eq!(

@@ -995,8 +995,15 @@ impl Plugin for CvarPlugin {
             )
             // After the tick, so a `SetCVar` from this frame reaches the registry and its observers
             // before the frame's drains; `video::drain_restart_gx` orders after this so the commit
-            // finds the stage.
-            .add_systems(Update, sync_cvars.after(crate::ui_script::UiInput))
+            // finds the stage. Before the world's input stage, so the observers run ahead of the
+            // camera's controller: the reference calls the change callback inside the call
+            // (`CVar::Set` `0x63df50`, `0x63df7d`).
+            .add_systems(
+                Update,
+                sync_cvars
+                    .in_set(crate::ui_script::UiDrain)
+                    .before(benilla_world::schedule::WorldStage::Input),
+            )
             // In `Last`, after every `Update` writer of the registry, so the save reads the frame's
             // settled state; before the exit flush, which finds it clean on a quiet exit frame.
             .add_systems(
@@ -1377,106 +1384,108 @@ pub(crate) fn reforged_models_setting() -> bool {
 /// Per frame: seed a new VM's mirror, drain its registrations and writes into the registry, push
 /// the registry's writes into the mirror, and trigger every accepted move.
 pub(crate) fn sync_cvars(
-    script: Option<NonSendMut<UiScript>>,
+    mut hosted_vm: crate::script_calls::HostedVm,
     mut cvars: ResMut<Cvars>,
     adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
     msaa_formats: Option<Res<benilla_world::view::MsaaFormats>>,
     mut seeded: Local<VmMemo<bool>>,
     mut commands: Commands,
 ) {
-    // The live render backend; absent headless, where the registered `""` stands.
-    if let Some(adapter) = adapter.as_deref() {
-        let backend = adapter.backend.to_str();
-        if cvars.get("gxApi") != Some(backend) {
-            cvars.own_for_session("gxApi", Some(backend));
+    hosted_vm.run(|script| {
+        // The live render backend; absent headless, where the registered `""` stands.
+        if let Some(adapter) = adapter.as_deref() {
+            let backend = adapter.backend.to_str();
+            if cvars.get("gxApi") != Some(backend) {
+                cvars.own_for_session("gxApi", Some(backend));
+            }
         }
-    }
-    // A Graphics write drained last frame (or folded at a session edge) retires the recovery
-    // tier; its render-scale move flushes with this frame's events below.
-    if cvars.take_graphics_applied() {
-        release_gpu_tier(&mut cvars);
-    }
-    if cvars.has_console_lines() {
-        cvars.log_console_lines();
-    }
-    let Some(mut script) = script else {
-        // fork: the Graphics Preset's label follows the rows it names.
+        // A Graphics write drained last frame (or folded at a session edge) retires the recovery
+        // tier; its render-scale move flushes with this frame's events below.
+        if cvars.take_graphics_applied() {
+            release_gpu_tier(&mut cvars);
+        }
+        if cvars.has_console_lines() {
+            cvars.log_console_lines();
+        }
+        let Some(script) = script else {
+            // fork: the Graphics Preset's label follows the rows it names.
+            if cvars.stale_graphics_quality().is_some() {
+                cvars.mirror_graphics_quality();
+            }
+            // Nothing to mirror into; a later VM is seeded from the table, which carries it all.
+            if cvars.has_outbox() {
+                cvars.take_outbox();
+            }
+            if cvars.has_events() {
+                for event in cvars.take_events() {
+                    commands.trigger(event);
+                }
+            }
+            return;
+        };
+        // The VM's writes before the seed: an addon's `SetCVar` at load is already queued, and
+        // seeding first would overwrite the mirror with the older value. Read before taking, so a
+        // quiet frame never deref-muts the registry.
+        if script.has_cvar_traffic() || script.cvar_lua_created() != cvars.lua_created {
+            cvars.drain_vm(script);
+            cvars.log_console_lines();
+        }
+        // fork: after every ordered write and before the mirror flush, the Graphics Preset's label
+        // is re-derived from the rows it names.
         if cvars.stale_graphics_quality().is_some() {
             cvars.mirror_graphics_quality();
         }
-        // Nothing to mirror into; a later VM is seeded from the table, which carries it all.
+        if seeded.claim(script) {
+            cvars.seed_vm(script);
+            if cvars.has_outbox() {
+                cvars.take_outbox(); // the seed just carried everything
+            }
+            // The Video dropdown's menu: what this device accepts, enumerated by
+            // `view::MsaaSupportPlugin`.
+            script.set_multisample_formats(
+                msaa_formats
+                    .as_deref()
+                    .map(|f| {
+                        f.formats
+                            .iter()
+                            .map(|&(color_bits, depth_bits, samples)| {
+                                benilla_ui::script::MultisampleFormat {
+                                    color_bits,
+                                    depth_bits,
+                                    samples,
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            );
+            // `GetVideoCaps`, the seven values `OptionsFrame_Load` destructures. Shaders,
+            // trilinear, anisotropy and the hardware cursor are always there (`crate::cursor`
+            // composites the reference's cursors into an OS cursor); `max_anisotropy` is reported
+            // raw because `OptionsFrame.lua:122` matches it against `ANISOTROPIC_VALUES`. Triple
+            // buffering is false: wgpu owns the surface's buffering, so the stock frame hides check
+            // button 13 (`OptionsFrame.lua:163-165`).
+            script.set_video_caps(benilla_ui::script::VideoCaps {
+                anisotropic: true,
+                pixel_shaders: true,
+                vertex_shaders: true,
+                trilinear: true,
+                triple_buffering: false,
+                max_anisotropy: *benilla_assets::ANISO_RANGE.end(),
+                hardware_cursor: true,
+            });
+        }
         if cvars.has_outbox() {
-            cvars.take_outbox();
+            for (name, value) in cvars.take_outbox() {
+                script.set_cvar_host(&name, &value);
+            }
         }
         if cvars.has_events() {
             for event in cvars.take_events() {
                 commands.trigger(event);
             }
         }
-        return;
-    };
-    // The VM's writes before the seed: an addon's `SetCVar` at load is already queued, and seeding
-    // first would overwrite the mirror with the older value. Read before taking, so a quiet frame
-    // never deref-muts the registry.
-    if script.has_cvar_traffic() || script.cvar_lua_created() != cvars.lua_created {
-        cvars.drain_vm(&mut script);
-        cvars.log_console_lines();
-    }
-    // fork: after every ordered write and before the mirror flush, the Graphics Preset's label
-    // is re-derived from the rows it names.
-    if cvars.stale_graphics_quality().is_some() {
-        cvars.mirror_graphics_quality();
-    }
-    if seeded.claim(&script) {
-        cvars.seed_vm(&mut script);
-        if cvars.has_outbox() {
-            cvars.take_outbox(); // the seed just carried everything
-        }
-        // The Video dropdown's menu: what this device accepts, enumerated by
-        // `view::MsaaSupportPlugin`.
-        script.set_multisample_formats(
-            msaa_formats
-                .as_deref()
-                .map(|f| {
-                    f.formats
-                        .iter()
-                        .map(|&(color_bits, depth_bits, samples)| {
-                            benilla_ui::script::MultisampleFormat {
-                                color_bits,
-                                depth_bits,
-                                samples,
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        );
-        // `GetVideoCaps`, the seven values `OptionsFrame_Load` destructures. Shaders, trilinear,
-        // anisotropy and the hardware cursor are always there (`crate::cursor` composites the
-        // reference's cursors into an OS cursor); `max_anisotropy` is reported raw because
-        // `OptionsFrame.lua:122` matches it against `ANISOTROPIC_VALUES`. Triple buffering is
-        // false: wgpu owns the surface's buffering, so the stock frame hides check button 13
-        // (`OptionsFrame.lua:163-165`).
-        script.set_video_caps(benilla_ui::script::VideoCaps {
-            anisotropic: true,
-            pixel_shaders: true,
-            vertex_shaders: true,
-            trilinear: true,
-            triple_buffering: false,
-            max_anisotropy: *benilla_assets::ANISO_RANGE.end(),
-            hardware_cursor: true,
-        });
-    }
-    if cvars.has_outbox() {
-        for (name, value) in cvars.take_outbox() {
-            script.set_cvar_host(&name, &value);
-        }
-    }
-    if cvars.has_events() {
-        for event in cvars.take_events() {
-            commands.trigger(event);
-        }
-    }
+    })
 }
 
 /// Fold the dying VM's last writes into the registry. Called from

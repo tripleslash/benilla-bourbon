@@ -194,7 +194,7 @@ pub(super) fn cursor_can_go_in_slot(model: &Model, id: u32) -> bool {
 /// events running first; then the app sends `CMSG_USE_ITEM` with bag 255 and the 0-based slot,
 /// dropping an empty slot unsent, or in repair mode a worn item is repaired, locked or not
 /// (`0x4c79c4`).
-pub(super) fn use_inventory_item(lua: &Lua, id: u32, on_self: bool) {
+pub(super) fn use_inventory_item(lua: &Lua, id: u32, on_self: bool) -> mlua::Result<()> {
     verb(lua, clear_cursor);
     // The item's on-use spell casts through `TryCastSpell`, behind the gate's tag 2.
     let may_cast = protected::gate(lua, Tag::CAST);
@@ -203,8 +203,9 @@ pub(super) fn use_inventory_item(lua: &Lua, id: u32, on_self: bool) {
         use_cleared(model, id, on_self, may_cast, &mut call)
     });
     if let Some(call) = call {
-        crate::script::calls::submit(lua, call);
+        crate::script::calls::submit(lua, call)?;
     }
+    Ok(())
 }
 
 /// `UseInventoryItem` past its clear. Outside repair mode a locked worn item is refused in the
@@ -320,8 +321,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let id = inventory_slot(lua, id, "Invalid inventory slot in UseInventoryItem")?;
             // `onSelf` through the client's flag coercion (`0x4c8e37`, `0x6f1c10`, default 0).
             let on_self = crate::script::binding_abi::bool_or_default(rest.front(), false);
-            use_inventory_item(lua, id, on_self);
-            Ok(())
+            use_inventory_item(lua, id, on_self)
         })?,
     )?;
     g.set(
@@ -400,6 +400,7 @@ mod tests {
             count: 1,
             contents_count: None,
             quality: 2,
+            inventory_type: Some(1),
             name: Some("Test Helm".into()),
             link: Some("|cff1eff00|Hitem:1234:0:0:0|h[Test Helm]|h|r".into()),
             guid: 0x10c,
@@ -428,6 +429,7 @@ mod tests {
             count: 1,
             contents_count: None,
             quality: 1,
+            inventory_type: Some(1),
             name: Some("Test Ring".into()),
             link: Some("|cffffffff|Hitem:555:0:0:0|h[Test Ring]|h|r".into()),
             guid: 0x10d,
@@ -456,6 +458,7 @@ mod tests {
             count: 1,
             contents_count: None,
             quality: 1,
+            inventory_type: Some(1),
             name: Some("Test Tabard".into()),
             link: Some("|cffffffff|Hitem:999:0:0:0|h[Test Tabard]|h|r".into()),
             guid: 0x10e,
@@ -656,6 +659,7 @@ mod tests {
             count: 1,
             contents_count: None,
             quality: 1,
+            inventory_type: Some(1),
             name: Some("Small Brown Pouch".into()),
             link: Some("|cffffffff|Hitem:4496:0:0:0|h[Small Brown Pouch]|h|r".into()),
             guid: 0x110,
@@ -901,6 +905,7 @@ mod tests {
     #[test]
     fn use_inventory_item_reads_the_lock_in_its_call() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let slots = doll_slots();
         let head = slots[1].as_ref().unwrap().guid;
         s.set_inventory_slots(slots);
@@ -916,6 +921,7 @@ mod tests {
     #[test]
     fn use_inventory_item_queues_the_id() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run("UseInventoryItem(1)").unwrap();
         s.run("UseInventoryItem(19)").unwrap();
         assert_eq!(s.take_inventory_uses(), vec![1, 19]);
@@ -926,6 +932,7 @@ mod tests {
     #[test]
     fn use_inventory_item_carries_on_self() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         for (chunk, on_self) in [
             ("UseInventoryItem(1)", false),
             ("UseInventoryItem(1, nil)", false),
@@ -951,6 +958,7 @@ mod tests {
     #[test]
     fn right_click_puts_a_held_item_back_then_uses_the_worn_one() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_inventory_slots(doll_slots());
         s.run("PickupInventoryItem(11)").unwrap();
         assert!(s.cursor_item().is_some());
@@ -1087,6 +1095,7 @@ mod tests {
     #[test]
     fn doll_uses_and_picks_carry_what_the_gate_allowed() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_inventory_slots(doll_slots());
         s.run("UseInventoryItem(1)").unwrap();
         s.run(r#"RunScript("UseInventoryItem(1)")"#).unwrap();
@@ -1254,6 +1263,7 @@ mod tests {
     #[test]
     fn a_worn_item_use_meets_the_dispatchers_gates() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut doll: crate::script::InventorySlots = Default::default();
         doll[13] = Some(InvSlotView {
             item_id: 871,
@@ -1299,6 +1309,7 @@ mod tests {
     #[test]
     fn a_worn_container_meets_no_gate() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut doll: crate::script::InventorySlots = Default::default();
         doll[13] = Some(InvSlotView {
             item_id: 4500,
