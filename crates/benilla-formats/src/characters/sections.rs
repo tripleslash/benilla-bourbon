@@ -226,7 +226,7 @@ impl CompositePlan {
     /// nothing in the type system stops a chain read from being moved to a worker — it would
     /// simply find no bridge, report every pack absent and fall back to a synchronous `XHR` per
     /// blob. This function is where that line is drawn, and it is drawn by construction: what
-    /// comes out is `Vec<u8>`.
+    /// comes out is owned bytes ([`crate::StoredBlob`]), a compressed pack frame still compressed.
     ///
     /// **A layer takes the first candidate that READS**, where the fused version took the first
     /// that *decoded*. The candidate list is an existence fallback and always was (`_U`, then the
@@ -237,12 +237,14 @@ impl CompositePlan {
     /// double the equipment reads on the frame thread to insure against a corrupt shipped file,
     /// which is the wrong way round.
     pub fn read(&self, chain: &mut Chain) -> Result<CompositeBlobs> {
-        let read_one = |chain: &mut Chain, path: &str| -> Result<Vec<u8>> {
+        // Stored, not read: a compressed pack frame decompresses in `CompositeBlobs::blend`, with
+        // the decode, wherever that runs.
+        let read_one = |chain: &mut Chain, path: &str| -> Result<crate::StoredBlob> {
             // `read_texture_mip_chain`'s own separator fix, which has to happen on this side of
             // the split now that the read and the decode are no longer one call.
             let name = path.replace('/', "\\");
             chain
-                .read_file(&name)
+                .read_stored(&name)
                 .with_context(|| format!("reading texture '{name}'"))
         };
         let base = read_one(chain, &self.base)
@@ -264,25 +266,29 @@ impl CompositePlan {
 /// One [`CompositePlan`]'s blobs, read and done with the [`Chain`] — the input to
 /// [`Self::blend`], and the payload a browser build hands to a worker.
 ///
-/// Plain bytes and `Copy` rects, so it is `Send` and reaches nothing that belongs to a JS agent.
+/// Owned bytes and `Copy` rects, so it is `Send` and reaches nothing that belongs to a JS agent.
 /// That bound is the guarantee, not this paragraph: a field that could reach the page would not
 /// cross `TaskPool::spawn_pooled`.
 pub struct CompositeBlobs {
     /// The base skin — the canvas.
-    base: Vec<u8>,
-    /// In blit order: the chosen candidate's bytes and the tile it covers.
-    layers: Vec<(Vec<u8>, Tile)>,
+    base: crate::StoredBlob,
+    /// In blit order: the chosen candidate's blob and the tile it covers.
+    layers: Vec<(crate::StoredBlob, Tile)>,
 }
 
 impl CompositeBlobs {
-    /// Decode and blend — the CPU half, with no reading in it. A layer that does not decode is
-    /// skipped (best-effort, like the rest of the asset pipeline); the base skin is required,
-    /// because without the canvas there is no atlas.
+    /// Decompress, decode and blend — the CPU half, with no reading in it. A layer that does not
+    /// decode is skipped (best-effort, like the rest of the asset pipeline); the base skin is
+    /// required, because without the canvas there is no atlas.
     pub fn blend(self) -> Result<BlpMipChain> {
-        let mut atlas = crate::blp_bytes_to_mip_chain(&self.base).context("decoding base skin")?;
-        for (bytes, tile) in &self.layers {
-            if let Ok(overlay) = crate::blp_bytes_to_mip_chain(bytes) {
-                blit_over(&mut atlas, &overlay, *tile);
+        let base = self.base.into_bytes().context("decompressing base skin")?;
+        let mut atlas = crate::blp_bytes_to_mip_chain(&base).context("decoding base skin")?;
+        for (blob, tile) in self.layers {
+            let overlay = blob
+                .into_bytes()
+                .and_then(|bytes| crate::blp_bytes_to_mip_chain(&bytes));
+            if let Ok(overlay) = overlay {
+                blit_over(&mut atlas, &overlay, tile);
             }
         }
         Ok(atlas)

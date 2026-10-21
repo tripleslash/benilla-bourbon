@@ -106,8 +106,30 @@ impl MpqAssetReader {
         #[cfg(not(target_arch = "wasm32"))]
         let bytes = self.chain.read(&internal);
         #[cfg(target_arch = "wasm32")]
-        let bytes = self.chain.read_async(&internal).await;
+        let bytes = match self.chain.read_async_stored(&internal).await {
+            // A compressed frame decompresses on a worker: a character model or a terrain tile is
+            // megabytes of zstd, which on this thread is a frame the loader's own offload never
+            // got to shorten.
+            Ok(blob) if blob.is_encoded() => {
+                crate::frame_budget::offload(read_lane(&internal), move || blob.into_bytes())
+                    .await
+                    .map_err(|e| e.context(internal.clone()))
+            }
+            other => other.and_then(benilla_formats::StoredBlob::into_bytes),
+        };
         bytes.map_err(|e| AssetReaderError::Io(Arc::new(std::io::Error::other(format!("{e:#}")))))
+    }
+}
+
+/// The [`frame_budget::Lane`] a read's decompression takes when no worker runs it: the lane its
+/// loader's own decode takes, geometry for models and terrain, art for the rest.
+#[cfg(target_arch = "wasm32")]
+fn read_lane(internal: &str) -> frame_budget::Lane {
+    let lower = internal.to_ascii_lowercase();
+    if [".m2", ".wmo", ".adt"].iter().any(|ext| lower.ends_with(ext)) {
+        frame_budget::Lane::Geometry
+    } else {
+        frame_budget::Lane::Art
     }
 }
 

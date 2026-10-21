@@ -443,34 +443,81 @@ impl NameCache {
     /// on the web that cost is spent on the frame's own thread (see `name_persist`'s
     /// `SAVE_COST_RATIO`). `write!` to a `String` cannot fail, hence the discarded results.
     pub(crate) fn to_tsv(&self, realm: &str) -> String {
-        use std::fmt::Write as _;
-        let locale = cache_locale();
-        // ~48 bytes a line; over-shooting one growth step is much cheaper than the handful of
-        // reallocs a from-empty `String` would do at this size.
-        let mut out = String::with_capacity(128 + self.creatures.len() * 48);
-        let _ = writeln!(
-            out,
-            "{CACHE_MAGIC}\t{CACHE_FORMAT}\t{CACHE_BUILD}\t{locale}\t{realm}"
-        );
-        for (entry, r) in self.creatures.iter() {
-            let _ = writeln!(
-                out,
-                "C	{entry}	{}	{}	{}	{}	{}	{}	{}	{}	{}	{}",
-                r.creature_type,
-                r.pet_family,
-                r.rank,
-                r.type_flags,
-                u8::from(r.civilian),
-                u8::from(r.racial_leader),
-                r.display_id,
-                r.pet_spell_list,
-                r.name,
-                r.subname.as_deref().unwrap_or("")
-            );
-        }
-        out
+        write_tsv(
+            self.creatures.iter().map(|(&e, r)| (e, r)),
+            self.creatures.len(),
+            &cache_locale(),
+            realm,
+        )
     }
 
+    /// The records [`Self::to_tsv`] writes, owned, so the formatting can run on another thread
+    /// ([`CacheRows::to_tsv`]); the clone costs a fraction of the formatting.
+    pub(crate) fn rows(&self) -> CacheRows {
+        CacheRows {
+            records: self
+                .creatures
+                .iter()
+                .map(|(&e, r)| (e, r.clone()))
+                .collect(),
+            locale: cache_locale(),
+        }
+    }
+}
+
+/// A snapshot of the persisted records ([`NameCache::rows`]), with the locale its header names.
+pub(crate) struct CacheRows {
+    records: Vec<(u32, CreatureRecord)>,
+    locale: String,
+}
+
+impl CacheRows {
+    /// [`NameCache::to_tsv`]'s text for these records.
+    pub(crate) fn to_tsv(&self, realm: &str) -> String {
+        write_tsv(
+            self.records.iter().map(|(e, r)| (*e, r)),
+            self.records.len(),
+            &self.locale,
+            realm,
+        )
+    }
+}
+
+/// The cache file's text ([`NameCache::to_tsv`]).
+fn write_tsv<'a>(
+    records: impl Iterator<Item = (u32, &'a CreatureRecord)>,
+    len: usize,
+    locale: &str,
+    realm: &str,
+) -> String {
+    use std::fmt::Write as _;
+    // ~48 bytes a line; over-shooting one growth step is much cheaper than the handful of
+    // reallocs a from-empty `String` would do at this size.
+    let mut out = String::with_capacity(128 + len * 48);
+    let _ = writeln!(
+        out,
+        "{CACHE_MAGIC}\t{CACHE_FORMAT}\t{CACHE_BUILD}\t{locale}\t{realm}"
+    );
+    for (entry, r) in records {
+        let _ = writeln!(
+            out,
+            "C	{entry}	{}	{}	{}	{}	{}	{}	{}	{}	{}	{}",
+            r.creature_type,
+            r.pet_family,
+            r.rank,
+            r.type_flags,
+            u8::from(r.civilian),
+            u8::from(r.racial_leader),
+            r.display_id,
+            r.pet_spell_list,
+            r.name,
+            r.subname.as_deref().unwrap_or("")
+        );
+    }
+    out
+}
+
+impl NameCache {
     /// Rebuild a cache from [`Self::to_tsv`]'s output, `None` when the header differs; a
     /// malformed line is skipped, and so is a `c` line, the negative an earlier build wrote.
     pub(crate) fn from_tsv(text: &str, realm: &str) -> Option<Self> {

@@ -55,6 +55,39 @@ pub enum TryRead {
     Missing,
 }
 
+/// A blob as a read hands it over: its bytes, or (web) its pack frame still compressed, so the
+/// decompression runs wherever the caller takes [`Self::into_bytes`], a worker included: it is
+/// plain CPU over owned bytes.
+pub enum StoredBlob {
+    /// The bytes themselves.
+    Plain(Vec<u8>),
+    /// fork: web — one BENPACK frame, its header included, whose payload is compressed.
+    #[cfg(target_arch = "wasm32")]
+    Frame(Vec<u8>),
+}
+
+impl StoredBlob {
+    /// Whether [`Self::into_bytes`] decompresses, rather than hand the bytes back.
+    pub fn is_encoded(&self) -> bool {
+        match self {
+            Self::Plain(_) => false,
+            #[cfg(target_arch = "wasm32")]
+            Self::Frame(_) => true,
+        }
+    }
+
+    /// The blob's bytes, decompressing a frame.
+    pub fn into_bytes(self) -> Result<Vec<u8>> {
+        match self {
+            Self::Plain(bytes) => Ok(bytes),
+            #[cfg(target_arch = "wasm32")]
+            Self::Frame(frame) => {
+                benilla_pack::frame_bytes(&frame).map_err(|e| anyhow::anyhow!("{e}"))
+            }
+        }
+    }
+}
+
 /// A priority-ordered patch chain of MPQ archives (`Send + Sync`; reads are `&self` and lock-free).
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Chain {
@@ -298,6 +331,11 @@ impl Chain {
             );
         }
         Ok(archive.clone())
+    }
+
+    /// [`Self::read`] as a [`StoredBlob`]: always plain on native, where nothing is left to decode.
+    pub fn read_stored(&self, name: &str) -> Result<StoredBlob> {
+        self.read(name).map(StoredBlob::Plain)
     }
 
     /// `&mut` alias of [`Chain::read`] for call sites that thread a `&mut Chain`.
@@ -617,13 +655,21 @@ impl Chain {
     /// file matches the native path's (`"file not in patch chain: {name}"`) so a caller that
     /// matches on that text — there are some — behaves the same on both targets.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
+        self.read_stored(name)?
+            .into_bytes()
+            .map_err(|e| anyhow::anyhow!("{name}: {e}"))
+    }
+
+    /// [`Self::read`] without the frame decode: a compressed frame comes back as
+    /// [`StoredBlob::Frame`], for a caller that decompresses it off the thread that draws.
+    pub fn read_stored(&self, name: &str) -> Result<StoredBlob> {
         crate::web::trace(name); // boot-manifest capture; no-op unless the page armed it
         if let Some(bytes) = self.bundled(name) {
-            return Ok(bytes);
+            return Ok(StoredBlob::Plain(bytes));
         }
         let mounts = Mounts::now();
         let (store, alias) = self.pick(name, &mounts);
-        store.read_sync(alias.as_deref().unwrap_or(name))
+        store.read_sync_stored(alias.as_deref().unwrap_or(name))
     }
 
     /// Read `name` **without ever blocking the frame** — the lane the UI and the sound engine take.
@@ -675,13 +721,24 @@ impl Chain {
     /// and the lane that pulls multi-megabyte SINGLETON packs through a real `ArrayBuffer` instead
     /// of the sync path's per-character body decode.
     pub async fn read_async(&self, name: &str) -> Result<Vec<u8>> {
+        self.read_async_stored(name)
+            .await?
+            .into_bytes()
+            .map_err(|e| anyhow::anyhow!("{name}: {e}"))
+    }
+
+    /// [`Self::read_async`] without the frame decode, as [`Self::read_stored`]: the asset reader's
+    /// lane, which decompresses on a worker (`benilla_assets::frame_budget::offload`).
+    pub async fn read_async_stored(&self, name: &str) -> Result<StoredBlob> {
         crate::web::trace(name);
         if let Some(bytes) = self.bundled(name) {
-            return Ok(bytes);
+            return Ok(StoredBlob::Plain(bytes));
         }
         let mounts = Mounts::now();
         let (store, alias) = self.pick(name, &mounts);
-        store.read_async(alias.as_deref().unwrap_or(name)).await
+        store
+            .read_async_stored(alias.as_deref().unwrap_or(name))
+            .await
     }
 
     /// `&mut` alias of [`Chain::read`] — see the native impl for why this exists.

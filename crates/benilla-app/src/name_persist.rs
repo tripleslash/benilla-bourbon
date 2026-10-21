@@ -47,6 +47,9 @@ const SAVE_DEBOUNCE: f32 = 10.0;
 /// the right trade for a file whose staleness costs only a re-query.
 ///
 /// 1000 = 0.1% of wall time. A 10 ms write keeps the 10 s floor; a 40 ms one backs off to 40 s.
+///
+/// fork: web — where the page has workers the formatting leaves the frame ([`PendingWrite`]), and
+/// what is priced is the `setItem` alone: the invariant is about the thread that draws.
 const SAVE_COST_RATIO: f32 = 1000.0;
 
 pub(crate) struct NamePersistPlugin;
@@ -73,6 +76,20 @@ pub(crate) struct NameCacheFile {
     /// been timed, then whatever [`SAVE_COST_RATIO`] makes of that measurement. Held rather than
     /// recomputed so the backoff survives the frames between writes.
     save_gap: f32,
+    /// fork: web — a periodic write whose text a worker is formatting.
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    pending: Option<PendingWrite>,
+}
+
+/// fork: web — a write in flight: the generation its snapshot holds, the file it is for, and the
+/// formatting task. The realm and path are its own, so a realm change before it lands writes the
+/// old realm's text to the old realm's file and marks nothing saved for the new one.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+struct PendingWrite {
+    generation: u64,
+    realm: String,
+    path: PathBuf,
+    task: bevy::tasks::Task<String>,
 }
 
 impl Default for NameCacheFile {
@@ -84,6 +101,8 @@ impl Default for NameCacheFile {
             since_save: 0.0,
             // Before the first write there is nothing to have measured, so the floor stands.
             save_gap: SAVE_DEBOUNCE,
+            #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+            pending: None,
         }
     }
 }
@@ -137,11 +156,24 @@ fn load_name_cache(
 /// Writes the cache when answers have landed and the current gap has elapsed, then sets the next gap
 /// from what that write cost ([`SAVE_COST_RATIO`]).
 fn save_name_cache(time: Res<Time>, mut file: ResMut<NameCacheFile>, names: Res<NameCache>) {
+    // fork: web — a write formatted on a worker stores the frame it lands; the gap waits for it.
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    if file.pending.is_some() {
+        if let Some(ms) = land_formatted(&mut file) {
+            file.save_gap = next_gap(ms);
+        }
+        return;
+    }
     file.since_save += time.delta_secs();
     if file.since_save < file.save_gap {
         return;
     }
     file.since_save = 0.0;
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    if benilla_assets::frame_budget::pooled_work_runs() {
+        start_formatting(&mut file, &names);
+        return;
+    }
     // Only a write that HAPPENED re-prices the gap. A tick that found nothing to save measures the
     // two comparisons in `write_now` and nothing else, and letting that ~0 ms reading through would
     // reset the backoff to the floor on every quiet tick — so the next real write, however
@@ -156,6 +188,50 @@ fn save_name_cache(time: Res<Time>, mut file: ResMut<NameCacheFile>, names: Res<
 /// filesystem, a `localStorage` or a clock.
 fn next_gap(ms: f32) -> f32 {
     SAVE_DEBOUNCE.max(ms / 1000.0 * SAVE_COST_RATIO)
+}
+
+/// fork: web — snapshot the records and format them on a worker, if anything landed.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+fn start_formatting(file: &mut NameCacheFile, names: &NameCache) {
+    if names.generation() == file.saved_generation {
+        return; // nothing landed since the last write
+    }
+    let (Some(path), Some(realm)) = (file.path.clone(), file.realm.clone()) else {
+        return;
+    };
+    let rows = names.rows();
+    let task = {
+        let realm = realm.clone();
+        bevy::tasks::AsyncComputeTaskPool::get().spawn_pooled(async move { rows.to_tsv(&realm) })
+    };
+    file.pending = Some(PendingWrite {
+        generation: names.generation(),
+        realm,
+        path,
+        task,
+    });
+}
+
+/// fork: web — store a formatted write once its task has finished. `Some(ms)` = the store happened
+/// and took that long on this thread; `None` = still formatting.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+fn land_formatted(file: &mut NameCacheFile) -> Option<f32> {
+    use bevy::tasks::{block_on, futures_lite::future::poll_once};
+    let text = block_on(poll_once(&mut file.pending.as_mut()?.task))?;
+    let done = file.pending.take()?;
+    let t0 = bevy::platform::time::Instant::now();
+    let wrote = crate::local_state::write_atomic(&done.path, &text);
+    let ms = t0.elapsed().as_secs_f32() * 1000.0;
+    match wrote {
+        Ok(()) => {
+            if file.realm.as_deref() == Some(done.realm.as_str()) {
+                file.saved_generation = done.generation;
+            }
+            debug!("names: wrote {} in {ms:.1} ms", done.path.display());
+        }
+        Err(e) => warn!("names: cannot write {}: {e}", done.path.display()),
+    }
+    Some(ms)
 }
 
 /// The exit write, regardless of the debounce and the backoff: there is no next frame to protect.

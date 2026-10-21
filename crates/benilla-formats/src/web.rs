@@ -173,8 +173,8 @@ pub struct TerrainFocus {
 ///
 /// A side channel rather than an argument, because the read that needs it is four layers away and
 /// carries nothing but a name: `AssetServer` → `benilla_assets`' `MpqAssetReader` → [`crate::Chain`]
-/// → `PackStore::read_async`, none of which has any business knowing where the player is. One global
-/// the one writer sets and the one reader reads is the narrower seam.
+/// → `PackStore::read_async_stored`, none of which has any business knowing where the player is.
+/// One global the one writer sets and the one reader reads is the narrower seam.
 ///
 /// Cheap to call every frame: a read, and a write only when the answer changed.
 pub fn set_terrain_focus(map_dir: &str, tile: (i32, i32), lean: (i32, i32)) {

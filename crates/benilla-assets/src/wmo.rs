@@ -356,6 +356,64 @@ fn resolve_doodad_bases(
         .collect()
 }
 
+/// One group file's CPU work, done off the frame: its render geometry and every walk over its
+/// bytes. Each collision walk indexes its own buffer from 0; the loader rebases it.
+struct GroupParse {
+    subs: Vec<benilla_formats::RenderSubmesh>,
+    header: Option<benilla_formats::WmoGroupHeader>,
+    /// The walking-collidable faces, as a vertex and index buffer.
+    walk: (Vec<[f32; 3]>, Vec<u32>),
+    /// The same faces as triangles, for the group's own collision.
+    walk_tris: Vec<[[f32; 3]; 3]>,
+    /// The camera and line-of-sight faces.
+    camera: (Vec<[f32; 3]>, Vec<u32>),
+    /// The camera-only faces, as triangles.
+    camera_only_tris: Vec<[[f32; 3]; 3]>,
+    doodad_refs: Vec<u16>,
+    light_refs: Vec<u16>,
+    footprint: Option<FootprintTris>,
+    liquid: Option<LiquidMesh>,
+}
+
+/// An indexed face buffer as triangles; an index past the vertices drops its triangle.
+fn indexed_tris(pos: &[[f32; 3]], idx: &[u32]) -> Vec<[[f32; 3]; 3]> {
+    idx.as_chunks::<3>()
+        .0
+        .iter()
+        .filter_map(|t| {
+            Some([
+                *pos.get(t[0] as usize)?,
+                *pos.get(t[1] as usize)?,
+                *pos.get(t[2] as usize)?,
+            ])
+        })
+        .collect()
+}
+
+/// Parse and walk one group file against its root.
+fn parse_group(gbytes: &[u8], root: &benilla_formats::WmoRoot) -> anyhow::Result<GroupParse> {
+    let subs = wmo_group_submeshes(gbytes, root)?;
+    let (mut gpos, mut gidx) = (Vec::new(), Vec::new());
+    accumulate_wmo_group_collision(gbytes, &mut gpos, &mut gidx);
+    let walk_tris = indexed_tris(&gpos, &gidx);
+    let (mut cpos, mut cidx) = (Vec::new(), Vec::new());
+    accumulate_wmo_group_camera_collision(gbytes, &mut cpos, &mut cidx);
+    let (mut dpos, mut didx) = (Vec::new(), Vec::new());
+    accumulate_wmo_group_camera_only_collision(gbytes, &mut dpos, &mut didx);
+    Ok(GroupParse {
+        subs,
+        header: wmo_group_header(gbytes),
+        walk: (gpos, gidx),
+        walk_tris,
+        camera: (cpos, cidx),
+        camera_only_tris: indexed_tris(&dpos, &didx),
+        doodad_refs: wmo_group_doodad_refs(gbytes),
+        light_refs: wmo_group_light_refs(gbytes),
+        footprint: wmo_group_footprint_tris(gbytes),
+        liquid: wmo_group_liquid_mesh(gbytes),
+    })
+}
+
 /// Loads a WMO root and its group files into a [`WmoModel`].
 #[derive(Default, TypePath)]
 pub struct WmoModelLoader;
@@ -374,14 +432,14 @@ impl AssetLoader for WmoModelLoader {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
-        // Each CPU-bound stretch of this loader runs under a metered slot: on the web target
-        // there is one thread and this is the one that draws (`crate::frame_budget`). Scoped, not
-        // held to the end of `load`, because the group loop below awaits and a slot must never
-        // span I/O.
+        // Each CPU-bound stretch of this loader is offloaded, or metered where it must stay: on the
+        // web target the loader runs on the thread that draws (`crate::frame_budget`). A slot is
+        // scoped, not held to the end of `load`, because the group loop below awaits and a slot
+        // must never span I/O.
         //
-        // All three of this loader's slots take the **geometry** lane: a building's groups are
-        // where both per-WMO collider bakes come from, so every stretch here is on the path to a
-        // floor and none of it may queue behind the art hanging on that floor.
+        // All of this loader's offloads and slots take the **geometry** lane: a building's groups
+        // are where both per-WMO collider bakes come from, so every stretch here is on the path to
+        // a floor and none of it may queue behind the art hanging on that floor.
         // Everything this loader ever reads out of the ROOT file is read here, in one closure, and
         // that is what lets `bytes` move: the id and the light list used to be parsed hundreds of
         // lines further down, which would have meant keeping the whole root buffer alive on this
@@ -453,29 +511,33 @@ impl AssetLoader for WmoModelLoader {
             let Ok(gbytes) = ctx.read_asset_bytes(group_url).await else {
                 continue; // a missing or unreadable group is skipped
             };
-            // `Arc`, not `clone`: the geometry parse below takes the buffer to a worker while the
-            // collision walks keep reading it here, and a group file is megabytes.
-            let gbytes = std::sync::Arc::new(gbytes);
-            // The group's render geometry, a pure `(bytes, root) -> submeshes` and the heaviest
-            // call in the loop, goes to a worker, before the slot below is taken. The collision
-            // gathers stay: they write into the loader's accumulators at offsets against their
-            // current length.
-            let subs = {
-                let gbytes = gbytes.clone();
+            // The group's render geometry and every walk over its bytes, one crossing: each walk
+            // re-parses the group file, and a city's interior groups are megabytes.
+            let group = {
                 let root = root.clone();
                 crate::frame_budget::offload(crate::frame_budget::Lane::Geometry, move || {
-                    wmo_group_submeshes(&gbytes, &root)
+                    parse_group(&gbytes, &root)
                 })
                 .await
                 .map_err(to_io)?
             };
-            // One slot per group, so the budget can put a building's expensive groups on separate
-            // frames; it meters the collision walk.
+            // One slot per group, so the budget can put a building's large groups on separate
+            // frames; what is left here is appending the walks to the building's buffers.
             let _group_slot =
                 crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
-            if let (Some(h), Some(nav)) =
-                (wmo_group_header(&gbytes), group_nav.get_mut(gi as usize))
-            {
+            let GroupParse {
+                subs,
+                header,
+                walk: (gpos, gidx),
+                walk_tris,
+                camera: (cpos, cidx),
+                camera_only_tris,
+                doodad_refs,
+                light_refs,
+                footprint,
+                liquid,
+            } = group;
+            if let (Some(h), Some(nav)) = (header, group_nav.get_mut(gi as usize)) {
                 nav.flags = h.flags;
                 nav.ref_start = h.portal_ref_start;
                 nav.ref_count = h.portal_ref_count;
@@ -483,50 +545,31 @@ impl AssetLoader for WmoModelLoader {
                 nav.fog_indices = h.fog_indices;
                 nav.group_liquid = h.group_liquid;
             }
-            // One walking gather feeds both the per-group faces and the flat collider.
-            let mut gpos: Vec<[f32; 3]> = Vec::new();
-            let mut gidx: Vec<u32> = Vec::new();
-            accumulate_wmo_group_collision(&gbytes, &mut gpos, &mut gidx);
             if let Some(tris) = group_collision_tris.get_mut(gi as usize) {
-                for t in gidx.as_chunks::<3>().0 {
-                    if let (Some(&a), Some(&b), Some(&c)) = (
-                        gpos.get(t[0] as usize),
-                        gpos.get(t[1] as usize),
-                        gpos.get(t[2] as usize),
-                    ) {
-                        tris.push([a, b, c]);
-                    }
-                }
+                *tris = walk_tris;
             }
+            // The walks indexed their own buffers from 0; rebased onto the building's.
             let base = col_pos.len() as u32;
             col_pos.extend_from_slice(&gpos);
             col_idx.extend(gidx.iter().map(|i| i + base));
-            accumulate_wmo_group_camera_collision(&gbytes, &mut cam_pos, &mut cam_idx);
-            let (mut dpos, mut didx): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
-            accumulate_wmo_group_camera_only_collision(&gbytes, &mut dpos, &mut didx);
+            let base = cam_pos.len() as u32;
+            cam_pos.extend_from_slice(&cpos);
+            cam_idx.extend(cidx.iter().map(|i| i + base));
             if let Some(tris) = group_camera_only_tris.get_mut(gi as usize) {
-                for t in didx.as_chunks::<3>().0 {
-                    if let (Some(&a), Some(&b), Some(&c)) = (
-                        dpos.get(t[0] as usize),
-                        dpos.get(t[1] as usize),
-                        dpos.get(t[2] as usize),
-                    ) {
-                        tris.push([a, b, c]);
-                    }
-                }
+                *tris = camera_only_tris;
             }
             // The reference walks MODR at `0x695aa0` and MOLR at `0x695c00`.
             if let Some(slot) = group_doodad_refs.get_mut(gi as usize) {
-                *slot = wmo_group_doodad_refs(&gbytes);
+                *slot = doodad_refs;
             }
             if let Some(slot) = group_light_refs.get_mut(gi as usize) {
-                *slot = wmo_group_light_refs(&gbytes);
+                *slot = light_refs;
             }
             if let Some(slot) = group_footprints.get_mut(gi as usize) {
-                *slot = wmo_group_footprint_tris(&gbytes);
+                *slot = footprint;
             }
             if let Some(slot) = group_liquids.get_mut(gi as usize) {
-                *slot = wmo_group_liquid_mesh(&gbytes);
+                *slot = liquid;
             }
             for sub in subs {
                 // Lowercased: Bevy's loader lookup is case-sensitive, and an uppercase `.BLP` falls
@@ -571,67 +614,71 @@ impl AssetLoader for WmoModelLoader {
                 submesh_group.push(gi as u16);
             }
         }
-        // Nothing is awaited from here to the end of `load`, so the tail (doodad-base resolution,
-        // the portal build, the collider merges) runs under one last geometry slot.
-        let _tail_slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
-        let doodad_owner = modr_owners(root.doodads().len(), &group_doodad_refs);
-        let doodad_groups = modr_refs(root.doodads().len(), &group_doodad_refs);
-        let doodad_base = resolve_doodad_bases(
-            root.doodads(),
-            root.group_infos(),
-            &doodad_owner,
-            &doodad_groups,
-            &group_light_refs,
-        );
+        // The tail (doodad-base resolution, the portal build, the collider bounds and grids, the
+        // liquid dedupe) is pure work over what the groups gathered: a city's is the largest single
+        // stretch of the load, so it builds the model off the frame.
+        let model = crate::frame_budget::offload(crate::frame_budget::Lane::Geometry, move || {
+            let doodad_owner = modr_owners(root.doodads().len(), &group_doodad_refs);
+            let doodad_groups = modr_refs(root.doodads().len(), &group_doodad_refs);
+            let doodad_base = resolve_doodad_bases(
+                root.doodads(),
+                root.group_infos(),
+                &doodad_owner,
+                &doodad_groups,
+                &group_light_refs,
+            );
 
-        let collision = (!col_idx.is_empty()).then_some(CollisionMesh {
-            positions: col_pos,
-            indices: col_idx,
-        });
-        let collision_camera = (!cam_idx.is_empty()).then_some(CollisionMesh {
-            positions: cam_pos,
-            indices: cam_idx,
-        });
-        resolve_shared_liquid_cells(&mut group_liquids);
-        let portals = root.portals();
-        let (group_collision_bounds, collision_bounds) =
-            collision_tri_bounds(&group_collision_tris);
-        let group_footprint_bounds = footprint_tri_bounds(&group_footprints);
-        let group_collision_grids = collision_tri_grids(&group_collision_tris);
-        let group_footprint_grids = footprint_tri_grids(&group_footprints);
-        Ok(WmoModel {
-            wmo_id,
-            submeshes,
-            submesh_group,
-            portal_vertices: portals.vertices.clone(),
-            portal_infos: portals.infos.clone(),
-            portal_refs: portals.refs.clone(),
-            group_nav,
-            ambient,
-            fogs: root.fogs().to_vec(),
-            skybox: root.skybox().map(str::to_owned),
-            group_collision_tris,
-            group_camera_only_tris,
-            group_collision_bounds,
-            group_collision_grids,
-            collision_bounds,
-            collision,
-            collision_camera,
-            doodads: root.doodads().to_vec(),
-            doodad_sets: root.doodad_sets().to_vec(),
-            lights,
-            group_bounds: root.group_infos().to_vec(),
-            doodad_base,
-            doodad_owner,
-            doodad_groups,
-            group_footprints,
-            material_ground_type: root.material_ground_types(),
-            material_diff_color: root.material_diff_colors(),
-            group_footprint_bounds,
-            group_footprint_grids,
-            group_light_refs,
-            group_liquids,
+            let collision = (!col_idx.is_empty()).then_some(CollisionMesh {
+                positions: col_pos,
+                indices: col_idx,
+            });
+            let collision_camera = (!cam_idx.is_empty()).then_some(CollisionMesh {
+                positions: cam_pos,
+                indices: cam_idx,
+            });
+            resolve_shared_liquid_cells(&mut group_liquids);
+            let portals = root.portals();
+            let (group_collision_bounds, collision_bounds) =
+                collision_tri_bounds(&group_collision_tris);
+            let group_footprint_bounds = footprint_tri_bounds(&group_footprints);
+            let group_collision_grids = collision_tri_grids(&group_collision_tris);
+            let group_footprint_grids = footprint_tri_grids(&group_footprints);
+            WmoModel {
+                wmo_id,
+                submeshes,
+                submesh_group,
+                portal_vertices: portals.vertices.clone(),
+                portal_infos: portals.infos.clone(),
+                portal_refs: portals.refs.clone(),
+                group_nav,
+                ambient,
+                fogs: root.fogs().to_vec(),
+                skybox: root.skybox().map(str::to_owned),
+                group_collision_tris,
+                group_camera_only_tris,
+                group_collision_bounds,
+                group_collision_grids,
+                collision_bounds,
+                collision,
+                collision_camera,
+                doodads: root.doodads().to_vec(),
+                doodad_sets: root.doodad_sets().to_vec(),
+                lights,
+                group_bounds: root.group_infos().to_vec(),
+                doodad_base,
+                doodad_owner,
+                doodad_groups,
+                group_footprints,
+                material_ground_type: root.material_ground_types(),
+                material_diff_color: root.material_diff_colors(),
+                group_footprint_bounds,
+                group_footprint_grids,
+                group_light_refs,
+                group_liquids,
+            }
         })
+        .await;
+        Ok(model)
     }
 
     fn extensions(&self) -> &[&str] {

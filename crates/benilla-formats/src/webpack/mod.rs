@@ -37,10 +37,10 @@
 
 use anyhow::{anyhow, Result};
 use benilla_pack::{
-    decode_pack_body, frame_bytes, frame_from_body, pack_body, Index, Located, PackMeta,
+    decode_pack_body, frame_bytes, pack_body, Codec, Index, Located, PackMeta, FRAME_HEADER_LEN,
 };
 
-use crate::TryRead;
+use crate::{StoredBlob, TryRead};
 
 pub mod bootstrap;
 pub mod probe;
@@ -203,12 +203,19 @@ impl PackStore {
     /// honours ranges (one round trip for exactly this blob's frame), or the whole pack comes down
     /// and is kept — which costs one round trip now and makes its whole locality group free.
     pub fn read_sync(&self, name: &str) -> Result<Vec<u8>> {
+        self.read_sync_stored(name)?
+            .into_bytes()
+            .map_err(|e| anyhow!("{name}: {e}"))
+    }
+
+    /// [`Self::read_sync`] without the frame decode (`stored`).
+    pub fn read_sync_stored(&self, name: &str) -> Result<StoredBlob> {
         let Some((at, meta)) = self.locate(name) else {
             // Byte-identical wording to the native path: callers match on this text.
             return Err(anyhow!("file not in patch chain: {name}"));
         };
         if let Some(frame) = resident::slice(self.key(at.pack_id), at.frame_off, at.frame_len) {
-            return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
+            return stored(name, frame);
         }
         // Metered: from here on this read is a synchronous XHR on the thread that draws.
         let t0 = js_sys::Date::now();
@@ -218,14 +225,14 @@ impl PackStore {
     }
 
     /// [`Self::read_sync`]'s blocking half: the pack is not resident.
-    fn fetch_sync(&self, name: &str, at: Located, meta: &PackMeta) -> Result<Vec<u8>> {
+    fn fetch_sync(&self, name: &str, at: Located, meta: &PackMeta) -> Result<StoredBlob> {
         let url = self.pack_url(at.pack_id);
         if probe::policy() == Policy::Range && meta.is_range_extractable() {
             let (start, end) = at.wire_range();
             let (status, body) = crate::web::fetch_sync_range(&url, Some((start, end)))
                 .map_err(|e| fetch_err(name, at.pack_id, e))?;
             if status == 206 && body.len() as u64 == end - start + 1 {
-                return frame_bytes(&body).map_err(|e| anyhow!("{name}: {e}"));
+                return stored(name, body);
             }
             // A range answered with the whole object is a static host on a cache miss, not an error.
             // The body is already paid for, so it is absorbed rather than discarded, and the policy
@@ -341,12 +348,15 @@ impl PackStore {
     /// at, and here there is a real `ArrayBuffer` instead. It is also the only lane that can read
     /// Cache Storage, which is async-only — see [`resident::fetch_wire`] — and the only one that
     /// can wait on the decode worker ([`resident::warm`]), for the same structural reason.
-    pub async fn read_async(&self, name: &str) -> Result<Vec<u8>> {
+    ///
+    /// The frame comes back undecoded (`stored`): the caller decompresses it, off the thread
+    /// that draws where it can.
+    pub async fn read_async_stored(&self, name: &str) -> Result<StoredBlob> {
         let Some((at, meta)) = self.locate(name) else {
             return Err(anyhow!("file not in patch chain: {name}"));
         };
         if let Some(frame) = resident::slice(self.key(at.pack_id), at.frame_off, at.frame_len) {
-            return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
+            return stored(name, frame);
         }
         // The **Web Worker** first (`web/packworker.js`): it fetches the object and undoes the
         // pack's zstd stream on its own thread, and hands the decoded body straight to the resident
@@ -361,7 +371,7 @@ impl PackStore {
         .await
         {
             if let Some(frame) = resident::slice(self.key(at.pack_id), at.frame_off, at.frame_len) {
-                return frame_bytes(&frame).map_err(|e| anyhow!("{name}: {e}"));
+                return stored(name, frame);
             }
         }
         if probe::policy() == Policy::Range && meta.is_range_extractable() {
@@ -371,7 +381,7 @@ impl PackStore {
                     .await
                     .map_err(|e| anyhow!("{name}: fetching pack {}: {e}", at.pack_id))?;
             if ranged && body.len() as u64 == end - start + 1 {
-                return frame_bytes(&body).map_err(|e| anyhow!("{name}: {e}"));
+                return stored(name, body);
             }
             probe::demote();
             return self.absorb(name, at, &meta, &body);
@@ -388,11 +398,22 @@ impl PackStore {
     /// The pack-id check inside [`pack_body`] is load-bearing here rather than paranoid: a static
     /// host misconfigured to answer a missing object with `index.html` and a 200 would otherwise
     /// feed an HTML page to a zstd decoder and corrupt silently.
-    fn absorb(&self, name: &str, at: Located, meta: &PackMeta, wire: &[u8]) -> Result<Vec<u8>> {
+    fn absorb(&self, name: &str, at: Located, meta: &PackMeta, wire: &[u8]) -> Result<StoredBlob> {
         let body = pack_body(wire, at.pack_id).map_err(|e| anyhow!("{name}: {e}"))?;
         let body = decode_pack_body(body, meta).map_err(|e| anyhow!("{name}: {e}"))?;
         resident::put(self.key(at.pack_id), &body);
-        frame_from_body(&body, &at).map_err(|e| anyhow!("{name}: {e}"))
+        let start = at.frame_off as usize;
+        let frame = start
+            .checked_add(at.frame_len as usize)
+            .and_then(|end| body.get(start..end))
+            .ok_or_else(|| {
+                anyhow!(
+                    "{name}: frame {start}+{} past a {}-byte body",
+                    at.frame_len,
+                    body.len()
+                )
+            })?;
+        stored(name, frame.to_vec())
     }
 
     /// The container's name list, for [`crate::Chain::list`].
@@ -413,6 +434,20 @@ impl PackStore {
                 size: 0,
             })
             .collect())
+    }
+}
+
+/// One frame as a read hands it over: a stored frame is its payload, a copy away, and a compressed
+/// one goes back undecoded, since its decompression is CPU the thread that draws need not pay
+/// (`Chain::read_async_stored`).
+fn stored(name: &str, frame: Vec<u8>) -> Result<StoredBlob> {
+    // The header's last byte is the frame's codec.
+    if frame.get(FRAME_HEADER_LEN - 1) == Some(&(Codec::Store as u8)) {
+        frame_bytes(&frame)
+            .map(StoredBlob::Plain)
+            .map_err(|e| anyhow!("{name}: {e}"))
+    } else {
+        Ok(StoredBlob::Frame(frame))
     }
 }
 
