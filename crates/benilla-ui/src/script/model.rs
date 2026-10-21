@@ -9,7 +9,7 @@ use super::{
     macros, mail, merchant, parse_unit_token, party, petition, pvp, quest, quest_log, reputation,
     session, simplehtml, skills, slider, social, spellbook, stable, taxi, trade, tradeskill,
     trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest,
-    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState, UnitTokenParse,
+    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitBase, UnitState, UnitTokenParse,
 };
 
 // ── The Rust-side model ──
@@ -506,7 +506,6 @@ pub(crate) struct Model {
     /// `Languages.dbc`'s `(ID, Name_lang)` rows in file order, whatever the character knows.
     pub(crate) language_table: Vec<(u32, String)>,
     pub(crate) zone_channel_catalog: Vec<super::channel::ZoneChannelRow>,
-    pub(crate) channel_commands: Vec<super::channel::ChannelCommand>,
     /// The recruitment auto-join latch `[0x843608]`: 0 `STANDARD`, 1 `AUTO` (`0x49ea70` maps any
     /// other word to 1). Boots at 1, as the reference writes `AUTO` for an untouched option.
     pub(crate) guild_recruitment_mode: u8,
@@ -515,14 +514,8 @@ pub(crate) struct Model {
     pub(crate) guild_recruitment_cascade: bool,
     /// What the cascade `0x49ea90` would do now, pushed by the app.
     pub(crate) guild_recruitment_plan: super::channel::RecruitmentPlan,
-    /// The cascade's joins and leaves since the last drain, for the app's wire and slot halves.
-    pub(crate) guild_recruitment_runs: Vec<super::channel::RecruitmentRun>,
     /// Lua changed the recruitment mode: the chat cache's dirty signal.
     pub(crate) guild_recruitment_changed: bool,
-    /// `DoEmote` calls queued.
-    pub(crate) emote_requests: Vec<super::chat_misc::EmoteRequest>,
-    /// `UninviteByName` calls queued.
-    pub(crate) uninvite_requests: Vec<String>,
     /// `ConsoleExec` lines that were not CVar writes.
     pub(crate) console_lines: Vec<String>,
     /// `LoggingChat` and `LoggingCombat`'s flags, and their change cue.
@@ -1300,8 +1293,6 @@ pub(crate) struct Model {
     /// The world points our own `Minimap:PingLocation` calls pinged, for the host's wire send
     /// (`0x1d5`, `0x4eef72`) and its process-wide copy of the ping.
     pub(crate) minimap_pings_sent: Vec<(f32, f32)>,
-    /// `SendAddonMessage` broadcasts: `LANG_ADDON`, four distributions, `prefix` TAB `message`.
-    pub(crate) addon_sends: Vec<super::addon_message::AddonSend>,
     /// `RequestTimePlayed()` calls, one empty `CMSG_PLAYED_TIME` each.
     pub(crate) played_time_asks: u32,
     /// `OpeningCinematic()` calls, one empty `CMSG_OPENING_CINEMATIC` each.
@@ -1414,7 +1405,8 @@ impl Model {
     }
 
     /// The state of the unit `token` names, as the `Unit*` getters read it: the snapshot the app
-    /// pushed under the token, else, for a token with a `target` hop, the chain's end.
+    /// pushed under the token, else, for a token with a `target` hop or for `target` itself, what
+    /// the getters read for the guid it resolves to.
     pub(crate) fn unit(&self, token: &str) -> Option<&UnitState> {
         self.pushed_unit(token).or_else(|| self.chained_unit(token))
     }
@@ -1430,16 +1422,18 @@ impl Model {
         }
     }
 
-    /// The unit a token with a `target` hop and no push of its own names: the resolver's guid
-    /// (`0x515970`, which the getters call before their own object lookup, `0x468460`), then what
-    /// each getter reads for that guid. A held unit's snapshot first; with no object, the group
-    /// row naming the guid, whose own token's push carries its records (`0x496400`, `0x496420`)
-    /// and the roster's `UnitExists` (`0x491900`); off the roster, the app's no-object entry, a
-    /// name from the name cache (`0x5171eb`) and nothing more. A token without a hop is the app's
-    /// to push, base by base, and reads nothing here.
+    /// The unit a token with a `target` hop and no push of its own names, or `target` itself while
+    /// the selection's object is not held (the app pushes `"target"` for a held one): the
+    /// resolver's guid (`0x515970`, which the getters call before their own object lookup,
+    /// `0x468460`), then what each getter reads for that guid. A held unit's snapshot first; with
+    /// no object, the group row naming the guid, whose own token's push carries its records
+    /// (`0x496400`, `0x496420`) and the roster's `UnitExists` (`0x491900`), so a party member out
+    /// of range shows on the target frame; off the roster, the app's no-object entry, a name from
+    /// the name cache (`0x5171eb`) and nothing more. Any other token without a hop is the app's to
+    /// push, base by base, and reads nothing here.
     fn chained_unit(&self, token: &str) -> Option<&UnitState> {
         match parse_unit_token(token) {
-            UnitTokenParse::Unit { base, hops } if hops > 0 => {
+            UnitTokenParse::Unit { base, hops } if hops > 0 || base == UnitBase::Target => {
                 let guid = self.unit_guids.resolve_unit(base, hops)?;
                 match self.units_by_guid.get(&guid) {
                     Some(held) if held.has_object => Some(held),
@@ -1604,14 +1598,10 @@ impl Model {
             known_languages: Vec::new(),
             language_table: Vec::new(),
             zone_channel_catalog: Vec::new(),
-            channel_commands: Vec::new(),
             guild_recruitment_mode: 1,
             guild_recruitment_cascade: false,
             guild_recruitment_plan: Default::default(),
-            guild_recruitment_runs: Vec::new(),
             guild_recruitment_changed: false,
-            emote_requests: Vec::new(),
-            uninvite_requests: Vec::new(),
             console_lines: Vec::new(),
             logging_chat: false,
             logging_combat: false,
@@ -1907,7 +1897,6 @@ impl Model {
             cursor_pos: (0.0, 0.0),
             minimap: crate::widget::MinimapStatics::default(),
             minimap_pings_sent: Vec::new(),
-            addon_sends: Vec::new(),
             played_time_asks: 0,
             opening_cinematic_asks: 0,
             screenshot_asks: 0,

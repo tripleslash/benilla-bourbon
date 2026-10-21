@@ -1,8 +1,7 @@
 //! The engine verbs stock `ChatFrame.lua`'s slash handlers call that are not sends, channels or
 //! window state: `DoEmote` (`0x49fd30`), `RandomRoll` (`0x48c7b0`), `AssistByName` (`0x489c40`),
-//! `UninviteByName` (`0x48a610`), `LoggingChat` and `LoggingCombat`. `RandomRoll` and
-//! `AssistByName` apply inside the call ([`super::ScriptCall`]); the rest are a queue or a flag the
-//! app drains.
+//! `UninviteByName` (`0x48a610`), `LoggingChat` and `LoggingCombat`. The first four apply inside
+//! the call ([`super::ScriptCall`]); the logging pair is a flag the app drains.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -19,9 +18,12 @@ pub struct EmoteRequest {
 }
 
 impl super::UiScript {
-    /// `DoEmote` calls since the last drain.
+    /// The `DoEmote` calls a harness's VM kept ([`Self::keep_calls`]), in call order.
     pub fn take_emote_requests(&mut self) -> Vec<EmoteRequest> {
-        std::mem::take(&mut self.model_mut().emote_requests)
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::DoEmote(e) => Some(e.clone()),
+            _ => None,
+        })
     }
 
     /// The `RandomRoll(min, max)` sends a harness's VM kept ([`Self::keep_calls`]), in call order.
@@ -32,9 +34,12 @@ impl super::UiScript {
         })
     }
 
-    /// `UninviteByName` calls since the last drain.
+    /// The `UninviteByName` calls a harness's VM kept ([`Self::keep_calls`]), in call order.
     pub fn take_uninvite_requests(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().uninvite_requests)
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::Uninvite(name) => Some(name.clone()),
+            _ => None,
+        })
     }
 
     /// `ConsoleExec` lines its own CVar commands did not run ([`super::console_exec`]): the app's
@@ -70,14 +75,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(token) = token.filter(|t| !t.is_empty()) else {
                 return Ok(());
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.emote_requests.push(EmoteRequest {
+            let request = EmoteRequest {
                 token: token.to_ascii_uppercase(),
                 // `lua_tostring(2)` (`0x49fdc5`): a number is its `%.14g` text.
                 target: crate::script::binding_abi::optional_string(lua, &target)
                     .filter(|t| !t.is_empty()),
-            });
-            Ok(())
+            };
+            super::calls::submit(lua, super::ScriptCall::DoEmote(request))
         })?,
     )?;
 
@@ -107,12 +111,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // AssistByName(name) (`0x489c40`): a non-string raises `Usage:` (`0x489d3f`); any string,
+    // the empty one included, goes to the host, which assists the named player or, for an empty
+    // name, the selection (`0x489c89`), and shows the line its miss owes (`0x489d17`, `0x489d2b`).
     g.set(
         "AssistByName",
-        lua.create_function(|lua, name: Option<String>| {
-            let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
-                return Ok(());
-            };
+        lua.create_function(|lua, name: Value| {
+            let name = super::binding_abi::string_arg(lua, name, r#"Usage: AssistByName("name")"#)?;
             let may_cast = super::protected::select_may_cast(lua);
             super::calls::submit(
                 lua,
@@ -131,9 +136,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
                 return Ok(());
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.uninvite_requests.push(name);
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::Uninvite(name))
         })?,
     )?;
 
@@ -179,6 +182,7 @@ mod tests {
     #[test]
     fn do_emote_queues_the_uppercased_token_and_a_non_empty_target() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run("DoEmote('wave', 'Bob') DoEmote('DANCE', '') DoEmote('') DoEmote()")
             .unwrap();
         assert_eq!(
@@ -202,6 +206,7 @@ mod tests {
     #[test]
     fn do_emote_second_argument_is_passed_as_a_string() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run("DoEmote('WAVE', 'target') DoEmote('WAVE', '%t') DoEmote('WAVE', {})")
             .unwrap();
         let targets: Vec<_> = s
@@ -268,6 +273,8 @@ mod tests {
         assert_eq!(s.take_roll_requests(), vec![(0, 1_000_000), (7, 7), (0, 3)]);
     }
 
+    /// `AssistByName` hands the host any string, the empty one included, which assists the
+    /// selection (`0x489c89`).
     #[test]
     fn assist_and_uninvite_by_name_queue_their_names() {
         let mut s = UiScript::new().unwrap();
@@ -276,7 +283,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             s.take_selection_requests(),
-            vec![SelectionRequest::AssistByName("Alice".into())]
+            vec![
+                SelectionRequest::AssistByName("Alice".into()),
+                SelectionRequest::AssistByName(String::new()),
+            ]
         );
         assert_eq!(s.take_uninvite_requests(), vec!["Carol".to_string()]);
     }

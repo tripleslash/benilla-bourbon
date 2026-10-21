@@ -65,19 +65,20 @@ pub(super) fn load_server_messages(mut commands: Commands, assets: Option<Res<Wo
     }
 }
 
-/// The joined channels a defense broadcast about `subject_zone` reaches, in slot order. With
-/// `player_zone` unknown only non-`ZONE_DEP` rows pass, as with the reference's unset
-/// `[0xb6e5d0]`. Every slot counts whatever its state; the reference takes only state 0
-/// (`[e+0x9c]`, `0x49dd5a`), skipping pending, renamed and suspended slots.
+/// The joined channels a defense broadcast about `subject_zone` reaches, in slot order: the slots
+/// in state 0 (`0x49dd5a`-`0x49dd63`, `0x49deaa`-`0x49deb3`) whose ChannelID names a `DEFENSE`
+/// row (`0x49dd69`-`0x49dd94`), a `ZONE_DEP` one only when the zone is the player's
+/// (`0x49dd9c`-`0x49dda4`). With `player_zone` unknown only non-`ZONE_DEP` rows pass, as with the
+/// reference's unset `[0xb6e5d0]`.
 pub(crate) fn defense_targets(
     channels: &ChannelState,
     subject_zone: u32,
     player_zone: Option<u32>,
 ) -> Vec<String> {
     channels
-        .iter_names()
-        .filter(|name| {
-            let Some(row) = channels.channels.row_for_name(name) else {
+        .confirmed_slots()
+        .filter(|(_, slot)| {
+            let Some(row) = channels.channels.row(slot.id) else {
                 return false; // a custom channel: no DBC row, no defense flag
             };
             if row.flags & chan_flags::DEFENSE == 0 {
@@ -85,7 +86,7 @@ pub(crate) fn defense_targets(
             }
             row.flags & chan_flags::ZONE_DEP == 0 || player_zone == Some(subject_zone)
         })
-        .map(str::to_string)
+        .map(|(_, slot)| slot.name.clone())
         .collect()
 }
 
@@ -105,13 +106,13 @@ fn parent_zone(areas: &AreaTableRes, id: u32) -> Option<u32> {
 /// lands the frame it decodes.
 pub(super) fn feed_broadcasts(
     log: Res<ChatLog>,
-    mut hosted_vm: crate::script_calls::HostedVm,
-    channels: Res<ChannelState>,
+    // The slots beside the VM: the lines are queued, so this runs no Lua.
+    mut vm: crate::script_calls::VmWith<Res<'static, ChannelState>>,
     areas: Option<Res<AreaTableRes>>,
     messages: Option<Res<ServerMessages>>,
     world: benilla_world::world_point::WorldPoint,
 ) {
-    hosted_vm.run(|script| {
+    vm.turn(|script, channels| {
         if log.broadcasts_pending() == 0 {
             return;
         }
@@ -309,11 +310,15 @@ mod tests {
         ])
     }
 
+    /// Confirmed slots, each carrying the row its name composes from.
     fn state(joined: &[&str]) -> ChannelState {
         ChannelState {
             joined: joined
                 .iter()
-                .map(|n| Some(crate::ui_chat::edit::ChannelSlot::joined(n)))
+                .map(|n| {
+                    crate::ui_chat::edit::ChannelSlot::confirmed(n, catalog().zone_channel_id(n))
+                        .into()
+                })
                 .collect(),
             channels: catalog(),
             ..Default::default()
@@ -368,10 +373,44 @@ mod tests {
     #[test]
     fn a_freed_slot_does_not_end_the_walk() {
         let mut s = state(&["LocalDefense - Westfall", "WorldDefense"]);
-        s.joined[0] = None;
+        s.free_slot("LocalDefense - Westfall");
         assert_eq!(
             defense_targets(&s, WESTFALL, Some(WESTFALL)),
             vec!["WorldDefense"]
+        );
+    }
+
+    /// Both handlers skip a slot whose state is not 0 (`0x49dd5a`-`0x49dd63`, `0x49deaa`-`0x49deb3`):
+    /// one the walk registered and the server has not confirmed (1), renamed (2) or suspended (3).
+    #[test]
+    fn the_defense_broadcasts_skip_every_slot_the_server_has_not_confirmed() {
+        use crate::ui_chat::edit::SlotState;
+        for state_of in [SlotState::Pending, SlotState::Renamed, SlotState::Suspended] {
+            let mut s = state(&["LocalDefense - Westfall", "WorldDefense"]);
+            for record in s.joined.iter_mut() {
+                if let crate::ui_chat::edit::SlotRecord::Held(slot) = record {
+                    slot.state = state_of;
+                }
+            }
+            assert!(
+                defense_targets(&s, WESTFALL, Some(WESTFALL)).is_empty(),
+                "{state_of:?}"
+            );
+        }
+    }
+
+    /// The handlers read the row through the slot's id (`0x49dd69`-`0x49dd94`): a custom channel
+    /// whose name holds a defense row's pattern has id 0.
+    #[test]
+    fn a_custom_channel_named_like_a_defense_row_is_not_one() {
+        let mut s = state(&["WorldDefense"]);
+        s.joined[0] = crate::ui_chat::edit::ChannelSlot::confirmed("WorldDefense2", 23).into();
+        s.joined
+            .push(crate::ui_chat::edit::ChannelSlot::confirmed("WorldDefense3", 0).into());
+        assert_eq!(
+            defense_targets(&s, WESTFALL, Some(WESTFALL)),
+            vec!["WorldDefense2"],
+            "the slot that carries row 23 hears it, under whatever name; the custom one does not"
         );
     }
 

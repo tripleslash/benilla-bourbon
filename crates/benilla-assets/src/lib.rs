@@ -126,7 +126,10 @@ impl MpqAssetReader {
 #[cfg(target_arch = "wasm32")]
 fn read_lane(internal: &str) -> frame_budget::Lane {
     let lower = internal.to_ascii_lowercase();
-    if [".m2", ".wmo", ".adt"].iter().any(|ext| lower.ends_with(ext)) {
+    if [".m2", ".wmo", ".adt"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+    {
         frame_budget::Lane::Geometry
     } else {
         frame_budget::Lane::Art

@@ -81,7 +81,8 @@ const ITEM_ARM_BITS: u16 = TF_ITEM | TF_LOCKED;
 /// What the wire's target block should carry for this cast.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CastWireTarget {
-    /// Word 0: mask 0, no guid; the server resolves the target implicitly.
+    /// Mask 0, no guid; the server resolves the target implicitly. Word 0 sends so (`0x6e5342`),
+    /// and so does the arm's long-range leg, whose parked guid the mask never names (`0x6e5454`).
     SelfImplicit,
     /// Mask `TARGET_FLAG_UNIT` (0x2) and this guid, possibly the player's own.
     Unit(u64),
@@ -108,6 +109,9 @@ pub(crate) enum CastWireTarget {
 pub(crate) struct CastCandidates<'a> {
     /// The current selection (the client's `0xb4e2d8`); benilla never passes an explicit guid.
     pub(crate) selection: Option<u64>,
+    /// Whether the object manager holds the selection's object: the arm looks the candidate up
+    /// (`0x468460` at `0x6e53bc`) and `BindTarget` binds no null object (`0x6e5b5e`).
+    pub(crate) selection_held: bool,
     /// The caster, which a gate tests the candidate against.
     pub(crate) caster: Option<u64>,
     /// The `autoSelfCast` fallback's candidate, the active player whoever casts (`0x6e53e3`-
@@ -117,7 +121,14 @@ pub(crate) struct CastCandidates<'a> {
     /// The equipped main hand's item guid (`[player+0x1d3c][15]`), only when it resolves to a
     /// streamed item object (`0x468460` at `0x6e53bc`).
     pub(crate) main_hand_item: Option<u64>,
+    /// Whether the spell's maximum range, `GetMinMaxRange` with no unit target (`0x6e543f`), is
+    /// above [`LONG_RANGE`] (`0x6e5447`), which the arm's last leg tests.
+    pub(crate) long_range: bool,
 }
+
+/// `[0x806b10]`, 100.0: a maximum range above it lets the arm send at a candidate with no object
+/// (`0x6e5447`).
+pub(crate) const LONG_RANGE: f32 = 100.0;
 
 /// What the binder's gates and relation checks read: the selected unit's store and the player's.
 #[derive(Clone, Copy)]
@@ -214,6 +225,9 @@ impl UnitLookup for TargetRelations<'_> {
 /// The targeting inputs [`super::send_spell_cast`] resolves with, built by both cast callers.
 pub(crate) struct CastContext<'a> {
     pub(crate) selection_guid: Option<u64>,
+    /// Whether the object manager holds [`Self::selection_guid`]'s object, which the bind needs
+    /// (`0x6e53bc`, `0x6e5b5e`).
+    pub(crate) selection_held: bool,
     pub(crate) self_guid: Option<u64>,
     pub(crate) auto_self_cast: bool,
     pub(crate) rel: TargetRelations<'a>,
@@ -249,6 +263,7 @@ impl CastContext<'_> {
     pub(crate) fn self_bound(mut self, on_self: bool) -> Self {
         if on_self {
             self.selection_guid = self.self_guid;
+            self.selection_held = true;
             self.rel.target_store = self.rel.self_store;
             self.rel.group.target_guid = self.self_guid;
         }
@@ -353,15 +368,14 @@ impl CastTargeting<'_, '_> {
         self.context_on(Some(entity), Some(guid))
     }
 
-    /// [`Self::context_at`] for a guid alone: the unit a macro option's `@unit` names (this fork;
-    /// 1.12 casts at the selection or, with `onSelf`, at the caster). A guid that streams no entity
-    /// binds with no store or position, and the server judges.
+    /// [`Self::context_at`] for an explicit guid (`0x6e5a90`'s, as `CastDuelSpell 0x4d4810` passes
+    /// it), on the guid's object, or on the guid alone when the object manager holds none: the
+    /// range test passes it (`0x6e4482`) and the bind binds nothing (`0x6e5b5e`).
+    /// A macro option's `@unit` binds here too (this fork; 1.12 casts at the selection or, with
+    /// `onSelf`, at the caster).
     pub(crate) fn context_at_guid(&self, guid: u64) -> CastContext<'_> {
-        let entity = self
-            .index
-            .as_deref()
-            .and_then(|index| index.0.get(&guid).copied());
-        self.context_on(entity, Some(guid))
+        let target = self.index.as_deref().and_then(|i| i.0.get(&guid).copied());
+        self.context_on(target, Some(guid))
     }
 
     /// The context for an attempt whose caster is a unit other than the active player, the pet
@@ -386,6 +400,7 @@ impl CastTargeting<'_, '_> {
         let caster_unit = self.range_units.unit(caster);
         Some(CastContext {
             selection_guid: guid,
+            selection_held: target.is_some(),
             self_guid: Some(caster_guid),
             auto_self_cast: self.auto_self_cast.0,
             rel: TargetRelations {
@@ -443,6 +458,7 @@ impl CastTargeting<'_, '_> {
         let self_store = self.self_store.iter().next();
         CastContext {
             selection_guid: guid,
+            selection_held: target.is_some(),
             self_guid: self.self_guid.0,
             auto_self_cast: self.auto_self_cast.0,
             rel: TargetRelations {
@@ -658,6 +674,21 @@ pub(crate) fn resolve_cast_target(
             Some(_) => {}
         }
     }
+    // `ArmCast`'s last leg (`0x6e540e`-`0x6e5467`), reached once the candidate binds nothing and
+    // `autoSelfCast` is off (`0x6e53e1`): a candidate the object manager does not hold
+    // (`0x6e5425`), for a spell whose maximum range is above 100, is parked in the pending block
+    // (`0xceac60`) and sent at once. The block's mask holds no unit bit, so the packet names no
+    // target. A candidate with no object binds nothing under any word (`0x6e5b5e`), so a location
+    // word reaches the leg as a unit word does. The main hand is the candidate instead of the
+    // selection for the attribute above (`0x6e536e`).
+    if !auto_self_cast
+        && cand.long_range
+        && cand.selection.is_some()
+        && !cand.selection_held
+        && !def.targets_main_hand_item()
+    {
+        return CastWireTarget::SelfImplicit;
+    }
     // A non-unit bit enters the cursor with the whole word. The reference only reaches the cursor
     // after the unit walk fails (`0x6e50c8`), so deferring first matches it only because no unit
     // candidate clears these bits; a location word with a unit bit beside it (0x42, NPC-cast
@@ -670,9 +701,9 @@ pub(crate) fn resolve_cast_target(
         }
         return CastWireTarget::Refused(ERR_INVALID_TARGET);
     }
-    // The selection (`0xb4e2d8`, `0x6e539f`). A unit the gates or the relation checks refuse binds
-    // nothing, so the fallback below gets its turn.
-    if let Some(guid) = cand.selection {
+    // The selection (`0xb4e2d8`, `0x6e539f`). A guid with no object (`0x6e5b5e`), or a unit the
+    // gates or the relation checks refuse, binds nothing, so the fallback below gets its turn.
+    if let Some(guid) = cand.selection.filter(|_| cand.selection_held) {
         let is_self = cand.caster == Some(guid);
         if unit_binds(Some(def), word, is_self, rel) {
             return CastWireTarget::Unit(guid);
@@ -718,10 +749,12 @@ mod tests {
     fn cands(selection: Option<u64>, caster: Option<u64>) -> CastCandidates<'static> {
         CastCandidates {
             selection,
+            selection_held: true,
             caster,
             auto_self: caster,
             auto_self_store: None,
             main_hand_item: None,
+            long_range: false,
         }
     }
 

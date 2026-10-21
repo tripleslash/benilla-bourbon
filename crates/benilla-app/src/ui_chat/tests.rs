@@ -720,8 +720,8 @@ fn a_channel_we_are_not_in_fires_the_bare_name_and_zeroes() {
 fn stamping_a_channel_splits_the_display_form_from_the_base_name() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut channels = super::edit::ChannelState::default();
-    channels.claim_slot("World");
-    channels.claim_slot("General - Elwynn Forest");
+    channels.claim_slot("World", 0);
+    channels.claim_slot("General - Elwynn Forest", 1);
 
     let mut e = ev(K::Channel, "wts boar livers", "Bob");
     e.channel = "General - Elwynn Forest".into();
@@ -749,7 +749,7 @@ fn a_channel_notice_renders_in_the_channels_color_not_the_notice_row() {
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     let mut channels = super::edit::ChannelState::default();
-    channels.claim_slot("General - Elwynn Forest");
+    channels.claim_slot("General - Elwynn Forest", 1);
 
     // The window prints only a channel it carries (`ChatFrame.lua:1374-1391`).
     s.run("ChatFrame_AddChannel(ChatFrame1, 'General - Elwynn Forest')")
@@ -799,7 +799,7 @@ fn a_zone_change_must_not_deregister_the_channel_it_renames() {
         ]),
         ..Default::default()
     };
-    channels.claim_slot("General - Elwynn Forest");
+    channels.claim_slot("General - Elwynn Forest", 1);
 
     // `ChatFrame_RegisterForChannels(GetChatWindowChannels(1))`'s two writes, by hand.
     s.run("ChatFrame1.channelList[1] = 'General' ChatFrame1.zoneChannelList[1] = 1")
@@ -905,7 +905,7 @@ fn leaving_a_capital_suspends_trade_rather_than_deregistering_it() {
         ]),
         ..Default::default()
     };
-    channels.claim_slot("Trade - City");
+    channels.claim_slot("Trade - City", 2);
     s.run("ChatFrame1.channelList[1] = 'Trade' ChatFrame1.zoneChannelList[1] = 2")
         .unwrap();
 
@@ -969,7 +969,7 @@ fn leaving_a_capital_suspends_trade_rather_than_deregistering_it() {
     assert_eq!(channels.number_of("Trade - City"), Some(1));
     assert_eq!(
         channels.slot_state("Trade - City"),
-        Some(super::edit::SlotState::Joined),
+        Some(super::edit::SlotState::Confirmed),
         "and the slot is back to plain joined"
     );
 }
@@ -991,7 +991,7 @@ fn a_renamed_zone_channel_confirms_as_changed_not_joined() {
         ]),
         ..Default::default()
     };
-    channels.claim_slot("General - Elwynn Forest");
+    channels.claim_slot("General - Elwynn Forest", 1);
     s.run("ChatFrame1.channelList[1] = 'General' ChatFrame1.zoneChannelList[1] = 1")
         .unwrap();
     channels.rename_slot("General - Elwynn Forest", "General - Westfall");
@@ -1012,7 +1012,7 @@ fn a_renamed_zone_channel_confirms_as_changed_not_joined() {
     );
     assert_eq!(
         channels.slot_state("General - Westfall"),
-        Some(super::edit::SlotState::Joined),
+        Some(super::edit::SlotState::Confirmed),
         "and the confirming notice resolves the state — a second crossing must read as a rename \
          of its own, not as a leftover"
     );
@@ -1026,8 +1026,9 @@ fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     let mut channels = super::edit::ChannelState::default();
-    channels.claim_slot("World");
-    channels.claim_slot("General - Elwynn Forest");
+    channels.claim_slot("World", 0);
+    channels.confirm_slot("World");
+    channels.claim_slot("General - Elwynn Forest", 1);
 
     let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
     e.channel = "General - Elwynn Forest".into();
@@ -1055,19 +1056,19 @@ fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
 fn a_freed_slot_is_reused_and_the_others_keep_their_numbers() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut c = super::edit::ChannelState::default();
-    assert_eq!(c.claim_slot("General - Teldrassil"), Some(1));
-    assert_eq!(c.claim_slot("Trade - City"), Some(2));
-    assert_eq!(c.claim_slot("LocalDefense - Teldrassil"), Some(3));
+    assert_eq!(c.claim_slot("General - Teldrassil", 1), Some(1));
+    assert_eq!(c.claim_slot("Trade - City", 2), Some(2));
+    assert_eq!(c.claim_slot("LocalDefense - Teldrassil", 22), Some(3));
 
     // Cross a zone border: General and LocalDefense rename, Trade is untouched.
     assert_eq!(c.free_slot("General - Teldrassil"), Some(1));
     assert_eq!(
-        c.claim_slot("General - The Barrens"),
+        c.claim_slot("General - The Barrens", 1),
         Some(1),
         "the freed slot is reused — the client scans for a zeroed record before growing"
     );
     assert_eq!(c.free_slot("LocalDefense - Teldrassil"), Some(3));
-    assert_eq!(c.claim_slot("LocalDefense - The Barrens"), Some(3));
+    assert_eq!(c.claim_slot("LocalDefense - The Barrens", 22), Some(3));
     assert_eq!(
         c.number_of("Trade - City"),
         Some(2),
@@ -1076,22 +1077,22 @@ fn a_freed_slot_is_reused_and_the_others_keep_their_numbers() {
 
     // Leaving the city drops Trade; the hole it leaves is what the next join takes.
     assert_eq!(c.free_slot("Trade - City"), Some(2));
-    assert!(c.joined[1].is_none(), "a hole answers 'not joined'");
+    assert!(c.joined[1].held().is_none(), "a hole answers 'not joined'");
     assert_eq!(c.number_of("General - The Barrens"), Some(1), "still 1");
     assert_eq!(
-        c.claim_slot("Trade - City"),
+        c.claim_slot("Trade - City", 2),
         Some(2),
         "and back into slot 2"
     );
 
     // The ceiling is ten slots (`0x49b9c0`).
     for i in 4..=super::edit::MAX_CHANNELS {
-        assert_eq!(c.claim_slot(&format!("Custom{i}")), Some(i as u32));
+        assert_eq!(c.claim_slot(&format!("Custom{i}"), 0), Some(i as u32));
     }
-    assert_eq!(c.claim_slot("OneTooMany"), None);
+    assert_eq!(c.claim_slot("OneTooMany", 0), None);
     assert_eq!(c.free_slot("Custom7"), Some(7));
     assert_eq!(
-        c.claim_slot("OneTooMany"),
+        c.claim_slot("OneTooMany", 0),
         Some(7),
         "full means no free slot, not a permanent ceiling"
     );
@@ -1880,6 +1881,7 @@ fn the_addon_event_reaches_lua_with_four_arguments_in_order() {
 fn an_addon_message_survives_its_own_send_and_receive() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.keep_calls();
     s.run(r#"SendAddonMessage("oRA", "SYNC\t1\t2", "PARTY")"#)
         .unwrap();
     assert!(s.errors().is_empty(), "send raised: {:?}", s.errors());
@@ -2713,18 +2715,20 @@ fn a_named_language_rides_the_chat_command() {
 /// (`0x49f535`), so it never reaches the host.
 #[test]
 fn a_channel_send_carries_the_numbered_slots_name() {
-    use super::edit::{ChannelSlot, ChannelState, SlotState};
+    use super::edit::{ChannelSlot, ChannelState, SlotRecord, SlotState};
     use crate::net::{ChatKind, ClientCommand};
 
     let channels = ChannelState {
         joined: vec![
-            Some(ChannelSlot::joined("General - Elwynn Forest")),
-            Some(ChannelSlot::joined("Trade - City")),
-            None,
-            Some(ChannelSlot {
+            ChannelSlot::confirmed("General - Elwynn Forest", 1).into(),
+            ChannelSlot::confirmed("Trade - City", 2).into(),
+            SlotRecord::Freed { id: 0 },
+            ChannelSlot {
                 name: "LocalDefense - Elwynn Forest".into(),
+                id: 22,
                 state: SlotState::Suspended,
-            }),
+            }
+            .into(),
         ],
         ..Default::default()
     };
@@ -2810,17 +2814,20 @@ fn a_channel_number_sends_as_the_walk_and_the_notices_leave_its_slot() {
     // The walk into `zone`, then the server's notices for it, in order.
     let (wire, _rx) = crossbeam_channel::unbounded();
     let commands = NetCommands(wire);
+    let errors = crate::ui_action::UiErrorKeys::default();
     let cross = |script: &mut benilla_ui::script::UiScript,
                  channels: &mut ChannelState,
                  zone: &str,
                  in_city: bool,
                  notices: &[(&str, &str)]| {
+        // A capital's `AreaTable.dbc` flags, `0x138`, carry the city gate and the city word's bit.
+        let area_flags = if in_city { 0x138 } else { 0 };
         super::channels::walk_zone(
             channels,
             zone,
-            in_city,
+            area_flags,
             Some("City"),
-            &commands,
+            (&commands, &errors),
             Some(script),
         );
         let mut windows = super::frames::ChatWindows::default();
@@ -2919,7 +2926,7 @@ fn an_empty_line_sends_nothing_but_afk_and_dnd() {
     let mut script = in_world_vm();
     script.set_joined_channels(
         ChannelState {
-            joined: vec![Some(ChannelSlot::joined("General - Elwynn Forest"))],
+            joined: vec![ChannelSlot::confirmed("General - Elwynn Forest", 1).into()],
             ..Default::default()
         }
         .names(),

@@ -598,10 +598,12 @@ mod tests {
             };
             let candidates = CastCandidates {
                 selection: Some(target.0),
+                selection_held: true,
                 caster: Some(ME),
                 auto_self: Some(ME),
                 auto_self_store: rel.self_store,
                 main_hand_item: None,
+                long_range: false,
             };
             resolve_cast_target(Some(&shield), &candidates, auto_self_cast, &rel)
         };
@@ -673,10 +675,12 @@ mod tests {
                 };
                 let candidates = CastCandidates {
                     selection: Some(target.0),
+                    selection_held: true,
                     caster: Some(ME),
                     auto_self: Some(ME),
                     auto_self_store: rel.self_store,
                     main_hand_item: None,
+                    long_range: false,
                 };
                 resolve_cast_target(Some(def), &candidates, false, &rel)
             };

@@ -778,6 +778,7 @@ fn send_spell_cast(
     };
     let candidates = cast_target::CastCandidates {
         selection: ctx.selection_guid,
+        selection_held: ctx.selection_held,
         caster: ctx.self_guid,
         auto_self,
         auto_self_store,
@@ -786,6 +787,18 @@ fn send_spell_cast(
         main_hand_item: ctx
             .main_hand_item
             .filter(|guid| objects.object(*guid).is_some()),
+        // `GetMinMaxRange(caster, spell, &min, &max, 0)` (`0x6e543f`): no unit target, and no
+        // auto-attack target to hand, as the range gate passes none.
+        long_range: def.is_some_and(|d| {
+            let row = spells.and_then(|s| s.ranges.get(d.range_index));
+            let targets = benilla_formats::RangeTargets {
+                target: None,
+                attack_target: None,
+            };
+            spell_mods
+                .min_max_range(d, row, ctx.range.caster, targets)
+                .is_some_and(|(_, max)| max > cast_target::LONG_RANGE)
+        }),
     };
     let target = match explicit_object {
         Some(_) => None,
@@ -1190,6 +1203,7 @@ mod tests {
     pub(super) fn ctx() -> cast_target::CastContext<'static> {
         cast_target::CastContext {
             selection_guid: None,
+            selection_held: true,
             self_guid: Some(0x0000_0000_0000_0007),
             auto_self_cast: false,
             rel: cast_target::TargetRelations {

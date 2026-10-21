@@ -78,6 +78,7 @@ pub(crate) struct ScriptCallHost<'w, 's> {
                 (
                     crate::ui_action::ActionPress<'w, 's>,
                     crate::ui_chat::ChatSender<'w, 's>,
+                    crate::ui_chat::EmoteDoer<'w, 's>,
                 ),
             >,
             crate::ui_items::ScriptItemUse<'w, 's>,
@@ -91,6 +92,11 @@ impl ScriptCallHost<'_, '_> {
     /// The selected unit, as the calls applied so far left it.
     pub(crate) fn target(&mut self) -> Option<Entity> {
         self.appliers.p0().target()
+    }
+
+    /// A probe line's text emote, run as `DoEmote` runs it inside its call (`0x5ef560`).
+    pub(crate) fn emote(&mut self, text_id: u32, arg: Option<&str>) {
+        self.appliers.p4().p2().emote(text_id, arg);
     }
 }
 
@@ -168,6 +174,10 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::PetOrder(packed) => pet_in_order!(appliers, begin_order(packed)),
             ScriptCall::SendChat(send) => appliers.p4().p1().send_chat(script, send),
             ScriptCall::RandomRoll { min, max } => appliers.p4().p1().random_roll(min, max),
+            ScriptCall::Channel(cmd) => appliers.p4().p1().channel(script, cmd),
+            ScriptCall::DoEmote(request) => appliers.p4().p2().do_emote(request),
+            ScriptCall::Uninvite(name) => appliers.p4().p1().uninvite(name),
+            ScriptCall::AddonMessage(send) => appliers.p4().p1().addon_message(send),
             ScriptCall::PickItem(pick) => popup = appliers.p1().pick_item(pick),
             ScriptCall::EnchantConfirm(answer) => popup = appliers.p1().confirm_enchant(answer),
         }
@@ -270,17 +280,11 @@ pub(crate) struct HostedVm<'w, 's> {
     host: Option<ScriptCallHost<'w, 's>>,
 }
 
-impl<'w, 's> HostedVm<'w, 's> {
+impl HostedVm<'_, '_> {
     /// Run `f` on the VM with the host lent around all of it ([`hosted`]); `f` gets `None` with
     /// no VM.
     pub(crate) fn run<R>(&mut self, f: impl FnOnce(Option<&mut UiScript>) -> R) -> R {
         hosted(&mut self.script, &mut self.host, f)
-    }
-
-    /// The VM and the host apart, for a drain that lends the host to each item's Lua in turn
-    /// ([`lent`]) and reads what the calls moved through the host between them.
-    pub(crate) fn parts(&mut self) -> (Option<&mut UiScript>, Option<&mut ScriptCallHost<'w, 's>>) {
-        (self.script.as_deref_mut(), self.host.as_mut())
     }
 }
 
@@ -366,6 +370,19 @@ impl<P: SystemParam + 'static> VmWith<'_, '_, P> {
                 }
             }
         });
+    }
+}
+
+impl<'w, 's, P: SystemParam + 'static> VmWith<'w, 's, P> {
+    /// The VM and the set apart, for a drain that lends the host to each item's Lua in turn
+    /// ([`lent`]) and reads or writes `P` between them, never while the host is lent.
+    pub(crate) fn parts(
+        &mut self,
+    ) -> (
+        Option<&mut UiScript>,
+        &mut ParamSet<'w, 's, (P, Option<ScriptCallHost<'w, 's>>)>,
+    ) {
+        (self.script.as_deref_mut(), &mut self.set)
     }
 }
 
@@ -2648,12 +2665,15 @@ mod tests {
     /// and the last enemy) beside `OLD` (selected) and `NEW` (party1, "Bob"), with `OLD` the last
     /// target.
     fn with_things_to_select(f: &mut Frame) {
-        spawn_mob(f, &[]);
+        // Units (`OBJECT_FIELD_TYPE` 0x9, 0x19 for the player), the typemask `0x489a40` and the
+        // assist's basis lookup take (`0x489c9b`).
+        spawn_mob(f, &[(2, 0x9)]);
         let world = f.app.world_mut();
         let new = world.resource::<GuidIndex>().0[&NEW];
         world
             .entity_mut(new)
             .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (2, 0x19),
                 (22, 100),
                 (28, 100),
                 (16, MOB as u32),

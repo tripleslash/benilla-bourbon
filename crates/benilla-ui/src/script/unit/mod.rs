@@ -589,6 +589,8 @@ mod chain_tests;
 mod relations;
 mod resolve;
 #[cfg(test)]
+mod selection_tests;
+#[cfg(test)]
 mod tests;
 
 pub use relations::UnitRelations;
