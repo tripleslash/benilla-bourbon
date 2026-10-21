@@ -245,6 +245,8 @@ pub struct InvSlotView {
     pub enchants: Vec<super::EnchantView>,
     /// The instance's remaining lifetime in ms; `None` without a timer.
     pub duration_ms: Option<u64>,
+    /// `ITEM_FIELD_DURATION`, as [`super::container::ContainerSlot::field_duration`].
+    pub field_duration: u32,
 }
 
 /// The doll snapshot: 0 ammo, 1..=19 equipment, 20..=23 the equipped bags, as
@@ -718,6 +720,7 @@ impl InvSlotView {
             // The item's own flags (UNLOCKED, WRAPPED) and expiry, which the tooltip builder reads.
             flags: slot.flags,
             duration_ms: slot.duration_ms,
+            field_duration: slot.field_duration,
             // Slot 20 (`Bag0Slot`) among `equip_slots` marks a container (`INVTYPE_BAG`). The bank
             // vault is past the `0x16` short-circuit, so only `Some` versus `None` matters.
             contents_count: slot.equip_slots.contains(&20).then_some(0),
@@ -2543,5 +2546,33 @@ mod tests {
         // A declared frame that is not a model pane has no pane.
         s.run(r#"CreateFrame("Frame", "NotAPane")"#).unwrap();
         assert!(s.model_pane("NotAPane").is_none());
+    }
+
+    /// A vault or keyring item read through the inventory API keeps its `ITEM_FIELD_DURATION`
+    /// (`[item+0x114]+0x24`), the field the auction sell slot refuses on (`0x4ce411`).
+    #[test]
+    fn a_container_slot_seen_as_an_inventory_slot_keeps_its_field_duration() {
+        use crate::script::container::{ContainerSlot, ContainerState};
+        let mut s = seated();
+        for (bag, live_id) in [(super::BANK_CONTAINER, 40), (super::KEYRING_CONTAINER, 82)] {
+            let mut state = ContainerState {
+                num_slots: 24,
+                ..Default::default()
+            };
+            state.slots.insert(
+                1,
+                ContainerSlot {
+                    item_id: 7000,
+                    guid: 0x700,
+                    count: 1,
+                    field_duration: 3_600_000,
+                    ..Default::default()
+                },
+            );
+            s.set_container(bag, Some(state));
+            let view = s.model_ref().inv_slot("player", live_id).unwrap();
+            assert_eq!(view.item_id, 7000, "bag {bag}");
+            assert_eq!(view.field_duration, 3_600_000, "bag {bag}");
+        }
     }
 }

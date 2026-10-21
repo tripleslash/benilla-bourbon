@@ -716,6 +716,7 @@ fn backpack() -> ContainerState {
             use_fork: Default::default(),
             item_class: None,
             duration_ms: None,
+            field_duration: 0,
             petition: None,
             already_bound: false,
             occupied_seats: None,

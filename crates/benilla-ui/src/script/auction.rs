@@ -1,22 +1,26 @@
-//! The auction-house bindings: the app pushes a snapshot of three lists, rows already resolved and
-//! in display order, and the Lua calls queue intents the app drains. Getters are keyed by `"list"`
+//! The auction-house bindings: the app pushes a snapshot of three lists, rows resolved and in
+//! wire order, and the Lua calls queue intents the app drains. Getters are keyed by `"list"`
 //! (Browse), `"bidder"` (Bids) or `"owner"` (Auctions), with `index` 1-based in the 50-row batch.
 //!
-//! The wire carries no sort: each list keeps an 8-deep stack of `(key, reversed)`, where clicking
-//! the primary column toggles it and another column is promoted with the direction it remembers.
+//! The order is the VM's: a list is sorted where the reference sorts it, by its key stack
+//! ([`AuctionSortStack`]), in `SortAuctionItems` and in the tail the app runs once a result's
+//! items are all known ([`super::UiScript::sort_auction_list`]), and holds still in between.
 
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{self, flag};
 use super::cursor;
 use super::Model;
+use crate::auction_sort::{floor_level, sort_column, AuctionSortStack};
 
 /// The three list types, in the order the app pushes them.
 pub const LIST: usize = 0;
 pub const BIDDER: usize = 1;
 pub const OWNER: usize = 2;
 
-/// The eight sort keys the reference's column headers pass, in the API's order.
+/// The eight sort columns by number, as `SortAuctionItems` names them (`0x4cfc4b`-`0x4cfd1d`)
+/// and the comparator `0x4cd940` numbers its modes: level 0, quality 1, bid 2, duration 3,
+/// buyout 4, status 5, name 6, seller 7.
 pub const SORT_KEYS: [&str; 8] = [
     "level", "quality", "bid", "duration", "buyout", "status", "name", "seller",
 ];
@@ -26,13 +30,27 @@ pub(super) fn list_index_of(kind: &str) -> Option<usize> {
     list_index(kind)
 }
 
+/// `"owner"`, `"bidder"` or `"list"`, matched without case in that order (`SStrCmpI`,
+/// `0x4ced6b`, `0x4cedb0`, `0x4cedf4`), by every function that takes a list type.
 fn list_index(kind: &str) -> Option<usize> {
-    match kind {
-        "list" => Some(LIST),
-        "bidder" => Some(BIDDER),
-        "owner" => Some(OWNER),
-        _ => None,
-    }
+    [("owner", OWNER), ("bidder", BIDDER), ("list", LIST)]
+        .into_iter()
+        .find(|(name, _)| crate::crt::str_cmp_i(name, kind) == 0)
+        .map(|(_, i)| i)
+}
+
+/// `SortAuctionItems`' and `IsAuctionSortReversed`' two arguments: `lua_isstring` on each, a number
+/// read as its text (`0x6f3510`, `0x6f3690`), else the usage line.
+fn type_and_sort(
+    lua: &Lua,
+    kind: Value,
+    sort: Value,
+    usage: &'static str,
+) -> mlua::Result<(String, String)> {
+    Ok((
+        binding_abi::string_arg(lua, kind, usage)?,
+        binding_abi::string_arg(lua, sort, usage)?,
+    ))
 }
 
 /// One auction row, resolved by the app from a wire record.
@@ -53,7 +71,8 @@ pub struct AuctionItemRow {
     pub count: u32,
     /// `None` while the item template query is in flight.
     pub quality: Option<u32>,
-    /// `RequiredLevel`, printed red above the player's level.
+    /// The template's `RequiredLevel` (`+0x3c`), 0 for none; `GetAuctionItemInfo` and the level
+    /// sort read it floored at 1.
     pub level: u32,
     /// The seller's opening price, shown as the current bid while [`Self::bid_amount`] is 0.
     pub min_bid: u32,
@@ -67,8 +86,17 @@ pub struct AuctionItemRow {
     pub high_bidder: AuctionHighBidder,
     /// The seller's name; `None` while the name query is in flight.
     pub owner: Option<String>,
-    /// The time-left bucket, `1..=4` (Short, Medium, Long, Very Long); 0 when not known yet.
-    pub time_left: u32,
+    /// The auction's deadline in milliseconds on `GetTime`'s clock ([`UiScript::auction_tick_ms`]):
+    /// the tick its list was read at plus the wire's milliseconds left, wrapping (`0x4cc865`,
+    /// `0x4cc966`-`0x4cc975`). `GetAuctionItemTimeLeft` reads it against the clock at the call.
+    ///
+    /// [`UiScript::auction_tick_ms`]: super::UiScript::auction_tick_ms
+    pub deadline: u32,
+    /// The high bidder's rank (`0x4cdb10`-`0x4cdb6a`): 2 the player, 1 another bidder, 0 no bid.
+    pub bidder_rank: u8,
+    /// The item template's own name (`[rec+8]`), without the random suffix [`Self::name`]
+    /// carries; `None` while the template query is in flight.
+    pub base_name: Option<String>,
     /// The full item link: auction rows carry entry, enchant, random property and suffix.
     pub link: Option<String>,
 }
@@ -90,22 +118,24 @@ pub enum AuctionHighBidder {
 /// One of the three lists: the batch the server sent, the pre-cap match count and its sort stack.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AuctionListState {
-    /// The current batch in display order, at most 50 (the server's page cap).
+    /// The current batch, at most 50 (the server's page cap): in wire order as the app pushes it,
+    /// in display order once the VM holds it.
     pub rows: Vec<AuctionItemRow>,
     /// `totalAuctions`: the match count before the 50-row cap.
     pub total: u32,
-    /// The most-recently-clicked sort stack, primary first: `(key, reversed)`.
-    pub sort: Vec<(String, bool)>,
-}
-
-impl AuctionListState {
-    /// This list's remembered direction for `key`, or `false` for a key it has never sorted by.
-    fn reversed(&self, key: &str) -> bool {
-        self.sort
-            .iter()
-            .find(|(k, _)| k == key)
-            .is_some_and(|(_, rev)| *rev)
-    }
+    /// The list's key stack. The VM takes the app's copy at its first push and keeps its own
+    /// after it, which the header clicks promote in place.
+    pub sort: AuctionSortStack,
+    /// Which result the rows came from, counted by the app across every list: a new one is laid
+    /// in wire order, as the result handler writes its records (`0x4cc880`), and one the VM holds
+    /// keeps the VM's order.
+    pub page: u32,
+    /// The list's sort tail is still owed: its pending-lookups counter is not back at 0
+    /// (`0xb72644`, `0xb72648`, `0xb7264c`), so a removal from it signals nothing (`0x4ce035`).
+    pub pending: bool,
+    /// The auctions a time-left read removed from this page ([`remove_auction`]), which a push of
+    /// the same page leaves out. The VM's own: a push's value is not read.
+    pub removed: Vec<u32>,
 }
 
 /// One class of the Browse tab's category tree, from the player's `ItemClass.dbc`.
@@ -133,13 +163,31 @@ pub struct AuctionSubCategory {
     pub has_inv_types: bool,
 }
 
-/// The open auction house's snapshot, pushed whole by the app.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// The auction house's snapshot, pushed whole by the app: the three lists, which outlive the
+/// session as the reference's arrays do, and the session itself.
+#[derive(Clone, Debug, PartialEq)]
 pub struct AuctionState {
     /// Browse / Bids / Auctions, indexed by [`LIST`], [`BIDDER`], [`OWNER`].
     pub lists: [AuctionListState; 3],
     /// `GetAuctionHouseDepositRate()`: the house's `AuctionHouse.dbc` deposit percentage.
     pub deposit_percent: u32,
+    /// An auctioneer session is open (`[0xb725f8]` nonzero): `StartAuction` sends only then
+    /// (`0x4ce7da`).
+    pub open: bool,
+}
+
+impl Default for AuctionState {
+    /// Three empty lists, each with its world-entry stack, and no session.
+    fn default() -> Self {
+        Self {
+            lists: AuctionSortStack::seeded_all().map(|sort| AuctionListState {
+                sort,
+                ..Default::default()
+            }),
+            deposit_percent: 0,
+            open: false,
+        }
+    }
 }
 
 /// A drained `QueryAuctionItems`, the `CMSG_AUCTION_LIST_ITEMS` filters: each is already a wire id,
@@ -182,8 +230,8 @@ const RUN_TIMES: [u32; 3] = [120, 480, 1440];
 pub struct AuctionBid {
     /// [`LIST`] or [`BIDDER`]: the Auctions tab has no bid button.
     pub list: usize,
-    /// 1-based row within the current batch; the app maps it to the wire auction id.
-    pub index: u32,
+    /// The auction at the bid's row when the call was made, as the verb reads it (`0x4cf610`).
+    pub auction_id: u32,
     pub amount: u32,
 }
 
@@ -194,14 +242,66 @@ impl super::UiScript {
         self.model_mut().auction_item_classes = classes;
     }
 
-    pub fn set_auction(&mut self, state: Option<AuctionState>) {
+    /// Push the lists and the session. The VM's first push takes the app's key stacks and every
+    /// later one keeps the VM's; a list pushed with the page it holds keeps the VM's order and
+    /// leaves out what a time-left read removed. The selection is an auction id no push writes
+    /// (`0x849058`): it stops resolving when its auction leaves the list.
+    pub fn set_auction(&mut self, state: AuctionState) {
         let mut model = self.model_mut();
-        // Only opening or closing the session drops the selection: it is an auction id, so it
-        // survives a new page or a re-sort and stops resolving when the auction leaves the page.
-        if model.auction.is_none() || state.is_none() {
-            model.auction_selected = [0; 3];
+        model.auction = match (model.auction.take(), state) {
+            (Some(held), mut state) => {
+                for (list, held) in state.lists.iter_mut().zip(held.lists) {
+                    list.sort = held.sort;
+                    list.removed = Vec::new();
+                    if list.page == held.page {
+                        list.removed = held.removed;
+                        let removed = &list.removed;
+                        list.rows.retain(|r| !removed.contains(&r.auction_id));
+                        list.rows = in_held_order(&held.rows, std::mem::take(&mut list.rows));
+                    }
+                }
+                Some(state)
+            }
+            (None, state) => Some(state),
+        };
+    }
+
+    /// The close's half the VM holds (`0x4cd613`-`0x4cd61f`): the session and its house go; the
+    /// lists, their stacks and the selection stand, and the getters still answer them.
+    pub fn close_auction_session(&mut self) {
+        if let Some(a) = self.model_mut().auction.as_mut() {
+            a.open = false;
+            a.deposit_percent = 0;
         }
-        model.auction = state;
+    }
+
+    /// The world-enter cascade's reset of the selection (`0x4cc2d5`), the one writer of the cells
+    /// besides `SetSelectedAuctionItem`.
+    pub fn clear_auction_selections(&mut self) {
+        self.model_mut().auction_selected = [0; 3];
+    }
+
+    /// A list's sort tail, run by the app when the last of a result's items is known (`0x4cc9f1`,
+    /// `0x4cca21`): the list sorted by its stack and its update signalled.
+    pub fn sort_auction_list(&mut self, list: usize) {
+        super::tick::verb(&self.lua, |model| sort_tail(model, list));
+    }
+
+    /// The 1-based row the auction `auction_id` shows at in `list`, for an instrument that clicks
+    /// it.
+    pub fn auction_display_index(&self, list: usize, auction_id: u32) -> Option<u32> {
+        let model = self.model_ref();
+        let rows = &model.auction.as_ref()?.lists.get(list)?.rows;
+        rows.iter()
+            .position(|r| r.auction_id == auction_id)
+            .map(|i| i as u32 + 1)
+    }
+
+    /// The millisecond tick a list result is read at (`0x42c010` at `0x4cc865`), on `GetTime`'s
+    /// clock: the one `GetAuctionItemTimeLeft` reads at its call (`0x4cf548`), so each row's
+    /// deadline is this plus the wire's milliseconds left.
+    pub fn auction_tick_ms(&self) -> u32 {
+        tick_ms(self.model_ref().now)
     }
 
     /// Push `CanSendAuctionQuery()`'s answer, the app's query throttle.
@@ -229,7 +329,7 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().auction_bids)
     }
 
-    /// Drain the 1-based owner-row indices `CancelAuction` was called on.
+    /// Drain the auctions `CancelAuction` was called on, each read at its row when called.
     pub fn take_auction_cancels(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.model_mut().auction_cancels)
     }
@@ -239,7 +339,8 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().auction_starts)
     }
 
-    /// Drain the header clicks: `(list index, sort key)`, in click order. The app owns the stacks.
+    /// Drain the header clicks: `(list index, sort key)`, in click order, which the app replays
+    /// onto its own copy of the stacks, the one that outlives the session and the VM.
     pub fn take_auction_sorts(&mut self) -> Vec<(usize, String)> {
         std::mem::take(&mut self.model_mut().auction_sorts)
     }
@@ -257,8 +358,8 @@ impl super::UiScript {
             .map(|it| (it.bag, it.slot))
     }
 
-    /// Empty the sell slot on session close: the sell-slot clear (`0x4cd640`), as
-    /// [`clear_sell_slot`] runs it.
+    /// Empty the sell slot at the close and the world-enter reset: the sell-slot clear
+    /// (`0x4cd640`), as [`clear_sell_slot`] runs it.
     pub fn clear_auction_sell_item(&mut self) {
         super::tick::verb(&self.lua, clear_sell_slot);
     }
@@ -272,6 +373,165 @@ pub(crate) fn clear_sell_slot(model: &mut Model) {
         super::cursor::unlock_item(model, item.guid);
         model.raise("NEW_AUCTION_UPDATE", Vec::new());
     }
+}
+
+/// The error `ClickAuctionSellItemButton` refuses a held item with (`0x4ce360`-`0x4ce4f1`), read
+/// off the item and its record as the reference reads its object; none when the item is gone, as
+/// an object the cursor's guid no longer finds goes straight to the attach (`0x4ce35a`). In order:
+/// a bound item (`0x5da2c0`) is `ERR_AUCTION_QUEST_ITEM` for quest bonding 4 or 5 (`[rec+0x194]`)
+/// and `ERR_AUCTION_BOUND_ITEM` otherwise, a missing record included (`0x4ce38d`); record flags
+/// `0x2` or `0x10000` (`0x4ce3e2`, `0x4ce3ec`), `ITEM_FIELD_DURATION` (`0x4ce411`), an area
+/// (`0x5da500`) or a map (`0x5da570`) are `ERR_AUCTION_CONJURED_ITEM`; a container with an item in
+/// a seat is `ERR_AUCTION_BAG` (`0x4ce45e`-`0x4ce48f`); `ITEM_FIELD_FLAGS & 8` is
+/// `ERR_AUCTION_WRAPPED_ITEM` (`0x4ce4b1`); record flags `& 4` are `ERR_AUCTION_LOOT_ITEM`
+/// (`0x4ce4d6`). The record is the item cache's, read with no callback (`0x55ba30`); without one
+/// its flags read 0 (`0x5da2b3`).
+fn sell_refusal(model: &Model, item: &cursor::CursorItem) -> Option<&'static str> {
+    let (bound, flags, duration, seats) = if item.bag == cursor::EQUIPMENT_BAG {
+        let s = model
+            .inv_slot("player", item.slot as usize)
+            .filter(|s| s.guid == item.guid)?;
+        (s.already_bound, s.flags, s.field_duration, s.occupied_seats)
+    } else {
+        let s = model
+            .containers
+            .get(&item.bag)?
+            .slots
+            .get(&item.slot)
+            .filter(|s| s.guid == item.guid)?;
+        (s.already_bound, s.flags, s.field_duration, s.occupied_seats)
+    };
+    let record = model.item_templates.get(&item.item_id);
+    /// `BIND_QUEST_ITEM` and `BIND_QUEST_ITEM1`.
+    const QUEST_BONDING: [u32; 2] = [4, 5];
+    if bound {
+        return Some(
+            if record.is_some_and(|r| QUEST_BONDING.contains(&r.bonding)) {
+                "ERR_AUCTION_QUEST_ITEM"
+            } else {
+                "ERR_AUCTION_BOUND_ITEM"
+            },
+        );
+    }
+    let record_flags = record.map_or(0, |r| r.flags);
+    if record_flags & (0x2 | 0x10000) != 0
+        || duration != 0
+        || record.is_some_and(|r| r.area != 0 || r.map != 0)
+    {
+        return Some("ERR_AUCTION_CONJURED_ITEM");
+    }
+    if seats.is_some_and(|n| n > 0) {
+        return Some("ERR_AUCTION_BAG");
+    }
+    if flags & 0x8 != 0 {
+        return Some("ERR_AUCTION_WRAPPED_ITEM");
+    }
+    (record_flags & 0x4 != 0).then_some("ERR_AUCTION_LOOT_ITEM")
+}
+
+/// `pushed`, a page the VM already holds, in the order of `held`, its rows matched by auction id;
+/// a page whose ids differ is taken as pushed.
+fn in_held_order(held: &[AuctionItemRow], pushed: Vec<AuctionItemRow>) -> Vec<AuctionItemRow> {
+    if held.len() != pushed.len() {
+        return pushed;
+    }
+    let mut used = vec![false; pushed.len()];
+    let mut order = Vec::with_capacity(held.len());
+    for h in held {
+        match (0..pushed.len()).find(|&k| !used[k] && pushed[k].auction_id == h.auction_id) {
+            Some(k) => {
+                used[k] = true;
+                order.push(k);
+            }
+            None => return pushed,
+        }
+    }
+    let mut rows: Vec<Option<AuctionItemRow>> = pushed.into_iter().map(Some).collect();
+    order.into_iter().filter_map(|k| rows[k].take()).collect()
+}
+
+/// The sort tails `0x4cd8b0`, `0x4cdcd0` and `0x4cddc0`: `qsort` by the list's stack, then the
+/// list's event with no test (`mov ecx,0x1a8`-`0x1aa`; `jmp 0x703e50`), a session or none.
+fn sort_tail(model: &mut Model, list: usize) {
+    if let Some(l) = model.auction.as_mut().and_then(|a| a.lists.get_mut(list)) {
+        let stack = l.sort;
+        stack.sort(&mut l.rows);
+    }
+    match list {
+        LIST => model.raise("AUCTION_ITEM_LIST_UPDATE", Vec::new()),
+        BIDDER => model.raise("AUCTION_BIDDER_LIST_UPDATE", Vec::new()),
+        _ => model.raise("AUCTION_OWNED_LIST_UPDATE", Vec::new()),
+    }
+}
+
+/// `GetTime`'s seconds as the reference's millisecond tick (`0x42c010`), the dword it wraps at.
+fn tick_ms(now: f64) -> u32 {
+    (now * 1000.0) as u64 as u32
+}
+
+/// The time-left bands' upper bounds in milliseconds left (`0x8072a8`): band 1 under 30
+/// minutes, 2 under 2 hours, 3 under 8 hours, 4 past them (`0x4cf5a1`).
+const TIME_LEFT_BOUNDS: [u32; 3] = [1_800_000, 7_200_000, 28_800_000];
+
+/// How far past its deadline a row still answers 1 and stays: further, the read removes it
+/// (`0x4cf569`).
+const TIME_LEFT_GRACE_MS: u32 = 10_000;
+
+/// `GetAuctionItemTimeLeft`'s answer for a row with `deadline` at the tick `now` (`0x4cf548`-
+/// `0x4cf5a1`): 1 at or past it, the sign read off the wrapping difference (`0x4cf556`), else the
+/// band of the time left; and whether it is far enough past to be removed (`0x4cf569`).
+fn time_left_band(deadline: u32, now: u32) -> (i64, bool) {
+    let past = now.wrapping_sub(deadline);
+    if (past as i32) >= 0 {
+        return (1, past > TIME_LEFT_GRACE_MS);
+    }
+    let left = deadline.wrapping_sub(now);
+    let band = TIME_LEFT_BOUNDS
+        .iter()
+        .position(|&bound| left < bound)
+        .map_or(4, |i| i as i64 + 1);
+    (band, false)
+}
+
+/// `0x4cdfe0`: the auction leaves browse, owner and bidder in that order (`0x4cdfec`, `0x4ce04b`,
+/// `0x4ce0ab`), each list signalled as its own copy finishes (`0x4ce03e`, `0x4ce09e`,
+/// `0x4ce101`), so each segment is its own verb and the browse list's handlers still see the row
+/// on the owner list.
+fn remove_auction(lua: &Lua, auction_id: u32) {
+    for list in [LIST, OWNER, BIDDER] {
+        super::tick::verb(lua, |model| remove_from(model, list, auction_id));
+    }
+}
+
+/// One list's copy of `0x4cdfe0`: the auction's row goes, the rows after it moving up and the
+/// total kept, and a list that held it signals unless its sort tail is owed (`0x4ce035`,
+/// `0x4ce095`, `0x4ce0f5`). The VM keeps the id, so a push of the same page leaves it out.
+fn remove_from(model: &mut Model, list: usize, auction_id: u32) {
+    let Some(l) = model.auction.as_mut().map(|a| &mut a.lists[list]) else {
+        return;
+    };
+    let Some(i) = l.rows.iter().position(|r| r.auction_id == auction_id) else {
+        return;
+    };
+    l.rows.remove(i);
+    l.removed.push(auction_id);
+    if l.pending {
+        return;
+    }
+    match list {
+        LIST => model.raise("AUCTION_ITEM_LIST_UPDATE", Vec::new()),
+        OWNER => model.raise("AUCTION_OWNED_LIST_UPDATE", Vec::new()),
+        _ => model.raise("AUCTION_BIDDER_LIST_UPDATE", Vec::new()),
+    }
+}
+
+/// The auction id at `list`'s 1-based row `index`, as the getters read it.
+fn row_id(model: &Model, list: usize, index: usize) -> Option<u32> {
+    model
+        .auction
+        .as_ref()
+        .and_then(|a| index.checked_sub(1).and_then(|n| a.lists[list].rows.get(n)))
+        .map(|r| r.auction_id)
 }
 
 fn row_at(model: &Model, kind: &str, index: usize) -> Option<AuctionItemRow> {
@@ -388,7 +648,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Value::Integer(i64::from(r.count)),
                 Value::Integer(r.quality.map_or(-1, i64::from)),
                 flag(can_use),
-                Value::Integer(i64::from(r.level)),
+                // The required level floored at 1 (`0x4cf091`-`0x4cf0b1`).
+                Value::Integer(i64::from(floor_level(&r))),
                 Value::Integer(i64::from(r.min_bid)),
                 Value::Integer(i64::from(r.min_increment)),
                 Value::Integer(i64::from(r.buyout_price)),
@@ -403,8 +664,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetAuctionItemTimeLeft(type, index) → the 1..4 bucket, 0 when unknown. The reference has no
-    // live countdown: it moves only when a new list lands.
+    // GetAuctionItemTimeLeft(type, index) (`0x4cf470`) → the band 1 to 4 of the row's time left,
+    // read off its deadline against the clock at the call ([`time_left_band`]); 0 for a type or
+    // row that misses (`0x4cf5e1`). A row far enough past is removed after its 1 is pushed
+    // (`0x4cf574` → `0x4cdfe0`), its lists signalled inside the call.
     g.set(
         "GetAuctionItemTimeLeft",
         lua.create_function(|lua, (kind, index): (Value, Value)| {
@@ -420,8 +683,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 index,
                 r#"Usage: GetAuctionItemTimeLeft("type", index)"#,
             )?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(row_at(&model, &kind, index).map_or(0, |r| i64::from(r.time_left)))
+            let (band, remove) = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let Some(row) = row_at(&model, &kind, index) else {
+                    return Ok(0);
+                };
+                let (band, remove) = time_left_band(row.deadline, tick_ms(model.now));
+                (band, remove.then_some(row.auction_id))
+            };
+            if let Some(auction_id) = remove {
+                remove_auction(lua, auction_id);
+            }
+            Ok(band)
         })?,
     )?;
 
@@ -498,38 +771,58 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SortAuctionItems(type, key): queue the header click for the app, which pushes the reordered
-    // rows back. The reference raises this `Usage:` only for an argument neither string nor number
-    // (`0x6f3510`) and matches both strings case-insensitively (`0x64a4c0`), an unknown one sorting
-    // nothing (`0x4cfd90`); here an unknown or differently cased type or column raises.
+    // SortAuctionItems(type, sort) (`0x4cfc00`): the sort name is matched first, then the type;
+    // either unknown sorts nothing (`0x4cfd90`). Otherwise the list's driver promotes the column
+    // and runs the sort tail, which sorts and signals before the call returns (`0x4cd850`,
+    // `0x4cdc70`, `0x4cdd60`); the click is queued for the app's copy of the stack.
     g.set(
         "SortAuctionItems",
-        lua.create_function(|lua, (kind, key): (String, String)| {
-            let Some(i) = list_index(&kind) else {
-                return Err(mlua::Error::RuntimeError(
-                    "Usage: SortAuctionItems(\"type\", \"sort\")".into(),
-                ));
+        lua.create_function(|lua, (kind, sort): (Value, Value)| {
+            let (kind, sort) = type_and_sort(
+                lua,
+                kind,
+                sort,
+                r#"Usage: SortAuctionItems("type", "sort")"#,
+            )?;
+            let Some(column) = sort_column(&sort) else {
+                return Ok(());
             };
-            if !SORT_KEYS.contains(&key.as_str()) {
-                return Err(mlua::Error::RuntimeError(
-                    "Usage: SortAuctionItems(\"type\", \"sort\")".into(),
-                ));
-            }
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.auction_sorts.push((i, key));
+            let Some(list) = list_index(&kind) else {
+                return Ok(());
+            };
+            super::tick::verb(lua, |model| {
+                model
+                    .auction_sorts
+                    .push((list, SORT_KEYS[usize::from(column)].to_string()));
+                if let Some(a) = model.auction.as_mut() {
+                    a.lists[list].sort.promote(column);
+                }
+                sort_tail(model, list);
+            });
             Ok(())
         })?,
     )?;
 
-    // IsAuctionSortReversed(type, key) → 1/nil, for any key the stack remembers.
+    // IsAuctionSortReversed(type, sort) → 1/nil (`0x4d0030`): an unknown sort name returns no
+    // value (`0x4d024e`), an unknown type nil (`0x4d0230`).
     g.set(
         "IsAuctionSortReversed",
-        lua.create_function(|lua, (kind, key): (String, String)| {
+        lua.create_function(|lua, (kind, sort): (Value, Value)| {
+            let (kind, sort) = type_and_sort(
+                lua,
+                kind,
+                sort,
+                r#"Usage: IsAuctionSortReversed("type", "sort")"#,
+            )?;
+            let Some(column) = sort_column(&sort) else {
+                return Ok(MultiValue::new());
+            };
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let rev = list_index(&kind)
                 .zip(model.auction.as_ref())
-                .is_some_and(|(i, a)| a.lists[i].reversed(&key));
-            Ok(flag(rev))
+                .and_then(|(i, a)| a.lists[i].sort.reversed(column))
+                .unwrap_or(false);
+            Ok(MultiValue::from_vec(vec![flag(rev)]))
         })?,
     )?;
 
@@ -742,9 +1035,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             };
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            // The record at the row as the call finds it; no row, no bid (`0x4cf610`).
+            let Some(auction_id) = row_id(&model, list, index as usize) else {
+                return Ok(());
+            };
             model.auction_bids.push(AuctionBid {
                 list,
-                index,
+                auction_id,
                 amount,
             });
             Ok(())
@@ -763,7 +1060,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // No auctioneer or an empty slot, its stored guid zero, ends it before the send
                 // (`0x4ce7da`, `0x4ce7e4`).
                 let guid = model.auction_sell_item.as_ref().map_or(0, |it| it.guid);
-                if model.auction.is_none() || guid == 0 {
+                if !model.auction.as_ref().is_some_and(|a| a.open) || guid == 0 {
                     return;
                 }
                 // A damaged item, not wrapped (`flags & 8`), with a max durability whose current
@@ -815,7 +1112,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let index =
                 binding_abi::index_arg32(lua, index, "Usage: SetSelectedAuctionItem(index)")?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.auction_cancels.push(index);
+            // The owner record at the row; out of range sends nothing (`0x4d02c5`).
+            if let Some(auction_id) = row_id(&model, OWNER, index as usize) {
+                model.auction_cancels.push(auction_id);
+            }
             Ok(())
         })?,
     )?;
@@ -907,12 +1207,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // ClickAuctionSellItemButton() (`0x4ce310`): attach the cursor's item, putting an earlier
-    // attachment back on the cursor ([`cursor::click_attach_slot`]); a changed slot signals
-    // `NEW_AUCTION_UPDATE` right after that `SetCursorItem` (`0x4ce56c`, `0x4ce576`).
+    // ClickAuctionSellItemButton() (`0x4ce310`): a held item the reference refuses shows its
+    // error and changes nothing ([`sell_refusal`]); otherwise attach the cursor's item, putting an
+    // earlier attachment back on the cursor ([`cursor::click_attach_slot`]), and a changed slot
+    // signals `NEW_AUCTION_UPDATE` right after that `SetCursorItem` (`0x4ce56c`, `0x4ce576`).
     g.set(
         "ClickAuctionSellItemButton",
         lua.create_function(|lua, ()| {
+            let refusal = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                match &model.cursor {
+                    Some(cursor::CursorPayload::Item(item)) => sell_refusal(&model, item),
+                    _ => None,
+                }
+            };
+            if let Some(key) = refusal {
+                super::tick::verb(lua, |model| model.push_ui_error(key));
+                return Ok(());
+            }
             if cursor::click_attach_slot(lua, |model| &mut model.auction_sell_item) {
                 super::tick::verb(lua, |model| {
                     model.raise("NEW_AUCTION_UPDATE", Vec::new());
@@ -991,24 +1303,252 @@ mod tests {
                 item_id: 1000 + auction_id,
                 // A cached template: a `None` quality is a row still in the item cache's miss.
                 name: Some(format!("Item {auction_id}")),
+                base_name: Some(format!("Item {auction_id}")),
                 quality: Some(1),
                 count: 1,
                 ..Default::default()
             })
             .collect();
-        let mut state = AuctionState::default();
+        let mut state = AuctionState {
+            open: true,
+            ..Default::default()
+        };
         state.lists[LIST] = AuctionListState {
             total: rows.len() as u32,
             rows,
-            sort: Vec::new(),
+            ..Default::default()
         };
         state
+    }
+
+    /// Every list type and sort name matches without case (`SStrCmpI`, `0x64a4c0`), an unknown
+    /// one sorts nothing (`0x4cfd90`), and only an argument that is neither string nor number
+    /// raises (`0x4cfd82`). `IsAuctionSortReversed` answers nothing for an unknown sort name
+    /// (`0x4d024e`) and nil for an unknown type (`0x4d0230`).
+    #[test]
+    fn list_types_and_sort_names_match_without_case() {
+        let mut s = UiScript::new().unwrap();
+        s.set_auction(page(&[7]));
+        assert_eq!(
+            s.eval::<i64>(r#"return (GetNumAuctionItems("LIST"))"#)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.eval::<String>(r#"return (GetAuctionItemInfo("List", 1))"#)
+                .unwrap(),
+            "Item 7"
+        );
+        s.run(r#"SortAuctionItems("LIST", "Name")"#).unwrap();
+        assert_eq!(s.take_auction_sorts(), [(LIST, "name".to_string())]);
+        s.run(r#"SortAuctionItems("list", "nonsense") SortAuctionItems("nowhere", "name")"#)
+            .unwrap();
+        s.run("SortAuctionItems(1, 2)").unwrap();
+        assert!(
+            s.take_auction_sorts().is_empty(),
+            "an unknown one sorts nothing"
+        );
+        let err = s
+            .run(r#"SortAuctionItems({}, "name")"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(r#"Usage: SortAuctionItems("type", "sort")"#),
+            "{err}"
+        );
+        assert_eq!(
+            s.arity(r#"IsAuctionSortReversed("list", "nonsense")"#)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.arity(r#"IsAuctionSortReversed("nowhere", "bid")"#)
+                .unwrap(),
+            1
+        );
+    }
+
+    /// `GetAuctionItemInfo`'s sixth value is the required level floored at 1
+    /// (`0x4cf091`-`0x4cf0b1`, `max(template+0x3c, 1)`).
+    #[test]
+    fn the_level_is_floored_at_one() {
+        let mut s = UiScript::new().unwrap();
+        let mut state = page(&[7, 8]);
+        state.lists[LIST].rows[0].level = 0;
+        state.lists[LIST].rows[1].level = 12;
+        s.set_auction(state);
+        let level = |s: &UiScript, i: usize| {
+            s.eval::<i64>(&format!(
+                r#"local _, _, _, _, _, l = GetAuctionItemInfo("list", {i}) return l"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(level(&s, 1), 1, "no requirement reads 1");
+        assert_eq!(level(&s, 2), 12);
+    }
+
+    /// `SortAuctionItems` sorts and signals before it returns (`0x4cd850` → `0x4cd8b0`: `qsort`,
+    /// then `jmp 0x703e50`), so an addon that flags its own call, as Auctioneer's
+    /// `PerformingSortAuctionItems` does, sees the update inside it with the rows in order, and
+    /// reads the flipped flag on the next line.
+    #[test]
+    fn a_sort_signals_its_list_inside_the_call_with_the_rows_in_order() {
+        let mut s = UiScript::new().unwrap();
+        let mut state = page(&[1, 2]);
+        state.lists[LIST].rows[0].name = Some("Cheap".into());
+        state.lists[LIST].rows[0].buyout_price = 100;
+        state.lists[LIST].rows[1].name = Some("Dear".into());
+        state.lists[LIST].rows[1].buyout_price = 900;
+        s.set_auction(state);
+        s.run(
+            r#"SEEN = {}
+               local f = CreateFrame("Frame")
+               f:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
+               f:SetScript("OnEvent", function()
+                   table.insert(SEEN, tostring(INSIDE) .. ":" .. (GetAuctionItemInfo("list", 1)))
+               end)
+               INSIDE = true
+               SortAuctionItems("list", "buyout")
+               INSIDE = false
+               REVERSED = IsAuctionSortReversed("list", "buyout")"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<Vec<String>>("return SEEN").unwrap(),
+            ["true:Dear"],
+            "the highest buyout first, signalled inside the call"
+        );
+        assert!(s.eval::<bool>("return REVERSED == nil").unwrap());
+        s.run(
+            r#"SEEN = {}
+               SortAuctionItems("list", "buyout")
+               REVERSED = IsAuctionSortReversed("list", "buyout")"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<Vec<String>>("return SEEN").unwrap(),
+            ["false:Cheap"]
+        );
+        assert!(
+            s.eval::<bool>("return REVERSED == 1").unwrap(),
+            "the second click flips the primary, and the next line reads it"
+        );
+    }
+
+    /// `GetAuctionItemTimeLeft` reads the row's deadline against the clock at the call
+    /// (`0x4cf548`): 1 to 3 under 30 minutes, 2 hours and 8 hours left (`0x8072a8`), else 4
+    /// (`0x4cf5a1`); 1 at or past the deadline (`0x4cf558`). More than 10 s past (`0x4cf569`) the
+    /// call also removes the auction (`0x4cdfe0`) from browse, owner and bidder in that order, each
+    /// list that held it signalled inside the call unless its sort tail is owed (`0x4ce035`), the
+    /// totals kept; a push of the same page keeps it out. A type or row that misses answers 0
+    /// (`0x4cf5e1`).
+    #[test]
+    fn the_time_left_reads_the_deadline_at_the_call() {
+        use crate::script::tick::heard;
+        let mut s = UiScript::new().unwrap();
+        s.set_now(1000.0);
+        let now: u32 = 1_000_000;
+        let list = |rows: &[(u32, u32)], pending: bool| {
+            let rows: Vec<AuctionItemRow> = rows
+                .iter()
+                .map(|&(auction_id, deadline)| AuctionItemRow {
+                    auction_id,
+                    item_id: 1000 + auction_id,
+                    name: Some(format!("Item {auction_id}")),
+                    quality: Some(1),
+                    count: 1,
+                    deadline,
+                    ..Default::default()
+                })
+                .collect();
+            AuctionListState {
+                total: rows.len() as u32 + 2,
+                rows,
+                pending,
+                ..Default::default()
+            }
+        };
+        let gone = now - 10_001;
+        let mut state = AuctionState::default();
+        state.lists[LIST] = list(
+            &[
+                (1, now + 1_799_999),
+                (2, now + 1_800_000),
+                (3, now + 7_200_000),
+                (4, now + 28_800_000),
+                (5, now),
+                (6, now - 10_000),
+                (7, gone),
+            ],
+            false,
+        );
+        state.lists[OWNER] = list(&[(7, gone)], false);
+        state.lists[BIDDER] = list(&[(7, gone)], true);
+        s.set_auction(state.clone());
+        heard::listen(
+            &s,
+            &[
+                "AUCTION_ITEM_LIST_UPDATE",
+                "AUCTION_OWNED_LIST_UPDATE",
+                "AUCTION_BIDDER_LIST_UPDATE",
+            ],
+            Some("(GetNumAuctionItems('list')) .. '/' .. (GetNumAuctionItems('owner'))"),
+        );
+        let left = |s: &UiScript, kind: &str, i: i64| {
+            s.eval::<i64>(&format!("return GetAuctionItemTimeLeft('{kind}', {i})"))
+                .unwrap()
+        };
+        let bands: Vec<i64> = (1..=6).map(|i| left(&s, "list", i)).collect();
+        assert_eq!(bands, [1, 2, 3, 4, 1, 1]);
+        assert!(heard::take(&s).is_empty(), "10 s past is kept");
+        assert_eq!(left(&s, "list", 7), 1);
+        assert_eq!(
+            heard::take(&s),
+            [
+                "AUCTION_ITEM_LIST_UPDATE 6/1",
+                "AUCTION_OWNED_LIST_UPDATE 6/0"
+            ],
+            "the bidder list owes its tail"
+        );
+        let counts = "local a, b = GetNumAuctionItems('list') local c, d = \
+                      GetNumAuctionItems('bidder') return a, b, c, d";
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(counts).unwrap(),
+            (6, 9, 0, 3)
+        );
+        s.set_auction(state);
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(counts).unwrap(),
+            (6, 9, 0, 3)
+        );
+        assert_eq!(left(&s, "list", 7), 0, "a row past the list");
+        assert_eq!(left(&s, "list", 0), 0);
+        assert_eq!(left(&s, "auction", 1), 0);
+        assert_eq!(left(&s, "LIST", 6), 1);
+    }
+
+    /// The band reads the wrapping difference's sign (`0x4cf556`): an unclamped wire time gone
+    /// negative (`AuctionHouseMgr.cpp:838`) is past, not eternal, and a deadline across the
+    /// dword's wrap still counts down.
+    #[test]
+    fn the_time_left_band_reads_the_wrapping_difference() {
+        let now: u32 = 5_000_000;
+        assert_eq!(
+            time_left_band(now.wrapping_add(u32::MAX - 1000), now),
+            (1, false)
+        );
+        assert_eq!(
+            time_left_band(now.wrapping_add(u32::MAX - 20_000), now),
+            (1, true)
+        );
+        assert_eq!(time_left_band(100, u32::MAX - 5), (1, false), "106 ms left");
+        assert_eq!(time_left_band(now + 20 * 3_600_000, now), (4, false));
     }
 
     #[test]
     fn the_selection_follows_its_auction_through_a_resort() {
         let mut s = UiScript::new().unwrap();
-        s.set_auction(Some(page(&[11, 22])));
+        s.set_auction(page(&[11, 22]));
 
         s.eval::<()>(r#"SetSelectedAuctionItem("list", 2)"#)
             .unwrap();
@@ -1018,8 +1558,9 @@ mod tests {
             2
         );
 
-        // The same two auctions, re-sorted into the opposite order.
-        s.set_auction(Some(page(&[22, 11])));
+        // The same two auctions, sorted into the opposite order: name, reversed.
+        s.run(r#"SortAuctionItems("list", "name") SortAuctionItems("list", "name")"#)
+            .unwrap();
         assert_eq!(
             s.eval::<i64>(r#"return GetSelectedAuctionItem("list")"#)
                 .unwrap(),
@@ -1028,7 +1569,7 @@ mod tests {
         );
 
         // It leaves the page.
-        s.set_auction(Some(page(&[33, 44])));
+        s.set_auction(page(&[33, 44]));
         assert_eq!(
             s.eval::<i64>(r#"return GetSelectedAuctionItem("list")"#)
                 .unwrap(),
@@ -1036,11 +1577,17 @@ mod tests {
             "gone means nothing selected, never its neighbour"
         );
 
-        // Closing the session drops it outright.
-        s.set_auction(Some(page(&[33])));
+        // The close keeps it (`0x4cd5f0`); the world-enter cascade's reset drops it.
+        s.set_auction(page(&[33]));
         s.eval::<()>(r#"SetSelectedAuctionItem("list", 1)"#)
             .unwrap();
-        s.set_auction(None);
+        s.close_auction_session();
+        assert_eq!(
+            s.eval::<i64>(r#"return GetSelectedAuctionItem("list")"#)
+                .unwrap(),
+            1
+        );
+        s.clear_auction_selections();
         assert_eq!(
             s.eval::<i64>(r#"return GetSelectedAuctionItem("list")"#)
                 .unwrap(),
@@ -1192,7 +1739,7 @@ mod tests {
             owner: Some("Seller".into()),
             ..Default::default()
         };
-        s.set_auction(Some(state));
+        s.set_auction(state);
         let shape: String = s
             .eval(
                 r#"local t = {GetAuctionItemInfo("list", 1)}
@@ -1220,7 +1767,7 @@ mod tests {
     #[test]
     fn a_cached_row_answers_its_quality() {
         let mut s = UiScript::new().unwrap();
-        s.set_auction(Some(page(&[7])));
+        s.set_auction(page(&[7]));
         let (name, quality): (String, i64) = s
             .eval(r#"local n, _, _, q = GetAuctionItemInfo("list", 1) return n, q"#)
             .unwrap();
@@ -1234,7 +1781,7 @@ mod tests {
         let mut state = page(&[1, 2, 3]);
         state.lists[LIST].rows[0].high_bidder = AuctionHighBidder::Name("Bidder".into());
         state.lists[LIST].rows[1].high_bidder = AuctionHighBidder::Player;
-        s.set_auction(Some(state));
+        s.set_auction(state);
         let eleventh = |i: usize| {
             s.eval::<Value>(&format!(
                 r#"local _,_,_,_,_,_,_,_,_,_,h = GetAuctionItemInfo("list", {i}) return h"#
@@ -1355,22 +1902,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reversed_answers_for_any_remembered_key() {
-        let list = AuctionListState {
-            sort: vec![
-                ("bid".into(), false),
-                ("quality".into(), true),
-                ("level".into(), false),
-            ],
-            ..Default::default()
-        };
-        assert!(!list.reversed("bid"), "the primary, not reversed");
-        assert!(list.reversed("quality"), "remembered, and reversed");
-        assert!(!list.reversed("level"));
-        assert!(!list.reversed("seller"), "never sorted by: not reversed");
-    }
-
     /// The attach clears with `SetCursorItem(0, …)` (`0x4ce56a`): no unlock and no
     /// `ITEM_LOCK_CHANGED`, so the item stays locked in its bag and cannot be picked up again,
     /// until the sell-slot clear lifts the lock with its event (`0x4cd653`).
@@ -1449,6 +1980,130 @@ mod tests {
         assert_eq!(heard::take(&s), ["CURSOR_UPDATE none"]);
     }
 
+    /// `ClickAuctionSellItemButton`'s refusals (`0x4ce360`-`0x4ce4f1`), in the reference's order:
+    /// each shows its error (`0x496720`) and returns, the cursor kept, the slot holding what it
+    /// held and nothing signalled. A bound item (`0x5da2c0`) is `ERR_AUCTION_QUEST_ITEM` for quest
+    /// bonding 4 or 5 and `ERR_AUCTION_BOUND_ITEM` otherwise, a missing record included; then
+    /// `ERR_AUCTION_CONJURED_ITEM` for record flags `0x2` or `0x10000`, a nonzero
+    /// `ITEM_FIELD_DURATION`, an area or a map; then `ERR_AUCTION_BAG` for a container with an
+    /// item in a seat, `ERR_AUCTION_WRAPPED_ITEM` for `ITEM_FIELD_FLAGS & 8` and
+    /// `ERR_AUCTION_LOOT_ITEM` for record flags `& 4`. An item that passes them all attaches, one
+    /// with no record among them, whose flags read 0 (`0x5da2b3`).
+    #[test]
+    fn the_sell_slot_refuses_in_the_references_order() {
+        use crate::script::container::{ContainerSlot, ContainerState};
+        use crate::script::tick::heard;
+        use crate::script::ItemTemplateView;
+        let mut s = UiScript::new().unwrap();
+        // `(bound, ITEM_FIELD_FLAGS, ITEM_FIELD_DURATION, filled seats, record as (flags,
+        // bonding, area, map))` per backpack slot, and what the click answers.
+        type Record = Option<(u32, u32, u32, u32)>;
+        type Case = (bool, u32, u32, Option<u32>, Record, Option<&'static str>);
+        #[rustfmt::skip]
+        let cases: [Case; 14] = [
+            (true, 0, 0, None, Some((0, 4, 0, 0)), Some("ERR_AUCTION_QUEST_ITEM")),
+            (true, 0, 0, None, Some((0x2, 5, 12, 0)), Some("ERR_AUCTION_QUEST_ITEM")),
+            (true, 0, 0, None, Some((0, 1, 0, 0)), Some("ERR_AUCTION_BOUND_ITEM")),
+            (true, 0, 0, None, None, Some("ERR_AUCTION_BOUND_ITEM")),
+            (false, 0, 0, None, Some((0x2, 0, 0, 0)), Some("ERR_AUCTION_CONJURED_ITEM")),
+            (false, 0, 0, None, Some((0x10000, 0, 0, 0)), Some("ERR_AUCTION_CONJURED_ITEM")),
+            (false, 0, 60_000, Some(2), Some((0, 0, 0, 0)), Some("ERR_AUCTION_CONJURED_ITEM")),
+            (false, 0, 0, None, Some((0, 0, 12, 0)), Some("ERR_AUCTION_CONJURED_ITEM")),
+            (false, 0, 0, None, Some((0, 0, 0, 33)), Some("ERR_AUCTION_CONJURED_ITEM")),
+            (false, 0x8, 0, Some(2), Some((0x4, 0, 0, 0)), Some("ERR_AUCTION_BAG")),
+            (false, 0x8, 0, None, Some((0x4, 0, 0, 0)), Some("ERR_AUCTION_WRAPPED_ITEM")),
+            (false, 0, 0, None, Some((0x4, 0, 0, 0)), Some("ERR_AUCTION_LOOT_ITEM")),
+            (false, 0, 0, Some(0), Some((0, 0, 0, 0)), None),
+            (false, 0, 0, None, None, None),
+        ];
+        let mut bag = ContainerState {
+            num_slots: 16,
+            ..Default::default()
+        };
+        for (i, &(bound, flags, duration, seats, record, _)) in cases.iter().enumerate() {
+            let slot = i as u32 + 1;
+            bag.slots.insert(
+                slot,
+                ContainerSlot {
+                    item_id: 1000 + slot,
+                    guid: 0x500 + u64::from(slot),
+                    count: 1,
+                    quality: record.map(|_| 1),
+                    already_bound: bound,
+                    flags,
+                    field_duration: duration,
+                    occupied_seats: seats,
+                    ..Default::default()
+                },
+            );
+            if let Some((flags, bonding, area, map)) = record {
+                s.set_item_template(
+                    1000 + slot,
+                    ItemTemplateView {
+                        flags,
+                        bonding,
+                        area,
+                        map,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        s.set_container(0, Some(bag));
+        // A worn trinket with a lifetime, picked up off the doll.
+        let mut doll: crate::script::InventorySlots = Default::default();
+        doll[14] = Some(crate::script::InvSlotView {
+            item_id: 7000,
+            guid: 0x714,
+            field_duration: 3_600_000,
+            ..Default::default()
+        });
+        s.set_inventory_slots(doll);
+        heard::listen(
+            &s,
+            &["CURSOR_UPDATE", "NEW_AUCTION_UPDATE", "ITEM_LOCK_CHANGED"],
+            None,
+        );
+        let click = |s: &mut UiScript, pick: &str| {
+            s.run(&format!("ClearCursor() {pick}")).unwrap();
+            heard::take(s);
+            s.run("ClickAuctionSellItemButton()").unwrap();
+            (s.take_ui_errors(), heard::take(s))
+        };
+        // The last slot attaches first, so each refusal shows the slot left as it was.
+        let (errors, heard) = click(&mut s, "PickupContainerItem(0, 14)");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(heard, ["CURSOR_UPDATE", "NEW_AUCTION_UPDATE"]);
+        let mut held = 14;
+        for (i, &(.., refusal)) in cases.iter().enumerate() {
+            let slot = i as u32 + 1;
+            let pick = format!("PickupContainerItem(0, {slot})");
+            let (errors, heard) = click(&mut s, &pick);
+            match refusal {
+                Some(key) => {
+                    assert_eq!((errors, heard), (vec![key], vec![]), "slot {slot}");
+                    assert_eq!(
+                        s.cursor_item().map(|c| c.slot),
+                        Some(slot),
+                        "slot {slot}: the cursor keeps it"
+                    );
+                }
+                None => {
+                    assert!(errors.is_empty(), "slot {slot}: {errors:?}");
+                    held = slot;
+                }
+            }
+            assert_eq!(s.auction_sell_item(), Some((0, held)), "slot {slot}");
+        }
+        let (errors, heard) = click(&mut s, "PickupInventoryItem(14)");
+        assert_eq!(
+            (errors, heard),
+            (vec!["ERR_AUCTION_CONJURED_ITEM"], vec![]),
+            "a worn item answers to its own ITEM_FIELD_DURATION"
+        );
+        assert_eq!(s.auction_sell_item(), Some((0, held)));
+    }
+
     /// `StartAuction` (`0x4ce770`) sends and then runs the sell-slot clear in the verb
     /// (`0x4ce92a` → `0x4cd640`): the unlock and `NEW_AUCTION_UPDATE` fire before it returns,
     /// whatever the server answers, so a second call finds the slot empty and sends nothing
@@ -1471,7 +2126,10 @@ mod tests {
         s.run("StartAuction(100, 0, 120)").unwrap();
         assert!(s.take_auction_starts().is_empty(), "no auctioneer");
 
-        s.set_auction(Some(AuctionState::default()));
+        s.set_auction(AuctionState {
+            open: true,
+            ..Default::default()
+        });
         heard::listen(
             &s,
             &["ITEM_LOCK_CHANGED", "NEW_AUCTION_UPDATE"],
@@ -1514,7 +2172,10 @@ mod tests {
     fn start_auction_refuses_a_damaged_item() {
         use crate::script::cursor::two_item_bag;
         let mut s = UiScript::new().unwrap();
-        s.set_auction(Some(AuctionState::default()));
+        s.set_auction(AuctionState {
+            open: true,
+            ..Default::default()
+        });
         let bag = |durability, flags| {
             let mut bag = two_item_bag();
             for (slot, item) in bag.slots.iter_mut() {
