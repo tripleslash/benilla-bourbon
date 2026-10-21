@@ -4,12 +4,9 @@
 //! reaches them, so what they signal is queued in order on [`CastReports`] and signalled inside
 //! that call ([`crate::script_calls`]), or by the frame's feed for a packet's.
 
-// `bevy::platform::time::Instant`: `std`'s panics on wasm32, where the page has no clock of its own.
-use bevy::platform::time::Instant;
-
 use bevy::prelude::*;
 
-use super::inflight::{inflight, Inflight};
+use super::inflight::{inflight, inflight_item, Inflight};
 use super::{PendingCast, QueuedMeleeSpell, SpellTargeting};
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_action::CastFail;
@@ -22,6 +19,9 @@ const ATTR_EX_NOT_REAPED: u32 = 0x4;
 /// `CancelQueuedCast` pass the cancel: `SPELL_FAILED_ERROR` (`0x6e4d6d`, `0x6e490b`, `0x6e6ec3`,
 /// `0x6e6f62`).
 pub(crate) const REASON_ERROR: u8 = 0x1c;
+
+/// The reason the inventory refusal's cancel passes (`0x5e3aad`): `SPELL_FAILED_DONT_REPORT`.
+pub(crate) const REASON_DONT_REPORT: u8 = 0x17;
 
 /// The failure the reporter fires no event for: `SPELL_FAILED_SPELL_IN_PROGRESS` (`0x6e2234`).
 const REASON_IN_PROGRESS: u8 = 0x61;
@@ -66,10 +66,15 @@ impl CastCore<'_> {
         inflight(self.pending, self.queued_melee, self.ground)
     }
 
+    /// The guid of the item the in-flight cast came from (`0x6e3d20` → `0xcecab0`).
+    pub(crate) fn slot_item(&self) -> Option<u64> {
+        inflight_item(self.pending, self.queued_melee, self.ground)
+    }
+
     /// `SetInFlightSpell(spell)` as the attempt calls it (`0x6e5026`): the same spell leaves the
     /// slot as it is, unsignalled (`0x6e4ad7`); another saves what the slot held (`0x6e4adf`, of
     /// which only a strike is kept), takes its place and signals (`0x6e4b13` → `0x4b3250`).
-    pub(crate) fn push(&mut self, spell_id: u32, held: Held, now: Instant) {
+    pub(crate) fn push(&mut self, spell_id: u32, held: Held) {
         let slot = self.slot();
         if slot.map(Inflight::spell_id) == Some(spell_id) {
             return;
@@ -82,7 +87,7 @@ impl CastCore<'_> {
             Held::Strike => self.queued_melee.push(strike, Some(spell_id)),
             Held::Cast { item_flags, item } => {
                 self.queued_melee.push(strike, None);
-                self.pending.push_cast(spell_id, item_flags, item, now);
+                self.pending.push_cast(spell_id, item_flags, item);
             }
             Held::Cursor => self.queued_melee.push(strike, None),
         }
@@ -102,22 +107,6 @@ impl CastCore<'_> {
         }
         self.queued_melee.restore();
         self.reports.changed();
-    }
-
-    /// A cast whose deadline passed with no result ([`PendingCast::lapsed`]) leaves the slot as
-    /// its result's pop takes it (`0x6e4b2c`): the save copied back, a strike under it included,
-    /// and signalled. The deadline is benilla's own net for a lost result, which the reference
-    /// waits on.
-    pub(crate) fn reap_lapsed(&mut self, now: Instant) {
-        let Some(spell_id) = self.pending.lapsed(now) else {
-            return;
-        };
-        let slot = self.slot();
-        if slot == Some(Inflight::Cast(spell_id)) {
-            self.pop(slot);
-        } else {
-            self.pending.clear_if(spell_id);
-        }
     }
 
     /// The send's pop of an auto-repeat spell once its packet is out (`0x6e597d`-`0x6e5989`): only
@@ -176,24 +165,34 @@ impl CastCore<'_> {
         (slot, caster)
     }
 
-    /// [`Self::cancel`], answering the spell its tail reaps on the player, for a caller that
-    /// applies the reap itself (StartAttack's, `0x5ecc85`): the record's `[0xceac58]`
-    /// (`0x6e4a8e`), whatever was popped, while the record's caster was the active player, and
-    /// not for a record with `AttributesEx & 0x4` (`0x6e4aad`); a spell with no record is reaped
-    /// (`0x6e4ab3`).
+    /// [`Self::cancel`] with its tail's reap of the player's cast (`0x614150` at `0x6e4ab7`),
+    /// queued on `edits` for `player`, the active player's object (`0x6e4a77`-`0x6e4a8c`): the
+    /// record's spell `[0xceac58]` (`0x6e4a8e`), whatever was popped, while the record's caster
+    /// was the active player (`0x6e4a11`), and not for a record with `AttributesEx & 0x4`
+    /// (`0x6e4aad`); a spell with no record is reaped (`0x6e4ab3`). Every caller that tears its
+    /// cast down locally takes this one tail: StartAttack's (`0x5ecc85`), the self cancel's and the
+    /// inventory refusal's (`0x5e3ab3`).
     pub(crate) fn cancel_reaping(
         &mut self,
         failed: bool,
         send: bool,
         reason: u8,
         spells: Option<&crate::ui_action::Spells>,
-    ) -> Option<u32> {
+        player: Option<Entity>,
+        edits: &crate::creature_anim::UnitEdits,
+    ) -> Option<Inflight> {
         let record = self.pending.record_spell();
-        let (_, caster) = self.cancel_for_caster(failed, send, reason);
+        let (slot, caster) = self.cancel_for_caster(failed, send, reason);
         let kept = spells
             .and_then(|s| s.catalog.get(record))
             .is_some_and(|d| d.attributes_ex & ATTR_EX_NOT_REAPED != 0);
-        (caster && !kept && record != 0).then_some(record)
+        if let (true, Some(entity)) = (caster && !kept && record != 0, player) {
+            edits.push(crate::creature_anim::UnitEdit::AbortCasting {
+                entity,
+                spell_id: record,
+            });
+        }
+        slot
     }
 
     /// The merge's range refusal re-arms the cursor as its attempt left it
@@ -390,14 +389,12 @@ mod tests {
         let (net, _rx) = wire();
         let mut s = Slots::default();
         s.queued_melee.arm(HEROIC_STRIKE);
-        let now = Instant::now();
         s.core(&net).push(
             FIREBALL,
             Held::Cast {
                 item_flags: None,
                 item: None,
             },
-            now,
         );
         s.core(&net).push(
             FIREBALL,
@@ -405,7 +402,6 @@ mod tests {
                 item_flags: None,
                 item: None,
             },
-            now,
         );
         assert_eq!(s.core(&net).slot(), Some(Inflight::Cast(FIREBALL)));
         assert_eq!(s.queued_melee.saved(), Some(HEROIC_STRIKE));
@@ -449,7 +445,6 @@ mod tests {
                 item_flags: None,
                 item: None,
             },
-            Instant::now(),
         );
         s.stream();
         s.core(&net).cancel_queued();
@@ -473,7 +468,6 @@ mod tests {
                 item_flags: None,
                 item: None,
             },
-            Instant::now(),
         );
         s.core(&net).cancel(false, false, REASON_ERROR);
         s.stream();

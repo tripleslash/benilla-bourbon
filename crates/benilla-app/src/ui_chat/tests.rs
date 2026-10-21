@@ -3622,8 +3622,9 @@ fn honor_gained_follows_its_line_and_only_a_written_one() {
 }
 
 /// The drain fires a queued `UNIT_COMBAT` at its place among the lines queued beside it, so a
-/// handler's order reaches Lua: here a flash, a line, a flash. Only the tokens naming the unit
-/// fire, `"player"` for your own guid.
+/// handler's order reaches Lua: here a flash, a line, a flash, and the attack stop's
+/// `PLAYER_LEAVE_COMBAT` after its flush (`0x625778`). Only the tokens naming the unit fire,
+/// `"player"` for your own guid.
 #[test]
 fn unit_combat_fires_at_its_place_in_the_drain() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -3640,6 +3641,7 @@ fn unit_combat_fires_at_its_place_in_the_drain() {
             end)
             Ord:RegisterEvent("UNIT_COMBAT")
             Ord:RegisterEvent("CHAT_MSG_COMBAT_XP_GAIN")
+            Ord:RegisterEvent("PLAYER_LEAVE_COMBAT")
         "#,
         )
         .unwrap();
@@ -3656,6 +3658,7 @@ fn unit_combat_fires_at_its_place_in_the_drain() {
         log.push_xp_gain(0, 10, 10, 1.0);
         log.push_unit_combat(flash(7, "PARRY"));
         log.push_unit_combat(flash(8, "MISS"));
+        log.push_combat_edge(false);
     }
     feed.drain();
     let order = feed.script().eval::<Vec<String>>("return Order").unwrap();
@@ -3664,7 +3667,8 @@ fn unit_combat_fires_at_its_place_in_the_drain() {
         [
             "UNIT_COMBAT player DODGE",
             "CHAT_MSG_COMBAT_XP_GAIN",
-            "UNIT_COMBAT player PARRY"
+            "UNIT_COMBAT player PARRY",
+            "PLAYER_LEAVE_COMBAT"
         ]
     );
 }
@@ -3766,5 +3770,207 @@ fn a_kills_unnamed_victim_is_the_unit_getters_miss() {
     assert_eq!(lines.len(), 2, "{lines:?}");
     for line in &lines {
         assert!(line.starts_with("Unknown Being "), "{lines:?}");
+    }
+}
+
+/// The reference's handlers fire inside the dispatch (`0x537aa0`): our `SMSG_ATTACKSTART` signals
+/// `PLAYER_ENTER_COMBAT` (`0x6256ff`) and the object update that sets the combat flag signals
+/// `PLAYER_REGEN_DISABLED` (`UNIT_FIELD_FLAGS` 0x80000, `crate::field_watch`). vmangos sends the
+/// start at once (`Unit.cpp:4774`) and the flag with the next update (`Unit.cpp:6145`), so in one
+/// drain the edge comes first; packets the other way round give the other order. The edge waits in
+/// the chat queue and the flag's notice in the field notices, each fired by its own pass.
+#[test]
+fn the_combat_edge_and_the_regen_notice_fire_in_their_packets_order() {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+
+    use crate::field_watch::FieldNotice;
+    use crate::net::handlers::NetHandlerApp;
+
+    fn edge(_: In<SessionEvent>, log: Res<super::ChatLog>) {
+        log.push_combat_edge(true);
+    }
+    fn regen(_: In<SessionEvent>, mut notices: MessageWriter<FieldNotice>) {
+        notices.write(FieldNotice::Global {
+            id: crate::field_watch::id::PLAYER_REGEN_DISABLED,
+        });
+    }
+    let start = || SessionEvent::LoggedOut;
+    let update = || SessionEvent::LoginQueued {
+        position: None,
+        realm: None,
+    };
+    for (packets, heard) in [
+        (
+            vec![start(), update()],
+            "PLAYER_ENTER_COMBAT PLAYER_REGEN_DISABLED",
+        ),
+        (
+            vec![update(), start()],
+            "PLAYER_REGEN_DISABLED PLAYER_ENTER_COMBAT",
+        ),
+    ] {
+        let mut app = App::new();
+        app.add_plugins(crate::ui_unit::UiUnitPlugin)
+            .net_handler(SessionEventKind::LoggedOut, edge)
+            .net_handler(SessionEventKind::LoginQueued, regen);
+        let world = app.world_mut();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        world.insert_resource(crate::net::NetCommands(tx));
+        world.insert_resource(super::frames::ChatWindows::default());
+        world.insert_resource(super::edit::ChannelState::default());
+        world.insert_resource(crate::names::NameCache::default());
+        world.insert_resource(crate::chat_bubble::BubbleQueue::default());
+        world.insert_resource(crate::chat_bubble::BubbleConfig::default());
+        world.insert_resource(crate::creature_anim::GestureQueue::default());
+        world.insert_resource(crate::net::SelfGuid::default());
+        world.insert_resource(crate::net::GuidIndex::default());
+        world.insert_resource(crate::world_state::WorldStates::default());
+        world.insert_resource(super::language::ChatLanguages::default());
+        world.insert_resource(crate::items::Items::default());
+        world.insert_resource(crate::go_templates::GameObjectTemplates::default());
+        world.insert_resource(crate::text_filter::TextFilter::default());
+        world.insert_resource(crate::text_filter::TextFilterSwitches::default());
+        let s = benilla_ui::script::UiScript::new().unwrap();
+        s.run(
+            r#"
+            Heard = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("PLAYER_ENTER_COMBAT")
+            f:RegisterEvent("PLAYER_REGEN_DISABLED")
+            f:SetScript("OnEvent", function() table.insert(Heard, event) end)
+        "#,
+        )
+        .unwrap();
+        world.insert_non_send(s);
+
+        crate::net::handlers::dispatch(world, packets);
+        world
+            .run_system_once(crate::ui_unit::field_events::fire_field_notices)
+            .unwrap();
+        crate::ui_chat::feed_chat_once(world);
+        let order = world
+            .non_send::<benilla_ui::script::UiScript>()
+            .eval::<String>("return table.concat(Heard, ' ')")
+            .unwrap();
+        assert_eq!(order, heard);
+    }
+}
+
+/// A field notice that waits for the chat drain shows its line as it fires: the rest-state
+/// callback signals `UPDATE_EXHAUSTION` and then shows the line for the new state (`0x5de4e0`),
+/// which `0x496720` hands the chat frames at once as `CHAT_MSG_SYSTEM`, ahead of the next
+/// packet's events. One between two combat edges, and one after the last, each show theirs in the
+/// pass that fires them, and of two in a row each shows its own before the next one signals.
+#[test]
+fn a_waiting_notices_chat_line_shows_in_the_pass_that_fires_it() {
+    use benilla_protocol::{SessionEvent, SessionEventKind};
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+
+    use crate::field_watch::FieldNotice;
+    use crate::net::handlers::NetHandlerApp;
+
+    fn enter(_: In<SessionEvent>, log: Res<super::ChatLog>) {
+        log.push_combat_edge(true);
+    }
+    fn leave(_: In<SessionEvent>, log: Res<super::ChatLog>) {
+        log.push_combat_edge(false);
+    }
+    fn rest(_: In<SessionEvent>, mut notices: MessageWriter<FieldNotice>) {
+        notices.write(FieldNotice::RestState { old: 1, new: 2 });
+    }
+    fn rest_back(_: In<SessionEvent>, mut notices: MessageWriter<FieldNotice>) {
+        notices.write(FieldNotice::RestState { old: 2, new: 1 });
+    }
+    let enter_packet = || SessionEvent::LoggedOut;
+    let rest_packet = || SessionEvent::LoginQueued {
+        position: None,
+        realm: None,
+    };
+    let leave_packet = || SessionEvent::LogoutCancelled;
+    let rest_back_packet = || SessionEvent::LogoutResponse {
+        reason: 0,
+        instant: false,
+    };
+    for (packets, heard) in [
+        (
+            vec![enter_packet(), rest_packet(), leave_packet()],
+            "PLAYER_ENTER_COMBAT UPDATE_EXHAUSTION CHAT_MSG_SYSTEM:You feel normal. \
+             PLAYER_LEAVE_COMBAT",
+        ),
+        (
+            vec![enter_packet(), rest_packet()],
+            "PLAYER_ENTER_COMBAT UPDATE_EXHAUSTION CHAT_MSG_SYSTEM:You feel normal.",
+        ),
+        (
+            vec![
+                enter_packet(),
+                rest_packet(),
+                rest_back_packet(),
+                leave_packet(),
+            ],
+            "PLAYER_ENTER_COMBAT UPDATE_EXHAUSTION CHAT_MSG_SYSTEM:You feel normal. \
+             UPDATE_EXHAUSTION CHAT_MSG_SYSTEM:You feel rested. PLAYER_LEAVE_COMBAT",
+        ),
+        (
+            vec![enter_packet(), rest_packet(), rest_back_packet()],
+            "PLAYER_ENTER_COMBAT UPDATE_EXHAUSTION CHAT_MSG_SYSTEM:You feel normal. \
+             UPDATE_EXHAUSTION CHAT_MSG_SYSTEM:You feel rested.",
+        ),
+    ] {
+        let mut app = App::new();
+        app.add_plugins(crate::ui_unit::UiUnitPlugin)
+            .net_handler(SessionEventKind::LoggedOut, enter)
+            .net_handler(SessionEventKind::LoginQueued, rest)
+            .net_handler(SessionEventKind::LogoutCancelled, leave)
+            .net_handler(SessionEventKind::LogoutResponse, rest_back);
+        let world = app.world_mut();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        world.insert_resource(crate::net::NetCommands(tx));
+        world.insert_resource(super::frames::ChatWindows::default());
+        world.insert_resource(super::edit::ChannelState::default());
+        world.insert_resource(crate::names::NameCache::default());
+        world.insert_resource(crate::chat_bubble::BubbleQueue::default());
+        world.insert_resource(crate::chat_bubble::BubbleConfig::default());
+        world.insert_resource(crate::creature_anim::GestureQueue::default());
+        world.insert_resource(crate::net::SelfGuid::default());
+        world.insert_resource(crate::net::GuidIndex::default());
+        world.insert_resource(crate::world_state::WorldStates::default());
+        world.insert_resource(super::language::ChatLanguages::default());
+        world.insert_resource(crate::items::Items::default());
+        world.insert_resource(crate::go_templates::GameObjectTemplates::default());
+        world.insert_resource(crate::text_filter::TextFilter::default());
+        world.insert_resource(crate::text_filter::TextFilterSwitches::default());
+        let s = benilla_ui::script::UiScript::new().unwrap();
+        s.run(
+            r#"
+            ERR_EXHAUSTION_NORMAL = "You feel normal."
+            ERR_EXHAUSTION_RESTED = "You feel rested."
+            Heard = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("PLAYER_ENTER_COMBAT")
+            f:RegisterEvent("PLAYER_LEAVE_COMBAT")
+            f:RegisterEvent("UPDATE_EXHAUSTION")
+            f:RegisterEvent("CHAT_MSG_SYSTEM")
+            f:SetScript("OnEvent", function()
+                table.insert(Heard, event == "CHAT_MSG_SYSTEM" and event .. ":" .. arg1 or event)
+            end)
+        "#,
+        )
+        .unwrap();
+        world.insert_non_send(s);
+
+        crate::net::handlers::dispatch(world, packets);
+        world
+            .run_system_once(crate::ui_unit::field_events::fire_field_notices)
+            .unwrap();
+        crate::ui_chat::feed_chat_once(world);
+        let order = world
+            .non_send::<benilla_ui::script::UiScript>()
+            .eval::<String>("return table.concat(Heard, ' ')")
+            .unwrap();
+        assert_eq!(order, heard);
     }
 }

@@ -466,9 +466,9 @@ fn drain_trade_skill(
     )>,
     mut open: ResMut<TradeSkillOpen>,
 ) {
-    vm.turn(|script, (mut cast_events, targeting, mut ladder)| {
+    let edges = vm.turn(|script, (mut cast_events, targeting, mut ladder)| {
         let Some(script) = script else {
-            return;
+            return Vec::new();
         };
 
         // The verb reads the held list, not the open marker (`0x5002e1`, `0x5002e9`), so a recipe
@@ -479,11 +479,21 @@ fn drain_trade_skill(
         }
 
         let self_entity = ladder.self_player.single().ok().map(|(e, _)| e);
-        for ev in cast_events.read() {
-            if Some(ev.entity) != self_entity {
-                continue;
-            }
-            if let Some(spell_id) = repeat_edge(script, ev) {
+        cast_events
+            .read()
+            .filter(|ev| Some(ev.entity) == self_entity)
+            .copied()
+            .collect::<Vec<_>>()
+    });
+
+    // Each edge is its own packet's hook (`0x6e81d3` → `0x4fd7b0`), whose signal's handlers run
+    // before the next packet counts down: a turn each.
+    for ev in edges {
+        vm.turn(|script, (_, targeting, mut ladder)| {
+            let Some(script) = script else {
+                return;
+            };
+            if let Some(spell_id) = repeat_edge(script, &ev) {
                 debug!(
                     "ui_tradeskill: recast {spell_id} ({} left)",
                     script.trade_skill_repeat().1
@@ -492,13 +502,13 @@ fn drain_trade_skill(
                 ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
                 script.trade_skill_recast_sent();
             }
-        }
+        });
+    }
 
-        if script.take_trade_skill_close() {
-            debug!("ui_tradeskill: client-side close (no packet)");
-            open.line = None;
-        }
-    })
+    if vm.run(|script| script.is_some_and(UiScript::take_trade_skill_close)) {
+        debug!("ui_tradeskill: client-side close (no packet)");
+        open.line = None;
+    }
 }
 
 /// One of our own cast edges into the VM's repeat: every GO whose first guid is the player, not
@@ -1000,6 +1010,42 @@ mod tests {
             )),
             "the craft was dropped"
         );
+    }
+
+    /// Each of our cast edges is its own `SMSG_SPELL_GO` in the reference, whose hook (`0x4fd7b0`)
+    /// counts down (`0x4fd7ca`) and signals `UPDATE_TRADESKILL_RECAST` (`0x4fd7dc`) before the next
+    /// packet is read, so two edges drained in one pass show their handlers 2, then 1.
+    #[test]
+    fn each_recasts_handlers_read_the_count_its_edge_left() {
+        let (mut app, _rx) = headless_tailor();
+        app.world_mut()
+            .non_send_mut::<UiScript>()
+            .run(
+                "SEEN = '' local f = CreateFrame('Frame') \
+                 f:RegisterEvent('UPDATE_TRADESKILL_RECAST') \
+                 f:SetScript('OnEvent', function() SEEN = SEEN .. GetTradeskillRepeatCount() .. ' ' end) \
+                 SelectTradeSkill(2) DoTradeSkill(2, 3)",
+            )
+            .unwrap();
+        let me = app
+            .world_mut()
+            .query_filtered::<Entity, With<SelfPlayer>>()
+            .single(app.world())
+            .unwrap();
+        for seq in 0..2 {
+            app.world_mut().write_message(CastEvent {
+                entity: me,
+                spell_id: 2963,
+                kind: CastEventKind::Go,
+                cast_flags: 0,
+                item_cast: false,
+                seq,
+            });
+        }
+        drain(&mut app);
+        let script = app.world().non_send::<UiScript>();
+        assert_eq!(script.trade_skill_repeat(), (2963, 1));
+        assert_eq!(script.eval::<String>("return SEEN").unwrap(), "3 2 1 ");
     }
 
     /// A cancelled targeting cursor is the cast abort with its disarm flag (`0x6e4900`,

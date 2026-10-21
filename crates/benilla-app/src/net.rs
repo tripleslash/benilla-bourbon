@@ -681,6 +681,11 @@ impl Objects<'_, '_> {
         self.me.single().ok()
     }
 
+    /// Our own player's descriptor fields, once in the world.
+    pub(crate) fn player_fields(&self) -> Option<&ObjectFields> {
+        self.stores.get(self.player()?).ok().map(|s| &s.0)
+    }
+
     /// An item object's countdown cells.
     pub(crate) fn countdowns(&self, guid: u64) -> Option<&crate::items::Countdowns> {
         self.index
@@ -2004,6 +2009,9 @@ pub(crate) enum ClientCommand {
         icon: u8,
         guid: u64,
     },
+    /// `MSG_RAID_TARGET_UPDATE` with the byte 0xff alone, the request for every icon, which a raid
+    /// list sends on finding no roster held (`0x4babf4`-`0x4bac33`).
+    RequestRaidTargets,
     /// `MSG_MINIMAP_PING`, raw world `(x, y)`. The server relays it to the rest of the group and
     /// ignores it solo, so our own marker is drawn locally.
     MinimapPing {

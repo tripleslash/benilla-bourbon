@@ -208,9 +208,11 @@ fn answer(app: &mut App, i: u64) {
         format!("M{i}"),
         Some((1, 1, 0)),
     );
-    app.world_mut()
+    let name = format!("M{i}");
+    let _ = app
+        .world_mut()
         .resource_mut::<GroupState>()
-        .apply_player_name(member(i));
+        .apply_player_name(member(i), Some(&name));
 }
 
 /// A frame that counts `PARTY_MEMBERS_CHANGED` and `RAID_ROSTER_UPDATE` in the order the VM is
@@ -692,7 +694,7 @@ fn the_sandbox_answers_a_raid_intent_with_a_raid_roster_update() {
     assert_eq!(rows(&mut app), 5.0, "its four, then us");
     intent(&mut app, PartyRequest::LootThreshold(4));
     assert_eq!(fired(&mut app), 1, "a raid intent that moves no member");
-    intent(&mut app, PartyRequest::PromoteUnit("party2".into()));
+    intent(&mut app, PartyRequest::PromoteGuid(0xF002));
     assert_eq!(
         fired(&mut app),
         1,

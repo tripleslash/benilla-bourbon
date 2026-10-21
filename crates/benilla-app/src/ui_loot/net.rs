@@ -935,6 +935,7 @@ mod tests {
         world.init_resource::<crate::target::Selection>();
         world.init_resource::<crate::spell::SpellTargeting>();
         world.init_resource::<crate::spell::CursorPicks>();
+        world.init_resource::<crate::spell::targeting::EnchantConfirmItem>();
         world.init_resource::<bevy::ecs::message::Messages<crate::target::DeselectGuid>>();
         world.init_resource::<bevy::ecs::message::Messages<crate::player::StandStateRequest>>();
         world.init_resource::<crate::player::Player>();
@@ -1185,6 +1186,9 @@ mod tests {
         "Interface\\FrameXML\\PlayerFrame.xml",
         "Interface\\FrameXML\\PartyFrame.xml",
         "Interface\\FrameXML\\TargetFrame.xml",
+        // `StaticPopup_Hide`, which UIParent's `PLAYER_UNGHOST` arm calls (`UIParent.lua:251-257`)
+        // at a live arrival.
+        "Interface\\FrameXML\\StaticPopup.xml",
     ];
 
     /// [`tabbed_world`] under the stock `ui` files, with the unit feed and both creatures named.

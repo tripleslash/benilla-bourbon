@@ -313,7 +313,7 @@ pub use item_stats::{
 pub use item_text::ItemTextState;
 pub use layout_cache::{AnchorLayout, FrameLayout, LayoutPoint};
 pub use lock_check::{check_lock, LockCheck, LockOpener, LockOpeners, LockSlotView};
-pub use loot::{LootRow, LootState, LOOT_PORTRAIT_UNIT};
+pub use loot::{LootRow, LootState, LootTake, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macro_options::{has_options as macro_has_options, show_directive, ShowDirective};
 pub use macros::{
@@ -382,7 +382,7 @@ pub use types::{
     ExtractedQuad, FontObject, FontShadow, Gradient, JustifyH, JustifyV, LineMeasureRequest,
     MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords, TextShadow,
 };
-pub use unit::by_name::{self, NameCandidate};
+pub use unit::by_name::{self, NameCandidate, SeatedSelection};
 pub use unit::{
     grey_band, level_reads_unknown, parse_unit_token, power_token, unit_is_grey, PlayerRecord,
     SelectionRequest, UnitBase, UnitGuids, UnitRelations, UnitState, UnitTokenParse,
@@ -878,8 +878,12 @@ impl UiScript {
         let session = NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut model = self.model_ref().clone();
         model.session = session;
+        // What waits is the original's host's, and its handlers' values its VM's.
+        model.script_calls.clear();
         lua.set_app_data(model);
+        // A fork is a VM of its own, so it carries the profiler's slot and the call host's.
         handler_prof::install(&lua);
+        host::install(&lua);
         UiScript {
             lua,
             instructions: Default::default(),
@@ -1140,16 +1144,20 @@ impl UiScript {
 
     /// Run a chunk under the name the 1.12 client gives it ([`addon_chunk_name`] for addon files).
     pub fn run_chunk_named(&self, chunk: &[u8], name: &str) -> mlua::Result<()> {
-        self.lua
-            .load(crate::source::chunk(chunk))
-            .set_name(name)
-            .set_mode(mlua::ChunkMode::Text)
-            .exec()
+        host::unheld(&self.lua, || {
+            self.lua
+                .load(crate::source::chunk(chunk))
+                .set_name(name)
+                .set_mode(mlua::ChunkMode::Text)
+                .exec()
+        })
     }
 
     /// Load and evaluate a Lua chunk, returning its result: for tests and one-shot queries.
     pub fn eval<T: mlua::FromLuaMulti>(&self, chunk: &str) -> mlua::Result<T> {
-        self.lua.load(chunk).set_mode(mlua::ChunkMode::Text).eval()
+        host::unheld(&self.lua, || {
+            self.lua.load(chunk).set_mode(mlua::ChunkMode::Text).eval()
+        })
     }
 
     /// How many values the Lua expression `expr` returns (`"GetItemInfo(1)"`, not a chunk), zero
@@ -1641,7 +1649,10 @@ impl UiScript {
             return;
         };
         for arg in pending {
-            if let Err(e) = arg.value(&self.lua).and_then(|v| handler.call::<()>(v)) {
+            let ran = host::unheld(&self.lua, || {
+                arg.value(&self.lua).and_then(|v| handler.call::<()>(v))
+            });
+            if let Err(e) = ran {
                 self.model_mut()
                     .errors
                     .push(format!("error handler itself failed: {e}"));

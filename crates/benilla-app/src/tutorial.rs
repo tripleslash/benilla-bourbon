@@ -263,7 +263,7 @@ impl Tutorials {
 
 /// The last-seen level and swimming state, for the edge-triggered `0x4b5390` sites polled here.
 /// The ghost, resting, PvP and rested tutorials ride their field watchers
-/// ([`crate::field_watch`]).
+/// ([`crate::field_watch`]), the ghost's arrival leg the cascade ([`run_world_enter_cascade`]).
 #[derive(Default)]
 struct SelfWatch {
     level: Option<u32>,
@@ -442,8 +442,9 @@ fn on_world_enter(
 }
 
 /// The enter-world cascade `0x4908c0`'s two unconditional triggers, Welcome (`0x490a48`) then
-/// Questgivers (`0x490a51`), once per world session when the local player exists; and the
-/// Movement popup's silence window.
+/// Questgivers (`0x490a51`), once per world session when the local player exists, each arrival's
+/// ghost tutorial ahead of them ([`run_world_enter_cascade`]); and the Movement popup's silence
+/// window.
 #[derive(Resource, Default)]
 pub(crate) struct WorldEnterCascade {
     armed: bool,
@@ -454,12 +455,22 @@ pub(crate) struct WorldEnterCascade {
     reset_watch: bool,
 }
 
+/// The arrival's tutorial and the cascade's. Our player's create (`0x5dea50`) runs its ghost state
+/// (`0x5deb2a` → `0x5de9c0`) before the cascade (`0x5deb60`): arriving with `PLAYER_FLAGS` bit
+/// 0x10 triggers Death (`0x5de9eb`-`0x5de9f0`), at login and at every cross-map port, so it comes
+/// ahead of Welcome.
 fn run_world_enter_cascade(
     mut cascade: ResMut<WorldEnterCascade>,
     mut tutorials: ResMut<Tutorials>,
     self_q: Query<(), With<SelfPlayer>>,
+    arrivals: Query<&ObjectStore, Added<SelfPlayer>>,
 ) {
     let now = Instant::now();
+    for store in &arrivals {
+        if store.0.player_flags() & 0x10 != 0 {
+            tutorials.trigger(id::DEATH, 0, now);
+        }
+    }
     if cascade.armed && !self_q.is_empty() {
         cascade.armed = false;
         tutorials.trigger(id::WELCOME, 0, now);
@@ -904,5 +915,55 @@ mod tests {
             app.world().resource::<Tutorials>().fired.is_empty(),
             "…and once there is an interface, it is published exactly once"
         );
+    }
+
+    /// The active player's arrival runs its ghost state (`0x5dea50` → `0x5deb2a` → `0x5de9c0`)
+    /// before the world-enter cascade (`0x5deb60` → `0x4908c0`): arriving with `PLAYER_FLAGS`
+    /// bit 0x10 set fires Death (0x18, `0x5de9eb`-`0x5de9f0`) ahead of Welcome and Questgivers,
+    /// published as their number plus one; arriving alive fires no Death.
+    #[test]
+    fn a_ghost_arrival_fires_death_ahead_of_the_cascades_tutorials() {
+        const PLAYER_FLAGS: u16 = 190;
+        for (flags, published) in [(0x10, vec![0x19, 0x2a, 0x01]), (0, vec![0x2a, 0x01])] {
+            let mut app = App::new();
+            app.add_plugins(TutorialPlugin)
+                .init_resource::<crate::items::Items>()
+                .init_resource::<crate::sound::MessageSounds>()
+                .init_resource::<crate::ui_trainer::TrainerOpen>()
+                .init_resource::<crate::ui_merchant::MerchantOpen>()
+                .init_resource::<crate::ui_taxi::TaxiState>()
+                .init_resource::<Player>()
+                .add_message::<EnteredWorldMessage>();
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            app.insert_resource(crate::net::NetCommands(tx));
+            app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+            let script = UiScript::new().expect("a VM");
+            script
+                .run(
+                    "SEEN = {} local f = CreateFrame('Frame') \
+                     f:RegisterEvent('TUTORIAL_TRIGGER') \
+                     f:SetScript('OnEvent', function() table.insert(SEEN, arg1) end)",
+                )
+                .unwrap();
+            app.insert_non_send(script);
+            app.world_mut().write_message(EnteredWorldMessage {
+                tutorial_flags: Some(vec![0u8; 32]),
+            });
+            app.world_mut().spawn((
+                SelfPlayer,
+                ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                    PLAYER_FLAGS,
+                    flags,
+                )])),
+            ));
+            app.update();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
+            s.resolve();
+            assert_eq!(
+                s.eval::<Vec<i64>>("return SEEN").unwrap(),
+                published,
+                "flags {flags:#x}"
+            );
+        }
     }
 }

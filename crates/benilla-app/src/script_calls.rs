@@ -103,6 +103,8 @@ impl CallHost for ScriptCallHost<'_, '_> {
         let selected_before = appliers.p0().selected();
         let report_mark = appliers.p2().p2().mark();
         let mut tail: Option<CallTail> = None;
+        // The confirm popup an item pick or a Yes raised, signalled with the call's reports.
+        let mut popup = None;
         match call {
             ScriptCall::Select { request, .. } => appliers.p0().select(request),
             ScriptCall::TargetByName { name, exact, .. } => {
@@ -166,6 +168,8 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::PetOrder(packed) => pet_in_order!(appliers, begin_order(packed)),
             ScriptCall::SendChat(send) => appliers.p4().p1().send_chat(script, send),
             ScriptCall::RandomRoll { min, max } => appliers.p4().p1().random_roll(min, max),
+            ScriptCall::PickItem(pick) => popup = appliers.p1().pick_item(pick),
+            ScriptCall::EnchantConfirm(answer) => popup = appliers.p1().confirm_enchant(answer),
         }
         // A selection this call made with the targeting cursor up was handed to the cast
         // (`SelectTarget`, `0x4935d5`) and is bound now, before the next call reads either.
@@ -203,17 +207,20 @@ impl CallHost for ScriptCallHost<'_, '_> {
         }
         // Whatever casts next is the engine's own, which asks no gate.
         appliers.p3().ladder.permit(true);
-        // The reference signals `PLAYER_TARGET_CHANGED` inside `SetSelection`, so inside this
-        // call's input events; the unit feed signals it a step later, and asks for them.
+        // The selection the call committed (`SetSelection 0x493540`, inside every selecting
+        // verb) is `"target"` for the script's next line. The reference signals
+        // `PLAYER_TARGET_CHANGED` there too, so inside this call's input events; the unit feed
+        // signals it a step later, and asks for them.
         let selected_after = appliers.p0().selected();
         let input = script.input_events();
         if selected_after != selected_before {
+            script.seat_selection(appliers.p0().seated());
             script.note_selection_cause(selected_after, input);
         }
         // The reports the call made, in its order: a refusal's `UI_ERROR_MESSAGE` and its
         // `SPELLCAST_FAILED` (`ReportCastFailure 0x6e1a00` inside `TryCast 0x6e4b60`), a cancel's
-        // event, `CURRENT_SPELL_CAST_CHANGED` at each of the attempt's signals, all signalled
-        // below as the call returns, under its input events.
+        // event, `CURRENT_SPELL_CAST_CHANGED` at each of the attempt's signals, and the item gate's
+        // confirm (`0x495d60`), all signalled below as the call returns, under its input events.
         let ready = appliers.p2().p2().ready_since(script, report_mark);
         // The cast state the call left, for the script's next line: `SpellStopCasting`
         // (`0x6e6e80`) finds the cast it sent in flight (`0x6e5026`), and `IsCurrentAction`
@@ -224,12 +231,15 @@ impl CallHost for ScriptCallHost<'_, '_> {
         // The word the call left: `SpellIsTargeting` (`0x6e6cd0`) reads it, and `SpellTargetUnit`
         // binds to it.
         appliers.p1().push_view(script);
-        if ready.is_empty() {
+        if ready.is_empty() && popup.is_none() {
             return tail;
         }
         let macro_lines = tail.take();
         Some(Box::new(move |script: &mut UiScript| {
             crate::ui_cast::fire(script, ready);
+            if let Some(popup) = popup {
+                popup.fire(script);
+            }
             if let Some(lines) = macro_lines {
                 lines(script);
             }
@@ -384,21 +394,26 @@ pub(crate) fn with_hosted_vm<R>(
     r
 }
 
-/// Apply what an engine turn left waiting on `script`, a VM out of the world (the UI load runs on
-/// one, with the world in hand): through a host built off the world, or dropped with none.
-pub(crate) fn apply_waiting(world: &mut World, script: &mut UiScript) {
+/// Run `f` on `script`, a VM out of the world (the UI load runs on one, with the world in hand),
+/// with a host built off the world lent, as a system's would be, and apply what its calls queued
+/// after. A world without the appliers' state (a bare test world) lends none: the calls are
+/// dropped as `f` returns ([`UiScript::refusing`]).
+pub(crate) fn lent_by_world<R>(
+    world: &mut World,
+    script: &mut UiScript,
+    f: impl FnOnce(&mut UiScript) -> R,
+) -> R {
     let mut state = bevy::ecs::system::SystemState::<Option<ScriptCallHost>>::new(world);
-    {
+    let r = {
         let mut host = state.get_mut(world).expect("an optional host validates");
         match host.as_mut() {
-            Some(host) => script.hosted(host, |_| ()),
-            None => {
-                script.refuse_waiting();
-            }
+            Some(host) => script.hosted(host, f),
+            None => script.refusing(f),
         }
-    }
+    };
     state.apply(world);
     crate::creature_anim::apply_unit_edits(world);
+    r
 }
 
 /// Run `system` as a one-shot from an exclusive caller, as [`World::run_system_cached`] does, and
@@ -933,6 +948,46 @@ mod tests {
         }
     }
 
+    /// The resolver reads the target's `UNIT_FIELD_TARGET` live (`0x515970`, the hop at
+    /// `0x515a0f`), so `"targettarget"` follows each selection a call commits: after
+    /// `TargetUnit` it names the new target's target, and after `ClearTarget` nobody, whatever
+    /// the frame pushed for the selection the chunk started on.
+    #[test]
+    fn target_of_target_follows_the_selection_a_call_commits() {
+        use benilla_ui::script::UnitState;
+        let mut f = frame(true);
+        let world = f.app.world_mut();
+        // `party1` targets us (`UNIT_FIELD_TARGET`, fields 16 and 17).
+        let new = world.resource::<GuidIndex>().0[&NEW];
+        world
+            .entity_mut(new)
+            .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (22, 100),
+                (28, 100),
+                (16, ME as u32),
+                (17, 0),
+            ])));
+        let mut script = world.non_send_mut::<UiScript>();
+        let named = |guid, name: &str| UnitState {
+            exists: true,
+            has_object: true,
+            guid,
+            name: Some(name.into()),
+            ..Default::default()
+        };
+        script.set_unit("player", Some(named(ME, "Me")));
+        // The frame's push for the old selection's target.
+        script.set_unit("targettarget", Some(named(0x77, "Stale")));
+        let tot = eval::<Option<String>>(
+            &mut f,
+            r#"TargetUnit("party1") return UnitName("targettarget")"#,
+        );
+        assert_eq!(tot.as_deref(), Some("Me"), "the new target's target");
+        let exists =
+            eval::<Option<i64>>(&mut f, r#"ClearTarget() return UnitExists("targettarget")"#);
+        assert_eq!(exists, None, "no target, so no target of target");
+    }
+
     /// `TargetNearestEnemy` (`0x489a80` → `0x493f60(0, 1)`) commits through `SetSelection` before
     /// it returns, so the cast after it in the same script goes to the unit the TAB cycle picked.
     #[test]
@@ -979,6 +1034,143 @@ mod tests {
         let mut f = frame(true);
         run(&mut f, r#"TargetUnit("party1") AttackTarget()"#);
         assert_eq!(swings(&f), (vec![NEW], false));
+    }
+
+    /// `LOOT_OPENED` is signalled by the response's copier (`0x4c2ac0`), whose listeners run in
+    /// place (`SignalEvent`, `0x703e50`), so a selecting verb a handler calls has committed by its
+    /// next line, as every verb's has: `TargetUnit` then `UnitName("target")` names the new
+    /// target. The window's feed is an engine turn; its handlers run as the turn ends, with the
+    /// host lent.
+    #[test]
+    fn a_loot_opened_handlers_target_call_applies_inside_it() {
+        let mut f = frame(true);
+        let world = f.app.world_mut();
+        world
+            .resource_mut::<crate::names::NameCache>()
+            .insert_player(NEW, "Red Whelp".into(), None);
+        world
+            .run_system_once(crate::ui_unit::feed_name_candidates)
+            .expect("the candidate feed runs as a one-shot system");
+        run(
+            &mut f,
+            r#"local l = CreateFrame("Frame")
+            l:RegisterEvent("LOOT_OPENED")
+            l:SetScript("OnEvent", function() TargetUnit("party1") SEEN = UnitName("target") end)"#,
+        );
+        let world = f.app.world_mut();
+        world
+            .resource_mut::<crate::ui_loot::LootState>()
+            .open(MOB, 1, 0, Vec::new());
+        crate::ui_loot::feed_loot_once(world);
+        let seen = eval::<Option<String>>(&mut f, "return SEEN");
+        assert_eq!(seen.as_deref(), Some("Red Whelp"), "the new target");
+        assert_eq!(selected(&f), Some(NEW));
+    }
+
+    /// The plate driver hides each live plate in turn as it returns it to the pool (`0x608a10`),
+    /// so each plate's `OnHide` runs as its plate goes, with the plates after it still shown, and
+    /// a call it makes commits before its verb returns: `TargetUnit` then `UnitName("target")`
+    /// names the new target. The driver's turn leaves the widgets to change after it, with the
+    /// host lent.
+    #[test]
+    fn a_plates_on_hide_runs_as_it_goes_with_the_host_lent() {
+        use benilla_ui::script::{PlateGeometry, PlateState};
+        let mut f = frame(true);
+        let world = f.app.world_mut();
+        world
+            .resource_mut::<crate::names::NameCache>()
+            .insert_player(NEW, "Red Whelp".into(), None);
+        world
+            .run_system_once(crate::ui_unit::feed_name_candidates)
+            .expect("the candidate feed runs as a one-shot system");
+        let plate = |key: u64| PlateState {
+            key,
+            top_centre: (400.0, 400.0),
+            health: 30.0,
+            max_health: 40.0,
+            bar_colour: [1.0, 0.0, 0.0],
+            name: "Wolf".into(),
+            level: Some(12),
+            skull: false,
+            level_colour: [1.0, 1.0, 0.0],
+            raid_icon: None,
+            alpha: 255,
+            lit: false,
+            hovered: false,
+        };
+        let geometry = PlateGeometry {
+            width: 128.0,
+            height: 32.0,
+            bar_off_x: 4.0,
+            bar_off_y: 4.0,
+            bar_width: 103.0,
+            bar_height: 9.0,
+            level_off_x: 11.8,
+            level_off_y: 9.1,
+            skull_size: 12.8,
+            raid_size: 25.6,
+            name_height: 12.8,
+            level_height: 11.0,
+            shadow_offset: 1.0,
+        };
+        {
+            let mut script = world.non_send_mut::<UiScript>();
+            script.run(r#"CreateFrame("Frame", "WorldFrame")"#).unwrap();
+            script.sync_nameplates(geometry, &[plate(OLD), plate(NEW)]);
+            script
+                .run(
+                    r#"SHOWN = ""
+                    local function shown()
+                        local n = 0
+                        for _, c in ipairs({WorldFrame:GetChildren()}) do
+                            if c:IsShown() then n = n + 1 end
+                        end
+                        return n
+                    end
+                    for _, c in ipairs({WorldFrame:GetChildren()}) do
+                        c:SetScript("OnHide", function()
+                            SHOWN = SHOWN .. shown()
+                            TargetUnit("party1")
+                            SEEN = UnitName("target")
+                        end)
+                    end"#,
+                )
+                .unwrap();
+        }
+        // Neither kind of plate on: the driver retires every live one.
+        world.init_resource::<crate::player::CameraControl>();
+        crate::vplates::drive_vplates_once(world);
+        let (shown, seen) = eval::<(Option<String>, Option<String>)>(&mut f, "return SHOWN, SEEN");
+        assert_eq!(shown.as_deref(), Some("10"), "each as its plate goes");
+        assert_eq!(seen.as_deref(), Some("Red Whelp"), "the new target");
+    }
+
+    /// A probe's `/script` line is `RunScript(msg)`, a verb like any other: the line's `TargetUnit`
+    /// commits through `SetSelection 0x493540` before it returns, so the line's next statement
+    /// reads the new target. The drain takes the lines in an engine turn and runs each line's Lua
+    /// between turns, with the host lent.
+    #[test]
+    fn a_probe_lines_target_call_applies_inside_it() {
+        let mut f = frame(true);
+        let world = f.app.world_mut();
+        world
+            .resource_mut::<crate::names::NameCache>()
+            .insert_player(NEW, "Red Whelp".into(), None);
+        world
+            .run_system_once(crate::ui_unit::feed_name_candidates)
+            .expect("the candidate feed runs as a one-shot system");
+        benilla_world::world_point::init_world_point_resources(world);
+        world.insert_resource(crate::ui_chat::commands::SlashCommands::build(
+            |name| (name == "SLASH_SCRIPT1").then(|| "/script".to_string()),
+            |_| None,
+        ));
+        world
+            .non_send_mut::<UiScript>()
+            .push_chat_input(r#"/script TargetUnit("party1") SEEN = UnitName("target")"#.into());
+        crate::ui_chat::drain_chat_input_once(world);
+        let seen = eval::<Option<String>>(&mut f, "return SEEN");
+        assert_eq!(seen.as_deref(), Some("Red Whelp"), "the new target");
+        assert_eq!(selected(&f), Some(NEW));
     }
 
     /// `TargetByName` (`0x489d60`) commits through `SetSelection 0x493540` before it returns, so
@@ -1184,9 +1376,9 @@ mod tests {
         }
     }
 
-    /// The candidate feed marks a `UNIT_FLAG_NOT_SELECTABLE` unit as the commit's `IsSelectable`
-    /// does (`0x4935ee`): the nearer namesake is the ranked pick and it is refused, so the chunk
-    /// keeps the old target's view and the commit keeps its selection, not the farther namesake.
+    /// The commit's `IsSelectable` (`0x4935ee`) refuses a `UNIT_FLAG_NOT_SELECTABLE` unit: the
+    /// nearer namesake is the ranked pick and it is refused, so the commit keeps its selection,
+    /// not the farther namesake, and the chunk keeps the old target's view.
     #[test]
     fn target_by_name_shows_nothing_when_the_commit_refuses_its_pick() {
         /// `UNIT_FLAG_NOT_SELECTABLE`, `UNIT_FIELD_FLAGS` bit 25.
@@ -2471,6 +2663,33 @@ mod tests {
         names.insert_player(NEW, "Bob".into(), None);
         world.resource_mut::<crate::target::LastEnemy>().0 = Some(MOB);
         world.resource_mut::<Selection>().last = Some(NEW);
+    }
+
+    /// Every selecting verb commits through `SetSelection 0x493540` before it returns: the TAB
+    /// cycle's pick (`0x4941e6`), and `TargetLastTarget`, `TargetLastEnemy` and `AssistUnit`
+    /// through `0x489a40` (`0x489a74`). So `UnitName("target")` on the next line of the same chunk
+    /// names the unit the call selected, from the frame's candidates.
+    #[test]
+    fn the_next_line_reads_the_target_each_selecting_verb_committed() {
+        for (lua, name) in [
+            ("TargetNearestEnemy()", "Red Affinity"),
+            ("TargetLastEnemy()", "Red Affinity"),
+            (r#"AssistUnit("party1")"#, "Red Affinity"),
+            ("TargetLastTarget()", "Bob"),
+        ] {
+            let mut f = frame(true);
+            with_things_to_select(&mut f);
+            f.app
+                .world_mut()
+                .run_system_once(crate::ui_unit::feed_name_candidates)
+                .unwrap();
+            let seen = with_hosted_vm(f.app.world_mut(), |s| {
+                s.expect("a VM")
+                    .eval::<Option<String>>(&format!(r#"{lua} return UnitName("target")"#))
+            })
+            .unwrap();
+            assert_eq!(seen.as_deref(), Some(name), "{lua}");
+        }
     }
 
     /// `SelectTarget` (`0x493540`) with the targeting cursor up binds the unit to the pending cast

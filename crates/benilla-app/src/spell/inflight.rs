@@ -11,25 +11,11 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
 use super::SpellTargeting;
-use crate::creature_anim::{CastEvent, CastEventKind, PlaySeq};
 use crate::net::{ClientCommand, GuidIndex, NetCommands, SelfGuid};
 use crate::ui_action::Spells;
 use crate::ui_cast::CastReports;
 use benilla_protocol::messages::ITEM_FLAG_PLAYERCAST;
 use benilla_ui::script::CastView;
-
-/// The in-flight window from send until `SMSG_SPELL_START` names the cast time; the server
-/// answers every `CMSG_CAST_SPELL`, so a packet always clears it first.
-const SEND_PROVISIONAL: Duration = Duration::from_secs(5);
-
-/// The same for an item use, kept short: vmangos refuses some `CMSG_USE_ITEM`s with only
-/// `SMSG_INVENTORY_CHANGE_FAILURE` and no cast result (`HandleUseItemOpcode`), so this deadline
-/// is what reopens casting.
-const ITEM_SEND_PROVISIONAL: Duration = Duration::from_millis(1_500);
-
-/// Pushback slack added to the server's cast time at `SMSG_SPELL_START`, so a cast the server
-/// delays (`SMSG_SPELL_DELAYED`) still guards past its stretched end.
-const CAST_SLACK: Duration = Duration::from_secs(2);
 
 /// Our outstanding cast: the reference's in-flight slot `0xceca88` for everything that is sent.
 ///
@@ -44,9 +30,10 @@ const CAST_SLACK: Duration = Duration::from_secs(2);
 /// [`inflight`] joins the three into the reference's one slot.
 ///
 /// Cleared by the spell's `SMSG_CAST_RESULT`, success or failure (`0x6e7408` → `0x6e741a`), keyed
-/// on the spell id, or by [`local_self_cancel`]. `deadline` covers a lost result, which the
-/// reference has no answer for: [`reap_lapsed_cast`] pops a cast past it as its result would,
-/// once a frame, so every reader in between sees the slot the same.
+/// on the spell id, by a cancel (`CancelCast 0x6e4940`: [`local_self_cancel`], Esc, an inventory
+/// refusal naming its item), or by the world entry's reset. Nothing times it out: `0xceca88` is
+/// written by the push `0x6e4af8`, the pop `0x6e4b3d` and the world-entry zero `0x6e72e7` alone,
+/// so a cast whose answer never comes holds the slot until a cancel.
 ///
 /// It also carries the pending record's caster word (`0xceac48 + 0x08`, `0xceac50`), the one gate
 /// on the cancel's events: see [`Self::fill_record`] and [`Self::take_caster_event`]; and its
@@ -60,7 +47,6 @@ pub(crate) struct PendingCast {
 
 struct PendingCastState {
     spell_id: u32,
-    deadline: Instant,
     /// The guid of the item the cast came from (`0xcecab0`), `None` for a spell's own cast.
     item: Option<u64>,
 }
@@ -78,47 +64,23 @@ impl PendingCast {
         self.slot.as_ref().map(|p| p.spell_id)
     }
 
-    /// The outstanding cast, when its deadline has passed at `now`.
-    pub(crate) fn lapsed(&self, now: Instant) -> Option<u32> {
-        self.slot
-            .as_ref()
-            .filter(|p| now >= p.deadline)
-            .map(|p| p.spell_id)
-    }
-
     /// `SetInFlightSpell(spell, item)` as the attempt calls it (`0x6e5026`). `item_flags` is the
     /// used item's template flags, `None` for a cast with no item: an item whose flags lack
     /// [`ITEM_FLAG_PLAYERCAST`] never enters the slot (a potion, food, a healthstone), so it
     /// blocks nothing. `item` is the item object's guid, which the slot keeps beside the spell
-    /// (`0x6e4b00`). An item's deadline is short: vmangos refuses some `CMSG_USE_ITEM`s with
-    /// only `SMSG_INVENTORY_CHANGE_FAILURE` and no cast result (`HandleUseItemOpcode`), and this
-    /// deadline is what reopens casting.
-    pub(crate) fn push_cast(
-        &mut self,
-        spell_id: u32,
-        item_flags: Option<u32>,
-        item: Option<u64>,
-        now: Instant,
-    ) {
+    /// (`0x6e4b00`).
+    pub(crate) fn push_cast(&mut self, spell_id: u32, item_flags: Option<u32>, item: Option<u64>) {
         if item_flags.is_some_and(|flags| flags & ITEM_FLAG_PLAYERCAST == 0) {
             return;
         }
-        let window = if item_flags.is_some() {
-            ITEM_SEND_PROVISIONAL
-        } else {
-            SEND_PROVISIONAL
-        };
-        self.slot = Some(PendingCastState {
-            spell_id,
-            item,
-            deadline: now + window,
-        });
+        self.slot = Some(PendingCastState { spell_id, item });
     }
 
-    /// [`Self::push_cast`] with no item object.
+    /// [`Self::push_cast`] with no item object. `_sent` is the press time its callers stamp,
+    /// which the slot does not keep.
     #[cfg(test)]
-    pub(crate) fn push(&mut self, spell_id: u32, item_flags: Option<u32>, now: Instant) {
-        self.push_cast(spell_id, item_flags, None, now);
+    pub(crate) fn push(&mut self, spell_id: u32, item_flags: Option<u32>, _sent: Instant) {
+        self.push_cast(spell_id, item_flags, None);
     }
 
     /// The guid of the item the outstanding cast came from.
@@ -126,26 +88,17 @@ impl PendingCast {
         self.slot.as_ref().and_then(|p| p.item)
     }
 
-    /// Tighten the deadline to the server's real cast time once `SMSG_SPELL_START` names it.
-    pub(crate) fn refine(&mut self, cast_time_ms: u32, now: Instant) {
-        if let Some(p) = &mut self.slot {
-            p.deadline = now + Duration::from_millis(u64::from(cast_time_ms)) + CAST_SLACK;
-        }
-    }
-
-    /// `SMSG_SPELL_DELAYED`: extend from the later of the deadline and now, so a lapsed deadline
-    /// re-arms.
-    pub(crate) fn delay(&mut self, delay_ms: u32, now: Instant) {
-        if let Some(p) = &mut self.slot {
-            p.deadline = p.deadline.max(now) + Duration::from_millis(u64::from(delay_ms));
-        }
-    }
-
     /// Clear on a resolution for our spell only: a proc's `SMSG_SPELL_GO` mid-cast must not.
     pub(crate) fn clear_if(&mut self, spell_id: u32) {
         if self.slot.as_ref().is_some_and(|p| p.spell_id == spell_id) {
             self.slot = None;
         }
+    }
+
+    /// The world entry's zero of the slot and its item guid (`0x6e72e7`, `0x6e72ed`). The pending
+    /// record is not `0x6e7150`'s to zero, so its caster word and spell stay.
+    pub(crate) fn clear_slot(&mut self) {
+        self.slot = None;
     }
 
     /// The attempt's record fill (`0x6e4fb1`, once every rung has passed and before the arm, so a
@@ -189,7 +142,7 @@ impl PendingCast {
 /// strike a cast popped back over is in both. Only a strike's save matters: the attempt refuses or
 /// cancels anything else in flight before it pushes (`0x6e4d62`, `0x6e4d97`).
 ///
-/// No deadline. The handler clears the save for its spell (`0x6e73ee`) and pops the slot for it
+/// The handler clears the save for its spell (`0x6e73ee`) and pops the slot for it
 /// (`0x6e7408`); vmangos answers a dead melee slot with `SMSG_SPELL_FAILED_OTHER`, which touches
 /// neither (`0x6e8e40`), then a failing `SMSG_CAST_RESULT` 0x23 (`Spell::cancel`). A re-arm
 /// replaces it (the server's one `CURRENT_MELEE_SPELL`). Re-pressing the queued spell bails with
@@ -297,7 +250,7 @@ pub(crate) fn inflight(
 /// with the slot's own precedence: the cursor's commit, else the outstanding cast's. A strike has
 /// none, and a cast pushed over one keeps its own, the strike's coming back with the pop
 /// (`0x6e4ad0`, the save at `0xcecb20`).
-fn inflight_item(
+pub(super) fn inflight_item(
     pending: &PendingCast,
     queued_melee: &QueuedMeleeSpell,
     targeting: &SpellTargeting,
@@ -422,9 +375,10 @@ pub(crate) struct LocalMoveStart {
 ///
 /// - Esc first stops a running auto-repeat (`SpellStopCasting 0x6e6e80`, then `0x6ea080`),
 ///   and that spends the press; the cast survives to the next one.
-/// - The cast: `CMSG_CANCEL_CAST`, the self `Casting` reaped with a `Fail` cast event, and the
-///   `Stop` bar edge the cancel's own event fires ([`super::CastCore::cancel`]). Movement tests
-///   the spell's `InterruptFlags`; Esc does not.
+/// - The cast: `CMSG_CANCEL_CAST`, the `Stop` bar edge the cancel's own event fires, and the
+///   record's cast reaped with a `Fail` cast event as the cancel's tail gates it
+///   ([`super::CastCore::cancel_reaping`]). Movement tests the spell's `InterruptFlags`; Esc does
+///   not.
 /// - The channel, on movement only and only while the player is the mover (`0x515180`):
 ///   `CMSG_CANCEL_CHANNELLING` (`0x6e9b70`) and nothing local; the bar and [`ActiveChannel`] close
 ///   on `MSG_CHANNEL_UPDATE(0)` (`0x6e75f0`). Esc cannot stop a channel: `0x6e6e80` never calls
@@ -442,12 +396,6 @@ pub(super) fn local_self_cancel(mut moved: ResMut<LocalMoveStart>, mut cancel: S
     }
 }
 
-/// The guard's deadline, once a frame ahead of the local cancel, so a move that frame reads the
-/// slot the lapse left: a cast past it pops ([`super::CastCore::reap_lapsed`]).
-pub(super) fn reap_lapsed_cast(mut slots: super::CastSlots, net: Res<NetCommands>) {
-    slots.core(&net).reap_lapsed(Instant::now());
-}
-
 /// What [`local_self_cancel`] reads and writes, shared with the Esc cancel, which is a script call
 /// (`SpellStopCasting`) and lands in call order ([`crate::script_calls`]).
 #[derive(bevy::ecs::system::SystemParam)]
@@ -461,8 +409,6 @@ pub(crate) struct SelfCancel<'w> {
     net: Res<'w, NetCommands>,
     self_guid: Res<'w, SelfGuid>,
     index: Res<'w, GuidIndex>,
-    cast_events: MessageWriter<'w, CastEvent>,
-    play_seq: ResMut<'w, PlaySeq>,
     /// The reap and the auto-repeat clear, applied after the pass.
     edits: Res<'w, crate::creature_anim::UnitEdits>,
     ground: ResMut<'w, super::targeting::SpellTargeting>,
@@ -492,11 +438,11 @@ impl SelfCancel<'_> {
             .copied()
     }
 
-    /// `CancelCast(failed, 1, 0x1c)` ([`super::CastCore::cancel`]), then a popped cast's local
-    /// teardown: its self `Casting` reaped with a `Fail` cast event, as `spell_failed_other`'s
-    /// echo would, run early so the echo finds it done. A strike a cast popped back over is in the
-    /// slot and the save, so its pop copies it back (`0x6e4b2c`): it stays in flight, and each
-    /// press until the server's echo sends its cancel again (`0x6e6eb4`).
+    /// `CancelCast(failed, 1, 0x1c)` with its tail's reap ([`super::CastCore::cancel_reaping`]):
+    /// the record's cast on the player, as `spell_failed_other`'s echo would end it, run early so
+    /// the echo finds it done. A strike a cast popped back over is in the slot and the save, so its
+    /// pop copies it back (`0x6e4b2c`): it stays in flight, and each press until the server's echo
+    /// sends its cancel again (`0x6e6eb4`).
     fn cancel_inflight(&mut self, failed: bool, why: &str) {
         let self_e = self.self_entity();
         let Self {
@@ -504,8 +450,7 @@ impl SelfCancel<'_> {
             queued_melee,
             reports,
             net,
-            cast_events,
-            play_seq,
+            spells,
             edits,
             ground,
             ..
@@ -517,23 +462,16 @@ impl SelfCancel<'_> {
             reports,
             net,
         }
-        .cancel(failed, true, super::REASON_ERROR);
+        .cancel_reaping(
+            failed,
+            true,
+            super::REASON_ERROR,
+            spells.as_deref(),
+            self_e,
+            edits,
+        );
         if *crate::net::CAST_TRACE {
             info!("cast-trace: LOCAL self-cancel — {popped:?} ({why})");
-        }
-        if let (Some(Inflight::Cast(spell_id)), Some(e)) = (popped, self_e) {
-            edits.push(crate::creature_anim::UnitEdit::ReapCasting {
-                entity: e,
-                spell_id,
-            });
-            cast_events.write(CastEvent {
-                entity: e,
-                spell_id,
-                kind: CastEventKind::Fail,
-                cast_flags: 0,
-                item_cast: false,
-                seq: play_seq.next(),
-            });
         }
     }
 
@@ -611,7 +549,7 @@ impl SelfCancel<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::creature_anim::Casting;
+    use crate::creature_anim::{CastEvent, Casting};
 
     const FIREBALL: u32 = 133;
 
@@ -684,7 +622,6 @@ mod tests {
                             item_flags: None,
                             item: None,
                         },
-                        Instant::now(),
                     );
                 },
             )
@@ -752,7 +689,6 @@ mod tests {
             HEARTH,
             Some(ITEM_FLAG_PLAYERCAST),
             Some(ITEM),
-            Instant::now(),
         );
         assert_eq!(item_of(&mut app), Some(HEARTHSTONE));
         app.world_mut().entity_mut(item).despawn();
@@ -783,8 +719,7 @@ mod tests {
     }
 
     /// `0x6e500b`–`0x6e501f`: an item use is pushed only when its template flags carry
-    /// `ITEM_FLAG_PLAYERCAST` (`0x40`); a spell has no item and is always pushed. The item's
-    /// window is the short one.
+    /// `ITEM_FLAG_PLAYERCAST` (`0x40`); a spell has no item and is always pushed.
     #[test]
     fn an_item_use_enters_the_slot_only_with_the_playercast_flag() {
         let t0 = Instant::now();
@@ -795,14 +730,9 @@ mod tests {
         assert!(!g.in_flight(), "other bits do not count");
         g.push(FIREBALL, Some(0x40), t0);
         assert!(g.in_flight(), "the flag pushes");
-        let past_item = t0 + ITEM_SEND_PROVISIONAL + Duration::from_millis(1);
-        assert_eq!(
-            g.lapsed(past_item),
-            Some(FIREBALL),
-            "on the item's own deadline"
-        );
+        g.clear_if(FIREBALL);
         g.push(FIREBALL, None, t0);
-        assert_eq!(g.lapsed(past_item), None);
+        assert!(g.in_flight(), "a spell's own cast");
     }
 
     #[test]
@@ -814,108 +744,6 @@ mod tests {
         assert!(
             g.in_flight(),
             "a different spell's resolution must not open the guard on our cast"
-        );
-    }
-
-    #[test]
-    fn the_guard_lapses_at_its_safety_deadline() {
-        let t0 = Instant::now();
-        let mut g = PendingCast::default();
-        g.push(FIREBALL, None, t0);
-        assert_eq!(
-            g.lapsed(t0 + SEND_PROVISIONAL - Duration::from_secs(1)),
-            None
-        );
-        assert_eq!(
-            g.lapsed(t0 + SEND_PROVISIONAL + Duration::from_secs(1)),
-            Some(FIREBALL)
-        );
-        assert!(g.in_flight(), "until the reaper pops it");
-    }
-
-    #[test]
-    fn a_pushback_extends_the_guard_so_it_holds_past_the_stretched_cast() {
-        let t0 = Instant::now();
-        let mut g = PendingCast::default();
-        g.push(FIREBALL, None, t0);
-        g.refine(1_000, t0); // deadline t0 + 1 s + 2 s slack
-        g.delay(500, t0); // pushed to t0 + 3.5 s
-        assert_eq!(
-            g.lapsed(t0 + Duration::from_millis(3_200)),
-            None,
-            "the pushback kept the guard shut past the original refined deadline"
-        );
-    }
-
-    #[test]
-    fn spell_start_tightens_the_deadline_to_the_real_cast_time() {
-        let t0 = Instant::now();
-        let mut g = PendingCast::default();
-        g.push(FIREBALL, None, t0);
-        g.refine(1_500, t0); // SMSG_SPELL_START: 1.5 s + 2 s slack
-        let at_four = t0 + Duration::from_secs(4);
-        assert_eq!(
-            g.lapsed(at_four),
-            Some(FIREBALL),
-            "refined to 1.5s + slack, the guard has lapsed by t+4s (it would still hold at the \
-             5s provisional)"
-        );
-    }
-
-    /// A lapsed cast leaves the slot as its result's pop would (`0x6e4b2c`): a strike the push
-    /// saved under it comes back to the slot, signalled, so the late result finds it queued and
-    /// the strike survives. Inside its deadline the reaper leaves the cast alone.
-    #[test]
-    fn a_lapsed_cast_pops_back_the_strike_it_was_pushed_over() {
-        use bevy::ecs::system::RunSystemOnce;
-        const HEROIC_STRIKE: u32 = 78;
-        let mut app = App::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        app.init_resource::<PendingCast>()
-            .init_resource::<QueuedMeleeSpell>()
-            .init_resource::<SpellTargeting>()
-            .init_resource::<CastReports>()
-            .insert_resource(NetCommands(tx));
-        let t0 = Instant::now();
-        let reap = |app: &mut App, now: Instant| {
-            app.world_mut()
-                .run_system_once(
-                    move |mut slots: super::super::CastSlots, net: Res<NetCommands>| {
-                        slots.core(&net).reap_lapsed(now);
-                    },
-                )
-                .unwrap();
-            std::mem::take(&mut app.world_mut().resource_mut::<CastReports>().0).len()
-        };
-        app.world_mut()
-            .run_system_once(
-                move |mut slots: super::super::CastSlots, net: Res<NetCommands>| {
-                    let mut core = slots.core(&net);
-                    core.push(HEROIC_STRIKE, super::super::Held::Strike, t0);
-                    core.push(
-                        FIREBALL,
-                        super::super::Held::Cast {
-                            item_flags: None,
-                            item: None,
-                        },
-                        t0,
-                    );
-                },
-            )
-            .unwrap();
-        app.world_mut().resource_mut::<CastReports>().0.clear();
-        assert_eq!(reap(&mut app, t0), 0, "inside its deadline");
-        assert!(app.world().resource::<PendingCast>().in_flight());
-        assert_eq!(
-            reap(&mut app, t0 + SEND_PROVISIONAL + Duration::from_millis(1)),
-            1,
-            "one pop, signalled"
-        );
-        assert!(!app.world().resource::<PendingCast>().in_flight());
-        assert_eq!(
-            app.world().resource::<QueuedMeleeSpell>().current(),
-            Some(HEROIC_STRIKE),
-            "the strike is back in the slot"
         );
     }
 
@@ -990,7 +818,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(
                     move |mut slots: crate::spell::CastSlots, net: Res<NetCommands>| {
-                        slots.core(&net).push(spell_id, held, Instant::now());
+                        slots.core(&net).push(spell_id, held);
                     },
                 )
                 .unwrap();
@@ -1040,6 +868,9 @@ mod tests {
                 },
             )]));
             fill_record(&mut app);
+            app.world_mut()
+                .resource_mut::<PendingCast>()
+                .fill_record_spell(FIREBALL);
             app.world_mut()
                 .resource_mut::<PendingCast>()
                 .push(FIREBALL, None, Instant::now());
@@ -1570,6 +1401,145 @@ mod tests {
                 app.world().resource::<CastReports>().0.is_empty(),
                 "no local bar edge — the bar closes on the wire's SPELLCAST_CHANNEL_STOP"
             );
+        }
+
+        /// The failed cast events written since the last look, by spell.
+        fn fails(app: &mut App) -> Vec<u32> {
+            app.world_mut()
+                .resource_mut::<Messages<CastEvent>>()
+                .drain()
+                .filter(|e| e.kind == crate::creature_anim::CastEventKind::Fail)
+                .map(|e| e.spell_id)
+                .collect()
+        }
+
+        /// The cancel's reap is its tail's (`0x6e4a04`-`0x6e4ab7`): the record's spell
+        /// `[0xceac58]` (`0x6e4a8e`), whatever the slot popped. A cast nested over another
+        /// record's leaves that record's cast reaped and its own running.
+        #[test]
+        fn esc_reaps_the_records_spell_not_the_popped_one() {
+            const FROSTBOLT: u32 = 116;
+            let (mut app, _rx) = harness(HashMap::from([
+                (FIREBALL, SpellDisplay::default()),
+                (FROSTBOLT, SpellDisplay::default()),
+            ]));
+            app.insert_non_send(UiScript::new().unwrap());
+            fill_record(&mut app);
+            app.world_mut()
+                .resource_mut::<PendingCast>()
+                .fill_record_spell(FROSTBOLT);
+            app.world_mut()
+                .resource_mut::<PendingCast>()
+                .push(FIREBALL, None, Instant::now());
+            mark_casting(&mut app, FROSTBOLT);
+
+            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            assert_eq!(stop_casting(&mut app), Some(1));
+            crate::creature_anim::apply_unit_edits(app.world_mut());
+
+            let self_e = app.world().resource::<GuidIndex>().0[&10];
+            assert!(
+                app.world().get::<Casting>(self_e).is_none(),
+                "the record's cast"
+            );
+            assert_eq!(fails(&mut app), vec![FROSTBOLT]);
+        }
+
+        /// The tail spares a record spell with `AttributesEx & 0x4` (`0x6e4aad`): the cancel goes
+        /// out and the cast keeps running locally.
+        #[test]
+        fn a_move_cancel_spares_an_attributes_ex_4_cast() {
+            let (mut app, rx) = harness(HashMap::from([(
+                FIREBALL,
+                SpellDisplay {
+                    interrupt_flags: 0xf,
+                    attributes_ex: 0x4,
+                    ..Default::default()
+                },
+            )]));
+            fill_record(&mut app);
+            app.world_mut()
+                .resource_mut::<PendingCast>()
+                .fill_record_spell(FIREBALL);
+            app.world_mut()
+                .resource_mut::<PendingCast>()
+                .push(FIREBALL, None, Instant::now());
+            mark_casting(&mut app, FIREBALL);
+            run(&mut app, true);
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(crate::net::ClientCommand::CancelCast { spell_id: FIREBALL })
+            ));
+            let self_e = app.world().resource::<GuidIndex>().0[&10];
+            assert!(
+                app.world().get::<Casting>(self_e).is_some(),
+                "AttributesEx & 0x4"
+            );
+            assert!(fails(&mut app).is_empty());
+        }
+
+        /// The tail reaps nothing unless the record's caster is the active player (`0x6e4a11`).
+        #[test]
+        fn a_move_cancel_reaps_nothing_for_another_casters_record() {
+            let (mut app, rx) = harness(HashMap::from([(
+                FIREBALL,
+                SpellDisplay {
+                    interrupt_flags: 0xf,
+                    ..Default::default()
+                },
+            )]));
+            app.world_mut()
+                .resource_mut::<PendingCast>()
+                .fill_record_spell(FIREBALL);
+            app.world_mut()
+                .resource_mut::<PendingCast>()
+                .push(FIREBALL, None, Instant::now());
+            mark_casting(&mut app, FIREBALL);
+            run(&mut app, true);
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(crate::net::ClientCommand::CancelCast { spell_id: FIREBALL })
+            ));
+            let self_e = app.world().resource::<GuidIndex>().0[&10];
+            assert!(
+                app.world().get::<Casting>(self_e).is_some(),
+                "no record caster"
+            );
+            assert!(fails(&mut app).is_empty());
+        }
+
+        /// The frame's pass over the slot with no press: the systems the plugin chains in
+        /// [`super::super::LocalCancel`].
+        fn quiet_frame(app: &mut App) {
+            run(app, false);
+        }
+
+        /// Nothing times the slot out (`0xceca88`'s writers are the push `0x6e4af8`, the pop
+        /// `0x6e4b3d` and the world-entry zero `0x6e72e7`): a cast whose answer never comes holds
+        /// it, refusing the next press, until `SpellStopCasting` (`0x6e6e80` → `0x6e4940`) frees it.
+        #[test]
+        fn a_cast_with_no_answer_holds_the_slot_until_esc() {
+            let (mut app, rx) = harness(HashMap::from([(FIREBALL, SpellDisplay::default())]));
+            app.insert_non_send(UiScript::new().unwrap());
+            let sent = Instant::now()
+                .checked_sub(Duration::from_secs(60))
+                .expect("a clock a minute old");
+            app.world_mut()
+                .resource_mut::<PendingCast>()
+                .push(FIREBALL, None, sent);
+            quiet_frame(&mut app);
+            assert_eq!(
+                app.world().resource::<PendingCast>().current(),
+                Some(FIREBALL),
+                "a minute on, still in flight"
+            );
+            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            assert_eq!(stop_casting(&mut app), Some(1));
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(crate::net::ClientCommand::CancelCast { spell_id: FIREBALL })
+            ));
+            assert_eq!(app.world().resource::<PendingCast>().current(), None);
         }
     }
 

@@ -426,9 +426,10 @@ pub(crate) struct Model {
     pub(crate) cancel_aura_requests: Vec<u32>,
     /// The player's active tracking aura, behind `GetTrackingTexture`.
     pub(crate) tracking: Option<super::aura::TrackingState>,
-    /// The calls that touch the selection, the cast or the targeting cursor made while the host
-    /// was out, in call order, for it to apply as soon as it is back.
-    pub(crate) script_calls: Vec<super::calls::QueuedCall>,
+    /// What waits for the host, in the order made: the calls that touch the selection, the cast
+    /// or the targeting cursor made while it was out, and the handlers an engine step fired then
+    /// ([`super::host::holding`]), for it to run as soon as it is back.
+    pub(crate) script_calls: Vec<super::calls::Waiting>,
     /// How many drains of [`Self::script_calls`] are running, each inside a call the one outside
     /// it applied ([`super::calls::submit`]).
     pub(crate) call_depth: u8,
@@ -794,10 +795,6 @@ pub(crate) struct Model {
     pub(crate) container_repairs: Vec<(i64, u32)>,
     /// Targeting wants an item (`0x6e6330`): a bag or paper-doll click becomes a pick.
     pub(crate) item_pick_armed: bool,
-    /// Picked `(bag, slot)`s; a paper-doll click is `EQUIPMENT_BAG` and its 1-based inventory slot.
-    pub(crate) item_picks: Vec<cursor::ItemPick>,
-    /// `BindEnchant()` and `ReplaceEnchant()`, the enchant popups' answers.
-    pub(crate) enchant_confirms: Vec<cursor::EnchantAnswer>,
     /// `DeleteCursorItem`'s `(bag, slot, count)`, 0 for the whole stack, as `CMSG_DESTROYITEM`.
     pub(crate) container_destroys: Vec<(i64, u32, u32)>,
     /// The wrapping paper a right-click armed (`0x5edea0`: lock it, cursor mode 2, no packet). Not
@@ -950,9 +947,9 @@ pub(crate) struct Model {
     /// `0x4c2790` with flag 0, raising `LOOT_BIND` for a bind-on-pickup row (a `LootButton`'s own
     /// click, `0x4c1820`); `LootSlot` passes 1 (`0x4c2e70`), taking it after the confirm.
     pub(crate) loot: Option<loot::LootState>,
-    pub(crate) loot_picks: Vec<u32>,
-    /// `LootSlot(slot)` rows, 1-based, apart from clicks for the reference's pending-slot gate.
-    pub(crate) loot_confirms: Vec<u32>,
+    /// The row clicks and `LootSlot(slot)` rows, 1-based, in call order, for the reference's
+    /// pending-slot gate.
+    pub(crate) loot_takes: Vec<loot::LootTake>,
     /// The first `CloseLoot` since the last drain, with its `failed` flag; a later one in the
     /// same frame finds the loot already released.
     pub(crate) loot_close: Option<bool>,
@@ -1730,8 +1727,6 @@ impl Model {
             container_moves: Vec::new(),
             container_repairs: Vec::new(),
             item_pick_armed: false,
-            item_picks: Vec::new(),
-            enchant_confirms: Vec::new(),
             container_destroys: Vec::new(),
             pending_wrap: None,
             container_wraps: Vec::new(),
@@ -1800,8 +1795,7 @@ impl Model {
             loot: None,
             pending_equip_answers: Vec::new(),
             bind_on_use_confirms: Vec::new(),
-            loot_picks: Vec::new(),
-            loot_confirms: Vec::new(),
+            loot_takes: Vec::new(),
             loot_close: None,
             loot_master_gives: Vec::new(),
             loot_rolls: loot_roll::LootRollsState::default(),

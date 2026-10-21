@@ -2133,3 +2133,280 @@ fn a_sweeps_pins_arm_in_slot_order() {
         "slot 33's kit armed last, so it is the head"
     );
 }
+
+/// `CancelCast`'s reap is `0x614150` on the record's spell (`0x6e4a8e`-`0x6e4ab7`), which stops
+/// only the effects that spell's kits made (`0x614167`): Esc with Blizzard's cursor up over a
+/// running Arcane Missiles channel ends the cursor and leaves the channel's hold and its loop.
+#[test]
+fn esc_with_a_cursor_up_leaves_the_running_channels_hold_and_loop() {
+    use benilla_protocol::messages::{ObjectFields, ObjectType};
+    use bevy::ecs::system::RunSystemOnce;
+
+    const ARCANE_MISSILES: u32 = 5143;
+    const AM_VISUAL: u32 = 225;
+    const AM_CHANNEL_KIT: u32 = 436;
+    const AM_HUM: u32 = 3136;
+    const BLIZZARD: u32 = 10;
+    const ME: u64 = 10;
+
+    let mut app = app();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(
+            AM_VISUAL,
+            VisualStages {
+                channel: AM_CHANNEL_KIT,
+                ..Default::default()
+            },
+        )]),
+        HashMap::from([(
+            AM_CHANNEL_KIT,
+            VisualKit {
+                anim_id: Some(HOLD_ANIM),
+                sound: Some(AM_HUM),
+                ..Default::default()
+            },
+        )]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([
+            (
+                ARCANE_MISSILES,
+                SpellDisplay {
+                    visual: AM_VISUAL,
+                    ..Default::default()
+                },
+            ),
+            (BLIZZARD, SpellDisplay::default()),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    // What the cancel reads and writes.
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    app.insert_resource(crate::net::NetCommands(tx))
+        .init_resource::<crate::spell::PendingCast>()
+        .init_resource::<crate::spell::QueuedMeleeSpell>()
+        .init_resource::<crate::spell::ActiveChannel>()
+        .init_resource::<crate::spell::AutoRepeatActive>()
+        .init_resource::<crate::spell::SpellTargeting>()
+        .init_resource::<crate::ui_cast::CastReports>()
+        .init_resource::<crate::creature_anim::UnitEdits>()
+        .init_resource::<crate::creature_anim::PlaySeq>()
+        .init_resource::<crate::net::GuidIndex>()
+        .init_resource::<crate::net::SelfGuid>();
+    // The player, channelling: `UNIT_CHANNEL_SPELL` (144) holds Arcane Missiles.
+    let me = app
+        .world_mut()
+        .spawn((
+            crate::net::Guid(ME),
+            crate::net::SelfPlayer,
+            crate::net::ObjectStore(
+                ObjectFields::from_pairs(&[(144, ARCANE_MISSILES)])
+                    .into_created(ObjectType::Player),
+            ),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<crate::net::GuidIndex>()
+        .0
+        .insert(ME, me);
+    app.world_mut().resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
+    let sounds = |app: &mut App| -> Vec<SpellKitSound> {
+        app.world_mut()
+            .resource_mut::<Messages<SpellKitSound>>()
+            .drain()
+            .collect()
+    };
+
+    // The channel poll's rising edge holds the channel and rings its hum.
+    app.update();
+    let rise = sounds(&mut app);
+    assert!(
+        rise.iter().any(|s| matches!(
+            s,
+            SpellKitSound::Play { entity, kit_sound, .. } if *entity == me && *kit_sound == AM_HUM
+        )),
+        "the channel's loop (got {rise:?})"
+    );
+    assert_eq!(hold(&app, me), Some(ARCANE_MISSILES));
+
+    // Blizzard's attempt fills the record (`0x6e4f88`, `0x6e4fb1`) and raises its cursor.
+    {
+        let world = app.world_mut();
+        let mut pending = world.resource_mut::<crate::spell::PendingCast>();
+        pending.fill_record();
+        pending.fill_record_spell(BLIZZARD);
+        world.resource_mut::<crate::spell::SpellTargeting>().enter(
+            BLIZZARD,
+            crate::spell::CastCommit::Spell,
+            0x40,
+        );
+    }
+    // Esc: `SpellStopCasting` (`0x6e6e80` → `0x6e4940(0, 1, 0x1c)`).
+    app.world_mut()
+        .run_system_once(|mut cancel: crate::spell::SelfCancel| cancel.stop_casting())
+        .unwrap();
+    crate::creature_anim::apply_unit_edits(app.world_mut());
+    app.update();
+
+    assert!(
+        !app.world()
+            .resource::<crate::spell::SpellTargeting>()
+            .active(),
+        "the cursor is down"
+    );
+    assert_eq!(hold(&app, me), Some(ARCANE_MISSILES), "the channel's hold");
+    let after = sounds(&mut app);
+    // The sound router's books over both frames, the hum a looping kit.
+    let mut loops = crate::sound::HoldLoops::default();
+    for ev in rise.iter().chain(&after) {
+        match *ev {
+            SpellKitSound::Play {
+                entity,
+                spell_id,
+                kit_sound: AM_HUM,
+            } => loops.rang(entity, spell_id, AM_HUM),
+            SpellKitSound::StopHold { entity, spell_id } => {
+                loops.stop_hold(entity, spell_id);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        loops.held(me),
+        Some((ARCANE_MISSILES, AM_HUM)),
+        "Blizzard's reap stops none of the channel's sound (got {after:?})"
+    );
+}
+
+/// Beside its own stop, a spell go stops its caster's kits of the running auto-repeat spell
+/// `[0xceac30]` (`0x6e7fed` when set, `0x6e7ffb` with force 0): another spell's go ends an Auto
+/// Shot hold and its loop on its caster and on no other unit, and with no auto-repeat running it
+/// ends neither.
+#[test]
+fn a_go_stops_the_running_auto_repeat_spells_hold_and_loop_on_its_caster() {
+    use crate::sound::HoldLoops;
+
+    const AUTO_SHOT: u32 = 75;
+    const AUTO_SHOT_VISUAL: u32 = 2003;
+    const AUTO_SHOT_PRECAST_KIT: u32 = 3030;
+    const AUTO_SHOT_LOOP: u32 = 4040;
+    const ARCANE_SHOT: u32 = 3044;
+
+    /// One frame of `events` through the router, its sounds through the sound router's books (the
+    /// Auto Shot sound a looping kit); returns the hold reaps it wrote.
+    fn frame(app: &mut App, loops: &mut HoldLoops, events: &[CastEvent]) -> Vec<(Entity, u32)> {
+        for &ev in events {
+            app.world_mut().write_message(ev);
+        }
+        app.update();
+        let sounds: Vec<SpellKitSound> = app
+            .world_mut()
+            .resource_mut::<Messages<SpellKitSound>>()
+            .drain()
+            .collect();
+        for ev in sounds {
+            match ev {
+                SpellKitSound::Play {
+                    entity,
+                    spell_id,
+                    kit_sound: AUTO_SHOT_LOOP,
+                } => loops.rang(entity, spell_id, AUTO_SHOT_LOOP),
+                SpellKitSound::StopHold { entity, spell_id } => {
+                    loops.stop_hold(entity, spell_id);
+                }
+                _ => {}
+            }
+        }
+        app.world_mut()
+            .resource_mut::<Messages<SpellKitFx>>()
+            .drain()
+            .filter_map(|fx| match fx {
+                SpellKitFx::Reap {
+                    entity, spell_id, ..
+                } => Some((entity, spell_id)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let mut app = app();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(
+            AUTO_SHOT_VISUAL,
+            VisualStages {
+                precast: AUTO_SHOT_PRECAST_KIT,
+                ..Default::default()
+            },
+        )]),
+        HashMap::from([(
+            AUTO_SHOT_PRECAST_KIT,
+            VisualKit {
+                anim_id: Some(HOLD_ANIM),
+                sound: Some(AUTO_SHOT_LOOP),
+                ..Default::default()
+            },
+        )]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([
+            (
+                AUTO_SHOT,
+                SpellDisplay {
+                    visual: AUTO_SHOT_VISUAL,
+                    ..Default::default()
+                },
+            ),
+            (ARCANE_SHOT, SpellDisplay::default()),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.insert_resource(crate::spell::AutoRepeatActive(Some(AUTO_SHOT)));
+    let hunter = app.world_mut().spawn_empty().id();
+    let other = app.world_mut().spawn_empty().id();
+    let mut loops = HoldLoops::default();
+
+    frame(
+        &mut app,
+        &mut loops,
+        &[
+            cast_event(hunter, AUTO_SHOT, CastEventKind::Start),
+            cast_event(other, AUTO_SHOT, CastEventKind::Start),
+        ],
+    );
+    assert_eq!(hold(&app, hunter), Some(AUTO_SHOT));
+    assert_eq!(loops.held(hunter), Some((AUTO_SHOT, AUTO_SHOT_LOOP)));
+
+    let reaped = frame(
+        &mut app,
+        &mut loops,
+        &[cast_event(hunter, ARCANE_SHOT, CastEventKind::Go)],
+    );
+    assert_eq!(hold(&app, hunter), None, "the caster's Auto Shot hold");
+    assert_eq!(loops.held(hunter), None, "and its loop");
+    assert_eq!(
+        reaped,
+        vec![(hunter, ARCANE_SHOT), (hunter, AUTO_SHOT)],
+        "the go's own spell, then the auto-repeat spell, on the caster alone"
+    );
+    assert_eq!(hold(&app, other), Some(AUTO_SHOT), "another unit's hold");
+    assert_eq!(
+        loops.held(other),
+        Some((AUTO_SHOT, AUTO_SHOT_LOOP)),
+        "and its loop"
+    );
+
+    // With no auto-repeat running, another spell's go leaves both.
+    app.insert_resource(crate::spell::AutoRepeatActive(None));
+    frame(
+        &mut app,
+        &mut loops,
+        &[cast_event(hunter, AUTO_SHOT, CastEventKind::Start)],
+    );
+    frame(
+        &mut app,
+        &mut loops,
+        &[cast_event(hunter, ARCANE_SHOT, CastEventKind::Go)],
+    );
+    assert_eq!(hold(&app, hunter), Some(AUTO_SHOT));
+    assert_eq!(loops.held(hunter), Some((AUTO_SHOT, AUTO_SHOT_LOOP)));
+}

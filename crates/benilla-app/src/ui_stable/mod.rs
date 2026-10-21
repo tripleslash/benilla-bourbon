@@ -218,7 +218,21 @@ fn feed_stable(
     mut last: crate::ui_script::WindowMemo<Option<StableState>>,
     mut closes: CoreCloses,
     mut sink: crate::ui_action::MessageSink,
+    ticks: bevy::ecs::system::SystemChangeTick,
 ) {
+    // A refusal's line shows inside `SMSG_STABLE_RESULT`'s handler (`0x4cacb0`), so its handlers
+    // read the stable the packets before it left: one a later packet's write to the stable follows
+    // shows ahead of the frame's push, the rest after it and its events.
+    let (listed, now) = (open.last_changed(), ticks.this_run());
+    let ahead = errors
+        .0
+        .iter()
+        .take_while(|(_, at)| listed.is_newer_than(*at, now))
+        .count();
+    let behind = errors.0.split_off(ahead);
+    if !errors.0.is_empty() {
+        vm.run(|script| show_refusals(script, &mut errors.0, &mut sink));
+    }
     vm.feed(|script, bar, fires| {
         let Some(script) = script else {
             return;
@@ -227,16 +241,6 @@ fn feed_stable(
         if closes.since_last(script, NpcWindow::Stable) {
             *last = None;
         }
-        // Refusals show, and speak, as their message rows say.
-        let lines: Vec<_> = errors
-            .0
-            .drain(..)
-            .filter_map(|key| {
-                let text = script.lua().globals().get::<String>(key).ok()?;
-                (!text.is_empty()).then(|| crate::ui_action::Shown::keyed(key, text))
-            })
-            .collect();
-        crate::ui_action::show_messages(script, &mut sink, "ui_stable", lines);
 
         // The next slot's price: `StableSlotPrices.dbc` row `purchased + 1`, 0 past the table.
         let next_slot_cost = prices
@@ -284,7 +288,31 @@ fn feed_stable(
             fires.post("PET_STABLE_UPDATE_PAPERDOLL", vec![]);
         }
         *last = fresh;
-    })
+    });
+    errors.0.extend(behind);
+    if !errors.0.is_empty() {
+        vm.run(|script| show_refusals(script, &mut errors.0, &mut sink));
+    }
+}
+
+/// Show `refusals`, in a run with the host lent, each as its message row says, speech included;
+/// with no VM up they wait.
+fn show_refusals(
+    script: Option<&mut UiScript>,
+    refusals: &mut Vec<(&'static str, bevy::ecs::change_detection::Tick)>,
+    sink: &mut crate::ui_action::MessageSink,
+) {
+    let Some(script) = script else {
+        return;
+    };
+    let lines: Vec<_> = refusals
+        .drain(..)
+        .filter_map(|(key, _)| {
+            let text = script.lua().globals().get::<String>(key).ok()?;
+            (!text.is_empty()).then(|| crate::ui_action::Shown::keyed(key, text))
+        })
+        .collect();
+    crate::ui_action::show_messages(script, sink, "ui_stable", lines);
 }
 
 /// Drain the Lua intents into the four stable verbs, each aimed at the open session's NPC; a close
@@ -323,9 +351,11 @@ fn drain_stable(
 }
 
 /// Stable refusals as message keys: only `ERR_NOT_ENOUGH_MONEY`, `DisplayError(0x25)` in the
-/// `SMSG_STABLE_RESULT` handler `0x4cacb0`, whose row also speaks (line `0x28`).
+/// `SMSG_STABLE_RESULT` handler `0x4cacb0`, whose row also speaks (line `0x28`). Each carries the
+/// change tick of the handler call that queued it, its place on the wire: each call is its own
+/// system run, so a later packet's writes carry newer ticks.
 #[derive(Resource, Default)]
-pub(crate) struct StableErrors(pub(crate) Vec<&'static str>);
+pub(crate) struct StableErrors(pub(crate) Vec<(&'static str, bevy::ecs::change_detection::Tick)>);
 
 /// `StableSlotPrices.dbc`, the purchase row's prices; absent, the row quotes 0.
 #[derive(Resource)]
@@ -380,6 +410,77 @@ mod tests {
         list(&mut app);
         app.update();
         assert_eq!(crate::query_cache::queries(&rx).len(), 1);
+    }
+
+    /// A stable open on its master with no slot bought, pushed, whose VM notes the slot count
+    /// at each `UI_ERROR_MESSAGE`; the stable's handlers in the table.
+    fn refusal_app() -> App {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<StableOpen>()
+            .init_resource::<StableErrors>()
+            .init_resource::<crate::names::NameCache>()
+            .init_resource::<crate::ui_pet::PetBar>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<crate::net::SelfGuid>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .add_systems(Update, feed_stable);
+        net::register(&mut app);
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                "ERR_NOT_ENOUGH_MONEY = 'Poor.' SEEN = '' local f = CreateFrame('Frame') \
+                 f:RegisterEvent('UI_ERROR_MESSAGE') \
+                 f:SetScript('OnEvent', function() SEEN = SEEN .. GetNumStableSlots() end)",
+            )
+            .unwrap();
+        app.insert_non_send(script);
+        app.world_mut()
+            .resource_mut::<StableOpen>()
+            .open(MASTER, 0, Vec::new());
+        app.update();
+        app
+    }
+
+    const MASTER: u64 = 0xF130_0000_4500_0001;
+
+    /// The refusal and a list showing two slots bought, the list first when `list_first`, as one
+    /// frame's packets; then the count the refusal's handler read and the count after the frame.
+    fn refusal_then(list_first: bool) -> (String, i64) {
+        use benilla_protocol::messages::stable_result;
+        use benilla_protocol::SessionEvent;
+        let mut app = refusal_app();
+        let refusal = SessionEvent::StableResult {
+            result: stable_result::ERR_MONEY,
+        };
+        let list = SessionEvent::ListStabledPets {
+            npc: MASTER,
+            num_stable_slots: 2,
+            pets: Vec::new(),
+        };
+        let events = if list_first {
+            vec![list, refusal]
+        } else {
+            vec![refusal, list]
+        };
+        crate::net::handlers::dispatch(app.world_mut(), events);
+        app.update();
+        let s = app.world().non_send::<UiScript>();
+        (
+            s.eval::<String>("return SEEN").unwrap(),
+            s.eval::<i64>("return GetNumStableSlots()").unwrap(),
+        )
+    }
+
+    /// The refusal's line shows in `SMSG_STABLE_RESULT`'s handler (`0x4cacb0`,
+    /// `DisplayError(0x25)`), so its handlers read the stable as the packets before it left it: a
+    /// list after it is not there yet, and a list before it is.
+    #[test]
+    fn a_refusals_handlers_read_the_stable_the_packets_before_it_left() {
+        assert_eq!(refusal_then(false), ("0".into(), 2), "the list came after");
+        assert_eq!(refusal_then(true), ("2".into(), 2), "the list came first");
     }
 
     /// The range guard cannot close it: after the drop there is no self player to measure from.

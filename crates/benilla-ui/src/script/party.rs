@@ -74,9 +74,11 @@ pub struct PartyState {
     /// The other party members in `party1`..`party4` order, empty when ungrouped. The player is
     /// never in it, as in `SMSG_GROUP_LIST`; in a raid it is our own subgroup's slice.
     pub members: Vec<PartyMemberInfo>,
-    /// `GetPartyLeaderIndex`: the leader's `members` slot, `1..=4`, else `0`: the player, and a
-    /// raid leader in another subgroup, who holds none of the slots (`0x84c150` is -1 then, and
-    /// the binding pushes it plus one). Not the leadership test: [`Self::leader_guid`] is.
+    /// `GetPartyLeaderIndex`: the leader-index cell `0x84c150` plus one, as the binding pushes it
+    /// (`0x4e9104`). The leader's `members` slot, `1..=4`; `0` for a leader in none of the slots,
+    /// the player and a raid leader in another subgroup among them, and before any list; `1` once
+    /// a list, a kick, a leave or a disband stored no leader. Not the leadership test:
+    /// [`Self::leader_guid`] is.
     pub leader_index: u32,
     /// The cached group-leader guid (the reference's `[0xbc75f8]:[0xbc75fc]`), `0` when
     /// ungrouped, fed from the wire rather than derived from [`Self::leader_index`].
@@ -117,10 +119,9 @@ pub enum PartyRequest {
     InviteName(String),
     /// `InviteToParty(unit)`, by unit token; the app resolves it to a name.
     InviteUnit(String),
-    /// `UninviteFromParty(unit)`, by unit token.
-    UninviteUnit(String),
-    /// `PromoteToPartyLeader(unit)`, by unit token.
-    PromoteUnit(String),
+    /// `UninviteFromParty(unit)` after the resolver (`0x48a54d`): the guid the kick sender
+    /// `0x5e9510` takes.
+    UninviteGuid(u64),
     /// `SetLootMethod(method[, masterName][, threshold])` after the binding's own checks
     /// (`0x4e92a0`): the wire's `CMSG_LOOT_METHOD` fields (`0x5e97e0`).
     LootMethod {
@@ -146,7 +147,8 @@ pub enum PartyRequest {
     /// `SwapRaidSubgroup(index, other)`: trade two raid rows' subgroups
     /// (`CMSG_GROUP_SWAP_SUB_GROUP`, two names on the wire).
     SwapSubgroup { index: u32, other: u32 },
-    /// `PromoteByName(name)` after the resolver (`0x48a86a`): `CMSG_GROUP_SET_LEADER` with the guid.
+    /// `PromoteToPartyLeader(unit)` or `PromoteByName(name)` after the resolver (`0x48a7fd`,
+    /// `0x48a86a`): `CMSG_GROUP_SET_LEADER` with the guid.
     PromoteGuid(u64),
     /// `PromoteToAssistant(name)` / `DemoteAssistant(name)` after the resolver (`0x4bbd6b`,
     /// `0x4bbe3b`): `CMSG_GROUP_ASSISTANT_LEADER` with the guid.
@@ -473,7 +475,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetPartyLeaderIndex() → 0 (the player leads) or 1..4 (that party slot leads).
+    // GetPartyLeaderIndex() → the leader-index cell plus one ([`PartyState::leader_index`]).
     g.set(
         "GetPartyLeaderIndex",
         lua.create_function(|lua, ()| {
@@ -565,22 +567,38 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
-    g.set(
-        "UninviteFromParty",
-        lua.create_function(|lua, unit: String| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.party_requests.push(PartyRequest::UninviteUnit(unit));
-            Ok(())
-        })?,
-    )?;
-    g.set(
-        "PromoteToPartyLeader",
-        lua.create_function(|lua, unit: String| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.party_requests.push(PartyRequest::PromoteUnit(unit));
-            Ok(())
-        })?,
-    )?;
+    // UninviteFromParty("unit") (`0x48a510`) and PromoteToPartyLeader("unit") (`0x48a7c0`): a
+    // string or a number (`0x6f3510`) else the usage line (`0x84277c`, `0x8427e0`), then the token's
+    // guid through `GetGUIDFromName` (`0x48a54d`, `0x48a7fd`), which raises for an unknown token;
+    // with our player object (`0x48a538`) and a nonzero guid, the kick sender `0x5e9510` or the
+    // leader sender `0x5e9640`. No party test: any unit the token names.
+    type GuidRequest = fn(u64) -> PartyRequest;
+    let token_verbs: [(&str, &'static str, GuidRequest); 2] = [
+        (
+            "UninviteFromParty",
+            r#"Usage: UninviteFromParty("unit")"#,
+            PartyRequest::UninviteGuid,
+        ),
+        (
+            "PromoteToPartyLeader",
+            r#"Usage: PromoteToPartyLeader("unit")"#,
+            PartyRequest::PromoteGuid,
+        ),
+    ];
+    for (binding, usage, request) in token_verbs {
+        g.set(
+            binding,
+            lua.create_function(move |lua, unit: Value| {
+                let token = binding_abi::string_arg(lua, unit, usage)?;
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let guid = model.unit_guids.guid_of(&token)?.unwrap_or(0);
+                if model.unit_guids.player != 0 && guid != 0 {
+                    model.party_requests.push(request(guid));
+                }
+                Ok(())
+            })?,
+        )?;
+    }
     // SetLootMethod("method" [,master] [,threshold]) (`0x4e92a0`), in the binding's own order:
     // not in a group (the first party guid and the raid count, `0x4e92a6`, `0x4e92b8`) shows game
     // error 0x48 and returns, then not the group leader (`0x4e92d4`..`0x4e92eb`) 0x4b. Argument 1
@@ -1364,6 +1382,11 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         hold(&mut s, "player", 0x5E1F, "Me");
         s.set_party(led_party());
+        s.set_unit_guids(&crate::script::UnitGuids {
+            player: 0x5E1F,
+            party: [0xA11CE, 0xB0B, 0, 0],
+            ..Default::default()
+        });
         assert!(s.take_party_requests().is_empty());
 
         s.run("AcceptGroup()").unwrap();
@@ -1384,8 +1407,8 @@ mod tests {
                 PartyRequest::Leave,
                 PartyRequest::InviteName("Bob".into()),
                 PartyRequest::InviteUnit("target".into()),
-                PartyRequest::UninviteUnit("party2".into()),
-                PartyRequest::PromoteUnit("party2".into()),
+                PartyRequest::UninviteGuid(0xB0B),
+                PartyRequest::PromoteGuid(0xB0B),
                 PartyRequest::LootMethod {
                     method: 2,
                     master: 0xB0B,
@@ -1394,6 +1417,40 @@ mod tests {
                 PartyRequest::LootThreshold(3),
             ]
         );
+        assert!(s.take_party_requests().is_empty());
+    }
+
+    /// `UninviteFromParty` (`0x48a510`) and `PromoteToPartyLeader` (`0x48a7c0`) take a string or
+    /// a number (`0x6f3510`), else their usage line (`0x84277c`, `0x8427e0`); the token goes through
+    /// `0x515970`, which raises for one it does not know (`0x515c14`). Nothing is queued without our
+    /// player object or for a token naming nobody (`0x48a552`-`0x48a55a`, `0x48a802`-`0x48a80a`).
+    #[test]
+    fn the_token_verbs_raise_their_usage_and_queue_nothing_for_nobody() {
+        let mut s = UiScript::new().unwrap();
+        for (call, error) in [
+            ("UninviteFromParty()", r#"Usage: UninviteFromParty("unit")"#),
+            (
+                "PromoteToPartyLeader({})",
+                r#"Usage: PromoteToPartyLeader("unit")"#,
+            ),
+            (r#"UninviteFromParty("bogus")"#, "Unknown unit name: bogus"),
+            ("PromoteToPartyLeader(5)", "Unknown unit name: 5"),
+        ] {
+            let raised = s.run(call).unwrap_err().to_string();
+            assert!(raised.contains(error), "{call}: {raised}");
+        }
+        s.set_unit_guids(&crate::script::UnitGuids {
+            target: 0xB0B,
+            ..Default::default()
+        });
+        s.run(r#"UninviteFromParty("target") PromoteToPartyLeader("target")"#)
+            .unwrap();
+        s.set_unit_guids(&crate::script::UnitGuids {
+            player: 0x5E1F,
+            ..Default::default()
+        });
+        s.run(r#"UninviteFromParty("party1") PromoteToPartyLeader("target")"#)
+            .unwrap();
         assert!(s.take_party_requests().is_empty());
     }
 
@@ -1669,7 +1726,6 @@ mod tests {
                 is_player: true,
                 ..Default::default()
             },
-            selectable: true,
             assistable_alive,
         }
     }

@@ -1855,6 +1855,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             threshold,
         } => w.loot_method(method, master, threshold),
         ClientCommand::SetRaidTarget { icon, guid } => w.raid_target_set(icon, guid),
+        ClientCommand::RequestRaidTargets => w.raid_target_request(),
         ClientCommand::MinimapPing { x, y } => w.minimap_ping(x, y),
         ClientCommand::GroupChangeSubGroup { name, group } => {
             w.group_change_sub_group(&name, group)

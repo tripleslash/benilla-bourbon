@@ -97,6 +97,7 @@ pub(crate) mod id {
     pub(crate) const PET_ATTACK_STOP: u16 = 335;
     pub(crate) const PLAYER_GUILD_UPDATE: u16 = 345;
     pub(crate) const TABARD_CANSAVE_CHANGED: u16 = 376;
+    pub(crate) const PLAYER_UNGHOST: u16 = 401;
     pub(crate) const PLAYER_UPDATE_RESTING: u16 = 405;
     pub(crate) const PET_UI_UPDATE: u16 = 427;
     pub(crate) const PLAYTIME_CHANGED: u16 = 530;
@@ -532,14 +533,20 @@ pub(crate) fn values(
             // against the new flags.
             if around.me == Some(guid) {
                 let flags = fields.player_flags();
-                // 0x10, the ghost state (`0x5eeab4` → `0x5de9c0`): its tutorial when now set.
-                if flipped & 0x10 != 0 && flags & 0x10 != 0 {
-                    pass.push(
-                        at,
-                        FieldNotice::Tutorial {
-                            id: tutorial::DEATH,
-                        },
-                    );
+                // 0x10, the ghost state (`0x5eeab4` → `0x5de9c0`) on either edge: set, its
+                // tutorial (`0x5de9eb`-`0x5de9f0`); clear, `PLAYER_UNGHOST` (`0x5dea2a`).
+                if flipped & 0x10 != 0 {
+                    if flags & 0x10 != 0 {
+                        pass.push(
+                            at,
+                            FieldNotice::Tutorial {
+                                id: tutorial::DEATH,
+                            },
+                        );
+                    } else {
+                        let id = id::PLAYER_UNGHOST;
+                        pass.push(at, FieldNotice::Global { id });
+                    }
                 }
                 // 0x20, resting: the rest tutorial when now set (`0x5eeae6`-`0x5eeaed`), then
                 // `PLAYER_UPDATE_RESTING` on either edge (`0x5eead0`, `0x5eeaf2`).
@@ -1341,6 +1348,32 @@ mod tests {
         );
     }
 
+    /// `0x5ee990`'s ghost arm runs the ghost state `0x5de9c0` on either edge of bit 0x10
+    /// (`0x5eeab4` → `0x5eeabc`), after `PLAYER_FLAGS_CHANGED` (`0x5eea35`): set, its tutorial
+    /// (`0x5de9eb`-`0x5de9f0`); clear, `PLAYER_UNGHOST` (`0x5dea25`-`0x5dea2a`), with no gate
+    /// before it, so the health plays no part. Another player's ghost bit reaches neither.
+    #[test]
+    fn the_ghost_bit_runs_the_ghost_state_on_either_edge() {
+        let flags = pf(PLAYER_FLAGS.0);
+        let changed = signal(ME, 407);
+        let mut me = player();
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(flags, 0x10)]),
+            [changed, FieldNotice::Tutorial { id: 0x18 }]
+        );
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(flags, 0)]),
+            [changed, FieldNotice::Global { id: 401 }],
+            "with no health in the store"
+        );
+        let mut other = player();
+        block(&mut other, Some(ME), OTHER, &[(flags, 0x10)]);
+        assert_eq!(
+            block(&mut other, Some(ME), OTHER, &[(flags, 0)]),
+            [signal(OTHER, 407)]
+        );
+    }
+
     /// `0x5ff580` on `UNIT_FIELD_FLAGS`: the active player's combat bit first (`0x5ff4e0`), the
     /// reactions, then the combat bit of a unit whose charmer, else summoner, is the player.
     #[test]
@@ -1416,7 +1449,8 @@ mod tests {
     /// resting bit is now set (`0x5eeae6`-`0x5eeaed`, 0x1d), ahead of `PLAYER_UPDATE_RESTING`
     /// (`0x5eeaf7`); the PvP tutorial when the PvP bit is now set, after its reaction (`0x5ff756`,
     /// 0x1f); and the rest state's row for state 1 (`0x80af50`: 0x19) after its line (`0x5de542`).
-    /// A cleared bit, another unit and rest state 2 raise none.
+    /// A cleared bit, another unit and rest state 2 raise none; the ghost bit's clear signals
+    /// instead.
     #[test]
     fn the_flag_tutorials_ride_their_watchers_for_the_active_player() {
         let flags = pf(PLAYER_FLAGS.0);
@@ -1436,7 +1470,11 @@ mod tests {
             block(&mut me, Some(ME), ME, &[(flags, 0x10)]),
             [changed, tutorial(0x18)]
         );
-        assert_eq!(block(&mut me, Some(ME), ME, &[(flags, 0)]), [changed]);
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(flags, 0)]),
+            [changed, FieldNotice::Global { id: 401 }],
+            "the ghost bit's clear runs the ghost state too, its event and no tutorial"
+        );
         let mut other = player();
         assert_eq!(
             block(&mut other, Some(ME), OTHER, &[(flags, 0x30)]),

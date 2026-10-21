@@ -7,7 +7,6 @@
 
 use bevy::prelude::*;
 
-use crate::client_state::ClientState;
 use crate::ui_script::UiFeed;
 use crate::ui_unit::UnitFeed;
 
@@ -93,8 +92,7 @@ impl Plugin for SpellPlugin {
             .add_systems(
                 Update,
                 (
-                    (inflight::reap_lapsed_cast, inflight::local_self_cancel)
-                        .chain()
+                    inflight::local_self_cancel
                         .in_set(UnitFeed)
                         .in_set(LocalCancel),
                     mods::track_class_family
@@ -123,13 +121,8 @@ impl Plugin for SpellPlugin {
                     group_relation::publish_group_roster
                         .in_set(UiFeed)
                         .before(UnitFeed),
-                    // The item-target commit (`0x495d60`): after the input pass so a bag click
-                    // binds the same frame; outside the target chain, as its clicks never reach
-                    // the world.
-                    targeting::commit_item_cast_on_pick.in_set(crate::ui_script::UiDrain),
                 ),
-            )
-            .add_systems(OnEnter(ClientState::InWorld), mods::clear_on_world_enter);
+            );
         net::register(app);
     }
 }

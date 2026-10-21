@@ -25,6 +25,7 @@ pub(crate) mod field_events;
 mod held;
 pub(crate) mod relations;
 pub(crate) mod tooltip_facts;
+pub(crate) mod wire_order;
 
 pub(crate) use held::{traits_from_name_cache, unit_reach};
 
@@ -128,6 +129,13 @@ pub(crate) struct UiUnitPlugin;
 impl Plugin for UiUnitPlugin {
     fn build(&self, app: &mut App) {
         field_events::add_notice_drop(app);
+        // The handler table's marks, which put the field notices and the chat queue in their
+        // packets' order.
+        crate::net::handlers::NetHandlerApp::net_drain_marks(
+            app,
+            wire_order::begin_drain,
+            wire_order::mark_call,
+        );
         app.configure_sets(
             Update,
             UnitFeed
@@ -1434,7 +1442,11 @@ fn feed_units(
     // `ResMut` because the guild-identity cache is lazy: a miss sends `CMSG_GUILD_QUERY`.
     mut guild: ResMut<crate::ui_guild::GuildState>,
     interact: Option<Res<crate::ui_session::InteractNpc>>,
+    // Our player's create since this feed last ran: an arrival (`0x5dea50`), which a `/reload`'s
+    // cascade lacks. The feed runs only with an interface up, so an arrival before one waits.
+    arrivals: Query<(), Added<SelfPlayer>>,
 ) {
+    let arrived = !arrivals.is_empty();
     let p = hosted.p0();
     let selection_changed = p.is_changed();
     let selection = *p;
@@ -1586,12 +1598,14 @@ fn feed_units(
             gate.audit("feed_units", "the target snapshot");
             script.set_unit("target", target.clone());
         }
-        // Absence is data here too: the target dropping its target clears the token.
-        let tot_dirty = match (&tot, memo.last.get("targettarget")) {
-            (Some(cur), Some(prev)) => cur != prev,
-            (None, None) => false,
-            _ => true,
-        };
+        // Absence is data here too: the target dropping its target clears the token. A seat
+        // replaced it past the memo, as it did `"target"`.
+        let tot_dirty = target_view_moved
+            || match (&tot, memo.last.get("targettarget")) {
+                (Some(cur), Some(prev)) => cur != prev,
+                (None, None) => false,
+                _ => true,
+            };
         if tot_dirty {
             gate.audit("feed_units", "the target-of-target snapshot");
             script.set_unit("targettarget", tot.clone());
@@ -1707,7 +1721,7 @@ fn feed_units(
         // in the world both times. `PLAYER_LOGIN` only when this VM's load armed it, so a
         // worldport's re-entry fires `PLAYER_ENTERING_WORLD` alone. At world exit, re-arm the entry
         // and forget the player-global memos so the next character seeds them.
-        if let Some((_, me)) = self_pair {
+        if let Some((store, me)) = self_pair {
             // wenilla carry: **the cascade waits for the book's spell views, a few frames at most.**
             // The reference builds a spell tooltip at the call, so an addon scanning the book with
             // `SetSpell` at `PLAYER_ENTERING_WORLD` reads every line; here the views land a frame after
@@ -1727,6 +1741,12 @@ fn feed_units(
                 // ahead of the aura feed's full resolver push, which this feed is not ordered
                 // against.
                 script.seat_player_guid(me.0);
+                // The arrival's ghost state (`0x5deb2a` → `0x5de9c0`) runs ahead of its cascade
+                // (`0x5deb60`): alive, `PLAYER_UNGHOST` (`0x5dea2a`), with no gate before it; a
+                // ghost's leg is its tutorial (`crate::tutorial`).
+                if arrived && store.0.player_flags() & 0x10 == 0 {
+                    script.fire_event("PLAYER_UNGHOST", vec![]);
+                }
                 script.fire_world_enter();
                 memo.entered_world = true;
             }
@@ -3844,11 +3864,13 @@ mod tests {
         );
     }
 
-    /// A selection call shows its pick as `"target"` to the rest of its chunk (`TargetByName`,
-    /// `0x489d60`); when the commit does not follow (here the call is dropped), the next frame
-    /// re-pushes `"target"` from the committed selection, though nothing the feed diffs moved.
+    /// The host seats each selection a call commits as `"target"` for the rest of its chunk
+    /// ([`UiScript::seat_selection`]), from its by-name candidate's snapshot, and its
+    /// `"targettarget"`; the next frame re-pushes both from the committed selection, though
+    /// nothing the feed diffs moved, as when a chunk selects a unit and goes back to the one it
+    /// started on.
     #[test]
-    fn a_target_view_the_commit_did_not_follow_is_re_pushed_the_next_frame() {
+    fn a_seated_target_view_is_re_pushed_from_the_selection_the_next_frame() {
         use crate::names::CreatureRecord;
         use benilla_protocol::messages::ObjectType;
         use benilla_protocol::ObjectFields;
@@ -3869,10 +3891,7 @@ mod tests {
             .init_resource::<crate::ui_guild::GuildState>();
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(NetCommands(tx));
-        // No engine behind it: the VM keeps its calls, and none is applied.
-        let mut script = UiScript::new().unwrap();
-        script.keep_calls();
-        app.insert_non_send(script);
+        app.insert_non_send(UiScript::new().unwrap());
         let mut names = NameCache::default();
         names.insert_creature(
             69,
@@ -3931,25 +3950,36 @@ mod tests {
                     name: Some("Druid".into()),
                     ..Default::default()
                 },
-                selectable: true,
                 assistable_alive: true,
             }),
         );
+        // The druid targets the player, so the seat shows a target of target too.
+        script.seat_selection(Some(benilla_ui::script::SeatedSelection {
+            guid: DRUID,
+            target: 0x77,
+            target_held: true,
+        }));
+        let tot_exists = |app: &mut App| {
+            app.world_mut()
+                .non_send_mut::<UiScript>()
+                .eval::<bool>("return UnitExists('targettarget') == 1")
+                .unwrap()
+        };
         assert_eq!(
-            target_name(&mut app, "TargetByName('Druid')").as_deref(),
+            target_name(&mut app, "").as_deref(),
             Some("Druid"),
-            "the chunk reads its pick"
+            "the chunk reads the seat"
         );
-        let dropped = app
-            .world_mut()
-            .non_send_mut::<UiScript>()
-            .take_script_calls();
-        assert_eq!(dropped.len(), 1, "the call, never applied");
+        assert!(tot_exists(&mut app), "and the seat's target of target");
         app.update();
         assert_eq!(
             target_name(&mut app, "").as_deref(),
             Some("Wolf"),
             "the committed selection is shown again"
+        );
+        assert!(
+            !tot_exists(&mut app),
+            "the wolf targets nobody, so its target of target is nobody"
         );
     }
 

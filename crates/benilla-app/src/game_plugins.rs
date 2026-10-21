@@ -1482,7 +1482,7 @@ pub(crate) mod schedule_tests {
         ("::death::drive_death_look",
          "level-driven: it writes the fade from the ghost flag every frame and re-reads self each time, so a frame with no self is overwritten by the next"),
         ("::tutorial::run_world_enter_cascade",
-         "`armed` stays set until self exists, so the welcome and questgiver triggers wait for the tag rather than being spent"),
+         "`armed` stays set until self exists, so the welcome and questgiver triggers wait for the tag rather than being spent, and the arrival's `Added<SelfPlayer>` is relative to this system's own last run, so a tag that lands after a run is still seen at the next"),
         ("::ui_session::close_npc_session_out_of_range<",
          "no self returns before anything changes, and a question open on an NPC needs a self that interacted; the leash is re-tested every frame"),
         ("::ui_session::latch::watch_interaction_range",
@@ -1869,10 +1869,6 @@ pub(crate) mod schedule_tests {
          "`pending` holds only the VM's own `Screenshot()` asks, and the take spawns a capture, publishing nothing"),
         ("screenshot.rs", "report_captures", Because::FilledByVm,
          "the outcome chain starts with the VM's own `Screenshot()` call"),
-        ("spell/targeting/item.rs", "commit_item_cast_on_pick", Because::FilledByVm,
-         "the picks and answers are the VM's own: a bag or paper-doll click with an item-targeting \
-          spell on the cursor, and the bind and replace popups' `BindEnchant` and \
-          `ReplaceEnchant`; the two events it fires answer them"),
         ("tutorial.rs", "drain_tutorials", Because::FilledByVm,
          "`sends` exist only after Lua acknowledged, cleared or reset a flag, and go to the wire"),
         ("ui_action/drain.rs", "drain_click_casts", Because::FilledByVm,
