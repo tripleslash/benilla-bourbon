@@ -128,16 +128,29 @@ The page never waits on the worker's event loop. Measured in Chrome: after a tas
 frame, the worker ran no task at all (no message, no timer) for as long as the page spun, 20 s, so a
 page spinning on it waits for itself. An extract the worker does not claim within 4 ms is withdrawn;
 after a render the worker is `SETTLING` until its next task marks it `IDLE` (`settle`, posted by
-`web/renderworker.js`). An update that ends without an extract leaves it owed, and `bevy_winit`'s
-`set_may_update` hook (`before_update`) holds the next update until it is paid: the runner skips it
-and asks for the next frame. It is never dropped: bevy's messages (the `AssetEvent`s
+`web/renderworker.js`). An update that ends without an extract leaves it owed. The page then lends
+its world to the worker while it waits in the browser's event loop (`lend`/`reclaim`, `bevy_winit`'s
+`set_lend_world`, seventh delta there): the worker takes it as soon as its render is done, from its
+settle or a wake, and the page takes it back before its next callback touches it, waiting only while
+the worker is inside the extract. `set_may_update` (`before_update`) still holds the next update until
+the extract is paid, which now happens only when the loan went untaken and the worker is still busy.
+Timed (`?rwtrace=1`, Wailing Caverns at 2x, 144 Hz): the worker's settle lands ~0.07 ms after its
+render, and a failed hand-over found it still *rendering* (the update ended early after a late
+animation frame); held, that update chained into the next frame, a third of updates were owed
+(`owed≈300 skipped≈330` per 5 s, ~108 renders/s). Lent, the worker takes those at its settle:
+`skipped` 0-5 per 5 s, one render per update. The worker's host (`web/renderworker.js`) also settles
+only once the GPU has at most two of its frames in hand (`onSubmittedWorkDone`): a GPU slower than the
+display let the canvas run ~5 frames ahead (44-48 ms from a frame's submit to its completion, on the
+page leg too); held to two it is as busy (~114 frames/s there, against ~113 on `?renderworker=0`),
+the latency halves to ~24 ms, and the page holds its update while the GPU is behind instead of
+queueing it. It is never dropped: bevy's messages (the `AssetEvent`s
 `extract_render_asset` reads, removed components) live two updates, so an update that was never
 extracted would lose asset changes, and every main update stays extracted exactly once and before
 the next one runs, as on one thread.
 
 | file | change |
 |---|---|
-| `src/render_worker.rs` | new — the state machine, the job queue, `run_blocking` for the runner's `finish`/`cleanup`, `RenderWorkerPlugin` (parks the `RenderApp` on the worker in `cleanup`, leaves `RenderWorkerExtractApp` and its non-blocking extract on the page), `before_update` (the runner's hold while an extract is owed), `settle`, the page-side buffer creation and write queue, the graveyard, the stats `webdiag` prints |
+| `src/render_worker.rs` | new — the state machine, the job queue, `run_blocking` for the runner's `finish`/`cleanup`, `RenderWorkerPlugin` (parks the `RenderApp` on the worker in `cleanup`, leaves `RenderWorkerExtractApp` and its non-blocking extract on the page), `before_update` (the runner's hold while an extract is owed), `lend`/`reclaim` (the world lent while the page waits), `settle` (which also takes a lent world), the page-side buffer creation and write queue, the graveyard, the stats `webdiag` prints, and `?rwtrace=1`'s timeline (`stamp`/`trace`, read by `__wenilla_render_trace`) |
 | `src/lib.rs` | `pub mod render_worker`; `RenderPlugin::build` adds `RenderWorkerPlugin` when active, and does not insert the `TimeReceiver` (the main app keeps its own clock; the worker's `send_time` then finds the channel closed, which it ignores) |
 | `src/settings.rs` | `create_render` posts `initialize_renderer` to the worker when active (no surface: the browser's adapter request has no use for one), marks its stages (`DEVICE_AT`, read by `describe`) and wakes the page when it has published the device (`set_wake_page`, `bevy_winit::wake_event_loop`); `unpack_into` records the device for page-made buffers |
 | `src/view/window/mod.rs` | `create_surfaces` makes the surface from the worker's `OffscreenCanvas` (the window's raw handle names a page-heap object); the upstream path is wrapped in an `unwrap_or_else` and otherwise unchanged |

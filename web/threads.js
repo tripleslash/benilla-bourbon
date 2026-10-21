@@ -75,6 +75,19 @@ export function installThreads() {
 
   let started = 0;
   let render = null;
+  // `?rwtrace=1`: the page's animation frames for the render worker's timeline
+  // (`__wenilla_render_trace`): `[callback entry, frame time]`, both `timeOrigin + now()` in ms.
+  if (new URLSearchParams(location.search).get('rwtrace') === '1') {
+    const frames = (window.__wenilla_rwframes = []);
+    const raf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (cb) =>
+      raf((t) => {
+        if (frames.length < 100000) {
+          frames.push([performance.timeOrigin + performance.now(), performance.timeOrigin + t]);
+        }
+        cb(t);
+      });
+  }
   // With `?renderworker=0` the page renders, so the census counts here.
   if (CENSUS && new URLSearchParams(location.search).get('renderworker') === '0') {
     startPageCensus();

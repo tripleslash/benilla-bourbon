@@ -67,11 +67,21 @@ update timer only on an elapsed wait.
 `set_may_update` (`src/lib.rs`) installs a hook the runner asks, with the main world, before each
 update (`run_app_update`, `src/state.rs`). `false` holds that update: nothing of it is consumed, the
 runner asks for the next redraw, and the held update runs at the next frame whatever the update mode
-(`update_deferred`). The runner also asks it at the end of an iteration that held or ran no update,
-and asks for the next frame while it says `false`, so what it holds is settled even when no update
-follows (a reactive window). The browser's render worker uses it to pay an extract the last update owed
+(`update_deferred`). The browser's render worker uses it to pay an extract the last update owed
 before the next one starts, without the page's thread waiting on the worker (which, between its
-tasks, can be waiting on the page). Unset, every update runs.
+tasks, can be waiting on the page). Unset, every update runs. What it holds is settled even when no
+update follows (a reactive window) by the seventh delta, which lets the worker take the extract while
+the page waits.
+
+## The seventh delta: the world lent between callbacks (web)
+
+`set_lend_world` (`src/lib.rs`) installs two hooks, and on `wasm32` the runner state is spawned
+inside `Lending` (`src/state.rs`), which calls `reclaim` before each `ApplicationHandler` callback and
+`lend`, with the main world, after it (once the plugins are cleaned). Between the two the page is in
+the browser's event loop and the runner does not touch the world, so the browser's render worker may
+extract from it there: an update that ended while the worker was still drawing the last one is
+extracted as soon as the worker is free, and the next update is not held for it. `exiting` only
+reclaims. Unset, both are no-ops and `Lending` is the runner state as upstream.
 
 Search for `benilla fork` to find every hunk.
 
@@ -81,4 +91,4 @@ Search for `benilla fork` to find every hunk.
 diff -ru <crates.io bevy_winit-0.19.1> third_party/bevy_winit
 ```
 
-The diff shows only the `src/state.rs` hunks above, `AfterUpdate`, the finish hook, `wake_event_loop` and `set_may_update` in `src/lib.rs`, plus this file.
+The diff shows only the `src/state.rs` hunks above, `AfterUpdate`, the finish hook, `wake_event_loop`, `set_may_update` and `set_lend_world` in `src/lib.rs`, plus this file.

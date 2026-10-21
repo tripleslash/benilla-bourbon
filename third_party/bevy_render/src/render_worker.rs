@@ -29,9 +29,13 @@
 //! `SETTLING` until a fresh task of its own ([`settle`]) marks it `IDLE`, so the page does not
 //! publish into the gap where the worker waits on it.
 //!
-//! An update whose extract did not happen leaves it *owed*, and the runner does not start another
-//! update until it is paid ([`before_update`], `bevy_winit`'s `set_may_update`): it skips the
-//! update and asks for the next frame instead. So every main update is still extracted exactly
+//! An update whose extract did not happen leaves it *owed*. When the page returns to the browser
+//! with an extract owed it *lends* the worker its world ([`lend`], `bevy_winit`'s `set_lend_world`,
+//! after every runner callback): the worker takes it as soon as it is free, from its settle or a
+//! wake, while the page waits in its event loop, and the page takes it back before its next
+//! callback touches it ([`reclaim`]), waiting only if the worker is mid-extract. The runner does not
+//! start another update until the extract is paid ([`before_update`], `set_may_update`): if the
+//! loan went untaken and the worker is still busy, it skips the update and asks for the next frame. So every main update is still extracted exactly
 //! once and before the next one starts, as on one thread: bevy's messages (`AssetEvent`s that
 //! `extract_render_asset` reads, removed components) live two updates, and an update that was never
 //! extracted would drop them. The worker renders right after extract and returns to its event loop,
@@ -295,6 +299,10 @@ pub struct RenderWorkerStats {
     pub skipped: u64,
     /// Published extracts the worker did not claim within [`CLAIM_BUDGET`].
     pub withdrawn: u64,
+    /// Worlds lent to the worker when the page returned to the browser with an extract owed
+    /// ([`lend`]), and those the worker extracted before the page came back ([`reclaim`]).
+    pub lent: u64,
+    pub lent_paid: u64,
     /// Extracts done, and their total and worst page-side wait (wake + extract + queued writes), µs.
     pub extracts: u64,
     pub wait_us: u64,
@@ -307,6 +315,8 @@ static RENDER_MAX_US: AtomicU64 = AtomicU64::new(0);
 static OWED_COUNT: AtomicU64 = AtomicU64::new(0);
 static SKIPPED: AtomicU64 = AtomicU64::new(0);
 static WITHDRAWN: AtomicU64 = AtomicU64::new(0);
+static LENT_COUNT: AtomicU64 = AtomicU64::new(0);
+static LENT_PAID: AtomicU64 = AtomicU64::new(0);
 static EXTRACTS: AtomicU64 = AtomicU64::new(0);
 static WAIT_US: AtomicU64 = AtomicU64::new(0);
 static WAIT_MAX_US: AtomicU64 = AtomicU64::new(0);
@@ -320,6 +330,8 @@ pub fn take_stats() -> RenderWorkerStats {
         owed: OWED_COUNT.swap(0, Ordering::Relaxed),
         skipped: SKIPPED.swap(0, Ordering::Relaxed),
         withdrawn: WITHDRAWN.swap(0, Ordering::Relaxed),
+        lent: LENT_COUNT.swap(0, Ordering::Relaxed),
+        lent_paid: LENT_PAID.swap(0, Ordering::Relaxed),
         extracts: EXTRACTS.swap(0, Ordering::Relaxed),
         wait_us: WAIT_US.swap(0, Ordering::Relaxed),
         wait_max_us: WAIT_MAX_US.swap(0, Ordering::Relaxed),
@@ -330,12 +342,101 @@ fn micros(d: Duration) -> u64 {
     u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
 }
 
+/// `?rwtrace=1`: a timeline of the handshake, one clock for both agents (`timeOrigin + now()`,
+/// µs), in a ring the page reads with [`trace`]. Off, a stamp is one relaxed load.
+static TRACE_ON: AtomicBool = AtomicBool::new(false);
+const TRACE_LEN: usize = 8192;
+static TRACE: [AtomicU64; TRACE_LEN] = [const { AtomicU64::new(0) }; TRACE_LEN];
+static TRACE_NEXT: AtomicU32 = AtomicU32::new(0);
+
+/// What a trace entry marks. The page's own: an animation frame (`web/threads.js`), the runner's
+/// `before_update`, a hand-over tried (with the state it found), done, withdrawn, an extract owed,
+/// an update skipped. The worker's: a wake, a claim, render start and end, a settle.
+pub mod mark {
+    pub const PAGE_FRAME: u8 = 1;
+    pub const BEFORE_UPDATE: u8 = 2;
+    pub const HAND_TRY: u8 = 3;
+    pub const HAND_DONE: u8 = 4;
+    pub const WITHDRAWN: u8 = 5;
+    pub const OWED: u8 = 6;
+    pub const SKIPPED: u8 = 7;
+    pub const WORKER_POLL: u8 = 10;
+    pub const CLAIM: u8 = 11;
+    pub const RENDER_START: u8 = 12;
+    pub const RENDER_END: u8 = 13;
+    pub const SETTLE: u8 = 14;
+    pub const LEND: u8 = 15;
+    pub const RECLAIM: u8 = 16;
+    pub const TAKE_LENT: u8 = 17;
+}
+
+/// Turn the timeline on (page, before the worker starts).
+pub fn set_trace(on: bool) {
+    TRACE_ON.store(on, Ordering::Release);
+}
+
+thread_local! {
+    /// This agent's `performance` and its `timeOrigin`, ms.
+    static CLOCK: Option<(js_sys::Function, JsValue, f64)> = {
+        let perf = js_sys::Reflect::get(&js_sys::global(), &"performance".into()).ok();
+        perf.and_then(|perf| {
+            let now = js_sys::Reflect::get(&perf, &"now".into()).ok()?;
+            let origin = js_sys::Reflect::get(&perf, &"timeOrigin".into()).ok()?.as_f64()?;
+            Some((now.into(), perf, origin))
+        })
+    };
+}
+
+/// Stamp `kind` (with an 8-bit `arg`) at this instant, if the timeline is on.
+pub fn stamp(kind: u8, arg: u8) {
+    if !TRACE_ON.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(ms) = CLOCK.with(|c| {
+        let (now, perf, origin) = c.as_ref()?;
+        Some(origin + now.call0(perf).ok()?.as_f64()?)
+    }) else {
+        return;
+    };
+    let us = (ms * 1000.0) as u64 & ((1 << 48) - 1);
+    let slot = TRACE_NEXT.fetch_add(1, Ordering::Relaxed) as usize % TRACE_LEN;
+    TRACE[slot].store(
+        (u64::from(kind) << 56) | (u64::from(arg) << 48) | us,
+        Ordering::Relaxed,
+    );
+}
+
+/// The timeline, oldest first, as `kind arg µs` lines, and the ring emptied.
+pub fn trace() -> String {
+    let next = TRACE_NEXT.swap(0, Ordering::AcqRel) as usize;
+    let (start, len) = if next > TRACE_LEN {
+        (next % TRACE_LEN, TRACE_LEN)
+    } else {
+        (0, next)
+    };
+    let mut out = String::new();
+    for i in 0..len {
+        let v = TRACE[(start + i) % TRACE_LEN].swap(0, Ordering::Relaxed);
+        if v != 0 {
+            out.push_str(&alloc::format!(
+                "{} {} {}\n",
+                v >> 56,
+                (v >> 48) & 0xff,
+                v & ((1 << 48) - 1)
+            ));
+        }
+    }
+    out
+}
+
 /// The page's half of the frame handshake, as the extract function of [`RenderWorkerExtractApp`].
 ///
 /// Never waits for a render or for the worker's event loop: if the extract does not happen now
-/// ([`try_hand_over`]), it is owed, and [`before_update`] holds the next update until it is paid.
+/// ([`try_hand_over`]), it is owed, and the page lends its world to the worker when it returns to
+/// the browser ([`lend`]).
 fn renderer_extract(main_world: &mut World, _: &mut World) {
     if !try_hand_over(main_world) {
+        stamp(mark::OWED, 0);
         OWED.store(true, Ordering::Relaxed);
         OWED_COUNT.fetch_add(1, Ordering::Relaxed);
     }
@@ -348,11 +449,11 @@ pub fn extract_owed() -> bool {
 }
 
 /// Whether the runner may start the next main update: `bevy_winit`'s `set_may_update` hook, on the
-/// page. An extract the last update owed is paid first, against the world and messages that update
-/// left; if the worker cannot take it yet, the runner skips this update and asks for the next
-/// frame, returning the page's thread to the browser meanwhile. The runner also asks between
-/// updates, so an owed extract is paid even when no update follows.
+/// page. An extract the last update owed, and the worker did not take while the page was away
+/// ([`reclaim`]), is paid first, against the world and messages that update left; if the worker
+/// cannot take it yet, the runner skips this update and asks for the next frame.
 pub fn before_update(world: &mut World) -> bool {
+    stamp(mark::BEFORE_UPDATE, OWED.load(Ordering::Relaxed) as u8);
     if !OWED.load(Ordering::Relaxed) {
         return true;
     }
@@ -361,6 +462,7 @@ pub fn before_update(world: &mut World) -> bool {
         return true;
     }
     SKIPPED.fetch_add(1, Ordering::Relaxed);
+    stamp(mark::SKIPPED, 0);
     false
 }
 
@@ -368,7 +470,9 @@ pub fn before_update(world: &mut World) -> bool {
 /// wake the worker, and wait at most [`CLAIM_BUDGET`] for its claim. Claimed, spin until the
 /// extract is done and return `true`. Unclaimed, withdraw it and return `false`.
 fn try_hand_over(main_world: &mut World) -> bool {
-    if STATE.load(Ordering::Acquire) != IDLE {
+    let state = STATE.load(Ordering::Acquire);
+    stamp(mark::HAND_TRY, state as u8);
+    if state != IDLE {
         return false;
     }
     let start = Instant::now();
@@ -387,6 +491,7 @@ fn try_hand_over(main_world: &mut World) -> bool {
         {
             MAIN_WORLD.store(core::ptr::null_mut(), Ordering::Release);
             WITHDRAWN.fetch_add(1, Ordering::Relaxed);
+            stamp(mark::WITHDRAWN, 0);
             return false;
         }
     }
@@ -398,16 +503,139 @@ fn try_hand_over(main_world: &mut World) -> bool {
     );
     MAIN_WORLD.store(core::ptr::null_mut(), Ordering::Release);
     let waited = micros(start.elapsed());
+    stamp(mark::HAND_DONE, 0);
     EXTRACTS.fetch_add(1, Ordering::Relaxed);
     WAIT_US.fetch_add(waited, Ordering::Relaxed);
     WAIT_MAX_US.fetch_max(waited, Ordering::Relaxed);
     true
 }
 
+/// Nothing lent.
+const LENT_NONE: u32 = 0;
+/// The page is waiting in the browser's event loop with its world parked in [`MAIN_WORLD`] and an
+/// extract owed; the worker takes it when it is free.
+const LENT: u32 = 1;
+/// The worker took the lent world and is extracting it.
+const LENT_TAKEN: u32 = 2;
+/// The worker has extracted the lent world; the page's next callback finds the extract paid.
+const LENT_DONE: u32 = 3;
+static LEND: AtomicU32 = AtomicU32::new(LENT_NONE);
+
+/// The runner returns to the browser (`bevy_winit`'s `set_lend_world` hook, after each of its
+/// callbacks): an extract still owed is paid now if the worker is free, else the world is lent to
+/// the worker, which extracts it as soon as its render is done ([`settle`]) while the page waits in
+/// its event loop. The page touches nothing of the world until [`reclaim`].
+///
+/// Without it, an update that ended while the worker was still drawing the last one held the next
+/// update for a whole frame and paid at that frame's start, so the worker drew alongside the page's
+/// next update and that update's hand-over raced it again (measured: a third of updates owed).
+pub fn lend(world: &mut World) {
+    if !OWED.load(Ordering::Relaxed) {
+        return;
+    }
+    if try_hand_over(world) {
+        OWED.store(false, Ordering::Relaxed);
+        return;
+    }
+    MAIN_WORLD.store(world, Ordering::SeqCst);
+    LEND.store(LENT, Ordering::SeqCst);
+    LENT_COUNT.fetch_add(1, Ordering::Relaxed);
+    stamp(mark::LEND, STATE.load(Ordering::Relaxed) as u8);
+    // A worker that went idle before it could see the loan has nothing left to wake it: the loan's
+    // store and this load pair with `settle`'s, so one of the two sees the other.
+    if STATE.load(Ordering::SeqCst) == IDLE {
+        kick();
+    }
+}
+
+/// The runner is back from the browser (`bevy_winit`'s `set_lend_world` hook, before each of its
+/// callbacks): take back a world [`lend`] left with the worker. Untaken, it is withdrawn and the
+/// extract stays owed; taken, the worker is inside its task extracting it, which needs nothing from
+/// this thread, so the page waits for that to finish.
+pub fn reclaim() {
+    match LEND.compare_exchange(LENT, LENT_NONE, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => {
+            MAIN_WORLD.store(core::ptr::null_mut(), Ordering::Release);
+            stamp(mark::RECLAIM, 0);
+        }
+        Err(LENT_NONE) => {}
+        Err(_) => {
+            let start = Instant::now();
+            spin_until(
+                || LEND.load(Ordering::Acquire) == LENT_DONE,
+                EXTRACT_DEADLINE,
+                "the worker stopped answering a lent extract",
+            );
+            LEND.store(LENT_NONE, Ordering::Release);
+            MAIN_WORLD.store(core::ptr::null_mut(), Ordering::Release);
+            OWED.store(false, Ordering::Relaxed);
+            let waited = micros(start.elapsed());
+            stamp(mark::RECLAIM, 1);
+            EXTRACTS.fetch_add(1, Ordering::Relaxed);
+            LENT_PAID.fetch_add(1, Ordering::Relaxed);
+            WAIT_US.fetch_add(waited, Ordering::Relaxed);
+            WAIT_MAX_US.fetch_max(waited, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Extract the main world into the render app and render it. `extracted` runs once the page may
+/// have its world back, before the render.
+fn extract_and_render(main_world: &mut World, extracted: impl FnOnce()) {
+    RENDER_APP.with_borrow_mut(|app| {
+        let app = app
+            .as_mut()
+            .expect("render worker: an extract arrived before the render app");
+        at(AT_EXTRACT);
+        app.extract(main_world);
+        at(AT_WRITES);
+        // The page's writes from the update this extract closes, before the page moves on.
+        if let Some(queue) = app.world().get_resource::<RenderQueue>() {
+            drain_writes(queue);
+        }
+        STATE.store(RENDERING, Ordering::Release);
+        extracted();
+        stamp(mark::RENDER_START, 0);
+
+        let start = Instant::now();
+        at(AT_RENDER);
+        app.update();
+        at(AT_GRAVE);
+        drain_graveyard();
+        let took = micros(start.elapsed());
+        RENDERS.fetch_add(1, Ordering::Relaxed);
+        RENDER_US.fetch_add(took, Ordering::Relaxed);
+        RENDER_MAX_US.fetch_max(took, Ordering::Relaxed);
+        STATE.store(SETTLING, Ordering::Release);
+        stamp(mark::RENDER_END, 0);
+    });
+}
+
+/// Take and render a world the page lent ([`lend`]), if the worker is free and there is one.
+/// Whether it rendered.
+fn take_lent() -> bool {
+    if STATE.load(Ordering::SeqCst) != IDLE
+        || LEND
+            .compare_exchange(LENT, LENT_TAKEN, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+    {
+        return false;
+    }
+    stamp(mark::TAKE_LENT, 0);
+    STATE.store(TAKEN, Ordering::Release);
+    // SAFETY: the page stored this pointer from its `&mut World` before it lent it and returned to
+    // the browser; from the claim above until `LENT_DONE` it does not touch the world (its next
+    // callback waits in `reclaim`).
+    let main_world = unsafe { &mut *MAIN_WORLD.load(Ordering::Acquire) };
+    extract_and_render(main_world, || LEND.store(LENT_DONE, Ordering::Release));
+    true
+}
+
 /// The worker's whole loop body, run each time its event loop wakes: boot jobs first, then an
-/// extract and a render if the page published one. Returns whether it rendered, in which case the
-/// worker's host must call [`settle`] from a later task.
+/// extract and a render if the page published one or lent its world. Returns whether it rendered,
+/// in which case the worker's host must call [`settle`] from a later task.
 pub fn poll() -> bool {
+    stamp(mark::WORKER_POLL, STATE.load(Ordering::Relaxed) as u8);
     at(AT_JOBS);
     loop {
         let job = lock(&JOBS).pop_front();
@@ -416,49 +644,37 @@ pub fn poll() -> bool {
             None => break,
         }
     }
-    let claimed = STATE
+    let rendered = if STATE
         .compare_exchange(EXTRACT, TAKEN, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok();
-    if claimed {
-        RENDER_APP.with_borrow_mut(|app| {
-            let app = app
-                .as_mut()
-                .expect("render worker: an extract arrived before the render app");
-            // SAFETY: the page stored this pointer from its `&mut World`, and once the claim above
-            // succeeded it spins, touching nothing, until `STATE` leaves `TAKEN` below.
-            let main_world = unsafe { &mut *MAIN_WORLD.load(Ordering::Acquire) };
-            at(AT_EXTRACT);
-            app.extract(main_world);
-            at(AT_WRITES);
-            // The page's writes from the update this extract closes, before the page moves on.
-            if let Some(queue) = app.world().get_resource::<RenderQueue>() {
-                drain_writes(queue);
-            }
-            STATE.store(RENDERING, Ordering::Release);
-
-            let start = Instant::now();
-            at(AT_RENDER);
-            app.update();
-            at(AT_GRAVE);
-            drain_graveyard();
-            let took = micros(start.elapsed());
-            RENDERS.fetch_add(1, Ordering::Relaxed);
-            RENDER_US.fetch_add(took, Ordering::Relaxed);
-            RENDER_MAX_US.fetch_max(took, Ordering::Relaxed);
-            STATE.store(SETTLING, Ordering::Release);
-        });
+        .is_ok()
+    {
+        stamp(mark::CLAIM, 0);
+        // SAFETY: the page stored this pointer from its `&mut World`, and once the claim above
+        // succeeded it spins, touching nothing, until `STATE` leaves `TAKEN`.
+        let main_world = unsafe { &mut *MAIN_WORLD.load(Ordering::Acquire) };
+        extract_and_render(main_world, || {});
+        true
     } else {
+        take_lent()
+    };
+    if !rendered {
         at(AT_GRAVE);
         drain_graveyard();
     }
     at(AT_LOOP);
-    claimed
+    rendered
 }
 
-/// The worker is free again: called by its host from the first task after a [`poll`] that
-/// rendered, once the browser has had the worker's event loop back (to present the frame).
-pub fn settle() {
-    let _ = STATE.compare_exchange(SETTLING, IDLE, Ordering::AcqRel, Ordering::Acquire);
+/// The worker is free again: called by its host from the first task after a [`poll`] (or a
+/// `settle`) that rendered, once the browser has had the worker's event loop back (to present the
+/// frame). A world the page lent meanwhile is taken and rendered here; then, as after a poll, it
+/// returns `true` and the host settles again from its next task.
+pub fn settle() -> bool {
+    stamp(mark::SETTLE, STATE.load(Ordering::Relaxed) as u8);
+    let _ = STATE.compare_exchange(SETTLING, IDLE, Ordering::SeqCst, Ordering::SeqCst);
+    let rendered = take_lent();
+    at(AT_LOOP);
+    rendered
 }
 
 /// The page-side stand-in for the render sub-app: no schedules, only the handshake as its extract.

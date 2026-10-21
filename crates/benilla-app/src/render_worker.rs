@@ -54,11 +54,17 @@ mod imp {
         // Before the worker can read anything through `webenv`: it has no `window`.
         crate::webenv::publish_for_workers();
         render_worker::install(kick);
+        // `?rwtrace=1`: the handshake's timeline (`__wenilla_render_trace`).
+        if crate::webenv::var("WOW_RWTRACE").as_deref() == Some("1") {
+            render_worker::set_trace(true);
+        }
         // The device is made on the worker; its arrival must wake the page's event loop.
         render_worker::set_wake_page(bevy::winit::wake_event_loop);
         bevy::winit::set_finish_plugins(finish_on_worker);
         // An update whose extract the worker could not take yet is held, not waited on.
         bevy::winit::set_may_update(render_worker::before_update);
+        // And while the page waits in the browser, the worker may take that extract itself.
+        bevy::winit::set_lend_world(render_worker::lend, render_worker::reclaim);
         web_sys::console::log_1(
             &"wenilla: rendering on a worker (?renderworker=0 to compare)".into(),
         );
@@ -119,7 +125,7 @@ mod imp {
         let avg = |sum: u64, n: u64| if n > 0 { ms(sum) / n as f32 } else { 0.0 };
         format!(
             "renders={} render_avg={:.2}ms render_max={:.2}ms extracts={} wait_avg={:.2}ms \
-             wait_max={:.2}ms owed={} skipped={} withdrawn={}",
+             wait_max={:.2}ms owed={} lent={} lent_paid={} skipped={} withdrawn={}",
             s.renders,
             avg(s.render_us, s.renders),
             ms(s.render_max_us),
@@ -127,9 +133,18 @@ mod imp {
             avg(s.wait_us, s.extracts),
             ms(s.wait_max_us),
             s.owed,
+            s.lent,
+            s.lent_paid,
             s.skipped,
             s.withdrawn,
         )
+    }
+
+    /// The handshake's timeline since the last call (`render_worker::trace`, `?rwtrace=1`), as
+    /// `kind arg µs` lines, for a console on the page. Nothing else calls it.
+    #[wasm_bindgen]
+    pub fn __wenilla_render_trace() -> String {
+        render_worker::trace()
     }
 
     /// Each wake of the worker's event loop (`web/renderworker.js`); `true` when it rendered, and
@@ -140,10 +155,11 @@ mod imp {
         render_worker::poll()
     }
 
-    /// The first task after a poll that rendered (`web/renderworker.js`): the worker is free
-    /// again. **Not for anything else to call.**
+    /// The first task after a poll or a settle that rendered (`web/renderworker.js`): the worker
+    /// is free again, and renders a world the page lent it meanwhile; `true` when it did, and the
+    /// worker then settles again from its next task. **Not for anything else to call.**
     #[wasm_bindgen]
-    pub fn __wenilla_render_settle() {
-        render_worker::settle();
+    pub fn __wenilla_render_settle() -> bool {
+        render_worker::settle()
     }
 }

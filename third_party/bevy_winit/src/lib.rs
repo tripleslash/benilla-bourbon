@@ -74,6 +74,32 @@ pub(crate) fn may_update(world: &mut World) -> bool {
     MAY_UPDATE.get().is_none_or(|hook| hook(world))
 }
 
+/// benilla fork — the render worker: the page's main world may stay with its render worker while
+/// the page waits in the browser's event loop. `lend` runs after each runner callback, with the
+/// world; `reclaim` before each, before the runner touches it. Unset, nothing is lent, as upstream.
+static LEND_WORLD: std::sync::OnceLock<(fn(&mut World), fn())> = std::sync::OnceLock::new();
+
+/// Install [`LEND_WORLD`]'s hooks. The first call wins; call it before `App::run`.
+pub fn set_lend_world(lend: fn(&mut World), reclaim: fn()) {
+    let _ = LEND_WORLD.set((lend, reclaim));
+}
+
+/// Lend the main world ([`LEND_WORLD`]): the runner returns to the browser.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn lend_world(world: &mut World) {
+    if let Some((lend, _)) = LEND_WORLD.get() {
+        lend(world);
+    }
+}
+
+/// Take a lent main world back ([`LEND_WORLD`]): the runner is back from the browser.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn reclaim_world() {
+    if let Some((_, reclaim)) = LEND_WORLD.get() {
+        reclaim();
+    }
+}
+
 /// benilla fork — the render worker: the proxy [`wake_event_loop`] sends through, kept from
 /// [`WinitPlugin::build`].
 static WAKE: std::sync::OnceLock<EventLoopProxy<WinitUserEvent>> = std::sync::OnceLock::new();

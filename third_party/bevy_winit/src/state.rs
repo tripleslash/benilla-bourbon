@@ -696,16 +696,6 @@ impl WinitAppRunnerState {
             update_mode = config.update_mode(focused);
         }
 
-        // benilla fork (BENILLA.md, sixth delta): what the hook holds is settled at the next frame
-        // even when no update follows: a reactive window may not update again for a long time,
-        // and the browser's render worker still needs the last update's extract to draw it.
-        if !self.update_deferred
-            && self.app.plugins_state() == PluginsState::Cleaned
-            && !crate::may_update(self.app.world_mut())
-        {
-            self.redraw_requested = true;
-        }
-
         // The update mode could have been changed, so we need to redraw and force an update
         if update_mode != self.update_mode {
             // Trigger the next redraw since we're changing the update mode
@@ -963,7 +953,8 @@ pub fn winit_runner(mut app: App, event_loop: EventLoop<WinitUserEvent>) -> AppE
     // https://docs.rs/winit/latest/winit/platform/web/trait.EventLoopExtWebSys.html#tymethod.spawn_app
     cfg_select! {
         target_arch = "wasm32" => {
-            event_loop.spawn_app(runner_state);
+            // benilla fork (BENILLA.md, seventh delta): the world may be lent between callbacks.
+            event_loop.spawn_app(Lending(runner_state));
             AppExit::Success
         }
         _ => {
@@ -1297,5 +1288,69 @@ mod tests {
         let window_entity = app.world_mut().spawn(window).id();
 
         (app, window_entity)
+    }
+}
+
+/// benilla fork (BENILLA.md, seventh delta): the browser's runner, which may lend the main world to
+/// the render worker while the page waits in the browser's event loop. Every callback takes it back
+/// before the runner touches it and lends it again after ([`crate::set_lend_world`]); with no hooks
+/// installed both are no-ops and this is the runner state as upstream.
+#[cfg(target_arch = "wasm32")]
+struct Lending(WinitAppRunnerState);
+
+#[cfg(target_arch = "wasm32")]
+impl Lending {
+    fn around(&mut self, callback: impl FnOnce(&mut WinitAppRunnerState)) {
+        crate::reclaim_world();
+        callback(&mut self.0);
+        if self.0.app.plugins_state() == PluginsState::Cleaned {
+            crate::lend_world(self.0.app.world_mut());
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl ApplicationHandler<WinitUserEvent> for Lending {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        self.around(|s| s.new_events(event_loop, cause));
+    }
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.around(|s| s.resumed(event_loop));
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WinitUserEvent) {
+        self.around(|s| s.user_event(event_loop, event));
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        self.around(|s| s.window_event(event_loop, window_id, event));
+    }
+
+    fn device_event(&mut self, event_loop: &ActiveEventLoop, device_id: DeviceId, event: DeviceEvent) {
+        self.around(|s| s.device_event(event_loop, device_id, event));
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.around(|s| s.about_to_wait(event_loop));
+    }
+
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        self.around(|s| s.suspended(event_loop));
+    }
+
+    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+        // Nothing is lent again: the world is cleared.
+        crate::reclaim_world();
+        self.0.exiting(event_loop);
+    }
+
+    fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
+        self.around(|s| s.memory_warning(event_loop));
     }
 }

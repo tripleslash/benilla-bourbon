@@ -13,6 +13,9 @@
 //   3. after a poll that rendered, the next task of this worker settles it (`render_worker::settle`):
 //      only then may the page publish another extract. Between the two tasks the browser can hold
 //      this worker until the page's thread is free, so the page must not be spinning on it then.
+//      A settle also renders a world the page lent while it waits in its own event loop, and is
+//      then followed by another settle, as a poll that rendered is. The settle after a render
+//      waits until the GPU has at most `IN_FLIGHT` frames of this worker's in hand.
 
 import {
   initSync,
@@ -80,16 +83,53 @@ function guarded(f) {
 /// A task of its own after each render: a message to ourselves runs once the browser has had the
 /// event loop back from the task that rendered.
 const settler = new MessageChannel();
-settler.port1.onmessage = () => guarded(__wenilla_render_settle);
+settler.port1.onmessage = () => {
+  if (guarded(__wenilla_render_settle)) rendered();
+};
 
 function poll() {
-  if (guarded(__wenilla_render_poll)) settler.port2.postMessage(0);
+  if (guarded(__wenilla_render_poll)) rendered();
+}
+
+/// How many frames the GPU may still be working on when the worker takes the next extract. The
+/// browser lets a canvas run ~5 frames ahead of a GPU that cannot keep up with the display
+/// (measured at Wailing Caverns, 2x: 44-48 ms from a frame's last submit to its completion, one
+/// frame done every 8.7 ms); held to 2 the GPU is as busy, the latency halves and the frames it
+/// completes come evenly (gap p99 16 ms against 26-32). While the GPU is behind the worker stays
+/// settling, so the page holds its next update instead of queueing it (`render_worker`).
+const IN_FLIGHT = 2;
+/// The device's queue, seen at its first submit, and the frames submitted to it not yet done.
+let queue = null;
+const inFlight = [];
+function watchQueue() {
+  const submit = self.GPUQueue?.prototype?.submit;
+  if (typeof submit !== 'function') return;
+  self.GPUQueue.prototype.submit = function (...args) {
+    queue = this;
+    return submit.apply(this, args);
+  };
+}
+
+/// After a render: settle once at most `IN_FLIGHT` frames, this one included, are on the GPU. A
+/// frame whose completion fails (a lost device, which the page's guard handles) counts as done.
+function rendered() {
+  const settle = () => settler.port2.postMessage(0);
+  if (queue) {
+    const done = queue.onSubmittedWorkDone();
+    const drop = () => inFlight.splice(inFlight.indexOf(done), 1);
+    inFlight.push(done);
+    done.then(drop, drop);
+  }
+  const ahead = inFlight.length > IN_FLIGHT ? inFlight[inFlight.length - 1 - IN_FLIGHT] : null;
+  if (ahead) ahead.then(settle, settle);
+  else settle();
 }
 
 self.onmessage = (event) => {
   const { module, memory, canvas, stackSize, census } = event.data || {};
   self.onmessage = poll;
   watchDevices();
+  watchQueue();
   try {
     const exports = initSync({ module, memory, thread_stack_size: stackSize ?? undefined });
     if (census) startCensus(exports);

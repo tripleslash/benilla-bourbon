@@ -48,23 +48,65 @@ export function installGpuCensus() {
   watch(self.GPUCommandEncoder?.prototype, 'beginComputePass', 'computePass');
   watch(self.GPUCommandEncoder?.prototype, 'finish', 'commandBuffer');
   watch(self.GPUCanvasContext?.prototype, 'getCurrentTexture', 'canvasTexture');
+  const gpu = watchGpuFrames();
   return () => {
     const top = Object.entries(labels)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 10);
     labels = Object.create(null);
-    return { made: { ...made }, freed: { ...freed }, top };
+    return { made: { ...made }, freed: { ...freed }, top, gpu: gpu() };
+  };
+}
+
+/// When the GPU finished each frame: a frame is the work submitted between two `getCurrentTexture`
+/// calls, and it is done when `onSubmittedWorkDone`, asked after its last submit, resolves. Returns
+/// a summary of the window since the last call: `lat` from that submit to done, `gap` between two
+/// frames' done. A `gap` that stays above the refresh while `lat` grows is a GPU that cannot keep up.
+function watchGpuFrames() {
+  const submit = self.GPUQueue?.prototype?.submit;
+  const current = self.GPUCanvasContext?.prototype?.getCurrentTexture;
+  if (typeof submit !== 'function' || typeof current !== 'function') return () => '';
+  let last = null;
+  let lastDone = 0;
+  let lat = [];
+  let gap = [];
+  self.GPUQueue.prototype.submit = function (...args) {
+    const r = submit.apply(this, args);
+    last = { queue: this, at: performance.now() };
+    return r;
+  };
+  self.GPUCanvasContext.prototype.getCurrentTexture = function (...args) {
+    if (last) {
+      const { queue, at } = last;
+      queue.onSubmittedWorkDone().then(() => {
+        const now = performance.now();
+        lat.push(now - at);
+        if (lastDone) gap.push(now - lastDone);
+        lastDone = now;
+      });
+      last = null;
+    }
+    return current.apply(this, args);
+  };
+  const q = (xs, p) => (xs.length ? xs[Math.min(xs.length - 1, Math.floor(p * xs.length))].toFixed(2) : '-');
+  return () => {
+    const l = lat.sort((a, b) => a - b);
+    const g = gap.sort((a, b) => a - b);
+    lat = [];
+    gap = [];
+    return `frames=${l.length} lat p50=${q(l, 0.5)} p90=${q(l, 0.9)} max=${q(l, 1)} gap p50=${q(g, 0.5)} p90=${q(g, 0.9)} p99=${q(g, 0.99)}`;
   };
 }
 
 /// One report as a console line: the shared linear memory, the JS values Rust holds on the
 /// reporting agent (wasm-bindgen's externref table, which only grows), and per kind the objects
 /// alive (made, less freed) with how many were made since `last`.
-export function censusLine(where, { made, freed, refs, mib, top, handshake }, last) {
+export function censusLine(where, { made, freed, refs, mib, top, handshake, gpu }, last) {
   const parts = Object.keys(made)
     .sort()
     .map((k) => `${k}=${made[k] - (freed[k] || 0)}(+${made[k] - (last?.[k] || 0)})`);
   const churn = (top || []).map(([label, n]) => `${label}×${n}`).join(' ');
   const hs = handshake ? ` | handshake: ${handshake}` : '';
-  return `[gpucensus] ${where} refs=${refs} mem=${mib}MiB alive(+made/5s): ${parts.join(' ')} | made by label: ${churn}${hs}`;
+  const done = gpu ? ` | gpu: ${gpu}` : '';
+  return `[gpucensus] ${where} refs=${refs} mem=${mib}MiB alive(+made/5s): ${parts.join(' ')} | made by label: ${churn}${hs}${done}`;
 }
