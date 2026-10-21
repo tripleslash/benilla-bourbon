@@ -453,6 +453,7 @@ impl NameCache {
 
     /// The records [`Self::to_tsv`] writes, owned, so the formatting can run on another thread
     /// ([`CacheRows::to_tsv`]); the clone costs a fraction of the formatting.
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
     pub(crate) fn rows(&self) -> CacheRows {
         CacheRows {
             records: self
@@ -466,11 +467,13 @@ impl NameCache {
 }
 
 /// A snapshot of the persisted records ([`NameCache::rows`]), with the locale its header names.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 pub(crate) struct CacheRows {
     records: Vec<(u32, CreatureRecord)>,
     locale: String,
 }
 
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 impl CacheRows {
     /// [`NameCache::to_tsv`]'s text for these records.
     pub(crate) fn to_tsv(&self, realm: &str) -> String {
