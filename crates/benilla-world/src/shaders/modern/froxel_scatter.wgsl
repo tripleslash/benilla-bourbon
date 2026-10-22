@@ -64,32 +64,31 @@ const BANK_EDGE: vec2<f32> = vec2<f32>(0.45, 0.72);
 const BANK_KEY_GAIN: f32 = 1.6;
 const BANK_SKY_SHARE: f32 = 0.5;
 
-// The terrain's height under `p` from the heightfield (`probegi::terrain_height`'s read), else the
-// ground under the camera.
-fn ground_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
-    if (f.ground.x < 0.5) {
-        return f.night.y;
-    }
+// The terrain under `p` from the heightfield (`probegi::terrain_height`'s read), read once per froxel
+// for the ground banks and the sea fog: x = the height at the texel `p` clamps to (`-1e9` where
+// nothing is drawn), y = 1 when `p` lies inside the heightfield over drawn terrain. The caller
+// checks `ground.x` (the heightfield is live).
+fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> vec2<f32> {
     let q = vec4<f32>(p, 1.0);
-    let uv = vec2<f32>(dot(f.ground_x, q), dot(f.ground_y, q));
-    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
-        return f.night.y;
-    }
+    let raw = vec2<f32>(dot(f.ground_x, q), dot(f.ground_y, q));
+    let uv = clamp(raw, vec2<f32>(0.0), vec2<f32>(1.0));
     let n = f.ground.w;
     let d = textureLoad(ground_map, vec2<i32>(clamp(uv * n, vec2<f32>(0.0), vec2<f32>(n - 1.0))), 0);
     if (d <= 0.0) {
-        return f.night.y;
+        return vec2<f32>(-1e9, 0.0);
     }
-    return f.ground.y + d * f.ground.z;
+    return vec2<f32>(f.ground.y + d * f.ground.z, select(0.0, 1.0, all(raw == uv)));
 }
 
-// The ground banks' extinction at `p` (1/yd).
-fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
+// The ground banks' extinction at `p` (1/yd), over `terrain` (`terrain_under`; off or outside it,
+// the ground under the camera).
+fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>, terrain: vec2<f32>) -> f32 {
     let core = f.night.x;
     if (core <= 0.0) {
         return 0.0;
     }
-    let above = max(p.y - ground_under(f, p), 0.0);
+    let ground = select(f.night.y, terrain.x, terrain.y > 0.5);
+    let above = max(p.y - ground, 0.0);
     let height = exp(-min(above * f.night.z, 24.0));
     let q = vec3<f32>(p.x, p.y * 0.25, p.z) + f.wind.xyz * 0.5;
     let n = textureSampleLevel(noise_tex, repeat_samp, q / BANK_SCALE + vec3<f32>(0.37, 0.11, 0.73), 0.0).r;
@@ -106,41 +105,36 @@ const SEA_LEVEL: f32 = 0.0;
 // The bank's mean top (yd of e-folding above the sea), and the depth band that is the shore.
 const SEA_HEIGHT: f32 = 16.0;
 const SEA_SHORE: vec2<f32> = vec2<f32>(1.5, 10.0);
-// The swell's and the billows' feature sizes (yd). The billows are a quarter of the swell, so one
-// drift wraps both seamlessly.
+// The swell's feature size (yd). The billows are the froxel's own drifting noise (`NOISE_SCALE`,
+// 48 yd), already sampled for the fog's wisps: a third tap per froxel over the whole sea cost
+// frames walking through the banks.
 const SEA_SCALE: f32 = 220.0;
-const SEA_BILLOW: f32 = SEA_SCALE * 0.25;
-// The drift, in swell tiles per wrapped hour (`camera.w` wraps at 3600 s): whole numbers, so the
+// The swell's drift, in tiles per wrapped hour (`camera.w` wraps at 3600 s): whole numbers, so the
 // noise does not jump when the clock wraps (~0.5 yd/s).
 const SEA_DRIFT: vec3<f32> = vec3<f32>(8.0, 0.0, 3.0);
 
-// The terrain's height under `p`, clamped into the heightfield; `-1e9` where nothing is drawn.
-fn seabed_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
-    let q = vec4<f32>(p, 1.0);
-    let uv = clamp(vec2<f32>(dot(f.ground_x, q), dot(f.ground_y, q)), vec2<f32>(0.0), vec2<f32>(1.0));
-    let n = f.ground.w;
-    let d = textureLoad(ground_map, vec2<i32>(clamp(uv * n, vec2<f32>(0.0), vec2<f32>(n - 1.0))), 0);
-    if (d <= 0.0) {
-        return -1e9;
-    }
-    return f.ground.y + d * f.ground.z;
+// Whether the sea fog can reach `p` at all: on in this zone, the heightfield live, and `p` between
+// just under the surface and the height past which the tallest bank has thinned to nothing.
+fn sea_reaches(f: froxelfog::FroxelFog, p: vec3<f32>) -> bool {
+    let above = p.y - SEA_LEVEL;
+    return f.night.w > 0.0 && f.ground.x > 0.5 && above <= SEA_HEIGHT * 10.0 && above >= -2.0;
 }
 
-// The sea fog's extinction at `p` (1/yd).
-fn sea_fog(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
-    let core = f.night.w;
-    let above = p.y - SEA_LEVEL;
-    if (core <= 0.0 || f.ground.x < 0.5 || above > SEA_HEIGHT * 10.0 || above < -2.0) {
+// The sea fog's extinction at `p` (1/yd), over the bed `seabed` (`terrain_under`'s x), broken by
+// `billow` (the froxel's noise).
+fn sea_fog(f: froxelfog::FroxelFog, p: vec3<f32>, seabed: f32, billow: f32) -> f32 {
+    if (!sea_reaches(f, p)) {
         return 0.0;
     }
-    let shore = smoothstep(SEA_SHORE.x, SEA_SHORE.y, SEA_LEVEL - seabed_under(f, p));
+    let core = f.night.w;
+    let above = p.y - SEA_LEVEL;
+    let shore = smoothstep(SEA_SHORE.x, SEA_SHORE.y, SEA_LEVEL - seabed);
     if (shore <= 0.0) {
         return 0.0;
     }
     let drift = SEA_DRIFT * (f.camera.w / 3600.0);
     let swell = textureSampleLevel(noise_tex, repeat_samp, vec3<f32>(p.x, 0.0, p.z) / SEA_SCALE + drift + vec3<f32>(0.61, 0.29, 0.17), 0.0).r;
     let top = SEA_HEIGHT * mix(0.3, 2.2, smoothstep(0.25, 0.75, swell));
-    let billow = textureSampleLevel(noise_tex, repeat_samp, vec3<f32>(p.x, p.y * 1.6, p.z) / SEA_BILLOW + drift * 4.0, 0.0).r;
     let body = smoothstep(0.3, 0.6, billow + 0.25 * (swell - 0.5));
     // Under the surface the water carries its own fog.
     let height = exp(-max(above, 0.0) / top) * smoothstep(-2.0, 0.0, above);
@@ -247,10 +241,16 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let sigma_fog = ext.x;
     let sigma_haze = ext.y;
     let sigma_night = ext.z;
+    // fork: the terrain under the froxel, read once for the ground banks and the sea fog, and only
+    // when one of them can reach it.
+    var terrain = vec2<f32>(-1e9, 0.0);
+    if (f.ground.x > 0.5 && (f.night.x > 0.0 || sea_reaches(f, p))) {
+        terrain = terrain_under(f, p);
+    }
     // fork: the ground banks (outside rooms: a building's air is its own).
-    let sigma_bank = ground_banks(f, p) * (1.0 - room);
+    let sigma_bank = ground_banks(f, p, terrain) * (1.0 - room);
     // fork: the sea fog, lit as the zone's own fog (`lum_fog`'s open-air term).
-    let sigma_sea = sea_fog(f, p) * (1.0 - room);
+    let sigma_sea = sea_fog(f, p, terrain.x, noise) * (1.0 - room);
     let sigma = sigma_fog + sigma_haze + sigma_night + sigma_bank + sigma_sea;
     // fork: the lamps scatter off the clear-weather air (`froxelfog::halo_fog`), so rain does not
     // swell their glow; the storm's own medium still dims it on the way to the eye.
