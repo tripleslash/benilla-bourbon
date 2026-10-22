@@ -371,6 +371,64 @@ fn ends_with_any(name: &str, rows: &[&str]) -> bool {
     rows.iter().any(|s| name.ends_with(s))
 }
 
+/// The resources a system's declared access names, read and written: 0.18's resource access.
+/// 0.19 keeps resources as components: a `Res`/`ResMut` is a filtered access `With<IsResource>`
+/// beside the queries, and a `NonSend`'s an unfiltered one on a type that is not `Send`; an
+/// unbounded read (an `EntityRef` query) names none, as 0.18's never counted those.
+#[derive(Default)]
+struct ResourceAccess {
+    /// Read or written.
+    reads: BTreeSet<ComponentId>,
+    writes: BTreeSet<ComponentId>,
+}
+
+impl ResourceAccess {
+    fn of(world: &World, set: &bevy::ecs::query::FilteredAccessSet) -> Self {
+        let mut out = Self::default();
+        for fa in set.filtered_accesses() {
+            let resource = fa
+                .with_filters()
+                .any(|id| id == bevy::ecs::resource::IS_RESOURCE);
+            let access = fa.access();
+            let keep = |id: &ComponentId| {
+                resource
+                    || world
+                        .components()
+                        .get_info(*id)
+                        .is_some_and(|info| !info.is_send_and_sync())
+            };
+            if let Ok(rw) = access.try_reads_and_writes() {
+                out.reads.extend(rw.iter().filter(keep));
+            }
+            if let Ok(w) = access.try_writes() {
+                out.writes.extend(w.iter().filter(keep));
+            }
+        }
+        out
+    }
+
+    fn has_resource_read(&self, id: ComponentId) -> bool {
+        self.reads.contains(&id)
+    }
+
+    fn has_resource_write(&self, id: ComponentId) -> bool {
+        self.writes.contains(&id)
+    }
+
+    /// Read and not written.
+    fn resource_reads(&self) -> impl Iterator<Item = ComponentId> + '_ {
+        self.reads.difference(&self.writes).copied()
+    }
+
+    fn resource_writes(&self) -> impl Iterator<Item = ComponentId> + '_ {
+        self.writes.iter().copied()
+    }
+
+    fn is_subset_resources(&self, other: &Self) -> bool {
+        self.reads.is_subset(&other.reads) && self.writes.is_subset(&other.writes)
+    }
+}
+
 /// The queues the handlers fill, by id: each resource one writes, past the pure caches, and each
 /// resource in [`FILLED_THROUGH_A_READ`] one reads.
 fn handler_queues(
@@ -380,7 +438,7 @@ fn handler_queues(
     let handlers = world.resource::<crate::net::handlers::NetHandlers>();
     let mut out = BTreeSet::new();
     for (_, access) in &handlers.accesses {
-        let access = access.combined_access();
+        let access = ResourceAccess::of(world, access);
         out.extend(access.resource_writes().filter(|id| !caches.contains(id)));
         out.extend(
             access
@@ -392,12 +450,11 @@ fn handler_queues(
 }
 
 /// The call host's own state, which every system that lends it holds: what a call touches.
-fn call_host_access(world: &mut World) -> bevy::ecs::query::Access {
+fn call_host_access(world: &mut World) -> ResourceAccess {
     use bevy::ecs::system::System;
     let mut host = IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {});
-    System::initialize(&mut host, world)
-        .combined_access()
-        .clone()
+    let set = System::initialize(&mut host, world);
+    ResourceAccess::of(world, &set)
 }
 
 /// Whether `node` sits in the `UiFeed` phase, through any set.
@@ -435,14 +492,14 @@ fn every_resource_a_handler_reads_is_a_known_queue_or_read_only() {
     let handlers = world.resource::<crate::net::handlers::NetHandlers>();
     let vm = world
         .components()
-        .get_resource_id(TypeId::of::<benilla_ui::script::UiScript>());
+        .get_id(TypeId::of::<benilla_ui::script::UiScript>());
     let lanes: Vec<Option<ComponentId>> = lane_types()
         .into_iter()
-        .map(|t| world.components().get_resource_id(t))
+        .map(|t| world.components().get_id(t))
         .collect();
     let mut reads = BTreeSet::new();
     for (_, access) in &handlers.accesses {
-        let access = access.combined_access();
+        let access = ResourceAccess::of(world, access);
         for id in access.resource_reads() {
             if !access.has_resource_write(id) && Some(id) != vm && !lanes.contains(&Some(id)) {
                 reads.insert(name(world, id));
@@ -575,13 +632,15 @@ fn every_handler_queue_a_feed_takes_is_on_a_lane_or_listed() {
     let (taken, exclusive, systems, host_held) =
         app.world_mut().schedule_scope(Update, |world, schedule| {
             schedule.graph_mut().systems.initialize(world);
+            // 0.19 keeps the stored access private: read it back by initializing again.
+            let accesses = crate::vm_pass::system_accesses(schedule, world);
             let vm = world
                 .components()
-                .get_resource_id(TypeId::of::<benilla_ui::script::UiScript>());
+                .get_id(TypeId::of::<benilla_ui::script::UiScript>());
             let host = call_host_access(world);
             let lanes: Vec<ComponentId> = lane_types()
                 .into_iter()
-                .filter_map(|t| world.components().get_resource_id(t))
+                .filter_map(|t| world.components().get_id(t))
                 .collect();
             let graph = schedule.graph();
             let in_feed = |node: NodeId| in_feed(graph, node);
@@ -606,10 +665,10 @@ fn every_handler_queue_a_feed_takes_is_on_a_lane_or_listed() {
                     exclusive.insert(name);
                     continue;
                 }
-                let Some(with_access) = graph.systems.get(key) else {
+                let Some(access) = accesses.get(&key) else {
                     continue;
                 };
-                let access = with_access.access.combined_access();
+                let access = ResourceAccess::of(world, access);
                 if !vm.is_some_and(|vm| access.has_resource_write(vm)) {
                     continue;
                 }
@@ -761,13 +820,14 @@ fn every_lane_push_off_a_handler_queue_keeps_its_place() {
     let queues = handler_queues(app.world(), &caches);
     let (pushes, systems) = app.world_mut().schedule_scope(Update, |world, schedule| {
         schedule.graph_mut().systems.initialize(world);
+        let accesses = crate::vm_pass::system_accesses(schedule, world);
         let host = call_host_access(world);
-        let id = |t: TypeId| world.components().get_resource_id(t);
+        let id = |t: TypeId| world.components().get_id(t);
         let vm = id(TypeId::of::<benilla_ui::script::UiScript>());
         let lanes: Vec<ComponentId> = lane_types().into_iter().filter_map(id).collect();
         // The chat lane is pushed through a shared reference, the others through a write.
         let chat = id(TypeId::of::<crate::ui_chat::ChatLog>());
-        let pushes_onto = |access: &bevy::ecs::query::Access, lane: ComponentId| {
+        let pushes_onto = |access: &ResourceAccess, lane: ComponentId| {
             if Some(lane) == chat {
                 access.has_resource_read(lane)
             } else {
@@ -780,10 +840,10 @@ fn every_lane_push_off_a_handler_queue_keeps_its_place() {
         let mut systems = BTreeSet::new();
         for (key, system, _) in graph.systems.iter() {
             systems.insert(system.name().to_string());
-            let Some(with_access) = graph.systems.get(key) else {
+            let Some(access) = accesses.get(&key) else {
                 continue;
             };
-            let access = with_access.access.combined_access();
+            let access = &ResourceAccess::of(world, access);
             let fires = vm.is_some_and(|vm| access.has_resource_write(vm));
             // A feed of the phase that fires is the other guard's, and an exclusive one is its
             // row; a system that lends the call host outside the phase is judged here, by the
@@ -861,11 +921,11 @@ fn every_lane_push_off_a_handler_queue_keeps_its_place() {
 /// shows bevy no access, so each one needs a declared order against the drain.
 #[test]
 fn the_systems_unordered_against_the_drain_meet_it_only_on_a_pure_cache() {
-    use bevy::ecs::query::{Access, AccessConflicts};
+    use bevy::ecs::query::{AccessConflicts, FilteredAccess, FilteredAccessSet};
     let mut app = headless_client();
-    let mut drain = Access::new();
+    let mut drain = FilteredAccessSet::default();
     for a in &app.world().resource::<super::Lanes>().1 {
-        drain.extend(a.combined_access());
+        drain.extend(a.clone());
     }
     {
         use crate::creature_anim::UnitEdit;
@@ -876,38 +936,43 @@ fn the_systems_unordered_against_the_drain_meet_it_only_on_a_pure_cache() {
             .collect();
         for t in writes {
             if let Some(id) = world.components().get_id(t) {
-                drain.add_component_write(id);
+                let mut write = FilteredAccess::default();
+                write.add_write(id);
+                drain.add(write);
             }
         }
         let player = world.register_component::<crate::net::SelfPlayer>();
-        drain.add_component_read(player);
+        let mut read = FilteredAccess::default();
+        read.add_read(player);
+        drain.add(read);
         for t in [
             TypeId::of::<crate::creature_anim::PlaySeq>(),
             TypeId::of::<bevy::ecs::message::Messages<crate::creature_anim::CastEvent>>(),
             TypeId::of::<crate::ui_loot::LootMoveStart>(),
             TypeId::of::<crate::ui_loot::LootCloseAtRest>(),
         ] {
-            if let Some(id) = world.components().get_resource_id(t) {
+            if let Some(id) = world.components().get_id(t) {
                 drain.add_resource_write(id);
             }
         }
         if let Some(id) = world
             .components()
-            .get_resource_id(TypeId::of::<crate::player::Player>())
+            .get_id(TypeId::of::<crate::player::Player>())
         {
             drain.add_resource_read(id);
         }
     }
     // Each system's access, read before the census builds the schedule.
-    let accesses: HashMap<_, (Access, bool)> =
+    let accesses: HashMap<_, (FilteredAccessSet, bool)> =
         app.world_mut().schedule_scope(Update, |world, schedule| {
             schedule.graph_mut().systems.initialize(world);
+            let mut accesses = crate::vm_pass::system_accesses(schedule, world);
             let graph = schedule.graph();
             graph
                 .systems
                 .iter()
                 .filter_map(|(k, system, _)| {
-                    let access = graph.systems.get(k)?.access.combined_access().clone();
+                    let access = accesses.remove(&k)?;
                     Some((k, (access, system.is_exclusive())))
                 })
                 .collect()
@@ -957,8 +1022,7 @@ fn the_systems_unordered_against_the_drain_meet_it_only_on_a_pure_cache() {
         let met: Vec<String> = match a.get_conflicts(&drain) {
             AccessConflicts::All => vec!["everything".to_string()],
             AccessConflicts::Individual(ids) => ids
-                .ones()
-                .map(ComponentId::new)
+                .iter()
                 .filter(|id| !c.classes.caches.contains(id))
                 .map(|id| name(world, id))
                 .collect(),
