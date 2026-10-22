@@ -14,6 +14,11 @@
 //! busy shard's request — goes through [`FairLock`], which lets no waiter starve: once one has
 //! waited long, the others hold back until it is served, so the page thread waits a bounded time.
 //!
+//! A block over 16 KiB that is freed while the shared lock is busy is not waited for: it goes on a
+//! lock-free list ([`Deferred`]) and whoever holds the lock next frees a few of them. Dropping an
+//! unloaded terrain tile's or WMO's meshes on the page thread stalled it in that wait (measured:
+//! a 206 ms frame, most of its samples spinning in `dealloc` while the workers decoded).
+//!
 //! The shard is picked from the stack address, not a thread-local: a new thread's stack and TLS
 //! block are allocated with this allocator as wasm-bindgen starts it, possibly before that thread's
 //! TLS exists, and a thread-local touched then would write through an unset TLS base. Thread stacks are disjoint, so
@@ -23,7 +28,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::UnsafeCell;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 /// The size classes, bytes; every class block is allocated at [`CLASS_ALIGN`].
 const CLASSES: [usize; 36] = [
@@ -202,6 +207,14 @@ impl FairLock {
         }
     }
 
+    /// The lock if it is free and no waiter is starving; never waits.
+    fn try_lock(&self) -> Option<FairGuard<'_>> {
+        (self.starving.load(Ordering::Relaxed) == 0
+            && !self.locked.load(Ordering::Relaxed)
+            && !self.locked.swap(true, Ordering::Acquire))
+        .then(|| FairGuard(self))
+    }
+
     fn lock(&self) -> FairGuard<'_> {
         let mut spins = 0u32;
         let mut starving = false;
@@ -239,6 +252,79 @@ impl Drop for FairGuard<'_> {
 /// The lock every call into the shared allocator takes.
 static SHARED: FairLock = FairLock::new();
 
+/// A large block freed while [`SHARED`] was busy, written over the block's own first bytes.
+struct Deferred {
+    next: *mut u8,
+    size: usize,
+    align: usize,
+}
+
+/// The deferred blocks, newest first. Any thread pushes; only a holder of [`SHARED`] pops, so a
+/// popped head cannot come back while it is read (no ABA).
+static DEFERRED: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
+/// Deferred blocks one hold of [`SHARED`] frees, at most: the hold stays short.
+const DRAIN: usize = 2;
+
+/// SAFETY: `block` is a free block over [`MAX_SMALL`] bytes that `System` allocated at `layout`.
+unsafe fn defer(block: *mut u8, layout: Layout) {
+    let mut head = DEFERRED.load(Ordering::Relaxed);
+    loop {
+        let entry = Deferred {
+            next: head,
+            size: layout.size(),
+            align: layout.align(),
+        };
+        // SAFETY: the block is far larger than an entry, and nobody else owns it.
+        unsafe { block.cast::<Deferred>().write_unaligned(entry) };
+        match DEFERRED.compare_exchange_weak(head, block, Ordering::Release, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(now) => head = now,
+        }
+    }
+}
+
+/// Free up to `n` deferred blocks; the caller holds [`SHARED`].
+fn drain(_turn: &FairGuard<'_>, n: usize) {
+    for _ in 0..n {
+        let block = DEFERRED.load(Ordering::Acquire);
+        if block.is_null() {
+            return;
+        }
+        // SAFETY: a listed block holds the entry its pusher wrote, and only a holder of `SHARED`
+        // pops, so `block` is still listed while it is read.
+        let entry = unsafe { block.cast::<Deferred>().read_unaligned() };
+        if DEFERRED
+            .compare_exchange(block, entry.next, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            // SAFETY: the entry records the layout `System` allocated the block at.
+            unsafe {
+                System.dealloc(
+                    block,
+                    Layout::from_size_align_unchecked(entry.size, entry.align),
+                )
+            };
+        }
+    }
+}
+
+/// A hold of [`SHARED`] that first frees a few deferred blocks.
+fn shared() -> FairGuard<'static> {
+    let turn = SHARED.lock();
+    drain(&turn, DRAIN);
+    turn
+}
+
+/// `alloc` under `turn`, and once more after freeing every deferred block if that fails.
+fn alloc_or_drain(turn: &FairGuard<'_>, alloc: impl Fn() -> *mut u8) -> *mut u8 {
+    let block = alloc();
+    if !block.is_null() || DEFERRED.load(Ordering::Relaxed).is_null() {
+        return block;
+    }
+    drain(turn, usize::MAX);
+    alloc()
+}
+
 /// Small blocks from per-shard class lists, everything else from `System` in turn.
 pub(crate) struct ShardedAlloc;
 
@@ -249,10 +335,10 @@ impl ShardedAlloc {
         if let Some(mut shard) = shard().try_take() {
             let list = shard.list(c);
             if list.head.is_null() {
-                let _turn = SHARED.lock();
+                let turn = shared();
                 for _ in 0..batch(c) {
                     // SAFETY: a class layout is non-zero-sized.
-                    let block = unsafe { System.alloc(class_layout(c)) };
+                    let block = alloc_or_drain(&turn, || unsafe { System.alloc(class_layout(c)) });
                     if block.is_null() {
                         break;
                     }
@@ -265,9 +351,9 @@ impl ShardedAlloc {
                 return block;
             }
         }
-        let _turn = SHARED.lock();
+        let turn = shared();
         // SAFETY: a class layout is non-zero-sized.
-        unsafe { System.alloc(class_layout(c)) }
+        alloc_or_drain(&turn, || unsafe { System.alloc(class_layout(c)) })
     }
 
     /// Return a class block: onto this shard's list (flushing a batch when full), or straight to the
@@ -276,7 +362,7 @@ impl ShardedAlloc {
         if let Some(mut shard) = shard().try_take() {
             let list = shard.list(c);
             if list.len >= cap(c) {
-                let _turn = SHARED.lock();
+                let _turn = shared();
                 for _ in 0..batch(c) {
                     let spare = list.pop();
                     // SAFETY: every listed block came from `System` at the class layout.
@@ -287,7 +373,7 @@ impl ShardedAlloc {
             unsafe { list.push(block) };
             return;
         }
-        let _turn = SHARED.lock();
+        let _turn = shared();
         // SAFETY: every class block came from `System` at the class layout.
         unsafe { System.dealloc(block, class_layout(c)) };
     }
@@ -300,8 +386,8 @@ unsafe impl GlobalAlloc for ShardedAlloc {
         match class_of(layout) {
             Some(c) => unsafe { self.alloc_small(c) },
             None => {
-                let _turn = SHARED.lock();
-                unsafe { System.alloc(layout) }
+                let turn = shared();
+                alloc_or_drain(&turn, || unsafe { System.alloc(layout) })
             }
         }
     }
@@ -316,8 +402,8 @@ unsafe impl GlobalAlloc for ShardedAlloc {
                 block
             }
             None => {
-                let _turn = SHARED.lock();
-                unsafe { System.alloc_zeroed(layout) }
+                let turn = shared();
+                alloc_or_drain(&turn, || unsafe { System.alloc_zeroed(layout) })
             }
         }
     }
@@ -325,10 +411,12 @@ unsafe impl GlobalAlloc for ShardedAlloc {
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
         match class_of(layout) {
             Some(c) => unsafe { self.dealloc_small(block, c) },
-            None => {
-                let _turn = SHARED.lock();
-                unsafe { System.dealloc(block, layout) };
-            }
+            // A busy lock is not waited for: the next holder frees the block. A free that gets the
+            // lock frees only its own block, so it never pays for others' deferred ones.
+            None => match SHARED.try_lock() {
+                Some(_turn) => unsafe { System.dealloc(block, layout) },
+                None => unsafe { defer(block, layout) },
+            },
         }
     }
 
@@ -337,8 +425,8 @@ unsafe impl GlobalAlloc for ShardedAlloc {
         let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
         match (class_of(layout), class_of(new_layout)) {
             (None, None) => {
-                let _turn = SHARED.lock();
-                unsafe { System.realloc(block, layout, new_size) }
+                let turn = shared();
+                alloc_or_drain(&turn, || unsafe { System.realloc(block, layout, new_size) })
             }
             (Some(a), Some(b)) if a == b => block,
             _ => {
@@ -459,6 +547,36 @@ mod tests {
             check(b as *const u8, s, sd);
             unsafe { ShardedAlloc.dealloc(b as *mut u8, Layout::from_size_align(s, a).unwrap()) };
         }
+    }
+
+    /// A large block freed while the shared lock is held elsewhere waits on the deferred list
+    /// instead of the lock, and the next holder frees it.
+    #[test]
+    fn a_large_free_under_a_busy_lock_is_deferred_and_drained() {
+        let layout = Layout::from_size_align(64 * 1024, 8).unwrap();
+        let block = unsafe { ShardedAlloc.alloc(layout) };
+        assert!(!block.is_null());
+        let listed = |b: *mut u8| {
+            let mut at = DEFERRED.load(Ordering::Acquire);
+            while !at.is_null() {
+                if at == b {
+                    return true;
+                }
+                at = unsafe { at.cast::<Deferred>().read_unaligned() }.next;
+            }
+            false
+        };
+        let turn = SHARED.lock();
+        let freeing = block as usize;
+        std::thread::spawn(move || unsafe { ShardedAlloc.dealloc(freeing as *mut u8, layout) })
+            .join()
+            .unwrap();
+        assert!(
+            listed(block),
+            "the free returned without the lock, so it must be listed"
+        );
+        drain(&turn, usize::MAX);
+        assert!(!listed(block), "the holder's drain frees it");
     }
 
     /// Growing and shrinking across the class boundary and into the shared allocator keeps the
