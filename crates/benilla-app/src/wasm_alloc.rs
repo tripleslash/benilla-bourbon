@@ -286,6 +286,10 @@ static POOL: PoolCell = PoolCell(UnsafeCell::new(Pool {
     map: 0,
 }));
 
+/// Slices filed free in the pool's bins, kept by [`bin_insert`] and [`bin_remove`] under [`SPANS`];
+/// read without it by [`headroom`].
+static POOLED: AtomicUsize = AtomicUsize::new(0);
+
 fn pool(_turn: &FairGuard<'_>) -> *mut Pool {
     POOL.0.get()
 }
@@ -314,7 +318,9 @@ fn bin_insert(turn: &FairGuard<'_>, s: u32) {
     let pool = pool(turn);
     // SAFETY: the caller holds `SPANS`, which owns the pool and free spans' links.
     unsafe {
-        let b = bin_of((*sp(s)).slices);
+        let n = (*sp(s)).slices;
+        POOLED.fetch_add(n as usize, Ordering::Relaxed);
+        let b = bin_of(n);
         let head = (*pool).bins[b];
         (*sp(s)).prev = NIL;
         (*sp(s)).next = head;
@@ -330,7 +336,9 @@ fn bin_remove(turn: &FairGuard<'_>, s: u32) {
     let pool = pool(turn);
     // SAFETY: as `bin_insert`.
     unsafe {
-        let b = bin_of((*sp(s)).slices);
+        let n = (*sp(s)).slices;
+        POOLED.fetch_sub(n as usize, Ordering::Relaxed);
+        let b = bin_of(n);
         let (prev, next) = ((*sp(s)).prev, (*sp(s)).next);
         if prev == NIL {
             (*pool).bins[b] = next;
@@ -520,6 +528,14 @@ pub(crate) fn set_grow_step(bytes: usize) {
     GROW_STEP.store(bytes, Ordering::Relaxed);
 }
 
+/// Bytes the allocator can still hand out: the free spans in the pool, and the memory not grown
+/// yet. It rises again as memory is freed, which linear memory's size, only ever growing, cannot
+/// show. Empty pages a heap keeps and spans waiting on [`DEFERRED`] count as used, so it errs low;
+/// a request for one contiguous run can still fail on a fragmented pool.
+pub(crate) fn headroom() -> usize {
+    POOLED.load(Ordering::Relaxed) * SLICE + heap::max_bytes().saturating_sub(heap::bytes())
+}
+
 /// Memory growth since the last call: (grows, grows by the step, bytes grown).
 pub(crate) fn take_grow_stats() -> (u32, u32, usize) {
     (
@@ -542,9 +558,16 @@ pub(crate) mod heap {
 
     /// Bytes of linear memory.
     #[cfg(target_arch = "wasm32")]
-    #[allow(dead_code, reason = "read by the tests and the stress app")]
     pub(crate) fn bytes() -> usize {
         core::arch::wasm32::memory_size(0) * SLICE
+    }
+
+    /// The most linear memory can grow to: the whole 32-bit address space, which the threaded
+    /// build declares as its maximum (`scripts/web-build-threads.sh`, `--max-memory`). 4 GiB is one
+    /// past what `usize` holds here; a byte short of it is all a gauge needs.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn max_bytes() -> usize {
+        usize::MAX
     }
 
     /// `memory.grow` by `slices`: the address of the first new one.
@@ -587,9 +610,13 @@ pub(crate) mod heap {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    #[allow(dead_code, reason = "read by the stress app")]
     pub(crate) fn bytes() -> usize {
         model::PAGES.load(Relaxed) * SLICE
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn max_bytes() -> usize {
+        model::CAP_PAGES.load(Relaxed) * SLICE
     }
 
     /// The model's `memory.grow`, under `SPANS`: the region is reserved at the first one.
@@ -1306,6 +1333,24 @@ mod tests {
         assert_ne!(s, NIL, "the step left a span of its size");
         release(&turn, s, 128);
         GROW_STEP.store(step, Ordering::Relaxed);
+    }
+
+    /// A span taken from the pool lowers the headroom by its size, and giving it back restores it;
+    /// a grow on the way moves memory from not grown to pooled and changes nothing. Under the
+    /// pool's lock throughout, so no other test moves the pool meanwhile.
+    #[test]
+    fn a_span_out_lowers_the_headroom_and_its_return_restores_it() {
+        let turn = SPANS.lock();
+        let before = headroom();
+        let mut s = take(&turn, 16);
+        if s == NIL {
+            assert!(grow(&turn, 16));
+            s = take(&turn, 16);
+        }
+        assert_ne!(s, NIL);
+        assert_eq!(headroom(), before - 16 * SLICE);
+        release(&turn, s, 16);
+        assert_eq!(headroom(), before);
     }
 
     /// Growing and shrinking across the classes and through large spans, in place and moved, keeps

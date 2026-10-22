@@ -99,6 +99,15 @@ mod items;
 mod lanes;
 mod loading_screen;
 mod local_state;
+#[cfg(any(
+    test,
+    all(
+        target_arch = "wasm32",
+        target_feature = "atomics",
+        not(debug_assertions)
+    )
+))]
+mod memory_pressure;
 mod minimap;
 mod nameplates;
 mod names;
@@ -735,6 +744,14 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // (no `LogPlugin` there), with spikes stamped on the wall clock every thread shares.
     #[cfg(feature = "trace_systems")]
     benilla_world::system_profile::plugin(&mut app);
+    // fork: web — the memory-pressure valve: short of linear memory, the view distance steps
+    // down, and back up once there is room (`memory_pressure`).
+    #[cfg(all(
+        target_arch = "wasm32",
+        target_feature = "atomics",
+        not(debug_assertions)
+    ))]
+    memory_pressure::plugin(&mut app);
 
     // A background run opens unfocused, and `WinitSettings::game()` drives an unfocused window at
     // reactive 1/60 s, so a frame-time instrument would read ~16.7 ms whatever the scene costs.
