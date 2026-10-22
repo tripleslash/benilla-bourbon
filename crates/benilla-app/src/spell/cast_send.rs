@@ -1241,8 +1241,6 @@ mod tests {
         on_object: None,
     };
 
-    static EMPTY_REPUTATIONS: Reputations = Reputations::from_slots(Vec::new());
-
     /// A context with nothing selected: every rung that needs world state is inert.
     pub(super) fn ctx() -> cast_target::CastContext<'static> {
         cast_target::CastContext {
@@ -1255,7 +1253,7 @@ mod tests {
                 target_owner_store: None,
                 self_store: None,
                 factions: None,
-                reputations: &EMPTY_REPUTATIONS,
+                reputations: Reputations::empty(),
                 types: Default::default(),
                 group: Default::default(),
             },
