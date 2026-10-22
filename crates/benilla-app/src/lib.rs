@@ -93,6 +93,7 @@ mod go_templates;
 mod hd_models;
 #[cfg(feature = "dev")]
 mod hover_log;
+mod item_lane;
 mod item_watch;
 mod items;
 mod lanes;

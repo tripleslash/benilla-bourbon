@@ -821,7 +821,7 @@ fn resolve_slot(
     spells: Option<&benilla_formats::SpellCatalog>,
     names: &crate::names::NameCache,
     // Mutable: reading a charter's record is what queries it.
-    petitions: &crate::ui_petition::PetitionState,
+    petitions: &crate::ui_petition::PetitionRecords,
     // `bevy::platform::time::Instant`: this is `clock.anchor` (`crate::ui_script::UiClock`), which
     // on wasm32 is a different type from `std::time::Instant` (that field's own doc has the reason).
     now: bevy::platform::time::Instant,
@@ -1073,7 +1073,7 @@ fn bag_family_name(
 pub(super) fn ask_item_build_lookups(
     mut hosted_vm: crate::script_calls::HostedVm,
     names: Res<crate::names::NameCache>,
-    petitions: Res<crate::ui_petition::PetitionState>,
+    petitions: Res<crate::ui_petition::PetitionRecords>,
     objects: Objects,
     commands: Res<NetCommands>,
 ) {
@@ -1098,7 +1098,7 @@ fn ask_build_lookups(
     (name_asks, petition_asks): (Vec<u64>, Vec<u64>),
     petition_id: impl Fn(u64) -> u32,
     names: &crate::names::NameCache,
-    petitions: &crate::ui_petition::PetitionState,
+    petitions: &crate::ui_petition::PetitionRecords,
     commands: &NetCommands,
 ) {
     for guid in name_asks {
@@ -1131,7 +1131,7 @@ pub(crate) fn feed_containers(
     names: Res<crate::names::NameCache>,
     clock_and_petitions: (
         Res<crate::ui_script::UiClock>,
-        Res<crate::ui_petition::PetitionState>,
+        Res<crate::ui_petition::PetitionRecords>,
     ),
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
     writes: BagWrites,
@@ -2039,7 +2039,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let commands = crate::net::NetCommands(tx);
         let mut names = crate::names::NameCache::default();
-        let petitions = crate::ui_petition::PetitionState::default();
+        let petitions = crate::ui_petition::PetitionRecords::default();
         let run = |names: &crate::names::NameCache| {
             ask_build_lookups((vec![0x5], vec![0x99]), |_| 7, names, &petitions, &commands);
             crate::query_cache::queries(&rx).len()
@@ -2091,7 +2091,7 @@ mod tests {
 
         let names = NameCache::default();
         let cooldowns = crate::spell::Cooldowns::default();
-        let petitions = crate::ui_petition::PetitionState::default();
+        let petitions = crate::ui_petition::PetitionRecords::default();
         let mut slot = |guid: u64| {
             resolve_slot(
                 guid,
@@ -2144,7 +2144,7 @@ mod tests {
         let mut charter = test_template("Guild Charter");
         charter.flags = benilla_protocol::messages::ITEM_FLAG_CHARTER;
         items.insert_template(5863, Some(charter));
-        let mut petitions = crate::ui_petition::PetitionState::default();
+        let mut petitions = crate::ui_petition::PetitionRecords::default();
         crate::ui_petition::net::query_response(
             &mut petitions,
             benilla_protocol::messages::PetitionQueryResponse {
@@ -2163,7 +2163,7 @@ mod tests {
             None,
             &NameCache::default(),
             &petitions,
-            std::time::Instant::now(),
+            bevy::platform::time::Instant::now(),
             0.0,
             false,
         )
@@ -2207,7 +2207,7 @@ mod tests {
         items.insert_template(4496, Some(test_template("Small Brown Pouch")));
         let names = NameCache::default();
         let cooldowns = crate::spell::Cooldowns::default();
-        let petitions = crate::ui_petition::PetitionState::default();
+        let petitions = crate::ui_petition::PetitionRecords::default();
         let mut seats = |guid: u64| {
             resolve_slot(
                 guid,
@@ -2345,7 +2345,7 @@ mod tests {
         let expected = [None, running, None, running, running];
 
         let names = NameCache::default();
-        let petitions = crate::ui_petition::PetitionState::default();
+        let petitions = crate::ui_petition::PetitionRecords::default();
         for (&(guid, ..), want) in cases.iter().zip(expected) {
             let slot = resolve_slot(
                 guid,

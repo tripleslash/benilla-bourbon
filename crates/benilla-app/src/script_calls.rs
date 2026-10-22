@@ -83,9 +83,21 @@ pub(crate) struct ScriptCallHost<'w, 's> {
                     crate::ui_social::SocialSteps<'w>,
                     crate::ui_party::PartyCalls<'w, 's>,
                     crate::ui_trade::TradeSteps<'w, 's>,
+                    // The guild's windows: the roster, the charter and the tabard designer. A
+                    // further guild window's applier joins this set.
+                    ParamSet<
+                        'w,
+                        's,
+                        (
+                            crate::ui_guild::GuildSteps<'w>,
+                            crate::ui_petition::PetitionSteps<'w, 's>,
+                            crate::ui_tabard::TabardSteps<'w, 's>,
+                        ),
+                    >,
                 ),
             >,
-            // The bags', the loot window's, the mailbox's, the questgiver's and the gossip menu's.
+            // The bags', the loot window's, the mailbox's, the questgiver's, the gossip menu's and
+            // the other NPC windows'.
             ParamSet<
                 'w,
                 's,
@@ -95,6 +107,9 @@ pub(crate) struct ScriptCallHost<'w, 's> {
                     crate::ui_mail::MailVerbs<'w>,
                     crate::ui_quest::QuestVerbs<'w, 's>,
                     crate::ui_gossip::GossipVerbs<'w, 's>,
+                    crate::ui_trainer::TrainerSteps<'w, 's>,
+                    crate::ui_taxi::TaxiSteps<'w, 's>,
+                    crate::ui_merchant::MerchantSteps<'w, 's>,
                 ),
             >,
             crate::ui_pet::PetPress<'w, 's>,
@@ -214,6 +229,12 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 appliers.p1().trade_enchant(script, partner, check);
             }
             ScriptCall::Trade(call) => tail = appliers.p4().p6().apply(call),
+            ScriptCall::Trainer(call) => tail = appliers.p5().p5().apply(call),
+            ScriptCall::Taxi(call) => tail = appliers.p5().p6().apply(call),
+            ScriptCall::Merchant(call) => appliers.p5().p7().apply(script, call),
+            ScriptCall::Guild(call) => appliers.p4().p7().p0().apply(script, call),
+            ScriptCall::Petition(call) => tail = appliers.p4().p7().p1().apply(script, call),
+            ScriptCall::Tabard(call) => appliers.p4().p7().p2().apply(script, call),
         }
         // A selection this call made with the targeting cursor up was handed to the cast
         // (`SelectTarget`, `0x4935d5`) and is bound now, before the next call reads either.

@@ -486,12 +486,14 @@ pub(crate) struct Model {
     pub(crate) guild: guild::GuildState,
     /// The rank editor's unsaved edits, apart from `guild` so a push cannot discard them.
     pub(crate) guild_control: guild::GuildRankEdit,
-    /// Guild calls (`GuildInviteByName`, `GuildSetMOTD`, `GuildControlSaveRank`, …) queued.
-    pub(crate) guild_requests: Vec<guild::GuildRequest>,
+    /// The roster module's own cells, apart from `guild` so a push keeps them.
+    pub(crate) guild_cells: guild::GuildCells,
+    /// The guilds `GetGuildInfo` missed, `(guild_id, guid)`, for the app to ask with a waiter.
+    pub(crate) guild_info_asks: Vec<(u32, u64)>,
     /// The charter price and open petition, names resolved from caches as the reference does.
     pub(crate) petition: petition::PetitionState,
-    /// Charter calls (`BuyGuildCharter`, `SignPetition`, `TurnInGuildCharter`, …) queued.
-    pub(crate) petition_requests: Vec<petition::PetitionRequest>,
+    /// `CloseGuildRegistrar` was called: the interaction latch runs the close core.
+    pub(crate) registrar_close: bool,
     /// Per chat window from `ChatFrame1`, the tint, alpha and font size its tab menu can change.
     pub(crate) chat_window_looks: [chat_window::ChatWindowLook; chat_window::NUM_CHAT_WINDOWS],
     /// 0-based windows whose look Lua changed, the persist cue.
@@ -845,15 +847,11 @@ pub(crate) struct Model {
     pub(crate) repair_all_cost: u32,
     /// The repair costs `SetInventoryItem` and `SetBagItem` return.
     pub(crate) repair_costs: merchant::RepairCosts,
-    pub(crate) merchant_buys: Vec<(u32, u32)>,
-    /// The held `(bag, slot)` when `PickupMerchantItem` sells, sent as `CMSG_SELL_ITEM`.
-    pub(crate) merchant_cursor_sells: Vec<(i64, u32)>,
-    /// A held vendor row dropped in a bag, `(bag, slot, item entry)`, for `CMSG_BUY_ITEM_IN_SLOT`.
+    /// A held vendor row a drop verb bought into a slot, `(bag, slot, item entry)`, handed to the
+    /// host as the verb returns ([`merchant::MerchantCall::BuyInSlot`]).
     pub(crate) merchant_slot_buys: Vec<(i64, u32, u32)>,
     pub(crate) merchant_close: bool,
-    /// `BuybackItem` 1-based slots, the `RepairAllItems` flag and repair mode (`InRepairMode`).
-    pub(crate) merchant_buybacks: Vec<u32>,
-    pub(crate) repair_all: bool,
+    /// Repair mode (`InRepairMode`).
     pub(crate) repair_mode: bool,
 
     /// The stable window: snapshot, selection, drag and queued calls, reset together on close.
@@ -864,10 +862,9 @@ pub(crate) struct Model {
     pub(crate) bank_purchase: bool,
     pub(crate) bank_close: bool,
 
-    /// The open trainer, its buys, selection and close. The selection is a spell id, since
-    /// filters, collapses and re-lists all move row numbers.
+    /// The open trainer, its selection and close. The selection is a spell id, since filters,
+    /// collapses and re-lists all move row numbers.
     pub(crate) trainer: Option<trainer::TrainerState>,
-    pub(crate) trainer_buys: Vec<u32>,
     pub(crate) trainer_selection: Option<u32>,
     pub(crate) trainer_close: bool,
     /// Available, unavailable and used filters, all on by default; they hide services, not headers.
@@ -876,12 +873,16 @@ pub(crate) struct Model {
     pub(crate) trainer_collapsed: HashSet<u32>,
     /// The skill-line filter `ds:0xb73a20`: bit n set shows header group n, every bit on a list.
     pub(crate) trainer_line_filter: u32,
-    /// `OpenTrainer` asked for the player's own trainer list; the app drains it.
-    pub(crate) trainer_open_own: bool,
+    /// The whole row array `ds:0xb737b0` in its last sorted order, and the visible count
+    /// `ds:0xb73a18`: each finalize sorts it from the order it left (`0x4d857e`).
+    pub(crate) trainer_rows: Vec<trainer::Row>,
+    pub(crate) trainer_visible: usize,
+    /// A list packet reset the array: the next push lays it out as the builder does.
+    pub(crate) trainer_rows_fresh: bool,
 
-    /// The open taxi map, the `TakeTaxiNode` calls, whether `CloseTaxiMap` ran and whether we ride.
+    /// The open taxi map, whether a `CloseTaxiMap` call left the latch to release, and whether
+    /// we ride.
     pub(crate) taxi: Option<taxi::TaxiUiState>,
-    pub(crate) taxi_takes: Vec<usize>,
     pub(crate) taxi_close: bool,
     pub(crate) taxi_riding: bool,
 
@@ -1184,7 +1185,8 @@ pub(crate) struct Model {
     pub(crate) tabard_designs: HashMap<crate::widget::FrameHandle, [i32; 5]>,
     pub(crate) tabard_preview: Option<[i32; 5]>,
     pub(crate) tabard_host: super::tabard::TabardHost,
-    pub(crate) tabard_intents: Vec<super::tabard::TabardIntent>,
+    /// `CloseTabardCreation` was called: the interaction latch runs the close core.
+    pub(crate) tabard_close: bool,
     /// The `WorldFrame` type's one-shot record: true once the first is made.
     pub(crate) world_frame_made: bool,
     /// Set while the XML loader's `CreateFrame` call builds a frame: the creation half only, so
@@ -1557,9 +1559,10 @@ impl Model {
             lfg_comment: String::new(),
             guild: guild::GuildState::default(),
             guild_control: guild::GuildRankEdit::default(),
-            guild_requests: Vec::new(),
+            guild_info_asks: Vec::new(),
+            guild_cells: guild::GuildCells::default(),
             petition: petition::PetitionState::default(),
-            petition_requests: Vec::new(),
+            registrar_close: false,
             // Per window, as the stock dock differs: 1 and 2 are the dock, the rest undocked.
             chat_window_looks: std::array::from_fn(chat_window::ChatWindowLook::stock),
             chat_window_changes: HashSet::new(),
@@ -1711,27 +1714,23 @@ impl Model {
             merchant: None,
             repair_all_cost: 0,
             repair_costs: Default::default(),
-            merchant_buys: Vec::new(),
-            merchant_cursor_sells: Vec::new(),
             merchant_slot_buys: Vec::new(),
             merchant_close: false,
-            merchant_buybacks: Vec::new(),
-            repair_all: false,
             repair_mode: false,
             stable: Default::default(),
             bank: None,
             bank_purchase: false,
             bank_close: false,
             trainer: None,
-            trainer_buys: Vec::new(),
             trainer_selection: None,
             trainer_close: false,
             trainer_filter: [true; 3],
             trainer_collapsed: HashSet::new(),
             trainer_line_filter: u32::MAX,
-            trainer_open_own: false,
+            trainer_rows: Vec::new(),
+            trainer_visible: 0,
+            trainer_rows_fresh: false,
             taxi: None,
-            taxi_takes: Vec::new(),
             taxi_close: false,
             taxi_riding: false,
             trade_skill: None,
@@ -1895,7 +1894,7 @@ impl Model {
             tabard_designs: HashMap::new(),
             tabard_preview: None,
             tabard_host: Default::default(),
-            tabard_intents: Vec::new(),
+            tabard_close: false,
             world_frame_made: false,
             xml_creating: false,
             unit_reach: HashMap::new(),

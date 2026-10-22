@@ -285,8 +285,8 @@ pub use gm_survey::{GmSurveyTables, SurveyAnswerSend};
 pub use gm_ticket::{GmTicketIntent, GmTicketWrite};
 pub use gossip::{GossipCall, GossipMenu, GossipOptionView, GossipQuestRow};
 pub use guild::{
-    GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
-    MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
+    GuildCall, GuildCells, GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildState, LastOnline,
+    UnitGuild, MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
 pub use host::{CallHost, CallTail};
 pub use input_verbs::{BindingInput, FiredInput, HeldInput};
@@ -294,12 +294,12 @@ pub use lfg::LfgDungeon;
 pub use lottery::UnservedSend;
 pub use modelframe::{CharacterPaneFrame, ModelPaneFrame, ModelWanted};
 pub use petition::{
-    validate_guild_name, PetitionRecordView, PetitionRequest, PetitionState, PETITION_TYPE_CHARTER,
+    validate_guild_name, PetitionCall, PetitionRecordView, PetitionState, PETITION_TYPE_CHARTER,
     PETITION_TYPE_PETITION,
 };
 pub use protected::InputEvents;
 pub use tabard::{
-    emblem_mask_path, TabardHost, TabardIntent, EMBLEM_MASK_TOKEN, TABARD_COUNTS,
+    emblem_mask_path, TabardCall, TabardHost, EMBLEM_MASK_TOKEN, TABARD_COUNTS,
     TABARD_CREATION_COST,
 };
 pub use video_pairs::VIDEO_PAIR_CVARS;
@@ -327,7 +327,7 @@ pub use mail::{
     StationeryView,
 };
 pub use measure::TextMeasure;
-pub use merchant::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts};
+pub use merchant::{ItemStatsHead, MerchantCall, MerchantItem, MerchantState, RepairCosts};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub use minimap::{
     MinimapRimArrow, CORPSE_ARROW as MINIMAP_CORPSE_ARROW, GROUP_ARROW as MINIMAP_GROUP_ARROW,
@@ -371,15 +371,15 @@ pub use spellbook::{
 pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
 pub use summon::SummonConfirmUiState;
 pub use talent::{TalentPrereqView, TalentTabView, TalentUiState, TalentView};
-pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
+pub use taxi::{TaxiCall, TaxiNodeType, TaxiUiNode, TaxiUiState};
 pub use tooltip_aura::{AuraKey, AuraTooltipView};
 pub use tooltip_spell::{ReputationRequirement, SpellTooltipView};
 pub use tooltip_text::{KeyedArg, TextPart, TooltipText};
 pub use trade::{TradeCall, TradeOpenItem, TradeSideState, TradeSlotItem, TradeState, TRADE_SLOTS};
 pub use tradeskill::{TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState};
 pub use trainer::{
-    TrainerAbilityReq, TrainerGroup, TrainerService, TrainerServiceCategory, TrainerSkillReq,
-    TrainerState, TrainerTooltip, TRAINER_GROUP_KNOWN,
+    TrainerAbilityReq, TrainerCall, TrainerGroup, TrainerService, TrainerServiceCategory,
+    TrainerSkillReq, TrainerState, TrainerTooltip, TRAINER_GROUP_KNOWN,
 };
 pub(crate) use types::{monochrome_flag, FontMask, MeasuredText, RegionData};
 pub use types::{
