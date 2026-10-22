@@ -38,8 +38,8 @@
 #[global_allocator]
 static ALLOC: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
-/// fork: web — the threaded browser build's allocator: per-shard class lists over a lock that lets
-/// no waiter starve, so the page thread is never starved by workers on std's one spin-locked
+/// fork: web — the threaded browser build's allocator: per-thread heaps of size-class pages over
+/// linear memory it owns, so the page thread never waits on workers in std's one spin-locked
 /// `dlmalloc`.
 #[cfg(all(
     target_arch = "wasm32",
@@ -47,7 +47,7 @@ static ALLOC: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
     not(debug_assertions)
 ))]
 #[global_allocator]
-static ALLOC: wasm_alloc::ShardedAlloc = wasm_alloc::ShardedAlloc;
+static ALLOC: wasm_alloc::PageAlloc = wasm_alloc::PageAlloc;
 
 pub mod addon_harness;
 mod area;
@@ -511,7 +511,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     render_worker::install();
     // Before any resource reads `launch_env` (`LightingSettings`, `WaterDetail`, …).
     seed_launch_env();
-    // fork: web — the allocator's grow-ahead step, `?alloc_grow_mb=` (64; 0 is off).
+    // fork: web — the allocator's grow step, `?alloc_grow_mb=` (64; 0 grows by need alone).
     #[cfg(all(
         target_arch = "wasm32",
         target_feature = "atomics",
@@ -519,7 +519,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     ))]
     if let Some(mb) = webenv::var("WOW_ALLOC_GROW_MB").and_then(|v| v.trim().parse::<usize>().ok())
     {
-        wasm_alloc::set_grow_step(mb << 20);
+        wasm_alloc::set_grow_step(mb.saturating_mul(1 << 20));
     }
 
     // The offload lever, read once and applied before the first asset can be asked for.

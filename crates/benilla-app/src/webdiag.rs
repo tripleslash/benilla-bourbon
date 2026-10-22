@@ -811,9 +811,9 @@ fn audio_field() -> String {
     String::new()
 }
 
-/// `<grows>+<ahead>/<MB>`: allocations that grew wasm memory this window, growths the allocator
-/// made ahead of need, and the MB both added (`wasm_alloc::take_grow_stats`). A stall in a window
-/// that grew is the allocator's: each grow runs under its shared lock.
+/// `<grows>+<ahead>/<MB>`: wasm memory grows this window, how many of them took the allocator's
+/// grow step rather than only the need, and the MB added (`wasm_alloc::take_grow_stats`). A stall
+/// in a window that grew may be the allocator's: each grow runs under its span pool's lock.
 #[cfg(all(
     target_arch = "wasm32",
     target_feature = "atomics",
