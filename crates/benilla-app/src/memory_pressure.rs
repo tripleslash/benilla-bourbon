@@ -184,12 +184,12 @@ mod tests {
         let mut v = MemoryPressure::default();
         assert_eq!(v.weigh(10.0, 100 * MIB, 1000.0), Some(800.0));
         assert_eq!(v.weigh(15.0, 100 * MIB, 800.0), Some(640.0));
-        // The second step freed 300 MiB, so it comes back only above 1 GiB + 300 MiB.
-        assert_eq!(v.weigh(20.0, 400 * MIB, 640.0), None);
-        assert_eq!(v.weigh(21.0, 1200 * MIB, 640.0), None, "short of its cost");
-        assert_eq!(v.weigh(22.0, 1400 * MIB, 640.0), None, "the dwell starts");
-        assert_eq!(v.weigh(31.0, 1400 * MIB, 640.0), None);
-        assert_eq!(v.weigh(32.0, 1400 * MIB, 640.0), Some(800.0));
+        // The second step freed 500 MiB, so it comes back only above 1 GiB + 500 MiB.
+        assert_eq!(v.weigh(20.0, 600 * MIB, 640.0), None);
+        assert_eq!(v.weigh(21.0, 1400 * MIB, 640.0), None, "short of its cost");
+        assert_eq!(v.weigh(22.0, 1600 * MIB, 640.0), None, "the dwell starts");
+        assert_eq!(v.weigh(31.0, 1600 * MIB, 640.0), None);
+        assert_eq!(v.weigh(32.0, 1600 * MIB, 640.0), Some(800.0));
         assert_eq!(v.weigh(33.0, 3000 * MIB, 800.0), None, "settling");
         assert_eq!(v.weigh(40.0, 3000 * MIB, 800.0), None, "a new dwell");
         assert_eq!(v.weigh(50.0, 3000 * MIB, 800.0), Some(1000.0));
