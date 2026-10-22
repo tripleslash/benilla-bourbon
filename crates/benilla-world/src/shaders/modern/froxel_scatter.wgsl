@@ -96,6 +96,57 @@ fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     return core * height * smoothstep(BANK_EDGE.x, BANK_EDGE.y, n);
 }
 
+// fork: **sea fog.** A zone look's `sea_fog` (`fog.night.w`) lays a bank on the ocean along the
+// whole coast: dense at sea level, rolling up to a top that swells and sinks across the water, broken
+// into billows, and coming in off the shore over the first few yards of depth, so the beach stays
+// clear. The sea is wherever the terrain heightfield's bed lies under sea level; past the
+// heightfield's edge the edge row stands in, and an undrawn texel (open ocean, no tile) is sea.
+// WoW's oceans lie at height 0.
+const SEA_LEVEL: f32 = 0.0;
+// The bank's mean top (yd of e-folding above the sea), and the depth band that is the shore.
+const SEA_HEIGHT: f32 = 16.0;
+const SEA_SHORE: vec2<f32> = vec2<f32>(1.5, 10.0);
+// The swell's and the billows' feature sizes (yd). The billows are a quarter of the swell, so one
+// drift wraps both seamlessly.
+const SEA_SCALE: f32 = 220.0;
+const SEA_BILLOW: f32 = SEA_SCALE * 0.25;
+// The drift, in swell tiles per wrapped hour (`camera.w` wraps at 3600 s): whole numbers, so the
+// noise does not jump when the clock wraps (~0.5 yd/s).
+const SEA_DRIFT: vec3<f32> = vec3<f32>(8.0, 0.0, 3.0);
+
+// The terrain's height under `p`, clamped into the heightfield; `-1e9` where nothing is drawn.
+fn seabed_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
+    let q = vec4<f32>(p, 1.0);
+    let uv = clamp(vec2<f32>(dot(f.ground_x, q), dot(f.ground_y, q)), vec2<f32>(0.0), vec2<f32>(1.0));
+    let n = f.ground.w;
+    let d = textureLoad(ground_map, vec2<i32>(clamp(uv * n, vec2<f32>(0.0), vec2<f32>(n - 1.0))), 0);
+    if (d <= 0.0) {
+        return -1e9;
+    }
+    return f.ground.y + d * f.ground.z;
+}
+
+// The sea fog's extinction at `p` (1/yd).
+fn sea_fog(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
+    let core = f.night.w;
+    let above = p.y - SEA_LEVEL;
+    if (core <= 0.0 || f.ground.x < 0.5 || above > SEA_HEIGHT * 10.0 || above < -2.0) {
+        return 0.0;
+    }
+    let shore = smoothstep(SEA_SHORE.x, SEA_SHORE.y, SEA_LEVEL - seabed_under(f, p));
+    if (shore <= 0.0) {
+        return 0.0;
+    }
+    let drift = SEA_DRIFT * (f.camera.w / 3600.0);
+    let swell = textureSampleLevel(noise_tex, repeat_samp, vec3<f32>(p.x, 0.0, p.z) / SEA_SCALE + drift + vec3<f32>(0.61, 0.29, 0.17), 0.0).r;
+    let top = SEA_HEIGHT * mix(0.3, 2.2, smoothstep(0.25, 0.75, swell));
+    let billow = textureSampleLevel(noise_tex, repeat_samp, vec3<f32>(p.x, p.y * 1.6, p.z) / SEA_BILLOW + drift * 4.0, 0.0).r;
+    let body = smoothstep(0.3, 0.6, billow + 0.25 * (swell - 0.5));
+    // Under the surface the water carries its own fog.
+    let height = exp(-max(above, 0.0) / top) * smoothstep(-2.0, 0.0, above);
+    return core * shore * height * body;
+}
+
 // How far around a froxel the canopy cover is gathered (yd).
 const CANOPY_REACH: f32 = 7.0;
 
@@ -198,11 +249,13 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let sigma_night = ext.z;
     // fork: the ground banks (outside rooms: a building's air is its own).
     let sigma_bank = ground_banks(f, p) * (1.0 - room);
-    let sigma = sigma_fog + sigma_haze + sigma_night + sigma_bank;
+    // fork: the sea fog, lit as the zone's own fog (`lum_fog`'s open-air term).
+    let sigma_sea = sea_fog(f, p) * (1.0 - room);
+    let sigma = sigma_fog + sigma_haze + sigma_night + sigma_bank + sigma_sea;
     // fork: the lamps scatter off the clear-weather air (`froxelfog::halo_fog`), so rain does not
     // swell their glow; the storm's own medium still dims it on the way to the eye.
     let lamp_ext = froxelfog::extinction(froxelfog::halo_fog(f), p, d, room, 1.0, cover);
-    let sigma_lamps = lamp_ext.x + lamp_ext.y + lamp_ext.z + sigma_bank;
+    let sigma_lamps = lamp_ext.x + lamp_ext.y + lamp_ext.z + sigma_bank + sigma_sea;
 
     // In-scatter.
     let ray = p - f.camera.xyz;
@@ -248,6 +301,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     let lum_haze = f.ambient.rgb * (sky_term * SHAFT_SKY_SHARE)
         + shaft_key(f) * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN * (1.0 + CANOPY_SHAFT * cover));
+    let lum_sea = f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis);
     let lum_bank = f.ambient.rgb * (sky_term * BANK_SKY_SHARE)
         + shaft_key(f) * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * BANK_KEY_GAIN);
     var points = PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
@@ -290,7 +344,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var cur = vec4<f32>(
         lum_fog * sigma_fog + lum_haze * sigma_haze + (lum_haze + froxelfog::night_glow(f)) * sigma_night
-            + lum_bank * sigma_bank + points.medium * sigma_lamps + points.lamp,
+            + lum_bank * sigma_bank + lum_sea * sigma_sea + points.medium * sigma_lamps + points.lamp,
         sigma,
     );
 

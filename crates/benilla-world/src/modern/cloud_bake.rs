@@ -152,7 +152,8 @@ pub(super) fn cloud_params(light: &WowLighting, look: &ZoneLook) -> CloudParams 
     // The lit side takes a fifth of the sky's hue too: the air between the cloud and the eye
     // tints it, so a green-skied zone's clouds are not a neutral white pasted over it.
     let sky_hue = sky_col / sky_col.max_element().max(1e-3);
-    let key_col = Vec3::from(light.diffuse.map(srgb_to_linear)) * Vec3::from(look.key_tint);
+    let key_col =
+        Vec3::from(light.diffuse.map(srgb_to_linear)) * Vec3::from(look.key_hue(look.key_tint));
     let key_col = (key_col / key_col.max_element().max(1e-3)).lerp(Vec3::ONE, style.whiten * high)
         * Vec3::ONE.lerp(sky_hue, SKY_HUE)
         * style.bright;

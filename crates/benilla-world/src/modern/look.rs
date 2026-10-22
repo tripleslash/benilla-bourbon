@@ -83,6 +83,16 @@ pub struct ZoneLook {
     pub noon_key: [f32; 3],
     /// fork: how far the key moves to [`Self::noon_key`] (0 keeps the authored row).
     pub noon_mix: f32,
+    /// fork: the sea fog's extinction at sea level (1/yd): a bank lying on the ocean along the
+    /// whole coast, clear over the beach (`froxel_scatter.wgsl`'s `sea_fog`). 0 = none.
+    pub sea_fog: f32,
+    /// fork: the share of the fog's forward lobe kept while the moon keys (`sun_arc::moon_key`):
+    /// in a dense zone fog the lobe that glows salmon around the sun made a second sun of the moon.
+    /// 1 = as by day.
+    pub moon_glow: f32,
+    /// fork: how much of the look's sun hues (`glow`, `key_tint`) the moonlight keeps
+    /// ([`ZoneLook::key_hue`]): 0 lights the moon in its authored colour, never warm like the sun.
+    pub moon_hue: f32,
 }
 
 impl ZoneLook {
@@ -117,6 +127,9 @@ impl ZoneLook {
         room_reach: 1.0,
         noon_key: [1.0, 0.8, 0.4],
         noon_mix: 0.0,
+        sea_fog: 0.0,
+        moon_glow: 1.0,
+        moon_hue: 1.0,
     };
 
     /// fork: **the default look at noon**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
@@ -149,6 +162,13 @@ impl ZoneLook {
         [0, 1, 2].map(|i| row[i] * (1.0 - t) + noon[i] * t)
     }
 
+    /// One of the look's sun hues (`glow`, `key_tint`) as the key light takes it now: faded toward
+    /// white by `1 - moon_hue` while the moon keys (`sun_arc::moon_key`).
+    pub fn key_hue(&self, hue: [f32; 3]) -> [f32; 3] {
+        let t = (1.0 - self.moon_hue.clamp(0.0, 1.0)) * super::sun_arc::moon_key();
+        hue.map(|c| c + (1.0 - c) * t)
+    }
+
     fn lerp(self, to: Self, t: f32) -> Self {
         let m = |a: f32, b: f32| a + (b - a) * t;
         Self {
@@ -178,6 +198,9 @@ impl ZoneLook {
             room_reach: m(self.room_reach, to.room_reach),
             noon_key: [0, 1, 2].map(|i| m(self.noon_key[i], to.noon_key[i])),
             noon_mix: m(self.noon_mix, to.noon_mix),
+            sea_fog: m(self.sea_fog, to.sea_fog),
+            moon_glow: m(self.moon_glow, to.moon_glow),
+            moon_hue: m(self.moon_hue, to.moon_hue),
         }
     }
 
@@ -203,6 +226,9 @@ impl ZoneLook {
             && d(self.night_glow, other.night_glow)
             && d(self.room_reach, other.room_reach)
             && d(self.noon_mix, other.noon_mix)
+            && d(self.sea_fog, other.sea_fog)
+            && d(self.moon_glow, other.moon_glow)
+            && d(self.moon_hue, other.moon_hue)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.haze_tint[i], other.haze_tint[i])
@@ -304,6 +330,48 @@ impl ZoneLook {
     };
 }
 
+impl ZoneLook {
+    /// fork: **Darkshore**, at every hour. Against a modern-client reference at the Long Wash
+    /// looking up the coast to Auberdine (`worldview_pose=6187.7,520.7,20,21.5,-4,5`, map 1, 17:00,
+    /// approved in the viewer): the zone's authored
+    /// `Light.dbc` rows are grey all day (fog `[60 60 59]`, sun `[224 224 224]` at noon), where the
+    /// reference is a mauve haze glowing salmon toward the sun. The fog tint lifts the grey into
+    /// that mauve, the glow warms the sun side, the piers stand as silhouettes, and a thick sea fog
+    /// lies along the whole coast.
+    pub const DARKSHORE: Self = Self {
+        key: 0.85,
+        fill: 0.95,
+        exposure: 0.95,
+        haze: 0.0025,
+        forward: 0.82,
+        key_scatter: 0.9,
+        glow: [1.15, 0.7, 0.6],
+        haze_tint: [0.85, 0.76, 0.78],
+        fog_reach: 0.7,
+        fog_tint: [2.1, 1.85, 1.85],
+        fog_falloff: 100.0,
+        sky_tint: [1.15, 1.0, 1.0],
+        silhouette: 0.75,
+        fog_clear: 80.0,
+        contrast: 1.12,
+        saturation: 0.85,
+        vignette: 0.32,
+        key_tint: [1.0, 0.88, 0.85],
+        ground_fog: 0.3,
+        night_banks: 0.6,
+        night_glow: 0.5,
+        sea_fog: 0.06,
+        // The moon lights the haze from every side, not as a second sun.
+        moon_glow: 0.1,
+        // The salmon glow and warm key are the sun's: the moon lights in its own colour.
+        moon_hue: 0.0,
+        ..Self::NEUTRAL
+    };
+}
+
+/// `AreaTable.dbc` zone id that takes [`ZoneLook::DARKSHORE`].
+const DARKSHORE_ZONE: u32 = 148;
+
 /// `AreaTable.dbc` zone id that takes [`ZoneLook::IRONFORGE`].
 const IRONFORGE_ZONE: u32 = 1537;
 
@@ -318,11 +386,12 @@ const TIRISFAL_ZONE: u32 = 85;
 /// Gilneas and Gilneas City.
 const EERIE_ZONES: &[u32] = &[10, 130, 41, 28, 139, 8, 361, 5179, 5208];
 
-/// The zone's look `midday` of the way into noon: the default look takes [`ZoneLook::NOON`].
-pub fn look_for_zone_at(zone: u32, midday: f32) -> ZoneLook {
+/// The zone's look at `minute` of the day: the default look takes [`ZoneLook::NOON`] across midday
+/// (`sun_arc::midday_at`); a zone with its own look keeps it at every hour.
+pub fn look_for_zone_at(zone: u32, minute: f32) -> ZoneLook {
     let look = look_for_zone(zone);
     if look == ZoneLook::NEUTRAL {
-        look.lerp(ZoneLook::NOON, midday.clamp(0.0, 1.0))
+        look.lerp(ZoneLook::NOON, super::sun_arc::midday_at(minute))
     } else {
         look
     }
@@ -335,6 +404,8 @@ pub fn look_for_zone(zone: u32) -> ZoneLook {
         ZoneLook::EERIE
     } else if zone == IRONFORGE_ZONE {
         ZoneLook::IRONFORGE
+    } else if zone == DARKSHORE_ZONE {
+        ZoneLook::DARKSHORE
     } else if COLD_ZONES.contains(&zone) {
         ZoneLook::COLD
     } else {
@@ -557,7 +628,7 @@ fn publish(look: ZoneLook, auto_exposure: f32) {
     for i in 0..3 {
         FOG_TINT[i].store(look.fog_tint[i].to_bits(), Ordering::Relaxed);
         SKY_TINT[i].store(look.sky_tint[i].to_bits(), Ordering::Relaxed);
-        KEY_TINT[i].store(look.key_tint[i].to_bits(), Ordering::Relaxed);
+        KEY_TINT[i].store(look.key_hue(look.key_tint)[i].to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -597,7 +668,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -643,6 +714,9 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
         set(&mut look.noon_key[c], 34 + c);
     }
     set(&mut look.noon_mix, 37);
+    set(&mut look.sea_fog, 38);
+    set(&mut look.moon_glow, 39);
+    set(&mut look.moon_hue, 40);
     look
 }
 
@@ -701,9 +775,9 @@ fn update_look(
         (id, None) => id,
         (None, _) => None,
     };
-    let midday = clock.map_or(0.0, |c| super::sun_arc::midday_at(c.minute as f32));
+    let minute = clock.map_or(0.0, |c| c.minute as f32);
     let target = apply_override(
-        look_for_zone_at(zone.unwrap_or(0), midday),
+        look_for_zone_at(zone.unwrap_or(0), minute),
         &look_override(),
     );
     let next = look.0.lerp(target, (time.delta_secs() / 2.0).min(1.0));
@@ -785,6 +859,7 @@ mod tests {
             (10, ZoneLook::EERIE, 6.0..=25.0),
             (1, ZoneLook::COLD, 6.0..=10.0),
             (1537, ZoneLook::IRONFORGE, 6.0..=10.0),
+            (148, ZoneLook::DARKSHORE, 6.0..=10.0),
         ] {
             let r = key_to_fill(look);
             assert!(band.contains(&r), "zone {zone}: {r:.2}:1");
@@ -820,9 +895,9 @@ mod tests {
     #[test]
     fn only_the_default_look_ramps_into_noon() {
         assert_eq!(look_for_zone_at(999_999, 0.0), ZoneLook::NEUTRAL);
-        assert_eq!(look_for_zone_at(999_999, 1.0), ZoneLook::NOON);
-        assert_eq!(look_for_zone_at(1, 1.0), ZoneLook::COLD);
-        assert_eq!(look_for_zone_at(10, 1.0), ZoneLook::EERIE);
+        assert_eq!(look_for_zone_at(999_999, 720.0), ZoneLook::NOON);
+        assert_eq!(look_for_zone_at(1, 720.0), ZoneLook::COLD);
+        assert_eq!(look_for_zone_at(10, 720.0), ZoneLook::EERIE);
     }
 
     #[test]
@@ -889,6 +964,36 @@ mod tests {
             assert!(green(a) > green(b), "{a:?} against {b:?}");
         }
         assert_eq!((t.key, t.fill, t.exposure), (e.key, e.fill, e.exposure));
+    }
+
+    /// Darkshore wears its own look at every hour.
+    #[test]
+    fn darkshore_keeps_its_look_at_every_hour() {
+        for minute in [0.0, 390.0, 720.0, 1080.0, 1260.0] {
+            assert_eq!(
+                look_for_zone_at(DARKSHORE_ZONE, minute),
+                ZoneLook::DARKSHORE,
+                "{minute}"
+            );
+        }
+    }
+
+    /// Darkshore's sea fog is its own: no other look lays one, and its grey authored rows are
+    /// tinted warm, toward the reference's mauve.
+    #[test]
+    fn only_darkshore_lays_a_sea_fog() {
+        let d = look_for_zone(DARKSHORE_ZONE);
+        assert!(d.sea_fog > 0.0);
+        assert!(d.fog_tint[0] > d.fog_tint[1] && d.glow[0] > d.glow[2]);
+        for look in [
+            ZoneLook::NEUTRAL,
+            ZoneLook::NOON,
+            ZoneLook::EERIE,
+            ZoneLook::COLD,
+            ZoneLook::IRONFORGE,
+        ] {
+            assert_eq!(look.sea_fog, 0.0);
+        }
     }
 
     /// Every zone the user named reads Elwynn's look (Elwynn 12, Stranglethorn 33, Durotar 14,

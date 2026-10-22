@@ -62,7 +62,8 @@ struct FroxelFog {
     // rgb = the room's key-light in-scatter radiance; w = the night air's glow (b).
     room_sun: vec4<f32>,
     // fork: the night's ground banks. x = extinction at the ground (1/yd, 0 by day); y = the ground
-    // under the camera (world y); z = 1 / height falloff (yd); w = unused.
+    // under the camera (world y); z = 1 / height falloff (yd); w = the sea fog's extinction at sea
+    // level (1/yd, the zone look's `sea_fog`; `froxel_scatter::sea_fog`).
     night: vec4<f32>,
     // fork: the terrain heightfield the banks lie on (`probegi::GiClip`'s `hf_row_x`, `hf_row_y` and
     // `hf`: x = enabled, y = lowest height, z = span, w = texels), written in the render world.

@@ -494,7 +494,8 @@ fn update_volume(
             underwater: underwater.as_deref().is_some_and(|u| u.0.any()),
             interior,
             haze: look.0.haze * HAZE_SCALE,
-            forward: look.0.forward,
+            // fork: under the moon the look keeps `moon_glow` of its forward lobe.
+            forward: look.0.forward * (1.0 + (look.0.moon_glow - 1.0) * super::sun_arc::moon_key()),
             key_scatter: look.0.key_scatter,
             fog_reach: look.0.fog_reach,
             fog_tint: look.0.fog_tint,
@@ -631,7 +632,8 @@ fn update_volume(
         ),
         // The zone look's colour dials (`look::ZoneLook::glow` / `haze_tint`).
         ambient: (Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint)).extend(shaft_key.y),
-        sun: (Vec3::from(media.key_in) * Vec3::from(look.0.glow)).extend(media.forward_share),
+        sun: (Vec3::from(media.key_in) * Vec3::from(look.0.key_hue(look.0.glow)))
+            .extend(media.forward_share),
         sun_dir: to_light.extend(look.0.silhouette),
         phase: Vec4::new(
             media.g_backward,
@@ -668,7 +670,7 @@ fn update_volume(
             .unwrap_or_default()
             .extend(night_glow.y),
         room_sun: room_media
-            .map(|m| Vec3::from(m.key_in) * Vec3::from(look.0.glow))
+            .map(|m| Vec3::from(m.key_in) * Vec3::from(look.0.key_hue(look.0.glow)))
             .unwrap_or_default()
             .extend(night_glow.z),
         night: Vec4::new(
@@ -679,7 +681,12 @@ fn update_volume(
             },
             bank_ground,
             1.0 / BANK_FALLOFF,
-            0.0,
+            // fork: the zone look's sea fog (`froxel_scatter.wgsl`'s `sea_fog`).
+            if super::banks_enabled() {
+                look.0.sea_fog
+            } else {
+                0.0
+            },
         ),
         ground_x: Vec4::ZERO,
         ground_y: Vec4::ZERO,
@@ -723,7 +730,7 @@ fn fading_room(
 fn shaft_key(diffuse: [f32; 3], look: &super::look::ZoneLook) -> Vec3 {
     let horizon = super::sun_arc::key_horizon() * super::look::key_scatter_gain();
     let scale = look.key_scatter.max(0.0) * look.shafts.max(0.0) * SHAFT_SCALE * horizon;
-    Vec3::from(diffuse.map(super::srgb_to_linear)) * Vec3::from(look.glow) * scale
+    Vec3::from(diffuse.map(super::srgb_to_linear)) * Vec3::from(look.key_hue(look.glow)) * scale
 }
 
 /// How far the regional reference may sit below the ground under the camera (yd) — most of a
