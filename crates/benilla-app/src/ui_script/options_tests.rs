@@ -1015,8 +1015,8 @@ fn defaults_resets_the_audio_page_to_registered_defaults() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The two 1.12 sliders read the table: uiScale over 0.64..1.0 in percent, farclip over 177..777
-/// in yards (`OptionsFrame.lua:25-26`).
+/// The two 1.12 sliders read the table: uiScale over 0.64..1.0 in percent, farclip from 177 in
+/// yards (`OptionsFrame.lua:25-26`), its ceiling raised to the engine's.
 #[test]
 fn the_graphics_page_reads_the_cvar_table_on_select() {
     benilla_formats::wow_data_or_skip!();
@@ -2005,7 +2005,8 @@ fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
 }
 
 /// Turtle WoW's `OptionsFrame.lua` has no `OptionsFrameSliders`; without it every Graphics row
-/// reads the bounds Turtle's `Options\Options.lua` carries, which are the stock table's own.
+/// reads the bounds Turtle's `Options\Options.lua` carries, which are the stock table's own, and
+/// Terrain Distance the same raised ceiling.
 #[test]
 fn the_graphics_rows_read_the_same_bounds_without_the_stock_slider_table() {
     benilla_formats::wow_data_or_skip!();
@@ -2014,9 +2015,13 @@ fn the_graphics_rows_read_the_same_bounds_without_the_stock_slider_table() {
         .eval::<String>(
             r#"
             local stock = OptionsFrameSliders
+            local with = {}
+            for i, _ in BENILLA_GRAPHICS_SLIDER_ROWS do
+                with[i] = BenillaGraphicsSliderInfo(i)
+            end
             OptionsFrameSliders = nil
             for i, _ in BENILLA_GRAPHICS_SLIDER_ROWS do
-                local a, b = stock[i], BenillaGraphicsSliderInfo(i)
+                local a, b = with[i], BenillaGraphicsSliderInfo(i)
                 if a.minValue ~= b.minValue or a.maxValue ~= b.maxValue
                     or a.valueStep ~= b.valueStep then
                     return tostring(i)
@@ -2113,15 +2118,14 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
         3,
         "only the default writes queue — never the dead pending: {changes:?}"
     );
-    // 777, not 1000: the fork registers 1000, past the top of the reference's 177 + n * 60 ladder
-    // (`OptionsFrame.lua:1-2`, `:26`), and `SetValue` snaps it on as 1.12's does; the CVar keeps
-    // 1000.
+    // The fork's 1000, inside the row's raised ceiling (`BENILLA_FARCLIP_MAX`); a refresh sets the
+    // slider raw, off the 177 + n * 60 ladder (`OptionsFrame.lua:26`).
     assert_eq!(
         s.eval::<String>(
             "return BenillaOptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
         )
         .unwrap(),
-        "777"
+        "1000"
     );
     assert_eq!(
         s.eval::<String>(

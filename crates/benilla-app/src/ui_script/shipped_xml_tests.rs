@@ -1566,10 +1566,16 @@ fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
         (
             s.eval::<f64>("return OptionsFrameSliders[2].minValue")
                 .unwrap(),
-            s.eval::<f64>("return OptionsFrameSliders[2].maxValue")
-                .unwrap()
+            1500.0
         ),
-        "our row is built from the REFERENCE's row 2, not from a transcription of it"
+        "our row is built from the REFERENCE's row 2, not from a transcription of it, with the \
+         engine's ceiling"
+    );
+    assert_eq!(
+        s.eval::<f64>("return OptionsFrameSliders[2].maxValue")
+            .unwrap(),
+        777.0,
+        "the stock table itself keeps the reference's ceiling"
     );
 
     // The display verbs, at the shapes their consumers read.

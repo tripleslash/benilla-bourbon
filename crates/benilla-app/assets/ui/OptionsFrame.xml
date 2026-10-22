@@ -805,11 +805,21 @@
         -- OptionsFrameSliders; its Options\Options.lua carries the same bounds for these rows
         -- (UI_SCALE, FARCLIP, ENVIRONMENT_DETAIL, GAMMA, WEATHER_DETAIL), read here without it;
         -- Spell Detail takes 1.12's own row 8 grid, 0 to 2, one apart.
+        --
+        -- Deviation: Terrain Distance (row 2) goes past the reference's 777 to the engine's 1500
+        -- (`benilla_world::view::FARCLIP_RANGE`, `check_farclip`), which the modern look's fog
+        -- shows; the stock table itself is left as it is, for the addons that read and write it.
+        BENILLA_FARCLIP_MAX = 1500
         function BenillaGraphicsSliderInfo(i)
             if ( OptionsFrameSliders ) then
-                return OptionsFrameSliders[i]
+                local info = OptionsFrameSliders[i]
+                if ( i == 2 and info ) then
+                    return { minValue = info.minValue, maxValue = BENILLA_FARCLIP_MAX,
+                        valueStep = info.valueStep }
+                end
+                return info
             end
-            local lo, hi = OPTIONS_FARCLIP_MIN, OPTIONS_FARCLIP_MAX
+            local lo, hi = OPTIONS_FARCLIP_MIN, BENILLA_FARCLIP_MAX
             local bounds = {
                 { minValue = 0.64, maxValue = 1.0, valueStep = 0.01 },
                 { minValue = lo, maxValue = hi, valueStep = (hi - lo) / 10 },
@@ -3965,6 +3975,10 @@
                             -- Turtle's `smallCull` 0-2 is our `WorldDetail` 0-2, which the 1.12
                             -- slider of this name drives.
                             option.cvar = "WorldDetail"
+                        elseif ( option.name == "FARCLIP" ) then
+                            -- Deviation: up to the engine's ceiling, as our window's row
+                            -- (`BENILLA_FARCLIP_MAX`).
+                            option.maxval = BENILLA_FARCLIP_MAX
                         end
                     end
                 end
