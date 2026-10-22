@@ -539,7 +539,7 @@ mod tests {
 
     /// Holds `TZ` for a test: the lock keeps two zone tests apart, the drop restores it.
     struct Zone {
-        old: Option<std::ffi::OsString>,
+        old: Option<String>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -547,18 +547,31 @@ mod tests {
         fn set(tz: &str) -> Self {
             static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let old = std::env::var_os("TZ");
-            std::env::set_var("TZ", tz);
+            let old = std::env::var("TZ").ok();
+            set_tz(Some(tz));
             Self { old, _lock: lock }
         }
     }
 
     impl Drop for Zone {
         fn drop(&mut self) {
-            match self.old.take() {
-                Some(v) => std::env::set_var("TZ", v),
-                None => std::env::remove_var("TZ"),
-            }
+            set_tz(self.old.as_deref());
+        }
+    }
+
+    /// `TZ` for the process and for the Windows runtime's own copy of the environment, which
+    /// `std::env::set_var` never reaches: the runtime takes it once, at its first read.
+    fn set_tz(tz: Option<&str>) {
+        match tz {
+            Some(v) => std::env::set_var("TZ", v),
+            None => std::env::remove_var("TZ"),
+        }
+        #[cfg(windows)]
+        {
+            let value = std::ffi::CString::new(tz.unwrap_or("")).expect("a zone has no NUL");
+            // SAFETY: both arguments are NUL-terminated and outlive the call, which copies them;
+            // an empty value removes the variable.
+            unsafe { libc::putenv_s(c"TZ".as_ptr(), value.as_ptr()) };
         }
     }
 

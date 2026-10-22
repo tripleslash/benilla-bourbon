@@ -110,6 +110,11 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::Queue,
+        "::ui_battlefield_score::BattlefieldScoreboard",
+        "the scoreboard, which this fork's feed clears when the battleground ends",
+    ),
+    (
+        Row::Queue,
         "::ui_dialog_verbs::InstanceBoot",
         "the instance boot",
     ),

@@ -243,7 +243,7 @@ mod zone {
         pub tm_isdst: i32,
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn reread() {}
 
     fn date(secs: i64) -> Option<Date> {
@@ -304,11 +304,31 @@ pub fn unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
+/// Sets `TZ` (`None` removes it) where both the process and the C runtime read it, and rereads
+/// the zone: the Windows runtime keeps its own copy of the environment, taken at its first read,
+/// which `std::env::set_var` never reaches, so `_putenv_s` writes that copy too. For tests that fix
+/// the zone.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_tz(tz: Option<&str>) {
+    match tz {
+        Some(v) => std::env::set_var("TZ", v),
+        None => std::env::remove_var("TZ"),
+    }
+    #[cfg(windows)]
+    {
+        let value = std::ffi::CString::new(tz.unwrap_or("")).expect("a zone has no NUL");
+        // SAFETY: both arguments are NUL-terminated and outlive the call, which copies them; an
+        // empty value removes the variable.
+        unsafe { libc::putenv_s(c"TZ".as_ptr(), value.as_ptr()) };
+    }
+    zone::reread();
+}
+
 /// Holds the process's time zone at a `TZ` value for a test, so a local-time answer is the same on
 /// every machine: the lock keeps two zone tests apart, and the drop puts the old `TZ` back.
 #[cfg(test)]
 pub(crate) struct ZoneGuard {
-    old: Option<std::ffi::OsString>,
+    old: Option<String>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -317,9 +337,8 @@ impl ZoneGuard {
     pub(crate) fn set(tz: &str) -> Self {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var_os("TZ");
-        std::env::set_var("TZ", tz);
-        reread_zone();
+        let old = std::env::var("TZ").ok();
+        set_tz(Some(tz));
         Self { old, _lock: lock }
     }
 }
@@ -327,17 +346,8 @@ impl ZoneGuard {
 #[cfg(test)]
 impl Drop for ZoneGuard {
     fn drop(&mut self) {
-        match self.old.take() {
-            Some(v) => std::env::set_var("TZ", v),
-            None => std::env::remove_var("TZ"),
-        }
-        reread_zone();
+        set_tz(self.old.as_deref());
     }
-}
-
-#[cfg(test)]
-fn reread_zone() {
-    zone::reread();
 }
 
 #[cfg(test)]
