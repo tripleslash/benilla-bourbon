@@ -152,11 +152,14 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SystemProfile {
 fn record(name: &str, entered: Instant, now: Instant) {
     let took = now.saturating_duration_since(entered);
     {
+        // A name seen before is looked up by `&str`: allocating it per run made the profiler a
+        // heavy client of the allocator lock it was measuring.
         let mut totals = spin_lock(&TOTALS);
-        let t = totals
-            .get_or_insert_with(HashMap::new)
-            .entry(name.to_owned())
-            .or_default();
+        let totals = totals.get_or_insert_with(HashMap::new);
+        if !totals.contains_key(name) {
+            totals.insert(name.to_owned(), Tally::default());
+        }
+        let t = totals.get_mut(name).expect("inserted above");
         t.total += took;
         t.runs += 1;
         t.longest = t.longest.max(took);
@@ -240,12 +243,14 @@ impl Subscriber for NonBlocking {
         }) else {
             return;
         };
-        let name = spin_lock(&NAMES)
-            .0
-            .get(id as usize - 1)
-            .cloned()
-            .unwrap_or_default();
-        record(&name, entered, now);
+        // Recorded under `NAMES` rather than with a cloned name; nothing takes `NAMES` while
+        // holding `TOTALS` or `SPIKES`, so the order cannot invert.
+        let names = spin_lock(&NAMES);
+        record(
+            names.0.get(id as usize - 1).map_or("", String::as_str),
+            entered,
+            now,
+        );
     }
 }
 
