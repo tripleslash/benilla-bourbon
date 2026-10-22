@@ -528,6 +528,14 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         Err(err) => return no_install::fail(&err, run_mode::unattended()),
     };
 
+    // fork: perf — the profiler's subscriber before any system exists, so every system's span
+    // (made when the system is built) records; the report system is added after the game.
+    #[cfg(feature = "trace_systems")]
+    {
+        #[cfg(target_arch = "wasm32")]
+        benilla_world::system_profile::set_web_hooks(webdiag::out, js_sys::Date::now);
+        benilla_world::system_profile::install();
+    }
     let mut app = App::new();
     // The panel footer and the build banner read the stamp back.
     app.insert_resource(build);
@@ -710,15 +718,11 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         connect: !capturing,
         start: run_mode::start_state(),
     });
-    // fork: perf — the per-system CPU profile, always on in a `trace_systems` build.
+    // fork: perf — the per-system CPU profile, always on in a `trace_systems` build. Its hooks
+    // and subscriber went in before `App::new` (above); the report goes to the console on the web
+    // (no `LogPlugin` there), with spikes stamped on the wall clock every thread shares.
     #[cfg(feature = "trace_systems")]
-    {
-        // fork: web — the report goes to the console (no `LogPlugin` there), and spikes are
-        // stamped on the wall clock every thread shares.
-        #[cfg(target_arch = "wasm32")]
-        benilla_world::system_profile::set_web_hooks(webdiag::out, js_sys::Date::now);
-        benilla_world::system_profile::plugin(&mut app);
-    }
+    benilla_world::system_profile::plugin(&mut app);
 
     // A background run opens unfocused, and `WinitSettings::game()` drives an unfocused window at
     // reactive 1/60 s, so a frame-time instrument would read ~16.7 ms whatever the scene costs.

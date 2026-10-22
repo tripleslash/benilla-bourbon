@@ -300,7 +300,10 @@ fn report(mut last: Local<Option<Instant>>) {
     emit(&out);
 }
 
-pub fn plugin(app: &mut App) {
+/// The threshold, the app's thread and, on the web, the subscriber; the first call wins. Call it
+/// before any system is added: a system's span is made once, when the system is built, and one
+/// made before the subscriber exists records nothing.
+pub fn install() {
     let spike_ms: u64 = crate::launch_env::var("WOW_SYSTEM_PROFILE_SPIKE")
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(8);
@@ -310,5 +313,9 @@ pub fn plugin(app: &mut App) {
     // subscriber of its own. Where one is already installed this does nothing.
     #[cfg(target_arch = "wasm32")]
     let _ = bevy::log::tracing::subscriber::set_global_default(NonBlocking);
+}
+
+pub fn plugin(app: &mut App) {
+    install();
     app.add_systems(Last, report);
 }
