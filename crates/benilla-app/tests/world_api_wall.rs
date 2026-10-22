@@ -201,7 +201,9 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("sky_order::Rung", "wall"),
     ("ssilvb::IndirectLighting", "wall"),
     ("ssilvb::SSILVB_RANGE", "wall"),
+    ("system_profile::install", "wall"),
     ("system_profile::plugin", "wall"),
+    ("system_profile::set_web_hooks", "wall"),
     ("terrain_stream::SPAWN_XY", "wall"),
     ("terrain_stream::StreamActivity", "wall"),
     ("terrain_stream::ViewFocus", "record"),
@@ -351,7 +353,8 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
 /// horizon's culling knob and set (`horizon::*`), and the portrait's every-frame pose
 /// (`rig_anim::PoseEveryFrame`), the placed-light marker the app's lamps carry so the modern
 /// frame can merge near lights (`lighting::PlacedLight`), and the per-system CPU profile
-/// (`system_profile::plugin`). They gate nothing; only the leaks do.
+/// (`system_profile::plugin`, with its subscriber's `install` and the page's `set_web_hooks`). They
+/// gate nothing; only the leaks do.
 const LEAK_CEILING: usize = 107;
 
 /// How far under [`LEAK_CEILING`] the count may sit before the test asks for the ceiling to be
