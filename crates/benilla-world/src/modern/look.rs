@@ -240,6 +240,17 @@ impl ZoneLook {
         noon_mix: 0.0,
         ..Self::NEUTRAL
     };
+
+    /// fork: **Tirisfal Glades**, the eerie look tinted greener (asked in the viewer): the sun,
+    /// shafts, fog and sky lean further from red and blue toward green.
+    pub const TIRISFAL: Self = Self {
+        glow: [0.58, 1.0, 0.62],
+        haze_tint: [0.19, 0.36, 0.22],
+        fog_tint: [0.7, 1.05, 0.7],
+        sky_tint: [0.52, 0.72, 0.52],
+        key_tint: [0.72, 1.0, 0.74],
+        ..Self::EERIE
+    };
 }
 
 impl ZoneLook {
@@ -299,10 +310,13 @@ const IRONFORGE_ZONE: u32 = 1537;
 /// `AreaTable.dbc` zone ids that take [`ZoneLook::COLD`]: Dun Morogh, Winterspring, Alterac Valley and the Alterac Mountains.
 const COLD_ZONES: &[u32] = &[1, 618, 2597, 36];
 
-/// `AreaTable.dbc` zone ids that take [`ZoneLook::EERIE`]: Duskwood, Silverpine Forest, Tirisfal
-/// Glades, Deadwind Pass, the Western and Eastern Plaguelands, Swamp of Sorrows and Felwood, and
-/// Turtle WoW's Gilneas and Gilneas City.
-const EERIE_ZONES: &[u32] = &[10, 130, 85, 41, 28, 139, 8, 361, 5179, 5208];
+/// `AreaTable.dbc` zone id that takes [`ZoneLook::TIRISFAL`].
+const TIRISFAL_ZONE: u32 = 85;
+
+/// `AreaTable.dbc` zone ids that take [`ZoneLook::EERIE`]: Duskwood, Silverpine Forest, Deadwind
+/// Pass, the Western and Eastern Plaguelands, Swamp of Sorrows and Felwood, and Turtle WoW's
+/// Gilneas and Gilneas City.
+const EERIE_ZONES: &[u32] = &[10, 130, 41, 28, 139, 8, 361, 5179, 5208];
 
 /// The zone's look `midday` of the way into noon: the default look takes [`ZoneLook::NOON`].
 pub fn look_for_zone_at(zone: u32, midday: f32) -> ZoneLook {
@@ -315,7 +329,9 @@ pub fn look_for_zone_at(zone: u32, midday: f32) -> ZoneLook {
 }
 
 pub fn look_for_zone(zone: u32) -> ZoneLook {
-    if EERIE_ZONES.contains(&zone) {
+    if zone == TIRISFAL_ZONE {
+        ZoneLook::TIRISFAL
+    } else if EERIE_ZONES.contains(&zone) {
         ZoneLook::EERIE
     } else if zone == IRONFORGE_ZONE {
         ZoneLook::IRONFORGE
@@ -822,7 +838,7 @@ mod tests {
 
     #[test]
     fn the_dark_zones_days_are_darker_than_elwynns() {
-        for zone in EERIE_ZONES {
+        for zone in EERIE_ZONES.iter().chain([&TIRISFAL_ZONE]) {
             let d = look_for_zone(*zone);
             assert!(d.key < ZoneLook::NEUTRAL.key && d.fill < ZoneLook::NEUTRAL.fill);
             assert!(d.exposure < ZoneLook::NEUTRAL.exposure);
@@ -847,7 +863,7 @@ mod tests {
     /// An ordinary zone's night is clearer than a dark zone's: faint banks and a dim air glow.
     #[test]
     fn only_the_dark_zones_nights_are_eerie() {
-        for zone in EERIE_ZONES {
+        for zone in EERIE_ZONES.iter().chain([&TIRISFAL_ZONE]) {
             let d = look_for_zone(*zone);
             assert_eq!((d.night_banks, d.night_glow), (1.0, 1.0), "zone {zone}");
         }
@@ -856,6 +872,23 @@ mod tests {
             assert!(n.night_banks < ZoneLook::EERIE.night_banks, "zone {zone}");
             assert!(n.night_glow < ZoneLook::EERIE.night_glow, "zone {zone}");
         }
+    }
+
+    /// Tirisfal is the eerie look, its sun, shafts, fog and sky leaning further green.
+    #[test]
+    fn tirisfal_is_greener_than_the_other_dark_zones() {
+        let (t, e) = (look_for_zone(TIRISFAL_ZONE), ZoneLook::EERIE);
+        let green = |c: [f32; 3]| c[1] / c[0].max(c[2]);
+        for (a, b) in [
+            (t.glow, e.glow),
+            (t.haze_tint, e.haze_tint),
+            (t.fog_tint, e.fog_tint),
+            (t.sky_tint, e.sky_tint),
+            (t.key_tint, e.key_tint),
+        ] {
+            assert!(green(a) > green(b), "{a:?} against {b:?}");
+        }
+        assert_eq!((t.key, t.fill, t.exposure), (e.key, e.fill, e.exposure));
     }
 
     /// Every zone the user named reads Elwynn's look (Elwynn 12, Stranglethorn 33, Durotar 14,
