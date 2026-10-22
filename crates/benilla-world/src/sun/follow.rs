@@ -482,6 +482,15 @@ pub(super) fn follow_moons(
     }
 }
 
+/// fork: **the modern night sky**, in every zone: the star dome (patch-Y's nebulae) at this share
+/// of its authored strength, so the sky band shows through it rather than a lit band over the
+/// haze.
+const MODERN_STAR_SHARE: f32 = 0.3;
+/// fork: the view elevation (sine) above which the modern star dome is whole; below it the dome
+/// fades out to the horizon (`StarExt::horizon`). It draws after the fog composite, so without
+/// the fade its nebulae ran unhazed down to a hard line on the horizon band (~20 degrees).
+const MODERN_STAR_HORIZON: f32 = 0.35;
+
 /// Anchor the star dome and fade it by the model-global byte `trunc(curve·254 + 1)`, the draw
 /// skipped below 2 (`0x6d1b50`/`0x7e6120`), times each patch's [`StarDome::weight`]; drift a
 /// scrolling batch's stage 0 on its global-sequence clock.
@@ -509,16 +518,18 @@ pub(super) fn follow_stars(
         _ => 3000.0,
     };
     let byte = (light.star_alpha * 254.0 + 1.0).trunc();
-    let global = if debug.lighting.disable_sky_dome || byte < 2.0 {
-        0.0
-    } else {
-        byte / 255.0
-    };
     // fork: modern lighting (FORK.md) — `.z` = the frame is linear (star.wgsl).
     let linear = if crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled() {
         1.0
     } else {
         0.0
+    };
+    // fork: a modern frame's dome at [`MODERN_STAR_SHARE`] of its strength; a classic one's whole.
+    let share = if linear > 0.5 { MODERN_STAR_SHARE } else { 1.0 };
+    let global = if debug.lighting.disable_sky_dome || byte < 2.0 {
+        0.0
+    } else {
+        byte / 255.0 * share
     };
     // fork: `.w` = the reciprocal of the modern post's exposure (the zone look's times the night
     // auto-exposure lift), so the night sky reaches the screen at its classic brightness: the
@@ -529,6 +540,12 @@ pub(super) fn follow_stars(
         benilla_assets::quantize(1.0 / crate::modern::look::exposure().max(1e-3), 1024.0)
     } else {
         1.0
+    };
+    // fork: the horizon fade on a linear frame (`StarExt::horizon`).
+    let horizon = if linear > 0.5 {
+        Vec4::new(0.0, MODERN_STAR_HORIZON, 0.0, 0.0)
+    } else {
+        Vec4::ZERO
     };
     // A capture holds the drift at its seed, as the shared-clock material lanes do.
     let gseq_now = if crate::dev_state::deterministic_run() {
@@ -568,13 +585,15 @@ pub(super) fn follow_stars(
                     || (shown
                         && (m.base.uv_transform != uv
                             || m.extension.params.z != linear
-                            || m.extension.params.w != unexpose))
+                            || m.extension.params.w != unexpose
+                            || m.extension.horizon != horizon))
             },
             |m| {
                 m.base.base_color = color;
                 m.base.uv_transform = uv;
                 m.extension.params.z = linear;
                 m.extension.params.w = unexpose;
+                m.extension.horizon = horizon;
             },
         );
     }

@@ -75,6 +75,11 @@ pub struct StarExt {
     #[texture(101)]
     #[sampler(102)]
     pub(super) stage2: Option<Handle<Image>>,
+    /// fork: the modern horizon fade (`follow::MODERN_STAR_HORIZON`), modern frames only: the dome is
+    /// gone below the view elevation (sine) `.x` and whole above `.y`; `.y` 0 = no fade. The dome
+    /// draws after the fog composite, so without it the nebulae ran unhazed down to the horizon.
+    #[uniform(103)]
+    pub(super) horizon: Vec4,
 }
 
 impl MaterialExtension for StarExt {

@@ -250,6 +250,7 @@ pub(super) fn setup_sun(
                         0.0,
                     ),
                     stage2,
+                    horizon: Vec4::ZERO,
                 },
             });
             commands.spawn((

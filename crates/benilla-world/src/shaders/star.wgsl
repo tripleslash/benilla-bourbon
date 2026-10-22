@@ -7,6 +7,7 @@
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     forward_io::VertexOutput,
+    mesh_view_bindings::view,
 }
 
 // `StarExt::params`: `.x` additive, `.y` stage 2 bound, `.z` the frame is linear, `.w` the
@@ -14,6 +15,8 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> star: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var stage2_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var stage2_sampler: sampler;
+// fork: `StarExt::horizon`: gone below the view elevation (sine) `.x`, whole above `.y`; `.y` 0 = off.
+@group(#{MATERIAL_BIND_GROUP}) @binding(103) var<uniform> horizon: vec4<f32>;
 
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     let lo = c * 12.92;
@@ -49,6 +52,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
     // fork: and the colour leaves pre-divided by the post's exposure, which then multiplies it back
     // to the classic level instead of lifting the night sky with the lit world.
     if star.z > 0.5 {
+        // fork: the horizon fade: the dome draws after the fog composite, so near the
+        // horizon it gives way to the hazed sky band under it.
+        if horizon.y > 0.0 {
+            let up = normalize(in.world_position.xyz - view.world_position).y;
+            a *= smoothstep(horizon.x, horizon.y, up);
+        }
         let keep = pow(1.0 - a, 2.2);
         return vec4<f32>(srgb_to_linear(rgb * a) * star.w, select(1.0 - keep, 0.0, star.x > 0.5));
     }
