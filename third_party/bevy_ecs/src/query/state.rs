@@ -588,6 +588,36 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             if self.archetype_generation == world.archetypes().generation() {
                 return;
             }
+            // **benilla fork.** Upstream walks every archetype holding the rarest required component
+            // and skips the old ones one by one, so each new archetype in the world cost every
+            // query a pass over hundreds of archetypes: with ~3,400 systems that was most of each
+            // 100-150 ms stall in a crowd. When fewer archetypes are new than that set holds, test
+            // only the new ones; `new_archetype` checks the match itself.
+            let archetypes = world.archetypes();
+            let fresh = archetypes.len() - self.archetype_generation.0.index();
+            let rarest = self
+                .component_access
+                .required
+                .iter()
+                .filter_map(|component_id| {
+                    archetypes
+                        .component_index()
+                        .get(&component_id)
+                        .map(|index| index.len())
+                })
+                .min();
+            if rarest.is_some_and(|rarest| fresh < rarest) {
+                let old_generation =
+                    core::mem::replace(&mut self.archetype_generation, archetypes.generation());
+                for archetype in &archetypes[old_generation..] {
+                    // SAFETY: The validate_world call ensures that the world is the same the
+                    // QueryState was initialized from.
+                    unsafe {
+                        self.new_archetype(archetype);
+                    }
+                }
+                return;
+            }
             // if there are required components, we can optimize by only iterating through archetypes
             // that contain at least one of the required components
             let potential_archetypes = self

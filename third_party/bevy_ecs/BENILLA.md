@@ -22,8 +22,8 @@ were *written* for parallelism would keep running serially on the thread that dr
 
 ## The delta, and the command that proves it
 
-**13 `#[cfg]` predicates, in two files. No logic changed anywhere.** Each is one of two mechanical
-rewrites:
+**13 `#[cfg]` predicates, in two files, and one logic change (below).** Each predicate is one of
+two mechanical rewrites:
 
 | upstream | fork |
 |---|---|
@@ -36,6 +36,15 @@ rewrites:
 | `src/query/state.rs` | 4 parallel-arm gates (one `use`, three methods) |
 
 Both files carry a `**benilla fork.**` comment at their first rewritten site saying why.
+
+**One logic change, in `src/query/state.rs`'s `update_archetypes_unsafe_world_cell`.** When a query
+has required components and the world has new archetypes, upstream walks every archetype that holds
+the rarest required component and skips the already-seen ones one by one. The fork first compares
+how many archetypes are new with the size of that set, and when fewer are new it tests only those,
+as the no-required-components arm already does (`new_archetype` checks the match). Measured in a
+crowd on the threaded browser build (JS self-profiler, page thread): ~67% of the samples in frames
+of 100 ms or more sat in this walk, across dozens of queries, because every new archetype made each
+of ~3,400 systems' queries re-walk hundreds of archetypes.
 
 ## What is deliberately NOT forked
 
