@@ -150,22 +150,31 @@ const COPY_SLICE: usize = 1 << 18;
 /// Mono is duplicated to both sides rather than left half-silent (`Frame::from_mono`, the same
 /// answer kira's own decoder gives a mono file); anything above two channels takes the first two,
 /// which is every file in the corpus and all the mixer can place anyway.
+///
+/// `copyFromChannel` refuses a shared `Float32Array`, and with threads every view of wasm memory
+/// is one, so the channels land in a JS scratch array first and `copy_to` moves them into memory.
+/// Copying straight into the slices failed every decode there and fell back to the wasm decoder.
 async fn frames_from(audio: &web_sys::AudioBuffer) -> Result<StaticSoundData, String> {
     let len = audio.length() as usize;
     let stereo = audio.number_of_channels() > 1;
     let mut frames: Arc<[std::mem::MaybeUninit<Frame>]> = Arc::new_uninit_slice(len);
     let slice = COPY_SLICE.min(len.max(1));
     let (mut left, mut right) = (vec![0.0f32; slice], vec![0.0f32; slice]);
+    let scratch = js_sys::Float32Array::new_with_length(slice as u32);
+    let channel = |dst: &mut [f32], ch: i32, at: usize| -> Result<(), String> {
+        let view = scratch.subarray(0, dst.len() as u32);
+        audio
+            .copy_from_channel_with_f32_array_and_start_in_channel(&view, ch, at as u32)
+            .map_err(js_err)?;
+        view.copy_to(dst);
+        Ok(())
+    };
     let mut at = 0;
     while at < len {
         let n = slice.min(len - at);
-        audio
-            .copy_from_channel_with_start_in_channel(&mut left[..n], 0, at as u32)
-            .map_err(js_err)?;
+        channel(&mut left[..n], 0, at)?;
         if stereo {
-            audio
-                .copy_from_channel_with_start_in_channel(&mut right[..n], 1, at as u32)
-                .map_err(js_err)?;
+            channel(&mut right[..n], 1, at)?;
         }
         let dst = Arc::get_mut(&mut frames).expect("the only owner until it is returned");
         for i in 0..n {
