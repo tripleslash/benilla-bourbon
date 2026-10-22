@@ -154,6 +154,8 @@ struct Diag {
 struct Counts {
     entities: u32,
     archetypes: usize,
+    /// Archetypes ever made: bevy never removes one, and each new one costs every query a rescan.
+    archetypes_made: usize,
     /// Component -> entities carrying it.
     components: HashMap<ComponentId, u32>,
     meshes: usize,
@@ -447,6 +449,7 @@ fn report(world: &mut World) {
             (w.0.created.load(Ordering::Relaxed), settled)
         });
     let gpu = gpu_line(world);
+    let fresh = new_archetypes(world, world.resource::<Diag>().prev.archetypes_made);
     let mut d = world.resource_mut::<Diag>();
     d.next_report = now + REPORT_SECS;
 
@@ -470,6 +473,7 @@ fn report(world: &mut World) {
     let dr = counts.render_entities as i64 - prev.render_entities as i64;
     let dw = counts.wasm_bytes as i64 - prev.wasm_bytes as i64;
     let dj = counts.js_heap as i64 - prev.js_heap as i64;
+    let da = counts.archetypes_made as i64 - prev.archetypes_made as i64;
 
     // Per FRAME, not per window: the same unit as the p50 beside it, so "decode is 3 of my 14 ms"
     // reads straight off the line. Zero here with a non-zero mesh delta is the answer this probe
@@ -480,7 +484,7 @@ fn report(world: &mut World) {
     let pipes = pipes_field(&mut d, pipes);
     let mut line = format!(
         "[diag] t={now:.0}s frames={n} | ms p50={p50:.1} p95={p95:.1} max={max:.1} decode={decode:.1} \
-         | slow>{SLOW_MS:.0}ms={} | ents={} {} rents={} {} arch={} | mesh={} {} img={} {} mat={} {} \
+         | slow>{SLOW_MS:.0}ms={} | ents={} {} rents={} {} arch={} made={} {} | mesh={} {} img={} {} mat={} {} \
          | wasm={} {} js={} {} | thr={} pipes={} audio={}",
         d.slow,
         counts.entities,
@@ -488,6 +492,8 @@ fn report(world: &mut World) {
         counts.render_entities,
         signed(dr),
         counts.archetypes,
+        counts.archetypes_made,
+        signed(da),
         counts.meshes,
         signed(dm),
         counts.images,
@@ -502,6 +508,7 @@ fn report(world: &mut World) {
         pipes,
         audio_field(),
     );
+    line.push_str(&fresh);
 
     // What a slow frame was made of, averaged over the slow frames in this window only.
     if d.slow > 0 {
@@ -641,6 +648,48 @@ fn growers(world: &World, base: &Counts, now: &Counts, t: f32) {
     }
 }
 
+/// How many archetypes a window lists by their components, at most.
+const NEW_ARCHETYPES_SHOWN: usize = 8;
+
+/// The first archetypes made since `since`, by their components: whatever keeps making them is the
+/// code to look at. Nothing before the first report, which would list the whole boot.
+fn new_archetypes(world: &World, since: usize) -> String {
+    let made = world.archetypes().len();
+    if since == 0 || made <= since {
+        return String::new();
+    }
+    let mut out = String::new();
+    for arch in world
+        .archetypes()
+        .iter()
+        .skip(since)
+        .take(NEW_ARCHETYPES_SHOWN)
+    {
+        let names: Vec<String> = arch
+            .components()
+            .iter()
+            .map(|&id| {
+                world
+                    .components()
+                    .get_info(id)
+                    .map_or_else(|| format!("{id:?}"), |i| short(&i.name().to_string()))
+            })
+            .collect();
+        out.push_str(&format!(
+            "\n[diag]   new archetype ({} ents): {}",
+            arch.len(),
+            names.join(", ")
+        ));
+    }
+    if made - since > NEW_ARCHETYPES_SHOWN {
+        out.push_str(&format!(
+            "\n[diag]   and {} more new archetypes",
+            made - since - NEW_ARCHETYPES_SHOWN
+        ));
+    }
+    out
+}
+
 /// One census of the world: every non-empty archetype's population charged to each component it
 /// carries, so a population split across archetypes still reads as one number.
 fn census(world: &mut World) -> Counts {
@@ -660,6 +709,7 @@ fn census(world: &mut World) -> Counts {
     Counts {
         entities: world.entities().len(),
         archetypes,
+        archetypes_made: world.archetypes().len(),
         components,
         meshes: world.get_resource::<Assets<Mesh>>().map_or(0, Assets::len),
         images: world.get_resource::<Assets<Image>>().map_or(0, Assets::len),
