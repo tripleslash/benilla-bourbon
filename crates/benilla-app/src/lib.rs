@@ -510,6 +510,16 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     render_worker::install();
     // Before any resource reads `launch_env` (`LightingSettings`, `WaterDetail`, …).
     seed_launch_env();
+    // fork: web — the allocator's grow-ahead step, `?alloc_grow_mb=` (64; 0 is off).
+    #[cfg(all(
+        target_arch = "wasm32",
+        target_feature = "atomics",
+        not(debug_assertions)
+    ))]
+    if let Some(mb) = webenv::var("WOW_ALLOC_GROW_MB").and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        wasm_alloc::set_grow_step(mb << 20);
+    }
 
     // The offload lever, read once and applied before the first asset can be asked for.
     // `?offload=0` puts every `spawn_pooled` caller back on the frame thread under the asset

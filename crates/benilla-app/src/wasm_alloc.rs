@@ -19,16 +19,20 @@
 //! unloaded terrain tile's or WMO's meshes on the page thread stalled it in that wait (measured:
 //! a 206 ms frame, most of its samples spinning in `dealloc` while the workers decoded).
 //!
+//! An allocation that makes dlmalloc grow linear memory grows it ahead by a large step
+//! ([`grow_ahead`], `?alloc_grow_mb=`), so a load burst pays a few `memory.grow`s under the shared
+//! lock instead of one per allocation that outruns the free space.
+//!
 //! The shard is picked from the stack address, not a thread-local: a new thread's stack and TLS
 //! block are allocated with this allocator as wasm-bindgen starts it, possibly before that thread's
 //! TLS exists, and a thread-local touched then would write through an unset TLS base. Thread stacks are disjoint, so
 //! the stack address keeps a thread on its own shard; two threads that land on one shard only
 //! share it.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::UnsafeCell;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
 /// The size classes, bytes; every class block is allocated at [`CLASS_ALIGN`].
 const CLASSES: [usize; 36] = [
@@ -284,7 +288,7 @@ unsafe fn defer(block: *mut u8, layout: Layout) {
 }
 
 /// Free up to `n` deferred blocks; the caller holds [`SHARED`].
-fn drain(_turn: &FairGuard<'_>, n: usize) {
+fn drain(turn: &FairGuard<'_>, n: usize) {
     for _ in 0..n {
         let block = DEFERRED.load(Ordering::Acquire);
         if block.is_null() {
@@ -299,7 +303,8 @@ fn drain(_turn: &FairGuard<'_>, n: usize) {
         {
             // SAFETY: the entry records the layout `System` allocated the block at.
             unsafe {
-                System.dealloc(
+                heap::dealloc(
+                    turn,
                     block,
                     Layout::from_size_align_unchecked(entry.size, entry.align),
                 )
@@ -315,14 +320,183 @@ fn shared() -> FairGuard<'static> {
     turn
 }
 
-/// `alloc` under `turn`, and once more after freeing every deferred block if that fails.
+/// `alloc` under `turn`, and once more after freeing every deferred block if that fails. An
+/// allocation that grew the heap grows it ahead too ([`grow_ahead`]).
 fn alloc_or_drain(turn: &FairGuard<'_>, alloc: impl Fn() -> *mut u8) -> *mut u8 {
-    let block = alloc();
-    if !block.is_null() || DEFERRED.load(Ordering::Relaxed).is_null() {
-        return block;
+    let before = heap::bytes();
+    let mut block = alloc();
+    if block.is_null() && !DEFERRED.load(Ordering::Relaxed).is_null() {
+        drain(turn, usize::MAX);
+        block = alloc();
     }
-    drain(turn, usize::MAX);
-    alloc()
+    let after = heap::bytes();
+    if after > before {
+        GROWS.fetch_add(1, Ordering::Relaxed);
+        GROWN.fetch_add(after - before, Ordering::Relaxed);
+        grow_ahead(turn, after - before);
+    }
+    block
+}
+
+/// Bytes the heap grows ahead by once an allocation has grown it (`set_grow_step`); 0 is off.
+static GROW_STEP: AtomicUsize = AtomicUsize::new(64 << 20);
+/// Since the last [`take_grow_stats`]: allocations that grew the heap, heap growths made ahead,
+/// and bytes grown by both.
+static GROWS: AtomicU32 = AtomicU32::new(0);
+static AHEAD: AtomicU32 = AtomicU32::new(0);
+static GROWN: AtomicUsize = AtomicUsize::new(0);
+
+/// Set the grow-ahead step, bytes; 0 turns it off.
+pub(crate) fn set_grow_step(bytes: usize) {
+    GROW_STEP.store(bytes, Ordering::Relaxed);
+}
+
+/// Heap growth since the last call: (allocations that grew it, growths ahead, bytes grown).
+pub(crate) fn take_grow_stats() -> (u32, u32, usize) {
+    (
+        GROWS.swap(0, Ordering::Relaxed),
+        AHEAD.swap(0, Ordering::Relaxed),
+        GROWN.swap(0, Ordering::Relaxed),
+    )
+}
+
+/// After an allocation grew the heap by `grown`, take [`GROW_STEP`] more and give it straight
+/// back: dlmalloc keeps it as free space at the top, so the next allocations need no
+/// `memory.grow`. dlmalloc grows only by what the request needs, and each grow ran under
+/// [`SHARED`] with every other allocating thread waiting behind it: in a crowd, 81% of the page
+/// thread's samples in frames of 250 ms or more sat in that wait or in `memory.grow` itself, while
+/// the heap grew 35-122 MB per 5 s. Near the memory's maximum the step fails and nothing happens.
+fn grow_ahead(turn: &FairGuard<'_>, grown: usize) {
+    let step = GROW_STEP.load(Ordering::Relaxed);
+    if step <= grown {
+        return;
+    }
+    let before = heap::bytes();
+    // SAFETY: the step is non-zero and a multiple of the alignment.
+    let layout = unsafe { Layout::from_size_align_unchecked(step & !15, 16) };
+    let block = heap::alloc(turn, layout);
+    if block.is_null() {
+        return;
+    }
+    // SAFETY: freed at the layout it was just allocated at.
+    unsafe { heap::dealloc(turn, block, layout) };
+    let after = heap::bytes();
+    if after > before {
+        AHEAD.fetch_add(1, Ordering::Relaxed);
+        GROWN.fetch_add(after - before, Ordering::Relaxed);
+    }
+}
+
+/// The shared allocator under [`SHARED`], and the size of the heap it grows. On wasm that is
+/// `System` (std's dlmalloc) and linear memory, which only grows. Natively (the tests and the
+/// stress app) linear memory is modelled: the heap is the high-water mark of the bytes `System`
+/// holds for this allocator, in 64 KiB pages, and growing it can be given a cost
+/// ([`heap::set_grow_cost`]), so grow-ahead runs and can be measured off the browser.
+pub(crate) mod heap {
+    use super::FairGuard;
+    use std::alloc::{GlobalAlloc, Layout, System};
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn bytes() -> usize {
+        core::arch::wasm32::memory_size(0) * 65536
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn alloc(_turn: &FairGuard<'_>, layout: Layout) -> *mut u8 {
+        // SAFETY: the callers pass non-zero-sized layouts.
+        unsafe { System.alloc(layout) }
+    }
+
+    /// SAFETY: as `GlobalAlloc::dealloc`.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) unsafe fn dealloc(_turn: &FairGuard<'_>, block: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(block, layout) }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) mod model {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+        pub(super) static LIVE: AtomicUsize = AtomicUsize::new(0);
+        pub(super) static HIGH: AtomicUsize = AtomicUsize::new(0);
+        pub(super) static GROW_COST_NS: AtomicU64 = AtomicU64::new(0);
+
+        /// `live` changed by `delta`; a new high-water mark is a grow, and costs its time.
+        pub(super) fn track(delta: isize) {
+            let live = LIVE.load(Ordering::Relaxed).saturating_add_signed(delta);
+            LIVE.store(live, Ordering::Relaxed);
+            if live > HIGH.load(Ordering::Relaxed) {
+                HIGH.store(live.div_ceil(65536) * 65536, Ordering::Relaxed);
+                let cost = GROW_COST_NS.load(Ordering::Relaxed);
+                if cost > 0 {
+                    let until = std::time::Instant::now() + std::time::Duration::from_nanos(cost);
+                    while std::time::Instant::now() < until {
+                        std::hint::spin_loop();
+                    }
+                }
+            }
+        }
+    }
+
+    /// The modelled cost of one heap growth, nanoseconds (the stress app's lever).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_grow_cost(ns: u64) {
+        model::GROW_COST_NS.store(ns, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn bytes() -> usize {
+        model::HIGH.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn alloc(_turn: &FairGuard<'_>, layout: Layout) -> *mut u8 {
+        // SAFETY: the callers pass non-zero-sized layouts.
+        let block = unsafe { System.alloc(layout) };
+        if !block.is_null() {
+            model::track(layout.size() as isize);
+        }
+        block
+    }
+
+    /// SAFETY: as `GlobalAlloc::dealloc`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) unsafe fn dealloc(_turn: &FairGuard<'_>, block: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(block, layout) };
+        model::track(-(layout.size() as isize));
+    }
+
+    /// SAFETY: as `GlobalAlloc::realloc`.
+    pub(super) unsafe fn realloc(
+        turn: &FairGuard<'_>,
+        block: *mut u8,
+        layout: Layout,
+        new_size: usize,
+    ) -> *mut u8 {
+        #[cfg(target_arch = "wasm32")]
+        let _ = turn;
+        let moved = unsafe { System.realloc(block, layout, new_size) };
+        #[cfg(not(target_arch = "wasm32"))]
+        if !moved.is_null() {
+            let _ = turn;
+            model::track(new_size as isize - layout.size() as isize);
+        }
+        moved
+    }
+
+    /// SAFETY: as `GlobalAlloc::alloc_zeroed`.
+    pub(super) unsafe fn alloc_zeroed(turn: &FairGuard<'_>, layout: Layout) -> *mut u8 {
+        #[cfg(target_arch = "wasm32")]
+        let _ = turn;
+        let block = unsafe { System.alloc_zeroed(layout) };
+        #[cfg(not(target_arch = "wasm32"))]
+        if !block.is_null() {
+            let _ = turn;
+            model::track(layout.size() as isize);
+        }
+        block
+    }
 }
 
 /// Small blocks from per-shard class lists, everything else from `System` in turn.
@@ -338,7 +512,7 @@ impl ShardedAlloc {
                 let turn = shared();
                 for _ in 0..batch(c) {
                     // SAFETY: a class layout is non-zero-sized.
-                    let block = alloc_or_drain(&turn, || unsafe { System.alloc(class_layout(c)) });
+                    let block = alloc_or_drain(&turn, || heap::alloc(&turn, class_layout(c)));
                     if block.is_null() {
                         break;
                     }
@@ -353,7 +527,7 @@ impl ShardedAlloc {
         }
         let turn = shared();
         // SAFETY: a class layout is non-zero-sized.
-        alloc_or_drain(&turn, || unsafe { System.alloc(class_layout(c)) })
+        alloc_or_drain(&turn, || heap::alloc(&turn, class_layout(c)))
     }
 
     /// Return a class block: onto this shard's list (flushing a batch when full), or straight to the
@@ -362,20 +536,20 @@ impl ShardedAlloc {
         if let Some(mut shard) = shard().try_take() {
             let list = shard.list(c);
             if list.len >= cap(c) {
-                let _turn = shared();
+                let turn = shared();
                 for _ in 0..batch(c) {
                     let spare = list.pop();
                     // SAFETY: every listed block came from `System` at the class layout.
-                    unsafe { System.dealloc(spare, class_layout(c)) };
+                    unsafe { heap::dealloc(&turn, spare, class_layout(c)) };
                 }
             }
             // SAFETY: the caller frees a block of class `c`.
             unsafe { list.push(block) };
             return;
         }
-        let _turn = shared();
+        let turn = shared();
         // SAFETY: every class block came from `System` at the class layout.
-        unsafe { System.dealloc(block, class_layout(c)) };
+        unsafe { heap::dealloc(&turn, block, class_layout(c)) };
     }
 }
 
@@ -387,7 +561,7 @@ unsafe impl GlobalAlloc for ShardedAlloc {
             Some(c) => unsafe { self.alloc_small(c) },
             None => {
                 let turn = shared();
-                alloc_or_drain(&turn, || unsafe { System.alloc(layout) })
+                alloc_or_drain(&turn, || heap::alloc(&turn, layout))
             }
         }
     }
@@ -403,7 +577,7 @@ unsafe impl GlobalAlloc for ShardedAlloc {
             }
             None => {
                 let turn = shared();
-                alloc_or_drain(&turn, || unsafe { System.alloc_zeroed(layout) })
+                alloc_or_drain(&turn, || unsafe { heap::alloc_zeroed(&turn, layout) })
             }
         }
     }
@@ -414,7 +588,7 @@ unsafe impl GlobalAlloc for ShardedAlloc {
             // A busy lock is not waited for: the next holder frees the block. A free that gets the
             // lock frees only its own block, so it never pays for others' deferred ones.
             None => match SHARED.try_lock() {
-                Some(_turn) => unsafe { System.dealloc(block, layout) },
+                Some(turn) => unsafe { heap::dealloc(&turn, block, layout) },
                 None => unsafe { defer(block, layout) },
             },
         }
@@ -426,7 +600,9 @@ unsafe impl GlobalAlloc for ShardedAlloc {
         match (class_of(layout), class_of(new_layout)) {
             (None, None) => {
                 let turn = shared();
-                alloc_or_drain(&turn, || unsafe { System.realloc(block, layout, new_size) })
+                alloc_or_drain(&turn, || unsafe {
+                    heap::realloc(&turn, block, layout, new_size)
+                })
             }
             (Some(a), Some(b)) if a == b => block,
             _ => {
@@ -577,6 +753,29 @@ mod tests {
         );
         drain(&turn, usize::MAX);
         assert!(!listed(block), "the holder's drain frees it");
+    }
+
+    /// An allocation that grows the heap grows it ahead by the step, and the next allocation that
+    /// fits in that step grows nothing. Under the shared lock throughout, so no other test moves
+    /// the model or the counters meanwhile.
+    #[test]
+    fn a_grow_grows_ahead_and_the_next_allocation_fits() {
+        let turn = SHARED.lock();
+        let step = GROW_STEP.swap(8 << 20, Ordering::Relaxed);
+        let _ = take_grow_stats();
+        let headroom = heap::bytes() - heap::model::LIVE.load(Ordering::Relaxed);
+        let outgrow = Layout::from_size_align(headroom + 64 * 1024, 16).unwrap();
+        let a = alloc_or_drain(&turn, || heap::alloc(&turn, outgrow));
+        let (grows, ahead, _) = take_grow_stats();
+        assert_eq!((grows, ahead), (1, 1), "one grow by need, one ahead");
+        let fits = Layout::from_size_align(4 << 20, 16).unwrap();
+        let b = alloc_or_drain(&turn, || heap::alloc(&turn, fits));
+        assert_eq!(take_grow_stats().0, 0, "the step left room for it");
+        unsafe {
+            heap::dealloc(&turn, a, outgrow);
+            heap::dealloc(&turn, b, fits);
+        }
+        GROW_STEP.store(step, Ordering::Relaxed);
     }
 
     /// Growing and shrinking across the class boundary and into the shared allocator keeps the
