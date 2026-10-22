@@ -227,13 +227,13 @@ pub use social::{
     add_friend, add_ignore, del_friend, del_ignore, friend_list, friend_result, friend_status,
     looking_for_group_query, read_friend_list, read_friend_status, read_ignore_list, read_who,
     set_looking_for_group, who, FriendEntry, FriendOnline, FriendStatusUpdate, WhoEntry,
-    WhoRequest, WhoResults, WHO_MAX_SEARCH_TERMS, WHO_MAX_ZONES,
+    WhoRequest, WhoResults,
 };
 pub use spellbook::SpellCooldown;
 pub use spells::{
     cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_at_source, cast_spell_corpse,
-    cast_spell_gameobject, cast_spell_item, CastOutcome, CorpseTarget, SpellCastTargets,
-    SpellChainTargets, SpellGo, SpellGoMiss, SpellStart,
+    cast_spell_gameobject, cast_spell_item, cast_spell_trade_item, CastOutcome, CorpseTarget,
+    SpellCastTargets, SpellChainTargets, SpellGo, SpellGoMiss, SpellStart,
 };
 pub use stable::{
     buy_stable_slot, list_stabled_pets, stable_pet, stable_result, stable_swap_pet, unstable_pet,

@@ -466,6 +466,11 @@ fn left_clicking_the_player_frame_targets_self() {
         "Loot Method is nested for the leader"
     );
     s.resolve();
+    // `LeaveParty` sends only with the player's object (`0x4e9196`).
+    s.set_unit_guids(&benilla_ui::script::UnitGuids {
+        player: 0x5E1F,
+        ..Default::default()
+    });
     let (rx, ry) = s
         .eval::<(f64, f64)>("return DropDownList1Button4:GetCenter()")
         .unwrap();
@@ -490,6 +495,7 @@ fn left_clicking_the_player_frame_targets_self() {
 fn raid_mark_clicks_through_the_nested_level() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     load_unit_frames(&s);
 
@@ -1088,7 +1094,6 @@ fn a_live_faction_template_change_recolours_the_target_plate() {
 /// pushed for the stock poll.
 #[test]
 fn a_values_block_moves_the_target_health_bar_and_a_retarget_fires_no_unit_event() {
-    use crate::field_watch::FieldNotice;
     use crate::net::{Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
     use crate::target::Selection;
     use benilla_protocol::field::{FIELD_UNIT_HEALTH, FIELD_UNIT_MAXHEALTH};
@@ -1232,7 +1237,7 @@ fn a_values_block_moves_the_target_health_bar_and_a_retarget_fires_no_unit_event
         )
     };
     app.world_mut()
-        .resource_mut::<Messages<FieldNotice>>()
+        .resource_mut::<crate::field_watch::NoticeLane>()
         .write_batch(notices);
     app.update();
     assert_eq!(seen(&mut app), ["UNIT_HEALTH:target"]);
@@ -1263,7 +1268,7 @@ fn a_values_block_moves_the_target_health_bar_and_a_retarget_fires_no_unit_event
         )
     };
     app.world_mut()
-        .resource_mut::<Messages<FieldNotice>>()
+        .resource_mut::<crate::field_watch::NoticeLane>()
         .write_batch(notices);
     app.update();
     assert!(seen(&mut app).is_empty(), "no targettarget unit event");

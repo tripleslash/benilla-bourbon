@@ -1,8 +1,8 @@
 //! `CGUnit_C::OnDied 0x605860`, which the health watcher runs on every unit's alive-to-dead edge
 //! (`0x6046f0` at `0x6047a3`: the new health not above 0, the old above). In its order:
 //!
-//! - a player's own leg first (`0x5e99b0` at `0x60588d`), whose active-player release latch and
-//!   timer are [`crate::ui_session`]'s;
+//! - a player's own leg first (`0x5e99b0` at `0x60588d`): a groupmate's death line, here, and
+//!   the active player's release latch and timer, [`crate::ui_session`]'s;
 //! - the dying unit's attack words zeroed (`0x605896`-`0x6058a8`): its target ([`Engaged`],
 //!   `+0xc48`) and its stop in flight (`+0xc54`);
 //! - `PresentUnitDeath 0x625190` (`0x6058ae`), the death line, animation and sound, which the chat
@@ -16,22 +16,51 @@
 
 use bevy::prelude::*;
 
+use benilla_protocol::messages::ObjectType;
+
 use super::Selection;
 use crate::creature_anim::{AttackSeam, Engaged};
-use crate::net::{FieldChanged, SelfPlayer};
+use crate::net::{FieldChanged, ObjectStore, SelfPlayer};
+use crate::query_cache::Ask;
+use crate::ui_action::{FillArg, UiError, UiErrorKeys};
+
+/// What a groupmate's death shows: message `0x4c` (`0x5e9a0e`).
+const PLAYER_DIED: &str = "ERR_PLAYER_DIED_S";
 
 /// Each unit's death, in the order the edges came.
+#[allow(clippy::too_many_arguments)] // the death's legs, each its own owner's state
 pub(super) fn on_unit_died(
     mut edges: MessageReader<FieldChanged>,
     mut selection: ResMut<Selection>,
     mut seam: AttackSeam,
     mut commands: Commands,
     engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
+    group: Res<crate::ui_party::GroupState>,
+    names: Res<crate::names::NameCache>,
+    stores: Query<&ObjectStore>,
+    errors: Res<UiErrorKeys>,
 ) {
     // Our attack target as this pass leaves it: our own death zeroes it before a deselect reads it.
     let mut me_engaged = !engaged.is_empty();
     for e in edges.read().filter(|e| e.unit_died()) {
         let me = seam.me.single().ok();
+        // `CGPlayer_C::OnDied 0x5e99b0`, for a player (`0x605882`): another player than the
+        // active one (`0x5e99d8`-`0x5e99e4`) on one of our four party slots (`IsPartyMember
+        // 0x4918d0` → `0x4e7f70` at `0x5e99f7`) shows the line under `GetUnitName`'s name, the
+        // cache's with a callback or `UNKNOWNOBJECT` (`0x609210` at `0x5e9a08`, `0x496720` at
+        // `0x5e9a10`).
+        if e.kind == ObjectType::Player
+            && me != Some(e.entity)
+            && group.party_slots().any(|m| m.guid == e.guid)
+        {
+            let store = stores.get(e.entity).ok();
+            errors.push(
+                match names.resolve_unit(e.guid, store, Ask::Event(&seam.net)) {
+                    Some(name) => UiError::s(PLAYER_DIED, name),
+                    None => UiError::args(PLAYER_DIED, vec![FillArg::UnknownObject]),
+                },
+            );
+        }
         if let Ok(mut unit) = commands.get_entity(e.entity) {
             unit.try_remove::<Engaged>();
         }
@@ -219,6 +248,7 @@ mod tests {
         fn dies(&mut self, entity: Entity, guid: u64, kind: ObjectType) {
             let world = self.world();
             world.write_message(FieldChanged {
+                at: crate::lanes::stamp(),
                 entity,
                 guid,
                 kind,
@@ -236,7 +266,7 @@ mod tests {
         }
 
         fn reports(&mut self) -> Vec<CastReport> {
-            std::mem::take(&mut self.world().resource_mut::<CastReports>().0)
+            self.world().resource_mut::<CastReports>().take()
         }
 
         fn in_flight(&mut self) -> Option<u32> {
@@ -471,5 +501,92 @@ mod tests {
             !c.world().resource::<AttackStopInFlight>().of(me),
             "the echo"
         );
+    }
+
+    /// `CGPlayer_C::OnDied 0x5e99b0`, run for a player (`0x605882` → `0x60588d`): another player
+    /// than the active one (`0x5e99d8`-`0x5e99e4`) who holds one of our four party slots
+    /// (`IsPartyMember 0x4918d0` → `0x4e7f70`, the slots at `0xbc6f48`) shows `ERR_PLAYER_DIED_S`,
+    /// message `0x4c`, with `GetUnitName`'s name (`0x609210` at `0x5e9a08`, `0x496720` at
+    /// `0x5e9a10`): the name cache's, `UNKNOWNOBJECT` on a miss. A raid member in another
+    /// subgroup holds no slot; a stranger, a creature and our own death show nothing.
+    #[test]
+    fn a_party_members_death_names_them_and_no_one_elses_does() {
+        use crate::ui_action::{FillArg, UiError, UiErrorKeys};
+        use benilla_protocol::messages::GroupMemberEntry;
+        const MATE: u64 = 0x21;
+        const NAMELESS: u64 = 0x22;
+        const FAR: u64 = 0x23;
+        const STRANGER: u64 = 0x24;
+        let mut c = client();
+        let mut players = Vec::new();
+        for guid in [MATE, NAMELESS, FAR, STRANGER] {
+            let store = ObjectStore(
+                ObjectFields::from_pairs(&[
+                    (2, 0x19),
+                    (FIELD_UNIT_HEALTH, 100),
+                    (FIELD_UNIT_MAXHEALTH, 100),
+                ])
+                .into_created(ObjectType::Player),
+            );
+            let e = c.world().spawn((Guid(guid), store)).id();
+            c.world().resource_mut::<GuidIndex>().0.insert(guid, e);
+            players.push(e);
+        }
+        let entry = |name: &str, guid: u64, subgroup: u8| GroupMemberEntry {
+            name: name.into(),
+            guid,
+            status: 1,
+            flags: subgroup,
+        };
+        c.world()
+            .resource_mut::<crate::ui_party::GroupState>()
+            .apply_list(
+                crate::ui_party::GROUPTYPE_RAID,
+                0,
+                vec![
+                    entry("Mate", MATE, 0),
+                    entry("Nameless", NAMELESS, 0),
+                    entry("Far", FAR, 1),
+                ],
+                ME,
+                None,
+                Some(ME),
+            );
+        let mut names = c.world().resource_mut::<crate::names::NameCache>();
+        for (guid, name) in [(MATE, "Mate"), (FAR, "Far"), (STRANGER, "Stranger")] {
+            names.insert_player(guid, name.into(), None);
+        }
+        let _ = c.world().resource::<UiErrorKeys>().take();
+        let lines = |c: &mut Client, entity, guid, kind| {
+            // Each one-shot reads every edge still buffered: only this death's.
+            c.world().resource_mut::<Messages<FieldChanged>>().clear();
+            c.dies(entity, guid, kind);
+            c.world().resource::<UiErrorKeys>().take()
+        };
+        assert_eq!(
+            lines(&mut c, players[0], MATE, ObjectType::Player),
+            [UiError::s("ERR_PLAYER_DIED_S", "Mate")]
+        );
+        assert_eq!(
+            lines(&mut c, players[1], NAMELESS, ObjectType::Player),
+            [UiError::args(
+                "ERR_PLAYER_DIED_S",
+                vec![FillArg::UnknownObject]
+            )],
+            "a name the cache misses"
+        );
+        assert_eq!(
+            lines(&mut c, players[2], FAR, ObjectType::Player),
+            [],
+            "another subgroup"
+        );
+        assert_eq!(
+            lines(&mut c, players[3], STRANGER, ObjectType::Player),
+            [],
+            "no groupmate"
+        );
+        let (mob, me) = (c.mob, c.me);
+        assert_eq!(lines(&mut c, mob, MOB, ObjectType::Unit), [], "a creature");
+        assert_eq!(lines(&mut c, me, ME, ObjectType::Player), [], "our own");
     }
 }

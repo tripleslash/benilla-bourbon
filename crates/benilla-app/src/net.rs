@@ -125,7 +125,7 @@ impl Plugin for NetPlugin {
             .add_message::<TeleportMessage>()
             .add_message::<FieldChanged>()
             .add_message::<crate::item_watch::ItemNotice>()
-            .add_message::<crate::field_watch::FieldNotice>()
+            .init_resource::<crate::field_watch::NoticeLane>()
             .add_message::<SelfMoveMessage>()
             .add_message::<SpeedChangeMessage>()
             .add_message::<ClientControlMessage>()
@@ -372,8 +372,13 @@ impl ObjectStore {
 ///
 /// `kind` is the store's class from its create block, since a raw index differs per class (`36`
 /// is a unit's `BYTES_0` and a corpse's `DYNAMIC_FLAGS`).
+///
+/// `at` is the edge's place among what the packets queue ([`crate::lanes::stamp`]), taken as the
+/// handler writes it, so a line a later system words off the edge fires where the reference's
+/// field callback wrote it, inside the update's handler.
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FieldChanged {
+    pub at: crate::lanes::Stamp,
     pub entity: Entity,
     pub guid: u64,
     pub kind: benilla_protocol::messages::ObjectType,
@@ -430,6 +435,7 @@ pub(crate) fn apply_fields_for_test(world: &mut World, entity: Entity, delta: Ob
             let moved = write_fields(&mut store.0, delta);
             if let Some(kind) = store.0.created_as() {
                 edges.extend(moved.into_iter().map(|(index, old, new)| FieldChanged {
+                    at: crate::lanes::stamp(),
                     entity,
                     guid,
                     kind,
@@ -1317,11 +1323,12 @@ pub(crate) enum ClientCommand {
     GossipHello {
         guid: u64,
     },
-    /// `CMSG_GOSSIP_SELECT_OPTION` with the line's `index`. No code is ever sent: coded options
-    /// are not selectable.
+    /// `CMSG_GOSSIP_SELECT_OPTION` with the line's `index`, and the code a coded option was
+    /// given.
     GossipSelectOption {
         guid: u64,
         option: u32,
+        code: Option<Vec<u8>>,
     },
     /// `CMSG_NPC_TEXT_QUERY`, asked once per `text_id` on menu receipt.
     NpcTextQuery {
@@ -1607,6 +1614,12 @@ pub(crate) enum ClientCommand {
         spell_id: u32,
         item_guid: u64,
     },
+    /// A cast at the partner's trade slot `slot` (`TARGET_FLAG_TRADE_ITEM`, the bind of
+    /// `0x6e6900`).
+    CastSpellTradeItem {
+        spell_id: u32,
+        slot: u8,
+    },
     /// `CMSG_LOOT` on a unit; the server rejects a GameObject guid, which loots by `GameObjUse`.
     Loot {
         guid: u64,
@@ -1739,6 +1752,7 @@ pub(crate) enum ClientCommand {
     MailCreateTextItem {
         mailbox: u64,
         mail_id: u32,
+        template_id: u32,
     },
     /// `CMSG_ITEM_TEXT_QUERY`, once per mail with a nonzero `item_text_id`.
     ItemTextQuery {
@@ -1826,8 +1840,10 @@ pub(crate) enum ClientCommand {
     /// `CMSG_BUSY_TRADE` (`0x118`, sent by `0x5d4150`): five of the ladder's eight refusal legs;
     /// vmangos sends `TRADE_STATUS_BUSY` to both. The player's own No is [`Self::CancelTrade`].
     BusyTrade,
-    /// `CMSG_ACCEPT_TRADE`: the Trade button.
-    AcceptTrade,
+    /// `CMSG_ACCEPT_TRADE`: the Trade button, with the partner's last extended-status flag.
+    AcceptTrade {
+        flag: u32,
+    },
     /// `CMSG_UNACCEPT_TRADE`: drop our accept, stay in the trade.
     UnacceptTrade,
     /// `CMSG_CANCEL_TRADE`.
@@ -2047,9 +2063,9 @@ pub(crate) enum ClientCommand {
     },
     /// `MSG_RAID_READY_CHECK` with an empty body, leader only.
     ReadyCheckStart,
-    /// `MSG_RAID_READY_CHECK` with one byte.
+    /// `MSG_RAID_READY_CHECK` with one byte, the status.
     ReadyCheckAnswer {
-        ready: bool,
+        status: u8,
     },
     /// `CMSG_REQUEST_RAID_INFO`.
     RequestRaidInfo,
@@ -2630,9 +2646,11 @@ mod tests {
             unit,
             ObjectFields::from_pairs(&[(FIELD_UNIT_LEVEL, 9), (FIELD_UNIT_HEALTH, 0)]),
         );
+        let edges = drain(&mut world);
         assert_eq!(
-            drain(&mut world),
+            edges,
             vec![FieldChanged {
+                at: edges[0].at,
                 entity: unit,
                 guid: 0xF130_0000_0000_0042,
                 kind: ObjectType::Unit,

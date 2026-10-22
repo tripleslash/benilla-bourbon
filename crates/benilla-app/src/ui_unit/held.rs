@@ -732,9 +732,11 @@ mod tests {
         let mut app = app();
         let (tx, rx) = crossbeam_channel::unbounded();
         app.insert_resource(NetCommands(tx));
-        app.init_resource::<crate::ui_chat::ChatLog>();
+        app.init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>();
         benilla_world::world_point::init_world_point_resources(app.world_mut());
-        app.add_systems(Update, crate::ui_party::feed_party);
+        app.init_resource::<crate::ui_party::PartyLane>()
+            .add_systems(Update, crate::ui_party::feed_party);
         {
             let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.run(r#"UNKNOWNOBJECT = "Unknown""#).unwrap();

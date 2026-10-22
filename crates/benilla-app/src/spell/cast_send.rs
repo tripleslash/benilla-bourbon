@@ -239,6 +239,8 @@ pub(crate) enum TargetedBind {
     Source([f32; 3]),
     /// The bag or paper-doll click's item guid.
     Item(u64),
+    /// The partner's trade slot, the bind of `0x6e6900` (mask `0x1000`, guid `{6, 0}`).
+    TradeItem(u8),
     /// The world click's GameObject guid: a chest, door, vein or herb.
     Object(u64),
     /// The world click's unit guid.
@@ -324,6 +326,9 @@ impl CastLadder<'_, '_> {
                     spell_id,
                     item_guid,
                 },
+                TargetedBind::TradeItem(slot) => {
+                    ClientCommand::CastSpellTradeItem { spell_id, slot }
+                }
                 // The right-click OPEN_LOCK packet: `BindTarget`'s GameObject arm fills both.
                 TargetedBind::Object(go_guid) => {
                     ClientCommand::CastSpellGameObject { spell_id, go_guid }
@@ -1505,7 +1510,7 @@ mod tests {
             ),
             "the cancel and no cast: {sent:?}"
         );
-        let reports = &world.resource::<CastReports>().0;
+        let reports = &world.resource::<CastReports>().reports();
         assert!(
             matches!(
                 reports[..],
@@ -2217,8 +2222,8 @@ mod tests {
     fn stream(world: &mut World) -> Vec<&'static str> {
         world
             .resource_mut::<CastReports>()
-            .0
-            .drain(..)
+            .take()
+            .into_iter()
             .map(|r| match r {
                 crate::ui_cast::CastReport::Changed => "CHANGED",
                 crate::ui_cast::CastReport::Bar(crate::ui_cast::CastBarEdge::Failed) => "FAILED",
@@ -2228,6 +2233,7 @@ mod tests {
                 crate::ui_cast::CastReport::TradeSkillDisarm => "DISARM",
                 crate::ui_cast::CastReport::AutoRepeat(true) => "START_AUTOREPEAT",
                 crate::ui_cast::CastReport::AutoRepeat(false) => "STOP_AUTOREPEAT",
+                crate::ui_cast::CastReport::Redisplay => "REDISPLAY",
             })
             .collect()
     }
@@ -2457,7 +2463,7 @@ mod tests {
         );
 
         // The record is keyed (use-spell, entry); a spell press queries (spell, 0) and passes.
-        world.resource_mut::<CastReports>().0.clear();
+        world.resource_mut::<CastReports>().clear();
         world.insert_resource(crate::spell::PendingCast::default());
         send(&mut world, HEARTHSTONE, CastCommit::Spell);
         assert!(
@@ -2606,7 +2612,7 @@ mod tests {
             vec![CastFail::local(HEARTHSTONE, 0x4d)]
         );
 
-        world.resource_mut::<CastReports>().0.clear();
+        world.resource_mut::<CastReports>().clear();
         let base = ctx();
         let with_store = cast_target::CastContext {
             rel: cast_target::TargetRelations {

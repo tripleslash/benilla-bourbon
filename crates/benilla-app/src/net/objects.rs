@@ -85,19 +85,26 @@ pub(crate) struct Scene<'w, 's> {
     speeds: Query<'w, 's, &'static mut UnitSpeeds>,
     field_changes: MessageWriter<'w, FieldChanged>,
     item_notices: MessageWriter<'w, crate::item_watch::ItemNotice>,
-    field_notices: MessageWriter<'w, crate::field_watch::FieldNotice>,
+    field_notices: ResMut<'w, crate::field_watch::NoticeLane>,
     /// The guid-scoped selection teardowns (`0x493910(guid, 1)`) a watcher raises.
     deselect: MessageWriter<'w, crate::target::DeselectGuid>,
     speed_changes: MessageWriter<'w, SpeedChangeMessage>,
     self_moves: MessageWriter<'w, super::SelfMoveMessage>,
     hard_landings: MessageWriter<'w, crate::creature_anim::HardLanding>,
     names: Res<'w, NameCache>,
+    // The combat lines held for an item's name, shown where its answer lands.
+    chat: Option<Res<'w, crate::ui_chat::ChatLog>>,
     items: ResMut<'w, Items>,
     go_templates: ResMut<'w, GameObjectTemplates>,
     death_net: ResMut<'w, crate::death::DeathNet>,
     group: ResMut<'w, crate::ui_party::GroupState>,
     pet_bar: Option<Res<'w, crate::ui_pet::PetBar>>,
     guilds: Option<ResMut<'w, crate::ui_guild::GuildState>>,
+    // The own offer the coinage watcher trims (`0x5ddf30`).
+    trade: Option<ResMut<'w, crate::ui_trade::TradeSession>>,
+    // The auction lists whose pages wait on an item's record, and the steps their tails take.
+    auction: Option<ResMut<'w, crate::ui_auction::AuctionOpen>>,
+    house: Option<ResMut<'w, crate::ui_auction::HouseLane>>,
     pass: ResMut<'w, update::UpdatePass>,
     released: ResMut<'w, Released>,
     nets: Query<'w, 's, &'static NetEntity>,
@@ -171,6 +178,16 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
                 }
                 sc.item_notices.write_batch(notices);
                 sc.field_notices.write_batch(signals);
+            }
+            // The combat log's callback for its held lines (`0x6294b0`), which writes each one
+            // whose item the cache now holds.
+            if let Some(chat) = &sc.chat {
+                chat.answer_landed(crate::ui_chat::Answer::Item(entry));
+            }
+            // The auction lists' callbacks (`0x4cc9bf`, `0x4ccbff`, `0x4cce4f`), a record or a
+            // refusal: a page that now waits on nothing runs its tail.
+            if let (Some(auction), Some(house)) = (sc.auction.as_mut(), sc.house.as_mut()) {
+                crate::ui_auction::record_answered(auction, house, &sc.items, entry);
             }
             // The trade getters' and the ammo getters' callbacks run for a ready record only
             // (`0x4c0343`, `0x4c84f6`).
@@ -1323,7 +1340,7 @@ mod tests {
             ]),
         );
         let inventory: Vec<FieldNotice> = world
-            .resource_mut::<Messages<FieldNotice>>()
+            .resource_mut::<crate::field_watch::NoticeLane>()
             .drain()
             .filter(|n| match *n {
                 FieldNotice::Unit { id, .. }
@@ -1374,7 +1391,7 @@ mod tests {
             ]),
         );
         let notices: Vec<FieldNotice> = world
-            .resource_mut::<Messages<FieldNotice>>()
+            .resource_mut::<crate::field_watch::NoticeLane>()
             .drain()
             .collect();
         assert_eq!(
@@ -1427,7 +1444,7 @@ mod tests {
         world.resource_mut::<SelfGuid>().0 = Some(ME);
         let drain = |world: &mut World| -> Vec<FieldNotice> {
             world
-                .resource_mut::<Messages<FieldNotice>>()
+                .resource_mut::<crate::field_watch::NoticeLane>()
                 .drain()
                 .collect()
         };
@@ -1516,7 +1533,7 @@ mod tests {
             .insert(MATE, record.clone());
         let drain = |world: &mut World| -> Vec<FieldNotice> {
             world
-                .resource_mut::<Messages<FieldNotice>>()
+                .resource_mut::<crate::field_watch::NoticeLane>()
                 .drain()
                 .collect()
         };

@@ -45,7 +45,7 @@ fn resolve(app: &mut App, at: u64, party: [u64; 4]) {
 }
 
 fn lua(app: &mut App, code: &str) {
-    app.world_mut().non_send::<UiScript>().run(code).unwrap();
+    hosted_run(app, code);
     frame(app);
 }
 

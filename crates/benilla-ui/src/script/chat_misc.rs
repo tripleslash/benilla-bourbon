@@ -130,12 +130,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // UninviteByName(name) (`0x48a610`): `lua_isstring` (`0x6f3510` at `0x48a61e`) else
+    // `Usage: UninviteByName("name")` (`0x48a698`, the string at `0x8427c0`); any string, the
+    // empty one included, goes into `CMSG_GROUP_UNINVITE` as it is (`0x48a65e`), with no trim.
     g.set(
         "UninviteByName",
-        lua.create_function(|lua, name: Option<String>| {
-            let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
-                return Ok(());
-            };
+        lua.create_function(|lua, name: Value| {
+            let name =
+                super::binding_abi::string_arg(lua, name, r#"Usage: UninviteByName("name")"#)?;
             super::calls::submit(lua, super::ScriptCall::Uninvite(name))
         })?,
     )?;
@@ -279,7 +281,7 @@ mod tests {
     fn assist_and_uninvite_by_name_queue_their_names() {
         let mut s = UiScript::new().unwrap();
         s.keep_calls();
-        s.run("AssistByName('Alice') AssistByName('') UninviteByName('Carol') UninviteByName()")
+        s.run("AssistByName('Alice') AssistByName('') UninviteByName('Carol')")
             .unwrap();
         assert_eq!(
             s.take_selection_requests(),
@@ -289,6 +291,27 @@ mod tests {
             ]
         );
         assert_eq!(s.take_uninvite_requests(), vec!["Carol".to_string()]);
+    }
+
+    /// `UninviteByName` (`0x48a610`) tests its argument with `lua_isstring` (`0x6f3510` at
+    /// `0x48a61e`): a non-string, nil and no argument included, raises `Usage:
+    /// UninviteByName("name")` (`0x48a625` → `0x48a698`, the string at `0x8427c0`). Any string,
+    /// a number's text among them, goes into `CMSG_GROUP_UNINVITE` as it is (`0x48a655`,
+    /// `0x48a65e`) and is sent (`0x48a669`): no trim and no empty test.
+    #[test]
+    fn uninvite_by_name_raises_for_a_non_string_and_sends_any_string() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        for arg in ["", "nil", "true", "{}"] {
+            let e = s
+                .run(&format!("UninviteByName({arg})"))
+                .expect_err(arg)
+                .to_string();
+            assert!(e.contains(r#"Usage: UninviteByName("name")"#), "{arg}: {e}");
+        }
+        s.run("UninviteByName('') UninviteByName('  ') UninviteByName(5) UninviteByName('Carol')")
+            .unwrap();
+        assert_eq!(s.take_uninvite_requests(), ["", "  ", "5", "Carol"]);
     }
 
     #[test]

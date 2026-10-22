@@ -283,7 +283,7 @@ pub use duel::DuelRequest;
 pub use follow::FollowRequest;
 pub use gm_survey::{GmSurveyTables, SurveyAnswerSend};
 pub use gm_ticket::{GmTicketIntent, GmTicketWrite};
-pub use gossip::{GossipMenu, GossipOptionView, GossipQuestRow};
+pub use gossip::{GossipCall, GossipMenu, GossipOptionView, GossipQuestRow};
 pub use guild::{
     GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
     MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
@@ -323,7 +323,8 @@ pub use macros::{
     MAX_MACRO_NAME,
 };
 pub use mail::{
-    MailInboxRow, MailInvoice, MailSendRequest, MailState, PackageView, StationeryView,
+    MailCall, MailInboxRow, MailInvoice, MailRowVerb, MailSendRequest, MailState, PackageView,
+    StationeryView,
 };
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts};
@@ -337,15 +338,17 @@ pub use model::{
     FontProbe, MacroIconSource, TextureProbe, TextureSizeFn, TextureSizeProbe, WorldLocFn,
     WorldLocProjector,
 };
-pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
+pub use party::{
+    PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, ReadyCheckState, SavedInstanceInfo,
+};
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{
     decorated_name, medal_line, pvp_name_global_keys, HonorState, InspectHonorData, RankTitle,
 };
-pub use quest::{
-    QuestAction, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState,
+pub use quest::{QuestCall, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState};
+pub use quest_log::{
+    QuestLogCarry, QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS,
 };
-pub use quest_log::{QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS};
 pub(crate) use region::{
     apply_texture_name, apply_wrap_attrs, implicit_creation_anchor_lua, install_loaded_texture,
     load_blend_mode, load_texture_file, load_texture_name, load_xml_font_file,
@@ -359,7 +362,7 @@ pub(crate) use simplehtml::{
     element_of_xml_tag as simplehtml_element_of_xml_tag,
 };
 pub use skills::{SkillEntry, SkillsState};
-pub use social::{FriendInfo, SocialRequest, SocialState, WhoInfo};
+pub use social::{FriendInfo, IgnoreInfo, SocialCall, SocialState, WhoInfo};
 pub use sound::{MusicRequest, SoundRequest};
 pub use spellbook::{
     resolve_spell_in_books, NamedSpell, PetBookState, SpellBookState, SpellSlotView, SpellTabName,
@@ -372,7 +375,7 @@ pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
 pub use tooltip_aura::{AuraKey, AuraTooltipView};
 pub use tooltip_spell::{ReputationRequirement, SpellTooltipView};
 pub use tooltip_text::{KeyedArg, TextPart, TooltipText};
-pub use trade::{TradeSideState, TradeSlotItem, TradeState, TRADE_SLOTS};
+pub use trade::{TradeCall, TradeOpenItem, TradeSideState, TradeSlotItem, TradeState, TRADE_SLOTS};
 pub use tradeskill::{TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState};
 pub use trainer::{
     TrainerAbilityReq, TrainerGroup, TrainerService, TrainerServiceCategory, TrainerSkillReq,

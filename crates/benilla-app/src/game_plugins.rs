@@ -656,7 +656,7 @@ pub(crate) mod schedule_tests {
     /// Does this build carry type names? Bevy has them only under its `debug` feature, which
     /// rides with `benilla-world`'s `dev`. Probed off the census, not a `cfg`, which belongs in
     /// `run_mode` alone; name-dependent tests skip without them.
-    fn type_names_available(c: &Census) -> bool {
+    pub(crate) fn type_names_available(c: &Census) -> bool {
         c.systems.values().any(|s| s.name.contains("benilla_app::"))
     }
 
@@ -990,7 +990,18 @@ pub(crate) mod schedule_tests {
     ///   `portrait::test_bake::sync_test_portraits`,
     ///   `sound::emitter_pool::pump_emitters`, `sound::liquid_loop::drive_liquid_loops` and
     ///   `quest_markers::bake_seat_scale`. It reads its two units' poses for the display range;
-    ///   those move booth, emitter and marker-seat entities, never a unit.
+    ///   those move booth, emitter and marker-seat entities, never a unit;
+    /// - the lanes' drain (`lanes::fire_in_order`), exclusive as the handler table's drain is,
+    ///   against the 80 world systems no declared order places against it, which bevy lists with
+    ///   no component. What they meet of the drain's (its lanes' firings, the VM with the call host,
+    ///   and the unit edits it applies in place: every component a change writes, the cast events,
+    ///   the precast tail's loot release) is the name cache alone, a pure cache, which the
+    ///   persisted-name load writes; `lanes::guard_tests` checks that it stays so, and that no
+    ///   exclusive system is among them. Commands a firing defers, which the drain applies after
+    ///   it, are outside that model;
+    /// - the minimap's draw (`minimap::emit_minimap`), which reads `QuestGiver`'s dialog statuses,
+    ///   against `ui_panes::feed_character_panes`, which lends the call host, whose quest verbs
+    ///   write that window's cell and panel latches and never a status.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
@@ -1062,6 +1073,9 @@ pub(crate) mod schedule_tests {
     ///
     /// Upstream's VM pass (fcb42ab40, #2143) moved its ceiling 3,079 -> 1,708 through 3387c8225;
     /// the merge of 3387c8225 measures 2,043 (-1,353).
+    ///
+    /// Upstream's ceiling moved 1,708 -> 1,780 (+72) through 601438a77 (the lanes' drain and the
+    /// minimap's quest statuses, listed above).
     const UPDATE_ACTIONABLE_CEILING: usize = 2_043;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
@@ -1401,7 +1415,11 @@ pub(crate) mod schedule_tests {
     /// Why a VM holder in `Update` ordered before the tick may stay out of
     /// [`crate::ui_script::UiFeed`], keyed by a suffix of the system's full name, with the
     /// reason.
-    const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[];
+    const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[(
+        "::ui_chat::frames::tee_shown_lines",
+        "in the lanes' set after their drain (`lanes::UiLanes`, after `UiFeed` and before the \
+         tick), so the log files take the lines the verbs showed after the drain's own",
+    )];
 
     /// The create's control restore (`player::regain_control_on_arrival`) is registered in the
     /// built client and ordered: after the self create it answers, before the controller and the
@@ -1620,6 +1638,51 @@ pub(crate) mod schedule_tests {
             runs_before(bind, interact),
             "the interact runs after the chain's bind"
         );
+    }
+
+    /// The world click's trade leg runs ahead of its select (`0x4925d0`: the trade request at
+    /// `0x49278e`, `SelectTarget` at `0x49280c`), so the targeting cursor it tests (`0x492668`)
+    /// is the one the click found, not what the select's bind left.
+    #[test]
+    fn the_world_clicks_trade_leg_runs_before_its_select() {
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let one = |suffix: &str| {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let trade = one("::ui_action::drop_item::trade_on_world_click");
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+        }
+        let mut seen = HashSet::new();
+        let mut stack = vec![trade];
+        while let Some(n) = stack.pop() {
+            for m in succ.get(&n).into_iter().flatten() {
+                if seen.insert(*m) {
+                    stack.push(*m);
+                }
+            }
+        }
+        for select in [
+            "::target::click::select_on_plate_click",
+            "::target::click::select_on_click",
+        ] {
+            assert!(
+                seen.contains(&one(select)),
+                "the trade leg runs before {select}"
+            );
+        }
     }
 
     /// The `Startup` VM, the stock glue's, is built after the glyph cache:
@@ -1869,8 +1932,6 @@ pub(crate) mod schedule_tests {
          "`pending` holds only the VM's own `Screenshot()` asks, and the take spawns a capture, publishing nothing"),
         ("screenshot.rs", "report_captures", Because::FilledByVm,
          "the outcome chain starts with the VM's own `Screenshot()` call"),
-        ("tutorial.rs", "drain_tutorials", Because::FilledByVm,
-         "`sends` exist only after Lua acknowledged, cleared or reset a flag, and go to the wire"),
         ("ui_action/drain.rs", "drain_click_casts", Because::FilledByVm,
          "filled only by a world right-click on a GameObject or a body; the drain sends casts to the wire"),
         ("ui_bank/mod.rs", "feed_bank", Because::PlayerRoundTrip,
@@ -1925,7 +1986,7 @@ pub(crate) mod schedule_tests {
         ("ui_script/extract/mod.rs", "paint_script", Because::Deliberate,
          "per-frame paint and cost state, not a queue"),
         ("ui_social/feed.rs", "feed_social", Because::Deliberate,
-         "its take is `name_events`, the packets' ask markers: taken before the interface is up they still send their name queries, to the server and not the VM, and the lists and lines are read again as the names land"),
+         "its take is the handlers' list events and lines: those taken into the glue VM are lost there, and the in-game VM's first feed fires both list events again over the lists as they stand"),
         ("ui_stable/mod.rs", "feed_stable", Because::PlayerRoundTrip,
          "both packets follow a stable master's gossip and a click in its window"),
         ("ui_summon.rs", "feed_summon", Because::PlayerRoundTrip,

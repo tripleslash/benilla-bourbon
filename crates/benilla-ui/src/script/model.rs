@@ -452,8 +452,6 @@ pub(crate) struct Model {
     pub(crate) joined_channels: Vec<Option<super::channel::JoinedChannel>>,
     /// The party or raid roster the app pushes; the default is not in a group.
     pub(crate) party: party::PartyState,
-    /// Party and loot-method calls (`AcceptGroup`, `InviteToParty`, `SetLootMethod`, …) queued.
-    pub(crate) party_requests: Vec<party::PartyRequest>,
     /// The ready-check deadline and the unanswered flags the timeout tick reads.
     pub(crate) ready_check: party::ReadyCheckState,
     /// Saved raid lockouts from `SMSG_RAID_INSTANCE_INFO`, which outlive any roster change.
@@ -476,8 +474,8 @@ pub(crate) struct Model {
     pub(crate) reset_instance_asks: u32,
     /// Friends, ignores and the last `/who`, display-resolved as the reference resolves them.
     pub(crate) social: social::SocialState,
-    /// Social calls (`AddFriend`, `RemoveFriend`, `SendWho`, …) queued.
-    pub(crate) social_requests: Vec<social::SocialRequest>,
+    /// `SetWhoToUI`'s flag (`0xc2a12c`), written only by the binding (`0x5ad87c`).
+    pub(crate) who_to_ui: bool,
     /// `LFGDungeons.dbc`, pushed by the app.
     pub(crate) lfg_dungeons: Vec<super::lfg::LfgDungeon>,
     /// The client-local LFG slot words (`[0xbc70a0]`) and comment (`[0xbc6e98]`, 0x80 bytes) that
@@ -837,12 +835,9 @@ pub(crate) struct Model {
     /// A ColorSelect wheel or value-bar drag, press to release.
     pub(crate) color_drag: Option<colorselect::ColorDrag>,
 
-    /// The open gossip menu, the `SelectGossipOption` calls and whether `CloseGossip` ran.
+    /// The open gossip menu, and whether `CloseGossip` ran.
     pub(crate) gossip: Option<gossip::GossipMenu>,
-    pub(crate) gossip_selects: Vec<u32>,
     pub(crate) gossip_close: bool,
-    /// `SelectGossipQuest` 1-based rows, each sent as `CMSG_QUESTGIVER_QUERY_QUEST` for its quest.
-    pub(crate) gossip_quest_selects: Vec<u32>,
 
     /// The open vendor's stock, the `BuyMerchantItem` calls and whether `CloseMerchant` ran.
     pub(crate) merchant: Option<merchant::MerchantState>,
@@ -950,9 +945,8 @@ pub(crate) struct Model {
     pub(crate) item_text: Option<item_text::ItemTextState>,
     pub(crate) item_text_close: bool,
     pub(crate) item_text_page_turns: Vec<i32>,
-    /// The open inbox and mail calls, rows 1-based: `mail_opens` are rows `GetInboxText` read.
+    /// The inbox, rows 1-based.
     pub(crate) mail: Option<mail::MailState>,
-    pub(crate) mail_check_inbox: bool,
     /// `CheckInbox`'s throttle `[0xb6efc4]`, on the `GetTime` clock: the list query 60 s ago
     /// plus its window, before which a check re-announces the held list instead.
     pub(crate) mail_list_stamp: Option<f64>,
@@ -963,17 +957,13 @@ pub(crate) struct Model {
     /// the send's result (`0x4ad159`) or the compose reset (`0x4ace02`); `SendMail` returns while
     /// it is up (`0x4ae85e`).
     pub(crate) mail_send_pending: bool,
-    pub(crate) mail_opens: Vec<u32>,
-    pub(crate) mail_take_items: Vec<u32>,
-    pub(crate) mail_take_money: Vec<u32>,
-    pub(crate) mail_deletes: Vec<u32>,
-    pub(crate) mail_returns: Vec<u32>,
-    pub(crate) mail_take_texts: Vec<u32>,
+    /// `CloseMail`, for the interaction latch's close.
     pub(crate) mail_close: bool,
-    pub(crate) mail_send: Option<(String, String, String)>,
+    /// The masked body the host answered the applying `GetInboxText` call with (`0x4af203`).
+    pub(crate) mail_body_answer: Option<String>,
     pub(crate) mail_send_money: u32,
     pub(crate) mail_send_cod: u32,
-    /// The Send tab's attached item, resolved to its guid when the send fires.
+    /// The Send tab's attached item (`0xb6ef90`), whose guid the send carries.
     pub(crate) mail_send_item: Option<cursor::CursorItem>,
     /// The usable stationery, in the picker's order.
     pub(crate) mail_stationeries: Vec<mail::StationeryView>,
@@ -1002,8 +992,7 @@ pub(crate) struct Model {
     /// The sell slot's item, resolved to its guid when `StartAuction` fires.
     pub(crate) auction_sell_item: Option<cursor::CursorItem>,
 
-    /// The last trade's two offers and its calls: `InitiateTrade` tokens, the accept, unaccept and
-    /// cancel flags, and `SetTradeMoney` copper (`CMSG_SET_TRADE_GOLD`). The offers are the
+    /// The last trade's two offers. The offers are the
     /// getters' tables (`0xb714f4` and its siblings, `0xb716d0`), which a close leaves alone and
     /// the next open clears (`0x4bf549`-`0x4bf5ef`).
     pub(crate) trade: Option<trade::TradeState>,
@@ -1013,45 +1002,36 @@ pub(crate) struct Model {
     /// The entries the item getters found filled and unnamed (`0x4c017f`, `0x4c0582`), for the
     /// host to ask the item cache for with the callback that signals `TRADE_UPDATE`.
     pub(crate) trade_record_asks: Vec<u32>,
-    pub(crate) trade_initiates: Vec<String>,
-    pub(crate) trade_accept: bool,
-    pub(crate) trade_unaccept: bool,
+    /// `CloseTrade` was called: the interaction latch runs the close core.
     pub(crate) trade_close: bool,
-    /// `BeginTrade()` and `CancelTrade()` calls.
-    pub(crate) trade_begin: bool,
-    pub(crate) trade_cancel: bool,
-    pub(crate) trade_set_money: Vec<u32>,
-    /// Items dropped on our slots, `(1-based trade slot, bag, slot)`, and the slots clicks cleared.
-    pub(crate) trade_set_items: Vec<(u32, i64, u32)>,
-    pub(crate) trade_clear_items: Vec<u32>,
+    /// The close core's done flag `[0xb71748]`, which `CloseTrade` tests (`0x4bfdc0`).
+    pub(crate) trade_done: bool,
+    /// The placements whose send the host has yet to answer, by the id their call carries
+    /// ([`super::TradeCall::SetItem`]): what `0x4bfa70` writes and its caller does once it knows.
+    pub(crate) trade_placing: std::collections::HashMap<u64, super::trade::Placing>,
+    /// The last id handed to a placement.
+    pub(crate) trade_place_seq: u64,
     /// The item each of our trade slots holds, as the client's own table records it at the click
     /// (`[0xb716d0]`, written by `0x4bfa70`): the item a later click puts back on the cursor, and
     /// one the client keeps locked until the trade closes (`0x4bfcf0` unlocks them and leaves the
     /// table, which the next open clears).
     pub(crate) trade_offered: [Option<cursor::CursorItem>; super::trade::TRADE_SLOTS],
 
-    /// The open questgiver panel, its greeting-row selects and its button calls.
+    /// The open questgiver panel, and whether `CloseQuest` ran.
     pub(crate) quest: Option<quest::QuestState>,
+    pub(crate) quest_close: bool,
     /// The levels of the last greeting's two pools (`0xbde690`, `0xbdfe60`), which outlive the
     /// panel until the next list fills them.
     pub(crate) quest_pool_levels: quest::PoolLevels,
-    pub(crate) quest_selects: Vec<quest::QuestSelect>,
-    pub(crate) quest_actions: Vec<quest::QuestAction>,
 
     /// Death countdowns and offers, and the release, reclaim and resurrect calls.
     pub(crate) death: death::DeathUiState,
     pub(crate) death_actions: Vec<death::DeathAction>,
 
-    /// The quest log, selection (1-based), abandon mark (a quest id, `0xbb7484`) and abandons.
+    /// The quest log, selection (1-based) and abandon mark (a quest id, `0xbb7484`).
     pub(crate) quest_log: quest_log::QuestLogState,
     pub(crate) quest_log_selection: u32,
     pub(crate) quest_log_abandon_mark: u32,
-    /// The log slots of the confirmed abandons, for the app to send.
-    pub(crate) quest_log_abandons: Vec<u8>,
-    /// `QuestLogPushQuest()` quest ids, resolved at the click so a log change cannot retarget one.
-    pub(crate) quest_log_pushes: Vec<u32>,
-    /// `ConfirmAcceptQuest()` calls, the escort confirm; the app holds the pending quest.
-    pub(crate) quest_confirms: u32,
     /// Item id to its tooltip view.
     pub(crate) item_templates: HashMap<u32, ItemTemplateView>,
     /// Item ids asked for and missing, for the app to answer: a lookup with a callback, which
@@ -1110,13 +1090,14 @@ pub(crate) struct Model {
     pub(crate) item_cache_waits: HashMap<FrameHandle, Vec<super::tooltip_item::build::CacheWait>>,
     /// The misses of the item build under way, handed to its tooltip as it ends.
     pub(crate) item_cache_misses: Vec<super::tooltip_item::build::CacheWait>,
-    /// Every quest-log row as the rebuild made it, each header followed by all its quests, which
-    /// [`quest_log::fold`] folds into the visible [`Self::quest_log`].
-    pub(crate) quest_log_rows: Vec<quest_log::QuestLogRow>,
+    /// The quest-log groups' `(ZoneOrSort, name)`, sorted by `0x4de8f0` (`0xbb7040`): a row's
+    /// group ordinal is its place here.
+    pub(crate) quest_log_headers: Vec<(i32, String)>,
     /// The slots, the quest records and the lookups in flight the quest-log verbs read.
     pub(crate) quest_store: quest_log::QuestLogStore,
-    /// The collapsed headers by title, the reference's fold mask `0xbb748c`.
-    pub(crate) quest_log_collapsed: HashSet<String>,
+    /// The folded headers' ids: the reference's mask `0xbb748c` holds a bit per sorted header,
+    /// clear for a folded one, which its rebuild carries across by id (`0x4de5bc`, `0x4de777`).
+    pub(crate) quest_log_collapsed: HashSet<i32>,
     /// A selected quest a previous VM left, placed at the first push.
     pub(crate) quest_log_selection_seed: Option<u32>,
     /// Watched quest ids in watch order, pruned when a quest leaves the log.
@@ -1560,7 +1541,6 @@ impl Model {
             drop_item_on_unit: Vec::new(),
             joined_channels: Vec::new(),
             party: party::PartyState::default(),
-            party_requests: Vec::new(),
             ready_check: party::ReadyCheckState::default(),
             saved_instances: Vec::new(),
             raid_selection: 0,
@@ -1571,7 +1551,7 @@ impl Model {
             can_reset_instances: false,
             reset_instance_asks: 0,
             social: social::SocialState::default(),
-            social_requests: Vec::new(),
+            who_to_ui: false,
             lfg_dungeons: Vec::new(),
             lfg_slots: [0; 3],
             lfg_comment: String::new(),
@@ -1727,9 +1707,7 @@ impl Model {
             slider_drag: None,
             color_drag: None,
             gossip: None,
-            gossip_selects: Vec::new(),
             gossip_close: false,
-            gossip_quest_selects: Vec::new(),
             merchant: None,
             repair_all_cost: 0,
             repair_costs: Default::default(),
@@ -1783,18 +1761,11 @@ impl Model {
             item_text_close: false,
             item_text_page_turns: Vec::new(),
             mail: None,
-            mail_check_inbox: false,
             mail_list_stamp: None,
             mail_busy: false,
             mail_send_pending: false,
-            mail_opens: Vec::new(),
-            mail_take_items: Vec::new(),
-            mail_take_money: Vec::new(),
-            mail_deletes: Vec::new(),
-            mail_returns: Vec::new(),
-            mail_take_texts: Vec::new(),
             mail_close: false,
-            mail_send: None,
+            mail_body_answer: None,
             mail_send_money: 0,
             mail_send_cod: 0,
             mail_send_item: None,
@@ -1814,28 +1785,19 @@ impl Model {
             trade: None,
             trade_window: false,
             trade_record_asks: Vec::new(),
-            trade_initiates: Vec::new(),
-            trade_accept: false,
-            trade_unaccept: false,
             trade_close: false,
-            trade_begin: false,
-            trade_cancel: false,
-            trade_set_money: Vec::new(),
-            trade_set_items: Vec::new(),
-            trade_clear_items: Vec::new(),
+            trade_done: false,
+            trade_placing: std::collections::HashMap::new(),
+            trade_place_seq: 0,
             trade_offered: Default::default(),
             quest: None,
             quest_pool_levels: Default::default(),
-            quest_selects: Vec::new(),
-            quest_actions: Vec::new(),
+            quest_close: false,
             death: death::DeathUiState::default(),
             death_actions: Vec::new(),
             quest_log: quest_log::QuestLogState::default(),
             quest_log_selection: 0,
             quest_log_abandon_mark: 0,
-            quest_log_abandons: Vec::new(),
-            quest_log_pushes: Vec::new(),
-            quest_confirms: 0,
             item_templates: HashMap::new(),
             item_sets: HashMap::new(),
             item_set_asks: HashSet::new(),
@@ -1861,7 +1823,7 @@ impl Model {
             item_builds: HashMap::new(),
             item_cache_waits: HashMap::new(),
             item_cache_misses: Vec::new(),
-            quest_log_rows: Vec::new(),
+            quest_log_headers: Vec::new(),
             quest_store: Default::default(),
             quest_log_collapsed: HashSet::new(),
             quest_log_selection_seed: None,

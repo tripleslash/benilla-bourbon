@@ -1556,9 +1556,8 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::Emote { emote } => w.emote(emote),
         ClientCommand::TextEmote { text_id, target } => w.text_emote(text_id, target),
         ClientCommand::GossipHello { guid } => w.gossip_hello(guid),
-        ClientCommand::GossipSelectOption { guid, option } => {
-            // No code is sent: coded options are greyed, never selected.
-            w.gossip_select_option(guid, option, None)
+        ClientCommand::GossipSelectOption { guid, option, code } => {
+            w.gossip_select_option(guid, option, code.as_deref())
         }
         ClientCommand::NpcTextQuery { text_id, guid } => w.npc_text_query(text_id, guid),
         ClientCommand::ListInventory { guid } => w.list_inventory(guid),
@@ -1677,6 +1676,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             spell_id,
             item_guid,
         } => w.cast_spell_item(spell_id, item_guid),
+        ClientCommand::CastSpellTradeItem { spell_id, slot } => {
+            w.cast_spell_trade_item(spell_id, slot)
+        }
         ClientCommand::LootMasterGive { guid, slot, target } => {
             w.loot_master_give(guid, slot, target)
         }
@@ -1729,9 +1731,11 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             w.mail_return_to_sender(mailbox, mail_id)
         }
         ClientCommand::MailDelete { mailbox, mail_id } => w.mail_delete(mailbox, mail_id),
-        ClientCommand::MailCreateTextItem { mailbox, mail_id } => {
-            w.mail_create_text_item(mailbox, mail_id)
-        }
+        ClientCommand::MailCreateTextItem {
+            mailbox,
+            mail_id,
+            template_id,
+        } => w.mail_create_text_item(mailbox, mail_id, template_id),
         ClientCommand::ItemTextQuery { text_id, mail_id } => w.item_text_query(text_id, mail_id),
         ClientCommand::QueryNextMailTime => w.query_next_mail_time(),
         // The auction house: the auctioneer guid rides on every verb.
@@ -1793,7 +1797,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::BeginTrade => w.begin_trade(),
         ClientCommand::BusyTrade => w.busy_trade(),
         ClientCommand::IgnoreTrade => w.ignore_trade(),
-        ClientCommand::AcceptTrade => w.accept_trade(),
+        ClientCommand::AcceptTrade { flag } => w.accept_trade(flag),
         ClientCommand::UnacceptTrade => w.unaccept_trade(),
         ClientCommand::CancelTrade => w.cancel_trade(),
         ClientCommand::SetTradeGold { copper } => w.set_trade_gold(copper),
@@ -1866,7 +1870,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             w.group_assistant_leader(guid, grant)
         }
         ClientCommand::ReadyCheckStart => w.ready_check_start(),
-        ClientCommand::ReadyCheckAnswer { ready } => w.ready_check_answer(ready),
+        ClientCommand::ReadyCheckAnswer { status } => w.ready_check_answer(status),
         ClientCommand::RequestRaidInfo => w.request_raid_info(),
         ClientCommand::ResetInstances => w.reset_instances(),
         ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),

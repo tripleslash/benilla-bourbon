@@ -235,7 +235,7 @@ pub(crate) enum Inflight {
     /// The spell awaiting its click, which the attempt pushed (`0x6e5026`) before the arm raised
     /// the cursor (`0x6e5250`). A bind sends with it still in the slot, where it stays until its
     /// result, but the trade slot's bind, which pops it right after its send (`0x6e695a`,
-    /// `CancelCast(0, 0, 0x17)`; not built, #88). A cursor whose item lacks the flag holds no
+    /// `CancelCast(0, 0, 0x17)`). A cursor whose item lacks the flag holds no
     /// slot, and the word stands alone ([`SpellTargeting`]).
     Targeting(u32),
 }
@@ -785,7 +785,7 @@ mod tests {
         use super::*;
         use crate::creature_anim::PlaySeq;
         use crate::net::{Guid, GuidIndex, NetCommands, SelfGuid, SelfPlayer};
-        use crate::ui_cast::{feed_cast_reports, CastBarEdge};
+        use crate::ui_cast::CastBarEdge;
         use benilla_formats::{SpellCatalog, SpellDisplay};
         use benilla_ui::script::{ScriptCall, UiScript};
         use bevy::ecs::system::RunSystemOnce;
@@ -854,7 +854,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-            app.world_mut().resource_mut::<CastReports>().0.clear();
+            app.world_mut().resource_mut::<CastReports>().clear();
         }
 
         fn run(app: &mut App, moved: bool) {
@@ -962,7 +962,7 @@ mod tests {
                 app.world().resource::<PendingCast>().in_flight(),
                 "the guard keeps holding — the cast runs on"
             );
-            assert!(app.world().resource::<CastReports>().0.is_empty());
+            assert!(app.world().resource::<CastReports>().is_empty());
         }
 
         /// A spell with no record is no cancel's: the cast test leaves on a null record
@@ -1062,7 +1062,7 @@ mod tests {
             assert!(rx.try_recv().is_err(), "no cancel goes out");
             let self_e = app.world().resource::<GuidIndex>().0[&10];
             assert!(app.world().entity(self_e).get::<Casting>().is_some());
-            assert!(app.world().resource::<CastReports>().0.is_empty());
+            assert!(app.world().resource::<CastReports>().is_empty());
         }
 
         #[test]
@@ -1082,7 +1082,7 @@ mod tests {
 
             assert!(rx.try_recv().is_err());
             assert!(app.world().resource::<PendingCast>().in_flight());
-            assert!(app.world().resource::<CastReports>().0.is_empty());
+            assert!(app.world().resource::<CastReports>().is_empty());
         }
 
         /// Mid-channel `SpellStopCasting()` answers nil and nothing is sent.
@@ -1095,7 +1095,9 @@ mod tests {
                 .resource_mut::<ActiveChannel>()
                 .start(ARCANE_MISSILES, 5_000, now);
 
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             assert_eq!(
                 stop_casting(&mut app),
                 None,
@@ -1124,7 +1126,9 @@ mod tests {
             mark_casting(&mut app, FIREBALL);
 
             // Press 1 stops the auto-repeat only.
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             assert_eq!(stop_casting(&mut app), Some(1));
             assert!(
                 matches!(
@@ -1141,14 +1145,16 @@ mod tests {
             );
             assert!(
                 matches!(
-                    app.world().resource::<CastReports>().0[..],
+                    app.world().resource::<CastReports>().reports()[..],
                     [crate::ui_cast::CastReport::AutoRepeat(false)]
                 ),
                 "an auto-repeat cancel paints no bar edge, only its `STOP_AUTOREPEAT_SPELL`"
             );
 
             // Press 2 cancels the cast.
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             assert_eq!(stop_casting(&mut app), Some(1));
             assert!(
                 matches!(
@@ -1177,7 +1183,9 @@ mod tests {
                 .resource_mut::<QueuedMeleeSpell>()
                 .arm(HEROIC_STRIKE);
 
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             assert_eq!(
                 stop_casting(&mut app),
                 Some(1),
@@ -1239,7 +1247,9 @@ mod tests {
                 .resource_mut::<crate::spell::targeting::SpellTargeting>()
                 .enter(FIREBALL, crate::spell::CastCommit::Spell, 0x40);
 
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             assert_eq!(
                 stop_casting(&mut app),
                 Some(1),
@@ -1260,7 +1270,9 @@ mod tests {
                 ),
                 "STOP and nothing else: no wire echo follows, so no INTERRUPTED"
             );
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             let script = app.world().non_send::<UiScript>();
             assert_eq!(script.eval::<i64>("return STOPS").unwrap(), 1);
             assert_eq!(script.eval::<i64>("return FAILS").unwrap(), 0);
@@ -1295,7 +1307,7 @@ mod tests {
                 .world()
                 .resource::<crate::spell::targeting::SpellTargeting>()
                 .active());
-            assert!(app.world().resource::<CastReports>().0.is_empty());
+            assert!(app.world().resource::<CastReports>().is_empty());
         }
 
         /// Heroic Strike's `InterruptFlags` are 0, so movement leaves it queued.
@@ -1344,7 +1356,9 @@ mod tests {
             );
             mark_casting(&mut app, FIREBALL);
 
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             assert_eq!(stop_casting(&mut app), Some(1));
             assert!(
                 matches!(
@@ -1363,10 +1377,12 @@ mod tests {
                 app.world().resource::<CastReports>().edges()[..],
                 [CastBarEdge::Stop]
             ));
-            app.world_mut().resource_mut::<CastReports>().0.clear();
+            app.world_mut().resource_mut::<CastReports>().clear();
 
             // Press 2: the pop put the strike back in the slot.
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             assert_eq!(
                 stop_casting(&mut app),
                 Some(1),
@@ -1390,7 +1406,9 @@ mod tests {
             );
 
             // Press 3, still inside the round trip: the same again.
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             assert_eq!(stop_casting(&mut app), Some(1));
             assert!(matches!(
                 rx.try_recv(),
@@ -1433,7 +1451,7 @@ mod tests {
                 "the mirror stays live — the server's UPDATE(0) is what clears it"
             );
             assert!(
-                app.world().resource::<CastReports>().0.is_empty(),
+                app.world().resource::<CastReports>().is_empty(),
                 "no local bar edge — the bar closes on the wire's SPELLCAST_CHANNEL_STOP"
             );
         }
@@ -1468,7 +1486,9 @@ mod tests {
                 .push(FIREBALL, None, Instant::now());
             mark_casting(&mut app, FROSTBOLT);
 
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             assert_eq!(stop_casting(&mut app), Some(1));
             crate::creature_anim::apply_unit_edits(app.world_mut());
 
@@ -1568,7 +1588,9 @@ mod tests {
                 Some(FIREBALL),
                 "a minute on, still in flight"
             );
-            app.world_mut().run_system_once(feed_cast_reports).unwrap();
+            app.world_mut()
+                .run_system_once(crate::ui_cast::signal_reports)
+                .unwrap();
             assert_eq!(stop_casting(&mut app), Some(1));
             assert!(matches!(
                 rx.try_recv(),

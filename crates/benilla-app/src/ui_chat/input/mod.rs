@@ -511,7 +511,7 @@ pub(super) fn drain_chat_input(
                             self_guid.0,
                         ));
                     }
-                    "invite" => group.pending_invite = Some("Partner".to_string()),
+                    "invite" => group.apply_invited("Partner"),
                     // A group member's ping 35 yd north-east: off both axes, so a mirrored sign
                     // shows, and inside every outdoor view radius (the tightest is 66.7 yd).
                     "ping" => {
@@ -571,7 +571,7 @@ pub(super) fn drain_chat_input(
                     if let Some(name) =
                         name.or_else(|| target_player_name(&selection, &names, &commands))
                     {
-                        // The binding's own resolve and queue (`PromoteByName 0x48a86a`); a miss is
+                        // The binding's own resolve and call (`PromoteByName 0x48a86a`); a miss is
                         // silent there.
                         script.promote_by_name(&name);
                     }

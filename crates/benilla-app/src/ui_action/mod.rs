@@ -32,7 +32,7 @@ mod drain_tests;
 pub(crate) mod drop_item;
 mod errors;
 mod feed;
-pub(crate) use feed::{spell_action_icon, MISSING_ITEM_ICON};
+pub(crate) use feed::{bonus_bar_offset, spell_action_icon, MISSING_ITEM_ICON};
 #[cfg(test)]
 mod feed_tests;
 mod net;
@@ -59,7 +59,7 @@ pub(crate) use cast_fail::report_reaches_pop;
 #[cfg(test)]
 pub(crate) use cast_fail::CAST_FAIL_KEYS;
 pub(crate) use errors::{
-    attack_actor_refusal, keyed_line, keyed_line_s, reagent_totem_refusal, show_messages,
+    attack_actor_refusal, keyed_line, keyed_line_s, reagent_totem_refusal, show_messages, show_now,
     ui_error_text, CastFail, Caster, FillArg, MessageSink, MountErrors, PetTameFailures, Shown,
     UiError, UiErrorKeys, UiErrorTexts,
 };
@@ -401,13 +401,13 @@ impl Plugin for UiActionPlugin {
                     // `0x4936e2`, a watched field written before its watch runs), and ahead of the
                     // events its producers precede: the select's `PLAYER_TARGET_CHANGED` and the
                     // combo points' event (the unit events), the watched fields' own events (the
-                    // field notices) and the form's cast change (the cast reports).
+                    // field notices, whose lane fires after every feed) and the form's cast
+                    // change (the cast reports).
                     state::fire_action_events
                         .in_set(UnitFeed)
                         .in_set(CooldownEvents)
                         .after(state::feed_action_state)
                         .after(crate::ui_unit::UnitSnapshots)
-                        .before(crate::ui_unit::field_events::fire_field_notices)
                         .before(crate::ui_cast::feed_cast_reports),
                     drain::drain_action_sets.in_set(crate::ui_script::UiDrain),
                     // The target chain queues the right-click casts earlier in the frame.

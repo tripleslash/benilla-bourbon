@@ -1,36 +1,26 @@
 //! The interface events of the field watches and the packet handlers that signal unit events
-//! ([`crate::field_watch`]): each notice the packets wrote this frame fires its callback's
-//! signals, in wire order, after every snapshot those events' handlers read is pushed
-//! ([`FieldEventPushes`]) and the unit tokens are seated ([`crate::ui_aura::AuraEvents`]).
+//! ([`crate::field_watch`]): the notice lane, whose notices fire their callbacks' signals in the
+//! packets' order among the other lanes ([`crate::lanes`]), after every snapshot those events'
+//! handlers read is pushed ([`FieldEventPushes`]) and the unit tokens are seated
+//! ([`crate::ui_aura::AuraEvents`]), as the reference's notify pass follows a block's write passes
+//! (`0x465277` after `0x46520e`, `0x465222`).
 
-use bevy::ecs::message::MessageCursor;
 use bevy::prelude::*;
 
 use benilla_ui::script::{ScriptValue, UiScript};
 
-use crate::field_watch::FieldNotice;
+use crate::field_watch::{FieldNotice, NoticeLane};
+use crate::lanes::Until;
 
 /// The feeds that push what a field event's handlers read: the unit tokens' snapshots with the XP
 /// and rest values (`feed_units`), the group's and the pet's tokens, the pet's stats, the player's
 /// combat stats and inventory, the inspected unit's slots, the honor block and the watched
-/// faction. The firing runs
-/// after all of them, as the reference writes a whole block before its notify pass.
+/// faction. The lanes' drain runs after all of them, as the reference writes a whole block before
+/// its notify pass.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct FieldEventPushes;
 
-/// The read position in the notices, one for both of their readers: the firing while the in-game
-/// interface is up and the drop while it is not, so each notice is taken exactly once, the frame
-/// it is written.
-#[derive(Resource, Default)]
-pub(crate) struct FieldNoticeCursor(MessageCursor<FieldNotice>);
-
-/// The notices [`fire_field_notices`] left for the chat drain, each by its message id: each came
-/// after a chat item the drain had yet to fire, in the order the packets queued them
-/// ([`super::wire_order`]).
-#[derive(Resource, Default)]
-pub(crate) struct DeferredNotices(Vec<(usize, FieldNotice)>);
-
-/// What a field notice's firing reads, and the notices left for the chat drain.
+/// What a field notice's firing reads.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct NoticeFiring<'w, 's> {
     sink: crate::ui_action::MessageSink<'w>,
@@ -38,10 +28,9 @@ pub(crate) struct NoticeFiring<'w, 's> {
     names: Res<'w, crate::names::NameCache>,
     // The quest log's watcher reads the slots.
     me: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
-    tutorials: Option<ResMut<'w, crate::tutorial::Tutorials>>,
-    // `Option`, as the marks: a harness without the unit plugin defers nothing.
-    deferred: Option<ResMut<'w, DeferredNotices>>,
-    marks: Option<Res<'w, super::wire_order::WireMarks>>,
+    tutorials: Option<Res<'w, crate::tutorial::Tutorials>>,
+    // The form table the bonus bar's offset reads (`0x4e4fc0`).
+    spells: Option<Res<'w, crate::ui_action::Spells>>,
 }
 
 impl NoticeFiring<'_, '_> {
@@ -55,7 +44,8 @@ impl NoticeFiring<'_, '_> {
         }
         if let FieldNotice::Tutorial { id } = notice {
             // `0x4b5390` with no delay, inside the watcher's run.
-            if let Some(published) = self.tutorials.as_mut().and_then(|t| t.fire_now(id)) {
+            let published = self.tutorials.as_ref().and_then(|t| t.lock().fire_now(id));
+            if let Some(published) = published {
                 crate::tutorial::fire_published(script, &self.sink.sounds, published);
             }
             return;
@@ -64,89 +54,70 @@ impl NoticeFiring<'_, '_> {
             drunk(script, &mut self.sink, &self.names, guid, old, new);
             return;
         }
+        if notice == FieldNotice::Shapeshift {
+            // `0x5de016` → `0x4b3250`: `0x4e5bf0`'s event, then its own (`0x4b325a`).
+            script.fire_event("ACTIONBAR_UPDATE_STATE", vec![]);
+            script.fire_event("CURRENT_SPELL_CAST_CHANGED", vec![]);
+            // `0x5de01b` → `0x4e4fc0`: the offset stored, then the event, on every form change.
+            let offset =
+                crate::ui_action::bonus_bar_offset(self.me.iter().next(), self.spells.as_deref());
+            script.set_bonus_bar_offset(offset);
+            script.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+            return;
+        }
         fire(script, &mut self.sink, notice);
-    }
-
-    /// The handler call that wrote notice `id` ([`super::wire_order::WireMarks::of_notice`]).
-    fn call_of_notice(&self, id: usize) -> usize {
-        self.marks.as_ref().map_or(0, |m| m.of_notice(id))
-    }
-
-    /// The handler call that queued chat item `seq`, on the notices' scale.
-    pub(crate) fn call_of_chat(&self, seq: u64) -> usize {
-        self.marks.as_ref().map_or(0, |m| m.of_chat(seq))
-    }
-
-    /// Fire the first waiting notice if a chat item of handler call `call` comes after it, as one
-    /// of an earlier call or of the same one does; `None` fires it whatever its call. Whether one
-    /// fired: one at a time, so the chat drain shows each one's line before the next signals.
-    pub(crate) fn fire_next(&mut self, script: &mut UiScript, call: Option<usize>) -> bool {
-        let Some(&(id, notice)) = self.deferred.as_ref().and_then(|d| d.0.first()) else {
-            return false;
-        };
-        if call.is_some_and(|call| self.call_of_notice(id) > call) {
-            return false;
-        }
-        if let Some(deferred) = self.deferred.as_mut() {
-            deferred.0.remove(0);
-        }
-        self.fire(script, notice);
-        true
-    }
-
-    /// Whether a notice waits for the chat drain.
-    pub(crate) fn any_waiting(&self) -> bool {
-        self.deferred.as_ref().is_some_and(|d| !d.0.is_empty())
-    }
-
-    /// Leave `notice` for the chat drain; `false` with nowhere to leave it.
-    fn defer(&mut self, id: usize, notice: FieldNotice) -> bool {
-        match self.deferred.as_mut() {
-            Some(deferred) => {
-                deferred.0.push((id, notice));
-                true
-            }
-            None => false,
-        }
     }
 }
 
-/// Fire this frame's field notices in the order the packets wrote them. A notice a packet wrote
-/// after a chat item still queued, and every notice after it, waits for the chat drain, which
-/// fires them in their packets' order among its items ([`super::wire_order`]). Under the unit
-/// feed's gate, so only while the in-game interface is up; [`drop_field_notices`] takes them
-/// otherwise.
-pub(crate) fn fire_field_notices(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    notices: Res<Messages<FieldNotice>>,
-    mut cursor: ResMut<FieldNoticeCursor>,
-    mut firing: NoticeFiring,
+/// The notice lane's head ([`crate::lanes`]).
+fn peek(world: &World) -> Option<crate::lanes::Stamp> {
+    world.get_resource::<NoticeLane>()?.peek()
+}
+
+/// The notices `until` admits, in stamp order, each one's signals with the host lent; the lane's
+/// firing stops after a notice whose firing stamped anything, so the drain takes what it pushed
+/// next. With no VM there is nobody to hear them, and they are dropped, as below.
+fn fire_lane(
+    hosted_vm: &mut crate::script_calls::HostedVm,
+    lane: &mut NoticeLane,
+    firing: &mut NoticeFiring,
+    until: Until,
 ) {
     hosted_vm.run(|script| {
-        let fresh: Vec<(FieldNotice, usize)> = cursor
-            .0
-            .read_with_id(&notices)
-            .map(|(notice, id)| (*notice, id.id))
-            .collect();
-        // No VM, nobody to hear them: they are dropped, as below.
         let Some(script) = script else {
+            lane.clear();
             return;
         };
-        // The chat drain's first item, by the handler call that queued it.
-        let chat_first = firing
-            .sink
-            .chat
-            .first_live_seq()
-            .map(|seq| firing.call_of_chat(seq));
-        for (notice, id) in fresh {
-            let waits =
-                firing.any_waiting() || chat_first.is_some_and(|c| c < firing.call_of_notice(id));
-            if waits && firing.defer(id, notice) {
-                continue;
+        while let Some((stamp, notice)) = lane.pop(until) {
+            let ((), moved) = crate::lanes::firing(stamp, || firing.fire(script, notice));
+            if moved {
+                break;
             }
-            firing.fire(script, notice);
         }
     })
+}
+
+/// The notice lane's `fire_until`.
+fn fire_notices(
+    In(until): In<Until>,
+    mut hosted_vm: crate::script_calls::HostedVm,
+    mut lane: ResMut<NoticeLane>,
+    mut firing: NoticeFiring,
+) {
+    fire_lane(&mut hosted_vm, &mut lane, &mut firing, until);
+}
+
+/// Every notice waiting, fired alone, for a test that drives the notices without the chat lane.
+#[cfg(test)]
+pub(crate) fn fire_field_notices(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    mut lane: ResMut<NoticeLane>,
+    mut firing: NoticeFiring,
+) {
+    let until = Until::all();
+    while lane.peek().is_some_and(|s| until.admits(s)) {
+        fire_lane(&mut hosted_vm, &mut lane, &mut firing, until);
+    }
 }
 
 /// `0x5e2a90`'s run on the player `guid` whose drunk byte moved from `old` to `new`. On the active
@@ -196,18 +167,19 @@ fn drunk(
                 benilla_ui::strings::fill(&template, &args),
             )
         })
-        .collect();
-    crate::ui_action::show_messages(script, sink, "ui_unit", lines);
+        .collect::<Vec<_>>();
+    // Each to the line function inside the watcher's run (`0x5e2c68` → `0x49a870`).
+    for line in lines {
+        crate::ui_action::show_now(script, sink, "ui_unit", line);
+    }
 }
 
-/// The field notices' second reader and its position: [`drop_field_notices`] under the exact
-/// complement of the unit feed's gate, so a notice is fired or dropped the frame it is written,
-/// never left to age in the buffer.
-pub(super) fn add_notice_drop(app: &mut App) {
-    app.add_message::<FieldNotice>()
-        .init_resource::<FieldNoticeCursor>()
-        .init_resource::<DeferredNotices>()
-        .init_resource::<super::wire_order::WireMarks>()
+/// The notice lane and its drop: [`drop_field_notices`] under the exact complement of the
+/// drain's gate, so a notice is fired or dropped the frame it is written, never left to age.
+pub(super) fn add_notice_lane(app: &mut App) {
+    use crate::lanes::LaneApp;
+    app.init_resource::<NoticeLane>()
+        .add_lane("field notices", peek, fire_notices, None)
         .add_systems(
             Update,
             drop_field_notices
@@ -221,15 +193,8 @@ pub(super) fn add_notice_drop(app: &mut App) {
 /// to hear them, and the one that comes up later must not hear changes from before it. The
 /// reference's interface exists before the world it watches, so it has no such window; the
 /// snapshots the VM reads are pushed whole when it comes up, as they are at a `/reload`.
-pub(super) fn drop_field_notices(
-    notices: Res<Messages<FieldNotice>>,
-    mut cursor: ResMut<FieldNoticeCursor>,
-    deferred: Option<ResMut<DeferredNotices>>,
-) {
-    cursor.0.clear(&notices);
-    if let Some(mut deferred) = deferred {
-        deferred.0.clear();
-    }
+pub(super) fn drop_field_notices(mut lane: ResMut<NoticeLane>) {
+    lane.clear();
 }
 
 /// One callback's signals.
@@ -246,9 +211,12 @@ fn fire(script: &mut UiScript, sink: &mut crate::ui_action::MessageSink, notice:
         FieldNotice::RestState { old, new } => {
             // `0x5de4e0`: the signal, then the line for the new state.
             script.fire_event("UPDATE_EXHAUSTION", vec![]);
+            // Through `DisplayError` (`0x5de52c`), whose chat row shows it at once (`0x496842`).
             let line = super::rest_state_message(old, new)
                 .and_then(|key| crate::ui_action::keyed_line(script, key));
-            crate::ui_action::show_messages(script, sink, "ui_unit", line);
+            if let Some(line) = line {
+                crate::ui_action::show_now(script, sink, "ui_unit", line);
+            }
         }
         FieldNotice::CombatSkill => {
             // `0x5ed990`, in its order (`0x5ed99f`, `0x5ed9b3`, `0x5ed9c7`).
@@ -271,8 +239,14 @@ fn fire(script: &mut UiScript, sink: &mut crate::ui_action::MessageSink, notice:
                 script.fire_event(global, vec![]);
             }
         }
-        // Fired by [`fire_field_notices`], which holds the slots, the banks and the names.
-        FieldNotice::QuestLog | FieldNotice::Tutorial { .. } | FieldNotice::Drunk { .. } => {}
+        // `0x5ddffa`.
+        FieldNotice::ComboPoints => script.fire_event("PLAYER_COMBO_POINTS", vec![]),
+        // Fired by [`NoticeFiring::fire`], which holds the slots, the banks, the names and the
+        // form table.
+        FieldNotice::QuestLog
+        | FieldNotice::Tutorial { .. }
+        | FieldNotice::Drunk { .. }
+        | FieldNotice::Shapeshift => {}
         FieldNotice::PvpPreference { on } => {
             let (toast, verbose) = super::pvp_announcement(on);
             // The verbose sentence is no catalog row, so it goes `unkeyed` to chat:
@@ -289,7 +263,9 @@ fn fire(script: &mut UiScript, sink: &mut crate::ui_action::MessageSink, notice:
                         crate::ui_action::Shown::unkeyed(benilla_ui::messages::MsgKind::Chat, t)
                     }),
             ];
-            crate::ui_action::show_messages(script, sink, "ui_unit", lines.into_iter().flatten());
+            for line in lines.into_iter().flatten() {
+                crate::ui_action::show_now(script, sink, "ui_unit", line);
+            }
         }
     }
 }
@@ -507,8 +483,7 @@ mod tests {
     /// A world whose VM records every event the notices fire, with `guids` seated.
     fn world(guids: benilla_ui::script::UnitGuids) -> App {
         let mut app = App::new();
-        app.add_message::<FieldNotice>()
-            .init_resource::<FieldNoticeCursor>()
+        app.init_resource::<crate::field_watch::NoticeLane>()
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()
             .init_resource::<crate::names::NameCache>();
@@ -532,7 +507,7 @@ mod tests {
 
     fn fired(app: &mut App, notices: &[FieldNotice]) -> Vec<String> {
         app.world_mut()
-            .resource_mut::<Messages<FieldNotice>>()
+            .resource_mut::<crate::field_watch::NoticeLane>()
             .write_batch(notices.iter().copied());
         app.world_mut().run_system_once(fire_field_notices).unwrap();
         let mut s = app.world_mut().non_send_mut::<UiScript>();
@@ -640,7 +615,9 @@ mod tests {
     }
 
     /// A global notice fires its event bare, once, whatever unit raised it; the PvP preference
-    /// shows its toast for the new state, then its verbose sentence as a chat line.
+    /// shows its toast for the new state, then its verbose sentence as a chat line, whose
+    /// `CHAT_MSG_SYSTEM` fires inside the watcher's run, its line function called directly
+    /// (`0x5eeb5d` → `0x49a870`).
     #[test]
     fn a_global_notice_fires_bare_and_the_pvp_preference_speaks() {
         let mut app = world(seated());
@@ -670,16 +647,19 @@ mod tests {
             [
                 "PLAYER_REGEN_DISABLED nil",
                 "UI_INFO_MESSAGE on",
+                "CHAT_MSG_SYSTEM on, verbose",
                 "PET_ATTACK_STOP nil",
                 "UI_INFO_MESSAGE off",
+                "CHAT_MSG_SYSTEM off, verbose",
                 "PLAYER_UNGHOST nil",
             ]
         );
-        assert_eq!(
+        assert!(
             app.world()
                 .resource::<crate::ui_chat::ChatLog>()
-                .pending_lines(),
-            ["on, verbose", "off, verbose"]
+                .pending_lines()
+                .is_empty(),
+            "the lines fired in the watcher's run, not from the chat lane"
         );
     }
 
@@ -758,30 +738,39 @@ mod tests {
                 )
                 .unwrap();
         }
-        let chat = |app: &mut App| -> Vec<String> {
-            let lines = app
-                .world()
-                .resource::<crate::ui_chat::ChatLog>()
-                .pending_lines();
-            app.world_mut()
-                .insert_resource(crate::ui_chat::ChatLog::default());
-            lines
-        };
         let drunk = |guid, old, new| FieldNotice::Drunk { guid, old, new };
-        assert_eq!(fired(&mut app, &[drunk(ME, 0, 95)]), ["UNIT_LEVEL target"]);
-        assert_eq!(chat(&mut app), ["self 2", "self 4"]);
-        // Another player: no signal, its name in the line.
-        assert!(fired(&mut app, &[drunk(OTHER, 95, 0)]).is_empty());
         assert_eq!(
-            chat(&mut app),
-            ["Bob other 1", "Bob other 2", "Bob other 3"]
+            fired(&mut app, &[drunk(ME, 0, 95)]),
+            [
+                "UNIT_LEVEL target",
+                "CHAT_MSG_SYSTEM self 2",
+                "CHAT_MSG_SYSTEM self 4"
+            ]
+        );
+        // Another player: no signal, its name in the line.
+        assert_eq!(
+            fired(&mut app, &[drunk(OTHER, 95, 0)]),
+            [
+                "CHAT_MSG_SYSTEM Bob other 1",
+                "CHAT_MSG_SYSTEM Bob other 2",
+                "CHAT_MSG_SYSTEM Bob other 3"
+            ]
         );
         // A target the player cannot attack: the lines alone.
         app.world_mut()
             .non_send_mut::<UiScript>()
             .set_unit_guids(&seated());
-        assert!(fired(&mut app, &[drunk(ME, 60, 40)]).is_empty());
-        assert_eq!(chat(&mut app), ["self 2"]);
+        assert_eq!(
+            fired(&mut app, &[drunk(ME, 60, 40)]),
+            ["CHAT_MSG_SYSTEM self 2"]
+        );
+        assert!(
+            app.world()
+                .resource::<crate::ui_chat::ChatLog>()
+                .pending_lines()
+                .is_empty(),
+            "each line fired in the watcher's run (`0x5e2c68`)"
+        );
     }
 
     /// A watcher's tutorial fires inside its run (`0x4b5390` with delay 0): the `TutorialPopup` cue
@@ -792,7 +781,8 @@ mod tests {
         let mut app = world(seated());
         app.init_resource::<crate::tutorial::Tutorials>();
         app.world_mut()
-            .resource_mut::<crate::tutorial::Tutorials>()
+            .resource::<crate::tutorial::Tutorials>()
+            .lock()
             .apply_flags(&[0u8; 8]);
         assert_eq!(
             fired(
@@ -818,7 +808,7 @@ mod tests {
     fn a_dropped_notice_never_fires_later() {
         let mut app = world(seated());
         app.world_mut()
-            .resource_mut::<Messages<FieldNotice>>()
+            .resource_mut::<crate::field_watch::NoticeLane>()
             .write(FieldNotice::Player { id: 523 });
         app.world_mut().run_system_once(drop_field_notices).unwrap();
         assert_eq!(
@@ -827,33 +817,38 @@ mod tests {
         );
     }
 
-    /// The drop's own registration: while no in-game interface is up it takes each notice the
-    /// frame it is written; once one is up it leaves them to the firing.
+    /// The lane's registration: while no in-game interface is up the drop takes each notice the
+    /// frame it is written, unheard; once one is up the lanes' drain fires it.
     #[test]
     fn the_drop_runs_exactly_while_no_interface_is_up() {
-        let mut app = App::new();
-        add_notice_drop(&mut app);
-        let unread = |app: &mut App, notice: FieldNotice| -> usize {
+        let mut app = world(seated());
+        add_notice_lane(&mut app);
+        let heard = |app: &mut App, notice: FieldNotice| -> Vec<String> {
             app.world_mut()
-                .resource_mut::<Messages<FieldNotice>>()
+                .resource_mut::<crate::field_watch::NoticeLane>()
                 .write(notice);
             app.update();
-            app.world_mut()
-                .resource_scope(|world, cursor: Mut<FieldNoticeCursor>| {
-                    cursor.0.len(world.resource::<Messages<FieldNotice>>())
-                })
+            assert_eq!(
+                app.world()
+                    .resource::<crate::field_watch::NoticeLane>()
+                    .iter()
+                    .count(),
+                0,
+                "fired or dropped the frame it is written"
+            );
+            seen(app)
         };
         // No state yet: the login screen's side of the gate.
-        assert_eq!(unread(&mut app, FieldNotice::Player { id: 189 }), 0);
+        assert!(heard(&mut app, FieldNotice::Player { id: 189 }).is_empty());
         app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
         assert_eq!(
-            unread(&mut app, FieldNotice::Player { id: 189 }),
-            1,
-            "the interface is up: the firing's to take"
+            heard(&mut app, FieldNotice::Player { id: 189 }),
+            ["PLAYER_XP_UPDATE player"],
+            "the interface is up: the drain fires it"
         );
         // An entry load pending is the interface not up yet.
         app.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
-        assert_eq!(unread(&mut app, FieldNotice::Player { id: 406 }), 0);
+        assert!(heard(&mut app, FieldNotice::Player { id: 406 }).is_empty());
     }
 
     /// A self player seated in a world that runs `feed_units` and the honor feed, its VM
@@ -862,8 +857,7 @@ mod tests {
         use crate::net::{Guid, NetCommands, ObjectStore, SelfPlayer};
         let mut app = App::new();
         app.add_message::<crate::net::FieldChanged>()
-            .add_message::<FieldNotice>()
-            .init_resource::<FieldNoticeCursor>()
+            .init_resource::<crate::field_watch::NoticeLane>()
             .init_resource::<crate::target::Selection>()
             .init_resource::<super::super::UnitFeedState>()
             .init_resource::<crate::names::NameCache>()
@@ -1104,43 +1098,43 @@ mod tests {
             crate::test_support::runs_before(
                 &mut headless,
                 super::super::feed_units,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_char::feed_char,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_honor::feed_honor,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_reputation::feed_reputation,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_party::feed_party,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_pet::feed_pet_unit,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_pet_stats::feed_pet_stats,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
             // The inspected unit's slots, which the bridge's `UNIT_INVENTORY_CHANGED` repaints.
             crate::test_support::runs_before(
                 &mut headless,
                 crate::ui_inspect::feed_inspect,
-                fire_field_notices,
+                crate::lanes::fire_in_order,
             ),
         ];
         assert_eq!(
@@ -1186,7 +1180,7 @@ mod tests {
             &crate::field_watch::Notified::new(crate::field_watch::Sent::Fields(&[XP]), &edges),
         );
         app.world_mut()
-            .resource_mut::<Messages<FieldNotice>>()
+            .resource_mut::<crate::field_watch::NoticeLane>()
             .write_batch(notices);
         app.world_mut()
             .run_system_once(super::super::feed_units)

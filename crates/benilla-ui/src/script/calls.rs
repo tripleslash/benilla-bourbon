@@ -147,6 +147,23 @@ pub enum ScriptCall {
     /// An auction verb past its binding's checks: its gates, refusals and packet
     /// ([`super::AuctionCall`]).
     Auction(super::AuctionCall),
+    /// A friend or ignore verb ([`super::SocialCall`]): its packet, its selection and its line
+    /// inside the call.
+    Social(super::SocialCall),
+    /// A party or raid verb past its binding's checks ([`super::PartyRequest`]): the host sends
+    /// its packet inside the call, so a chunk's group packets go out in call order with every
+    /// other verb's.
+    Party(super::PartyRequest),
+    /// A questgiver, quest-log or share verb ([`super::QuestCall`]): its gates and its packet
+    /// inside the call, so a chunk's quest packets go out in call order with every other verb's.
+    Quest(super::QuestCall),
+    /// A gossip select ([`super::GossipCall`]): its packet inside the call.
+    Gossip(super::GossipCall),
+    /// A mail verb past its binding's guards: its packet, and for `GetInboxText` the read mark
+    /// and the body's ask ([`super::MailCall`]).
+    Mail(super::MailCall),
+    /// A trade verb ([`super::TradeCall`]): its packet, its state and its signal inside the call.
+    Trade(super::TradeCall),
 }
 
 /// The mode the four `TargetNearest*` shims hand the TAB cycler `0x493f60`, the only byte that

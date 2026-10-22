@@ -1,8 +1,8 @@
 //! The reference callbacks that signal interface events from the object packets: the field watches
 //! on units and the active player, and the packet handlers that signal unit events through the
-//! token fan-out `0x515e50`. The packets write one [`FieldNotice`] per signal, in wire order, and
-//! the unit feed fires each (`crate::ui_unit`), so an event follows the change that raised it and
-//! nothing else: not a login, not a `/reload`, not a value read for the first time, not a token
+//! token fan-out `0x515e50`. The packets write one [`FieldNotice`] per signal onto the notice
+//! lane ([`NoticeLane`]), and the lanes' drain fires each in the packets' order
+//! ([`crate::lanes`]), so an event follows the change that raised it and nothing else: not a login, not a `/reload`, not a value read for the first time, not a token
 //! that comes to name another unit.
 //!
 //! A block's notify runs each watch whose bytes now differ from the copy its object's last write
@@ -27,7 +27,7 @@ use bevy::prelude::*;
 use crate::tutorial::id as tutorial;
 
 /// One signal a reference callback raised, in the order the packets raised them.
-#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FieldNotice {
     /// The unit-field bridge `0x51bd50`: event `id`, the watched field's byte offset in the unit
     /// section over 4 (`0x51bd55`), or the fixed id of a player-block watch (`0x51bd90`), through
@@ -71,6 +71,75 @@ pub(crate) enum FieldNotice {
     /// fire-once bit tested and set, then its `TutorialPopup` cue and `TUTORIAL_TRIGGER` at once,
     /// in the watcher's order.
     Tutorial { id: u32 },
+    /// `OnShapeshiftFormChanged` (`0x5de010`) on the active player's form byte: after the usable
+    /// refresh (`0x5de011`, the action feed's), `ACTIONBAR_UPDATE_STATE` and
+    /// `CURRENT_SPELL_CAST_CHANGED` (`0x5de016` → `0x4b3250`), then the bonus bar's offset and
+    /// `UPDATE_BONUS_ACTIONBAR` (`0x5de01b` → `0x4e4fc0`).
+    Shapeshift,
+    /// `OnComboPointsChanged` (`0x5ddff0`) on the active player's combo count: after the usable
+    /// refresh (the action feed's), `PLAYER_COMBO_POINTS` (`0x5ddffa`).
+    ComboPoints,
+}
+
+/// The notice lane: each notice stamped as a handler writes it ([`crate::lanes::stamp`]), fired
+/// by `crate::ui_unit::field_events` in stamp order among the other lanes.
+#[derive(Resource, Default)]
+pub(crate) struct NoticeLane(std::collections::VecDeque<(crate::lanes::Stamp, FieldNotice)>);
+
+impl NoticeLane {
+    /// Queue `notice` behind everything stamped before it.
+    pub(crate) fn write(&mut self, notice: FieldNotice) {
+        let stamp = crate::lanes::stamp();
+        let at = self.0.partition_point(|(s, _)| *s < stamp);
+        self.0.insert(at, (stamp, notice));
+    }
+
+    /// Queue each of `notices` in turn.
+    pub(crate) fn write_batch(&mut self, notices: impl IntoIterator<Item = FieldNotice>) {
+        for notice in notices {
+            self.write(notice);
+        }
+    }
+
+    /// The head's stamp.
+    pub(crate) fn peek(&self) -> Option<crate::lanes::Stamp> {
+        self.0.front().map(|(s, _)| *s)
+    }
+
+    /// Take the head if `until` admits it.
+    pub(crate) fn pop(
+        &mut self,
+        until: crate::lanes::Until,
+    ) -> Option<(crate::lanes::Stamp, FieldNotice)> {
+        until
+            .admits(self.peek()?)
+            .then(|| self.0.pop_front())
+            .flatten()
+    }
+
+    /// Drop every notice waiting, unfired.
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// The notices waiting, in order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &FieldNotice> {
+        self.0.iter().map(|(_, n)| n)
+    }
+
+    /// Take every notice waiting, in order, unfired.
+    #[cfg(test)]
+    pub(crate) fn drain(&mut self) -> impl Iterator<Item = FieldNotice> + '_ {
+        self.0.drain(..).map(|(_, n)| n)
+    }
+
+    /// Take every notice waiting with its stamp, in order, unfired.
+    #[cfg(test)]
+    pub(crate) fn drain_stamped(
+        &mut self,
+    ) -> impl Iterator<Item = (crate::lanes::Stamp, FieldNotice)> + '_ {
+        self.0.drain(..)
+    }
 }
 
 /// The event ids the producers pass to `0x515e50`, by their event-table names.
@@ -277,9 +346,15 @@ const GUILD_TIMESTAMP: (u16, u16) = (0x24, 4);
 /// section's `+0x10`, refreshing its reaction (`0x5de0b5`).
 const CHARMED_BY: (u16, u16) = (0x10, 8);
 
+/// The active player's form watch `0x5de010`, `UNIT_FIELD_BYTES_1` byte 2, the unit section's
+/// `+0x212` (`0x5dda18`-`0x5dda21`), and its combo-count watch `0x5ddff0`, `PLAYER_FIELD_BYTES`
+/// byte 1, the player section's `+0x1029` (`0x5dd9d0`-`0x5dd9d9`), one byte each.
+const SHAPESHIFT_FORM: (u16, u16) = (0x212, 1);
+const COMBO_POINTS: (u16, u16) = (0x1029, 1);
+
 /// Which list a watch sits on: at one field the type watchers run ahead of the object's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum List {
+pub(crate) enum List {
     Type,
     Object,
 }
@@ -397,7 +472,7 @@ impl<'a> Notified<'a> {
 }
 
 /// A watch's place in the notify pass: the field it ran at, its range's first field, its list.
-type Place = (u16, u16, List);
+pub(crate) type Place = (u16, u16, List);
 
 /// The signals of one block in the notify pass's order. A stable sort keeps one callback's
 /// signals, and the watches of one list at one field, in the order they ran.
@@ -433,13 +508,53 @@ impl Pass {
         }
     }
 
-    fn into_notices(mut self) -> Vec<FieldNotice> {
+    fn into_placed(mut self) -> Vec<(Place, FieldNotice)> {
         self.0.sort_by_key(|&(at, _)| at);
-        self.0.into_iter().map(|(_, n)| n).collect()
+        self.0
     }
 }
 
+/// One step of a block's notify in the watchers' order: a field edge, whose watcher may write a
+/// chat line, or a notice.
+pub(crate) enum Step {
+    Edge { index: u16, old: u32, new: u32 },
+    Notice(FieldNotice),
+}
+
+/// The type watch an edge's chat line is written in, by the edge's field: the aura watcher
+/// `0x604d00` over `UNIT_FIELD_AURA` and `AURAFLAGS` (fields 47-100), whose removals and adds log
+/// (`0x612320` → `0x62b480`, `0x6123f0`), and each other field's own: the applications watcher
+/// `0x604ea0` is 48 one-byte watches, one per byte of fields 113-124 (the loop at `0x60423b`), so
+/// each runs at its own field (`0x612450` → `0x62b800`), as do the health's `0x6046f0` and the
+/// loyalty byte's `0x604530` (→ `0x5ff860` → `0x62d440`).
+fn edge_place(block: &Notified, index: u16) -> Place {
+    use benilla_protocol::field::FIELD_UNIT_AURA;
+    const AURA_WATCH: u16 = 54;
+    if (FIELD_UNIT_AURA..FIELD_UNIT_AURA + AURA_WATCH).contains(&index) {
+        let fired = block
+            .fired(FIELD_UNIT_AURA, 0, 4 * AURA_WATCH)
+            .unwrap_or(index);
+        return (fired, FIELD_UNIT_AURA, List::Type);
+    }
+    (index, index, List::Type)
+}
+
+/// A block's edges and notices in the one ascending walk the notify pass makes (`0x465330`): by
+/// field, the type watchers ahead of the object's own, an edge ahead of a notice at one place.
+/// Each takes its stamp as it is written in this order, so a line a later system words off an
+/// edge fires among the notices where its watcher ran.
+pub(crate) fn in_watch_order(block: &Notified, notices: Vec<(Place, FieldNotice)>) -> Vec<Step> {
+    let mut steps: Vec<(Place, Step)> = block
+        .edges()
+        .map(|(index, old, new)| (edge_place(block, index), Step::Edge { index, old, new }))
+        .collect();
+    steps.extend(notices.into_iter().map(|(at, n)| (at, Step::Notice(n))));
+    steps.sort_by_key(|&(at, _)| at);
+    steps.into_iter().map(|(_, step)| step).collect()
+}
+
 /// The notices of one block's notify on `guid`, created as `kind`: `fields` is the store now.
+#[cfg(test)]
 pub(crate) fn values(
     around: &Around,
     guid: u64,
@@ -447,6 +562,20 @@ pub(crate) fn values(
     fields: &ObjectFields,
     block: &Notified,
 ) -> Vec<FieldNotice> {
+    placed_values(around, guid, kind, fields, block)
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect()
+}
+
+/// [`values`], each with its watch's place, for [`in_watch_order`].
+pub(crate) fn placed_values(
+    around: &Around,
+    guid: u64,
+    kind: ObjectType,
+    fields: &ObjectFields,
+    block: &Notified,
+) -> Vec<(Place, FieldNotice)> {
     if block.is_quiet() || !matches!(kind, ObjectType::Unit | ObjectType::Player) {
         return Vec::new();
     }
@@ -646,6 +775,12 @@ pub(crate) fn values(
         if let Some(at) = at(UNIT_SECTION, CHARMED_BY, List::Object) {
             pass.reaction(at, guid, fields, around);
         }
+        if let Some(at) = at(UNIT_SECTION, SHAPESHIFT_FORM, List::Object) {
+            pass.push(at, FieldNotice::Shapeshift);
+        }
+        if let Some(at) = at(PLAYER_SECTION, COMBO_POINTS, List::Object) {
+            pass.push(at, FieldNotice::ComboPoints);
+        }
         // Registered at world entry (`0x4de430`), after the bridge's watch on the same range.
         if let Some(at) = at(PLAYER_SECTION, QUEST_LOG_WATCH, List::Object) {
             pass.push(at, FieldNotice::QuestLog);
@@ -695,7 +830,7 @@ pub(crate) fn values(
             }
         }
     }
-    pass.into_notices()
+    pass.into_placed()
 }
 
 /// `0x5de180`'s gate ahead of its `0x5ed990` call: the new shown value, the value plus the
@@ -1591,6 +1726,75 @@ mod tests {
         assert_eq!(
             block_around(&mut me, &around, ME, &[(12, 0x55)]),
             [signal(ME, 29), signal(MOB, 29)]
+        );
+    }
+
+    /// The form watch `0x5de010` is one byte, `UNIT_FIELD_BYTES_1` byte 2, and the combo watch
+    /// `0x5ddff0` one byte, `PLAYER_FIELD_BYTES` byte 1, both on the active player's own object
+    /// (`0x5dda18`, `0x5dd9d0`): another byte of either dword, or another player, runs neither.
+    #[test]
+    fn the_form_and_combo_watches_are_one_byte_each_on_the_active_player() {
+        let (bytes_1, bytes) = (UNIT_SECTION + 0x210 / 4, pf(0x1028));
+        let ours = |notices: Vec<FieldNotice>| -> Vec<FieldNotice> {
+            notices
+                .into_iter()
+                .filter(|n| matches!(n, FieldNotice::Shapeshift | FieldNotice::ComboPoints))
+                .collect()
+        };
+        let mut me = player();
+        let mut other = player();
+        assert!(ours(block(&mut me, Some(ME), ME, &[(bytes_1, 1), (bytes, 1)])).is_empty());
+        assert_eq!(
+            ours(block(
+                &mut me,
+                Some(ME),
+                ME,
+                &[(bytes_1, 0x0001_0001), (bytes, 0x0201)]
+            )),
+            [FieldNotice::Shapeshift, FieldNotice::ComboPoints]
+        );
+        let theirs = block(
+            &mut other,
+            Some(ME),
+            0x08,
+            &[(bytes_1, 1 << 16), (bytes, 1 << 8)],
+        );
+        assert!(ours(theirs).is_empty());
+    }
+
+    /// The applications watcher `0x604ea0` is registered once per byte of fields 113-124, each a
+    /// one-byte watch (`0x60423b`-`0x604256`), so an edge on field 115 runs at 115: after the
+    /// bridge's `UNIT_AURA`-applications watch (id 107, 0x30 bytes from 113), which runs at the
+    /// first field of its range the block visits, and after the edge on 113.
+    #[test]
+    fn each_applications_byte_is_its_own_watch_at_its_own_field() {
+        let mut mob = ObjectFields::from_pairs(&[]).into_created(ObjectType::Unit);
+        let delta = ObjectFields::from_pairs(&[(113, 2), (115, 3)]);
+        let sent: Vec<u16> = delta.raw_fields().map(|(i, _)| i).collect();
+        let mut moved = Vec::new();
+        mob.merge_diff(delta, |i, o, n| moved.push((i, o, n)));
+        let around = Around {
+            me: Some(ME),
+            creature_lookup: &|_| false,
+            others: &Vec::new,
+            pet_bar: 0,
+        };
+        let block = Notified::new(Sent::Fields(&sent), &moved);
+        let placed = placed_values(&around, MOB, ObjectType::Unit, &mob, &block);
+        let steps: Vec<String> = in_watch_order(&block, placed)
+            .into_iter()
+            .map(|s| match s {
+                Step::Edge { index, .. } => format!("edge {index}"),
+                Step::Notice(n) => format!("{n:?}"),
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                "edge 113".to_string(),
+                format!("{:?}", bridge(MOB, 107)),
+                "edge 115".to_string(),
+            ]
         );
     }
 

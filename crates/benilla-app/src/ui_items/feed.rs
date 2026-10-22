@@ -841,7 +841,7 @@ fn resolve_slot(
     // NULL), so `GetContainerItemInfo` pushes nothing (`0x4f96dc`, `0x4f96e0`, `0x4f9810`) and
     // the slot reads empty.
     let fields = objects.object(guid)?;
-    let (entry, count, durability, readable, creator, flags, already_bound, roll, enchant_lines) = (
+    let (entry, count, durability, readable, creator, flags, already_bound, enchant_lines) = (
         fields.object_entry().unwrap_or(0),
         fields.item_stack_count().unwrap_or(1),
         // Max 0 is indestructible: no line.
@@ -862,8 +862,6 @@ fn resolve_slot(
         fields.item_flags().unwrap_or(0),
         // `0x5da2c0`: soulbound, or carrying a binding enchant, off the raw descriptor.
         crate::items::already_bound(fields, rolls.enchants),
-        // The roll behind the name's suffix; its enchants are already in slots 2..6.
-        fields.item_random_properties_id(),
         // All seven enchant slots with charges and countdowns: our own items stream whole,
         // where others' carry two slots.
         crate::items::enchant_lines(
@@ -945,16 +943,9 @@ fn resolve_slot(
         quality: Some(t.quality),
         inventory_type: t.inventory_type,
         item_id: entry,
-        // The link carries the roll in `randomPropertyId` and in the suffixed name (`0x5d8b00`);
-        // the tooltip reads its name back off it.
-        link: Some(crate::ui_items::item_link_full(
-            entry,
-            0,
-            roll,
-            0,
-            &rolls.name(&t.name, roll),
-            t.quality,
-        )),
+        // `GetContainerItemLink` links the object (`0x4f997f` → `0x52ae00`); the tooltip reads its
+        // name back off it.
+        link: Some(crate::ui_items::object_link(fields, &t, rolls)),
         guid,
         readable,
         creator,
@@ -2848,6 +2839,10 @@ mod tests {
 #[cfg(test)]
 #[path = "feed_cooldown_tests.rs"]
 mod cooldown_tests;
+
+#[cfg(test)]
+#[path = "feed_link_tests.rs"]
+mod link_tests;
 
 #[cfg(test)]
 mod ask_tests {

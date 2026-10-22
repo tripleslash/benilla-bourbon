@@ -262,10 +262,12 @@ pub(in crate::ui_party) mod tests {
         let mut app = App::new();
         app.add_message::<FieldChanged>()
             .init_resource::<GroupState>()
+            .init_resource::<crate::ui_party::calls::GroupEdits>()
             .init_resource::<GuidIndex>()
             .init_resource::<NameCache>()
             .init_resource::<crate::ui_guild::GuildState>()
-            .init_resource::<crate::ui_chat::ChatLog>();
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>();
         let (tx, rx) = crossbeam_channel::unbounded();
         // Kept alive for the run: a dropped receiver would fail the name queries.
         std::mem::forget(rx);
@@ -287,7 +289,17 @@ pub(in crate::ui_party) mod tests {
             )
             .unwrap();
         app.insert_non_send(script);
-        app.add_systems(Update, super::super::feed::feed_party);
+        // The feed, then the party lane, as the lanes' drain follows the feeds.
+        app.init_resource::<crate::ui_party::PartyLane>()
+            .add_systems(
+                Update,
+                (
+                    super::super::feed::feed_party,
+                    crate::ui_party::fire_party_lane
+                        .after(super::super::feed::feed_party)
+                        .before(super::super::feed::drain_party),
+                ),
+            );
         app
     }
 

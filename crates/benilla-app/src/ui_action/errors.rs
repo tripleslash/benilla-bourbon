@@ -114,6 +114,9 @@ pub(crate) enum FillArg {
     /// empty string when missing): for a line queued while the VM in hand is not the loaded
     /// interface's, which defines none of the strings the reference reads at its own display.
     Global(String),
+    /// `GetUnitName`'s miss: the `UNKNOWNOBJECT` global (`0x60932e`, read when the line is
+    /// shown), or `Unknown Being` (`0x860fa4`) when it is missing or empty (`0x609333`-`0x60933c`).
+    UnknownObject,
 }
 
 /// One `DisplayError` (`0x496720`) message, whatever its surface: a GlobalStrings key and the
@@ -155,7 +158,7 @@ impl UiError {
     pub(crate) fn arg_s(&self) -> Option<&str> {
         self.args.iter().find_map(|a| match a {
             FillArg::S(s) => Some(s.as_str()),
-            FillArg::D(_) | FillArg::Global(_) => None,
+            FillArg::D(_) | FillArg::Global(_) | FillArg::UnknownObject => None,
         })
     }
 
@@ -164,7 +167,7 @@ impl UiError {
     pub(crate) fn arg_d(&self) -> Option<i64> {
         self.args.iter().find_map(|a| match a {
             FillArg::D(d) => Some(*d),
-            FillArg::S(_) | FillArg::Global(_) => None,
+            FillArg::S(_) | FillArg::Global(_) | FillArg::UnknownObject => None,
         })
     }
 }
@@ -255,6 +258,9 @@ pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -
         .iter()
         .map(|a| match a {
             FillArg::Global(key) => get(key).unwrap_or_default(),
+            FillArg::UnknownObject => get("UNKNOWNOBJECT")
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "Unknown Being".to_string()),
             FillArg::S(_) | FillArg::D(_) => String::new(),
         })
         .collect();
@@ -265,7 +271,7 @@ pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -
         .map(|(a, word)| match a {
             FillArg::S(s) => benilla_ui::strings::Arg::S(s),
             FillArg::D(d) => benilla_ui::strings::Arg::D(*d),
-            FillArg::Global(_) => benilla_ui::strings::Arg::S(word),
+            FillArg::Global(_) | FillArg::UnknownObject => benilla_ui::strings::Arg::S(word),
         })
         .collect();
     Some(benilla_ui::strings::fill(
@@ -372,6 +378,27 @@ pub(crate) fn show_messages(
             script.with_input_events(input, |script| script.fire_event(event, args));
         }
     }
+}
+
+/// [`show_messages`] for one line shown inside the handler that adds it, as `DisplayError`
+/// (`0x496720`) shows it: a chat line's `CHAT_MSG_SYSTEM` fires now ([`ChatLog::show_now`],
+/// `0x49a870`), where [`show_messages`] queues it for the chat drain.
+pub(crate) fn show_now(script: &mut UiScript, sink: &mut MessageSink, who: &str, shown: Shown) {
+    if !matches!(shown.kind, MsgKind::Chat) || shown.text.is_empty() {
+        return show_messages(script, sink, who, [shown]);
+    }
+    let Shown {
+        record,
+        text,
+        input,
+        ..
+    } = shown;
+    debug!("{who}: message (Chat) {text:?}");
+    if let Some(record) = record {
+        sink.sounds.push(record);
+    }
+    let event = ChatEvent::text_only(ChatEventKind::System, text);
+    script.with_input_events(input, |script| sink.chat.show_now(script, &event));
 }
 
 impl Shown {
@@ -690,6 +717,24 @@ mod ui_error_tests {
         );
         assert_eq!(t(&UiError::key("EMPTY")).as_deref(), Some(""));
         assert_eq!(t(&UiError::key("ABSENT")).as_deref(), Some(""));
+    }
+
+    /// `GetUnitName`'s miss reads the `UNKNOWNOBJECT` global (`0x60932e`) and falls back to
+    /// `Unknown Being` (`0x860fa4`) when it is missing or empty (`0x609333`-`0x60933c`).
+    #[test]
+    fn an_unknown_object_reads_its_global_or_unknown_being() {
+        let died = UiError::args("ERR_PLAYER_DIED_S", vec![FillArg::UnknownObject]);
+        let with = |unknown: Option<&str>| {
+            let get = |key: &str| match key {
+                "ERR_PLAYER_DIED_S" => Some("%s has died.".to_string()),
+                "UNKNOWNOBJECT" => unknown.map(str::to_string),
+                _ => None,
+            };
+            ui_error_text(&died, &get)
+        };
+        assert_eq!(with(Some("Unknown")).as_deref(), Some("Unknown has died."));
+        assert_eq!(with(Some("")).as_deref(), Some("Unknown Being has died."));
+        assert_eq!(with(None).as_deref(), Some("Unknown Being has died."));
     }
 
     /// The lock-refusal keys (the use sender `0x5f33e0`) against the shipped file.

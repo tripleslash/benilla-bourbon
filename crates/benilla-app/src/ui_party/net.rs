@@ -42,9 +42,10 @@ pub(super) fn register(app: &mut App) {
         .add_message::<DeselectGuid>();
 }
 
-fn on_invite(In(ev): In<SessionEvent>, mut group: ResMut<GroupState>, errors: Res<UiErrorKeys>) {
+/// The popup's signal; the feed shows its line after the event ([`GroupState::apply_invited`]).
+fn on_invite(In(ev): In<SessionEvent>, mut group: ResMut<GroupState>) {
     if let SessionEvent::GroupInvite { inviter } = ev {
-        invited(&mut group, &errors, &inviter);
+        group.apply_invited(&inviter);
     }
 }
 
@@ -93,7 +94,6 @@ fn on_destroyed(
 fn on_list(
     In(ev): In<SessionEvent>,
     mut group: ResMut<GroupState>,
-    errors: Res<UiErrorKeys>,
     sounds: Res<MessageSounds>,
     mut quest: ResMut<QuestGiver>,
     self_guid: Res<SelfGuid>,
@@ -121,7 +121,7 @@ fn on_list(
             }
         }
         list(
-            &mut group, &errors, &sounds, &mut quest, group_type, own_flags, members, leader, loot,
+            &mut group, &sounds, &mut quest, group_type, own_flags, members, leader, loot,
             &self_guid, &names, &index, &commands,
         );
         teardown.run(&mut group);
@@ -195,7 +195,7 @@ impl RosterTeardown<'_, '_> {
 fn on_member_stats(
     In(ev): In<SessionEvent>,
     mut group: ResMut<GroupState>,
-    mut notices: MessageWriter<crate::field_watch::FieldNotice>,
+    mut notices: ResMut<crate::field_watch::NoticeLane>,
 ) {
     if let SessionEvent::PartyMemberStats { guid, full, info } = ev {
         let old = group.stats.get(&guid).cloned().unwrap_or_default();
@@ -241,17 +241,13 @@ fn on_raid_instance_info(In(ev): In<SessionEvent>, mut group: ResMut<GroupState>
 /// ([`GroupState::apply_player_name`]). The name cache's handler, registered ahead of every other
 /// (`names::net::register`), has filed the answer by then, and a found answer's notices read that
 /// record with no callback (`0x4bad6b`).
-fn on_player_name(
-    In(ev): In<SessionEvent>,
-    mut group: ResMut<GroupState>,
-    errors: Res<UiErrorKeys>,
-    names: Res<NameCache>,
-) {
+fn on_player_name(In(ev): In<SessionEvent>, mut group: ResMut<GroupState>, names: Res<NameCache>) {
     if let SessionEvent::PlayerName { guid, name, .. } = ev {
         let filed = (!name.is_empty())
             .then(|| names.resolve_player(guid, Ask::Read))
             .flatten();
-        push_group_lines(&errors, group.apply_player_name(guid, filed));
+        // Its lines fire from the party lane, each in its place among its signals.
+        group.apply_player_name(guid, filed);
     }
 }
 
@@ -269,10 +265,6 @@ fn push_group_lines(errors: &UiErrorKeys, lines: Vec<UiError>) {
 fn ready_check_request(group: &mut GroupState, errors: &UiErrorKeys, self_guid: &SelfGuid) {
     let we_lead = self_guid.0 == Some(group.leader);
     push_group_lines(errors, group.apply_ready_check_request(we_lead));
-}
-
-fn invited(group: &mut GroupState, errors: &UiErrorKeys, inviter: &str) {
-    push_group_lines(errors, group.apply_invited(inviter));
 }
 
 fn declined(group: &mut GroupState, errors: &UiErrorKeys, name: &str) {
@@ -310,7 +302,6 @@ fn leader_changed(
 /// the answer ([`on_player_name`]).
 fn list(
     group: &mut GroupState,
-    errors: &UiErrorKeys,
     sounds: &MessageSounds,
     quest: &mut QuestGiver,
     group_type: u8,
@@ -348,7 +339,7 @@ fn list(
         &lookup,
         &cached_name,
     );
-    push_group_lines(errors, shown.lines);
+    // The lines fire from the party lane, each in its place among the list's signals.
     if shown.invite_accept {
         sounds.push_cue(INVITE_ACCEPT_SOUND);
     }
@@ -492,17 +483,12 @@ mod tests {
     fn a_refused_member_is_asked_again_by_the_next_list() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
-        let (mut group, errors, mut quest) = (
-            GroupState::default(),
-            UiErrorKeys::default(),
-            QuestGiver::default(),
-        );
+        let (mut group, mut quest) = (GroupState::default(), QuestGiver::default());
         let mut names = NameCache::default();
         let far = 8 | (u64::from(guid::HIGH_PLAYER) << 48);
         let mut send = |names: &NameCache| {
             list(
                 &mut group,
-                &errors,
                 &MessageSounds::default(),
                 &mut quest,
                 0,
@@ -532,11 +518,7 @@ mod tests {
     fn the_roster_warms_every_member_into_the_name_cache_once() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
-        let (mut group, errors, mut quest) = (
-            GroupState::default(),
-            UiErrorKeys::default(),
-            QuestGiver::default(),
-        );
+        let (mut group, mut quest) = (GroupState::default(), QuestGiver::default());
         let mut names = NameCache::default();
         // A player guid, `counter | (high << 48)`, the shape `NameCache::resolve` routes on.
         let player_guid = |counter: u64| counter | (u64::from(guid::HIGH_PLAYER) << 48);
@@ -544,7 +526,6 @@ mod tests {
 
         list(
             &mut group,
-            &errors,
             &MessageSounds::default(),
             &mut quest,
             0,
@@ -575,7 +556,6 @@ mod tests {
         names.insert_player(leader, "Aldwyn".into(), Some((1, 4, 1)));
         list(
             &mut group,
-            &errors,
             &MessageSounds::default(),
             &mut quest,
             0,
@@ -602,18 +582,13 @@ mod tests {
     fn a_raid_list_signals_the_roster_only_once_every_name_is_held() {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
-        let (mut group, errors, mut quest) = (
-            GroupState::default(),
-            UiErrorKeys::default(),
-            QuestGiver::default(),
-        );
+        let (mut group, mut quest) = (GroupState::default(), QuestGiver::default());
         let mut names = NameCache::default();
         let player_guid = |counter: u64| counter | (u64::from(guid::HIGH_PLAYER) << 48);
         let (me, a, b) = (player_guid(1), player_guid(7), player_guid(8));
         let mut raid = |group: &mut GroupState, names: &NameCache, group_type: u8| {
             list(
                 group,
-                &errors,
                 &MessageSounds::default(),
                 &mut quest,
                 group_type,
@@ -667,9 +642,8 @@ mod tests {
     fn a_join_queues_the_invite_accept_chime_and_a_resync_does_not() {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
-        let (mut group, errors, sounds, mut quest) = (
+        let (mut group, sounds, mut quest) = (
             GroupState::default(),
-            UiErrorKeys::default(),
             MessageSounds::default(),
             QuestGiver::default(),
         );
@@ -677,7 +651,6 @@ mod tests {
         let mut send = |sounds: &MessageSounds, members: Vec<GroupMemberEntry>| {
             list(
                 &mut group,
-                &errors,
                 sounds,
                 &mut quest,
                 0,
@@ -982,7 +955,12 @@ mod tests {
                 },
             )
             .expect("the group-list handler");
-        let signals = |app: &mut App| app.world_mut().resource_mut::<GroupState>().signals.take();
+        let signals = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<GroupState>()
+                .signals
+                .take_events()
+        };
         assert_eq!(
             signals(&mut app),
             [GroupSignal::MembersChanged, GroupSignal::LeaderChanged],
@@ -1097,8 +1075,18 @@ mod tests {
         );
     }
 
+    /// The lines the handlers showed, in order, off the party lane.
     fn shown(app: &mut App) -> Vec<UiError> {
-        app.world_mut().resource::<UiErrorKeys>().take()
+        app.world_mut()
+            .resource_mut::<GroupState>()
+            .signals
+            .take()
+            .into_iter()
+            .filter_map(|s| match s {
+                GroupSignal::Line(line) => Some(line),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A raid list onto a held roster looks each arrival up with the callback `0x4bacd0`
@@ -1250,11 +1238,7 @@ mod tests {
     fn a_roster_new_member_is_seated_at_one_one_and_asked_for_only_when_unseen() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
-        let (mut group, errors, mut quest) = (
-            GroupState::default(),
-            UiErrorKeys::default(),
-            QuestGiver::default(),
-        );
+        let (mut group, mut quest) = (GroupState::default(), QuestGiver::default());
         let names = NameCache::default();
         let (near, far) = (0x11u64, 0x22u64);
 
@@ -1267,7 +1251,6 @@ mod tests {
         let mut send = |group: &mut GroupState, members: Vec<GroupMemberEntry>| {
             list(
                 group,
-                &errors,
                 &MessageSounds::default(),
                 &mut quest,
                 0,
@@ -1325,11 +1308,7 @@ mod tests {
     fn a_resent_list_moves_a_known_members_online_bit_and_keeps_its_record() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let net = NetCommands(tx);
-        let (mut group, errors, mut quest) = (
-            GroupState::default(),
-            UiErrorKeys::default(),
-            QuestGiver::default(),
-        );
+        let (mut group, mut quest) = (GroupState::default(), QuestGiver::default());
         let names = NameCache::default();
         let far = 0x22u64;
         let mut send = |group: &mut GroupState, status: u8| {
@@ -1339,7 +1318,6 @@ mod tests {
             };
             list(
                 group,
-                &errors,
                 &MessageSounds::default(),
                 &mut quest,
                 0,
@@ -1478,7 +1456,7 @@ mod tests {
         const MATE: u64 = 0x2001;
         let mut app = App::new();
         app.init_resource::<GroupState>()
-            .add_message::<FieldNotice>();
+            .init_resource::<crate::field_watch::NoticeLane>();
         let mut packet = |full: bool, info: PartyMemberStatsInfo| -> Vec<FieldNotice> {
             app.world_mut()
                 .run_system_once_with(
@@ -1491,7 +1469,7 @@ mod tests {
                 )
                 .unwrap();
             app.world_mut()
-                .resource_mut::<Messages<FieldNotice>>()
+                .resource_mut::<crate::field_watch::NoticeLane>()
                 .drain()
                 .collect()
         };
@@ -1583,12 +1561,21 @@ mod tests {
                     },
                 )
                 .expect("the group-list handler");
-            app.world().resource::<UiErrorKeys>().take()
+            app.world_mut()
+                .resource_mut::<GroupState>()
+                .signals
+                .take()
+                .into_iter()
+                .filter_map(|s| match s {
+                    GroupSignal::Line(line) => Some(line),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
         };
         let lines = send(aldwyn);
         assert_eq!(lines.len(), 3, "{lines:?}");
 
-        // The interface comes up; the chat feed resolves the queued lines against it.
+        // The interface comes up; the party lane resolves the logged lines against it.
         let real = benilla_ui::script::UiScript::new().unwrap();
         real.run(
             r#"

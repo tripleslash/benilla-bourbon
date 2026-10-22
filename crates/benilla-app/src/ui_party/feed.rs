@@ -1,6 +1,6 @@
 //! The party feed and drain: push the roster and the `party1..4` and `raid1..40` unit snapshots
-//! into the VM, fire the party events on their edges, and turn the Lua [`PartyRequest`] intents
-//! into `CMSG_*` sends. The state and its lines live in the parent module.
+//! into the VM, fire the party events on their edges, and answer what the party calls left
+//! ([`super::calls`]). The state and its lines live in the parent module.
 
 use benilla_protocol::messages::{
     member_status, GroupLootInfo, GroupMemberEntry, ObjectType, PartyMemberStatsInfo,
@@ -26,9 +26,6 @@ use crate::query_cache::Ask;
 /// What the feed last pushed: the values its event edges fire on.
 #[derive(Default)]
 pub(crate) struct FedParty {
-    /// How far into [`GroupState::signals`] the feed has fired.
-    signals: u64,
-    invite: Option<String>,
     units: [Option<UnitState>; 4],
     /// Each party slot's (member guid, object streamed) pair, the `PARTY_MEMBER_ENABLE`/`DISABLE`
     /// edge; with the guid in it a new occupant is a roster edge, not an activation.
@@ -61,14 +58,13 @@ fn saved_instances_moved(saved: &[SavedInstanceInfo], answers: u32, fed: &FedPar
     saved != fed.saved || answers != fed.saved_answers
 }
 
-/// What a fresh VM is told in place of the signals it never heard: one of each event the state it
-/// finds still carries, in the order a list signals them. The reference has no such pass: its
-/// world entry (`0x4908c0`) signals the roster only through the raid leg's fill of a zero row
-/// (`0x4ba140`, signalling at `0x4ba1a2`), and stock `RaidFrame.lua:32` reads the raid on
-/// `PLAYER_LOGIN` instead. It is benilla's seam: the in-world VM is built once the loading cover
-/// is up (`ui_script::lifecycle`), so a list can land before any VM hears it. A reload's VM is
-/// told the same, since it loads the stock frames before the feed pushes the roster and its party
-/// frames show a member only on the event.
+/// What a world entry's fresh VM is told in place of the signals it never heard: one of each
+/// event the state it finds still carries, in the order a list signals them. The reference has no
+/// such pass: its world entry (`0x4908c0`) signals the roster only through the raid leg's fill of
+/// a zero row (`0x4ba140`, signalling at `0x4ba1a2`), and stock `RaidFrame.lua:32` reads the raid
+/// on `PLAYER_LOGIN` instead. It is benilla's seam: the in-world VM is built once the loading
+/// cover is up (`ui_script::lifecycle`), so a list can land before any VM hears it. A reload's VM
+/// is seeded before its load instead and told none ([`seed_reloaded_vm`]).
 fn catch_up(group: &GroupState) -> Vec<GroupSignal> {
     [
         (GroupSignal::MembersChanged, group.listed),
@@ -80,6 +76,166 @@ fn catch_up(group: &GroupState) -> Vec<GroupSignal> {
     .into_iter()
     .filter_map(|(signal, owed)| owed.then_some(signal))
     .collect()
+}
+
+/// The party lane's place in [`GroupState::signals`]: the sequence number of the first entry it
+/// has not fired.
+#[derive(Resource, Default)]
+pub(crate) struct PartyLane {
+    fired: u64,
+}
+
+/// The party lane's head ([`crate::lanes`]): the stamp of the first entry it has not fired.
+pub(super) fn peek_group_signals(world: &World) -> Option<crate::lanes::Stamp> {
+    let log = &world.get_resource::<GroupState>()?.signals;
+    let fired = world.get_resource::<PartyLane>()?.fired;
+    log.at(fired.max(log.first())).map(|(stamp, _)| *stamp)
+}
+
+/// The party lane's `fire_until`: each group event `until` admits, signalled with the host lent at
+/// its handler's place among the other lanes' items, after the roster and unit snapshots the
+/// feed pushed, which their handlers read. The lane stops after an event whose firing stamped
+/// anything, so what it pushed fires next.
+pub(super) fn fire_group_signals(
+    In(until): In<crate::lanes::Until>,
+    mut vm: crate::script_calls::VmWith<(Res<'static, GroupState>, ResMut<'static, PartyLane>)>,
+    mut sink: crate::ui_action::MessageSink,
+) {
+    loop {
+        let next = {
+            let (group, mut lane) = vm.own();
+            let seq = lane.fired.max(group.signals.first());
+            match group.signals.at(seq) {
+                Some((stamp, signal)) if until.admits(*stamp) => {
+                    lane.fired = seq + 1;
+                    Some((*stamp, signal.clone()))
+                }
+                _ => None,
+            }
+        };
+        let Some((stamp, signal)) = next else {
+            return;
+        };
+        let ((), moved) = crate::lanes::firing(stamp, || {
+            vm.run(|script| {
+                if let Some(script) = script {
+                    fire_signal(script, &mut sink, signal);
+                }
+            })
+        });
+        if moved {
+            return;
+        }
+    }
+}
+
+/// The group events waiting, fired alone, for a test that drives them without the other lanes.
+#[cfg(test)]
+pub(crate) fn fire_party_lane(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    let until = crate::lanes::Until::all();
+    while peek_group_signals(world).is_some_and(|s| until.admits(s)) {
+        world
+            .run_system_once_with(fire_group_signals, until)
+            .unwrap();
+    }
+}
+
+/// One group event as its handler signals it.
+fn fire_signal(
+    script: &mut UiScript,
+    sink: &mut crate::ui_action::MessageSink,
+    signal: GroupSignal,
+) {
+    let (signalled, args) = match signal {
+        GroupSignal::MembersChanged => ("PARTY_MEMBERS_CHANGED", vec![]),
+        GroupSignal::LeaderChanged => ("PARTY_LEADER_CHANGED", vec![]),
+        GroupSignal::LootMethodChanged => ("PARTY_LOOT_METHOD_CHANGED", vec![]),
+        GroupSignal::RaidRosterUpdate => ("RAID_ROSTER_UPDATE", vec![]),
+        GroupSignal::RaidTargetUpdate => ("RAID_TARGET_UPDATE", vec![]),
+        // `0x5e6730` signals the event (`0x5e6747`), then shows `ERR_INVITED_TO_GROUP_S` (message
+        // `0x3c`, `0x5e6752`), so the line follows the popup's handlers.
+        GroupSignal::InviteRequest(inviter) => {
+            script.fire_event(
+                "PARTY_INVITE_REQUEST",
+                vec![ScriptValue::Str(inviter.clone())],
+            );
+            if let Some(line) =
+                crate::ui_action::keyed_line_s(script, "ERR_INVITED_TO_GROUP_S", &[&inviter])
+            {
+                crate::ui_action::show_now(script, sink, "ui_party", line);
+            }
+            return;
+        }
+        GroupSignal::Line(line) => {
+            let shown = crate::ui_action::ui_error_text(&line, &|key| {
+                script.lua().globals().get::<String>(key).ok()
+            })
+            .map(|text| crate::ui_action::Shown::keyed(line.key, text));
+            if let Some(shown) = shown {
+                crate::ui_action::show_now(script, sink, "ui_party", shown);
+            }
+            return;
+        }
+    };
+    script.fire_event(signalled, args);
+}
+
+/// The VM a `/reload` built and [`seed_reloaded_vm`] seeded, by its session, and how far into
+/// [`GroupState::signals`] the seed reached: the feed tells that VM only what was signalled after.
+#[derive(Resource, Default)]
+pub(crate) struct ReloadSeed(Option<(u64, u64)>);
+
+/// Seed a reload's VM with the group before the stock frames load into it: the roster and the
+/// party and raid unit tokens, as the feed pushes them, with no event. The reference's reload
+/// builds its frames over the engine's group, which they read as they load
+/// (`PartyMemberFrame.lua:20-24`, `RaidFrame.lua:32`), and signals none of the group events: their
+/// sites are the group packets' handlers and the name callback, and the world entry's raid fill
+/// signals only for an empty row (`0x4ba140`, `0x4ba15c`), which the first entry filled. So the
+/// feed tells this VM no [`catch_up`].
+pub(crate) fn seed_reloaded_vm(world: &mut World, script: &mut UiScript) {
+    world.init_resource::<ReloadSeed>();
+    let seeded = world.run_system_cached_with(
+        |bevy::ecs::system::InMut(script): bevy::ecs::system::InMut<UiScript>,
+         view: GroupView,
+         mut seed: ResMut<ReloadSeed>| {
+            let mut fed = FedParty::default();
+            push_group(&view, script, &mut fed, &gate::Gate::new(true), true);
+            seed.0 = Some((script.session(), view.group.signals.end()));
+        },
+        script,
+    );
+    if let Err(e) = seeded {
+        warn!("ui_party: the reload's VM is not seeded with the group: {e}");
+    }
+}
+
+/// The ready check a dying VM held ([`fold_dying_vm_ready_check`]), for the next VM's seed
+/// ([`seed_vm_ready_check`]).
+#[derive(Resource, Default)]
+pub(crate) struct ReadyCheckCarry(benilla_ui::script::ReadyCheckState);
+
+/// Fold the ready check out of the dying VM, with the item locks: its deadline (`[0xb713f4]`) and
+/// pending flags are engine state, which no reload path writes.
+pub(crate) fn fold_dying_vm_ready_check(world: &mut World) {
+    let Some(state) = world
+        .get_non_send_mut::<UiScript>()
+        .map(|mut s| s.take_ready_check())
+    else {
+        return;
+    };
+    world.insert_resource(ReadyCheckCarry(state));
+}
+
+/// Seat a new in-game VM's ready check before its load runs: a `/reload`'s is the dying VM's, a
+/// world entry's none, as `InitializeGame`'s group init zeroes it (`0x4ba130`, from `0x48f603`).
+pub(crate) fn seed_vm_ready_check(world: &mut World, script: &mut UiScript, reload: bool) {
+    let carried = world
+        .remove_resource::<ReadyCheckCarry>()
+        .unwrap_or_default();
+    if reload {
+        script.seed_ready_check(carried.0);
+    }
 }
 
 /// The `raid1..raid40` unit tokens, one per `MAX_RAID_MEMBERS` (40, `RaidFrame.lua:2`).
@@ -109,31 +265,53 @@ pub(crate) const GROUPTYPE_RAID: u8 = 1;
 /// The subgroup bits (0-2) of a member's flags byte; `0x80` is the assistant bit.
 pub(crate) const GROUP_MEMBER_SUBGROUP: u8 = 0x07;
 
+/// What the feed reads to push the group into a VM ([`push_group`]).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct GroupView<'w, 's> {
+    // `ChrClasses.dbc` field 16, `UnitHasRelicSlot`'s input, and the form table the creature type
+    // reads.
+    tables: crate::ui_unit::SnapshotTables<'w>,
+    group: Res<'w, GroupState>,
+    index: Res<'w, GuidIndex>,
+    stores: Query<'w, 's, &'static ObjectStore>,
+    self_q: Query<'w, 's, (Entity, &'static Guid, &'static ObjectStore), With<SelfPlayer>>,
+    factions: Option<Res<'w, crate::target::Factions>>,
+    names: pets::Names<'w>,
+    areas: Option<Res<'w, crate::area::AreaTableRes>>,
+    // The area under us, through the accessor `crate::area` uses: `terrain_stream::CurrentArea`
+    // would cross the world-API wall (`tests/world_api_wall.rs`).
+    here: benilla_world::world_point::WorldPoint<'w, 's>,
+    map_catalog: Option<Res<'w, benilla_assets::MapCatalogRes>>,
+    // The guild cache, every held member's guild leg.
+    guild: Res<'w, crate::ui_guild::GuildState>,
+}
+
 /// Push the roster and the party unit snapshots into the VM and fire the party events on their
 /// edges. A member's unit state is their live descriptor when streamed, else their roster record.
 pub(crate) fn feed_party(
-    // `ChrClasses.dbc` field 16, `UnitHasRelicSlot`'s input, and the form table the creature type
-    // reads.
-    tables: crate::ui_unit::SnapshotTables,
+    view: GroupView,
     mut hosted_vm: crate::script_calls::HostedVm,
-    group: Res<GroupState>,
-    index: Res<GuidIndex>,
-    stores: Query<&ObjectStore>,
     changed_stores: Query<(), Changed<ObjectStore>>,
     mut removed_stores: RemovedComponents<ObjectStore>,
-    self_q: Query<(Entity, &Guid, &ObjectStore), With<SelfPlayer>>,
-    factions: Option<Res<crate::target::Factions>>,
-    names: pets::Names,
-    areas: Option<Res<crate::area::AreaTableRes>>,
-    // The area under us, through the accessor `crate::area` uses: `terrain_stream::CurrentArea`
-    // would cross the world-API wall (`tests/world_api_wall.rs`).
-    here: benilla_world::world_point::WorldPoint,
-    map_catalog: Option<Res<benilla_assets::MapCatalogRes>>,
     mut fed: Local<crate::ui_script::VmMemo<FedParty>>,
     chat: Res<crate::ui_chat::ChatLog>,
-    // The guild cache, every held member's guild leg.
-    guild: Res<crate::ui_guild::GuildState>,
+    seeded: Option<Res<ReloadSeed>>,
+    mut sink: crate::ui_action::MessageSink,
+    mut lane: ResMut<PartyLane>,
 ) {
+    let GroupView {
+        tables,
+        group,
+        index,
+        stores,
+        self_q,
+        factions,
+        names,
+        areas,
+        here,
+        map_catalog,
+        guild,
+    } = &view;
     hosted_vm.run(|script| {
         let Some(script) = script else {
             return;
@@ -147,8 +325,7 @@ pub(crate) fn feed_party(
                 line,
             ));
         }
-        let chr = tables.unit_names();
-        let types = tables.types(&names);
+        let types = tables.types(names);
         // The gate also opens on a despawn, which `Changed` misses. Solo, it almost always stays
         // shut.
         let names_moved = fed.names_generation.moved(names.generation());
@@ -157,9 +334,9 @@ pub(crate) fn feed_party(
         let group_changed = group.is_changed();
         let index_changed = index.is_changed();
         let look = pets::Lookup::new(
-            &index,
-            &stores,
-            &names,
+            index,
+            stores,
+            names,
             types,
             tables.catalog(),
             tables.study(),
@@ -178,7 +355,7 @@ pub(crate) fn feed_party(
             })
             || pets::store_changed(
                 &look,
-                &group,
+                group,
                 self_q.iter().next().map(|(_, g, store)| (g.0, store)),
                 &changed_stores,
             );
@@ -219,278 +396,63 @@ pub(crate) fn feed_party(
         if gate.skip() {
             return;
         }
-        let self_pair = self_q.iter().next();
-        let self_guid = self_pair.map(|(_, g, _)| g.0);
-        // The party's PvP faction group is our own: a 1.12 party is one faction, and an unstreamed
-        // member has no descriptor to read one from.
-        let own_group = self_pair
-            .and_then(|(_, _, store)| crate::ui_unit::faction_group(store, factions.as_deref()));
-
-        let slots: Vec<&GroupMemberEntry> = group.party_slots().collect();
-
-        // The master looter as a party index, 0 for us. It covers our own subgroup's slots only,
-        // as the leader index does; `GetRaidRosterInfo` carries every subgroup.
-        let members: Vec<PartyMemberInfo> = slots
-            .iter()
-            .map(|m| PartyMemberInfo {
-                name: m.name.clone(),
-                guid: m.guid,
-            })
-            .collect();
-        // `GetLootMethod` and `GetLootThreshold` read the stored cells, with no group test.
-        let loot = group.loot_cells();
-        // Methods 0 to 4 through the table `0x4e9280`, `ERROR!` above (`0x4e91ef`).
-        let loot_method = match loot.method {
-            0 => "freeforall",
-            1 => "roundrobin",
-            2 => "master",
-            3 => "group",
-            4 => "needbeforegreed",
-            _ => "ERROR!",
-        };
-        // `GetLootMethod`'s second return, for any looter in the cell whatever the method
-        // (`0x4e9209`): 0 when it is us (`0x4e9215`), else its party slot + 1 over the four slots
-        // only (`0x4e9238`, `0x4e81a0`, even in a raid), else nil. A looter in another raid
-        // subgroup reads nil, never 0, which would light the crown on our portrait
-        // (`PlayerFrame.lua:48`).
-        let master_looter = (loot.master != 0)
-            .then(|| {
-                if Some(loot.master) == self_guid {
-                    Some(0)
-                } else {
-                    slots
-                        .iter()
-                        .position(|m| m.guid == loot.master)
-                        .map(|i| i as u32 + 1)
-                }
-            })
-            .flatten();
-        let (loot_method, loot_threshold) = (loot_method.to_string(), u32::from(loot.threshold));
-        // The raid roster, the one list `GetNumRaidMembers`, `GetRaidRosterInfo` and `UnitInRaid`
-        // read.
-        let me = self_pair.map(|(_, g, store)| RaidSelf {
-            guid: g.0,
-            level: store.0.unit_level().unwrap_or(0),
-            area: here.area(),
-            dead: store.0.unit_is_dead(),
-            class: store.0.unit_class(),
-        });
-        let zone_name = |area: u32| {
-            let areas = areas.as_ref()?;
-            // A member's wire zone is already a zone; our own area is the finest leaf, so walk it
-            // up. `top_zone` leaves a zone as it is, so one resolver serves both.
-            areas
-                .0
-                .name(areas.0.top_zone(area).unwrap_or(area))
-                .map(str::to_string)
-        };
-        let held_store = |guid: u64| index.0.get(&guid).and_then(|e| stores.get(*e).ok());
-        let raid = raid_roster(&group, me.as_ref(), &held_store, &names, chr, &zone_name);
-
-        let fresh = PartyState {
-            members,
-            leader_index: group.leader_index,
-            // `UnitIsPartyLeader` compares a resolved token's guid with it, which an index cannot
-            // do for an unstreamed member; zero when ungrouped (see `PartyState::leader_guid`).
-            leader_guid: group.leader,
-            own_guid: self_guid.unwrap_or(0),
-            raid,
-            loot_method,
-            master_looter,
-            loot_threshold,
-        };
-        if fed.pushed_party.as_ref() != Some(&fresh) {
-            gate.audit("feed_party", "the roster snapshot");
-            script.set_party(fresh.clone());
-            fed.pushed_party = Some(fresh);
-        }
-
-        let area_names = areas.as_deref().map(|a| &a.0);
-        for (i, token) in PARTY_TOKENS.iter().enumerate() {
-            let member = slots.get(i);
-            let snap = member.map(|m| {
-                let mut s = member_unit_state(
-                    m,
-                    group.stats.get(&m.guid),
-                    index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()),
-                    &group,
-                    own_group.clone(),
-                    &names,
-                    &guild,
-                    chr,
-                    types,
-                );
-                s.tooltip.party = party_record(&group, m.guid, area_names);
-                s
-            });
-            if fed.units[i] != snap {
-                gate.audit("feed_party", "a party-token snapshot");
-                script.set_unit(token, snap.clone());
-                fed.units[i] = snap;
-            }
-            // ── PARTY_MEMBER_ENABLE / PARTY_MEMBER_DISABLE ──────────────────────
-            //
-            // Fired as a slot's object enters (`0x4e86b6`) or leaves (`0x5e9b78`) the object
-            // manager, with the 1-based slot as a number (`%d`, `esi+1` at `0x4e869d`). Stock
-            // FrameXML ignores them (`PartyMemberFrame.lua:145` is commented out).
-            let presence = member.map_or((0, false), |m| (m.guid, index.0.contains_key(&m.guid)));
-            if fed.presence[i] != presence {
-                gate.audit("feed_party", "a party-slot presence edge");
-                // Only the same member's object crossing is an activation, and not on the first
-                // look after a VM reset, which would announce an arrival that never happened.
-                if !vm_reset && presence.0 != 0 && fed.presence[i].0 == presence.0 {
-                    let event = if presence.1 {
-                        "PARTY_MEMBER_ENABLE"
-                    } else {
-                        "PARTY_MEMBER_DISABLE"
-                    };
-                    script.fire_event(event, vec![ScriptValue::Int(i as i64 + 1)]);
-                }
-                fed.presence[i] = presence;
-            }
-        }
-
-        // ── partypet1..partypet4 ────────────────────────────────────────────────
-        //
-        // Each slot's pet, off its descriptor or its record, after the members' own tokens and
-        // before the roster event whose handler asks `UnitExists("partypetN")`
-        // (`PartyMemberFrame.lua:73`).
-        for (i, token) in PARTY_PET_TOKENS.iter().enumerate() {
-            let owner = slots.get(i).map_or(0, |m| m.guid);
-            let now = pets::member_pet(&look, &group, owner, look.store(owner), Roster::Party);
-            pets::feed_token(script, &gate, &mut fed.pets.party[i], token, now);
-        }
-
-        // ── raid1..raid40 ──────────────────────────────────────────────────────
-        //
-        // Token N is `GetRaidRosterInfo` row N, both in `raid_row_guids`' order. Our own row comes
-        // off our descriptor: the wire list never contains us.
-        let raid_guids = raid_row_guids(&group);
-        fed.raid_units.resize(RAID_TOKENS.len(), None);
-        for (i, token) in RAID_TOKENS.iter().enumerate() {
-            let snap = raid_guids.get(i).and_then(|guid| {
-                if Some(*guid) == group.own_raid_row {
-                    let name = names
-                        .resolve_unit(*guid, None, Ask::Read)
-                        .map(str::to_string);
-                    let mut s = match self_pair.filter(|(_, g, _)| g.0 == *guid) {
-                        Some((_, _, store)) => {
-                            let mut s = crate::ui_unit::snapshot(store, *guid, name, 0, chr, types);
-                            s.guild = crate::ui_guild::cached_unit_guild(&store.0, &guild);
-                            s
-                        }
-                        // No object of ours, as across a worldport: the row's guid still names us,
-                        // through the roster (`0x491900`), the name cache (`0x5171eb`) and the row
-                        // the list wrote online (`0x5e6e94`).
-                        None => {
-                            let mut s = UnitState {
-                                exists: true,
-                                guid: *guid,
-                                name,
-                                is_connected: true,
-                                ..Default::default()
-                            };
-                            crate::ui_unit::traits_from_name_cache(&mut s, &names, *guid, chr);
-                            s
-                        }
-                    };
-                    s.is_player = true;
-                    s.raid_target = group.raid_target_index(*guid);
-                    s.faction_group = own_group.clone();
-                    Some(s)
-                } else {
-                    let m = group.members.iter().find(|m| m.guid == *guid)?;
-                    let mut s = member_unit_state(
-                        m,
-                        group.stats.get(guid),
-                        index.0.get(guid).and_then(|e| stores.get(*e).ok()),
-                        &group,
-                        own_group.clone(),
-                        &names,
-                        &guild,
-                        chr,
-                        types,
-                    );
-                    s.tooltip.party = party_record(&group, *guid, area_names);
-                    Some(s)
-                }
-            });
-            if fed.raid_units[i] != snap {
-                gate.audit("feed_party", "a raid-token snapshot");
-                script.set_unit(token, snap.clone());
-                fed.raid_units[i] = snap;
-            }
-        }
-
-        // ── raidpet1..raidpet40 ────────────────────────────────────────────────
-        //
-        // Row N's pet; our own row's is `"pet"`'s unit.
-        fed.pets
-            .raid
-            .resize_with(RAID_PET_TOKENS.len(), Default::default);
-        for (i, token) in RAID_PET_TOKENS.iter().enumerate() {
-            let owner = raid_guids.get(i).copied().unwrap_or(0);
-            let ours = Some(owner) == self_guid;
-            let held = if ours {
-                self_pair.map(|(_, _, store)| store)
-            } else {
-                look.store(owner)
-            };
-            let now = pets::member_pet(&look, &group, owner, held, Roster::Raid);
-            pets::feed_token(script, &gate, &mut fed.pets.raid[i], token, now);
-        }
+        push_group(&view, script, fed, &gate, vm_reset);
+        let self_guid = self_q.iter().next().map(|(_, g, _)| g.0);
 
         // ── The group events ────────────────────────────────────────────────────
         //
         // `PARTY_MEMBERS_CHANGED`, `PARTY_LEADER_CHANGED`, `PARTY_LOOT_METHOD_CHANGED`,
-        // `RAID_ROSTER_UPDATE` and `RAID_TARGET_UPDATE`, each as its handler signalled it, in
-        // packet order and once ([`GroupState::signals`]), after the snapshots above, which their
+        // `RAID_ROSTER_UPDATE` and `RAID_TARGET_UPDATE` fire from the party lane, each at its
+        // handler's place ([`fire_group_signals`]), after the snapshots above, which their
         // handlers read. Nothing gates one on a difference: a list that changes nothing still
         // signals, and a stats packet signals none. `RAID_ROSTER_UPDATE`'s fourth site, the world
         // entry's fill of a zero row (`0x4ba1a2`), is not built: our row holds our guid
-        // ([`GroupState::own_raid_row`]). A fresh VM heard none of them and is told [`catch_up`]
-        // instead.
-        let owed = if vm_reset {
-            catch_up(&group)
-        } else {
-            group.signals.since(fed.signals).to_vec()
-        };
-        fed.signals = group.signals.end();
-        if !owed.is_empty() {
-            gate.audit("feed_party", "a group signal");
-        }
-        for signal in owed {
-            let signalled = match signal {
-                GroupSignal::MembersChanged => "PARTY_MEMBERS_CHANGED",
-                GroupSignal::LeaderChanged => "PARTY_LEADER_CHANGED",
-                GroupSignal::LootMethodChanged => "PARTY_LOOT_METHOD_CHANGED",
-                GroupSignal::RaidRosterUpdate => "RAID_ROSTER_UPDATE",
-                GroupSignal::RaidTargetUpdate => "RAID_TARGET_UPDATE",
+        // ([`GroupState::own_raid_row`]). A world entry's fresh VM heard none of them and is told
+        // [`catch_up`] here instead, the lane passing over what was logged; a reload's seeded VM
+        // hears from the lane only what came after its seed.
+        if vm_reset {
+            let seed = seeded
+                .as_ref()
+                .and_then(|s| s.0)
+                .filter(|&(session, _)| session == script.session());
+            let from = match seed {
+                Some((_, cursor)) => cursor,
+                None => {
+                    let owed = catch_up(group);
+                    if !owed.is_empty() {
+                        gate.audit("feed_party", "the catch-up's group signals");
+                    }
+                    for signal in owed {
+                        fire_signal(script, &mut sink, signal);
+                    }
+                    group.signals.end()
+                }
             };
-            script.fire_event(signalled, vec![]);
+            lane.fired = lane.fired.max(from);
         }
 
         // ── READY_CHECK ─────────────────────────────────────────────────────────
         //
-        // Fired by the reference's open handler `0x4ba360` (at `0x4ba53a`), which also arms the 30
-        // s deadline (`0xb713f4`). `UIParent.lua:571` shows the popup on it, and UIParent's
-        // OnUpdate ticks the deadline through `CheckReadyCheckTime` (`UIParent.xml:24`): no clock
-        // here.
+        // Fired by the reference's open handler `0x4ba360` (at `0x4ba53a`), once it has armed the
+        // 30 s deadline (`0xb713f4`, `0x4ba535`), so a handler's `ConfirmReadyCheck` finds the
+        // check running. `UIParent.lua:571` shows the popup on it, and UIParent's OnUpdate ticks
+        // the deadline through `CheckReadyCheckTime` (`UIParent.xml:24`): no clock here.
+        //
+        // Each request arms the engine's side first (the leader's close, a member's 30 s
+        // deadline); the answer log then replays from this memo's cursor.
+        if group.ready_check_requests != fed.ready_check_requests {
+            fed.ready_check_requests = group.ready_check_requests;
+            fed.answers_forwarded = 0;
+            if !vm_reset {
+                script.ready_check_request(Some(group.leader) == self_guid);
+            }
+        }
         if group.ready_check != fed.ready_check {
             gate.audit("feed_party", "the ready-check edge");
             fed.ready_check = group.ready_check;
             // Not on the first look after a VM reset, which would pop a check that has ended.
             if !vm_reset {
                 script.fire_event("READY_CHECK", vec![]);
-            }
-        }
-        // Each request arms the engine's side (the leader's close, a member's 30 s deadline); the
-        // answer log then replays from this memo's cursor.
-        if group.ready_check_requests != fed.ready_check_requests {
-            fed.ready_check_requests = group.ready_check_requests;
-            fed.answers_forwarded = 0;
-            if !vm_reset {
-                script.ready_check_request(Some(group.leader) == self_guid);
             }
         }
         for &(guid, ready) in group.ready_check_answers.iter().skip(fed.answers_forwarded) {
@@ -525,21 +487,261 @@ pub(crate) fn feed_party(
                 script.fire_event("UPDATE_INSTANCE_INFO", vec![]);
             }
         }
-
-        if group.pending_invite != fed.invite {
-            gate.audit("feed_party", "the invite edge");
-            match &group.pending_invite {
-                Some(inviter) => script.fire_event(
-                    "PARTY_INVITE_REQUEST",
-                    vec![ScriptValue::Str(inviter.clone())],
-                ),
-                // Also fires on accept and decline: hiding a hidden popup is a no-op, and the
-                // accepted guard stops a second decline.
-                None => script.fire_event("PARTY_INVITE_CANCEL", vec![]),
-            }
-            fed.invite = group.pending_invite.clone();
-        }
     })
+}
+
+/// Push the roster, the party and raid unit snapshots and their pets' into `script`, against what
+/// `fed` says it last pushed: the feed's pass, and a reload's seed ([`seed_reloaded_vm`]).
+fn push_group(
+    view: &GroupView,
+    script: &mut UiScript,
+    fed: &mut FedParty,
+    gate: &gate::Gate,
+    vm_reset: bool,
+) {
+    let GroupView {
+        tables,
+        group,
+        index,
+        stores,
+        self_q,
+        factions,
+        names,
+        areas,
+        here,
+        map_catalog: _,
+        guild,
+    } = view;
+    let chr = tables.unit_names();
+    let types = tables.types(names);
+    let look = pets::Lookup::new(
+        index,
+        stores,
+        names,
+        types,
+        tables.catalog(),
+        tables.study(),
+    );
+    let self_pair = self_q.iter().next();
+    let self_guid = self_pair.map(|(_, g, _)| g.0);
+    // The party's PvP faction group is our own: a 1.12 party is one faction, and an unstreamed
+    // member has no descriptor to read one from.
+    let own_group = self_pair
+        .and_then(|(_, _, store)| crate::ui_unit::faction_group(store, factions.as_deref()));
+
+    let slots: Vec<&GroupMemberEntry> = group.party_slots().collect();
+
+    // The master looter as a party index, 0 for us. It covers our own subgroup's slots only,
+    // as the leader index does; `GetRaidRosterInfo` carries every subgroup.
+    let members: Vec<PartyMemberInfo> = slots
+        .iter()
+        .map(|m| PartyMemberInfo {
+            name: m.name.clone(),
+            guid: m.guid,
+        })
+        .collect();
+    // `GetLootMethod` and `GetLootThreshold` read the stored cells, with no group test.
+    let loot = group.loot_cells();
+    // Methods 0 to 4 through the table `0x4e9280`, `ERROR!` above (`0x4e91ef`).
+    let loot_method = match loot.method {
+        0 => "freeforall",
+        1 => "roundrobin",
+        2 => "master",
+        3 => "group",
+        4 => "needbeforegreed",
+        _ => "ERROR!",
+    };
+    // `GetLootMethod`'s second return, for any looter in the cell whatever the method
+    // (`0x4e9209`): 0 when it is us (`0x4e9215`), else its party slot + 1 over the four slots
+    // only (`0x4e9238`, `0x4e81a0`, even in a raid), else nil. A looter in another raid
+    // subgroup reads nil, never 0, which would light the crown on our portrait
+    // (`PlayerFrame.lua:48`).
+    let master_looter = (loot.master != 0)
+        .then(|| {
+            if Some(loot.master) == self_guid {
+                Some(0)
+            } else {
+                slots
+                    .iter()
+                    .position(|m| m.guid == loot.master)
+                    .map(|i| i as u32 + 1)
+            }
+        })
+        .flatten();
+    let (loot_method, loot_threshold) = (loot_method.to_string(), u32::from(loot.threshold));
+    // The raid roster, the one list `GetNumRaidMembers`, `GetRaidRosterInfo` and `UnitInRaid`
+    // read.
+    let me = self_pair.map(|(_, g, store)| RaidSelf {
+        guid: g.0,
+        level: store.0.unit_level().unwrap_or(0),
+        area: here.area(),
+        dead: store.0.unit_is_dead(),
+        class: store.0.unit_class(),
+    });
+    let zone_name = |area: u32| {
+        let areas = areas.as_ref()?;
+        // A member's wire zone is already a zone; our own area is the finest leaf, so walk it
+        // up. `top_zone` leaves a zone as it is, so one resolver serves both.
+        areas
+            .0
+            .name(areas.0.top_zone(area).unwrap_or(area))
+            .map(str::to_string)
+    };
+    let held_store = |guid: u64| index.0.get(&guid).and_then(|e| stores.get(*e).ok());
+    let raid = raid_roster(group, me.as_ref(), &held_store, names, chr, &zone_name);
+
+    let fresh = PartyState {
+        members,
+        leader_index: group.leader_index,
+        // `UnitIsPartyLeader` compares a resolved token's guid with it, which an index cannot
+        // do for an unstreamed member; zero when ungrouped (see `PartyState::leader_guid`).
+        leader_guid: group.leader,
+        own_guid: self_guid.unwrap_or(0),
+        raid,
+        loot_method,
+        master_looter,
+        loot_threshold,
+    };
+    if fed.pushed_party.as_ref() != Some(&fresh) {
+        gate.audit("feed_party", "the roster snapshot");
+        script.set_party(fresh.clone());
+        fed.pushed_party = Some(fresh);
+    }
+
+    let area_names = areas.as_deref().map(|a| &a.0);
+    for (i, token) in PARTY_TOKENS.iter().enumerate() {
+        let member = slots.get(i);
+        let snap = member.map(|m| {
+            let mut s = member_unit_state(
+                m,
+                group.stats.get(&m.guid),
+                index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()),
+                group,
+                own_group.clone(),
+                names,
+                guild,
+                chr,
+                types,
+            );
+            s.tooltip.party = party_record(group, m.guid, area_names);
+            s
+        });
+        if fed.units[i] != snap {
+            gate.audit("feed_party", "a party-token snapshot");
+            script.set_unit(token, snap.clone());
+            fed.units[i] = snap;
+        }
+        // ── PARTY_MEMBER_ENABLE / PARTY_MEMBER_DISABLE ──────────────────────
+        //
+        // Fired as a slot's object enters (`0x4e86b6`) or leaves (`0x5e9b78`) the object
+        // manager, with the 1-based slot as a number (`%d`, `esi+1` at `0x4e869d`). Stock
+        // FrameXML ignores them (`PartyMemberFrame.lua:145` is commented out).
+        let presence = member.map_or((0, false), |m| (m.guid, index.0.contains_key(&m.guid)));
+        if fed.presence[i] != presence {
+            gate.audit("feed_party", "a party-slot presence edge");
+            // Only the same member's object crossing is an activation, and not on the first
+            // look after a VM reset, which would announce an arrival that never happened.
+            if !vm_reset && presence.0 != 0 && fed.presence[i].0 == presence.0 {
+                let event = if presence.1 {
+                    "PARTY_MEMBER_ENABLE"
+                } else {
+                    "PARTY_MEMBER_DISABLE"
+                };
+                script.fire_event(event, vec![ScriptValue::Int(i as i64 + 1)]);
+            }
+            fed.presence[i] = presence;
+        }
+    }
+
+    // ── partypet1..partypet4 ────────────────────────────────────────────────
+    //
+    // Each slot's pet, off its descriptor or its record, after the members' own tokens and
+    // before the roster event whose handler asks `UnitExists("partypetN")`
+    // (`PartyMemberFrame.lua:73`).
+    for (i, token) in PARTY_PET_TOKENS.iter().enumerate() {
+        let owner = slots.get(i).map_or(0, |m| m.guid);
+        let now = pets::member_pet(&look, group, owner, look.store(owner), Roster::Party);
+        pets::feed_token(script, gate, &mut fed.pets.party[i], token, now);
+    }
+
+    // ── raid1..raid40 ──────────────────────────────────────────────────────
+    //
+    // Token N is `GetRaidRosterInfo` row N, both in `raid_row_guids`' order. Our own row comes
+    // off our descriptor: the wire list never contains us.
+    let raid_guids = raid_row_guids(group);
+    fed.raid_units.resize(RAID_TOKENS.len(), None);
+    for (i, token) in RAID_TOKENS.iter().enumerate() {
+        let snap = raid_guids.get(i).and_then(|guid| {
+            if Some(*guid) == group.own_raid_row {
+                let name = names
+                    .resolve_unit(*guid, None, Ask::Read)
+                    .map(str::to_string);
+                let mut s = match self_pair.filter(|(_, g, _)| g.0 == *guid) {
+                    Some((_, _, store)) => {
+                        let mut s = crate::ui_unit::snapshot(store, *guid, name, 0, chr, types);
+                        s.guild = crate::ui_guild::cached_unit_guild(&store.0, guild);
+                        s
+                    }
+                    // No object of ours, as across a worldport: the row's guid still names us,
+                    // through the roster (`0x491900`), the name cache (`0x5171eb`) and the row
+                    // the list wrote online (`0x5e6e94`).
+                    None => {
+                        let mut s = UnitState {
+                            exists: true,
+                            guid: *guid,
+                            name,
+                            is_connected: true,
+                            ..Default::default()
+                        };
+                        crate::ui_unit::traits_from_name_cache(&mut s, names, *guid, chr);
+                        s
+                    }
+                };
+                s.is_player = true;
+                s.raid_target = group.raid_target_index(*guid);
+                s.faction_group = own_group.clone();
+                Some(s)
+            } else {
+                let m = group.members.iter().find(|m| m.guid == *guid)?;
+                let mut s = member_unit_state(
+                    m,
+                    group.stats.get(guid),
+                    index.0.get(guid).and_then(|e| stores.get(*e).ok()),
+                    group,
+                    own_group.clone(),
+                    names,
+                    guild,
+                    chr,
+                    types,
+                );
+                s.tooltip.party = party_record(group, *guid, area_names);
+                Some(s)
+            }
+        });
+        if fed.raid_units[i] != snap {
+            gate.audit("feed_party", "a raid-token snapshot");
+            script.set_unit(token, snap.clone());
+            fed.raid_units[i] = snap;
+        }
+    }
+
+    // ── raidpet1..raidpet40 ────────────────────────────────────────────────
+    //
+    // Row N's pet; our own row's is `"pet"`'s unit.
+    fed.pets
+        .raid
+        .resize_with(RAID_PET_TOKENS.len(), Default::default);
+    for (i, token) in RAID_PET_TOKENS.iter().enumerate() {
+        let owner = raid_guids.get(i).copied().unwrap_or(0);
+        let ours = Some(owner) == self_guid;
+        let held = if ours {
+            self_pair.map(|(_, _, store)| store)
+        } else {
+            look.store(owner)
+        };
+        let now = pets::member_pet(&look, group, owner, held, Roster::Raid);
+        pets::feed_token(script, gate, &mut fed.pets.raid[i], token, now);
+    }
 }
 
 /// What our own raid row reads off our object: `SMSG_GROUP_LIST` never lists the recipient, and
@@ -570,14 +772,14 @@ pub(crate) fn raid_row_guid(group: &GroupState, index: usize) -> Option<u64> {
 }
 
 /// A 1-based raid row index to its guid; row 0, a row past the end or no raid gives `None`.
-fn raid_guid_at(group: &GroupState, index: u32) -> Option<u64> {
+pub(super) fn raid_guid_at(group: &GroupState, index: u32) -> Option<u64> {
     raid_row_guid(group, usize::try_from(index).ok()?)
 }
 
 /// A 1-based raid row's subgroup as the roster holds it, the row's `+8` (`0x4ba8ea`, the flags
 /// under 0x7f): a member's from the list's flags, ours, the row after them, from our own
 /// (`0x5e6e82`). No row, no subgroup.
-fn raid_row_subgroup(group: &GroupState, index: u32) -> Option<u8> {
+pub(super) fn raid_row_subgroup(group: &GroupState, index: u32) -> Option<u8> {
     let row = usize::try_from(index).ok()?.checked_sub(1)?;
     if !group.raid_held() {
         return None;
@@ -590,7 +792,7 @@ fn raid_row_subgroup(group: &GroupState, index: u32) -> Option<u8> {
 
 /// The name the subgroup verbs send: the cache's record, looked up with no callback
 /// (`0x4bba5e`, `0x4bbbc4`, `0x4bbbe5`), so a name still to come sends nothing.
-fn cached_player_name(names: &NameCache, guid: u64) -> Option<String> {
+pub(super) fn cached_player_name(names: &NameCache, guid: u64) -> Option<String> {
     names.resolve_player(guid, Ask::Read).map(str::to_string)
 }
 
@@ -814,205 +1016,29 @@ fn record_bit(stats: Option<&PartyMemberStatsInfo>, bit: u8) -> bool {
     stats.is_some_and(|s| s.status.unwrap_or(0) & bit != 0)
 }
 
-/// Drain the Lua party intents into their `CMSG_*` sends.
+/// Every frame: age the signal log, and answer what the party calls left
+/// ([`super::calls::GroupEdits`]): the sandbox's group-changing calls, echoed onto the mirror as
+/// the server would answer them.
 pub(crate) fn drain_party(
-    mut vm: crate::script_calls::VmWith<(
-        ResMut<'static, GroupState>,
-        crate::target::RelationWorld<'static, 'static>,
-    )>,
-    names: Res<NameCache>,
-    index: Res<GuidIndex>,
-    stores: Query<&ObjectStore>,
+    mut group: ResMut<GroupState>,
+    mut edits: ResMut<super::calls::GroupEdits>,
     self_q: Query<&Guid, With<SelfPlayer>>,
-    commands: Res<NetCommands>,
-    errors: Res<crate::ui_action::UiErrorKeys>,
-    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
-    vm.turn(|script, (mut group, relations)| {
-        // Every frame, VM or none: what the feed has fired goes ([`super::SignalLog`]). Not a
-        // change the feed's gate should open on.
-        group.bypass_change_detection().signals.age();
-        let Some(script) = script else {
-            return;
-        };
-        let self_guid = self_q.iter().next().map(|g| g.0);
-        let held = |guid: u64| index.0.get(&guid).and_then(|e| stores.get(*e).ok());
-        for req in script.take_party_requests() {
-            // In the sandbox the server holds no group, so the group-changing intents apply to the
-            // mirror as its echo would. Invites and accept/decline stay real: a real group ends it.
-            if group.test && test_apply_local(&mut group, &req, self_guid) {
-                continue;
+    // What the feed has fired goes ([`super::SignalLog`]). Not a change the feed's gate should
+    // open on.
+    group.bypass_change_detection().signals.age();
+    let self_guid = self_q.iter().next().map(|g| g.0);
+    for echo in std::mem::take(&mut edits.sandbox) {
+        match echo {
+            super::calls::SandboxEcho::Request(request) => {
+                let echoed = test_apply_local(&mut group, &request, self_guid);
+                debug_assert!(echoed, "only a sandboxed call is echoed: {request:?}");
             }
-            match req {
-                PartyRequest::Accept => {
-                    let _ = commands.0.send(ClientCommand::GroupAccept);
-                    group.pending_invite = None;
-                }
-                PartyRequest::Decline => {
-                    let _ = commands.0.send(ClientCommand::GroupDecline);
-                    group.pending_invite = None;
-                }
-                PartyRequest::Leave => {
-                    let _ = commands.0.send(ClientCommand::GroupLeave);
-                }
-                PartyRequest::InviteName(name) => {
-                    if let Some(t) = tutorials.as_mut() {
-                        t.write(crate::tutorial::TutorialEvent::Acknowledge {
-                            id: crate::tutorial::id::GROUPING,
-                        });
-                    }
-                    let _ = commands.0.send(ClientCommand::GroupInvite { name });
-                }
-                // The binding resolved the token (`0x48a3ed`). `InviteByGuid` (`0x5e9440`) invites
-                // only a player the object manager holds (`0x5e945d`, typemask 0x10), by its
-                // `GetUnitName` (`0x609210`), through `InviteByName` (`0x5e9477`).
-                PartyRequest::InviteGuid(guid) => {
-                    let Some(store) = held(guid)
-                        .filter(|s| matches!(s.0.object_type(), Some(ObjectType::Player)))
-                    else {
-                        continue;
-                    };
-                    let name = names
-                        .resolve_unit(guid, Some(store), Ask::Event(&commands))
-                        .map_or_else(|| script.unknown_object_text(), str::to_string);
-                    if let Some(t) = tutorials.as_mut() {
-                        t.write(crate::tutorial::TutorialEvent::Acknowledge {
-                            id: crate::tutorial::id::GROUPING,
-                        });
-                    }
-                    let _ = commands.0.send(ClientCommand::GroupInvite { name });
-                }
-                // The binding resolved the token (`0x48a54d`).
-                PartyRequest::UninviteGuid(guid) => {
-                    uninvite_by_guid(guid, held(guid), &names, &commands, script);
-                }
-                // The binding resolved the method, the master and the threshold (`0x4e92a0`).
-                PartyRequest::LootMethod {
-                    method,
-                    master,
-                    threshold,
-                } => {
-                    let _ = commands.0.send(ClientCommand::LootMethod {
-                        method,
-                        master,
-                        threshold,
-                    });
-                }
-                // The binding resolved the token (`0x4bbeff`). A mark takes a raid row or its pet
-                // (`0x4bafd0`), a party slot or its pet (`0x4e8fa0`), or, with the player's object
-                // and the unit's held (`0x4bbf85`, `0x4bbfa4`), a unit that is no player
-                // (`0x4bbfc1`), a player we can cooperate with (`0x606ba0`) or ourselves
-                // (`0x4bbfcd`).
-                PartyRequest::SetRaidTarget { guid, index } => {
-                    let markable = || {
-                        let live = |g: u64| held(g).map(|s| &s.0);
-                        group.member_or_pet(guid, None, live)
-                            || relations
-                                .me()
-                                .zip(relations.unit(guid))
-                                .is_some_and(|(me, unit)| {
-                                    !unit.is_player
-                                        || relations.get().can_cooperate(&me, &unit)
-                                        || unit.guid == me.guid
-                                })
-                    };
-                    match raid_target_mark(&group, guid, index, markable) {
-                        RaidTargetMark::Invalid => {
-                            errors.push(crate::ui_action::UiError::key("ERR_INVALID_RAID_TARGET"));
-                        }
-                        RaidTargetMark::Nothing => {}
-                        RaidTargetMark::Send { icon, guid } if group.test => {
-                            echo_raid_target(&mut group, icon, guid);
-                        }
-                        RaidTargetMark::Send { icon, guid } => {
-                            let _ = commands.0.send(ClientCommand::SetRaidTarget { icon, guid });
-                        }
-                    }
-                }
-                // The stored method and looter with the new threshold (`0x4e95aa`-`0x4e95b8`).
-                PartyRequest::LootThreshold(threshold) => {
-                    let _ = commands.0.send(ClientCommand::LootMethod {
-                        method: u32::from(group.loot_stored.method),
-                        master: group.loot_stored.master,
-                        threshold,
-                    });
-                }
-                // ── The raid-management verbs ────────────────────────────────────
-                //
-                // The RaidFrame names rows by index, UnitPopup by name. A row that is not there
-                // sends nothing, as in the reference's bindings (`UninviteFromRaid`, `0x48a5c9`).
-                PartyRequest::ConvertToRaid => {
-                    let _ = commands.0.send(ClientCommand::GroupRaidConvert);
-                }
-                PartyRequest::SetSubgroup { index, group: sub } => {
-                    // Lua subgroups 1..8 are wire 0..7, the flags' bits 0-2
-                    // (`Server/Packets/Group.cpp:158`); out-of-range ones are dropped, never
-                    // wrapped.
-                    let Some(sub) = (1..=8).contains(&sub).then(|| (sub - 1) as u8) else {
-                        continue;
-                    };
-                    // `0x4bb990`: a row (`0x4bba1f`-`0x4bba36`) not already in the subgroup
-                    // (`0x4bba3c`) whose name the cache holds (`0x4bba68`).
-                    let Some(guid) = raid_guid_at(&group, index) else {
-                        continue;
-                    };
-                    if raid_row_subgroup(&group, index) == Some(sub) {
-                        continue;
-                    }
-                    let Some(name) = cached_player_name(&names, guid) else {
-                        continue;
-                    };
-                    let _ = commands
-                        .0
-                        .send(ClientCommand::GroupChangeSubGroup { name, group: sub });
-                }
-                PartyRequest::SwapSubgroup { index, other } => {
-                    // `0x4bbb00`: two rows (`0x4bbb71`-`0x4bbb99`) in different subgroups
-                    // (`0x4bbba5`) whose names the cache both holds (`0x4bbbec`-`0x4bbbf7`).
-                    let (Some(a), Some(b)) =
-                        (raid_guid_at(&group, index), raid_guid_at(&group, other))
-                    else {
-                        continue;
-                    };
-                    if raid_row_subgroup(&group, index) == raid_row_subgroup(&group, other) {
-                        continue;
-                    }
-                    let (Some(name), Some(other)) =
-                        (cached_player_name(&names, a), cached_player_name(&names, b))
-                    else {
-                        continue;
-                    };
-                    let _ = commands
-                        .0
-                        .send(ClientCommand::GroupSwapSubGroup { name, other });
-                }
-                // The binding resolved the token or the name (`0x48a7fd`, `0x48a86a`, `0x4bbd6b`,
-                // `0x4bbe3b`).
-                PartyRequest::PromoteGuid(guid) => {
-                    let _ = commands.0.send(ClientCommand::GroupSetLeader { guid });
-                }
-                PartyRequest::AssistantLeader { guid, grant } => {
-                    let _ = commands
-                        .0
-                        .send(ClientCommand::GroupAssistantLeader { guid, grant });
-                }
-                PartyRequest::UninviteRaid(row) => {
-                    if let Some(guid) = raid_guid_at(&group, row) {
-                        uninvite_by_guid(guid, held(guid), &names, &commands, script);
-                    }
-                }
-                PartyRequest::ReadyCheckStart => {
-                    let _ = commands.0.send(ClientCommand::ReadyCheckStart);
-                }
-                PartyRequest::ReadyCheckAnswer(ready) => {
-                    let _ = commands.0.send(ClientCommand::ReadyCheckAnswer { ready });
-                }
-                PartyRequest::RequestRaidInfo => {
-                    let _ = commands.0.send(ClientCommand::RequestRaidInfo);
-                }
+            super::calls::SandboxEcho::RaidTarget { icon, guid } => {
+                echo_raid_target(&mut group, icon, guid);
             }
         }
-    })
+    }
 }
 
 /// `UninviteByGuid` (`0x5e9510`), the sender `UninviteFromParty` (`0x48a560`) and
@@ -1022,7 +1048,7 @@ pub(crate) fn drain_party(
 /// player-name cache with a callback, else as `UNKNOWNOBJECT`; any other, by its guid in
 /// `CMSG_GROUP_UNINVITE_GUID` (`0x5e953e`). Only `UninviteByName` always sends the name
 /// (`0x48a62a`).
-fn uninvite_by_guid(
+pub(super) fn uninvite_by_guid(
     guid: u64,
     held: Option<&ObjectStore>,
     names: &NameCache,
@@ -1043,7 +1069,7 @@ fn uninvite_by_guid(
 
 /// What `SetRaidTarget` (`0x4bbec0`) does for the nonzero guid its token named.
 #[derive(Debug, PartialEq, Eq)]
-enum RaidTargetMark {
+pub(super) enum RaidTargetMark {
     /// `MSG_RAID_TARGET_UPDATE` with this wire slot and guid (`0x4bc01b`-`0x4bc03a`).
     Send { icon: u8, guid: u64 },
     /// `ERR_INVALID_RAID_TARGET` (`0x4bbfd2`), and nothing sent.
@@ -1057,7 +1083,7 @@ enum RaidTargetMark {
 /// (`0x4bbf29` wraps it), clears the slot the guid holds by sending it with guid 0
 /// (`0x4bbf36`-`0x4bbf40`), and nothing for a guid holding none (`0x4bbfed`). A clear asks
 /// nothing of the unit.
-fn raid_target_mark(
+pub(super) fn raid_target_mark(
     group: &GroupState,
     guid: u64,
     index: u8,
@@ -1094,8 +1120,9 @@ fn echo_raid_target(group: &mut GroupState, icon: u8, guid: u64) {
     group.apply_raid_target_update(icon, guid);
 }
 
-/// The sandbox half of [`drain_party`]: apply one group-changing intent to the mirror as the
-/// server's echo would. False for the intents that stay real (invites, accept and decline).
+/// The sandbox's echo of one group-changing call ([`drain_party`]), applied to the mirror as the
+/// server's answer would be. False for the calls that stay real (invites, accept and decline),
+/// which [`super::calls`] never hands it.
 fn test_apply_local(group: &mut GroupState, req: &PartyRequest, self_guid: Option<u64>) -> bool {
     let was_held = group.raid_held();
     let handled = apply_test_intent(group, req, self_guid);
@@ -2215,9 +2242,9 @@ mod tests {
         assert_eq!(catch_up(&g), [MembersChanged], "the group ended");
     }
 
-    /// The feed and the drain in the schedule's order, with a system between them that logs a
-    /// signal, as the chat input's `/partytest` can: the drain's age keeps it, the next frame's
-    /// feed fires it once, and the ages after drop it.
+    /// The feed, the party lane and the drain in the schedule's order, with a system between the
+    /// lane and the drain that logs a signal, as the chat input's `/partytest` can: the drain's
+    /// age keeps it, the next frame's lane fires it once, and the ages after drop it.
     #[test]
     fn a_signal_logged_between_the_feed_and_the_drain_fires_on_the_next_frame_once() {
         #[derive(Resource, Default)]
@@ -2231,7 +2258,10 @@ mod tests {
         app.init_resource::<crate::net::Reputations>()
             .init_resource::<crate::ui_action::UiErrorKeys>()
             .init_resource::<Mark>();
-        app.add_systems(Update, (mark.after(feed_party), drain_party.after(mark)));
+        app.add_systems(
+            Update,
+            (mark.after(super::fire_party_lane), drain_party.after(mark)),
+        );
         let script = app.world_mut().non_send_mut::<UiScript>();
         script
             .run(
@@ -2253,8 +2283,8 @@ mod tests {
         marks(&mut app);
 
         app.world_mut().resource_mut::<Mark>().0 = true;
-        assert_eq!(marks(&mut app), 0, "logged after this frame's feed");
-        assert_eq!(marks(&mut app), 1, "the next frame's feed");
+        assert_eq!(marks(&mut app), 0, "logged after this frame's lane");
+        assert_eq!(marks(&mut app), 1, "the next frame's lane");
         marks(&mut app);
         assert_eq!(marks(&mut app), 0, "once");
         let log = &app.world().resource::<GroupState>().signals;
@@ -2269,11 +2299,11 @@ mod tests {
         use GroupSignal::*;
         let mut g = GroupState::default();
         synthetic_roster(&mut g, None);
-        g.signals.take();
+        g.signals.take_events();
         let same = PartyRequest::LootThreshold(3);
         assert!(test_apply_local(&mut g, &same, Some(ME)));
         assert_eq!(
-            g.signals.take(),
+            g.signals.take_events(),
             [
                 MembersChanged,
                 LeaderChanged,
@@ -2283,7 +2313,7 @@ mod tests {
             "a threshold it already had, under the leader it already had"
         );
         assert!(test_apply_local(&mut g, &PartyRequest::Leave, Some(ME)));
-        assert_eq!(g.signals.take(), [MembersChanged, RaidTargetUpdate]);
+        assert_eq!(g.signals.take_events(), [MembersChanged, RaidTargetUpdate]);
     }
 
     /// The sandbox stands in for the server, whose echo of each group intent is a list.
@@ -2983,6 +3013,58 @@ mod tests {
         (app, rx)
     }
 
+    /// Run `chunk` with a host lent that applies the party calls inside their verbs, as the app's
+    /// host does ([`super::super::calls::PartyCalls`]); other calls go nowhere.
+    pub(super) fn hosted_run(app: &mut App, chunk: &str) {
+        use bevy::ecs::system::SystemState;
+        let world = app.world_mut();
+        let mut script = world.remove_non_send::<UiScript>().expect("a VM");
+        let mut state = SystemState::<super::super::calls::PartyCalls>::new(world);
+        let ran = {
+            let mut host = crate::script_calls::FnHost(|s: &mut UiScript, call| {
+                if let benilla_ui::script::ScriptCall::Party(request) = call {
+                    state
+                        .get_mut(world)
+                        .expect("the party calls validate")
+                        .apply(s, request);
+                }
+            });
+            script.hosted(&mut host, |s| s.run(chunk))
+        };
+        state.apply(world);
+        world.insert_non_send(script);
+        ran.expect("the chunk runs");
+    }
+
+    /// In the `/partytest` sandbox a group-changing call sends nothing: the drain answers it on
+    /// the mirror as the server's list would, and an accept still goes out, as a real group ends
+    /// the sandbox.
+    #[test]
+    fn the_sandbox_echoes_a_group_call_and_sends_an_accept() {
+        let (mut app, rx) = drain_app();
+        seat_self(&mut app);
+        resolve_party(&mut app, [0; 4]);
+        let mut group = app.world_mut().resource_mut::<GroupState>();
+        let _ = synthetic_roster(&mut group, None);
+        // `/partytest lead`: we lead, so `ConvertToRaid` passes its gate (`0x4bbca5`).
+        group.leader = ME;
+        frame(&mut app);
+        let _ = rx.try_iter().count();
+        hosted_run(&mut app, "ConvertToRaid() AcceptGroup()");
+        let sent: Vec<bool> = rx
+            .try_iter()
+            .map(|c| matches!(c, ClientCommand::GroupAccept))
+            .collect();
+        assert_eq!(sent, [true], "the accept alone");
+        assert_eq!(app.world().resource::<GroupState>().group_type, 0);
+        frame(&mut app);
+        assert_eq!(
+            app.world().resource::<GroupState>().group_type,
+            GROUPTYPE_RAID,
+            "the drain's echo"
+        );
+    }
+
     /// The kicks among the commands sent, `name:<name>` or `guid:<guid>`, in order.
     fn kicks(rx: &crossbeam_channel::Receiver<ClientCommand>) -> Vec<String> {
         rx.try_iter()
@@ -3026,10 +3108,10 @@ mod tests {
         frame(&mut app);
         let _ = kicks(&rx);
 
-        app.world_mut()
-            .non_send::<UiScript>()
-            .run(r#"UninviteFromParty("party1") UninviteFromParty("party2")"#)
-            .unwrap();
+        hosted_run(
+            &mut app,
+            r#"UninviteFromParty("party1") UninviteFromParty("party2")"#,
+        );
         frame(&mut app);
         assert_eq!(kicks(&rx), ["guid:0x1001", "name:M2"]);
     }
@@ -3056,10 +3138,10 @@ mod tests {
         frame(&mut app);
         let _ = kicks(&rx);
 
-        app.world_mut()
-            .non_send::<UiScript>()
-            .run("UninviteFromRaid(1) UninviteFromRaid(2) UninviteFromRaid(3)")
-            .unwrap();
+        hosted_run(
+            &mut app,
+            "UninviteFromRaid(1) UninviteFromRaid(2) UninviteFromRaid(3)",
+        );
         frame(&mut app);
         assert_eq!(kicks(&rx), ["guid:0x1001", "name:M2", "name:Me"]);
     }
@@ -3077,8 +3159,7 @@ mod tests {
         frame(&mut app);
         let _ = kicks(&rx);
 
-        let script = app.world_mut().non_send::<UiScript>();
-        script.run(r#"UninviteFromParty("party1")"#).unwrap();
+        hosted_run(&mut app, r#"UninviteFromParty("party1")"#);
         frame(&mut app);
         assert_eq!(kicks(&rx), ["name:Unknown Entity"]);
     }
@@ -3106,14 +3187,12 @@ mod tests {
         frame(&mut app);
         let _ = rx.try_iter().count();
 
-        app.world_mut()
-            .non_send::<UiScript>()
-            .run(
-                "SetRaidSubgroup(1, 2) SetRaidSubgroup(2, 1) SetRaidSubgroup(3, 1) \
-                 SetRaidSubgroup(1, 3) SwapRaidSubgroup(1, 1) SwapRaidSubgroup(1, 2) \
-                 SwapRaidSubgroup(2, 3) SwapRaidSubgroup(1, 3)",
-            )
-            .unwrap();
+        hosted_run(
+            &mut app,
+            "SetRaidSubgroup(1, 2) SetRaidSubgroup(2, 1) SetRaidSubgroup(3, 1) \
+             SetRaidSubgroup(1, 3) SwapRaidSubgroup(1, 1) SwapRaidSubgroup(1, 2) \
+             SwapRaidSubgroup(2, 3) SwapRaidSubgroup(1, 3)",
+        );
         frame(&mut app);
         let sent: Vec<String> = rx
             .try_iter()
@@ -3156,13 +3235,12 @@ mod tests {
             raid: vec![member(1), member(2), ME],
             ..Default::default()
         });
-        script
-            .run(
-                r#"UninviteFromParty("target") PromoteToPartyLeader("raid2")
-                   UninviteFromParty("raid1") PromoteToPartyLeader("party1")
-                   UninviteFromParty("party2") PromoteToPartyLeader("mouseover")"#,
-            )
-            .unwrap();
+        hosted_run(
+            &mut app,
+            r#"UninviteFromParty("target") PromoteToPartyLeader("raid2")
+               UninviteFromParty("raid1") PromoteToPartyLeader("party1")
+               UninviteFromParty("party2") PromoteToPartyLeader("mouseover")"#,
+        );
         frame(&mut app);
         let sent: Vec<String> = rx
             .try_iter()
@@ -3179,30 +3257,226 @@ mod tests {
         );
     }
 
-    /// A `/reload` loads the stock frames into a new VM that holds no group, and the roster is
-    /// pushed by the feed's first look after the load (`ui_script::lifecycle` seeds the player
-    /// alone): `PartyMemberFrame_OnLoad` reads `GetPartyMember` at the load (`PartyMemberFrame.lua:
-    /// 20-24`) and finds nobody, and only a `PARTY_MEMBERS_CHANGED` shows the row. The reference's
-    /// load reads the engine's group, so its reload fires none; benilla's fires the catch-up, and a
-    /// reload told nothing would leave the party frames hidden.
+    /// The open form arms the 30 s deadline (`0x4ba535`) before it signals `READY_CHECK`
+    /// (`0x4ba53a`), so a handler that answers at once finds the check running
+    /// (`GetReadyCheckMsLeft 0x4bb2f0`, read at `0x4bc099`) and its answer goes out.
     #[test]
-    fn a_reloaded_vm_has_its_party_frames_filled_by_the_catch_up() {
-        benilla_formats::wow_data_or_skip!();
-        let load = || {
-            let mut script = UiScript::new().unwrap();
-            script.set_screen_size(1024.0, 768.0);
-            let failures = crate::ui_script::load_default_ui(&script);
-            assert!(failures.is_empty(), "load failures: {failures:?}");
-            script.run("SEEN = {}").unwrap();
-            script
+    fn a_ready_check_handler_answers_inside_the_check() {
+        let mut app = app();
+        party(&mut app, 2, true);
+        frame(&mut app);
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
+        script.keep_calls();
+        script
+            .run(
+                r#"local f = CreateFrame("Frame")
+                   f:RegisterEvent("READY_CHECK")
+                   f:SetScript("OnEvent", function() ConfirmReadyCheck(1) end)"#,
+            )
+            .unwrap();
+        let _ = app
+            .world_mut()
+            .resource_mut::<GroupState>()
+            .apply_ready_check_request(false);
+        frame(&mut app);
+        assert_eq!(
+            app.world_mut()
+                .non_send_mut::<UiScript>()
+                .take_party_requests(),
+            [PartyRequest::ReadyCheckAnswer(1)]
+        );
+    }
+
+    /// `SMSG_GROUP_INVITE`'s handler signals `PARTY_INVITE_REQUEST` with the inviter (`0x5e6747`
+    /// → `0x48f420`, event `0x118`) for every invite; `PARTY_INVITE_CANCEL` is
+    /// `SMSG_GROUP_CANCEL`'s alone (`0x5e6784` → `0x48f440`), and `AcceptGroup` and
+    /// `DeclineGroup` only send (`0x48aa80`, `0x48aab0`). So an answer signals nothing, and the
+    /// same inviter asking again is asked about again.
+    /// `SMSG_GROUP_INVITE`'s handler (`0x5e6730`) signals `PARTY_INVITE_REQUEST` (`0x5e6747`), then
+    /// shows `ERR_INVITED_TO_GROUP_S` (message `0x3c`, `0x5e6752`): one pass, the event first.
+    #[test]
+    fn an_invite_fires_its_request_then_shows_its_line() {
+        let (mut app, _rx) = drain_app();
+        resolve_party(&mut app, [0; 4]);
+        app.world_mut()
+            .non_send::<UiScript>()
+            .run(
+                r#"ERR_INVITED_TO_GROUP_S = "%s has invited you to join a group."
+                   HEARD = {}
+                   local f = CreateFrame("Frame")
+                   for _, e in ipairs({ "PARTY_INVITE_REQUEST", "CHAT_MSG_SYSTEM",
+                                        "UI_INFO_MESSAGE", "UI_ERROR_MESSAGE" }) do
+                       f:RegisterEvent(e)
+                   end
+                   f:SetScript("OnEvent", function()
+                       table.insert(HEARD, event .. ":" .. tostring(arg1))
+                   end)"#,
+            )
+            .unwrap();
+        frame(&mut app);
+        app.world_mut()
+            .resource_mut::<GroupState>()
+            .apply_invited("Bob");
+        frame(&mut app);
+        let heard: Vec<String> = app
+            .world_mut()
+            .non_send::<UiScript>()
+            .eval("return HEARD")
+            .unwrap();
+        assert_eq!(
+            heard,
+            [
+                "PARTY_INVITE_REQUEST:Bob",
+                "CHAT_MSG_SYSTEM:Bob has invited you to join a group."
+            ]
+        );
+    }
+
+    #[test]
+    fn every_invite_signals_its_request_and_an_answer_signals_nothing() {
+        let (mut app, _rx) = drain_app();
+        resolve_party(&mut app, [0; 4]);
+        app.world_mut()
+            .non_send::<UiScript>()
+            .run(
+                r#"INVITES = {}
+                   local f = CreateFrame("Frame")
+                   f:RegisterEvent("PARTY_INVITE_REQUEST")
+                   f:RegisterEvent("PARTY_INVITE_CANCEL")
+                   f:SetScript("OnEvent", function()
+                       table.insert(INVITES, event .. ":" .. tostring(arg1))
+                   end)"#,
+            )
+            .unwrap();
+        let invites = |app: &mut App| -> Vec<String> {
+            app.world_mut()
+                .non_send::<UiScript>()
+                .eval("local i = INVITES; INVITES = {}; return i")
+                .unwrap()
         };
-        let mut app = app_with(load());
+        let invite = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<GroupState>()
+                .apply_invited("Bob");
+            frame(app);
+        };
+        // The VM's first look, which owes it nothing.
+        frame(&mut app);
+        invite(&mut app);
+        assert_eq!(invites(&mut app), ["PARTY_INVITE_REQUEST:Bob"]);
+        hosted_run(&mut app, "AcceptGroup()");
+        frame(&mut app);
+        frame(&mut app);
+        assert_eq!(invites(&mut app), Vec::<String>::new(), "the accept");
+        invite(&mut app);
+        assert_eq!(
+            invites(&mut app),
+            ["PARTY_INVITE_REQUEST:Bob"],
+            "asked again"
+        );
+        invite(&mut app);
+        assert_eq!(
+            invites(&mut app),
+            ["PARTY_INVITE_REQUEST:Bob"],
+            "unanswered, asked again"
+        );
+    }
+
+    /// The group events a VM heard, in order, once [`hear_group_events`] is installed.
+    fn heard(app: &mut App) -> Vec<String> {
+        app.world_mut()
+            .non_send::<UiScript>()
+            .eval::<Vec<String>>("local h = HEARD; HEARD = {}; return h")
+            .unwrap()
+    }
+
+    /// Note the five group events in `HEARD`, with the `SEEN` the harness's frame reads.
+    fn hear_group_events(script: &UiScript) {
+        script
+            .run(
+                r#"
+                SEEN = {}
+                HEARD = {}
+                local f = CreateFrame("Frame")
+                for _, e in ipairs({ "PARTY_MEMBERS_CHANGED", "PARTY_LEADER_CHANGED",
+                                     "PARTY_LOOT_METHOD_CHANGED", "RAID_ROSTER_UPDATE",
+                                     "RAID_TARGET_UPDATE" }) do
+                    f:RegisterEvent(e)
+                end
+                f:SetScript("OnEvent", function() table.insert(HEARD, event) end)
+                "#,
+            )
+            .unwrap();
+    }
+
+    /// A `/reload` signals none of the group events in 1.12.1: their sites are the group packets'
+    /// handlers (`ReadGroupList 0x5e6a40`, `SetGroupLeader 0x4e8250`, `ClearParty 0x4e84a0`, the
+    /// raid target handler `0x4ba220`), the name callback `0x4bad90` and the world entry's fill of
+    /// a zero raid row (`0x4ba140`, `0x4ba15c`), and the stock frames read the group as they load
+    /// (`PartyMemberFrame.lua:20-24`, `RaidFrame.lua:32`). So the reload's VM is seeded with the
+    /// group before its files run ([`seed_reloaded_vm`]) and told nothing after; a list that
+    /// lands later signals as ever, and a VM nobody seeded, the world entry's first, still hears
+    /// the catch-up.
+    #[test]
+    fn a_reloaded_vm_reads_the_group_as_it_loads_and_hears_no_group_event() {
+        let mut app = app();
+        party(&mut app, 2, true);
+        frame(&mut app);
+
+        let mut reloaded = UiScript::new().unwrap();
+        seed_reloaded_vm(app.world_mut(), &mut reloaded);
+        reloaded
+            .run(r#"LOADED = GetNumPartyMembers() .. "," .. tostring(UnitName("party2"))"#)
+            .unwrap();
+        hear_group_events(&reloaded);
+        app.insert_non_send(reloaded);
+        frame(&mut app);
+        let loaded: String = app
+            .world_mut()
+            .non_send::<UiScript>()
+            .eval("return LOADED")
+            .unwrap();
+        assert_eq!(loaded, "2,M2", "the group is there for the files");
+        assert_eq!(heard(&mut app), Vec::<String>::new(), "the reload");
+
+        party(&mut app, 2, true);
+        frame(&mut app);
+        assert_eq!(
+            heard(&mut app),
+            [
+                "PARTY_MEMBERS_CHANGED",
+                "PARTY_LEADER_CHANGED",
+                "RAID_TARGET_UPDATE"
+            ],
+            "a list after it"
+        );
+
+        let entry = UiScript::new().unwrap();
+        hear_group_events(&entry);
+        app.insert_non_send(entry);
+        frame(&mut app);
+        assert_eq!(
+            heard(&mut app),
+            ["PARTY_MEMBERS_CHANGED", "PARTY_LEADER_CHANGED"],
+            "a VM nobody seeded hears the catch-up"
+        );
+    }
+
+    /// The stock party frames, loaded into a reload's seeded VM, show the members at once.
+    #[test]
+    fn a_reloaded_vm_has_its_party_frames_filled_as_it_loads() {
+        benilla_formats::wow_data_or_skip!();
+        let mut app = app();
         party(&mut app, 1, true);
         frame(&mut app);
-        assert_eq!(flag(&mut app, "PartyMemberFrame1:IsShown()"), Some(1.0));
 
-        app.insert_non_send(load());
-        frame(&mut app);
+        let mut script = UiScript::new().unwrap();
+        seed_reloaded_vm(app.world_mut(), &mut script);
+        script.set_screen_size(1024.0, 768.0);
+        let failures = crate::ui_script::load_default_ui(&script);
+        assert!(failures.is_empty(), "load failures: {failures:?}");
+        script.run("SEEN = {}").unwrap();
+        app.insert_non_send(script);
         assert_eq!(flag(&mut app, "PartyMemberFrame1:IsShown()"), Some(1.0));
         assert_eq!(
             app.world_mut()
