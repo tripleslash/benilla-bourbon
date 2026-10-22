@@ -117,7 +117,8 @@ mod imp {
     }
 
     /// The handshake's counters since the last call (`render_worker::take_stats`), as one line, for
-    /// `?gpucensus=1` (`web/renderworker.js`), which asks every 5 s. Nothing else calls it.
+    /// `?gpucensus=1` (`web/renderworker.js`), which asks every 5 s; `webdiag` leaves the
+    /// counters to it then.
     #[wasm_bindgen]
     pub fn __wenilla_render_stats() -> String {
         let s = render_worker::take_stats();

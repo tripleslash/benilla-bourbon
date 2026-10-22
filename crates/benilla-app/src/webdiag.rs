@@ -396,6 +396,11 @@ fn render_worker_line() -> Option<String> {
         if !render_worker::active() {
             return None;
         }
+        // `?gpucensus=1` takes the same counters for the same 5 s; two readers would each see
+        // part of every window, so the census line carries them alone.
+        if crate::webenv::var("WOW_GPUCENSUS").as_deref() == Some("1") {
+            return Some("\n[diag]   render worker: see the [gpucensus] line".to_owned());
+        }
         let s = render_worker::take_stats();
         let avg = |sum: u64, n: u64| {
             if n > 0 {
@@ -485,7 +490,7 @@ fn report(world: &mut World) {
     let mut line = format!(
         "[diag] t={now:.0}s frames={n} | ms p50={p50:.1} p95={p95:.1} max={max:.1} decode={decode:.1} \
          | slow>{SLOW_MS:.0}ms={} | ents={} {} rents={} {} arch={} made={} {} | mesh={} {} img={} {} mat={} {} \
-         | wasm={} {} js={} {} | thr={} pipes={} audio={}",
+         | wasm={} {} js={} {} | thr={} pipes={} audio={} | grow={}",
         d.slow,
         counts.entities,
         signed(de),
@@ -507,6 +512,7 @@ fn report(world: &mut World) {
         worker_threads(),
         pipes,
         audio_field(),
+        grow_field(),
     );
     line.push_str(&fresh);
 
@@ -803,6 +809,29 @@ fn audio_field() -> String {
 #[cfg(not(target_arch = "wasm32"))]
 fn audio_field() -> String {
     String::new()
+}
+
+/// `<grows>+<ahead>/<MB>`: allocations that grew wasm memory this window, growths the allocator
+/// made ahead of need, and the MB both added (`wasm_alloc::take_grow_stats`). A stall in a window
+/// that grew is the allocator's: each grow runs under its shared lock.
+#[cfg(all(
+    target_arch = "wasm32",
+    target_feature = "atomics",
+    not(debug_assertions)
+))]
+fn grow_field() -> String {
+    let (grows, ahead, bytes) = crate::wasm_alloc::take_grow_stats();
+    format!("{grows}+{ahead}/{}MB", bytes >> 20)
+}
+
+/// No sharded allocator here (native, or a debug or single-threaded web build).
+#[cfg(not(all(
+    target_arch = "wasm32",
+    target_feature = "atomics",
+    not(debug_assertions)
+)))]
+fn grow_field() -> String {
+    "-".to_owned()
 }
 
 /// `+new/pending` for the pipeline cache this window, or `-` where there is no cache to ask
