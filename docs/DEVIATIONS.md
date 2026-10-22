@@ -33,14 +33,14 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 
 Each entry is the first sentence of a `Deviation:` comment, linking to where it lives.
 
-- [benilla-app](#benilla-app): 254
+- [benilla-app](#benilla-app): 257
 - [benilla-assets](#benilla-assets): 6
 - [benilla-blp](#benilla-blp): 2
 - [benilla-formats](#benilla-formats): 24
 - [benilla-lua](#benilla-lua): 11
 - [benilla-protocol](#benilla-protocol): 28
 - [benilla-srp](#benilla-srp): 2
-- [benilla-ui](#benilla-ui): 130
+- [benilla-ui](#benilla-ui): 132
 - [benilla-world](#benilla-world): 59
 
 ### benilla-app
@@ -63,16 +63,18 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The 1.15 era client's single settings window replaces the 1.12 four-panel family, which is much worse to use; the 1.12 frames still load, hidden, for addons. ([`assets/ui/OptionsFrame.xml:3`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L3))
 - AUTO\_QUEST\_WATCH is the string "1". 1.12 assigns the number 1 (l.122) but every consumer compares against "1" (QuestLogFrame.lua:64/68); 1 ~= "1" in Lua 5.0. ([`assets/ui/OptionsFrame.xml:31`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L31))
 - The bar toggles precede the lock, which 1.12's box leads with, so what is on screen reads first. ([`assets/ui/OptionsFrame.xml:670`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L670))
-- A named ladder reads out its stop; 1.12's slider labels only its ends, and a bare index would mean nothing to a player. ([`assets/ui/OptionsFrame.xml:899`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L899))
-- 1.12 returns early here; a mute row hides the last plate, so a neighbour's text cannot stand when its OnLeave was missed. ([`assets/ui/OptionsFrame.xml:1021`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L1021))
-- Ships "1" where 1.12 registers "0": off, a friendly cast falls into the targeting cursor, which is not modelled. ([`assets/ui/OptionsFrame.xml:2008`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L2008))
-- No partner write of cameraPitchSmoothSpeed, which has no reader: the follow here has one rate. ([`assets/ui/OptionsFrame.xml:2097`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L2097))
-- benilla's own level control, beside 1.12's Gamma (ui\_gamma.rs). ([`assets/ui/OptionsFrame.xml:2373`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L2373))
-- Our own row (the reference draws to the backbuffer), and no Multisampling, which misses alpha-tested cutouts. ([`assets/ui/OptionsFrame.xml:2663`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L2663))
-- Turtle's rows benilla cannot honour are cut, by the name Turtle keys them with (Options\\Options.lua). ([`assets/ui/OptionsFrame.xml:3925`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L3925))
-- Turtle's window writes a row the moment its control changes (OptionsFrame.lua's local `OnControlValueChanged`). ([`assets/ui/OptionsFrame.xml:4112`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L4112))
-- Turtle's slider labels only its ends (OptionsFrameTemplates.xml). Here each also reads out its value at its right, as every slider row of our window does and in that row's words; the readouts' column is the right end of every row, which the controls' column stops short of (below). ([`assets/ui/OptionsFrame.xml:4248`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L4248))
-- Turtle seats each control at the right end of a 346-wide row whose label column is 210: a 128-wide slider, a 110-wide dropdown, a checkbox. ([`assets/ui/OptionsFrame.xml:4385`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L4385))
+- Terrain Distance (row 2) goes past the reference's 777 to the engine's 1500 (`benilla_world::view::FARCLIP_RANGE`, `check_farclip`), which the modern look's fog shows; the stock table itself is left as it is, for the addons that read and write it. ([`assets/ui/OptionsFrame.xml:809`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L809))
+- A named ladder reads out its stop; 1.12's slider labels only its ends, and a bare index would mean nothing to a player. ([`assets/ui/OptionsFrame.xml:909`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L909))
+- 1.12 returns early here; a mute row hides the last plate, so a neighbour's text cannot stand when its OnLeave was missed. ([`assets/ui/OptionsFrame.xml:1031`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L1031))
+- Ships "1" where 1.12 registers "0": off, a friendly cast falls into the targeting cursor, which is not modelled. ([`assets/ui/OptionsFrame.xml:2018`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L2018))
+- No partner write of cameraPitchSmoothSpeed, which has no reader: the follow here has one rate. ([`assets/ui/OptionsFrame.xml:2107`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L2107))
+- benilla's own level control, beside 1.12's Gamma (ui\_gamma.rs). ([`assets/ui/OptionsFrame.xml:2383`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L2383))
+- Our own row (the reference draws to the backbuffer), and no Multisampling, which misses alpha-tested cutouts. ([`assets/ui/OptionsFrame.xml:2673`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L2673))
+- Turtle's rows benilla cannot honour are cut, by the name Turtle keys them with (Options\\Options.lua). ([`assets/ui/OptionsFrame.xml:3935`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L3935))
+- Up to the engine's ceiling, as our window's row (`BENILLA_FARCLIP_MAX`). ([`assets/ui/OptionsFrame.xml:3979`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L3979))
+- Turtle's window writes a row the moment its control changes (OptionsFrame.lua's local `OnControlValueChanged`). ([`assets/ui/OptionsFrame.xml:4126`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L4126))
+- Turtle's slider labels only its ends (OptionsFrameTemplates.xml). Here each also reads out its value at its right, as every slider row of our window does and in that row's words; the readouts' column is the right end of every row, which the controls' column stops short of (below). ([`assets/ui/OptionsFrame.xml:4262`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L4262))
+- Turtle seats each control at the right end of a 346-wide row whose label column is 210: a 128-wide slider, a 110-wide dropdown, a checkbox. ([`assets/ui/OptionsFrame.xml:4399`](../crates/benilla-app/assets/ui/OptionsFrame.xml#L4399))
 - 1.12 has no `/reload` (later clients added it; 1.12 reloads through `/console reloadui`); kept so a player can reload the interface after toggling addons. ([`assets/ui/ScriptLogFrame.xml:381`](../crates/benilla-app/assets/ui/ScriptLogFrame.xml#L381))
 - A three-slice where the reference overlaps two quads, since two quads reach only 362 units and a page here is 563 tall. ([`assets/ui/ScrollTemplates.xml:190`](../crates/benilla-app/assets/ui/ScrollTemplates.xml#L190))
 - The pet page's autocast widgets take the pet bar button's proportions, so the shine and the corner brackets sit on the button's edge and share its centre. ([`assets/ui/SpellBookAdapters.xml:3`](../crates/benilla-app/assets/ui/SpellBookAdapters.xml#L3))
@@ -167,6 +169,10 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### local_state
 
 - The reference writes `Screenshots\\` inside the install, which benilla never writes to; the folder keeps the reference's name. ([`src/local_state.rs:416`](../crates/benilla-app/src/local_state.rs#L416))
+
+#### memory_pressure
+
+- The reference has no such valve; its 32-bit process had the address space the page lacks. ([`src/memory_pressure.rs:13`](../crates/benilla-app/src/memory_pressure.rs#L13))
 
 #### minimap
 
@@ -738,13 +744,15 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - With no wheel it scales by the strip's, because the reference reads the missing wheel unguarded. ([`src/script/colorselect.rs:379`](../crates/benilla-ui/src/script/colorselect.rs#L379))
 - The reference's `set` registers an unknown name as a new category-5 record (`0x63d569`-`0x63d582`); benilla refuses it, because nothing would read the row and `config.toml` keeps an unknown key anyway. ([`src/script/console_exec.rs:120`](../crates/benilla-ui/src/script/console_exec.rs#L120))
 - A row the session owns (an env lever) is passed, because the env chose its value for this run and the file never holds it, so a reset would undo the lever and save nothing. ([`src/script/console_exec.rs:199`](../crates/benilla-ui/src/script/console_exec.rs#L199))
-- A row that no longer resolves is refused, as `0x4c7300` does, because this path dereferences it unchecked (`0x4f9f35`), a latent null deref. ([`src/script/container.rs:750`](../crates/benilla-ui/src/script/container.rs#L750))
+- The backpack is bounded by its own 16 slots, where `0x4f990f` bounds bag 0 by the player list's count (0x71), a reference bug that lets the backpack index read other containers. ([`src/script/container.rs:308`](../crates/benilla-ui/src/script/container.rs#L308))
+- A row index the list no longer holds buys nothing and drops, where this path reads through a null row (`0x4f9f35`). ([`src/script/container.rs:757`](../crates/benilla-ui/src/script/container.rs#L757))
 - A last `spell_id` key breaks the remaining ties (Charge's six ranks all have `spellLevel` 0), because the reference leaves them to its qsort over an array benilla does not reproduce; ascending id is ascending rank in every 1.12 pet-ability family. ([`src/script/craft.rs:104`](../crates/benilla-ui/src/script/craft.rs#L104))
 - The reference reads past the table unbounded (`0x4f6c90`), so type 5 would answer "CloseCraft"; no shipped opener carries a type past 3, and benilla answers nil rather than read past it. ([`src/script/craft.rs:430`](../crates/benilla-ui/src/script/craft.rs#L430))
-- On `Terrain` the reference keeps a spell, action, macro or pet action on the left button; we clear them, because otherwise a spell has no left-click way off the cursor. ([`src/script/cursor.rs:630`](../crates/benilla-ui/src/script/cursor.rs#L630))
-- Every lock lifts here, bag contents included. The reference's walk of a bag's contents indexes the bag by its own player-array index (`0x495528`, `0x495535`), at least 19, past a bag's slots in every case but the biggest bags, so it normally unlocks none of them; a lock it strands lasts until the item's seat or stack moves, which this does not copy. ([`src/script/cursor.rs:807`](../crates/benilla-ui/src/script/cursor.rs#L807))
-- Returns nothing. The handler ends `mov eax,1` with nothing pushed (`0x4895bc`), so Lua 5.0 hands back the stack top, the last argument or the function itself: an accident of the handler, not an API, and copying a stack-top leak would copy a bug. ([`src/script/cursor.rs:1028`](../crates/benilla-ui/src/script/cursor.rs#L1028))
+- On `Terrain` the reference keeps a spell, action, macro or pet action on the left button; we clear them, because otherwise a spell has no left-click way off the cursor. ([`src/script/cursor.rs:642`](../crates/benilla-ui/src/script/cursor.rs#L642))
+- Every lock lifts here, bag contents included. The reference's walk of a bag's contents indexes the bag by its own player-array index (`0x495528`, `0x495535`), at least 19, past a bag's slots in every case but the biggest bags, so it normally unlocks none of them; a lock it strands lasts until the item's seat or stack moves, which this does not copy. ([`src/script/cursor.rs:840`](../crates/benilla-ui/src/script/cursor.rs#L840))
+- Returns nothing. The handler ends `mov eax,1` with nothing pushed (`0x4895bc`), so Lua 5.0 hands back the stack top, the last argument or the function itself: an accident of the handler, not an API, and copying a stack-top leak would copy a bug. ([`src/script/cursor.rs:1068`](../crates/benilla-ui/src/script/cursor.rs#L1068))
 - An auto-store into a bank item or keyring slot sends nothing, because no container id names it and no stock caller passes one; the reference sends it and the server refuses. ([`src/script/cursor/bag_verbs.rs:25`](../crates/benilla-ui/src/script/cursor/bag_verbs.rs#L25))
+- A row index the list no longer holds buys nothing and drops, where this site reads through a null row (`0x4c7e9a`, `0x4c7ea5`). ([`src/script/cursor/bag_verbs.rs:125`](../crates/benilla-ui/src/script/cursor/bag_verbs.rs#L125))
 - Slot 11 is refused, because the reference's gate (`cmp esi,0xa; jbe`) admits it and neither `0x4bce00` nor `0x4bc9a0` bounds-checks again, so it writes one dword past the array, and the autocast toggle (`0x4bcbb0`) reads that word (`[0xb71438+0x28]`) with no bounds check. ([`src/script/cursor/pet.rs:19`](../crates/benilla-ui/src/script/cursor/pet.rs#L19))
 - The top is 1000, not the reference's 250, so the fork's shipped 500 (a 1000 yd far clip) is in range; `benilla_world::horizon::LOD_DIST_RANGE` is the same span. ([`src/script/cvar_checks.rs:336`](../crates/benilla-ui/src/script/cvar_checks.rs#L336))
 - The list is the window sizes this client can present, not the device's display modes, because benilla makes no exclusive mode-set. `"WxH"` is a contract: `OptionsFrame.lua:281-284` splits on the `x` and `CT_Viewport.lua:107` matches `"(%d+)x(%d+)"`, both failing silently. ([`src/script/cvars.rs:81`](../crates/benilla-ui/src/script/cvars.rs#L81))
@@ -773,8 +781,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The handle's value is the address of a `CGxTex` (`SMemAlloc(0x54)`, `0x594a96`), which benilla cannot reproduce; each texture ranks instead by a creation stamp, one global sequence number taken when its cache key is first created and taken anew once its last region has let go of it (`super::texel::Texels`). ([`src/script/layer_batch.rs:9`](../crates/benilla-ui/src/script/layer_batch.rs#L9))
 - The reference's byte copy can end inside a character and keep the stray bytes; a `String` must stay UTF-8, so the cut stops at the character boundary. ([`src/script/macros.rs:111`](../crates/benilla-ui/src/script/macros.rs#L111))
 - A listing that finds no icon stays empty, to be listed again on the next ask, where the reference's dedup then reads below its null list (`0x4f0134`-`0x4f0145`) and faults. ([`src/script/macros.rs:439`](../crates/benilla-ui/src/script/macros.rs#L439))
-- The client's Lua has no such bound, as nothing sets a hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that never ends hangs it. ([`src/script/mod.rs:904`](../crates/benilla-ui/src/script/mod.rs#L904))
-- The reference sets the cells only when glue or the interface is built, `0x41ad10` from `0x46a828` (`0x46a7b0`) and `0x48fe2b` (`0x48fbf0`), and a resize reaches them only through the rebuild it asks for. ([`src/script/mod.rs:955`](../crates/benilla-ui/src/script/mod.rs#L955))
+- The client's Lua has no such bound, as nothing sets a hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that never ends hangs it. ([`src/script/mod.rs:906`](../crates/benilla-ui/src/script/mod.rs#L906))
+- The reference sets the cells only when glue or the interface is built, `0x41ad10` from `0x46a828` (`0x46a7b0`) and `0x48fe2b` (`0x48fbf0`), and a resize reaches them only through the rebuild it asks for. ([`src/script/mod.rs:957`](../crates/benilla-ui/src/script/mod.rs#L957))
 - A path that does not resolve is stored, where the reference raises `Invalid model file: %s` (`0x878b44`), because the file loads asynchronously here and the call cannot know yet. ([`src/script/modelframe.rs:339`](../crates/benilla-ui/src/script/modelframe.rs#L339))
 - Benilla plays no pre-rendered movie (#968), so `StartMovie` answers nil, the reference's "could not start" (`0x78d861`), which the stock `MovieFrame_PlayMovie` answers by hiding the frame and so by returning to the login screen. ([`src/script/movieframe.rs:4`](../crates/benilla-ui/src/script/movieframe.rs#L4))
 - The reference's free list is FIFO; either keeps every index stable, all an addon can observe. ([`src/script/nameplate.rs:432`](../crates/benilla-ui/src/script/nameplate.rs#L432))
