@@ -267,10 +267,10 @@ pub use cvar_checks::{
     check_small_cull, check_tex_lod_bias, check_triple_buffer, CvarCheck, CvarRows, CvarVerdict,
 };
 pub use cvar_checks::{
-    check_dist_cull, check_error_filter, check_footstep_bias, check_horizon_farclip,
-    check_lod_dist, check_map_obj_light_lod, check_max_lights, check_particle_density,
-    check_shadow_bias, check_target_nearest_distance, check_texture_lod_dist, check_unit_draw_dist,
-    check_water_lod,
+    check_dist_cull, check_error_filter, check_ffx_echo, check_footstep_bias,
+    check_horizon_farclip, check_lod_dist, check_map_obj_light_lod, check_max_lights,
+    check_particle_density, check_shadow_bias, check_target_nearest_distance,
+    check_texture_lod_dist, check_unit_draw_dist, check_water_lod, scanf_f_prefix,
 };
 pub use cvars::small_cull_text;
 pub use cvars::{
@@ -343,7 +343,7 @@ pub use model::{
 pub use party::{
     PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, ReadyCheckState, SavedInstanceInfo,
 };
-pub use pet::{PetActionView, PetStats};
+pub use pet::{PetActionView, PetCall, PetStats, PET_DISMISS_WORD};
 pub use pvp::{
     decorated_name, medal_line, pvp_name_global_keys, HonorState, InspectHonorData, RankTitle,
 };
@@ -370,7 +370,7 @@ pub use spellbook::{
     resolve_spell_in_books, NamedSpell, PetBookState, SpellBookState, SpellSlotView, SpellTabName,
     SpellTabView,
 };
-pub use stable::{StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
+pub use stable::{StableCall, StableIntent, StablePetSlot, StableState, NUM_STABLE_SLOTS};
 pub use summon::SummonConfirmUiState;
 pub use talent::{TalentCall, TalentPrereqView, TalentTabView, TalentUiState, TalentView};
 pub use taxi::{TaxiCall, TaxiNodeType, TaxiUiNode, TaxiUiState};

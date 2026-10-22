@@ -361,6 +361,7 @@ fn emit_water_foam(
     units: Query<(Entity, &Transform, &WorldUnit), Without<ViewerUnit>>,
     water: Query<(Entity, &WaterChunkInfo, &FoamPatch)>,
     index: Res<WaterIndex>,
+    ripples: Option<Res<WaterRipples>>,
 ) {
     if materials.is_none() {
         return;
@@ -372,6 +373,8 @@ fn emit_water_foam(
         foam.units.clear();
         return;
     }
+    // `0x68bda3`: the emitter makes no record while `waterRipples` is 0.
+    let emits = ripples.is_none_or(|r| r.0 != 0);
     let now = time.elapsed_secs();
     let dt = time.delta_secs().max(1.0e-4);
 
@@ -410,7 +413,9 @@ fn emit_water_foam(
             } = &mut *foam;
             let uf = units.get_mut(&Entity::PLACEHOLDER).expect("inserted above");
             let mut alloc = |rec: FoamRecord| {
-                pool[alloc_slot(self_cursor, 0, SELF_SLOTS)] = Some(rec);
+                if emits {
+                    pool[alloc_slot(self_cursor, 0, SELF_SLOTS)] = Some(rec);
+                }
             };
             drive_unit(uf, &mut alloc, body, state, scale, h, &water, &index, now);
         }
@@ -461,7 +466,9 @@ fn emit_water_foam(
             } = &mut *foam;
             let uf = units.get_mut(&entity).expect("inserted above");
             let mut alloc = |rec: FoamRecord| {
-                pool[alloc_slot(other_cursor, SELF_SLOTS, POOL_SIZE - SELF_SLOTS)] = Some(rec);
+                if emits {
+                    pool[alloc_slot(other_cursor, SELF_SLOTS, POOL_SIZE - SELF_SLOTS)] = Some(rec);
+                }
             };
             drive_unit(
                 uf, &mut alloc, pos, state, unit.scale, h, &water, &index, now,
@@ -562,6 +569,17 @@ fn push_water_foam(
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WaterFoamSet;
 
+/// `waterRipples` (`0x673750`, `[0x86a03c]`, initialised 1): the emitter (`0x68bda0`) returns at
+/// once for 0 (`0x68bda3`), so no record is made; live records age out as before.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaterRipples(pub i32);
+
+impl Default for WaterRipples {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
 /// The water foam plugin.
 pub(crate) struct WaterFxPlugin;
 
@@ -584,10 +602,12 @@ mod tests {
     use super::*;
 
     /// One wading unit standing in an indexed pool, one dry control far outside it, on the
-    /// renderer `detail` names. The wader is 1.5 yd under the surface — past the 0.4·h step-in
-    /// line — so the one-shot ring fires on its first classified frame.
-    fn wading_world(detail: u8) -> App {
+    /// renderer `detail` names, with `waterRipples` at `ripples`. The wader is 1.5 yd under the
+    /// surface — past the 0.4·h step-in line — so the one-shot ring fires on its first
+    /// classified frame.
+    fn wading_world(detail: u8, ripples: WaterRipples) -> App {
         let mut app = App::new();
+        app.insert_resource(ripples);
         app.init_resource::<Time>()
             .init_resource::<WaterIndex>()
             .init_resource::<WaterFoam>()
@@ -647,20 +667,34 @@ mod tests {
             .collect()
     }
 
-    /// The emitter reaches its water through [`WaterIndex`], end to end: a wading unit standing
-    /// in an indexed pool emits a record on its first frame (the step-in one-shot), and a unit
-    /// on dry land emits nothing. This is the regression fence for the index rewire — an empty
-    /// or stale index is a world with NO foam, which no helper-level test would catch.
+    /// The emitter reaches its water through [`WaterIndex`]: an empty or stale index means no
+    /// foam anywhere, which no helper-level test catches.
     #[test]
     fn the_emitter_finds_its_water_through_the_index() {
-        let mut app = wading_world(crate::liquid::WATER_DETAIL_LEGACY);
+        assert_eq!(emitted(WaterRipples::default()).len(), 1);
+    }
+
+    /// `waterRipples 0` makes the emitter return before any record (`0x68bda3`).
+    #[test]
+    fn water_ripples_zero_emits_nothing() {
+        assert!(emitted(WaterRipples(0)).is_empty());
+        assert_eq!(emitted(WaterRipples(-3)).len(), 1, "any nonzero emits");
+    }
+
+    /// The live pool slots after one frame of the legacy renderer's wader stepping in.
+    fn emitted(ripples: WaterRipples) -> Vec<usize> {
+        let mut app = wading_world(crate::liquid::WATER_DETAIL_LEGACY, ripples);
         app.update();
         let live = live_slots(&app);
-        assert_eq!(live.len(), 1, "one record: the wader's, not the dry unit's");
         assert!(
-            live[0] >= SELF_SLOTS,
+            live.len() <= 1,
+            "one record at most: the wader's, not the dry unit's"
+        );
+        assert!(
+            live.iter().all(|&i| i >= SELF_SLOTS),
             "a streamed unit allocates from the other partition"
         );
+        live
     }
 
     /// **The Cataclysm path draws no decal.** Same world, same wader, same frame — the setting is
@@ -670,7 +704,7 @@ mod tests {
     /// the emitter forgot to read means every cata player sees the old stencil.
     #[test]
     fn the_cata_renderer_emits_no_foam_decal() {
-        let mut app = wading_world(crate::liquid::WATER_DETAIL_CATA);
+        let mut app = wading_world(crate::liquid::WATER_DETAIL_CATA, WaterRipples::default());
         app.update();
         assert!(
             live_slots(&app).is_empty(),

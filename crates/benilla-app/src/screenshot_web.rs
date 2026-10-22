@@ -6,8 +6,9 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
 export function download(name, bytes) {
-    // `bytes` is a view into wasm memory; the Blob copies it before anything can grow that memory.
-    const url = URL.createObjectURL(new Blob([bytes], {type: 'image/png'}));
+    // `bytes` is a view into wasm memory, which the threaded build shares, and a Blob refuses a
+    // shared view: `slice` copies it into an unshared buffer before anything can grow that memory.
+    const url = URL.createObjectURL(new Blob([bytes.slice()], {type: 'image/png'}));
     const link = document.createElement('a');
     link.href = url;
     link.download = name;

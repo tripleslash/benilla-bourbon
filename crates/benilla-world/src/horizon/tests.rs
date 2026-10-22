@@ -342,7 +342,6 @@ fn one_window_that_sees_an_object_shows_it() {
 #[test]
 fn the_drawn_chunk_level_is_the_horizons() {
     let on = HorizonCulling {
-        enabled: true,
         enforce: true,
         lod: true,
         lod_dist: LOD_DIST_SHIPPED,

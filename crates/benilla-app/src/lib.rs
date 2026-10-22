@@ -258,6 +258,7 @@ mod web_threads;
 // fork: the browser build's render thread — the render sub-app on its own Web Worker.
 mod render_worker;
 mod world_backdrop;
+mod world_console;
 mod world_state;
 mod world_state_ui;
 

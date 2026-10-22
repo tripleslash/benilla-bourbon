@@ -7,7 +7,8 @@
 //!
 //! A booth mirrors the unit's live dressed look ([`PortraitPart`]), so a gear change re-bakes;
 //! until the model loads the slot shows a 2D stand-in, where the reference leaves it blank
-//! (`0x519fcc`) and loads a stand-in only for a unit it holds no object for (`0x525ba0`).
+//! (`0x519fcc`) and loads a stand-in only for a unit it holds no object for: a player's
+//! (`0x525ba0`) or a group pet record's (`0x525cb0`).
 //! Framing is the model's
 //! authored portrait camera, the one `cameraLookup[0]` selects (`0x713540`), through the
 //! diagonal-FOV projection ([`WowPortraitProjection`]); a camera-less model falls back to
@@ -571,12 +572,14 @@ pub(crate) struct PartyBooths<'w, 's> {
 #[derive(Component)]
 pub(crate) struct BoothCam(pub(crate) String);
 
-/// The display aspect the client's `screencoord` scale uses: `gxResolution`'s width/height with
-/// `widescreen` on (its default), `4/3` off. Read by [`framing::pane_model_scale`].
+/// The display aspect the client's `screencoord` scale uses (`0x4901e0`): `gxResolution`'s
+/// width/height with `widescreen` on (its default), `4/3` off. Read by
+/// [`framing::pane_model_scale`]. Defaults to `4/3`, where the factor is 1.0.
 ///
-/// Deviation: this reads the window's aspect, not `gxResolution` (here only the windowed size)
-/// under `widescreen` (not registered), because fullscreen is the monitor's own size with no mode
-/// list, where the two agree. Defaults to `4/3`, where the factor is 1.0.
+/// Deviation: this reads the window's aspect, not `gxResolution`'s, because the window here takes
+/// any shape a drag gives it, where the reference's keeps `gxResolution`'s (`0x5989d7`). In
+/// fullscreen the window is the screen in logical pixels and `gxResolution` the screen in device
+/// pixels, so their aspects agree and their sizes need not.
 #[derive(Resource)]
 pub(crate) struct GxAspect(pub(crate) f32);
 
@@ -586,20 +589,25 @@ impl Default for GxAspect {
     }
 }
 
-/// Track the primary window's aspect into [`GxAspect`].
+/// Track the primary window's aspect into [`GxAspect`], or 4/3 with `widescreen` off.
 fn feed_gx_aspect(
     mut gx: ResMut<GxAspect>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    widescreen: Option<Res<crate::video::Widescreen>>,
 ) {
     let Ok(w) = window.single() else {
         return;
     };
     let (px_w, px_h) = (w.resolution.width(), w.resolution.height());
-    if px_h > 0.0 {
-        let a = px_w / px_h;
-        if (a - gx.0).abs() > 1e-4 {
-            gx.0 = a;
-        }
+    let a = if widescreen.is_some_and(|w| !w.0) {
+        4.0 / 3.0
+    } else if px_h > 0.0 {
+        px_w / px_h
+    } else {
+        return;
+    };
+    if (a - gx.0).abs() > 1e-4 {
+        gx.0 = a;
     }
 }
 
@@ -1120,8 +1128,9 @@ fn sync_portraits(
         return; // the test bake owns the booths
     }
     for token in SLOTS {
-        // A unit the object manager does not hold draws the 2D stand-in (`0x525ba0`), not the
-        // blank, which is for a model not ready (`0x519fcc`); `unseen` carries that art.
+        // A unit the object manager does not hold draws what `0x519fe6` gives its guid: a
+        // player's stand-in by race and sex (`0x525ba0`), a group pet record's (`0x525cb0`), or
+        // nothing; `unseen` carries that art.
         let mut unseen: Option<String> = None;
         let mut occupant: Option<u64> = None;
         let unit: Option<Entity> = match token {
@@ -1147,15 +1156,14 @@ fn sync_portraits(
                 })
                 .flatten(),
             "pet" => {
-                let guid = party.pet_bar.spells.pet_guid;
-                let entity = (guid != 0)
-                    .then(|| party.index.0.get(&guid))
-                    .flatten()
-                    .copied();
-                if entity.is_none() && guid != 0 {
-                    unseen = Some(creature_temporary_portrait());
-                }
-                entity
+                let subject = pet_subject(
+                    party.pet_bar.spells.pet_guid,
+                    |g| party.index.0.get(&g).copied(),
+                    &party.roster,
+                    &party.names,
+                );
+                unseen = subject.unseen;
+                subject.entity
             }
             "npc" => interact_npc.0,
             // Gated on the UI drawing it, as `"targettarget"`: no stock file binds it.
@@ -1635,6 +1643,25 @@ struct Subject {
     unseen: Option<String>,
 }
 
+/// `"pet"`'s subject: the object of the pet bar's guid, or for a pet the object manager does not
+/// hold, what any such guid draws (`0x519fe6`, [`unseen_portrait`]): our own pet is in no group
+/// pet record (`0x496420`), so its portrait stays empty (`0x51a0ce`).
+fn pet_subject(
+    pet_guid: u64,
+    entity_of: impl Fn(u64) -> Option<Entity>,
+    roster: &crate::ui_party::GroupState,
+    names: &crate::names::NameCache,
+) -> Subject {
+    let entity = (pet_guid != 0).then(|| entity_of(pet_guid)).flatten();
+    Subject {
+        entity,
+        occupant: None,
+        unseen: (entity.is_none() && pet_guid != 0)
+            .then(|| unseen_portrait(roster, names, pet_guid))
+            .flatten(),
+    }
+}
+
 /// `"target"`'s subject: the selection's object, or, for a selection with no object, a party
 /// member out of range, the guid's cached bake or stand-in, as any unit the object manager does not
 /// hold (`0x519fe6`).
@@ -1704,6 +1731,24 @@ fn aim(
 mod tests {
     use super::*;
     use crate::entities::ItemModelKind;
+
+    /// The screen basis's aspect is `0x4901e0`'s: the display's width over height while
+    /// `widescreen` is on, 4/3 when it is 0.
+    #[test]
+    fn the_gx_aspect_is_four_thirds_with_widescreen_off() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<GxAspect>();
+        world.init_resource::<crate::video::Widescreen>();
+        let mut window = Window::default();
+        window.resolution.set(1920.0, 1080.0);
+        world.spawn((window, bevy::window::PrimaryWindow));
+        world.run_system_once(feed_gx_aspect).unwrap();
+        assert!((world.resource::<GxAspect>().0 - 16.0 / 9.0).abs() < 1e-6);
+        world.insert_resource(crate::video::Widescreen(false));
+        world.run_system_once(feed_gx_aspect).unwrap();
+        assert_eq!(world.resource::<GxAspect>().0, 4.0 / 3.0);
+    }
 
     /// The stock pet frame binds `"partypetN"` (`PartyFrameTemplates.xml`, `UnitFrame_Initialize`),
     /// and `SetPortraitTexture` draws only a token a slot bakes.

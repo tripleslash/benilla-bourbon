@@ -36,6 +36,7 @@ use crate::exterior_cull::ExteriorCullSet;
 use crate::terrain_stream::{TerrainCell, TerrainStreamer};
 use crate::view::{ViewDistance, WorldCamera};
 use crate::wmo_portal::{ExteriorWindowReach, ExteriorWindows, Rect};
+use crate::world_flags::WorldFlags;
 
 /// The buffer's columns, 0x140.
 pub const HORIZON_COLS: usize = 320;
@@ -67,11 +68,10 @@ pub const FLAG_NEAR_OK: u32 = 8;
 /// A holes word with every block cut: the chunk is dropped (`0x683c28`).
 const ALL_HOLES: u16 = 0xffff;
 
-/// World flag 0x20, the `showCull` toggle: on by default, as `0x66f6cb` starts it.
-/// `$WOW_HORIZON=0` starts it off; `$WOW_HORIZON=count` walks and counts without hiding.
+/// How the horizon culls while world flag 0x20 ([`WorldFlags::CULL`], `showCull`) is set.
+/// `$WOW_HORIZON=count` walks and counts without hiding.
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
 pub struct HorizonCulling {
-    pub enabled: bool,
     /// Off under `count`: every verdict is computed and counted, none applied.
     pub enforce: bool,
     /// The `lod` CVar, world flag 4 (`0x688920`): a chunk past [`Self::lod_dist`] adds its rows at
@@ -105,9 +105,8 @@ const ROW_COUNT: [usize; 4] = [2, 3, 5, 9];
 const ROW_STRIDE: [usize; 4] = [8, 4, 2, 1];
 
 impl HorizonCulling {
-    /// As the reference starts: culling on and enforced, terrain LOD on, at the shipped `lodDist`.
+    /// As the reference starts: culling enforced, terrain LOD on, at the shipped `lodDist`.
     const REFERENCE: Self = Self {
-        enabled: true,
         enforce: true,
         lod: true,
         lod_dist: LOD_DIST_SHIPPED,
@@ -122,10 +121,6 @@ impl HorizonCulling {
 impl Default for HorizonCulling {
     fn default() -> Self {
         match crate::launch_env::var("WOW_HORIZON").as_deref() {
-            Some("0") => Self {
-                enabled: false,
-                ..Self::REFERENCE
-            },
             Some("count") => Self {
                 enforce: false,
                 ..Self::REFERENCE
@@ -632,6 +627,8 @@ impl HorizonCulling {
 #[derive(PartialEq)]
 struct WalkInputs {
     culling: HorizonCulling,
+    /// World flag 0x20.
+    cull: bool,
     windows: ExteriorWindows,
     reach: Vec<f32>,
     farclip: f32,
@@ -644,6 +641,7 @@ struct WalkInputs {
 /// so a still scene leaves the model-visibility skip armed, and walks only when an input moved.
 fn build_horizon(
     culling: Res<HorizonCulling>,
+    flags: Option<Res<WorldFlags>>,
     windows: Res<ExteriorWindows>,
     reach: Option<Res<ExteriorWindowReach>>,
     view_dist: Res<ViewDistance>,
@@ -656,6 +654,11 @@ fn build_horizon(
 ) {
     let inputs = WalkInputs {
         culling: *culling,
+        cull: flags
+            .as_deref()
+            .copied()
+            .unwrap_or_default()
+            .has(WorldFlags::CULL),
         windows: windows.clone(),
         reach: reach.as_deref().map_or_else(Vec::new, |r| r.0.clone()),
         farclip: view_dist.farclip,
@@ -676,7 +679,7 @@ fn build_horizon(
         return;
     }
     let next = (|| {
-        if !culling.enabled {
+        if !inputs.cull {
             return None;
         }
         let (cam_t, proj) = cam.iter().next()?;
