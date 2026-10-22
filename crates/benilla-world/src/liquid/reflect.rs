@@ -757,13 +757,14 @@ fn kept_in_mirror(
         return false;
     }
     match kind {
-        Some(ModelKind::Creature | ModelKind::GameObject) => false,
-        Some(ModelKind::Doodad) => radius >= MIRROR_MIN_DOODAD_RADIUS,
+        Some(ModelKind::Creature) => false,
+        // A transport's hull is a WMO-display GameObject, so the kind alone cannot drop it.
+        Some(ModelKind::Doodad | ModelKind::GameObject) => radius >= MIRROR_MIN_DOODAD_RADIUS,
         Some(ModelKind::Wmo) | None => true,
     }
 }
 
-/// fork (perf): leave ground clutter, units, GameObjects and small doodads out of the mirror.
+/// fork (perf): leave ground clutter, units, and small GameObjects and doodads out of the mirror.
 ///
 /// The mirror re-queues and re-encodes every entity its frustum holds, and at a waterside town that
 /// second pass was ~4 ms of render-thread CPU a frame (Auberdine, 2026-10-18), which the browser
@@ -912,7 +913,14 @@ mod tests {
             "a crate"
         );
         assert!(!kept_in_mirror(false, Some(ModelKind::Creature), 50.0));
-        assert!(!kept_in_mirror(false, Some(ModelKind::GameObject), 50.0));
+        assert!(
+            kept_in_mirror(false, Some(ModelKind::GameObject), 50.0),
+            "a transport's hull"
+        );
+        assert!(
+            !kept_in_mirror(false, Some(ModelKind::GameObject), 1.0),
+            "a chest"
+        );
         assert!(!kept_in_mirror(true, None, f32::INFINITY), "clutter");
     }
 
