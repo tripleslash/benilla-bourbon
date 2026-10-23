@@ -148,10 +148,34 @@ pub const HEAVY_HALO_GAIN: f32 = 1.5;
 
 /// One band under rain of heaviness `h`: darkened, then part turned to the cold hue.
 fn heavy_band(c: [f32; 3], h: f32) -> [f32; 3] {
-    let dark = c.map(|v| v * (1.0 + (HEAVY_DARKEN - 1.0) * h));
-    let blue = HEAVY_BLUE_HUE.map(|v| v * luma(dark) / luma(HEAVY_BLUE_HUE));
-    let k = HEAVY_BLUE * h;
-    [0, 1, 2].map(|i| (dark[i] + (blue[i] - dark[i]) * k).clamp(0.0, 1.0))
+    cold_band(c, HEAVY_DARKEN, HEAVY_BLUE, h)
+}
+
+/// One band at weight `h` of a cold grade: `darken` of its luma left, then `blue` of it turned to
+/// [`HEAVY_BLUE_HUE`] at the same luma.
+fn cold_band(c: [f32; 3], darken: f32, blue: f32, h: f32) -> [f32; 3] {
+    let dark = c.map(|v| v * (1.0 + (darken - 1.0) * h));
+    let hue = HEAVY_BLUE_HUE.map(|v| v * luma(dark) / luma(HEAVY_BLUE_HUE));
+    let k = blue * h;
+    [0, 1, 2].map(|i| (dark[i] + (hue[i] - dark[i]) * k).clamp(0.0, 1.0))
+}
+
+/// fork: **a bright night goes dark and cold**, as heavy rain does, a little more so. A zone whose
+/// night fog is authored grey and light (Darkshore's 0.15 luma against Elwynn's blue 0.05) read
+/// as a pale dusk at 03:00. Its night takes the heavy-rain grade at [`NIGHT_DARKEN`] and
+/// [`NIGHT_BLUE`], weighted by the night fraction and by how far the resolved fog sits between
+/// [`NIGHT_FOG_DARK`] (none: Elwynn's night as it is) and [`NIGHT_FOG_BRIGHT`] (whole).
+pub const NIGHT_DARKEN: f32 = 0.45;
+pub const NIGHT_BLUE: f32 = 0.7;
+pub const NIGHT_FOG_DARK: f32 = 0.06;
+pub const NIGHT_FOG_BRIGHT: f32 = 0.14;
+
+/// The bright-night grade's weight: the night fraction times the fog's place between
+/// [`NIGHT_FOG_DARK`] and [`NIGHT_FOG_BRIGHT`].
+fn bright_night(night: f32, fog_color: [f32; 3]) -> f32 {
+    let t =
+        ((luma(fog_color) - NIGHT_FOG_DARK) / (NIGHT_FOG_BRIGHT - NIGHT_FOG_DARK)).clamp(0.0, 1.0);
+    night.clamp(0.0, 1.0) * t * t * (3.0 - 2.0 * t)
 }
 
 /// A strike's flash pulses: one in two strikes flashes once, the rest two or three times, each
@@ -387,10 +411,10 @@ impl Lightning {
     }
 }
 
-/// Heavy rain's grade and lightning over the resolved light, after the sun arc has keyed it, so
-/// noon goes dark and cold as much as night: a flash lifts the ambient, key, sky and fog for its
-/// moment. The key keeps its direction, so the shadows hold still under the flash. A modern frame
-/// only.
+/// A bright night's grade ([`bright_night`]), then heavy rain's and its lightning, over the
+/// resolved light, after the sun arc has keyed it, so noon goes dark and cold as much as night: a
+/// flash lifts the ambient, key, sky and fog for its moment. The key keeps its direction, so the
+/// shadows hold still under the flash. A modern frame only.
 fn apply_heavy_rain(
     weather: Option<Res<WeatherState>>,
     time: Res<Time>,
@@ -401,6 +425,17 @@ fn apply_heavy_rain(
 ) {
     if !super::frame_is_modern() {
         return;
+    }
+    let n = bright_night(lighting.sidn_night, lighting.fog_color);
+    if n > 0.0 {
+        let l = &mut *lighting;
+        for c in [&mut l.ambient, &mut l.diffuse, &mut l.fog_color]
+            .into_iter()
+            .chain(l.sky.iter_mut())
+            .chain(l.cloud_colors.iter_mut())
+        {
+            *c = cold_band(*c, NIGHT_DARKEN, NIGHT_BLUE, n);
+        }
     }
     let h = weather.as_deref().map_or(0.0, heavy_rain);
     let storm = weather.as_deref().map_or(0.0, storminess);
