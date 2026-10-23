@@ -328,6 +328,7 @@
 - `WOW_LIFT_CENSUS` — benilla-app/src/capture/probes/lift_census.rs, benilla-app/src/dev.rs
 - `WOW_LIGHTING` — benilla-app/src/cvars/mod.rs, benilla-app/src/lib.rs, benilla-world/src/modern/mod.rs
 - `WOW_LIGHTING_QUALITY` — benilla-app/src/cvars/mod.rs, benilla-app/src/lib.rs, benilla-world/src/modern/mod.rs
+- `WOW_LIGHTNING_EVERY` — benilla-world/src/modern/weather.rs
 - `WOW_LIGHT_AT` — benilla-world/src/wmo_portal/audit/light_probe.rs
 - `WOW_LIGHT_DUMP` — benilla-world/src/lighting/global_light.rs, benilla-world/src/lighting/resolve.rs
 - `WOW_LIGHT_GRID` — benilla-world/src/wmo_portal/audit/light_probe.rs
