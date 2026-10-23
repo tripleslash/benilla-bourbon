@@ -93,6 +93,9 @@ pub struct MediaInputs {
     pub fog_clear: f32,
     /// fork: the zone look's room-fog reach (>1 = clearer): divides a building's MFOG extinction.
     pub room_reach: f32,
+    /// fork: the zone look's `added_air`: the share of the storm's humid veil a zone takes on top
+    /// of its own haze.
+    pub added_air: f32,
 }
 
 /// The solved medium, in the units `froxelfog.wgsl` reads.
@@ -215,7 +218,7 @@ pub fn solve(i: &MediaInputs) -> Media {
         density,
         inv_height: (1.0 - interior) / i.fog_falloff.max(1.0),
         near_clear,
-        haze: i.haze.max(0.0) + STORM_HAZE * storm,
+        haze: i.haze.max(0.0) + STORM_HAZE * storm * i.added_air.clamp(0.0, 1.0),
         // Faint: drifting density wisps over the ground read as cloud shadows sliding past the player.
         // A storm barely raises them: it thickens the air, not the ground.
         noise: 0.15 + 0.1 * storm,
@@ -250,6 +253,7 @@ mod tests {
             fog_falloff: HEIGHT_FALLOFF,
             fog_clear: 0.0,
             room_reach: 1.0,
+            added_air: 1.0,
         }
     }
 
@@ -444,6 +448,7 @@ mod tests {
             fog_falloff: HEIGHT_FALLOFF,
             fog_clear: 0.0,
             room_reach: 1.0,
+            added_air: 1.0,
         };
         let m = solve(&i);
         for c in 0..3 {

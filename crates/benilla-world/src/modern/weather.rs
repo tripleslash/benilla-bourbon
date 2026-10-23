@@ -144,18 +144,6 @@ pub const HEAVY_HAZE: f32 = 0.0008;
 /// lamps bloom into the wet air (`volumetrics`' `halo_air`). By day only: the night air already
 /// thickens their glow.
 pub const HEAVY_HALO_GAIN: f32 = 1.5;
-/// A zone look's haze (1/yd) up to which heavy rain thickens its air whole (Elwynn's), and from
-/// which it counts as hazy already (Felwood's) and takes only [`HAZY_SHARE`] of it.
-pub const CLEAR_LOOK_HAZE: f32 = 0.0025;
-pub const HAZY_LOOK_HAZE: f32 = 0.004;
-pub const HAZY_SHARE: f32 = 0.25;
-
-/// How much of heavy rain's humid air a zone takes, 0 to 1, from its look's haze and the rain's
-/// heaviness `heavy`: an eerie, hazy zone is already thick and gets only a slight bump.
-pub fn humid_gain(look_haze: f32, heavy: f32) -> f32 {
-    let hazy = ((look_haze - CLEAR_LOOK_HAZE) / (HAZY_LOOK_HAZE - CLEAR_LOOK_HAZE)).clamp(0.0, 1.0);
-    heavy * (1.0 + (HAZY_SHARE - 1.0) * hazy)
-}
 
 /// One band under rain of heaviness `h`: darkened, then part turned to the cold hue.
 fn heavy_band(c: [f32; 3], h: f32) -> [f32; 3] {
@@ -633,17 +621,6 @@ mod tests {
             .filter(|_| downpour.step(1.0 / 60.0, 1.0, 1.0))
             .count();
         assert!(strikes > 0, "a minute of downpour strikes");
-    }
-
-    /// A clear zone's air takes heavy rain's humid veil whole; an eerie, hazy one only a quarter of
-    /// it; no rain, none.
-    #[test]
-    fn a_hazy_zone_takes_only_a_slight_humid_bump() {
-        assert_eq!(humid_gain(0.0024, 1.0), 1.0, "Elwynn");
-        assert_eq!(humid_gain(HAZY_LOOK_HAZE, 1.0), HAZY_SHARE, "Felwood");
-        let mid = humid_gain(0.5 * (CLEAR_LOOK_HAZE + HAZY_LOOK_HAZE), 1.0);
-        assert!(HAZY_SHARE < mid && mid < 1.0, "{mid}");
-        assert_eq!(humid_gain(0.0024, 0.0), 0.0);
     }
 
     /// Strikes pace with how far past heavy the rain is: rare at its edge, every few seconds in a

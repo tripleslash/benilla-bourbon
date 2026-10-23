@@ -100,6 +100,14 @@ const BANK_FALLOFF: f32 = 4.0;
 /// fork: under a risen moon the night air's uniform glow drops to this share: the moonlight and
 /// the banks carry the night instead of a veil over everything.
 const MOON_VEIL: f32 = 0.4;
+/// fork: **a hazy zone stays as hazy as it is.** The zone's own air by day (1/yd: its shaft haze,
+/// its day banks and any sea fog) up to which the night air and rain's humid veil come in whole
+/// (Elwynn's haze), and from which a zone counts as hazy already (Darkshore's coast, the eerie
+/// zones' banks) and takes only [`HAZY_SHARE`] of them: the night and a downpour add a touch, never
+/// a white-out over air that was thick at noon.
+const CLEAR_AIR: f32 = 0.0017;
+const HAZY_AIR: f32 = 0.005;
+const HAZY_SHARE: f32 = 0.15;
 const SHAFT_SCALE: f32 = 1.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -470,7 +478,8 @@ fn update_volume(
     let l = &*lighting;
     // fork: modern weather — heavy rain's humid air (`modern::weather::heavy_rain`).
     let heavy = weather.as_deref().map_or(0.0, super::weather::heavy_rain);
-    let humid = super::weather::humid_gain(look.0.haze, heavy);
+    let added = added_air(&look.0);
+    let humid = heavy * added;
     // By day only: the night air already swells a lamp's glow.
     let halo_humid = 1.0 + super::weather::HEAVY_HALO_GAIN * humid * (1.0 - l.sidn_night);
     let view_from_world = camera.to_matrix().inverse();
@@ -508,6 +517,7 @@ fn update_volume(
             fog_falloff: look.0.fog_falloff,
             fog_clear: look.0.fog_clear,
             room_reach: look.0.room_reach,
+            added_air: added,
         };
     let media = media::solve(&shared(l.fog_color, l.fog_start, l.fog_end, 0.0));
     // fork: the lamp halos' air — the same zone solved in clear weather, so rain and storms neither
@@ -670,7 +680,7 @@ fn update_volume(
         room_media: Vec4::new(
             room_media.map_or(0.0, |m| m.density),
             room_w,
-            NIGHT_HAZE * night,
+            NIGHT_HAZE * night * added,
             night_glow.x,
         ),
         room_ambient: room_media
@@ -683,7 +693,7 @@ fn update_volume(
             .extend(night_glow.z),
         night: Vec4::new(
             if super::banks_enabled() {
-                BANK_EXTINCTION * (night * look.0.night_banks).max(look.0.ground_fog)
+                BANK_EXTINCTION * night_bank_share(&look.0, night, added)
             } else {
                 0.0
             },
@@ -735,6 +745,21 @@ fn fading_room(
         *latched = None;
     }
     *latched
+}
+
+/// The share of the night air and rain's humid veil a zone takes on top of its own air (see
+/// [`CLEAR_AIR`]): 1 in a clear zone, [`HAZY_SHARE`] in one that is hazy all day.
+pub(crate) fn added_air(look: &super::look::ZoneLook) -> f32 {
+    let own = look.haze * HAZE_SCALE + BANK_EXTINCTION * look.ground_fog + look.sea_fog;
+    let hazy = ((own - CLEAR_AIR) / (HAZY_AIR - CLEAR_AIR)).clamp(0.0, 1.0);
+    1.0 + (HAZY_SHARE - 1.0) * hazy
+}
+
+/// The ground banks' share of [`BANK_EXTINCTION`] at night fraction `night`: the day's banks, and
+/// `added` of what the night lays over them.
+fn night_bank_share(look: &super::look::ZoneLook, night: f32, added: f32) -> f32 {
+    let day = look.ground_fog.max(0.0);
+    day + added * (night * look.night_banks - day).max(0.0)
 }
 
 /// The shaft haze's key radiance: the key light's own colour (decoded, horizon-faded, and the moon's
@@ -826,6 +851,26 @@ fn cloud_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clear zone takes the night air and rain whole; a zone hazy all day, only a touch of them,
+    /// banks included.
+    #[test]
+    fn a_hazy_zone_takes_only_a_touch_of_night_and_rain() {
+        use crate::modern::look::ZoneLook;
+        assert_eq!(added_air(&ZoneLook::NEUTRAL), 1.0, "Elwynn");
+        for hazy in [ZoneLook::DARKSHORE, ZoneLook::EERIE, ZoneLook::TIRISFAL] {
+            assert_eq!(added_air(&hazy), HAZY_SHARE);
+            let (day, night) = (
+                night_bank_share(&hazy, 0.0, HAZY_SHARE),
+                night_bank_share(&hazy, 1.0, HAZY_SHARE),
+            );
+            assert!(night >= day && night - day <= HAZY_SHARE * hazy.night_banks);
+        }
+        assert_eq!(
+            night_bank_share(&ZoneLook::NEUTRAL, 1.0, 1.0),
+            ZoneLook::NEUTRAL.night_banks
+        );
+    }
 
     #[test]
     fn the_tail_matches_the_wgsl_layout() {
