@@ -91,7 +91,7 @@ const HAZE_SCALE: f32 = 0.67;
 /// fork: **ground fog** — the banks' extinction at the ground (1/yd) at the full SIDN night, and
 /// their height falloff (yd) above the terrain under each froxel (the GI heightfield; past it, the
 /// ground under the camera). `froxel_scatter.wgsl` breaks them into patches and lights them with
-/// the shaft haze's key. Overnight a zone look's `night_banks` takes its share (a faint wisp in an
+/// the shaft haze's key. Overnight a zone look's `night_banks` takes its share (none in an
 /// ordinary zone, the whole bank in a dark one), and its `ground_fog` keeps a share by day.
 /// Anchored to one plane at the camera's ground, 0.035 filled Hillsbrad's low ground and left
 /// Gilneas's hills bare.
@@ -853,8 +853,8 @@ fn cloud_grid(
 mod tests {
     use super::*;
 
-    /// A clear zone takes the night air and rain whole; a zone hazy all day, only a touch of them,
-    /// banks included.
+    /// A clear zone takes the night air and rain whole, banks included; a zone hazy all day, only a
+    /// touch of them. An ordinary zone lays no banks at night.
     #[test]
     fn a_hazy_zone_takes_only_a_touch_of_night_and_rain() {
         use crate::modern::look::ZoneLook;
@@ -867,9 +867,15 @@ mod tests {
             );
             assert!(night >= day && night - day <= HAZY_SHARE * hazy.night_banks);
         }
+        assert_eq!(night_bank_share(&ZoneLook::NEUTRAL, 1.0, 1.0), 0.0);
+        let banked = ZoneLook {
+            night_banks: ZoneLook::EERIE.night_banks,
+            ..ZoneLook::NEUTRAL
+        };
+        assert_eq!(added_air(&banked), 1.0);
         assert_eq!(
-            night_bank_share(&ZoneLook::NEUTRAL, 1.0, 1.0),
-            ZoneLook::NEUTRAL.night_banks
+            night_bank_share(&banked, 1.0, added_air(&banked)),
+            banked.night_banks
         );
     }
 

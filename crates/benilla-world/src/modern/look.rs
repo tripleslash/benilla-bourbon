@@ -69,8 +69,8 @@ pub struct ZoneLook {
     /// fork: the ground-fog banks by day, as a share of the night's (`volumetrics`): 0 at night only,
     /// 1 as thick at noon as at midnight.
     pub ground_fog: f32,
-    /// fork: the night's ground-fog banks as a share of the full bank (`volumetrics`): a faint wisp
-    /// in the hollows of an ordinary zone, the whole bank in a dark one.
+    /// fork: the night's ground-fog banks as a share of the full bank (`volumetrics`): an ordinary
+    /// zone lies clear at night, and only the dark zones (eerie, Tirisfal, Darkshore) keep banks.
     pub night_banks: f32,
     /// fork: the night air's glow (`volumetrics::NIGHT_GLOW`) as a share: an ordinary zone's night
     /// stays clear, a dark zone's air glows grey.
@@ -122,7 +122,7 @@ impl ZoneLook {
         toe: 1.03,
         key_tint: [1.0, 1.0, 1.0],
         ground_fog: 0.0,
-        night_banks: 0.25,
+        night_banks: 0.0,
         night_glow: 0.33,
         room_reach: 1.0,
         noon_key: [1.0, 0.8, 0.4],
@@ -307,12 +307,11 @@ impl ZoneLook {
     /// fork: **the cold look at night**, which [`look_for_zone_at`] ramps [`Self::COLD`] into
     /// across `sun_arc::night_at`. Dun Morogh's night fog ends at 417 yd, and the day's thick blue
     /// haze over it veiled the moonlit snow in a grey wash brighter than the snow itself: the night
-    /// air is clear, the long-range fog reaches past the authored end, and no ground banks lie in
-    /// the hollows (Gates of Ironforge at 02:00, approved in the viewer).
+    /// air is clear and the long-range fog reaches past the authored end (Gates of Ironforge at
+    /// 02:00, approved in the viewer).
     pub const COLD_NIGHT: Self = Self {
         haze: 0.0012,
         fog_reach: 1.2,
-        night_banks: 0.0,
         ..Self::COLD
     };
 }
@@ -948,15 +947,14 @@ mod tests {
         assert_eq!(look_for_zone_at(10, 720.0), ZoneLook::EERIE);
     }
 
-    /// Every snow zone's night air is clearer than its day's, with no ground banks, and the day's
-    /// look comes back by dawn.
+    /// Every snow zone's night air is clearer than its day's, and the day's look comes back by
+    /// dawn.
     #[test]
     fn the_snow_zones_nights_are_clear() {
         for zone in COLD_ZONES {
             let night = look_for_zone_at(*zone, 120.0);
             assert_eq!(night, ZoneLook::COLD_NIGHT, "zone {zone}");
             assert!(night.haze < ZoneLook::COLD.haze && night.fog_reach > ZoneLook::COLD.fog_reach);
-            assert_eq!(night.night_banks, 0.0);
             assert_eq!(
                 look_for_zone_at(*zone, 720.0),
                 ZoneLook::COLD,
@@ -1002,7 +1000,7 @@ mod tests {
         }
     }
 
-    /// An ordinary zone's night is clearer than a dark zone's: faint banks and a dim air glow.
+    /// An ordinary zone's night is clearer than a dark zone's: no banks and a dim air glow.
     #[test]
     fn only_the_dark_zones_nights_are_eerie() {
         for zone in EERIE_ZONES.iter().chain([&TIRISFAL_ZONE]) {
@@ -1011,9 +1009,33 @@ mod tests {
         }
         for zone in [12, 33, 14, 1637, 17, 215] {
             let n = look_for_zone(zone);
-            assert!(n.night_banks < ZoneLook::EERIE.night_banks, "zone {zone}");
+            assert_eq!(n.night_banks, 0.0, "zone {zone}");
             assert!(n.night_glow < ZoneLook::EERIE.night_glow, "zone {zone}");
         }
+    }
+
+    /// Only the dark looks (eerie, Tirisfal, Darkshore) lay ground banks at night; every other
+    /// look lies clear, by day as by night.
+    #[test]
+    fn only_the_dark_looks_carry_night_banks() {
+        for dark in [
+            ZoneLook::EERIE,
+            ZoneLook::TIRISFAL,
+            ZoneLook::DARKSHORE,
+            ZoneLook::DARKSHORE_NOON,
+        ] {
+            assert!(dark.night_banks > 0.0);
+        }
+        for clear in [
+            ZoneLook::NEUTRAL,
+            ZoneLook::NOON,
+            ZoneLook::COLD,
+            ZoneLook::COLD_NIGHT,
+            ZoneLook::IRONFORGE,
+        ] {
+            assert_eq!((clear.night_banks, clear.ground_fog), (0.0, 0.0));
+        }
+        assert_eq!(look_for_zone(DARKSHORE_ZONE), ZoneLook::DARKSHORE);
     }
 
     /// Tirisfal is the eerie look, its sun, shafts, fog and sky leaning further green.
