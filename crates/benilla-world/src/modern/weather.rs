@@ -97,6 +97,22 @@ pub fn storm_atmosphere(clear: &Atmosphere, stormy: &Atmosphere, t: f32) -> Atmo
     clear.lerp(&target, t)
 }
 
+/// fork: **rain clears around the eye.** A streak keeps its whole size from this many yards out
+/// and shrinks to nothing inside a quarter of it (`effect_points.wgsl`): the reference's streaks
+/// are fixed world-size triangles, so the few drops beside the camera were the widest marks on the
+/// screen and a downpour hid the view behind them.
+pub const STREAK_NEAR_YD: f32 = 4.0;
+
+/// The streaks' near fade on a modern frame ([`STREAK_NEAR_YD`]); 0 in a classic one, which keeps
+/// the reference's.
+pub fn streak_near() -> f32 {
+    if super::frame_is_modern() {
+        STREAK_NEAR_YD
+    } else {
+        0.0
+    }
+}
+
 /// The puff a modern frame draws; `None` in a classic one, which keeps the reference's.
 pub fn puff_look() -> Option<PuffLook> {
     super::frame_is_modern().then_some(PUFF)

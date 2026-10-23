@@ -70,15 +70,17 @@ fn expand(
     out.uv = vec2<f32>(0.0);
     out.color = vec4<f32>(1.0);
     if (shape_a.x < 1.5) {
-        // Streak (half_w, tail; tilt): the base straddles the eye line across the fall, the apex
-        // trails up the fall, leaned by the wind (`0x80ff78`, `0x80ff74`, `0x674a70`).
+        // Streak (half_w, tail, near; tilt): the base straddles the eye line across the fall, the apex
+        // trails up the fall, leaned by the wind (`0x80ff78`, `0x80ff74`, `0x674a70`). fork: with a
+        // `near` (modern frames) the triangle shrinks away toward the eye, whole from `near` yards.
         let anti_vel = -unit_or(point_b.xyz, vec3<f32>(0.0, -1.0, 0.0));
+        let size = select(1.0, smoothstep(0.25 * shape_a.w, shape_a.w, length(rel)), shape_a.w > 0.0);
         if (index % 3u == 2u) {
-            out.rel = rel + turn(shape_b, anti_vel * shape_a.z);
+            out.rel = rel + turn(shape_b, anti_vel * (shape_a.z * size));
             out.uv = vec2<f32>(0.5, 0.0);
         } else {
             let to_eye = unit_or(-rel, vec3<f32>(1.0, 0.0, 0.0));
-            let across = unit_or(cross(to_eye, anti_vel), vec3<f32>(1.0, 0.0, 0.0)) * shape_a.y;
+            let across = unit_or(cross(to_eye, anti_vel), vec3<f32>(1.0, 0.0, 0.0)) * (shape_a.y * size);
             let side = select(-1.0, 1.0, index % 3u == 1u);
             out.rel = rel + across * side;
             out.uv = vec2<f32>(0.5 + 0.5 * side, 1.0);

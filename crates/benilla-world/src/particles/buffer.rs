@@ -93,8 +93,14 @@ pub struct EffectPoint {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum EffectShape {
     /// A white triangle along a velocity (`v`): base `pos ∓ half_w·right` across the eye line,
-    /// apex `pos + tilt·(tail·antiVel̂)`.
-    Streak { half_w: f32, tail: f32, tilt: Quat },
+    /// apex `pos + tilt·(tail·antiVel̂)`. fork: `near` > 0 (modern frames) shrinks it to nothing
+    /// toward the eye, whole from `near` yards and gone inside a quarter of it; 0 keeps it whole.
+    Streak {
+        half_w: f32,
+        tail: f32,
+        near: f32,
+        tilt: Quat,
+    },
     /// A white camera-facing triangle `pos ∓ right·view_right`, `pos + up·view_up`, stepping the
     /// four frames of row `b` of a 4×4 atlas over `life` seconds of age `a`.
     Patter { right: f32, up: f32, life: f32 },
@@ -132,9 +138,12 @@ impl EffectShape {
     /// The two params rows `effect_points.wgsl` reads; the first row's `x` names the shape.
     pub(crate) fn rows(self) -> [Vec4; 2] {
         match self {
-            Self::Streak { half_w, tail, tilt } => {
-                [Vec4::new(1.0, half_w, tail, 0.0), Vec4::from(tilt)]
-            }
+            Self::Streak {
+                half_w,
+                tail,
+                near,
+                tilt,
+            } => [Vec4::new(1.0, half_w, tail, near), Vec4::from(tilt)],
             Self::Patter { right, up, life } => [Vec4::new(2.0, right, up, life), Vec4::ZERO],
             Self::Flake {
                 px_at_eye,
@@ -535,12 +544,13 @@ mod tests {
         let streak = EffectShape::Streak {
             half_w: 0.05,
             tail: 2.0,
+            near: 4.0,
             tilt,
         };
         assert_eq!(
             streak.rows(),
             [
-                Vec4::new(1.0, 0.05, 2.0, 0.0),
+                Vec4::new(1.0, 0.05, 2.0, 4.0),
                 Vec4::new(0.1, 0.2, 0.3, 0.9)
             ]
         );

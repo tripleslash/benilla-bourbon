@@ -10,11 +10,13 @@ use crate::particles::buffer::{EffectPoint, EffectShape};
 use super::pool::{Drop, Patter};
 use super::*;
 
-/// The streak triangle (`0x80ff78`, `0x80ff74`), its apex leaned by the wind's `tilt`.
+/// The streak triangle (`0x80ff78`, `0x80ff74`), its apex leaned by the wind's `tilt`; fork: on
+/// a modern frame it shrinks away toward the eye (`modern::weather::streak_near`).
 pub(super) fn streak_shape(tilt: Quat) -> EffectShape {
     EffectShape::Streak {
         half_w: STREAK_HALF_W,
         tail: STREAK_TAIL,
+        near: crate::modern::weather::streak_near(),
         tilt,
     }
 }
@@ -205,6 +207,7 @@ mod tests {
             EffectShape::Streak {
                 half_w: 0.05,
                 tail: 2.0,
+                near: 0.0,
                 tilt,
             }
         );
