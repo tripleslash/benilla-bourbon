@@ -70,7 +70,8 @@ pub struct ZoneLook {
     /// 1 as thick at noon as at midnight.
     pub ground_fog: f32,
     /// fork: the night's ground-fog banks as a share of the full bank (`volumetrics`): an ordinary
-    /// zone lies clear at night, and only the dark zones (eerie, Tirisfal, Darkshore) keep banks.
+    /// zone lies clear at night, and only the dark zones (eerie, Tirisfal, Darkshore) keep banks, and
+    /// the misty ones a share on the default look (`MIST_ZONES`).
     pub night_banks: f32,
     /// fork: the night air's glow (`volumetrics::NIGHT_GLOW`) as a share: an ordinary zone's night
     /// stays clear, a dark zone's air glows grey.
@@ -411,10 +412,19 @@ const TIRISFAL_ZONE: u32 = 85;
 /// Gilneas and Gilneas City.
 const EERIE_ZONES: &[u32] = &[10, 130, 41, 28, 139, 8, 361, 5179, 5208];
 
+/// `AreaTable.dbc` zone ids that wear the default look but keep [`MIST_BANKS`] of the night's
+/// ground banks: Wetlands, Dustwallow Marsh, Ashenvale, Teldrassil and Feralas, and Turtle WoW's
+/// Moonwhisper Coast.
+const MIST_ZONES: &[u32] = &[11, 15, 331, 141, 357, 5642];
+
+/// fork: the night banks a misty zone keeps: the share every ordinary zone had before only the
+/// dark zones kept theirs.
+const MIST_BANKS: f32 = 0.25;
+
 /// The zone's look at `minute` of the day: the default look takes [`ZoneLook::NOON`] across midday
 /// (`sun_arc::midday_at`) and Darkshore [`ZoneLook::DARKSHORE_NOON`]; the snow zones take
 /// [`ZoneLook::COLD_NIGHT`] across the night (`sun_arc::night_at`); any other zone with its own
-/// look keeps it at every hour.
+/// look keeps it at every hour. A misty zone keeps its banks on top, at every hour.
 pub fn look_for_zone_at(zone: u32, minute: f32) -> ZoneLook {
     let look = look_for_zone(zone);
     let (to, t) = if look == ZoneLook::NEUTRAL {
@@ -426,7 +436,15 @@ pub fn look_for_zone_at(zone: u32, minute: f32) -> ZoneLook {
     } else {
         return look;
     };
-    look.lerp(to, t)
+    let look = look.lerp(to, t);
+    if MIST_ZONES.contains(&zone) {
+        ZoneLook {
+            night_banks: MIST_BANKS,
+            ..look
+        }
+    } else {
+        look
+    }
 }
 
 pub fn look_for_zone(zone: u32) -> ZoneLook {
@@ -1103,6 +1121,29 @@ mod tests {
         ] {
             assert_eq!(look.sea_fog, 0.0);
         }
+    }
+
+    /// The misty zones wear the default look and its noon ramp, and keep night banks; an ordinary
+    /// zone keeps none.
+    #[test]
+    fn the_misty_zones_keep_night_banks() {
+        for zone in MIST_ZONES {
+            assert_eq!(look_for_zone(*zone), ZoneLook::NEUTRAL, "zone {zone}");
+            let noon = look_for_zone_at(*zone, 720.0);
+            assert_eq!(
+                ZoneLook {
+                    night_banks: ZoneLook::NOON.night_banks,
+                    ..noon
+                },
+                ZoneLook::NOON,
+                "zone {zone}"
+            );
+            assert!(
+                look_for_zone_at(*zone, 120.0).night_banks > 0.0,
+                "zone {zone}"
+            );
+        }
+        assert_eq!(look_for_zone_at(12, 120.0).night_banks, 0.0);
     }
 
     /// Every zone the user named reads Elwynn's look (Elwynn 12, Stranglethorn 33, Durotar 14,
