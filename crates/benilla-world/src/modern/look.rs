@@ -367,6 +367,20 @@ impl ZoneLook {
         moon_hue: 0.0,
         ..Self::NEUTRAL
     };
+
+    /// fork: **Darkshore at midday**, which [`look_for_zone_at`] ramps [`Self::DARKSHORE`] into
+    /// across `sun_arc::midday_at`, as the default look takes [`Self::NOON`]. The salmon glow and
+    /// warm fog read golden under the white noon sun (asked in the viewer): the noon sun, glow, fog,
+    /// haze and sky go grey at the same fog brightness, and the grade is less saturated.
+    pub const DARKSHORE_NOON: Self = Self {
+        glow: [1.0, 0.96, 0.95],
+        haze_tint: [0.8, 0.8, 0.82],
+        fog_tint: [1.9, 1.9, 1.93],
+        sky_tint: [1.0, 1.0, 1.04],
+        saturation: 0.72,
+        key_tint: [0.97, 0.97, 1.0],
+        ..Self::DARKSHORE
+    };
 }
 
 /// `AreaTable.dbc` zone id that takes [`ZoneLook::DARKSHORE`].
@@ -387,14 +401,18 @@ const TIRISFAL_ZONE: u32 = 85;
 const EERIE_ZONES: &[u32] = &[10, 130, 41, 28, 139, 8, 361, 5179, 5208];
 
 /// The zone's look at `minute` of the day: the default look takes [`ZoneLook::NOON`] across midday
-/// (`sun_arc::midday_at`); a zone with its own look keeps it at every hour.
+/// (`sun_arc::midday_at`) and Darkshore [`ZoneLook::DARKSHORE_NOON`]; any other zone with its own
+/// look keeps it at every hour.
 pub fn look_for_zone_at(zone: u32, minute: f32) -> ZoneLook {
     let look = look_for_zone(zone);
-    if look == ZoneLook::NEUTRAL {
-        look.lerp(ZoneLook::NOON, super::sun_arc::midday_at(minute))
+    let noon = if look == ZoneLook::NEUTRAL {
+        ZoneLook::NOON
+    } else if look == ZoneLook::DARKSHORE {
+        ZoneLook::DARKSHORE_NOON
     } else {
-        look
-    }
+        return look;
+    };
+    look.lerp(noon, super::sun_arc::midday_at(minute))
 }
 
 pub fn look_for_zone(zone: u32) -> ZoneLook {
@@ -860,6 +878,7 @@ mod tests {
             (1, ZoneLook::COLD, 6.0..=10.0),
             (1537, ZoneLook::IRONFORGE, 6.0..=10.0),
             (148, ZoneLook::DARKSHORE, 6.0..=10.0),
+            (148, ZoneLook::DARKSHORE_NOON, 6.0..=10.0),
         ] {
             let r = key_to_fill(look);
             assert!(band.contains(&r), "zone {zone}: {r:.2}:1");
@@ -966,10 +985,10 @@ mod tests {
         assert_eq!((t.key, t.fill, t.exposure), (e.key, e.fill, e.exposure));
     }
 
-    /// Darkshore wears its own look at every hour.
+    /// Darkshore wears its own look outside midday and its grey noon row across it.
     #[test]
-    fn darkshore_keeps_its_look_at_every_hour() {
-        for minute in [0.0, 390.0, 720.0, 1080.0, 1260.0] {
+    fn darkshore_greys_across_midday() {
+        for minute in [0.0, 390.0, 1020.0, 1080.0, 1260.0] {
             assert_eq!(
                 look_for_zone_at(DARKSHORE_ZONE, minute),
                 ZoneLook::DARKSHORE,
