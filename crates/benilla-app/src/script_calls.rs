@@ -2534,12 +2534,15 @@ mod tests {
                         item_class,
                         count: 1,
                         guid: POTION,
+                        // The record cached, as the feed pushes it.
+                        quality: Some(1),
                         ..Default::default()
                     },
                 )]),
                 ..Default::default()
             }),
         );
+        world.non_send_mut::<UiScript>().seat_item_records();
         let _ = f.rx.try_iter().count();
     }
 
@@ -2799,12 +2802,15 @@ mod tests {
             count: 1,
             bonding,
             equip_slots: equip,
+            // The record cached, as the feed pushes it.
+            quality: Some(1),
             ..Default::default()
         };
         let mut slots = std::collections::HashMap::new();
         slots.insert(1, slot(HELD, HELD_ENTRY, vec![], 0));
         slots.insert(2, slot(HELM, HELM_ENTRY, vec![1], bonding));
-        world.non_send_mut::<UiScript>().set_container(
+        let mut script = world.non_send_mut::<UiScript>();
+        script.set_container(
             0,
             Some(benilla_ui::script::ContainerState {
                 name: None,
@@ -2812,6 +2818,7 @@ mod tests {
                 slots,
             }),
         );
+        script.seat_item_records();
     }
 
     /// The bar's equip runs `0x5e1840` (`0x4e602a`): `SetCursorItem`'s inner clear drops and
