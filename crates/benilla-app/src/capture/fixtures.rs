@@ -1654,6 +1654,7 @@ fn seed_cooldown_filmstrip(
         slots.insert(
             slot,
             benilla_ui::script::ContainerSlot {
+                uncached_link: None,
                 use_fork: Default::default(),
                 item_class: None,
                 petition: None,
@@ -1719,6 +1720,7 @@ fn seed_bag_window(
     };
     let slot = |disp: u32, count: u32, id: u32, name: &str, quality: u32| {
         benilla_ui::script::ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             petition: None,
@@ -1818,6 +1820,7 @@ fn seed_equipped_bags(
     };
     let slot =
         |disp: u32, count: u32, name: &str, quality: u32| benilla_ui::script::ContainerSlot {
+            uncached_link: None,
             use_fork: Default::default(),
             item_class: None,
             petition: None,

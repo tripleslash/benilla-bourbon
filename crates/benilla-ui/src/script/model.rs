@@ -148,6 +148,9 @@ pub(crate) struct Model {
     /// A path's texel size, which an axis authored as 0 takes, one texel per unit, as the client's
     /// `GetWidth` (`0x770720`) and `GetHeight` (`0x770790`) do; `None` leaves it as authored.
     pub(crate) texture_size_probe: Option<TextureSizeProbe>,
+    /// The size of a picture the cursor code opens (`0x449610`), which `SetCursor`'s custom
+    /// cursor must have at 32 by 32 (`0x523cb9`); `None` loads none.
+    pub(crate) cursor_size_probe: Option<TextureSizeProbe>,
     /// Whether a font path loads: `SetFont`'s 1 or nil, nil meaning a load failure (`0x79f345`,
     /// `0x79f361`, from `0x5c1ae0` in the `0x44d040` cache). Unlike `texture_probe`, `None` answers
     /// 1 for a non-empty path: without a font backend nothing failed, and addons revert their font
@@ -440,9 +443,9 @@ pub(crate) struct Model {
     pub(crate) call_raises: super::calls::CallRaises,
     /// The binding functions' queue and mouselook state.
     pub(crate) input: super::input_verbs::InputState,
-    /// The selection change a script call made and the input events it ran under, for the event
-    /// the unit feed signals for it ([`super::UiScript::note_selection_cause`]).
-    pub(crate) selection_cause: Option<(Option<u64>, super::InputEvents)>,
+    /// The selection a script call last moved to and signalled `PLAYER_TARGET_CHANGED` for inside
+    /// itself, for the unit feed to take as heard ([`super::UiScript::announce_selection`]).
+    pub(crate) announced_selection: Option<Option<u64>>,
     /// The protected-action gate's input events ([`super::protected`]).
     pub(crate) protected: super::protected::Flags,
     /// `DropItemOnUnit` tokens (`0x48d960`), gated by the app; a refusal silently keeps the item.
@@ -484,9 +487,8 @@ pub(crate) struct Model {
     pub(crate) lfg_comment: String,
     /// Guild roster, ranks, MOTD and info, sorted and filtered by the app, which holds the toggles.
     pub(crate) guild: guild::GuildState,
-    /// The rank editor's unsaved edits, apart from `guild` so a push cannot discard them.
-    pub(crate) guild_control: guild::GuildRankEdit,
-    /// The roster module's own cells, apart from `guild` so a push keeps them.
+    /// The roster module's own cells and the rank editor's unsaved edits, apart from `guild` so a
+    /// push keeps them.
     pub(crate) guild_cells: guild::GuildCells,
     /// The guilds `GetGuildInfo` missed, `(guild_id, guid)`, for the app to ask with a waiter.
     pub(crate) guild_info_asks: Vec<(u32, u64)>,
@@ -642,14 +644,17 @@ pub(crate) struct Model {
     pub(crate) pet_book_generation: u64,
     /// The player's macros, owned here as 1.12 macros have no server side; the app persists them.
     pub(crate) macros: macros::MacroState,
-    /// A script changed the macros: the save and `UPDATE_MACROS` cue.
+    /// A script changed the macros: the save's cue.
     pub(crate) macros_dirty: bool,
     /// Bumped by every seed and change, for readers that must not drain `macros_dirty`.
     pub(crate) macros_generation: u64,
     /// Bumped by every `EditMacro` that names a macro, whose worker `0x4f1280` ends in the action
     /// bar's usable refresh (`0x4f132e`).
     pub(crate) macro_edits: u64,
-    /// Each macro's cached cast by id, from the app; an absent macro reads unbound.
+    /// The load's derivations the table owes the app since its last take.
+    pub(crate) macro_derives: macros::MacroDerives,
+    /// Each macro's cached cast by id, derived in the verbs and the app's pass; an absent macro
+    /// reads unbound.
     pub(crate) macro_bindings: HashMap<u32, macros::MacroBinding>,
     /// The macro icon chooser's paths, behind `GetMacroIconInfo`: `0x4f0090`'s listing of
     /// `Interface\Icons\`, not `SpellIcon.dbc`.
@@ -1236,8 +1241,6 @@ pub(crate) struct Model {
     /// The world points our own `Minimap:PingLocation` calls pinged, for the host's wire send
     /// (`0x1d5`, `0x4eef72`) and its process-wide copy of the ping.
     pub(crate) minimap_pings_sent: Vec<(f32, f32)>,
-    /// `RequestTimePlayed()` calls, one empty `CMSG_PLAYED_TIME` each.
-    pub(crate) played_time_asks: u32,
     /// `OpeningCinematic()` calls, one empty `CMSG_OPENING_CINEMATIC` each.
     pub(crate) opening_cinematic_asks: u32,
     /// `Screenshot()` calls, one capture each.
@@ -1407,6 +1410,7 @@ impl Model {
             texture_probe: None,
             world_loc_projector: None,
             texture_size_probe: None,
+            cursor_size_probe: None,
             font_probe: None,
             addons_saved_account: None,
             addons_saved_character: None,
@@ -1509,7 +1513,7 @@ impl Model {
             call_raises: Default::default(),
             input: Default::default(),
             protected: Default::default(),
-            selection_cause: None,
+            announced_selection: None,
             drop_item_on_unit: Vec::new(),
             joined_channels: Vec::new(),
             party: party::PartyState::default(),
@@ -1528,7 +1532,6 @@ impl Model {
             lfg_slots: [0; 3],
             lfg_comment: String::new(),
             guild: guild::GuildState::default(),
-            guild_control: guild::GuildRankEdit::default(),
             guild_info_asks: Vec::new(),
             guild_cells: guild::GuildCells::default(),
             petition: petition::PetitionState::default(),
@@ -1599,6 +1602,7 @@ impl Model {
             macros_dirty: false,
             macros_generation: 0,
             macro_edits: 0,
+            macro_derives: Default::default(),
             macro_bindings: HashMap::new(),
             macro_icons: Vec::new(),
             macro_icon_source: None,
@@ -1796,7 +1800,6 @@ impl Model {
             cursor_pos: (0.0, 0.0),
             minimap: crate::widget::MinimapStatics::default(),
             minimap_pings_sent: Vec::new(),
-            played_time_asks: 0,
             opening_cinematic_asks: 0,
             screenshot_asks: 0,
             realm_name: String::new(),

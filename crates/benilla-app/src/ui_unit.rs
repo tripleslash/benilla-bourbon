@@ -25,6 +25,7 @@ pub(crate) mod field_events;
 mod held;
 pub(crate) mod relations;
 pub(crate) mod tooltip_facts;
+pub(crate) mod views;
 
 pub(crate) use held::{traits_from_name_cache, unheld_state, unit_reach};
 
@@ -127,6 +128,7 @@ pub(crate) struct UiUnitPlugin;
 impl Plugin for UiUnitPlugin {
     fn build(&self, app: &mut App) {
         field_events::add_notice_lane(app);
+        views::add_unit_views_lane(app);
         app.configure_sets(
             Update,
             UnitFeed
@@ -448,7 +450,7 @@ pub(crate) fn melee_unit_combat(
     let Some((guid, _)) = victim.filter(|(_, store)| crate::ui_chat::combat::is_unit(store)) else {
         return;
     };
-    crate::combat_log::feedback::swing(log, guid, s.victim_state, s.hit_info, s.damage);
+    crate::combat_log::feedback::swing(log, guid, s.victim_state, s.hit_info, s.damage, s.school);
 }
 
 /// `COMBAT_TEXT_UPDATE(messageType, data, extra)` (event `0x21e`, through the five helpers
@@ -508,6 +510,8 @@ pub(crate) fn fire_unit_combat(script: &mut UiScript, ev: &UnitCombatFeedback) {
 pub(crate) struct UnitNames<'a> {
     pub(crate) races: Option<&'a ChrRaces>,
     pub(crate) classes: Option<&'a ChrClasses>,
+    /// Each race's PvP side off the chain.
+    pub(crate) teams: Option<&'a crate::chr_classes::RacePvpTeams>,
 }
 
 /// Race and class rows for a test: an enUS install's, and a koKR install's for a test that must
@@ -516,6 +520,7 @@ pub(crate) struct UnitNames<'a> {
 pub(crate) struct TestNames {
     pub(crate) races: ChrRaces,
     pub(crate) classes: ChrClasses,
+    pub(crate) teams: crate::chr_classes::RacePvpTeams,
 }
 
 #[cfg(test)]
@@ -544,6 +549,7 @@ impl TestNames {
                 (9, "Warlock", "WARLOCK"),
                 (11, "Druid", "DRUID"),
             ]),
+            teams: crate::chr_classes::RacePvpTeams::stock(),
         }
     }
 
@@ -571,6 +577,7 @@ impl TestNames {
                 (9, "흑마법사", "WARLOCK"),
                 (11, "드루이드", "DRUID"),
             ]),
+            teams: crate::chr_classes::RacePvpTeams::stock(),
         }
     }
 
@@ -578,6 +585,7 @@ impl TestNames {
         UnitNames {
             races: Some(&self.races),
             classes: Some(&self.classes),
+            teams: Some(&self.teams),
         }
     }
 
@@ -589,6 +597,7 @@ impl TestNames {
     pub(crate) fn insert_world(&self, world: &mut World) {
         world.insert_resource(crate::chr_classes::ChrRaceTable(self.races.clone()));
         world.insert_resource(crate::chr_classes::ChrClassTable(self.classes.clone()));
+        world.insert_resource(self.teams.clone());
     }
 }
 
@@ -601,6 +610,7 @@ pub(crate) fn world_unit_names(world: &World) -> UnitNames<'_> {
         classes: world
             .get_resource::<crate::chr_classes::ChrClassTable>()
             .map(|t| &t.0),
+        teams: world.get_resource::<crate::chr_classes::RacePvpTeams>(),
     }
 }
 
@@ -609,6 +619,7 @@ pub(crate) fn world_unit_names(world: &World) -> UnitNames<'_> {
 pub(crate) struct NameTables<'w> {
     races: Option<Res<'w, crate::chr_classes::ChrRaceTable>>,
     classes: Option<Res<'w, crate::chr_classes::ChrClassTable>>,
+    teams: Option<Res<'w, crate::chr_classes::RacePvpTeams>>,
 }
 
 impl NameTables<'_> {
@@ -616,6 +627,7 @@ impl NameTables<'_> {
         UnitNames {
             races: self.races.as_deref().map(|t| &t.0),
             classes: self.classes.as_deref().map(|t| &t.0),
+            teams: self.teams.as_deref(),
         }
     }
 }
@@ -625,6 +637,21 @@ impl<'a> UnitNames<'a> {
     /// the name); `None` for a race with no row.
     pub(crate) fn race(&self, race: u8) -> Option<(&'a str, &'a str)> {
         self.races?.names(u32::from(race))
+    }
+
+    /// A unit's PvP team digit, `0x5efe00`'s `0` Horde, `1` Alliance, `-1` no side, from the race
+    /// and never the live template ([`crate::chr_classes::RacePvpTeams`]), so a template-35 GM
+    /// keeps his rank title. Read by `GetPVPRankInfo` (`0x51a9af`, `0x51a9c8`), `UnitPVPName`
+    /// (`0x5efe60`) and the scoreboard (`0x4aa200`). With no table no race has a side.
+    pub(crate) fn pvp_team(&self, race: u8) -> i8 {
+        self.teams.map_or(-1, |t| t.team(race))
+    }
+
+    /// The race's side as a `FactionGroup` token, for where no faction template is at hand, as at
+    /// world entry, where addons concatenate `UnitFactionGroup("player")` at file scope;
+    /// [`faction_group`] reads the live template.
+    pub(crate) fn faction_group(&self, race: u8) -> Option<&'static str> {
+        self.teams?.faction_group(race)
     }
 
     /// The class byte's display name and its uppercase token (`"Warrior"`, `"WARRIOR"`); `None`
@@ -638,50 +665,6 @@ impl<'a> UnitNames<'a> {
                 classes.file(class).unwrap_or_default(),
             )
         })
-    }
-}
-
-/// A playable race's fixed side, for where no faction template is at hand, as at world entry,
-/// where addons concatenate `UnitFactionGroup("player")` at file scope; [`faction_group`] reads
-/// the live template.
-pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
-    race_faction_group_in(race, crate::flavor::turtle())
-}
-
-/// [`race_faction_group`] under a given flavor: Turtle WoW's ten playable races.
-pub(crate) fn race_faction_group_in(race: u8, turtle: bool) -> Option<&'static str> {
-    let last = if turtle { 10 } else { 8 };
-    if !(1..=last).contains(&race) {
-        return None;
-    }
-    Some(if crate::flavor::alliance_races(turtle).contains(&race) {
-        "Alliance"
-    } else {
-        "Horde"
-    })
-}
-
-/// A unit's PvP team digit, `0x5efe00`'s `0` Horde, `1` Alliance, `-1` no side, from the race and
-/// never the live template: `ChrRaces.dbc` field 2 to `FactionTemplate.dbc` field 3's group mask,
-/// `& 4` Horde, else `& 2` Alliance, so a template-35 GM keeps his rank title. Read by
-/// `GetPVPRankInfo` (`0x51a9af`, `0x51a9c8`), `UnitPVPName` (`0x5efe60`) and the scoreboard
-/// (`0x4aa200`). A frozen copy of the shipped nine rows; race 9 (Goblin) answers Alliance.
-pub(crate) fn race_pvp_team(race: u8) -> i8 {
-    race_pvp_team_in(race, crate::flavor::turtle())
-}
-
-/// [`race_pvp_team`] under a given flavor: Turtle WoW's rows put Goblin (9, template 1609, group
-/// mask 5) with the Horde and add High Elf (10, template 1610, mask 3) to the Alliance.
-pub(crate) fn race_pvp_team_in(race: u8, turtle: bool) -> i8 {
-    match race {
-        9 if turtle => 0,
-        10 if turtle => 1,
-        // Group mask 3, Player|Alliance: `& 4` clear, `& 2` set.
-        1 | 3 | 4 | 7 | 9 => 1,
-        // Group mask 5, Player|Horde: `& 4` set, tested first.
-        2 | 5 | 6 | 8 => 0,
-        // No `ChrRaces` row: the engine's bounds-failure `-1`, which names no GlobalString.
-        _ => -1,
     }
 }
 
@@ -718,7 +701,8 @@ pub(crate) struct UnitTokens<'w, 's> {
     hovered_go: Option<Res<'w, crate::target::HoveredObject>>,
     interact: Option<Res<'w, crate::ui_session::InteractNpc>>,
     group: Res<'w, crate::ui_party::GroupState>,
-    pub(crate) stores: Query<'w, 's, &'static ObjectStore>,
+    /// The stores as of the drain's place, so a verb a listener calls reads its packet's.
+    pub(crate) stores: views::ViewStores<'w, 's>,
     me: Query<'w, 's, (Entity, &'static Guid), With<SelfPlayer>>,
 }
 
@@ -916,6 +900,8 @@ pub(crate) struct UnitStores<'w, 's> {
     own_changed: Query<'w, 's, (), (Changed<ObjectStore>, With<SelfPlayer>)>,
     /// Whose object left the manager, by [`Guid`]: a fading model keeps its store 2 s longer.
     removed: RemovedComponents<'w, 's, Guid>,
+    /// The stores as of the drain's place, for the tokens' snapshots.
+    views: Option<Res<'w, views::UnitViews>>,
 }
 
 /// The client tables [`snapshot`] reads beside a descriptor, as one parameter for the feeders that
@@ -1073,12 +1059,17 @@ pub(crate) fn snapshot(
             .unwrap_or(0),
         // `UnitAffectingCombat` (`0x517e10`): bit 19, the one combat bit for every token.
         in_combat: store.0.unit_flags() & crate::player::UNIT_FLAG_IN_COMBAT != 0,
-        // Free-for-all PvP, `PLAYER_FLAGS` bit 7 (vmangos `Player.h:322`); false on a creature.
-        is_pvp_ffa: store.0.player_flags() & 0x80 != 0,
+        // `UnitIsPVPFreeForAll` as the unit alone answers it: a player that answers to nobody is
+        // its own controller ([`pvp_free_for_all`]); a held unit's view asks its controller.
+        is_pvp_ffa: matches!(store.0.object_type(), Some(ObjectType::Player))
+            && store.0.unit_charmed_by().is_none()
+            && store.0.unit_created_by().is_none()
+            && store.0.unit_flags() & 0x8 != 0
+            && store.0.player_flags() & PLAYER_FLAGS_FFA_PVP != 0,
         // The honor rank, `PLAYER_BYTES_3` byte 3 (0..=18), public for every player in view.
         pvp_rank: store.0.player_pvp_rank().unwrap_or(0),
-        // The team digit of `PVP_RANK_<rank>_<team>`, from the race ([`race_pvp_team`]).
-        pvp_team: store.0.unit_race().map_or(-1, race_pvp_team),
+        // The team digit of `PVP_RANK_<rank>_<team>`, from the race ([`UnitNames::pvp_team`]).
+        pvp_team: store.0.unit_race().map_or(-1, |r| tables.pvp_team(r)),
         // `PLAYER_BYTES_3` byte 2, the city-protector title (`PVP_MEDAL<n>`), unset by vmangos.
         pvp_medal: store.0.player_pvp_medal().unwrap_or(0),
         // `[mounted]` (this fork): a mount display is the one mounted signal, as the animation
@@ -1108,6 +1099,25 @@ pub(crate) fn snapshot(
         // `is_player` and the creature-record fields come from [`enrich_unit`].
         ..Default::default()
     }
+}
+
+/// `PLAYER_FLAGS` bit 7, free-for-all PvP (vmangos `Player.h:322`).
+const PLAYER_FLAGS_FFA_PVP: u32 = 0x80;
+
+/// `UnitIsPVPFreeForAll` (`0x516540`) on a held unit: `UNIT_FIELD_FLAGS` 0x8 (`0x5165ad`-
+/// `0x5165bf`), then the player controlling it (`0x606170` at `0x5165c3`) and that player's
+/// `PLAYER_FLAGS` 0x80 (`0x5165cc`-`0x5165d5`), so a pet or a charmed unit answers with its
+/// owner's or charmer's flag.
+pub(crate) fn pvp_free_for_all(rel: &Relations, unit: &RelUnit) -> bool {
+    unit.player_controlled()
+        && rel
+            .controller(unit)
+            .is_some_and(|c| c.player_flags & PLAYER_FLAGS_FFA_PVP != 0)
+}
+
+/// [`pvp_free_for_all`] on a held object's descriptor.
+pub(crate) fn pvp_free_for_all_of(rel: &Relations, guid: u64, store: &ObjectStore) -> bool {
+    pvp_free_for_all(rel, &RelUnit::of(guid, store))
 }
 
 /// Fill the guid-keyed tooltip fields: `is_player`, or a creature's record fields and its
@@ -1333,19 +1343,24 @@ pub(crate) fn live_player_seat(
     group: Res<crate::ui_party::GroupState>,
     factions: Option<Res<Factions>>,
     guild: Res<crate::ui_guild::GuildState>,
+    world: crate::target::RelationWorld,
 ) -> Option<LivePlayerSeat> {
     let (store, guid) = self_q.iter().next()?;
+    let mut state = player_snapshot(
+        store,
+        guid.0,
+        &tables,
+        &names,
+        &commands,
+        &group,
+        factions.as_deref(),
+        &guild,
+    );
+    if let Some(me) = world.me() {
+        state.is_pvp_ffa = pvp_free_for_all(&world.get(), &me);
+    }
     Some(LivePlayerSeat {
-        state: player_snapshot(
-            store,
-            guid.0,
-            &tables,
-            &names,
-            &commands,
-            &group,
-            factions.as_deref(),
-            &guild,
-        ),
+        state,
         xp: xp_pair(store),
     })
 }
@@ -1400,8 +1415,6 @@ fn feed_units(
         let Some(script) = script else {
             return owed;
         };
-        let chr = tables.unit_names();
-        let types = tables.types(&names);
         // One reborrow, so the memo and `warned_sideless` borrow disjointly rather than alias.
         let feed = &mut *feed;
         let (memo, vm_reset) = feed.vm.get_reset(script);
@@ -1455,19 +1468,53 @@ fn feed_units(
         }
 
         // A missing unit is `None`, which `set_unit` clears; a name miss lands on a later frame.
+        // Each store is read as of the drain's place ([`views::UnitViews::as_of`]), the live one
+        // here, ahead of the drain.
         let self_pair = self_q.iter().next();
-        let player = self_pair.map(|(store, guid)| {
-            player_snapshot(
-                store,
-                guid.0,
-                &tables,
-                &names,
-                &commands,
-                &group,
-                world.factions(),
-                &guild,
-            )
-        });
+        let scratch = stores.views.as_deref();
+        let at = |guid: u64, live| match scratch {
+            Some(v) => v.as_of(guid, live),
+            None => live,
+        };
+        let held = |guid: u64, entity: Option<Entity>| {
+            let live = entity.and_then(|e| stores.all.get(e).ok());
+            Some((at(guid, live)?, guid))
+        };
+        // What the snapshots besides ours (target, target-of-target, NPC) read, for the gate's
+        // next run ([`held::StoreReads`]).
+        let reads = std::cell::RefCell::new(held::StoreReads::default());
+        let object = |guid: u64| {
+            let entity = index.as_ref().and_then(|i| i.0.get(&guid).copied());
+            reads.borrow_mut().looked_up(guid, entity);
+            held(guid, entity).map(|(s, _)| s)
+        };
+        let token_stores = views::TokenStores {
+            me: self_pair.and_then(|(s, g)| Some((at(g.0, Some(s))?, g.0))),
+            target: selection.target.zip(selection.guid).and_then(|(e, g)| {
+                reads.borrow_mut().held(e);
+                held(g, Some(e))
+            }),
+            // `"npc"`: the interaction NPC, the reference's `[0xb4e2d0]` that
+            // `CGGameUI::SetInteractNPC` (`0x4930d0`) writes, which `InteractNpc` models.
+            npc: interact
+                .as_deref()
+                .and_then(|i| Some((i.0?, i.1?)))
+                .and_then(|(e, g)| {
+                    reads.borrow_mut().held(e);
+                    held(g, Some(e))
+                }),
+            by_guid: &object,
+        };
+        let sources = views::TokenSources {
+            tables: &tables,
+            names: &names,
+            commands: &commands,
+            group: &group,
+            guild: &guild,
+            world: &world,
+        };
+        let [player, target, tot, npc] = views::token_views(&sources, &token_stores);
+        memo.reads = reads.take();
         // Log once when our template names no side, almost always GM mode (vmangos forces template
         // 35, group mask 0): every `UnitFactionGroup` surface loses its side, as in the reference.
         if let Some(p) = &player {
@@ -1483,47 +1530,6 @@ fn feed_units(
             }
             feed.warned_sideless = sideless;
         }
-        // What the three snapshots below (target, target-of-target, NPC) read besides a descriptor.
-        let reads = std::cell::RefCell::new(held::StoreReads::default());
-        let entity_of = |guid: u64| {
-            let entity = index.as_ref().and_then(|i| i.0.get(&guid).copied());
-            reads.borrow_mut().looked_up(guid, entity);
-            entity
-        };
-        // The tooltip facts' object lookup, through the tracked one so the gate sees its reads.
-        let object = |guid: u64| stores.all.get(entity_of(guid)?).ok();
-        let held = held::HeldUnits {
-            names: &names,
-            commands: &commands,
-            group: &group,
-            self_store: self_pair.map(|(s, _)| s),
-            unit_names: chr,
-            types,
-            rel: world.get(),
-            me: world.me(),
-            tooltip: tooltip_facts::TooltipSources {
-                names: &names,
-                catalog: tables.catalog(),
-                object: &object,
-                study: tables.study(),
-            },
-            guild: &guild,
-        };
-        let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
-            reads.borrow_mut().held(e);
-            Some(held.state(stores.all.get(e).ok()?, guid))
-        });
-
-        // `"targettarget"`: one hop off the target's `UNIT_FIELD_TARGET`, streamed guids only, for
-        // the stock frame's poll (`TargetofTarget_OnUpdate`, `TargetFrame.lua:494-538`): no unit
-        // event carries the hop, whose token is none of `0x515c50`'s.
-        let tot = selection
-            .target
-            .and_then(|e| stores.all.get(e).ok())
-            .and_then(|s| s.0.unit_target())
-            .filter(|guid| *guid != 0)
-            .and_then(|guid| Some((entity_of(guid)?, guid)))
-            .and_then(|(entity, guid)| Some(held.state(stores.all.get(entity).ok()?, guid)));
 
         // `"player"` is pushed only while its descriptor exists: the roster seat stands in before
         // arrival, and `PLAYER_LOGOUT` handlers still read `UnitName("player")`, as the reference's
@@ -1557,16 +1563,6 @@ fn feed_units(
             script.set_unit("targettarget", tot.clone());
         }
 
-        // `"npc"`: the interaction NPC, the reference's `[0xb4e2d0]` that
-        // `CGGameUI::SetInteractNPC` (`0x4930d0`) writes, which `InteractNpc` models.
-        let npc = interact
-            .as_deref()
-            .and_then(|i| Some((i.0?, i.1?)))
-            .and_then(|(entity, guid)| {
-                reads.borrow_mut().held(entity);
-                Some(held.state(stores.all.get(entity).ok()?, guid))
-            });
-        memo.reads = reads.take();
         // Closing the window must clear the token, so the memo is written here, not only read.
         let npc_dirty = match (&npc, memo.last.get("npc")) {
             (Some(cur), Some(prev)) => cur != prev,
@@ -1710,8 +1706,13 @@ fn feed_units(
         }
 
         // `PLAYER_TARGET_CHANGED`, argless, when the selection changes, owed to
-        // [`fire_unit_events`]. A `/reload`'s fresh memo finds none: the shutdown dropped the
-        // target and told the dying VM (`0x490bdf`).
+        // [`fire_unit_events`]; a script call signalled its own change inside itself, as
+        // `SetSelection` does (`0x49389c`, `0x493a73`), so the feed hears only a change no call
+        // made. A `/reload`'s fresh memo finds none: the shutdown dropped the target and told the
+        // dying VM (`0x490bdf`).
+        if let Some(announced) = script.take_announced_selection() {
+            memo.target_guid = announced;
+        }
         if selection.guid != memo.target_guid {
             gate.audit("feed_units", "the PLAYER_TARGET_CHANGED edge");
             memo.target_guid = selection.guid;
@@ -1797,29 +1798,19 @@ impl OwedUnitEvents {
     }
 }
 
-/// The event [`feed_units`]' pushes owe, signalled after the action feed's usable refresh as the
-/// reference orders them: `SelectTarget` stores the target (`0x4936e2`) and refreshes (`0x493892`)
-/// before `PLAYER_TARGET_CHANGED` (`0x49389c`), and so does a release (`0x4939d3`, `0x493a69`,
+/// The event [`feed_units`]' pushes owe for a selection change no script call made (a world
+/// click, the server's), signalled after the action feed's usable refresh as the reference orders
+/// them: `SelectTarget` stores the target (`0x4936e2`) and refreshes (`0x493892`) before
+/// `PLAYER_TARGET_CHANGED` (`0x49389c`), and so does a release (`0x4939d3`, `0x493a69`,
 /// `0x493a73`). A usable handler reads the new target, and hears this after it.
-fn fire_unit_events(
-    // What the host also reaches, read before the VM runs with the host lent.
-    mut hosted: ParamSet<(Res<Selection>, crate::script_calls::HostedVm)>,
-    mut feed: ResMut<UnitFeedState>,
-) {
-    let selection = *hosted.p0();
-    hosted.p1().run(|script| {
+fn fire_unit_events(mut hosted_vm: crate::script_calls::HostedVm, mut feed: ResMut<UnitFeedState>) {
+    hosted_vm.run(|script| {
         let Some(script) = script else {
             return;
         };
         let pending = std::mem::take(&mut feed.vm.get(script).pending);
         if pending.target_changed {
-            // The reference signals it inside `SetSelection`, so inside the key or click whose
-            // call moved the selection; a change that call made hears it under that call's input
-            // events.
-            let cause = script.take_selection_cause(selection.guid);
-            script.with_input_events(cause, |script| {
-                script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-            });
+            script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
         }
     })
 }
@@ -1863,6 +1854,7 @@ mod tests {
             hit_info: 0x80,
             victim_state: 1,
             damage: 40,
+            school: 0,
             displayed,
             seq: 0,
         };
@@ -2767,13 +2759,17 @@ mod tests {
         /// vmangos's GM template: `FactionTemplate.dbc` group mask 0.
         const GM_TEMPLATE: u32 = 35;
 
+        let teams = crate::chr_classes::RacePvpTeams::stock();
         let team = |fields: &[(u16, u32)]| {
             snapshot(
                 &ObjectStore(ObjectFields::from_pairs(fields)),
                 0,
                 None,
                 0,
-                Default::default(),
+                UnitNames {
+                    teams: Some(&teams),
+                    ..Default::default()
+                },
                 Default::default(),
             )
             .pvp_team
@@ -2847,23 +2843,14 @@ mod tests {
         assert_eq!(got, ids);
     }
 
-    /// [`race_pvp_team`] against the shipped DBCs, walked as `0x5efe00` walks them.
+    /// The race load's walk of the shipped DBCs, as `0x5efe00` walks them: the stock chain's nine
+    /// rows, each with its side.
     #[test]
-    fn race_pvp_team_matches_the_shipped_tables() {
+    fn the_race_sides_load_off_the_shipped_tables() {
         let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
-        let want = benilla_formats::load_race_pvp_teams(&mut chain).expect("ChrRaces walk");
-        // 1.12 ships nine rows; a truncated map would pass by asserting nothing.
-        assert_eq!(want.len(), 9, "ChrRaces.dbc row count");
-        for (&race, &team) in &want {
-            assert_eq!(race_pvp_team(race), team, "race {race}");
-        }
-        assert!(want.values().any(|&t| t == 0), "some race is Horde");
-        assert!(want.values().any(|&t| t == 1), "some race is Alliance");
-        for race in [0u8, 10, 255] {
-            assert!(!want.contains_key(&race));
-            assert_eq!(race_pvp_team(race), -1, "race {race} has no ChrRaces row");
-        }
+        let teams = benilla_formats::load_race_pvp_teams(&mut chain).expect("ChrRaces walk");
+        assert_eq!(teams, crate::chr_classes::RacePvpTeams::stock().0);
     }
 
     /// LOST going down, GAINED going up (boot is in control); far sight on every change.
@@ -3407,6 +3394,39 @@ mod tests {
             vec!["refused".to_string()],
             "the retarget's event reads the creature's reach, not the player's"
         );
+    }
+
+    /// A race's PvP side is the chain's (`0x5efe00`: `ChrRaces` field 2 to the template's group
+    /// mask), so a chain that moves Goblin (9) to the Horde and adds a race 10 on the Alliance
+    /// side answers both, in the snapshot's team digit and the race's faction group, and a race
+    /// with no row has no side.
+    #[test]
+    fn a_races_side_is_the_chains() {
+        use benilla_protocol::messages::ObjectFields;
+        /// `UNIT_FIELD_BYTES_0`, whose byte 0 is the race.
+        const BYTES_0: u16 = 36;
+        let teams = crate::chr_classes::RacePvpTeams(HashMap::from([(1, 1), (9, 0), (10, 1)]));
+        let names = UnitNames {
+            teams: Some(&teams),
+            ..Default::default()
+        };
+        let team = |race: u32| {
+            snapshot(
+                &ObjectStore(ObjectFields::from_pairs(&[(BYTES_0, race)])),
+                0,
+                None,
+                0,
+                names,
+                Default::default(),
+            )
+            .pvp_team
+        };
+        assert_eq!(team(9), 0, "the chain's Goblin is Horde");
+        assert_eq!(team(10), 1, "a race the stock chain lacks");
+        assert_eq!(team(2), -1, "a race this chain has no row for");
+        assert_eq!(names.faction_group(9), Some("Horde"));
+        assert_eq!(names.faction_group(10), Some("Alliance"));
+        assert_eq!(names.faction_group(2), None);
     }
 
     /// `UNIT_DYNFLAG_DEAD` alone makes empty bars over real maxima, through `snapshot`'s wiring.

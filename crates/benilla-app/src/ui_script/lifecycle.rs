@@ -222,6 +222,8 @@ fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
     let chain = assets.chain.clone();
     let size_chain = chain.clone();
     let size_loose = loose.clone();
+    let cursor_chain = chain.clone();
+    let cursor_loose = loose.clone();
     let font_chain = chain.clone();
     let font_loose = loose.clone();
     // `SetTexture` runs per frame in the addons that set an icon every `OnUpdate`: the probe
@@ -250,6 +252,12 @@ fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
             // taken before the art arrived would be the number the region keeps forever.
             benilla_assets::SpriteDims::Pending => None,
         }
+    }));
+    // `SetCursor`'s 32×32 test reads the picture the cursor code opens (`0x449610`), its `.blp`
+    // alone, decoded each call as `0x523c98` waits on the load.
+    script.set_cursor_size_probe(Box::new(move |path| {
+        benilla_assets::file_texture_rgba(&cursor_chain, &cursor_loose, path)
+            .map(|(w, h, _)| (w, h))
     }));
     // Existence over the same stores, in the same order, as `ui_text::engine`'s face loader,
     // memoised because a path's answer cannot change and an addon may call `SetFont` every frame.
@@ -1164,7 +1172,7 @@ pub(crate) fn seat_from_roster(
         is_player: true,
         player_controlled: true,
         // AceDB-2.0 concatenates `UnitFactionGroup("player")` at file scope, where nil is an error.
-        faction_group: crate::ui_unit::race_faction_group(row.race).map(str::to_string),
+        faction_group: names.faction_group(row.race).map(str::to_string),
         ..Default::default()
     })
 }

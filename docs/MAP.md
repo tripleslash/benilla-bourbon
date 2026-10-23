@@ -379,6 +379,7 @@
 - `WOW_MODERN_MIRRORTIER` — benilla-app/src/lib.rs, benilla-world/src/modern/mod.rs
 - `WOW_MODERN_PERVIEW` — benilla-world/src/modern/mod.rs
 - `WOW_MODERN_SHADOWDEBUG` — benilla-app/src/lib.rs, benilla-world/src/modern/mod.rs
+- `WOW_MODERN_STARS` — benilla-world/src/sun/follow.rs
 - `WOW_MODERN_SUNARC` — benilla-app/src/lib.rs, benilla-world/src/modern/mod.rs
 - `WOW_MODERN_VERTEXHINTS` — benilla-world/src/modern/mod.rs
 - `WOW_MODERN_VERTEXWALKS` — benilla-assets/src/materials.rs

@@ -1506,6 +1506,8 @@ pub(crate) mod schedule_tests {
          "no self returns before anything changes, and a question open on an NPC needs a self that interacted; the leash is re-tested every frame"),
         ("::ui_session::latch::watch_interaction_range",
          "no self returns before anything changes, and a latch needs a self that interacted; the leash is re-tested every frame"),
+        ("::ui_unit::views::mark_frame_start",
+         "a debug snapshot of what the frame starts from, ahead of the net stage by design and with no change detection: a self the frame tags is in no snapshot, and the views' check skips it"),
     ];
 
     /// Every `Update` system that names `SelfPlayer` (reads it, or filters on it) is ordered after
@@ -1814,6 +1816,72 @@ pub(crate) mod schedule_tests {
         );
     }
 
+    /// Every latched window's show reads `"npc"` (`GossipFrame.lua:33-35`, `QuestFrame.lua:63-65`,
+    /// `BankFrame.lua:127-128`, …), which the reference seats before the show: the packet's handler
+    /// writes `[0xb4e2d0]` (`0x4e26fa` → `0x4e1fe9` → `0x4930d0`) and only then fires
+    /// `GOSSIP_SHOW` (`0x4e27df`). Here the latch reaches the token through `feed_interact_npc` and
+    /// `feed_units`, so each window's feed runs after both, or a show whose text is cached fires in
+    /// the same frame as the open with the token unset. Read off the declared graph.
+    #[test]
+    fn every_latched_windows_show_reads_the_token_its_latch_seated() {
+        let mut app = headless_client();
+        let c = census(&mut app, Update, SyncPoints::Declared);
+        if !type_names_available(&c) {
+            eprintln!(
+                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+            );
+            return;
+        }
+        let one = |suffix: &str| -> SystemKey {
+            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+            match (hits.next(), hits.next()) {
+                (Some((k, _)), None) => *k,
+                _ => panic!("exactly one system named `…{suffix}` in Update"),
+            }
+        };
+        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
+        for (a, b) in &c.dependencies {
+            succ.entry(*a).or_default().push(*b);
+        }
+        let after = |from: SystemKey| -> HashSet<SystemKey> {
+            let (mut seen, mut stack) = (HashSet::new(), vec![from]);
+            while let Some(n) = stack.pop() {
+                for m in succ.get(&n).into_iter().flatten() {
+                    if seen.insert(*m) {
+                        stack.push(*m);
+                    }
+                }
+            }
+            seen
+        };
+        let units = one("::ui_unit::feed_units");
+        assert!(
+            after(one("::ui_session::feed_interact_npc")).contains(&units),
+            "feed_units runs after feed_interact_npc, which publishes the latch it names \"npc\" by"
+        );
+        let seated = after(units);
+        let stale: Vec<&str> = [
+            "::ui_gossip::feed_gossip",
+            "::ui_quest::feed_quest",
+            "::ui_bank::feed_bank",
+            "::ui_taxi::feed_taxi",
+            "::ui_stable::feed_stable",
+            "::ui_tabard::feed_tabard",
+            "::ui_petition::feed::feed_petition",
+            "::ui_merchant::feed_merchant",
+            "::ui_trainer::feed_trainer",
+            "::ui_auction::feed_auction",
+            "::ui_trade::feed_trade",
+        ]
+        .into_iter()
+        .filter(|feed| !seated.contains(&one(feed)))
+        .collect();
+        assert!(
+            stale.is_empty(),
+            "these windows' shows can read \"npc\" before feed_units seats it: {stale:?}"
+        );
+    }
+
     /// The VM ticks once a frame (`extract::tick_script`, in `UiInput`): a push the tick must
     /// see rides `UiFeed`, chained after the net drain and before the tick; a drain of what it
     /// produced is `.after(UiInput)`. Read off the built graph. Fails a holder with no path to or
@@ -2007,8 +2075,6 @@ pub(crate) mod schedule_tests {
          "a roll exists only after a group member loots under group loot; leftovers are cleared at socket teardown (another player's act: coincidence-only residual)"),
         ("ui_macro/mod.rs", "load_macros", Because::MemoLatched,
          "`MacroFiles.identity` is a `VmMemo`, so a new session re-reads the files and re-fires UPDATE_MACROS; also `InWorldGated`"),
-        ("ui_macro/mod.rs", "save_dirty_macros", Because::FilledByVm,
-         "`take_macros_dirty` is raised only by the macro window's Lua"),
         ("ui_mail/mod.rs", "feed_mail", Because::SelfHealing,
          "the window queues are mailbox-click replies; the one server push (`SMSG_RECEIVED_MAIL`) is re-asked by `send_query_next_mail_time_on_enter`, whose reply sets `notify` unconditionally"),
         ("ui_merchant/mod.rs", "feed_merchant", Because::PlayerRoundTrip,

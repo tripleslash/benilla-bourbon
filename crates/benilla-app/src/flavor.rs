@@ -59,34 +59,6 @@ pub(crate) fn turtle() -> bool {
     benilla_formats::layers::turtle_mounted()
 }
 
-/// 1.12.1's playable races by side, the race-to-side split `UnitFactionGroup` answers before a
-/// player object exists: Human, Dwarf, Night Elf, Gnome; Orc, Scourge, Tauren, Troll.
-const ALLIANCE: [u8; 4] = [1, 3, 4, 7];
-const HORDE: [u8; 4] = [2, 5, 6, 8];
-/// Turtle WoW's: its High Elf (10) is Alliance and its Goblin (9) Horde, by their faction
-/// templates' group masks (1610: 3, 1609: 5).
-const TURTLE_ALLIANCE: [u8; 5] = [1, 3, 4, 7, 10];
-const TURTLE_HORDE: [u8; 5] = [2, 5, 6, 8, 9];
-
-/// The Alliance's playable races under a flavor.
-pub(crate) fn alliance_races(turtle: bool) -> &'static [u8] {
-    if turtle {
-        &TURTLE_ALLIANCE
-    } else {
-        &ALLIANCE
-    }
-}
-
-/// The Horde's playable races under a flavor.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn horde_races(turtle: bool) -> &'static [u8] {
-    if turtle {
-        &TURTLE_HORDE
-    } else {
-        &HORDE
-    }
-}
-
 /// Whether this build can play `realm` at all: a Turtle realm needs the Turtle layer, which only
 /// the web build mounts. The auto-answer skips a realm that fails this; a click on one is refused
 /// with a reason.
@@ -333,29 +305,6 @@ mod tests {
             playable(&realm(v(1, 18, 1))),
             benilla_formats::layers::turtle_available()
         );
-    }
-
-    /// Goblin and High Elf exist only under Turtle, on the sides their templates' group masks give;
-    /// 1.12.1's tables answer exactly as before. Their names are the mounted `ChrRaces.dbc`'s.
-    #[test]
-    fn turtle_races_are_turtle_only() {
-        use super::{alliance_races, horde_races};
-        use crate::ui_unit::{race_faction_group_in, race_pvp_team_in};
-        assert_eq!(race_faction_group_in(9, false), None);
-        assert_eq!(race_faction_group_in(9, true), Some("Horde"));
-        assert_eq!(race_faction_group_in(10, true), Some("Alliance"));
-        assert_eq!(
-            race_pvp_team_in(9, false),
-            1,
-            "1.12.1's Goblin row answers Alliance"
-        );
-        assert_eq!(race_pvp_team_in(10, false), -1);
-        assert_eq!(race_pvp_team_in(9, true), 0);
-        assert_eq!(race_pvp_team_in(10, true), 1);
-        assert_eq!(alliance_races(false), [1, 3, 4, 7]);
-        assert_eq!(horde_races(false), [2, 5, 6, 8]);
-        assert_eq!(alliance_races(true), [1, 3, 4, 7, 10]);
-        assert_eq!(horde_races(true), [2, 5, 6, 8, 9]);
     }
 
     /// Entering a realm of the flavor already in force answers the park and touches nothing else:

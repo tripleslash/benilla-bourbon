@@ -1,9 +1,6 @@
 //! The pet action bar's feed: the ten packed words of the last `SMSG_PET_SPELLS`, which the
 //! server owns whole, rendered as ten `PetActionView`s each frame.
 
-// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
-use bevy::platform::time::Instant;
-
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{
@@ -175,18 +172,22 @@ pub(crate) fn active_aura_press(
 /// of the cooldowns alone is pushed without an event: the pet's cooldown events fire off the
 /// list's generation, so a natural expiry fires none, as in the reference.
 pub(super) fn feed_pet_bar(
-    mut vm: crate::script_calls::VmWith<Res<'static, PetBar>>,
+    mut vm: crate::script_calls::VmWith<(
+        Res<'static, PetBar>,
+        Res<'static, super::PetAttackLatch>,
+    )>,
     spells: Option<Res<Spells>>,
     clock: Res<crate::ui_script::UiClock>,
     pet: PetUnit,
     mut memory: Local<crate::ui_script::VmMemo<PetBarMemory>>,
 ) {
-    vm.feed(|script, bar, fires| {
+    vm.feed(|script, (bar, latch), fires| {
         let Some(script) = script else {
             return;
         };
         let memory = memory.get(script);
-        let now = Instant::now();
+        // Every read takes the frame's anchor, the instant its starts project from: one frame,
+        // one time, however long the frame runs.
         let (anchor, ui_now) = (clock.anchor, clock.ui_now);
         let has_bar = bar.has_bar();
         // An unstreamed pet is not usable (`0x4bd034`), and no slot shows active.
@@ -198,7 +199,7 @@ pub(super) fn feed_pet_bar(
         // so possession stays out of `usable`; an unstreamed pet has no flags to test and lifts
         // nothing.
         let pickup_allowed = pet_flags.is_some_and(|flags| flags & UNIT_FLAG_POSSESSED == 0);
-        let pet_attacking = bar.attacking;
+        let pet_attacking = latch.up();
         // `GetPetTimeRemaining`'s expiry on the VM clock, signed both ways around the anchor
         // sample.
         script.set_pet_expiry(bar.expires.map(|t| match t.checked_duration_since(anchor) {
@@ -217,7 +218,7 @@ pub(super) fn feed_pet_bar(
                         .flatten();
                     let cooldown = display.and_then(|d| {
                         bar.cooldowns
-                            .info(entry.action(), 0, Some(d), now)
+                            .info(entry.action(), 0, Some(d), anchor)
                             .ui_triple(anchor, ui_now)
                     });
                     slot_view(

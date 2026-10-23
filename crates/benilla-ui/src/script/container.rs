@@ -3,7 +3,7 @@
 //! (0 the backpack, 1-4 the worn bags, -1 the bank's own slots, 5-10 the bank bags, -2 the
 //! keyring); slots are 1-based.
 
-use mlua::{Lua, MultiValue, Table, Value};
+use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{self, flag, number_arg};
 use super::cursor::{self, CursorItem, CursorPayload};
@@ -48,6 +48,10 @@ pub struct ContainerSlot {
     pub item_id: u32,
     /// An `|Hitem:…|h[Name]|h` link once the name is known.
     pub link: Option<String>,
+    /// The link `0x52ae00` builds while the record is not cached, white and nameless (`0x52aec5`,
+    /// `0x5d8b40`); `None` once [`Self::link`] is set. `GetContainerItemLink` answers it
+    /// (`0x4f997f`), and `GetInventoryItemLink` for the vault and keyring bands (`0x4c8ce2`).
+    pub uncached_link: Option<String>,
     /// The item object's guid, 0 while unresolved: what the client's lock (`item+0x314`) and
     /// every lock read key on.
     pub guid: u64,
@@ -405,6 +409,13 @@ impl super::UiScript {
         self.model_ref().custom_cursor_name.clone()
     }
 
+    /// Install the host's size of a picture the cursor code opens (`0x449610`: the name's `.blp`,
+    /// decoded), which `SetCursor`'s custom cursor must have at 32 by 32; without one no custom
+    /// cursor loads.
+    pub fn set_cursor_size_probe(&mut self, probe: Box<super::TextureSizeFn>) {
+        self.model_mut().cursor_size_probe = Some(probe.into());
+    }
+
     /// Drain the pending cursor write: `Some(mode)` a set, `Some(None)` a reset, `None` no call,
     /// which must leave the cursor as it was, so an armed spell keeps its cast cursor over a
     /// spellbook button.
@@ -470,7 +481,7 @@ fn custom_cursor(model: &mut super::Model, name: &str) -> bool {
         return true;
     }
     let size = model
-        .texture_size_probe
+        .cursor_size_probe
         .as_ref()
         .and_then(|probe| probe(name));
     if size != Some((32, 32)) {
@@ -850,9 +861,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // up raise.
     lua.globals().set(
         "SetBagPortaitTexture",
-        lua.create_function(|lua, (region, container): (Table, Value)| {
-            // `is-number` else `Usage: SetBagPortaitTexture(texture, slot)` (`0x84d9c4`,
-            // `0x4fa58e`).
+        lua.create_function(|lua, (region, container): (Value, Value)| {
+            // The texture first, the member prologue against the Texture id (`0x4fa4f9`-
+            // `0x4fa56e`); then `is-number` else `Usage: SetBagPortaitTexture(texture, slot)`
+            // (`0x84d9c4`, `0x4fa58e`).
+            let rh = crate::script::region::this_texture(lua, &region)?;
             let container = i64::from(binding_abi::number_arg(
                 lua,
                 container,
@@ -881,7 +894,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .and_then(|slot| model.inv_slot("player", slot))
                     .and_then(|v| v.icon.clone())
             };
-            let rh = crate::script::region::region_handle_of(lua, &region)?;
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             // An empty slot's `None` is the answer: the reference clears first, then sets.
             let set = path.map_or(super::texel::TexSet::None, super::texel::TexSet::Portrait);
@@ -981,10 +993,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let key = container_key(lua, bag, slot, "Usage: GetContainerItemLink(index, slot)")?;
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                key.and_then(|(bag, slot)| model.bag_slot(bag, slot)?.link.clone())
+                key.and_then(|(bag, slot)| {
+                    let s = model.bag_slot(bag, slot)?;
+                    s.link.clone().or_else(|| s.uncached_link.clone())
+                })
             };
-            // Nothing at all on every miss: the resolver failing, no item object or no template
-            // name (`0x4f996b`, `0x4f9979`, `0x4f99a5`).
+            // Nothing at all when the resolver fails or finds no item object (`0x4f996b`,
+            // `0x4f997b`, both to `0x4f99a5`); any object links (`0x4f997f` → `0x52ae00`), with
+            // no record white and nameless.
             match link {
                 Some(l) => Ok(MultiValue::from_vec(vec![Value::String(
                     lua.create_string(&l)?,
@@ -1294,7 +1310,7 @@ mod tests {
     #[test]
     fn set_cursor_loads_any_other_name_as_a_32_by_32_texture() {
         let mut s = UiScript::new().unwrap();
-        s.set_texture_size_probe(Box::new(|path| match path {
+        s.set_cursor_size_probe(Box::new(|path| match path {
             "Interface\\AddOns\\Mine\\Sword" | "5" => Some((32, 32)),
             "Interface\\Icons\\Big" => Some((64, 64)),
             _ => None,
@@ -1324,11 +1340,34 @@ mod tests {
         assert_eq!(s.custom_cursor_name(), "5");
     }
 
+    /// `SetCursor`'s load is the cursor code's (`0x523c86` into `0x449610`), not
+    /// `TextureCreate`'s: its 32 by 32 test reads the cursor picture's probe, which opens only the
+    /// `.blp`, never the interface texture's, which would read a `.tga`.
+    #[test]
+    fn set_cursor_sizes_the_cursor_picture_not_the_interface_texture() {
+        let mut s = UiScript::new().unwrap();
+        s.set_texture_size_probe(Box::new(|_| Some((32, 32))));
+        s.set_cursor_size_probe(Box::new(|path| (path == "Mine\\Sword").then_some((32, 32))));
+        assert_eq!(
+            s.eval::<Option<i64>>(r#"return SetCursor("Mine\\Arrow")"#)
+                .unwrap(),
+            None,
+            "only a .tga: no cursor picture"
+        );
+        assert_eq!(s.ui_cursor(), None);
+        assert_eq!(
+            s.eval::<Option<i64>>(r#"return SetCursor("Mine\\Sword")"#)
+                .unwrap(),
+            Some(1)
+        );
+    }
+
     fn backpack() -> ContainerState {
         let mut slots = std::collections::HashMap::new();
         slots.insert(
             1,
             ContainerSlot {
+                uncached_link: None,
                 use_fork: Default::default(),
                 item_class: None,
                 duration_ms: None,
@@ -1580,6 +1619,37 @@ mod tests {
         assert!(s
             .eval::<bool>("return GetContainerItemInfo(0, 2) == nil")
             .unwrap());
+    }
+
+    /// A bag item whose record the cache lacks still links: `GetContainerItemLink` pushes nothing
+    /// only when it finds no item object (`0x4f996b`, `0x4f997b` → `0x4f99a5`), and `0x52ae00`
+    /// links any object (`0x4f997f`), white and nameless without a record (`0x52aec5`, `0x5d8b40`).
+    #[test]
+    fn an_uncached_bag_item_links_white_and_nameless() {
+        let mut s = UiScript::new().unwrap();
+        let mut bag = backpack();
+        let nameless = "|cffffffff|Hitem:2589:0:0:0|h[]|h|r";
+        bag.slots.insert(
+            3,
+            ContainerSlot {
+                item_id: 2589,
+                count: 1,
+                uncached_link: Some(nameless.into()),
+                ..Default::default()
+            },
+        );
+        s.set_container(0, Some(bag));
+        assert_eq!(
+            s.eval::<Option<String>>("return GetContainerItemLink(0, 3)")
+                .unwrap()
+                .as_deref(),
+            Some(nameless)
+        );
+        assert_eq!(
+            s.arity("GetContainerItemLink(0, 2)").unwrap(),
+            0,
+            "no object"
+        );
     }
 
     /// The keyring, the bank and an out-of-range id answer no slots and no name, however the
@@ -2158,6 +2228,7 @@ mod tests {
         state.slots.insert(
             5,
             ContainerSlot {
+                uncached_link: None,
                 use_fork: Default::default(),
                 item_class: None,
                 duration_ms: None,

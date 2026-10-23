@@ -33,6 +33,8 @@ mod worldmap_arrow;
 mod button;
 mod calls;
 mod camera_view;
+#[cfg(any(test, feature = "test-support"))]
+pub mod census;
 mod channel;
 mod char_stats;
 pub mod chat_bubble;
@@ -321,8 +323,8 @@ pub use loot::{LootCall, LootRow, LootState, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macro_options::{has_options as macro_has_options, show_directive, ShowDirective};
 pub use macros::{
-    MacroBinding, MacroState, MacroView, CHARACTER_ID_BASE, MAX_MACROS, MAX_MACRO_BODY,
-    MAX_MACRO_NAME,
+    macro_lines, reads_options as macro_reads_options, MacroBinding, MacroDerives, MacroState,
+    MacroView, CHARACTER_ID_BASE, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME,
 };
 pub use mail::{
     MailCall, MailInboxRow, MailInvoice, MailRowVerb, MailSendRequest, MailState, PackageView,
@@ -817,6 +819,7 @@ impl UiScript {
     pub fn new() -> mlua::Result<UiScript> {
         let lua = install_framescript(VmKind::InGame)?;
         install_in_game(&lua)?;
+        object::guard_receivers(&lua)?;
         Ok(Self::host(lua))
     }
 
@@ -828,6 +831,7 @@ impl UiScript {
     pub fn new_glue() -> mlua::Result<UiScript> {
         let lua = install_framescript(VmKind::Glue)?;
         glue::install(&lua)?;
+        object::guard_receivers(&lua)?;
         Ok(Self::host(lua))
     }
 
