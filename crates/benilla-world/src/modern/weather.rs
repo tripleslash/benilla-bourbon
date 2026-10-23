@@ -12,6 +12,8 @@
 //! colder and throws lightning ([`apply_heavy_rain`]): neither is in 1.12.1, whose weather has no
 //! flash and whose storm row is one grey for every hour.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use benilla_formats::Atmosphere;
 use bevy::prelude::*;
 
@@ -123,6 +125,21 @@ pub fn puff_look() -> Option<PuffLook> {
 pub fn puff_color(fog_color: [f32; 3]) -> [f32; 3] {
     let tint = super::look::fog_tint();
     media::subtle([0, 1, 2].map(|c| fog_color[c] * tint[c]))
+}
+
+/// This frame's weather intensity (any precipitation's effect density, 0 fine) and [`heavy_rain`],
+/// for readers without the weather (the cloud deck).
+static INTENSITY_NOW: AtomicU32 = AtomicU32::new(0);
+static HEAVY_NOW: AtomicU32 = AtomicU32::new(0);
+
+/// This frame's weather intensity on a modern frame, 0 (fine) to 1 (0 in a classic one).
+pub fn intensity_now() -> f32 {
+    f32::from_bits(INTENSITY_NOW.load(Ordering::Relaxed))
+}
+
+/// This frame's rain heaviness on a modern frame, 0 to 1 (0 in a classic one).
+pub fn heavy_now() -> f32 {
+    f32::from_bits(HEAVY_NOW.load(Ordering::Relaxed))
 }
 
 /// How heavy the rain is, 0 to 1, from the effect's ramped density (`(grade − 0.25)·4/3`): eased
@@ -464,6 +481,8 @@ fn apply_heavy_rain(
     mut lighting: ResMut<WowLighting>,
 ) {
     if !super::frame_is_modern() {
+        INTENSITY_NOW.store(0, Ordering::Relaxed);
+        HEAVY_NOW.store(0, Ordering::Relaxed);
         return;
     }
     let n = bright_night(lighting.sidn_night, lighting.fog_color);
@@ -478,6 +497,12 @@ fn apply_heavy_rain(
         }
     }
     let h = weather.as_deref().map_or(0.0, heavy_rain);
+    HEAVY_NOW.store(h.to_bits(), Ordering::Relaxed);
+    let intensity = weather
+        .as_deref()
+        .filter(|w| w.effect_kind != WeatherKind::Fine)
+        .map_or(0.0, |w| w.effect_density.clamp(0.0, 1.0));
+    INTENSITY_NOW.store(intensity.to_bits(), Ordering::Relaxed);
     let storm = weather.as_deref().map_or(0.0, storminess);
     if lightning.step(time.delta_secs(), h, storm) {
         if let Ok(eye) = cam.single() {

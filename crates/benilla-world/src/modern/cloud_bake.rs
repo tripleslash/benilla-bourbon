@@ -70,6 +70,9 @@ pub(super) struct CloudStyle {
     pub powder: f32,
     /// The dome height below which the cloud takes the horizon haze's colour (aerial perspective).
     pub haze: f32,
+    /// fork: the density field's floor (0 = none, 1 = a whole deck): the gaps between the puffs
+    /// close over ([`storm_deck`]).
+    pub deck: f32,
 }
 
 pub(super) const CLOUD_STYLE: CloudStyle = CloudStyle {
@@ -86,10 +89,31 @@ pub(super) const CLOUD_STYLE: CloudStyle = CloudStyle {
     ambient: 0.7,
     powder: 0.4,
     haze: 0.3,
+    deck: 0.0,
 };
 
+/// fork: **the weather thickens the clouds, and a thunderstorm closes the sky.** With the
+/// weather's intensity (`weather::intensity_now`, its effect density) the layer's peak opacity
+/// rises to [`STORM_OPACITY`] and its optical depth to [`STORM_DENSITY`]; under heavy rain
+/// (`weather::heavy_now`) the density field is floored at the heaviness, so the gaps between the
+/// puffs fill in. At [`CLOUD_STYLE`]'s 0.4 the coverage tile's thickest storm still showed the sky,
+/// stars and nebulae through every cloud.
+const STORM_OPACITY: f32 = 1.0;
+const STORM_DENSITY: f32 = 5.0;
+
+/// The style at weather intensity `intensity` and rain heaviness `heavy`.
+fn storm_deck(s: CloudStyle, intensity: f32, heavy: f32) -> CloudStyle {
+    let i = intensity.clamp(0.0, 1.0);
+    CloudStyle {
+        opacity: s.opacity + (STORM_OPACITY - s.opacity) * i,
+        density: s.density + (STORM_DENSITY - s.density) * i,
+        deck: s.deck.max(heavy.clamp(0.0, 1.0)),
+        ..s
+    }
+}
+
 /// Dev tuning (`$WOW_MODERN_CLOUDS`, browser `?modern_clouds=`): comma-separated overrides in field
-/// order — `opacity,soft,detail,horizon,desat,whiten,bright,density,step,sigma,ambient,powder,haze`.
+/// order — `opacity,soft,detail,horizon,desat,whiten,bright,density,step,sigma,ambient,powder,haze,deck`.
 /// An empty or unparsable entry keeps the default.
 pub(super) fn cloud_style() -> CloudStyle {
     let Some(v) = crate::launch_env::live_var("WOW_MODERN_CLOUDS") else {
@@ -112,6 +136,7 @@ pub(super) fn cloud_style() -> CloudStyle {
         ambient: get(10, d.ambient),
         powder: get(11, d.powder),
         haze: get(12, d.haze).max(1e-3),
+        deck: get(13, d.deck).clamp(0.0, 1.0),
     }
 }
 
@@ -143,7 +168,11 @@ pub(super) struct CloudParams {
 }
 
 pub(super) fn cloud_params(light: &WowLighting, look: &ZoneLook) -> CloudParams {
-    let style = cloud_style();
+    let style = storm_deck(
+        cloud_style(),
+        super::weather::intensity_now(),
+        super::weather::heavy_now(),
+    );
     // Clouds follow the key light (sun by day, moon by night).
     let key = (-light.sun_dir).normalize_or(Vec3::Y);
     // Neutral under a high key, coloured as it nears the horizon: a 15:00 sun-glow row's pink is
@@ -260,7 +289,7 @@ impl CloudBake {
         for x in 0..RES {
             let uv = texel_uv(x, y);
             let a = self.tile_at(uv).w;
-            self.density[y * RES + x] = if a <= 0.0 {
+            let puffs = if a <= 0.0 {
                 0.0
             } else {
                 let p = uv * s.detail + self.drift;
@@ -268,6 +297,7 @@ impl CloudBake {
                 let n = 0.65 * billow(p) + 0.35 * billow(p * 2.03 + Vec2::new(5.2, 1.3));
                 smoothstep(1.0 - a - s.soft, 1.0 - a + s.soft, n) * (0.5 + 0.5 * a)
             };
+            self.density[y * RES + x] = puffs.max(s.deck);
         }
     }
 
@@ -393,6 +423,7 @@ fn inputs_hash(tile: &[[u8; 4]], params: &CloudParams) -> u64 {
         s.sigma,
         s.ambient,
         s.powder,
+        s.deck,
         params.desat,
         params.elev,
     ]
