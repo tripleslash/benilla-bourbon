@@ -83,7 +83,7 @@ const NIGHT_GLOW: f32 = 5.0;
 /// fork: **the air is as faint by day as it is at midnight.** The zone rows' shaft haze was fitted
 /// to reference shots, and in play the daylight lit it into a veil — Goldshire at dusk sat in an
 /// orange wash, while the same air under the moon read as the faint haze the user wants at every
-/// hour. Every row's haze extinction and shaft gain are scaled by these, so the zones keep their
+/// hour. Every row's haze extinction is scaled by this, so the zones keep their
 /// character against each other (Ashenvale still hazier than Durotar) but none of them fogs the
 /// street the player stands in. Halfway to the thinnest tried (0.25 / 0.5), which cleared noon but
 /// lost the dusk glow. The live `WOW_MODERN_LOOK` override is scaled too.
@@ -108,7 +108,6 @@ const MOON_VEIL: f32 = 0.4;
 const CLEAR_AIR: f32 = 0.0017;
 const HAZY_AIR: f32 = 0.005;
 const HAZY_SHARE: f32 = 0.15;
-const SHAFT_SCALE: f32 = 1.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum FogMode {
@@ -769,7 +768,7 @@ fn night_bank_share(look: &super::look::ZoneLook, night: f32, added: f32) -> f32
 /// half takes `look::key_air_share` of it (`halo_air.w`).
 fn shaft_key(diffuse: [f32; 3], look: &super::look::ZoneLook) -> Vec3 {
     let horizon = super::sun_arc::key_horizon();
-    let scale = look.key_scatter.max(0.0) * look.shafts.max(0.0) * SHAFT_SCALE * horizon;
+    let scale = look.key_scatter.max(0.0) * look.shafts.max(0.0) * horizon;
     Vec3::from(diffuse.map(super::srgb_to_linear)) * Vec3::from(look.key_hue(look.glow)) * scale
 }
 

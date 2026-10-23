@@ -132,10 +132,9 @@ const POINT_FORWARD: f32 = 0.3;
 const POINT_HALO_YD: f32 = 4.0;
 const POINT_FAR_SHARE: f32 = 0.35;
 const POINT_HALO_GAIN: f32 = 3.0;
-// fork: inside a building a light keeps `ROOM_POINT_FAR_SHARE` past its halo and its halo shrinks
-// to `ROOM_POINT_HALO_YD` at `ROOM_POINT_HALO_GAIN`: an inn's dozen candles each filling their
-// range put a grey veil on the whole common room.
-const ROOM_POINT_FAR_SHARE: f32 = 0.0;
+// fork: inside a building a light keeps nothing past its halo and its halo shrinks to
+// `ROOM_POINT_HALO_YD` at `ROOM_POINT_HALO_GAIN`: an inn's dozen candles each filling their range
+// put a grey veil on the whole common room.
 const ROOM_POINT_HALO_YD: f32 = 1.5;
 const ROOM_POINT_HALO_GAIN: f32 = 1.5;
 
@@ -226,7 +225,7 @@ fn point_halo_yd(room: f32) -> f32 {
 }
 
 fn point_far_share(room: f32) -> f32 {
-    return mix(POINT_FAR_SHARE, ROOM_POINT_FAR_SHARE, room);
+    return POINT_FAR_SHARE * (1.0 - room);
 }
 
 fn point_halo_gain(room: f32) -> f32 {

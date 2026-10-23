@@ -44,9 +44,6 @@ const SHAFT_SKY_SHARE: f32 = 0.55;
 // dual lobe alone passes ~0.4 at 90 degrees from the sun.
 const SHAFT_ISOTROPIC: f32 = 0.5;
 
-// Under full cover the shaft haze scatters the key this much harder (its density: `froxelfog::CANOPY_HAZE`).
-const CANOPY_SHAFT: f32 = 1.0;
-
 // The key light's own radiance for the shaft haze (the zone's glow and shaft gain applied): the
 // medium's key term is normalized to the fog colour, so a beam would take the fog's hue.
 fn shaft_key(f: froxelfog::FroxelFog) -> vec3<f32> {
@@ -301,16 +298,20 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     let phase = froxelfog::dual_phase(f, mu);
+    // The zone's open air; the sea fog is lit as it is.
+    let lum_sea = f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis);
     let lum_fog = mix(
-        f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis),
+        lum_sea,
         f.room_ambient.rgb * sky_term + f.room_sun.rgb * (phase * sun_vis),
         room,
     );
+    // The key as the shaft haze and the banks take it; under full cover the haze scatters it twice
+    // as hard (its density: `froxelfog::CANOPY_HAZE`).
+    let key_lit = shaft_phase(f, phase) * sun_vis;
     let lum_haze = f.ambient.rgb * (sky_term * SHAFT_SKY_SHARE)
-        + shaft_key(f) * (shaft_phase(f, phase) * sun_vis * SHAFT_KEY_GAIN * (1.0 + CANOPY_SHAFT * cover));
-    let lum_sea = f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis);
+        + shaft_key(f) * (key_lit * SHAFT_KEY_GAIN * (1.0 + cover));
     let lum_bank = f.ambient.rgb * (sky_term * BANK_SKY_SHARE)
-        + shaft_key(f) * (shaft_phase(f, phase) * sun_vis * BANK_KEY_GAIN);
+        + shaft_key(f) * (key_lit * BANK_KEY_GAIN);
     var points = PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
 
     // The point lights, isotropic, with the surface lanes' WoW falloff and range window.
