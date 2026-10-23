@@ -303,6 +303,18 @@ impl ZoneLook {
         noon_mix: 0.0,
         ..Self::NEUTRAL
     };
+
+    /// fork: **the cold look at night**, which [`look_for_zone_at`] ramps [`Self::COLD`] into
+    /// across `sun_arc::night_at`. Dun Morogh's night fog ends at 417 yd, and the day's thick blue
+    /// haze over it veiled the moonlit snow in a grey wash brighter than the snow itself: the night
+    /// air is clear, the long-range fog reaches past the authored end, and no ground banks lie in
+    /// the hollows (Gates of Ironforge at 02:00, approved in the viewer).
+    pub const COLD_NIGHT: Self = Self {
+        haze: 0.0012,
+        fog_reach: 1.2,
+        night_banks: 0.0,
+        ..Self::COLD
+    };
 }
 
 impl ZoneLook {
@@ -401,18 +413,21 @@ const TIRISFAL_ZONE: u32 = 85;
 const EERIE_ZONES: &[u32] = &[10, 130, 41, 28, 139, 8, 361, 5179, 5208];
 
 /// The zone's look at `minute` of the day: the default look takes [`ZoneLook::NOON`] across midday
-/// (`sun_arc::midday_at`) and Darkshore [`ZoneLook::DARKSHORE_NOON`]; any other zone with its own
+/// (`sun_arc::midday_at`) and Darkshore [`ZoneLook::DARKSHORE_NOON`]; the snow zones take
+/// [`ZoneLook::COLD_NIGHT`] across the night (`sun_arc::night_at`); any other zone with its own
 /// look keeps it at every hour.
 pub fn look_for_zone_at(zone: u32, minute: f32) -> ZoneLook {
     let look = look_for_zone(zone);
-    let noon = if look == ZoneLook::NEUTRAL {
-        ZoneLook::NOON
+    let (to, t) = if look == ZoneLook::NEUTRAL {
+        (ZoneLook::NOON, super::sun_arc::midday_at(minute))
     } else if look == ZoneLook::DARKSHORE {
-        ZoneLook::DARKSHORE_NOON
+        (ZoneLook::DARKSHORE_NOON, super::sun_arc::midday_at(minute))
+    } else if look == ZoneLook::COLD {
+        (ZoneLook::COLD_NIGHT, super::sun_arc::night_at(minute))
     } else {
         return look;
     };
-    look.lerp(noon, super::sun_arc::midday_at(minute))
+    look.lerp(to, t)
 }
 
 pub fn look_for_zone(zone: u32) -> ZoneLook {
@@ -887,6 +902,7 @@ mod tests {
             (0, ZoneLook::NOON, 6.0..=18.0),
             (10, ZoneLook::EERIE, 6.0..=25.0),
             (1, ZoneLook::COLD, 6.0..=10.0),
+            (1, ZoneLook::COLD_NIGHT, 6.0..=10.0),
             (1537, ZoneLook::IRONFORGE, 6.0..=10.0),
             (148, ZoneLook::DARKSHORE, 6.0..=10.0),
             (148, ZoneLook::DARKSHORE_NOON, 6.0..=10.0),
@@ -928,6 +944,25 @@ mod tests {
         assert_eq!(look_for_zone_at(999_999, 720.0), ZoneLook::NOON);
         assert_eq!(look_for_zone_at(1, 720.0), ZoneLook::COLD);
         assert_eq!(look_for_zone_at(10, 720.0), ZoneLook::EERIE);
+    }
+
+    /// Every snow zone's night air is clearer than its day's, with no ground banks, and the day's
+    /// look comes back by dawn.
+    #[test]
+    fn the_snow_zones_nights_are_clear() {
+        for zone in COLD_ZONES {
+            let night = look_for_zone_at(*zone, 120.0);
+            assert_eq!(night, ZoneLook::COLD_NIGHT, "zone {zone}");
+            assert!(night.haze < ZoneLook::COLD.haze && night.fog_reach > ZoneLook::COLD.fog_reach);
+            assert_eq!(night.night_banks, 0.0);
+            assert_eq!(
+                look_for_zone_at(*zone, 720.0),
+                ZoneLook::COLD,
+                "zone {zone}"
+            );
+        }
+        let dusk = look_for_zone_at(1, super::super::sun_arc::MOONRISE_MINUTE + 30.0);
+        assert!(dusk.haze < ZoneLook::COLD.haze && dusk.haze > ZoneLook::COLD_NIGHT.haze);
     }
 
     #[test]

@@ -120,15 +120,20 @@ const STARS_FADE: f32 = 60.0;
 /// The star field's alpha in a modern frame at `minute`: never below the reference curve's
 /// `reference`, full from an hour after moonrise to an hour before moonset.
 pub fn star_alpha(minute: f32, reference: f32) -> f32 {
+    reference.max(night_at(minute))
+}
+
+/// How much of `minute` is night: 0 by day, in over the [`STARS_FADE`] after moonrise, 1 until
+/// the same span before moonset. The stars and the zone look's night rows ramp on it.
+pub fn night_at(minute: f32) -> f32 {
     let after_rise = (minute - MOONRISE_MINUTE).rem_euclid(1440.0);
     let before_set = (MOONSET_MINUTE - minute).rem_euclid(1440.0);
     let night = 1440.0 - (MOONRISE_MINUTE - MOONSET_MINUTE);
-    let fade = if after_rise <= night {
+    if after_rise <= night {
         (after_rise.min(before_set) / STARS_FADE).clamp(0.0, 1.0)
     } else {
         0.0
-    };
-    reference.max(fade)
+    }
 }
 
 /// Whether `minute` falls between moonrise and moonset.
