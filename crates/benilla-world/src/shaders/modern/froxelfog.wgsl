@@ -88,6 +88,13 @@ fn halo_fog(f: FroxelFog) -> FroxelFog {
     return g;
 }
 
+// fork: **a lamp's halo is the same from any distance.** The lamps scatter off the air as it is
+// `LAMP_EYE_DEPTH` yards from the eye (inside the near-clear range, at the night air's near share),
+// not at their own depth: there the fog thickens past the near-clear range and the night air
+// triples by 80 yd, so a camp's torch stood in a wide bright bloom from afar and shrank to its
+// glow a step closer. 1, not 0: with no near-clear range `fog_clear`'s smoothstep has equal edges.
+const LAMP_EYE_DEPTH: f32 = 1.0;
+
 // Under full cover the shaft haze is this much denser (`canopy_cover` in `froxel_scatter.wgsl`).
 const CANOPY_HAZE: f32 = 1.5;
 // fork: **a room's air stays clear.** Inside a building (the room weight) the open air's shaft haze

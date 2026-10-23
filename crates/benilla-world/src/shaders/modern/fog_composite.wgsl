@@ -97,7 +97,7 @@ fn point_halos(f: froxelfog::FroxelFog, eye: vec3<f32>, ray: vec3<f32>, seg: f32
         }
         let integral = acc * ((th1 - th0) / (f32(HALO_TAPS) * h));
         let pc = eye + ray * clamp(tp, t0, t1);
-        let ext = froxelfog::extinction(clear_air, pc, froxelfog::view_depth(f, pc), room, 1.0, 0.0);
+        let ext = froxelfog::extinction(clear_air, pc, froxelfog::LAMP_EYE_DEPTH, room, 1.0, 0.0);
         let through = froxelfog::fog_at(fog_volume, fog_samp, f, pc).a;
         let excess = froxelfog::point_halo_gain(room) - froxelfog::point_far_share(room);
         let scattered = (ext.x + ext.y + ext.z) * integral.x

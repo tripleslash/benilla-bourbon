@@ -257,8 +257,9 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let sigma_sea = sea_fog(f, p, terrain.x, noise) * (1.0 - room);
     let sigma = sigma_fog + sigma_haze + sigma_night + sigma_bank + sigma_sea;
     // fork: the lamps scatter off the clear-weather air (`froxelfog::halo_fog`), so rain does not
-    // swell their glow; the storm's own medium still dims it on the way to the eye.
-    let lamp_ext = froxelfog::extinction(froxelfog::halo_fog(f), p, d, room, 1.0, cover);
+    // swell their glow, and as it is beside the eye (`froxelfog::LAMP_EYE_DEPTH`), so distance does
+    // not either; the storm's own medium still dims it on the way to the eye.
+    let lamp_ext = froxelfog::extinction(froxelfog::halo_fog(f), p, froxelfog::LAMP_EYE_DEPTH, room, 1.0, cover);
     let sigma_lamps = lamp_ext.x + lamp_ext.y + lamp_ext.z + sigma_bank + sigma_sea;
 
     // In-scatter.
