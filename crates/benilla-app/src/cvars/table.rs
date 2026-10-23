@@ -951,6 +951,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "the fork's own — the reference's exposure never moves",
     ),
+    // `serverTimeOffset` — whole hours, -12 to 12, added to the server's time of day for the sky,
+    // the light and the clock the UI reads (`net::game_time::TimeOffset`); the session clock
+    // itself and the daytime gate the server checks stay on its time. Applies to the next frame.
+    ours(
+        "serverTimeOffset",
+        "0",
+        "the fork's own — 1.12 draws and shows the server's time of day",
+    ),
     // ── end fork-owned block ──
     // ── fork-owned block: fsr (FORK.md) ──
     // fork: fsr (FORK.md)

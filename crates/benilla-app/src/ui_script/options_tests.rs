@@ -2774,6 +2774,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "GraphicsRowLightingQuality",
             ),
             ("BENILLA_TOOLTIP_AUTO_EXPOSURE", "GraphicsRowAutoExposure"),
+            (
+                "BENILLA_TOOLTIP_SERVER_TIME_OFFSET",
+                "GraphicsRowServerTimeOffset",
+            ),
             // fork: fsr (FORK.md)
             (
                 "BENILLA_TOOLTIP_FRAME_GENERATION",
@@ -5146,6 +5150,7 @@ fn turtle_options_carry_every_graphics_row() {
         "lightingModel",
         "lightingQuality",
         "autoExposure",
+        "serverTimeOffset",
         "ssaoStrength",
         "ssgiStrength",
         "waterDetail",

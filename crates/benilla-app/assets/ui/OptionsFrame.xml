@@ -575,6 +575,12 @@
             .. "and enchanted weapons. Cinematic also gives a dozen of those lights faint shadows.\n\n"
             .. "Has no effect on Classic lighting. Applies when you click Apply."
 
+        -- fork: `serverTimeOffset` -- 1.12 shows the server's time of day and nothing else.
+        BENILLA_TOOLTIP_SERVER_TIME_OFFSET =
+            "Moves the game's time of day by this many hours from the server's, for the sky, the "
+            .. "sun and moon, and the clock: play a server in another time zone at your own "
+            .. "day and night. 0 is the server's own time."
+
         -- fork: `autoExposure`, the modern model's light auto-exposure.
         BENILLA_TOOLTIP_AUTO_EXPOSURE =
             "Brightens the picture when the light is dark - at dusk, at night, or in a "
@@ -639,6 +645,8 @@
                 "RowAmbientOcclusion", "RowIndirectLight", "RowWaterDetail",
                 -- fork: the modern lighting model and its tier (FORK.md).
                 "RowLightingModel", "RowLightingQuality", "RowAutoExposure",
+                -- fork: the hour the world's day and night are drawn at.
+                "RowServerTimeOffset",
                 -- fork: the Everwood port (FORK.md) -- what moves in the world.
                 "RowFoliageWind", "RowFoliageWindStrength", "RowRainSurfaces",
                 -- fork: fsr (FORK.md) — how the world is presented, above how big it is drawn.
@@ -985,6 +993,12 @@
         function BenillaOptionsRow_FormatValue(row, value)
             if row.fmt == "raw" then
                 return string.format("%d", math.floor(value + 0.5))
+            end
+            -- fork: "hours": a signed offset, `+3 h`, `0 h`, `-5 h`.
+            if row.fmt == "hours" then
+                local h = math.floor(value + 0.5)
+                if h > 0 then return string.format("+%d h", h) end
+                return string.format("%d h", h)
             end
             -- The clamp guards a short stops table.
             if row.stops then
@@ -2608,10 +2622,23 @@
                                                     "BENILLA_TOOLTIP_AUTO_EXPOSURE")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowFoliageWind" inherits="BenillaOptionsDropdownRowTemplate">
+                                        <Frame name="$parentRowServerTimeOffset" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: `serverTimeOffset`, our own row: whole
+                                                -- hours on the server's time of day, -12 to +12.
+                                                BenillaOptionsRow_OnLoad(this, "serverTimeOffset", "Server Time Offset",
+                                                    "BENILLA_TOOLTIP_SERVER_TIME_OFFSET")
+                                                BenillaOptionsSliderRow_Setup(this, -12, 12, 1, "hours")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowFoliageWind" inherits="BenillaOptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowServerTimeOffset" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowServerTimeOffset" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: Foliage Wind -- `foliageWind`, 0 off /
@@ -3845,6 +3872,7 @@
             }
             BENILLA_LIGHTING_QUALITY = "Lighting Quality"
             BENILLA_AUTO_EXPOSURE = "Auto Exposure"
+            BENILLA_SERVER_TIME_OFFSET = "Server Time Offset"
             BENILLA_AMBIENT_OCCLUSION = "Ambient Occlusion"
             BENILLA_INDIRECT_LIGHT = "Indirect Lighting"
             BENILLA_WATER_DETAIL = "Water Detail"
@@ -4028,6 +4056,11 @@
                 { category = PIXEL_SHADERS, row = {
                     name = "BENILLA_AUTO_EXPOSURE", desc = BENILLA_TOOLTIP_AUTO_EXPOSURE,
                     type = "checkbutton", cvar = "autoExposure" } },
+                -- fork: the hour the world's day and night are drawn at, under the light's rows.
+                { after = "BENILLA_AUTO_EXPOSURE", row = {
+                    name = "BENILLA_SERVER_TIME_OFFSET", desc = BENILLA_TOOLTIP_SERVER_TIME_OFFSET,
+                    type = "slider", cvar = "serverTimeOffset", minval = -12, maxval = 12,
+                    step = 1 } },
                 { category = PIXEL_SHADERS, row = {
                     name = "BENILLA_AMBIENT_OCCLUSION", desc = BENILLA_TOOLTIP_AMBIENT_OCCLUSION,
                     type = "slider", cvar = "ssaoStrength", minval = 0, maxval = 1.0, step = 0.05 } },
@@ -4270,6 +4303,7 @@
             local readouts = {
                 GAMMA = { fmt = "gamma" },
                 MAX_FOLLOW_DIST = { fmt = "yards" },
+                BENILLA_SERVER_TIME_OFFSET = { fmt = "hours" },
                 ENVIRONMENT_DETAIL = { stops = { "Low", "Medium", "High" } },
                 SPELL_DETAIL = { stops = { "Low", "Medium", "High" } },
                 WEATHER_DETAIL = { stops = { "Minimal", "Low", "Medium", "Full" } },

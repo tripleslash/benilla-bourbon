@@ -923,16 +923,19 @@ fn feed_minimap_player_facing(mut hosted_vm: crate::script_calls::HostedVm, play
 }
 
 /// Push the game clock `GetGameTime()` answers when its hour or minute changes, the API's own
-/// resolution: the clock's fields as they stand (`0x515ee0`), -1, -1 while it is unset.
+/// resolution: the clock's fields as they stand (`0x515ee0`), -1, -1 while it is unset. fork: moved
+/// by the `serverTimeOffset` hours.
 fn feed_game_time(
     mut hosted_vm: crate::script_calls::HostedVm,
     time: Res<crate::net::ServerTime>,
+    offset: Option<Res<crate::net::TimeOffset>>,
     mut last: Local<crate::ui_script::VmMemo<Option<(i32, i32)>>>,
 ) {
+    let offset = offset.map_or_else(Default::default, |o| *o);
     hosted_vm.run(|script| {
         let Some(script) = script else { return };
         let last = last.get(script);
-        let now = (time.0.hour(), time.0.minute());
+        let now = offset.shown(time.0.hour(), time.0.minute());
         if *last == Some(now) {
             return;
         }

@@ -43,7 +43,7 @@ pub(crate) use apply::enter_world_on_self_create;
 use apply::tag_self_player;
 #[cfg(test)]
 pub(crate) use game_time::GameTime;
-pub(crate) use game_time::{clock_tick, ServerTime};
+pub(crate) use game_time::{clock_tick, time_offset_on_cvar, ServerTime, TimeOffset};
 pub(crate) use handlers::NetHandlerApp;
 
 pub(crate) use io::LoginRequest;

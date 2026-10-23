@@ -194,10 +194,15 @@ fn seed_vm_clock(world: &mut World, script: &mut UiScript) {
 /// Start the new VM's `GetGameTime()` at the game clock as it stands: the reference's clock is one
 /// object (`0xce8538`) built at start-up with every field -1 (`0x643300`, `0x642300`) and reset
 /// by no logout or `ReloadUI`, so a VM answers -1, -1 before any server time and the last known
-/// time after it, from the first line its addons run.
+/// time after it, from the first line its addons run. fork: moved by the `serverTimeOffset` hours.
 fn seed_game_time(world: &World, script: &mut UiScript) {
     if let Some(time) = world.get_resource::<crate::net::ServerTime>() {
-        script.set_game_time(time.0.hour(), time.0.minute());
+        let offset = world
+            .get_resource::<crate::net::TimeOffset>()
+            .copied()
+            .unwrap_or_default();
+        let (hour, minute) = offset.shown(time.0.hour(), time.0.minute());
+        script.set_game_time(hour, minute);
     }
 }
 

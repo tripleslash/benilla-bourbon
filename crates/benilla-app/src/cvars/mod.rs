@@ -1320,6 +1320,8 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "lightingModel",
     "lightingQuality",
     "autoExposure",
+    // fork: the hour the world's day and night are drawn at.
+    "serverTimeOffset",
     "renderScale",
     // fork: fsr (FORK.md)
     "frameGeneration",
@@ -1894,6 +1896,10 @@ mod tests {
             benilla_world::fsr::RCAS_SHARPNESS_DEFAULT
         );
         assert_eq!(
+            d["serverTimeOffset"] as i32,
+            crate::net::TimeOffset::default().0
+        );
+        assert_eq!(
             d["nearclip"],
             ViewDistance::default().nearclip,
             "the registered default and the resource's own must be one number"
@@ -2264,6 +2270,12 @@ mod tests {
         assert!(res::<benilla_world::fsr::FrameGeneration>(&app).0);
         apply(&mut app, "framegeneration", "0");
         assert!(!res::<benilla_world::fsr::FrameGeneration>(&app).0);
+        apply(&mut app, "serverTimeOffset", "-5");
+        assert_eq!(res::<crate::net::TimeOffset>(&app).0, -5);
+        apply(&mut app, "servertimeoffset", "30");
+        assert_eq!(res::<crate::net::TimeOffset>(&app).0, 12);
+        apply(&mut app, "serverTimeOffset", "2.6");
+        assert_eq!(res::<crate::net::TimeOffset>(&app).0, 3);
         apply(&mut app, "rcasSharpness", "0.5");
         assert_eq!(res::<benilla_world::fsr::RcasSharpness>(&app).0, 0.5);
         apply(&mut app, "rcassharpness", "7");
@@ -3391,6 +3403,7 @@ mod tests {
             // fork: fsr (FORK.md)
             .init_resource::<benilla_world::fsr::FrameGeneration>()
             .init_resource::<benilla_world::fsr::RcasSharpness>()
+            .init_resource::<crate::net::TimeOffset>()
             // Literal for the same reason: LightingSettings::default() reads $WOW_LIGHTING /
             // $WOW_LIGHTING_QUALITY, IndirectLighting::default() $WOW_SSAO / $WOW_SSGI, and
             // WaterDetail::default() $WOW_WATER_DETAIL.
@@ -3437,6 +3450,9 @@ mod tests {
         },
         |app| {
             app.add_observer(crate::video::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::net::time_offset_on_cvar);
         },
         |app| {
             app.add_observer(crate::player::camera::on_cvar);
