@@ -488,9 +488,6 @@ pub fn key_tint() -> [f32; 3] {
 pub const MOON_KEY: f32 = 0.85;
 /// The fill's multiplier under a full moon: the shadowed side falls toward the night floor.
 pub const MOON_FILL: f32 = 0.45;
-/// The moonlight's scattering into the air against the sun's: a beam reads from its contrast with
-/// the dark air around it, and the moon's key is a fraction of the sun's.
-pub const MOON_SCATTER: f32 = 2.5;
 
 /// The exact sRGB encode, the inverse of [`srgb_to_linear`].
 fn linear_to_srgb(c: f32) -> f32 {
@@ -517,9 +514,23 @@ pub fn key_fill() -> (f32, f32) {
     )
 }
 
-/// The gain on the key light's scattering into the air (1 by day, [`MOON_SCATTER`] under the moon).
-pub fn key_scatter_gain() -> f32 {
-    lerp(1.0, MOON_SCATTER, super::sun_arc::moon_key())
+/// fork: the share of the moon's key the shaft haze and banks scatter on their isotropic half
+/// (`froxel_scatter.wgsl`'s `shaft_phase`); their phase lobe, where a beam reads, takes it whole as
+/// it takes the sun's. The authored night diffuse rows are bright enough to light the ground
+/// (Darkshore's is 0.58), and haze lit by them evenly read as a pale dusk out to the horizon.
+pub const MOON_HAZE: f32 = 0.4;
+
+/// Dev tuning (`$WOW_MODERN_MOON_HAZE`, browser `?modern_moon_haze=`): the share in place of
+/// [`MOON_HAZE`].
+fn moon_haze() -> f32 {
+    crate::launch_env::live_var("WOW_MODERN_MOON_HAZE")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .map_or(MOON_HAZE, |v| v.clamp(0.0, 1.0))
+}
+
+/// The key light's share on the air's isotropic half (1 by day, [`MOON_HAZE`] under the moon).
+pub fn key_air_share() -> f32 {
+    lerp(1.0, moon_haze(), super::sun_arc::moon_key())
 }
 
 /// The post's exposure for a modern frame.
@@ -995,6 +1006,26 @@ mod tests {
                 "{minute}"
             );
         }
+        for minute in [660.0, 720.0, 870.0] {
+            assert_eq!(
+                look_for_zone_at(DARKSHORE_ZONE, minute),
+                ZoneLook::DARKSHORE_NOON,
+                "{minute}"
+            );
+        }
+        // Every warm hue is nearer grey at noon: a smaller spread between its channels.
+        let spread = |c: [f32; 3]| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
+        let (d, n) = (ZoneLook::DARKSHORE, ZoneLook::DARKSHORE_NOON);
+        for (a, b) in [
+            (n.glow, d.glow),
+            (n.haze_tint, d.haze_tint),
+            (n.fog_tint, d.fog_tint),
+            (n.sky_tint, d.sky_tint),
+            (n.key_tint, d.key_tint),
+        ] {
+            assert!(spread(a) < spread(b), "{a:?} against {b:?}");
+        }
+        assert!(n.saturation < d.saturation);
     }
 
     /// Darkshore's sea fog is its own: no other look lays one, and its grey authored rows are

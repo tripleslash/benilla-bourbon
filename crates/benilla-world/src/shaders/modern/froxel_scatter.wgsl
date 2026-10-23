@@ -53,6 +53,13 @@ fn shaft_key(f: froxelfog::FroxelFog) -> vec3<f32> {
     return vec3<f32>(f.medium.z, f.ambient.w, f.wind.w);
 }
 
+// fork: the shaft haze's and the banks' phase: half the fog's dual lobe, where a beam reads, and half
+// isotropic at the key's share on the air (`halo_air.w`: 1 by day, the moon's `look::MOON_HAZE`).
+// Lit evenly by a bright night diffuse, every moonlit froxel out to the horizon read pale.
+fn shaft_phase(f: froxelfog::FroxelFog, phase: f32) -> f32 {
+    return mix(phase, f.halo_air.w, SHAFT_ISOTROPIC);
+}
+
 // fork: **ground fog.** Overnight (and by day in the dark zones) the air near the ground gathers into
 // banks (`fog.night`): dense within a few yards of the terrain under each froxel, broken into
 // patches by the drifting noise at a coarse scale, and lit by the key as hard as the shaft haze, so
@@ -300,10 +307,10 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         room,
     );
     let lum_haze = f.ambient.rgb * (sky_term * SHAFT_SKY_SHARE)
-        + shaft_key(f) * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * SHAFT_KEY_GAIN * (1.0 + CANOPY_SHAFT * cover));
+        + shaft_key(f) * (shaft_phase(f, phase) * sun_vis * SHAFT_KEY_GAIN * (1.0 + CANOPY_SHAFT * cover));
     let lum_sea = f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis);
     let lum_bank = f.ambient.rgb * (sky_term * BANK_SKY_SHARE)
-        + shaft_key(f) * (mix(phase, 1.0, SHAFT_ISOTROPIC) * sun_vis * BANK_KEY_GAIN);
+        + shaft_key(f) * (shaft_phase(f, phase) * sun_vis * BANK_KEY_GAIN);
     var points = PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
 
     // The point lights, isotropic, with the surface lanes' WoW falloff and range window.

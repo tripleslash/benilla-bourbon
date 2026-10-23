@@ -71,7 +71,8 @@ struct FroxelFog {
     ground_y: vec4<f32>,
     ground: vec4<f32>,
     // fork: the lamp halos' air — the zone's medium solved in clear weather (`volumetrics::halo_air`):
-    // x = fog extinction (1/yd), y = near-clear range (planar yd), z = haze extinction; w unused.
+    // x = fog extinction (1/yd), y = near-clear range (planar yd), z = haze extinction; w = the key's
+    // share on the shaft haze's and banks' isotropic half (`look::key_air_share`).
     halo_air: vec4<f32>,
 }
 

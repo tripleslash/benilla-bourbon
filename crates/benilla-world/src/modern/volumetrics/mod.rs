@@ -221,7 +221,8 @@ pub struct FroxelFog {
     pub ground_x: Vec4,
     pub ground_y: Vec4,
     pub ground: Vec4,
-    /// fork: the lamp halos' clear-weather air: x = fog extinction, y = near-clear range, z = haze.
+    /// fork: the lamp halos' clear-weather air: x = fog extinction, y = near-clear range, z = haze;
+    /// w = the key's share on the shaft haze's and banks' isotropic half (`look::key_air_share`).
     pub halo_air: Vec4,
 }
 
@@ -713,7 +714,7 @@ fn update_volume(
             halo_air.density,
             halo_air.near_clear,
             halo_air.haze * halo_humid,
-            0.0,
+            super::look::key_air_share(),
         ),
     };
     hist.prev_clip = Some(clip_from_world);
@@ -762,11 +763,12 @@ fn night_bank_share(look: &super::look::ZoneLook, night: f32, added: f32) -> f32
     day + added * (night * look.night_banks - day).max(0.0)
 }
 
-/// The shaft haze's key radiance: the key light's own colour (decoded, horizon-faded, and the moon's
-/// harder scattering, `look::key_scatter_gain`) times the zone's key scattering, glow and shaft gain — not the medium's key term, which is normalized to the fog
-/// colour and would tint every beam with the zone's fog hue.
+/// The shaft haze's key radiance: the key light's own colour (decoded and horizon-faded) times the
+/// zone's key scattering, glow and shaft gain — not the medium's key term, which is normalized to
+/// the fog colour and would tint every beam with the zone's fog hue. Under the moon the isotropic
+/// half takes `look::key_air_share` of it (`halo_air.w`).
 fn shaft_key(diffuse: [f32; 3], look: &super::look::ZoneLook) -> Vec3 {
-    let horizon = super::sun_arc::key_horizon() * super::look::key_scatter_gain();
+    let horizon = super::sun_arc::key_horizon();
     let scale = look.key_scatter.max(0.0) * look.shafts.max(0.0) * SHAFT_SCALE * horizon;
     Vec3::from(diffuse.map(super::srgb_to_linear)) * Vec3::from(look.key_hue(look.glow)) * scale
 }
