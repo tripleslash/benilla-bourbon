@@ -503,11 +503,19 @@ pub(super) fn follow_moons(
 /// fork: **the modern night sky**, in every zone: the star dome (patch-Y's nebulae) at this share
 /// of its authored strength, so the sky band shows through it rather than a lit band over the
 /// haze.
-const MODERN_STAR_SHARE: f32 = 0.3;
+const MODERN_STAR_SHARE: f32 = 0.65;
 /// fork: the view elevation (sine) above which the modern star dome is whole; below it the dome
 /// fades out to the horizon (`StarExt::horizon`). It draws after the fog composite, so without
 /// the fade its nebulae ran unhazed down to a hard line on the horizon band (~20 degrees).
 const MODERN_STAR_HORIZON: f32 = 0.35;
+
+/// Dev tuning (`$WOW_MODERN_STARS`, browser `?modern_stars=`): the modern star dome's share in
+/// place of [`MODERN_STAR_SHARE`].
+fn modern_star_share() -> f32 {
+    crate::launch_env::live_var("WOW_MODERN_STARS")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .map_or(MODERN_STAR_SHARE, |v| v.clamp(0.0, 1.0))
+}
 
 /// Anchor the star dome and fade it by the model-global byte `trunc(curve·254 + 1)`, the draw
 /// skipped below 2 (`0x6d1b50`/`0x7e6120`), times each patch's [`StarDome::weight`]; drift a
@@ -543,7 +551,11 @@ pub(super) fn follow_stars(
         0.0
     };
     // fork: a modern frame's dome at [`MODERN_STAR_SHARE`] of its strength; a classic one's whole.
-    let share = if linear > 0.5 { MODERN_STAR_SHARE } else { 1.0 };
+    let share = if linear > 0.5 {
+        modern_star_share()
+    } else {
+        1.0
+    };
     let global = if debug.lighting.disable_sky_dome || byte < 2.0 {
         0.0
     } else {

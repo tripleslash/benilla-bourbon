@@ -54,7 +54,9 @@ pub(super) struct CloudStyle {
     pub desat: f32,
     /// How far the key light's colour is whitened under a high key (1 = white).
     pub whiten: f32,
-    /// A gain on the lit side's brightness.
+    /// A gain on the lit side's brightness. The key colour is taken at full brightness whatever
+    /// its level, so this sets how far a cloud stands out of the sky behind it, the dim moon's as
+    /// the noon sun's.
     pub bright: f32,
     /// The coverage's optical depth at full cover (Beer's law: opacity `1 − e^−τ`).
     pub density: f32,
@@ -77,7 +79,7 @@ pub(super) const CLOUD_STYLE: CloudStyle = CloudStyle {
     horizon: 0.12,
     desat: 0.9,
     whiten: 0.3,
-    bright: 0.85,
+    bright: 0.5,
     density: 3.0,
     step: 0.08,
     sigma: 0.6,
