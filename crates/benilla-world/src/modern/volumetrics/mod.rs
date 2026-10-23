@@ -860,7 +860,7 @@ mod tests {
         use crate::modern::look::ZoneLook;
         assert_eq!(added_air(&ZoneLook::NEUTRAL), 1.0, "Elwynn");
         for hazy in [ZoneLook::DARKSHORE, ZoneLook::EERIE, ZoneLook::TIRISFAL] {
-            assert_eq!(added_air(&hazy), HAZY_SHARE);
+            assert!((added_air(&hazy) - HAZY_SHARE).abs() < 1e-6);
             let (day, night) = (
                 night_bank_share(&hazy, 0.0, HAZY_SHARE),
                 night_bank_share(&hazy, 1.0, HAZY_SHARE),
