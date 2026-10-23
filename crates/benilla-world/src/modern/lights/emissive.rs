@@ -960,6 +960,24 @@ mod tests {
         );
     }
 
+    /// An emitter parked in the air beside a glow card does not drag the light off the lamp:
+    /// Turtle's reforged `GeneralHangingLantern01.m2` parks both 6 yd under its lantern, which hung
+    /// the light 4 yd below it. One inside the glow still counts.
+    #[test]
+    fn a_stray_emitter_does_not_drag_the_light_off_its_lamp() {
+        let card = glow_batch([1.0, 0.6, 0.2, 1.0]);
+        let stray = [0.0, 0.0, -6.0];
+        let (at, _) = glow_anchor([stray, stray], [&card]).unwrap();
+        assert!(at.iter().all(|c| c.abs() < 1e-4), "on the card: {at:?}");
+        let (with_flame, _) = glow_anchor([stray, [0.0, 0.0, 1.0]], [&card]).unwrap();
+        assert!(
+            (with_flame[2] - 0.5).abs() < 1e-4,
+            "the card and the flame inside it: {with_flame:?}"
+        );
+        let (bare, _) = glow_anchor([stray], []).unwrap();
+        assert_eq!(bare, stray, "with no card, the emitters are the glow");
+    }
+
     /// Darkshire's firefly swarms floated a lamp's halo in the air; a lamp is still a lamp.
     #[test]
     fn a_swarm_derives_no_light() {

@@ -635,6 +635,57 @@ mod tests {
         assert!(strikes > 0, "a minute of downpour strikes");
     }
 
+    /// A clear zone's air takes heavy rain's humid veil whole; an eerie, hazy one only a quarter of
+    /// it; no rain, none.
+    #[test]
+    fn a_hazy_zone_takes_only_a_slight_humid_bump() {
+        assert_eq!(humid_gain(0.0024, 1.0), 1.0, "Elwynn");
+        assert_eq!(humid_gain(HAZY_LOOK_HAZE, 1.0), HAZY_SHARE, "Felwood");
+        let mid = humid_gain(0.5 * (CLEAR_LOOK_HAZE + HAZY_LOOK_HAZE), 1.0);
+        assert!(HAZY_SHARE < mid && mid < 1.0, "{mid}");
+        assert_eq!(humid_gain(0.0024, 0.0), 0.0);
+    }
+
+    /// Strikes pace with how far past heavy the rain is: rare at its edge, every few seconds in a
+    /// full storm.
+    #[test]
+    fn a_full_storm_strikes_far_more_often_than_the_edge_of_heavy_rain() {
+        let strikes = |storm: f32| {
+            let mut l = Lightning {
+                every: None,
+                ..Lightning::default()
+            };
+            (0..60 * 600)
+                .filter(|_| l.step(1.0 / 60.0, 1.0, storm))
+                .count()
+        };
+        let (edge, full) = (strikes(0.0), strikes(1.0));
+        assert!(edge > 0, "heavy rain still strikes");
+        assert!(
+            full > 3 * edge,
+            "{full} strikes in a full storm vs {edge} at its edge"
+        );
+    }
+
+    /// A bolt stands in front of the view and climbs well over the horizon, so it runs off the top
+    /// of the frame rather than stopping in the sky.
+    #[test]
+    fn a_bolt_stands_ahead_and_climbs_steeply() {
+        let mut l = Lightning::default();
+        let eye = Vec3::new(10.0, 50.0, -20.0);
+        for _ in 0..20 {
+            let bolt = l.make_bolt(eye, Vec3::NEG_Z, 777.0);
+            let top = bolt.lines[0].0[0] - eye;
+            let flat = Vec3::new(top.x, 0.0, top.z);
+            assert!(top.y > 1.5 * flat.length(), "top {top}");
+            let off_axis = flat.normalize().angle_between(Vec3::NEG_Z).to_degrees();
+            assert!(
+                off_axis <= BOLT_SPREAD_DEG + 1e-3,
+                "{off_axis} deg off the view"
+            );
+        }
+    }
+
     /// A bright, saturated authored fog (a sandstorm's) is held to the haze's caps, hue kept; a
     /// grey storm fog passes through.
     #[test]
