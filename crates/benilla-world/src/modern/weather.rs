@@ -255,30 +255,42 @@ impl Strike {
 }
 
 /// Where a bolt stands: this share of the farclip out (yd, clamped), within ±this of the view's
-/// heading, its top this share of its distance above the eye and its foot below the horizon.
+/// heading, its top this share of its distance above the eye and its foot below the horizon, or
+/// for [`BOLT_AIR`] of strikes in the air ([`BOLT_AIR_FOOT`]).
 const BOLT_REACH: f32 = 0.45;
 const BOLT_DIST_YD: (f32, f32) = (120.0, 350.0);
 const BOLT_SPREAD_DEG: f32 = 25.0;
 const BOLT_TOP: f32 = 2.0;
 const BOLT_FOOT_YD: f32 = 40.0;
+/// The chance a strike ends in the air, and where its foot stops then: this share of the top's
+/// height above the eye, from the lowest to the highest — about 6 to 22 degrees over the horizon,
+/// so the end shows in a level view (the top stands at ~63 degrees, off the top of the frame).
+const BOLT_AIR: f32 = 0.7;
+const BOLT_AIR_FOOT: (f32, f32) = (0.05, 0.2);
 /// The bolt's sideways jag, a share of each split segment, over this many halvings: a few long
 /// straight runs between sharp kinks.
 const BOLT_JAG: f32 = 0.14;
 const BOLT_SPLITS: u32 = 5;
 /// The chance a strike forks once.
 const BOLT_FORK: f32 = 0.25;
-/// Half widths (yd) of the core and its glow, and the glow's opacity.
+/// Half widths (yd) of the widest strike's core and its glow, and the glow's opacity.
 const BOLT_CORE_YD: f32 = 1.5;
+/// Each strike's share of [`BOLT_CORE_YD`], from the thinnest to the widest, drawn as
+/// `lo + (hi − lo)·r²`: most strikes are thin, a few as heavy as the widest.
+const BOLT_WIDTH: (f32, f32) = (0.3, 1.0);
 const BOLT_GLOW_YD: f32 = 8.0;
 const BOLT_GLOW_ALPHA: f32 = 0.35;
-/// What is left of a line's brightness at its far end: a bolt dims toward the ground.
+/// What is left of a line's brightness at its far end: a bolt dims toward the ground, and one that
+/// ends in the air ([`BOLT_AIR`]) fades out to nothing.
 const BOLT_FOOT_ALPHA: f32 = 0.6;
+const BOLT_AIR_FOOT_ALPHA: f32 = 0.0;
 const BOLT_CORE: [f32; 3] = [0.88, 0.92, 1.0];
 const BOLT_GLOW: [f32; 3] = [0.55, 0.65, 1.0];
 
-/// One strike's bolt: its jagged lines, each with its core half width.
+/// One strike's bolt: its jagged lines, each with its core half width and what is left of its
+/// brightness at its far end.
 struct Bolt {
-    lines: Vec<(Vec<Vec3>, f32)>,
+    lines: Vec<(Vec<Vec3>, f32, f32)>,
 }
 
 /// The lightning clock: seconds to the next strike, and the live strike's age and bolt.
@@ -401,17 +413,24 @@ impl Lightning {
         let dist = (BOLT_REACH * farclip).clamp(BOLT_DIST_YD.0, BOLT_DIST_YD.1);
         let across = dir.cross(Vec3::Y);
         let top = eye + dir * dist + Vec3::Y * (BOLT_TOP * dist);
-        let foot =
-            eye + dir * dist + across * (0.15 * dist * self.rand_signed()) - Vec3::Y * BOLT_FOOT_YD;
+        let (drop, fade) = if self.rand01() < BOLT_AIR {
+            let share = BOLT_AIR_FOOT.0 + (BOLT_AIR_FOOT.1 - BOLT_AIR_FOOT.0) * self.rand01();
+            (-BOLT_TOP * dist * share, BOLT_AIR_FOOT_ALPHA)
+        } else {
+            (BOLT_FOOT_YD, BOLT_FOOT_ALPHA)
+        };
+        let foot = eye + dir * dist + across * (0.15 * dist * self.rand_signed()) - Vec3::Y * drop;
         let main = self.jag(top, foot, eye);
+        let r = self.rand01();
+        let core = BOLT_CORE_YD * (BOLT_WIDTH.0 + (BOLT_WIDTH.1 - BOLT_WIDTH.0) * r * r);
         let mut lines = Vec::new();
         // Some strikes fork once, from the upper half of the main line.
         if self.rand01() < BOLT_FORK {
             let at = main[(main.len() as f32 * (0.15 + 0.35 * self.rand01())) as usize];
             let end = at + across * (0.2 * dist * self.rand_signed()) - Vec3::Y * (0.3 * dist);
-            lines.push((self.jag(at, end, eye), 0.5 * BOLT_CORE_YD));
+            lines.push((self.jag(at, end, eye), 0.5 * core, fade));
         }
-        lines.insert(0, (main, BOLT_CORE_YD));
+        lines.insert(0, (main, core, fade));
         Bolt { lines }
     }
 }
@@ -492,9 +511,9 @@ fn push_bolt(
         .batch(cam, Handle::<Image>::default().id())
         .additive()
         .anchored(main[main.len() / 2]);
-    for (line, core) in &bolt.lines {
+    for (line, core, fade) in &bolt.lines {
         let glow = BOLT_GLOW_YD * core / BOLT_CORE_YD;
-        ribbon(batch.verts_mut(), line, eye, *core, BOLT_CORE, alpha);
+        ribbon(batch.verts_mut(), line, eye, *core, BOLT_CORE, alpha, *fade);
         ribbon(
             batch.verts_mut(),
             line,
@@ -502,13 +521,14 @@ fn push_bolt(
             glow,
             BOLT_GLOW,
             BOLT_GLOW_ALPHA * alpha,
+            *fade,
         );
     }
     batch.quads();
 }
 
 /// A camera-facing strip along `line`, `half` yd each side, opaque on the line and clear at its
-/// edges and fading to [`BOLT_FOOT_ALPHA`] along it, as quads: the two halves of each span.
+/// edges and fading to `fade` of `alpha` along it, as quads: the two halves of each span.
 fn ribbon(
     out: &mut Vec<crate::particles::buffer::EffectVertex>,
     line: &[Vec3],
@@ -516,6 +536,7 @@ fn ribbon(
     half: f32,
     rgb: [f32; 3],
     alpha: f32,
+    fade: f32,
 ) {
     let side = |i: usize| {
         let along = line[(i + 1).min(line.len() - 1)] - line[i.saturating_sub(1)];
@@ -527,7 +548,7 @@ fn ribbon(
         color: [rgb[0], rgb[1], rgb[2], a],
     };
     let last = line.len().saturating_sub(1).max(1) as f32;
-    let at = |i: usize| alpha * (1.0 + (BOLT_FOOT_ALPHA - 1.0) * i as f32 / last);
+    let at = |i: usize| alpha * (1.0 + (fade - 1.0) * i as f32 / last);
     for i in 0..line.len().saturating_sub(1) {
         let (a, b) = (line[i], line[i + 1]);
         let (sa, sb) = (side(i), side(i + 1));
@@ -691,13 +712,21 @@ mod tests {
     }
 
     /// A bolt stands in front of the view and climbs well over the horizon, so it runs off the top
-    /// of the frame rather than stopping in the sky.
+    /// of the frame rather than stopping in the sky; most strikes end in the air, the rest below
+    /// the horizon.
     #[test]
     fn a_bolt_stands_ahead_and_climbs_steeply() {
         let mut l = Lightning::default();
         let eye = Vec3::new(10.0, 50.0, -20.0);
-        for _ in 0..20 {
+        let (mut air, mut ground) = (0, 0);
+        for _ in 0..40 {
             let bolt = l.make_bolt(eye, Vec3::NEG_Z, 777.0);
+            let foot = *bolt.lines[0].0.last().unwrap() - eye;
+            if foot.y > 0.0 {
+                air += 1;
+            } else {
+                ground += 1;
+            }
             let top = bolt.lines[0].0[0] - eye;
             let flat = Vec3::new(top.x, 0.0, top.z);
             assert!(top.y > 1.5 * flat.length(), "top {top}");
@@ -707,6 +736,10 @@ mod tests {
                 "{off_axis} deg off the view"
             );
         }
+        assert!(
+            ground > 0 && air > ground,
+            "{air} in the air, {ground} to the ground"
+        );
     }
 
     /// A bright, saturated authored fog (a sandstorm's) is held to the haze's caps, hue kept; a
