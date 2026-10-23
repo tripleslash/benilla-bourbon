@@ -109,18 +109,19 @@ pub fn puff_color(fog_color: [f32; 3]) -> [f32; 3] {
     media::subtle([0, 1, 2].map(|c| fog_color[c] * tint[c]))
 }
 
-/// How heavy the rain is, 0 to 1, from the effect's ramped density (`(grade − 0.25)·4/3`): whole
-/// from [`HEAVY_DENSITY`], the server's heavy rain (grade 0.70, vmangos `GetWeatherState`), eased
-/// in over the top of its medium rain. The storm light weight `min(1, 4·density)` is whole at a
+/// How heavy the rain is, 0 to 1, from the effect's ramped density (`(grade − 0.25)·4/3`): eased
+/// in from [`HEAVY_FROM`] and whole at [`HEAVY_DENSITY`], across the server's medium and heavy rain
+/// (grade 0.70, vmangos `GetWeatherState`). The storm light weight `min(1, 4·density)` is whole at a
 /// quarter, so it cannot tell a shower from a downpour.
 pub fn heavy_rain(weather: &WeatherState) -> f32 {
     heaviness(weather.effect_kind, weather.effect_density)
 }
 
-/// The effect density of the server's heavy rain, grade 0.70, and where the look starts easing
-/// in, grade 0.625.
-const HEAVY_DENSITY: f32 = 0.6;
-const HEAVY_FROM: f32 = 0.5;
+/// The effect density where the look is whole, grade 0.8, and where it starts easing in, grade 0.5
+/// (fork: from 0.625 to 0.70, asked in the viewer: the rain light swapped in too late and too fast;
+/// the server's heavy rain, grade 0.70, now takes about three quarters of it).
+const HEAVY_DENSITY: f32 = 0.55 * 4.0 / 3.0;
+const HEAVY_FROM: f32 = 1.0 / 3.0;
 
 fn heaviness(kind: WeatherKind, density: f32) -> f32 {
     if kind != WeatherKind::Rain {
@@ -577,14 +578,15 @@ mod tests {
     /// A shower is not heavy; a downpour is, and only rain is.
     #[test]
     fn only_a_downpour_is_heavy() {
-        assert_eq!(heaviness(WeatherKind::Rain, 0.5), 0.0, "medium rain");
         let grade = |g: f32| (g - 0.25) * 4.0 / 3.0;
-        assert_eq!(
-            heaviness(WeatherKind::Rain, grade(0.70)),
-            1.0,
-            "the server's heavy rain"
+        assert_eq!(heaviness(WeatherKind::Rain, grade(0.5)), 0.0, "medium rain");
+        assert_eq!(heaviness(WeatherKind::Rain, grade(0.8)), 1.0);
+        assert!((heaviness(WeatherKind::Rain, grade(0.65)) - 0.5).abs() < 1e-5);
+        let server = heaviness(WeatherKind::Rain, grade(0.70));
+        assert!(
+            server > 0.7 && server < 0.8,
+            "the server's heavy rain: {server}"
         );
-        assert!((heaviness(WeatherKind::Rain, 0.55) - 0.5).abs() < 1e-5);
         assert_eq!(heaviness(WeatherKind::Snow, 1.0), 0.0);
     }
 
