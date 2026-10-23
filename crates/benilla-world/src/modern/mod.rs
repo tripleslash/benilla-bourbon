@@ -354,6 +354,7 @@ impl Plugin for ModernLightingPlugin {
                 volumetrics::plugin,
                 gi::plugin,
                 lights::plugin,
+                weather::plugin,
             ));
     }
 }

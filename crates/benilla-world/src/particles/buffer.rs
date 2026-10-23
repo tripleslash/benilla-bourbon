@@ -114,6 +114,9 @@ pub enum EffectShape {
         near: f32,
         far: f32,
         color: [f32; 3],
+        /// fork: modern weather — the fragment's coverage is `effect_points::puff_falloff` in
+        /// place of the texture.
+        procedural: bool,
     },
 }
 
@@ -147,9 +150,10 @@ impl EffectShape {
                 near,
                 far,
                 color,
+                procedural,
             } => [
                 Vec4::new(4.0, half, near, far),
-                Vec3::from(color).extend(0.0),
+                Vec3::from(color).extend(if procedural { 1.0 } else { 0.0 }),
             ],
         }
     }
@@ -564,6 +568,7 @@ mod tests {
             near: 6.0,
             far: 18.0,
             color: [0.5, 0.6, 0.7],
+            procedural: false,
         };
         assert_eq!(
             puff.rows(),
@@ -572,6 +577,14 @@ mod tests {
                 Vec4::new(0.5, 0.6, 0.7, 0.0)
             ]
         );
+        let soft = EffectShape::Puff {
+            half: 6.0,
+            near: 6.0,
+            far: 18.0,
+            color: [0.5, 0.6, 0.7],
+            procedural: true,
+        };
+        assert_eq!(soft.rows()[1], Vec4::new(0.5, 0.6, 0.7, 1.0));
         // A triangle a point, or a quad as two.
         assert_eq!(
             [streak, patter, flake, puff].map(EffectShape::vertices),

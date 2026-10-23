@@ -221,6 +221,7 @@ pub(super) const REFERENCE_PUFF: PuffLook = PuffLook {
     far: MIST_ALPHA_FAR,
     fade: MIST_FADE_S,
     alpha: 1.0,
+    procedural: false,
 };
 
 /// Mist puffs: 12×12 camera-facing quads in the current fog colour (so drawn fog-off), alpha per
@@ -256,6 +257,7 @@ pub(super) fn puff_shape(
         near: look.near,
         far: look.far,
         color: fog_color,
+        procedural: look.procedural,
     }
 }
 
@@ -304,6 +306,7 @@ mod tests {
                 near: 6.0,
                 far: 18.0,
                 color: [0.5, 0.6, 0.7],
+                procedural: false,
             }
         );
         assert_eq!(pushed(1.35, REFERENCE_PUFF), 1.0, "whole in mid-life");
@@ -326,6 +329,10 @@ mod tests {
         assert!(edge * edge <= 0.7 * 144.0, "{edge} yd");
         assert_eq!(pushed(1.35, look), look.alpha);
         assert!(look.alpha < 1.0);
+        assert!(
+            look.procedural && !REFERENCE_PUFF.procedural,
+            "a modern puff draws its own falloff, a classic one the texture"
+        );
         for dist in [0.0f32, 6.0, 12.0, 18.0, 24.0, 60.0] {
             for age in [0.1f32, 0.5, 1.35, 2.2, 2.65] {
                 assert!(

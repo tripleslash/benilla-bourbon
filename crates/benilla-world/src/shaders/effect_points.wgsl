@@ -43,6 +43,14 @@ fn quad_corner(index: u32) -> vec2<f32> {
     );
 }
 
+// fork: modern weather — a procedural puff's coverage at `uv`: `(1 − r²)³` over the inscribed disc,
+// whose value and slope both reach zero at the rim, so stacked puffs leave no contour.
+fn puff_falloff(uv: vec2<f32>) -> f32 {
+    let p = uv * 2.0 - 1.0;
+    let k = clamp(1.0 - dot(p, p), 0.0, 1.0);
+    return k * k * k;
+}
+
 // `point_a` = (pos, a), `point_b` = (v, b). `eye`, `right`, `up` and `forward` are the view's
 // world position and axes.
 fn expand(

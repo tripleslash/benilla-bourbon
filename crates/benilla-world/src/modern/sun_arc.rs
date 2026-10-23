@@ -85,7 +85,7 @@ fn horizon_factor(elevation: f32) -> f32 {
 
 /// The arc's rewrite of the resolved bodies; every `WowLighting` consumer reads after it.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-struct SunArcSet;
+pub(crate) struct SunArcSet;
 
 pub(super) fn plugin(app: &mut App) {
     app.configure_sets(Update, LightingConsumeSet.after(SunArcSet))

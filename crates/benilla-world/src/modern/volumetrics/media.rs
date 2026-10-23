@@ -59,9 +59,9 @@ pub const ROOM_MAX_DENSITY: f32 = 0.003;
 /// walls the distance while the scene around the camera stays readable. With no clear range at
 /// all the modern storm kept 15 % of the scene at 100 yd in Elwynn, under the reference's 43 %.
 pub const STORM_CLEAR: f32 = 120.0;
-/// The shaft haze a full storm adds (1/yd). The haze is never near-cleared, so this is the veil
-/// on the near field: 0.006 alone took 45 % of the scene at 100 yd.
-pub const STORM_HAZE: f32 = 0.002;
+/// The shaft haze a full storm adds (1/yd): a uniform humid veil, never near-cleared. 0.006 alone
+/// took 45 % of the scene at 100 yd and 0.002 a third at 200; this keeps 79 % at 200.
+pub const STORM_HAZE: f32 = 0.0012;
 
 /// What one frame's media is solved from. Colours are the authored gamma values.
 #[derive(Clone, Copy, Debug)]
@@ -217,7 +217,8 @@ pub fn solve(i: &MediaInputs) -> Media {
         near_clear,
         haze: i.haze.max(0.0) + STORM_HAZE * storm,
         // Faint: drifting density wisps over the ground read as cloud shadows sliding past the player.
-        noise: 0.15 + 0.3 * storm,
+        // A storm barely raises them: it thickens the air, not the ground.
+        noise: 0.15 + 0.1 * storm,
         ambient_in,
         key_in,
         forward_share: i.forward.clamp(0.0, 1.0) * (1.0 - 0.5 * storm),

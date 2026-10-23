@@ -16,6 +16,7 @@ use bevy::prelude::*;
 use crate::dev_state::DebugState;
 
 mod precip;
+pub(crate) use precip::WeatherIndoors;
 pub mod shelter;
 mod wet_ssr;
 pub mod wetness;

@@ -97,11 +97,12 @@ const SHADOW_SUN_FLOOR: f32 = 0.70;
 
 // fork: rain on surfaces — how far a soaked face lifts the authored `_s` sheen (×1.2 at most), the
 // wet sun highlight's share on the ground, and the ground's share of the wet reflectance
-// (`wet_hook::wet_reflectance`, the screen-space pass's weight or the sky term's). Each a fifth
-// under what the first cut shipped: at full strength soaked ground read as lacquer.
-const WET_SPEC_GAIN: f32 = 0.2;
-const WET_SUN_GAIN: f32 = 0.28;
-const WET_REFLECT_GAIN: f32 = 0.8;
+// (`wet_hook::wet_reflectance`, the screen-space pass's weight or the sky term's). Well under what
+// the first cut shipped: at full strength soaked ground read as lacquer, and grass at 0.2/0.28/0.8
+// still shone like a wet road.
+const WET_SPEC_GAIN: f32 = 0.12;
+const WET_SUN_GAIN: f32 = 0.16;
+const WET_REFLECT_GAIN: f32 = 0.55;
 // fork: yards per unit of the `UV1.x` fraction: `adt::WATER_DEPTH_RANGE / WATER_DEPTH_SPAN`.
 const WATER_DEPTH_UNPACK: f32 = 40.0;
 

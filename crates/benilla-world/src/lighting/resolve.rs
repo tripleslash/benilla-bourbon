@@ -14,6 +14,17 @@ use benilla_formats::{Atmosphere, LightCatalog};
 
 use super::{daynight, quantize_glow, ClockSource, GameClock, LightSampler, WowLighting};
 
+/// The storm `LightParams` over the clear one by `bcc`.
+/// fork: modern weather — a modern frame's storm only darkens and greys the clear colours
+/// (`modern::weather::storm_atmosphere`).
+fn storm_lerp(clear: &Atmosphere, stormy: &Atmosphere, storm: f32) -> Atmosphere {
+    if crate::modern::frame_is_modern() {
+        crate::modern::weather::storm_atmosphere(clear, stormy, storm)
+    } else {
+        clear.lerp(stormy, storm)
+    }
+}
+
 /// The scene-fog stage (`0x6cee30`): the pushed pair `end = min(zone end, farclip)` and
 /// `start = frac × end`, unclamped. The storm's negative fraction (Elwynn −0.5) floors the near
 /// field at `1 − 1/(1−frac)`, about 33% fog at the eye: the constant storm veil.
@@ -246,7 +257,7 @@ pub(super) fn update_time_lighting(
             let atmo = if storm > 0.0 {
                 let stormy =
                     s.0.sample_blended(map, wow_pos, minute * 2, true, submerged, ghost);
-                clear.lerp(&stormy, storm)
+                storm_lerp(&clear, &stormy, storm)
             } else {
                 clear
             };
@@ -276,7 +287,7 @@ pub(super) fn update_time_lighting(
             let clear = s.0.sample_blended(map, wow_pos, 0, false, submerged, ghost);
             if storm > 0.0 {
                 let stormy = s.0.sample_blended(map, wow_pos, 0, true, submerged, ghost);
-                clear.lerp(&stormy, storm)
+                storm_lerp(&clear, &stormy, storm)
             } else {
                 clear
             }

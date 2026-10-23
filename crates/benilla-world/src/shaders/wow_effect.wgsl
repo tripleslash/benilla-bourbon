@@ -169,7 +169,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     // Texture bytes × authored vertex colour in gamma space; `view.mip_bias` is the render-scale
     // LOD compensation, 0.0 at native and above.
-    let c = textureSampleBias(effect_texture, effect_sampler, in.uv, view.mip_bias) * in.color;
+    var c = textureSampleBias(effect_texture, effect_sampler, in.uv, view.mip_bias) * in.color;
+#ifdef EFFECT_POINTS
+    // fork: modern weather — a procedural puff (shape_b.w = 1) takes an analytic falloff in place
+    // of `snowmist01.blp`, whose 4-bit DXT3 alpha bands into rings.
+    if (wow_params.shape_a.x > 3.5 && wow_params.shape_b.w > 0.5) {
+        c = vec4<f32>(in.color.rgb, in.color.a * effect_points::puff_falloff(in.uv));
+    }
+#endif
 #ifdef BLEND_ALPHAKEY
     // The fixed-function alpha test (EGxRs id 0x08, `glAlphaFunc(GL_GEQUAL, ref/255)`): `0x70c256`
     // sets ref = round(instanceAlpha × 224), 224 at full alpha, and `c.a` is the reference's

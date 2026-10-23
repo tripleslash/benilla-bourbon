@@ -447,6 +447,7 @@ fn update_volume(
     debug: Option<Res<crate::dev_state::DebugState>>,
     wdl: Option<Res<crate::wdl::WdlStreamer>>,
     view_distance: Option<Res<crate::view::ViewDistance>>,
+    weather: Option<Res<crate::weather::WeatherState>>,
     mut out: ResMut<ModernVolume>,
     mut hist: Local<VolumeHistory>,
 ) {
@@ -467,6 +468,11 @@ fn update_volume(
     };
     let tier = froxel_tier(active.quality);
     let l = &*lighting;
+    // fork: modern weather — heavy rain's humid air (`modern::weather::heavy_rain`).
+    let heavy = weather.as_deref().map_or(0.0, super::weather::heavy_rain);
+    let humid = super::weather::humid_gain(look.0.haze, heavy);
+    // By day only: the night air already swells a lamp's glow.
+    let halo_humid = 1.0 + super::weather::HEAVY_HALO_GAIN * humid * (1.0 - l.sidn_night);
     let view_from_world = camera.to_matrix().inverse();
     let clip_from_view = projection.get_clip_from_view();
     let clip_from_world = clip_from_view * view_from_world;
@@ -493,7 +499,7 @@ fn update_volume(
             storm: l.storm_bcc,
             underwater: underwater.as_deref().is_some_and(|u| u.0.any()),
             interior,
-            haze: look.0.haze * HAZE_SCALE,
+            haze: look.0.haze * HAZE_SCALE + super::weather::HEAVY_HAZE * humid,
             // fork: under the moon the look keeps `moon_glow` of its forward lobe.
             forward: look.0.forward * (1.0 + (look.0.moon_glow - 1.0) * super::sun_arc::moon_key()),
             key_scatter: look.0.key_scatter,
@@ -505,9 +511,11 @@ fn update_volume(
         };
     let media = media::solve(&shared(l.fog_color, l.fog_start, l.fog_end, 0.0));
     // fork: the lamp halos' air — the same zone solved in clear weather, so rain and storms neither
-    // swell nor fade a lamp's glow (`froxelfog::halo_fog`).
+    // swell nor fade a lamp's glow (`froxelfog::halo_fog`), but for heavy rain, whose wet air the
+    // lamps bloom into (`modern::weather::HEAVY_HALO_GAIN`).
     let halo_air = media::solve(&media::MediaInputs {
         storm: 0.0,
+        haze: look.0.haze * HAZE_SCALE,
         zone_fog_end: l.clear_fog[2],
         ..shared(l.fog_color, l.clear_fog[0], l.clear_fog[1], 0.0)
     });
@@ -691,7 +699,12 @@ fn update_volume(
         ground_x: Vec4::ZERO,
         ground_y: Vec4::ZERO,
         ground: Vec4::ZERO,
-        halo_air: Vec4::new(halo_air.density, halo_air.near_clear, halo_air.haze, 0.0),
+        halo_air: Vec4::new(
+            halo_air.density,
+            halo_air.near_clear,
+            halo_air.haze * halo_humid,
+            0.0,
+        ),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;

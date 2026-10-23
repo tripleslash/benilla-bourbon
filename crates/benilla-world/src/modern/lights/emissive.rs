@@ -333,6 +333,11 @@ fn batch_glow(geometry: &benilla_formats::RenderSubmesh) -> Option<Glow> {
 ///
 /// The radius is the furthest a glow card's own vertex gets from that centre. Emitters are points
 /// and contribute none — a flame has no frame around it to clip.
+///
+/// Where the model draws glow cards, an emitter further than [`EMITTER_REACH`] from every card
+/// vertex does not anchor: a glow's emitters burn inside it, and one parked in the air is a data
+/// slip that would drag the light off its lamp (Turtle's reforged `GeneralHangingLantern01.m2`
+/// parks both 6 yd under its lantern, which put the light 4 yd below it).
 pub fn glow_anchor<'a>(
     emitter_positions: impl IntoIterator<Item = [f32; 3]>,
     cards: impl IntoIterator<Item = &'a benilla_formats::RenderSubmesh> + Clone,
@@ -340,15 +345,35 @@ pub fn glow_anchor<'a>(
     glow_anchor_by(emitter_positions, cards, glow_of_geometry)
 }
 
+/// How far (model yd) an emitter may sit from its model's glow cards and still anchor the light.
+const EMITTER_REACH: f32 = 2.5;
+
 /// [`glow_anchor`] over the batches `glows` reads as glowing.
 fn glow_anchor_by<'a>(
     emitter_positions: impl IntoIterator<Item = [f32; 3]>,
     cards: impl IntoIterator<Item = &'a benilla_formats::RenderSubmesh> + Clone,
     glows: fn(&benilla_formats::RenderSubmesh) -> Option<Glow>,
 ) -> Option<([f32; 3], f32)> {
+    let card_verts: Vec<[f32; 3]> = cards
+        .clone()
+        .into_iter()
+        .filter(|g| glows(g).is_some())
+        .flat_map(|g| {
+            let shift = carried_shift(g);
+            g.positions
+                .iter()
+                .map(move |p| [p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]])
+        })
+        .collect();
+    let in_glow = |pos: &[f32; 3]| {
+        card_verts.is_empty()
+            || card_verts.iter().any(|v| {
+                (0..3).map(|c| (v[c] - pos[c]).powi(2)).sum::<f32>() <= EMITTER_REACH.powi(2)
+            })
+    };
     let mut sum = [0.0f32; 3];
     let mut n = 0.0f32;
-    for pos in emitter_positions {
+    for pos in emitter_positions.into_iter().filter(in_glow) {
         for c in 0..3 {
             sum[c] += pos[c];
         }

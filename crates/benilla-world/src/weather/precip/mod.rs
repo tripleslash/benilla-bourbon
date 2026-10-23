@@ -164,7 +164,7 @@ pub(super) struct Precip {
 /// exterior group seen through a portal (`0x6b42d9`). The reference's dispatchers update the
 /// drops first and gate only the draw and the mist on it (`0x677380`, `0x6790b0`, `0x67a520`).
 #[derive(Resource, Default)]
-pub(super) struct WeatherIndoors(bool);
+pub(crate) struct WeatherIndoors(pub(crate) bool);
 
 /// Resolves [`WeatherIndoors`] from the portal pass's [`CameraInteriorClaim`] this frame.
 fn gate_weather_indoors(claim: Res<CameraInteriorClaim>, mut indoors: ResMut<WeatherIndoors>) {
