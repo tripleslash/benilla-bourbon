@@ -132,11 +132,12 @@ fn heaviness(kind: WeatherKind, density: f32) -> f32 {
 }
 
 /// What heavy rain leaves of each band's luma.
-pub const HEAVY_DARKEN: f32 = 0.55;
+pub const HEAVY_DARKEN: f32 = 0.4;
 /// The share of each band heavy rain turns to [`HEAVY_BLUE_HUE`] at the same luma.
-pub const HEAVY_BLUE: f32 = 0.6;
-/// The cold hue heavy rain casts (gamma).
-pub const HEAVY_BLUE_HUE: [f32; 3] = [0.40, 0.55, 0.90];
+pub const HEAVY_BLUE: f32 = 0.8;
+/// The cold hue heavy rain casts (gamma): a deep teal-blue, green well over red (asked in the
+/// viewer: a thunderstorm should sink the zone into it).
+pub const HEAVY_BLUE_HUE: [f32; 3] = [0.18, 0.62, 1.0];
 
 /// The humid veil heavy rain adds to the air's shaft haze (1/yd), on top of the storm's
 /// (`media::STORM_HAZE`): with Elwynn's look the air keeps half the scene at 200 yd.
@@ -148,14 +149,14 @@ pub const HEAVY_HALO_GAIN: f32 = 1.5;
 
 /// One band under rain of heaviness `h`: darkened, then part turned to the cold hue.
 fn heavy_band(c: [f32; 3], h: f32) -> [f32; 3] {
-    cold_band(c, HEAVY_DARKEN, HEAVY_BLUE, h)
+    cold_band(c, HEAVY_DARKEN, HEAVY_BLUE, HEAVY_BLUE_HUE, h)
 }
 
 /// One band at weight `h` of a cold grade: `darken` of its luma left, then `blue` of it turned to
-/// [`HEAVY_BLUE_HUE`] at the same luma.
-fn cold_band(c: [f32; 3], darken: f32, blue: f32, h: f32) -> [f32; 3] {
+/// the cold `hue` at the same luma.
+fn cold_band(c: [f32; 3], darken: f32, blue: f32, hue: [f32; 3], h: f32) -> [f32; 3] {
     let dark = c.map(|v| v * (1.0 + (darken - 1.0) * h));
-    let hue = HEAVY_BLUE_HUE.map(|v| v * luma(dark) / luma(HEAVY_BLUE_HUE));
+    let hue = hue.map(|v| v * luma(dark) / luma(hue));
     let k = blue * h;
     [0, 1, 2].map(|i| (dark[i] + (hue[i] - dark[i]) * k).clamp(0.0, 1.0))
 }
@@ -163,10 +164,12 @@ fn cold_band(c: [f32; 3], darken: f32, blue: f32, h: f32) -> [f32; 3] {
 /// fork: **a bright night goes dark and cold**, as heavy rain does, a little more so. A zone whose
 /// night fog is authored grey and light (Darkshore's 0.15 luma against Elwynn's blue 0.05) read
 /// as a pale dusk at 03:00. Its night takes the heavy-rain grade at [`NIGHT_DARKEN`] and
-/// [`NIGHT_BLUE`], weighted by the night fraction and by how far the resolved fog sits between
-/// [`NIGHT_FOG_DARK`] (none: Elwynn's night as it is) and [`NIGHT_FOG_BRIGHT`] (whole).
+/// [`NIGHT_BLUE`] toward [`NIGHT_BLUE_HUE`], weighted by the night fraction and by how far the
+/// resolved fog sits between [`NIGHT_FOG_DARK`] (none: Elwynn's night as it is) and
+/// [`NIGHT_FOG_BRIGHT`] (whole).
 pub const NIGHT_DARKEN: f32 = 0.45;
 pub const NIGHT_BLUE: f32 = 0.7;
+pub const NIGHT_BLUE_HUE: [f32; 3] = [0.40, 0.55, 0.90];
 pub const NIGHT_FOG_DARK: f32 = 0.06;
 pub const NIGHT_FOG_BRIGHT: f32 = 0.14;
 
@@ -206,7 +209,9 @@ fn storminess(weather: &WeatherState) -> f32 {
     ((weather.effect_density - HEAVY_DENSITY) / (1.0 - HEAVY_DENSITY)).clamp(0.0, 1.0)
 }
 /// What a whole flash adds to the ambient, the key, the sky and the fog (gamma): a cold white
-/// that lifts the storm without lighting a day; the key carries most.
+/// that lifts the storm without lighting a day; the key carries most. Under heavy rain it takes the
+/// rain's own cold hue at the same luma (`apply_heavy_rain`): a near-neutral white over the teal
+/// storm turned the scene grey for as long as a bolt was up, and back between strikes.
 const FLASH_AMBIENT: [f32; 3] = [0.12, 0.14, 0.19];
 const FLASH_KEY: [f32; 3] = [0.45, 0.50, 0.60];
 const FLASH_SKY: [f32; 3] = [0.10, 0.12, 0.16];
@@ -434,7 +439,7 @@ fn apply_heavy_rain(
             .chain(l.sky.iter_mut())
             .chain(l.cloud_colors.iter_mut())
         {
-            *c = cold_band(*c, NIGHT_DARKEN, NIGHT_BLUE, n);
+            *c = cold_band(*c, NIGHT_DARKEN, NIGHT_BLUE, NIGHT_BLUE_HUE, n);
         }
     }
     let h = weather.as_deref().map_or(0.0, heavy_rain);
@@ -449,7 +454,10 @@ fn apply_heavy_rain(
     if h <= 0.0 && flash <= 0.0 {
         return;
     }
-    let add = |c: [f32; 3], f: [f32; 3]| [0, 1, 2].map(|i| (c[i] + f[i] * flash).min(1.0));
+    let add = |c: [f32; 3], f: [f32; 3]| {
+        let f = cold_band(f, 1.0, HEAVY_BLUE, HEAVY_BLUE_HUE, h);
+        [0, 1, 2].map(|i| (c[i] + f[i] * flash).min(1.0))
+    };
     let l = &mut *lighting;
     l.ambient = add(heavy_band(l.ambient, h), FLASH_AMBIENT);
     l.diffuse = add(heavy_band(l.diffuse, h), FLASH_KEY);
@@ -625,7 +633,7 @@ mod tests {
         assert_eq!(heaviness(WeatherKind::Snow, 1.0), 0.0);
     }
 
-    /// Elwynn's noon ambient under a downpour: darker, and bluer than it is green or red.
+    /// Elwynn's noon ambient under a downpour: darker, bluer than it is green, and greener than red.
     #[test]
     fn a_downpour_darkens_and_cools_noon() {
         let noon = bytes([104, 130, 154]);
@@ -633,6 +641,7 @@ mod tests {
         assert!(luma(wet) < 0.75 * luma(noon), "{wet:?}");
         let cool = |c: [f32; 3]| c[2] / c[0];
         assert!(cool(wet) > cool(noon), "{wet:?}");
+        assert!(wet[2] > wet[1] && wet[1] > wet[0], "teal-blue: {wet:?}");
         assert_eq!(heavy_band(noon, 0.0), noon);
     }
 
