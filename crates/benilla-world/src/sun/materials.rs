@@ -80,6 +80,12 @@ pub struct StarExt {
     /// draws after the fog composite, so without it the nebulae ran unhazed down to the horizon.
     #[uniform(103)]
     pub(super) horizon: Vec4,
+    /// fork: the modern sky's hue (`follow::star_tint`), modern frames only: `.rgb` the hue of the
+    /// sky the dome draws over, at luma 1, and `.w` the share of the dome's own colour that gives way
+    /// to it at the same luma; `.w` 0 = the authored colour. patch-Y's teal nebulae otherwise
+    /// clashed with a zone's mauve or green night sky.
+    #[uniform(104)]
+    pub(super) tint: Vec4,
 }
 
 impl MaterialExtension for StarExt {

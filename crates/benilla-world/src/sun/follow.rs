@@ -517,6 +517,36 @@ fn modern_star_share() -> f32 {
         .map_or(MODERN_STAR_SHARE, |v| v.clamp(0.0, 1.0))
 }
 
+/// fork: the share of the modern star dome's own colour that gives way to the sky's hue
+/// (`StarExt::tint`): patch-Y's teal nebulae read as a band laid over a zone's mauve or green night.
+const MODERN_STAR_TINT: f32 = 0.8;
+
+/// Dev tuning (`$WOW_MODERN_STAR_TINT`, browser `?modern_star_tint=`): the share in place of
+/// [`MODERN_STAR_TINT`].
+fn modern_star_tint() -> f32 {
+    crate::launch_env::live_var("WOW_MODERN_STAR_TINT")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .map_or(MODERN_STAR_TINT, |v| v.clamp(0.0, 1.0))
+}
+
+/// The hue (at luma 1) of the sky the star dome draws over: the mean of the dome's upper three
+/// stops as `sky::dome_stops` tints them, in gamma, quantized to 1/256 for the write gate. Grey where
+/// the sky is black.
+fn star_tint(light: &WowLighting, share: f32) -> Vec4 {
+    let sky_tint = crate::modern::look::sky_tint();
+    let mean = (0..3).fold(Vec3::ZERO, |acc, i| {
+        acc + Vec3::from(light.sky[i]) * Vec3::from(sky_tint)
+    }) / 3.0;
+    let luma = mean.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+    let hue = if luma > 1e-3 {
+        (mean / luma).min(Vec3::splat(4.0))
+    } else {
+        Vec3::ONE
+    };
+    hue.map(|c| benilla_assets::quantize(c, 256.0))
+        .extend(share)
+}
+
 /// Anchor the star dome and fade it by the model-global byte `trunc(curve·254 + 1)`, the draw
 /// skipped below 2 (`0x6d1b50`/`0x7e6120`), times each patch's [`StarDome::weight`]; drift a
 /// scrolling batch's stage 0 on its global-sequence clock.
@@ -577,6 +607,12 @@ pub(super) fn follow_stars(
     } else {
         Vec4::ZERO
     };
+    // fork: the sky's hue on a linear frame (`StarExt::tint`).
+    let tint = if linear > 0.5 {
+        star_tint(&light, modern_star_tint())
+    } else {
+        Vec4::ZERO
+    };
     // A capture holds the drift at its seed, as the shared-clock material lanes do.
     let gseq_now = if crate::dev_state::deterministic_run() {
         0.0
@@ -616,7 +652,8 @@ pub(super) fn follow_stars(
                         && (m.base.uv_transform != uv
                             || m.extension.params.z != linear
                             || m.extension.params.w != unexpose
-                            || m.extension.horizon != horizon))
+                            || m.extension.horizon != horizon
+                            || m.extension.tint != tint))
             },
             |m| {
                 m.base.base_color = color;
@@ -624,6 +661,7 @@ pub(super) fn follow_stars(
                 m.extension.params.z = linear;
                 m.extension.params.w = unexpose;
                 m.extension.horizon = horizon;
+                m.extension.tint = tint;
             },
         );
     }

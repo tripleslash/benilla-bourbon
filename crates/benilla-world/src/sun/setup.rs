@@ -251,6 +251,7 @@ pub(super) fn setup_sun(
                     ),
                     stage2,
                     horizon: Vec4::ZERO,
+                    tint: Vec4::ZERO,
                 },
             });
             commands.spawn((

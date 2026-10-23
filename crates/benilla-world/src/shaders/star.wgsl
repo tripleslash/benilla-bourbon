@@ -17,6 +17,9 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var stage2_sampler: sampler;
 // fork: `StarExt::horizon`: gone below the view elevation (sine) `.x`, whole above `.y`; `.y` 0 = off.
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var<uniform> horizon: vec4<f32>;
+// fork: `StarExt::tint`: the sky's hue at luma 1 `.rgb`, and the share of the dome's colour that
+// takes it `.w` (0 = the authored colour).
+@group(#{MATERIAL_BIND_GROUP}) @binding(104) var<uniform> tint: vec4<f32>;
 
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     let lo = c * 12.92;
@@ -58,6 +61,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
             let up = normalize(in.world_position.xyz - view.world_position).y;
             a *= smoothstep(horizon.x, horizon.y, up);
         }
+        // fork: the dome's colour gives way to the sky's hue at its own luma (gamma bytes, as the
+        // stages multiply them), so the nebulae read as the zone's night rather than patch-Y's teal.
+        let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        rgb = mix(rgb, min(tint.rgb * luma, vec3<f32>(1.0)), tint.w);
         let keep = pow(1.0 - a, 2.2);
         return vec4<f32>(srgb_to_linear(rgb * a) * star.w, select(1.0 - keep, 0.0, star.x > 0.5));
     }
