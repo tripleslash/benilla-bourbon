@@ -266,9 +266,8 @@ pub(super) fn spawn_loaded_placements(
                             .entity(*e)
                             .insert(crate::exterior_cull::ExteriorScene);
                     }
-                    // The collision hull, welded into the owner tile's batch. It never clamps the
-                    // mouse pick: the reference traces a doodad's opaque drawn batches for that
-                    // (`interact::WorldPick::doodad_occluder`), never its collision triangles.
+                    // The collision hull, welded into the owner tile's batch: the body's alone, as
+                    // the mouse pick tests the drawn batches (`interact::DoodadOccluders`).
                     if let Some((verts, tris)) = (!doodad_bodies_disabled())
                         .then(|| placement_collider_data(m.collision.as_ref(), &p.transform))
                         .flatten()

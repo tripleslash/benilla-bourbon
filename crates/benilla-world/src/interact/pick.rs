@@ -5,19 +5,13 @@
 use std::sync::Arc;
 
 use benilla_assets::coords::wow_to_bevy;
-use benilla_formats::{ModelBlend, RenderSubmesh};
+use benilla_formats::RenderSubmesh;
 use bevy::camera::primitives::Aabb;
 use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 
 use super::WorldObject;
-use crate::model_render::{ModelKind, ModelPart};
-
-/// Which batches a filtered cast tests, by the placement's kind and the batch's own blend. An
-/// entity part answers through its [`ModelPart`] kind, so a part without one never passes, nor
-/// does a [`PickBox`].
-pub type PickAccept<'a> = &'a dyn Fn(ModelKind, ModelBlend) -> bool;
 
 /// The resident pick geometry of one drawn batch, shared with the model asset; the render mesh is
 /// `RENDER_WORLD`-only. A keyed entity with neither this nor [`PickBox`] is not pickable.
@@ -59,15 +53,24 @@ pub struct ObjectHit {
 /// Geometry drawn with no entity to hang a [`PickMesh`] on ([`crate::static_gx`]). The lane answers
 /// the ray itself, since only it knows what it drew, and reports only content it selected.
 pub trait PickSource {
-    /// Append the nearest hit per member along `ray` among the members `accept` passes;
-    /// `all_hits` asks for the whole ray.
-    fn cast_objects(
-        &self,
-        ray: Ray3d,
-        all_hits: bool,
-        accept: PickAccept,
-        out: &mut Vec<(Arc<WorldObject>, RayHit)>,
-    );
+    /// Append the nearest hit per member along `ray`; `all_hits` asks for the whole ray.
+    fn cast_objects(&self, ray: Ray3d, all_hits: bool, out: &mut Vec<(Arc<WorldObject>, RayHit)>);
+
+    /// The distance to the nearest drawn batch along `ray` that occludes the mouse pick
+    /// ([`occludes_pick`]); run every frame, so a lane keeps what it needs inline.
+    fn nearest_occluder(&self, ray: Ray3d) -> Option<f32>;
+}
+
+/// Whether a drawn batch is the static-doodad geometry the reference's world trace tests
+/// (`0x69c0f0`, the mouse pick's mask `0x1000114`): `0x69cdb0` queues a doodad def whose owner pair
+/// `+0x180` is zero, a map doodad rather than a GameObject's, in mode 2 under bits 4 and
+/// `0x1000000`, and mode 2 of `0x7089c0` tests the render submeshes, skipping any blend but 0
+/// (`0x70903b`). The def is queued once flag `0x80` of `+0xc` is set, which the pending-doodad
+/// drain sets once its model is loaded (`0x698c50`, `or byte [ebx+0xc],0x81` at `0x698cc1`). The
+/// collision triangles, mode 3, need bit 1 or `0x100000`, which the pick's mask lacks.
+pub fn occludes_pick(object: &WorldObject, geometry: &RenderSubmesh) -> bool {
+    object.kind == crate::model_render::ModelKind::Doodad
+        && geometry.blend == benilla_formats::ModelBlend::Opaque
 }
 
 /// One triangle-accurate hit; the normal follows the authored winding, not the ray.
@@ -88,7 +91,6 @@ pub type PickParts<'w, 's> = Query<
         Option<&'static Aabb>,
         Has<PickBox>,
         Option<&'static PickBlob>,
-        Option<&'static ModelPart>,
     ),
 >;
 
@@ -118,26 +120,25 @@ pub fn cast_object_ray(
     sources: &[&dyn PickSource],
     all_hits: bool,
 ) -> Vec<ObjectHit> {
-    let mut out: Vec<ObjectHit> =
-        cast_pick_ray_impl(ray, pickable.iter().copied(), parts, all_hits, false, None)
-            .into_iter()
-            .map(|(entity, member, hit)| match member {
-                // A blob member: its identity travels with the hit, and the blob entity is dropped.
-                Some(object) => ObjectHit {
-                    object: Some((*object).clone()),
-                    entity: None,
-                    hit,
-                },
-                None => ObjectHit {
-                    object: objects.get(entity).ok().cloned(),
-                    entity: Some(entity),
-                    hit,
-                },
-            })
-            .collect();
+    let mut out: Vec<ObjectHit> = cast_pick_ray_impl(ray, pickable, parts, all_hits, false)
+        .into_iter()
+        .map(|(entity, member, hit)| match member {
+            // A blob member: its identity travels with the hit, and the blob entity is dropped.
+            Some(object) => ObjectHit {
+                object: Some((*object).clone()),
+                entity: None,
+                hit,
+            },
+            None => ObjectHit {
+                object: objects.get(entity).ok().cloned(),
+                entity: Some(entity),
+                hit,
+            },
+        })
+        .collect();
     let mut lane: Vec<(Arc<WorldObject>, RayHit)> = Vec::new();
     for source in sources {
-        source.cast_objects(ray, all_hits, &|_, _| true, &mut lane);
+        source.cast_objects(ray, all_hits, &mut lane);
     }
     out.extend(lane.into_iter().map(|(object, hit)| ObjectHit {
         object: Some((*object).clone()),
@@ -176,32 +177,10 @@ pub fn cast_pick_ray(
     parts: &PickParts,
     all_hits: bool,
 ) -> Vec<(Entity, RayHit)> {
-    cast_pick_ray_impl(ray, pickable.iter().copied(), parts, all_hits, false, None)
+    cast_pick_ray_impl(ray, pickable, parts, all_hits, false)
         .into_iter()
         .map(|(e, _, hit)| (e, hit))
         .collect()
-}
-
-/// The nearest hit along `ray` among the batches `accept` passes, across the entity parts named by
-/// `candidates`, their blob members and every entity-less [`PickSource`]: the mouse pick's world
-/// trace reads its doodad leg from here (`target::hover`).
-pub fn cast_nearest_accepted(
-    ray: Ray3d,
-    candidates: impl IntoIterator<Item = Entity>,
-    parts: &PickParts,
-    sources: &[&dyn PickSource],
-    accept: PickAccept,
-) -> Option<RayHit> {
-    let entities = cast_pick_ray_impl(ray, candidates, parts, false, false, Some(accept))
-        .into_iter()
-        .map(|(_, _, hit)| hit);
-    let mut lane: Vec<(Arc<WorldObject>, RayHit)> = Vec::new();
-    for source in sources {
-        source.cast_objects(ray, false, accept, &mut lane);
-    }
-    entities
-        .chain(lane.into_iter().map(|(_, hit)| hit))
-        .min_by(|a, b| a.distance.total_cmp(&b.distance))
 }
 
 /// [`cast_pick_ray`]'s generous second pass, mouse pick only (the reference's resolve `0x7089c0`,
@@ -215,39 +194,28 @@ pub fn cast_pick_ray_inflated(
     pickable: &HashSet<Entity>,
     parts: &PickParts,
 ) -> Vec<(Entity, RayHit)> {
-    cast_pick_ray_impl(ray, pickable.iter().copied(), parts, true, true, None)
+    cast_pick_ray_impl(ray, pickable, parts, true, true)
         .into_iter()
         .map(|(e, _, hit)| (e, hit))
         .collect()
 }
 
-/// The entity walk; a blob hit carries its member's identity ([`PickBlob`]). With `accept`, only
-/// the batches it passes are tested: a part by its [`ModelPart`] kind and its geometry's blend, a
-/// blob member by its own identity and geometry.
+/// The entity walk; a blob hit carries its member's identity ([`PickBlob`]).
 fn cast_pick_ray_impl(
     ray: Ray3d,
-    pickable: impl IntoIterator<Item = Entity>,
+    pickable: &HashSet<Entity>,
     parts: &PickParts,
     all_hits: bool,
     inflate: bool,
-    accept: Option<PickAccept>,
 ) -> Vec<(Entity, Option<Arc<WorldObject>>, RayHit)> {
     let (origin, dir) = (ray.origin, *ray.direction);
     let mut candidates: Vec<(f32, Entity)> = Vec::new();
-    for entity in pickable {
-        let Ok((mesh, gt, vis, aabb, is_box, blob, part)) = parts.get(entity) else {
+    for &entity in pickable {
+        let Ok((mesh, gt, vis, aabb, is_box, blob)) = parts.get(entity) else {
             continue;
         };
         if !vis.get() {
             continue; // not drawn in any view this frame
-        }
-        if let (Some(accept), None) = (accept, blob) {
-            let passes = mesh
-                .zip(part)
-                .is_some_and(|(mesh, part)| accept(part.kind, mesh.0.blend));
-            if !passes {
-                continue;
-            }
         }
         // A blob's authored bound (`NoAutoAabb`) is its members' union; a blob with no bound is
         // narrow-tested unconditionally, like a bound-less part.
@@ -298,15 +266,12 @@ fn cast_pick_ray_impl(
         if !all_hits && best < entry {
             break; // every remaining box starts beyond the confirmed nearest hit
         }
-        let Ok((mesh, gt, _, _, _, blob, _)) = parts.get(entity) else {
+        let Ok((mesh, gt, _, _, _, blob)) = parts.get(entity) else {
             continue;
         };
         if let Some(blob) = blob {
             // The hit is the member under the cursor, cast at the member's own world pose.
             for m in blob.0.iter() {
-                if accept.is_some_and(|a| !a(m.object.kind, m.geometry.blend)) {
-                    continue;
-                }
                 let gt = GlobalTransform::from(m.transform);
                 if let Some(h) = ray_submesh(&m.geometry, &gt, origin, dir, inflate) {
                     best = best.min(h.distance);
@@ -535,6 +500,15 @@ pub fn ray_member(geometry: &RenderSubmesh, transform: Transform, ray: Ray3d) ->
     )
 }
 
+/// [`ray_member`] for a part posed by its entity's `GlobalTransform`.
+pub(crate) fn ray_member_at(
+    geometry: &RenderSubmesh,
+    gt: &GlobalTransform,
+    ray: Ray3d,
+) -> Option<RayHit> {
+    ray_submesh(geometry, gt, ray.origin, *ray.direction, false)
+}
+
 /// Ray against an entity's `Aabb` taken to world space corner by corner: the broad phase, and the
 /// whole test for a part with no resident geometry.
 pub fn ray_mesh_bounds(origin: Vec3, dir: Vec3, aabb: &Aabb, gt: &GlobalTransform) -> Option<f32> {
@@ -680,8 +654,9 @@ mod tests {
             ids: Query<Entity, With<ViewVisibility>>,
             parts: PickParts,
         ) -> Vec<(Entity, f32)> {
+            let all: HashSet<Entity> = ids.iter().collect();
             let ray = Ray3d::new(origin, Dir3::new(dir).expect("a non-zero ray"));
-            cast_pick_ray_impl(ray, ids.iter(), &parts, true, inflate, None)
+            cast_pick_ray_impl(ray, &all, &parts, true, inflate)
                 .into_iter()
                 .map(|(e, _, h)| (e, h.distance))
                 .collect()
@@ -849,83 +824,6 @@ mod tests {
         )));
         *e.get_mut::<ViewVisibility>().expect("spawned visible") = ViewVisibility::HIDDEN;
         assert!(names_in(&mut world, Vec3::new(0.0, 10.0, 0.0), Vec3::NEG_Y).is_empty());
-    }
-
-    /// The mouse pick's doodad leg: a drawn doodad's opaque batch.
-    fn opaque_doodad(kind: ModelKind, blend: ModelBlend) -> bool {
-        kind == ModelKind::Doodad && blend == ModelBlend::Opaque
-    }
-
-    /// [`wow_tri`] drawn with `blend`.
-    fn tri_blend(blend: ModelBlend) -> Arc<RenderSubmesh> {
-        Arc::new(RenderSubmesh { blend, ..wow_tri() })
-    }
-
-    /// [`cast_nearest_accepted`] down from `origin` over every entity in a hand-built world.
-    fn nearest_in(world: &mut World, origin: Vec3) -> Option<f32> {
-        use bevy::ecs::system::RunSystemOnce;
-        fn cast(
-            In(origin): In<Vec3>,
-            ids: Query<Entity, With<ViewVisibility>>,
-            parts: PickParts,
-        ) -> Option<f32> {
-            let ray = Ray3d::new(origin, Dir3::NEG_Y);
-            cast_nearest_accepted(ray, ids.iter(), &parts, &[], &opaque_doodad).map(|h| h.distance)
-        }
-        world.run_system_once_with(cast, origin).expect("cast")
-    }
-
-    /// An alpha-keyed net, a GameObject and a part with no `ModelPart` stack above an opaque doodad:
-    /// the filtered cast sees through all three to it.
-    #[test]
-    fn the_filtered_cast_tests_opaque_doodad_parts_only() {
-        let mut world = World::new();
-        let part = |kind, blend| ModelPart { kind, blend };
-        drawn(&mut world, Vec3::new(0.0, -2.0, 0.0), Vec3::splat(1.0)).insert((
-            PickMesh(tri_blend(ModelBlend::AlphaTest)),
-            part(ModelKind::Doodad, ModelBlend::AlphaTest),
-        ));
-        drawn(&mut world, Vec3::new(0.0, -4.0, 0.0), Vec3::splat(1.0)).insert((
-            PickMesh(tri_blend(ModelBlend::Opaque)),
-            part(ModelKind::GameObject, ModelBlend::Opaque),
-        ));
-        drawn(&mut world, Vec3::new(0.0, -6.0, 0.0), Vec3::splat(1.0))
-            .insert(PickMesh(tri_blend(ModelBlend::Opaque)));
-        assert_eq!(nearest_in(&mut world, Vec3::ZERO), None);
-        drawn(&mut world, Vec3::new(0.0, -8.0, 0.0), Vec3::splat(1.0)).insert((
-            PickMesh(tri_blend(ModelBlend::Opaque)),
-            part(ModelKind::Doodad, ModelBlend::Opaque),
-        ));
-        assert_eq!(nearest_in(&mut world, Vec3::ZERO), Some(8.0));
-        // The unfiltered cast still names every part, the net first.
-        let all = cast_in(&mut world, Vec3::ZERO, Vec3::NEG_Y, false);
-        assert_eq!(all.first().map(|(_, d)| *d), Some(2.0));
-    }
-
-    /// A blob's members are filtered one by one, by their own identity and blend.
-    #[test]
-    fn the_filtered_cast_filters_blob_members() {
-        let mut world = World::new();
-        let member = |object, blend, y| PickMember {
-            object,
-            geometry: tri_blend(blend),
-            transform: Transform::from_xyz(0.0, y, 0.0),
-        };
-        let wmo = Arc::new(WorldObject {
-            kind: ModelKind::Wmo,
-            label: "wall.wmo".into(),
-            id: 3,
-            detail: String::new(),
-        });
-        drawn(&mut world, Vec3::ZERO, Vec3::new(4.0, 20.0, 4.0)).insert(PickBlob(Arc::from(
-            [
-                member(object(1, "net.m2"), ModelBlend::AlphaTest, -3.0),
-                member(wmo, ModelBlend::Opaque, -5.0),
-                member(object(2, "crate.m2"), ModelBlend::Opaque, -7.0),
-            ]
-            .as_slice(),
-        )));
-        assert_eq!(nearest_in(&mut world, Vec3::ZERO), Some(7.0));
     }
 
     /// The render form centres a billboard card at its pivot, so the pick subtracts the same pivot.

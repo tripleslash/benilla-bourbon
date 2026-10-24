@@ -517,6 +517,10 @@ pub fn spawn_model_entities(
             Some(slot) => MeshTag(crate::mesh_tag::probe_bits(slot)),
             None => MeshTag(alpha_bits(1.0)),
         };
+        // A static doodad's opaque batch occludes the mouse pick; a WMO's is the walk collider's.
+        let occluder = (kind == ModelKind::Doodad)
+            .then(|| crate::interact::PickOccluderPart::of(sub.blend))
+            .flatten();
         // A billboard batch on a rigged placement is a skinned part whose billboard bone the rig's
         // world pass faces to the camera, as the reference skins it (`0x714260`); its unrigged
         // twin draws nothing, so a placement not yet woken (or whose wake found the palette table
@@ -551,6 +555,9 @@ pub fn spawn_model_entities(
             if let Some(aabb) = cull_bound(Some(&pb.aabb), anim_bound) {
                 part_entity.insert((aabb, NoAutoAabb));
             }
+            if let Some(m) = occluder {
+                part_entity.insert(m);
+            }
             let entity = part_entity.id();
             lazy_parts.push(entity);
             skinned_meshes.push(entity);
@@ -579,6 +586,9 @@ pub fn spawn_model_entities(
                 mesh_tag,
                 card,
             ));
+            if let Some(m) = occluder {
+                card_entity.insert(m);
+            }
             // The build-time Aabb, inserted here: `calculate_bounds` can race extraction of a
             // `RENDER_WORLD` form, and the exterior cull fails open without a bound.
             if let Some(aabb) = stat_aabb {
@@ -603,6 +613,9 @@ pub fn spawn_model_entities(
                 crate::interact::PickMesh(sub.geometry.clone()),
                 mesh_tag,
             ));
+            if let Some(m) = occluder {
+                part_entity.insert(m);
+            }
             // An animated placement's joints move the vertices away from the bind-pose bound, so
             // it widens to the authored all-animation box; a card, which follows its joint, needs
             // none. `NoAutoAabb` keeps the bound: `calculate_bounds` recomputes it on

@@ -133,6 +133,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("horizon::world_box", "wall"),
     ("instance_tint::InstanceTintMirrors", "record"),
     ("instance_tint::InstanceTints", "record"),
+    ("interact::DoodadOccluders", "wall"),
     ("interact::PickMesh", "record"),
     ("interact::PosedPickScratch", "wall"),
     ("interact::WorldObject", "record"),

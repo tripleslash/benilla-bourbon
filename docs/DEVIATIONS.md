@@ -41,7 +41,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - [benilla-protocol](#benilla-protocol): 28
 - [benilla-srp](#benilla-srp): 2
 - [benilla-ui](#benilla-ui): 136
-- [benilla-world](#benilla-world): 59
+- [benilla-world](#benilla-world): 58
 
 ### benilla-app
 
@@ -103,7 +103,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### chat_bubble
 
-- Sizes ride the plates' damped diagonal basis (`plate_basis`), not the unbounded reference law, so bubble text and plate text keep one em at every window size. ([`src/chat_bubble.rs:23`](../crates/benilla-app/src/chat_bubble.rs#L23))
+- Sizes ride the plates' damped diagonal basis (`plate_basis`), not the unbounded reference law, so bubble text and plate text keep one em at every window size. ([`src/chat_bubble.rs:24`](../crates/benilla-app/src/chat_bubble.rs#L24))
 
 #### cinematic
 
@@ -512,13 +512,13 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### vplates
 
-- The basis is damped past `PLATE_DIAG_KNEE`, because the reference's unbounded growth (`0x7705b0`) draws plates too large and soft at high resolutions. ([`src/vplates.rs:13`](../crates/benilla-app/src/vplates.rs#L13))
-- The bar fill brightens by `LIT_BOOST` in place of the reference's ADD `Nameplate-Glow` rim, which reads as hard edge lines under benilla's linear blending. ([`src/vplates.rs:17`](../crates/benilla-app/src/vplates.rs#L17))
-- `LEVEL_H` is 0.0086, one em under the reference's 0.009, because the level number read too large. ([`src/vplates.rs:110`](../crates/benilla-app/src/vplates.rs#L110))
-- The reference dims non-target plates to `0x7F`; raised because that fades them too far to read. ([`src/vplates.rs:126`](../crates/benilla-app/src/vplates.rs#L126))
-- The reference draws at fractional device coordinates; the snap keeps the magnified border crisp. ([`src/vplates.rs:185`](../crates/benilla-app/src/vplates.rs#L185))
-- The reference's plates grow with the diagonal without limit (`0x7705b0`), which reads too big and soft; past this diagonal, where the frame is the border art's native 128x32 px, the basis grows at `PLATE_GROWTH_DAMP` of that rate. ([`src/vplates.rs:191`](../crates/benilla-app/src/vplates.rs#L191))
-- A constant one-logical-pixel shadow, not the reference's 0.001 gx, which draws 2 px thick and too heavy at larger windows. ([`src/vplates.rs:673`](../crates/benilla-app/src/vplates.rs#L673))
+- The basis is damped past `PLATE_DIAG_KNEE`, because the reference's unbounded growth (`0x7705b0`) draws plates too large and soft at high resolutions. ([`src/vplates.rs:14`](../crates/benilla-app/src/vplates.rs#L14))
+- The bar fill brightens by `LIT_BOOST` in place of the reference's ADD `Nameplate-Glow` rim, which reads as hard edge lines under benilla's linear blending. ([`src/vplates.rs:18`](../crates/benilla-app/src/vplates.rs#L18))
+- `LEVEL_H` is 0.0086, one em under the reference's 0.009, because the level number read too large. ([`src/vplates.rs:111`](../crates/benilla-app/src/vplates.rs#L111))
+- The reference dims non-target plates to `0x7F`; raised because that fades them too far to read. ([`src/vplates.rs:127`](../crates/benilla-app/src/vplates.rs#L127))
+- The reference draws at fractional device coordinates; the snap keeps the magnified border crisp. ([`src/vplates.rs:186`](../crates/benilla-app/src/vplates.rs#L186))
+- The reference's plates grow with the diagonal without limit (`0x7705b0`), which reads too big and soft; past this diagonal, where the frame is the border art's native 128x32 px, the basis grows at `PLATE_GROWTH_DAMP` of that rate. ([`src/vplates.rs:192`](../crates/benilla-app/src/vplates.rs#L192))
+- A constant one-logical-pixel shadow, not the reference's 0.001 gx, which draws 2 px thick and too heavy at larger windows. ([`src/vplates.rs:696`](../crates/benilla-app/src/vplates.rs#L696))
 - The reference magnifies the 128 × 32 `Interface\Tooltips\Nameplate-Border` art with `GL_LINEAR` (`0x770200`, filter `[0x878cf0]` = 1), smearing its 1 px bevel once the plate is larger than native; we resample the same pixels to the plate's physical size with sharp bilinear and draw it 1:1, because the chosen look is the same art with a crisp bevel. `super::drive_vplates` regenerates it when the physical size changes. ([`src/vplates/border.rs:3`](../crates/benilla-app/src/vplates/border.rs#L3))
 
 #### wdb
@@ -668,9 +668,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### events
 
-- `benilla::spell_mods` refuses an out-of-range pair, because the reference would overrun it. ([`src/events.rs:731`](../crates/benilla-protocol/src/events.rs#L731))
-- An out-of-range list past the first block reads no body in the write passes (`0x466076`), which misread every block behind it, while the notify pass reads past it (`0x465fd0`) and stays in step; benilla reads the list and drops it, keeping the blocks behind it whole. ([`src/events/decode.rs:1133`](../crates/benilla-protocol/src/events/decode.rs#L1133))
-- The flagged pass reads a movement block's guid as 8 raw bytes (`0x467140`, `0x46714d`) where the wire packs it, so unless the packed guid happens to be 8 bytes the reference misreads the rest of that pass; benilla reads the block once, packed, as pass 0 does (`0x467080`). ([`src/events/decode.rs:1150`](../crates/benilla-protocol/src/events/decode.rs#L1150))
+- `benilla::spell_mods` refuses an out-of-range pair, because the reference would overrun it. ([`src/events.rs:734`](../crates/benilla-protocol/src/events.rs#L734))
+- An out-of-range list past the first block reads no body in the write passes (`0x466076`), which misread every block behind it, while the notify pass reads past it (`0x465fd0`) and stays in step; benilla reads the list and drops it, keeping the blocks behind it whole. ([`src/events/decode.rs:1134`](../crates/benilla-protocol/src/events/decode.rs#L1134))
+- The flagged pass reads a movement block's guid as 8 raw bytes (`0x467140`, `0x46714d`) where the wire packs it, so unless the packed guid happens to be 8 bytes the reference misreads the rest of that pass; benilla reads the block once, packed, as pass 0 does (`0x467080`). ([`src/events/decode.rs:1151`](../crates/benilla-protocol/src/events/decode.rs#L1151))
 
 #### examples
 
@@ -686,7 +686,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - Zone and position are kept, not set to the viewer's zone and the object's position, because nothing in benilla reads them. ([`src/messages/group.rs:256`](../crates/benilla-protocol/src/messages/group.rs#L256))
 - String reads are unbounded. The reference `0x4191b0` caps each field, counting the NUL (roster name `0x30`, notes `0x80`, MOTD `0x200`, info `0x7d0`, guild name `0x60`, rank name `0x40`), and on overflow empties it and no-ops every later read in the packet. ([`src/messages/guild.rs:4`](../crates/benilla-protocol/src/messages/guild.rs#L4))
 - A reason of 3 or more is silent, where the reference prints an uninitialized stack buffer, because 3 is the server's `INSTANCERESET_FAIL_SILENTLY`. ([`src/messages/instance.rs:70`](../crates/benilla-protocol/src/messages/instance.rs#L70))
-- 2 or more prints nothing, because the reference prints an uninitialized buffer. ([`src/messages/opcode.rs:1041`](../crates/benilla-protocol/src/messages/opcode.rs#L1041))
+- 2 or more prints nothing, because the reference prints an uninitialized buffer. ([`src/messages/opcode.rs:1044`](../crates/benilla-protocol/src/messages/opcode.rs#L1044))
 - The consumer refuses 64 and up, because there the reference's store overruns its table. ([`src/messages/packet.rs:637`](../crates/benilla-protocol/src/messages/packet.rs#L637))
 - A body too short for the position gives `None` where the client redisplays a stale global, because showing a stale queue position as current is a client bug. ([`src/messages/parse.rs:285`](../crates/benilla-protocol/src/messages/parse.rs#L285))
 - A type outside 1-7 reads as nothing rather than the reference's default arm, which under-pushes its returns. ([`src/messages/pet.rs:71`](../crates/benilla-protocol/src/messages/pet.rs#L71))
@@ -907,8 +907,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### interact
 
-- Admission is drawn-this-frame where the reference walks loaded defs, and the texunit-`0x08`, textureless and zero-alpha skips (`0x70902f`, `0x709071`, `0x7090c2`) are not modelled; neither can stop the trace sooner than the reference. ([`src/interact/mod.rs:112`](../crates/benilla-world/src/interact/mod.rs#L112))
-- The broad bound is the mesh `Aabb` grown by 1 unit, not the reference's sequence-bounds sphere, because it can only err permissive. ([`src/interact/pick.rs:211`](../crates/benilla-world/src/interact/pick.rs#L211))
+- The broad bound is the mesh `Aabb` grown by 1 unit, not the reference's sequence-bounds sphere, because it can only err permissive. ([`src/interact/pick.rs:190`](../crates/benilla-world/src/interact/pick.rs#L190))
 
 #### lighting
 
@@ -946,7 +945,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### static_gx
 
-- The reference tests each doodad's sphere against the horizon (`0x683700` → `0x686000`); a retained cell is one batched draw of its 4×4 chunks' doodads, so the test takes the cell's box, which only ever hides less. ([`src/static_gx/cull.rs:359`](../crates/benilla-world/src/static_gx/cull.rs#L359))
+- The reference tests each doodad's sphere against the horizon (`0x683700` → `0x686000`); a retained cell is one batched draw of its 4×4 chunks' doodads, so the test takes the cell's box, which only ever hides less. ([`src/static_gx/cull.rs:362`](../crates/benilla-world/src/static_gx/cull.rs#L362))
 
 #### terrain_stream
 
@@ -959,7 +958,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - Benilla gates on terrain alone, which is more permissive; the settle hold covers a building or doodad arriving after a teleport. ([`src/terrain_stream/residency.rs:9`](../crates/benilla-world/src/terrain_stream/residency.rs#L9))
 - On the page a tile a stand-in floor holds (`super::provisional`) is resident too. ([`src/terrain_stream/residency.rs:113`](../crates/benilla-world/src/terrain_stream/residency.rs#L113))
 - Tagged per submesh, where the reference tests the whole object, because a placement has no root entity to carry the bound. ([`src/terrain_stream/spawn/mod.rs:260`](../crates/benilla-world/src/terrain_stream/spawn/mod.rs#L260))
-- The box, where the reference tests its circumsphere (`0x683700` → `0x682ef0` → `0x686b80` on the `[rec+0x5c]` centre and `[rec+0x68]` radius × scale), because Bevy culls by box and the box is tighter. ([`src/terrain_stream/spawn/mod.rs:971`](../crates/benilla-world/src/terrain_stream/spawn/mod.rs#L971))
+- The box, where the reference tests its circumsphere (`0x683700` → `0x682ef0` → `0x686b80` on the `[rec+0x5c]` centre and `[rec+0x68]` radius × scale), because Bevy culls by box and the box is tighter. ([`src/terrain_stream/spawn/mod.rs:970`](../crates/benilla-world/src/terrain_stream/spawn/mod.rs#L970))
 - Whole tiles, because benilla loads, spawns and releases ADT tiles, not chunks: a tile is wanted when any of its chunks lies in the outer window, and waited for when any lies in the inner one, so each edge is a tile line where the reference's is a chunk line. ([`src/terrain_stream/window.rs:7`](../crates/benilla-world/src/terrain_stream/window.rs#L7))
 - A one-chunk keep band (`KEEP_BAND_CHUNKS`), because a tile reload re-decodes and re-spawns where the reference's is a cheap read: a tile releases only past `outer + 1`. ([`src/terrain_stream/window.rs:10`](../crates/benilla-world/src/terrain_stream/window.rs#L10))
 
