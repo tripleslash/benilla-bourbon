@@ -1113,7 +1113,7 @@ pub(crate) mod schedule_tests {
     /// the merge of 3387c8225 measures 2,043 (-1,353).
     ///
     /// Upstream's ceiling moved 1,708 -> 1,780 (+72) through 601438a77 (the lanes' drain and the
-    /// minimap's quest statuses, listed above).
+    /// minimap's quest statuses, listed above), then 1,780 -> 1,756 (-24) through 965fda84f.
     const UPDATE_ACTIONABLE_CEILING: usize = 2_043;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
