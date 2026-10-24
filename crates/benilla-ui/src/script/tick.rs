@@ -378,7 +378,8 @@ impl super::UiScript {
         // A frame hid or showed under a still cursor: re-run the hover walk at the saved position,
         // as the reference's pump tail does (`0x765650` → `0x7660d0`). The hidden frame's OnLeave
         // already fired, so only the new winner's `OnEnter` fires.
-        let repick = self.model_ref().hover_repick.then(|| {
+        let due = self.model_ref().hover_repick;
+        let repick = due.then(|| {
             let mut model = self.model_mut();
             model.hover_repick = false;
             model.cursor_pos

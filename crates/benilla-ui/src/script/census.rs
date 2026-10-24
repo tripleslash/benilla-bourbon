@@ -87,8 +87,9 @@ impl Applying {
 
     /// An engine turn called from `at`, counted as `turn@` and its file and line under `src/`.
     pub(crate) fn turn(at: &std::panic::Location) -> Self {
-        let file = at.file();
-        let file = file.rsplit_once("src/").map_or(file, |(_, rest)| rest);
+        // A Windows build spells the path with `\`: one spelling, so a count reads the same there.
+        let file = at.file().replace('\\', "/");
+        let file = file.rsplit_once("src/").map_or(&*file, |(_, rest)| rest);
         Self::kind(format!("turn@{file}:{}", at.line()))
     }
 
