@@ -54,7 +54,7 @@ use mount::reseat_mounts;
 pub(crate) mod corpse;
 
 mod live_display;
-pub(crate) use live_display::{rebuild_character_bodies, DisplaySwapped};
+pub(crate) use live_display::{rebuild_character_bodies, AppliedDisplay, DisplaySwapped};
 use live_display::{refresh_live_display, tick_scale_ease};
 
 /// Terrain conform: a model flagged `GlobalModelFlags & 3 ∈ {1,3}` tilts to the ground.
@@ -93,7 +93,7 @@ use chain_beam::{simulate_chain_beams, spawn_chain_beams};
 // `equip_slot` is the one InventoryType → slot table; the dressing room places items by it.
 pub(crate) use attach::equip_slot;
 pub(crate) use equipment::ItemDisplays;
-pub(crate) use equipment::{attach_id, DressKey, HeldAttached};
+pub(crate) use equipment::{attach_id, DressKey, HeldAttached, HeldItems};
 pub(crate) use equipment::{BoneAttach, Equipment};
 // Only the tests that build a `DressKey` name this type.
 #[cfg(test)]
