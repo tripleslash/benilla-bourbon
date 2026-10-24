@@ -80,6 +80,7 @@ pub(crate) struct Lifecycle<'w> {
     actions: ResMut<'w, PlayerActions>,
     learned_in_tab: ResMut<'w, LearnedInTab>,
     reports: ResMut<'w, CastReports>,
+    tutorials: Option<Res<'w, crate::tutorial::Tutorials>>,
     pending: ResMut<'w, PendingCast>,
     /// With `pending`, `reports` and `net`, the in-flight slot the GO-deferred attack start's
     /// cancel reads (`0x5ecc85`).
@@ -224,6 +225,7 @@ fn on_cast_result(
             ground: &mut ladder.ground,
             reports: &mut ladder.reports,
             net: &ladder.commands,
+            tutorials: ladder.tutorials.as_deref(),
         };
         let chained = cast_result(
             spell_id,
@@ -378,6 +380,7 @@ fn on_spell_go(
                         ground: &mut l.ground,
                         reports: &mut l.reports,
                         net: &l.net,
+                        tutorials: l.tutorials.as_deref(),
                     },
                 ),
                 l.play_seq.next(),
@@ -436,6 +439,7 @@ fn on_cancel_auto_repeat(In(ev): In<SessionEvent>, mut l: Lifecycle, sc: Scene) 
                 ground: &mut l.ground,
                 reports: &mut l.reports,
                 net: &l.net,
+                tutorials: l.tutorials.as_deref(),
             },
         );
     }
@@ -2407,6 +2411,7 @@ mod tests {
                                     ground: &mut Default::default(),
                                     reports: &mut Default::default(),
                                     net: &net_commands,
+                                    tutorials: None,
                                 },
                             ),
                             1,
@@ -3334,6 +3339,7 @@ mod tests {
                                 ground: &mut Default::default(),
                                 reports: &mut Default::default(),
                                 net: &net_commands,
+                                tutorials: None,
                             },
                         ),
                         1,
@@ -3532,6 +3538,7 @@ mod tests {
                                 ground: &mut Default::default(),
                                 reports: &mut Default::default(),
                                 net: &net_commands,
+                                tutorials: None,
                             },
                         ),
                         1,
@@ -3912,6 +3919,7 @@ mod tests {
                                     ground: &mut Default::default(),
                                     reports: &mut Default::default(),
                                     net: &net_commands,
+                                    tutorials: None,
                                 },
                             ),
                             1,

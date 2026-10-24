@@ -425,6 +425,7 @@ pub(crate) struct SelfCancel<'w> {
     channel: Res<'w, ActiveChannel>,
     auto_repeat: ResMut<'w, AutoRepeatActive>,
     reports: ResMut<'w, CastReports>,
+    tutorials: Option<Res<'w, crate::tutorial::Tutorials>>,
     spells: Option<Res<'w, Spells>>,
     net: Res<'w, NetCommands>,
     self_guid: Res<'w, SelfGuid>,
@@ -473,6 +474,7 @@ impl SelfCancel<'_> {
             spells,
             edits,
             ground,
+            tutorials,
             ..
         } = self;
         let popped = super::CastCore {
@@ -481,6 +483,7 @@ impl SelfCancel<'_> {
             ground,
             reports,
             net,
+            tutorials: tutorials.as_deref(),
         }
         .cancel_reaping(
             failed,
@@ -511,6 +514,7 @@ impl SelfCancel<'_> {
                 net,
                 auto_repeat,
                 edits,
+                tutorials,
                 ..
             } = self;
             crate::creature_anim::cancel_auto_repeat_local(
@@ -523,6 +527,7 @@ impl SelfCancel<'_> {
                     ground,
                     reports,
                     net,
+                    tutorials: tutorials.as_deref(),
                 },
             );
             false // the press is spent
