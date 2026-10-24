@@ -143,13 +143,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             {
                 return Ok(());
             }
-            let mut model = lua
-                .app_data_mut::<crate::script::ModelCell>()
-                .expect("model app_data");
-            if !run_cvar_command(&mut model, word, rest) {
-                model.console_lines.push(line.to_string());
+            let ran = {
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
+                run_cvar_command(&mut model, word, rest)
+            };
+            // The rest through `ConsoleCommandExecute` inside the call (`0x515f43` →
+            // `0x63ce00`), against what the host lends.
+            if ran {
+                return Ok(());
             }
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::Console(line.to_string()))
         })?,
     )?;
     Ok(())
@@ -306,6 +311,7 @@ mod tests {
     #[test]
     fn console_exec_writes_a_registered_cvar_and_queues_anything_else() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.register_cvars([("uiScale", "1")]);
         s.run("ConsoleExec('uiscale 0.8') ConsoleExec('reloadui') ConsoleExec('uiScale')")
             .unwrap();
@@ -332,6 +338,7 @@ mod tests {
     #[test]
     fn console_exec_runs_the_cvar_commands_inside_the_call() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.register_cvars([("farclip", "350"), ("MusicVolume", "0.4")]);
         let read = |s: &UiScript, chunk: &str| {
             s.eval::<String>(&format!("{chunk} return GetCVar('farclip')"))
@@ -388,6 +395,7 @@ mod tests {
     #[test]
     fn cvar_reset_restores_the_session_start_value_and_cvar_default_the_default() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut farclip = seeded("farclip", "400", "350");
         farclip.reset = Some("400".into());
         s.seed_cvars([farclip]);
@@ -425,6 +433,7 @@ mod tests {
     #[test]
     fn the_first_value_a_cvar_command_stores_is_its_reset_text() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.seed_cvars([seeded("farclip", "350", "350")]);
         s.run("SetCVar('farclip', '450') ConsoleExec('set farclip 460')")
             .unwrap();
@@ -459,6 +468,7 @@ mod tests {
     #[test]
     fn a_reset_runs_no_callback_and_honours_the_flags() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut shadow = seeded("shadowLevel", "0", "1");
         shadow.check = Some(crate::script::check_shadow_level);
         shadow.reset = Some("7".into());
@@ -505,6 +515,7 @@ mod tests {
     #[test]
     fn a_reset_with_no_name_restores_every_row_but_the_sessions() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut ui_scale = seeded("uiScale", "1.2", "0.9");
         ui_scale.session = true;
         s.seed_cvars([
@@ -534,6 +545,7 @@ mod tests {
     #[test]
     fn console_exec_takes_a_string_or_a_number_and_raises_its_usage_otherwise() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         for call in [
             "ConsoleExec()",
             "ConsoleExec(nil)",
@@ -560,6 +572,7 @@ mod tests {
     #[test]
     fn console_exec_reload_ui_asks_the_gate() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run(r#"RunScript("ConsoleExec('reloadUI')")"#).unwrap();
         assert!(s.take_console_lines().is_empty());
         s.run_binding(r#"RunScript("ConsoleExec('ReloadUI')")"#)

@@ -43,7 +43,6 @@ mod presets;
 #[cfg(test)]
 mod reference_table;
 mod table;
-#[cfg(test)]
 pub(crate) use listing::list_rank;
 pub(crate) use listing::reference_help;
 #[cfg(test)]
