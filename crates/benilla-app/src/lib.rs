@@ -38,6 +38,13 @@
 #[global_allocator]
 static ALLOC: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
+/// The native release allocator, mimalloc: the frame's allocation churn (command queues, extract
+/// buffers, per-system scratch) runs through thread-local heaps instead of the OS heap's lock.
+/// Not under a doctest, which links its own allocator.
+#[cfg(all(not(target_arch = "wasm32"), not(debug_assertions), not(doctest)))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// fork: web — the threaded browser build's allocator: per-thread heaps of size-class pages over
 /// linear memory it owns, so the page thread never waits on workers in std's one spin-locked
 /// `dlmalloc`.
@@ -585,6 +592,26 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         println!(
             "executor: PostUpdate -> single-threaded (the default; WOW_MT_POSTUPDATE=1 for MT)"
         );
+    }
+    // PreUpdate as well: its systems sum to ~0.01 ms a frame, under ~0.2 ms of multi-threaded
+    // dispatch. `WOW_MT_PREUPDATE=1` restores it.
+    if std::env::var_os("WOW_MT_PREUPDATE").is_none() {
+        app.edit_schedule(PreUpdate, |s| {
+            s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
+    }
+    // The fixed-timestep schedules hold a handful of systems around avian's `PhysicsSchedule`,
+    // which avian already runs single-threaded; their dispatch cost ~0.1 ms a frame.
+    // `WOW_MT_FIXED=1` restores it.
+    if std::env::var_os("WOW_MT_FIXED").is_none() {
+        let single = |s: &mut Schedule| {
+            s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        };
+        app.edit_schedule(FixedFirst, single)
+            .edit_schedule(FixedPreUpdate, single)
+            .edit_schedule(FixedUpdate, single)
+            .edit_schedule(FixedPostUpdate, single)
+            .edit_schedule(FixedLast, single);
     }
     // The build banner ships in every build: which build produced a log is the first thing a report
     // from another machine must establish.

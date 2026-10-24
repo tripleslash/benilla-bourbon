@@ -315,9 +315,64 @@ impl HeightCache {
         column
     }
 
+    /// [`Self::ground_y`] without the ray: the cached answer, or `None` where `ground_y` would
+    /// cast or re-cast (no column, one that does not cover `cast_from_y`, or one from before the
+    /// last nearby collider change). Read-only, so the drift asks it from every worker at once.
+    fn peek(&self, key: (i32, i32), cast_from_y: f32) -> Option<f32> {
+        let column = self.cells.get(&key)?;
+        if column.epoch != self.epoch {
+            return None;
+        }
+        column.ground(cast_from_y)
+    }
+
     /// The grid cell owning an XZ position.
     pub(super) fn key(x: f32, z: f32) -> (i32, i32) {
         ((x / CELL).floor() as i32, (z / CELL).floor() as i32)
+    }
+}
+
+/// Drops per parallel task in the drift: a step is a few nanoseconds, so a chunk this size keeps
+/// the dispatch cost small against the work (heavy rain holds ~17 k drops).
+const DRIFT_CHUNK: usize = 2048;
+
+/// Move every drop by `dt` and give each that changed cell its new cell's ground from the cache.
+/// Returns the drops whose new cell [`HeightCache::peek`] could not answer, in pool order: each
+/// moves alone and only reads the cache, so the chunks run in parallel on the compute pool, and
+/// the misses take their rays after, serially, as rays fill the shared cache and spend the
+/// frame's recast budget, in the order the serial walk spent it.
+fn drift_drops(drops: &mut [Drop], heights: &HeightCache, cast_plane: f32, dt: f32) -> Vec<usize> {
+    let step = |base: usize, chunk: &mut [Drop]| {
+        let mut miss = Vec::new();
+        for (i, d) in chunk.iter_mut().enumerate() {
+            d.pos += d.vel * dt;
+            d.age += dt;
+            let cell = HeightCache::key(d.pos.x, d.pos.z);
+            if cell != d.cell {
+                d.cell = cell;
+                match heights.peek(cell, cast_plane) {
+                    Some(y) => d.land_y = y,
+                    None => miss.push(base + i),
+                }
+            }
+        }
+        miss
+    };
+    // Below a chunk, or with no compute pool (a unit test), the walk stays on this thread.
+    let pool = bevy::tasks::ComputeTaskPool::try_get().filter(|p| p.thread_num() > 1);
+    match pool {
+        Some(pool) if drops.len() > DRIFT_CHUNK => {
+            let step = &step;
+            pool.scope(|s| {
+                for (c, chunk) in drops.chunks_mut(DRIFT_CHUNK).enumerate() {
+                    s.spawn(async move { step(c * DRIFT_CHUNK, chunk) });
+                }
+            })
+            .into_iter()
+            .flatten()
+            .collect()
+        }
+        _ => step(0, drops),
     }
 }
 
@@ -491,16 +546,13 @@ pub(super) fn run_kind(
     // ===== integrate + land =====
     // Landing tests the current cell's ground, a max from above: a drop drifting under cover
     // lands on the roof and splashes there, never on the floor below.
+    for i in drift_drops(&mut pool.drops, heights, cast_plane, dt) {
+        let d = &mut pool.drops[i];
+        d.land_y = heights.ground_y(d.pos.x, d.pos.z, cast_plane, spatial, filter);
+    }
     let mut landed: Vec<Patter> = Vec::new();
     {
         pool.drops.retain_mut(|d| {
-            d.pos += d.vel * dt;
-            d.age += dt;
-            let cell = HeightCache::key(d.pos.x, d.pos.z);
-            if cell != d.cell {
-                d.cell = cell;
-                d.land_y = heights.ground_y(d.pos.x, d.pos.z, cast_plane, spatial, filter);
-            }
             if d.pos.y > d.land_y {
                 return true;
             }
@@ -583,6 +635,60 @@ mod tests {
         heights.begin_frame(false);
         assert!(!heights.serves(0), "a new frame, a new budget");
         assert!(heights.serves(1));
+    }
+
+    /// The drift's read-only lookup answers only what `ground_y` would answer without a ray: a
+    /// current column over the plane. A missing cell, an uncovered plane or a column from before
+    /// the last nearby collider change is a miss, left to the serial pass and its recast budget.
+    #[test]
+    fn the_drift_peeks_only_a_current_column() {
+        let mut heights = HeightCache::default();
+        let mut hits = [0.0; COLUMN_HITS];
+        hits[0] = 5.0;
+        heights.cells.insert(
+            (0, 0),
+            Column {
+                top: 40.0,
+                bottom: -300.0,
+                hits,
+                len: 1,
+                epoch: 0,
+            },
+        );
+        assert_eq!(
+            heights.peek((0, 0), 20.0),
+            Some(5.0),
+            "a current column answers"
+        );
+        assert_eq!(
+            heights.peek((0, 0), 60.0),
+            None,
+            "a plane over its top casts"
+        );
+        assert_eq!(heights.peek((1, 0), 20.0), None, "no column casts");
+        heights.begin_frame(true);
+        assert_eq!(heights.peek((0, 0), 20.0), None, "a stale column re-casts");
+    }
+
+    /// Drifting in chunks moves every drop and lists the misses in pool order, as the serial walk
+    /// met them.
+    #[test]
+    fn the_drift_moves_every_drop_and_lists_misses_in_order() {
+        let heights = HeightCache::default();
+        let mut drops: Vec<Drop> = (0..DRIFT_CHUNK * 2 + 7)
+            .map(|i| Drop {
+                pos: Vec3::new(i as f32 * 0.01, 30.0, 0.0),
+                vel: Vec3::new(2.0, -10.0, 0.0),
+                land_y: 0.0,
+                cell: (i32::MIN, 0),
+                age: 0.0,
+            })
+            .collect();
+        let misses = drift_drops(&mut drops, &heights, 40.0, 0.1);
+        assert_eq!(misses, (0..drops.len()).collect::<Vec<_>>());
+        assert!(drops
+            .iter()
+            .all(|d| (d.pos.y - 29.0).abs() < 1e-5 && d.age > 0.0));
     }
 
     /// The cells far from the camera go on a clock as well as at the bound, so every column the

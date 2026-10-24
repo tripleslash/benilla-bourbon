@@ -27,6 +27,8 @@ pub struct SceneClock(pub f64);
 /// Parks this rig's per-bone pose evaluation: the evaluator and the pose post-passes skip it,
 /// while the sequence clocks, the driver state machine and the event scanner keep running.
 #[derive(Component)]
+// Sparse: parking toggles it, and a table column would split every unit's table in two.
+#[component(storage = "SparseSet")]
 pub struct AnimParked;
 
 /// Registers the rig machinery; `WorldPlugins` adds it, so a program with no game still poses its

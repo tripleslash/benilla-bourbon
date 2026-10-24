@@ -31,9 +31,27 @@ pub struct PosePost;
 ///
 /// Splitting them costs one extra walk of the rig query. That is a per-rig branch on `pose_dirty`
 /// against a per-BONE affine chain, and the two are three orders of magnitude apart.
+///
+/// A leaf anchor (a [`super::RigAnchor`] with no children, which is almost every one: they exist
+/// so cards, emitters and held effects can read their global) takes its global here, `parent ×
+/// seat` as propagation would compute it, and its local without a change mark, so the transform
+/// tree is not marked dirty for it. A parent that moves this frame is still propagated, its
+/// subtree with it, from that local; an anchor with children keeps the plain write.
+#[allow(clippy::type_complexity)] // the anchor tuple, commented inline
 fn compose_rig_models(
     mut rigs: Query<&mut RigPose, Without<AnimParked>>,
-    mut anchors: Query<&mut Transform>,
+    // A rig anchor, its parent and whether it is a leaf, for the direct global write below.
+    mut anchors: Query<
+        (
+            &mut Transform,
+            &mut GlobalTransform,
+            Option<&ChildOf>,
+            Has<Children>,
+        ),
+        With<super::RigAnchor>,
+    >,
+    parents: Query<&GlobalTransform, Without<super::RigAnchor>>,
+    mut other_anchors: Query<&mut Transform, Without<super::RigAnchor>>,
 ) {
     // Pass 1 — the fold, in parallel. `into_inner` only on a dirty rig, so a clean one is still
     // not marked changed (reading `pose_dirty` through the `Mut` does not raise the flag).
@@ -55,12 +73,28 @@ fn compose_rig_models(
             let Some(seat) = seat else {
                 continue;
             };
-            let Ok(mut t) = anchors.get_mut(anchor) else {
+            let Ok((mut t, mut g, child_of, has_children)) = anchors.get_mut(anchor) else {
+                if let Ok(mut t) = other_anchors.get_mut(anchor) {
+                    t.set_if_neq(*seat);
+                }
                 continue;
             };
             // Compared first: `DerefMut` marks the anchor `Changed` (a propagation subtree walk)
             // whether or not the value moved, and a still scenery rig poses to the same place.
-            t.set_if_neq(*seat);
+            if *t == *seat {
+                continue;
+            }
+            let world = child_of
+                .filter(|_| !has_children)
+                .and_then(|c| parents.get(c.parent()).ok())
+                .map(|pg| pg.mul_transform(*seat));
+            match world {
+                Some(world) => {
+                    *t.bypass_change_detection() = *seat;
+                    g.set_if_neq(world);
+                }
+                None => *t = *seat,
+            }
         }
     }
 }

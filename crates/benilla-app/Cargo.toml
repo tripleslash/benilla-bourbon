@@ -105,6 +105,9 @@ arboard = "3"
 # parent handle, which a message dialog without a parent never reads. Native only: the page has
 # no native dialog to raise.
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# The native release allocator (`lib.rs`): the OS heap (Windows HeapAlloc, glibc malloc)
+# serializes under Bevy's per-frame churn. Native only: the web build has its own page allocator.
+mimalloc = { version = "0.1", default-features = false }
 
 # The audio device layer off macOS (`sound::output::cpal`); on macOS cpal cannot rebuild on a
 # lost default device and drops the IO-cycle timestamp. wasm32 is in this table too: `mixer` names

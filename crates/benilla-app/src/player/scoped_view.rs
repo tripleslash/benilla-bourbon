@@ -69,10 +69,15 @@ pub(super) fn apply_scoped_view(
         return;
     };
     let want = CAM_FOVY * scoped.zoom.unwrap_or(1.0);
+    // `&mut` marks the projection changed even when the value is equal, so compare first.
+    let Projection::Perspective(PerspectiveProjection { fov, .. }) = projection.as_ref() else {
+        return;
+    };
+    if (*fov - want).abs() <= f32::EPSILON {
+        return;
+    }
     if let Projection::Perspective(PerspectiveProjection { fov, .. }) = &mut *projection {
-        if (*fov - want).abs() > f32::EPSILON {
-            *fov = want;
-        }
+        *fov = want;
     }
 }
 
@@ -103,5 +108,33 @@ mod tests {
             "unscoped restores OUR default, never the reference's stored 90"
         );
         assert!(!none.active());
+    }
+
+    /// An unscoped frame over an unchanged field of view leaves the projection unmarked: the
+    /// particle gate's and model visibility's still-camera skips read its change tick.
+    #[test]
+    fn an_equal_field_of_view_leaves_the_projection_unmarked() {
+        #[derive(Resource, Default)]
+        struct Marks(u32);
+        fn probe(cams: Query<Ref<Projection>, With<WorldCamera>>, mut marks: ResMut<Marks>) {
+            marks.0 += cams.iter().filter(|p| p.is_changed()).count() as u32;
+        }
+        let mut app = App::new();
+        app.init_resource::<ScopedView>();
+        app.init_resource::<Marks>();
+        app.add_systems(Update, (apply_scoped_view, probe).chain());
+        app.world_mut().spawn((
+            WorldCamera,
+            Projection::Perspective(PerspectiveProjection {
+                fov: CAM_FOVY,
+                ..default()
+            }),
+        ));
+        app.update();
+        app.world_mut().resource_mut::<Marks>().0 = 0;
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<Marks>().0, 0, "no write, no mark");
     }
 }

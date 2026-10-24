@@ -314,7 +314,11 @@ struct AuraInput {
 /// `PLAYER_FIELD_BYTES2` byte 1 is set, the shift's count taken mod 32 and its low byte tested
 /// (`0x5198a8`-`0x5198b6`). `vision` is that byte, `None` with no active player (`0x51989a`). A
 /// spell the catalog lacks keeps the display filter's deviation and shows.
-fn vision_hides(catalog: Option<&SpellCatalog>, spell_id: u32, vision: Option<u8>) -> bool {
+pub(crate) fn vision_hides(
+    catalog: Option<&SpellCatalog>,
+    spell_id: u32,
+    vision: Option<u8>,
+) -> bool {
     let need = catalog
         .and_then(|c| c.get(spell_id))
         .map_or(0, |d| d.required_aura_vision);

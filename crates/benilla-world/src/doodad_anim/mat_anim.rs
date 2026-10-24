@@ -139,12 +139,22 @@ type AlphaHost = (
     Option<&'static crate::rig_anim::SceneClock>,
 );
 
+/// A host's playing slot and clip time, and its scene clock, as [`sample_mat_anim`] reads them.
+type HostSample = (Option<(usize, f32)>, Option<f64>);
+
 /// Sample every instance: a hosted one on its host's sequence and clip clock, and its global
 /// sequences on the host's scene clock when it stands in one ([`crate::rig_anim::SceneClock`]);
 /// a pinned one on its spawn clock; frozen ones keep their t = 0 sample. Hidden instances sample too, as the reference
 /// evaluates the tracks every frame regardless of the cull (`0x707b3a`–`0x707b5c`), or a batch
 /// born at weight 0 would stay hidden. Runs before the visibility authority.
-pub fn sample_mat_anim(time: Res<Time>, hosts: Query<AlphaHost>, mut q: Query<&mut MatAnim>) {
+pub fn sample_mat_anim(
+    time: Res<Time>,
+    hosts: Query<AlphaHost>,
+    mut q: Query<&mut MatAnim>,
+    // One host's playing slot and scene clock this frame, shared by its many animated batches.
+    mut by_host: Local<bevy::ecs::entity::EntityHashMap<HostSample>>,
+) {
+    by_host.clear();
     let now = time.elapsed_secs();
     // The world clock in f64: a long-uptime f32 drifts whole milliseconds.
     let world = time.elapsed_secs_f64();
@@ -153,11 +163,12 @@ pub fn sample_mat_anim(time: Res<Time>, hosts: Query<AlphaHost>, mut q: Query<&m
             continue;
         }
         // A host with no player yet keeps its last slot at t = 0, a bind-posed model's pose.
-        let (rig, clock) = m
-            .host
-            .and_then(|h| hosts.get(h).ok())
-            .unwrap_or((None, None));
-        let played = rig.and_then(|(p, a)| playing_seq(p, a));
+        let (played, clock) = m.host.map_or((None, None), |h| {
+            *by_host.entry(h).or_insert_with(|| {
+                let (rig, clock) = hosts.get(h).ok().unwrap_or((None, None));
+                (rig.and_then(|(p, a)| playing_seq(p, a)), clock.map(|c| c.0))
+            })
+        });
         let (seq, elapsed) = match played {
             Some((seq, t)) => {
                 m.seq = Some(seq);
@@ -168,7 +179,7 @@ pub fn sample_mat_anim(time: Res<Time>, hosts: Query<AlphaHost>, mut q: Query<&m
         };
         // The gseq cursor is sceneNow − attach, the anchor stamped on the first pass, on the
         // host's own scene clock when it has one.
-        let shared = clock.map_or(world, |c| c.0);
+        let shared = clock.unwrap_or(world);
         let attach = *m.gseq_attach.get_or_insert(shared);
         m.current = m.anim.sample(seq, elapsed, shared - attach);
     }

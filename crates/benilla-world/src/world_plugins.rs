@@ -143,11 +143,27 @@ impl PluginGroup for WorldPlugins {
     }
 }
 
+/// Any of Bevy's own lights.
+type BevyLight = Or<(With<DirectionalLight>, With<PointLight>, With<SpotLight>)>;
+
+/// Whether any Bevy light exists, the gate on Bevy's light-visibility pass.
+fn bevy_light_exists(lights: Query<(), BevyLight>) -> bool {
+    !lights.is_empty()
+}
+
 /// The engine's bare settings, after `PhysicsPlugins`: [`SubstepCount`] overwrites its default.
 struct WorldFoundation;
 
 impl Plugin for WorldFoundation {
     fn build(&self, app: &mut App) {
+        // Bevy's light visibility serves its shadow maps, and the world's lights are
+        // `WorldPointLight`s on the reference's model; only the player shadow's sun is a Bevy
+        // light. With none, the pass still queues a fresh `ViewVisibility` query state every
+        // frame (~0.1 ms matching this world's archetypes), so it waits for a light.
+        app.configure_sets(
+            PostUpdate,
+            bevy::light::SimulationLightSystems::CheckLightVisibility.run_if(bevy_light_exists),
+        );
         // One solver substep, not avian's 6: with no dynamic bodies, kinematic motion is exact at
         // any count. Revisit when a dynamic body enters the world.
         app.insert_resource(SubstepCount(1))
@@ -179,12 +195,15 @@ impl Plugin for WorldFoundation {
         // No pre-step transform propagation: movers write `Position`/`Rotation` directly, so a
         // second whole-world sweep buys nothing; an opening door's hull reaches physics a frame
         // late. `WOW_PHYS_PREPROP=1` restores avian's default.
-        if std::env::var_os("WOW_PHYS_PREPROP").is_none() {
-            app.insert_resource(avian3d::physics_transform::PhysicsTransformConfig {
-                propagate_before_physics: false,
-                ..Default::default()
-            });
-        }
+        //
+        // avian's transform-to-position sync walks every collider each step; ours walks the moved
+        // ones (`collision::sync_moved_positions`).
+        app.insert_resource(avian3d::physics_transform::PhysicsTransformConfig {
+            propagate_before_physics: std::env::var_os("WOW_PHYS_PREPROP").is_some(),
+            transform_to_position: false,
+            ..Default::default()
+        });
+        crate::collision::add_moved_position_sync(app, PostUpdate);
         // Static transform tracking always on: movers are 1–3% of the world, so the adaptive
         // check's two full scans a frame could only ever conclude "track".
         app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::Enabled);
@@ -218,6 +237,18 @@ impl Plugin for WorldFoundation {
         if std::env::var_os("WOW_INDIRECT").is_none() {
             app.register_required_components::<bevy::camera::Camera, bevy::render::view::NoIndirectDrawing>();
         }
+    }
+
+    fn finish(&self, app: &mut App) {
+        // Bevy's prepass copies every mesh's `GlobalTransform` into `PreviousGlobalTransform` each
+        // frame for motion vectors; no view here asks for them (no `MotionVectorPrepass`, no TAA:
+        // the FSR velocity pass keeps its own last-world-frame poses, `fsr::velocity`), and a mesh
+        // without the component extracts its current transform as its previous one.
+        let _ = app.remove_systems_in_set(
+            PreUpdate,
+            bevy::pbr::update_mesh_previous_global_transforms,
+            bevy::ecs::schedule::ScheduleCleanupPolicy::RemoveSetAndSystems,
+        );
     }
 }
 
