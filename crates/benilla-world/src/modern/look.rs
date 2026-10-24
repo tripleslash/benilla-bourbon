@@ -94,6 +94,15 @@ pub struct ZoneLook {
     /// fork: how much of the look's sun hues (`glow`, `key_tint`) the moonlight keeps
     /// ([`ZoneLook::key_hue`]): 0 lights the moon in its authored colour, never warm like the sun.
     pub moon_hue: f32,
+    /// fork: a gain on [`MOON_KEY`] in this zone. The moon lights each zone with its own night
+    /// rows, and over a bright authored night diffuse (Elwynn's) twice the key read as dusk, where
+    /// snow and the dark zones need it to read at all. 1 = the default look's night.
+    pub moon_key: f32,
+    /// fork: how much the ground banks stand out from the haze under the moon: 0 lights them as
+    /// the shaft haze is lit ([`MOON_HAZE`] on their isotropic half) and lays only a hazy zone's
+    /// share of the night's banks (`volumetrics::added_air`); 1 lights them by the whole moon and
+    /// lays the whole night bank, dense fog lying on the ground.
+    pub bank_moon: f32,
 }
 
 impl ZoneLook {
@@ -131,6 +140,8 @@ impl ZoneLook {
         sea_fog: 0.0,
         moon_glow: 1.0,
         moon_hue: 1.0,
+        moon_key: 1.0,
+        bank_moon: 0.0,
     };
 
     /// fork: **the default look at noon**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
@@ -202,6 +213,8 @@ impl ZoneLook {
             sea_fog: m(self.sea_fog, to.sea_fog),
             moon_glow: m(self.moon_glow, to.moon_glow),
             moon_hue: m(self.moon_hue, to.moon_hue),
+            moon_key: m(self.moon_key, to.moon_key),
+            bank_moon: m(self.bank_moon, to.bank_moon),
         }
     }
 
@@ -230,6 +243,8 @@ impl ZoneLook {
             && d(self.sea_fog, other.sea_fog)
             && d(self.moon_glow, other.moon_glow)
             && d(self.moon_hue, other.moon_hue)
+            && d(self.moon_key, other.moon_key)
+            && d(self.bank_moon, other.bank_moon)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.haze_tint[i], other.haze_tint[i])
@@ -265,6 +280,10 @@ impl ZoneLook {
         night_banks: 1.0,
         night_glow: 1.0,
         noon_mix: 0.0,
+        // The dark zones need the doubled moon to read at night (Duskwood, approved in the client).
+        moon_key: 2.0,
+        // Their night banks are ground fog, not more haze: whole, and lit by the whole moon.
+        bank_moon: 1.0,
         ..Self::NEUTRAL
     };
 
@@ -313,6 +332,8 @@ impl ZoneLook {
     pub const COLD_NIGHT: Self = Self {
         haze: 0.0012,
         fog_reach: 1.2,
+        // The moonlit snow reads as snow (Gates of Ironforge at 02:00, approved in the viewer).
+        moon_key: 2.0,
         ..Self::COLD
     };
 }
@@ -377,6 +398,8 @@ impl ZoneLook {
         moon_glow: 0.1,
         // The salmon glow and warm key are the sun's: the moon lights in its own colour.
         moon_hue: 0.0,
+        // A dark zone's moon, as the eerie look's.
+        moon_key: 2.0,
         ..Self::NEUTRAL
     };
 
@@ -479,6 +502,7 @@ struct ZoneCatalog(AreaTableCatalog);
 
 const ONE_BITS: u32 = 0x3f80_0000;
 static KEY: AtomicU32 = AtomicU32::new(ONE_BITS);
+static MOON_KEY_GAIN: AtomicU32 = AtomicU32::new(ONE_BITS);
 static FILL: AtomicU32 = AtomicU32::new(ONE_BITS);
 static EXPOSURE: AtomicU32 = AtomicU32::new(ONE_BITS);
 static FOG_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
@@ -513,13 +537,13 @@ pub fn key_tint() -> [f32; 3] {
     [0, 1, 2].map(|i| f32::from_bits(KEY_TINT[i].load(Ordering::Relaxed)))
 }
 
-/// fork: **a moonlit night.** While the moon keys, every zone takes one night key and a thinner
-/// fill instead of its day ratio: the authored night rows sit key and fill close together, which
-/// under a risen moon read as a flat blue wash with no shadow in it. Ramped by
-/// [`super::sun_arc::moon_key`], so it comes in with the moonrise and leaves with the moonset.
-/// At 0.85 moonlit snow at the Gates of Ironforge read grey (the frame's brightest fifth only
-/// 1.29x its median); twice that, in every zone, was chosen in the viewer.
-pub const MOON_KEY: f32 = 1.7;
+/// fork: **a moonlit night.** While the moon keys, every zone takes one night key (times its look's
+/// `moon_key`) and a thinner fill instead of its day ratio: the authored night rows sit key and
+/// fill close together, which under a risen moon read as a flat blue wash with no shadow in it.
+/// Ramped by [`super::sun_arc::moon_key`], so it comes in with the moonrise and leaves with the
+/// moonset. Twice this in every zone put Goldshire at 02:00 near dusk (the frame's brightest fifth
+/// at sRGB 111 against Westfall's 56), so only the looks that need it double it.
+pub const MOON_KEY: f32 = 0.85;
 /// The fill's multiplier under a full moon: the shadowed side falls toward the night floor.
 pub const MOON_FILL: f32 = 0.45;
 
@@ -542,8 +566,11 @@ pub fn key_fill() -> (f32, f32) {
     let moon = super::sun_arc::moon_key();
     (
         // The key also fades with its body's elevation (`sun_arc::key_horizon`, 1 in classic).
-        lerp(f32::from_bits(KEY.load(Ordering::Relaxed)), MOON_KEY, moon)
-            * super::sun_arc::key_horizon(),
+        lerp(
+            f32::from_bits(KEY.load(Ordering::Relaxed)),
+            MOON_KEY * f32::from_bits(MOON_KEY_GAIN.load(Ordering::Relaxed)),
+            moon,
+        ) * super::sun_arc::key_horizon(),
         f32::from_bits(FILL.load(Ordering::Relaxed)) * lerp(1.0, MOON_FILL, moon),
     )
 }
@@ -676,6 +703,7 @@ fn auto_exposure(l: &WowLighting) -> f32 {
 
 fn publish(look: ZoneLook, auto_exposure: f32) {
     KEY.store(look.key.to_bits(), Ordering::Relaxed);
+    MOON_KEY_GAIN.store(look.moon_key.to_bits(), Ordering::Relaxed);
     FILL.store(look.fill.to_bits(), Ordering::Relaxed);
     EXPOSURE.store(
         (super::MODERN_EXPOSURE * look.exposure * auto_exposure).to_bits(),
@@ -731,7 +759,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -780,6 +808,8 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.sea_fog, 38);
     set(&mut look.moon_glow, 39);
     set(&mut look.moon_hue, 40);
+    set(&mut look.moon_key, 41);
+    set(&mut look.bank_moon, 42);
     look
 }
 
@@ -972,6 +1002,7 @@ mod tests {
         for zone in COLD_ZONES {
             let night = look_for_zone_at(*zone, 120.0);
             assert_eq!(night, ZoneLook::COLD_NIGHT, "zone {zone}");
+            assert!(night.moon_key > 1.0, "zone {zone}");
             assert!(night.haze < ZoneLook::COLD.haze && night.fog_reach > ZoneLook::COLD.fog_reach);
             assert_eq!(
                 look_for_zone_at(*zone, 720.0),

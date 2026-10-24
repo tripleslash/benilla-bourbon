@@ -63,6 +63,8 @@ fn shaft_phase(f: froxelfog::FroxelFog, phase: f32) -> f32 {
 // a beam reads brightest where it crosses a bank.
 // The patches' feature size (yd), and the noise band that is bank: below the low edge is clear air.
 const BANK_SCALE: f32 = 150.0;
+// 1 / the banks' height falloff (yd) above the terrain: dense within a few yards of it.
+const BANK_INV_FALLOFF: f32 = 0.25;
 const BANK_EDGE: vec2<f32> = vec2<f32>(0.45, 0.72);
 // A bank's in-scatter: the key as the shaft haze takes it, and this share of the sky.
 const BANK_KEY_GAIN: f32 = 1.6;
@@ -93,7 +95,7 @@ fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>, terrain: vec2<f32>) -> f3
     }
     let ground = select(f.night.y, terrain.x, terrain.y > 0.5);
     let above = max(p.y - ground, 0.0);
-    let height = exp(-min(above * f.night.z, 24.0));
+    let height = exp(-min(above * BANK_INV_FALLOFF, 24.0));
     let q = vec3<f32>(p.x, p.y * 0.25, p.z) + f.wind.xyz * 0.5;
     let n = textureSampleLevel(noise_tex, repeat_samp, q / BANK_SCALE + vec3<f32>(0.37, 0.11, 0.73), 0.0).r;
     return core * height * smoothstep(BANK_EDGE.x, BANK_EDGE.y, n);
@@ -311,8 +313,11 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let key_lit = shaft_phase(f, phase) * sun_vis;
     let lum_haze = f.ambient.rgb * (sky_term * SHAFT_SKY_SHARE)
         + shaft_key(f) * (key_lit * SHAFT_KEY_GAIN * (1.0 + cover));
+    // A bank's isotropic half takes its own share of the key (`fog.night.z`): the haze's, or the
+    // whole moon where the zone's banks are ground fog.
+    let bank_lit = mix(phase, f.night.z, SHAFT_ISOTROPIC) * sun_vis;
     let lum_bank = f.ambient.rgb * (sky_term * BANK_SKY_SHARE)
-        + shaft_key(f) * (key_lit * BANK_KEY_GAIN);
+        + shaft_key(f) * (bank_lit * BANK_KEY_GAIN);
     var points = PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
 
     // The point lights, isotropic, with the surface lanes' WoW falloff and range window.

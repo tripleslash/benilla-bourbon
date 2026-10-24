@@ -88,15 +88,14 @@ const NIGHT_GLOW: f32 = 5.0;
 /// street the player stands in. Halfway to the thinnest tried (0.25 / 0.5), which cleared noon but
 /// lost the dusk glow. The live `WOW_MODERN_LOOK` override is scaled too.
 const HAZE_SCALE: f32 = 0.67;
-/// fork: **ground fog** — the banks' extinction at the ground (1/yd) at the full SIDN night, and
-/// their height falloff (yd) above the terrain under each froxel (the GI heightfield; past it, the
-/// ground under the camera). `froxel_scatter.wgsl` breaks them into patches and lights them with
-/// the shaft haze's key. Overnight a zone look's `night_banks` takes its share (none in an
-/// ordinary zone, the whole bank in a dark one), and its `ground_fog` keeps a share by day.
-/// Anchored to one plane at the camera's ground, 0.035 filled Hillsbrad's low ground and left
-/// Gilneas's hills bare.
+/// fork: **ground fog** — the banks' extinction at the ground (1/yd) at the full SIDN night, which
+/// falls off within a few yards of the terrain under each froxel (`froxel_scatter.wgsl`'s
+/// `BANK_INV_FALLOFF`; the GI heightfield, past it the ground under the camera).
+/// `froxel_scatter.wgsl` breaks them into patches and lights them with the shaft haze's key.
+/// Overnight a zone look's `night_banks` takes its share (none in an ordinary zone, the whole bank
+/// in a dark one), and its `ground_fog` keeps a share by day. Anchored to one plane at the camera's
+/// ground, 0.035 filled Hillsbrad's low ground and left Gilneas's hills bare.
 const BANK_EXTINCTION: f32 = 0.022;
-const BANK_FALLOFF: f32 = 4.0;
 /// fork: under a risen moon the night air's uniform glow drops to this share: the moonlight and
 /// the banks carry the night instead of a veil over everything.
 const MOON_VEIL: f32 = 0.4;
@@ -698,7 +697,7 @@ fn update_volume(
                 0.0
             },
             bank_ground,
-            1.0 / BANK_FALLOFF,
+            bank_air_share(&look.0),
             // fork: the zone look's sea fog (`froxel_scatter.wgsl`'s `sea_fog`).
             if super::banks_enabled() {
                 look.0.sea_fog
@@ -756,10 +755,19 @@ pub(crate) fn added_air(look: &super::look::ZoneLook) -> f32 {
 }
 
 /// The ground banks' share of [`BANK_EXTINCTION`] at night fraction `night`: the day's banks, and
-/// `added` of what the night lays over them.
+/// `added` of what the night lays over them, all of it where the look's banks are ground fog
+/// (`ZoneLook::bank_moon` 1).
 fn night_bank_share(look: &super::look::ZoneLook, night: f32, added: f32) -> f32 {
     let day = look.ground_fog.max(0.0);
+    let added = added + (1.0 - added) * look.bank_moon.clamp(0.0, 1.0);
     day + added * (night * look.night_banks - day).max(0.0)
+}
+
+/// The key's share on the banks' isotropic half: the shaft haze's ([`super::look::key_air_share`]),
+/// up to the whole moon where the look's banks are ground fog (`ZoneLook::bank_moon` 1).
+fn bank_air_share(look: &super::look::ZoneLook) -> f32 {
+    let haze = super::look::key_air_share();
+    haze + (1.0 - haze) * look.bank_moon.clamp(0.0, 1.0)
 }
 
 /// The shaft haze's key radiance: the key light's own colour (decoded and horizon-faded) times the
@@ -861,11 +869,16 @@ mod tests {
         assert_eq!(added_air(&ZoneLook::NEUTRAL), 1.0, "Elwynn");
         for hazy in [ZoneLook::DARKSHORE, ZoneLook::EERIE, ZoneLook::TIRISFAL] {
             assert!((added_air(&hazy) - HAZY_SHARE).abs() < 1e-6);
-            let (day, night) = (
-                night_bank_share(&hazy, 0.0, HAZY_SHARE),
-                night_bank_share(&hazy, 1.0, HAZY_SHARE),
-            );
-            assert!(night >= day && night - day <= HAZY_SHARE * hazy.night_banks);
+        }
+        let darkshore = ZoneLook::DARKSHORE;
+        let (day, night) = (
+            night_bank_share(&darkshore, 0.0, HAZY_SHARE),
+            night_bank_share(&darkshore, 1.0, HAZY_SHARE),
+        );
+        assert!(night >= day && night - day <= HAZY_SHARE * darkshore.night_banks);
+        // The dark zones' banks are ground fog: the whole night bank, whatever their haze.
+        for eerie in [ZoneLook::EERIE, ZoneLook::TIRISFAL] {
+            assert_eq!(night_bank_share(&eerie, 1.0, HAZY_SHARE), eerie.night_banks);
         }
         assert_eq!(night_bank_share(&ZoneLook::NEUTRAL, 1.0, 1.0), 0.0);
         let banked = ZoneLook {
