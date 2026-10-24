@@ -16,6 +16,22 @@ use bevy::prelude::*;
 #[derive(Resource, Default, Clone, Copy, PartialEq)]
 pub struct CameraWmoFog(pub Option<WmoFogTarget>);
 
+/// fork: modern lighting (`FORK.md` P4) — **the room the camera stands in, as a
+/// world-space sphere** (Bevy axes): the centre and radius of its MOGI box, written beside
+/// [`CameraWmoFog`] and `None` wherever that is.
+///
+/// The modern medium is the only reader, and what it needs is the room's REACH. A room's MFOG is a
+/// room-scale wall (`crate::modern::volumetrics::media`), and a room's air ends at its walls:
+/// Orgrimmar's gate hall is a 30 yd tunnel carrying a 292 yd fog record, so the city framed by its
+/// mouth wore three quarters of a wall of the building's teal until the medium knew where the room
+/// stopped. In a sealed room every surface is inside the sphere, and nothing changes.
+///
+/// It is the sphere of the group whose MFOG engaged (a true interior), never the in-group's as
+/// such: an exterior-lit courtyard claims the camera without a fog, and Orgrimmar's entry canyon is
+/// a 170 yd sphere that carried the tunnel's teal over the whole city while it faded out.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
+pub struct CameraRoomExtent(pub Option<(Vec3, f32)>);
+
 /// One resolved MFOG fog triple in the record's own units; the staging transform is the consumer's
 /// (`end = min(end, farclip)`, `start = end × start_scalar`, `0x6cef43`–`0x6cef62`).
 #[derive(Clone, Copy, PartialEq, Debug)]

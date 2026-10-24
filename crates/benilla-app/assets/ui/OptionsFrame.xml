@@ -93,7 +93,7 @@
         -- The category tree in list order; keys are the row name suffixes.
         BENILLA_OPTIONS_CATEGORY_KEYS = {
             "Controls", "Interface", "ActionBars", "Combat", "Chat", "Keybindings", "Nameplates",
-            "Graphics", "Audio",
+            "Graphics", "Audio", "AddOns",
         }
 
         -- The era UIParent draws smaller than our 768-unit canvas; a chosen value, not the
@@ -156,13 +156,22 @@
             BenillaOptionsFrameContainerScroll:SetVerticalScroll(0)
             -- Leaving Keybindings disarms a pending capture, which must never outlive the page.
             local kb = getglobal("BenillaOptionsFrameContainerBodyKeybindings")
+            local addons = getglobal("BenillaOptionsFrameContainerBodyAddOns")
             if key == "Keybindings" then
                 kb:Show()
+                addons:Hide()
                 BenillaKeyBindingsPage_Refresh()
                 BenillaOptionsFrameContainerUnbind:Show()
                 BenillaOptionsFrameContainerDefaults:Enable()
+            elseif key == "AddOns" then
+                kb:Hide()
+                addons:Show()
+                BenillaOptionsAddOns_Refresh()
+                BenillaOptionsFrameContainerUnbind:Hide()
+                BenillaOptionsFrameContainerDefaults:Disable()
             else
                 kb:Hide()
+                addons:Hide()
                 BenillaKeyBindings_SetSelected(nil)
                 BenillaKeyBindings_Output("")
                 BenillaOptionsFrameContainerUnbind:Hide()
@@ -260,6 +269,11 @@
             for i = 1, BENILLA_KEYBINDINGS_SEARCH_ROWS do
                 take("BenillaOptionsFrameContainerBodyKeybindSearch" .. i)
             end
+            -- The AddOns page's dynamic rows: row 0 is the Load out of date AddOns row.
+            for i = 0, table.getn(BenillaOptionsAddOns_Rows) do
+                local row = BenillaOptionsAddOns_Rows[i]
+                if row then take(row:GetName()) end
+            end
             return bottom
         end
 
@@ -342,6 +356,8 @@
             for i = 1, BENILLA_KEYBINDINGS_SEARCH_ROWS do
                 getglobal("BenillaOptionsFrameContainerBodyKeybindSearch" .. i):Hide()
             end
+            -- The AddOns page is not in BENILLA_OPTIONS_PAGE_ROWS; hide it and its rows with it.
+            BenillaOptionsFrameContainerBodyAddOns:Hide()
             BenillaKeyBindingsPage.searchPainted = nil
             BenillaKeyBindings_SetSelected(nil)
             BenillaOptionsFrameContainerUnbind:Hide()
@@ -430,8 +446,45 @@
         BENILLA_TOOLTIP_RENDER_SCALE =
             "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
             .. "The interface is unaffected at any setting.\n\n"
-            .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
-            .. "smooths edges at the cost of frame rate. Applies when you click Apply."
+            .. "Below 100% trades sharpness for frame rate, and AMD FSR 3.1 rebuilds the full "
+            .. "resolution from several frames; above 100% is supersampling, which smooths edges "
+            .. "at the cost of frame rate. Applies when you click Apply."
+
+        -- fork: fsr (FORK.md) — 1.12 has no such checkbox.
+        BENILLA_TOOLTIP_FRAME_GENERATION =
+            "Uses AMD FSR 3.1 frame generation to show a generated frame between every two the "
+            .. "game draws, nearly doubling the frames you see for one frame of added latency.\n\n"
+            .. "Render Scale is held at 100% or below while it is on. Applies when you click Apply."
+
+        -- fork: fsr (FORK.md) — 1.12 has no such slider.
+        BENILLA_TOOLTIP_RCAS_SHARPNESS =
+            "How strongly AMD FSR 3.1's RCAS pass sharpens the upscaled picture. Higher is "
+            .. "crisper, lower is softer; 0% leaves only the mildest sharpening. Applies when you "
+            .. "click Apply."
+
+        -- fork: the Everwood port (FORK.md) -- 1.12 has no such rows.
+        BENILLA_TOOLTIP_FOLIAGE_WIND =
+            "Grass bends in two travelling wind waves and parts around nearby characters. "
+            .. "Grass + Trees also gives tree and bush foliage a gentle sway.\n\n"
+            .. "Off leaves grass and foliage still, as the original client draws them. "
+            .. "Tree shadows stay still at every setting."
+        BENILLA_TOOLTIP_FOLIAGE_WIND_STRENGTH =
+            "How far grass and foliage swing in the wind. 100% is the standard sway; lower is "
+            .. "calmer, higher is a blustery day. Storms swing everything harder on top.\n\n"
+            .. "Grass still parts around characters the same way. Needs Foliage Wind on."
+
+        BENILLA_TOOLTIP_GRAPHICS_PRESET =
+            "Sets every graphics setting below at once, from the original client's look to the "
+            .. "most detailed one: lighting, view distance, ground detail, weather, shadows, "
+            .. "ambient occlusion, water, the updated and reforged models, render scale, frame "
+            .. "generation, foliage wind, wet surfaces and lava light.\n\n"
+            .. "Classic is the original client. Changing a setting a preset names shows Custom. "
+            .. "Applies when you click Apply; the reforged models change on the next load."
+        BENILLA_TOOLTIP_RAIN_SURFACES =
+            "Rain slowly soaks the ground, stone and wood under the open sky: they darken, puddles "
+            .. "gather on flat ground and wet tops catch the light. Everything dries over a few "
+            .. "minutes after the rain stops, and nothing under a roof gets wet.\n\n"
+            .. "Off is the original client's look."
 
         -- 1.12 has no such checkbox.
         BENILLA_TOOLTIP_BACKGROUND_SOUND =
@@ -440,20 +493,115 @@
             .. "Sounds keep running while they are silenced, so a long one may have finished by "
             .. "the time you return."
 
-        -- 1.12's WINDOWED_MODE text describes a checkbox and exclusive-mode gamma.
-        BENILLA_TOOLTIP_DISPLAY_MODE =
-            "Windowed (Fullscreen) fills the screen with a borderless window; Windowed runs in "
-            .. "an ordinary one.\n\n"
-            .. "There is no exclusive fullscreen mode. WoW itself removed one in 8.0.1, and "
-            .. "modern Classic offers these same two."
+        -- Updated character models. benilla's own row on the plainest terms of all: 1.12 has no
+        -- optional content at all, so there is not even a near-miss reference string to adapt.
+        --
+        -- The tooltip carries THREE things a player cannot find out by clicking, in the order
+        -- they will be wanted. First what changes — only characters, so a player who turns it
+        -- off and looks at a tree knows why nothing happened. Then when: in the browser the layer
+        -- is a live mount and Apply swaps it (crate::hd_models); the desktop client decides its
+        -- archives at start. Then, on the web build, the download: the row is ON by default, so
+        -- what a browser client needs before the click is what turning it OFF saves rather than
+        -- what turning it on costs.
+        BENILLA_TOOLTIP_HD_MODELS =
+            "Uses the updated, higher-detail player character models and animations in place of "
+            .. "the original ones. Creatures, buildings and the world are unaffected.\n\n"
+            .. "In the browser this applies when you click Apply; the characters around you "
+            .. "change once their new models have arrived. The desktop client applies it the "
+            .. "next time you start the game.\n\n"
+            .. "On by default. In the browser these models are an additional ~1.7 GB of game "
+            .. "data; turning this off fetches none of it and plays on the original art."
+
+        -- Reforged game models and textures: Turtle WoW's own window only (below), for Turtle's
+        -- Project Reforged art. The tooltip says the two things a click cannot show: that it
+        -- waits for the next load (the layer is latched as the page loads, cvars::
+        -- apply_boot_layers), and that a 1.12.1 realm never gets it.
+        BENILLA_TOOLTIP_REFORGED_MODELS =
+            "Uses the reforged, higher-detail models and textures for creatures, gear, spells, "
+            .. "buildings and the world on Turtle WoW realms. Realms of the original game are "
+            .. "unaffected.\n\n"
+            .. "Takes effect the next time you load the game.\n\n"
+            .. "On by default. In the browser this art is an additional download, fetched as you "
+            .. "meet it; turning this off fetches none of it."
+
+        BENILLA_TOOLTIP_WORLD_SHADOWS =
+            "Renders real dynamic silhouettes for players, NPCs, creatures, and mounts. Terrain, "
+            .. "buildings, and trees keep their authored shading, matching Wrath's character-only "
+            .. "shadow tier. This uses additional GPU time and memory."
+
+        -- The two halves of the indirect-lighting pass. One gather produces both, so they are two
+        -- rows rather than one only because a player wants to move them apart: contact darkening
+        -- is close to a fidelity choice, colour bleed is squarely a taste one. Neither has a 1.12
+        -- counterpart -- the reference renders straight to the backbuffer, with no depth buffer it
+        -- could gather over -- so both carry a BENILLA_ description, like Render Scale below.
+        BENILLA_TOOLTIP_AMBIENT_OCCLUSION =
+            "Darkens the creases the sun cannot reach: the base of a tree, the inside of a "
+            .. "doorway, the underside of a roof.\n\n"
+            .. "0% turns it off entirely. Higher values cost additional GPU time."
+
+        BENILLA_TOOLTIP_INDIRECT_LIGHT =
+            "Bounces colour between nearby surfaces, so grass tints the trunk standing in it and "
+            .. "a painted wall tints the floor.\n\n"
+            .. "0% turns off colour bleeding and leaves Ambient Occlusion running on its own."
+
+        -- Water Detail: which liquid renderer draws the world's water. Not a 1.12 row -- 1.12 has
+        -- one water and no CVar for it -- so a BENILLA_ description, like the two above. The CVar
+        -- name and its values ARE the reference's, from a later client's liquid system; the row
+        -- offers the two tiers benilla implements.
+        BENILLA_TOOLTIP_WATER_DETAIL =
+            "Which water the world is drawn with.\n\n"
+            .. "Modern adds surface waves, a reflection of the sky and shoreline, and lets you "
+            .. "see through the surface to the bottom. Classic is the original flat, tinted water.\n\n"
+            .. "Modern (Experimental) is Modern with a work-in-progress surface: clear, tinted "
+            .. "shallows that show the bed and the shadows on it, a calm surface, and a soft reflection "
+            .. "of the sky.\n\n"
+            .. "Modern (SSR) skips the second, mirrored render of the world and reflects only what "
+            .. "is already on screen: much cheaper, but reflections fade when you look down at the water.\n\n"
+            .. "Modern water costs additional GPU time."
+
+        -- fork: the modern lighting model (FORK.md). The MODEL and the TIER both
+        -- apply on the frame Apply commits them, like every Graphics row.
+        BENILLA_TOOLTIP_LIGHTING_MODEL =
+            "How the world is lit.\n\n"
+            .. "Modern adds real-time sun shadows from every object, light shafts through fog and "
+            .. "foliage, bounced light and HDR bloom. Classic is the original baked lighting.\n\n"
+            .. "Applies when you click Apply. Modern costs additional GPU time."
+
+        BENILLA_TOOLTIP_LIGHTING_QUALITY =
+            "The detail of Modern lighting: shadow range and resolution, light shaft resolution and "
+            .. "bounced light.\n\n"
+            .. "Ultra and Cinematic additionally light the world from things that only ever glowed - "
+            .. "lamps, braziers and candles that carry no light of their own, lit windows at night, "
+            .. "and enchanted weapons. Cinematic also gives a dozen of those lights faint shadows.\n\n"
+            .. "Has no effect on Classic lighting. Applies when you click Apply."
+
+        -- fork: `serverTimeOffset` -- 1.12 shows the server's time of day and nothing else.
+        BENILLA_TOOLTIP_SERVER_TIME_OFFSET =
+            "Moves the game's time of day by this many hours from the server's, for the sky, the "
+            .. "sun and moon, and the clock: play a server in another time zone at your own "
+            .. "day and night. 0 is the server's own time."
+
+        -- fork: `autoExposure`, the modern model's light auto-exposure.
+        BENILLA_TOOLTIP_AUTO_EXPOSURE =
+            "Brightens the picture when the light is dark - at dusk, at night, or in a "
+            .. "gloomy zone - so the world stays visible. Daylight is left as it is, "
+            .. "and a night still reads as night.\n\n"
+            .. "Has no effect on Classic lighting. Applies when you click Apply."
 
         -- 1.12's GAMMA text points at gray-bar art this page does not have.
-        BENILLA_TOOLTIP_BRIGHTNESS =
-            "Lightens or darkens the whole picture — nights, caves and interiors are what it is "
-            .. "for.\n\n"
+        BENILLA_TOOLTIP_GAMMA =
+            "Bends the midtones of the whole picture while black stays black and white stays "
+            .. "white. Above 1.00 brightens them and softens the contrast; below 1.00 darkens them "
+            .. "and deepens it.\n\n"
             .. "This is the same correction 1.12 applied through the display's own gamma ramp, "
             .. "which it could only do in exclusive fullscreen. benilla applies it to the "
             .. "finished image instead, so it works in both display modes."
+
+        -- benilla's own level control beside Gamma; 1.12 has none.
+        BENILLA_TOOLTIP_BRIGHTNESS =
+            "Raises or lowers the level of the whole picture. Above 50% lifts the darkest shades "
+            .. "— nights, caves and interiors are what it is for; below 50% dims the brightest. "
+            .. "At 50% the picture is unchanged."
 
         BENILLA_OPTIONS_PAGE_ROWS = {
             -- The era Controls order first; the rest follow their 1.12 box's columns.
@@ -471,9 +619,41 @@
                 "RowBackgroundSound",
             },
             Graphics = {
+                -- fork: the Graphics Preset heads the page it names (FORK.md).
+                "RowGraphicsPreset",
                 "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
-                "RowWeatherDensity",
-                "RowDisplayMode", "RowVerticalSync", "RowRenderScale",
+                "RowGamma", "RowWeatherDensity",
+                -- Display Mode was pulled 2026-09-08 (the director's call): the client ships two
+                -- window states and the window's own title-bar control already moves between
+                -- them, so the row was a second way to say one thing. `gxWindow` survives as the
+                -- CVar and as `$WOW_WIN` — what went is the row, on exactly the terms 1648
+                -- pulled Multisampling's. Upstream still ships the row (2180 rebuilt it against
+                -- modern Classic's boolean dropdown); this branch keeps it pulled, and the CVar
+                -- it rode is untouched either way, so nothing downstream of the panel differs.
+                --
+                -- Brightness, Gamma and Weather Intensity arrive from upstream ABOVE that seat
+                -- rather than below it: all are "what the world IS" rows, and the group they join
+                -- runs from scale and distance down through detail to the picture's own level and
+                -- gamma.
+                --
+                -- Updated Character Models closes the "what the world IS" group: it is the only
+                -- row on the page that changes the ART rather than how the art is drawn.
+                "RowVerticalSync", "RowWorldShadows", "RowHdModels",
+                -- The indirect-lighting pair sits between the shadow toggle and Render Scale:
+                -- everything above it is what the world IS, Render Scale is how big it gets
+                -- drawn, and Render Scale keeps the last seat its own note below claims.
+                "RowAmbientOcclusion", "RowIndirectLight", "RowWaterDetail",
+                -- fork: the modern lighting model and its tier (FORK.md).
+                "RowLightingModel", "RowLightingQuality", "RowAutoExposure",
+                -- fork: the hour the world's day and night are drawn at.
+                "RowServerTimeOffset",
+                -- fork: the Everwood port (FORK.md) -- what moves in the world.
+                "RowFoliageWind", "RowFoliageWindStrength", "RowRainSurfaces",
+                -- fork: fsr (FORK.md) — how the world is presented, above how big it is drawn.
+                "RowFrameGeneration",
+                "RowRenderScale",
+                -- fork: fsr (FORK.md) -- FSR's sharpening, beside the scale it sharpens.
+                "RowRcasSharpness",
             },
             -- Guild Names and Player Titles are children of Player Names
             -- (UIOptionsFrame.lua:703-709).
@@ -571,6 +751,13 @@
             end
             SetCVar(row.cvar, value, row.cvarEvent)
             BenillaOptionsRow_WritePartner(row, value)
+            -- fork: the `gx*` rows are LATCHED since upstream's registry (2303): a `SetCVar` on
+            -- one only stages, and nothing moves until `RestartGx()` — the stock video window's
+            -- Okay. This window commits a row in one step, so it asks for the commit there too;
+            -- without it the Vertical Sync box would stage a value the session never applies.
+            if string.sub(row.cvar, 1, 2) == "gx" then
+                RestartGx()
+            end
         end
 
         -- UIOptionsFrame_Save's partner writes: Pet Melee Damage also writes PetSpellDamage
@@ -619,14 +806,113 @@
         -- Holes at 4, 5 and 7, so the OnShow loop uses the pairs form: ipairs would stop at 3.
         BENILLA_GRAPHICS_SLIDER_ROWS = {
             "RowUiScale", "RowFarclip", "RowWorldDetail",
-            [6] = "RowBrightness", [8] = "RowSpellDetail", [9] = "RowWeatherDensity",
+            [6] = "RowGamma", [8] = "RowSpellDetail", [9] = "RowWeatherDensity",
         }
+
+        -- A graphics row's bounds: the stock table's row. Turtle WoW's OptionsFrame.lua has no
+        -- OptionsFrameSliders; its Options\Options.lua carries the same bounds for these rows
+        -- (UI_SCALE, FARCLIP, ENVIRONMENT_DETAIL, GAMMA, WEATHER_DETAIL), read here without it;
+        -- Spell Detail takes 1.12's own row 8 grid, 0 to 2, one apart.
+        --
+        -- Deviation: Terrain Distance (row 2) goes past the reference's 777 to the engine's 1500
+        -- (`benilla_world::view::FARCLIP_RANGE`, `check_farclip`), which the modern look's fog
+        -- shows; the stock table itself is left as it is, for the addons that read and write it.
+        BENILLA_FARCLIP_MAX = 1500
+        function BenillaGraphicsSliderInfo(i)
+            if ( OptionsFrameSliders ) then
+                local info = OptionsFrameSliders[i]
+                if ( i == 2 and info ) then
+                    return { minValue = info.minValue, maxValue = BENILLA_FARCLIP_MAX,
+                        valueStep = info.valueStep }
+                end
+                return info
+            end
+            local lo, hi = OPTIONS_FARCLIP_MIN, BENILLA_FARCLIP_MAX
+            local bounds = {
+                { minValue = 0.64, maxValue = 1.0, valueStep = 0.01 },
+                { minValue = lo, maxValue = hi, valueStep = (hi - lo) / 10 },
+                { minValue = 0, maxValue = 2, valueStep = 1 },
+                [6] = { minValue = -0.5, maxValue = 0.5, valueStep = 0.1 },
+                [8] = { minValue = 0, maxValue = 2, valueStep = 1 },
+                [9] = { minValue = 0, maxValue = 3, valueStep = 1 },
+            }
+            return bounds[i]
+        end
+
+        -- fork: fsr (FORK.md) -- a slider's marked stops (Render Scale's 0.67, FSR's quality
+        -- ratio, and 1x): a gold tick on the groove over each, its label under it, and a drag that
+        -- ends within BENILLA_SLIDER_MARK_PULL of one lands on it.
+        BENILLA_SLIDER_MARK_PULL = 0.03
+        BENILLA_RENDER_SCALE_MARKS = {
+            { value = 0.67, text = "67%" },
+            { value = 1, text = "100%" },
+        }
+
+        -- A frame's width in its own units: from its edges once it has a rect, else the width it
+        -- was given.
+        function BenillaOptions_SpanWidth(frame)
+            local l, r = frame:GetLeft(), frame:GetRight()
+            if ( l and r ) then return r - l end
+            return frame:GetWidth()
+        end
+
+        -- Placed once the slider has a width: the thumb travels its width less its own, so a
+        -- mark sits where the thumb's centre stands at that value.
+        function BenillaSlider_PlaceMarks(slider, min, max, marks)
+            if ( not marks or max <= min ) then return end
+            -- From its edges: this window's slider is sized by its anchors, and GetWidth answers
+            -- such a frame's span before the window's scale divides it.
+            local w = BenillaOptions_SpanWidth(slider)
+            if ( not w or w <= 0 ) then return end
+            local thumb = slider:GetThumbTexture()
+            local tw = 0
+            if ( thumb ) then tw = thumb:GetWidth() or 0 end
+            if ( not slider.benillaMarks ) then slider.benillaMarks = {} end
+            for i, m in ipairs(marks) do
+                local mark = slider.benillaMarks[i]
+                if ( not mark ) then
+                    mark = {}
+                    mark.tick = slider:CreateTexture(nil, "BACKGROUND")
+                    mark.tick:SetTexture(1, 0.82, 0, 0.9)
+                    mark.tick:SetWidth(2)
+                    mark.tick:SetHeight(10)
+                    mark.label = slider:CreateFontString(nil, "BACKGROUND", "GameFontHighlightSmall")
+                    slider.benillaMarks[i] = mark
+                end
+                mark.label:SetText(m.text)
+                local x = tw / 2 + (m.value - min) / (max - min) * (w - tw)
+                mark.tick:ClearAllPoints()
+                mark.tick:SetPoint("CENTER", slider, "LEFT", x, 0)
+                mark.tick:Show()
+                mark.label:ClearAllPoints()
+                mark.label:SetPoint("TOP", mark.tick, "BOTTOM", 0, -4)
+                mark.label:Show()
+            end
+        end
+
+        -- A slider handed to another row drops the ticks it wore.
+        function BenillaSlider_HideMarks(slider)
+            for _, mark in ipairs(slider.benillaMarks or {}) do
+                mark.tick:Hide()
+                mark.label:Hide()
+            end
+        end
+
+        -- The mark within the pull of `value`, if any.
+        function BenillaSlider_MarkNear(marks, value)
+            if ( not marks ) then return end
+            for _, m in ipairs(marks) do
+                if ( math.abs(value - m.value) <= BENILLA_SLIDER_MARK_PULL ) then
+                    return m.value
+                end
+            end
+        end
 
         -- SetMinMaxValues re-clamps and fires OnValueChanged, which must not write back.
         function BenillaOptionsSliderRow_Setup(row, min, max, step, fmt, stops)
             local slider = getglobal(row:GetName() .. "ControlSlider")
             row.fmt = fmt
-            -- Kept for the "travel" readout, a share of the row's own range.
+            -- Kept for the groove's marks, placed by the row's own range.
             row.minv, row.maxv = min, max
             -- Deviation: a named ladder reads out its stop; 1.12's slider labels only its ends, and
             -- a bare index would mean nothing to a player.
@@ -665,7 +951,11 @@
         function BenillaOptionsDropdownEntry_OnClick()
             local dd = UIDropDownMenu_GetCurrentDropDown()
             local row = dd:GetParent()
-            BenillaOptionsRow_Set(row, this.value)
+            if BenillaOptionsRow_IsDeferred(row) then
+                BenillaOptionsRow_Stage(row, this.value)
+            else
+                BenillaOptionsRow_Set(row, this.value)
+            end
             BenillaOptionsDropdown_ShowValue(row)
         end
 
@@ -673,7 +963,7 @@
         -- value shows the nearest entry.
         function BenillaOptionsDropdown_ShowValue(row)
             local dd = getglobal(row:GetName() .. "Dropdown")
-            local v = BenillaOptionsRow_Get(row)
+            local v = BenillaOptionsRow_Shown(row)
             local match
             for _, e in ipairs(row.entries) do
                 -- `alt`: a stored "3" shows as Never, where the nearest value would show Always.
@@ -704,6 +994,12 @@
             if row.fmt == "raw" then
                 return string.format("%d", math.floor(value + 0.5))
             end
+            -- fork: "hours": a signed offset, `+3 h`, `0 h`, `-5 h`.
+            if row.fmt == "hours" then
+                local h = math.floor(value + 0.5)
+                if h > 0 then return string.format("+%d h", h) end
+                return string.format("%d h", h)
+            end
             -- The clamp guards a short stops table.
             if row.stops then
                 local i = math.floor(value + 0.5) + 1
@@ -711,15 +1007,18 @@
                 if i > table.getn(row.stops) then i = table.getn(row.stops) end
                 return row.stops[i]
             end
-            -- "travel": the thumb's share of the groove. Brightness stores the reference's
-            -- `1 - gamma` (-0.5 to +0.5, default 0) and reads 0 to 100% with the default at 50.
-            if row.fmt == "travel" and row.minv and row.maxv and row.maxv > row.minv then
-                return string.format("%d%%",
-                    math.floor((value - row.minv) / (row.maxv - row.minv) * 100 + 0.5))
+            -- "gamma": the display gamma the ramp gives, `1 / gamma`. Gamma stores the reference's
+            -- `1 - gamma` (-0.5 to +0.5, default 0), so the registered 1.0 reads 1.00, and right of
+            -- it, where the ramp brightens the midtones, the readout climbs to 2.00.
+            if row.fmt == "gamma" then
+                return string.format("%.2f", 1 / math.max(1 - value, 0.01))
             end
-            -- "yards": cameraDistanceMaxFactor over the 15 yd base.
+            -- "yards": the zoom limit, cameraDistanceMax x cameraDistanceMaxFactor held to [0, 50]
+            -- (`0x5112d6`).
             if row.fmt == "yards" then
-                return string.format("%d yd", math.floor(value * 15 + 0.5))
+                local base = tonumber(GetCVar("cameraDistanceMax")) or 15
+                local yards = math.min(math.max(value * base, 0), 50)
+                return string.format("%d yd", math.floor(yards + 0.5))
             end
             return string.format("%d%%", math.floor(value * 100 + 0.5))
         end
@@ -764,10 +1063,12 @@
             -- An inverted row (Sticky Targeting, Disable Spam Filter) writes the opposite.
             local on = checked
             if row.invert then on = not on end
-            if on then
-                BenillaOptionsRow_Set(row, "1")
+            local v = "0"
+            if on then v = "1" end
+            if BenillaOptionsRow_IsDeferred(row) then
+                BenillaOptionsRow_Stage(row, v)
             else
-                BenillaOptionsRow_Set(row, "0")
+                BenillaOptionsRow_Set(row, v)
             end
             BenillaOptionsPage_UpdateDependencies(BenillaOptionsFrame.selectedCategory)
         end
@@ -776,6 +1077,12 @@
             local control = slider:GetParent()
             local row = control:GetParent()
             if not row.refreshing then
+                -- fork: fsr (FORK.md) -- a marked stop pulls a drag that ends near it.
+                local mark = BenillaSlider_MarkNear(row.marks, value)
+                if mark and math.abs(mark - value) > 0.00001 then
+                    slider:SetValue(mark) -- re-enters once with the mark
+                    return
+                end
                 -- Snaps to the grid from the minimum (farclip's is 177+n*60); a refresh sets it
                 -- raw.
                 local step = slider:GetValueStep()
@@ -794,18 +1101,35 @@
                 -- Two decimals, trailing zeros stripped: a whole value writes "1", not "1.00",
                 -- which still differs from a default registered as "1.0" and so is saved.
                 local str = string.gsub(string.format("%.2f", value), "%.?0+$", "")
-                if row.deferred then
-                    -- Stored on Apply; a pending equal to the committed value is dropped.
-                    if str == BenillaOptionsRow_Get(row) then
-                        row.pending = nil
-                    else
-                        row.pending = str
-                    end
-                    BenillaOptionsApply_Update()
+                if BenillaOptionsRow_IsDeferred(row) then
+                    BenillaOptionsRow_Stage(row, str)
                 else
                     BenillaOptionsRow_Set(row, str)
                 end
             end
+        end
+
+        -- fork: every Graphics row stages to Apply (era CommitFlag.Apply), whatever its control;
+        -- elsewhere only a row marked `deferred` does.
+        function BenillaOptionsRow_IsDeferred(row)
+            return row.deferred
+                or row:GetParent():GetName() == "BenillaOptionsFrameContainerBodyGraphics"
+        end
+
+        -- Era CommitFlag.Apply: shown at once, stored on Apply. A pending equal to the committed
+        -- value is dropped, as the era's IsModified does.
+        function BenillaOptionsRow_Stage(row, value)
+            if value == BenillaOptionsRow_Get(row) then
+                row.pending = nil
+            else
+                row.pending = value
+            end
+            BenillaOptionsApply_Update()
+        end
+
+        -- What the row shows: a staged value first, as the era's GetValue returns it.
+        function BenillaOptionsRow_Shown(row)
+            return row.pending or BenillaOptionsRow_Get(row)
         end
 
         function BenillaOptionsPage_Refresh(key)
@@ -817,10 +1141,10 @@
                     -- "0" unchecks; an inverted row checks on "0".
                     if row.invert then
                         local checked
-                        if BenillaOptionsRow_Get(row) == "0" then checked = 1 end
+                        if BenillaOptionsRow_Shown(row) == "0" then checked = 1 end
                         box:SetChecked(checked)
                     else
-                        box:SetChecked(BenillaOptionsRow_Get(row))
+                        box:SetChecked(BenillaOptionsRow_Shown(row))
                     end
                 elseif row.entries then
                     BenillaOptionsDropdown_ShowValue(row)
@@ -833,10 +1157,76 @@
                     -- SetValue fires only on a change, so the readout is written here.
                     getglobal(base .. rkey .. "ControlValue"):SetText(
                         BenillaOptionsRow_FormatValue(row, slider:GetValue()))
+                    -- fork: fsr (FORK.md) -- shown, the slider has its width.
+                    if ( row.marks ) then
+                        BenillaSlider_PlaceMarks(slider, row.minv, row.maxv, row.marks)
+                    end
                 end
             end
             BenillaOptionsPage_UpdateDependencies(key)
             BenillaOptionsApply_Update()
+        end
+
+        -- ── The AddOns page: the era's per-addon enable list ──
+        -- Rows are built on show from the AddOn API: one checkbox per installed addon (its
+        -- `GetAddOnInfo` enabled state), then the Load out of date AddOns row. A toggle calls
+        -- `EnableAddOn`/`DisableAddOn`, which the host persists to `AddOns.txt` at logout, so the
+        -- change applies on the next world entry — the reference's own contract for the AddOns
+        -- screen. Row 0 is the Load out of date AddOns row.
+        BenillaOptionsAddOns_Rows = {}
+
+        function BenillaOptionsAddOns_GetRow(i)
+            local row = BenillaOptionsAddOns_Rows[i]
+            if row then return row end
+            row = CreateFrame("Frame", "BenillaOptionsFrameContainerBodyAddOnsRow" .. i,
+                BenillaOptionsFrameContainerBodyAddOns, "BenillaOptionsCheckboxRowTemplate")
+            row.index = i
+            BenillaOptionsAddOns_Rows[i] = row
+            return row
+        end
+
+        function BenillaOptionsAddOns_OnClick(box)
+            local row = box:GetParent()
+            local checked = box:GetChecked()
+            PlaySound(checked and "igMainMenuOptionCheckBoxOn" or "igMainMenuOptionCheckBoxOff")
+            if checked then
+                EnableAddOn(row.index)
+            else
+                DisableAddOn(row.index)
+            end
+        end
+
+        function BenillaOptionsAddOns_Refresh()
+            local n = GetNumAddOns()
+            local prev = nil
+            for i = 1, n do
+                local name, title, notes, enabled = GetAddOnInfo(i)
+                local row = BenillaOptionsAddOns_GetRow(i)
+                row:Show()
+                local label = getglobal(row:GetName() .. "Label")
+                label:SetText(title or name)
+                row.searchTag = string.upper(title or name)
+                local box = getglobal(row:GetName() .. "Check")
+                box:SetChecked(enabled)
+                -- A 1.12 handler is called with no arguments and reads `this`.
+                box:SetScript("OnClick", function() BenillaOptionsAddOns_OnClick(this) end)
+                BenillaOptionsSearch_Place(row:GetName(), prev)
+                prev = row:GetName()
+            end
+            for i = n + 1, table.getn(BenillaOptionsAddOns_Rows) do
+                BenillaOptionsAddOns_Rows[i]:Hide()
+            end
+            -- The Load out of date AddOns row, under the list; inverted, `checkAddonVersion`
+            -- "1" enforces the check (`0x402c3b`), so checked means "0".
+            local lod = BenillaOptionsAddOns_GetRow(0)
+            if not lod.cvar then
+                BenillaOptionsRow_OnLoad(lod, "checkAddonVersion", "Load out of date AddOns")
+                lod.invert = 1
+            end
+            lod:Show()
+            getglobal(lod:GetName() .. "Check"):SetChecked(
+                BenillaOptionsRow_Get(lod) == "0" and 1 or nil)
+            BenillaOptionsSearch_Place(lod:GetName(), prev)
         end
 
         -- Each page's dependency rules, the 1.12 panel's own.
@@ -960,6 +1350,31 @@
                 BenillaOptionsRow_Set(row, BenillaOptionsRow_Default(row))
             end
             BenillaOptionsPage_Refresh(key)
+            if key == "Graphics" then BenillaOptionsPreset_Settle() end
+        end
+
+        -- fork: the Graphics Preset (FORK.md). The host writes a rung's rows a
+        -- frame after its name is stored, and re-derives the name whenever a row it names moves,
+        -- so the row repaints the page once those writes have landed and follows its own label.
+        function BenillaOptionsPreset_Settle()
+            BenillaOptionsFrameContainerBodyGraphicsRowGraphicsPreset.settle = 3
+        end
+
+        function BenillaOptionsPresetRow_OnUpdate(row)
+            if row.settle then
+                row.settle = row.settle - 1
+                if row.settle <= 0 then
+                    row.settle = nil
+                    row.seen = GetCVar(row.cvar)
+                    BenillaOptionsPage_Refresh("Graphics")
+                end
+                return
+            end
+            local live = GetCVar(row.cvar)
+            if live ~= row.seen then
+                row.seen = live
+                BenillaOptionsDropdown_ShowValue(row)
+            end
         end
 
         -- ── The Apply flow ──
@@ -994,6 +1409,8 @@
                 end
             end
             BenillaOptionsApply_Update()
+            -- fork: a Graphics write may move the preset's rows or its label.
+            BenillaOptionsPreset_Settle()
         end
 
         function BenillaOptionsPage_DiscardPending()
@@ -1296,7 +1713,7 @@
                 </Texture>
             </Layer>
             <Layer level="OVERLAY">
-                <!-- Not BenillaGameFontNormalMed1: GameMenuAdapters.xml declares it later. -->
+                <!-- Not BenillaGameFontNormalMed1: GameMenuFrame.xml declares that after this file. -->
                 <FontString name="$parentTitleText" inherits="GameFontNormal" text="Options">
                     <Anchors>
                         <Anchor point="TOP" relativeTo="$parentHeader"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor>
@@ -1367,7 +1784,8 @@
                 <HighlightFont inherits="GameFontHighlightSmall"/>
                 <DisabledFont inherits="GameFontHighlightSmall"/>
             </Button>
-            <Button name="$parentAddOnsTab">
+            <!-- Hidden: the AddOns page opens from the category list (the owner, 2026-10-20). -->
+            <Button name="$parentAddOnsTab" hidden="true">
                 <Size><AbsDimension x="87" y="37"/></Size>
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="$parentGameTab" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor>
@@ -1390,9 +1808,8 @@
                 <NormalFont inherits="GameFontNormalSmall"/>
                 <HighlightFont inherits="GameFontNormalSmall"/>
                 <DisabledFont inherits="GameFontNormalSmall"/>
-                <!-- No addon list behind it: disabled, in the era's unselected gold. -->
                 <Scripts>
-                    <OnLoad>this:Disable()</OnLoad>
+                    <OnClick>BenillaOptionsFrame_SelectCategory("AddOns")</OnClick>
                 </Scripts>
             </Button>
 
@@ -1456,6 +1873,10 @@
                     <Button name="$parentRowAudio" inherits="BenillaOptionsCategoryRowTemplate">
                         <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowGraphics" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaOptionsCategoryRow_OnLoad(this, "Audio", "Audio")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="$parentRowAddOns" inherits="BenillaOptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowAudio" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaOptionsCategoryRow_OnLoad(this, "AddOns", "AddOns")</OnLoad></Scripts>
                     </Button>
                 </Frames>
             </Frame>
@@ -1866,6 +2287,15 @@
                                         </Frame>
                                     </Frames>
                                 </Frame>
+                                <!-- The era AddOns page: one checkbox per installed addon (enabled
+                                     state), then the Load out of date AddOns row; the rows are
+                                     built by BenillaOptionsAddOns_Refresh on show. -->
+                                <Frame name="$parentAddOns" hidden="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
                                 <!-- No useUiScale checkbox, which 1.12 has: benilla registers
                                      useUiScale but never reads it, so the UI scale always
                                      applies. -->
@@ -1875,17 +2305,42 @@
                                         <Anchor point="BOTTOMRIGHT"/>
                                     </Anchors>
                                     <Frames>
-                                        <Frame name="$parentRowUiScale" inherits="BenillaOptionsSliderRowTemplate">
+                                        <!-- fork: the Graphics Preset (FORK.md).
+                                             One CVar: the host's `cvars::presets` writes the rows
+                                             a rung names and re-derives this one every frame. -->
+                                        <Frame name="$parentRowGraphicsPreset" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
                                             </Anchors>
+                                            <Scripts>
+                                                <OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "graphicsQuality", "Graphics Preset",
+                                                    "BENILLA_TOOLTIP_GRAPHICS_PRESET")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Classic", value = "Classic" },
+                                                    { text = "Low", value = "Low" },
+                                                    { text = "Medium", value = "Medium" },
+                                                    { text = "High", value = "High" },
+                                                    { text = "Ultra", value = "Ultra" },
+                                                    { text = "Cinematic", value = "Cinematic" },
+                                                    { text = "Custom", value = "Custom" },
+                                                })
+                                                </OnLoad>
+                                                <OnUpdate>BenillaOptionsPresetRow_OnUpdate(this)</OnUpdate>
+                                            </Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowUiScale" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGraphicsPreset" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGraphicsPreset" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "uiScale", "UI Scale",
                                                     "OPTION_TOOLTIP_UI_SCALE")
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[1].minValue,
-                                                    OptionsFrameSliders[1].maxValue,
-                                                    OptionsFrameSliders[1].valueStep)
+                                                local info = BenillaGraphicsSliderInfo(1)
+                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
+                                                    info.valueStep)
                                                 -- A live write would rescale the slider mid-drag.
                                                 this.deferred = 1
                                             </OnLoad></Scripts>
@@ -1898,9 +2353,9 @@
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "farclip", "Terrain Distance",
                                                     "OPTION_TOOLTIP_FARCLIP")
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[2].minValue,
-                                                    OptionsFrameSliders[2].maxValue,
-                                                    OptionsFrameSliders[2].valueStep, "raw")
+                                                local info = BenillaGraphicsSliderInfo(2)
+                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
+                                                    info.valueStep, "raw")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowWorldDetail" inherits="BenillaOptionsSliderRowTemplate">
@@ -1912,9 +2367,9 @@
                                                 BenillaOptionsRow_OnLoad(this, "WorldDetail", "Environment Detail",
                                                     "OPTION_TOOLTIP_ENVIRONMENT_DETAIL")
                                                 -- Stop names from the era quality ladder.
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[3].minValue,
-                                                    OptionsFrameSliders[3].maxValue,
-                                                    OptionsFrameSliders[3].valueStep, nil,
+                                                local info = BenillaGraphicsSliderInfo(3)
+                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
+                                                    info.valueStep, nil,
                                                     { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -1930,83 +2385,313 @@
                                                     "OPTION_TOOLTIP_SPELL_DETAIL")
                                                 -- Our names for the handler's emission scalars
                                                 -- 0.33, 0.66 and 1.0 (`0x689510`).
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[8].minValue,
-                                                    OptionsFrameSliders[8].maxValue,
-                                                    OptionsFrameSliders[8].valueStep, nil,
+                                                local info = BenillaGraphicsSliderInfo(8)
+                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
+                                                    info.valueStep, nil,
                                                     { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <!-- An API row over GetGamma/SetGamma, whose unit is
-                                             `1 - gamma`; writing `gamma` would invert the
-                                             control. -->
+                                        <!-- Deviation: benilla's own level control, beside
+                                             1.12's Gamma (ui_gamma.rs). -->
                                         <Frame name="$parentRowBrightness" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "brightness", "Brightness",
+                                                    "BENILLA_TOOLTIP_BRIGHTNESS")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.05)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- An API row over GetGamma/SetGamma, whose unit is
+                                             `1 - gamma`; writing `gamma` would invert the
+                                             control. -->
+                                        <Frame name="$parentRowGamma" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowBrightness" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowBrightness" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
                                                 -- OptionsFrame_SetDefaults' default (l.444-445);
                                                 -- `or 1` covers a VM with no CVars.
                                                 local gd = tonumber(GetCVarDefault("gamma")) or 1
                                                 BenillaOptionsNumFuncRow_OnLoad(this, GetGamma, SetGamma,
-                                                    tostring(1 - gd), "Brightness",
-                                                    "BENILLA_TOOLTIP_BRIGHTNESS")
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[6].minValue,
-                                                    OptionsFrameSliders[6].maxValue,
-                                                    OptionsFrameSliders[6].valueStep, "travel")
+                                                    tostring(1 - gd), GAMMA,
+                                                    "BENILLA_TOOLTIP_GAMMA")
+                                                local info = BenillaGraphicsSliderInfo(6)
+                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
+                                                    info.valueStep, "gamma")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- On the CVar, as 1.12's lands: there is no
                                              SetweatherDensity global. -->
                                         <Frame name="$parentRowWeatherDensity" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowBrightness" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowBrightness" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGamma" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGamma" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "weatherDensity", "Weather Intensity",
                                                     "OPTION_TOOLTIP_WEATHER_DETAIL")
                                                 -- Our names for `0x67b870`'s spawn-rate gains
                                                 -- `{0.1, 0.33, 0.66, 1.0}` (`[0x8680ec]`).
-                                                BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[9].minValue,
-                                                    OptionsFrameSliders[9].maxValue,
-                                                    OptionsFrameSliders[9].valueStep, nil,
+                                                local info = BenillaGraphicsSliderInfo(9)
+                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
+                                                    info.valueStep, nil,
                                                     { "Minimal", "Low", "Medium", "Full" })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowDisplayMode" inherits="BenillaOptionsDropdownRowTemplate">
+                                        <Frame name="$parentRowVerticalSync" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowWeatherDensity" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowWeatherDensity" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                -- Deviation: modern Classic's two-entry Display
-                                                -- Mode, as there is no exclusive fullscreen;
-                                                -- gxWindow "0" is the borderless window.
-                                                BenillaOptionsRow_OnLoad(this, "gxWindow", "Display Mode",
-                                                    "BENILLA_TOOLTIP_DISPLAY_MODE")
-                                                BenillaOptionsDropdownRow_Setup(this, {
-                                                    { text = "Windowed (Fullscreen)", value = "0" },
-                                                    { text = "Windowed", value = "1" },
-                                                })
-                                            </OnLoad></Scripts>
-                                        </Frame>
-                                        <Frame name="$parentRowVerticalSync" inherits="BenillaOptionsCheckboxRowTemplate">
-                                            <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowDisplayMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowDisplayMode" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            </Anchors>
-                                            <Scripts><OnLoad>
-                                                -- Not deferred despite gxRestart: vsync changes
-                                                -- live.
+                                                -- 1.12's Video Options checkbox 5. Staged to Apply
+                                                -- like the page; the present mode then changes
+                                                -- live despite its gxRestart = 1.
                                                 BenillaOptionsRow_OnLoad(this, "gxVSync", "Vertical Sync",
                                                     "OPTION_TOOLTIP_VERTICAL_SYNC")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowRenderScale" inherits="BenillaOptionsSliderRowTemplate">
+                                        <Frame name="$parentRowWorldShadows" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "worldShadows", "Real Character Shadows",
+                                                    "BENILLA_TOOLTIP_WORLD_SHADOWS")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowHdModels" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWorldShadows" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldShadows" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Use updated character models -- benilla's own
+                                                -- row, and the only one on this page that changes
+                                                -- what the world is MADE of rather than how it is
+                                                -- drawn. The player supplies the art (patch-A.MPQ
+                                                -- beside the other archives; a /data-hd container
+                                                -- in the browser) and this box is whether the
+                                                -- chain mounts it.
+                                                --
+                                                -- Apply writes the CVar like every row on the
+                                                -- page. In the browser that edge swaps the layer
+                                                -- live (crate::hd_models: mount, catalogs,
+                                                -- caches, reloads, then the character bodies
+                                                -- rebuild). A native chain decides its archives
+                                                -- as it opens, so there the next start reads it
+                                                -- (cvars::apply_boot_layers). The tooltip says
+                                                -- which.
+                                                BenillaOptionsRow_OnLoad(this, "hdCharacterModels",
+                                                    "Use updated character models",
+                                                    "BENILLA_TOOLTIP_HD_MODELS")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAmbientOcclusion" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowHdModels" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowHdModels" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Ambient Occlusion -- the AO half of the
+                                                -- screen-space indirect-lighting pass
+                                                -- (benilla_world::ssilvb). benilla's own row, no
+                                                -- 1.12 counterpart, in the Render Scale mould.
+                                                --
+                                                -- 0-100%, narrower than the CVar's own clamp
+                                                -- (SSILVB_RANGE, 0-2). The headroom above is for
+                                                -- a hand-typed CVar and for looking at an
+                                                -- exaggerated term while tuning; this is what a
+                                                -- player should be offered.
+                                                --
+                                                -- fork: staged to Apply like every Graphics row
+                                                -- (the maintainer's call); the render node reads
+                                                -- the strength each frame from then on.
+                                                BenillaOptionsRow_OnLoad(this, "ssaoStrength", "Ambient Occlusion",
+                                                    "BENILLA_TOOLTIP_AMBIENT_OCCLUSION")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.05)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowIndirectLight" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAmbientOcclusion" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAmbientOcclusion" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Indirect Lighting -- the colour-bleed half of
+                                                -- the same gather, and the same row shape as its
+                                                -- neighbour above for the same reasons. At 0% the
+                                                -- bounce term is exactly zero and Ambient
+                                                -- Occlusion is left running on its own.
+                                                BenillaOptionsRow_OnLoad(this, "ssgiStrength", "Indirect Lighting",
+                                                    "BENILLA_TOOLTIP_INDIRECT_LIGHT")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.05)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowWaterDetail" inherits="BenillaOptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowIndirectLight" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowIndirectLight" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Water Detail -- which of benilla's two liquid
+                                                -- renderers draws the world. A DROPDOWN rather than a
+                                                -- checkbox, and the difference is load-bearing:
+                                                -- BenillaOptionsCheckbox_OnClick writes "1"/"0", and this row
+                                                -- writes "0"/"2" because those are the REFERENCE's own
+                                                -- tier numbers (4.1.0's Liquid::CMaterialWater::
+                                                -- InitResources switches on waterDetail: Water at 0,
+                                                -- MediumWater at 1, ProcWaterAbove/Below at 2).
+                                                -- benilla implements 0 and 2 and leaves 1 empty, so a
+                                                -- medium tier can land later without renumbering what
+                                                -- players already have in config.toml.
+                                                --
+                                                -- Modern (the Cataclysm-era renderer) is the default: it
+                                                -- is the newer look and the better one. Classic stays a
+                                                -- click away for a player who wants the original, or whose
+                                                -- machine would rather not pay for the screen-space passes.
+                                                BenillaOptionsRow_OnLoad(this, "waterDetail", "Water Detail",
+                                                    "BENILLA_TOOLTIP_WATER_DETAIL")
+                                                -- "Modern (SSR)" is tier 1: the same modern water
+                                                -- without its planar mirror render, reflecting
+                                                -- through the screen-space trace alone.
+                                                -- "Modern (Experimental)" is tier 3: Modern with
+                                                -- the fork's stylised clear surface (the bed through
+                                                -- the water, a calm swell, a capped reflection) in
+                                                -- place of the reference's combine, under either
+                                                -- lighting model.
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Modern", value = "2" },
+                                                    { text = "Modern (Experimental)", value = "3" },
+                                                    { text = "Modern (SSR)", value = "1" },
+                                                    { text = "Classic", value = "0" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowLightingModel" inherits="BenillaOptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: Lighting -- `lightingModel`, 0 classic / 1 modern.
+                                                -- Written like every row (SetCVar), so config.toml keeps it.
+                                                BenillaOptionsRow_OnLoad(this, "lightingModel", "Lighting",
+                                                    "BENILLA_TOOLTIP_LIGHTING_MODEL")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Classic", value = "0" },
+                                                    { text = "Modern", value = "1" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowLightingQuality" inherits="BenillaOptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowLightingModel" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowLightingModel" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: Lighting Quality -- `lightingQuality`, the modern tier.
+                                                BenillaOptionsRow_OnLoad(this, "lightingQuality", "Lighting Quality",
+                                                    "BENILLA_TOOLTIP_LIGHTING_QUALITY")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Low", value = "0" },
+                                                    { text = "Medium", value = "1" },
+                                                    { text = "High", value = "2" },
+                                                    { text = "Ultra", value = "3" },
+                                                    { text = "Cinematic", value = "4" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAutoExposure" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowLightingQuality" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowLightingQuality" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: Auto Exposure -- `autoExposure`, the modern
+                                                -- model's light auto-exposure.
+                                                BenillaOptionsRow_OnLoad(this, "autoExposure", "Auto Exposure",
+                                                    "BENILLA_TOOLTIP_AUTO_EXPOSURE")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowServerTimeOffset" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: `serverTimeOffset`, our own row: whole
+                                                -- hours on the server's time of day, -12 to +12.
+                                                BenillaOptionsRow_OnLoad(this, "serverTimeOffset", "Server Time Offset",
+                                                    "BENILLA_TOOLTIP_SERVER_TIME_OFFSET")
+                                                BenillaOptionsSliderRow_Setup(this, -12, 12, 1, "hours")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowFoliageWind" inherits="BenillaOptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowServerTimeOffset" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowServerTimeOffset" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: Foliage Wind -- `foliageWind`, 0 off /
+                                                -- 1 grass / 2 grass and trees (the Everwood port).
+                                                BenillaOptionsRow_OnLoad(this, "foliageWind", "Foliage Wind",
+                                                    "BENILLA_TOOLTIP_FOLIAGE_WIND")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Off", value = "0" },
+                                                    { text = "Grass", value = "1" },
+                                                    { text = "Grass + Trees", value = "2" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowFoliageWindStrength" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFoliageWind" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFoliageWind" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: the sway gain, 0.25..3 (100% the shipped
+                                                -- tuning).
+                                                BenillaOptionsRow_OnLoad(this, "foliageWindStrength", "Foliage Wind Strength",
+                                                    "BENILLA_TOOLTIP_FOLIAGE_WIND_STRENGTH")
+                                                BenillaOptionsSliderRow_Setup(this, 0.25, 3, 0.25)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRainSurfaces" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFoliageWindStrength" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFoliageWindStrength" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: `rainSurfaces`, wet surfaces in rain (the
+                                                -- Everwood port).
+                                                BenillaOptionsRow_OnLoad(this, "rainSurfaces", "Wet Surfaces in Rain",
+                                                    "BENILLA_TOOLTIP_RAIN_SURFACES")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowFrameGeneration" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRainSurfaces" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRainSurfaces" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: fsr (FORK.md) -- `frameGeneration`,
+                                                -- our own row. Deferred: a write moves the
+                                                -- render target's size cap.
+                                                BenillaOptionsRow_OnLoad(this, "frameGeneration", "Use Frame Generation",
+                                                    "BENILLA_TOOLTIP_FRAME_GENERATION")
+                                                this.deferred = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRenderScale" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Deviation: our own row (the reference draws to
@@ -2015,8 +2700,25 @@
                                                 -- rebuilds the render target.
                                                 BenillaOptionsRow_OnLoad(this, "renderScale", "Render Scale",
                                                     "BENILLA_TOOLTIP_RENDER_SCALE")
-                                                BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.05)
+                                                -- fork: fsr (FORK.md) -- a 0.01 grid, so
+                                                -- FSR's 0.67 is a stop, marked with 1x.
+                                                this.marks = BENILLA_RENDER_SCALE_MARKS
+                                                BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.01)
                                                 this.deferred = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRcasSharpness" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: fsr (FORK.md) -- `rcasSharpness`,
+                                                -- our own row: the SDK's 0-1 sharpness, 87.5%
+                                                -- as shipped, on a grid that stops on it.
+                                                BenillaOptionsRow_OnLoad(this, "rcasSharpness", "RCAS Sharpening",
+                                                    "BENILLA_TOOLTIP_RCAS_SHARPNESS")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.025)
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
@@ -2025,7 +2727,7 @@
                                     <Scripts>
                                         <OnShow>
                                             for i, name in BENILLA_GRAPHICS_SLIDER_ROWS do
-                                                local info = OptionsFrameSliders[i]
+                                                local info = BenillaGraphicsSliderInfo(i)
                                                 local row = getglobal(this:GetName() .. name)
                                                 if ( info and row ) then
                                                     BenillaOptionsSliderRow_Setup(row, info.minValue, info.maxValue,
@@ -3130,5 +3832,706 @@
     <Script><![CDATA[
         -- The reference's OptionsFrame row (UIParent.lua:16): the centre slot, openable while dead.
         UIPanelWindows["BenillaOptionsFrame"] = { area = "center", pushable = 0, whileDead = 1 }
+    ]]></Script>
+
+    <!--
+        Our Graphics rows in Turtle WoW 1.18.1's own options window, which the game menu opens on
+        a Turtle realm (GameMenuFrame.xml). That window is data-driven: its Options\Options.lua
+        lists categories of rows in `GameOptions`, and its OptionsFrame.lua builds a category's
+        controls from them each time the category shows, labelling a row with `_G[row.name]` and
+        tipping it with `row.desc`. Turtle's rows benilla cannot honour are cut, and ours join the
+        categories Turtle's own sit in. A 1.12.1 chain has no `GameOptions`, and none of this runs
+        there.
+    -->
+    <Script><![CDATA[
+        -- Read at load, after the chain's OptionsFrame.xml and before any addon.
+        BENILLA_TURTLE_OPTIONS = type(GameOptions) == "table" and 1 or nil
+
+        if ( BENILLA_TURTLE_OPTIONS ) then
+            -- Row labels, read through `_G[row.name]`: our rows' own.
+            BENILLA_WORLD_SHADOWS = "Real Character Shadows"
+            BENILLA_HD_MODELS = "Use updated character models"
+            BENILLA_REFORGED_MODELS = "Use reforged game models and textures"
+            BENILLA_LIGHTING_MODEL = "Lighting"
+
+            -- A row that waits for the next load says so when applied, in the shape of 1.12's
+            -- own CLIENT_RESTART_ALERT dialog (StaticPopup.lua), in the browser's words.
+            BENILLA_RELOAD_REQUIRED = "Reload the game to apply this change: the reforged "
+                .. "game models and textures are chosen as the game loads."
+            StaticPopupDialogs["BENILLA_RELOAD_REQUIRED"] = {
+                text = BENILLA_RELOAD_REQUIRED,
+                button1 = OKAY,
+                showAlert = 1,
+                timeout = 0,
+                exclusive = 1,
+                whileDead = 1,
+                hideOnEscape = 1,
+            }
+            BENILLA_LIGHTING_QUALITY = "Lighting Quality"
+            BENILLA_AUTO_EXPOSURE = "Auto Exposure"
+            BENILLA_SERVER_TIME_OFFSET = "Server Time Offset"
+            BENILLA_AMBIENT_OCCLUSION = "Ambient Occlusion"
+            BENILLA_INDIRECT_LIGHT = "Indirect Lighting"
+            BENILLA_WATER_DETAIL = "Water Detail"
+            BENILLA_RENDER_SCALE = "Render Scale"
+            -- fork: fsr (FORK.md)
+            BENILLA_FRAME_GENERATION = "Use Frame Generation"
+            BENILLA_RCAS_SHARPNESS = "RCAS Sharpening"
+            -- fork: the Everwood port (FORK.md)
+            BENILLA_FOLIAGE_WIND = "Foliage Wind"
+            BENILLA_FOLIAGE_WIND_STRENGTH = "Foliage Wind Strength"
+            BENILLA_RAIN_SURFACES = "Wet Surfaces in Rain"
+            BENILLA_GRAPHICS_PRESET = "Graphics Preset"
+            BENILLA_BRIGHTNESS = "Brightness"
+            -- Our window's rows Turtle's lacks, in our window's words.
+            BENILLA_AUTO_LOOT = "Auto Loot"
+            BENILLA_BACKGROUND_SOUND = "Enable Sound in Background"
+            BENILLA_DISABLE_SPAM_FILTER = "Disable Spam Filter"
+            BENILLA_TOOLTIP_AUTO_LOOT = "Take everything from a corpse as its loot window "
+                .. "opens. Hold Shift while looting to open the window instead."
+            BENILLA_ENEMY_NAMEPLATES = "Enemy Name Plates"
+            BENILLA_FRIENDLY_NAMEPLATES = "Friendly Name Plates"
+
+            -- Turtle's getter/setter shape for the plate globals: a getter its checkbox can
+            -- `tonumber`, a setter handed the number its click computes or the string Defaults
+            -- and Cancel write back.
+            function BenillaTurtle_GetEnemyPlates()
+                return NAMEPLATES_ON and "1" or "0"
+            end
+            function BenillaTurtle_SetEnemyPlates(value)
+                BenillaOptionsFrame_SetEnemyPlates(tostring(value))
+            end
+            function BenillaTurtle_GetFriendlyPlates()
+                return FRIENDNAMEPLATES_ON and "1" or "0"
+            end
+            function BenillaTurtle_SetFriendlyPlates(value)
+                BenillaOptionsFrame_SetFriendlyPlates(tostring(value))
+            end
+
+            -- A dropdown's `<identifier>Dropdown_Init`, in the shape of Turtle's own
+            -- (Options\Functions.lua): each entry picks through OptionsFrameDropdown_OnValueChanged.
+            local function dropdown(cvar, entries)
+                return function()
+                    local menu = getglobal(UIDROPDOWNMENU_INIT_MENU)
+                    for _, entry in ipairs(entries) do
+                        local info = {}
+                        info.text = entry.text
+                        info.value = entry.value
+                        info.func = OptionsFrameDropdown_OnValueChanged
+                        UIDropDownMenu_AddButton(info)
+                    end
+                    UIDropDownMenu_SetSelectedValue(menu, GetCVar(cvar))
+                end
+            end
+            -- The entries our own rows offer, in their order.
+            BenillaLightingModelDropdown_Init = dropdown("lightingModel", {
+                { text = "Classic", value = "0" },
+                { text = "Modern", value = "1" },
+            })
+            BenillaLightingQualityDropdown_Init = dropdown("lightingQuality", {
+                { text = "Low", value = "0" },
+                { text = "Medium", value = "1" },
+                { text = "High", value = "2" },
+                { text = "Ultra", value = "3" },
+                { text = "Cinematic", value = "4" },
+            })
+            BenillaGraphicsPresetDropdown_Init = dropdown("graphicsQuality", {
+                { text = "Classic", value = "Classic" },
+                { text = "Low", value = "Low" },
+                { text = "Medium", value = "Medium" },
+                { text = "High", value = "High" },
+                { text = "Ultra", value = "Ultra" },
+                { text = "Cinematic", value = "Cinematic" },
+                { text = "Custom", value = "Custom" },
+            })
+            BenillaFoliageWindDropdown_Init = dropdown("foliageWind", {
+                { text = "Off", value = "0" },
+                { text = "Grass", value = "1" },
+                { text = "Grass + Trees", value = "2" },
+            })
+            BenillaWaterDetailDropdown_Init = dropdown("waterDetail", {
+                { text = "Modern", value = "2" },
+                { text = "Modern (Experimental)", value = "3" },
+                { text = "Modern (SSR)", value = "1" },
+                { text = "Classic", value = "0" },
+            })
+
+            -- ── Only rows that work here ──
+            -- Deviation: Turtle's rows benilla cannot honour are cut, by the name Turtle keys them
+            -- with (Options\Options.lua).
+            local cut = {
+                -- What the browser page owns, not the client: the display mode and its refresh,
+                -- the desktop's gamma ramp, multisampling, vsync and the hardware cursor.
+                RESOLUTION = 1, WINDOWED_MODE = 1, WINDOWED_MAXIMIZED = 1, REFRESH = 1,
+                DESKTOP_GAMMA = 1, MULTISAMPLE = 1, VERTICAL_SYNC = 1, TRIPLE_BUFFER = 1,
+                HARDWARE_CURSOR = 1, FIX_LAG = 1,
+                -- A CVar benilla has no reader for: `useUiScale` (the UI scale always applies),
+                -- `lod`, `shadowLevel`, `baseMip`, the 1.12 shader switches, `movieSubtitle`.
+                -- Spell Detail (`spellEffectLevel`) stays: it drives the particle and shard
+                -- rates. Player Titles (`UnitNamePlayerPVPTitle`) stays: the overhead name's
+                -- rank prefix reads it.
+                USE_UISCALE = 1, WORLD_LOD = 1, TERRAIN_MIP = 1, TEXTURE_DETAIL = 1,
+                ENABLE_ALL_SHADERS = 1, TERRAIN_HIGHLIGHTS = 1,
+                FULL_SCREEN_GLOW = 1, DEATH_EFFECT = 1, VERTEX_ANIMATION_SHADERS = 1,
+                PHONG_SHADING = 1, USE_WEATHER_SHADER = 1, CINEMATIC_SUBTITLES = 1,
+                -- Latched at boot into every sampler (`tex_filter`), which a page reload re-reads.
+                TRILINEAR_FILTERING = 1, ANISOTROPIC = 1,
+                -- The engine path is missing: Simple Chat's re-layout, a zone-objective tracker,
+                -- and the GUID `UnitExists` returns on Turtle, which its challenge lookup keys by.
+                SIMPLE_CHAT_TEXT = 1, HIDE_OUTDOOR_WORLD_STATE_TEXT = 1,
+                SHOW_PLAYER_CHALLENGES_TEXT = 1,
+            }
+            for i = getn(GameOptions), 1, -1 do
+                local category = GameOptions[i]
+                if ( category.options ) then
+                    for k = getn(category.options), 1, -1 do
+                        local option = category.options[k]
+                        if ( cut[option.name] ) then
+                            tremove(category.options, k)
+                        elseif ( option.name == "UI_SCALE" ) then
+                            -- Gated on a cut row (`useUiScale`): always live here.
+                            option.dependency = nil
+                        elseif ( option.name == "GAMMA" ) then
+                            -- Gated on a cut row (`desktopGamma`): always live here, and tipped
+                            -- as our window's Gamma, beside our Brightness.
+                            option.dependency = nil
+                            option.desc = BENILLA_TOOLTIP_GAMMA
+                        elseif ( option.name == "ENVIRONMENT_DETAIL" ) then
+                            -- Turtle's `smallCull` 0-2 is our `WorldDetail` 0-2, which the 1.12
+                            -- slider of this name drives.
+                            option.cvar = "WorldDetail"
+                        elseif ( option.name == "FARCLIP" ) then
+                            -- Deviation: up to the engine's ceiling, as our window's row
+                            -- (`BENILLA_FARCLIP_MAX`).
+                            option.maxval = BENILLA_FARCLIP_MAX
+                        end
+                    end
+                end
+            end
+
+            -- The rows, by the category they join; the bounds are our rows'. The tooltips are
+            -- ours, whose "Applies when you click Apply" holds here too (below).
+            local rows = {
+                -- fork: the Graphics Preset heads the first video category
+                -- (FORK.md). `benillaPreset`: committed before every other row,
+                -- and the window follows the rows the host then writes.
+                { category = DISPLAY, first = 1, row = {
+                    name = "BENILLA_GRAPHICS_PRESET", desc = BENILLA_TOOLTIP_GRAPHICS_PRESET,
+                    type = "dropdown", identifier = "BenillaGraphicsPreset",
+                    cvar = "graphicsQuality", benillaPreset = 1 } },
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_WORLD_SHADOWS", desc = BENILLA_TOOLTIP_WORLD_SHADOWS,
+                    type = "checkbutton", cvar = "worldShadows" } },
+                -- Turtle WoW runs in the browser only, where the layer swaps live on Apply.
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_HD_MODELS", desc = BENILLA_TOOLTIP_HD_MODELS,
+                    type = "checkbutton", cvar = "hdCharacterModels" } },
+                -- Latched as the page loads: Apply writes it for the next load and says so.
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_REFORGED_MODELS", desc = BENILLA_TOOLTIP_REFORGED_MODELS,
+                    type = "checkbutton", cvar = "reforgedModels", benillaReload = 1 } },
+                -- fork: the Everwood port (FORK.md)
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_FOLIAGE_WIND", desc = BENILLA_TOOLTIP_FOLIAGE_WIND,
+                    type = "dropdown", identifier = "BenillaFoliageWind", cvar = "foliageWind" } },
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_FOLIAGE_WIND_STRENGTH",
+                    desc = BENILLA_TOOLTIP_FOLIAGE_WIND_STRENGTH,
+                    type = "slider", cvar = "foliageWindStrength",
+                    minval = 0.25, maxval = 3, step = 0.25 } },
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_RAIN_SURFACES", desc = BENILLA_TOOLTIP_RAIN_SURFACES,
+                    type = "checkbutton", cvar = "rainSurfaces" } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_LIGHTING_MODEL", desc = BENILLA_TOOLTIP_LIGHTING_MODEL,
+                    type = "dropdown", identifier = "BenillaLightingModel",
+                    cvar = "lightingModel" } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_LIGHTING_QUALITY", desc = BENILLA_TOOLTIP_LIGHTING_QUALITY,
+                    type = "dropdown", identifier = "BenillaLightingQuality",
+                    cvar = "lightingQuality" } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_AUTO_EXPOSURE", desc = BENILLA_TOOLTIP_AUTO_EXPOSURE,
+                    type = "checkbutton", cvar = "autoExposure" } },
+                -- fork: the hour the world's day and night are drawn at, under the light's rows.
+                { after = "BENILLA_AUTO_EXPOSURE", row = {
+                    name = "BENILLA_SERVER_TIME_OFFSET", desc = BENILLA_TOOLTIP_SERVER_TIME_OFFSET,
+                    type = "slider", cvar = "serverTimeOffset", minval = -12, maxval = 12,
+                    step = 1 } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_AMBIENT_OCCLUSION", desc = BENILLA_TOOLTIP_AMBIENT_OCCLUSION,
+                    type = "slider", cvar = "ssaoStrength", minval = 0, maxval = 1.0, step = 0.05 } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_INDIRECT_LIGHT", desc = BENILLA_TOOLTIP_INDIRECT_LIGHT,
+                    type = "slider", cvar = "ssgiStrength", minval = 0, maxval = 1.0, step = 0.05 } },
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_WATER_DETAIL", desc = BENILLA_TOOLTIP_WATER_DETAIL,
+                    type = "dropdown", identifier = "BenillaWaterDetail", cvar = "waterDetail" } },
+                -- Our level control, above Turtle's Gamma as above ours.
+                { before = "GAMMA", row = {
+                    name = "BENILLA_BRIGHTNESS", desc = BENILLA_TOOLTIP_BRIGHTNESS,
+                    type = "slider", cvar = "brightness", minval = 0, maxval = 1.0, step = 0.05 } },
+                { category = DISPLAY, row = {
+                    name = "BENILLA_RENDER_SCALE", desc = BENILLA_TOOLTIP_RENDER_SCALE,
+                    type = "slider", cvar = "renderScale", minval = 0.5, maxval = 2.0, step = 0.01,
+                    -- fork: fsr (FORK.md) -- FSR's 0.67 and 1x, marked on the groove.
+                    benillaMarks = BENILLA_RENDER_SCALE_MARKS, numberLabels = true } },
+                -- fork: fsr (FORK.md) -- FSR's sharpening, right under Render Scale.
+                { after = "BENILLA_RENDER_SCALE", row = {
+                    name = "BENILLA_RCAS_SHARPNESS", desc = BENILLA_TOOLTIP_RCAS_SHARPNESS,
+                    type = "slider", cvar = "rcasSharpness", minval = 0, maxval = 1.0, step = 0.025 } },
+                -- fork: fsr (FORK.md)
+                { category = DISPLAY, row = {
+                    name = "BENILLA_FRAME_GENERATION", desc = BENILLA_TOOLTIP_FRAME_GENERATION,
+                    type = "checkbutton", cvar = "frameGeneration" } },
+                -- Our window's rows Turtle's lacks, each beside the Turtle row it sits by in ours.
+                { after = "AUTO_SELF_CAST_TEXT", row = {
+                    name = "BENILLA_AUTO_LOOT", desc = BENILLA_TOOLTIP_AUTO_LOOT,
+                    type = "checkbutton", cvar = "autoLootDefault" } },
+                { after = "ENABLE_ERROR_SPEECH", row = {
+                    name = "BENILLA_BACKGROUND_SOUND", desc = BENILLA_TOOLTIP_BACKGROUND_SOUND,
+                    type = "checkbutton", cvar = "Sound_EnableSoundWhenGameIsInBG" } },
+                -- 1.12's Disable Spam Filter box (UIOptionsFrame.lua:47), inverted as there.
+                { after = "PROFANITY_FILTER", row = {
+                    name = "BENILLA_DISABLE_SPAM_FILTER", desc = OPTION_TOOLTIP_DISABLE_SPAM_FILTER,
+                    type = "checkbutton", cvar = "spamFilter", inverted = true } },
+                -- The V-key plates, heading the overhead names as on our Nameplates page.
+                { before = "SHOW_PLAYER_NAMES", row = {
+                    name = "BENILLA_ENEMY_NAMEPLATES", type = "checkbutton",
+                    getter = "BenillaTurtle_GetEnemyPlates",
+                    setter = "BenillaTurtle_SetEnemyPlates", defaultValue = "0" } },
+                { before = "SHOW_PLAYER_NAMES", row = {
+                    name = "BENILLA_FRIENDLY_NAMEPLATES", type = "checkbutton",
+                    getter = "BenillaTurtle_GetFriendlyPlates",
+                    setter = "BenillaTurtle_SetFriendlyPlates", defaultValue = "0" } },
+            }
+            -- A row placed by its neighbour: the category holding the Turtle row of that name.
+            local function placeBeside(entry)
+                local anchor = entry.after or entry.before
+                for _, category in ipairs(GameOptions) do
+                    for k, option in ipairs(category.options or {}) do
+                        if ( option.name == anchor ) then
+                            tinsert(category.options, entry.after and k + 1 or k, entry.row)
+                            return 1
+                        end
+                    end
+                end
+            end
+            -- The first category of a name: DISPLAY is both a VIDEO and an interface category,
+            -- and VIDEO's comes first.
+            for _, entry in ipairs(rows) do
+                local placed
+                if ( entry.after or entry.before ) then
+                    placed = placeBeside(entry)
+                end
+                for _, category in ipairs(placed and {} or GameOptions) do
+                    if ( category.options and category.name == entry.category ) then
+                        if ( entry.first ) then
+                            tinsert(category.options, 1, entry.row)
+                        else
+                            tinsert(category.options, entry.row)
+                        end
+                        placed = 1
+                        break
+                    end
+                end
+                if ( not placed ) then
+                    error("Turtle options: no place " .. tostring(entry.category or entry.after
+                        or entry.before)
+                        .. " for " .. entry.row.name)
+                end
+            end
+            -- A category left with no row goes, once ours are in: PIXEL_SHADERS loses every
+            -- Turtle row to the cut but holds our lighting rows; VIDEO's Miscellaneous goes.
+            for i = getn(GameOptions), 1, -1 do
+                local category = GameOptions[i]
+                if ( category.options and getn(category.options) == 0 ) then
+                    tremove(GameOptions, i)
+                end
+            end
+            -- Turtle's OnLoad listed the categories before the cut: list them again.
+            OptionsFrame_UpdateCategories()
+
+            -- ── The VIDEO rows stage to Apply ──
+            -- Deviation: Turtle's window writes a row the moment its control changes
+            -- (OptionsFrame.lua's local `OnControlValueChanged`). Here its VIDEO rows (the
+            -- categories under the VIDEO header) stage instead and commit on an Apply button, as
+            -- every Graphics row of our window does; Okay commits them too, and Cancel or closing
+            -- the window discards them, having written nothing. Its other rows write as Turtle's do.
+            local video
+            for _, category in ipairs(GameOptions) do
+                if ( not category.options ) then
+                    video = category.name == VIDEO
+                elseif ( video ) then
+                    for _, option in ipairs(category.options) do
+                        option.benillaStaged = 1
+                    end
+                end
+            end
+
+            -- option -> the value its control shows, uncommitted.
+            local staged = {}
+
+            local function committed(option)
+                if ( option.cvar ) then
+                    return GetCVar(option.cvar)
+                elseif ( option.uvar ) then
+                    return getglobal(option.uvar)
+                elseif ( option.getter ) then
+                    return getglobal(option.getter)()
+                end
+            end
+
+            local function same(a, b)
+                if ( tonumber(a) and tonumber(b) ) then
+                    return tonumber(a) == tonumber(b)
+                end
+                return tostring(a) == tostring(b)
+            end
+
+            local apply = CreateFrame("Button", "OptionsFrameApply", OptionsFrame, "UIPanelButtonTemplate")
+            apply:SetWidth(96)
+            apply:SetHeight(22)
+            apply:SetPoint("BOTTOMRIGHT", OptionsFrameOkay, "BOTTOMLEFT", 0, 0)
+            apply:SetText("Apply")
+            apply:Hide()
+
+            -- A value equal to the committed one is no edit.
+            local function stage(option, value)
+                if ( same(value, committed(option)) ) then
+                    staged[option] = nil
+                else
+                    staged[option] = value
+                end
+                if ( next(staged) ) then
+                    apply:Show()
+                else
+                    apply:Hide()
+                end
+            end
+
+            -- Commit what is staged as OnControlValueChanged writes a row, then mark it
+            -- unchanged, so Cancel's OptionsFrame_RevertOptions leaves it. `redraw` re-renders the
+            -- category, since Turtle greys a dependent row off the committed value.
+            local function commit(redraw)
+                if ( not next(staged) ) then
+                    return
+                end
+                local restart, reload
+                -- fork: the Graphics Preset first, so a row staged beside it wins over its rung;
+                -- the watch below follows what the host then writes.
+                for option, value in pairs(staged) do
+                    if ( option.benillaPreset ) then
+                        BenillaPresetWatch.reforged = GetCVar("reforgedModels")
+                        BenillaPresetWatch.frames = 6
+                        BenillaPresetWatch:Show()
+                        SetCVar(option.cvar, value, option.name)
+                    end
+                end
+                for option, value in pairs(staged) do
+                    if ( option.benillaPreset ) then
+                        -- Written above.
+                    elseif ( option.cvar ) then
+                        SetCVar(option.cvar, value, option.name)
+                    elseif ( option.uvar ) then
+                        setglobal(option.uvar, value)
+                    elseif ( option.setter ) then
+                        getglobal(option.setter)(tonumber(value))
+                    end
+                    if ( option.func ) then
+                        getglobal(option.func)(value)
+                    end
+                    restart = restart or option.restartGx
+                    reload = reload or option.benillaReload
+                    option.initialValue = value
+                    option.changedValue = false
+                end
+                staged = {}
+                apply:Hide()
+                if ( restart ) then
+                    RestartGx()
+                end
+                if ( reload ) then
+                    StaticPopup_Show("BENILLA_RELOAD_REQUIRED")
+                end
+                if ( redraw ) then
+                    OptionsFrame_OnShow()
+                end
+            end
+
+            apply:SetScript("OnClick", function()
+                PlaySound("igMainMenuOption")
+                commit(1)
+            end)
+
+            -- fork: the Graphics Preset's rows are written by the host a frame after its name
+            -- is. A few frames on, the window re-renders from them, and a rung that moved the
+            -- reforged models says the reload it waits for, as that row's own Apply does.
+            local watch = CreateFrame("Frame", "BenillaPresetWatch", UIParent)
+            watch:Hide()
+            watch:SetScript("OnUpdate", function()
+                this.frames = this.frames - 1
+                if ( this.frames > 0 ) then
+                    return
+                end
+                this:Hide()
+                if ( GetCVar("reforgedModels") ~= this.reforged ) then
+                    StaticPopup_Show("BENILLA_RELOAD_REQUIRED")
+                end
+                if ( OptionsFrame:IsVisible() ) then
+                    OptionsFrame_OnShow()
+                end
+            end)
+            local okay = OptionsFrameOkay:GetScript("OnClick")
+            OptionsFrameOkay:SetScript("OnClick", function()
+                commit()
+                okay()
+            end)
+
+            -- ── A slider reads out its value ──
+            -- Deviation: Turtle's slider labels only its ends (OptionsFrameTemplates.xml). Here
+            -- each also reads out its value at its right, as every slider row of our window does
+            -- and in that row's words; the readouts' column is the right end of every row, which
+            -- the controls' column stops short of (below).
+            BENILLA_TURTLE_VALUE_WIDTH = 44
+            -- The readouts that are not the value as a percentage, by the name Turtle keys the
+            -- row with: our window's row of that CVar. A range past 10 reads its number.
+            local percent, raw = {}, { fmt = "raw" }
+            local readouts = {
+                GAMMA = { fmt = "gamma" },
+                MAX_FOLLOW_DIST = { fmt = "yards" },
+                BENILLA_SERVER_TIME_OFFSET = { fmt = "hours" },
+                ENVIRONMENT_DETAIL = { stops = { "Low", "Medium", "High" } },
+                SPELL_DETAIL = { stops = { "Low", "Medium", "High" } },
+                WEATHER_DETAIL = { stops = { "Minimal", "Low", "Medium", "Full" } },
+            }
+            function BenillaTurtle_SliderText(option, value)
+                local readout = readouts[option.name]
+                    or ((tonumber(option.maxval) or 0) > 10 and raw or percent)
+                return BenillaOptionsRow_FormatValue(readout, value)
+            end
+
+            -- Greyed with its row, as Turtle greys the slider's own two labels.
+            local function showValue(frame)
+                local option = frame.option
+                if ( not option or option.type ~= "slider" or not frame.benillaValue ) then
+                    return
+                end
+                local v = frame.control:GetValue()
+                if ( option.inverted ) then
+                    v = option.maxval - v + option.minval
+                end
+                frame.benillaValue:SetText(BenillaTurtle_SliderText(option, v))
+                local color = frame.enabled and NORMAL_FONT_COLOR or GRAY_FONT_COLOR
+                frame.benillaValue:SetTextColor(color.r, color.g, color.b)
+            end
+
+            -- A rendered category's sliders get their readouts, each on its row's own line, level
+            -- with the label and not with the groove Turtle seats 5 above it. Turtle's slider has
+            -- no OnValueChanged (below), so the script that follows a drag is ours alone.
+            local function showValues()
+                for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
+                    local option = frame:IsShown() and frame.option
+                    if ( option and option.type == "slider" ) then
+                        if ( not frame.benillaValue ) then
+                            frame.benillaValue = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+                            frame.benillaValue:SetPoint("LEFT", frame, "RIGHT", 6 - BENILLA_TURTLE_VALUE_WIDTH, 0)
+                            frame.control:SetScript("OnValueChanged", function()
+                                showValue(this:GetParent())
+                            end)
+                        end
+                        showValue(frame)
+                    end
+                end
+            end
+
+            -- Turtle's three control handlers, each computing its value as Turtle's does; a VIDEO
+            -- row stages it, any other row goes to Turtle's own, which may grey a dependent slider.
+            local checkClick = OptionsFrameCheckButton_OnClick
+            function OptionsFrameCheckButton_OnClick()
+                local option = this:GetParent().option
+                if ( not option.benillaStaged ) then
+                    checkClick()
+                    return showValues()
+                end
+                local on = this:GetChecked()
+                local value = on and (option.inverted and "0" or "1") or (option.inverted and "1" or "0")
+                stage(option, value)
+                PlaySound("igMainMenuOptionCheckBoxOn")
+            end
+
+            local dropdownChanged = OptionsFrameDropdown_OnValueChanged
+            function OptionsFrameDropdown_OnValueChanged()
+                local menu = getglobal(UIDROPDOWNMENU_OPEN_MENU)
+                local option = menu:GetParent().option
+                if ( not option.benillaStaged ) then
+                    dropdownChanged()
+                    return showValues()
+                end
+                UIDropDownMenu_SetSelectedValue(menu, this.value)
+                stage(option, this.value)
+            end
+
+            -- Turtle's slider calls this from its OnMouseUp alone (OptionsFrameTemplates.xml): its
+            -- OnValueChanged is the readout's, so a SetValue here re-enters nothing.
+            local sliderChanged = OptionsFrameSlider_OnValueChanged
+            function OptionsFrameSlider_OnValueChanged()
+                local option = this:GetParent().option
+                -- fork: fsr (FORK.md) -- a marked stop pulls a drag that ends near it, and
+                -- the mark is what stages.
+                local v = this:GetValue()
+                local mark = BenillaSlider_MarkNear(option.benillaMarks, v)
+                if ( mark ) then
+                    this:SetValue(mark)
+                    v = mark
+                end
+                if ( not option.benillaStaged ) then
+                    return sliderChanged()
+                end
+                stage(option, option.inverted and (option.maxval - v + option.minval) or v)
+            end
+
+            -- A category re-renders from the committed values; show the staged ones over them, as
+            -- Turtle's UpdateOptions sets each control.
+            local function showStaged()
+                for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
+                    local option = frame:IsShown() and frame.option
+                    local value = option and staged[option]
+                    if ( value ~= nil ) then
+                        if ( option.type == "checkbutton" ) then
+                            frame.control:SetChecked(option.inverted and (1 - tonumber(value)) or tonumber(value))
+                        elseif ( option.type == "slider" ) then
+                            frame.control:SetValue(tonumber(option.inverted and (option.maxval - value + option.minval) or value))
+                        elseif ( option.type == "dropdown" ) then
+                            UIDropDownMenu_Initialize(frame.control, getglobal(option.identifier .. "Dropdown_Init"))
+                            UIDropDownMenu_SetSelectedValue(frame.control, value)
+                        end
+                    end
+                end
+            end
+
+            -- fork: fsr (FORK.md) -- a rendered category's marked sliders get their ticks.
+            -- Turtle hands a category its sliders by index (`OptionsFrameSlider<n>`), so a
+            -- slider that wore another category's ticks drops them first.
+            local function placeMarks()
+                for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
+                    local option = frame:IsShown() and frame.option
+                    if ( option and option.type == "slider" ) then
+                        BenillaSlider_HideMarks(frame.control)
+                        if ( option.benillaMarks ) then
+                            BenillaSlider_PlaceMarks(frame.control, option.minval, option.maxval,
+                                option.benillaMarks)
+                        end
+                    end
+                end
+            end
+
+            -- ── One control column ──
+            -- Deviation: Turtle seats each control at the right end of a 346-wide row whose label
+            -- column is 210: a 128-wide slider, a 110-wide dropdown, a checkbox. Here a page's
+            -- controls share one column, which ends BENILLA_TURTLE_VALUE_WIDTH short of the row's
+            -- right end, where the sliders read out: a slider's groove and a dropdown's capsule
+            -- span it and a checkbox closes it, so every control ends on one line and every slider
+            -- and dropdown starts on one. The column widens into the room the page's longest
+            -- slider or dropdown label leaves, from Turtle's 128 up to
+            -- BENILLA_TURTLE_CONTROL_MAX, which gives a fine slider like Render Scale the travel
+            -- to pick a stop on; a checkbox's label runs under no control, so it does not count.
+            BENILLA_TURTLE_CONTROL_MAX = 176
+            -- The column's width on a row `rowWidth` wide, its longest such label `longest` wide.
+            function BenillaTurtle_ColumnWidth(rowWidth, longest)
+                local room = rowWidth - BENILLA_TURTLE_VALUE_WIDTH - longest - 12
+                return max(128, min(BENILLA_TURTLE_CONTROL_MAX, room))
+            end
+
+            local function seatControls()
+                local rows, longest = {}, 0
+                for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
+                    local option = frame:IsShown() and frame.option
+                    if ( option and option.type ~= "button" ) then
+                        tinsert(rows, frame)
+                        if ( option.type ~= "checkbutton" ) then
+                            -- Turtle's UpdateOptions indents a dependent row's label by 10.
+                            local indent = option.dependency and not option.ignoreOffset and 10 or 0
+                            longest = max(longest, (frame.label:GetStringWidth() or 0) + indent)
+                        end
+                    end
+                end
+                for _, frame in ipairs(rows) do
+                    local control, kind = frame.control, frame.option.type
+                    local width = BenillaTurtle_ColumnWidth(BenillaOptions_SpanWidth(frame), longest)
+                    local right = -BENILLA_TURTLE_VALUE_WIDTH
+                    control:ClearAllPoints()
+                    if ( kind == "slider" ) then
+                        -- Turtle's own seat, 5 above the row's line over its two end labels.
+                        control:SetPoint("RIGHT", frame, "RIGHT", right, 5)
+                        control:SetWidth(width)
+                    elseif ( kind == "dropdown" ) then
+                        -- The menu is its width and 50 (UIDropDownMenu_SetWidth); the capsule's
+                        -- ink stops 17 inside each end of it (CharacterCreate-LabelFrame) and
+                        -- sits 3 above its line.
+                        control:SetPoint("RIGHT", frame, "RIGHT", right + 17, -3)
+                        UIDropDownMenu_SetWidth(width - 16, control)
+                    else
+                        -- The box's ink stops 5 inside its right end (UI-CheckBox-Up).
+                        control:SetPoint("RIGHT", frame, "RIGHT", right + 5, 0)
+                    end
+                end
+            end
+
+            -- What a rendered category gets over Turtle's own render.
+            local function dress()
+                seatControls()
+                showValues()
+                placeMarks()
+            end
+
+            local listClick = OptionsListButton_OnClick
+            function OptionsListButton_OnClick(category, focusOption)
+                listClick(category, focusOption)
+                if ( next(staged) ) then
+                    showStaged()
+                end
+                dress()
+            end
+
+            -- Apply's redraw and a reopen render the category without the list click.
+            local frameOnShow = OptionsFrame_OnShow
+            function OptionsFrame_OnShow()
+                frameOnShow()
+                dress()
+            end
+
+            -- Turtle's Defaults button (OptionsFrame.xml, under the category list) writes the
+            -- shown category's defaults outright, as Turtle's does, over anything staged, and
+            -- renders it bare. On a VIDEO category the preset's watch follows as after Apply: the
+            -- host re-derives the preset from the rows just written, and the reforged models
+            -- moving wait for their reload.
+            local setDefaults = OptionsFrame_SetDefaults
+            function OptionsFrame_SetDefaults(popup)
+                if ( popup ) then
+                    return setDefaults(popup)
+                end
+                staged = {}
+                apply:Hide()
+                local reforged = GetCVar("reforgedModels")
+                setDefaults()
+                dress()
+                for _, frame in ipairs({ OptionsFrameContentScrollFrameChild:GetChildren() }) do
+                    if ( frame:IsShown() and frame.option and frame.option.benillaStaged ) then
+                        watch.reforged = reforged
+                        watch.frames = 6
+                        watch:Show()
+                        break
+                    end
+                end
+            end
+
+            local onHide = OptionsFrame_OnHide
+            function OptionsFrame_OnHide()
+                staged = {}
+                apply:Hide()
+                return onHide()
+            end
+        end
     ]]></Script>
 </Ui>

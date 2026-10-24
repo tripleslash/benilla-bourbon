@@ -14,6 +14,8 @@ mod kernel;
 mod layer;
 
 pub use layer::CloudMaterial;
+// fork: modern lighting — the modern bake (`modern::cloud_bake`) writes the layer's image.
+pub(crate) use layer::CloudLayer;
 mod tables;
 
 pub use kernel::{occ1_moon, occ1_sun};
@@ -45,6 +47,11 @@ impl CloudCoverage {
     /// Coverage in [0, 1] toward camera-relative `d` (Bevy frame, +Y up).
     pub fn coverage(&self, d: Vec3) -> f32 {
         self.kernel.coverage(d)
+    }
+
+    /// fork: modern lighting — the coloured tile, the modern bake's low-resolution field.
+    pub(crate) fn tile(&self) -> &[[u8; 4]] {
+        self.kernel.rgba()
     }
 }
 
@@ -135,17 +142,42 @@ fn tick_clouds(
     } else {
         cov.kernel.tick(time.delta_secs(), density, &frame)
     };
-    if changed {
+    // fork: modern lighting (FORK.md) — a modern frame's image is the worker-baked
+    // layer (`modern::cloud_bake`); the tile is uploaded only in a classic frame, and the first
+    // classic frame after a modern one restores its size and format.
+    if crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled() {
+        return;
+    }
+    let format = bevy::render::render_resource::TextureFormat::Rgba8Unorm;
+    let size = bevy::render::render_resource::Extent3d {
+        width: kernel::COLS as u32,
+        height: kernel::COLS as u32,
+        depth_or_array_layers: 1,
+    };
+    let reformat = clock.as_ref().is_some_and(|layer| {
+        images.get(&layer.image).is_some_and(|i| {
+            i.texture_descriptor.format != format || i.texture_descriptor.size != size
+        })
+    });
+    if changed || reformat {
         if let Some(layer) = clock.as_ref() {
-            if let Some(image) = images.get_mut(&layer.image) {
+            if let Some(mut image) = images.get_mut(&layer.image) {
+                if image.texture_descriptor.size != size {
+                    image.resize(size);
+                }
+                if image.texture_descriptor.format != format {
+                    image.texture_descriptor.format = format;
+                }
                 image
                     .data
                     .as_mut()
                     .expect("cpu-side cloud image")
                     .copy_from_slice(cov.kernel.rgba().as_flattened());
                 // Touch the material: a modified Image gets a new GPU texture, and a stale bind
-                // group keeps sampling the first upload.
-                materials.get_mut(&layer.material);
+                // group keeps sampling the first upload. `into_inner`: a bare `AssetMut` emits nothing.
+                if let Some(material) = materials.get_mut(&layer.material) {
+                    material.into_inner();
+                }
             }
         }
     }

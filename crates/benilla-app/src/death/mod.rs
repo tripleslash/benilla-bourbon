@@ -841,7 +841,7 @@ mod tests {
             .init_resource::<crate::items::Items>()
             .init_resource::<Time<Real>>()
             .add_systems(Update, feed_death);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         // `UNIT_FIELD_HEALTH` 0 of a `UNIT_FIELD_MAXHEALTH` 100: dead.
         let dead = ObjectFields::from_pairs(&[(22, 0), (28, 100)]).into_created(ObjectType::Player);
         let me = app
@@ -911,7 +911,7 @@ mod tests {
                  PickupPlayerMoney(10)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let dead = ObjectFields::from_pairs(&[(22, 0), (28, 100)]).into_created(ObjectType::Player);
         let me = app
             .world_mut()
@@ -923,7 +923,7 @@ mod tests {
             .insert(ME, me);
         app.world_mut().resource_mut::<SelfGuid>().0 = Some(ME);
         signal_death_state(app.world_mut());
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert_eq!(script.eval::<i64>("return HELD").unwrap(), 10);
         assert!(script.cursor_payload().is_none(), "then the clear");
     }
@@ -1024,7 +1024,7 @@ mod tests {
         });
         let script = UiScript::new().unwrap();
         record_reports(&script);
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         (app, rx)
     }
 
@@ -1058,7 +1058,7 @@ mod tests {
     /// The lines [`record_reports`] saw since the last read.
     fn lines(app: &mut App) -> Vec<String> {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval("local l = LINES LINES = {} return l")
             .unwrap()
     }
@@ -1074,7 +1074,7 @@ mod tests {
     /// The cast's bar events the press signalled inside its call.
     fn edges(app: &App) -> Vec<&'static str> {
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<String>>("return EDGES")
             .unwrap()
             .into_iter()
@@ -1099,19 +1099,17 @@ mod tests {
     #[test]
     fn a_locked_soulstone_is_not_used() {
         let (mut app, rx) = soulstone_app();
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .lock_item(STONE);
+        app.world_mut().non_send_mut::<UiScript>().lock_item(STONE);
         let _ = rx.try_iter().count();
         press_soulstone(&mut app);
         assert_eq!(rx.try_iter().count(), 0, "a locked stone is not used");
         assert!(app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .take_ui_errors()
             .is_empty());
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .unlock_item(STONE);
         press_soulstone(&mut app);
         assert!(
@@ -1122,7 +1120,7 @@ mod tests {
 
     /// Arm a three-craft Create All repeat in the VM, with an `UPDATE_TRADESKILL_RECAST` counter.
     fn arm_repeat(app: &mut App) {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.set_trade_skill(Some(benilla_ui::script::TradeSkillState {
             line: 197,
             line_name: "Tailoring".into(),
@@ -1199,7 +1197,7 @@ mod tests {
              answer"
         );
         signal(&mut app);
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert_eq!(
             script.trade_skill_repeat(),
             (0, 3),
@@ -1246,9 +1244,7 @@ mod tests {
         );
         signal(&mut app);
         assert_eq!(
-            app.world()
-                .non_send_resource::<UiScript>()
-                .trade_skill_repeat(),
+            app.world().non_send::<UiScript>().trade_skill_repeat(),
             (0, 3),
             "and the disarm flag acts on this branch"
         );
@@ -1264,9 +1260,7 @@ mod tests {
         assert!(edges(&app).is_empty());
         signal(&mut app);
         assert_eq!(
-            app.world()
-                .non_send_resource::<UiScript>()
-                .trade_skill_repeat(),
+            app.world().non_send::<UiScript>().trade_skill_repeat(),
             (0, 3)
         );
     }
@@ -1336,9 +1330,7 @@ mod tests {
         assert!(!asked(&rx), "the cast ladder was never entered");
         signal(&mut app);
         assert_eq!(
-            app.world()
-                .non_send_resource::<UiScript>()
-                .trade_skill_repeat(),
+            app.world().non_send::<UiScript>().trade_skill_repeat(),
             (0, 3),
             "the cancel ran ahead of the gate"
         );
@@ -1376,7 +1368,7 @@ mod tests {
                 }),
             );
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.set_player_control(false);
             script
                 .run("ERR_CLIENT_LOCKED_OUT = 'ERR_CLIENT_LOCKED_OUT'")
@@ -1402,9 +1394,7 @@ mod tests {
     #[test]
     fn a_locked_soulstone_still_cancels_first() {
         let (mut app, rx) = soulstone_app();
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .lock_item(STONE);
+        app.world_mut().non_send_mut::<UiScript>().lock_item(STONE);
         app.world_mut()
             .resource_mut::<crate::spell::PendingCast>()
             .push(FIREBALL, None, std::time::Instant::now());

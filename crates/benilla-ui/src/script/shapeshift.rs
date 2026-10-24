@@ -85,7 +85,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumShapeshiftForms",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.shapeshift_forms.len() as i64)
         })?,
     )?;
@@ -94,7 +96,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetShapeshiftFormInfo",
         lua.create_function(|lua, index: Option<Value>| {
             let i = form_index(lua, index, "Usage: GetShapeshiftFormInfo(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(form) = form_at(&model, i) else {
                 // `0x4b47d9`: four nils.
                 return Ok(super::binding_abi::tuple(&[None; 4]));
@@ -120,7 +124,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Option<Value>| {
             let i = form_index(lua, index, "Usage: GetShapeshiftFormCooldown(index)")?;
             let now = crate::script::clock::now(lua);
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(match form_at(&model, i).and_then(|f| f.cooldown) {
                 Some((start, duration, enabled)) if start + duration > now || !enabled => (
                     crate::script::clock::held_start(start, enabled, now),
@@ -147,8 +153,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // the cancels of an active form (`0x4b496b`, `0x4b497c`) run ahead of it, so the call
             // is queued whatever the gate said and carries the answer to the cast alone.
             let may_cast = super::protected::gate(lua, super::protected::Tag::CAST);
-            let spell_id = form_at(&lua.app_data_ref::<Model>().expect("model app_data"), i)
-                .map(|f| f.view.spell_id);
+            let spell_id = form_at(
+                &lua.app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data"),
+                i,
+            )
+            .map(|f| f.view.spell_id);
             if let Some(spell_id) = spell_id {
                 super::calls::submit(
                     lua,

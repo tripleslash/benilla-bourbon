@@ -1,5 +1,7 @@
 //! The login engine: the session's credentials, the IO thread's pre-logon park, the glue screens'
-//! asks, the login's success edge, the quit and the saved account. What the screens show of it is
+//! asks, the login's success edge and the saved account. Deviation (this fork): the glue's
+//! `QuitGame` is heard and ignored ([`GlueLogin::Quit`]): in a browser tab, closing the client is
+//! the browser's gesture, and the fork's login screen has no Quit button. What the screens show of it is
 //! the glue manager's ([`crate::ui_script::glue_mgr`]), which reads the net messages themselves and
 //! the one refusal with no message behind it ([`LoginGuardRefused`]).
 //!
@@ -24,11 +26,6 @@ use crate::net::{
 /// The resubmit delay after a transport failure with pending credentials.
 const RETRY_DELAY_SECS: f32 = 3.0;
 
-/// The realmlist dialog's prompt for a value that is not an address; the typed text stays for
-/// editing.
-pub(crate) const REALMLIST_BAD: &str =
-    "That is not a server address.\nTry  logon.example.org  or  127.0.0.1:3724";
-
 /// The login engine's frame; a screen that shows what it decided runs after it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct LoginPolicy;
@@ -40,9 +37,8 @@ pub(super) fn build(app: &mut App) {
         .add_systems(
             Update,
             // Every state: the reconnect resubmit fires while `InWorld`, and the roster edge
-            // lands wherever it lands. The screen moves and the quit go through `Commands`,
-            // applied before `drive_quit` in this chain.
-            (answer_glue, drive_policy, to_select_on_auth, drive_quit)
+            // lands wherever it lands. The screen moves go through `Commands`.
+            (answer_glue, drive_policy, to_select_on_auth)
                 .chain()
                 .in_set(LoginPolicy)
                 .after(benilla_world::schedule::WorldStage::Net),
@@ -114,7 +110,7 @@ impl Attempt<'_> {
         self.intent.in_flight = true;
         self.intent.announced = announced;
         self.intent.retry_at = None;
-        let _ = self.submit.0.send(LoginRequest {
+        let _ = self.submit.0.try_send(LoginRequest {
             user: user.to_string(),
             pass: pass.to_string(),
             host: self.realmlist.address().to_string(),
@@ -143,7 +139,8 @@ pub(crate) enum GlueLogin {
     /// `DisconnectFromServer` (`0x46d340`): the world session dropped if there is one, then the
     /// logon cancelled, as select's Back drops the parked session.
     Disconnect,
-    /// `QuitGame` (`0x46cea0` → `0x401560(0)`): the process ends, with no grace for a sound.
+    /// `QuitGame` (`0x46cea0` → `0x401560(0)`), where the reference's process ends. Deviation
+    /// (this fork): ignored, since no login screen quits the client (the module header's).
     Quit,
     /// `CLoginMgr::Cancel` (`0x5b3320`) on a logon that failed: the realmd link closes if one is
     /// open (`[login+5]`, `0x5b3323`; only the IO thread's logon park holds one), and nothing
@@ -152,14 +149,14 @@ pub(crate) enum GlueLogin {
 }
 
 /// The glue manager's asks: a typed submit (the account saving is the stock Lua's
-/// `SetSavedAccountName`), a cancel, a disconnect as select's Back, a quit with no grace.
+/// `SetSavedAccountName`), a cancel, a disconnect as select's Back; a quit is ignored (this fork's
+/// deviation, the module header's).
 pub(crate) fn answer_glue(
     mut asks: MessageReader<GlueLogin>,
     mut attempt: Attempt,
     pick: Option<Res<crate::net::CharPick>>,
     realm: Option<Res<crate::net::RealmChoice>>,
     state: Res<State<ClientState>>,
-    time: Res<Time>,
     mut commands: Commands,
 ) {
     for ask in asks.read() {
@@ -186,8 +183,7 @@ pub(crate) fn answer_glue(
                 }
             }
             GlueLogin::Quit => {
-                info!("login: QuitGame");
-                commands.insert_resource(QuitArm(Some(time.elapsed_secs())));
+                info!("login: QuitGame ignored — no login screen quits the client in this fork");
             }
         }
     }
@@ -232,8 +228,8 @@ pub(crate) fn drive_policy(
     if !attempt.intent.env_read {
         attempt.intent.env_read = true;
         if crate::run_mode::env_login() {
-            let user = std::env::var("WOW_USER").unwrap_or_default();
-            let pass = std::env::var("WOW_PASS").unwrap_or_default();
+            let user = crate::webenv::var("WOW_USER").unwrap_or_default();
+            let pass = crate::webenv::var("WOW_PASS").unwrap_or_default();
             // A vmangos login kicks whoever holds the account, so the automated path logs in
             // only as the checkout's declared account (`.probe-identity`); a typed login is not
             // gated.
@@ -378,19 +374,6 @@ fn to_select_on_auth(
     }
 }
 
-/// The armed quit: `AppExit` once the time it holds has passed.
-#[derive(Resource, Default)]
-pub(crate) struct QuitArm(Option<f32>);
-
-/// Fire the armed quit once its grace has elapsed.
-fn drive_quit(arm: Option<Res<QuitArm>>, time: Res<Time>, mut exit: MessageWriter<AppExit>) {
-    if let Some(arm) = arm {
-        if arm.0.is_some_and(|t| time.elapsed_secs() >= t) {
-            exit.write(AppExit::Success);
-        }
-    }
-}
-
 // ── The login shot ───────────────────────────────────────────────────────────────────────────────
 
 /// `WOW_LOGIN_SHOT_OUT=<path>`: one PNG of the login screen once it has settled.
@@ -426,8 +409,8 @@ mod tests {
 
     /// `drive_policy` alone with the env fast path spent, so an ambient `WOW_USER` cannot seed
     /// credentials.
-    fn policy_app() -> (App, crossbeam_channel::Receiver<LoginRequest>) {
-        let (tx, rx) = crossbeam_channel::unbounded();
+    fn policy_app() -> (App, async_channel::Receiver<LoginRequest>) {
+        let (tx, rx) = async_channel::unbounded();
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<LoginIntent>()
@@ -547,6 +530,7 @@ mod tests {
             characters: 0,
             category: 1,
             id: 1,
+            version: None,
         }
     }
 
@@ -573,7 +557,7 @@ mod tests {
     /// and the session that parked behind its back is abandoned.
     #[test]
     fn a_login_edge_behind_the_abandon_generation_abandons_the_session() {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = async_channel::unbounded();
         let mut app = edge_app(1);
         app.insert_resource(crate::net::CharPick(tx.into()));
         let send = |app: &mut App, generation: u64| {
@@ -612,7 +596,7 @@ mod tests {
     #[test]
     fn the_glue_arms_cancel_keeps_an_unattended_resubmit() {
         let (mut app, requests) = policy_app();
-        let (realm_tx, realm_rx) = crossbeam_channel::unbounded();
+        let (realm_tx, realm_rx) = async_channel::unbounded();
         app.insert_resource(crate::net::RealmChoice(realm_tx.into()))
             .insert_resource(State::new(ClientState::Login))
             .add_message::<GlueLogin>()

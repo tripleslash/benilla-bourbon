@@ -1,8 +1,8 @@
 //! A body's batches merged by material: one mesh entity per group of batches that nothing
 //! downstream of the spawn can tell apart (the same six-handle material set, blend, sidedness and
 //! skinning, and no alpha track, billboard, welded seam or ground quad), not one per M2 batch.
-//! A batch's own materials are keyed by its authored order (`MatKey`'s `batch_order`), so two
-//! transparent batches never merge. The key names a texture slot, never a texture, so a gear
+//! A batch's own blending materials are keyed by its authored order (`MatKey`'s `batch_order`), so
+//! two transparent batches never merge. The key names a texture slot, never a texture, so a gear
 //! change re-points a group in place and only a change to the shown set rebuilds groups.
 
 use std::collections::HashMap;
@@ -158,13 +158,27 @@ pub(in crate::entities) struct MergedForms {
 }
 
 /// Merged forms keyed by (the first member's geometry `Arc`, the member set): one model's one
-/// silhouette, shared by every unit of that display. Cleared whole past [`MERGED_FORMS_CAP`].
+/// silhouette, shared by every unit of that display. Each entry holds that `Arc`, so the address
+/// it is keyed by cannot be reused by another model's geometry — a reload replaces a model in
+/// place — while the entry lives. Cleared whole past [`MERGED_FORMS_CAP`].
 #[derive(Resource, Default)]
-pub(crate) struct MergedFormsCache(HashMap<(usize, Vec<u32>), MergedForms>);
+pub(crate) struct MergedFormsCache(HashMap<(usize, Vec<u32>), KeyedForms>);
+
+/// One cached group's forms and the geometry its key's address is taken from.
+struct KeyedForms {
+    _key: Arc<RenderSubmesh>,
+    forms: MergedForms,
+}
 
 const MERGED_FORMS_CAP: usize = 1024;
 
 impl MergedFormsCache {
+    /// Drop every entry, with the display caches: once their models go, a key's address may be
+    /// reused by another model's geometry.
+    pub(in crate::entities) fn clear(&mut self) {
+        self.0.clear();
+    }
+
     /// The forms of `group`, built on a miss; a singleton borrows the model's own, uncached.
     pub(in crate::entities) fn forms(
         &mut self,
@@ -182,8 +196,8 @@ impl MergedFormsCache {
             };
         }
         let key = (Arc::as_ptr(&first.geometry) as usize, group.members.clone());
-        if let Some(f) = self.0.get(&key) {
-            return f.clone();
+        if let Some(cached) = self.0.get(&key) {
+            return cached.forms.clone();
         }
         if self.0.len() >= MERGED_FORMS_CAP {
             self.0.clear();
@@ -208,7 +222,13 @@ impl MergedFormsCache {
             skinned_mesh: skinned,
             aabb,
         };
-        self.0.insert(key, forms.clone());
+        self.0.insert(
+            key,
+            KeyedForms {
+                _key: first.geometry.clone(),
+                forms: forms.clone(),
+            },
+        );
         forms
     }
 }

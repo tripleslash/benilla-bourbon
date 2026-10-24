@@ -216,13 +216,13 @@ impl Fix {
             script.cursor_payload().is_some(),
             "{held:?} is on the cursor"
         );
-        self.app.world_mut().insert_non_send_resource(script);
+        self.app.world_mut().insert_non_send(script);
     }
 
     fn held(&self) -> bool {
         self.app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .cursor_payload()
             .is_some()
     }
@@ -613,7 +613,7 @@ fn a_right_press_with_a_payload_is_consumed_before_the_world_sees_it() {
             None => f
                 .app
                 .world_mut()
-                .insert_non_send_resource(UiScript::new().expect("a VM")),
+                .insert_non_send(UiScript::new().expect("a VM")),
         }
         let world = f.app.world_mut();
         let mut window = Window {

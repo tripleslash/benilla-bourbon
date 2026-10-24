@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use crate::net::{Guid, NetEntity, ObjectStore};
 use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::decal::{DecalFrame, WorldDecal};
-use benilla_world::particles::buffer::EffectVertex;
+use benilla_world::particles::buffer::{EffectMotion, EffectVertex};
 
 use super::relations::{RelUnit, RelationWorld, Relations};
 use super::{CombatFlash, Selection, SelectionRadius};
@@ -398,14 +398,23 @@ pub(super) fn push_ring(
     state: Option<Res<RingState>>,
     cam: Query<Entity, With<WorldCamera>>,
     mut draw: benilla_world::particles::buffer::WorldEffectDraw,
+    // fork: fsr (FORK.md) — the ring's feet at the last world frame it drew.
+    mut last_feet: Local<Option<Vec3>>,
 ) {
     let (Some(assets), Some(state)) = (assets, state) else {
         return;
     };
     let Ok(cam) = cam.single() else { return };
     if !state.shown || state.verts.is_empty() {
+        *last_feet = None;
         return;
     }
+    // The ring rides its target; a jump past a stride is a new target, not a motion.
+    let feet = state.key.feet;
+    let motion = match last_feet.replace(feet) {
+        Some(last) if feet.distance(last) < 5.0 => EffectMotion::Rigid(feet - last),
+        _ => EffectMotion::Static,
+    };
     let tint = state.color.to_linear();
     let mut batch = draw
         .batch(cam, assets.texture.id())
@@ -414,7 +423,8 @@ pub(super) fn push_ring(
         .rung(
             benilla_world::sky_order::Rung::RING,
             benilla_world::sky_order::Rung::DECAL_RASTER,
-        );
+        )
+        .moving(motion);
     batch.extend(state.verts.iter().map(|v| EffectVertex {
         pos: v.pos,
         uv: v.uv,

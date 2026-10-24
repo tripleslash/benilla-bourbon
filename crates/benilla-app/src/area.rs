@@ -40,7 +40,8 @@ use bevy::prelude::*;
 use benilla_formats::{AreaTableCatalog, AreaTableRow};
 
 use crate::target::Factions;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 /// The shared `AreaTable.dbc` catalog, read by the world map and this module; absent if the DBC
 /// failed to read.
@@ -313,7 +314,7 @@ pub(crate) struct AreaPlugin;
 impl Plugin for AreaPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RealmPvp>()
-            .add_systems(Startup, load_area_table.after(AssetSet::Open))
+            .add_data_loaders(load_area_table)
             .add_systems(
                 OnEnter(crate::client_state::ClientState::InWorld),
                 latch_realm_pvp,
@@ -514,7 +515,7 @@ mod tests {
             },
         )])));
         world.insert_resource(benilla_world::terrain_stream::CurrentArea(Some(ORGRIMMAR)));
-        world.insert_non_send_resource(UiScript::new().unwrap());
+        world.insert_non_send(UiScript::new().unwrap());
         let store = |template: Option<u32>| {
             let pairs: Vec<(u16, u32)> = template.map(|t| (TEMPLATE, t)).into_iter().collect();
             ObjectStore(ObjectFields::from_pairs(&pairs).into_created(ObjectType::Player))
@@ -529,7 +530,7 @@ mod tests {
                 world.run_system_cached(feed_zone_events).unwrap();
             }
             world
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<(Option<String>, Option<String>)>(
                     "local t, f = GetZonePVPInfo() return t, f",
                 )
@@ -588,7 +589,7 @@ mod tests {
                 "#,
             )
             .unwrap();
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         let frame = |app: &mut App| {
             let world = app.world_mut();
             crate::ui_unit::run_feed_units_once(world);
@@ -596,7 +597,7 @@ mod tests {
             for _ in 0..10 {
                 world.run_system_cached(feed_zone_events).unwrap();
             }
-            let s = world.non_send_resource::<UiScript>();
+            let s = world.non_send::<UiScript>();
             let seen = s.eval::<Vec<String>>("return Seen").unwrap();
             s.run("Seen = {}").unwrap();
             seen
@@ -671,7 +672,7 @@ mod tests {
                 "#,
             )
             .unwrap();
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         let store = ObjectStore(ObjectFields::from_pairs(&[]).into_created(ObjectType::Player));
         let me = world.spawn((SelfPlayer, Guid(ME), store)).id();
         world.resource_mut::<GuidIndex>().0.insert(ME, me);
@@ -681,7 +682,7 @@ mod tests {
             for _ in 0..n {
                 world.run_system_cached(feed_zone_events).unwrap();
             }
-            let s = world.non_send_resource::<UiScript>();
+            let s = world.non_send::<UiScript>();
             let seen = s.eval::<Vec<String>>("return Seen").unwrap();
             s.run("Seen = {}").unwrap();
             seen

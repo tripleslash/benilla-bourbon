@@ -237,8 +237,13 @@ impl CrtRand {
 
     /// The start-up seed, `OsGetAsyncTimeMs` (`0x42c010`): milliseconds, as a 32-bit integer.
     pub(crate) fn from_clock() -> CrtRand {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        // `std::time::SystemTime` panics on wasm32, where `web_time`'s is `Date.now()`.
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::{SystemTime, UNIX_EPOCH};
+        #[cfg(target_arch = "wasm32")]
+        use web_time::{SystemTime, UNIX_EPOCH};
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map_or(1, |d| d.as_millis() as u32);
         CrtRand(ms)
     }

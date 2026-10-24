@@ -69,7 +69,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // shows, and the stock panel's string `"0"` hides where Lua 5.0 holds it truthy.
             lua.create_function(move |lua, args: MultiValue| {
                 let flip = want(
-                    &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                    &mut lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data"),
                     which,
                     bool_or_default(args.front(), true),
                 );
@@ -89,7 +91,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         g.set(
             name,
             lua.create_function(move |lua, ()| {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let shown = match which {
                     WornDisplay::Helm => model.helm_shown,
                     WornDisplay::Cloak => model.cloak_shown,

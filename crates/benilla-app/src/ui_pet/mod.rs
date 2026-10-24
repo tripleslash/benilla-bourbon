@@ -3,7 +3,9 @@
 //! data (vmangos `CharmInfo::InitPetActionBar`), not a layout: a possessed or charmed unit fills
 //! the same ten words differently, so nothing here assumes them.
 
-use std::time::Instant;
+// `bevy::platform::time::Instant` (fork: web build): the anchor it is compared with is, and on wasm32
+// `std::time::Instant` is a different type that panics.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 

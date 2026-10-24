@@ -144,7 +144,7 @@ pub(super) fn client() -> Loot {
             ROW:EnableMouse(true)"#,
         )
         .expect("the recorder installs");
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     Loot { app, rx }
 }
 
@@ -695,7 +695,7 @@ fn the_stock_frames_hide_on_a_replacing_response_releases_nothing() {
     benilla_formats::wow_data_or_skip!();
     let mut l = client();
     {
-        let mut s = l.app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut s = l.app.world_mut().non_send_mut::<UiScript>();
         s.set_screen_size(1024.0, 768.0);
         for f in crate::ui_script::test_ui::production_order(&[
             crate::ui_script::test_ui::LOOT_UI,

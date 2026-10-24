@@ -5,6 +5,7 @@
 
 use benilla_assets::coords::bevy_to_wow;
 use benilla_protocol::{JumpInfo, TransportPose};
+use bevy::math::Vec3;
 use crossbeam_channel::Sender;
 
 use crate::creature_anim::move_flags;
@@ -400,43 +401,58 @@ fn facing_set_passes(player: &Player, facing: f32, swimming: bool) -> bool {
 /// Sends one flag-less `MSG_MOVE_STOP` when the controller stops driving the avatar (free-fly),
 /// as nothing else would clear the flags observers extrapolate from; a no-op once stopped.
 pub(super) fn park_mover(sender: &Sender<ClientCommand>, player: &mut Player) {
-    if player.move_flags == 0 {
+    let transport = wire_transport(player);
+    let kept = if transport.is_some() {
+        move_flags::ON_TRANSPORT
+    } else {
+        0
+    };
+    if player.move_flags == kept {
         return;
     }
     let facing = player.face_yaw.rem_euclid(std::f32::consts::TAU);
     let pos = bevy_to_wow(player.pos);
     player.last_pos = pos; // the park is a position report too
-    super::move_trace::sent(MoveKind::Stop, 0, facing, pos);
+    super::move_trace::sent(MoveKind::Stop, kept, facing, pos);
     let _ = sender.send(ClientCommand::Move {
         kind: MoveKind::Stop,
-        flags: 0,
+        flags: kept,
         pos,
         orientation: facing,
-        pitch: 0.0, // flags cleared → not swimming → no pitch tail written
+        pitch: 0.0, // not swimming → no pitch tail written
         fall_time: 0,
         jump: None,
-        transport: None, // flags cleared → no transport tail written
+        transport,
     });
-    player.move_flags = 0;
+    player.move_flags = kept;
     player.last_facing = facing;
     player.sent_facing = facing;
 }
 
 /// The rider's deck-local pose for the `ON_TRANSPORT` tail, or `None` off a deck. `bevy_to_wow` is
 /// a pure rotation, so it converts the local offset too; the local facing is `face_yaw - boat_yaw`.
+///
+/// A rider the server has seated but whose transport is not armed yet (a login aboard) sends the
+/// server's own seat: vmangos takes any word without `ON_TRANSPORT` as a deboard
+/// (`HandleMoverRelocation` → `RemovePassenger`), so an ack in that window would unseat us.
 pub(super) fn wire_transport(player: &Player) -> Option<TransportPose> {
-    player.ride.as_ref().map(|r| {
-        let local = bevy_to_wow(r.local_pos);
+    let pose = |guid, local: Vec3, orientation: f32| {
+        let local = bevy_to_wow(local);
         TransportPose {
-            guid: r.guid,
+            guid,
             pos: benilla_protocol::wire::Vector3d {
                 x: local[0],
                 y: local[1],
                 z: local[2],
             },
-            orientation: (player.face_yaw - r.boat_yaw).rem_euclid(std::f32::consts::TAU),
+            orientation: orientation.rem_euclid(std::f32::consts::TAU),
         }
-    })
+    };
+    if let Some(r) = player.ride.as_ref() {
+        return Some(pose(r.guid, r.local_pos, player.face_yaw - r.boat_yaw));
+    }
+    let p = player.pending_board?;
+    Some(pose(p.guid?, p.local_pos, p.local_yaw))
 }
 
 /// Acks forced speed changes on a frame the controller does not drive (a server spline, a fear, a

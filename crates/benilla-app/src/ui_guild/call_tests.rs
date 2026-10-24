@@ -34,7 +34,7 @@ fn client() -> Guild {
             f:SetScript("OnEvent", function() UPDATES = UPDATES + 1 end)"#,
         )
         .expect("the counter installs");
-    app.world_mut().insert_non_send_resource(script);
+    app.world_mut().insert_non_send(script);
     let feed = app.world_mut().register_system(super::feed::feed_guild);
     Guild { app, rx, feed }
 }
@@ -265,7 +265,7 @@ fn new_vm(g: &mut Guild, reload: bool) {
     super::fold_dying_vm_guild(world);
     let mut script = UiScript::new().expect("a VM");
     super::seed_vm_guild(world, &mut script, reload);
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     feed(g);
 }
 

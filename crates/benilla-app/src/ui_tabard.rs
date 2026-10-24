@@ -444,7 +444,7 @@ mod tests {
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()
             .add_systems(Update, feed_tabard)
-            .insert_non_send_resource(spied_vm(&["TABARD_CANSAVE_CHANGED"]));
+            .insert_non_send(spied_vm(&["TABARD_CANSAVE_CHANGED"]));
         app.update();
         let mut guild = app.world_mut().resource_mut::<GuildState>();
         guild.join_for_test(5);
@@ -470,7 +470,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<TabardOpen>()
             .add_latched_window::<TabardOpen>()
-            .insert_non_send_resource(spied_vm(&["OPEN_TABARD_FRAME", "CLOSE_TABARD_FRAME"]));
+            .insert_non_send(spied_vm(&["OPEN_TABARD_FRAME", "CLOSE_TABARD_FRAME"]));
         close_core(app.world_mut());
         assert!(seen_in(&app).is_empty(), "no vendor, no close");
 
@@ -543,7 +543,7 @@ mod tests {
                 TM:CycleVariation(1, 1)"#,
             )
             .expect("the designer seeds");
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         let run = |app: &mut App, lua: &str| {
             with_hosted_vm(app.world_mut(), |vm| vm.expect("a VM").run(lua))
                 .expect("the chunk runs");

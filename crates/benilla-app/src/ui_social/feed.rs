@@ -646,7 +646,7 @@ mod tests {
             .init_resource::<crate::sound::MessageSounds>()
             .insert_resource(NetCommands(tx))
             .add_systems(Update, feed_social);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         (app, rx)
     }
 

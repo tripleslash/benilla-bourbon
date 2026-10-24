@@ -18,7 +18,7 @@ pub(super) fn client() -> (App, Receiver<ClientCommand>) {
     let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let (tx, rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
-    app.insert_non_send_resource(UiScript::new().expect("a VM"));
+    app.insert_non_send(UiScript::new().expect("a VM"));
     (app, rx)
 }
 
@@ -51,7 +51,7 @@ fn banks(app: &mut App, bank: [u8; 32]) {
         .lock()
         .apply_flags(&bank);
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_tutorial_bank(Some(bank.to_vec()));
 }
 

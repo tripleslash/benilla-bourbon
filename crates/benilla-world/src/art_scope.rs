@@ -17,8 +17,9 @@ use benilla_formats::TILE_SIZE;
 /// Real-clock seconds between sweeps (housekeeping, not world time); also the stamp's resolution.
 const SWEEP_SECS: f32 = 1.0;
 
-/// Five ADT tiles (2667 yd), the smallest round tile multiple clear of [`radius_floor`].
-const DEFAULT_RADIUS_YD: f32 = 5.0 * TILE_SIZE;
+/// Seven ADT tiles (3733 yd), the smallest round tile multiple clear of [`radius_floor`] at this
+/// fork's 1500 yd `farclip` clamp (five cleared the reference's 777).
+const DEFAULT_RADIUS_YD: f32 = 7.0 * TILE_SIZE;
 
 /// The far corner of the widest tile block the residency window keeps (at the `farclip` clamp's
 /// maximum), plus a tile: a stamp is where the viewer stood, so no smaller radius is safe.
@@ -223,8 +224,8 @@ mod tests {
             "default {DEFAULT_RADIUS_YD} must clear the floor {}",
             radius_floor()
         );
-        // (26 + 1 + 16) chunks each way at farclip 777, to the corner, plus a tile: ~2560 yd.
-        assert!((radius_floor() - 2560.0).abs() < 1.0, "{}", radius_floor());
+        // The window's chunks each way at the 1500 yd farclip clamp, to the corner, plus a tile.
+        assert!((radius_floor() - 3597.5).abs() < 1.0, "{}", radius_floor());
     }
 
     /// `$WOW_ART_RADIUS` is unset in the test binary, as in every ordinary run.

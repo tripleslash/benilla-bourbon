@@ -490,7 +490,7 @@ fn every_shipped_text_attribute_answers_against_the_real_global_strings() {
     };
 
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
-    let mut swept = 0;
+    let mut keys = 0;
     for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "xml") {
@@ -509,6 +509,7 @@ fn every_shipped_text_attribute_answers_against_the_real_global_strings() {
                     "{file}: text=\"{value}\" is shaped like a GlobalStrings key but the real \
                      GlobalStrings.lua has no such string — it would render as its own key name"
                 );
+                keys += 1;
             } else {
                 assert!(
                     resolved.is_none(),
@@ -516,11 +517,10 @@ fn every_shipped_text_attribute_answers_against_the_real_global_strings() {
                      the loader would silently show that string's value instead of these words"
                 );
             }
-            swept += 1;
         }
     }
     // A floor, so the sweep cannot pass by matching nothing.
-    assert!(swept >= 1, "only {swept} text= values swept");
+    assert!(keys >= 1, "only {keys} key-shaped text= values swept");
 }
 
 /// No shipped script hands a GlobalStrings key to a text sink as its words: `SetText` cannot tell
@@ -1045,7 +1045,7 @@ fn every_declared_parent_really_attaches() {
     let declared = shipped_frame_parents();
     assert!(
         // A sanity floor for the scan, not a census.
-        !declared.is_empty(),
+        declared.len() >= 2,
         "only {} parent declarations found — the scan broke",
         declared.len()
     );
@@ -1409,7 +1409,7 @@ fn the_stock_sound_options_window_loads_hidden_and_the_alias_is_gone() {
     );
 
     // `IsOptionFrameOpen` names the stock options windows, all hidden; it sees ours through the
-    // wrapper `GameMenuAdapters.xml` installs.
+    // wrapper `GameMenuFrame.xml` installs.
     assert!(
         s.eval::<bool>("return IsOptionFrameOpen() and true or false")
             .unwrap(),
@@ -1468,7 +1468,7 @@ fn the_stock_sound_window_turns_a_box_off_and_stores_a_slider_as_lua_text() {
 
 /// The stock Video Options window loads hidden (`OptionsFrame.xml:5`) and owns the `OptionsFrame`
 /// name; ours is `BenillaOptionsFrame`, which the ESC menu opens and the stock "options window
-/// open?" consumers see only through the `GameMenuAdapters.xml` wrappers.
+/// open?" consumers see only through the `GameMenuFrame.xml` wrappers.
 #[test]
 fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -1583,10 +1583,16 @@ fn the_stock_video_options_window_loads_hidden_and_owns_its_own_name() {
         (
             s.eval::<f64>("return OptionsFrameSliders[2].minValue")
                 .unwrap(),
-            s.eval::<f64>("return OptionsFrameSliders[2].maxValue")
-                .unwrap()
+            1500.0
         ),
-        "our row is built from the REFERENCE's row 2, not from a transcription of it"
+        "our row is built from the REFERENCE's row 2, not from a transcription of it, with the \
+         engine's ceiling"
+    );
+    assert_eq!(
+        s.eval::<f64>("return OptionsFrameSliders[2].maxValue")
+            .unwrap(),
+        777.0,
+        "the stock table itself keeps the reference's ceiling"
     );
 
     // The display verbs, at the shapes their consumers read.
@@ -1790,7 +1796,7 @@ fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
     // Our Graphics row drives the pair, as the stock slider does, with the bounds of the stock
     // `OptionsFrameSliders[6]`.
     s.eval::<()>("SetGamma(0)").unwrap();
-    let row = "BenillaOptionsFrameContainerBodyGraphicsRowBrightness";
+    let row = "BenillaOptionsFrameContainerBodyGraphicsRowGamma";
     let bounds = s
         .eval::<Vec<f64>>(&format!(
             "local r = getglobal({row:?}) \
@@ -1810,7 +1816,7 @@ fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
         "…and its step: {}",
         bounds[2]
     );
-    // The readout is the thumb's share of the groove (default 50%), not the stored offset; the
+    // The readout is the display gamma `1 / gamma` (default 1.00), not the stored offset; the
     // page's refresh writes it, so the window must be up.
     s.eval::<()>(
         "ShowUIPanel(BenillaOptionsFrame) \
@@ -1822,7 +1828,7 @@ fn the_display_brightness_pair_speaks_the_reference_slider_unit() {
             "return getglobal({row:?} .. \"ControlValue\"):GetText()"
         ))
         .unwrap(),
-        "50%",
+        "1.00",
     );
 }
 
@@ -2030,7 +2036,9 @@ fn the_layer_does_not_grow() {
         "ScrollTemplates.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
-        "GameMenuAdapters.xml",
+        // Deviation (this fork): our own ESC menu in place of the stock one, which carries the
+        // Turtle WoW rungs and no Exit Game rung.
+        "GameMenuFrame.xml",
         "ContainerFrameAdapters.xml",
         "SpellBookAdapters.xml",
         "ScriptLogFrame.xml",
@@ -2051,8 +2059,7 @@ fn the_layer_does_not_grow() {
         .collect();
     found.sort();
     // Deviation: one glue file beside the in-game layer, `AccountLoginRealmlist.xml`, the
-    // realmlist control on the stock login screen, because benilla is a client for any server and
-    // 1.12.1 has no interface for the realmlist, only `realmlist.wtf`.
+    // realmlist readout on the stock login screen and, in this fork, its Quit button hidden.
     assert_eq!(super::glue::GLUE_LAYER, "AccountLoginRealmlist.xml");
     let mut shipped: Vec<String> = LAYER
         .iter()

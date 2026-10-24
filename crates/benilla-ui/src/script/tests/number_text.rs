@@ -3,7 +3,6 @@
 //! formatting.
 
 use super::common::script;
-use crate::script::Model;
 use crate::widget::KindState;
 
 /// `DoEmote`'s target (`0x49fdc5`), `SetLookingForGroup`'s comment (`0x4e9741`) and `SetModel`'s
@@ -41,7 +40,9 @@ fn replace_icon_texture_stores_a_number_as_lua_number_text() {
     )
     .unwrap();
     let lua = s.lua();
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let h = model.arena.lookup("IconModel").expect("frame");
     let Some(KindState::Model(m)) = model.arena.frame(h).map(|f| &f.kind_state) else {
         panic!("a Model pane");

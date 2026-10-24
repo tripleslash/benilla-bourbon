@@ -34,6 +34,23 @@ pub struct CloudExt {
     #[texture(100)]
     #[sampler(101)]
     pub(crate) texels: Handle<Image>,
+    /// fork: modern lighting (FORK.md, P4) — `xyz` = toward the key light, `w` = the
+    /// modern flag (`modern::sky` writes it; zero keeps the classic layer).
+    #[uniform(102)]
+    pub(crate) modern: bevy::math::Vec4,
+    /// fork: modern lighting (P4) — `y` = silver lining, `z` = its g.
+    #[uniform(102)]
+    pub(crate) light: bevy::math::Vec4,
+    /// fork: modern lighting — `x` = opacity, `w` = the horizon fade's top.
+    #[uniform(102)]
+    pub(crate) shape: bevy::math::Vec4,
+    /// fork: modern lighting — `rgb` = the key colour the silver lining takes.
+    #[uniform(102)]
+    pub(crate) key: bevy::math::Vec4,
+    /// fork: modern lighting — `rgb` = the horizon haze a low cloud dissolves into, `w` = the dome
+    /// height it reaches.
+    #[uniform(102)]
+    pub(crate) haze: bevy::math::Vec4,
 }
 
 impl MaterialExtension for CloudExt {
@@ -63,7 +80,7 @@ pub(super) struct CloudDome;
 /// The tick's upload target: the image the dome samples, and the material to touch on each upload
 /// so its bind group picks up the new texture.
 #[derive(Resource)]
-pub(super) struct CloudLayer {
+pub(crate) struct CloudLayer {
     pub(crate) image: Handle<Image>,
     pub(crate) material: Handle<CloudMaterial>,
 }
@@ -156,6 +173,11 @@ pub(super) fn setup_cloud_layer(
         },
         extension: CloudExt {
             texels: image.clone(),
+            modern: bevy::math::Vec4::ZERO, // fork: modern lighting (FORK.md, P4)
+            light: bevy::math::Vec4::ZERO,
+            shape: bevy::math::Vec4::ZERO,
+            key: bevy::math::Vec4::ZERO,
+            haze: bevy::math::Vec4::ZERO,
         },
     });
     commands.spawn((

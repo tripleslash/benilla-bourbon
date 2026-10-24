@@ -3,7 +3,10 @@
 //! ([`super::inflight`], [`super::cooldowns`], [`super::mods`]) and the windows' stores through
 //! [`Lifecycle`] and [`Scene`].
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
+use bevy::platform::time::Instant;
 
 use benilla_formats::LearnAnnouncement;
 use benilla_protocol::messages::{ActionButton, SpellCooldown};
@@ -1123,7 +1126,14 @@ fn spell_start(
     if cast_time_ms > 0 {
         commands.entity(e).insert(Casting {
             spell_id,
-            until: Some(Instant::now() + Duration::from_millis(u64::from(cast_time_ms))),
+            // `Casting::until` is its own self-contained animation deadline
+            // (`creature_anim::Casting`'s doc), never compared against the cooldown-clock
+            // `Instant` this file otherwise imports — spelled out fully so it stays that type
+            // regardless.
+            until: Some(
+                bevy::platform::time::Instant::now()
+                    + Duration::from_millis(u64::from(cast_time_ms)),
+            ),
         });
     }
     // `0x6ec220`'s precast: another unit's unless the packet's flag bit 0 is set (`0x6e78f8`,

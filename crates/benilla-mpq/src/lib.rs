@@ -1,6 +1,7 @@
 //! A read-only MPQ reader for the 1.12.1 `Data/` chain: format V1/V2, every file stored whole or
-//! `COMPRESS`-flagged and sectored, no encrypted or single-unit files, no PTCH patches. Anything
-//! else is a hard error.
+//! `COMPRESS`-flagged and sectored, no single-unit files, no PTCH patches. Anything else is a hard
+//! error. An encrypted file reads by name only, as its key derives from the name: 1.12.1 ships
+//! none, and a Turtle WoW 1.18.1 patch archive encrypts its `(listfile)`.
 //!
 //! The patch archives carry delete markers (flag `0x02000000`, size 0): the path is deleted from
 //! the composite chain. [`Archive::contains`] reports one present and [`Archive::read_file`]
@@ -20,7 +21,7 @@ use std::sync::Arc;
 use benilla_bytes::{capped, ByteExt};
 
 mod crypto;
-use crypto::{decrypt_block, hash_string, hash_type};
+use crypto::{decrypt_block, decrypt_bytes, hash_string, hash_type};
 
 /// `MPQ\x1A` as a little-endian `u32`: the archive header signature.
 const SIGNATURE: u32 = 0x1A51_504D;
@@ -30,6 +31,8 @@ const USERDATA_SIGNATURE: u32 = 0x1B51_504D;
 const FLAG_IMPLODE: u32 = 0x0000_0100;
 const FLAG_COMPRESS: u32 = 0x0000_0200;
 const FLAG_ENCRYPTED: u32 = 0x0001_0000;
+/// The file key is offset by the block position and XOR'd with the size (Storm's `MPQ_FILE_FIX_KEY`).
+const FLAG_FIX_KEY: u32 = 0x0002_0000;
 const FLAG_SINGLE_UNIT: u32 = 0x0100_0000;
 /// A patch archive's delete marker (size 0): the path is deleted from the composite chain.
 const FLAG_DELETE_MARKER: u32 = 0x0200_0000;
@@ -70,6 +73,29 @@ struct Index {
 #[derive(Clone)]
 pub struct Archive {
     index: Arc<Index>,
+}
+
+/// One live hash-table slot, as [`Archive::entries`] reports it: an entry identified by
+/// [`name_key`] instead of by name, because most of the corpus has no name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// [`name_key`] of whatever name hashes here: the slot's `(name_a, name_b)` pair as a u64.
+    pub key: u64,
+    /// Row in the block table, the argument [`Archive::read_block`] takes.
+    pub block_index: u32,
+    /// Uncompressed size, straight from the block entry. No I/O.
+    pub file_size: u32,
+    /// This slot is a patch tombstone, not a readable file: a chain walker lets it shadow the
+    /// lower-priority copy rather than skip it.
+    pub is_delete_marker: bool,
+}
+
+/// The archive's own identity for a file name: `(name_a << 32) | name_b`, the pair
+/// [`Archive::entries`] reports and the hash-table probe matches on. The hashes fold `/` to `\` and
+/// uppercase ASCII, so it inherits MPQ's name equivalence rather than reimplementing it.
+pub fn name_key(name: &str) -> u64 {
+    (hash_string(name, hash_type::NAME_A) as u64) << 32
+        | hash_string(name, hash_type::NAME_B) as u64
 }
 
 /// A read error; anything outside the 1.12.1 envelope surfaces here.
@@ -197,7 +223,32 @@ impl Archive {
         &self.index.path
     }
 
-    /// Read and decompress a file by its internal path (`/` or `\`, case-insensitive).
+    /// Every live entry in the archive by hash slot, not by name: the complete contents, including
+    /// the files no `(listfile)` names (the base archives ship none, so a listfile walk would drop
+    /// most of the corpus). Hash-table order, stable per archive, so a pack build is deterministic.
+    /// Empty, deleted and out-of-range slots are skipped; delete-markers are yielded, flagged, so a
+    /// chain walker can shadow the lower-priority copy.
+    pub fn entries(&self) -> impl Iterator<Item = Entry> + '_ {
+        let idx = &self.index;
+        idx.hash_table.iter().filter_map(move |e| {
+            if e.block_index == HASH_EMPTY || e.block_index == HASH_DELETED {
+                return None;
+            }
+            let block = idx.block_table.get(e.block_index as usize)?;
+            if block.flags & FLAG_EXISTS == 0 {
+                return None;
+            }
+            Some(Entry {
+                key: (e.name_a as u64) << 32 | e.name_b as u64,
+                block_index: e.block_index,
+                file_size: block.file_size,
+                is_delete_marker: block.flags & FLAG_DELETE_MARKER != 0,
+            })
+        })
+    }
+
+    /// Read and decompress a file by its internal path (`/` or `\`, case-insensitive), decrypting an
+    /// encrypted one with the key its name derives.
     pub fn read_file(&self, name: &str) -> Result<Vec<u8>> {
         self.open_file(name)?.read_all()
     }
@@ -205,11 +256,51 @@ impl Archive {
     /// Open a file for reading in place: its own OS handle, its sectors decompressed one at a
     /// time as they are read, so a long sound streams without the whole file read first, as the
     /// reference's FMOD streams read the archive through the file callbacks it registers
-    /// (`FSOUND_File_SetCallbacks` at `0x7a45e4`).
+    /// (`FSOUND_File_SetCallbacks` at `0x7a45e4`). An encrypted file decrypts with the key its
+    /// name derives.
     pub fn open_file(&self, name: &str) -> Result<ArchiveFile> {
-        let idx = &self.index;
-        let block = idx.find(name).ok_or_else(|| Error::NotFound(name.into()))?;
+        let block = self
+            .index
+            .find(name)
+            .ok_or_else(|| Error::NotFound(name.into()))?;
+        let key = (block.flags & FLAG_ENCRYPTED != 0).then(|| file_key(name, &block));
+        self.open_entry(&block, name, key)
+    }
 
+    /// Read and decompress the file at `block_index` — the block-table row [`Archive::entries`]
+    /// reported for a hash slot. The **nameless** read: the base content archives carry no
+    /// `(listfile)`, so most of `texture.MPQ` is reachable by name but not enumerable, and a tool
+    /// that must see the whole archive (the pack builder) has only the hash table to walk.
+    ///
+    /// An encrypted entry is refused here: its key derives from the name, the one thing this read
+    /// does not have ([`Archive::is_encrypted`] says which). Everything else (sector table, codec
+    /// mask, sizes) comes from the block entry and the archive itself, so every other entry reads.
+    pub fn read_block(&self, block_index: u32) -> Result<Vec<u8>> {
+        let block = self
+            .index
+            .block_table
+            .get(block_index as usize)
+            .copied()
+            .ok_or_else(|| Error::NotFound(format!("block {block_index}")))?;
+        self.open_entry(&block, &format!("block {block_index}"), None)?
+            .read_all()
+    }
+
+    /// Whether the entry at `block_index` is encrypted, so that only [`Archive::read_file`] can read
+    /// it. No I/O.
+    pub fn is_encrypted(&self, block_index: u32) -> bool {
+        self.index
+            .block_table
+            .get(block_index as usize)
+            .is_some_and(|b| b.flags & FLAG_ENCRYPTED != 0)
+    }
+
+    /// The shared body of [`Archive::open_file`] and [`Archive::read_block`]: everything after the
+    /// block entry is in hand. `name` is used only for error messages, so the nameless caller passes
+    /// its block index and gets errors that still say which entry failed. `key` is an encrypted
+    /// entry's file key; the nameless caller has none and so refuses one.
+    fn open_entry(&self, block: &BlockEntry, name: &str, key: Option<u32>) -> Result<ArchiveFile> {
+        let idx = &self.index;
         if block.flags & FLAG_EXISTS == 0 {
             return Err(Error::NotFound(name.into()));
         }
@@ -217,10 +308,12 @@ impl Archive {
         if block.flags & FLAG_DELETE_MARKER != 0 {
             return Err(Error::NotFound(name.into()));
         }
-        // Outside the 1.12.1 envelope: refuse rather than guess.
-        if block.flags & FLAG_ENCRYPTED != 0 {
-            return Err(Error::Unsupported(format!("encrypted file {name}")));
-        }
+        // Encrypted with no key to hand: refuse rather than guess.
+        let key = match (block.flags & FLAG_ENCRYPTED != 0, key) {
+            (false, _) => None,
+            (true, Some(key)) => Some(key),
+            (true, None) => return Err(Error::Unsupported(format!("encrypted file {name}"))),
+        };
         if block.flags & FLAG_SINGLE_UNIT != 0 {
             return Err(Error::Unsupported(format!("single-unit file {name}")));
         }
@@ -242,6 +335,7 @@ impl Archive {
             sector_size: idx.sector_size,
             offsets: None,
             implode_only,
+            key,
             avail,
             pos: 0,
             sector: None,
@@ -271,6 +365,10 @@ impl Archive {
         open.file.seek(SeekFrom::Start(file_pos))?;
         let mut otab = vec![0u8; otab_cap * 4]; // == otab_len * 4, proven <= avail above
         open.file.read_exact(&mut otab)?;
+        // An encrypted file's offset table is encrypted with `key - 1`.
+        if let Some(key) = key {
+            decrypt_bytes(&mut otab, key.wrapping_sub(1));
+        }
         let offsets = otab
             .as_chunks::<4>()
             .0
@@ -298,6 +396,8 @@ pub struct ArchiveFile {
     /// The sector offset table, relative to `base`; `None` for a stored file.
     offsets: Option<Vec<u32>>,
     implode_only: bool,
+    /// An encrypted file's key: sector i decrypts with `key + i`, stored or compressed.
+    key: Option<u32>,
     /// Bytes from `base` to the archive's end: the cap on every length read from a header.
     avail: usize,
     /// The read position in the uncompressed file.
@@ -318,6 +418,12 @@ impl ArchiveFile {
             self.file.seek(SeekFrom::Start(self.base))?;
             let mut out = vec![0u8; self.size]; // proven <= avail by `open_file`
             self.file.read_exact(&mut out)?;
+            // A stored file is still encrypted sector by sector, sector i with `key + i`.
+            if let Some(key) = self.key {
+                for (i, sector) in out.chunks_mut(self.sector_size).enumerate() {
+                    decrypt_bytes(sector, key.wrapping_add(i as u32));
+                }
+            }
             return Ok(out);
         }
         let sector_count = self.size.div_ceil(self.sector_size);
@@ -328,11 +434,22 @@ impl ArchiveFile {
         Ok(out)
     }
 
-    /// Sector `i` of a sectored file, read and decompressed to exactly its share of the file:
-    /// the sector size, or the remainder for the last. One that inflates short is refused, since
-    /// every later byte would shift into the gap.
+    /// Sector `i`, read, decrypted and decompressed to exactly its share of the file: the sector
+    /// size, or the remainder for the last. One that inflates short is refused, since every later
+    /// byte would shift into the gap. A stored file's sector is its raw span (reached only for an
+    /// encrypted one, whose key steps per sector).
     fn decode_sector(&mut self, i: usize) -> Result<Vec<u8>> {
         let want = (self.size - i * self.sector_size).min(self.sector_size);
+        if self.offsets.is_none() {
+            self.file
+                .seek(SeekFrom::Start(self.base + (i * self.sector_size) as u64))?;
+            let mut raw = vec![0u8; want]; // within `size`, proven <= avail by `open_file`
+            self.file.read_exact(&mut raw)?;
+            if let Some(key) = self.key {
+                decrypt_bytes(&mut raw, key.wrapping_add(i as u32));
+            }
+            return Ok(raw);
+        }
         let name = &self.name;
         let offsets = self.offsets.as_deref().unwrap_or_default();
         let (Some(&start), Some(&end)) = (offsets.get(i), offsets.get(i + 1)) else {
@@ -358,6 +475,10 @@ impl ArchiveFile {
             .seek(SeekFrom::Start(self.base + u64::from(start)))?;
         let mut raw = vec![0u8; comp_len]; // proven <= avail above
         self.file.read_exact(&mut raw)?;
+        // Sector i is encrypted with `key + i`, over its stored (compressed) bytes.
+        if let Some(key) = self.key {
+            decrypt_bytes(&mut raw, key.wrapping_add(i as u32));
+        }
 
         let out = if comp_len >= want {
             // A sector that would not shrink is stored verbatim.
@@ -413,7 +534,7 @@ impl Read for ArchiveFile {
         if buf.is_empty() || self.pos >= self.size as u64 {
             return Ok(0);
         }
-        let n = if self.offsets.is_some() {
+        let n = if self.offsets.is_some() || self.key.is_some() {
             self.read_sectored(buf)
         } else {
             self.read_stored(buf)
@@ -471,6 +592,18 @@ impl Index {
             }
         }
         None
+    }
+}
+
+/// The key Storm decrypts an encrypted file with: the name's last path component under the
+/// `FILE_KEY` hash, offset by the block position and XOR'd with the size for a `FIX_KEY` entry.
+fn file_key(name: &str, block: &BlockEntry) -> u32 {
+    let base = name.rsplit(['\\', '/']).next().unwrap_or(name);
+    let key = hash_string(base, hash_type::FILE_KEY);
+    if block.flags & FLAG_FIX_KEY != 0 {
+        key.wrapping_add(block.file_pos) ^ block.file_size
+    } else {
+        key
     }
 }
 
@@ -740,6 +873,113 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The nameless path agrees with the named one: what `entries` reports for a slot is the key
+    /// `name_key` derives from that slot's name, and reading it by block index yields the same bytes
+    /// `read_file` yields by name. This is the whole contract the pack builder rests on.
+    #[test]
+    fn entries_key_and_read_block_agree_with_the_named_path() {
+        let name = "Interface\\a.txt";
+        let (arc, path) = open_temp_kept(
+            "entries",
+            &archive_with_one_entry(name, FLAG_EXISTS, b"hello"),
+        );
+
+        let found: Vec<Entry> = arc.entries().collect();
+        assert_eq!(found.len(), 1, "one live slot, the rest are HASH_EMPTY");
+        assert_eq!(found[0].key, name_key(name));
+        assert_eq!(found[0].file_size, 5);
+        assert!(!found[0].is_delete_marker);
+        assert_eq!(
+            arc.read_block(found[0].block_index).unwrap(),
+            arc.read_file(name).unwrap()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A tombstone is *yielded, flagged* — not filtered out. A chain walker needs to see it to shadow
+    /// the lower-priority copy; silently skipping it would fall through to the stale base version,
+    /// which is exactly the mislead decision 0246 exists to prevent.
+    #[test]
+    fn entries_yields_tombstones_flagged_rather_than_hiding_them() {
+        let name = "Interface\\FrameXML\\ClassTrainerFrame.xml";
+        let (arc, path) = open_temp_kept(
+            "entries_tomb",
+            &archive_with_one_entry(name, FLAG_EXISTS | FLAG_DELETE_MARKER, &[]),
+        );
+        let found: Vec<Entry> = arc.entries().collect();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].is_delete_marker);
+        assert_eq!(found[0].key, name_key(name));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `name_key` inherits MPQ's name equivalence rather than restating it: separator-agnostic and
+    /// case-insensitive, because the two hashes it packs already fold `/`→`\` and uppercase.
+    #[test]
+    fn name_key_inherits_mpq_name_equivalence() {
+        let canonical = name_key("Interface\\Icons\\Spell_Holy_Heal.blp");
+        assert_eq!(canonical, name_key("interface/icons/spell_holy_heal.BLP"));
+        assert_eq!(canonical, name_key("INTERFACE\\ICONS\\SPELL_HOLY_HEAL.BLP"));
+        assert_ne!(canonical, name_key("Interface\\Icons\\Spell_Holy_Heal.tga"));
+    }
+
+    /// Over a **real** archive: for every name its `(listfile)` does name, reading by block index is
+    /// byte-identical to reading by name. The synthetic tests above prove the wiring on one entry;
+    /// this proves it against the sector layouts, codecs and table sizes an actual 1.12.1 archive
+    /// presents. Skipped without an install (`$WOW_DATA`), like every other corpus-backed test here.
+    #[test]
+    fn read_block_matches_read_file_across_a_real_archive() {
+        let Some(data) = std::env::var_os("WOW_DATA").filter(|v| !v.is_empty()) else {
+            eprintln!("skipping: $WOW_DATA not set");
+            return;
+        };
+        let mpq = PathBuf::from(data).join("patch.MPQ");
+        if !mpq.is_file() {
+            eprintln!("skipping: {} not found", mpq.display());
+            return;
+        }
+        let arc = Archive::open(&mpq).expect("open patch.MPQ");
+
+        // The block index a name resolves to isn't exposed by `find`, so go the other way: build the
+        // key → block_index map from `entries`, then look each listfile name up in it. A name whose
+        // key is absent would mean `entries` missed a live slot, which is the failure this guards.
+        let by_key: std::collections::HashMap<u64, Entry> =
+            arc.entries().map(|e| (e.key, e)).collect();
+
+        let listfile = arc
+            .read_file("(listfile)")
+            .expect("patch.MPQ has a listfile");
+        let mut checked = 0usize;
+        for raw in String::from_utf8_lossy(&listfile).split([';', '\r', '\n']) {
+            let name = raw.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let entry = by_key
+                .get(&name_key(name))
+                .unwrap_or_else(|| panic!("{name} is in the listfile but not in entries()"));
+            if entry.is_delete_marker {
+                continue; // read_file refuses these by design (0246); nothing to compare
+            }
+            assert_eq!(
+                arc.read_block(entry.block_index).ok(),
+                arc.read_file(name).ok(),
+                "{name} differs between the nameless and named read"
+            );
+            checked += 1;
+        }
+        // The archive's listfile is 26,350 entries; a near-empty run would mean the loop silently did
+        // nothing and the assertions above never fired.
+        assert!(checked > 20_000, "only checked {checked} names");
+
+        // And the point of the whole seam: the hash table holds far more than the listfile names.
+        assert!(
+            by_key.len() > checked,
+            "entries() ({}) should exceed the listfile ({checked})",
+            by_key.len()
+        );
+    }
+
     #[test]
     fn avail_from_never_underflows_when_pos_exceeds_file_len() {
         assert_eq!(avail_from(10, 100), 0);
@@ -796,6 +1036,71 @@ mod tests {
         assert_eq!(out.len(), 612);
         assert!(out[..512].iter().all(|&b| b == 0));
         assert!(out[512..].iter().all(|&b| b == 7));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An encrypted, stored entry reads back by name and is refused by block index: the key derives
+    /// from the name's last component (`hello.txt`), which the nameless read does not have.
+    #[test]
+    fn an_encrypted_stored_entry_reads_by_name_only() {
+        use crypto::encrypt_bytes;
+        let name = "Interface\\hello.txt";
+        let plain = b"hello, encrypted world";
+        let mut data = plain.to_vec();
+        encrypt_bytes(&mut data, hash_string("hello.txt", hash_type::FILE_KEY));
+        let (arc, path) = open_temp_kept(
+            "encrypted_stored",
+            &archive_with_one_entry(name, FLAG_EXISTS | FLAG_ENCRYPTED, &data),
+        );
+        assert_eq!(arc.read_file(name).unwrap(), plain);
+        let entry = arc.entries().next().expect("one entry");
+        assert!(arc.is_encrypted(entry.block_index));
+        match arc.read_block(entry.block_index) {
+            Err(Error::Unsupported(_)) => {}
+            other => panic!("expected Unsupported for a nameless encrypted read, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The shape a Turtle patch archive's `(listfile)` takes: `COMPRESS | ENCRYPTED | FIX_KEY`, the
+    /// offset table under `key - 1` and sector 0 under `key + 0`, with the key offset by the block
+    /// position and XOR'd with the size.
+    #[test]
+    fn an_encrypted_fix_key_compressed_entry_reads_by_name() {
+        use crypto::encrypt_bytes;
+        use flate2::{write::ZlibEncoder, Compression};
+        use std::io::Write;
+        let name = "(listfile)";
+        let plain =
+            b"Interface\\FrameXML\\LFT\\LFT.lua\r\nDBFilesClient\\ChrRaces.dbc\r\n".repeat(4);
+        let mut sector = vec![0x02u8];
+        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+        e.write_all(&plain).unwrap();
+        sector.extend_from_slice(&e.finish().unwrap());
+
+        // Laid out as `archive_with_one_block` lays it: 4 hash slots and one block entry after the
+        // 32-byte header, so the data starts at 32 + 64 + 16.
+        let data_pos = 32u32 + 4 * 16 + 16;
+        let key =
+            hash_string(name, hash_type::FILE_KEY).wrapping_add(data_pos) ^ plain.len() as u32;
+        let mut otab = Vec::new();
+        otab.extend_from_slice(&8u32.to_le_bytes());
+        otab.extend_from_slice(&(8 + sector.len() as u32).to_le_bytes());
+        encrypt_bytes(&mut otab, key.wrapping_sub(1));
+        encrypt_bytes(&mut sector, key);
+        let mut data = otab;
+        data.extend_from_slice(&sector);
+
+        let (arc, path) = open_temp_kept(
+            "encrypted_fix_key",
+            &archive_with_one_block(
+                name,
+                FLAG_EXISTS | FLAG_COMPRESS | FLAG_ENCRYPTED | FLAG_FIX_KEY,
+                &data,
+                plain.len() as u32,
+            ),
+        );
+        assert_eq!(arc.read_file(name).unwrap(), plain);
         let _ = std::fs::remove_file(&path);
     }
 

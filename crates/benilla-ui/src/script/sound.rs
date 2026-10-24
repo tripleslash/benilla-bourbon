@@ -13,8 +13,6 @@
 
 use mlua::{Lua, Value};
 
-use super::Model;
-
 /// One queued sound for the app's kit player.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SoundRequest {
@@ -44,13 +42,13 @@ impl super::UiScript {
 
     /// Drain the queued sounds; the app plays each in 2D, as UI sounds have no world position.
     pub fn take_sounds(&mut self) -> Vec<SoundRequest> {
-        std::mem::take(&mut self.model_mut().sound_queue)
+        drain_field!(self, sound_queue)
     }
 
     /// Drain the music intents in call order: a play and a stop in one frame are a track or
     /// silence by their order.
     pub fn take_music(&mut self) -> Vec<MusicRequest> {
-        std::mem::take(&mut self.model_mut().music_queue)
+        drain_field!(self, music_queue)
     }
 }
 
@@ -75,7 +73,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: PlaySoundFile(\"soundfile\")",
             )
             .map_err(bare)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.sound_queue.push(SoundRequest::File(path));
             Ok(1)
         })?,
@@ -91,7 +91,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: PlaySound(\"sound\")",
             )
             .map_err(bare)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             // During the UI load a by-name play is dropped before any other gate (`0x458046`,
             // `0x45804d`).
             if model.sound_suppression == 0 {
@@ -112,7 +114,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: PlayMusic(\"music\")",
             )
             .map_err(bare)?;
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .music_queue
                 .push(MusicRequest::Play(path));
@@ -123,7 +125,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "StopMusic",
         // Reads no argument (`0x458770`), so an extra one is ignored.
         lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .music_queue
                 .push(MusicRequest::Stop);

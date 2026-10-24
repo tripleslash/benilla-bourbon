@@ -94,7 +94,7 @@ pub enum PetitionCall {
 impl super::UiScript {
     /// Replace the charter snapshot; the app fires the four events and defers `PETITION_SHOW`.
     pub fn set_petition(&mut self, state: PetitionState) {
-        self.model_mut().petition = state;
+        set_field!(self, petition, state);
     }
 
     /// `0x4f3ef0` inside a close: the signers freed, the record still cached for the
@@ -107,7 +107,7 @@ impl super::UiScript {
 
     /// The close's last step (`0x4f4078`): the record goes.
     pub fn drop_petition_record(&mut self) {
-        self.model_mut().petition.record = None;
+        set_field!(self, petition.record, None);
     }
 
     /// The charter calls a harness VM kept ([`Self::keep_calls`]), in call order.
@@ -172,7 +172,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetPetitionInfo",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(r) = model.petition.record.as_ref() else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
@@ -198,7 +200,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumPetitionNames",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.petition.signers.len() as i64)
         })?,
     )?;
@@ -215,7 +219,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 index,
                 "Usage: GetPetitionNameInfo(index)",
             )?);
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(name) = usize::try_from(index)
                 .ok()
                 .and_then(|i| i.checked_sub(1))
@@ -233,7 +239,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CanSignPetition",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(binding_abi::flag(model.petition.can_sign))
         })?,
     )?;
@@ -243,7 +251,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetGuildCharterCost",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.petition.charter_cost))
         })?,
     )?;
@@ -279,7 +289,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "BuyGuildCharter",
         lua.create_function(|lua, name: Value| {
             let name = binding_abi::string_arg(lua, name, "Usage: BuyGuildCharter(guildName)")?;
-            let checked = check(&lua.app_data_ref::<Model>().expect("model app_data"), &name);
+            let checked = check(
+                &lua.app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data"),
+                &name,
+            );
             match checked {
                 Ok(()) => {
                     submit(lua, PetitionCall::Buy(name))?;
@@ -300,7 +314,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "RenamePetition",
         lua.create_function(|lua, name: Value| {
             let name = binding_abi::string_arg(lua, name, "Usage(RenamePetition(\"name\")")?;
-            let refusal = check(&lua.app_data_ref::<Model>().expect("model app_data"), &name).err();
+            let refusal = check(
+                &lua.app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data"),
+                &name,
+            )
+            .err();
             submit(lua, PetitionCall::Rename { name, refusal })
         })?,
     )?;

@@ -17,6 +17,9 @@ tracy = ["benilla-app/tracy"]
 trace_chrome = ["benilla-app/trace_chrome"]
 # Forwards to benilla-app's `bevy_dynamic_linking`, which enables bevy/dynamic_linking.
 bevy_dynamic_linking = ["benilla-app/bevy_dynamic_linking"]
+shader_reload = ["benilla-app/shader_reload"]
+# fork: perf — per-system CPU time (`benilla-world`'s `trace_systems`, `WOW_SYSTEM_PROFILE=1`).
+trace_systems = ["benilla-app/trace_systems"]
 
 [dependencies]
 # `default-features = false`, or `--no-default-features` here still builds benilla-app with `dev`.

@@ -1,0 +1,131 @@
+# Static-host headers (the `_headers` format). Fifteen rules of the 100 allowed.
+#
+# Hosted from web/site/_headers (staged out of Trunk's dist by scripts/stage-packs.sh).
+
+/*
+  # **This IS for SharedArrayBuffer now.** It was pre-positioned rather than needed: the note that
+  # stood here said the atomics build "does not compile at all", because bevy_render enabled wgpu's
+  # `fragile-send-sync-non-atomic-wasm` and every wgpu handle went !Send + !Sync under `+atomics`
+  # while RenderDevice/RenderQueue are #[derive(Resource)]. bevy 0.18.1 fixed that upstream —
+  # `WgpuWrapper` becomes a `send_wrapper::SendWrapper` on exactly `wasm32 + atomics` — and a
+  # measured build on 2026-09-06 compiled and linked the whole client with zero errors.
+  #
+  # So these two lines are now load-bearing, and they are the FIRST thing to check if the threaded
+  # bundle stops booting. A page that is not cross-origin isolated cannot construct a
+  # SharedArrayBuffer, the module's linear memory IS one, and the failure is a bare
+  # `WebAssembly.Memory` TypeError that names nothing. `wenilla-host::static_site` and `Trunk.toml`'s
+  # `[serve] headers` set the same pair so local dev and the site agree.
+  #
+  # The fetch/decode worker (`web/packworker.js`) still wants none of this — every asset it loads
+  # is same-origin, which `require-corp` allows unconditionally.
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+/data/p/*
+  # A pack's name IS its content: the id comes from a deterministic plan over the game files, so a
+  # given URL never changes meaning and `immutable` is honest rather than optimistic.
+  #
+  # It is also the rule that makes the edge *store* the object, which is the precondition for
+  # cache-layer range slicing. Measured before this existed: `Range: bytes=100-199` came back 200
+  # with the full body and `cf-cache-status: MISS` every time. Whether this flips that is the one
+  # thing to re-measure after the first upload — and nothing depends on the answer, because the
+  # client probes for it (web/packs.js) and the whole-object path is never wrong, only bigger.
+  Cache-Control: public, max-age=31536000, immutable
+  Cross-Origin-Resource-Policy: same-origin
+
+/addons/*
+  # The bundled addons' loose files (`scripts/stage-packs.sh`). Not immutable: an addon update
+  # rewrites them in place under the same names, so a day is the turnover.
+  Cache-Control: public, max-age=86400
+  Cross-Origin-Resource-Policy: same-origin
+
+/data/index.bpi
+  # Not immutable: a re-pack rewrites it in place, and a client holding a stale index would resolve
+  # names to packs that no longer exist. A week is long enough to be free on a repeat visit and
+  # short enough that a re-pack reaches everyone without a cache-busting query.
+  #
+  # This is the HTTP cache's rule and it is now the second line of defence, not the first: with
+  # `sw.js` installed the index is stored permanently and invalidated by build id instead, which is
+  # both stronger (it survives HTTP-cache eviction) and more precise (it turns over exactly when the
+  # container does). The header still governs a page with no worker.
+  Cache-Control: public, max-age=604800
+
+/data/listfile.txt
+  # Same shape as the index — rewritten by a re-pack, invalidated by build id under the worker — and
+  # left on the default `max-age=0, must-revalidate` it would be a conditional request for 4.5 MB
+  # on every load of a page that has no worker.
+  Cache-Control: public, max-age=604800
+
+/data/boot-packs.json
+  # The VERSION POINTER: it carries `build_id`, which is how the client decides whether the corpus
+  # it already holds is still the corpus this origin serves. `sw.js` keeps it network-first for that
+  # reason, and holding it would defeat the check — a client with a stale pointer never learns a
+  # re-pack happened. ~10 KB, and the only game-data request a warm repeat visit makes.
+  Cache-Control: no-cache
+
+# ---------------------------------------------------------------------------------------------
+# The optional updated-character-model layer, at /data-hd. The same four rules as /data, for the
+# same four reasons — it is the same container format, built by the same packer, and the arguments
+# above (a pack's name IS its content; an index a re-pack rewrites; a listfile likewise; a pointer
+# that must never be held) do not change because the tree is optional.
+#
+# They are spelled out rather than folded into a /data* glob deliberately: `/data*` would also match
+# a future sibling nobody has thought about yet, and these are cache lifetimes — the class of rule
+# where "it also applied to that" is discovered months later as a client holding bytes it should
+# have re-fetched.
+/data-hd/p/*
+  Cache-Control: public, max-age=31536000, immutable
+  Cross-Origin-Resource-Policy: same-origin
+
+/data-hd/index.bpi
+  Cache-Control: public, max-age=604800
+
+/data-hd/listfile.txt
+  Cache-Control: public, max-age=604800
+
+/data-hd/boot-packs.json
+  Cache-Control: no-cache
+
+# The Turtle WoW 1.18.1 layer, at /data-turtle: the same four rules again, spelled out for the same
+# reason the /data-hd ones are.
+/data-turtle/p/*
+  Cache-Control: public, max-age=31536000, immutable
+  Cross-Origin-Resource-Policy: same-origin
+
+/data-turtle/index.bpi
+  Cache-Control: public, max-age=604800
+
+/data-turtle/listfile.txt
+  Cache-Control: public, max-age=604800
+
+/data-turtle/boot-packs.json
+  Cache-Control: no-cache
+
+# The reforged art layer, at /data-reforged: the same four rules again.
+/data-reforged/p/*
+  Cache-Control: public, max-age=31536000, immutable
+  Cross-Origin-Resource-Policy: same-origin
+
+/data-reforged/index.bpi
+  Cache-Control: public, max-age=604800
+
+/data-reforged/listfile.txt
+  Cache-Control: public, max-age=604800
+
+/data-reforged/boot-packs.json
+  Cache-Control: no-cache
+
+/sw.js
+  # A worker script the browser holds is a worker that cannot be replaced, and this one owns what
+  # the client is allowed to serve off disk. Browsers already refuse to reuse a >24h-old worker
+  # script, but saying it is cheaper than relying on it.
+  Cache-Control: no-cache
+
+/config.json
+  # The gateway address and the realmlist — the site's whole configuration, and the only source
+  # the client has for either. The entire point of them being an asset rather than constants in the
+  # wasm is that re-uploading this one file repoints the client, so it must never be held.
+  #
+  # At the root, not under /data: it ships with the build (`web/config.json` -> Trunk -> dist), not
+  # with the container, so `sw.js` — scoped to /data/ — never sees it and needs no exception for it.
+  Cache-Control: no-cache

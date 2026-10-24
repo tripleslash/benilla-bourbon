@@ -165,11 +165,7 @@ fn a_stock_on_hide_close_inside_the_fire_runs_as_the_reference() {
                 "{window:?}, walk-away {walk_away}"
             );
             assert_eq!(latch(&app), None);
-            assert!(app
-                .world()
-                .non_send_resource::<UiScript>()
-                .errors()
-                .is_empty());
+            assert!(app.world().non_send::<UiScript>().errors().is_empty());
         }
     }
 }
@@ -208,7 +204,7 @@ fn close_mail_closes_before_the_next_verb() {
     let (mut app, rx) = client();
     open(&mut app, W::Mail, NPC);
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_mail(Some(benilla_ui::script::MailState {
             inbox: Vec::new(),
             open: true,
@@ -236,7 +232,7 @@ fn close_merchant_drops_a_held_vendor_row_inside_its_call() {
     let (mut app, _rx) = client();
     open(&mut app, W::Merchant, NPC);
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_merchant(Some(benilla_ui::script::MerchantState {
             items: vec![benilla_ui::script::MerchantItem {
                 name: Some("Refreshing Spring Water".into()),
@@ -248,7 +244,7 @@ fn close_merchant_drops_a_held_vendor_row_inside_its_call() {
             }],
             ..Default::default()
         }));
-    let payload = |app: &App| app.world().non_send_resource::<UiScript>().cursor_payload();
+    let payload = |app: &App| app.world().non_send::<UiScript>().cursor_payload();
     eval::<()>(&mut app, "PickupMerchantItem(1)");
     assert!(
         matches!(
@@ -305,7 +301,7 @@ fn close_trade_runs_the_queued_trade_touches_first() {
     let (mut app, rx) = client();
     open(&mut app, W::Trade, NPC);
     {
-        let mut vm = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut vm = app.world_mut().non_send_mut::<UiScript>();
         vm.keep_calls();
         vm.open_trade_window();
         vm.set_trade(Some(Default::default()));
@@ -364,7 +360,7 @@ fn the_merchant_close_ends_repair_mode_after_its_signal() {
     for world_close in [false, true] {
         open(&mut app, W::Merchant, NPC);
         {
-            let mut vm = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut vm = app.world_mut().non_send_mut::<UiScript>();
             vm.set_merchant(Some(benilla_ui::script::MerchantState {
                 can_repair: true,
                 ..Default::default()

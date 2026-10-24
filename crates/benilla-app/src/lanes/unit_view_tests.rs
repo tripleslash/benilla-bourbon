@@ -136,7 +136,7 @@ pub(super) fn client() -> App {
             "#,
         )
         .unwrap();
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     let mob = |hp: u32| [(FIELD_UNIT_HEALTH, hp), (FIELD_UNIT_MAXHEALTH, 100)];
     frame(
         &mut app,
@@ -173,7 +173,7 @@ pub(super) fn client() -> App {
 /// The resolver's seat: us, the wolf as `"target"`, and the wolf's target `tot`.
 pub(super) fn seat(app: &mut App, tot: u64) {
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_unit_guids(&UnitGuids {
             player: ME,
             target: WOLF,
@@ -206,7 +206,7 @@ pub(super) fn frame_after(
     crate::net::handlers::dispatch(world, wire(packets));
     crate::ui_unit::run_feed_units_once(world);
     crate::lanes::fire_in_order(world);
-    let s = world.non_send_resource_mut::<UiScript>();
+    let s = world.non_send_mut::<UiScript>();
     let out = s.eval::<Vec<String>>("return Seen").unwrap();
     s.run("Seen = {}").unwrap();
     let errors = s.errors();
@@ -277,7 +277,7 @@ fn the_replay_ends_on_the_live_stores() {
     frame(&mut app, vec![values(WOLF, &targets(BOAR))]);
     seat(&mut app, BOAR);
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(r#"function Look(event, unit) return UnitHealth("targettarget") end"#)
         .unwrap();
     lane_counts(&mut app);
@@ -329,7 +329,7 @@ fn the_replay_ends_on_the_live_stores() {
 fn two_packets_with_no_event_between_make_one_build() {
     let mut app = client();
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(r#"function Look(event, unit) return UnitHealth("targettarget") end"#)
         .unwrap();
     lane_counts(&mut app);
@@ -455,7 +455,7 @@ fn a_drain_that_stops_early_leaves_no_rewound_store() {
     assert_eq!(frame(&mut app, vec![]), ["UNIT_HEALTH:target:70"]);
     let health = app
         .world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .eval::<f64>("return UnitHealth('target')")
         .unwrap();
     assert_eq!(health, 70.0);
@@ -500,7 +500,7 @@ fn player_dead_reads_its_packets_health_after_an_earlier_packets_line() {
         .resource_mut::<crate::net::NetStatus>()
         .connected = true;
     app.world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run(
             r#"local d = CreateFrame("Frame") d:RegisterEvent("PLAYER_DEAD")
             d:SetScript("OnEvent", function()
@@ -528,7 +528,7 @@ fn our_deaths_list_signals_before_its_line_and_player_dead_after() {
         .resource_mut::<crate::net::NetStatus>()
         .connected = true;
     app.world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run(
             r#"UNITDIESSELF = "You die." UNITDIESOTHER = "%s dies."
             local d = CreateFrame("Frame")
@@ -555,7 +555,7 @@ fn our_deaths_list_signals_before_its_line_and_player_dead_after() {
     crate::ui_unit::run_feed_units_once(world);
     crate::lanes::fire_in_order(world);
     let seen = world
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<Vec<String>>("return Seen")
         .unwrap();
     let ours: Vec<&str> = seen
@@ -573,7 +573,7 @@ fn spy_level_up(app: &mut App) {
         .lock()
         .apply_flags(&[0u8; 32]);
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"
             local f = CreateFrame("Frame")

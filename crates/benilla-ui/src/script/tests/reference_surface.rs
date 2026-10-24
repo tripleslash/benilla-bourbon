@@ -9,7 +9,11 @@ use std::collections::HashSet;
 use super::common::script;
 
 /// Globals the engine exposes that 1.12 does not, each with its reason. The list is exact.
-const BEYOND_1_12: &[&str] = &[];
+const BEYOND_1_12: &[&str] = &[
+    // This fork reads retail macro options (`script::macro_options`), and keeps the evaluator
+    // under retail's name for `/script` lines and macro addons written against it.
+    "SecureCmdOptionParse",
+];
 
 /// `reference/lua_globals.tsv`'s names.
 fn reference() -> HashSet<String> {

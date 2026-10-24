@@ -39,7 +39,7 @@ tree_key() {
     rm -f "$tmpidx"
     [ -n "$t" ] || return 1
     printf '%s|%s|%s' "$t" "$(rustc -V 2>/dev/null)" \
-        "$(shasum "$root/scripts/gates.sh" 2>/dev/null | cut -d' ' -f1)"
+        "$(git hash-object "$root/scripts/gates.sh" 2>/dev/null)"
 }
 resolve_wow() { cargo run -q -p benilla-formats --example where 2>/dev/null || true; }
 # A delta only under docs/, in top-level *.md files or in the issue and PR templates keeps the
@@ -157,7 +157,7 @@ run test-no-install env -u BENILLA_REQUIRE_DATA WOW_DATA= "$root/scripts/unit-te
 
 # doc-links: refuses a doc link to a `crate::`, `super::`, `self::` or `Self::` path whose leaf is
 # declared nowhere in the workspace. Narrow on purpose: every other unresolved link is a convention.
-run doc-links scripts/doc-links.py
+run doc-links scripts/doc-links.sh
 
 # message-catalog: `crates/benilla-ui/src/messages/catalog.rs` is what the vendored messages table
 # generates, byte for byte.
@@ -165,7 +165,7 @@ run message-catalog scripts/gen-message-catalog.py --check
 
 # pass-span-lint: refuses a second `pass_span` on a render pass whose span is still open, a fatal
 # wgpu validation error on Vulkan and a silent no-op on Metal and DX12, which no macOS run sees.
-run pass-span-lint scripts/pass-span-lint.py
+run pass-span-lint scripts/pass-span-lint.sh
 
 # player-clippy: the player build's own lints, which no other gate sees. `clippy` runs the dev
 # feature set and player-tests compiles under `cfg(test)`, where test code uses imports and items

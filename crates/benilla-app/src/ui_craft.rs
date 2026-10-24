@@ -553,11 +553,11 @@ mod tests {
                  f:SetScript('OnEvent', function() CLOSES = CLOSES + 1 end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.add_systems(Update, feed_craft);
         let closes = |app: &App| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<i64>("return CLOSES")
                 .unwrap()
         };
@@ -565,7 +565,7 @@ mod tests {
         app.world_mut().resource_mut::<CraftOpen>().line = Some(333);
         app.update();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("CloseCraft()")
             .unwrap();
         assert_eq!(closes(&app), 1, "the verb's own signal");
@@ -706,7 +706,7 @@ mod tests {
             .world_mut()
             .spawn((SelfPlayer, ObjectStore(Default::default())))
             .id();
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, feed_craft);
         {
             let mut open = app.world_mut().resource_mut::<CraftOpen>();
@@ -730,7 +730,7 @@ mod tests {
                 )));
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<(i64, bool)>(
                     "local _, _, _, have = GetCraftReagentInfo(1, 1) \
                      local _, hasTool = GetCraftSpellFocus(1) return have, hasTool == 1",
@@ -861,12 +861,12 @@ mod tests {
                 ..crate::ui_action::Spells::empty_for_tests()
             })
             .insert_resource(SkillLines { catalog });
-        app.insert_non_send_resource(rx);
+        app.insert_non_send(rx);
         app.world_mut().spawn((
             ObjectStore(benilla_protocol::ObjectFields::from_pairs(player)),
             SelfPlayer,
         ));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, feed_craft);
         let mut open = app.world_mut().resource_mut::<CraftOpen>();
         open.line = Some(if craft_type == 3 {
@@ -927,7 +927,7 @@ mod tests {
     fn craft_rows(app: &mut App) -> Vec<(String, String, i64, i64)> {
         app.update();
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<Vec<String>>>(
                 "local t = {} for i = 1, GetNumCrafts() do \
                  local n, s, k, _, _, tp, l = GetCraftInfo(i) \
@@ -973,7 +973,7 @@ mod tests {
         );
         assert!(app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<bool>("return GetCraftSkillLine(1) == nil")
             .unwrap());
     }
@@ -1191,7 +1191,7 @@ mod tests {
         let triple = |app: &mut App| {
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<(Option<String>, i64, i64)>("return GetCraftDisplaySkillLine()")
                 .unwrap()
         };
@@ -1238,7 +1238,7 @@ mod tests {
         app.update();
         let name = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Option<String>>("return (GetCraftDisplaySkillLine())")
             .unwrap();
         assert_eq!(name.as_deref(), Some("Tailoring"));
@@ -1268,7 +1268,7 @@ mod tests {
             &[(F_SKILL_1, ENCHANTING), (F_SKILL_1 + 1, 1 | 75 << 16)],
         );
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run(
                 "HEARD = {} local f = CreateFrame('Frame') f:RegisterEvent('CRAFT_SHOW') \
                  f:RegisterEvent('CRAFT_UPDATE') \
@@ -1278,7 +1278,7 @@ mod tests {
         let heard = |app: &mut App| {
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
                 .unwrap()
         };
@@ -1292,7 +1292,7 @@ mod tests {
         assert!(heard(&mut app).is_empty());
         assert_eq!(
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<String>("local _, _, k = GetCraftInfo(1) return k")
                 .unwrap(),
             "trivial",
@@ -1341,7 +1341,7 @@ mod tests {
         app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
         crate::ui_tradeskill::register_rebuild_triggers(&mut app);
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run(
                 "HEARD = {} local f = CreateFrame('Frame') f:RegisterEvent('CRAFT_SHOW') \
                  f:RegisterEvent('CRAFT_UPDATE') \
@@ -1351,7 +1351,7 @@ mod tests {
         let heard = |app: &mut App| {
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
                 .unwrap()
         };
@@ -1374,7 +1374,7 @@ mod tests {
         );
         assert!(heard(&mut app).is_empty());
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run("GetCraftReagentInfo(1, 1) GetCraftReagentInfo(1, 1)")
             .unwrap();
         assert!(heard(&mut app).is_empty());
@@ -1416,7 +1416,7 @@ mod tests {
                 .unwrap();
             script
         };
-        app.insert_non_send_resource(listening());
+        app.insert_non_send(listening());
         app.add_systems(
             Update,
             (
@@ -1429,7 +1429,7 @@ mod tests {
         let heard = |app: &mut App| {
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
                 .unwrap()
         };
@@ -1448,7 +1448,7 @@ mod tests {
         assert_eq!(app.world().resource::<CraftOpen>().line, None);
 
         assert_eq!(open(&mut app), ["CRAFT_UPDATE", "CRAFT_SHOW"]);
-        app.insert_non_send_resource(listening());
+        app.insert_non_send(listening());
         app.world_mut()
             .write_message(crate::net::WorldEnterCascadeMessage);
         assert!(heard(&mut app).is_empty(), "a reload shows nothing");

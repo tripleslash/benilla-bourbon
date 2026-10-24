@@ -50,6 +50,18 @@ process exits, even after the sound is stopped. symphonia 0.6 estimates the leng
 without a Xing header from its first frames, and over-counts one of the install's tracks,
 `ZulGurubVooDoo.mp3`, by one frame. With the error the sound stops where its packets end.
 
+## Patch 3 (fork: web) — the cpal backend stays on cpal 0.17
+
+`Cargo.toml` pins both `cpal` target tables to `0.17.0` where 0.12.4 asks for `0.18.1`, drops the
+`cpal-realtime` and `cpal-realtime-dbus` features that only 0.18 has, and
+`src/backend/cpal/{desktop.rs,desktop/stream_manager.rs,error.rs,wasm.rs}` and `src/lib.rs` are
+0.12.1's, which is the whole of 0.12.4's cpal 0.18 port. Upstream benilla never turns kira's
+`cpal` feature on; the browser build does, on wasm32 alone (`benilla-app`'s wasm32 table), and
+the lock resolves every target at once, so a cpal 0.18 under kira beside `benilla-app`'s own
+cpal 0.17 is two `alsa-sys` claiming `links = "alsa"` and no resolution. Removal: when
+`benilla-app` moves its own `sound::output::cpal` to cpal 0.18, restore the five files and the
+two version lines from the registry crate.
+
 ## How to check
 
 For each patched file, `diff -u <(sed 's/\r$//' <registry>/kira-0.12.4/<file>)

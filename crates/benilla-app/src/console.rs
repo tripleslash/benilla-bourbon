@@ -380,7 +380,7 @@ mod tests {
         };
         assert_eq!(
             line(&mut app, "farclip"),
-            "  \"farclip\" is \"400\" (default \"350\")",
+            "  \"farclip\" is \"400\" (default \"1000\")",
             "the reset text is the value"
         );
         app.world_mut()
@@ -388,14 +388,14 @@ mod tests {
             .set("farclip", "500");
         assert_eq!(
             line(&mut app, "farclip"),
-            "  \"farclip\" is \"500\" (default \"350\") (reset \"400\")"
+            "  \"farclip\" is \"500\" (default \"1000\") (reset \"400\")"
         );
         app.world_mut()
             .resource_mut::<Cvars>()
-            .set("farclip", "350");
+            .set("farclip", "1000");
         assert_eq!(
             line(&mut app, "farclip"),
-            "  \"farclip\" is \"350\" (reset \"400\")"
+            "  \"farclip\" is \"1000\" (reset \"400\")"
         );
         assert_eq!(
             line(&mut app, "MusicVolume"),

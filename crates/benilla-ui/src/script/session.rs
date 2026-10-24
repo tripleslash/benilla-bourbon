@@ -1,13 +1,11 @@
-//! The session verbs: the game menu's Logout and Exit Game, their dialogs' answers, `ReloadUI`
-//! and the cinematic pair. Each hands its [`SessionRequest`] to the call host, which sends the
-//! packet, sets the latch or ends the process before the verb returns, as the reference's do
-//! (`Logout` `0x489390` → `0x5ab000`); the server decides whether a logout is instant or a
-//! 20-second countdown. Beside them, the world-enter cascade's two events and the `PLAYER_LOGIN`
+//! The session verbs: Logout and `Quit()` (the fork's menu has no Exit Game rung; `/quit` calls
+//! it), their dialogs' answers, `ReloadUI` and the cinematic pair. Each hands its
+//! [`SessionRequest`] to the call host, which sends the packet, sets the latch or ends the process
+//! before the verb returns, as the reference's do (`Logout` `0x489390` → `0x5ab000`); the server
+//! decides whether a logout is instant or a 20-second countdown. Beside them, the world-enter cascade's two events and the `PLAYER_LOGIN`
 //! arm a UI load sets.
 
 use mlua::Lua;
-
-use super::Model;
 
 /// A session verb, which the call host applies inside the call ([`super::ScriptCall::Session`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,7 +56,7 @@ impl super::UiScript {
     /// `0x49011d`, unconditionally, and [`Self::fire_world_enter`] spends it. The flag lives in
     /// this VM, so each load arms its own and a worldport, which loads nothing, re-arms nothing.
     pub fn arm_player_login(&mut self) {
-        self.model_mut().player_login_armed = true;
+        set_field!(self, player_login_armed, true);
     }
 
     /// The bag watchers' set-up in the world-enter cascade (`0x4f8cc0`): the bag cache zeroed,
@@ -179,7 +177,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "InCinematic",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(if model.in_cinematic {
                 mlua::Value::Integer(1)
             } else {

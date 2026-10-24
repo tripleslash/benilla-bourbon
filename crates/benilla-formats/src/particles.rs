@@ -67,6 +67,12 @@ impl CellRamp {
         }
     }
 
+    /// The ramp's `(base, span)`, which [`Self::sample`] reads; for an evaluator that runs the same
+    /// law elsewhere (the effect lane's GPU particle expansion).
+    pub fn base_span(&self) -> (i32, i32) {
+        (self.base, self.span)
+    }
+
     /// The cell at segment fraction `t` (inset and repeat already applied, [`OverLife::sample`]):
     /// `floor(base + span·t) & 0xFF`, the reference's mod-256 wrap, not a clamp.
     pub fn sample(&self, t: f32) -> u16 {

@@ -1477,7 +1477,7 @@ mod tests {
                 .collect();
             let refused = app
                 .world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<Vec<String>>("return REFUSED")
                 .expect("the tap reads");
             (sent, refused)

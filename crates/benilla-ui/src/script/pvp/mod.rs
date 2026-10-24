@@ -20,7 +20,6 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{number_arg, string_arg};
 use super::unit::{check_unit_token, is_civilian_kill};
-use super::Model;
 
 /// The local player's honor snapshot, decoded by the app from the private honor descriptor
 /// fields. Kill counts are halves of `TWO_SHORT` fields, low honorable and high dishonorable.
@@ -109,7 +108,7 @@ impl super::UiScript {
     /// Push or clear the local player's honor snapshot, the self getters' only source. It fires
     /// no event: the app fires `PLAYER_PVP_KILLS_CHANGED`/`PLAYER_PVP_RANK_CHANGED` alongside.
     pub fn set_honor(&mut self, honor: Option<HonorState>) {
-        self.model_mut().honor = honor;
+        set_field!(self, honor, honor);
     }
 
     /// Push or clear the last `MSG_INSPECT_HONOR_STATS` reply, paired with the pane's
@@ -180,11 +179,13 @@ fn rank_progress(bar: u8) -> f64 {
 }
 
 fn honor(lua: &Lua) -> Option<HonorState> {
-    lua.app_data_ref::<Model>().expect("model app_data").honor
+    lua.app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data")
+        .honor
 }
 
 fn inspect_honor(lua: &Lua) -> Option<InspectHonorData> {
-    lua.app_data_ref::<Model>()
+    lua.app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .inspect_honor
 }
@@ -219,12 +220,16 @@ fn team_arg(lua: &Lua, v: Value) -> mlua::Result<i64> {
     }
     let Some(token) = lua.coerce_string(v)? else {
         // Absent, boolean or table: the local player.
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         return Ok(model.unit("player").map_or(0, team_of));
     };
     let token = Some(token.to_str()?.to_owned());
     check_unit_token(&token)?;
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     Ok(token
         .as_ref()
         .and_then(|t| model.unit(t))
@@ -299,14 +304,16 @@ fn format_two_strings(fmt: &str, a: &str, b: &str) -> String {
     out
 }
 
-/// The install keys a name-line rank prefix can resolve: `UNIT_PVP_NAME` and every
-/// `PVP_RANK_<rank>_<team>[_FEMALE]` for ranks 1..=19 and both team digits. The range reaches 19
+/// The install keys a name-line rank prefix can resolve: `UNIT_PVP_NAME`, every `PVP_MEDAL<n>`
+/// for the title byte, and every `PVP_RANK_<rank>_<team>[_FEMALE]` for ranks 1..=19 and both team
+/// digits. The range reaches 19
 /// because the builder is range-unchecked and the install's `PVP_RANK_19_*` names the racial
 /// "Leader", past the player rank byte's 0..=18. The world-text pass, which runs without the VM,
 /// reads them off each VM once; `UnitPVPName` looks them up live.
 pub fn pvp_name_global_keys() -> Vec<String> {
-    let mut keys = Vec::with_capacity(1 + 19 * 2 * 2);
+    let mut keys = Vec::with_capacity(1 + 255 + 19 * 2 * 2);
     keys.push("UNIT_PVP_NAME".to_string());
+    keys.extend((1..=255u8).map(|n| format!("PVP_MEDAL{n}")));
     for rank in 1..=19 {
         for team in 0..=1 {
             keys.push(format!("PVP_RANK_{rank}_{team}"));
@@ -331,6 +338,23 @@ pub fn decorated_name(
     let title = rank_title(&lookup, key)?;
     let template = lookup("UNIT_PVP_NAME")?;
     Some(format_two_strings(&template, &title, name))
+}
+
+/// The title line under a player's name: `PVP_MEDAL<medal>` (`0x6093ef`, ungendered) for a nonzero
+/// `PLAYER_BYTES_3` byte 2. The reference reaches it only from the ranked-player leg; a Turtle
+/// 1.18 realm stores the chosen character title ("Still Alive", `PVP_MEDAL18`) in that byte for
+/// any player, so under `turtle` an unranked player shows it too. `None` for no title or a string
+/// the lookup lacks.
+pub fn medal_line(
+    lookup: impl Fn(&str) -> Option<String>,
+    rank: u8,
+    medal: u8,
+    turtle: bool,
+) -> Option<String> {
+    if medal == 0 || (rank == 0 && !turtle) {
+        return None;
+    }
+    lookup(&format!("PVP_MEDAL{medal}"))
 }
 
 /// `0x609370`, the name builder behind `UnitPVPName` (its legs are at the binding) and the unit
@@ -358,6 +382,19 @@ pub(super) fn pvp_name(lua: &Lua, u: &super::UnitState, name: &str, player_level
             return out;
         }
         return name.to_owned();
+    }
+    // Leg A″: an unranked player's Turtle character title, on its own line under the name.
+    if u.is_player && u.pvp_rank == 0 && u.pvp_medal != 0 {
+        let turtle = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .is_some_and(|m| m.flavor == super::UiFlavor::Turtle);
+        let medal = medal_line(|key| global_string(lua, key), 0, u.pvp_medal, turtle);
+        if let Some(medal) = medal {
+            return format!(
+                "{name}
+{medal}"
+            );
+        }
     }
     // Leg B: the dishonorable-kill warning, on the same predicate the tooltip's CIVILIAN line uses.
     if is_civilian_kill(u, player_level) {
@@ -501,7 +538,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, token: Value| {
             let token = Some(string_arg(lua, token, "Usage: UnitPVPRank(\"unit\")")?);
             check_unit_token(&token)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(token
                 .as_ref()
                 .and_then(|t| model.unit(t))
@@ -533,7 +572,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let token = Some(string_arg(lua, token, "Usage: UnitPVPName(\"unit\")")?);
             check_unit_token(&token)?;
             let (unit, player_level) = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 (
                     token.as_ref().and_then(|t| model.unit(t)).cloned(),
                     model.player_req.level,
@@ -563,7 +604,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "RequestInspectHonorData",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             if model.inspect_honor.is_some() || model.inspect_honor_pending {
                 return Ok(());
             }

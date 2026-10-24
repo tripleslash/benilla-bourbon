@@ -1,7 +1,9 @@
 //! The always-up world-state readout, stock `WorldStateFrame.lua`, fed as the client feeds it:
 //! rows pushed, then `UPDATE_WORLD_STATES`. Which rows exist is [`crate::world_state_ui`]'s.
 
-use benilla_ui::script::{QuadContent, ScriptValue, UiScript, WorldStateUiView};
+use benilla_ui::script::{
+    BattlefieldScoreRow, BattlefieldScores, QuadContent, ScriptValue, UiScript, WorldStateUiView,
+};
 
 use super::test_ui::load_ui as load_xml;
 
@@ -262,6 +264,54 @@ fn a_capture_point_row_is_a_bar_not_a_line_of_text() {
         s.eval::<bool>("return WorldStateCaptureBar1 ~= nil and WorldStateCaptureBar1:IsShown()")
             .unwrap(),
         "the capture bar was built and shown"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The end-of-battleground modal is `WorldStateScoreFrame`, and the stock handler has exactly one
+/// hide: `PLAYER_ENTERING_WORLD` (`WorldStateFrame.lua:226-230`). Every other arrival that reaches
+/// `WorldStateScoreFrame_OnEvent` re-checks `GetBattlefieldWinner()` and re-runs the update while it
+/// is non-nil (`:221-224`), and the update shows the panel again on a non-nil winner (`:351-355`).
+///
+/// So stock Lua offers the board as the only defence: whatever keeps `GetBattlefieldWinner()`
+/// answering after the worldport brings the modal back, with its leave button. This pins that
+/// contract; the fix is on the board, in
+/// [`crate::ui_battlefield_score::tests::leaving_the_battleground_stops_the_board_answering_a_winner`].
+#[test]
+fn the_panel_returns_whilever_the_board_answers_a_winner() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = harness();
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
+    let shown = |s: &mut UiScript| {
+        s.eval::<bool>("return WorldStateScoreFrame:IsShown()")
+            .expect("the score frame answers")
+    };
+
+    s.set_battlefield_scores(BattlefieldScores {
+        rows: vec![BattlefieldScoreRow {
+            name: "Bob".into(),
+            faction: 0,
+            ..Default::default()
+        }],
+        ended: true,
+        winner: 1,
+        columns: Vec::new(),
+    });
+    s.tick(0.0);
+    s.fire_event("UPDATE_BATTLEFIELD_SCORE", vec![]);
+    assert!(shown(&mut s), "the finished board shows the modal");
+
+    // The worldport out of the battleground: the one hide stock has.
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![ScriptValue::Str("".into())]);
+    assert!(!shown(&mut s), "PLAYER_ENTERING_WORLD hides the modal");
+
+    // The server re-sends the world states after the teleport, and the readout has changed with the
+    // map, so `UPDATE_WORLD_STATES` follows — with no board change, no score event in between.
+    push(&mut s, Vec::new());
+    assert!(
+        shown(&mut s),
+        "the panel is gated on the winner alone: a board that still answers one puts the modal back \
+         in the open world, which is why the board has to be zeroed on the way out"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -435,12 +435,12 @@ impl super::UiScript {
     /// Fill the holder from a realm list reply, as the parser does (`0x5b2230`): the categories
     /// keep what the last rebuild put in them.
     pub fn set_glue_realms(&mut self, holder: Vec<GlueRealm>) {
-        self.model_mut().glue.realms.holder = holder;
+        set_field!(self, glue.realms.holder, holder);
     }
 
     /// The character count of the last `SMSG_CHAR_ENUM` (`[svc+0x1ae4]`).
     pub fn set_glue_realm_characters(&mut self, characters: u16) {
-        self.model_mut().glue.realms.characters = characters;
+        set_field!(self, glue.realms.characters, characters);
     }
 
     /// The cells the next glue VM must start from.
@@ -450,7 +450,7 @@ impl super::UiScript {
 
     /// Carry the cells over from the last glue VM.
     pub fn set_glue_realm_cells(&mut self, cells: GlueRealmCells) {
-        self.model_mut().glue.realms.cells = cells;
+        set_field!(self, glue.realms.cells, cells);
     }
 
     /// The realm list rebuild (`0x46e510`) and the event its tail fires.
@@ -473,8 +473,9 @@ pub(super) fn realm_name(model: &Model) -> String {
         .unwrap_or_default()
 }
 
-fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, Model> {
-    lua.app_data_mut::<Model>().expect("model app_data")
+fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, crate::script::ModelCell> {
+    lua.app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data")
 }
 
 /// `is-number` (`0x6f34d0`) on an argument, then `tonumber` and `0x40a2b0`.

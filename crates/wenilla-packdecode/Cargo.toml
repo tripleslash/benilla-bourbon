@@ -1,0 +1,29 @@
+[package]
+name = "wenilla-packdecode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The pack Web Worker's other half: BENPACK header checks and zstd/deflate decoding, compiled to its own small wasm module so a pack is decoded off the frame thread (web/packworker.js)"
+
+[lints]
+workspace = true
+
+[lib]
+# The cargo artifact's name. The files Trunk emits are `wenilla-packdecode.js` /
+# `wenilla-packdecode_bg.wasm` — it names the pair after the PACKAGE, not after this — and
+# `web/packworker.js` imports those two by name, so with `filehash = false` they are part of the
+# page contract. This is set only so `data-target-name` in `web/index.html` has one target to name.
+name = "packdecode"
+crate-type = ["cdylib"]
+
+[dependencies]
+# The container's reader, exactly the one the client itself links. Not a re-implementation: a
+# second decoder that drifted from `benilla_formats::webpack`'s would corrupt silently rather than
+# fail, since both sides would still "work" on the packs that happened to agree.
+benilla-pack = { path = "../benilla-pack" }
+# Pinned exact for the `wenilla` shim's reason — a newer crate against the 0.2.126 CLI Trunk
+# downloads emits broken glue.
+wasm-bindgen = "=0.2.126"
+# A panic inside ruzstd would otherwise reach the page as "unreachable executed" with no message,
+# and a worker has no other way to say what went wrong.
+console_error_panic_hook = "0.1"

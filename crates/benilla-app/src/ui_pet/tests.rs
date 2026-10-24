@@ -792,12 +792,12 @@ fn a_cooldown_alone_is_pushed_with_no_event_from_the_bar_feed() {
         "#,
         )
         .unwrap();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     let seen = |app: &mut App| -> Vec<String> {
         app.update();
         let mut s = app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+            .non_send_mut::<benilla_ui::script::UiScript>();
         s.resolve();
         let out = s.eval::<Vec<String>>("return SEEN").unwrap();
         s.run("SEEN = {}").unwrap();
@@ -821,7 +821,7 @@ fn a_cooldown_alone_is_pushed_with_no_event_from_the_bar_feed() {
     );
     let (start, duration, enable): (f64, f64, i32) = app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .eval("return GetPetActionCooldown(4)")
         .unwrap();
     assert!(
@@ -946,12 +946,12 @@ fn a_held_pet_reads_connected_and_its_stock_power_bar_shows_its_power() {
         .resource_mut::<crate::net::GuidIndex>()
         .0
         .insert(PET, pet);
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
 
     app.update();
     let mut script = app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        .non_send_mut::<benilla_ui::script::UiScript>();
     // The bar's `UNIT_PET` (`0x4bc84f`), which shows the frame on the snapshot just pushed.
     script.fire_event(
         "UNIT_PET",
@@ -1045,12 +1045,12 @@ fn a_held_pet_names_its_templates_creature_type() {
         .resource_mut::<crate::net::GuidIndex>()
         .0
         .insert(PET, pet);
-    app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+    app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
 
     app.update();
     let answer = app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .eval::<Option<String>>("return UnitCreatureType('pet')")
         .unwrap();
     assert_eq!(answer.as_deref(), Some("악마"));
@@ -1109,7 +1109,7 @@ fn the_pet_feed_fires_no_attack_event() {
         "#,
         )
         .unwrap();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
 
     for flags in [0x800, 0, 0x800] {
         app.world_mut()
@@ -1123,7 +1123,7 @@ fn the_pet_feed_fires_no_attack_event() {
         app.update();
         let mut script = app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+            .non_send_mut::<benilla_ui::script::UiScript>();
         script.resolve();
         let seen = script.eval::<Vec<String>>("return SEEN").unwrap();
         assert!(seen.is_empty(), "flags {flags:#x}: {seen:?}");
@@ -1157,12 +1157,12 @@ fn a_pet_with_no_object_exists_and_is_not_visible() {
     std::mem::forget(rx);
     app.insert_resource(NetCommands(tx));
     summoning(&mut app, 0x77, PET);
-    app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+    app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
 
     app.update();
     let (exists, visible) = app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .eval::<(Option<f64>, Option<f64>)>("return UnitExists('pet'), UnitIsVisible('pet')")
         .unwrap();
     assert_eq!(exists, Some(1.0), "the pet exists with no object");
@@ -1178,7 +1178,7 @@ fn a_pet_with_no_object_exists_and_is_not_visible() {
     app.update();
     let exists = app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .eval::<Option<f64>>("return UnitExists('pet')")
         .unwrap();
     assert_eq!(exists, None);
@@ -1252,7 +1252,7 @@ fn a_rename_evicts_by_the_units_pet_number_for_any_unit() {
             f:SetScript("OnEvent", function() RENAMED = RENAMED + 1 end)"#,
         )
         .unwrap();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.update();
 
     for e in [pet, other] {
@@ -1285,7 +1285,7 @@ fn a_rename_evicts_by_the_units_pet_number_for_any_unit() {
     assert_eq!(by_bits(OTHER).as_deref(), Some("Eight"));
     let renamed = app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .eval::<i64>("return RENAMED")
         .unwrap();
     assert_eq!(renamed, 1, "only our own pet's rename signals");

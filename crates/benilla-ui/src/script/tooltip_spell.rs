@@ -73,6 +73,10 @@ pub struct SpellTooltipView {
     pub reagents: Option<TooltipText>,
     /// The player carries every reagent, which leaves the line out of a compact build.
     pub reagents_met: bool,
+    /// wenilla carry: a tool or reagent named by the spell had no streamed item name when this
+    /// view was built, so its line is short; the app re-pushes the view when the name lands. The
+    /// world-enter wait reads it (`book_spell_views_ready`).
+    pub names_pending: bool,
     /// `CHANCE_TO_DODGE` (`0x854e44`) and its siblings, by `Effect[0]`, of the player's live stat,
     /// which the app re-pushes as it moves.
     pub chance: Option<TooltipText>,
@@ -106,6 +110,22 @@ impl super::UiScript {
     /// at the call (`0x52e610`).
     pub fn set_spell_tooltip(&mut self, spell_id: u32, view: SpellTooltipView) {
         self.store_spell_view(false, spell_id, view);
+    }
+
+    /// wenilla carry: whether every spell in the player's book has its tooltip view seated. The
+    /// reference builds a spell tooltip whole at the call (`0x52e610`); here the view is pushed by
+    /// the host a frame after it is known, so an addon that scans the book through `SetSpell` at
+    /// `PLAYER_ENTERING_WORLD` (CallOfElements' heal scan reads `TextLeft2`) found only the name.
+    /// The host holds the world-enter cascade on this (`ui_unit::feed_units`).
+    pub fn book_spell_views_ready(&self) -> bool {
+        let model = self.model_ref();
+        model.spellbook.slots.iter().all(|s| {
+            s.spell_id == 0
+                || model
+                    .spell_tooltips
+                    .get(&s.spell_id)
+                    .is_some_and(|v| !v.names_pending)
+        })
     }
 
     /// Store or replace a spell's view built against the player's pet, the one the builder's unit
@@ -269,7 +289,9 @@ pub(super) fn insert_wait(
     if id == 0 {
         return Ok(());
     }
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let drawn = drawn_lines(&mut model, h)?;
     model.spell_tooltip_waits.insert(
         h,
@@ -292,7 +314,9 @@ pub(super) fn answer_wait(
     answers: &dyn Fn(&WaitFor) -> bool,
 ) -> mlua::Result<()> {
     let (id, wait) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let Some(wait) = model
             .spell_tooltip_waits
             .get(&h)
@@ -319,7 +343,9 @@ pub(super) fn answer_wait(
         }
     }
     // As the reference's spell callback sizes after its builder's show (`0x52f869`).
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     super::tooltip::size_tooltip(&mut model, h);
     Ok(())
 }
@@ -350,7 +376,9 @@ pub(super) fn spell_view_of(
     spell_id: u32,
     alt_caster: bool,
 ) -> Option<SpellTooltipView> {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let (views, asks) = spell_store(&mut model, alt_caster);
     let v = views.get(&spell_id).cloned();
     if v.is_none() && spell_id != 0 {
@@ -412,7 +440,9 @@ pub(crate) struct SpellRenderOpts {
 /// (`0x63de30`, `0x532622`, `0x532a35`), compact when it is missing or its integer is 0
 /// (`0x532627`-`0x532632`).
 fn compact_tooltips(lua: &Lua) -> bool {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     model
         .cvars
         .get("ubertooltips")
@@ -660,7 +690,7 @@ pub(super) fn set_spell_with_talent(
             }
         }
     }
-    super::tooltip::show_or_hide_empty(lua, h);
+    super::tooltip::show_or_hide_empty_spell(lua, h);
     Ok(())
 }
 
@@ -675,7 +705,7 @@ fn set_reward_spell(
         None => {
             let h = frame_handle_of(lua, this)?;
             clear_silent(lua, h);
-            super::tooltip::show_or_hide_empty(lua, h);
+            super::tooltip::show_or_hide_empty_spell(lua, h);
             Ok(())
         }
     }
@@ -726,7 +756,7 @@ fn fill_spell(
             false
         }
     };
-    super::tooltip::show_or_hide_empty(lua, h);
+    super::tooltip::show_or_hide_empty_spell(lua, h);
     Ok(live)
 }
 
@@ -747,7 +777,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 super::spellbook::spell_slot_args(book_id, book_type, "SetSpell")?;
             let now = crate::script::clock::now(lua);
             let (spell_id, name, remaining_ms) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 match super::spellbook::book_slot(&model, book_id, &book_type) {
                     Some(s) => {
                         let cooldown = s.cooldown.map(|(start_ms, duration_ms, enabled)| {
@@ -784,7 +816,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let index = binding_abi::index_arg(lua, index, "Usage: SetShapeshift(slot)")?;
             let now = crate::script::clock::now(lua);
             let (spell_id, name, remaining_ms) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 match model.shapeshift_forms.get(index.saturating_sub(1)) {
                     Some(f) => (
                         f.view.spell_id,
@@ -820,7 +854,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let index = binding_abi::index_arg(lua, index, "Usage: SetPetAction(slot)")?;
             let now = crate::script::clock::now(lua);
             let (spell_id, name, remaining_ms) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 match model
                     .pet_bar
                     .slots
@@ -854,7 +890,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetQuestRewardSpell",
         lua.create_function(|lua, this: Table| {
             let id = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .quest
                     .as_ref()
@@ -868,7 +906,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetQuestLogRewardSpell",
         lua.create_function(|lua, this: Table| {
             let id = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .selected_quest_record()
                     .and_then(|r| r.reward_spell.as_ref())
@@ -880,7 +920,8 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // GameTooltip:SetAction(slot): the action-bar hover by payload kind (`0x5322a0`): a spell
     // (0x00) to the spell builder `0x52e610`, an item (0x80) to the item builder `0x52b650`, a
     // macro (0x40) to `0x52b040`, which fetches it (`0x4f0f40`) and renders only its name, white
-    // (`0x5303b0` in colour `0xc0cf60`), or hides with none; 1.12 has no `#showtooltip`. It
+    // (`0x5303b0` in colour `0xc0cf60`), or hides with none; 1.12 has no `#showtooltip`, which this
+    // fork reads (`script::macro_options`). It
     // answers the spell or item builder's return value as 1 or nil (`0x5325a9`), the spell's only
     // with a cooldown running, nil for the macro leg, an empty slot and any other kind;
     // `ActionButton_SetTooltip` arms `updateTooltip` from it.
@@ -891,7 +932,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let slot = binding_abi::index_arg32(lua, slot, "Usage: SetAction(slot)")?;
             let now = crate::script::clock::now(lua);
             let (action, remaining_ms, owned) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let action = model.actions.get(&slot).cloned();
                 // An item word resolves to the player's own item by entry (`0x532490`).
                 let owned = action
@@ -910,18 +953,42 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // A macro is a word whose top nibble is 4 (`0x5322a0`), so a character macro's slot
             // (kind 0x41) is one too.
             if let Some(id) = super::action::macro_slot_id(a.kind, a.action) {
+                // Deviation (this fork): a `#showtooltip` macro shows its spell's tooltip, as
+                // retail does, and answers as the spell leg does.
+                let shown = {
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
+                    super::macro_options::shown_spell(&model, id).filter(|&(_, tooltip)| tooltip)
+                };
+                if let Some((spell, _)) = shown {
+                    let live = set_spell_flagged(
+                        lua,
+                        &this,
+                        spell,
+                        None,
+                        SpellRenderOpts {
+                            show_rank: true,
+                            remaining_ms,
+                            ..Default::default()
+                        },
+                    )?;
+                    return Ok(flag(remaining_ms > 0 && live));
+                }
                 let h = frame_handle_of(lua, &this)?;
                 clear(lua, h);
                 // The same lookup as `GetActionText` and the bar icon, so the three agree on a
                 // slot's macro.
                 let name = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     model.macros.by_id(id).map(|m| m.name.clone())
                 };
                 if let Some(name) = name {
                     append_line(lua, &this, (name, WHITE), None, false)?;
                 }
-                super::tooltip::show_or_hide_empty(lua, h);
+                super::tooltip::show_or_hide_empty_spell(lua, h);
                 // The macro leg's builder return is dropped (`0x5326be`).
                 return Ok(Value::Nil);
             }
@@ -977,7 +1044,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 "Invalid trainer service in SetTrainerService(index)",
             )?;
             let subject = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 match super::trainer::service(&model, index) {
                     Some(s) => s.tooltip.clone(),
                     None => return Ok(()),
@@ -1016,7 +1085,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let craft_index =
                 binding_abi::index_arg(lua, craft_index, "Invalid craft in SetCraftSpell(index)")?;
             let subject = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 match super::craft::recipe(&model, craft_index) {
                     Some(r) => r.tooltip.clone(),
                     None => return Ok(()),

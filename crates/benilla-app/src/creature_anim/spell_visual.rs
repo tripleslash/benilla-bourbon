@@ -1243,8 +1243,17 @@ pub(crate) fn arm_aura_state_fx(
     mut armed: Local<EntityHashMap<Vec<u32>>>,
     // Each unit's live pins, newest first, mirrored onto its `StateKitPins` on a change.
     mut pinned: Local<EntityHashMap<Vec<(u32, u16)>>>,
+    // Our own aura vision, `PLAYER_FIELD_BYTES2` byte 1; `None` with no active player.
+    self_store: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
+    mut seen_vision: Local<Option<Option<u8>>>,
 ) {
-    let full_sweep = visuals.as_ref().is_some_and(|v| v.is_changed())
+    // A slot whose spell needs an aura vision we lack shows no state kit (`0x5ff3cc` in
+    // `0x5ff350`), and a change of our vision re-shows or clears every unit's such slots
+    // (`0x612cd0`), so a guard's Stealth Detection eye is hidden from anyone who cannot see stealth.
+    let vision = self_store.iter().next().map(|s| s.0.player_aura_vision());
+    let vision_changed = seen_vision.replace(vision) != Some(vision);
+    let full_sweep = vision_changed
+        || visuals.as_ref().is_some_and(|v| v.is_changed())
         || spells.as_ref().is_some_and(|s| s.is_changed());
     let (Some(visuals), Some(spells)) = (visuals.as_deref(), spells.as_deref()) else {
         return; // no client data
@@ -1279,7 +1288,9 @@ pub(crate) fn arm_aura_state_fx(
         // drops a visual the server says still holds.
         let mut cur: Vec<u32> = Vec::new();
         for a in store.0.unit_auras() {
-            if !cur.contains(&a.spell_id) {
+            if !cur.contains(&a.spell_id)
+                && !crate::ui_aura::vision_hides(Some(&spells.catalog), a.spell_id, vision)
+            {
                 cur.push(a.spell_id);
             }
         }

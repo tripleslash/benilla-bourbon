@@ -112,7 +112,7 @@ fn harness_with_wire() -> (App, crossbeam_channel::Receiver<crate::net::ClientCo
         .add_latched_window::<TabardOpen>()
         .add_latched_window::<MailOpen>()
         .add_latched_window::<AuctionOpen>()
-        .insert_non_send_resource(spied_vm(&WINDOWS.map(event)));
+        .insert_non_send(spied_vm(&WINDOWS.map(event)));
     (app, rx)
 }
 
@@ -432,7 +432,7 @@ fn a_book_over_a_trade_cancels_it_before_the_begin() {
     use crate::net::ClientCommand;
     const PARTNER: u64 = 0x0000_0000_0000_0008;
     let (mut app, rx) = harness_with_wire();
-    app.insert_non_send_resource(spied_vm(&["TRADE_CLOSED", "ITEM_TEXT_BEGIN"]));
+    app.insert_non_send(spied_vm(&["TRADE_CLOSED", "ITEM_TEXT_BEGIN"]));
     app.world_mut()
         .resource_mut::<TradeSession>()
         .begin(PARTNER);

@@ -33,6 +33,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use benilla_assets::DataLoadAppExt;
 use bevy::prelude::*;
 use regex::{Regex, RegexSet};
 
@@ -434,15 +435,15 @@ mod tests {
 
     /// `\<` and `\>` are non-directional word boundaries, as the reference's compiler treats them.
     /// Start-up compiles the lists (`0x402b7f` → `0x6c91a0`) before its first frame, so a name
-    /// check never runs without them: the load orders ahead of the `Startup` build of the glue
-    /// VM, which is seated with them as it is made.
+    /// check never runs without them: the load, a data loader ([`benilla_assets::run_data_load`]),
+    /// orders ahead of the `Startup` build of the glue VM, which is seated with them as it is made.
     #[test]
     fn the_word_lists_load_before_the_first_vm_is_built() {
         let mut app = crate::game_plugins::schedule_tests::headless_client();
         assert!(crate::test_support::runs_before_in(
             &mut app,
             Startup,
-            load_text_filter_lists,
+            benilla_assets::run_data_load,
             crate::ui_script::setup_script
         ));
     }
@@ -896,12 +897,6 @@ fn load_text_filter_lists(
 
 pub(crate) struct TextFilterPlugin;
 
-/// The startup load of the lists ([`load_text_filter_lists`]). A set because the `Startup` build
-/// of the glue VM seats them, so it must order after the load; without the constraint that order
-/// is the executor's choice.
-#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct TextFilterLoad;
-
 /// The two switches' change callback, as the reference's `0x403570`/`0x4035b0` mirror
 /// `SStrToInt(newValue)` into a global.
 pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut switches: ResMut<TextFilterSwitches>) {
@@ -917,11 +912,6 @@ impl Plugin for TextFilterPlugin {
         app.add_observer(on_cvar);
         app.init_resource::<TextFilterSwitches>()
             .init_resource::<TextFilter>()
-            .add_systems(
-                Startup,
-                load_text_filter_lists
-                    .after(benilla_assets::AssetSet::Open)
-                    .in_set(TextFilterLoad),
-            );
+            .add_data_loaders(load_text_filter_lists);
     }
 }

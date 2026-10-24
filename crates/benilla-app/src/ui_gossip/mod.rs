@@ -363,7 +363,7 @@ mod tests {
             .init_resource::<crate::net::GuidIndex>()
             .init_resource::<crate::world_state::WorldStates>()
             .add_systems(Update, feed_gossip);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         // A creature not streamed: its name is asked by the guid's entry bits.
         const NPC: u64 = 0xF130_0000_4500_0001;
         let menu = |app: &mut App| {
@@ -470,7 +470,7 @@ mod tests {
             .add_systems(Update, feed_gossip);
         let mut script = UiScript::new().unwrap();
         prepare(&mut script);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 
@@ -481,7 +481,7 @@ mod tests {
     /// One frame, then the events the VM saw and `GetGossipText()` (`""` for nil).
     fn tick(app: &mut App) -> (Vec<String>, String) {
         app.update();
-        let s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let s = app.world_mut().non_send_mut::<UiScript>();
         assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
         let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
         s.run("SEEN = {}").unwrap();
@@ -664,7 +664,7 @@ mod tests {
         });
         // What the window shows: visible?, the greeting, the first row's label, the kits played.
         let window = |app: &mut App| -> (bool, String, String, Vec<SoundRequest>) {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             (
                 s.eval::<bool>("return GossipFrame:IsVisible()").unwrap(),
                 s.eval::<String>("return GossipGreetingText:GetText() or ''")

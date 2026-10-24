@@ -36,6 +36,54 @@ pub struct M2Bounds {
     /// and returns `out+0x20 − out+0x14`. The overhead name instead uses `0x608640`, the live posed
     /// attachment, which bobs. The header box's Z for a model with no sequences.
     pub stand_box_z: f32,
+    /// The **mounted** correction to the follow-camera pivot (model-local, pre-scale):
+    /// `Mount.max.z − Stand.max.z` off the same sequence boxes, `0.0` for a model authoring no
+    /// Mount sequence.
+    ///
+    /// The reference's follow-camera preset is not the bind-pose attachment alone — `0x50ca90`
+    /// corrects [`Self::pivot_z`] by the difference between the box of the animation the unit's
+    /// POSTURE selects and the box of Stand, all in the model's own frame. Its switch picks
+    /// SitGround / Sleep / SitChairLow-Med-High / Dead / KneelLoop from the posture word, and then
+    /// one branch overrides all of them: `0x50cba8` reads `UNIT_FIELD_MOUNTDISPLAYID` and, when it
+    /// is non-zero, forces animation **91 (`Mount`)**. The correction itself is `0x50cddf`-
+    /// `0x50ce09`: `preset -= (stand.max.z − anim.max.z) × scale`, applied to the posture preset
+    /// and — under the `cmp ebx, 0x5b` that singles Mount out — to the standing preset as well.
+    ///
+    /// **It is negative on every character** (human −0.95, gnome −0.21, tauren −0.69, night elf
+    /// −1.19), because the Mount pose hangs the legs below the model origin and drops the neck
+    /// with them. That is not the camera going down: while mounted the character model's origin is
+    /// the mount's attachment-0 **saddle**, so the world pivot is `saddle + (pivot_z + this)·scale`
+    /// and the net move is up by the seat height less this. Adding the seat without this
+    /// correction rides a head too high; applying this without the seat sinks the camera into the
+    /// mount.
+    ///
+    /// Only the Mount arm is read here. The seated postures need the unit's posture word, which is
+    /// not a model fact, and their preset would belong beside it.
+    pub mounted_pivot_delta: f32,
+    /// **Attachment id 0's model-space Z**, in model-local yards, pre-scale — where a rider sits,
+    /// *on a mount model*. `0.0` for a model that authors no slot-0 attachment.
+    ///
+    /// **Slot 0 is overloaded and this field is only meaningful on a mount.** The same id is the
+    /// SHIELD anchor on a character (a human male authors it at z 1.036, a gnome female at 0.385),
+    /// so "does this model author attachment 0" is not "is this a mount". That is why the reference
+    /// reads it off the mount model specifically — `0x50ce1c` loads `[ebp-8]`, the model the
+    /// function picked at its top, which is `[unit+0xdc]` when the unit is mounted — and why
+    /// benilla reads it off the MOUNT CHILD entity and never off the rider's own.
+    ///
+    /// The other half of the mounted camera preset, and the reason it is a FILE CONSTANT rather
+    /// than a posed bone. `0x50ce1c`-`0x50ce56` reads it off the **mount's** model —
+    /// `hasAttachment(mount, 0)` then `getAttachment(mount, &out, 0)`, the same `0x712cf0` that
+    /// answers [`Self::pivot_z`] — scales it, and `0x50cf77`-`0x50cf9e` adds it to all three
+    /// presets. `0x712cf0` returns the record's authored position; no bone matrix appears anywhere
+    /// in that call tree.
+    ///
+    /// Reading the **live seated** position instead is a defect with three faces, all reported
+    /// against the hosted page on 2026-09-09: the camera creeps up over seconds instead of
+    /// rising once (the target moves every frame, so the pivot glide re-arms every frame and
+    /// crawls toward it), it then wobbles with the mount's idle animation, and a MountSpecial
+    /// flourish lifts it further. The reference has none of those because the preset is computed
+    /// when the model event lands and is a constant until the next one.
+    pub mount_seat_z: f32,
     /// How far the camera pivot drops while swimming: Stand's box `max.z` less Swim's, floored at
     /// zero, and `0.0` without a Swim sequence. The reference adds the neck height
     /// (`attach17.z + 0.0972222`, `0x808ab0`) to three presets, `cam+0x11c`/`+0x120`/`+0x124`
@@ -114,6 +162,29 @@ fn stand_box(bytes: &[u8]) -> Option<(f32, f32, f32)> {
     Some((dx, dy, dz))
 }
 
+/// `AnimationData.dbc` id **91** — `Mount`, the pose `0x50cbbb` forces on a unit whose
+/// `UNIT_FIELD_MOUNTDISPLAYID` is non-zero (`mov ebx, 0x5b`). Named against the shipped DBC.
+const MOUNT_ANIM: usize = 91;
+
+/// `Mount.max.z − Stand.max.z` — the reference's mounted pivot correction (see
+/// [`M2Bounds::mounted_pivot_delta`]). `None` for a model with no sequences or no `Mount`.
+///
+/// Mount resolves through [`seq_max_z`], which is [`seq_index`] WITHOUT [`stand_record`]'s
+/// fall-back-to-record-0. The ring asks for a sequence every model has; this asks for one most
+/// models genuinely lack, and there "no Mount" must stay `None` rather than silently measuring
+/// whatever record 0 is — reading a chicken's flap as its mount pose would move the camera on a
+/// model that can never be ridden. Stand resolves through [`stand_record`], so the standing side of
+/// the subtraction is byte-for-byte the box the ring, the bubble and the swim preset already read.
+///
+/// NOT floored at zero, unlike [`swim_pivot_drop`]: this correction is negative on every character
+/// (see [`M2Bounds::mounted_pivot_delta`]), and clamping it away would cost the whole term.
+fn mounted_pivot_delta(bytes: &[u8]) -> Option<f32> {
+    // `max.z` alone, not the extent: the preset is a height above the model origin, and the
+    // reference reads `out+0x20` (the box's max C3's Z) on both sides of its subtraction.
+    let stand_z = stand_record(bytes).and_then(|rec| bytes.f32_at(rec + 0x38))?;
+    Some(seq_max_z(bytes, MOUNT_ANIM)? - stand_z)
+}
+
 /// `AnimationData` id 42, Swim: the second box `0x50ca90` queries (`0x50ccde call 0x711a20`).
 const SWIM_ANIM_ID: usize = 42;
 
@@ -163,6 +234,11 @@ pub fn parse_m2_bounds(bytes: &[u8]) -> Result<M2Bounds> {
         ring_footprint,
         pivot_z: model.pivot_attach_z,
         stand_box_z: rz.max(0.0),
+        mounted_pivot_delta: mounted_pivot_delta(bytes).unwrap_or(0.0),
+        // Through `M2Model::attachment`, which is the reference's own id→record resolve
+        // (`0x710310`: the AttachLookup, its bounds check and its `0xffff` sentinel) — never a
+        // scan of the record table, whose ids are not unique.
+        mount_seat_z: model.attachment(0).map_or(0.0, |a| a.position[2]),
         swim_pivot_drop: swim_pivot_drop(bytes),
     })
 }

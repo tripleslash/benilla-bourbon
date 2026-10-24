@@ -47,8 +47,11 @@ pub(super) fn spawn_mount_child(
     // The rider's arrival, so the mount rides the rider's appear ramp.
     arrival: Option<super::Arrival>,
 ) -> Entity {
+    // Child-side `ChildOf(host)`, not `add_child`: a parent-side add panics against a host that a
+    // same-frame teardown despawned mid-build.
     let child = commands
         .spawn((
+            ChildOf(host),
             NetEntity {
                 kind: EntityKind::Unit,
                 display_id: Some(display),
@@ -65,8 +68,9 @@ pub(super) fn spawn_mount_child(
     if fade_skip {
         commands.entity(child).insert(super::equipment::Reattached);
     }
-    commands.entity(host).add_child(child);
-    commands.entity(host).insert(MountChild(child));
+    // `try_`: the host may be torn down in the same frame this build runs (a battleground's
+    // stream churn), and a plain insert would panic where `despawn` only warns.
+    commands.entity(host).try_insert(MountChild(child));
     child
 }
 
@@ -82,13 +86,13 @@ fn spawn_seat_anchor(
 ) -> Entity {
     let anchor = commands
         .spawn((
+            ChildOf(joint),
             Transform::from_translation(offset)
                 .with_scale(Vec3::splat(1.0 / mount_scale.max(0.001))),
             Visibility::default(),
             benilla_world::rig_anim::RigFrame(rider),
         ))
         .id();
-    commands.entity(joint).add_child(anchor);
     anchor
 }
 
@@ -146,9 +150,9 @@ pub(super) fn seat_or_spawn_mount(
     let built = children.get(child).map(|(_, _, n)| n.display_id).ok();
     if built != Some(Some(mount_display)) {
         if let Ok(mut ec) = commands.get_entity(child) {
-            ec.despawn();
+            ec.try_despawn();
         }
-        commands.entity(unit).remove::<MountChild>();
+        commands.entity(unit).try_remove::<MountChild>();
         return Seat::Wait;
     }
     let Ok((true, Some(bones), _)) = children.get(child) else {
@@ -196,12 +200,12 @@ fn ground_frame(
     }
     let node = commands
         .spawn((
+            ChildOf(unit),
             super::conform::ConformNode { unit, mode: tilt },
             Transform::default(),
             Visibility::default(),
         ))
         .id();
-    commands.entity(unit).add_child(node);
     node
 }
 
@@ -213,15 +217,16 @@ fn reseat_rig(commands: &mut Commands, rig: &mut RigPose, frame: Entity, conform
         return;
     }
     let anchors: Vec<Entity> = rig.anchors.iter().map(|&(_, a)| a).collect();
-    if !anchors.is_empty() {
-        commands.entity(frame).add_children(&anchors);
+    for anchor in anchors {
+        // Child-side, so a frame despawned in the same frame warns rather than panicking.
+        commands.entity(anchor).try_insert(ChildOf(frame));
     }
     let old = std::mem::replace(&mut rig.joints_root, frame);
     rig.pose_dirty = true;
     // A conform node the rig just left is empty, so it goes; a seat anchor dies with its mount.
     if conform {
         if let Ok(mut ec) = commands.get_entity(old) {
-            ec.despawn();
+            ec.try_despawn();
         }
     }
 }
@@ -270,11 +275,11 @@ pub(super) fn reseat_mounts(
         let Ok(seated_root) = poses.get(entity).map(|r| r.joints_root) else {
             if let Some(&MountChild(child)) = child {
                 if let Ok(mut ec) = commands.get_entity(child) {
-                    ec.despawn();
+                    ec.try_despawn();
                 }
-                commands.entity(entity).remove::<MountChild>();
+                commands.entity(entity).try_remove::<MountChild>();
             }
-            commands.entity(entity).insert(AppliedMount(live));
+            commands.entity(entity).try_insert(AppliedMount(live));
             continue;
         };
         let child = child.map(|&MountChild(c)| c);
@@ -292,13 +297,13 @@ pub(super) fn reseat_mounts(
             }
             if let Some(child) = child {
                 if let Ok(mut ec) = commands.get_entity(child) {
-                    ec.despawn();
+                    ec.try_despawn();
                 }
             }
             commands
                 .entity(entity)
-                .remove::<MountChild>()
-                .insert(AppliedMount(0));
+                .try_remove::<MountChild>()
+                .try_insert(AppliedMount(0));
             continue;
         }
         // ── Leg 2 · `0x607a00`: build the mount model and attach the body to its seat.
@@ -319,10 +324,10 @@ pub(super) fn reseat_mounts(
                     let leaving_conform = conforms.contains(seated_root);
                     reseat_rig(&mut commands, &mut rig, anchor, leaving_conform);
                 }
-                commands.entity(entity).insert(AppliedMount(live));
+                commands.entity(entity).try_insert(AppliedMount(live));
             }
             Seat::UnitMatrix => {
-                commands.entity(entity).insert(AppliedMount(live));
+                commands.entity(entity).try_insert(AppliedMount(live));
             }
         }
     }

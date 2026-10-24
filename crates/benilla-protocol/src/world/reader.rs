@@ -1,34 +1,48 @@
-use std::net::TcpStream;
-
 use anyhow::{anyhow, Result};
 use benilla_srp::vanilla_header::DecrypterHalf;
 
 use crate::messages::{self, ServerPacket};
+use crate::transport::ConnReader;
 
 use super::{read_frame, recv_packet};
 
-/// The read half of a split [`WorldSession`](super::WorldSession): cloned socket and decrypter,
-/// and what the connection learned before the split, for
-/// [`WorldSession::rejoin`](super::WorldSession::rejoin).
+/// The read half of a split [`WorldSession`](super::WorldSession): the connection's read half, the
+/// decrypter, and what the connection learned before the split, for
+/// [`WorldSession::rejoin`](super::WorldSession::rejoin). Lives on the network thread (native) or
+/// in the sequencer task (web).
 pub struct WorldReader {
-    pub(super) stream: TcpStream,
+    pub(super) reader: ConnReader,
     pub(super) decrypter: DecrypterHalf,
     pub(super) link: super::session::LinkFacts,
     pub(super) traffic: std::sync::Arc<super::LinkTraffic>,
 }
 
 impl WorldReader {
-    /// Read + decrypt one server packet (blocking).
+    /// Read + decrypt one server packet (blocking) — the native twin of [`Self::recv_async`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn recv(&mut self) -> Result<ServerPacket> {
-        recv_packet(&mut self.stream, Some(&mut self.decrypter), &self.traffic)
+        futures_lite::future::block_on(self.recv_async())
+    }
+
+    /// Read + decrypt one server packet.
+    pub async fn recv_async(&mut self) -> Result<ServerPacket> {
+        recv_packet(&mut self.reader, Some(&mut self.decrypter), &self.traffic).await
+    }
+
+    /// Read one packet and decode it into a [`crate::Poll`] (blocking) — the native twin of
+    /// [`Self::poll_async`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll(&mut self) -> Result<crate::Poll> {
+        futures_lite::future::block_on(self.poll_async())
     }
 
     /// Read one packet and decode it into a [`crate::Poll`]; errors only when the socket fails. The
     /// whole body is read before parsing, so an unparseable packet is skipped, the stream aligned.
-    pub fn poll(&mut self) -> Result<crate::Poll> {
-        let (opcode, body) = read_frame(&mut self.stream, Some(&mut self.decrypter), &self.traffic)
+    pub async fn poll_async(&mut self) -> Result<crate::Poll> {
+        let (opcode, body) = read_frame(&mut self.reader, Some(&mut self.decrypter), &self.traffic)
+            .await
             .map_err(|e| anyhow!("world stream closed: {e}"))?;
-        let arrived = std::time::Instant::now();
+        let arrived = web_time::Instant::now();
         match messages::parse_server_with_tail(opcode, &body) {
             Ok((packet, tail)) => {
                 let mut events = crate::decode(packet);
@@ -56,7 +70,7 @@ impl WorldReader {
 
 /// Stamp every transport create of one packet with the instant it was read, as the reference's
 /// network thread stamps a packet's queue node (`0x538851`) and its create runs with that time.
-fn stamp_arrival(events: &mut [crate::SessionEvent], at: std::time::Instant) {
+fn stamp_arrival(events: &mut [crate::SessionEvent], at: web_time::Instant) {
     for ev in events {
         if let crate::SessionEvent::ObjectCreate {
             transport_progress: Some(clock),
@@ -107,7 +121,7 @@ mod tests {
             fields: ObjectFields::default(),
         };
         let mut events = vec![create(Some(7)), create(None), SessionEvent::ObjectUpdateEnd];
-        let at = std::time::Instant::now();
+        let at = web_time::Instant::now();
         stamp_arrival(&mut events, at);
         let clocks: Vec<Option<TransportClock>> = events
             .iter()

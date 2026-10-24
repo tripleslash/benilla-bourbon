@@ -51,8 +51,6 @@ impl Plugin for DevToolsPlugin {
                 // A probe account's body gets vmangos `.cheat god` (damage stops at 1 hp) and GM
                 // mode off on every world entry; inert on any other account.
                 .add_plugins(crate::probe_shield::ProbeShieldPlugin);
-            // Hot reload, the addon profiler and the Lua inspector.
-            app.add_plugins(crate::devtools::DevtoolsPlugin);
         }
     }
 }

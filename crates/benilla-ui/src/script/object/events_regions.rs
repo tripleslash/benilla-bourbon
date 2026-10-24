@@ -6,7 +6,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::script::binding_abi::optional_string;
 use crate::script::region::region_wrapper;
-use crate::script::{Model, RegionData, REG_SCRIPTS, SCRIPT_KINDS};
+use crate::script::{script_kind, Model, RegionData, REG_SCRIPTS};
 use crate::widget::{FrameHandle, RegionKind};
 
 use super::{decode_id, draw_layer_from_str, frame_handle_of, publish_global};
@@ -39,7 +39,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "RegisterEvent",
         lua.create_function(|lua, (this, event): (Table, String)| {
             let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             // A name the VM's event table lacks registers nothing and raises nothing (`0x702140`).
             let Some(event) = model.vm.event_key(&event) else {
                 return Ok(());
@@ -52,7 +54,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "UnregisterEvent",
         lua.create_function(|lua, (this, event): (Table, String)| {
             let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             // Matched as `RegisterEvent` matches (`0x702280`).
             let Some(event) = model.vm.event_key(&event).map(str::to_string) else {
                 return Ok(());
@@ -73,7 +77,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "RegisterAllEvents",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             for &event in model.vm.events() {
                 register(&mut model, h, event);
             }
@@ -85,7 +91,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "UnregisterAllEvents",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let events = model.frame_events.remove(&h).unwrap_or_default();
             for event in events {
                 if let Some(list) = model.event_to_frames.get_mut(&event) {
@@ -108,13 +116,18 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, name): (Table, String)| get_script(lua, &this, &name))?,
     )?;
     // `HasScript(name)`: 1 if the widget can carry that script kind, else nil, whether or not one
-    // is set. Answered from the flat `SCRIPT_KINDS`, so another type's kind reads 1 too, where the
-    // reference's tables are per widget type (base `0x76a0d0`; a plain Frame has no `OnClick`).
+    // is set. Answered from the flat kind list ([`script_kind`]), so another type's kind reads 1
+    // too, where the reference's tables are per widget type (base `0x76a0d0`; a plain Frame has no
+    // `OnClick`).
     m.set(
         "HasScript",
-        lua.create_function(|_, (_this, name): (Table, String)| {
+        lua.create_function(|lua, (_this, name): (Table, String)| {
+            let flavor = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model")
+                .flavor;
             Ok(crate::script::binding_abi::flag(
-                SCRIPT_KINDS.iter().any(|k| k.eq_ignore_ascii_case(&name)),
+                script_kind(flavor, &name).is_some(),
             ))
         })?,
     )?;
@@ -130,7 +143,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     set.insert(s.to_str()?.to_string());
                 }
             }
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             model.drag_registered.insert(h, set);
             Ok(())
         })?,
@@ -164,12 +179,16 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let owner = frame_handle_of(lua, &this)?;
             let existing = {
-                let model = lua.app_data_ref::<Model>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 model.arena.frame(owner).and_then(|f| f.title_region)
             };
             if let Some(rh) = existing {
                 let id = {
-                    let mut model = lua.app_data_mut::<Model>().expect("model");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model");
                     let d = model.region_data.entry(rh).or_default();
                     let changed = !d.anchors.is_empty();
                     d.anchors.clear();
@@ -182,7 +201,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
             let wrapper = create_region(lua, &this, RegionKind::Title, None, None)?;
             let id = decode_id(&wrapper)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let rh = *model
                 .id_to_region
                 .get(&id)
@@ -198,7 +219,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let owner = frame_handle_of(lua, &this)?;
             let found = {
-                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model");
                 model
                     .arena
                     .frame(owner)
@@ -232,18 +255,24 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `SetScript(name, func)`: stores the closure under one of [`SCRIPT_KINDS`], else raises. The
-/// movie frame's three are accepted: the stock XML sets them, and its player
+/// `SetScript(name, func)`: stores the closure under a kind the VM takes ([`script_kind`]), else
+/// raises. Deviation: a real 1.12 kind nothing fires yet raises too (`OnInputLanguageChanged`
+/// outside a Turtle WoW VM), because an accepted handler that never runs fails silently. The movie
+/// frame's three are accepted: the stock XML sets them, and its player
 /// ([`super::super::movieframe`]) is the one thing that fires them. `OnAttributeChanged` is 2.0's,
 /// with no 1.12 slot.
 fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> mlua::Result<()> {
-    let kind = SCRIPT_KINDS
-        .iter()
-        .copied()
-        .find(|&k| k.eq_ignore_ascii_case(name))
+    let flavor = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model")
+        .flavor;
+    let kind = script_kind(flavor, name)
         .ok_or_else(|| mlua::Error::runtime(format!("SetScript: unsupported script '{name}'")))?;
     let h = frame_handle_of(lua, this)?;
-    let id = lua.app_data_mut::<Model>().expect("model").frame_id(h);
+    let id = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model")
+        .frame_id(h);
 
     // The closure lives Lua-side in `REG_SCRIPTS[id][kind]`; Rust keeps a presence mirror.
     let scripts: Table = lua.named_registry_value(REG_SCRIPTS)?;
@@ -258,7 +287,9 @@ fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> ml
     match func {
         Some(f) => {
             per.set(kind, f)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             // The first handler of a kind joins that kind's list; nothing else writes `scripts`.
             if model.scripts.entry(h).or_default().insert(kind) {
                 match kind {
@@ -274,7 +305,9 @@ fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> ml
         }
         None => {
             per.set(kind, Value::Nil)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             if let Some(set) = model.scripts.get_mut(&h) {
                 if set.remove(&kind) {
                     match kind {
@@ -293,13 +326,12 @@ fn set_script(lua: &Lua, this: &Table, name: &str, func: Option<Function>) -> ml
 }
 
 fn get_script(lua: &Lua, this: &Table, name: &str) -> mlua::Result<Value> {
-    let kind = match SCRIPT_KINDS
-        .iter()
-        .copied()
-        .find(|&k| k.eq_ignore_ascii_case(name))
-    {
-        Some(k) => k,
-        None => return Ok(Value::Nil),
+    let flavor = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model")
+        .flavor;
+    let Some(kind) = script_kind(flavor, name) else {
+        return Ok(Value::Nil);
     };
     let id = decode_id(this)?;
     let scripts: Table = lua.named_registry_value(REG_SCRIPTS)?;
@@ -319,13 +351,15 @@ fn apply_region_inherits(lua: &Lua, wrapper: &Table, from: &str) -> mlua::Result
         return Ok(());
     }
     let is_template = lua
-        .app_data_ref::<Model>()
+        .app_data_ref::<crate::script::ModelCell>()
         .expect("model")
         .framexml_templates
         .borrow()
         .contains(from);
     if is_template {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         model.record_warning(format!(
             "CreateTexture/CreateFontString: '{from}' is a registered TEMPLATE, not a font object; \
              the region is created but the template's content is not applied (no corpus caller \
@@ -362,7 +396,9 @@ fn create_region(
         .unwrap_or_default();
 
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         let rh = model
             .arena
             .create_region(owner, kind, dl, 0)
@@ -377,13 +413,17 @@ fn create_region(
         // both bindings name the region through `CScriptRegion::SetName 0x76c650` (`0x773ba1`,
         // `0x773dc4`).
         let name = {
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             crate::framexml::resolve_name(&name, &super::parent_token_base(&model, Some(owner)))
         };
         publish_global(lua, &name, &wrapper)?;
         // The region keeps its own name; the lookup a sibling's `SetPoint` names it by stays
         // first-come, as `_G` is.
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         if let Some(rh) = model.id_to_region.get(&id).copied() {
             crate::script::region::set_region_name(&mut model, rh, id, &name);
         }

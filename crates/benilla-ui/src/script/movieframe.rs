@@ -14,7 +14,6 @@ use mlua::{Lua, MultiValue, Table, Value};
 use super::binding_abi::bool_or_default;
 use super::binding_abi::name_of;
 use super::object::frame_handle_of;
-use super::Model;
 use crate::widget::FrameKind;
 
 /// Registry key of the MovieFrame method table (the MAXCSTACK discipline: a Lua-side root).
@@ -24,7 +23,9 @@ pub(super) const REG_MOVIEFRAME_METHODS: &str = "__benilla_movieframe_methods";
 /// lift onto another frame (`0x847e98`, "Wrong object type for member function").
 fn check_movie_frame(lua: &Lua, this: &Table) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     match model.arena.frame(h) {
         Some(f) if f.kind == FrameKind::MovieFrame => Ok(()),
         _ => Err(mlua::Error::runtime(

@@ -9,7 +9,6 @@ use mlua::{Lua, Table};
 
 use super::object::{frame_handle_of, point_from_str};
 use super::region::region_handle_of;
-use super::Model;
 use crate::layout::Len;
 use crate::widget::KindState;
 
@@ -39,7 +38,9 @@ pub(crate) fn offset(lua: &Lua, wrapper: &Table, region: bool, point: &str, v: [
         let Ok(rh) = region_handle_of(lua, wrapper) else {
             return;
         };
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         if let Some(cell) = model
             .region_data
             .get_mut(&rh)
@@ -52,7 +53,9 @@ pub(crate) fn offset(lua: &Lua, wrapper: &Table, region: bool, point: &str, v: [
         let Ok(h) = frame_handle_of(lua, wrapper) else {
             return;
         };
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         if let Some(cell) = model
             .layout_inputs
             .get_mut(&h)
@@ -73,7 +76,9 @@ pub(crate) fn size(lua: &Lua, wrapper: &Table, region: bool, v: [Len; 2]) {
         let Ok(rh) = region_handle_of(lua, wrapper) else {
             return;
         };
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         let Some(d) = model.region_data.get_mut(&rh) else {
             return;
         };
@@ -86,7 +91,9 @@ pub(crate) fn size(lua: &Lua, wrapper: &Table, region: bool, v: [Len; 2]) {
         let Ok(h) = frame_handle_of(lua, wrapper) else {
             return;
         };
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         let input = model.layout_inputs.entry(h).or_default();
         put((&mut input.width, &mut input.height), v);
         model.invalidate_frame(h, true);
@@ -101,7 +108,9 @@ pub(crate) fn pushed_text_offset(lua: &Lua, wrapper: &Table, v: [Len; 2]) {
     let Ok(h) = frame_handle_of(lua, wrapper) else {
         return;
     };
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     if let Some(KindState::Button(bs)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
         let [x, y] = &mut bs.pushed_text_offset;
         put((x, y), v);
@@ -126,7 +135,9 @@ pub(crate) fn backdrop(
     let Ok(h) = frame_handle_of(lua, wrapper) else {
         return;
     };
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     let Some(spec) = model.backdrops.get(&h).map(|i| i.spec.clone()) else {
         return;
     };
@@ -157,7 +168,9 @@ pub(crate) fn hit_rect_insets(lua: &Lua, wrapper: &Table, v: [Len; 4]) {
     let Ok(h) = frame_handle_of(lua, wrapper) else {
         return;
     };
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     if let Some(f) = model.arena.frame_mut(h) {
         for (cell, l) in f.hit_rect_insets.iter_mut().zip(v) {
             if is_layout(l) {
@@ -175,7 +188,9 @@ pub(crate) fn resize_bound(lua: &Lua, wrapper: &Table, upper: bool, v: [Len; 2])
     let Ok(h) = frame_handle_of(lua, wrapper) else {
         return;
     };
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     if let Some(f) = model.arena.frame_mut(h) {
         let (w, ht) = if upper {
             &mut f.max_resize
@@ -195,7 +210,9 @@ pub(crate) fn text_insets(lua: &Lua, wrapper: &Table, v: [Len; 4]) {
         return;
     };
     {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         if let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
             for (cell, l) in eb.text_insets.iter_mut().zip(v) {
                 if is_layout(l) {

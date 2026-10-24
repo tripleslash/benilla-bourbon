@@ -168,6 +168,35 @@ pub(super) fn feed_default_language(
     }
 }
 
+/// Point the writer's chat language at the self race's `ChrRaces.BaseLanguage`, the id
+/// `SendChatMessage` speaks with no language named (`0x49f1e0`). The session's login guess knows
+/// only the eight stock races, so a custom server's Goblin would speak Common and be refused.
+/// Re-sent for each new self body: every world entry hands the writer a fresh login guess.
+pub(super) fn feed_chat_language(
+    commands: Option<Res<crate::net::NetCommands>>,
+    langs: Option<Res<crate::ui_unit::DefaultLanguagesRes>>,
+    self_q: Query<(Entity, &ObjectStore), With<SelfPlayer>>,
+    mut sent: Local<Option<(Entity, u32)>>,
+) {
+    let (Some(commands), Some(langs)) = (commands, langs) else {
+        return;
+    };
+    let Some((entity, language)) = self_q.iter().next().and_then(|(e, store)| {
+        let race = store.0.unit_race()?;
+        Some((e, langs.0.id(u32::from(race))?))
+    }) else {
+        return;
+    };
+    if *sent == Some((entity, language)) {
+        return;
+    }
+    info!("ui_chat: chat language {language}");
+    let _ = commands
+        .0
+        .send(crate::net::ClientCommand::SetChatLanguage { language });
+    *sent = Some((entity, language));
+}
+
 /// A skill's `PLAYER_SKILL_INFO` value as `0x5ec720` sums it: base, plus the permanent bonus only
 /// when base is non-zero, plus the signed temporary bonus; 0 with no row.
 fn skill_value(store: &ObjectStore, line: u32) -> u32 {

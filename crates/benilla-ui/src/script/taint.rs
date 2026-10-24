@@ -89,7 +89,7 @@ pub(crate) fn tag(lua: &Lua, f: &Function, context: &Context) {
 /// name while its files load, else nothing.
 pub(crate) fn tag_for_load(lua: &Lua, f: &Function) {
     let context = lua
-        .app_data_ref::<Model>()
+        .app_data_ref::<crate::script::ModelCell>()
         .and_then(|model| model.exec_context.borrow().clone());
     if let Some(name) = context {
         tag(lua, f, &Context::Addon(name));
@@ -130,7 +130,7 @@ pub(crate) fn current(lua: &Lua) -> Context {
                 }
             }
             let source = debug.source().source;
-            let model = lua.app_data_ref::<Model>()?;
+            let model = lua.app_data_ref::<crate::script::ModelCell>()?;
             addon_of_chunk(&model, source.as_deref()?).map(Context::Addon)
         });
         match frame {

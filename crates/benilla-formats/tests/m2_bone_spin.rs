@@ -129,6 +129,35 @@ fn the_caverns_of_time_sky_spins_exactly_its_three_belt_bones() {
     }
 }
 
+/// `DeathClouds.m2`, the ghost sky, turns its one bone on a 133.267 s global sequence, not on
+/// anim 0 (`benilla-extract m2anim`).
+#[test]
+fn the_ghost_sky_spins_its_bone_on_the_global_sequence() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = Chain::open(&data).expect("open vanilla patch chain");
+    let spins = load_m2_bone_spins(&mut chain, "Environments\\Stars\\DeathClouds.m2")
+        .expect("read DeathClouds.m2");
+    let s = spins.get(&0).expect("bone 0 spins");
+    assert_eq!(spins.len(), 1, "its only bone");
+    assert!(
+        (s.duration - 133.267).abs() < 0.01,
+        "one 133.267 s period, got {}",
+        s.duration
+    );
+    // The turn from the first key keeps moving across the period.
+    let from_start = |t: f32| {
+        let (a, b) = (s.keys[0].1, s.sample(t));
+        let dot: f32 = (0..4).map(|i| a[i] * b[i]).sum();
+        2.0 * dot.abs().clamp(0.0, 1.0).acos().to_degrees()
+    };
+    let (early, later) = (from_start(s.duration * 0.05), from_start(s.duration * 0.25));
+    assert!(early > 1.0, "already turning 5% in: {early}°");
+    assert!(
+        later > early,
+        "and further on at 25%: {early}° then {later}°"
+    );
+}
+
 /// `StratholmeSkybox` is three static opaque batches: nothing spins.
 #[test]
 fn the_stratholme_sky_spins_nothing() {

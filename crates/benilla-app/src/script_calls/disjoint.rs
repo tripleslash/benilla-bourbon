@@ -108,34 +108,29 @@ macro_rules! disjoint_set {
                 );)*
             }
 
-            unsafe fn validate_param(
-                state: &mut Self::State,
-                meta: &bevy::ecs::system::SystemMeta,
-                world: bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell,
-            ) -> Result<(), bevy::ecs::system::SystemParamValidationError> {
-                // SAFETY: upheld by the caller, for every member's access as for the set's.
-                unsafe {
-                    $(<$ty as bevy::ecs::system::SystemParam>::validate_param(
-                        &mut state.$field,
-                        meta,
-                        world,
-                    )?;)*
-                }
-                Ok(())
-            }
-
+            // Bevy 0.19 validates in `get_param`: each member is fetched once and let go, as
+            // `ParamSet` does, so a member that cannot be had skips the system.
             unsafe fn get_param<'w, 's>(
                 state: &'s mut Self::State,
                 meta: &bevy::ecs::system::SystemMeta,
                 world: bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell<'w>,
                 change_tick: bevy::ecs::change_detection::Tick,
-            ) -> Self::Item<'w, 's> {
-                $name {
+            ) -> Result<Self::Item<'w, 's>, bevy::ecs::system::SystemParamValidationError> {
+                // SAFETY: upheld by the caller, for every member's access as for the set's.
+                $(unsafe {
+                    <$ty as bevy::ecs::system::SystemParam>::get_param(
+                        &mut state.$field,
+                        meta,
+                        world,
+                        change_tick,
+                    )
+                }?;)*
+                Ok($name {
                     states: state,
                     meta: meta.clone(),
                     world,
                     change_tick,
-                }
+                })
             }
         }
 
@@ -155,6 +150,7 @@ macro_rules! disjoint_set {
                             self.change_tick,
                         )
                     }
+                    .unwrap_or_else(|e| panic!("{} failed validation: {e}", stringify!($field)))
                 }
             )*
         }
@@ -203,30 +199,23 @@ unsafe impl<A: SystemParam, B: SystemParam> SystemParam for Pair<'_, '_, A, B> {
         B::queue(&mut state.1, meta, world.reborrow());
     }
 
-    unsafe fn validate_param(
-        state: &mut Self::State,
-        meta: &SystemMeta,
-        world: UnsafeWorldCell,
-    ) -> Result<(), SystemParamValidationError> {
-        // SAFETY: upheld by the caller, for each member's access as for the pair's.
-        unsafe {
-            A::validate_param(&mut state.0, meta, world)?;
-            B::validate_param(&mut state.1, meta, world)
-        }
-    }
-
+    // Validated as [`disjoint_set!`]'s is: each member fetched once and let go.
     unsafe fn get_param<'w, 's>(
         state: &'s mut Self::State,
         meta: &SystemMeta,
         world: UnsafeWorldCell<'w>,
         change_tick: Tick,
-    ) -> Self::Item<'w, 's> {
-        Pair {
+    ) -> Result<Self::Item<'w, 's>, SystemParamValidationError> {
+        // SAFETY: upheld by the caller, for each member's access as for the pair's.
+        unsafe { A::get_param(&mut state.0, meta, world, change_tick) }?;
+        // SAFETY: as above; the first member's item is gone.
+        unsafe { B::get_param(&mut state.1, meta, world, change_tick) }?;
+        Ok(Pair {
             states: state,
             meta: meta.clone(),
             world,
             change_tick,
-        }
+        })
     }
 }
 
@@ -235,12 +224,14 @@ impl<A: SystemParam, B: SystemParam> Pair<'_, '_, A, B> {
     pub(crate) fn p0(&mut self) -> SystemParamItem<'_, '_, A> {
         // SAFETY: the pair registered `A`'s access, and `&mut self` keeps `B` unlent.
         unsafe { A::get_param(&mut self.states.0, &self.meta, self.world, self.change_tick) }
+            .unwrap_or_else(|e| panic!("p0 failed validation: {e}"))
     }
 
     /// The second member, the first unlent while it lives.
     pub(crate) fn p1(&mut self) -> SystemParamItem<'_, '_, B> {
         // SAFETY: the pair registered `B`'s access, and `&mut self` keeps `A` unlent.
         unsafe { B::get_param(&mut self.states.1, &self.meta, self.world, self.change_tick) }
+            .unwrap_or_else(|e| panic!("p1 failed validation: {e}"))
     }
 }
 

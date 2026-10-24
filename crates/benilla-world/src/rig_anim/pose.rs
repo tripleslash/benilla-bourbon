@@ -37,6 +37,9 @@ pub struct RigPose {
     pub anchors: Vec<(u16, Entity)>,
     /// `locals` changed since the last world pass; starts raised so the bind pose is written.
     pub pose_dirty: bool,
+    /// Each anchor's local TRS at the composed pose, `None` for a bone the skeleton lacks: worked
+    /// out beside the fold, on a worker, so the serial re-seat only compares and writes.
+    pub(crate) anchor_seats: Vec<Option<Transform>>,
 }
 
 impl RigPose {
@@ -66,9 +69,31 @@ impl RigPose {
                 .any(|j| j.billboard.is_some() || j.parent_arm.is_some()),
             anchors: Vec::new(),
             pose_dirty: true,
+            anchor_seats: Vec::new(),
         };
         rig.compose();
         rig
+    }
+
+    /// Decompose each anchor's composed model frame into [`Self::anchor_seats`].
+    pub(crate) fn seat_anchors(&mut self) {
+        let Self {
+            anchors,
+            model,
+            anchor_seats,
+            ..
+        } = self;
+        anchor_seats.clear();
+        anchor_seats.extend(anchors.iter().map(|&(bone, _)| {
+            model.get(bone as usize).map(|m| {
+                let (scale, rotation, translation) = m.to_scale_rotation_translation();
+                Transform {
+                    translation,
+                    rotation,
+                    scale,
+                }
+            })
+        }));
     }
 
     /// Fold `locals` into `model`, the `flags & 0x7` arm included since the anchors are seated
@@ -176,72 +201,128 @@ struct Active {
     cursor: usize,
 }
 
+/// fork (perf): animation LOD — how many frames apart a rig `dist` yards from the camera is
+/// re-posed. A skipped frame holds the last pose; the next sample is taken at the clip's own seek
+/// time, so a far rig steps at a lower rate and never drifts. `WOW_ANIM_LOD=0` poses every frame.
+fn pose_period(dist: f32) -> u32 {
+    match dist {
+        d if d < 50.0 => 1,
+        d if d < 100.0 => 2,
+        d if d < 200.0 => 3,
+        _ => 4,
+    }
+}
+
+/// A rig posed every frame whatever its distance: a UI model pane's stage (the character screen,
+/// the character pane, every `PlayerModel`/`DressUpModel`), which no world camera frames.
+#[derive(Component, Default)]
+pub struct PoseEveryFrame;
+
+fn anim_lod_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::launch_env::var("WOW_ANIM_LOD").as_deref() != Some("0"))
+}
+
+/// What `evaluate_rig_poses` reads and writes per rig.
+type RigPoseData = (
+    Entity,
+    &'static AnimationPlayer,
+    &'static ModelAnimations,
+    &'static mut RigPose,
+    Has<PoseEveryFrame>,
+);
+
 /// Pose every live rig where `animate_targets` runs, after `advance_animations`.
 fn evaluate_rig_poses(
-    mut rigs: Query<(&AnimationPlayer, &ModelAnimations, &mut RigPose), Without<AnimParked>>,
+    mut rigs: Query<RigPoseData, Without<AnimParked>>,
+    roots: Query<&GlobalTransform>,
+    cams: Query<&GlobalTransform, With<crate::view::WorldCamera>>,
+    frame: Option<Res<bevy::diagnostic::FrameCount>>,
 ) {
+    let eye = cams
+        .iter()
+        .next()
+        .map(GlobalTransform::translation)
+        .filter(|_| anim_lod_enabled());
+    let frame = frame.map_or(0, |f| f.0);
     // Parallel: a rig reads shared clips and writes only its own pose.
-    rigs.par_iter_mut().for_each(|(player, anims, mut rig)| {
-        let src = &anims.pose;
-        // The contributing animations in node order, in one scratch per worker thread.
-        thread_local! {
-            static ACTIVE: std::cell::RefCell<Vec<Active>> =
-                const { std::cell::RefCell::new(Vec::new()) };
-        }
-        ACTIVE.with(|cell| {
-            let mut active = cell.borrow_mut();
-            active.clear();
-            for (&node, anim) in player.playing_animations() {
-                // Bevy's exact gate: a weight of literal 0.0 skips the node (paused does not).
-                if anim.weight() == 0.0 {
-                    continue;
+    rigs.par_iter_mut()
+        .for_each(|(holder, player, anims, mut rig, every_frame)| {
+            // A far rig is posed on its own staggered slot of every `pose_period` frames.
+            if let (Some(eye), Ok(root), false) = (eye, roots.get(rig.joints_root), every_frame) {
+                let period = pose_period(root.translation().distance(eye));
+                if period > 1 && (frame.wrapping_add(holder.index_u32())) % period != 0 {
+                    return;
                 }
-                let Some(pn) = src.node(node) else { continue };
-                if src.clips.get(pn.clip as usize).is_none() {
-                    continue;
-                }
-                active.push(Active {
-                    node: node.index(),
-                    clip: pn.clip as usize,
-                    mask: pn.mask,
-                    weight: anim.weight(),
-                    seek: anim.seek_time(),
-                    cursor: 0,
-                });
             }
-            active.sort_unstable_by_key(|a| a.node);
-            match active.as_mut_slice() {
-                [] => {}
-                [one] => {
-                    // One contribution commits at full value whatever its weight.
-                    rig.pose_dirty = true;
-                    for pb in &src.clips[one.clip].bones {
-                        if src.bone_masks.get(pb.bone as usize).copied().unwrap_or(0) & one.mask
-                            != 0
-                        {
-                            continue;
-                        }
-                        let Some(tf) = rig.locals.get_mut(pb.bone as usize) else {
-                            continue;
-                        };
-                        if let Some(v) = pb.translation.sample(one.seek) {
-                            tf.translation = v;
-                        }
-                        if let Some(v) = pb.rotation.sample(one.seek) {
-                            tf.rotation = v;
-                        }
-                        if let Some(v) = pb.scale.sample(one.seek) {
-                            tf.scale = v;
+            let src = &anims.pose;
+            // The contributing animations in node order, in one scratch per worker thread.
+            //
+            // **`thread_local!` is correct here and is not a stand-in for a global.** It gains one
+            // copy per worker, which is the point — the copies are what make the scratch reusable
+            // without a lock. On the threaded browser build (`third_party/bevy_tasks/BENILLA.md`)
+            // that is now several copies rather than one, which changes nothing about this code and
+            // is worth saying because the tree's OTHER `thread_local!`s exist for the opposite
+            // reason: `benilla_formats::webpack::resident`'s is a global with the right lifetime,
+            // written when wasm had exactly one thread, and it must stay on the main thread.
+            thread_local! {
+                static ACTIVE: std::cell::RefCell<Vec<Active>> =
+                    const { std::cell::RefCell::new(Vec::new()) };
+            }
+            ACTIVE.with(|cell| {
+                let mut active = cell.borrow_mut();
+                active.clear();
+                for (&node, anim) in player.playing_animations() {
+                    // Bevy's exact gate: a weight of literal 0.0 skips the node (paused does not).
+                    if anim.weight() == 0.0 {
+                        continue;
+                    }
+                    let Some(pn) = src.node(node) else { continue };
+                    if src.clips.get(pn.clip as usize).is_none() {
+                        continue;
+                    }
+                    active.push(Active {
+                        node: node.index(),
+                        clip: pn.clip as usize,
+                        mask: pn.mask,
+                        weight: anim.weight(),
+                        seek: anim.seek_time(),
+                        cursor: 0,
+                    });
+                }
+                active.sort_unstable_by_key(|a| a.node);
+                match active.as_mut_slice() {
+                    [] => {}
+                    [one] => {
+                        // One contribution commits at full value whatever its weight.
+                        rig.pose_dirty = true;
+                        for pb in &src.clips[one.clip].bones {
+                            if src.bone_masks.get(pb.bone as usize).copied().unwrap_or(0) & one.mask
+                                != 0
+                            {
+                                continue;
+                            }
+                            let Some(tf) = rig.locals.get_mut(pb.bone as usize) else {
+                                continue;
+                            };
+                            if let Some(v) = pb.translation.sample(one.seek) {
+                                tf.translation = v;
+                            }
+                            if let Some(v) = pb.rotation.sample(one.seek) {
+                                tf.rotation = v;
+                            }
+                            if let Some(v) = pb.scale.sample(one.seek) {
+                                tf.scale = v;
+                            }
                         }
                     }
+                    many => {
+                        rig.pose_dirty = true;
+                        blend_rig(src, many, &mut rig);
+                    }
                 }
-                many => {
-                    rig.pose_dirty = true;
-                    blend_rig(src, many, &mut rig);
-                }
-            }
+            });
         });
-    });
 }
 
 /// Several animations: merge-walk the bone-sorted clips, folding each property in node order.
@@ -316,6 +397,22 @@ pub fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    #[test]
+    fn near_rigs_pose_every_frame_and_far_ones_less_often() {
+        use super::pose_period;
+        assert_eq!(pose_period(10.0), 1);
+        assert_eq!(pose_period(49.9), 1);
+        assert_eq!(pose_period(75.0), 2);
+        assert_eq!(pose_period(150.0), 3);
+        assert_eq!(pose_period(900.0), 4);
+        let mut last = 1;
+        for d in 0..1000 {
+            let p = pose_period(d as f32);
+            assert!(p >= last, "the period never shrinks with distance");
+            last = p;
+        }
+    }
 
     use benilla_assets::{bone_target_id, PoseBone, PoseClip, PoseTrack};
     use bevy::animation::animation_curves::{AnimatableCurve, AnimatableKeyframeCurve};

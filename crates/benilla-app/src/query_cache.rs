@@ -179,8 +179,8 @@ impl<K: Copy + Eq + Hash + Default, V> QueryCache<K, V> {
             || self.pending.lock_recover().contains(&key)
     }
 
-    #[cfg(test)]
     /// Whether an ask for `key` is in flight.
+    #[cfg(test)]
     pub(crate) fn is_pending(&self, key: K) -> bool {
         self.pending.lock_recover().contains(&key)
     }
@@ -282,7 +282,7 @@ impl<K: Copy + Eq + Hash + Default, V> QueryCache<K, V> {
 }
 
 /// A resource that owns one or more [`QueryCache`]s: what to forget on world entry.
-pub(crate) trait AskOnce: Resource {
+pub(crate) trait AskOnce: Resource<Mutability = bevy::ecs::component::Mutable> {
     fn clear_pending(&mut self);
 }
 

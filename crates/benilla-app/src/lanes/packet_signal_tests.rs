@@ -21,7 +21,7 @@ const FELL: &str = "UNIT_COMBAT:player:100";
 fn spy(app: &mut App, events: &[&str]) {
     let list: Vec<String> = events.iter().map(|e| format!("{e:?}")).collect();
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(&format!(
             r#"
             local f = CreateFrame("Frame")
@@ -174,7 +174,7 @@ fn the_spirit_healer_rescan_sends_with_no_vm() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let world = app.world_mut();
     world.insert_resource(crate::net::NetCommands(tx));
-    world.remove_non_send_resource::<UiScript>();
+    world.remove_non_send::<UiScript>();
     let healer = world
         .resource_mut::<crate::net::GuidIndex>()
         .0

@@ -166,7 +166,9 @@ pub(crate) enum Fan {
 /// make them again in their places, a cursor write as its operation ([`Fan::Again`]).
 pub(crate) fn verb<R>(lua: &Lua, body: impl FnOnce(&mut Model) -> R) -> R {
     let (out, raised) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data set");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data set");
         let outer = model.verb_events.replace(Vec::new());
         debug_assert!(outer.is_none(), "a verb segment opened inside another");
         let out = body(&mut model);
@@ -189,7 +191,9 @@ pub(crate) fn verb<R>(lua: &Lua, body: impl FnOnce(&mut Model) -> R) -> R {
     // or `UnlockItem` would overwrite it. What the body cannot match is a read: it ran before any
     // handler, so it never sees a handler's change.
     roll_back_locks(
-        &mut lua.app_data_mut::<Model>().expect("model app_data set"),
+        &mut lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data set"),
         &raised,
     );
     fan_out(lua, raised, Fan::Now);
@@ -209,14 +213,14 @@ pub(crate) fn fan_out(lua: &Lua, raised: Vec<Raised>, how: Fan) {
             }
             Raised::CursorWrite(write) => {
                 let waits = !lua
-                    .app_data_ref::<Model>()
+                    .app_data_ref::<crate::script::ModelCell>()
                     .expect("model app_data set")
                     .script_calls
                     .is_empty();
                 if waits {
                     // Queued ahead of what its handlers leave waiting, as it was made before them.
                     let raised = write.raised.clone();
-                    lua.app_data_mut::<Model>()
+                    lua.app_data_mut::<crate::script::ModelCell>()
                         .expect("model app_data set")
                         .push_waiting(super::calls::Waiting::Cursor { write, shown: true });
                     fan_out(lua, raised, Fan::Bare);
@@ -226,7 +230,9 @@ pub(crate) fn fan_out(lua: &Lua, raised: Vec<Raised>, how: Fan) {
             }
             Raised::Lock { guid, locked, .. } if how == Fan::Bare => {
                 set_lock_bit(
-                    &mut lua.app_data_mut::<Model>().expect("model app_data set"),
+                    &mut lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data set"),
                     guid,
                     locked,
                 );
@@ -234,24 +240,26 @@ pub(crate) fn fan_out(lua: &Lua, raised: Vec<Raised>, how: Fan) {
             Raised::Event(event, args) => fire_event_into(lua, &event, args),
             Raised::Call(call) => {
                 if let Err(e) = super::calls::submit(lua, *call) {
-                    lua.app_data_mut::<Model>()
+                    lua.app_data_mut::<crate::script::ModelCell>()
                         .expect("model app_data set")
                         .record_lua_error(&e);
                 }
             }
             Raised::CursorView(payload) => {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data set");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data set");
                 hidden.push(std::mem::replace(&mut model.cursor, payload));
             }
             Raised::EndCursorView => {
                 if let Some(real) = hidden.pop() {
-                    lua.app_data_mut::<Model>()
+                    lua.app_data_mut::<crate::script::ModelCell>()
                         .expect("model app_data set")
                         .cursor = real;
                 }
             }
             Raised::Lock { guid, locked, .. } => {
-                lua.app_data_mut::<Model>()
+                lua.app_data_mut::<crate::script::ModelCell>()
                     .expect("model app_data set")
                     .set_item_lock(guid, locked);
             }
@@ -292,7 +300,7 @@ pub fn system_chat_args(text: String) -> Vec<ScriptValue> {
 /// with its key for the app's log files and the row's sound ([`UiScript::take_shown_chat_lines`]).
 pub(crate) fn show_chat_line_into(lua: &Lua, key: &'static str, text: String) {
     fire_event_into(lua, "CHAT_MSG_SYSTEM", system_chat_args(text.clone()));
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data set")
         .shown_chat_lines
         .push((key, text));
@@ -305,7 +313,10 @@ pub(crate) fn show_chat_line_into(lua: &Lua, key: &'static str, text: String) {
 /// its call (`0x703ee8`): one appended meanwhile is reached unless the running one was the tail.
 /// An engine step that cannot lend the host holds the walk for it ([`super::host::holding`]).
 pub(crate) fn fire_event_into(lua: &Lua, event: &str, args: Vec<ScriptValue>) {
-    let model_mut = || lua.app_data_mut::<Model>().expect("model app_data set");
+    let model_mut = || {
+        lua.app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data set")
+    };
     let mut at = {
         let model = model_mut();
         model
@@ -355,7 +366,7 @@ impl super::UiScript {
     /// The catalog lines a verb showed in chat since the last call, by message key, for the log
     /// files and the sound the app keeps.
     pub fn take_shown_chat_lines(&mut self) -> Vec<(&'static str, String)> {
-        std::mem::take(&mut self.model_mut().shown_chat_lines)
+        drain_field!(self, shown_chat_lines)
     }
 
     /// Advance a frame: the `GetTime()` clock and queued events, then the pump `0x765650` and the
@@ -367,10 +378,16 @@ impl super::UiScript {
     /// range); drains the layout again (`0x765799`); then re-picks the hover against those rects
     /// (`0x7657be`). The draw pass fires `OnUpdateModel`.
     pub fn tick(&mut self, elapsed: f32) {
-        self.model_mut().nameplates.begin_update();
+        if self.model_ref().nameplates.paint_pending() {
+            self.model_mut().nameplates.begin_update();
+        }
+        // The clock is no extract input and a drained queue is no change: the mutation count
+        // stands ([`super::ModelCell`]); the events fired below move it through their verbs.
+        let quiet = self.visual_epoch();
         self.model_mut().now += f64::from(elapsed);
         // Events queued since the last tick fire before this tick's OnUpdate.
-        let pending = std::mem::take(&mut self.model_mut().pending_events);
+        let pending = drain_field!(self, pending_events);
+        self.restore_epoch(quiet);
         for (event, args) in pending {
             self.fire_event(&event, args);
         }
@@ -384,12 +401,12 @@ impl super::UiScript {
         // A frame hid or showed under a still cursor: re-run the hover walk at the saved position,
         // as the reference's pump tail does (`0x765650` → `0x7660d0`). The hidden frame's OnLeave
         // already fired, so only the new winner's `OnEnter` fires.
-        let repick = {
+        let due = self.model_ref().hover_repick;
+        let repick = due.then(|| {
             let mut model = self.model_mut();
-            let due = model.hover_repick;
             model.hover_repick = false;
-            due.then_some(model.cursor_pos)
-        };
+            model.cursor_pos
+        });
         if let Some((x, y)) = repick {
             self.mouse_move(x, y);
         }
@@ -407,9 +424,11 @@ impl UiScript {
     /// arm the last paint left. A zero advance tests nothing (`0x7074b7`).
     pub(super) fn advance_pane(&mut self, h: FrameHandle, elapsed: f32) {
         let dt_ms = crate::widget::pane_clock_step_ms(elapsed);
+        // The pane's clock is no extract input: without a completion the count stands.
+        let quiet = self.visual_epoch();
         let finished = {
             let mut model = self.model_mut();
-            let model = &mut *model;
+            let model: &mut crate::script::Model = &mut model;
             let Some(crate::widget::KindState::Model(m)) =
                 model.arena.frame_mut(h).map(|f| &mut f.kind_state)
             else {
@@ -430,6 +449,9 @@ impl UiScript {
                 _ => None,
             }
         };
+        if finished.is_none() {
+            self.restore_epoch(quiet);
+        }
         if let Some(id) = finished {
             if let Err(e) = event::fire_widget_handler(&self.lua, id, "OnAnimFinished", Vec::new())
             {
@@ -450,6 +472,8 @@ impl UiScript {
     /// A character pane's paint then runs its turn timer (`0x505c50`, after the root step
     /// `0x76d1a0` that fires `OnUpdateModel`), whether or not it has the handler.
     fn paint_model_panes(&mut self) {
+        // The roster compaction is bookkeeping, and a frame with no pane to paint changed nothing.
+        let quiet = self.visual_epoch();
         let mut model = self.model_mut();
         // Kept by `SetScript`; a destroyed frame's handle compacts out on its first miss.
         if model
@@ -481,6 +505,8 @@ impl UiScript {
             })
             .collect();
         if model.on_update_model_frames.is_empty() && copies.is_empty() {
+            drop(model);
+            self.restore_epoch(quiet);
             return;
         }
         drop(model);

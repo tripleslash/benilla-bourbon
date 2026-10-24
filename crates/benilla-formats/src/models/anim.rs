@@ -215,42 +215,69 @@ pub fn parse_m2_animation_lookup(bytes: &[u8]) -> Result<Vec<u16>> {
     Ok(format.model().animation_lookup.clone())
 }
 
-/// The bones that spin rigidly ([`BoneSpin`]) in anim 0, which the load arms play (`0x70ebd0`,
-/// doodads `0x695100`). How a WMO skybox is armed is untraced; both shipped ones have one clip.
+/// The bones that spin rigidly ([`BoneSpin`]): rotation-only parentless bones of anim 0, which the
+/// load arms play (`0x70ebd0`, doodads `0x695100`), and of a global sequence, which runs on the
+/// scene clock mod its own period (`0x714352`; `DeathClouds.m2`'s one bone, 133.267 s). How a WMO
+/// skybox is armed is untraced; both shipped ones have one clip.
 pub fn m2_bone_spins(bytes: &[u8]) -> HashMap<u16, BoneSpin> {
     let mut out = HashMap::new();
     let Ok(skeleton) = parse_m2_skeleton(bytes) else {
         return out;
     };
-    let anims = parse_m2_animations(bytes);
-    let Some(seq) = anims.iter().find(|a| a.anim_id == 0) else {
-        return out;
-    };
     let (bone_count, bone_ofs) = (le_u32(bytes, 0x34) as usize, le_u32(bytes, 0x38) as usize);
-    for keys in &seq.bones {
-        let idx = keys.bone as usize;
-        // Rotation only and at least two keys: one key is a pose, not a spin.
-        if keys.rotation.len() < 2 || !keys.translation.is_empty() || !keys.scale.is_empty() {
-            continue;
-        }
-        // Parentless: nothing above composes another motion in.
-        let Some(bone) = skeleton.bones.get(idx).filter(|b| b.parent < 0) else {
-            continue;
-        };
-        // The rotation track's `interp_type`, bounds-checked here: `le_u16` panics past the end.
-        let interp = idx < bone_count
+    // The rotation track's `interp_type`, bounds-checked here: `le_u16` panics past the end.
+    let interp_of = |idx: usize| {
+        idx < bone_count
             && bone_ofs
                 .checked_add(idx * 0x6c + 0x28)
-                .is_some_and(|t| t + 2 <= bytes.len() && le_u16(bytes, t) != 0);
-        out.insert(
-            keys.bone,
-            BoneSpin {
-                pivot: bone.pivot,
-                duration: seq.duration,
-                interp,
-                keys: keys.rotation.clone(),
-            },
-        );
+                .is_some_and(|t| t + 2 <= bytes.len() && le_u16(bytes, t) != 0)
+    };
+    // Parentless: nothing above composes another motion in.
+    let root = |idx: usize| skeleton.bones.get(idx).filter(|b| b.parent < 0);
+    let anims = parse_m2_animations(bytes);
+    if let Some(seq) = anims.iter().find(|a| a.anim_id == 0) {
+        for keys in &seq.bones {
+            let idx = keys.bone as usize;
+            // Rotation only and at least two keys: one key is a pose, not a spin.
+            if keys.rotation.len() < 2 || !keys.translation.is_empty() || !keys.scale.is_empty() {
+                continue;
+            }
+            let Some(bone) = root(idx) else {
+                continue;
+            };
+            out.insert(
+                keys.bone,
+                BoneSpin {
+                    pivot: bone.pivot,
+                    duration: seq.duration,
+                    interp: interp_of(idx),
+                    keys: keys.rotation.clone(),
+                },
+            );
+        }
+    }
+    // A track is on a sequence or on a global sequence, never both, so these never collide.
+    for g in parse_m2_global_sequence_bones(bytes) {
+        let idx = g.bone as usize;
+        let Some(rotation) = g.rotation.filter(|r| r.keys.len() >= 2) else {
+            continue;
+        };
+        if g.translation.is_some() || g.scale.is_some() {
+            continue;
+        }
+        let Some(bone) = root(idx) else {
+            continue;
+        };
+        out.entry(g.bone).or_insert_with(|| BoneSpin {
+            pivot: bone.pivot,
+            duration: rotation.period_ms as f32 / 1000.0,
+            interp: interp_of(idx),
+            keys: rotation
+                .keys
+                .iter()
+                .map(|&(ms, q)| (ms as f32 / 1000.0, q))
+                .collect(),
+        });
     }
     out
 }

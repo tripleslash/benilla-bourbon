@@ -10,8 +10,6 @@
 
 use mlua::{Lua, Value};
 
-use super::Model;
-
 /// The number of camera views, the rows of the reference's default-string table `0x84f488`.
 pub const CAMERA_VIEW_COUNT: u8 = 5;
 
@@ -31,12 +29,15 @@ pub enum CameraViewRequest {
     Prev,
     /// `FlipCameraYaw(degrees)`: add degrees to the camera's yaw; `Bindings.xml:795` passes 180.
     FlipYaw(f32),
+    /// `CameraZoomIn(n)` / `CameraZoomOut(n)` (a Turtle WoW VM's, [`install_turtle`]): move the
+    /// zoom `n` yards toward the head, or away for a negative `n`.
+    Zoom(f32),
 }
 
 impl super::UiScript {
     /// Drain the camera-view intents queued since the last call.
     pub fn take_camera_view_requests(&mut self) -> Vec<CameraViewRequest> {
-        std::mem::take(&mut self.model_mut().camera_view_requests)
+        drain_field!(self, camera_view_requests)
     }
 }
 
@@ -60,7 +61,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetView",
         lua.create_function(|lua, n: Value| {
             if let Some(view) = view_arg(lua, n) {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .camera_view_requests
                     .push(CameraViewRequest::Set(view));
@@ -75,7 +78,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SaveView",
         lua.create_function(|lua, n: Value| {
             if let Some(view) = view_arg(lua, n) {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .camera_view_requests
                     .push(CameraViewRequest::Save(view));
@@ -90,7 +95,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "ResetView",
         lua.create_function(|lua, n: Value| {
             if let Some(view) = view_arg(lua, n) {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .camera_view_requests
                     .push(CameraViewRequest::Reset(view));
@@ -103,7 +110,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "NextView",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.camera_view_requests.push(CameraViewRequest::Next);
             Ok(())
         })?,
@@ -111,7 +120,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "PrevView",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.camera_view_requests.push(CameraViewRequest::Prev);
             Ok(())
         })?,
@@ -123,7 +134,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "FlipCameraYaw",
         lua.create_function(|lua, degrees: Value| {
             if let Some(d) = lua.coerce_number(degrees).ok().flatten() {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .camera_view_requests
                     .push(CameraViewRequest::FlipYaw(d as f32));
@@ -133,4 +146,59 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     Ok(())
+}
+
+/// Register `CameraZoomIn` and `CameraZoomOut` (`0x50b400`, `0x50b450`) in a Turtle WoW VM, whose
+/// barbershop calls `CameraZoomOut(2)` as it seats the player (`Turtle_Barbershop.lua`
+/// `Barbershop:SetupCamera`). A 1.12.1 VM keeps the reference's pair, binding inputs
+/// (`input_verbs`); this replaces it in a Turtle VM. A number argument, a numeric string included (`0x6f34d0`), is the
+/// amount, anything else 1.0 (`0x50b42d`); the camera then zooms for `amount /
+/// cameraDistanceMoveSpeed` seconds at that speed (`0x50fc60`, `0x50fcd0`), `amount` yards.
+pub(super) fn install_turtle(lua: &Lua) -> mlua::Result<()> {
+    let g = lua.globals();
+    for (name, sign) in [("CameraZoomIn", 1.0f32), ("CameraZoomOut", -1.0f32)] {
+        g.set(
+            name,
+            lua.create_function(move |lua, amount: Value| {
+                let yards = lua.coerce_number(amount).ok().flatten().unwrap_or(1.0) as f32;
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
+                model
+                    .camera_view_requests
+                    .push(CameraViewRequest::Zoom(sign * yards));
+                Ok(())
+            })?,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CameraViewRequest;
+    use crate::script::{UiFlavor, UiScript};
+
+    /// A Turtle VM's zoom pair queues its amount, 1.0 for anything that is not a number; a 1.12.1
+    /// VM's pair is the reference's binding input (`input_verbs`) and queues no view request.
+    #[test]
+    fn a_turtle_vm_zooms_by_its_argument_and_a_vanilla_one_keeps_the_binding_verbs() {
+        let mut vanilla = UiScript::new().unwrap();
+        vanilla.run("CameraZoomOut(2) CameraZoomIn()").unwrap();
+        assert!(vanilla.take_camera_view_requests().is_empty());
+
+        let mut s = UiScript::new().unwrap();
+        s.set_flavor(UiFlavor::Turtle);
+        s.run(r#"CameraZoomOut(2) CameraZoomIn("0.5") CameraZoomIn() CameraZoomOut({})"#)
+            .unwrap();
+        assert_eq!(
+            s.take_camera_view_requests(),
+            vec![
+                CameraViewRequest::Zoom(-2.0),
+                CameraViewRequest::Zoom(0.5),
+                CameraViewRequest::Zoom(1.0),
+                CameraViewRequest::Zoom(-1.0),
+            ]
+        );
+    }
 }

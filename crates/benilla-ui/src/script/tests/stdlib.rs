@@ -217,7 +217,10 @@ fn an_addon_chunk_is_named_the_way_the_client_names_it() {
     let name = crate::script::addon_chunk_name("FuBar_BagFu", "FuBar_BagFu.lua");
     assert_eq!(name, "@Interface\\AddOns\\FuBar_BagFu\\FuBar_BagFu.lua");
 
-    // FuBar's own pattern, against a traceback from a chunk loaded under that name.
+    // FuBar's own pattern, against a traceback from a chunk loaded under that name. Called from
+    // a frame deeper than the probe's caller, as FuBar's is: with `count2` 0 the frame after
+    // `count1` prints only when it is the last, and that would be this host's own chunk, named
+    // by its source path (backslashes on Windows, which the greedy capture runs into).
     let s = script();
     s.run_chunk_named(
         b"function BenillaProbeFolder() return debugstack(1, 1, 0) end",
@@ -480,6 +483,14 @@ fn date_formats_as_msvcs_strftime() {
 /// `hour` 12 by default, `day`, `month` and `year` required, then the runtime's `_mktime`
 /// (`0x74066b`): the month folded into the year, years 1969 to 2039 only, a 32-bit overflow or a
 /// negative time nil.
+/// A table with `isdst` true under a `TZ` that names no daylight zone, on Windows: the runtime's
+/// `TZ`-string parse leaves `_dstbias` at its default -3600, where the system-zone path a player's
+/// client takes sets 0 for a zone without daylight time, as these rows assert. Only a test sets
+/// `TZ`, so Windows skips the rows rather than asserting the parse's default.
+fn windows_tz_string_daylight(src: &str) -> bool {
+    cfg!(windows) && src.contains("isdst=true")
+}
+
 #[test]
 fn time_converts_a_date_table() {
     let _zone = crate::civil::ZoneGuard::set("UTC0");
@@ -522,6 +533,9 @@ fn time_converts_a_date_table() {
         ("{year=2040, month=1, day=1}", "nil"),
         ("{year=2001, month=-11, day=1, hour=0}", "946684800"),
     ] {
+        if windows_tz_string_daylight(t) {
+            continue;
+        }
         assert_eq!(time(t), want, "time({t})");
     }
     assert!(time("{year=2001, month=9}").ends_with("field `day' missing in date table"));
@@ -588,6 +602,9 @@ fn date_and_time_read_the_local_zone() {
             ("return time{year=1970, month=1, day=1, hour=0}", "nil"),
             ("return time(date('*t', 1000000000))", "1000000000"),
         ] {
+            if windows_tz_string_daylight(src) {
+                continue;
+            }
             assert_eq!(eval(src), want, "{src}");
         }
     }

@@ -72,6 +72,47 @@ fn visible(s: &UiScript, frame: &str) -> bool {
         .unwrap()
 }
 
+/// **The reload raise** (reported against the hosted page): with nothing pushed at all, a
+/// `PARTY_LEADER_CHANGED` raised
+/// `BattlefieldFrame.lua:242: attempt to concatenate local 'queueMapName' (a nil value)`.
+///
+/// That event's arm (l.43-45) is the one the traceback named, and it calls `BattlefieldFrame_Update`
+/// unconditionally — the window does not have to be open, and on a `/reload` the party feed fires
+/// it before `feed_battlefield` has pushed a single slot. `BattlefieldFrame_Update` then loops
+/// `i = 1, MAX_BATTLEFIELD_QUEUES` (always in range) and guards its concatenation with
+/// `queueStatus ~= "none"`, so a nil status walks through the guard and into the `..`.
+///
+/// The engine side is `battlefield_queue::an_unpushed_in_range_slot_reads_none_not_nil`; this is
+/// the same law asserted against the reference's own file, which is what makes it a raise rather
+/// than a shape opinion. Both events are driven because both reach the same function.
+#[test]
+fn a_reload_before_the_first_queue_push_does_not_raise() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = session();
+    assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
+
+    // Nothing has been pushed — exactly the model a freshly reloaded VM holds.
+    s.fire_event("PARTY_LEADER_CHANGED", vec![]);
+    assert!(
+        s.errors().is_empty(),
+        "PARTY_LEADER_CHANGED before the first push: {:?}",
+        s.errors()
+    );
+    // The other arm into the same function, for the same reason.
+    s.fire_event("UPDATE_BATTLEFIELD_STATUS", vec![]);
+    assert!(
+        s.errors().is_empty(),
+        "UPDATE_BATTLEFIELD_STATUS before the first push: {:?}",
+        s.errors()
+    );
+    // And the guard really is the status: the stock line reads "none" and stops there.
+    assert_eq!(
+        s.eval::<String>("return (GetBattlefieldStatus(1))")
+            .unwrap(),
+        "none"
+    );
+}
+
 #[test]
 fn the_queue_icon_follows_the_slots_across_update_battlefield_status() {
     let _data = benilla_formats::wow_data_or_skip!();

@@ -15,6 +15,10 @@
 //! [`RenderScale`] renders the world at `window × scale` while the UI stays native. At exactly 2.0
 //! the combine's bilinear read is a 2×2 box average, so supersampling needs no filter of its own.
 //! The camera's logical viewport must not move with it ([`render_target_for`]).
+//!
+//! fork: fsr (FORK.md) — below 1.0, or with frame generation on, FSR 3.1.5 reconstructs the
+//! display-size image instead of the bilinear stretch ([`sync_fsr_view`]); frame generation caps
+//! the scale at 1.0 ([`effective_scale`]).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
@@ -25,6 +29,7 @@ use bevy::window::PrimaryWindow;
 
 use crate::ui_pass::PlayerUiCamera;
 use benilla_world::ffx_glow::FfxBackdrop;
+use benilla_world::fsr::{FgBlocked, FrameGeneration, FsrView};
 use benilla_world::view::WorldCamera;
 
 /// The render scale, the `renderScale` CVar, not a 1.12 CVar: it scales the 3D and keeps the
@@ -43,8 +48,10 @@ const MAX_RENDER_AXIS: u32 = 8192;
 impl Default for RenderScale {
     /// `$WOW_RENDER_SCALE` overrides the default for the session only, never into `config.toml`.
     fn default() -> Self {
-        let scale = std::env::var("WOW_RENDER_SCALE")
-            .ok()
+        // Through `webenv` so the browser build has the same lever as `?render_scale=0.75` — the
+        // one knob that matters there: the world is GPU-bound at a 2560×1600 DPR-scaled canvas on
+        // an iGPU (87 fps → 154 fps at ~40 % of the pixels, measured 2026-08-29).
+        let scale = crate::webenv::var("WOW_RENDER_SCALE")
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| v.is_finite())
             .map_or(1.0, |v| {
@@ -88,6 +95,28 @@ fn mip_bias(effective: f32) -> f32 {
     effective.log2().min(0.0)
 }
 
+/// fork: fsr (FORK.md) — FSR's texture LOD bias while it runs: one level sharper than the render
+/// scale owes, `log2(scale) − 1`, as the SDK prescribes for its jittered input.
+fn fsr_mip_bias(effective: f32) -> f32 {
+    effective.log2() - 1.0
+}
+
+/// fork: fsr (FORK.md) — the scale the world renders at: frame generation needs FSR's 1:1 inputs at
+/// most, so it caps the scale at 1.0.
+fn effective_scale(scale: f32, frame_generation: bool) -> f32 {
+    if frame_generation {
+        scale.min(1.0)
+    } else {
+        scale
+    }
+}
+
+/// fork: fsr (FORK.md) — FSR runs below 1:1, and at 1:1 under frame generation; it needs a
+/// single-sampled world.
+fn fsr_active(effective: f32, frame_generation: bool, msaa: Msaa) -> bool {
+    (effective < 1.0 || frame_generation) && msaa == Msaa::Off
+}
+
 /// The world camera's target, the size-carrier, in physical px × [`RenderScale`]; at 1.0 the
 /// combine's read of the world is an identity resample.
 #[derive(Resource)]
@@ -97,9 +126,10 @@ pub(crate) struct WorldBackdrop {
     pub(crate) image: Handle<Image>,
     /// The size the image was last built at, in physical px: the resize gate.
     size: UVec2,
-    /// The image and scale factor the camera was last stamped with. Both gate the re-stamp: a
-    /// rebuilt backdrop is a new asset ([`track_render_size`]). `None` until the first stamp.
-    stamped: Option<(AssetId<Image>, f32)>,
+    /// The image and scale factor the camera was last stamped with, and whether FSR ran. All gate
+    /// the re-stamp: a rebuilt backdrop is a new asset ([`track_render_size`]), and FSR moves the
+    /// mip bias. `None` until the first stamp.
+    stamped: Option<(AssetId<Image>, f32, bool)>,
 }
 
 impl WorldBackdrop {
@@ -139,13 +169,11 @@ fn setup_backdrop(
     mut images: ResMut<Assets<Image>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     scale: Res<RenderScale>,
+    fg: Option<Res<FrameGeneration>>,
 ) {
+    let scale = effective_scale(scale.0, fg.is_some_and(|f| f.0));
     let (size, _) = windows.single().map_or((UVec2::new(1280, 720), 1.0), |w| {
-        render_target_for(
-            window_physical_size(w),
-            w.resolution.scale_factor(),
-            scale.0,
-        )
+        render_target_for(window_physical_size(w), w.resolution.scale_factor(), scale)
     });
     let image = images.add(new_world_target(size));
     commands.insert_resource(WorldBackdrop {
@@ -166,10 +194,12 @@ fn track_render_size(
     mut images: ResMut<Assets<Image>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     scale: Res<RenderScale>,
+    fg: Option<Res<FrameGeneration>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
+    let scale = RenderScale(effective_scale(scale.0, fg.is_some_and(|f| f.0)));
     let (size, _) = render_target_for(
         window_physical_size(window),
         window.resolution.scale_factor(),
@@ -205,22 +235,35 @@ fn retarget_world_camera(
     mut backdrop: ResMut<WorldBackdrop>,
     windows: Query<&Window, With<PrimaryWindow>>,
     added: Query<(), Added<WorldCamera>>,
-    mut cameras: Query<(Entity, &mut RenderTarget), With<WorldCamera>>,
+    fg: Option<Res<FrameGeneration>>,
+    mut cameras: Query<(Entity, &mut RenderTarget, Option<&Msaa>), With<WorldCamera>>,
 ) {
     let (px, window_factor) = windows.single().map_or((UVec2::ONE, 1.0), |w| {
         (window_physical_size(w), w.resolution.scale_factor())
     });
     // The built size, not the requested one: `track_render_size` may have clamped.
     let scale_factor = window_factor * backdrop.size.x as f32 / px.x.max(1) as f32;
+    // fork: fsr (FORK.md) — FSR's own bias while it runs.
+    let effective = scale_factor / window_factor;
+    let msaa = cameras
+        .iter()
+        .next()
+        .and_then(|(_, _, m)| m.copied())
+        .unwrap_or_default();
+    let fsr = fsr_active(effective, fg.is_some_and(|f| f.0), msaa);
     // The image as well as the factor: a pure window resize rebuilds without moving the factor.
-    let want = (backdrop.image.id(), scale_factor);
+    let want = (backdrop.image.id(), scale_factor, fsr);
     let moved = backdrop.stamped != Some(want);
     if !moved && added.is_empty() {
         return;
     }
     backdrop.stamped = Some(want);
-    let bias = MipBias(mip_bias(scale_factor / window_factor));
-    for (entity, mut current) in &mut cameras {
+    let bias = MipBias(if fsr {
+        fsr_mip_bias(effective)
+    } else {
+        mip_bias(effective)
+    });
+    for (entity, mut current, _) in &mut cameras {
         *current = RenderTarget::Image(bevy::camera::ImageRenderTarget {
             handle: backdrop.image.clone(),
             scale_factor,
@@ -246,16 +289,91 @@ fn claim_backdrop(
     }
 }
 
+/// fork: fsr (FORK.md) — FSR on the active world camera: an [`FsrView`] at the window's size while
+/// it runs ([`fsr_active`]), none otherwise. Its epoch moves when the camera comes back from being
+/// gated (world entry, a loading screen), which resets the history. A capture run holds no frame.
+#[allow(clippy::type_complexity)]
+fn sync_fsr_view(
+    mut commands: Commands,
+    backdrop: Res<WorldBackdrop>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    fg: Option<Res<FrameGeneration>>,
+    blocked: Option<ResMut<FgBlocked>>,
+    capture: Option<Res<crate::run_mode::CaptureMode>>,
+    mut cameras: Query<(Entity, &Camera, Option<&Msaa>, Option<&mut FsrView>), With<WorldCamera>>,
+    mut was_active: Local<bevy::ecs::entity::EntityHashMap<bool>>,
+) {
+    if let Some(mut blocked) = blocked {
+        let want = capture.is_some();
+        if blocked.0 != want {
+            blocked.0 = want;
+        }
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let display = window_physical_size(window);
+    let frame_generation = fg.is_some_and(|f| f.0);
+    let effective = backdrop.size.x as f32 / display.x as f32;
+    for (entity, camera, msaa, view) in &mut cameras {
+        let returned =
+            camera.is_active && !was_active.insert(entity, camera.is_active).unwrap_or(false);
+        let on = fsr_active(
+            effective,
+            frame_generation,
+            msaa.copied().unwrap_or_default(),
+        );
+        match (on, view) {
+            (true, Some(mut view)) => {
+                if view.display != display || view.frame_generation != frame_generation || returned
+                {
+                    view.display = display;
+                    view.frame_generation = frame_generation;
+                    if returned {
+                        view.epoch = view.epoch.wrapping_add(1);
+                    }
+                }
+            }
+            (true, None) => {
+                commands
+                    .entity(entity)
+                    .insert(FsrView::new(display, 0, frame_generation));
+            }
+            (false, Some(_)) => {
+                commands.entity(entity).remove::<FsrView>();
+            }
+            (false, None) => {}
+        }
+    }
+}
+
 /// Owns the world camera's target (the size-carrier) and the UI camera's claim on the world.
 pub(crate) struct WorldBackdropPlugin;
 
 /// Render scale's change callback, clamped to [`RENDER_SCALE_RANGE`]; the backdrop and the
-/// camera's factor follow together on the next frame.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut scale: ResMut<RenderScale>) {
+/// camera's factor follow together on the next frame. fork: fsr (FORK.md) — and `frameGeneration`'s,
+/// a flag, and `rcasSharpness`'s, clamped to the SDK's `[0, 1]`.
+pub(crate) fn on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut scale: ResMut<RenderScale>,
+    mut fg: ResMut<FrameGeneration>,
+    mut rcas: ResMut<benilla_world::fsr::RcasSharpness>,
+) {
+    if ev.is("rcasSharpness") {
+        let v = ev.num();
+        rcas.0 = if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            benilla_world::fsr::RCAS_SHARPNESS_DEFAULT
+        };
+    }
     if ev.is("renderScale") {
         scale.0 = ev
             .num()
             .clamp(*RENDER_SCALE_RANGE.start(), *RENDER_SCALE_RANGE.end());
+    }
+    if ev.is("frameGeneration") {
+        fg.0 = ev.flag();
     }
 }
 
@@ -263,10 +381,19 @@ impl Plugin for WorldBackdropPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_cvar);
         app.init_resource::<RenderScale>()
+            // fork: fsr (FORK.md) — the settings' knobs; `FsrPlugin` installs them too.
+            .init_resource::<FrameGeneration>()
+            .init_resource::<benilla_world::fsr::RcasSharpness>()
             .add_systems(Startup, setup_backdrop)
             .add_systems(
                 Update,
-                (track_render_size, retarget_world_camera, claim_backdrop).chain(),
+                (
+                    track_render_size,
+                    retarget_world_camera,
+                    claim_backdrop,
+                    sync_fsr_view,
+                )
+                    .chain(),
             );
     }
 }
@@ -442,6 +569,31 @@ mod tests {
             (aspect(size) - aspect(huge)).abs() < 0.001,
             "aspect kept: {size}"
         );
+    }
+
+    /// fork: fsr (FORK.md) — FSR runs below 1:1 or under frame generation, single-sampled
+    /// only; frame generation caps the scale, and its bias is one level past the scale's.
+    #[test]
+    fn fsr_runs_below_one_or_with_frame_generation_and_caps_the_scale() {
+        assert!(fsr_active(0.67, false, Msaa::Off));
+        assert!(
+            !fsr_active(1.0, false, Msaa::Off),
+            "1:1 stays byte-identical"
+        );
+        assert!(!fsr_active(1.5, false, Msaa::Off));
+        assert!(
+            fsr_active(1.0, true, Msaa::Off),
+            "frame generation runs FSR at 1:1"
+        );
+        assert!(
+            !fsr_active(0.67, true, Msaa::Sample4),
+            "never over a multisampled world"
+        );
+        assert_eq!(effective_scale(1.5, true), 1.0);
+        assert_eq!(effective_scale(0.75, true), 0.75);
+        assert_eq!(effective_scale(1.5, false), 1.5);
+        assert!((fsr_mip_bias(0.5) - -2.0).abs() < 1e-6);
+        assert!((fsr_mip_bias(1.0) - -1.0).abs() < 1e-6);
     }
 
     #[test]

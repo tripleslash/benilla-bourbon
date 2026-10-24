@@ -118,14 +118,21 @@ pub mod exterior_cull;
 pub mod ffx_glow;
 pub mod final_pass;
 pub mod frame_pace;
+// fork: fsr (FORK.md) — FidelityFX Super Resolution 3.1.5, `fsr/HOOKS.md`.
+pub mod fsr;
 pub mod ground_fx;
+pub mod horizon;
 pub mod instance_tint;
 pub mod interact;
 pub mod interior;
+pub mod launch_env;
 pub mod layout_keys;
 pub mod lighting;
 pub mod liquid;
 pub mod log_ring;
+// fork: perf — per-system CPU time, only in a `trace_systems` build.
+#[cfg(feature = "trace_systems")]
+pub mod system_profile;
 
 /// macOS `Cmd+Q`, re-pointed at the window close so the shutdown systems run.
 pub mod mac_quit;
@@ -135,8 +142,13 @@ pub mod mesh_tag;
 pub mod model_fade;
 pub mod model_forms;
 pub mod model_render;
+pub mod modern;
 pub mod modkeys;
 pub mod particles;
+
+/// fork: the perf rig — a player-lane frame probe, because the browser build compiles
+/// `benilla-app::perf` out and the world viewer cannot reach it anyway (see the module header).
+pub mod perf_probe;
 pub mod ribbons;
 pub mod ride_frame;
 pub mod rig_anim;
@@ -147,6 +159,7 @@ mod shaders;
 pub mod sky;
 pub mod sky_order;
 pub mod skybox;
+pub mod ssilvb;
 pub mod static_gx;
 pub mod static_merge;
 pub mod straddle;
@@ -159,6 +172,7 @@ pub mod vis_chain;
 pub mod water_fx;
 pub mod wdl;
 pub mod weather;
+pub mod wind;
 pub mod wmo_portal;
 pub mod world_census;
 pub mod world_flags;

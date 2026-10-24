@@ -23,7 +23,7 @@
 //! # `default-features = false`, or `--no-default-features` still builds benilla-app with `dev`.
 //! benilla-app = { git = "https://github.com/samwhosung/benilla", default-features = false }
 //! # benilla's version, adding no features: bevy's defaults bring its audio stack back.
-//! bevy = { version = "0.18.1", default-features = false }
+//! bevy = { version = "0.19.1", default-features = false }
 //!
 //! [build-dependencies]
 //! benilla-buildstamp = { git = "https://github.com/samwhosung/benilla" }
@@ -33,6 +33,19 @@
 //! # `alsa-sys` and does not resolve.
 //! [patch.crates-io]
 //! kira = { git = "https://github.com/samwhosung/benilla" }
+//! # fork: the browser build's patches (threads, wasm32 atomics), from this fork.
+//! bevy_tasks = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! bevy_platform = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! bevy_ecs = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! async-executor = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! bevy_render = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! event-listener = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! parking = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! web-task = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! # fork: bevy_winit 0.19.1 without the runner's per-event query rebuilds (the browser's frame).
+//! bevy_winit = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! # fork: wgpu 29 with WebGPU's `subgroups` and `texture-formats-tier1` mapped, for FSR 3.1.5.
+//! wgpu = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! alsa = { git = "https://github.com/samwhosung/benilla" }
 //!
 //! [profile.dev]

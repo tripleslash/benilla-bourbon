@@ -5,7 +5,7 @@
 //! `WOW_LAYOUT_PROF=1` adds each solve's shape, whose `solved=`/`swept=` scope should stay small
 //! while `frames=`/`anchored=` grow.
 
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use benilla_ui::script::{MeasureRequest, TextMeasure, UiScript};
 

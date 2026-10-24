@@ -16,7 +16,7 @@ mod bind;
 #[cfg(test)]
 mod lua_tests;
 
-pub use bind::macro_lines;
+pub use bind::{macro_lines, reads_options};
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -309,12 +309,12 @@ impl super::UiScript {
 
     /// The live table, for the app's save.
     pub fn macros(&self) -> MacroState {
-        self.model_mut().macros.clone()
+        self.model_ref().macros.clone()
     }
 
     /// Push every macro's cached cast by id, replacing the last push.
     pub fn set_macro_bindings(&mut self, bindings: std::collections::HashMap<u32, MacroBinding>) {
-        self.model_mut().macro_bindings = bindings;
+        set_field!(self, macro_bindings, bindings);
     }
 
     /// Each macro's cached cast by id; a record with none is bound to nothing.
@@ -327,34 +327,52 @@ impl super::UiScript {
     /// (`0x4f0ca0`), the pet message's followers (`0x4f0ce0`).
     pub fn derive_macro_bindings(&mut self, pick: impl Fn(u32, MacroBinding) -> bool) {
         let aliases = bind::cast_aliases(self.lua());
+        // The picked records, their options evaluated (this fork) before the model is borrowed.
+        let picked: Vec<(u32, String, MacroBinding)> = {
+            let model = self.model_ref();
+            model
+                .macros
+                .list
+                .iter()
+                .map(|r| {
+                    let was = model.macro_bindings.get(&r.view.id).copied();
+                    (r.view.id, r.view.body.clone(), was.unwrap_or_default())
+                })
+                .filter(|&(id, _, was)| pick(id, was))
+                .collect()
+        };
+        let picked: Vec<_> = picked
+            .into_iter()
+            .map(|(id, body, was)| {
+                let options = bind::options_now(self.lua(), &aliases, &body);
+                (id, body, was, options)
+            })
+            .collect();
         let mut model = self.model_mut();
-        let model = &mut *model;
-        for record in &model.macros.list {
-            let id = record.view.id;
-            let was = model.macro_bindings.get(&id).copied().unwrap_or_default();
-            if pick(id, was) {
-                let next = bind::derive(
-                    &aliases,
-                    &record.view.body,
-                    &model.spellbook,
-                    &model.pet_book,
-                    was,
-                );
-                model.macro_bindings.insert(id, next);
-            }
+        let model: &mut crate::script::Model = &mut model;
+        for (id, body, was, options) in picked {
+            let next = bind::derive(
+                &aliases,
+                &body,
+                &model.spellbook,
+                &model.pet_book,
+                was,
+                &options,
+            );
+            model.macro_bindings.insert(id, next);
         }
     }
 
     /// Whether a script changed the table since the last call; the app then saves it. The verbs
     /// signal `UPDATE_MACROS` (`0x852460`) themselves, from the order's rebuild (`0x4f0d30`).
     pub fn take_macros_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().macros_dirty)
+        drain_field!(self, macros_dirty)
     }
 
     /// Push the icon chooser's texture paths in grid order: the files under `Interface\Icons\`
     /// that `0x4f0090` lists (`benilla_formats::load_macro_icons`), not `SpellIcon.dbc`.
     pub fn set_macro_icons(&mut self, icons: Vec<String>) {
-        self.model_mut().macro_icons = icons;
+        set_field!(self, macro_icons, icons);
     }
 
     /// Install what builds the icon list. `GetNumMacroIcons`, `CreateMacro` and `EditMacro` run it
@@ -374,13 +392,13 @@ impl super::UiScript {
     /// a `u64` instead of diffing the table. Not [`Self::take_macros_dirty`]: that drain has one
     /// owner, the save, and a second reader would steal its edge.
     pub fn macros_generation(&self) -> u64 {
-        self.model_mut().macros_generation
+        self.model_ref().macros_generation
     }
 
     /// How many `EditMacro` calls have edited a macro: each one's worker `EditMacroRecord 0x4f1280`
     /// ends in the action bar's usable refresh `0x4e5c00` (`0x4f132e`), which the app runs.
     pub fn macro_edits(&self) -> u64 {
-        self.model_mut().macro_edits
+        self.model_ref().macro_edits
     }
 }
 
@@ -392,7 +410,7 @@ fn create_macro(
     texture: Option<String>,
     body: &str,
     (local_only, per_character): (bool, bool),
-    aliases: &[String],
+    (aliases, options): (&[String], bind::Options<'_>),
 ) -> mlua::Result<usize> {
     let state = &mut model.macros;
     if state.count(per_character) >= MAX_MACROS {
@@ -420,6 +438,7 @@ fn create_macro(
         &model.spellbook,
         &model.pet_book,
         MacroBinding::default(),
+        options,
     );
     model.macro_bindings.insert(id, binding);
     model.macros_dirty = true;
@@ -441,7 +460,7 @@ fn edit_macro(
     index: usize,
     (name, texture, body): (Option<String>, Option<String>, Option<String>),
     local_only: bool,
-    aliases: &[String],
+    (aliases, options): (&[String], bind::Options<'_>),
 ) -> usize {
     let id = model.macros.id_at(index);
     if let Some(record) = model
@@ -463,7 +482,14 @@ fn edit_macro(
         view.local_only = local_only;
         // The record's cast derived again in the call (`0x4f1313`), against the book as it is.
         let was = model.macro_bindings.get(&id).copied().unwrap_or_default();
-        let binding = bind::derive(aliases, &view.body, &model.spellbook, &model.pet_book, was);
+        let binding = bind::derive(
+            aliases,
+            &view.body,
+            &model.spellbook,
+            &model.pet_book,
+            was,
+            options,
+        );
         model.macro_bindings.insert(id, binding);
         model.macros_dirty = true;
         model.macros_generation += 1;
@@ -518,7 +544,9 @@ fn delete_macro(model: &mut Model, index: usize) -> bool {
 /// macro went on.
 fn pickup_macro(lua: &Lua, index: usize) -> bool {
     let payload = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let Some(entry) = model.macros.get(index) else {
             return false;
         };
@@ -536,7 +564,9 @@ fn pickup_macro(lua: &Lua, index: usize) -> bool {
 /// dedup then reads below its null list (`0x4f0134`-`0x4f0145`) and faults.
 fn ensure_macro_icons(lua: &Lua) {
     let source = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         if !model.macro_icons.is_empty() {
             return;
         }
@@ -544,7 +574,7 @@ fn ensure_macro_icons(lua: &Lua) {
     };
     if let Some(source) = source {
         let icons = source();
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .macro_icons = icons;
     }
@@ -564,7 +594,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumMacros",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok((
                 model.macros.count(false) as i64,
                 model.macros.count(true) as i64,
@@ -577,13 +609,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetMacroInfo(index)` (`0x84cc0c`, `0x4f177b`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetMacroInfo(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(m) = model.macros.get(index) else {
                 // `0x4f1829`: four nils.
                 return Ok(super::binding_abi::tuple(&[None; 4]));
             };
             let texture = match &m.texture {
                 Some(t) => Value::String(lua.create_string(t)?),
+                // Turtle's `MacroFrame_Update` runs `strupper` on it unguarded; its chooser's
+                // first icon, the question mark, stands in.
+                None if model.flavor == super::UiFlavor::Turtle => {
+                    Value::String(lua.create_string(TURTLE_NO_ICON)?)
+                }
                 None => Value::Nil,
             };
             Ok(MultiValue::from_vec(vec![
@@ -605,7 +644,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetMacroIndexByName",
         lua.create_function(|lua, name: Value| {
             let name = binding_abi::string_arg(lua, name, "Usage: GetMacroIndexByName(name)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.macros.index_by_name(&name) as i64)
         })?,
     )?;
@@ -615,7 +656,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetNumMacroIcons",
         lua.create_function(|lua, ()| {
             ensure_macro_icons(lua);
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.macro_icons.len() as i64)
         })?,
     )?;
@@ -629,7 +672,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, v: Value| {
             let index = super::binding_abi::index_arg(lua, v, "Usage: GetMacroIconInfo(index)")?;
             let path = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .macro_icons
                     .get((index as u32).wrapping_sub(1) as usize)
@@ -646,7 +691,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // the first byte, so a blank one is a name) before the list is built (`0x4f1613`, `0x4f1637`),
     // and a full tab raises after (`0x84cbdc`); a made macro answers exactly its new 1-based index
     // (`0x4f16ce`). The gate `0x494a50(7)` ahead of the body passes every context (`0x494b54` maps
-    // tag 7 to the arm that returns 1).
+    // tag 7 to the arm that returns 1). A Turtle WoW VM also takes the icon as a texture name,
+    // which its `MacroPopupOkayButton_OnClick` passes (`MACRO_ICON_FILENAMES[selectedIcon]`, e.g.
+    // `INV_MISC_QUESTIONMARK`), and lists nothing for it ([`turtle_named_icon`]).
     g.set(
         "CreateMacro",
         lua.create_function(|lua, args: MultiValue| {
@@ -661,25 +708,34 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 a.first().cloned().unwrap_or(Value::Nil),
                 "Usage: CreateMacro(name, iconIndex, body, local, perCharacter)",
             )?;
-            let icon = lua
-                .coerce_number(a.get(1).cloned().unwrap_or(Value::Nil))?
-                .ok_or_else(usage)?;
+            let icon_arg = a.get(1).cloned().unwrap_or(Value::Nil);
+            let icon = lua.coerce_number(icon_arg.clone())?;
+            let named = match icon {
+                Some(_) => None,
+                None => Some(turtle_named_icon(lua, &icon_arg).ok_or_else(usage)?),
+            };
             if name.is_empty() {
                 return Err(mlua::Error::RuntimeError(
                     "CreateMacro() failed, no name specified".into(),
                 ));
             }
-            ensure_macro_icons(lua);
+            if named.is_none() {
+                ensure_macro_icons(lua);
+            }
             let body = a
                 .get(2)
                 .and_then(|v| super::binding_abi::optional_string(lua, v))
                 .unwrap_or_default();
             let flags = (flag(a.get(3)), flag(a.get(4)));
             let aliases = bind::cast_aliases(lua);
+            let options = bind::options_now(lua, &aliases, &cut_body(&body));
             super::tick::verb(lua, |model| {
                 // `0x4f1632`, `0x4f163c`.
-                let texture = icon_at(model, icon);
-                create_macro(model, &name, texture, &body, flags, &aliases)
+                let texture = match icon {
+                    Some(n) => icon_at(model, n),
+                    None => named,
+                };
+                create_macro(model, &name, texture, &body, flags, (&aliases, &options))
             })
             .map(|i| Value::Integer(i as i64))
         })?,
@@ -702,10 +758,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // The icon counts only as `lua_isnumber` reads it (`0x4f1945`): a numeric string is
             // its number, and any other value, nil among them, leaves the icon alone. The list is
             // built only for an index that names a macro and such an icon (`0x4f1913`,
-            // `0x4f196b`).
-            let icon = lua.coerce_number(a.get(2).cloned().unwrap_or(Value::Nil))?;
+            // `0x4f196b`). fork: a Turtle WoW VM's icon name is taken too ([`turtle_named_icon`]).
+            let icon_arg = a.get(2).cloned().unwrap_or(Value::Nil);
+            let icon = lua.coerce_number(icon_arg.clone())?;
+            let named = match icon {
+                Some(_) => None,
+                None => turtle_named_icon(lua, &icon_arg),
+            };
             let names_macro = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .macros
                 .get(index)
@@ -717,11 +778,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let body = a.get(3).and_then(|v| binding_abi::optional_string(lua, v));
             let local_only = flag(a.get(4));
             let aliases = bind::cast_aliases(lua);
+            // The body the edit leaves, for the options evaluated before the verb's borrow.
+            let after = body.clone().or_else(|| {
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
+                let id = model.macros.id_at(index);
+                model.macros.by_id(id).map(|m| m.body.clone())
+            });
+            let options = bind::options_now(lua, &aliases, &cut_body(&after.unwrap_or_default()));
             let at = super::tick::verb(lua, |model| {
                 // `0x4f1966`-`0x4f1983`: a miss leaves the pointer null, and the macro its old
                 // icon.
-                let texture = icon.and_then(|n| icon_at(model, n));
-                edit_macro(model, index, (name, texture, body), local_only, &aliases)
+                let texture = icon.and_then(|n| icon_at(model, n)).or(named);
+                edit_macro(
+                    model,
+                    index,
+                    (name, texture, body),
+                    local_only,
+                    (&aliases, &options),
+                )
             });
             Ok(Value::Integer(at as i64))
         })?,
@@ -748,6 +824,31 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     Ok(())
+}
+
+/// The icon a Turtle WoW VM reports for a macro without one.
+const TURTLE_NO_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
+
+/// fork: a Turtle WoW VM's icon given by texture name (its `MACRO_ICON_FILENAMES`), which is not
+/// a number: its path in the icons folder, as the macro file's icon token reads, and a name with
+/// a path separator taken whole. `None` on a 1.12.1 VM or for any other value.
+fn turtle_named_icon(lua: &Lua, v: &Value) -> Option<String> {
+    let turtle = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data")
+        .flavor
+        == super::UiFlavor::Turtle;
+    let Value::String(s) = v else {
+        return None;
+    };
+    let name = s.to_string_lossy();
+    turtle.then(|| {
+        if name.contains(['\\', '/']) {
+            name.to_string()
+        } else {
+            format!("Interface\\Icons\\{name}")
+        }
+    })
 }
 
 /// The chooser entry at a 1-based icon number: `trunc(n) - 1` (`__ftol`, `0x40a2b0`) compared
@@ -966,6 +1067,88 @@ mod tests {
             ),
             "a body save touches neither the name nor the icon"
         );
+    }
+
+    /// The verbs store a body as text: a macro's option brackets (`run::bound_spell`'s) come
+    /// through Turtle's `CreateMacro` and its `MacroFrame_SaveMacro` `EditMacro` byte for byte.
+    #[test]
+    fn a_conditional_macro_body_is_stored_as_written() {
+        let body = "#showtooltip\n/cast [mod:shift,@player][@mouseover,help,nodead] Heal; \
+                    [stance:1/3,nocombat][] Smite";
+        for turtle in [false, true] {
+            let mut s = seeded();
+            if turtle {
+                s.set_flavor(crate::script::UiFlavor::Turtle);
+            }
+            s.run(&format!("BODY = [[{body}]]")).unwrap();
+            let icon = if turtle {
+                "\"INV_MISC_QUESTIONMARK\""
+            } else {
+                "1"
+            };
+            let index = s
+                .eval::<i64>(&format!(
+                    "return CreateMacro(\"M\", {icon}, nil, nil, true)"
+                ))
+                .unwrap();
+            s.run(&format!("EditMacro({index}, nil, nil, BODY)"))
+                .unwrap();
+            let got = s
+                .eval::<String>(&format!("local _, _, b = GetMacroInfo({index}) return b"))
+                .unwrap();
+            assert_eq!(got, body, "turtle {turtle}");
+        }
+    }
+
+    #[test]
+    fn a_turtle_vm_takes_the_icon_by_texture_name() {
+        let mut s = seeded();
+        s.set_flavor(crate::script::UiFlavor::Turtle);
+        // Turtle's `MacroPopupOkayButton_OnClick` call, on the character tab.
+        let index = s
+            .eval::<i64>(r#"return CreateMacro("Bop", "INV_MISC_QUESTIONMARK", nil, nil, true)"#)
+            .unwrap();
+        assert_eq!(index, 19);
+        assert_eq!(
+            s.eval::<String>("local _, t = GetMacroInfo(19) return t")
+                .unwrap(),
+            "Interface\\Icons\\INV_MISC_QUESTIONMARK"
+        );
+        // Its rename popup passes the name to `EditMacro` too.
+        s.run(r#"EditMacro(19, "Bop", "SPELL_HOLY_SEALOFPROTECTION")"#)
+            .unwrap();
+        assert_eq!(
+            s.eval::<String>("local _, t = GetMacroInfo(19) return t")
+                .unwrap(),
+            "Interface\\Icons\\SPELL_HOLY_SEALOFPROTECTION"
+        );
+        // The chooser index still works, and a missing icon still raises.
+        assert_eq!(
+            s.eval::<i64>(r#"return CreateMacro("Two", 2, "")"#)
+                .unwrap(),
+            1
+        );
+        assert!(s
+            .run("CreateMacro('a', nil, 'b')")
+            .expect_err("nil icon")
+            .to_string()
+            .contains("Usage: CreateMacro"));
+        // An index past the chooser leaves no icon: Turtle answers the question mark, which its
+        // `MacroFrame_Update` can `strupper`, where 1.12.1 answers nil.
+        // The tab sorts by name (`0x4f0d30`), so the index is the one the call answers.
+        let bare = s
+            .eval::<i64>(r#"return CreateMacro("Bare", 99, "")"#)
+            .unwrap();
+        assert_eq!(
+            s.eval::<String>(&format!("local _, t = GetMacroInfo({bare}) return t"))
+                .unwrap(),
+            TURTLE_NO_ICON
+        );
+        let vanilla = seeded();
+        vanilla.run(r#"CreateMacro("Bare", 99, "")"#).unwrap();
+        assert!(vanilla
+            .eval::<bool>("local _, t = GetMacroInfo(1) return t == nil")
+            .unwrap());
     }
 
     #[test]

@@ -30,6 +30,40 @@ type SectionKey = (u8, u8, u8, u8, u8);
 /// The playable races, ChrRaces ids 1–8; Goblin (9) and above are not creatable.
 const PLAYABLE_RACES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
+/// Turtle WoW 1.18.1's playable races: 1.12.1's plus Goblin (9, Horde) and High Elf (10, ChrRaces
+/// fileString `BloodElf`, Alliance), every race its ChrRaces and CharBaseInfo both name.
+const TURTLE_PLAYABLE_RACES: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+/// Turtle's ChrRaces fileStrings: 1.12.1's, and its two races.
+const TURTLE_KNOWN_FILES: [(u8, &str); 10] = [
+    (1, "Human"),
+    (2, "Orc"),
+    (3, "Dwarf"),
+    (4, "NightElf"),
+    (5, "Scourge"),
+    (6, "Tauren"),
+    (7, "Gnome"),
+    (8, "Troll"),
+    (9, "Goblin"),
+    (10, "BloodElf"),
+];
+
+/// Turtle's `CharBaseInfo` rows by race, the same parse guard: 1.12.1's pairs and the ones Turtle
+/// adds (Human Hunter, Orc Mage, Dwarf Warlock, Undead Hunter, Tauren Priest, Gnome Hunter, Troll
+/// Warlock), and its two races'.
+const TURTLE_KNOWN_COMBOS: [(u8, &[u8]); 10] = [
+    (1, &[1, 2, 3, 4, 5, 8, 9]), // Human
+    (2, &[1, 3, 4, 7, 8, 9]),    // Orc
+    (3, &[1, 2, 3, 4, 5, 8, 9]), // Dwarf
+    (4, &[1, 3, 4, 5, 11]),      // Night Elf
+    (5, &[1, 3, 4, 5, 8, 9]),    // Undead
+    (6, &[1, 3, 5, 7, 11]),      // Tauren
+    (7, &[1, 3, 4, 8, 9]),       // Gnome
+    (8, &[1, 3, 4, 5, 7, 8, 9]), // Troll
+    (9, &[1, 3, 4, 8, 9]),       // Goblin
+    (10, &[1, 2, 3, 4, 5, 8]),   // High Elf
+];
+
 /// The shipped ChrRaces fileStrings (col 15), guarding [`load_races`]' string columns.
 const KNOWN_FILES: [(u8, &str); 8] = [
     (1, "Human"),
@@ -58,11 +92,38 @@ const KNOWN_COMBOS: [(u8, &[u8]); 8] = [
 
 /// `CharBaseInfo` pairs the client never offers: its class-list builder `0x4706b0` skips the
 /// literal `race == 3 && class == 8` (Dwarf-Mage), though the row and its outfit are populated.
+/// Turtle's client patches both immediates to `0xFE` (`cmp edi, 0FEh` / `cmp byte [ecx+1], 0FEh`
+/// at the same address), so it skips none and offers every row.
 const UNUSED_COMBOS: [(u8, u8); 1] = [(3, 8)];
 
-/// The `CharBaseInfo` misparse guard: every shipped pair is present; a patch's extra pairs pass.
-fn shipped_combos_present(combos: &HashSet<(u8, u8)>) -> Result<()> {
-    for (race, classes) in KNOWN_COMBOS {
+/// Which client's character data a catalog is loaded against, and the guards that go with it.
+struct Rules {
+    playable: &'static [u8],
+    known_files: &'static [(u8, &'static str)],
+    known_combos: &'static [(u8, &'static [u8])],
+    unused_combos: &'static [(u8, u8)],
+}
+
+/// World of Warcraft 1.12.1.
+const VANILLA: Rules = Rules {
+    playable: &PLAYABLE_RACES,
+    known_files: &KNOWN_FILES,
+    known_combos: &KNOWN_COMBOS,
+    unused_combos: &UNUSED_COMBOS,
+};
+
+/// Turtle WoW 1.18.1.
+const TURTLE: Rules = Rules {
+    playable: &TURTLE_PLAYABLE_RACES,
+    known_files: &TURTLE_KNOWN_FILES,
+    known_combos: &TURTLE_KNOWN_COMBOS,
+    unused_combos: &[],
+};
+
+/// The `CharBaseInfo` misparse guard: every shipped pair of the client's table (`known`) is
+/// present; a patch's extra pairs pass.
+fn shipped_combos_present(combos: &HashSet<(u8, u8)>, known: &[(u8, &[u8])]) -> Result<()> {
+    for &(race, classes) in known {
         let missing: Vec<u8> = classes
             .iter()
             .copied()
@@ -249,11 +310,22 @@ impl CharCreateCatalog {
     /// run before `UNUSED_COMBOS` are stripped.
     pub fn load(chain: &mut Chain) -> Result<Self> {
         let name_gen = load_name_gen(chain);
-        Self::load_with(chain, name_gen)
+        Self::load_with(chain, &VANILLA, name_gen)
     }
 
-    /// [`Self::load`] over NameGen's own load result.
-    fn load_with(chain: &mut Chain, name_gen: Result<Vec<NameGenRow>>) -> Result<Self> {
+    /// Load the catalog from a chain with the Turtle WoW 1.18.1 layer mounted: ten races, Turtle's
+    /// race/class table and none of the 1.12.1 client's skipped pairs.
+    pub fn load_turtle(chain: &mut Chain) -> Result<Self> {
+        let name_gen = load_name_gen(chain);
+        Self::load_with(chain, &TURTLE, name_gen)
+    }
+
+    /// [`Self::load`] under a flavor's rules, over NameGen's own load result.
+    fn load_with(
+        chain: &mut Chain,
+        rules: &Rules,
+        name_gen: Result<Vec<NameGenRow>>,
+    ) -> Result<Self> {
         let (race_rows, displays, files, names, custom_tokens) = load_races(chain)?;
         let base_info = load_base_info(chain)?;
         let combos: HashSet<(u8, u8)> = base_info.iter().copied().collect();
@@ -268,7 +340,7 @@ impl CharCreateCatalog {
 
         let mut ranges = HashMap::new();
         let mut hair_colors = HashMap::new();
-        for race in PLAYABLE_RACES {
+        for &race in rules.playable {
             for sex in [0u8, 1] {
                 ranges.insert((race, sex), derive_ranges(race, sex, &avail, &facial));
                 hair_colors.insert((race, sex), hair_colors_by_style(race, sex, &avail));
@@ -289,16 +361,21 @@ impl CharCreateCatalog {
             ranges,
             start_outfits,
         };
-        catalog.self_check()?;
-        for combo in UNUSED_COMBOS {
-            catalog.combos.remove(&combo);
+        catalog.self_check(rules)?;
+        for combo in rules.unused_combos {
+            catalog.combos.remove(combo);
         }
+        // `load_races` describes only the playable races, so a combo of a race a server added
+        // past them would offer a race with no body, files or dials.
+        catalog
+            .combos
+            .retain(|&(race, _)| rules.playable.contains(&race));
         Ok(catalog)
     }
 
-    fn self_check(&self) -> Result<()> {
-        shipped_combos_present(&self.combos)?;
-        for (race, file) in KNOWN_FILES {
+    fn self_check(&self, rules: &Rules) -> Result<()> {
+        shipped_combos_present(&self.combos, rules.known_combos)?;
+        for &(race, file) in rules.known_files {
             if self.race_file(race) != Some(file) {
                 bail!(
                     "ChrRaces misparse: race {race} fileString {:?} != known {file:?} \
@@ -327,7 +404,7 @@ impl CharCreateCatalog {
                 );
             }
         }
-        for race in PLAYABLE_RACES {
+        for &race in rules.playable {
             for sex in [0u8, 1] {
                 if self.body_display(race, sex).unwrap_or(0) == 0 {
                     bail!("ChrRaces: race {race} sex {sex} has no body displayId");
@@ -662,13 +739,13 @@ mod tests {
             .iter()
             .flat_map(|&(r, cs)| cs.iter().map(move |&c| (r, c)))
             .collect();
-        assert!(shipped_combos_present(&combos).is_ok());
+        assert!(shipped_combos_present(&combos, &KNOWN_COMBOS).is_ok());
         // A patch that adds Human Hunter: 1.12.1's builder lists it, so the load must go on.
         combos.insert((1, 3));
-        assert!(shipped_combos_present(&combos).is_ok());
+        assert!(shipped_combos_present(&combos, &KNOWN_COMBOS).is_ok());
         // A misparse that drops a shipped pair still refuses.
         combos.remove(&(2, 7));
-        assert!(shipped_combos_present(&combos).is_err());
+        assert!(shipped_combos_present(&combos, &KNOWN_COMBOS).is_err());
     }
 
     /// `GetCharacterInfo`'s race is ChrRaces `Name_Lang` (cols 17-24), not the file string beside
@@ -772,8 +849,12 @@ mod tests {
     fn a_lost_name_gen_costs_only_the_names() {
         let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
-        let cat = CharCreateCatalog::load_with(&mut chain, Err(anyhow::anyhow!("NameGen gone")))
-            .expect("the catalog loads without NameGen");
+        let cat = CharCreateCatalog::load_with(
+            &mut chain,
+            &VANILLA,
+            Err(anyhow::anyhow!("NameGen gone")),
+        )
+        .expect("the catalog loads without NameGen");
         assert!(cat.name_gen().is_empty());
         assert_eq!(cat.name_gen_error(), Some("NameGen gone"));
         assert_eq!(cat.race_name(2), Some("Orc"));

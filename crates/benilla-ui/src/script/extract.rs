@@ -58,8 +58,11 @@ impl UiScript {
 
     /// The render list in painter order, ascending by `ZKey`; call [`UiScript::resolve`] first.
     pub fn extract(&self) -> Vec<ExtractedQuad> {
-        // The files set since the last draw take their stamps: this draw forces them.
-        self.model_mut().texels.flush();
+        // The files set since the last draw take their stamps: this draw forces them. Read first,
+        // so a draw with none waiting leaves the mutation count standing.
+        if self.model_ref().texels.has_pending() {
+            self.model_mut().texels.flush();
+        }
         let model = self.model_ref();
         let list = order::traversal(&model.arena);
         let mut out = Vec::with_capacity(list.len());

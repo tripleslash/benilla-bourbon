@@ -1,8 +1,8 @@
 //! The engine-drawn bowstring: bow M2s have no string geometry. The reference's per-frame callback
 //! (`0x611ff0`) draws a two-segment line between the `$WTT`/`$WTB` limb-tip markers, its middle
 //! vertex at the HandArrow attach while the nock latch (`[+0xd58] & 0x4000`) holds, else the tip
-//! midpoint. Drawn here as gizmo lines; the color and width are inferred, since the reference's
-//! packed vertex color is not decoded.
+//! midpoint. Drawn here as gizmo lines one display pixel wide, as a D3D line rasterizes; the color
+//! is inferred, since the reference's packed vertex color is not decoded.
 //!
 //! The tips are posed: `$BWP` plays BowPull (160) on the prop and `$BWR` returns it to Stand (0),
 //! so the markers ride limb bones that bend through the draw.
@@ -11,6 +11,7 @@ use bevy::prelude::*;
 
 use crate::creature_anim::NockLatch;
 use crate::entities::BoneAttach;
+use crate::fishing_line::EngineLineGizmos;
 
 /// The HandArrow attach id (35, `0x6121b8`): the string's middle point while nocked.
 const HAND_ARROW: u16 = 0x23;
@@ -20,9 +21,10 @@ const HAND_ARROW: u16 = 0x23;
 pub(crate) struct Bowstring {
     /// The unit wearing the bow, which carries the HandArrow attach and the nock latch.
     pub(crate) owner: Entity,
-    /// The `$WTT` top and `$WTB` bottom anchors as `(bone, model-local offset)`.
-    pub(crate) top: (u16, Vec3),
-    pub(crate) bottom: (u16, Vec3),
+    /// The `$WTT` top / `$WTB` bottom anchors — the bone is load-bearing on an animated prop (see
+    /// the module note): the limb tips move with the draw.
+    pub(crate) top: benilla_assets::StringTip,
+    pub(crate) bottom: benilla_assets::StringTip,
 }
 
 /// Draws every visible bow's string, tip to middle to tip, from this frame's joint frames.
@@ -39,7 +41,7 @@ fn draw_bowstrings(
         Has<NockLatch>,
     )>,
     joints: Query<&GlobalTransform>,
-    mut gizmos: Gizmos,
+    mut gizmos: Gizmos<EngineLineGizmos>,
 ) {
     // Inferred: the reference's packed vertex color is not decoded.
     const STRING_COLOR: Color = Color::srgb(0.12, 0.10, 0.08);
@@ -47,11 +49,13 @@ fn draw_bowstrings(
         if !vis.get() {
             continue;
         }
-        // The prop's own pose when it flexes (`joints_root` is this entity); its rigid frame
-        // otherwise.
-        let tip = |(bone, offset): (u16, Vec3)| {
-            flex.and_then(|p| p.posed_point(prop, bone, offset))
-                .unwrap_or_else(|| prop.transform_point(offset))
+        // The prop's own pose when it flexes (`joints_root` IS this entity, so its
+        // `GlobalTransform` is the frame `posed_point` wants), composing the pivot-rebased offset
+        // through the live bone; the model-local point through its rigid frame otherwise, which
+        // is the same answer for a bow standing at bind pose.
+        let tip = |t: benilla_assets::StringTip| {
+            flex.and_then(|p| p.posed_point(prop, t.bone, t.offset))
+                .unwrap_or_else(|| prop.transform_point(t.rest))
         };
         let top = tip(bs.top);
         let bottom = tip(bs.bottom);

@@ -35,7 +35,7 @@ fn frame(app: &mut App, packets: Vec<Vec<SessionEvent>>) -> Vec<String> {
     crate::ui_unit::run_feed_units_once(world);
     crate::ui_aura::run_feed_auras_once(world);
     crate::lanes::fire_in_order(world);
-    let s = world.non_send_resource_mut::<UiScript>();
+    let s = world.non_send_mut::<UiScript>();
     let out = s.eval::<Vec<String>>("return Auras").unwrap();
     s.run("Auras = {}").unwrap();
     let errors = s.errors();
@@ -49,7 +49,7 @@ fn frame(app: &mut App, packets: Vec<Vec<SessionEvent>>) -> Vec<String> {
 fn aura_client() -> App {
     let mut app = client();
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"
             Auras = {}

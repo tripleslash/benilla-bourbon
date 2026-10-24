@@ -13,6 +13,9 @@ workspace = true
 test-support = []
 
 [dependencies]
+# Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
+# `Date.now()` in a browser, where std's panics on first use.
+web-time = "1"
 roxmltree = "0.20"
 # The script host's Lua: benilla's own interpreter, through a crate that answers to the name
 # `mlua` (`src/lib.rs`).
@@ -20,3 +23,8 @@ benilla-mlua = { path = "../benilla-mlua" }
 # `date` and `time`'s local zone: `localtime_r`, `mktime` and `tzname` on unix, the CRT's
 # `localtime_s` and zone globals on Windows (`civil`).
 libc = "0.2"
+
+# `civil`'s browser zone: the page's JS `Date`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.99"
+wasm-bindgen = "=0.2.126"

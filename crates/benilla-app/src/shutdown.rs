@@ -1,9 +1,9 @@
 //! The application-exit edge: where "the client is going down" may be observed.
 //!
 //! Bevy's runner leaves the loop after the `app.update()` in which an `AppExit` appears. A window
-//! close writes it in `PostUpdate` (`exit_on_all_closed`), after every `Update` system, so a saver
-//! in `Update` never sees the exit a player causes. [`on_app_exit`] puts savers in `Last`, after
-//! every announcement.
+//! close writes it in `Last` (`exit_on_all_closed`, in `ExitSystems`), after every `Update` system,
+//! so a saver in `Update` never sees the exit a player causes. [`on_app_exit`] puts savers in
+//! `Last` after `ExitSystems`, after every announcement.
 //!
 //! On macOS one more `Main` pass can run after `event_loop.exit()`, and `exit_on_all_closed`
 //! announces again on every frame with no window, so the set runs only on the rising edge
@@ -40,7 +40,12 @@ fn the_exit_frame(mut exits: MessageReader<AppExit>, mut announced: Local<bool>)
 pub(crate) fn on_app_exit(app: &mut App, systems: ScheduleConfigs<ScheduleSystem>) -> &mut App {
     if !app.world().contains_resource::<ExitSetLatched>() {
         app.insert_resource(ExitSetLatched);
-        app.configure_sets(Last, OnAppExit.run_if(the_exit_frame));
+        app.configure_sets(
+            Last,
+            OnAppExit
+                .run_if(the_exit_frame)
+                .after(bevy::window::ExitSystems),
+        );
     }
     app.add_systems(Last, systems.in_set(OnAppExit))
 }
@@ -58,7 +63,8 @@ pub(crate) struct AltF4Plugin;
 
 impl Plugin for AltF4Plugin {
     fn build(&self, app: &mut App) {
-        if cfg!(target_os = "macos") {
+        // fork: nor in the browser, where the page has no window to close and the tab owns Alt+F4.
+        if cfg!(any(target_os = "macos", target_arch = "wasm32")) {
             return;
         }
         // Before the loading cover swallows the input plane, which would eat the key.

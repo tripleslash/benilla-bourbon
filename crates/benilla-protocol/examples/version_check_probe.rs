@@ -12,13 +12,16 @@
 //! Usage: `cargo run -p benilla-protocol --example version_check_probe -- <host[:port]> <user>
 //! <pass> [install-dir]`. The local strict-mode realmd is `127.0.0.1:3725`, the ordinary one 3724.
 
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+// The login readers are awaited (the transport seam, so the same code runs in a browser); this
+// probe stays a straight-line CLI and drives each of them to completion where it stands.
+use benilla_protocol::transport::Conn;
 use benilla_protocol::{auth, host_port, AuthReject, AUTH_PORT, CLIENT_BUILD};
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge};
+use futures_lite::future::block_on;
 use sha1::{Digest, Sha1};
 
 /// Which `crc_hash` the arm puts in the proof packet.
@@ -47,7 +50,7 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
     // Redial past a width-unstable `B`, as `logon` does, so a 0x04 here is a bad password and
     // never the SHA-1 encoding disagreement.
     for _ in 0..8 {
-        let mut stream = TcpStream::connect((host, port))
+        let mut stream = block_on(Conn::connect(host, port))
             .with_context(|| format!("connecting to {host}:{port}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         auth::write_logon_challenge(
@@ -57,7 +60,7 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
             auth::LOCALE_TAG_EN_US,
         )
         .context("sending logon challenge")?;
-        let reply = auth::read_challenge_reply(&mut stream)
+        let reply = block_on(auth::read_challenge_reply(&mut stream))
             .context("reading challenge reply")?
             .ok_or_else(|| anyhow!("SUCCESS_SURVEY on the challenge: no SRP inputs"))?;
         let b = PublicKey::from_le_bytes(reply.server_public_key)
@@ -86,7 +89,7 @@ fn attempt(host: &str, port: u16, user: &str, pass: &str, arm: Arm) -> Result<Op
         )
         .context("sending logon proof")?;
 
-        return match auth::read_proof_reply(&mut stream) {
+        return match block_on(auth::read_proof_reply(&mut stream)) {
             Ok(_) => Ok(None),
             Err(e) => match e.downcast_ref::<AuthReject>() {
                 Some(r) => Ok(Some(r.code)),
@@ -185,8 +188,8 @@ fn main() -> Result<()> {
 
     // Our digest holds only for the one salt every mangos-family realmd sends; under any other,
     // the computed arm sends zeros too.
-    let mut stream =
-        TcpStream::connect((host, port)).with_context(|| format!("connecting to {host}:{port}"))?;
+    let mut stream = block_on(Conn::connect(host, port))
+        .with_context(|| format!("connecting to {host}:{port}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     auth::write_logon_challenge(
         &mut stream,
@@ -194,7 +197,7 @@ fn main() -> Result<()> {
         CLIENT_BUILD,
         auth::LOCALE_TAG_EN_US,
     )?;
-    let crc_salt = auth::read_challenge_reply(&mut stream)?
+    let crc_salt = block_on(auth::read_challenge_reply(&mut stream))?
         .ok_or_else(|| anyhow!("SUCCESS_SURVEY on the challenge: no SRP inputs"))?
         .crc_salt;
     drop(stream); // no proof follows, so realmd records nothing for this dial

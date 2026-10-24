@@ -54,12 +54,19 @@ fn yield_own_body(net_cmds: &NetCommands, player: &mut Player, self_guid: Option
         return;
     }
     super::move_trace::mover_claim("NOT_ACTIVE_MOVER", me);
+    // A rider lets go of a body still aboard: vmangos relocates it from this word too.
+    let transport = movement_net::wire_transport(player);
     let _ = net_cmds.0.send(ClientCommand::NotActiveMover {
         guid: me,
-        flags: 0,
+        flags: if transport.is_some() {
+            move_flags::ON_TRANSPORT
+        } else {
+            0
+        },
         pos: bevy_to_wow(player.pos),
         orientation: player.face_yaw.rem_euclid(std::f32::consts::TAU),
         fall_time: 0,
+        transport,
     });
 }
 
@@ -195,11 +202,19 @@ pub(super) fn apply_server_moves(
     }
     // Cross-map worldport: snap, bump `CurrentMap` for the terrain streamer, ack if required.
     for w in worldports.read() {
-        let riding = w.transport_entry.is_some() && player.ride.is_some();
+        // A transport tail makes the pose deck-local (`Player.cpp:2114`), never a world one.
+        let riding = w.transport_entry.is_some()
+            && player
+                .ride
+                .as_ref()
+                .is_some_and(|r| transports.get(r.entity).is_ok());
+        // Carried by a transport we do not ride yet (it changed continents during the login load,
+        // before its deck was armed): board it on the new map, by guid if we knew it.
+        let boarding = w.transport_entry.is_some() && !riding;
         if riding {
             // Riding through: the pose is deck-local (`Player.cpp:2114`) and the boat survived the
-            // purge. No settle hold: it would drop `MOVEFLAG_ONTRANSPORT` from the next move
-            // packet, which the server reads as a deboard mid-ocean.
+            // purge. The ride is kept, so the hold below carries the body with the deck and keeps
+            // `MOVEFLAG_ONTRANSPORT` on the wire.
             let ride = player.ride.as_mut().expect("riding checked above");
             ride.local_pos = wow_to_bevy(w.position);
             if let Ok((boat, ..)) = transports.get(ride.entity) {
@@ -210,39 +225,76 @@ pub(super) fn apply_server_moves(
                 player.face_yaw += dyaw;
                 player.model_yaw = wrap_pi(player.model_yaw + dyaw);
                 cam.yaw += dyaw;
-            } else {
-                warn!("worldport: riding but the boat entity is missing — using raw pose");
-                player.pos = wow_to_bevy(w.position);
-                player.ride = None;
             }
+        } else if boarding {
+            let guid = player
+                .ride
+                .take()
+                .map(|r| r.guid)
+                .or(player.pending_board.and_then(|p| p.guid));
+            player.pending_board = Some(super::state::PendingBoard {
+                guid,
+                entry: w.transport_entry,
+                local_pos: wow_to_bevy(w.position),
+                local_yaw: w.orientation,
+            });
+            info!(
+                "worldport: mapId {} carried by transport entry {:?} not yet boarded — boarding \
+                 on arrival",
+                w.map_id, w.transport_entry
+            );
+        } else if !w.needs_ack && (player.ride.is_some() || player.pending_board.is_some()) {
+            // The login snap (`SMSG_LOGIN_VERIFY_WORLD`, the one worldport with no ack) with a
+            // seat already taken: vmangos sends it before our create block, whose transport tail
+            // seated us, and both can apply in one frame, the seat first. The seat is the newer
+            // fact; dropping it as stale put a passenger on the ground and the next heartbeat,
+            // without `ON_TRANSPORT`, unseated it server-side. The carry poses the body.
+            player.pos = wow_to_bevy(w.position);
         } else {
             // No transport carried through: a world pose, and any ride is stale.
+            if player.ride.is_some() && crate::webdiag::armed() {
+                crate::webdiag::out("transport: deboard (a worldport with no transport)");
+            }
             player.ride = None;
+            player.pending_board = None;
             player.pos = wow_to_bevy(w.position);
             player.face_yaw = w.orientation;
             player.model_yaw = w.orientation; // the body snaps too, no chase
             cam.yaw = w.orientation;
-            player.settling = true; // hold (gravity off) until the new map's ground streams in
-            player.settle_since = time.elapsed_secs();
-            player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
-            // The physics world is still the old map's until the streamer swaps it.
-            player.world_stale = true;
         }
-        player.move_flags = 0;
+        // Hold (gravity off) until the new map's ground streams in, a riding crossing too: the
+        // reference's blocking load (`0x66fbe0`) freezes a rider as it does anyone, and a deck
+        // ridden through the purge is no floor while the destination's world is not resident.
+        player.settling = true;
+        player.settle_since = time.elapsed_secs();
+        player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
+        // The physics world is still the old map's until the streamer swaps it.
+        player.world_stale = true;
+        // A snap clears the movement bits; a rider is still on its deck, as the hold's wire says.
+        player.move_flags = if player.ride.is_some() {
+            move_flags::ON_TRANSPORT
+        } else {
+            0
+        };
         player.airborne_since = None; // a snap ends any jump arc (no phantom FALL_LAND)
         commands.insert_resource(CurrentMap(w.map_id));
         if w.needs_ack {
-            if riding {
-                // A riding crossing never settles, so it acks now.
+            if riding || boarding {
+                // Deviation: the reference acks after its blocking load (`0x401cae`); a rider acks
+                // now, so the server re-adds us to the boat at once. The hold keeps
+                // `ON_TRANSPORT` on the wire, so nothing it sends reads as a deboard.
                 let _ = net_cmds.0.send(ClientCommand::WorldportAck);
                 info!(
-                    "worldport: mapId {} @ {:?} (riding, boat-local pose, acked)",
+                    "worldport: mapId {} @ {:?} (riding, boat-local pose, acked; held until \
+                     resident)",
                     w.map_id, w.position
                 );
             } else {
                 // The ack waits for the settle release: the reference acks after its blocking
-                // load, and vmangos keeps us out of world until the ack, with no timeout.
+                // load, and vmangos keeps us out of world until the ack, with no timeout. Gravity
+                // waits on past it for our create block, which may seat us on a deck.
                 player.owes_worldport_ack = true;
+                player.awaiting_arrival = true;
                 info!(
                     "worldport: mapId {} @ {:?} (world pose, ack deferred to release)",
                     w.map_id, w.position
@@ -300,14 +352,24 @@ pub(super) fn apply_server_moves(
             player.hover_launch = true;
         }
         let facing = player.face_yaw.rem_euclid(std::f32::consts::TAU);
+        // A rider's ack keeps `ON_TRANSPORT` and its tail: vmangos relocates us from every ack
+        // (`HandleMoverRelocation`), and one without the bit removes us from the transport, which
+        // the root of a `/logout` then saves, so the next login lands where the deck was.
+        let transport = movement_net::wire_transport(player);
         let _ = net_cmds.0.send(ClientCommand::MoveModeAck {
             guid: m.guid,
             counter: m.counter,
             mode: m.mode,
             apply: m.apply,
-            flags: player.modes.wire_flags(),
+            flags: player.modes.wire_flags()
+                | if transport.is_some() {
+                    move_flags::ON_TRANSPORT
+                } else {
+                    0
+                },
             pos: bevy_to_wow(player.pos),
             orientation: facing,
+            transport,
         });
         precast_ended |= ack_ends_precast(m.mode);
         info!(
@@ -409,19 +471,26 @@ pub(super) fn apply_server_moves(
     // parked pose, so ack here.
     let speed_acks: Vec<SpeedChangeMessage> = speed_msgs.read().copied().collect();
     if !player.active || player.detached {
+        // A rider stays one (`ON_TRANSPORT` and its tail), as on every ack.
+        let transport = movement_net::wire_transport(player);
+        let flags = if transport.is_some() {
+            move_flags::ON_TRANSPORT
+        } else {
+            0
+        };
         for ack in &speed_acks {
             let _ = net_cmds.0.send(ClientCommand::ForceSpeedAck {
                 kind: ack.kind,
                 guid: ack.guid,
                 counter: ack.counter,
                 speed: ack.speed,
-                flags: 0,
+                flags,
                 pos: bevy_to_wow(player.pos),
                 orientation: player.face_yaw.rem_euclid(std::f32::consts::TAU),
                 pitch: 0.0,
                 fall_time: 0,
                 jump: None,
-                transport: None, // flags 0 → no transport tail
+                transport,
             });
         }
     }
@@ -433,10 +502,14 @@ pub(super) fn apply_server_moves(
 
 /// Apply one same-map teleport's snap (`MSG_MOVE_TELEPORT_ACK` inbound); the caller echoes it.
 fn snap_near_teleport(player: &mut Player, cam_yaw: &mut f32, t: &TeleportMessage, now: f32) {
+    if player.ride.is_some() && crate::webdiag::armed() {
+        crate::webdiag::out("transport: deboard (a near teleport snapped us off the deck)");
+    }
     // A near teleport arrives detached: vmangos takes this path only off a transport
     // (`Player.cpp:1866-1893`), and the reference's apply (`0x6186b0`) re-parents to the packet's
     // transport guid, zero here. A kept ride would carry us back onto the deck.
     player.ride = None;
+    player.pending_board = None;
     player.pos = wow_to_bevy(t.position);
     player.face_yaw = t.orientation;
     *cam_yaw = t.orientation;

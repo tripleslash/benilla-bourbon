@@ -3,17 +3,31 @@
 
 use bevy::prelude::*;
 
-use benilla_assets::AssetSet;
+use benilla_assets::DataLoadAppExt;
 use benilla_formats::{LightCatalog, LiquidKind};
 
 mod blob; // off-world light blobs (portrait booths, body panes, glue scene)
 mod daynight; // the sun, moon and day/night curves
+mod env_frame; // fork: the environment block (wind, wetness, benders) behind the point table
+mod flicker; // fork: the flame flicker folded into the packed point table (ported from pkuzic)
 mod global_light; // the shared global-light storage buffer
+mod lava_light; // fork: breathing point lights over magma surfaces (the Everwood port)
 mod prop_probes; // the interior-prop SH probe table
 mod resolve; // the per-frame time-of-day resolve and the interior-fog crossfade
 mod sh; // the model SH probe fold
 pub use blob::LightBlob;
-pub use global_light::{new_shared_light_buffer, LightRooms, SharedLightBuffer, WorldPointLight};
+pub use env_frame::{
+    shelter_region_offset, EnvFrame, ENV_FRAME_ROWS, MAX_BENDERS, SHELTER_GRID,
+    SHELTER_HEADER_ROWS, SHELTER_REGION_BYTES,
+};
+pub(crate) use flicker::is_warm;
+pub use flicker::{flame_flicker, FlameFlicker, FlameKind};
+pub use global_light::{
+    new_shared_light_buffer, Glowless, LightGroup, LightGroups, LightOwner, LightRank, LightRooms,
+    NightGlow, PlacedLight, SharedLightBuffer, SpellFxLight, WindowPane, WorldPointLight,
+    LIGHT_GROUP_RADIUS, MAX_POINT_LIGHTS, MODERN_PACK_RADIUS,
+};
+pub use lava_light::{LavaLight, LavaLightGain};
 pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
 // The std430 layout stays in the crate: off-world producers state values through `LightBlob`,
 // never a row index.
@@ -40,6 +54,19 @@ pub struct WowLighting {
     /// `start = frac × end` unclamped (`0x6cee61`), negative under storm: the near veil in rain.
     pub(crate) fog_start: f32,
     pub(crate) fog_end: f32,
+    /// fork: modern lighting (FORK.md) — the zone's fog end BEFORE the farclip
+    /// clamp (yd). The modern medium calibrates its long-range height fog on it, so the horizon is
+    /// not a wall at the view distance.
+    pub(crate) zone_fog_end: f32,
+    /// fork: modern lighting — `[fog_start, fog_end, zone_fog_end]` of the clear atmosphere, before
+    /// the storm blend: the air the lamp halos stand in, so the weather neither swells nor fades a
+    /// lamp's glow (`volumetrics`' `halo_air`).
+    pub(crate) clear_fog: [f32; 3],
+    /// fork: modern lighting — the zone's deep-night key colour and celestial tint: the diffuse row
+    /// and the row [`Self::spec`] samples, at midnight on the same blend. The risen moon lights
+    /// with these while the dusk and dawn rows are still the sun's (`modern::sun_arc`).
+    pub(crate) night_key: [f32; 3],
+    pub(crate) night_tint: [f32; 3],
     /// The interior fog triple (`DNState+0x80/84/88`): the scene fog lerped toward the claimed
     /// WMO's MFOG by the 4 s [`WmoCrossfade`]. Only content tagged as in a room on the camera's
     /// portal chain reads it: the group's surfaces (`0x6b5190`) and liquid (`0x6b62e0`) and the M2s
@@ -128,6 +155,17 @@ impl WowLighting {
 /// terrain uses 20.
 pub(crate) const WATER_SHININESS: f32 = 6.0;
 
+/// Water surface specular shininess on the **Cataclysm** (`waterDetail 2`) path — a different
+/// number from [`WATER_SHININESS`], and the reference says so twice in the same function.
+///
+/// `Liquid::SetShaderLighting` fills the vertex and pixel constant blocks from one light record and
+/// then writes the exponent into `.w` of the specular register by hand, with a **different literal
+/// for each stage**: `0x40C00000` (6.0) into the vertex block's `c4.w`, `0x42480000` (50.0) into the
+/// pixel block's. `ProcWaterAbove`/`ProcWaterBelow` read `c[4].w` — the pixel one — so cata water's
+/// Blinn exponent is 50, not the 6 the fixed-function 1.12 path uses. It is the difference between
+/// a broad wash across half the lake and a sun track you can see the shape of.
+pub(crate) const CATA_WATER_SHININESS: f32 = 50.0;
+
 /// `LightParams.glow` quantised to the byte the reference packs into the composite quad's colour,
 /// `floor(g·255)/255` (Elwynn 0.65 → 0.647).
 pub(crate) fn quantize_glow(glow: f32) -> f32 {
@@ -215,7 +253,7 @@ impl Plugin for LightingPlugin {
             .init_resource::<WorldTime>()
             .init_resource::<WmoCrossfade>()
             .insert_resource(ClearColor(Color::BLACK))
-            .add_systems(Startup, setup_lighting.after(AssetSet::Open))
+            .add_data_loaders(setup_lighting)
             .add_systems(
                 Update,
                 (update_time_lighting, apply_sky_backdrop)
@@ -230,6 +268,8 @@ impl Plugin for LightingPlugin {
             );
         // The shared light buffer, packed after the resolve and uploaded in the render world.
         global_light::register(app);
+        // fork: lava light (FORK.md).
+        lava_light::register(app);
     }
 }
 
@@ -263,11 +303,17 @@ mod ordering_tests {
                 (|mut p: ResMut<Probe>| p.0 += 1).in_set(LightingResolveSet),
             ),
         );
-        app.update();
-        let warnings = app
-            .get_schedule(Update)
-            .expect("Update schedule")
-            .warnings()
+        let world = app.world_mut();
+        let mut schedule = world
+            .resource_mut::<Schedules>()
+            .remove(Update)
+            .expect("Update schedule");
+        let built = schedule
+            .initialize(world)
+            .expect("Update builds")
+            .expect("a first build returns its metadata");
+        let warnings = built
+            .warnings
             .iter()
             .filter(|w| matches!(w, ScheduleBuildWarning::Ambiguity(_)))
             .count();
@@ -298,6 +344,16 @@ mod ordering_tests {
                 "the celestial follows: PostUpdate, BillboardPlace",
             ),
             ("weather/precip/mod.rs", "push_precip: PostUpdate"),
+            // fork: modern lighting (FORK.md)
+            ("modern/shadow.rs", "update_cascades: Last"),
+            ("modern/look.rs", "update_look: Last"),
+            (
+                "modern/sun_arc.rs",
+                "apply_sun_arc WRITES WowLighting, .after(LightingResolveSet); the Res< is GameClock's",
+            ),
+            ("modern/volumetrics/mod.rs", "update_volume: Last"),
+            ("modern/gi/mod.rs", "update_gi: Last"),
+            ("modern/cloud_bake.rs", "bake_clouds: Last"),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders = Vec::new();

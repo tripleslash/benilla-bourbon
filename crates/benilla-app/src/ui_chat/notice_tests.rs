@@ -52,7 +52,7 @@ impl Feed {
         let (tx, sent) = crossbeam_channel::unbounded();
 
         let mut world = World::new();
-        world.insert_non_send_resource(s);
+        world.insert_non_send(s);
         world.insert_resource(super::ChatLog::default());
         world.insert_resource(super::frames::ChatWindows::default());
         world.insert_resource(channels);
@@ -90,7 +90,7 @@ impl Feed {
     }
 
     pub(super) fn script(&self) -> &UiScript {
-        self.world.non_send_resource::<UiScript>()
+        self.world.non_send::<UiScript>()
     }
 
     fn lines(&self) -> i64 {

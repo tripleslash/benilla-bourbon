@@ -79,7 +79,7 @@ fn client() -> (App, Receiver<ClientCommand>) {
         party: [MEMBER, 0, 0, 0],
         ..Default::default()
     });
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     (app, rx)
 }
 
@@ -92,7 +92,7 @@ fn select(app: &mut App, guid: u64) {
         guid: Some(guid),
         ..Default::default()
     };
-    let mut script = world.non_send_resource_mut::<UiScript>();
+    let mut script = world.non_send_mut::<UiScript>();
     let mut guids = UnitGuids {
         player: ME,
         target: guid,

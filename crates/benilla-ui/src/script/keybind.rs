@@ -355,12 +355,12 @@ impl super::UiScript {
     /// Set 0, the defaults, from `WTF\DefaultBindings.wtf` ([`parse_bindings_wtf`]), as
     /// `0x4b62b0` loads it: each pair through `SetBinding(0, key, command)`.
     pub fn set_default_bindings(&mut self, pairs: Vec<KeyBinding>) {
-        self.model_mut().keybinds.defaults = key_list(pairs);
+        set_field!(self, keybinds.defaults, key_list(pairs));
     }
 
     /// Set 0, the defaults, in file order.
     pub fn default_bindings(&self) -> Vec<KeyBinding> {
-        self.model_mut().keybinds.defaults.clone()
+        self.model_ref().keybinds.defaults.clone()
     }
 
     /// Seed stored set 1 (account) or 2 (character) from `benilla-config/bindings/`; `None` clears
@@ -384,13 +384,13 @@ impl super::UiScript {
 
     /// The live keys as `(chord, command)` in bind order, for dispatch.
     pub fn binding_keys(&self) -> Vec<KeyBinding> {
-        self.model_mut().keybinds.live.clone()
+        self.model_ref().keybinds.live.clone()
     }
 
     /// The live table as `(command, chords)`: every declared command in registration order, then
     /// any other name a key is bound to, for the save and the tests.
     pub fn keybind_snapshot(&self) -> Vec<(String, Vec<String>)> {
-        let model = self.model_mut();
+        let model = self.model_ref();
         let kb = &model.keybinds;
         let mut out: Vec<(String, Vec<String>)> = kb
             .entries
@@ -414,35 +414,37 @@ impl super::UiScript {
 
     /// Bumped by every table change; re-derive dispatch when it moves.
     pub fn keybinds_generation(&self) -> u64 {
-        self.model_mut().keybinds.generation
+        self.model_ref().keybinds.generation
     }
 
     /// Whether a host-side load still owes its `UPDATE_BINDINGS` (`0x4b649d`); taking it clears
     /// the debt. A Lua verb's change signals in place and leaves it.
     pub fn take_keybinds_signal_owed(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().keybinds.signal_owed)
+        drain_field!(self, keybinds.signal_owed)
     }
 
     /// Drain the queued host requests.
     pub fn take_keybind_requests(&mut self) -> Vec<KeybindRequest> {
-        std::mem::take(&mut self.model_mut().keybinds.requests)
+        drain_field!(self, keybinds.requests)
     }
 
     /// Which set the live table edits: 1 account, 2 character.
     pub fn current_binding_set(&self) -> u32 {
-        self.model_mut().keybinds.current_set
+        self.model_ref().keybinds.current_set
     }
 
     /// Whether a character-specific stored set exists (the window's checkbox).
     pub fn character_bindings_exist(&self) -> bool {
-        self.model_mut().keybinds.stored[1].is_some()
+        self.model_ref().keybinds.stored[1].is_some()
     }
 }
 
 /// Register one addon's `Bindings.xml` from a bare `&Lua`: `LoadAddOn` runs inside a Lua binding
 /// with no `UiScript` to reach.
 pub(crate) fn register_addon_bindings(lua: &Lua, addon: &str, bindings: &[Binding]) {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     // The context the load runs under: the addon's name unless it is secure (`0x51f387`).
     let context = model.exec_context.borrow().clone();
     model
@@ -457,7 +459,9 @@ pub(crate) fn register_addon_bindings(lua: &Lua, addon: &str, bindings: &[Bindin
 /// ran.
 pub(crate) fn run_command(lua: &Lua, command: &str, down: bool) -> mlua::Result<bool> {
     let (name, body, context) = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let kb = &model.keybinds;
         let Some(&i) = kb.by_name.get(&command.to_ascii_uppercase()) else {
             return Ok(false);
@@ -496,7 +500,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetNumBindings",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_mut::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.keybinds.visible().count())
         })?,
     )?;
@@ -506,7 +512,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `lua_isnumber` else the usage line (`0x4b7fe4`); the ordinal is `__ftol(i) - 1`
             // (`0x4b7f92`), and a miss leaves the name `""` (`0x4b7f98`), whose keys follow it.
             let i = super::binding_abi::number_arg(lua, i, "Usage: GetBinding(index)")?;
-            let model = lua.app_data_mut::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let kb = &model.keybinds;
             let row = usize::try_from(i.wrapping_sub(1))
                 .ok()
@@ -568,7 +576,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, command: Value| {
             let command =
                 super::binding_abi::string_arg(lua, command, "Usage: GetBindingKey(\"COMMAND\")")?;
-            let model = lua.app_data_mut::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let kb = &model.keybinds;
             let mut out = Vec::new();
             for k in kb.keys_of(&command) {
@@ -581,7 +591,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBindingAction",
         lua.create_function(|lua, key: Value| {
             let key = super::binding_abi::string_arg(lua, key, "Usage: GetBindingAction(\"KEY\")")?;
-            let model = lua.app_data_mut::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let key = key.to_ascii_uppercase();
             let name = model
                 .keybinds
@@ -629,7 +641,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     ))
                 }
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.keybinds.save(which);
             Ok(())
         })?,
@@ -637,7 +651,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetCurrentBindingSet",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_mut::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.keybinds.current_set)
         })?,
     )?;

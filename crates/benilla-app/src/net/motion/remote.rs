@@ -346,15 +346,47 @@ pub(in crate::net) fn drain_pending_moves(
     }
 }
 
+/// Rotates a WoW XY vector by `yaw` radians, the way a deck's yaw turns its frame into the world's.
+fn rotate_xy(v: [f32; 2], yaw: f32) -> [f32; 2] {
+    let (s, c) = yaw.sin_cos();
+    [v[0] * c - v[1] * s, v[0] * s + v[1] * c]
+}
+
+/// Deviation: **a body nobody can see is stepped every [`HIDDEN_STRIDE`]th frame**, with the
+/// time it is owed, where the reference steps every mover every frame. With ~300 units streamed
+/// and almost all of them behind a wall, this system took ~1 ms and
+/// [`super::ground_clamp_creatures`] ~0.4 ms a frame: one capsule sweep (or ray) per moving body
+/// per frame, drawn or not. A sweep over the owed time is still a sweep, so a hidden
+/// mover cannot pass a wall it would have hit; it is only coarser in time, and the next packet
+/// corrects the pose as it always did. Shown again, it steps every frame from the next one.
+/// Staggered by entity, so the hidden crowd's sweeps spread evenly over the frames.
+pub(in crate::net) const HIDDEN_STRIDE: u32 = 4;
+
+/// Whether hidden body `e` takes its turn on frame `frame` (see [`HIDDEN_STRIDE`]).
+pub(in crate::net) fn hidden_turn(e: Entity, frame: u32) -> bool {
+    (e.to_bits() as u32)
+        .wrapping_add(frame)
+        .is_multiple_of(HIDDEN_STRIDE)
+}
+
 /// Dead-reckons every remote mover each frame from its flags, then resolves the step against the
 /// world with our own controller's capsule and step election, as the reference drives every mover
 /// through one controller. A mover with no [`move_flags::INTEGRATED`] bit is not integrated, as in
 /// the reference. The wire has no blocked bit: a mover held by a wall is held by ours. Real time,
 /// the clock the fire-times are on.
+///
+/// A transport rider is dead-reckoned in the deck's frame: the reference keeps a passenger's pose
+/// transport-local and composes it through the transport's matrix on read
+/// (`CPassenger::GetPosition`), so the step and the pre-fire blend advance its
+/// [`crate::transport::TransportRider`] pose. The world pose written here goes through the deck's
+/// pose from last frame, and `transport::compose_riders` carries it through this frame's.
 #[allow(clippy::type_complexity)]
 pub(in crate::net) fn extrapolate_remote_units(
     time: Res<Time<Real>>,
     mut commands: Commands,
+    guid_index: Res<crate::net::GuidIndex>,
+    // A rider's deck, looked up by its transport guid.
+    decks: Query<&Transform, Without<RemoteMotion>>,
     // The local controller's own sweep and capsule.
     world: benilla_world::collision::WorldCollision,
     // Liquid is queried, not swept, so a water-walker's plane is handed to the step.
@@ -372,20 +404,51 @@ pub(in crate::net) fn extrapolate_remote_units(
             Option<&UnitSpeeds>,
             Option<&mut crate::creature_anim::BodyTwist>,
             Has<super::FacingStep>,
-            Has<crate::transport::TransportRider>,
+            Option<&mut crate::transport::TransportRider>,
             // Trace-only: joins a `rem` line to its `rly` lines.
             Option<&crate::net::Guid>,
             // Modes from `SMSG_SPLINE_MOVE_*`, which vmangos sends only for a unit it drives; a
             // player's ride the pose, so the union is the reference's one `CMovement+0x40` word.
             Option<&crate::net::UnitMoveModes>,
+            // The draw election's verdict, for the hidden stride (see [`HIDDEN_STRIDE`]).
+            Option<&Visibility>,
         ),
         (Without<Spline>, Without<ActiveMover>),
     >,
+    mut frame: Local<u32>,
+    // Seconds each hidden mover is owed since its last step.
+    mut owed: Local<bevy::ecs::entity::EntityHashMap<f32>>,
 ) {
     use crate::creature_anim::{ease_strafe_yaw, strafe_body_offset, wrap_pi};
-    let dt = time.delta_secs();
+    let frame_dt = time.delta_secs();
+    *frame = frame.wrapping_add(1);
     let now_ms = time.elapsed_secs_f64() * 1000.0;
-    for (e, mut t, mut rm, speeds, twist, latched, riding, guid, granted) in &mut q {
+    for (e, mut t, mut rm, speeds, twist, latched, mut rider, guid, granted, vis) in &mut q {
+        let hidden = vis.is_some_and(|v| *v == Visibility::Hidden);
+        let dt = if hidden {
+            let acc = owed.entry(e).or_insert(0.0);
+            *acc += frame_dt;
+            if !hidden_turn(e, *frame) {
+                continue;
+            }
+            std::mem::take(acc)
+        } else {
+            frame_dt + owed.remove(&e).unwrap_or(0.0)
+        };
+        let delta = std::time::Duration::from_secs_f32(dt);
+        let riding = rider.is_some();
+        let rider_guid = rider.as_ref().map(|r| r.transport_guid);
+        // A rider whose deck is streamed reckons in its frame: the pose, and the frozen launch
+        // velocity, which the wire carries in world axes, turn into the deck's for the frame.
+        let deck = rider.as_ref().and_then(|r| {
+            let boat = *decks.get(*guid_index.0.get(&r.transport_guid)?).ok()?;
+            Some((
+                boat,
+                yaw_of(boat.rotation),
+                r.local_pos,
+                r.local_orientation,
+            ))
+        });
         if benilla_assets::trace::enabled() {
             let silent = now_ms - rm.last_apply_ms;
             let moving = rm.flags & move_flags::ANY_MOVE != 0;
@@ -399,6 +462,11 @@ pub(in crate::net) fn extrapolate_remote_units(
             }
         }
         let s = speeds.map_or_else(MoveSpeeds::default, |u| u.0);
+        if let Some((_, deck_yaw, local_pos, local_orientation)) = deck {
+            rm.wow_pos = local_pos;
+            rm.orientation = local_orientation;
+            rm.jump_xy_vel = rotate_xy(rm.jump_xy_vel, -deck_yaw);
+        }
         let prev = rm.wow_pos;
         let (mut pos, mut orientation, vertical_velocity, speed) = rm.advance(s, dt);
         // Horizontal travel the world took away, measured before the reconcile lerp.
@@ -425,7 +493,7 @@ pub(in crate::net) fn extrapolate_remote_units(
                 Vec3::ZERO
             };
             let resolved_center = if airborne {
-                crate::player::mover::airborne_step(&world, &capsule.0, from, vel, time.delta())
+                crate::player::mover::airborne_step(&world, &capsule.0, from, vel, delta)
             } else {
                 // The mover's granted modes: `HOVER` raises it a yard (`0x636e81`), and
                 // `WATER_WALKING` makes the liquid plane floor (`0x63162e`) unless swimming
@@ -444,7 +512,7 @@ pub(in crate::net) fn extrapolate_remote_units(
                     &capsule.0,
                     from,
                     vel,
-                    time.delta(),
+                    delta,
                     crate::player::mover::Support {
                         // `0x5fa550` is true for an uncharmed player, so the step height is 1.0.
                         rise: crate::player::STEP_UP_HEIGHT,
@@ -469,15 +537,27 @@ pub(in crate::net) fn extrapolate_remote_units(
             pos = resolved;
         }
         // The pre-fire reconcile toward the queued head, facing (armed by `0x619030`) and position
-        // (`0x619090`); a teleport arms neither (`@0x61904b`, `@0x6190bb`).
+        // (`0x619090`); a teleport arms neither (`@0x61904b`, `@0x6190bb`). A rider blends toward
+        // the head's pose on the same deck; a head off it, or on another, applies as a snap.
         if let Some(ev) = rm.pending.front() {
             let remaining_s = ((ev.fire_ms - now_ms) / 1000.0) as f32;
-            if remaining_s > 0.0 && ev.mv.reconciles() {
-                orientation = facing_lerp(orientation, ev.mv.orientation, dt, remaining_s);
+            let target = match deck {
+                Some(_) => ev
+                    .mv
+                    .transport
+                    .as_ref()
+                    .filter(|tp| Some(tp.guid) == rider_guid)
+                    .map(|tp| ([tp.pos.x, tp.pos.y, tp.pos.z], tp.orientation)),
+                None => Some((ev.mv.position, ev.mv.orientation)),
+            };
+            if let Some((target_pos, target_orientation)) =
+                target.filter(|_| remaining_s > 0.0 && ev.mv.reconciles())
+            {
+                orientation = facing_lerp(orientation, target_orientation, dt, remaining_s);
                 // Predicted from the pre-frame state to the fire-time.
                 let (predicted, ..) = rm.advance(s, dt + remaining_s);
                 let swimming = ev.mv.flags & move_flags::SWIMMING != 0;
-                pos = reconcile_lerp(pos, predicted, ev.mv.position, swimming, dt, remaining_s);
+                pos = reconcile_lerp(pos, predicted, target_pos, swimming, dt, remaining_s);
             }
         }
         // A mouse-turning mover sends no turn flag, only facing packets, so a standing, grounded
@@ -500,6 +580,17 @@ pub(in crate::net) fn extrapolate_remote_units(
         } else if latched {
             commands.entity(e).remove::<super::FacingStep>();
         }
+        let dz = pos[2] - prev[2];
+        // The deck-local result is the rider's pose; the world one goes through the deck.
+        if let (Some((boat, deck_yaw, ..)), Some(rider)) = (deck, rider.as_mut()) {
+            if rider.local_pos != pos || rider.local_orientation != orientation {
+                rider.local_pos = pos;
+                rider.local_orientation = orientation;
+            }
+            rm.jump_xy_vel = rotate_xy(rm.jump_xy_vel, deck_yaw);
+            pos = bevy_to_wow(boat.translation + boat.rotation * wow_to_bevy(pos));
+            orientation += deck_yaw;
+        }
         rm.wow_pos = pos;
         rm.orientation = orientation;
         rm.vertical_velocity = vertical_velocity;
@@ -510,14 +601,7 @@ pub(in crate::net) fn extrapolate_remote_units(
                 .is_none_or(|t| now_ms - t >= REMOTE_TRACE_MS)
         {
             sampled.insert(e, now_ms);
-            trace_remote(
-                e,
-                guid.map_or(0, |g| g.0),
-                &rm,
-                held,
-                pos[2] - prev[2],
-                now_ms,
-            );
+            trace_remote(e, guid.map_or(0, |g| g.0), &rm, held, dz, now_ms);
         }
         // Write only on change, so an idle crowd does not trip every `Changed<Transform>` gate.
         let translation = wow_to_bevy(pos);
@@ -548,6 +632,10 @@ pub(in crate::net) fn extrapolate_remote_units(
                 twist.yaw_gap = gap;
             }
         }
+    }
+    // Despawned movers leave the ledger.
+    if frame.is_multiple_of(256) {
+        owed.retain(|e, _| q.contains(*e));
     }
 }
 
@@ -718,7 +806,7 @@ mod under_floor {
             .id()
     }
 
-    fn mover(flags: u32, wow_z: f32) -> RemoteMotion {
+    pub(super) fn mover(flags: u32, wow_z: f32) -> RemoteMotion {
         RemoteMotion {
             wow_pos: [0.0, 0.0, wow_z],
             orientation: 0.0,
@@ -737,14 +825,27 @@ mod under_floor {
 
     /// The terrain in, the building's floor not yet, and one mover at the wire's Z.
     fn half_arrived_world(flags: u32) -> (App, Entity) {
+        let mut app = empty_world();
+        floor_at(&mut app, TERRAIN_Y);
+        let e = app
+            .world_mut()
+            .spawn((mover(flags, WIRE_Y), Transform::from_xyz(0.0, WIRE_Y, 0.0)))
+            .id();
+        app.update(); // seats Position/Rotation and the collider trees
+        (app, e)
+    }
+
+    /// Everything [`extrapolate_remote_units`] reads, with no collider and no entity yet.
+    pub(super) fn empty_world() -> App {
         let mut app = App::new();
         // `WorldCollision` needs the trace exclusions the world plugins would initialise.
-        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
+        app.init_resource::<benilla_world::collision::MoverTraceExclusions>()
+            .init_resource::<crate::net::GuidIndex>();
         app.add_plugins((
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>().init_resource::<ColliderEpoch>();
@@ -757,16 +858,10 @@ mod under_floor {
         // `update()` never runs plugin `finish()`, where avian seats its diagnostics resources.
         app.finish();
         app.cleanup();
-        floor_at(&mut app, TERRAIN_Y);
-        let e = app
-            .world_mut()
-            .spawn((mover(flags, WIRE_Y), Transform::from_xyz(0.0, WIRE_Y, 0.0)))
-            .id();
-        app.update(); // seats Position/Rotation and the collider trees
-        (app, e)
+        app
     }
 
-    fn frames(app: &mut App, n: usize) {
+    pub(super) fn frames(app: &mut App, n: usize) {
         for _ in 0..n {
             app.world_mut()
                 .resource_mut::<Time<Real>>()
@@ -871,6 +966,156 @@ mod under_floor {
         assert!(
             z_of(&app, e) < TERRAIN_Y + 0.1,
             "with the idle gate off, a standing mover sinks onto the terrain under the building"
+        );
+    }
+}
+
+/// A player running on a sailing, turned deck: dead-reckoned in the deck's frame between packets,
+/// and blended toward the next packet's deck-local pose, never its stale world one.
+#[cfg(test)]
+mod deck {
+    use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
+    use bevy::prelude::*;
+    use std::f32::consts::FRAC_PI_2;
+
+    use super::super::relay::{PendingMove, RelayMove};
+    use super::under_floor::{empty_world, frames, mover};
+    use crate::creature_anim::move_flags;
+    use crate::transport::TransportRider;
+
+    const BOAT: u64 = 0x1fc0_0000_0002_8407;
+    /// The deck's own sailing speed, yd per 60 fps frame (30 yd/s).
+    const SAIL_PER_FRAME: f32 = 0.5;
+
+    fn run_speeds() -> crate::net::UnitSpeeds {
+        crate::net::UnitSpeeds(benilla_protocol::events::MoveSpeeds {
+            walk: 2.5,
+            run: 7.0,
+            run_back: 4.5,
+            swim: 4.0,
+            swim_back: 2.5,
+            turn_rate: std::f32::consts::PI,
+        })
+    }
+
+    /// A deck a quarter turn round at sea, and one rider on it at `local`.
+    fn deck_with_rider(flags: u32, local: [f32; 3]) -> (App, Entity, Entity) {
+        let mut app = empty_world();
+        let boat = app
+            .world_mut()
+            .spawn(
+                Transform::from_xyz(100.0, 5.0, -40.0)
+                    .with_rotation(Quat::from_rotation_y(FRAC_PI_2)),
+            )
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(BOAT, boat);
+        let rider = app
+            .world_mut()
+            .spawn((
+                mover(flags, 0.0),
+                TransportRider {
+                    transport_guid: BOAT,
+                    local_pos: local,
+                    local_orientation: 0.0,
+                },
+                run_speeds(),
+                Transform::default(),
+            ))
+            .id();
+        (app, boat, rider)
+    }
+
+    /// The deck sails a frame, as `tick_transports` moves it before the next frame's movers.
+    fn sail(app: &mut App, boat: Entity) {
+        app.world_mut()
+            .get_mut::<Transform>(boat)
+            .unwrap()
+            .translation
+            .x += SAIL_PER_FRAME;
+    }
+
+    #[test]
+    fn a_rider_runs_across_the_deck_between_heartbeats() {
+        let (mut app, boat, rider) = deck_with_rider(move_flags::FORWARD, [1.0, 2.0, 3.0]);
+        // Half a second, a heartbeat's span, with no packet.
+        for _ in 0..30 {
+            sail(&mut app, boat);
+            frames(&mut app, 1);
+        }
+        let local = app.world().get::<TransportRider>(rider).unwrap().local_pos;
+        assert!(
+            (local[0] - 4.5).abs() < 1e-3 && local[1] == 2.0 && local[2] == 3.0,
+            "7 yd/s for 0.5 s along its deck facing, frame by frame: {local:?}"
+        );
+        let deck = *app.world().get::<Transform>(boat).unwrap();
+        let world = deck.translation + deck.rotation * wow_to_bevy(local);
+        let rm = app.world().get::<super::RemoteMotion>(rider).unwrap();
+        let drawn = app.world().get::<Transform>(rider).unwrap().translation;
+        assert!(
+            drawn.distance(world) < 1e-3,
+            "drawn through the deck: {drawn} vs {world}"
+        );
+        assert!(
+            (Vec3::from(rm.wow_pos) - Vec3::from(bevy_to_wow(world))).length() < 1e-3,
+            "the WoW pose is the world one: {:?}",
+            rm.wow_pos
+        );
+        assert!(
+            (rm.orientation - FRAC_PI_2).abs() < 1e-5,
+            "facing is the deck-local facing turned by the deck"
+        );
+    }
+
+    #[test]
+    fn a_rider_blends_toward_the_next_deck_local_pose() {
+        let (mut app, boat, rider) = deck_with_rider(0, [0.0, 0.0, 0.0]);
+        // The head fires in 250 ms at deck-local (2, 0, 0) facing 1.0; its world position was
+        // taken where the deck was when it was sent, far behind.
+        let head = RelayMove {
+            wire_ms: 1000,
+            position: [999.0, 999.0, 0.0],
+            orientation: 0.0,
+            flags: 0,
+            pitch: 0.0,
+            fall_time: 0,
+            jump: None,
+            transport: Some(benilla_protocol::TransportPose {
+                guid: BOAT,
+                pos: benilla_protocol::wire::Vector3d {
+                    x: 2.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                orientation: 1.0,
+            }),
+            verb: benilla_protocol::RelayVerb::Heartbeat,
+        };
+        app.world_mut()
+            .get_mut::<super::RemoteMotion>(rider)
+            .unwrap()
+            .pending
+            .push_back(PendingMove {
+                fire_ms: 250.0,
+                mv: head,
+            });
+        for _ in 0..14 {
+            sail(&mut app, boat);
+            frames(&mut app, 1);
+        }
+        // The blend is linear in time to the fire-time: 16.7 ms short, 1/15 of the gap remains.
+        let r = app.world().get::<TransportRider>(rider).unwrap();
+        assert!(
+            (r.local_pos[0] - 2.0 * 14.0 / 15.0).abs() < 1e-2 && r.local_pos[1].abs() < 1e-6,
+            "blended along the deck toward its deck-local target: {:?}",
+            r.local_pos
+        );
+        assert!(
+            (r.local_orientation - 14.0 / 15.0).abs() < 1e-2,
+            "facing blended toward the deck-local facing: {}",
+            r.local_orientation
         );
     }
 }

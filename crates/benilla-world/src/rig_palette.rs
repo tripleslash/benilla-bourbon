@@ -64,6 +64,9 @@ pub struct RigPalettes {
     rows: Arc<Vec<[f32; 4]>>,
     /// The row buffer retired by the last clone (`rows_make_mut`), reused once unshared.
     spare: Option<Arc<Vec<[f32; 4]>>>,
+    /// The row ranges written into `rows` since it took over from `spare`, which still holds
+    /// `rows` as it stood then; `None` once too many to replay, so the next clone copies whole.
+    since_swap: Option<Vec<(usize, usize)>>,
     /// Slot → base bone index. Slot 0 is the tag's "no rig" sentinel and never allocated.
     table: Arc<Vec<u32>>,
     /// Slot → the world position its rows are measured from, written with the rows.
@@ -101,6 +104,7 @@ impl Default for RigPalettes {
         Self {
             rows: Arc::new(vec![[0.0; 4]; 3 * MAX_PALETTE_BONES]),
             spare: None,
+            since_swap: Some(Vec::new()),
             table: Arc::new(vec![0; MAX_RIG_SLOTS]),
             origins: Arc::new(vec![[0.0; 4]; MAX_RIG_SLOTS]),
             origin_generation: 0,
@@ -130,28 +134,59 @@ pub fn rig_cost_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_RIG_COST").is_some())
 }
 
+/// The most ranges [`RigPalettes::since_swap`] holds before the next clone copies whole.
+const MAX_SWAP_RANGES: usize = 4096;
+
 /// Copy-on-write on the shared rows: after a publish the extract holds a second reference, so the
-/// frame's first write clones, copying only the live prefix ([`RigPalettes::bone_watermark`]).
+/// frame's first write clones. A reused spare holds `rows` as it stood when `rows` took over, so it
+/// takes only the ranges written since (`since_swap`); a fresh buffer copies the live prefix
+/// ([`RigPalettes::bone_watermark`]). `touched` is the row range this call writes.
 fn rows_make_mut<'a>(
     rows: &'a mut Arc<Vec<[f32; 4]>>,
     spare: &mut Option<Arc<Vec<[f32; 4]>>>,
+    since_swap: &mut Option<Vec<(usize, usize)>>,
     watermark_bones: u32,
+    touched: (usize, usize),
     copies: &mut u32,
     copy_us: &mut f32,
 ) -> &'a mut Vec<[f32; 4]> {
     if Arc::strong_count(rows) > 1 || Arc::weak_count(rows) > 0 {
-        let t = std::time::Instant::now();
+        let t = bevy::platform::time::Instant::now();
         let live = 3 * watermark_bones as usize;
         // Reuse the buffer retired two publishes ago once the render world lets go; its stale
         // tail is never uploaded, and `alloc` zeroes a range before use.
-        let mut new = match spare.take().and_then(|a| Arc::try_unwrap(a).ok()) {
-            Some(v) if v.len() == rows.len() => v,
-            _ => vec![[0.0f32; 4]; rows.len()],
+        let new = match (
+            spare.take().and_then(|a| Arc::try_unwrap(a).ok()),
+            since_swap.as_deref(),
+        ) {
+            (Some(mut v), Some(ranges)) if v.len() == rows.len() => {
+                for &(a, b) in ranges {
+                    let b = b.min(v.len());
+                    if a < b {
+                        v[a..b].copy_from_slice(&rows[a..b]);
+                    }
+                }
+                v
+            }
+            (reused, _) => {
+                let mut v = reused
+                    .filter(|v| v.len() == rows.len())
+                    .unwrap_or_else(|| vec![[0.0f32; 4]; rows.len()]);
+                v[..live].copy_from_slice(&rows[..live]);
+                v
+            }
         };
-        new[..live].copy_from_slice(&rows[..live]);
         *spare = Some(std::mem::replace(rows, Arc::new(new)));
+        *since_swap = Some(Vec::new());
         *copy_us += t.elapsed().as_secs_f32() * 1e6;
         *copies += 1;
+    }
+    if let Some(ranges) = since_swap {
+        if ranges.len() < MAX_SWAP_RANGES {
+            ranges.push(touched);
+        } else {
+            *since_swap = None;
+        }
     }
     Arc::make_mut(rows)
 }
@@ -216,7 +251,9 @@ impl RigPalettes {
         let rows = rows_make_mut(
             &mut self.rows,
             &mut self.spare,
+            &mut self.since_swap,
             wm,
+            (r0, r1),
             &mut self.cost_copies,
             &mut self.cost_copy_us,
         );
@@ -252,7 +289,9 @@ impl RigPalettes {
         let rows = rows_make_mut(
             &mut self.rows,
             &mut self.spare,
+            &mut self.since_swap,
             wm,
+            (3 * base as usize, 3 * (base + len) as usize),
             &mut self.cost_copies,
             &mut self.cost_copy_us,
         );
@@ -310,7 +349,9 @@ impl RigPalettes {
         let rows = rows_make_mut(
             &mut self.rows,
             &mut self.spare,
+            &mut self.since_swap,
             wm,
+            (3 * base as usize, 3 * (base + n) as usize),
             &mut self.cost_copies,
             &mut self.cost_copy_us,
         );
@@ -348,7 +389,9 @@ impl RigPalettes {
         let rows = rows_make_mut(
             &mut self.rows,
             &mut self.spare,
+            &mut self.since_swap,
             wm,
+            (3 * base as usize, 3 * (base + n) as usize),
             &mut self.cost_copies,
             &mut self.cost_copy_us,
         );
@@ -396,7 +439,9 @@ impl RigPalettes {
         let rows = rows_make_mut(
             &mut self.rows,
             &mut self.spare,
+            &mut self.since_swap,
             wm,
+            (3 * base as usize, 3 * (base + len) as usize),
             &mut self.cost_copies,
             &mut self.cost_copy_us,
         );
@@ -509,22 +554,45 @@ impl RigPalettes {
 /// the app's `entities` heal rebuilds it (the `0x60abe0` display-swap teardown, `Reattached` so it
 /// does not re-fade) once there is headroom.
 #[derive(Component)]
+// Sparse: a heal removes it, and a table column would split the unit's table.
+#[component(storage = "SparseSet")]
 pub struct RigStarved;
 
 /// A registered rig, on the entity that owns its pose: its palette slot, joint entities and inverse
-/// bindposes. The slot is freed `on_replace`, not `on_remove`, because a gear or display rebuild
+/// bindposes. The slot is freed `on_discard`, not `on_remove`, because a gear or display rebuild
 /// overwrites this component on the same entity, and `on_remove` does not fire on an overwrite.
 #[derive(Component)]
-#[component(on_replace = free_rig_skin)]
+#[component(on_discard = free_rig_skin)]
 pub struct RigSkin {
     pub slot: u16,
     base: u32,
     len: u32,
     pub(crate) joints: Vec<Entity>,
     pub(crate) ibp: Handle<SkinnedMeshInverseBindposes>,
+    /// The bindposes this rig skins with, taken from `ibp` the first time it skins
+    /// ([`Self::bindposes`]).
+    bindposes: std::sync::OnceLock<Arc<[Mat4]>>,
 }
 
 impl RigSkin {
+    /// The inverse bindposes this rig skins with: the asset behind [`Self::ibp`] as it was the
+    /// first time the rig skinned, which is the frame it was built.
+    ///
+    /// Held, not re-read: the asset is a labelled sub-asset of the model, and a reload (a layer
+    /// mounted or unmounted) replaces it in place the frame the new model lands. A rig built from
+    /// the old model keeps the old joints, pose and meshes until its body is rebuilt, and skinning
+    /// those with the new model's bindposes pulls every vertex toward another skeleton's bone.
+    pub fn bindposes<'a>(
+        &'a self,
+        ibps: &Assets<SkinnedMeshInverseBindposes>,
+    ) -> Option<&'a [Mat4]> {
+        if let Some(held) = self.bindposes.get() {
+            return Some(held);
+        }
+        let now = ibps.get(&self.ibp)?;
+        Some(self.bindposes.get_or_init(|| Arc::from(&now[..])))
+    }
+
     /// The rig's allocated bone count; the collapsed lane has no joint list to measure.
     pub fn bones(&self) -> u32 {
         self.len
@@ -568,6 +636,7 @@ impl RigSkin {
                 len: bones,
                 joints,
                 ibp,
+                bindposes: std::sync::OnceLock::new(),
             }),
             None => {
                 palettes.denied += 1;
@@ -627,7 +696,7 @@ fn compute_rig_palettes(
         let Ok(rig) = rigs.get(root) else {
             continue; // allocation failed at spawn (bind-pose fallback) or already torn down
         };
-        let Some(ibp) = ibps.get(&rig.ibp) else {
+        let Some(ibp) = rig.bindposes(&ibps) else {
             continue;
         };
         // The holder's translation is the origin, so the rows come out rig-sized; any origin is
@@ -644,7 +713,7 @@ fn compute_rig_palettes(
 
 /// The render-world mirror: `Arc` bumps and the frame's dirty ranges.
 #[derive(Resource, Clone, ExtractResource)]
-struct RigPaletteExtract {
+pub(crate) struct RigPaletteExtract {
     rows: Arc<Vec<[f32; 4]>>,
     table: Arc<Vec<u32>>,
     origins: Arc<Vec<[f32; 4]>>,
@@ -652,6 +721,16 @@ struct RigPaletteExtract {
     table_generation: u64,
     origin_generation: u64,
     origin_mirror_generation: u64,
+    // fork: fsr (FORK.md) — the bone offset above which no rig is allocated.
+    bone_watermark: u32,
+}
+
+impl RigPaletteExtract {
+    /// fork: fsr (FORK.md) — the shared light buffer's bytes up to the last allocated bone,
+    /// which bound the velocity pass's previous-pose copy: nothing above them is read.
+    pub(crate) fn live_bytes(&self) -> u64 {
+        palette_region_offset() + u64::from(self.bone_watermark) * BONE_BYTES
+    }
 }
 
 impl Default for RigPaletteExtract {
@@ -665,6 +744,7 @@ impl Default for RigPaletteExtract {
             table_generation: u64::MAX,
             origin_generation: u64::MAX,
             origin_mirror_generation: u64::MAX,
+            bone_watermark: 0,
         }
     }
 }
@@ -695,6 +775,8 @@ fn publish_rig_palettes(mut palettes: ResMut<RigPalettes>, mut out: ResMut<RigPa
     out.table_generation = p.table_generation;
     out.origin_generation = p.origin_generation;
     out.origin_mirror_generation = p.origin_mirror_generation;
+    // fork: fsr (FORK.md) — moves only with an alloc or a free, which bump the table generation.
+    out.bone_watermark = p.bone_watermark();
 }
 
 /// The glue and portrait booths' studio light buffers, which mirror the palette regions.
@@ -739,7 +821,7 @@ fn upload_rig_palettes(
         origin: Some(data.origin_generation),
         origin_mirror: Some(data.origin_mirror_generation),
     };
-    let cost_t0 = rig_cost_enabled().then(std::time::Instant::now);
+    let cost_t0 = rig_cost_enabled().then(bevy::platform::time::Instant::now);
     let mut cost_calls = 0u32;
     let mut cost_bytes = 0u64;
     // Coalesce first: each `write_buffer` call costs far more than its bytes.
@@ -973,6 +1055,29 @@ pub fn spawn_joints(
 mod tests {
     use super::*;
 
+    /// A rig skins with the bindposes of the model it was built from: the asset replaced in place
+    /// by a reload does not reach it, and a rig built after the reload takes the new ones.
+    #[test]
+    fn a_rig_keeps_the_bindposes_it_was_built_with() {
+        let mut ibps = Assets::<SkinnedMeshInverseBindposes>::default();
+        let old = vec![Mat4::IDENTITY; 2];
+        let handle = ibps.add(SkinnedMeshInverseBindposes::from(old.clone()));
+        let mut palettes = RigPalettes::default();
+        let built = RigSkin::allocate_bones(&mut palettes, 2, handle.clone()).unwrap();
+        assert_eq!(built.bindposes(&ibps), Some(&old[..]));
+
+        let new = vec![Mat4::from_translation(Vec3::X); 3];
+        ibps.insert(handle.id(), SkinnedMeshInverseBindposes::from(new.clone()))
+            .unwrap();
+        assert_eq!(
+            built.bindposes(&ibps),
+            Some(&old[..]),
+            "a body still standing on the old model skins with the old model's bindposes"
+        );
+        let rebuilt = RigSkin::allocate_bones(&mut palettes, 3, handle).unwrap();
+        assert_eq!(rebuilt.bindposes(&ibps), Some(&new[..]));
+    }
+
     #[test]
     fn alloc_free_coalesce_roundtrip() {
         let mut p = RigPalettes::default();
@@ -993,6 +1098,55 @@ mod tests {
         assert_eq!(p.occupancy().0, 0);
         assert_eq!(p.occupancy().2, 3, "peak slots");
         assert_eq!(p.occupancy().3, 60, "peak bones");
+    }
+
+    /// A reused spare replays only the ranges written since it retired, and still ends equal to
+    /// the rows it replaces: three rigs, a frame that writes only the first, then one that writes
+    /// only the third, each after the extract took and dropped its reference.
+    #[test]
+    fn a_reused_spare_takes_the_ranges_written_since_and_matches_the_rows() {
+        let mut p = RigPalettes::default();
+        let (_, b0) = p.alloc(2).unwrap();
+        let (_, b1) = p.alloc(2).unwrap();
+        let (_, b2) = p.alloc(2).unwrap();
+        let fill = |p: &mut RigPalettes, base: u32, v: f32| {
+            let wm = p.bone_watermark();
+            let r = 3 * base as usize;
+            let rows = rows_make_mut(
+                &mut p.rows,
+                &mut p.spare,
+                &mut p.since_swap,
+                wm,
+                (r, r + 6),
+                &mut p.cost_copies,
+                &mut p.cost_copy_us,
+            );
+            rows[r..r + 6].fill([v; 4]);
+        };
+        fill(&mut p, b0, 1.0);
+        fill(&mut p, b1, 2.0);
+        fill(&mut p, b2, 3.0);
+        // Frame 1: published, then only rig 0 moves; the clone is a fresh buffer.
+        let held = p.rows.clone();
+        fill(&mut p, b0, 4.0);
+        drop(held);
+        // Frame 2: published again, then only rig 2 moves; the retired buffer is reused.
+        let held = p.rows.clone();
+        fill(&mut p, b2, 5.0);
+        drop(held);
+        // Frame 3: the other buffer comes back, one swap behind, and must catch up rig 2.
+        let held = p.rows.clone();
+        fill(&mut p, b1, 6.0);
+        assert_eq!(p.cost_copies, 3, "each published frame cloned once");
+        for (base, want) in [(b0, 4.0), (b1, 6.0), (b2, 5.0)] {
+            let r = 3 * base as usize;
+            assert_eq!(p.rows[r..r + 6], [[want; 4]; 6], "rig at bone {base}");
+        }
+        assert_eq!(
+            held[3 * b2 as usize],
+            [5.0; 4],
+            "the extract kept its frame"
+        );
     }
 
     #[test]
@@ -1025,7 +1179,9 @@ mod tests {
         let rows = rows_make_mut(
             &mut p.rows,
             &mut p.spare,
+            &mut p.since_swap,
             wm,
+            (0, 3),
             &mut p.cost_copies,
             &mut p.cost_copy_us,
         );
@@ -1061,7 +1217,9 @@ mod tests {
         let rows = rows_make_mut(
             &mut p.rows,
             &mut p.spare,
+            &mut p.since_swap,
             wm,
+            (0, 3),
             &mut p.cost_copies,
             &mut p.cost_copy_us,
         );

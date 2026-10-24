@@ -46,7 +46,9 @@ pub(crate) fn own_font(model: &mut Model, h: FrameHandle) -> Option<FontId> {
 pub(crate) fn own_font_lua(lua: &Lua, frame: &Table) -> mlua::Result<Option<FontId>> {
     let h = super::object::frame_handle_of(lua, frame)?;
     Ok(own_font(
-        &mut lua.app_data_mut::<Model>().expect("model"),
+        &mut lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model"),
         h,
     ))
 }
@@ -215,7 +217,12 @@ pub(crate) const SAME_FONT_HEIGHT: f32 = 1.0 / 4_194_304.0;
 /// (`0x79f2f1`-`0x79f2ff`), else [`face_loads`]. A failure writes nothing (`0x79f30f` →
 /// `0x79f361`). Borrows the model, so a caller asks before it holds it.
 pub(super) fn instance_loads(lua: &Lua, path: &str, height: f32) -> bool {
-    height > 0.0 && face_loads(&lua.app_data_ref::<Model>().expect("model"), path)
+    height > 0.0
+        && face_loads(
+            &lua.app_data_ref::<crate::script::ModelCell>()
+                .expect("model"),
+            path,
+        )
 }
 
 /// Install the twelve font-block methods onto `m`, reading `this` through `resolve`; only for a
@@ -239,7 +246,9 @@ pub(super) fn install(
                 super::font::font_arg(lua, &who, super::font::Verb::SetFontObject, args.front())?;
             let rh = resolve(lua, &this)?;
             let relinked = {
-                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model");
                 match followed_own_font(&model, rh) {
                     // A frame's own font relinks (`0x79ef10`), refusing a loop (`0x79f045`).
                     Some(own) => {
@@ -269,7 +278,9 @@ pub(super) fn install(
         lua.create_function(move |lua, this: Table| {
             let rh = resolve(lua, &this)?;
             let id = {
-                let model = lua.app_data_ref::<Model>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 match followed_own_font(&model, rh) {
                     // A frame's own font answers what it follows (`0x79f090`).
                     Some(own) => model.fonts.get(own).parent,
@@ -300,7 +311,9 @@ pub(super) fn install(
                     monochrome,
                 } = set_font_args(lua, &this, &file, &height, &flags)?;
                 let rh = resolve(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model");
                 let before = model
                     .region_data
                     .get(&rh)
@@ -365,7 +378,9 @@ pub(super) fn install(
         "GetFont",
         lua.create_function(move |lua, this: Table| {
             let rh = resolve(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let d = model.region_data.get(&rh);
             let path = match d.and_then(|d| d.font_path.clone()) {
                 Some(p) => Value::String(lua.create_string(&p)?),
@@ -392,7 +407,9 @@ pub(super) fn install(
             move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
                 let c = super::object::colour_args(lua, &r, &g, &b, &a);
                 let rh = resolve(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model");
                 let d = model.region_data.entry(rh).or_default();
                 d.set_vertex_color(Some(c));
                 // Clears the colour inherit bit (`0x79dbd0`): it survives a font-object repaint.
@@ -408,7 +425,9 @@ pub(super) fn install(
         "GetTextColor",
         lua.create_function(move |lua, this: Table| {
             let rh = resolve(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let c = model
                 .region_data
                 .get(&rh)
@@ -434,7 +453,9 @@ pub(super) fn install(
             move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
                 let color = super::object::colour_args(lua, &r, &g, &b, &a);
                 let rh = resolve(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model");
                 let d = model.region_data.entry(rh).or_default();
                 let offset = d
                     .font_shadow
@@ -449,7 +470,9 @@ pub(super) fn install(
         "GetShadowColor",
         lua.create_function(move |lua, this: Table| {
             let rh = resolve(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let c = model
                 .region_data
                 .get(&rh)
@@ -463,7 +486,9 @@ pub(super) fn install(
         "SetShadowOffset",
         lua.create_function(move |lua, (this, x, y): (Table, f32, f32)| {
             let rh = resolve(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let d = model.region_data.entry(rh).or_default();
             let color = d.font_shadow.map_or(kind.unset_shadow(), |s| s.color);
             d.font_shadow = Some(FontShadow {
@@ -480,7 +505,9 @@ pub(super) fn install(
         "GetShadowOffset",
         lua.create_function(move |lua, this: Table| {
             let rh = resolve(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let o = model
                 .region_data
                 .get(&rh)
@@ -502,7 +529,9 @@ pub(super) fn install(
             let spacing = spacing_arg(lua, &this, &v)?;
             let rh = resolve(lua, &this)?;
             let changed = {
-                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model");
                 let d = model.region_data.entry(rh).or_default();
                 let changed = d.spacing.to_bits() != spacing.to_bits();
                 d.spacing = spacing;
@@ -531,7 +560,9 @@ pub(super) fn install(
         "GetSpacing",
         lua.create_function(move |lua, this: Table| {
             let rh = resolve(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let d = model.region_data.get(&rh);
             let spacing = match kind {
                 FontKind::FontString => d.map_or(0.0, super::RegionData::line_gap),

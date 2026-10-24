@@ -3,7 +3,8 @@
 
 use bevy::prelude::*;
 
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_formats::AreaPoiCatalog;
 
 /// The `AreaPOI.dbc` rows, in file order.
@@ -30,6 +31,6 @@ pub(crate) struct AreaPoiPlugin;
 
 impl Plugin for AreaPoiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_area_poi.after(AssetSet::Open));
+        app.add_data_loaders(load_area_poi);
     }
 }

@@ -65,7 +65,7 @@ fn client(data: &std::path::Path) -> (App, Receiver<ClientCommand>) {
             "#,
         )
         .expect("the recorder installs");
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     world.run_system_once(feed_taxi).expect("the feed runs");
     (app, rx)
 }

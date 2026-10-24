@@ -29,8 +29,6 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::Model;
-
 mod text;
 
 pub use text::{expand_target_tokens, validate_escapes, InvalidEscape, INVALID_ESCAPE};
@@ -40,7 +38,7 @@ impl super::UiScript {
     /// which returns zero values, not `nil`; the app resolves it per world entry from
     /// `ChrRaces.BaseLanguage` and `Languages.dbc`.
     pub fn set_default_language(&mut self, name: Option<String>) {
-        self.model_mut().default_language = name;
+        set_field!(self, default_language, name);
     }
 }
 
@@ -145,7 +143,7 @@ impl super::UiScript {
     /// Push `Languages.dbc` as `(ID, Name_lang)` rows in file order, the table `SendChatMessage`
     /// matches its language name against (`[0xc0db40]`, count `[0xc0db44]`).
     pub fn set_language_table(&mut self, rows: Vec<(u32, String)>) {
-        self.model_mut().language_table = rows;
+        set_field!(self, language_table, rows);
     }
 }
 
@@ -184,7 +182,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetNumLaguages",
         lua.create_function(|lua, _ignored: MultiValue| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.known_languages.len() as i64)
         })?,
     )?;
@@ -199,7 +199,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 index,
                 "Usage: GetLanguageByIndex(index)",
             )?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let name = index
                 .checked_sub(1)
                 .and_then(|i| model.known_languages.get(i));
@@ -216,7 +218,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetDefaultLanguage",
         lua.create_function(|lua, _ignored: MultiValue| {
             let name = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.default_language.clone()
             };
             Ok(match name {
@@ -233,7 +237,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // No local player ends the call quietly, ahead of every check (`0x49f219`-
                 // `0x49f223` to `0x49f78a`).
                 if !super::battlefield_queue::player_exists(
-                    &lua.app_data_ref::<Model>().expect("model app_data"),
+                    &lua.app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data"),
                 ) {
                     return Ok(());
                 }
@@ -255,7 +260,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // The language is read only past the empty-line gate (`0x49f2aa`-`0x49f2e1`).
                 let language = match super::binding_abi::optional_string(lua, &language) {
                     Some(name) => {
-                        let model = lua.app_data_ref::<Model>().expect("model app_data");
+                        let model = lua
+                            .app_data_ref::<crate::script::ModelCell>()
+                            .expect("model app_data");
                         let id = language_id(&model.language_table, &name);
                         Some(
                             id.ok_or_else(|| mlua::Error::RuntimeError("Unknown language".into()))?,

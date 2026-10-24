@@ -146,14 +146,18 @@ pub fn check_refresh(value: &str, _applied: &str, _rows: CvarRows<'_>) -> CvarVe
 /// (`0x869a94`). As in `texLodBias`'s, the lower test reads the parse as is and the upper one the
 /// float it was stored to (`0x688d4c`, `0x688d5c`), and a NaN passes both, unordered
 /// (`0x688d57`, `0x688d67`). Neither bound clamps.
+/// fork: modern lighting — the ceiling is 1500, `benilla_world::view::FARCLIP_RANGE`'s top.
 pub fn check_farclip(value: &str, _applied: &str, _rows: CvarRows<'_>) -> CvarVerdict {
     let v = s_str_to_float(value);
-    if v < 177.0 || v as f32 > 777.0 {
-        CvarVerdict::refuse("FarClip must be in range 177.0 - 777.0.")
+    if v < 177.0 || v as f32 > FARCLIP_MAX {
+        CvarVerdict::refuse("FarClip must be in range 177.0 - 1500.0.")
     } else {
         CvarVerdict::accept()
     }
 }
+
+/// fork: modern lighting — the reference's 777, raised so the long-range fog shows the world.
+const FARCLIP_MAX: f32 = 1500.0;
 
 /// `frillDensity`'s callback (`0x688de0`): `SStrToInt` (`0x64ac60`) compared unsigned to 1 and
 /// 256 (`0x688dec`-`0x688df6`), so a negative is refused too, with "Frill Density must be in
@@ -329,12 +333,14 @@ fn lod_distance(value: &str, min: f32, max: f32, line: &str) -> CvarVerdict {
 }
 
 /// `lodDist` ([`lod_distance`]).
+/// Deviation: the top is 1000, not the reference's 250, so the fork's shipped 500 (a 1000 yd far
+/// clip) is in range; `benilla_world::horizon::LOD_DIST_RANGE` is the same span.
 pub fn check_lod_dist(value: &str, _applied: &str, _rows: CvarRows<'_>) -> CvarVerdict {
     lod_distance(
         value,
         50.0,
-        250.0,
-        "Lod distance must be in range 50.0f - 250.0f.",
+        1000.0,
+        "Lod distance must be in range 50.0f - 1000.0f.",
     )
 }
 
@@ -676,17 +682,17 @@ mod tests {
 
     #[test]
     fn farclip_and_frill_density_refuse_without_clamping() {
-        for ok in ["177", "350", "777", "777.00001", "abc177"] {
+        for ok in ["177", "350", "777", "1000", "1500.00001", "abc177"] {
             let v = check_farclip(ok, "350", &no_rows);
             assert_eq!(v.accept, ok != "abc177", "{ok}");
         }
         // `SStrToFloat`'s 0 * inf is NaN, which neither of the callback's compares refuses.
         assert!(s_str_to_float("0e5000").is_nan());
         assert!(check_farclip("0e5000", "350", &no_rows).accept);
-        for bad in ["176.9", "1000", "-5", "0"] {
+        for bad in ["176.9", "1501", "-5", "0"] {
             assert_eq!(
                 check_farclip(bad, "350", &no_rows),
-                CvarVerdict::refuse("FarClip must be in range 177.0 - 777.0."),
+                CvarVerdict::refuse("FarClip must be in range 177.0 - 1500.0."),
                 "{bad}"
             );
         }
@@ -868,7 +874,7 @@ mod tests {
         assert_eq!(check_lod_dist("100", "", &no_rows), CvarVerdict::accept());
         assert_eq!(
             check_lod_dist("9999", "", &no_rows),
-            CvarVerdict::accept_saying("Lod distance must be in range 50.0f - 250.0f.")
+            CvarVerdict::accept_saying("Lod distance must be in range 50.0f - 1000.0f.")
         );
         assert_eq!(
             check_texture_lod_dist("777", "", &no_rows),

@@ -109,10 +109,18 @@ impl TerrainResidency {
 /// neither its terrain nor its fence collider is still building, or once its ADT's load failed
 /// (the module's `Deviation:`). A tile the WDT does not author is never requested, so never
 /// resident.
+///
+/// Deviation: on the page a tile a stand-in floor holds (`super::provisional`) is resident too. Its
+/// reads come over a network and are never waited for (`await_inner_tiles`), so the real colliders
+/// trail the body by design and the WDL floor holds it meanwhile; gating on them would stop the
+/// body at every tile line. The world's edge has no stand-in, so it still holds the body.
 pub(super) fn publish_terrain_residency(
     state: Res<TerrainStreamer>,
     pending: Query<(), With<PendingCollider>>,
     asset_server: Res<AssetServer>,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))] provisional: Option<
+        Res<super::provisional::ProvisionalCollision>,
+    >,
     mut residency: ResMut<TerrainResidency>,
 ) {
     let mut next = TerrainResidency {
@@ -132,6 +140,10 @@ pub(super) fn publish_terrain_residency(
         if pending.contains(root) || t.wall.is_some_and(|w| pending.contains(w)) {
             continue;
         }
+        next.insert(tx, ty);
+    }
+    #[cfg(target_arch = "wasm32")]
+    for (tx, ty) in provisional.iter().flat_map(|p| p.floored_tiles()) {
         next.insert(tx, ty);
     }
     if *residency != next {

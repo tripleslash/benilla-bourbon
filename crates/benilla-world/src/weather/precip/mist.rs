@@ -6,6 +6,7 @@
 use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
 use bevy::prelude::*;
 
+use crate::modern::weather::PuffLook;
 use crate::weather::{WeatherKind, WeatherState};
 
 use super::pool::{HeightCache, CELL};
@@ -212,45 +213,137 @@ pub(super) fn run_mist(
     mist.nodes.retain(|n| n.age < n.life);
 }
 
+/// The reference's puff, a classic frame's: 12×12, alpha `linearstep(6, 18)` uncapped.
+// fork: modern weather — the look is a parameter; a modern frame passes `modern::weather::PUFF`.
+pub(super) const REFERENCE_PUFF: PuffLook = PuffLook {
+    half: MIST_HALF,
+    near: MIST_ALPHA_NEAR,
+    far: MIST_ALPHA_FAR,
+    fade: MIST_FADE_S,
+    alpha: 1.0,
+    procedural: false,
+};
+
 /// Mist puffs: 12×12 camera-facing quads in the current fog colour (so drawn fog-off), alpha per
 /// corner (`0x67add0`, packed at `0x67ae20`) so a quad beside the camera shows its far corners.
+/// fork: perf — one point a puff, carrying its life's trapezoid; the quad and the corner fade
+/// are the vertex stage's ([`puff_shape`]).
 pub(super) fn push_mist(
-    out: &mut Vec<crate::particles::buffer::EffectVertex>,
+    out: &mut Vec<crate::particles::buffer::EffectPoint>,
     mist: &Mist,
-    cam_right: Vec3,
-    cam_up: Vec3,
-    cam_pos: Vec3,
-    fog_color: [f32; 3],
+    look: PuffLook,
 ) {
-    let r = cam_right * MIST_HALF;
-    let u = cam_up * MIST_HALF;
-    for node in mist.nodes.iter().take(MIST_CAP) {
+    out.extend(mist.nodes.iter().take(MIST_CAP).map(|node| {
         // A wall-bound puff's life was cut at spawn, so this same ramp fades it before the wall.
-        let trapezoid = (node.age / MIST_FADE_S).clamp(0.0, 1.0)
-            * ((node.life - node.age) / MIST_FADE_S).clamp(0.0, 1.0);
-        let c = node.pos;
-        // Perimeter order (bl, br, tr, tl).
-        for (corner, uv) in [
-            (c - r - u, [0.0, 1.0]),
-            (c + r - u, [1.0, 1.0]),
-            (c + r + u, [1.0, 0.0]),
-            (c - r + u, [0.0, 0.0]),
-        ] {
-            let dist_a = ((corner.distance(cam_pos) - MIST_ALPHA_NEAR)
-                / (MIST_ALPHA_FAR - MIST_ALPHA_NEAR))
-                .clamp(0.0, 1.0);
-            out.push(crate::particles::buffer::EffectVertex {
-                pos: corner.to_array(),
-                uv,
-                color: [fog_color[0], fog_color[1], fog_color[2], dist_a * trapezoid],
-            });
+        let trapezoid = (node.age / look.fade).clamp(0.0, 1.0)
+            * ((node.life - node.age) / look.fade).clamp(0.0, 1.0)
+            * look.alpha;
+        crate::particles::buffer::EffectPoint {
+            pos: node.pos.to_array(),
+            a: trapezoid,
+            v: [0.0; 3],
+            b: 0.0,
         }
+    }));
+}
+
+/// The puff's quad and its per-corner distance fade, in `fog_color`.
+pub(super) fn puff_shape(
+    look: PuffLook,
+    fog_color: [f32; 3],
+) -> crate::particles::buffer::EffectShape {
+    crate::particles::buffer::EffectShape::Puff {
+        half: look.half,
+        near: look.near,
+        far: look.far,
+        color: fog_color,
+        procedural: look.procedural,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One puff of `age` seconds as its pushed point's alpha: the life's trapezoid.
+    fn pushed(age: f32, look: PuffLook) -> f32 {
+        let mist = Mist {
+            nodes: vec![MistNode {
+                pos: Vec3::new(0.0, 0.0, -40.0),
+                dir: Vec3::ZERO,
+                tail: 0.0,
+                age,
+                life: 2.7,
+                path: vec![0.0],
+                planar_speed: 0.0,
+            }],
+            budget: 0.0,
+        };
+        let mut out = Vec::new();
+        push_mist(&mut out, &mist, look);
+        assert_eq!(out.len(), 1, "one point a puff");
+        assert_eq!(out[0].pos, [0.0, 0.0, -40.0]);
+        out[0].a
+    }
+
+    /// A corner's alpha `dist` yards from the eye, as the shape's ramp gives it to the shader.
+    fn corner_alpha(dist: f32, age: f32, look: PuffLook) -> f32 {
+        let crate::particles::buffer::EffectShape::Puff { near, far, .. } =
+            puff_shape(look, [0.5, 0.6, 0.7])
+        else {
+            panic!("the puff shape");
+        };
+        pushed(age, look) * ((dist - near) / (far - near)).clamp(0.0, 1.0)
+    }
+
+    /// The reference's puff: a 12×12 quad, opaque from 18 yd, nothing within 6, on 0.4 s ramps.
+    #[test]
+    fn a_classic_puff_is_the_references() {
+        assert_eq!(
+            puff_shape(REFERENCE_PUFF, [0.5, 0.6, 0.7]),
+            crate::particles::buffer::EffectShape::Puff {
+                half: 6.0,
+                near: 6.0,
+                far: 18.0,
+                color: [0.5, 0.6, 0.7],
+                procedural: false,
+            }
+        );
+        assert_eq!(pushed(1.35, REFERENCE_PUFF), 1.0, "whole in mid-life");
+        assert_eq!(corner_alpha(40.0, 1.35, REFERENCE_PUFF), 1.0);
+        assert_eq!(corner_alpha(6.0, 1.35, REFERENCE_PUFF), 0.0);
+        // A puff 12 yd out: its corners are √(12² + 6² + 6²) = 14.7 yd from the eye.
+        let corner = (12.0f32 * 12.0 + 72.0).sqrt();
+        let want = (corner - 6.0) / 12.0;
+        assert!((corner_alpha(corner, 1.35, REFERENCE_PUFF) - want).abs() < 1e-6);
+        // Half-way up the 0.4 s fade-in.
+        assert!((pushed(0.2, REFERENCE_PUFF) - 0.5).abs() < 1e-6);
+    }
+
+    /// A modern frame's puff covers less of the screen and never more than its cap, and close to
+    /// the camera (12 yd) it is under half as opaque as the reference's.
+    #[test]
+    fn a_modern_puff_is_smaller_fainter_and_farther_off() {
+        let look = crate::modern::weather::PUFF;
+        let edge = 2.0 * look.half;
+        assert!(edge * edge <= 0.7 * 144.0, "{edge} yd");
+        assert_eq!(pushed(1.35, look), look.alpha);
+        assert!(look.alpha < 1.0);
+        assert!(
+            look.procedural && !REFERENCE_PUFF.procedural,
+            "a modern puff draws its own falloff, a classic one the texture"
+        );
+        for dist in [0.0f32, 6.0, 12.0, 18.0, 24.0, 60.0] {
+            for age in [0.1f32, 0.5, 1.35, 2.2, 2.65] {
+                assert!(
+                    corner_alpha(dist, age, look)
+                        <= look.alpha * corner_alpha(dist, age, REFERENCE_PUFF) + 1e-6,
+                    "{dist} yd, {age} s"
+                );
+            }
+        }
+        assert!(corner_alpha(12.0, 1.35, look) < 0.5 * corner_alpha(12.0, 1.35, REFERENCE_PUFF));
+    }
 
     /// The shader leg's 38 nodes/s against the ceiling of [`MIST_CAP`].
     #[test]

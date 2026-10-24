@@ -5,13 +5,23 @@
 //! callers wait on their loads (`0x44ad50`): the glue model (`0x470c59`, `0x471308`, `0x4731b6`),
 //! the dressing room (`0x504485`), `PlayerModel`'s `SetUnit` (`0x5059be`) and world entry
 //! (`0x49091e`). Here the forced lane ([`SkinComposites::force`]) composites on the calling thread.
+//!
+//! fork: web — the browser splits the work where its platform does. The chain is reachable only
+//! from the page's thread (its resident pack map lives on the JS heap), so the plan's blobs are
+//! warmed ([`Chain::ready`]) and read there ([`CompositePlan::read`]), and only the decode and
+//! blend ([`benilla_formats::CompositeBlobs::blend`]) goes to a worker, when the page has one.
+//! A look whose blobs are still arriving answers [`BodyAtlas::Pending`] and is asked again next
+//! frame, forced or not: the page's thread never blocks on a fetch or a worker.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::Context;
 use benilla_assets::{repeat_texture_authored, LockRecover, SpatialCache};
-use benilla_formats::{blp_bytes_to_mip_chain, BlpMipChain, Chain, CharSections, CompositePlan};
+#[cfg(not(target_arch = "wasm32"))]
+use benilla_formats::blp_bytes_to_mip_chain;
+use benilla_formats::{BlpMipChain, Chain, CharSections, CompositePlan};
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
@@ -68,6 +78,10 @@ pub(super) struct SkinComposites {
     pub(super) done: SpatialCache<SkinKey, Option<Handle<Image>>>,
     /// Composites on the async compute pool, one per look however many bodies wait on it.
     running: HashMap<SkinKey, Task<Option<BlpMipChain>>>,
+    /// fork: web — composites blended on the page's thread for want of a worker, landed by
+    /// [`Self::land`] like a finished task.
+    #[cfg(target_arch = "wasm32")]
+    blended: HashMap<SkinKey, Option<BlpMipChain>>,
 }
 
 impl SkinComposites {
@@ -79,10 +93,14 @@ impl SkinComposites {
         sections: &SkinSections,
         plan: impl FnOnce() -> Option<CompositePlan>,
     ) -> BodyAtlas {
-        self.request_with(key, || plan().map(|p| work(p, sections.chain.clone())))
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.request_with(key, || plan().map(|p| work(p, sections.chain.clone())));
+        #[cfg(target_arch = "wasm32")]
+        return self.request_web(key, sections, plan);
     }
 
     /// [`Self::request`] over any work, so the lane is testable without the install.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn request_with(&mut self, key: SkinKey, work: impl FnOnce() -> Option<Work>) -> BodyAtlas {
         if let Some(done) = self.done.fetch(&key) {
             return BodyAtlas::Ready(done);
@@ -104,23 +122,30 @@ impl SkinComposites {
     /// An atlas composited on this thread on a miss, or waited for if it is already running, as
     /// the reference's forced composite waits on its section loads (`0x44ad50`) and passes no
     /// admission test: the glue model's (`0x477860(cc, 1)` at `0x470c59`, `0x471308`, `0x4731b6`)
-    /// and the dressing room's (`0x504485`, in `0x504470`). A re-dress of a standing body and a
-    /// rig-heal rebuild come here too, so neither drops out for a frame.
+    /// and the dressing room's (`0x504485`, in `0x504470`). A native re-dress of a standing body
+    /// and a rig-heal rebuild come here too, so neither drops out for a frame.
+    ///
+    /// Always [`BodyAtlas::Ready`] on native. fork: web — [`BodyAtlas::Pending`] while the look's
+    /// blobs are still arriving or its blend is on a worker, as the page's thread cannot wait.
     pub(super) fn force(
         &mut self,
         key: SkinKey,
         sections: &SkinSections,
         plan: impl FnOnce() -> Option<CompositePlan>,
         images: &mut Assets<Image>,
-    ) -> Option<Handle<Image>> {
-        self.force_with(
+    ) -> BodyAtlas {
+        #[cfg(not(target_arch = "wasm32"))]
+        return BodyAtlas::Ready(self.force_with(
             key,
             || plan().map(|p| work(p, sections.chain.clone())),
             images,
-        )
+        ));
+        #[cfg(target_arch = "wasm32")]
+        return self.force_web(key, sections, plan, images);
     }
 
     /// [`Self::force`] over any work, so the lane is testable without the install.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn force_with(
         &mut self,
         key: SkinKey,
@@ -148,6 +173,8 @@ impl SkinComposites {
                 }
                 None => true,
             });
+        #[cfg(target_arch = "wasm32")]
+        finished.extend(self.blended.drain());
         let landed = finished.len();
         for (key, atlas) in finished {
             self.install(key, atlas, images);
@@ -184,10 +211,132 @@ impl SkinComposites {
     pub(super) fn clear(&mut self) {
         self.done.clear();
         self.running.clear();
+        #[cfg(target_arch = "wasm32")]
+        self.blended.clear();
+    }
+
+    /// fork: web — [`Self::request`]: the blobs are read on this thread once every one is resident,
+    /// and blended on a worker, or here when the page has none (landed next frame either way).
+    #[cfg(target_arch = "wasm32")]
+    fn request_web(
+        &mut self,
+        key: SkinKey,
+        sections: &SkinSections,
+        plan: impl FnOnce() -> Option<CompositePlan>,
+    ) -> BodyAtlas {
+        if let Some(done) = self.done.fetch(&key) {
+            return BodyAtlas::Ready(done);
+        }
+        if self.running.contains_key(&key) || self.blended.contains_key(&key) {
+            return BodyAtlas::Pending;
+        }
+        let blobs = match read_blobs(sections, plan) {
+            WebRead::NoAtlas => {
+                self.done.insert(key, None);
+                return BodyAtlas::Ready(None);
+            }
+            WebRead::NotYet => return BodyAtlas::Pending,
+            WebRead::Read(blobs) => blobs,
+        };
+        match spawn_blend(blobs) {
+            Ok(task) => {
+                self.running.insert(key, task);
+            }
+            Err(blobs) => {
+                self.blended.insert(key, blend(blobs));
+            }
+        }
+        BodyAtlas::Pending
+    }
+
+    /// fork: web — [`Self::force`]: as [`Self::request_web`], but a look whose blobs are resident
+    /// blends here and binds this frame; one whose blend is on a worker is polled, never waited on.
+    #[cfg(target_arch = "wasm32")]
+    fn force_web(
+        &mut self,
+        key: SkinKey,
+        sections: &SkinSections,
+        plan: impl FnOnce() -> Option<CompositePlan>,
+        images: &mut Assets<Image>,
+    ) -> BodyAtlas {
+        if let Some(done) = self.done.fetch(&key) {
+            return BodyAtlas::Ready(done);
+        }
+        if let Some(atlas) = self.blended.remove(&key) {
+            return BodyAtlas::Ready(self.install(key, atlas, images));
+        }
+        if let Some(task) = self.running.get_mut(&key) {
+            return match block_on(future::poll_once(task)) {
+                Some(atlas) => {
+                    self.running.remove(&key);
+                    BodyAtlas::Ready(self.install(key, atlas, images))
+                }
+                None => BodyAtlas::Pending,
+            };
+        }
+        match read_blobs(sections, plan) {
+            WebRead::NoAtlas => BodyAtlas::Ready(self.install(key, None, images)),
+            WebRead::NotYet => BodyAtlas::Pending,
+            WebRead::Read(blobs) => BodyAtlas::Ready(self.install(key, blend(blobs), images)),
+        }
     }
 }
 
+/// fork: web — what reading a look's blobs on the page's thread found.
+#[cfg(target_arch = "wasm32")]
+enum WebRead {
+    /// No base skin row, or a base skin that does not read: the look has no atlas.
+    NoAtlas,
+    /// A blob is still on the wire; every one has been asked for, so the warm is under way.
+    NotYet,
+    Read(benilla_formats::CompositeBlobs),
+}
+
+/// fork: web — warm every blob the plan may read and, once all are resident, read them. A full
+/// pass, not `all`: every path must be asked, because asking is what starts its warm.
+#[cfg(target_arch = "wasm32")]
+fn read_blobs(sections: &SkinSections, plan: impl FnOnce() -> Option<CompositePlan>) -> WebRead {
+    let Some(plan) = plan() else {
+        return WebRead::NoAtlas;
+    };
+    let mut chain = sections.chain.lock_recover();
+    if plan.paths().filter(|p| !chain.ready(p)).count() != 0 {
+        return WebRead::NotYet;
+    }
+    match plan.read(&mut chain) {
+        Ok(blobs) => WebRead::Read(blobs),
+        Err(e) => {
+            warn!("body skin composite failed: {e:#}");
+            WebRead::NoAtlas
+        }
+    }
+}
+
+/// fork: web — decode and blend on this thread.
+#[cfg(target_arch = "wasm32")]
+fn blend(blobs: benilla_formats::CompositeBlobs) -> Option<BlpMipChain> {
+    blobs
+        .blend()
+        .inspect_err(|e| warn!("body skin composite failed: {e:#}"))
+        .ok()
+}
+
+/// fork: web — hand the blend to a worker (`spawn_pooled`, `Send` plain bytes), or give the blobs
+/// back when the page has no worker to take it (`?nothreads=1`, no cross-origin isolation, the
+/// single-threaded build): a pooled task there would never run.
+#[cfg(target_arch = "wasm32")]
+fn spawn_blend(
+    blobs: benilla_formats::CompositeBlobs,
+) -> Result<Task<Option<BlpMipChain>>, benilla_formats::CompositeBlobs> {
+    #[cfg(target_feature = "atomics")]
+    if benilla_assets::frame_budget::pooled_work_runs() {
+        return Ok(AsyncComputeTaskPool::get().spawn_pooled(async move { blend(blobs) }));
+    }
+    Err(blobs)
+}
+
 /// A plan's work over the shared chain, which each read locks for its archive lookup alone.
+#[cfg(not(target_arch = "wasm32"))]
 fn work(plan: CompositePlan, chain: Arc<Mutex<Chain>>) -> Work {
     Box::new(move || {
         plan.run(|path| read_texture(&chain, path))
@@ -197,6 +346,7 @@ fn work(plan: CompositePlan, chain: Arc<Mutex<Chain>>) -> Work {
 }
 
 /// Read and decode one BLP off `chain`, locked only to find its archive.
+#[cfg(not(target_arch = "wasm32"))]
 fn read_texture(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<BlpMipChain> {
     let name = path.replace('/', "\\");
     let archive = chain.lock_recover().archive_for(&name)?;

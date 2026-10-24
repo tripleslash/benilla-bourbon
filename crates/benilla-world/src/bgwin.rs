@@ -38,17 +38,34 @@ const BG_ENV_PREFIXES: &[&str] = &[
 ];
 
 /// Whether this is an instrumented background run: `WOW_BG=0` forces no (to watch a probe live),
-/// any other `WOW_BG` forces yes, and otherwise any [`BG_ENV_PREFIXES`] env counts.
+/// any other `WOW_BG` forces yes, and otherwise any [`BG_ENV_PREFIXES`] env counts. Read once:
+/// the probe window asks every frame, and the environment does not change under a run.
 pub fn background_run() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(scan_background_run)
+}
+
+fn scan_background_run() -> bool {
     match std::env::var("WOW_BG").as_deref() {
         Ok("0") => return false,
         Ok(_) => return true,
         Err(_) => {}
     }
-    std::env::vars_os().any(|(name, _)| {
-        name.to_str()
-            .is_some_and(|name| BG_ENV_PREFIXES.iter().any(|p| name.starts_with(p)))
-    })
+    env_names().any(|name| BG_ENV_PREFIXES.iter().any(|p| name.starts_with(p)))
+}
+
+/// Every environment variable name — or none in a browser, where `std::env::vars_os` does not
+/// return an empty list but *panics* ("not supported on this platform"), and a page has no
+/// instrumented-run env to detect anyway.
+fn env_names() -> impl Iterator<Item = String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        std::iter::empty()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::vars_os().filter_map(|(name, _)| name.to_str().map(str::to_owned))
+    }
 }
 
 /// Background envs whose run reads no pixels, so its window may be small; [`no_pixel_run`] needs
@@ -72,14 +89,19 @@ const NO_PIXEL_ENV_PREFIXES: &[&str] = &[
 
 /// Whether this run reads no pixels, so its window may be small and parked. The app pins a probe
 /// window `AlwaysOnTop` (an occluded macOS window throttles to about 1 fps), overriding this
-/// module's ordering. `WOW_BG=1` with no run-driving env is not a no-pixel run.
+/// module's ordering. `WOW_BG=1` with no run-driving env is not a no-pixel run. Read once, as
+/// [`background_run`].
 pub fn no_pixel_run() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(scan_no_pixel_run)
+}
+
+fn scan_no_pixel_run() -> bool {
     if !background_run() {
         return false;
     }
     let mut saw_one = false;
-    for (name, _) in std::env::vars_os() {
-        let Some(name) = name.to_str() else { continue };
+    for name in env_names() {
         if !BG_ENV_PREFIXES.iter().any(|p| name.starts_with(p)) {
             continue;
         }

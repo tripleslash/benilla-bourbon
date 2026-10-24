@@ -268,7 +268,7 @@ impl super::UiScript {
     /// Drain the ready-check lines composed since the last call; the reference prints each as a
     /// `CHAT_MSG_SYSTEM` line (`0x49a870(text, 10)`).
     pub fn take_ready_check_lines(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().ready_check.lines)
+        drain_field!(self, ready_check.lines)
     }
 
     /// `PromoteByName(name)` for the app's Rust slash parser: the binding's own resolve and call.
@@ -299,7 +299,7 @@ impl super::UiScript {
 
     /// Push the saved raid-lockout list, replacing it; the app fires `UPDATE_INSTANCE_INFO`.
     pub fn set_saved_instances(&mut self, saved: Vec<SavedInstanceInfo>) {
-        self.model_mut().saved_instances = saved;
+        set_field!(self, saved_instances, saved);
     }
 }
 
@@ -315,13 +315,17 @@ fn call(lua: &Lua, request: PartyRequest) -> mlua::Result<()> {
 /// Whether the active player's object is held (`ClntObjMgrObjectPtr(active, 0x10)`, as at
 /// `0x48aa96`): the unit feed's player guid.
 fn player_object(lua: &Lua) -> bool {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     model.unit_guids.player != 0
 }
 
 /// The best player of `name` (`0x493aa0`, typemask 0x10, mode 2), as the name verbs resolve it.
 fn player_named(lua: &Lua, name: &str) -> Option<u64> {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     model.closest_player(name, Filter::AssistableAlive)
 }
 
@@ -347,7 +351,9 @@ fn assistant_by_name(lua: &Lua, name: &str, grant: bool) -> mlua::Result<()> {
 /// Whether `guid` is ourselves or on the party slots (`0x4e7f70`), or on the raid roster
 /// (`0x4baee0`); a zero guid is neither.
 fn is_group_member(lua: &Lua, guid: u64) -> bool {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     let party = &model.party;
     guid != 0
         && (guid == party.own_guid
@@ -360,7 +366,9 @@ fn is_group_member(lua: &Lua, guid: u64) -> bool {
 /// group leader (`0x4e92d4`..`0x4e92eb`; `0x4e952b`..`0x4e9542`) 0x4b. `false` once one was shown.
 fn loot_gates(lua: &Lua) -> bool {
     let (grouped, leads) = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let party = &model.party;
         (
             party.members.first().is_some_and(|m| m.guid != 0) || !party.raid.is_empty(),
@@ -459,7 +467,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumPartyMembers",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.party.members.len() as i64)
         })?,
     )?;
@@ -468,7 +478,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumRaidMembers",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.party.raid.len() as i64)
         })?,
     )?;
@@ -481,7 +493,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetRaidRosterInfo(index)")?;
             let row = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // One unsigned compare after the decrement (`0x4bb5bb dec eax`, `0x4bb5be jae`)
                 // catches an index of 0 or below and one past the count; `dec` wraps, and
                 // `wrapping_sub` keeps that true of `i32::MIN`.
@@ -500,7 +514,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsRaidLeader",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(if is_raid_leader(&model.party) {
                 Value::Integer(1)
             } else {
@@ -520,7 +536,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if id.wrapping_sub(1) >= 4 {
                 return Err(mlua::Error::runtime(USAGE));
             }
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let (id, n) = (i64::from(id), model.party.members.len() as i64);
             Ok(if id <= n {
                 Value::Integer(1)
@@ -534,7 +552,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetPartyLeaderIndex",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.party.leader_index))
         })?,
     )?;
@@ -543,7 +563,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsPartyLeader",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(if is_party_leader(&model.party) {
                 Value::Integer(1)
             } else {
@@ -556,7 +578,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetLootMethod",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             // Never grouped, the reference reads zero-filled cells past `.data`'s end, and method
             // 0 is `freeforall`.
             let method = if model.party.loot_method.is_empty() {
@@ -576,7 +600,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetLootThreshold",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.party.loot_threshold))
         })?,
     )?;
@@ -609,7 +635,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, name: Value| {
             let name = binding_abi::string_arg(lua, name, r#"Usage: InviteByName("name")"#)?;
             let ours = player_object(lua) && {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .unit("player")
                     .and_then(|u| u.name.as_deref())
@@ -651,7 +679,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             lua.create_function(move |lua, unit: Value| {
                 let token = binding_abi::string_arg(lua, unit, usage)?;
                 let (player, guid) = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     let guid = model.unit_guids.guid_of(&token)?.unwrap_or(0);
                     (model.unit_guids.player, guid)
                 };
@@ -701,7 +731,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     return display_error(lua, "ERR_SPECIFY_MASTER_LOOTER");
                 };
                 let found = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     model.closest_player(&name, Filter::AssistableAlive)
                 };
                 // The pick must be ourselves (`0x4e7f70`, which also tests the four party slots)
@@ -752,7 +784,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let unit = binding_abi::string_arg(lua, unit, USAGE)?;
             let index = binding_abi::number_arg(lua, index, USAGE)? as u8;
             let guid = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.unit_guids.guid_of(&unit)?.unwrap_or(0)
             };
             if guid != 0 {
@@ -770,7 +804,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsRaidOfficer",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let me = model.unit("player").map_or(0, |u| u.guid);
             let officer = me != 0 && model.party.raid.iter().any(|m| m.guid == me && m.rank > 0);
             Ok(if officer {
@@ -792,7 +828,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // Party slot 1 held (`0x4bbc96`-`0x4bbca3`) and the leader cell our guid
             // (`0x4bbca5`-`0x4bbcbc`), else nothing.
             let leads = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let party = &model.party;
                 party.members.first().is_some_and(|m| m.guid != 0)
                     && party.leader_guid == party.own_guid
@@ -875,7 +913,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let now = clock(lua);
             {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // The worker `0x4bb1d0` runs for the leader alone: a nonzero active guid equal to
                 // the leader cell (`0x4bb1d6`-`0x4bb1fd`).
                 let own = model.party.own_guid;
@@ -903,7 +943,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // read raw (`0x703bf0` at `0x4bb2bb`, with no Model borrow held) and added as a system
             // line (`0x49a870(text, 10)` at `0x4bb2c7`).
             call(lua, PartyRequest::ReadyCheckStart)?;
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .ready_check
                 .deadline = Some(now + READY_CHECK_SECONDS);
@@ -938,7 +978,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ready: Option<Value>| {
             let now = clock(lua);
             let running = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.ready_check.deadline.is_some_and(|d| now < d)
             };
             if !running {
@@ -958,7 +1000,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumSavedInstances",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.saved_instances.len() as i64)
         })?,
     )?;
@@ -967,7 +1011,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetSavedInstanceInfo(index)")?;
             let row = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 usize::try_from(index.wrapping_sub(1))
                     .ok()
                     .and_then(|i| model.saved_instances.get(i))
@@ -990,7 +1036,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetRaidRosterSelection",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: SetRaidRosterSelection(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.raid_selection = i64::from(index);
             Ok(())
         })?,
@@ -998,7 +1046,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetRaidRosterSelection",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.raid_selection)
         })?,
     )?;
@@ -1034,7 +1084,9 @@ fn clock(lua: &Lua) -> f64 {
 /// already disarmed, as the reference's does.
 fn ready_check_tick(lua: &Lua, now: f64) {
     let names = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let Some(deadline) = model.ready_check.deadline else {
             return;
         };
@@ -1063,7 +1115,7 @@ fn ready_check_tick(lua: &Lua, now: f64) {
     } else {
         template.replacen("%s", &names.join(", "), 1)
     };
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .ready_check
         .lines
@@ -1085,7 +1137,9 @@ fn ready_check_pending_online(model: &Model) -> bool {
 /// worker runs at once.
 fn ready_check_force_close(lua: &Lua) {
     let now = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         if model.ready_check.deadline.is_none() {
             return;
         }

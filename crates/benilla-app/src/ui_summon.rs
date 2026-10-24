@@ -284,10 +284,10 @@ mod tests {
             .init_resource::<NameCache>()
             .init_resource::<Time<Real>>()
             .add_systems(Update, feed_summon);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let call = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .run("GetSummonConfirmSummoner()")
                 .unwrap();
             app.update();

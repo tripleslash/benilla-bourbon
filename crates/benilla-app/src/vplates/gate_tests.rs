@@ -45,7 +45,7 @@ fn plates_app() -> App {
     script
         .run(r#"CreateFrame("Frame", "WorldFrame") UNKNOWNOBJECT = "Unknown""#)
         .unwrap();
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     let mut camera = Camera::default();
     camera.computed.clip_from_view =
         Mat4::perspective_infinite_reverse_rh(1.2, 1024.0 / 768.0, 0.1);
@@ -142,7 +142,7 @@ fn plate_names(app: &mut App) -> Vec<String> {
     super::drive_vplates_once(app.world_mut());
     let mut names = app
         .world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<Vec<String>>(
             r#"local out = {}
             for _, c in ipairs({WorldFrame:GetChildren()}) do

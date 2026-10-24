@@ -24,17 +24,22 @@
 //! ([`Cvars::own_for_session`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::time::Instant;
+
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
 use crate::ui_script::VmMemo;
 use benilla_ui::script::{CvarCheck, CvarWrite, SeededCvar, UiScript};
+use benilla_world::liquid::WaterDetail;
+use benilla_world::modern::LightingSettings;
 
 #[cfg(test)]
 mod deviations_doc;
 mod inert;
+// fork: the Graphics Preset ladder (FORK.md).
 mod listing;
+mod presets;
 #[cfg(test)]
 mod reference_table;
 mod table;
@@ -123,6 +128,15 @@ pub(crate) struct Row {
     overlay: Option<(String, String)>,
 }
 
+impl Row {
+    /// fork: a row whose default parses as a number, so a session override (`?cvar=` on the page)
+    /// or a preset rung that does not parse is refused before it reaches the set path, which
+    /// stores any text and reads it as 0 (`SStrToInt`).
+    pub(crate) fn numeric(&self) -> bool {
+        self.default.trim().parse::<f32>().is_ok()
+    }
+}
+
 /// What a write did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SetOutcome {
@@ -156,6 +170,13 @@ pub(crate) struct Cvars {
     /// Lowercased names the session owns rather than the player: the env levers, and `gxApi`, the
     /// render backend. Never saved; the file's entry is left as found.
     session_owned: HashSet<String>,
+    /// The session-owned rows a player's own write takes back (fork: web build) — see
+    /// [`Self::fallback_for_session`] and [`Self::cap_for_session`] — each with the value it
+    /// displaced, which [`Self::release_fallbacks`] restores. Keys are a subset of `session_owned`.
+    yielding: HashMap<String, String>,
+    /// A player's write moved a [`GRAPHICS_CVARS`] row since [`sync_cvars`] last looked (fork: web
+    /// build) — the Graphics page's Apply or Defaults, which retires the GPU recovery tier.
+    graphics_applied: bool,
     /// Accepted moves not yet triggered, flushed by [`sync_cvars`], the boot load, the session-edge
     /// fold, or a caller of [`Cvars::take_events`].
     events: Vec<CvarChanged>,
@@ -196,6 +217,8 @@ impl Cvars {
             index: HashMap::with_capacity(REGISTERED.len() + inert::INERT.len()),
             file: BTreeMap::new(),
             session_owned: HashSet::new(),
+            yielding: HashMap::new(),
+            graphics_applied: false,
             events: Vec::new(),
             outbox: Vec::new(),
             dirty: false,
@@ -223,6 +246,11 @@ impl Cvars {
 }
 
 /// A row's registered default on a client of this locale index; `None` for a name no row has.
+///
+/// [`boot_cvar`] answers from `config.toml` and only from it, so it is `None` for a player who has
+/// never changed a setting, which is every player's first launch. A boot reader that treats that
+/// `None` as "off" is not reading the default, it is inventing a second one, and the two drift the
+/// moment the row is re-registered. [`apply_boot_layers`] is where that bit.
 pub(crate) fn registered_default(name: &str, locale: usize) -> Option<&'static str> {
     all_rows()
         .find(|r| r.name.eq_ignore_ascii_case(name))
@@ -315,7 +343,6 @@ impl Cvars {
         self.row(name).map(|r| r.default.as_str())
     }
 
-    #[cfg(test)]
     pub(crate) fn is_session_owned(&self, name: &str) -> bool {
         self.session_owned.contains(&name.to_ascii_lowercase())
     }
@@ -386,10 +413,19 @@ impl Cvars {
         }
         // The read-only flag stops a host write in `InternalSet`, after the callback ran; a VM
         // write met the VM's copy of the flag.
-        if !from_vm && self.read_only.contains(&row.name.to_ascii_lowercase()) {
+        let key = row.name.to_ascii_lowercase();
+        if !from_vm && self.read_only.contains(&key) {
             return SetOutcome::ReadOnly;
         }
+        // A player's write takes a yielding row back: from here on it is theirs and is saved.
+        let reclaimed = from_vm && self.yielding.remove(&key).is_some();
+        if reclaimed {
+            self.session_owned.remove(&key);
+        }
         if same_text(&row.value, value) {
+            if reclaimed {
+                self.touch();
+            }
             return SetOutcome::Unchanged;
         }
         let old = std::mem::replace(&mut row.value, value.to_string());
@@ -409,12 +445,36 @@ impl Cvars {
     /// A host-side write (minimap zoom, camera views, the remembered character, the tip cursor):
     /// mirrored into the VM, persisted and observed.
     pub(crate) fn set(&mut self, name: &str, value: &str) -> SetOutcome {
-        self.write(name, value, false)
+        let outcome = self.write(name, value, false);
+        // fork: a rung's name writes the rung's rows ([`presets`]).
+        if name.eq_ignore_ascii_case(presets::GRAPHICS_QUALITY) {
+            presets::apply_graphics_preset(self, value);
+        }
+        outcome
     }
 
     /// A write the VM's mirror already made, drained from its change queue.
     pub(crate) fn set_from_vm(&mut self, name: &str, value: &str) -> SetOutcome {
-        self.write(name, value, true)
+        let outcome = self.write(name, value, true);
+        if matches!(outcome, SetOutcome::Changed | SetOutcome::Staged)
+            && GRAPHICS_CVARS.iter().any(|c| c.eq_ignore_ascii_case(name))
+        {
+            self.graphics_applied = true;
+        }
+        // fork: a rung's name writes the rung's rows, at the write's own place in the queue, so a
+        // member edit queued behind it wins; a rung that moved a row is a Graphics Apply even
+        // when its name was already showing ([`presets`]).
+        if name.eq_ignore_ascii_case(presets::GRAPHICS_QUALITY)
+            && presets::apply_graphics_preset(self, value).is_some_and(|moved| moved > 0)
+        {
+            self.graphics_applied = true;
+        }
+        outcome
+    }
+
+    /// Whether a player's write moved a Graphics row since the last call — and clear it.
+    pub(crate) fn take_graphics_applied(&mut self) -> bool {
+        std::mem::take(&mut self.graphics_applied)
     }
 
     /// The reset text the VM's mirror filled ([`benilla_ui::script::CvarWrite::FillReset`]),
@@ -447,8 +507,17 @@ impl Cvars {
             warn!("cvar {name}: not registered — restore ignored");
             return SetOutcome::Unknown;
         };
+        // fork: a restore is the player's write, so it takes a yielding row back as `write` does.
+        let key = self.rows[i].name.to_ascii_lowercase();
+        let reclaimed = self.yielding.remove(&key).is_some();
+        if reclaimed {
+            self.session_owned.remove(&key);
+        }
         let row = &mut self.rows[i];
         if same_text(&row.value, value) {
+            if reclaimed {
+                self.touch();
+            }
             return SetOutcome::Unchanged;
         }
         let old = std::mem::replace(&mut row.value, value.to_string());
@@ -458,6 +527,10 @@ impl Cvars {
                 old,
                 new: value.to_string(),
             });
+        }
+        // fork: a restored Graphics row is a Graphics Apply, as a set one is.
+        if GRAPHICS_CVARS.iter().any(|c| c.eq_ignore_ascii_case(name)) {
+            self.graphics_applied = true;
         }
         self.touch();
         SetOutcome::Changed
@@ -538,6 +611,120 @@ impl Cvars {
             row.pending = None;
             self.outbox.push((row.name.clone(), value.to_string()));
         }
+    }
+
+    /// **This session owns the row, and the observers hear the value** — [`Self::own_for_session`]
+    /// for a lever no knob read at its `Default`: the page's `?name=value` query string and the
+    /// hosted `config.json` (fork: web build). Session-owned, so never saved and the file's entry
+    /// is kept; unlike `own_for_session`, the move is queued as a [`CvarChanged`] because nothing
+    /// else would carry it to the knob. A numeric row refuses a value that does not parse, as a
+    /// write does. Returns whether the row moved.
+    pub(crate) fn override_for_session(&mut self, name: &str, value: &str) -> bool {
+        let key = name.to_ascii_lowercase();
+        let Some(&i) = self.index.get(&key) else {
+            warn!("cvar {name}: not registered — session value ignored");
+            return false;
+        };
+        self.session_owned.insert(key);
+        let row = &mut self.rows[i];
+        if row.numeric() && value.trim().parse::<f32>().is_err() {
+            warn!(
+                "cvar {}: unparseable session value '{value}' ignored",
+                row.name
+            );
+            return false;
+        }
+        row.pending = None;
+        if row.value == value {
+            return false;
+        }
+        let old = std::mem::replace(&mut row.value, value.to_string());
+        self.events.push(CvarChanged {
+            name: row.name.clone(),
+            old,
+            new: value.to_string(),
+        });
+        self.outbox.push((row.name.clone(), value.to_string()));
+        true
+    }
+
+    /// **A value for the session only where the player has none** (fork: web build) — the page's
+    /// GPU recovery tier. It applies like [`Self::override_for_session`] (session-owned, never
+    /// saved), but only when the file holds no value of the player's own, and the player's next
+    /// write through the VM takes the row back ([`Self::write`]), so a scale chosen in the Graphics
+    /// page is applied, saved, and outranks the tier on every later load. Returns whether the row
+    /// moved.
+    pub(crate) fn fallback_for_session(&mut self, name: &str, value: &str) -> bool {
+        let key = name.to_ascii_lowercase();
+        if self.session_owned.contains(&key)
+            || self.file.keys().any(|k| k.eq_ignore_ascii_case(name))
+        {
+            return false;
+        }
+        self.yield_for_session(name, value)
+    }
+
+    /// **A ceiling for the session only** (fork: web build) — the GPU recovery tier's lighting
+    /// quality. Unlike [`Self::fallback_for_session`] it holds a saved value down as well: a tier
+    /// is the machine's evidence, and a saved Cinematic is exactly what it must not reload into.
+    /// A row already at or under the ceiling, or owned by a lever, is left alone. Session-owned
+    /// and never saved (the file keeps the player's value), and taken back by the player's own
+    /// write, or restored by [`Self::release_fallbacks`]. Returns whether the row moved.
+    pub(crate) fn cap_for_session(&mut self, name: &str, cap: &str) -> bool {
+        if self.is_session_owned(name) {
+            return false;
+        }
+        let (Some(current), Ok(ceiling)) =
+            (self.get(name).map(record_float), cap.trim().parse::<f32>())
+        else {
+            return false;
+        };
+        if current <= ceiling {
+            return false;
+        }
+        self.yield_for_session(name, cap)
+    }
+
+    /// The shared half of the two: take the row for the session, remembering what it displaced.
+    fn yield_for_session(&mut self, name: &str, value: &str) -> bool {
+        let key = name.to_ascii_lowercase();
+        let Some(prior) = self.get(name).map(str::to_string) else {
+            warn!("cvar {name}: not registered — session value ignored");
+            return false;
+        };
+        let moved = self.override_for_session(name, value);
+        if self.session_owned.contains(&key) {
+            self.yielding.insert(key, prior);
+        }
+        moved
+    }
+
+    /// **Every row the recovery tier still holds, back to the player** (fork: web build): each
+    /// leaves the session's hands and returns to the value it displaced — the registered default
+    /// under a fallback, the saved or default value under a cap — which is what a load without the
+    /// tier gives. The observers hear the move. Returns how many rows moved.
+    pub(crate) fn release_fallbacks(&mut self) -> usize {
+        let mut moved = 0;
+        for (key, prior) in std::mem::take(&mut self.yielding) {
+            self.session_owned.remove(&key);
+            let Some(&i) = self.index.get(&key) else {
+                continue;
+            };
+            let row = &mut self.rows[i];
+            row.pending = None;
+            if row.value == prior {
+                continue;
+            }
+            let old = std::mem::replace(&mut row.value, prior.clone());
+            self.events.push(CvarChanged {
+                name: row.name.clone(),
+                old,
+                new: prior.clone(),
+            });
+            self.outbox.push((row.name.clone(), prior));
+            moved += 1;
+        }
+        moved
     }
 
     /// An addon's `RegisterCVar`: a row of its own at the file's value for the name, else at the
@@ -802,7 +989,7 @@ impl Cvars {
         let Some(path) = path else {
             return;
         };
-        let name = match std::fs::read_to_string(&path) {
+        let name = match crate::local_state::read_to_string(&path) {
             Ok(text) => text.trim().to_string(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
@@ -885,7 +1072,9 @@ impl Plugin for CvarPlugin {
 /// seeded (`RenderScale::default()` reads `$WOW_RENDER_SCALE`, …). A lever whose resource is absent
 /// still marks its row, so the file cannot apply over the env.
 fn session_values(world: &World) -> Vec<(&'static str, Option<String>)> {
-    let set = |k: &str| std::env::var_os(k).is_some();
+    // `webenv::var`, not `std::env`: natively the same read, and in a browser tab the page's own
+    // env object and query string — so `?farclip=` is session-only exactly as `$WOW_FARCLIP` is.
+    let set = |k: &str| crate::webenv::var(k).is_some();
     let flag = |b: bool| if b { "1" } else { "0" }.to_string();
     let mut out: Vec<(&'static str, Option<String>)> = Vec::new();
     if set("WOW_UI_SCALE") {
@@ -935,6 +1124,44 @@ fn session_values(world: &World) -> Vec<(&'static str, Option<String>)> {
         let v = world.get_resource::<crate::world_backdrop::RenderScale>();
         out.push(("renderScale", v.map(|r| r.0.to_string())));
     }
+    // `$WOW_SSAO` / `$WOW_SSGI` are the indirect-lighting A/B levers, and doubly session-only:
+    // they are how `benilla-worldview` (which has no CVar host) drives the pass at all, so a value
+    // that stuck in the file would silently denominate every later look at the same scene.
+    let indirect = world.get_resource::<benilla_world::ssilvb::IndirectLighting>();
+    if set("WOW_SSAO") {
+        out.push(("ssaoStrength", indirect.map(|i| i.ao.to_string())));
+    }
+    if set("WOW_SSGI") {
+        out.push(("ssgiStrength", indirect.map(|i| i.gi.to_string())));
+    }
+    // fork: modern lighting — `$WOW_LIGHTING` / `$WOW_LIGHTING_QUALITY`, on the same law.
+    // `LightingSettings::default()` has already taken them.
+    let lighting = world.get_resource::<LightingSettings>();
+    if set("WOW_LIGHTING") {
+        out.push((
+            "lightingModel",
+            lighting.map(|l| l.model.as_cvar().to_string()),
+        ));
+    }
+    if set("WOW_LIGHTING_QUALITY") {
+        out.push((
+            "lightingQuality",
+            lighting.map(|l| l.quality.as_cvar().to_string()),
+        ));
+    }
+    // `$WOW_WATER_DETAIL` is the liquid-renderer A/B lever: every side-by-side of the two water
+    // paths sets it, and a value that stuck would leave the client on whichever side the last
+    // comparison wanted.
+    if set("WOW_WATER_DETAIL") {
+        let v = world.get_resource::<WaterDetail>();
+        out.push(("waterDetail", v.map(|w| w.0.to_string())));
+    }
+    // `$WOW_HD_MODELS` is the content-layer lever — how the model test suite and
+    // `benilla-worldview` reach the layer. `apply_boot_layers` has already taken it; a value that
+    // stuck in the file would leave a player mounting 1.7 GiB of art because a test run wanted it.
+    if set("WOW_HD_MODELS") {
+        out.push(("hdCharacterModels", None));
+    }
     // `$WOW_HOST` is the session's realmlist, which a test run must never write into the file.
     if set("WOW_HOST") {
         let v = world.get_resource::<crate::realmlist::Realmlist>();
@@ -960,6 +1187,10 @@ fn load_config(world: &mut World) {
         // `gxApi` is the render backend, a fact about the machine that `sync_cvars` pushes live, so
         // it is never persisted.
         cvars.own_for_session("gxApi", None);
+        // The hosted page's realmlist, applied BEFORE the file is read: it marks `realmlist`
+        // session-owned, and `load_file` skips every session-owned key. That ordering is the
+        // whole of "`/config.json` is the only source" — see the function.
+        apply_hosted_realmlist(&mut cvars);
         cvars.announce_locale_defaults();
         let (file_has_account, can_save) = match &stored {
             StoredConfig::Table(t) => (
@@ -976,18 +1207,143 @@ fn load_config(world: &mut World) {
                 // change.
                 warn!("{msg}");
             }
-            StoredConfig::Table(table) => cvars.load_file(table),
+            StoredConfig::Table(table) => {
+                cvars.load_file(table);
+                // fork: governed rows registered after the save follow the saved Graphics Preset.
+                cvars.reapply_saved_presets();
+            }
         }
         cvars.adopt_legacy_account(
             crate::local_state::legacy_account_path(),
             file_has_account,
             can_save,
         );
+        apply_query_overrides(&mut cvars);
+        apply_gpu_tier(&mut cvars);
         cvars.log_console_lines();
         cvars.take_events()
     };
     for event in events {
         world.trigger(event);
+    }
+}
+
+/// `/config.json`'s `realmlist` — on a hosted page, **the only source the address comes from**.
+///
+/// It used to be the bottom of the precedence stack: a default, applied only when `config.toml`
+/// carried no `realmList` of its own, because the login screen had a control a visitor could type
+/// their own realm into. That control is gone (see `login/screen.rs`), and with it the reason for
+/// the deference — a saved value can now only be one an *older* build wrote, and letting it win
+/// would mean an operator re-uploading `config.json` silently fails to move exactly the returning
+/// visitors, which is the whole population that matters.
+///
+/// So it registers as **session-overridden**, the same standing `$WOW_HOST` and every `$WOW_*`
+/// A/B lever have: the file's value is not applied over it, and nothing writes it back. Two things
+/// still outrank it, both deliberately — `$WOW_HOST`/`?host=` (the harness pin every probe and
+/// smoke run sets, which `Realmlist` refuses to be moved off) and a Lua `SetCVar("realmList")`,
+/// which is a live session act and not a stored one.
+///
+/// Native is untouched: [`crate::webenv::config`] is `None` off the page, so `config.toml` remains
+/// the realmlist's home there — the seam the reference itself edits through `realmlist.wtf`.
+fn apply_hosted_realmlist(cvars: &mut Cvars) {
+    if cvars.is_session_owned(crate::realmlist::CVAR_REALMLIST) {
+        return; // `$WOW_HOST` owns the session.
+    }
+    let Some(address) = crate::webenv::config("realmlist") else {
+        return;
+    };
+    // Marked whatever the value, and deliberately: a `config.json` that names an unusable address
+    // has still spoken for this key, and falling back to a saved `config.toml` one would be the
+    // two-source confusion this exists to end.
+    cvars.override_for_session(crate::realmlist::CVAR_REALMLIST, &address);
+    info!("config: realmList = {address} from the hosted config.json");
+}
+
+/// **Browser build only:** any registered CVar named in the page's query string
+/// (`?farclip=150&worlddetail=0&renderScale=0.75`) overrides the stored value for this session —
+/// the web twin of the `$WOW_*` A/B levers, and the only way to hand a slow device a setting from
+/// a link. Session-owned for the same reason, so the file keeps the player's own value.
+#[cfg(target_arch = "wasm32")]
+fn apply_query_overrides(cvars: &mut Cvars) {
+    for (name, _) in registered_pairs() {
+        if cvars.is_session_owned(name) {
+            continue; // a lever already took it, at the value its knob read
+        }
+        // `webenv::var` strips `WOW_` and lowercases, so the query key is the CVar's own name.
+        let Some(value) = crate::webenv::var(&format!("WOW_{name}")) else {
+            continue;
+        };
+        cvars.override_for_session(name, &value);
+        info!("config: {name} = {value} from the page URL (this session only)");
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_query_overrides(_cvars: &mut Cvars) {}
+
+/// fork: web build — what `web/gpu.js` steps down to after the GPU device was lost. The render
+/// scale (`__wenilla_env.gpu_render_scale`) is a fallback, so a render scale the player saved
+/// wins; the lighting quality (`gpu_lighting_quality`) is a ceiling, so it holds a saved Cinematic
+/// down too. Both are this session's only, either is the player's again from their own write to
+/// it, and any Graphics Apply retires both ([`release_gpu_tier`]).
+fn apply_gpu_tier(cvars: &mut Cvars) {
+    if let Some(value) = crate::webenv::var("WOW_GPU_RENDER_SCALE") {
+        if cvars.fallback_for_session("renderScale", &value) {
+            info!("config: renderScale = {value} from the GPU recovery tier (until you set one)");
+        }
+    }
+    if let Some(value) = crate::webenv::var("WOW_GPU_LIGHTING_QUALITY") {
+        if cvars.cap_for_session("lightingQuality", &value) {
+            info!("config: lightingQuality capped at {value} by the GPU recovery tier");
+        }
+    }
+}
+
+/// fork: web build — the CVars the Graphics page writes: its CVar rows, and `gamma` behind
+/// Gamma's `SetGamma`. A player's write to any of them is "applied new graphics settings",
+/// which is what retires `web/gpu.js`'s recovery tier.
+pub(crate) const GRAPHICS_CVARS: &[&str] = &[
+    "uiScale",
+    "farclip",
+    "WorldDetail",
+    // Spell Detail, a Graphics page row since upstream's panel.
+    "spellEffectLevel",
+    "gamma",
+    "brightness",
+    "weatherDensity",
+    "gxVSync",
+    "worldShadows",
+    "hdCharacterModels",
+    "ssaoStrength",
+    "ssgiStrength",
+    "waterDetail",
+    "lightingModel",
+    "lightingQuality",
+    "autoExposure",
+    // fork: the hour the world's day and night are drawn at.
+    "serverTimeOffset",
+    "renderScale",
+    // fork: fsr (FORK.md)
+    "frameGeneration",
+    "rcasSharpness",
+    // fork: the Everwood port (FORK.md)
+    "foliageWind",
+    "foliageWindStrength",
+    "rainSurfaces",
+    // The Graphics Preset and the two rows it governs that the page does not show.
+    "graphicsQuality",
+    "reforgedModels",
+    "lavaLight",
+];
+
+/// fork: web build — the player applied Graphics settings of their own, so the GPU recovery tier
+/// is over: the page persists tier 0 and lifts its pixel budget now ([`crate::webgpu`]), and a
+/// render scale the tier still holds returns to the player's default. Without it a single device
+/// loss held the lower tier until it decayed, storage was cleared, or `?gputier=0`.
+fn release_gpu_tier(cvars: &mut Cvars) {
+    let released = cvars.release_fallbacks();
+    if crate::webgpu::settings_applied() || released > 0 {
+        info!("config: Graphics settings applied — GPU recovery tier cleared");
     }
 }
 
@@ -1008,7 +1364,7 @@ fn stored_config() -> StoredConfig {
     let Some(path) = crate::local_state::config_path() else {
         return StoredConfig::Absent; // hermetic capture or no install: session-only state
     };
-    let text = match std::fs::read_to_string(&path) {
+    let text = match crate::local_state::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return StoredConfig::Absent,
         Err(e) => return StoredConfig::Bad(format!("config: cannot read {}: {e}", path.display())),
@@ -1034,6 +1390,51 @@ pub(crate) fn boot_cvar(name: &str) -> Option<String> {
     }
 }
 
+/// **Which optional content layers this run mounts**, resolved and published to
+/// `benilla_formats::layers` before the `App` exists.
+///
+/// A sibling of [`boot_cvar`]'s single caller and for the same structural reason: the client opens
+/// two chains — the Bevy `AssetReader`'s and the world store's — and both are built during
+/// plugin setup, long before a resource could carry the answer. A layer is a MOUNT, and a mounted
+/// chain has already decided; there is nothing a later read of the CVar could act on.
+///
+/// Environment first, file second, the row's own registered default if neither says otherwise —
+/// the ladder every other `$WOW_*` override in this module follows. **The last rung is
+/// [`registered_default`], not a literal**: `boot_cvar` answers only from `config.toml`, so a
+/// player who has never touched a setting has no row at all, and a hardcoded `false` there would
+/// leave the layer off for exactly the players the default is for.
+pub(crate) fn apply_boot_layers() {
+    // `webenv::var`, not `std::env` — `$WOW_HD_MODELS` natively, `?hd_models=1` (or
+    // `__wenilla_env`) in a browser tab. The parse is `benilla_formats::layers::layer_switch`'s,
+    // shared with the page and the tools: three readers of one setting that disagree about what
+    // "on" means is a client that mounts what the page did not download.
+    let hd = crate::webenv::var("WOW_HD_MODELS")
+        .and_then(|v| benilla_formats::layers::layer_switch(&v))
+        .unwrap_or_else(|| {
+            boot_cvar("hdCharacterModels")
+                .or_else(|| registered_default("hdCharacterModels", 0).map(str::to_string))
+                .and_then(|v| benilla_formats::layers::layer_switch(&v))
+                .unwrap_or(false)
+        });
+    benilla_formats::set_hd_character_models(hd);
+    // The reforged art mounts later, with the Turtle layer, but on this read: the session keeps
+    // what the page loaded with, and a change of the row waits for the next load.
+    benilla_formats::layers::set_reforged_models(reforged_models_setting());
+}
+
+/// The player's `reforgedModels` as the page loads, `$WOW_REFORGED_MODELS` (`?reforged_models=`)
+/// ahead of it: the client's boot read, and the world viewer's, which has no CVar host of its own.
+pub(crate) fn reforged_models_setting() -> bool {
+    crate::webenv::var("WOW_REFORGED_MODELS")
+        .and_then(|v| benilla_formats::layers::layer_switch(&v))
+        .unwrap_or_else(|| {
+            boot_cvar("reforgedModels")
+                .or_else(|| registered_default("reforgedModels", 0).map(str::to_string))
+                .and_then(|v| benilla_formats::layers::layer_switch(&v))
+                .unwrap_or(false)
+        })
+}
+
 /// Per frame: seed a new VM's mirror, drain its registrations and writes into the registry, push
 /// the registry's writes into the mirror, and trigger every accepted move.
 pub(crate) fn sync_cvars(
@@ -1052,10 +1453,19 @@ pub(crate) fn sync_cvars(
                 cvars.own_for_session("gxApi", Some(backend));
             }
         }
+        // A Graphics write drained last frame (or folded at a session edge) retires the recovery
+        // tier; its render-scale move flushes with this frame's events below.
+        if cvars.take_graphics_applied() {
+            release_gpu_tier(&mut cvars);
+        }
         if cvars.has_console_lines() {
             cvars.log_console_lines();
         }
         let Some(script) = script else {
+            // fork: the Graphics Preset's label follows the rows it names.
+            if cvars.stale_graphics_quality().is_some() {
+                cvars.mirror_graphics_quality();
+            }
             // Nothing to mirror into; a later VM is seeded from the table, which carries it all.
             if cvars.has_outbox() {
                 cvars.take_outbox();
@@ -1073,6 +1483,11 @@ pub(crate) fn sync_cvars(
         if script.has_cvar_traffic() || script.cvar_lua_created() != cvars.lua_created {
             cvars.drain_vm(script);
             cvars.log_console_lines();
+        }
+        // fork: after every ordered write and before the mirror flush, the Graphics Preset's label
+        // is re-derived from the rows it names.
+        if cvars.stale_graphics_quality().is_some() {
+            cvars.mirror_graphics_quality();
         }
         if seeded.claim(script) {
             cvars.seed_vm(script);
@@ -1137,7 +1552,7 @@ pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
         return;
     }
     let events = world.resource_scope(|world, mut cvars: Mut<Cvars>| {
-        let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() else {
+        let Some(mut script) = world.get_non_send_mut::<UiScript>() else {
             return Vec::new();
         };
         cvars.drain_vm(&mut script);
@@ -1207,10 +1622,8 @@ fn write_config(cvars: &mut Cvars) {
             cvars.file = file;
             cvars.dirty = false;
             if let Some(old) = cvars.legacy_account.take() {
-                if let Err(e) = std::fs::remove_file(&old) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        warn!("config: cannot remove {}: {e}", old.display());
-                    }
+                if let Err(e) = crate::local_state::remove_file(&old) {
+                    warn!("config: cannot remove {}: {e}", old.display());
                 }
             }
         }
@@ -1255,7 +1668,13 @@ mod tests {
     use crate::video::VideoConfig;
     use crate::world_backdrop::{RenderScale, RENDER_SCALE_RANGE};
     use benilla_world::clutter::ClutterConfig;
+    use benilla_world::modern::{LightingModel, LightingQuality};
+    use benilla_world::ssilvb::{IndirectLighting, SSILVB_RANGE};
     use benilla_world::view::{MsaaSetting, ViewDistance, FARCLIP_RANGE, MSAA_RANGE};
+    // The engine's shipped indirect-lighting numbers. Named only here: the registered strings are
+    // welded to them, and the fixtures below seed the resource with them rather than with
+    // `IndirectLighting::default()`, which reads $WOW_SSAO / $WOW_SSGI.
+    use benilla_world::ssilvb::{AO_DEFAULT, GI_DEFAULT};
 
     /// Every row's [`Reference`] column holds, both ways: a `Same` row that drifted fails, and so
     /// does a `Deviates` or `Overridden` row back in agreement. Numbers parse-compare, so "1" and
@@ -1419,12 +1838,18 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                // fork: the stock window's `SmallCull` boots at the High stop, with `WorldDetail`.
+                "SmallCull",
                 "SoundReverb",
+                // fork: 16x anisotropic filtering by default (c6b9efa9).
+                "anisotropic",
                 "frillDensity",
                 "gxApi",
                 "gxColorBits",
                 "gxDepthBits",
                 "gxResolution",
+                // fork: terrain chunk LOD switches at 500 yd, the far clip being 1000.
+                "lodDist",
                 "realmList",
                 "weatherDensity",
             ],
@@ -1461,9 +1886,19 @@ mod tests {
         assert!(sound.limiter, "the output limiter ships on");
         assert!(!sound.reverb, "zone reverb ships off");
         assert_eq!(d["uiScale"], DEFAULT_UI_SCALE);
-        // `ViewDistance::default()` reads `$WOW_FARCLIP`, so this is the env-less literal.
-        assert_eq!(d["farclip"], 350.0);
+        // `ViewDistance::default()` reads `$WOW_FARCLIP`, so this is the env-less literal (the
+        // fork's 1000 yd horizon; the reference registers 350).
+        assert_eq!(d["farclip"], 1000.0);
         assert_eq!(d["nearclip"], benilla_world::view::NEARCLIP_DEFAULT);
+        assert_eq!(d["lodDist"], benilla_world::horizon::LOD_DIST_SHIPPED);
+        assert_eq!(
+            d["rcasSharpness"],
+            benilla_world::fsr::RCAS_SHARPNESS_DEFAULT
+        );
+        assert_eq!(
+            d["serverTimeOffset"] as i32,
+            crate::net::TimeOffset::default().0
+        );
         assert_eq!(
             d["nearclip"],
             ViewDistance::default().nearclip,
@@ -1569,7 +2004,7 @@ mod tests {
             f32::from(benilla_world::weather::WeatherState::default().weather_density)
         );
         // `ClutterConfig::default()` reads `$WOW_CLUTTER_DENSITY`; stop 1 is its env-less ×2.
-        assert_eq!(d["WorldDetail"], 1.0);
+        assert_eq!(d["WorldDetail"], 2.0);
         assert_eq!(
             d["frillDensity"],
             (d["WorldDetail"] + 1.0) * benilla_formats::FRILL_DENSITY as f32
@@ -1584,9 +2019,58 @@ mod tests {
         assert_eq!(zoom.outdoor, benilla_ui::widget::MINIMAP_DEFAULT_ZOOM);
         // `video::tests` welds `VideoConfig::vsync` to the window's boot present mode.
         assert_eq!(d["gxVSync"] != 0.0, VideoConfig::default().vsync);
+        assert_eq!(
+            d["worldShadows"] != 0.0,
+            VideoConfig::default().world_shadows
+        );
         assert_eq!(d["boothHalfRate"] != 0.0, PaneRate::default().half);
         // Every visual golden assumes a 1:1 backdrop.
         assert_eq!(d["renderScale"], 1.0);
+        // The indirect-lighting pair welds to the ENGINE's shipped numbers, not to a literal
+        // repeated here: `benilla_world::ssilvb` owns what the pass ships at. (Not
+        // `IndirectLighting::default()`, which reads $WOW_SSAO / $WOW_SSGI.) The water tier welds
+        // to the engine's tier constant the same way.
+        assert_eq!(
+            d["waterDetail"],
+            f32::from(benilla_world::liquid::WATER_DETAIL_EXPERIMENTAL)
+        );
+        assert_eq!(d["ssaoStrength"], AO_DEFAULT);
+        assert_eq!(d["ssgiStrength"], GI_DEFAULT);
+        // The lighting pair welds to the engine's shipped model and tier: Modern at Cinematic.
+        assert_eq!(
+            d["lightingModel"],
+            f32::from(LightingModel::default().as_cvar())
+        );
+        assert_eq!(
+            d["lightingQuality"],
+            f32::from(LightingQuality::DEFAULT.as_cvar())
+        );
+        // fork: fsr (FORK.md) — frame generation boots on, as the engine's knob does.
+        assert_eq!(
+            d["frameGeneration"] != 0.0,
+            benilla_world::fsr::FrameGeneration::default().0
+        );
+        // fork: the Everwood port — the foliage wind boots at the engine's registered tier and gain.
+        assert_eq!(
+            d["foliageWind"],
+            f32::from(benilla_world::wind::FoliageWind::REGISTERED)
+        );
+        assert_eq!(
+            d["foliageWindStrength"],
+            benilla_world::wind::FoliageWindStrength::REGISTERED
+        );
+        assert_eq!(
+            d["rainSurfaces"] != 0.0,
+            benilla_world::weather::wetness::RainSurfaces::default().0
+        );
+        assert_eq!(
+            d["autoExposure"] != 0.0,
+            benilla_world::modern::look::AutoExposure::default().0
+        );
+        assert_eq!(
+            d["lavaLight"],
+            benilla_world::lighting::LavaLightGain::REGISTERED
+        );
     }
 
     /// The FFX pass's three switches reach it one by one (`ffx`, `ffxGlow`, `ffxDeath`).
@@ -1667,15 +2151,15 @@ mod tests {
             "elsewhere.example.org",
             "a known key with a bad value is consumed, and the resource keeps its truth",
         );
-        // Volume clamps at the knob to [0,1]; `farclip` refuses outside [177, 777] (`0x688d40`)
-        // and the old value stands.
+        // Volume clamps at the knob to [0,1]; `farclip` refuses outside [177, 1500] (`0x688d40`,
+        // the fork's ceiling) and the old value stands.
         apply(&mut app, "mastervolume", "7");
         assert_eq!(res::<SoundConfig>(&app).master, 1.0);
         apply(&mut app, "farclip", "400");
         assert_eq!(apply(&mut app, "farclip", "50"), SetOutcome::Vetoed);
         assert_eq!(res::<ViewDistance>(&app).farclip, 400.0);
         assert_eq!(res::<Cvars>(&app).get("farclip"), Some("400"));
-        assert_eq!(apply(&mut app, "farclip", "1000"), SetOutcome::Vetoed);
+        assert_eq!(apply(&mut app, "farclip", "2000"), SetOutcome::Vetoed);
         assert_eq!(res::<ViewDistance>(&app).farclip, 400.0);
         assert!(FARCLIP_RANGE.contains(&res::<ViewDistance>(&app).farclip));
         // `nearclip` clamps to the callback's `[0.01, 0.33]` (`0x688d90`).
@@ -1732,6 +2216,74 @@ mod tests {
         assert_eq!(res::<RenderScale>(&app).0, *RENDER_SCALE_RANGE.end());
         apply(&mut app, "renderscale", "0");
         assert_eq!(res::<RenderScale>(&app).0, *RENDER_SCALE_RANGE.start());
+        // The indirect-lighting pair: independent knobs, each clamped at both ends, and each
+        // reaching exactly ZERO — the off state the render node checks for and the shader's own
+        // no-op arm. A clamp that floored at some epsilon would make "0" not mean off.
+        apply(&mut app, "ssaoStrength", "0.25");
+        assert_eq!(res::<IndirectLighting>(&app).ao, 0.25);
+        assert_eq!(
+            res::<IndirectLighting>(&app).gi,
+            GI_DEFAULT,
+            "the two halves are independent"
+        );
+        apply(&mut app, "ssaostrength", "9");
+        assert_eq!(res::<IndirectLighting>(&app).ao, *SSILVB_RANGE.end());
+        apply(&mut app, "ssaostrength", "-1");
+        assert_eq!(res::<IndirectLighting>(&app).ao, *SSILVB_RANGE.start());
+        // `waterDetail` MAPS rather than clamps: the value space is a set of tiers, and everything
+        // that is not the 1.12.1 renderer resolves to cata. `1` — the reference's medium tier —
+        // is the fork's SSR-only cata tier: the same renderer without the planar mirror render.
+        apply(&mut app, "waterDetail", "0");
+        assert!(!res::<WaterDetail>(&app).is_cata());
+        apply(&mut app, "waterDetail", "1");
+        assert!(
+            res::<WaterDetail>(&app).is_cata(),
+            "the medium tier must resolve to a renderer that exists"
+        );
+        assert!(!res::<WaterDetail>(&app).has_planar_reflection());
+        apply(&mut app, "waterdetail", "2");
+        assert!(res::<WaterDetail>(&app).has_planar_reflection());
+        assert!(!res::<WaterDetail>(&app).is_experimental());
+        // `3` is the fork's experimental modern combine: the full tier, mirror and all. Only a 3
+        // asks for it — an out-of-range value still reads as plain cata.
+        apply(&mut app, "waterDetail", "3");
+        assert!(res::<WaterDetail>(&app).is_experimental());
+        assert!(res::<WaterDetail>(&app).has_planar_reflection());
+        apply(&mut app, "waterDetail", "7");
+        assert!(res::<WaterDetail>(&app).is_cata());
+        assert!(!res::<WaterDetail>(&app).is_experimental());
+        apply(&mut app, "waterDetail", "-3");
+        assert!(!res::<WaterDetail>(&app).is_cata());
+        // The fork's shadow switch and lighting pair.
+        apply(&mut app, "worldShadows", "0");
+        assert!(!res::<VideoConfig>(&app).world_shadows);
+        apply(&mut app, "lightingModel", "0");
+        assert_eq!(res::<LightingSettings>(&app).model, LightingModel::Classic);
+        apply(&mut app, "lightingModel", "1");
+        assert_eq!(
+            res::<LightingSettings>(&app).model,
+            LightingModel::from_cvar(1.0)
+        );
+        apply(&mut app, "lightingQuality", "3");
+        assert_eq!(
+            res::<LightingSettings>(&app).quality,
+            LightingQuality::from_cvar(3.0)
+        );
+        // fork: fsr (FORK.md)
+        apply(&mut app, "frameGeneration", "1");
+        assert!(res::<benilla_world::fsr::FrameGeneration>(&app).0);
+        apply(&mut app, "framegeneration", "0");
+        assert!(!res::<benilla_world::fsr::FrameGeneration>(&app).0);
+        apply(&mut app, "serverTimeOffset", "-5");
+        assert_eq!(res::<crate::net::TimeOffset>(&app).0, -5);
+        apply(&mut app, "servertimeoffset", "30");
+        assert_eq!(res::<crate::net::TimeOffset>(&app).0, 12);
+        apply(&mut app, "serverTimeOffset", "2.6");
+        assert_eq!(res::<crate::net::TimeOffset>(&app).0, 3);
+        apply(&mut app, "rcasSharpness", "0.5");
+        assert_eq!(res::<benilla_world::fsr::RcasSharpness>(&app).0, 0.5);
+        apply(&mut app, "rcassharpness", "7");
+        assert_eq!(res::<benilla_world::fsr::RcasSharpness>(&app).0, 1.0);
         assert!(!res::<crate::perf::FpsJournalSetting>(&app).0);
         apply(&mut app, "fpsJournal", "1");
         assert!(res::<crate::perf::FpsJournalSetting>(&app).0);
@@ -1903,6 +2455,18 @@ mod tests {
             res::<crate::ui_gamma::DisplayGamma>(&app).0,
             *crate::ui_gamma::GAMMA_RANGE.end()
         );
+        // `brightness` is the slider's 0 to 1, its 0.5 default the identity lift.
+        for (wrote, want, lift) in [
+            ("0.5", 0.5, 0.0),
+            ("1", 1.0, crate::ui_gamma::BRIGHTNESS_SPAN),
+            ("0", 0.0, -crate::ui_gamma::BRIGHTNESS_SPAN),
+            ("7", 1.0, crate::ui_gamma::BRIGHTNESS_SPAN),
+        ] {
+            apply(&mut app, crate::ui_gamma::CVAR_BRIGHTNESS, wrote);
+            let brightness = *res::<crate::ui_gamma::DisplayBrightness>(&app);
+            assert_eq!(brightness.0, want, "brightness {wrote}");
+            assert_eq!(brightness.lift(), lift, "brightness {wrote}");
+        }
         assert_eq!(res::<ClutterConfig>(&app).frill_density(), 32.0);
         // Both spellings reach the field from a state neither holds; `$WOW_CLUTTER_DENSITY` takes
         // both for the session. Two values, since writing the sibling's mirrored value is a no-op.
@@ -2060,7 +2624,7 @@ mod tests {
                 "SmallCull 5",
                 "SmallCull must be in range 0.001 - 2.0.",
                 "SmallCull",
-                "0.04",
+                "0.01",
             ),
             (
                 "shadowLevel 3",
@@ -2076,16 +2640,16 @@ mod tests {
             ),
             ("baseMip 5", "BaseMip must be 0 or 1", "baseMip", "0"),
             (
-                "farclip 1000",
-                "FarClip must be in range 177.0 - 777.0.",
+                "farclip 2000",
+                "FarClip must be in range 177.0 - 1500.0.",
                 "farclip",
-                "350",
+                "1000",
             ),
             (
                 "frillDensity 0",
                 "Frill Density must be in range 1 - 256.",
                 "frillDensity",
-                "32",
+                "48",
             ),
             (
                 "gxTripleBuffer 2",
@@ -2264,11 +2828,12 @@ mod tests {
                 "TargetNearestDistance must be between 1 and 50.000000",
                 "5",
             ),
+            // fork: the floor is `farclip` + 528, on the fork's farclip default 1000.
             (
                 "horizonfarclip",
                 "800",
-                "HorizonFarClip must be in range 878.000000 - 2112.000000.",
-                "900",
+                "HorizonFarClip must be in range 1528.000000 - 2112.000000.",
+                "1600",
             ),
             (
                 "footstepBias",
@@ -2319,7 +2884,7 @@ mod tests {
         assert_eq!(res::<Cvars>(&app).get("ErrorFilter"), Some("all"));
         assert_eq!(
             console_exec(&mut app, "lodDist 9999"),
-            ["Lod distance must be in range 50.0f - 250.0f."]
+            ["Lod distance must be in range 50.0f - 1000.0f."]
         );
         assert_eq!(res::<Cvars>(&app).get("lodDist"), Some("9999"));
         console_exec(&mut app, "textureLodDist 1");
@@ -2337,6 +2902,8 @@ mod tests {
     #[test]
     fn a_seeded_vm_refuses_what_the_registry_refuses() {
         let mut cvars = registry(&[]);
+        // The fork boots `SmallCull` at the High stop, not the reference's 0.04.
+        let small_cull = cvars.get("SmallCull").map(str::to_string);
         let mut script = UiScript::new().unwrap();
         cvars.seed_vm(&mut script);
         script
@@ -2344,7 +2911,7 @@ mod tests {
             .unwrap();
         assert_eq!(script.cvar("shadowLevel").as_deref(), Some("1"));
         assert_eq!(script.cvar("baseMip").as_deref(), Some("1"));
-        assert_eq!(script.cvar("SmallCull").as_deref(), Some("0.04"));
+        assert_eq!(script.cvar("SmallCull"), small_cull);
         cvars.drain_vm(&mut script);
         assert_eq!(cvars.get("baseMip"), Some("1"));
         assert_eq!(
@@ -2371,7 +2938,7 @@ mod tests {
             .into(),
         );
         cvars.set("MusicVolume", "0.7"); // moved: written
-        cvars.set("farclip", "350"); // back to default: removed
+        cvars.set("farclip", "1000"); // back to default: removed
         let out = cvars.compose();
         assert_eq!(out.get("MusicVolume").map(String::as_str), Some("0.7"));
         assert!(!out.contains_key("MasterVolume"), "at default: absent");
@@ -2475,7 +3042,7 @@ mod tests {
         let mut app = cvar_app();
         app.update();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(r#"SetCVar("MusicVolume", 0.75)"#)
             .unwrap();
         app.update();
@@ -2520,7 +3087,7 @@ mod tests {
         assert_eq!(res::<Cvars>(&app).get("accountName"), Some("PLAYER"));
         let glue = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<String>("return GetCVar('accountName')")
             .unwrap();
         assert_eq!(glue, "PLAYER", "the VM's mirror has it");
@@ -2636,7 +3203,7 @@ mod tests {
         assert_eq!(app.world().resource::<SoundConfig>().music, 0.1);
         assert_eq!(
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .cvar("MusicVolume")
                 .as_deref(),
             Some("0.1")
@@ -2644,7 +3211,7 @@ mod tests {
 
         // The Lua write (what a settings slider will do) reaches the knob on the next frame…
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(r#"SetCVar("MusicVolume", 0.75)"#)
             .unwrap();
         app.update();
@@ -2658,6 +3225,141 @@ mod tests {
         assert!(!text.contains("MasterVolume"), "defaults stay out:\n{text}");
         let back: LocalConfig = toml::from_str(&text).unwrap();
         assert_eq!(back.cvars.len(), 1, "a diff, not a dump: {text}");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// **The web's whole persistence path, and native's crash-safety.** A `SetCVar` must reach
+    /// `config.toml` after the one quiet second **with no `AppExit` ever fired**: on the page
+    /// there IS no exit frame — the tab closes and the wasm is simply gone — so an exit-only
+    /// flush means every settings change a browser player makes is silently lost on reload
+    /// (found live on a hosted realm, 2026-08-31). Decision 1528 moved `save_config` from
+    /// `Update` onto the exit edge to catch the close-button's late `AppExit`; the move fixed
+    /// that frame and deleted the debounced mid-session save this test pins down.
+    #[test]
+    fn a_setcvar_is_saved_after_the_quiet_second_without_an_app_exit() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-cvar-quiet-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _u = EnvGuard::unset("WOW_UI_SCALE");
+        let _f = EnvGuard::unset("WOW_FARCLIP");
+        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+
+        let mut app = cvar_app();
+        app.update();
+        app.world_mut()
+            .non_send_mut::<UiScript>()
+            .run(r#"SetCVar("MusicVolume", 0.33)"#)
+            .unwrap();
+        app.update(); // sync_cvars drains the change and stamps last_change
+        assert!(
+            !tmp.join("config.toml").exists(),
+            "inside the quiet second nothing is written yet"
+        );
+        std::thread::sleep(SAVE_QUIET + std::time::Duration::from_millis(100));
+        app.update(); // the debounce has elapsed — this frame must write, exit or not
+        let text = std::fs::read_to_string(tmp.join("config.toml"))
+            .expect("config.toml written by the quiet-second save, with no AppExit in sight");
+        assert!(text.contains("MusicVolume = \"0.33\""), "{text}");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// **The page and the client must default the layer the same way** — the tripwire for the
+    /// opt-in → opt-out flip.
+    ///
+    /// `web/packs.js`'s `hdWanted()` decides whether the PAGE fetches `/data-hd`;
+    /// [`apply_boot_layers`] decides whether the CLIENT mounts it. Neither can detect a
+    /// disagreement on its own: a page defaulting off against a client defaulting on makes every
+    /// character read a cold round trip, and the other way round makes a visitor pay 1.7 GB for
+    /// art they never see.
+    ///
+    /// Read the way a human reads it: `hdWanted` delegates to `settingOn`, whose fallback legs are
+    /// bare `return <bool>;` lines,
+    /// while its env/query arms all end in `=== true;`, so "which way does it fall back" is a
+    /// substring question with one answer.
+    #[test]
+    fn the_pages_layer_default_is_the_registered_one() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("workspace root");
+        let js = std::fs::read_to_string(root.join("web/packs.js")).expect("web/packs.js");
+        let fn_body = |name: &str| -> String {
+            let body = js
+                .split_once(&format!("function {name} {{"))
+                .unwrap_or_else(|| panic!("web/packs.js still defines {name}"))
+                .1;
+            let end = body.find("\n}").expect("the function's closing brace");
+            body[..end].to_string()
+        };
+        // `hdWanted` reads the row through `settingOn`, which holds the ladder and its fallbacks
+        // (shared with `reforgedWanted`, whose row is registered on too).
+        assert!(
+            fn_body("hdWanted()").contains("settingOn('hd_models', 'hdcharactermodels')"),
+            "hdWanted() no longer reads hdCharacterModels through settingOn()"
+        );
+        let body = fn_body("settingOn(envKey, cvar)");
+        let body = body.as_str();
+
+        let registered = registered_default("hdCharacterModels", 0).expect("the row is registered");
+        let on = benilla_formats::layers::layer_switch(registered)
+            .expect("the registered default is a value, not an empty string");
+        assert!(on, "this assertion is the flip itself: the row ships ON");
+
+        assert!(
+            !body.contains("return false;"),
+            "hdCharacterModels is registered {registered:?} (on), but web/packs.js's hdWanted() \
+             still falls back to false — the page would not fetch /data-hd for a player whose \
+             client mounts it"
+        );
+        assert!(
+            body.contains("return true;"),
+            "settingOn() has no fallback at all — every leg now depends on a saved setting"
+        );
+    }
+
+    /// **A row with no host knob still reaches the file** — `hdCharacterModels`, and the bug it
+    /// shipped with (reported 2026-09-08: "the toggle does nothing, even if I reload the page").
+    /// The layer is a MOUNT, decided before the `App` exists, so this row has nothing live to
+    /// write; the next start is its only reader, so the click has to land in `config.toml`.
+    /// The click driven is the **opt-out** — the row is registered `"1"`.
+    #[test]
+    fn the_knobless_hd_models_row_lands_in_config_toml() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-cvar-hd-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _u = EnvGuard::unset("WOW_UI_SCALE");
+        let _f = EnvGuard::unset("WOW_FARCLIP");
+        let _d = EnvGuard::unset("WOW_CLUTTER_DENSITY");
+        let _m = EnvGuard::unset("WOW_HD_MODELS");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+
+        let mut app = cvar_app();
+        app.update();
+        app.world_mut()
+            .non_send_mut::<UiScript>()
+            .run(r#"SetCVar("hdCharacterModels", 0)"#)
+            .unwrap();
+        app.update();
+        app.world_mut().write_message(AppExit::Success);
+        app.update();
+        let text = std::fs::read_to_string(tmp.join("config.toml"))
+            .expect("the click must reach config.toml — the next start is its only reader");
+        assert!(text.contains("hdCharacterModels = \"0\""), "{text}");
+        assert_eq!(
+            benilla_formats::layers::layer_switch(
+                &toml::from_str::<LocalConfig>(&text).unwrap().cvars["hdCharacterModels"]
+            ),
+            Some(false)
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -2676,7 +3378,7 @@ mod tests {
             // Literal: `TexFilterSetting::default()` reads `$WOW_TRILINEAR`/`$WOW_ANISO`.
             .insert_resource(benilla_assets::TexFilterSetting {
                 trilinear: true,
-                aniso: 1,
+                aniso: 16,
             })
             // A real-shaped device menu: `GetCurrentMultisampleFormat` needs rows to find.
             .insert_resource(benilla_world::view::MsaaFormats {
@@ -2692,6 +3394,7 @@ mod tests {
             .init_resource::<crate::video::SpellEffectLevel>()
             .init_resource::<crate::video::Widescreen>()
             .init_resource::<crate::ui_gamma::DisplayGamma>()
+            .init_resource::<crate::ui_gamma::DisplayBrightness>()
             .init_resource::<ClickConfig>()
             .init_resource::<crate::target::AssistAttack>()
             .init_resource::<LootConfig>()
@@ -2705,6 +3408,22 @@ mod tests {
             .init_resource::<benilla_world::ffx_glow::FfxSwitches>()
             // Literal, not Default: RenderScale::default() reads $WOW_RENDER_SCALE.
             .insert_resource(RenderScale(1.0))
+            // fork: fsr (FORK.md)
+            .init_resource::<benilla_world::fsr::FrameGeneration>()
+            .init_resource::<benilla_world::fsr::RcasSharpness>()
+            .init_resource::<crate::net::TimeOffset>()
+            // Literal for the same reason: LightingSettings::default() reads $WOW_LIGHTING /
+            // $WOW_LIGHTING_QUALITY, IndirectLighting::default() $WOW_SSAO / $WOW_SSGI, and
+            // WaterDetail::default() $WOW_WATER_DETAIL.
+            .insert_resource(LightingSettings {
+                model: LightingModel::default(),
+                quality: LightingQuality::DEFAULT,
+            })
+            .insert_resource(IndirectLighting {
+                ao: AO_DEFAULT,
+                gi: GI_DEFAULT,
+            })
+            .insert_resource(WaterDetail(benilla_world::liquid::WATER_DETAIL_CATA))
             // Literal: `Realmlist::default()` reads `$WOW_HOST`.
             .insert_resource(crate::realmlist::Realmlist::unpinned(
                 crate::realmlist::DEFAULT_REALMLIST,
@@ -2721,7 +3440,7 @@ mod tests {
         for observer in ALL_OBSERVERS {
             observer(&mut app);
         }
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app
     }
 
@@ -2739,6 +3458,9 @@ mod tests {
         },
         |app| {
             app.add_observer(crate::video::on_cvar);
+        },
+        |app| {
+            app.add_observer(crate::net::time_offset_on_cvar);
         },
         |app| {
             app.add_observer(crate::player::camera::on_cvar);
@@ -2911,8 +3633,9 @@ mod tests {
         assert_eq!(res::<ViewDistance>(&app).farclip, 400.0);
         assert!(res::<Cvars>(&app).dirty);
         console_exec(&mut app, "cvar_default farclip");
-        assert_eq!(res::<Cvars>(&app).get("farclip"), Some("350"));
-        assert_eq!(res::<ViewDistance>(&app).farclip, 350.0);
+        // fork: farclip's default is 1000.
+        assert_eq!(res::<Cvars>(&app).get("farclip"), Some("1000"));
+        assert_eq!(res::<ViewDistance>(&app).farclip, 1000.0);
         assert_eq!(
             console_exec(&mut app, "cvar_reset nosuch"),
             ["No such cvar \"nosuch\""]
@@ -2991,7 +3714,11 @@ mod tests {
             ["Restoring all cvars"]
         );
         let cvars = res::<Cvars>(&app);
-        assert_eq!(cvars.get("farclip"), Some("350"));
+        assert_eq!(
+            cvars.get("farclip"),
+            Some("1000"),
+            "fork: farclip's default"
+        );
         assert_eq!(cvars.get("uiScale"), Some("1.2"));
     }
 
@@ -3025,7 +3752,7 @@ mod tests {
             (z.outdoor, z.inside)
         };
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             assert_eq!(script.cvar("minimapZoom").as_deref(), Some("5"));
             // The widget is born first, then the persisted level is pushed into it: seeding a
             // widget that does not exist is a no-op.
@@ -3046,7 +3773,7 @@ mod tests {
         );
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("m:SetZoom(1)")
             .unwrap();
         app.update();
@@ -3073,8 +3800,9 @@ mod tests {
 
     /// The string-valued rows, a closed list, each default checked on its own terms: `realmName`
     /// and `accountName` (the reference's registered `""`, `0x882748`) and `gxApi` are empty until
-    /// the session or the login screen writes them; `gxResolution` and `realmList` pass their observers' parsers
-    /// ([`crate::video::parse_resolution`], [`crate::realmlist::normalize`]).
+    /// the session or the login screen writes them; `gxResolution` and `realmList` pass their
+    /// observers' parsers ([`crate::video::parse_resolution`], [`crate::realmlist::normalize`]);
+    /// fork: `graphicsQuality` is a rung's name, checked by [`presets`]' own tests.
     #[test]
     fn the_string_valued_cvars_are_the_realm_and_the_windowed_size() {
         let mut strings: Vec<&str> = REGISTERED
@@ -3087,6 +3815,7 @@ mod tests {
             strings,
             vec![
                 "accountName",
+                "graphicsQuality",
                 "gxApi",
                 "gxResolution",
                 "realmList",
@@ -3426,8 +4155,180 @@ mod tests {
         // A lever with no resource still marks the row, so the file cannot apply over the env.
         cvars.own_for_session("farclip", None);
         cvars.load_file(BTreeMap::from([("farclip".to_string(), "500".to_string())]));
-        assert_eq!(cvars.get("farclip"), Some("350"));
+        assert_eq!(cvars.get("farclip"), Some("1000"));
         assert!(cvars.is_session_owned("FARCLIP"));
+    }
+
+    /// fork: web build — **the GPU recovery tier's render scale is a fallback the player can take
+    /// back.** It applies only where the file holds no render scale, is never saved, and the
+    /// player's own write (the Graphics page's slider, through the VM) makes the row theirs again,
+    /// so it is saved and outranks the tier from the next load on. Before this the tier arrived as
+    /// an env override: the saved value was ignored and every in-game change was lost on reload.
+    #[test]
+    fn the_gpu_tier_render_scale_yields_to_the_player() {
+        let mut cvars = Cvars::default();
+        cvars.load_file(BTreeMap::new());
+        assert!(cvars.fallback_for_session("renderScale", "0.55"));
+        assert_eq!(cvars.get("renderScale"), Some("0.55"));
+        assert!(cvars.has_events(), "the knob hears the tier");
+        cvars.take_events();
+        assert!(
+            !cvars.compose().contains_key("renderScale"),
+            "a recovery never pins itself into the file"
+        );
+
+        // The player moves the slider: applied, and theirs.
+        assert_eq!(cvars.set_from_vm("renderScale", "1"), SetOutcome::Changed);
+        assert!(!cvars.is_session_owned("renderScale"));
+        cvars.set_from_vm("renderScale", "0.8");
+        assert_eq!(
+            cvars.compose().get("renderScale").map(String::as_str),
+            Some("0.8")
+        );
+
+        // A saved render scale outranks the tier on the next load.
+        let mut next = Cvars::default();
+        next.load_file(BTreeMap::from([(
+            "renderScale".to_string(),
+            "0.8".to_string(),
+        )]));
+        assert!(!next.fallback_for_session("renderScale", "0.55"));
+        assert_eq!(next.get("renderScale"), Some("0.8"));
+        assert!(!next.is_session_owned("renderScale"));
+
+        // A player who picks the tier's own value still takes the row back, and it is saved.
+        let mut same = Cvars::default();
+        same.load_file(BTreeMap::new());
+        same.fallback_for_session("renderScale", "0.55");
+        assert_eq!(
+            same.set_from_vm("renderScale", "0.55"),
+            SetOutcome::Unchanged
+        );
+        assert_eq!(
+            same.compose().get("renderScale").map(String::as_str),
+            Some("0.55")
+        );
+    }
+
+    /// fork: web build — **any Graphics Apply retires the recovery tier**, not only a Render
+    /// Scale move: the player's write to another Graphics row is flagged, and releasing the
+    /// fallback returns the render scale to its default, heard by the knob and never saved. A
+    /// write elsewhere, or a host write, is not the player applying Graphics settings.
+    #[test]
+    fn a_graphics_apply_releases_the_gpu_tier() {
+        let mut cvars = Cvars::default();
+        cvars.load_file(BTreeMap::new());
+        cvars.fallback_for_session("renderScale", "0.55");
+        cvars.take_events();
+
+        cvars.set("farclip", "300");
+        cvars.set_from_vm("MasterVolume", "0.5");
+        assert!(!cvars.take_graphics_applied());
+
+        assert_eq!(
+            cvars.set_from_vm("lightingQuality", "2"),
+            SetOutcome::Changed
+        );
+        assert!(cvars.take_graphics_applied());
+        assert!(!cvars.take_graphics_applied(), "an edge, not a state");
+
+        assert_eq!(cvars.release_fallbacks(), 1);
+        let default = cvars.default_of("renderScale").unwrap().to_string();
+        assert_eq!(cvars.get("renderScale"), Some(default.as_str()));
+        assert!(!cvars.is_session_owned("renderScale"));
+        assert!(cvars
+            .take_events()
+            .iter()
+            .any(|e| e.name == "renderScale" && e.new == default));
+        assert!(!cvars.compose().contains_key("renderScale"));
+        assert_eq!(cvars.release_fallbacks(), 0, "released once");
+
+        // The released row is the player's again: their next write is simply saved.
+        assert_eq!(cvars.set_from_vm("renderScale", "0.8"), SetOutcome::Changed);
+        assert_eq!(
+            cvars.compose().get("renderScale").map(String::as_str),
+            Some("0.8")
+        );
+
+        // A latched gx row stages on the write and still counts: its Okay commits it.
+        let mut gx = Cvars::default();
+        gx.load_file(BTreeMap::new());
+        let flipped = if gx.flag("gxVSync") == Some(true) {
+            "0"
+        } else {
+            "1"
+        };
+        gx.set_from_vm("gxVSync", flipped);
+        assert!(gx.take_graphics_applied());
+    }
+
+    /// fork: web build — **the recovery tier caps the lighting quality, saved value or not.** A
+    /// fallback would let a saved Cinematic reload straight back into the hang; the cap holds it
+    /// down for the session, never writes itself into the file, and a Graphics Apply restores
+    /// exactly what it displaced. A quality already under the cap, or a lever's, is left alone.
+    #[test]
+    fn the_gpu_tier_caps_the_lighting_quality() {
+        // The shipped default, capped and restored.
+        let mut fresh = Cvars::default();
+        fresh.load_file(BTreeMap::new());
+        assert!(fresh.cap_for_session("lightingQuality", "1"));
+        assert_eq!(fresh.get("lightingQuality"), Some("1"));
+        assert!(fresh
+            .take_events()
+            .iter()
+            .any(|e| e.name == "lightingQuality"));
+        assert!(!fresh.compose().contains_key("lightingQuality"));
+        assert_eq!(fresh.release_fallbacks(), 1);
+        assert_eq!(
+            fresh.get("lightingQuality"),
+            fresh.default_of("lightingQuality")
+        );
+
+        // A saved quality above the cap is held down, and the file keeps it.
+        let saved = || BTreeMap::from([("lightingQuality".to_string(), "3".to_string())]);
+        let mut cvars = Cvars::default();
+        cvars.load_file(saved());
+        assert!(cvars.cap_for_session("lightingQuality", "0"));
+        assert_eq!(cvars.get("lightingQuality"), Some("0"));
+        assert_eq!(
+            cvars.compose().get("lightingQuality").map(String::as_str),
+            Some("3")
+        );
+        cvars.set_from_vm("farclip", "300");
+        assert!(cvars.take_graphics_applied());
+        assert_eq!(cvars.release_fallbacks(), 1);
+        assert_eq!(cvars.get("lightingQuality"), Some("3"));
+        assert!(!cvars.is_session_owned("lightingQuality"));
+
+        // The player's own pick under the tier is theirs, and saved.
+        let mut pick = Cvars::default();
+        pick.load_file(saved());
+        pick.cap_for_session("lightingQuality", "0");
+        assert_eq!(
+            pick.set_from_vm("lightingQuality", "1"),
+            SetOutcome::Changed
+        );
+        assert_eq!(pick.release_fallbacks(), 0);
+        assert_eq!(
+            pick.compose().get("lightingQuality").map(String::as_str),
+            Some("1")
+        );
+
+        // Already under the cap: nothing moves, and nothing is held.
+        let mut low = Cvars::default();
+        low.load_file(BTreeMap::from([(
+            "lightingQuality".to_string(),
+            "1".to_string(),
+        )]));
+        assert!(!low.cap_for_session("lightingQuality", "2"));
+        assert!(!low.is_session_owned("lightingQuality"));
+
+        // A lever (`?lightingquality=`, `$WOW_LIGHTING_QUALITY`) outranks the tier.
+        let mut lever = Cvars::default();
+        lever.override_for_session("lightingQuality", "4");
+        lever.load_file(BTreeMap::new());
+        assert!(!lever.cap_for_session("lightingQuality", "0"));
+        assert_eq!(lever.get("lightingQuality"), Some("4"));
     }
 
     /// The camera reads `gxMultisample` once at spawn, so the file must be applied inside
@@ -3489,6 +4390,21 @@ mod tests {
             ),
             ("gxApi", "pfUI's system tooltip names the backend"),
             (
+                "graphicsQuality",
+                "the Graphics Preset row of our OptionsFrame.xml, in both options windows; the \
+                 host side is `cvars::presets`, which this walk skips with the rest of `cvars/`",
+            ),
+            (
+                "hdCharacterModels",
+                "not Lua: read before the App exists by `apply_boot_layers` in this file, which the \
+                 scan skips — a mount has no later reader to observe it",
+            ),
+            (
+                "reforgedModels",
+                "not Lua: latched before the App exists by `apply_boot_layers` in this file, which \
+                 the scan skips; Turtle's options window writes it for the next load",
+            ),
+            (
                 "cameraPitchSmoothSpeed",
                 "UIOptionsFrame.lua's Save writes it at a quarter of the Auto Follow Speed slider",
             ),
@@ -3510,7 +4426,6 @@ mod tests {
                 "OptionsFrame.lua's Vertex Animation Shaders box",
             ),
             ("M2UsePixelShaders", "OptionsFrame.lua's Phong Shading box"),
-            ("lod", "OptionsFrame.lua's World LOD box"),
             (
                 "movieSubtitle",
                 "OptionsFrame.lua's Cinematic Subtitles box",

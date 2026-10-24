@@ -50,7 +50,7 @@ fn client() -> Charter {
             end)"#,
         )
         .expect("the recorder installs");
-    app.world_mut().insert_non_send_resource(script);
+    app.world_mut().insert_non_send(script);
     let feed = app.world_mut().register_system(super::feed::feed_petition);
     Charter { app, rx, feed }
 }

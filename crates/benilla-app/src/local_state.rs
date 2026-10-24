@@ -16,6 +16,7 @@
 //! With `$WOW_CAPTURE` set every path resolves to `None`: a capture neither reads nor writes
 //! player state.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -26,11 +27,23 @@ const STATE_DIR: &str = "benilla-config";
 /// The state folder, or `None` when persistence is off (a capture run, or no executable path).
 /// It may not exist yet: [`write_atomic`] creates it, and a reader treats a missing file as
 /// defaults.
+// The wasm32 early return below makes the rest of the function genuinely unreachable there
+// (by design — see its own comment); `cfg_attr` keeps that lint quiet only on the target it
+// actually applies to, so a real unreachable branch on native would still warn.
+#[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
 pub(crate) fn home() -> Option<PathBuf> {
+    // On the page the folder is virtual: every resident is a small text file, and they live in
+    // the browser's `localStorage` under keys named by these same paths (see [`web_store`]). The
+    // callers' contract is unchanged — a path in, `read_to_string`/`write_atomic` on it — which
+    // is what makes this the one place the web needs to know about. An unattended page keeps the
+    // same store: a tab has no temp folder to give a run of its own.
+    #[cfg(target_arch = "wasm32")]
+    return Some(PathBuf::from("/benilla-config"));
     home_in(cfg!(test))
 }
 
 /// [`home`], with the unit-test stop as an argument so a test can walk the steps behind it.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn home_in(unit_test: bool) -> Option<PathBuf> {
     if std::env::var_os("WOW_CAPTURE").is_some() {
         return None; // hermetic: captures neither read nor write player state
@@ -170,6 +183,10 @@ fn migrate_addon_state(home: &Path) {
             return;
         }
         done.push(home.to_path_buf());
+    }
+    // fork: the page's store keeps the old keys; a tab holds few addons, so they are not carried.
+    if cfg!(target_arch = "wasm32") {
+        return;
     }
     let old = home.join("addons");
     let Ok(entries) = std::fs::read_dir(&old) else {
@@ -339,19 +356,35 @@ pub(crate) fn move_character_state(realm: &str, old: &str, new: &str) {
     if pairs.iter().any(|(from, to)| from == to) {
         return;
     }
-    if let Some((_, taken)) = pairs.iter().find(|(_, to)| to.exists()) {
+    if let Some((_, taken)) = pairs.iter().find(|(_, to)| state_exists(to)) {
         bevy::log::warn!(
             "rename: {} exists, so {old}'s files stay under that name",
             taken.display()
         );
         return;
     }
-    for (from, to) in pairs.into_iter().filter(|(from, _)| from.exists()) {
-        match std::fs::rename(&from, &to) {
+    for (from, to) in pairs.into_iter().filter(|(from, _)| state_exists(from)) {
+        match rename_state(&from, &to) {
             Ok(()) => bevy::log::info!("rename: moved {} to {}", from.display(), to.display()),
             Err(e) => bevy::log::warn!("rename: cannot move {}: {e}", from.display()),
         }
     }
+}
+
+/// fork: whether a state file or folder is there; on the page, a stored key at or under the path.
+fn state_exists(path: &Path) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    return web_store::exists_under(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    path.exists()
+}
+
+/// fork: move a state file or folder; on the page, every stored key at or under the path.
+fn rename_state(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    return web_store::rename_under(from, to);
+    #[cfg(not(target_arch = "wasm32"))]
+    std::fs::rename(from, to)
 }
 
 /// `benilla-config/cache/<realm>/<store>.bin`: one saved template store ([`crate::wdb`]), the
@@ -403,8 +436,23 @@ pub(crate) fn diagnostics_dir() -> Option<PathBuf> {
 
 /// `benilla-config/Diagnostics/fps-journal.csv`: the FPS journal's rows while the `fpsJournal`
 /// CVar is on; a capture names its own path through `WOW_FPS_JOURNAL`.
+///
+/// **And `None` on the page**, which is the one resident of this folder that does not follow
+/// [`home`] into `localStorage`. Every other resident is a small file rewritten when something
+/// changes; the journal is an APPEND once a second whose contents grow for as long as the tab is
+/// open, and a `localStorage` write is synchronous on the thread drawing the frame (`write_meter`
+/// below is the meter that exists because of it) — so the instrument built to find stutter would be the
+/// tab's biggest source of it, worsening the longer a reporter ran it. The browser's own
+/// instrument is `crate::webdiag`, which reports to the console and holds nothing.
 pub(crate) fn fps_journal_path() -> Option<PathBuf> {
-    diagnostics_dir().map(|d| d.join("fps-journal.csv"))
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        diagnostics_dir().map(|d| d.join("fps-journal.csv"))
+    }
 }
 
 /// A realm or character name as one path component: anything not a letter or digit becomes `_`.
@@ -429,7 +477,74 @@ pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 /// [`write_atomic`] for bytes: the saved-variables files carry Lua byte strings as they are.
+///
+/// fork: on the page the store holds text, so bytes that are not UTF-8 are kept losslessly by
+/// [`web_store::set_bytes`] and handed back as the same bytes by [`read`].
 pub(crate) fn write_atomic_bytes(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Metered (see [`write_meter`]): on the page this call is a **synchronous**
+        // `localStorage.setItem` on the frame's own thread, and every byte of it is spent there.
+        let t0 = bevy::platform::time::Instant::now();
+        let r = web_store::set_bytes(path, contents);
+        write_meter::record(path, contents.len(), t0.elapsed().as_secs_f32() * 1000.0);
+        return r;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    write_atomic_fs(path, contents)
+}
+
+/// **What the page's state writes cost the frame** — the meter `perf::webdiag` reports.
+///
+/// `write_atomic` is one line on native (a file write on a thread nobody is waiting for) and
+/// something else entirely on the web: `localStorage.setItem` is synchronous, it blocks the thread
+/// that calls it, and that thread is the one drawing the frame. So a resident of this folder that
+/// is rewritten on a timer, and whose contents *grow* with the session, is a stutter that gets
+/// worse the longer the tab is open — and it is invisible to every frame-cost meter we have, which
+/// can say a frame went long but not that a storage write is why.
+///
+/// The meter names the file as well as the cost, because "state writes cost 41 ms this window" and
+/// "`<realm>.tsv` cost 41 ms this window" are one round trip apart.
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod write_meter {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    thread_local! {
+        /// `file name -> (writes, bytes on the last one, total ms)` since the last [`take`].
+        static SEEN: RefCell<Vec<(String, u32, usize, f32)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(path: &Path, bytes: usize, ms: f32) {
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        SEEN.with(|s| {
+            let mut s = s.borrow_mut();
+            match s.iter_mut().find(|(n, ..)| *n == name) {
+                Some((_, calls, last_bytes, total)) => {
+                    *calls += 1;
+                    *last_bytes = bytes;
+                    *total += ms;
+                }
+                None => s.push((name, 1, bytes, ms)),
+            }
+        });
+    }
+
+    /// Drain the window's writes, costliest first.
+    pub(crate) fn take() -> Vec<(String, u32, usize, f32)> {
+        SEEN.with(|s| {
+            let mut v = std::mem::take(&mut *s.borrow_mut());
+            v.sort_by(|a, b| b.3.total_cmp(&a.3));
+            v
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_atomic_fs(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -440,6 +555,171 @@ pub(crate) fn write_atomic_bytes(path: &Path, contents: &[u8]) -> std::io::Resul
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)
+}
+
+/// Read a state file — the read twin of [`write_atomic`], and the only way a resident of the
+/// folder is read, so that the page's store answers too. Absent is `ErrorKind::NotFound` on both
+/// targets (every caller treats that as the first-run default).
+pub(crate) fn read_to_string(path: &Path) -> std::io::Result<String> {
+    #[cfg(target_arch = "wasm32")]
+    return web_store::get(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    std::fs::read_to_string(path)
+}
+
+/// [`read_to_string`] for the residents read as bytes (the addon enable state decodes its own
+/// encoding, and the saved-variables files carry a Lua byte string's bytes as they are); on the
+/// page the store holds text, and [`web_store::get_bytes`] undoes [`web_store::set_bytes`].
+pub(crate) fn read(path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(target_arch = "wasm32")]
+    return web_store::get_bytes(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    std::fs::read(path)
+}
+
+/// Rename a state file over `to`; the page's store has no rename, so there it is a copy and a
+/// remove.
+pub(crate) fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bytes = web_store::get_bytes(from)?;
+        web_store::set_bytes(to, &bytes)?;
+        return web_store::remove(from);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    std::fs::rename(from, to)
+}
+
+/// Remove a state file (a cleared saved account name). Absent is not an error.
+pub(crate) fn remove_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    return web_store::remove(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
+/// The page's state folder: `window.localStorage`, one entry per file, keyed by the file's own
+/// path (`/benilla-config/config.toml`, `/benilla-config/macros/account.txt`, …). Everything
+/// [`write_atomic`] writes is text, and the whole folder is a few tens of KB, far under the
+/// ~5 MB an origin gets — so the simplest store there is also the right one. Per browser and
+/// per origin, like a `benilla-config/` beside each install; nothing crosses to the server.
+#[cfg(target_arch = "wasm32")]
+mod web_store {
+    use std::io::{Error, ErrorKind, Result};
+    use std::path::Path;
+
+    fn key(path: &Path) -> String {
+        format!("benilla:{}", path.display())
+    }
+
+    fn storage() -> Result<web_sys::Storage> {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .ok_or_else(|| Error::new(ErrorKind::Unsupported, "localStorage unavailable"))
+    }
+
+    pub(super) fn get(path: &Path) -> Result<String> {
+        storage()?
+            .get_item(&key(path))
+            .map_err(|_| Error::new(ErrorKind::Other, "localStorage read failed"))?
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::NotFound,
+                    format!("{} not stored", path.display()),
+                )
+            })
+    }
+
+    pub(super) fn set(path: &Path, contents: &str) -> Result<()> {
+        storage()?
+            .set_item(&key(path), contents)
+            .map_err(|_| Error::new(ErrorKind::Other, "localStorage write failed (quota?)"))
+    }
+
+    pub(super) fn remove(path: &Path) -> Result<()> {
+        storage()?
+            .remove_item(&key(path))
+            .map_err(|_| Error::new(ErrorKind::Other, "localStorage remove failed"))
+    }
+
+    /// The stored keys naming `path` itself or a file under it, as a folder holds its files.
+    fn keys_under(storage: &web_sys::Storage, path: &Path) -> Vec<String> {
+        let exact = key(path);
+        let folder = format!("{exact}/");
+        let len = storage.length().unwrap_or(0);
+        (0..len)
+            .filter_map(|i| storage.key(i).ok().flatten())
+            .filter(|k| *k == exact || k.starts_with(&folder))
+            .collect()
+    }
+
+    pub(super) fn exists_under(path: &Path) -> bool {
+        storage().is_ok_and(|s| !keys_under(&s, path).is_empty())
+    }
+
+    /// Move every key at or under `from` to the same place under `to`.
+    pub(super) fn rename_under(from: &Path, to: &Path) -> Result<()> {
+        let storage = storage()?;
+        let (from_key, to_key) = (key(from), key(to));
+        for k in keys_under(&storage, from) {
+            let value = storage
+                .get_item(&k)
+                .map_err(|_| Error::new(ErrorKind::Other, "localStorage read failed"))?
+                .unwrap_or_default();
+            let moved = format!("{to_key}{}", &k[from_key.len()..]);
+            storage
+                .set_item(&moved, &value)
+                .map_err(|_| Error::new(ErrorKind::Other, "localStorage write failed (quota?)"))?;
+            storage
+                .remove_item(&k)
+                .map_err(|_| Error::new(ErrorKind::Other, "localStorage remove failed"))?;
+        }
+        Ok(())
+    }
+
+    /// Store bytes ([`super::bytes_as_text`]).
+    pub(super) fn set_bytes(path: &Path, contents: &[u8]) -> Result<()> {
+        set(path, &super::bytes_as_text(contents))
+    }
+
+    /// The bytes [`set_bytes`] stored, or the UTF-8 of a text entry ([`super::text_as_bytes`]).
+    pub(super) fn get_bytes(path: &Path) -> Result<Vec<u8>> {
+        get(path).map(super::text_as_bytes)
+    }
+}
+
+/// fork: marks a page-store entry whose bytes are not UTF-8: every byte after it is one `char` of
+/// the same value (Latin-1), so the store's string round-trips them exactly. A NUL and a word no
+/// text resident begins with, so it can never be mistaken for one.
+#[cfg(any(target_arch = "wasm32", test))]
+const BYTES_MARK: &str = "\u{0}benilla-bytes\u{0}";
+
+/// fork: bytes as the page store's text. UTF-8 is stored as the text it is — exactly what a text
+/// write would have stored, so every entry from before the saved-variables files became bytes
+/// still reads back; anything else is [`BYTES_MARK`] and a Latin-1 spelling.
+#[cfg(any(target_arch = "wasm32", test))]
+fn bytes_as_text(contents: &[u8]) -> std::borrow::Cow<'_, str> {
+    match std::str::from_utf8(contents) {
+        Ok(text) => std::borrow::Cow::Borrowed(text),
+        Err(_) => {
+            let mut text = String::with_capacity(BYTES_MARK.len() + contents.len() * 2);
+            text.push_str(BYTES_MARK);
+            text.extend(contents.iter().map(|&b| char::from(b)));
+            std::borrow::Cow::Owned(text)
+        }
+    }
+}
+
+/// fork: the inverse of [`bytes_as_text`].
+#[cfg(any(target_arch = "wasm32", test))]
+fn text_as_bytes(text: String) -> Vec<u8> {
+    match text.strip_prefix(BYTES_MARK) {
+        Some(latin1) => latin1.chars().map(|c| c as u32 as u8).collect(),
+        None => text.into_bytes(),
+    }
 }
 
 /// Test plumbing for the persistence env vars: `set_var` is process-global, so every such test
@@ -473,6 +753,27 @@ pub(crate) mod test_env {
 
 #[cfg(test)]
 mod tests {
+    /// fork: the page store keeps a saved-variables file's bytes EXACTLY — a Lua byte string need
+    /// not be UTF-8, and the store holds text — while a text file stays the text it always was.
+    #[test]
+    fn the_page_store_round_trips_bytes_and_leaves_text_alone() {
+        let text = "SV = { name = \"Zoë\" }\n";
+        assert_eq!(
+            super::bytes_as_text(text.as_bytes()),
+            text,
+            "UTF-8 is stored as itself"
+        );
+        assert_eq!(super::text_as_bytes(text.to_string()), text.as_bytes());
+        let raw: Vec<u8> = (0u8..=255).chain([0xff, 0xfe, 0x00, 0x80]).collect();
+        let stored = super::bytes_as_text(&raw).into_owned();
+        assert!(stored.starts_with(super::BYTES_MARK));
+        assert_eq!(
+            super::text_as_bytes(stored),
+            raw,
+            "every byte value comes back"
+        );
+    }
+
     use super::test_env::{EnvGuard, ENV_LOCK};
     use super::*;
 

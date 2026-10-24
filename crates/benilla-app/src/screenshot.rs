@@ -27,6 +27,10 @@ use bevy::tasks::IoTaskPool;
 
 use crate::ui_script::UiFeed;
 
+#[cfg(target_arch = "wasm32")]
+#[path = "screenshot_web.rs"]
+mod web;
+
 /// The reference's file stem.
 const STEM: &str = "WoWScrnShot";
 
@@ -118,7 +122,36 @@ fn spawn_captures(commands: &mut Commands, count: u32) {
 }
 
 /// Names the file and hands the encode and write to a worker, off the frame.
+// The wasm arm returns first; the native body below it stays as upstream wrote it.
+#[cfg_attr(target_arch = "wasm32", allow(unreachable_code, unused_variables))]
 fn write_capture(captured: On<ScreenshotCaptured>, mut state: ResMut<ScreenshotState>) {
+    // The browser has no folder to write into: the PNG becomes a page download (`screenshot_web`).
+    #[cfg(target_arch = "wasm32")]
+    {
+        let name = state.next_name(benilla_ui::civil::unix_seconds());
+        let outcome = match captured.image.clone().try_into_dynamic() {
+            Ok(img) => {
+                // Encoded on the frame (no threads here): the fast level keeps that hitch short.
+                use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+                let mut png = Vec::new();
+                let encoder = PngEncoder::new_with_quality(
+                    &mut png,
+                    CompressionType::Fast,
+                    FilterType::Adaptive,
+                );
+                match img.to_rgb8().write_with_encoder(encoder) {
+                    Ok(()) => {
+                        web::download(&name, &png);
+                        Outcome::Saved(name.into())
+                    }
+                    Err(e) => Outcome::Failed(format!("{name}: {e}")),
+                }
+            }
+            Err(e) => Outcome::Failed(format!("unreadable frame: {e}")),
+        };
+        let _ = state.tx.send(outcome);
+        return;
+    }
     // No folder under a `$WOW_CAPTURE` run or without an exe directory: report it as a failure.
     let Some(dir) = crate::local_state::screenshots_dir() else {
         let _ = state.tx.send(Outcome::Failed(
@@ -199,13 +232,31 @@ impl Plugin for ScreenshotPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+    use crate::local_state::test_env::ENV_LOCK;
     use benilla_ui::script::UiScript;
+
+    /// Holds `TZ` for a test where the C runtime reads it too ([`benilla_ui::civil::set_tz`]),
+    /// and puts the old value back.
+    struct Zone(Option<String>);
+
+    impl Zone {
+        fn set(tz: &str) -> Self {
+            let old = std::env::var("TZ").ok();
+            benilla_ui::civil::set_tz(Some(tz));
+            Self(old)
+        }
+    }
+
+    impl Drop for Zone {
+        fn drop(&mut self) {
+            benilla_ui::civil::set_tz(self.0.as_deref());
+        }
+    }
 
     #[test]
     fn names_follow_the_reference_and_never_collide() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _tz = EnvGuard::set("TZ", "UTC0");
+        let _tz = Zone::set("UTC0");
         let mut s = ScreenshotState::default();
         // 2026-08-21T13:45:07Z.
         assert_eq!(s.next_name(1_787_319_907), "WoWScrnShot_082126_134507.png");
@@ -227,7 +278,7 @@ mod tests {
     #[test]
     fn names_stamp_the_local_time() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _tz = EnvGuard::set("TZ", "NPT-05:45");
+        let _tz = Zone::set("NPT-05:45");
         let mut s = ScreenshotState::default();
         assert_eq!(s.next_name(1_787_319_907), "WoWScrnShot_082126_193007.png");
         assert_eq!(s.next_name(1_787_342_400), "WoWScrnShot_082226_014500.png");
@@ -291,7 +342,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        app.insert_non_send_resource(glue);
+        app.insert_non_send(glue);
         app.add_systems(Update, (ask_for_captures, report_captures).chain());
 
         app.update();
@@ -316,7 +367,7 @@ mod tests {
         app.update();
         let heard = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<String>>("return heard")
             .unwrap();
         assert_eq!(

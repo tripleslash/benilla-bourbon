@@ -88,21 +88,12 @@ or a finding.
    No history.
 4. The commit message says what changed, for a player or a developer, in one line.
 
-## After you open it
-
-A maintainer reads it, checks it against the reference, runs it and finishes it here: a rebase
-onto main, a fix, a test or a comment, added as commits on top of yours on your branch, so leave
-"Allow edits by maintainers" ticked. It lands as one squash-merged commit with you as its author.
-When what would land is mostly ours, we land our own version with you as a co-author and close
-yours with a note, and when main already has the fix, we close yours and say where. One that is
-out of scope is closed with the reason.
-
 ## Setting up
 
 - **The toolchain.** Stable Rust (`rust-toolchain.toml` adds clippy and rustfmt) and a C
   compiler, which some dependencies build with. On macOS the Xcode
   command line tools, which also supply libclang for the audio bindings; on Linux the ALSA and
-  udev development packages and pkg-config. `python3` runs two of the gates.
+  udev development packages and pkg-config. `python3` runs two of the gates, and `jq` the hooks.
 - **A 1.12.1 install of your own.** `WOW_DATA=<its Data folder>`, or a `WoW` link at the repo
   root, which only a dev build sees: the player build looks for `Data/` or `WoW/Data/` beside
   the binary. benilla reads the install and never writes into it. `WOW_DATA=` (set, empty)
@@ -124,8 +115,8 @@ out of scope is closed with the reason.
   account, since the client creates a character only when asked:
   `WOW_PROBE_CHARCREATE=<name> WOW_PROBE_CHARCREATE_KEEP=1`, run without `WOW_CHAR`, makes it.
   The probes drive the body with GM commands, so give that account the top GM level.
-- **Running it unattended.** The rules are `docs/METHOD.md`, "The local server"; these are the
-  switches.
+- **Running it unattended.** The rules are `docs/METHOD.md`, "The local server", and the `probe` skill
+  in `.claude/skills/` is the procedure; these are the switches.
   - `WOW_UNATTENDED=1` reconnects instead of waiting at a dialog, and exits non-zero on a login
     it cannot pass. `WOW_NOSOUND=1` runs silent. A capture (`WOW_CAPTURE`) is both, and a rig
     (`WOW_RIG`) is unattended. `WOW_ALLOW_ACCOUNT=1` overrides the account guard.

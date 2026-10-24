@@ -9,6 +9,7 @@
 //! moves, stores, repairs, destroys and bind answers. The cursor verbs lock what they pick up and
 //! place onto, and the server's answer lifts it ([`crate::ui_items::locks`]).
 
+use benilla_assets::DataLoadAppExt;
 use benilla_protocol::messages::{BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST, SLOT_PACK_FIRST};
 use benilla_protocol::ObjectFields;
 use benilla_ui::script::EQUIPMENT_BAG;
@@ -555,7 +556,7 @@ impl TestObjects {
     }
 
     pub(crate) fn get(&mut self) -> Objects<'_, '_> {
-        self.state.get(&self.world)
+        self.state.get(&self.world).expect("`Objects` validates")
     }
 }
 
@@ -1035,11 +1036,9 @@ impl Plugin for UiItemsPlugin {
             // its one bind-on-use cell.
             .init_resource::<crate::ui_bind_confirm::PendingEquips>()
             .init_resource::<crate::ui_bind_confirm::PendingBindOnUse>()
-            // After the chain opens: unordered, it can run first and skip every item DBC.
-            .add_systems(
-                Startup,
-                load_item_dbcs.after(benilla_assets::AssetSet::Open),
-            )
+            // After the chain opens (unordered, it can run first and skip every item DBC), and
+            // again when its data changes.
+            .add_data_loaders(load_item_dbcs)
             .add_systems(
                 Update,
                 (

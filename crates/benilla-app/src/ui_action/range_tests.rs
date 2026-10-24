@@ -101,14 +101,14 @@ fn range_answers(
         last: None,
         lit: None,
     });
-    app.insert_non_send_resource(UiScript::new().unwrap());
+    app.insert_non_send(UiScript::new().unwrap());
     app.init_resource::<ActionEvents>()
         .init_resource::<EnterUsable>()
         .init_resource::<ActionStateMemory>()
         .add_systems(Update, feed_action_state);
     app.update();
     app.world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<(bool, Option<i64>)>("return ActionHasRange(1) == 1, IsActionInRange(1)")
         .unwrap()
 }

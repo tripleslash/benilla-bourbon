@@ -91,7 +91,7 @@ impl House {
                 "#,
             )
             .unwrap();
-        self.app.insert_non_send_resource(script);
+        self.app.insert_non_send(script);
     }
 
     fn item(&mut self, entry: u32, name: &str, level: u32, quality: u32) {
@@ -168,7 +168,7 @@ impl House {
     }
 
     fn script(&mut self) -> Mut<'_, UiScript> {
-        self.app.world_mut().non_send_resource_mut::<UiScript>()
+        self.app.world_mut().non_send_mut::<UiScript>()
     }
 
     /// A chunk of Lua with the auction verbs' host lent, then two frames: whatever the chunk
@@ -180,7 +180,7 @@ impl House {
                 world,
             );
         {
-            let (mut script, mut verbs) = state.get_mut(world);
+            let (mut script, mut verbs) = state.get_mut(world).expect("the auction host validates");
             script
                 .hosted(&mut AuctionHost(&mut verbs), |s| s.run(chunk))
                 .unwrap();
@@ -431,7 +431,7 @@ fn a_sellers_name_signals_the_list_without_sorting_it() {
             "#,
         )
         .unwrap();
-    h.app.insert_non_send_resource(script);
+    h.app.insert_non_send(script);
     h.item(1, "Cloth", 10, 1);
     h.name(BOB, "Bob");
     h.open(AUCTIONEER);
@@ -793,7 +793,7 @@ fn a_rows_names_are_asked_by_its_read_not_by_its_page() {
             f:SetScript("OnEvent", function() UPDATES = UPDATES + 1 end)"#,
         )
         .unwrap();
-    h.app.insert_non_send_resource(script);
+    h.app.insert_non_send(script);
     h.item(1, "Cloth", 10, 1);
     h.open(AUCTIONEER);
     let seller = |auction_id, guid| AuctionListEntry {

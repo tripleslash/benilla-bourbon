@@ -39,8 +39,18 @@ impl super::UiScript {
 /// Runs `f` over a GameTooltip's state under one short write borrow.
 fn with_tip<T>(lua: &Lua, this: &Table, f: impl FnOnce(&mut TooltipState) -> T) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     tip_mut(&mut model, h).map(f)
+}
+
+/// The tooltip state of `h`, read only.
+fn tip_ref(model: &Model, h: FrameHandle) -> Option<&TooltipState> {
+    match model.arena.frame(h).map(|f| &f.kind_state) {
+        Some(KindState::Tooltip(t)) => Some(t),
+        _ => None,
+    }
 }
 
 pub(super) fn tip_mut(model: &mut Model, h: FrameHandle) -> mlua::Result<&mut TooltipState> {
@@ -57,7 +67,9 @@ fn global_font_string(lua: &Lua, name: &str) -> Option<crate::widget::RegionHand
         return None;
     };
     let rh = super::region::region_handle_of(lua, &t).ok()?;
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     (model.arena.region(rh)?.kind == crate::widget::RegionKind::FontString).then_some(rh)
 }
 
@@ -71,7 +83,9 @@ pub(crate) fn post_load(lua: &Lua, wrapper: &Table) {
         return;
     };
     let name = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         if !matches!(
             model.arena.frame(h).map(|f| &f.kind_state),
             Some(KindState::Tooltip(_))
@@ -91,7 +105,9 @@ pub(crate) fn post_load(lua: &Lua, wrapper: &Table) {
         };
         pairs.push((left, right));
     }
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     if let Ok(t) = tip_mut(&mut model, h) {
         t.left_lines = pairs.iter().map(|p| p.0).collect();
         t.right_lines = pairs.iter().map(|p| p.1).collect();
@@ -220,14 +236,18 @@ pub(super) fn status_bar(model: &Model, h: FrameHandle) -> Option<FrameHandle> {
 /// hide slot (`0x53009b`/`0x5300a1`), so its `OnHide` runs; then the lines, counters and subject.
 pub(super) fn clear_silent(lua: &Lua, h: FrameHandle) {
     let bar = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let held = tip_mut(&mut model, h).is_ok_and(|t| t.unit_guid.is_some());
         held.then(|| status_bar(&model, h)).flatten()
     };
     if let Some(bar) = bar {
         visibility::set_shown(lua, bar, false);
     }
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     clear_content(&mut model, h);
 }
 
@@ -240,11 +260,13 @@ pub(super) fn clear(lua: &Lua, h: FrameHandle) {
 /// Fires `OnTooltipCleared`; a script error is recorded, never propagated.
 pub(super) fn fire_cleared(lua: &Lua, h: FrameHandle) {
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.frame_id(h)
     };
     if let Err(e) = event::fire_widget_handler(lua, id, "OnTooltipCleared", Vec::new()) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }
@@ -262,10 +284,29 @@ pub(super) fn fire_cleared(lua: &Lua, h: FrameHandle) {
 /// such state. That plate takes the base hide, keeping its owner and its wait, so the view's
 /// arrival renders it in place.
 pub(super) fn show_or_hide_empty(lua: &Lua, h: FrameHandle) {
+    show_or_hide(lua, h, false);
+}
+
+/// [`show_or_hide_empty`] for the spell and aura builders, where a build that drew no line, an
+/// aura miss above all, also keeps its owner. CallOfElements owns its scan plate once, in
+/// `OnLoad` (`CallOfElements.xml:25`), and ends every debuff scan on a miss
+/// (`COE_TotemLogic.lua:280`, looping until `TextLeft1` reads nil); its later `SetSpell` scans
+/// (`COE_TotemData.lua:229`, `:528`) still read lines on the 1.12 client. Un-owning on the miss
+/// left every later scan empty, so every totem read "no tool" and stayed greyed. The tail traced
+/// above says the miss un-owns; the addon's working scans say the owner survives it, and the
+/// game's files win. Where the binary keeps it is unexplained. The item builder's uncached hide
+/// is a separate, traced step and still un-owns.
+pub(super) fn show_or_hide_empty_spell(lua: &Lua, h: FrameHandle) {
+    show_or_hide(lua, h, true);
+}
+
+fn show_or_hide(lua: &Lua, h: FrameHandle, keep_owner_when_empty: bool) {
     let waiting = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let empty = tip_mut(&mut model, h).is_ok_and(|t| t.num_lines == 0);
-        empty && model.spell_tooltip_waits.contains_key(&h)
+        empty && (keep_owner_when_empty || model.spell_tooltip_waits.contains_key(&h))
     };
     if waiting {
         visibility::set_shown_bit(lua, h, false);
@@ -282,7 +323,9 @@ pub(super) fn show_or_hide_empty(lua: &Lua, h: FrameHandle) {
 /// `0x530ac8`). So a parent's show brings back only a tooltip that still has an owner.
 pub(in crate::script) fn show_override(lua: &Lua, h: FrameHandle) {
     let live = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let live = tip_mut(&mut model, h).is_ok_and(|t| t.owner.is_some() && t.num_lines > 0);
         if live {
             full_alpha(&mut model, h);
@@ -303,7 +346,9 @@ pub(in crate::script) fn show_override(lua: &Lua, h: FrameHandle) {
 /// not the tooltip is shown: only the base hide gates on visibility (`0x76ad5b`).
 pub(in crate::script) fn hide_override(lua: &Lua, h: FrameHandle) {
     let is_tip = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         tip_mut(&mut model, h).is_ok()
     };
     if is_tip {
@@ -327,7 +372,9 @@ pub(in crate::script) fn set_owner_core(
     y: f32,
 ) {
     clear(lua, h);
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     full_alpha(&mut model, h);
     let Ok(t) = tip_mut(&mut model, h) else {
         return;
@@ -392,7 +439,9 @@ fn apply_anchor(
 /// with the full duration on every call (`0x530b00`–`0x530b10`), so a second call restarts it.
 pub(in crate::script) fn fade_out(lua: &Lua, h: FrameHandle) {
     {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let Ok(t) = tip_mut(&mut model, h) else {
             return;
         };
@@ -402,7 +451,9 @@ pub(in crate::script) fn fade_out(lua: &Lua, h: FrameHandle) {
         }
     }
     visibility::hide(lua, h);
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     if let Ok(t) = tip_mut(&mut model, h) {
         t.fade_left = None;
     }
@@ -547,7 +598,9 @@ pub(super) fn append_line(
         return Ok(());
     }
     let n = have + 1;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let (lh, rh) = match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::Tooltip(t)) => (t.left_lines[n - 1], t.right_lines[n - 1]),
         _ => return Err(mlua::Error::runtime("not a GameTooltip")),
@@ -634,8 +687,22 @@ pub(super) fn anchor_cursor_tooltips(model: &mut Model) {
 /// remains (`0x7ffa24` = 0.5, `0x530c0c`), else `trunc(255 × left / half)` (`0x530c18`–`0x530c2c`,
 /// `0x40a2b0` truncates). Nothing gates it on shown, owner or lines.
 pub(in crate::script) fn update(lua: &Lua, h: FrameHandle, elapsed: f32) {
+    // No fade armed is nothing to do: read first, so the mutation count stands.
+    let armed = {
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
+        let model = &**model;
+        model.frame_to_id.contains_key(&h)
+            && tip_ref(model, h).is_some_and(|t| t.fade_left.is_some())
+    };
+    if !armed {
+        return;
+    }
     let done = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         // Roster-gated as in `anchor_cursor_tooltips`, since the hide writes layout.
         if !model.frame_to_id.contains_key(&h) {
             return;
@@ -658,7 +725,7 @@ pub(in crate::script) fn update(lua: &Lua, h: FrameHandle, elapsed: f32) {
     // The end: full alpha (`0x530bd8`), then the shown bit cleared and the hide slot (`0x530bdf`,
     // `0x530be9`), as the Lua `Hide` does, so the hide's `OnTooltipCleared` sees 255.
     if done {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .arena
             .set_alpha(h, 255);

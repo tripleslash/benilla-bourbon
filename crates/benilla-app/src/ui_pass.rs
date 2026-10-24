@@ -403,8 +403,6 @@ impl Plugin for PlayerUiPlugin {
                 Material2dPlugin::<UiQuadMaterial>::default(),
                 // The lane's decode is not optional, so this plugin owns it.
                 crate::ui_gamma::UiGammaPlugin,
-                // Skips the 2D opaque pass when empty, which on this camera is always.
-                crate::opaque2d::SkipEmptyOpaque2dPlugin,
             ))
             .add_systems(Startup, (spawn_ui_camera, init_white_texture))
             .configure_sets(
@@ -430,6 +428,8 @@ fn spawn_ui_camera(mut commands: Commands) {
         crate::ui_gamma::UiGammaLane::default(),
         // The world as this pass's first draw; `source` is `None` until a world camera draws.
         benilla_world::ffx_glow::FfxBackdrop::default(),
+        // fork: fsr (FORK.md) — it presents every frame, a held one of frame generation included.
+        benilla_world::fsr::PresentsHeldFrames,
         // Bevy UI (the glue and loading screens) renders here, in the gamma lane; unmarked, it
         // would take the highest-order camera, the egui overlay.
         bevy::ui::IsDefaultUiCamera,
@@ -821,7 +821,8 @@ fn rebuild_ui_mesh(
     // A modified image is re-prepared into a new GPU texture, and a prepared material's bind group
     // keeps sampling the old one: mark each material over it modified, so it is re-prepared too.
     // The image's event reaches this read a frame after its own re-preparation was extracted, so
-    // the new texture is in place when the material's turn comes.
+    // the new texture is in place when the material's turn comes. `into_inner`, as an `AssetMut`
+    // dropped without a mutable borrow emits no `Modified`.
     if !replaced.is_empty() {
         let over: Vec<AssetId<UiQuadMaterial>> = pools
             .materials
@@ -832,20 +833,22 @@ fn rebuild_ui_mesh(
             .map(|(_, handle)| handle.id())
             .collect();
         for id in over {
-            stores.1.get_mut(id);
+            if let Some(material) = stores.1.get_mut(id) {
+                material.into_inner();
+            }
         }
     }
     // The meter is off unless asked (the hover recorder, `WOW_UI_COST=1`): one bool test.
     let cost_on = cost_wanted.0 || crate::ui_script::extract::ui_cost_enabled();
     *mesh_cost = UiMeshCost::default();
-    let t_rebuild = cost_on.then(std::time::Instant::now);
+    let t_rebuild = cost_on.then(bevy::platform::time::Instant::now);
     let mut t_mark = t_rebuild;
     let mut lap = move || -> u128 {
         if !cost_on {
             return 0;
         }
         t_mark
-            .replace(std::time::Instant::now())
+            .replace(bevy::platform::time::Instant::now())
             .map_or(0, |t| t.elapsed().as_micros())
     };
     let (meshes, materials) = (&mut stores.0, &mut stores.1);
@@ -1130,9 +1133,10 @@ fn rebuild_ui_mesh(
             use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
             static SHOWN: AtomicU32 = AtomicU32::new(0);
             static LAST_SEC: AtomicU64 = AtomicU64::new(0);
-            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            static START: std::sync::OnceLock<bevy::platform::time::Instant> =
+                std::sync::OnceLock::new();
             let sec = START
-                .get_or_init(std::time::Instant::now)
+                .get_or_init(bevy::platform::time::Instant::now)
                 .elapsed()
                 .as_secs();
             if LAST_SEC.swap(sec, Ordering::Relaxed) != sec {

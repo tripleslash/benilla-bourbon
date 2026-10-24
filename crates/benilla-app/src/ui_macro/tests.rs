@@ -239,6 +239,26 @@ fn a_registered_frame_sees_every_macro_line_as_an_event() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// This fork: a `#showtooltip` line is the button's and never reaches the chat frame, which 1.12
+/// would send as `/say`.
+#[test]
+fn a_show_line_is_not_sent() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = ui();
+    s.set_macros(MacroState::from_scopes(
+        vec![macro_view("Hop", "#showtooltip\n/say go")],
+        Vec::new(),
+    ));
+    assert!(super::run_macro(&mut s, 1));
+    assert_eq!(
+        s.take_chat_sends()
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>(),
+        vec!["go".to_string()]
+    );
+}
+
 /// The reference's tokenizer (`0x64ae50`) splits on either `\r` or `\n`.
 #[test]
 fn either_line_ending_splits_a_body() {
@@ -333,7 +353,7 @@ fn rebind_app(script: UiScript) -> bevy::prelude::App {
         .init_resource::<crate::ui_action::ActionSlots>()
         .init_resource::<super::MacroBoundSpells>()
         .init_resource::<crate::ui_pet::PetBar>()
-        .insert_non_send_resource(script)
+        .insert_non_send(script)
         .add_systems(Update, super::rebind_macro_spells);
     app
 }
@@ -408,7 +428,7 @@ fn the_pets_spell_list_rebinds_the_failed_and_the_pet_bound_macros_only() {
         (pet_spell, pet_spell, shadow_bolt),
         "the pet is out: both forms bind its spell, with its book"
     );
-    let script = app.world().non_send_resource::<UiScript>();
+    let script = app.world().non_send::<UiScript>();
     assert_eq!(
         script
             .eval::<(Option<i64>, Option<i64>)>("return GetActionAutocast(1)")
@@ -419,7 +439,7 @@ fn the_pets_spell_list_rebinds_the_failed_and_the_pet_bound_macros_only() {
 
     // The pet's book empties with no spell message: nothing is derived again.
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_pet_book(PetBookState::default());
     app.update();
     assert_eq!(
@@ -432,7 +452,7 @@ fn the_pets_spell_list_rebinds_the_failed_and_the_pet_bound_macros_only() {
     // pet's book. A quoted call made now never found the spell.
     pet_spell_list(&mut app);
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run(r#"CreateMacro("Later", 1, 'CastSpellByName("Seduction")')"#)
         .unwrap();
     app.update();
@@ -459,7 +479,7 @@ fn the_pets_spell_list_rebinds_the_failed_and_the_pet_bound_macros_only() {
 
     // It returns: the two that kept the pet's book bind again, the one made without it does not.
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_pet_book(seduction);
     pet_spell_list(&mut app);
     app.update();
@@ -505,7 +525,7 @@ fn a_save_writes_the_sorted_table_and_a_load_sorts_it_again() {
         account: Some(account.clone()),
         ..Default::default()
     })
-    .insert_non_send_resource(script)
+    .insert_non_send(script)
     .add_systems(Update, super::save_dirty_macros);
     app.update();
 
@@ -579,7 +599,7 @@ fn a_position_numbered_character_bar_moves_to_macro_ids_once() {
             7,
         ))
         .init_resource::<super::MacroFiles>()
-        .insert_non_send_resource(UiScript::new().unwrap())
+        .insert_non_send(UiScript::new().unwrap())
         .add_systems(Update, super::load_macros);
     let sent = |rx: &crossbeam_channel::Receiver<crate::net::ClientCommand>| {
         rx.try_iter()
@@ -623,7 +643,7 @@ fn a_position_numbered_character_bar_moves_to_macro_ids_once() {
         file.starts_with("MACRO 16777217 \"Alpha\""),
         "the file is renumbered, in name order: {file}"
     );
-    let state = app.world().non_send_resource::<UiScript>().macros();
+    let state = app.world().non_send::<UiScript>().macros();
     assert_eq!(state.by_id(0x100_0003).unwrap().name, "Charlie");
 
     // The next session: a fresh VM loads the renumbered file. A button at 0x40000013 is now the
@@ -639,15 +659,12 @@ fn a_position_numbered_character_bar_moves_to_macro_ids_once() {
                 kind: 0x40,
             },
         );
-    app.insert_non_send_resource(UiScript::new().unwrap());
+    app.insert_non_send(UiScript::new().unwrap());
     app.update();
     assert!(sent(&rx).is_empty(), "nothing is sent again");
     assert_eq!(word(&app, 9), Some(0x4000_0013));
     assert_eq!(
-        app.world()
-            .non_send_resource::<UiScript>()
-            .macros()
-            .count(true),
+        app.world().non_send::<UiScript>().macros().count(true),
         3,
         "and the renumbered file loaded"
     );
@@ -662,7 +679,7 @@ fn bound_of(app: &bevy::prelude::App, id: u32) -> super::run::BoundSpell {
 fn learn(app: &mut bevy::prelude::App, slots: Vec<benilla_ui::script::SpellSlotView>) {
     let ids: Vec<u32> = slots.iter().map(|s| s.spell_id).collect();
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_spellbook(benilla_ui::script::SpellBookState {
             tabs: Vec::new(),
             slots,
@@ -701,7 +718,7 @@ fn only_a_create_or_an_edit_of_that_macro_derives_its_spell_again() {
     );
 
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run("EditMacro(GetMacroIndexByName('Say'), nil, nil, '/say yo')")
         .unwrap();
     app.update();
@@ -712,7 +729,7 @@ fn only_a_create_or_an_edit_of_that_macro_derives_its_spell_again() {
     );
 
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run(r#"CreateMacro("Again", 1, "/cast Pyroblast")"#)
         .unwrap();
     app.update();
@@ -723,7 +740,7 @@ fn only_a_create_or_an_edit_of_that_macro_derives_its_spell_again() {
     );
 
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run("EditMacro(GetMacroIndexByName('Pyro'), 'Pyro')")
         .unwrap();
     app.update();
@@ -749,7 +766,7 @@ fn the_players_arrival_derives_every_macro() {
     assert_eq!(bound_of(&app, 1), BoundSpell::Unresolved);
     // The book the arrival's learns built, with no bar or macro change beside it.
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_spellbook(benilla_ui::script::SpellBookState {
             tabs: Vec::new(),
             slots: vec![book_slot(11366, "Pyroblast")],
@@ -844,16 +861,13 @@ fn a_supersede_with_no_vm_yet_is_kept_for_the_first_pass() {
     app.update();
     assert_eq!(bound_of(&app, 1), BoundSpell::Spell(116));
 
-    let script = app
-        .world_mut()
-        .remove_non_send_resource::<UiScript>()
-        .unwrap();
+    let script = app.world_mut().remove_non_send::<UiScript>().unwrap();
     app.world_mut()
         .resource_mut::<crate::ui_action::PlayerActions>()
         .superseded
         .push((116, 205));
     app.update();
-    app.world_mut().insert_non_send_resource(script);
+    app.world_mut().insert_non_send(script);
     app.update();
     assert_eq!(bound_of(&app, 1), BoundSpell::Spell(205));
 }
@@ -895,12 +909,12 @@ fn an_edit_derives_against_the_book_at_its_call() {
     assert_eq!(bound_of(&app, 1), BoundSpell::None);
 
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run("EditMacro(1, nil, nil, '/cast Frostbolt(Rank 1)')")
         .unwrap();
     // The next packet: rank 2 supersedes rank 1.
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_spellbook(benilla_ui::script::SpellBookState {
             tabs: Vec::new(),
             slots: vec![ranked(205, "Rank 2")],
@@ -930,7 +944,7 @@ fn a_load_and_an_arrival_in_one_pass_derive_once() {
     learn(&mut app, vec![book_slot(11366, "Pyroblast")]);
     // A change that runs the pass: the macro table's generation moves with no derive owed.
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run("CreateMacro('Other', 1, '/say hi')")
         .unwrap();
     app.update();

@@ -1,0 +1,9 @@
+[package]
+name = "may-park"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "benilla: which threads of the threaded browser build may park on a contended lock, and std locks that ask."
+publish = false
+
+[dependencies]

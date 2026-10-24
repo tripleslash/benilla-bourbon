@@ -10,10 +10,12 @@ use avian3d::character_controller::move_and_slide::{
 };
 use avian3d::prelude::*;
 use bevy::ecs::component::Component;
-use bevy::ecs::lifecycle::RemovedComponents;
+use bevy::ecs::lifecycle::{Remove, RemovedComponents};
+use bevy::ecs::observer::On;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::ResMut;
-use bevy::math::{Dir3, Quat, Vec3};
+use bevy::ecs::system::{Query, ResMut};
+use bevy::math::{Dir3, Quat, Vec2, Vec3};
+use bevy::transform::components::GlobalTransform;
 
 mod one_sided;
 
@@ -75,6 +77,76 @@ impl ColliderEpoch {
     }
 }
 
+/// fork: where the collider set changed since its reader last looked, as the Bevy XZ boxes of the
+/// colliders the streamer attached and of every collider removed. [`ColliderEpoch`] says that the
+/// set changed; a lane whose cached answers lie around the camera (the rain's ground columns)
+/// asks whether it changed within reach, since a zone streams colliders in a thousand yards out
+/// on most frames of a journey. One reader, which drains it ([`Self::take_near`]).
+#[derive(Resource, Default)]
+pub(crate) struct ColliderChanges {
+    boxes: Vec<(Vec2, Vec2)>,
+    /// A change whose place is not known counts as near.
+    unplaced: bool,
+}
+
+impl ColliderChanges {
+    /// Boxes kept before the lot folds into "somewhere": no reader, or a zone's worth in a frame.
+    const CAP: usize = 4096;
+
+    fn note(&mut self, aabb: ColliderAabb) {
+        let (min, max) = (
+            Vec2::new(aabb.min.x, aabb.min.z),
+            Vec2::new(aabb.max.x, aabb.max.z),
+        );
+        // An unset box (avian's default, before its first step) or a non-finite one has no place.
+        if !(min.is_finite() && max.is_finite()) || min.cmpgt(max).any() {
+            self.unplaced = true;
+        } else if self.boxes.len() < Self::CAP {
+            self.boxes.push((min, max));
+        } else {
+            self.unplaced = true;
+            self.boxes.clear();
+        }
+    }
+
+    /// Records a collider about to be attached to an entity placed at `at`.
+    pub(crate) fn note_attached(&mut self, collider: &Collider, at: Option<&GlobalTransform>) {
+        let (_, rotation, translation) = at
+            .copied()
+            .unwrap_or(GlobalTransform::IDENTITY)
+            .to_scale_rotation_translation();
+        self.note(collider.aabb(translation, rotation));
+    }
+
+    /// Did the set change within `reach` yards (XZ) of `at`, or with no camera to measure from?
+    /// Forgets what it held.
+    pub(crate) fn take_near(&mut self, at: Option<Vec3>, reach: f32) -> bool {
+        let near = self.unplaced
+            || (!self.boxes.is_empty()
+                && at.is_none_or(|at| {
+                    let p = Vec2::new(at.x, at.z);
+                    self.boxes.iter().any(|(min, max)| {
+                        (p.clamp(*min, *max) - p).length_squared() <= reach * reach
+                    })
+                }));
+        self.boxes.clear();
+        self.unplaced = false;
+        near
+    }
+}
+
+/// Records where a collider leaves the world ([`ColliderChanges`]), by its last world box.
+pub(crate) fn note_collider_removal(
+    removed: On<Remove, Collider>,
+    boxes: Query<&ColliderAabb>,
+    mut changes: ResMut<ColliderChanges>,
+) {
+    match boxes.get(removed.entity) {
+        Ok(aabb) => changes.note(*aabb),
+        Err(_) => changes.unplaced = true,
+    }
+}
+
 /// Bumps [`ColliderEpoch`] on any collider removal, despawns included; the streamer's attach loop
 /// bumps for its own attaches.
 pub(crate) fn track_collider_removals(
@@ -97,10 +169,12 @@ pub struct GroundDecalSurface;
 /// Marks a static collider that occludes the mouse pick: the reference traces the world too and
 /// drops the object hit when the world hit is strictly nearer (`0x480df0` at `0x480eb4`,
 /// `CWorld::Intersect` `0x672170`, mask `0x1000114`), so a unit behind a wall is not hoverable.
-/// Occluders are terrain (DDA `0x69c920`), WMO group faces outside MOPY reject mask `0x84` (here
-/// the walk collider, which rejects only `0x04`: a `0x84` face set is not built) and static
-/// default-set doodad hulls (`0x69cdb0`). Liquid (mask bits 16-19 off) is not, nor are unit and
-/// server-spawned GameObject hulls, transports included: those are the object trace.
+/// Occluders are terrain (DDA `0x69c920`) and WMO group faces outside MOPY mask `0x84`
+/// (`0x6a37b0`: `0xee`, `0xc6` for bit `0x10`, less `0x02` and `0x40`; leaf test `0x6bc716`), where
+/// `0x80` is the walk's runtime visited bit, so the walk collider's non-DETAIL set is exactly it.
+/// Doodads occlude by their drawn opaque batches, not their hulls, so no hull carries this
+/// (`interact::WorldPick::doodad_occluder`). Liquid (mask bits 16-19 off) is not an occluder, nor
+/// are unit and server-spawned GameObject hulls, transports included: those are the object trace.
 #[derive(Component)]
 pub struct PickOccluder;
 
@@ -313,6 +387,155 @@ impl WorldCollision<'_, '_> {
     }
 }
 
+/// avian's `transform_to_position`, over only the bodies whose pose can have left their
+/// `Position`/`Rotation`: a moved `GlobalTransform`, or a `Position`/`Rotation` just inserted.
+/// avian's own walks every collider each step and decomposes every matrix; with no change since
+/// the last sync, the two already agree.
+#[allow(clippy::type_complexity)]
+pub(crate) fn sync_moved_positions(
+    mut query: bevy::ecs::system::Query<
+        (
+            &bevy::transform::components::GlobalTransform,
+            &mut Position,
+            &mut Rotation,
+        ),
+        bevy::ecs::query::Or<(
+            bevy::ecs::query::Changed<bevy::transform::components::GlobalTransform>,
+            bevy::ecs::query::Added<Position>,
+            bevy::ecs::query::Added<Rotation>,
+        )>,
+    >,
+    length_unit: bevy::ecs::system::Res<PhysicsLengthUnit>,
+    last_physics_tick: bevy::ecs::system::Res<avian3d::schedule::LastPhysicsTick>,
+    system_tick: bevy::ecs::system::SystemChangeTick,
+) {
+    use bevy::ecs::change_detection::DetectChanges;
+    // avian's tolerances and first-tick floor, so both syncs take the same writes.
+    let this_run = if last_physics_tick.0.get() == 0 {
+        bevy::ecs::change_detection::Tick::new(1)
+    } else {
+        system_tick.this_run()
+    };
+    let distance_tolerance = length_unit.0 * 1e-5;
+    let rotation_tolerance = 0.1f32.to_radians();
+    let after_step = |changed: bool, at: bevy::ecs::change_detection::Tick| {
+        changed && at.is_newer_than(last_physics_tick.0, this_run)
+    };
+    for (global, mut position, mut rotation) in &mut query {
+        let pose = global.compute_transform();
+        let position_written =
+            !position.is_added() && after_step(position.is_changed(), position.last_changed());
+        if !position_written && !position.0.abs_diff_eq(pose.translation, distance_tolerance) {
+            position.0 = pose.translation;
+        }
+        let target = Rotation::from(pose.rotation);
+        let rotation_written =
+            !rotation.is_added() && after_step(rotation.is_changed(), rotation.last_changed());
+        if !rotation_written && rotation.angle_between(target).abs() > rotation_tolerance {
+            *rotation = target;
+        }
+    }
+}
+
+/// Puts [`sync_moved_positions`] in avian's transform-to-position slot of `schedule`; avian's own
+/// must be off (`PhysicsTransformConfig::transform_to_position`).
+pub(crate) fn add_moved_position_sync(
+    app: &mut bevy::app::App,
+    schedule: impl bevy::ecs::schedule::ScheduleLabel,
+) {
+    use bevy::ecs::schedule::IntoScheduleConfigs;
+    app.add_systems(
+        schedule,
+        sync_moved_positions
+            .in_set(avian3d::physics_transform::PhysicsTransformSystems::TransformToPosition),
+    );
+}
+
+/// The filtered sync places a spawned collider, follows a moved one, and seats a collider attached
+/// later to an entity that never moves, as avian's unfiltered one does.
+#[cfg(test)]
+mod moved_position_sync {
+    use super::*;
+    use bevy::prelude::*;
+
+    fn world() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            PhysicsPlugins::new(bevy::app::PostUpdate),
+        ));
+        app.insert_resource(avian3d::physics_transform::PhysicsTransformConfig {
+            transform_to_position: false,
+            ..Default::default()
+        });
+        add_moved_position_sync(&mut app, bevy::app::PostUpdate);
+        app.init_asset::<Mesh>();
+        app.finish();
+        app.cleanup();
+        app
+    }
+
+    fn settle(app: &mut App) {
+        for _ in 0..3 {
+            app.update();
+        }
+    }
+
+    fn pose(app: &App, e: Entity) -> (Vec3, Quat) {
+        let w = app.world();
+        (
+            w.get::<Position>(e).unwrap().0,
+            w.get::<Rotation>(e).unwrap().0,
+        )
+    }
+
+    #[test]
+    fn the_filtered_sync_follows_spawn_move_and_late_attach() {
+        let mut app = world();
+        let turn = Quat::from_rotation_y(0.8);
+        let spawned = app
+            .world_mut()
+            .spawn((
+                RigidBody::Static,
+                Collider::sphere(0.5),
+                Transform::from_xyz(3.0, 0.0, 0.0).with_rotation(turn),
+            ))
+            .id();
+        let late = app
+            .world_mut()
+            .spawn(Transform::from_xyz(7.0, 1.0, -2.0))
+            .id();
+        settle(&mut app);
+        let (p, r) = pose(&app, spawned);
+        assert!(
+            p.abs_diff_eq(Vec3::new(3.0, 0.0, 0.0), 1e-5),
+            "spawned: {p}"
+        );
+        assert!(r.abs_diff_eq(turn, 1e-5), "spawned rotation: {r} vs {turn}");
+
+        app.world_mut()
+            .get_mut::<Transform>(spawned)
+            .unwrap()
+            .translation = Vec3::new(5.0, 2.0, 0.0);
+        settle(&mut app);
+        let (p, _) = pose(&app, spawned);
+        assert!(p.abs_diff_eq(Vec3::new(5.0, 2.0, 0.0), 1e-5), "moved: {p}");
+
+        app.world_mut()
+            .entity_mut(late)
+            .insert((RigidBody::Static, Collider::sphere(0.5)));
+        settle(&mut app);
+        let (p, _) = pose(&app, late);
+        assert!(
+            p.abs_diff_eq(Vec3::new(7.0, 1.0, -2.0), 1e-5),
+            "late attach: {p}"
+        );
+    }
+}
+
 /// `cameraWaterCollision` is a trace mask (`0x50e5ec`): the waterline stops the camera boom only
 /// with it set, and never the walking body.
 #[cfg(test)]
@@ -328,7 +551,7 @@ mod liquid_trace_mask {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>();
@@ -385,7 +608,7 @@ mod liquid_trace_mask {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>();
@@ -608,6 +831,61 @@ mod liquid_trace_mask {
 /// The contact pipeline `world_plugins` disables: the stock broad phase pairs a resting kinematic
 /// trimesh with the static world for a manifold every tick, and dropping it keeps the shape casts.
 #[cfg(test)]
+mod collider_changes {
+    use super::*;
+
+    /// A change is near by the gap between its box and the point, in XZ; a change with no place
+    /// is near wherever the point is; and a look forgets what it saw.
+    #[test]
+    fn a_change_is_near_by_its_boxs_distance_in_the_plane() {
+        let floor = Collider::cuboid(10.0, 1.0, 10.0);
+        let at = |x: f32| GlobalTransform::from_translation(Vec3::new(x, 500.0, 0.0));
+        let mut changes = ColliderChanges::default();
+        assert!(
+            !changes.take_near(Some(Vec3::ZERO), 50.0),
+            "nothing changed"
+        );
+
+        // A box spanning x 995..1005: 945 yd from the origin, whatever its height.
+        changes.note_attached(&floor, Some(&at(1000.0)));
+        assert!(!changes.take_near(Some(Vec3::ZERO), 900.0));
+        assert!(
+            !changes.take_near(Some(Vec3::ZERO), 2000.0),
+            "already taken"
+        );
+        changes.note_attached(&floor, Some(&at(1000.0)));
+        assert!(changes.take_near(Some(Vec3::ZERO), 1000.0));
+        // Standing inside the box.
+        changes.note_attached(&floor, Some(&at(0.0)));
+        assert!(changes.take_near(Some(Vec3::new(2.0, -300.0, 3.0)), 1.0));
+        // No camera to measure from: any change counts.
+        changes.note_attached(&floor, Some(&at(1000.0)));
+        assert!(changes.take_near(None, 1.0));
+
+        // A collider avian has not boxed yet has no place.
+        changes.note(ColliderAabb::INVALID);
+        assert!(changes.take_near(Some(Vec3::ZERO), 1.0));
+        assert!(!changes.take_near(Some(Vec3::ZERO), 1.0));
+    }
+
+    /// With no reader the list folds into "somewhere" at its cap and holds nothing more.
+    #[test]
+    fn the_list_is_bounded() {
+        let far = Collider::cuboid(1.0, 1.0, 1.0);
+        let at = GlobalTransform::from_translation(Vec3::new(5000.0, 0.0, 0.0));
+        let mut changes = ColliderChanges::default();
+        for _ in 0..ColliderChanges::CAP + 10 {
+            changes.note_attached(&far, Some(&at));
+        }
+        assert!(changes.boxes.len() <= ColliderChanges::CAP);
+        assert!(
+            changes.take_near(Some(Vec3::ZERO), 1.0),
+            "past the cap: somewhere"
+        );
+    }
+}
+
+#[cfg(test)]
 mod contact_pipeline {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
@@ -621,7 +899,7 @@ mod contact_pipeline {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
         ));
         if broad_phase {
             app.add_plugins(physics);

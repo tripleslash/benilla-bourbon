@@ -224,7 +224,6 @@ pub(super) const INERT: &[Registered] = &[
     same("horizonfarclip", "2112").checked(benilla_ui::script::check_horizon_farclip), // 0x68881c
     same("hwDetect", "1"),                  // 0x63a259
     same("Joystick", "0"),                  // 0x5142bc
-    same("lodDist", "100.0").checked(benilla_ui::script::check_lod_dist), // 0x688524
     same("M2BatchDoodads", "1"),            // 0x40292f
     same("M2Faster", "1"),                  // 0x402952
     same("M2FasterDebug", "0"),             // 0x402975

@@ -398,7 +398,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 
@@ -416,7 +416,7 @@ mod tests {
                 .count()
         };
         let notified = {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.run(r#"NotifyInspect("target")"#).unwrap();
             script.take_inspect_notifies()
         };
@@ -425,6 +425,7 @@ mod tests {
         for token in notified {
             steps
                 .get_mut(app.world_mut())
+                .unwrap()
                 .apply(&mut UiScript::new().unwrap(), InspectCall::Notify(token));
         }
         assert!(
@@ -451,7 +452,7 @@ mod tests {
         let link = |app: &mut App, token: &str| {
             app.world_mut().run_system_once(feed_inspect).unwrap();
             app.world_mut()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<Option<String>>(&format!("return GetInventoryItemLink({token:?}, 1)"))
                 .unwrap()
         };
@@ -465,7 +466,7 @@ mod tests {
                 "{token}"
             );
         }
-        let s = app.world_mut().non_send_resource::<UiScript>();
+        let s = app.world_mut().non_send::<UiScript>();
         assert!(s.eval::<Vec<String>>("return SEEN").unwrap().is_empty());
     }
 
@@ -493,7 +494,7 @@ mod tests {
         app.update();
         let link = app
             .world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<String>(r#"return GetInventoryItemLink("target", 1)"#)
             .unwrap();
         assert!(link.contains("|Hitem:7366:1900:0:0|h"), "{link}");
@@ -543,7 +544,7 @@ mod tests {
             app.update();
             app.world_mut()
                 .resource_scope(|world, mut feed: Mut<InspectFeedState>| {
-                    feed.vm.get(world.non_send_resource::<UiScript>()).builds
+                    feed.vm.get(world.non_send::<UiScript>()).builds
                 })
         };
         let before = builds(&mut app);
@@ -571,7 +572,7 @@ mod tests {
             app.update();
             app.world_mut()
                 .resource_scope(|world, mut feed: Mut<InspectFeedState>| {
-                    feed.vm.get(world.non_send_resource::<UiScript>()).builds
+                    feed.vm.get(world.non_send::<UiScript>()).builds
                 })
         };
         assert_eq!(builds(&mut app), 2, "both players, first seen");
@@ -600,7 +601,7 @@ mod tests {
         const UNIT_FIELD_LEVEL: u16 = 34;
         let (mut app, _rx) = world([MATE, 0x2002], 7366);
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(
                 r#"
                 LEVELS = 0
@@ -622,7 +623,7 @@ mod tests {
                     level,
                 )]));
             app.world_mut().run_system_once(feed_inspect).unwrap();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             assert_eq!(s.eval::<i64>("return LEVELS").unwrap(), 0, "level {level}");
         }

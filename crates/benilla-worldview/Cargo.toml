@@ -8,6 +8,12 @@ description = "The world viewer: the engine with no game attached, which keeps t
 [lints]
 workspace = true
 
+[features]
+# fork: perf — per-system CPU time (`benilla-world`'s `trace_systems`).
+trace_systems = ["benilla-world/trace_systems"]
+# Tuning only: embedded shaders reload from the source tree on save (`benilla-world`'s).
+shader_reload = ["benilla-world/shader_reload"]
+
 [dependencies]
 # Only the engine, never a game crate: a world concept that needs the game fails to build here.
 benilla-world = { path = "../benilla-world" }

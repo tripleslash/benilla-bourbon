@@ -21,7 +21,7 @@ const ROLL: u16 = 44;
 /// The link of the item in backpack slot 1, whose descriptor is `pairs` and whose template's flags
 /// are `template_flags`.
 fn bag_link(pairs: &[(u16, u32)], template_flags: u32) -> String {
-    let now = std::time::Instant::now();
+    let now = bevy::platform::time::Instant::now();
     let mut app = App::new();
     app.init_resource::<Items>()
         .init_resource::<Cooldowns>()
@@ -63,10 +63,10 @@ fn bag_link(pairs: &[(u16, u32)], template_flags: u32) -> String {
     ));
     let mut script = UiScript::new().unwrap();
     script.set_now(1000.0);
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.update();
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .eval::<String>("return GetContainerItemLink(0, 1)")
         .unwrap()
 }

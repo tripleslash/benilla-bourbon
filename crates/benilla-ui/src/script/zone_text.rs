@@ -7,8 +7,6 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::Model;
-
 /// The zone caches, as the host resolves them from the area tables.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ZoneTexts {
@@ -66,18 +64,18 @@ fn zone_pvp_type(
 impl super::UiScript {
     /// Push the zone caches; the caller fires the zone events after.
     pub fn set_zone_texts(&mut self, texts: ZoneTexts) {
-        self.model_mut().zone = texts;
+        set_field!(self, zone, texts);
     }
 
     /// Push the realm's PvP flag, `0x88272c`, which `GetZonePVPInfo` reads at the call.
     pub fn set_realm_pvp(&mut self, on: bool) {
-        self.model_mut().realm_pvp = on;
+        set_field!(self, realm_pvp, on);
     }
 
     /// Push the active player's faction template masks, `(friend, enemy)`, `None` with no active
     /// player or no template row: what `GetZonePVPInfo` reads at the call (`0x48d5d6`-`0x48d613`).
     pub fn set_player_faction_masks(&mut self, masks: Option<(u32, u32)>) {
-        self.model_mut().player_faction_masks = masks;
+        set_field!(self, player_faction_masks, masks);
     }
 }
 
@@ -88,7 +86,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // their cache slot or the shared empty string `0x882748` when the slot is unset, never nil.
     let text = |pick: fn(&ZoneTexts) -> &str| {
         move |lua: &Lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             lua.create_string(pick(&model.zone))
         }
     };
@@ -107,7 +107,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetZonePVPInfo",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let z = &model.zone;
             let pvp = zone_pvp_type(
                 z.pvp_zone.as_ref(),

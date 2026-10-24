@@ -24,6 +24,22 @@ mod pick;
 mod pool;
 mod render;
 
+/// The retained pass's render system, re-exported for the passes that order against it: the
+/// gather, the fog composite and the water's scene copy must not run until it has written the WMO
+/// and doodad cells into the depth buffer they read. Ordering is the only thing outside this module
+/// that has any business naming the pass, so the module itself stays private.
+pub(crate) use render::static_gx_pass;
+// fork: modern lighting (FORK.md, P4) — the froxel pass reads the cascades this node draws.
+pub(crate) use render::gx_shadow_pass;
+// fork: modern lighting (FORK.md, P5) — the probe trace marches the voxels this node writes.
+pub(crate) use render::gi_voxel_pass;
+
+/// The view marker, re-exported for ONE writer: `crate::liquid::reflect`, whose mirrored camera
+/// spawns with [`StaticGxView::MIRROR`] so the buildings and props this pass owns appear in the
+/// water's reflection instead of only in the screen-space trace laid over it. The marker's own
+/// doc carries what that view does and does not get.
+pub(crate) use render::StaticGxView;
+
 /// The doodad spatial cell, a quarter ADT tile (133⅓ yd), as `terrain_stream::merge::CELL`.
 const CELL: f32 = 533.333_3 / 4.0;
 
@@ -62,13 +78,18 @@ const WORD_HAS_VC: u32 = 1 << 27;
 // `ShadeSel::Matte`, fixed 1.0: a map doodad never reaches the 2.5 site (`0x69e4ad`). Not
 // `WORD_SHADE_LIT`, so lifting the shader's `min(I, 1)` cap leaves this at 1.0.
 const WORD_MATTE: u32 = 1 << 28;
+// fork: a classified alpha-tested tree or bush leaf batch, swayed by the wind in the vertex stage;
+// bits 30-31 remain free.
+const WORD_FOLIAGE_WIND: u32 = 1 << 29;
 // An interior M2 prop is WORD_INTERIOR with WORD_WMO clear, the entity shader's `interior_prop =
 // flags.z && !flags.x`: SH-probe light from its record slot, interior fog, no live point lights.
 
 /// On unless `WOW_STATIC_GX=0`; read once, and the plugin registers nothing when off.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("WOW_STATIC_GX").as_deref() != Ok("0"))
+    // fork: `launch_env`, not `std::env` — the browser has no process environment, so `?static_gx=0`
+    // is how the retained lane's A/B arm reaches the web worldview. Native falls through unchanged.
+    *ON.get_or_init(|| crate::launch_env::var("WOW_STATIC_GX").as_deref() != Some("0"))
 }
 
 /// `WOW_WMO_BIAS=0`: the authored batch-order nudge bakes as zero, as in `model_material`.
@@ -113,8 +134,24 @@ pub(crate) static GX_PERF: [std::sync::atomic::AtomicU64; 5] = [
     std::sync::atomic::AtomicU64::new(0),
 ];
 
+/// Draw calls, `WOW_GX_PERF` only: the colour pass and its depth prepass, the shadow cascades,
+/// the GI voxelizer. Each costs its encode in the pass's `CommandEncoder::finish`.
+pub(crate) static GX_DRAWS: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// Count one draw in [`GX_DRAWS`] slot `i`; a no-op when the meter is off.
+#[inline]
+pub(crate) fn count_draw(i: usize) {
+    if gx_perf_enabled() {
+        GX_DRAWS[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Scope guard adding one site's wall time to [`GX_PERF`] slot `i`; a no-op when the meter is off.
-pub(crate) struct GxPerfGuard(Option<(usize, std::time::Instant)>);
+pub(crate) struct GxPerfGuard(Option<(usize, bevy::platform::time::Instant)>);
 impl Drop for GxPerfGuard {
     fn drop(&mut self) {
         if let Some((i, t0)) = self.0 {
@@ -126,7 +163,7 @@ impl Drop for GxPerfGuard {
     }
 }
 pub(crate) fn gx_perf_guard(i: usize) -> GxPerfGuard {
-    GxPerfGuard(gx_perf_enabled().then(|| (i, std::time::Instant::now())))
+    GxPerfGuard(gx_perf_enabled().then(|| (i, bevy::platform::time::Instant::now())))
 }
 
 /// One diverted batch, kept after its cell bakes so an unload or a later admission can re-bake.
@@ -141,7 +178,9 @@ struct GxItem {
     owner: (i32, i32),
     texture: Option<AssetId<bevy::image::Image>>,
     /// Keeps the render world's `GpuImage` alive under the baked cell; the id alone holds nothing.
-    _texture_handle: Option<Handle<bevy::image::Image>>,
+    /// Never read: its job is the strong reference, so `dead_code` is a false positive.
+    #[allow(dead_code)]
+    texture_handle: Option<Handle<bevy::image::Image>>,
     cutout: bool,
     two_sided: bool,
     unlit: bool,
@@ -155,6 +194,8 @@ struct GxItem {
     prop: Option<GxItemProp>,
     /// `Some(uid)` on a fader item: the placement it exiles with.
     fader: Option<u32>,
+    /// fork: an alpha-tested leaf-card batch of a static tree or bush model.
+    foliage_wind: bool,
 }
 
 /// A WMO-prop item's referrer set (an index into [`GxCell::sets`]) and folded SH-probe slot;
@@ -434,6 +475,7 @@ impl StaticGx {
                 return false;
             }
         };
+        let foliage_wind = foliage_wind_batch(&b.object.label, b.blend, b.wmo.is_some());
         let wmo_key = b.wmo.as_ref().map(|w| w.instance);
         let wmo = b.wmo.map(|w| GxItemWmo {
             group: w.group,
@@ -533,7 +575,7 @@ impl StaticGx {
             local_aabb: b.aabb,
             owner: b.owner,
             texture: b.texture.as_ref().map(Handle::id),
-            _texture_handle: b.texture,
+            texture_handle: b.texture,
             cutout: b.blend == ModelBlend::AlphaTest && !crate::model_render::alphatest_disabled(),
             two_sided: b.two_sided,
             unlit: b.unlit,
@@ -545,6 +587,7 @@ impl StaticGx {
             wmo,
             prop,
             fader: fader_uid,
+            foliage_wind,
         });
         if !entry.dirty {
             entry.dirty_since = self.frame;
@@ -640,6 +683,45 @@ impl StaticGx {
         self.declined_printed = 0;
         self.accepted = 0;
     }
+}
+
+/// The name terms of vanilla's tree, bush and plant families.
+const PLANT_TERMS: [&str; 15] = [
+    "tree", "bush", "shrub", "foliage", "fern", "palm", "plant", "willow", "canopy", "hedge",
+    "thorn", "cactus", "vine", "reed", "kelp",
+];
+
+/// File names of what stands rigid in a plant folder: a rock, a cage.
+const RIGID_TERMS: [&str; 8] = [
+    "rock", "stone", "boulder", "pebble", "gravel", "rubble", "cage", "prison",
+];
+
+/// fork: the foliage-wind leaf classification, conservative. Alpha test excludes trunks and rocks
+/// even when the model path says tree; the name terms cover vanilla's tree, bush and plant
+/// families. Animated doodads never reach this: `assemble.rs` excludes them before the divert.
+pub(crate) fn foliage_wind_batch(path: &str, blend: ModelBlend, wmo_geometry: bool) -> bool {
+    if wmo_geometry || blend != ModelBlend::AlphaTest {
+        return false;
+    }
+    // A zone's name is no plant: the "thorn" in Stranglethorn's folder named 77 stock models that
+    // carry no plant term of their own (ruins, pottery, bridges, cages, mine cars).
+    let p = path.to_ascii_lowercase().replace("stranglethorn", "");
+    // Substrings alone otherwise catch StreetLamp, tree huts, dead stumps and logs and painted
+    // tree facades: those can carry alpha-tested cards, but moving the whole card is not sway.
+    if ["street", "treehut", "stump", "log", "facade", "fallen"]
+        .iter()
+        .any(|term| p.contains(term))
+    {
+        return false;
+    }
+    let plant = |s: &str| PLANT_TERMS.iter().any(|term| s.contains(term));
+    // A rigid file name in a plant folder stays put (Azshara's `SeaPlants\BarnacleRock`); a
+    // plant's own name wins, so Stonetalon's `StoneTree` and Deadwind's `RockTree` still sway.
+    let name = p.rsplit(['/', '\\']).next().unwrap_or(&p);
+    if !plant(name) && RIGID_TERMS.iter().any(|term| name.contains(term)) {
+        return false;
+    }
+    plant(&p)
 }
 
 pub struct StaticGxPlugin;
@@ -783,6 +865,76 @@ mod tests {
         );
         assert!(gx.divert(batch(&g, Vec3::ZERO, None, ModelBlend::Opaque)));
         assert_eq!(gx.cells.len(), 1);
+    }
+
+    #[test]
+    fn foliage_classifier_requires_a_leaf_batch_and_a_plant_name() {
+        assert!(foliage_wind_batch(
+            "World\\Azeroth\\Elwynn\\PassiveDoodads\\Trees\\ElwynnTree01.m2",
+            ModelBlend::AlphaTest,
+            false,
+        ));
+        assert!(foliage_wind_batch(
+            "World\\Generic\\PassiveDoodads\\Bush\\Bush01.mdx",
+            ModelBlend::AlphaTest,
+            false,
+        ));
+        assert!(!foliage_wind_batch(
+            "World\\Azeroth\\Elwynn\\PassiveDoodads\\Trees\\ElwynnTree01.m2",
+            ModelBlend::Opaque,
+            false,
+        ));
+        assert!(!foliage_wind_batch(
+            "World\\Stormwind\\StreetLamp01.m2",
+            ModelBlend::AlphaTest,
+            false,
+        ));
+        assert!(!foliage_wind_batch(
+            "World\\Azeroth\\SwampOfSorrow\\PassiveDoodads\\TreeHuts\\LostTreeHuts03.m2",
+            ModelBlend::AlphaTest,
+            false,
+        ));
+        assert!(!foliage_wind_batch(
+            "World\\Azeroth\\Elwynn\\PassiveDoodads\\Tree\\ElwynnLog02.m2",
+            ModelBlend::AlphaTest,
+            false,
+        ));
+        assert!(!foliage_wind_batch(
+            "World\\Wmo\\TreeHouse.wmo",
+            ModelBlend::AlphaTest,
+            true,
+        ));
+    }
+
+    #[test]
+    fn foliage_classifier_reads_no_plant_into_a_zone_name_or_a_rigid_file() {
+        let leaf = |path: &str| foliage_wind_batch(path, ModelBlend::AlphaTest, false);
+        // "thorn" in the zone folder is not a plant term.
+        for path in [
+            "World\\Azeroth\\Stranglethorn\\ActiveDoodads\\Cages\\Cage01.m2",
+            "World\\Azeroth\\Stranglethorn\\PassiveDoodads\\Ruins\\TrollRuins01.m2",
+            "World\\Azeroth\\Stranglethorn\\PassiveDoodads\\Rocks\\StranglethornCliffRock01.m2",
+            "World\\Azeroth\\Stranglethorn\\PassiveDoodads\\GemMineCar01\\GemMineCar01.m2",
+        ] {
+            assert!(!leaf(path), "{path}");
+        }
+        // The zone's own plants keep their names.
+        for path in [
+            "World\\Azeroth\\Stranglethorn\\PassiveDoodads\\Trees\\StranglethornTree01.m2",
+            "World/Azeroth/Stranglethorn/PassiveDoodads/Fern/StranglethornFern01.m2",
+        ] {
+            assert!(leaf(path), "{path}");
+        }
+        // A rigid file name in a plant folder; a plant's own name wins over a rigid term in it.
+        assert!(!leaf(
+            "World\\Kalimdor\\Azshara\\SeaPlants\\BarnacleRock01_04\\BarnacleRock01_04.m2"
+        ));
+        assert!(leaf(
+            "World\\Kalimdor\\Stonetalon\\PassiveDoodads\\Trees\\StoneTree01.m2"
+        ));
+        assert!(leaf(
+            "World\\Azeroth\\DeadwindPass\\PassiveDoodads\\RockTrees\\DeadwindPassRockTree02.m2"
+        ));
     }
 
     #[test]

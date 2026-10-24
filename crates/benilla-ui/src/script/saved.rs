@@ -48,7 +48,7 @@ impl super::UiScript {
 
     /// The registered names in registration order, the reference's own write order.
     pub fn saved_variable_names(&self) -> Vec<String> {
-        self.model_mut().saved_names.clone()
+        self.model_ref().saved_names.clone()
     }
 
     /// Serialize every registered global as `NAME = value` lines, in bytes, since a Lua string is
@@ -64,7 +64,10 @@ impl super::UiScript {
     pub fn saved_variables_bytes_for(&self, names: &[String]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut unwritable = Vec::new();
-        let model = self.lua().app_data_ref::<Model>().expect("model");
+        let model = self
+            .lua()
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         for name in names {
             let value: Value = match self.lua().globals().get(name.as_str()) {
                 Ok(v) => v,
@@ -398,7 +401,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             let name =
                 super::binding_abi::string_arg(lua, name, r#"Usage: RegisterForSave("variable")"#)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             if !model.saved_names.contains(&name) {
                 model.saved_names.push(name);
             }

@@ -3,7 +3,9 @@
 //! (`PetHandler.cpp:203-300`), and sends `SMSG_PET_MODE` only from `Pet::SetEnabled`
 //! (`Pet.cpp:2362-2377`), so the client applies them itself until the next `SMSG_PET_SPELLS`.
 
-use std::time::Instant;
+// The platform clock: `std::time::Instant::now()` panics on wasm32, and the pet list is the
+// cooldowns' `bevy::platform::time::Instant`.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 

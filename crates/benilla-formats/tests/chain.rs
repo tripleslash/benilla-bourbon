@@ -1,6 +1,6 @@
 //! Integration tests over the patch chain of a real 1.12.1 install.
 
-use benilla_formats::{open_chain, Chain};
+use benilla_formats::{open_chain, Chain, TryRead};
 
 #[test]
 fn reads_spell_dbc_from_vanilla_chain() {
@@ -1374,4 +1374,39 @@ fn resolves_the_ghost_skybox_everywhere() {
         .read_file(DEATH_CLOUDS)
         .expect("the ghost sky model the DBC names must be readable from the chain");
     assert_eq!(&bytes[..4], b"MD20", "DeathClouds is an M2");
+}
+
+/// The non-blocking read lane answers exactly what the blocking one does **on native**, where there
+/// is no "not yet" to answer: a file the chain holds comes back `Ready` with identical bytes, and one
+/// it does not comes back `Missing`.
+///
+/// It is pinned because the two arms are what every converted call site now branches on — the sprite
+/// caches, the sound kits, the zone music slot — and the whole design rests on `Pending` being
+/// unreachable here. A native `try_read` that started answering `Pending` would make those callers
+/// defer forever with nothing warming behind them.
+#[test]
+fn try_read_agrees_with_read_and_never_defers_on_native() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let chain = open_chain(&data).expect("open vanilla patch chain");
+
+    let held = "Interface/Icons/Spell_Holy_ArcaneIntellect.blp";
+    let expected = chain.read(held).expect("read a file the chain holds");
+    match chain.try_read(held) {
+        TryRead::Ready(bytes) => assert_eq!(bytes, expected, "try_read must return read's bytes"),
+        TryRead::Pending => {
+            panic!("native try_read must never defer — there is nothing to wait for")
+        }
+        TryRead::Missing => panic!("{held} is in the chain; try_read reported it missing"),
+    }
+
+    assert!(
+        matches!(
+            chain.try_read("Interface/Icons/NoSuchIconEverShipped.blp"),
+            TryRead::Missing
+        ),
+        "a name no archive holds must read as Missing, not Pending"
+    );
+
+    // Free on native and the reason the shared call sites need no `cfg`: it is an empty call.
+    chain.prefetch(held);
 }

@@ -2,6 +2,7 @@
 //! [`UnitState`] per token for the engine-free `Unit*` bindings, plus the unit events; the Lua API
 //! never reaches into the ECS.
 
+use benilla_assets::DataLoadAppExt;
 use std::collections::HashMap;
 
 use bevy::prelude::*;
@@ -22,7 +23,7 @@ use crate::ui_script::{gate, SweepApp};
 pub(crate) mod control_gate;
 pub(crate) mod field_events;
 mod held;
-mod relations;
+pub(crate) mod relations;
 pub(crate) mod tooltip_facts;
 pub(crate) mod views;
 
@@ -79,6 +80,9 @@ struct UnitFeedState {
     warned_sideless: bool,
 }
 
+/// How long the world-enter cascade may wait for the book's spell views (see `feed_units`).
+const WORLD_ENTER_VIEW_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The per-VM half of [`UnitFeedState`]: the event-trigger diffs.
 #[derive(Default)]
 struct UnitFeedMemo {
@@ -87,8 +91,14 @@ struct UnitFeedMemo {
     guild_generation: gate::Watch,
     /// Whether the world-enter events have fired for this world entry.
     entered_world: bool,
+    /// wenilla carry: when the world-enter cascade first became due, for its bounded wait on the
+    /// book's spell views (see the cascade below).
+    enter_due_since: Option<bevy::platform::time::Instant>,
     /// Per token, the last snapshot pushed.
     last: HashMap<String, UnitState>,
+    /// The descriptors the last run's snapshots read: the target's, its target's, the
+    /// interaction NPC's and what their relations reached.
+    reads: held::StoreReads,
     target_guid: Option<u64>,
     last_xp: Option<(u32, u32)>,
     /// `(rest state, pool, PLAYER_FLAGS)`, pushed as one so no binding reads it half-updated.
@@ -193,7 +203,7 @@ impl Plugin for UiUnitPlugin {
             Update,
             load_exhaustion_rows.in_set(crate::ui_script::UiFeed),
         )
-        .add_systems(PostStartup, (load_default_languages, load_languages));
+        .add_data_loaders((load_default_languages, load_languages));
     }
 }
 
@@ -889,6 +899,8 @@ pub(crate) struct UnitStores<'w, 's> {
     all: Query<'w, 's, &'static ObjectStore>,
     /// The dirty gate: whose descriptor moved, items excluded (their writes name no unit token).
     changed: Query<'w, 's, (), (Changed<ObjectStore>, Without<crate::items::ItemObject>)>,
+    /// Our own descriptor's edge, which every snapshot's reaction reads.
+    own_changed: Query<'w, 's, (), (Changed<ObjectStore>, With<SelfPlayer>)>,
     /// Whose object left the manager, by [`Guid`]: a fading model keeps its store 2 s longer.
     removed: RemovedComponents<'w, 's, Guid>,
     /// The stores as of the drain's place, for the tokens' snapshots.
@@ -1063,6 +1075,9 @@ pub(crate) fn snapshot(
         pvp_team: store.0.unit_race().map_or(-1, |r| tables.pvp_team(r)),
         // `PLAYER_BYTES_3` byte 2, the city-protector title (`PVP_MEDAL<n>`), unset by vmangos.
         pvp_medal: store.0.player_pvp_medal().unwrap_or(0),
+        // `[mounted]` (this fork): a mount display is the one mounted signal, as the animation
+        // driver reads it.
+        mounted: store.0.unit_mount_display_id() != 0,
         // The quest-log window, off a player alone: `IsUnitOnQuest` looks the guid up with
         // TYPEMASK_PLAYER (`0x4dfe97`) before it reads `[obj+0xe68]`.
         quest_log: if matches!(store.0.object_type(), Some(ObjectType::Player)) {
@@ -1418,7 +1433,12 @@ fn feed_units(
         // The gate: every input read below, despawns included (invisible to `Changed`).
         let names_moved = memo.names_generation.moved(names.generation());
         let guild_moved = memo.guild_generation.moved(guild.identity_generation());
-        let stores_changed = !stores.changed.is_empty();
+        // The descriptors the last run read and ours, not any unit's ([`held::StoreReads`]).
+        let stores_changed = !stores.own_changed.is_empty()
+            || memo.reads.moved(
+                |e| stores.changed.contains(e),
+                |guid| index.as_ref().is_some_and(|i| i.0.contains_key(&guid)),
+            );
         let stores_removed = !stores.removed.is_empty();
         let group_changed = group.is_changed();
         let relations_changed = world.inputs_changed();
@@ -1471,22 +1491,29 @@ fn feed_units(
             let live = entity.and_then(|e| stores.all.get(e).ok());
             Some((at(guid, live)?, guid))
         };
+        // What the snapshots besides ours (target, target-of-target, NPC) read, for the gate's
+        // next run ([`held::StoreReads`]).
+        let reads = std::cell::RefCell::new(held::StoreReads::default());
         let object = |guid: u64| {
             let entity = index.as_ref().and_then(|i| i.0.get(&guid).copied());
+            reads.borrow_mut().looked_up(guid, entity);
             held(guid, entity).map(|(s, _)| s)
         };
         let token_stores = views::TokenStores {
             me: self_pair.and_then(|(s, g)| Some((at(g.0, Some(s))?, g.0))),
-            target: selection
-                .target
-                .zip(selection.guid)
-                .and_then(|(e, g)| held(g, Some(e))),
+            target: selection.target.zip(selection.guid).and_then(|(e, g)| {
+                reads.borrow_mut().held(e);
+                held(g, Some(e))
+            }),
             // `"npc"`: the interaction NPC, the reference's `[0xb4e2d0]` that
             // `CGGameUI::SetInteractNPC` (`0x4930d0`) writes, which `InteractNpc` models.
             npc: interact
                 .as_deref()
                 .and_then(|i| Some((i.0?, i.1?)))
-                .and_then(|(e, g)| held(g, Some(e))),
+                .and_then(|(e, g)| {
+                    reads.borrow_mut().held(e);
+                    held(g, Some(e))
+                }),
             by_guid: &object,
         };
         let sources = views::TokenSources {
@@ -1498,6 +1525,7 @@ fn feed_units(
             world: &world,
         };
         let [player, target, tot, npc] = views::token_views(&sources, &token_stores);
+        memo.reads = reads.take();
         // Log once when our template names no side, almost always GM mode (vmangos forces template
         // 35, group mask 0): every `UnitFactionGroup` surface loses its side, as in the reference.
         if let Some(p) = &player {
@@ -1505,7 +1533,7 @@ fn feed_units(
             if sideless && !feed.warned_sideless {
                 warn!(
                     "faction: our own template names no side (usually GM mode — vmangos forces \
-                     template 35, group mask 0). Every UnitFactionGroup-derived surface loses its \
+                 template 35, group mask 0). Every UnitFactionGroup-derived surface loses its \
                      side while this holds — the PvP flag icon stays hidden however flagged you \
                      are. `.gm off` restores it. (The Honor tab's rank title is NOT one of these: \
                      its team digit comes from your race, not your template.)"
@@ -1633,7 +1661,19 @@ fn feed_units(
         // worldport's re-entry fires `PLAYER_ENTERING_WORLD` alone. At world exit, re-arm the entry
         // and forget the player-global memos so the next character seeds them.
         if let Some((store, me)) = self_pair {
-            if !memo.entered_world {
+            // wenilla carry: **the cascade waits for the book's spell views, a few frames at most.**
+            // The reference builds a spell tooltip at the call, so an addon scanning the book with
+            // `SetSpell` at `PLAYER_ENTERING_WORLD` reads every line; here the views land a frame after
+            // the book (`ui_tooltip::feed_spell_tooltips`, ordered after this feed), so that scan read
+            // the name alone - CallOfElements' heal scan raised on a nil `TextLeft2` (the owner's
+            // report, 2026-10-20). Bounded by `WORLD_ENTER_VIEW_WAIT`, so a view that never comes
+            // cannot hold the world-enter events back.
+            let due = *memo
+                .enter_due_since
+                .get_or_insert_with(bevy::platform::time::Instant::now);
+            let views_ready =
+                script.book_spell_views_ready() || due.elapsed() >= WORLD_ENTER_VIEW_WAIT;
+            if !memo.entered_world && views_ready {
                 gate.audit("feed_units", "the world-enter events");
                 // `"player"` names us when the cascade runs, from our own create: the stock windows
                 // bind their model panes to it here (`PaperDollFrame.lua:39`), so it is seated
@@ -1654,9 +1694,10 @@ fn feed_units(
                 });
                 memo.entered_world = true;
             }
-        } else if memo.entered_world {
+        } else if memo.entered_world || memo.enter_due_since.is_some() {
             gate.audit("feed_units", "the world-exit disarm");
             memo.entered_world = false;
+            memo.enter_due_since = None;
             memo.last_xp = None;
             memo.last_rest = None;
             memo.last_combo = None;
@@ -2199,20 +2240,20 @@ mod tests {
                 .insert(Transform::from_xyz(15.0, 0.0, 0.0));
             app.init_resource::<Reputations>();
             app.insert_resource(Selection::default());
-            app.insert_non_send_resource(UiScript::new().unwrap());
-            app.world_mut()
-                .non_send_resource_mut::<UiScript>()
-                .set_unit_guids(&benilla_ui::script::UnitGuids {
+            app.insert_non_send(UiScript::new().unwrap());
+            app.world_mut().non_send_mut::<UiScript>().set_unit_guids(
+                &benilla_ui::script::UnitGuids {
                     player: ME,
                     party: [member(1), 0, 0, 0],
                     party_pets: [pet(1), 0, 0, 0],
                     held: HashMap::from([(ME, 0), (pet(1), 0)]),
                     ..Default::default()
-                });
+                },
+            );
             app.world_mut().run_system_once(feed_unit_reach).unwrap();
             let answer = |app: &App, expr: &str| {
                 app.world()
-                    .non_send_resource::<UiScript>()
+                    .non_send::<UiScript>()
                     .eval::<bool>(expr)
                     .unwrap()
             };
@@ -2567,7 +2608,7 @@ mod tests {
             .insert_resource(NetCommands(tx))
             .add_plugins(crate::ui_aura::UiAuraPlugin)
             .add_systems(Update, feed_unit_reach.after(crate::ui_aura::AuraEvents));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
 
         // We at the origin, party1 (`A`) 5 yards off with a pet 15 yards off, the mob 20 yards
         // off, and `B` 3 yards off. We and `A` target the mob, the mob targets `B`, the pet
@@ -2623,7 +2664,7 @@ mod tests {
 
         let answers = |app: &App, expr: &str| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<bool>(&format!("return {expr} ~= nil"))
                 .unwrap()
         };
@@ -2660,10 +2701,7 @@ mod tests {
         // no chain, so it knows no `npctarget`; a bad suffix after a known prefix is GUID 0.
         let call = r#"CheckInteractDistance("npctarget", 4)"#;
         assert!(
-            app.world()
-                .non_send_resource::<UiScript>()
-                .run(call)
-                .is_err(),
+            app.world().non_send::<UiScript>().run(call).is_err(),
             "{call}"
         );
         // `CanInspect`: a player within 10 yards, so `B` and not the mob 20 yards off.
@@ -2907,7 +2945,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let me = app
             .world_mut()
             .spawn((
@@ -2918,7 +2956,7 @@ mod tests {
             .id();
         let seen = |app: &mut App| -> Vec<String> {
             app.update();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let out = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
@@ -2947,7 +2985,7 @@ mod tests {
         assert_eq!(seen(&mut app), Vec::<String>::new());
         assert!(app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<bool>("return HasFullControl() == 1")
             .unwrap());
         app.world_mut()
@@ -3012,7 +3050,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let me = app
             .world_mut()
             .spawn((
@@ -3035,7 +3073,7 @@ mod tests {
                     (FIELD_PLAYER_FLAGS, player_flags),
                 ]));
             app.world_mut().run_system_once(feed_units).unwrap();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let out = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
@@ -3083,7 +3121,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let me = app
             .world_mut()
             .spawn((
@@ -3104,7 +3142,7 @@ mod tests {
                 .0
                 .merge(benilla_protocol::ObjectFields::from_pairs(pairs));
             app.world_mut().run_system_once(feed_units).unwrap();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let read = s
                 .eval::<String>(
@@ -3167,7 +3205,7 @@ mod tests {
             app.init_resource::<crate::ui_party::GroupState>()
                 .init_resource::<Reputations>()
                 .insert_resource(factions());
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
 
             let me_entity = app
                 .world_mut()
@@ -3198,18 +3236,18 @@ mod tests {
                 ..Default::default()
             });
             // The resolver's inputs the aura feed would push: us and the target, both held.
-            app.world_mut()
-                .non_send_resource_mut::<UiScript>()
-                .set_unit_guids(&benilla_ui::script::UnitGuids {
+            app.world_mut().non_send_mut::<UiScript>().set_unit_guids(
+                &benilla_ui::script::UnitGuids {
                     player: me.guid,
                     target: target.guid,
                     held: HashMap::from([(me.guid, 0), (target.guid, 0)]),
                     ..Default::default()
-                });
+                },
+            );
 
             app.world_mut().run_system_once(feed_unit_reach).unwrap();
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<bool>(expr)
                 .unwrap()
         }
@@ -3314,6 +3352,118 @@ mod tests {
             "friendly from us"
         );
         assert_eq!(player_reaction(&rel, &druid, None), 0);
+    }
+
+    /// `InspectFrame_OnEvent` runs `InspectUnit("target")` at `PLAYER_TARGET_CHANGED`
+    /// (`Blizzard_InspectUI.lua:32`): the reach must already name the new target there, or a player
+    /// inspected and then a creature clicked reopens the window on the creature, whose
+    /// `UnitRace` is nil. The plugin orders `feed_unit_reach` before `fire_unit_events` for this.
+    #[test]
+    fn a_retarget_answers_can_inspect_for_the_new_target() {
+        use crate::target::relations::fixture::{creature, factions, player, store_of, HUMAN, ORC};
+        use bevy::ecs::system::RunSystemOnce;
+
+        const ME: u64 = 0x0000_0000_0000_0001;
+        const FRIEND: u64 = 0x0000_0000_0000_0003;
+        const BOAR: u64 = 0xF130_0000_0000_0002;
+
+        let mut app = App::new();
+        app.add_message::<crate::net::FieldChanged>();
+        app.init_resource::<Selection>()
+            .init_resource::<UnitFeedState>()
+            .init_resource::<NameCache>()
+            .init_resource::<Reputations>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .init_resource::<crate::ui_guild::GuildState>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        // The relation model judges by faction template: a Human friend, an Orc boar.
+        app.insert_resource(factions());
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("PLAYER_TARGET_CHANGED")
+                f:SetScript("OnEvent", function()
+                    table.insert(SEEN, CanInspect("target") and "inspectable" or "refused")
+                end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send(script);
+
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                Guid(ME),
+                store_of(&player(ME, HUMAN)),
+                Transform::default(),
+            ))
+            .id();
+        let friend = app
+            .world_mut()
+            .spawn((
+                Guid(FRIEND),
+                store_of(&player(FRIEND, HUMAN)),
+                Transform::from_xyz(3.0, 0.0, 0.0),
+            ))
+            .id();
+        let boar = app
+            .world_mut()
+            .spawn((
+                Guid(BOAR),
+                store_of(&creature(BOAR, ORC)),
+                Transform::from_xyz(0.0, 3.0, 0.0),
+            ))
+            .id();
+        app.insert_resource(crate::net::GuidIndex(
+            [(ME, me), (FRIEND, friend), (BOAR, boar)]
+                .into_iter()
+                .collect(),
+        ));
+
+        // One frame of the plugin's chain on `target`, then what the handler saw.
+        let frame = |app: &mut App, target: Entity, guid: u64| -> Vec<String> {
+            app.insert_resource(Selection {
+                target: Some(target),
+                guid: Some(guid),
+                ..Default::default()
+            });
+            // The aura feed's step: it publishes the guids the tokens name, the new target's too.
+            app.world_mut().non_send_mut::<UiScript>().set_unit_guids(
+                &benilla_ui::script::UnitGuids {
+                    player: ME,
+                    target: guid,
+                    held: HashMap::from([(ME, 0), (guid, 0)]),
+                    ..Default::default()
+                },
+            );
+            app.world_mut().run_system_once(feed_unit_reach).unwrap();
+            app.world_mut().run_system_once(feed_units).unwrap();
+            // `feed_units` owes the event; `fire_unit_events` signals it.
+            app.world_mut().run_system_once(fire_unit_events).unwrap();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
+            s.resolve();
+            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            out
+        };
+
+        assert_eq!(
+            frame(&mut app, friend, FRIEND),
+            vec!["inspectable".to_string()],
+            "the control: a friendly player in range is inspectable at its own event"
+        );
+        assert_eq!(
+            frame(&mut app, boar, BOAR),
+            vec!["refused".to_string()],
+            "the retarget's event reads the creature's reach, not the player's"
+        );
     }
 
     /// A race's PvP side is the chain's (`0x5efe00`: `ChrRaces` field 2 to the template's group
@@ -3690,7 +3840,7 @@ mod tests {
             .init_resource::<InteractNpc>();
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(NetCommands(tx));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, feed_units);
         // Two vendors, told apart by level alone.
         let mut vendor = |level: u32| {
@@ -3705,7 +3855,7 @@ mod tests {
         let dobbins = vendor(9);
         let eval = |app: &mut App, expr: &str| -> i64 {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<i64>(expr)
                 .unwrap()
         };
@@ -3767,7 +3917,7 @@ mod tests {
             .init_resource::<crate::ui_guild::GuildState>();
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(NetCommands(tx));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let mut names = NameCache::default();
         names.insert_creature(
             69,
@@ -3805,7 +3955,7 @@ mod tests {
         };
         let target_name = |app: &mut App, lua: &str| -> Option<String> {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<Option<String>>(&format!("{lua} return UnitName('target')"))
                 .unwrap()
         };
@@ -3813,7 +3963,7 @@ mod tests {
         app.update();
         assert_eq!(target_name(&mut app, "").as_deref(), Some("Wolf"));
 
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.set_name_candidate(
             DRUID,
             Some(NameCandidate {
@@ -3838,7 +3988,7 @@ mod tests {
         }));
         let tot_exists = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<bool>("return UnitExists('targettarget') == 1")
                 .unwrap()
         };
@@ -3906,7 +4056,7 @@ mod tests {
             .init_resource::<crate::ui_guild::GuildState>();
         let (tx, _rx) = crossbeam_channel::unbounded();
         app.insert_resource(NetCommands(tx));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let mut names = NameCache::default();
         names.insert_creature(69, Some(record("Wolf", 1)));
         names.insert_creature(70, Some(record("Druid", 7)));
@@ -3946,7 +4096,7 @@ mod tests {
         let druid = creature(70);
         let creature_type = |app: &mut App, token: &str| -> Option<String> {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<Option<String>>(&format!(r#"return UnitCreatureType("{token}")"#))
                 .unwrap()
         };
@@ -4019,9 +4169,9 @@ mod tests {
         app.add_message::<crate::net::WorldportMessage>()
             .init_world_leave_sweep()
             .add_systems(Update, crate::ui_script::sweep_on_worldport);
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run(
                 "Left = 0 \
                  local f = CreateFrame(\"Frame\") \
@@ -4031,7 +4181,7 @@ mod tests {
             .expect("probe frame");
         let left = |app: &mut App| -> i64 {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<i64>("return Left")
                 .unwrap()
         };

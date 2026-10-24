@@ -140,7 +140,7 @@ fn setup_skinned_instance(
         if let Some(drive) =
             benilla_world::rig_anim::GlobalSeqDrive::new_rig(&anims.global_bones, nbones)
         {
-            commands.entity(entity).insert(drive);
+            commands.entity(entity).try_insert(drive);
         }
     }
     Some(RigBuild { pose, slot })
@@ -175,14 +175,14 @@ fn arm_sequence_clock(
             }
         }
     }
-    commands.entity(entity).insert((
+    commands.entity(entity).try_insert((
         player,
         AnimationGraphHandle(anims.graph.clone()),
         anims.clone(),
     ));
     match kind {
         EntityKind::GameObject if go_state_machine => {
-            commands.entity(entity).insert((
+            commands.entity(entity).try_insert((
                 // Cross-fades each transition over the clip's blend-in time, from the seed.
                 transitions,
                 crate::go_anim::GoAnim::default(),
@@ -195,20 +195,20 @@ fn arm_sequence_clock(
         EntityKind::Corpse => {
             commands
                 .entity(entity)
-                .insert(AnimationTransitions::new())
-                .remove::<benilla_world::rig_anim::AnimParked>();
+                .try_insert(AnimationTransitions::new())
+                .try_remove::<benilla_world::rig_anim::AnimParked>();
         }
         _ => {
             commands
                 .entity(entity)
-                .insert((
+                .try_insert((
                     // Cross-fades over each clip's blend-in time, so a gait change eases.
                     AnimationTransitions::new(),
                     AnimDriver::default(),
                 ))
                 // A rebuilt rig is born live: a stale park marker would desync the LOD gate's
                 // edge-triggered bookkeeping.
-                .remove::<benilla_world::rig_anim::AnimParked>();
+                .try_remove::<benilla_world::rig_anim::AnimParked>();
         }
     }
 }
@@ -276,6 +276,7 @@ pub(super) fn attach_entity_visuals(
     mut collider_epoch: ResMut<benilla_world::collision::ColliderEpoch>,
     time: Res<Time>,
 ) {
+    let frame_start = bevy::platform::time::Instant::now();
     let (
         sections,
         mut skin_composites,
@@ -303,8 +304,17 @@ pub(super) fn attach_entity_visuals(
     {
         // The appear ramp's origin: the unit's arrival, however long its visual waited to build.
         let arrived = arrival.map_or(now, |a| a.0);
-        // A player attaches once its equipment settles, so it never flashes naked.
-        if net.kind == EntityKind::Player && !equipment.is_some_and(|e| e.settled) {
+        // A player attaches once its equipment settles, so it never flashes naked - or once
+        // `EQUIPMENT_SETTLE_WAIT` has passed since it arrived. wenilla carry: a TurtleWoW server
+        // can leave a `PLAYER_VISIBLE_ITEM` template unanswered for good, and the plain gate then
+        // withheld that body for the session - in a battleground crowd, half of it (benilla-octo
+        // 3247bc76 removed the gate outright). Past the wait the compositor paints the armour it
+        // knows and `redress_player_looks` re-dresses when a template lands, as 1.12.1 does. Not
+        // dropped outright: a crowd would composite every body twice, naked and then dressed.
+        if net.kind == EntityKind::Player
+            && !equipment.is_some_and(|e| e.settled)
+            && now - arrived < EQUIPMENT_SETTLE_WAIT
+        {
             continue;
         }
         // A corpse waits for `resolve_corpse_equipment`: it is never re-dressed, so a body
@@ -358,7 +368,8 @@ pub(super) fn attach_entity_visuals(
         let body_tex = match look.as_ref() {
             Some(l) => {
                 let key = skin_key(l, equip, worn.emblem, worn.tabard_preview);
-                if shown_rebuild {
+                // fork: web — a forced composite is Pending while its blobs arrive; native never.
+                let atlas = if shown_rebuild {
                     char_skin::forced_body_atlas(
                         l,
                         key,
@@ -369,17 +380,18 @@ pub(super) fn attach_entity_visuals(
                         &mut images,
                     )
                 } else {
-                    match body_atlas(
+                    body_atlas(
                         l,
                         key,
                         displays.as_deref(),
                         sections.as_deref(),
                         &mut skin_composites,
                         &asset_server,
-                    ) {
-                        BodyAtlas::Ready(tex) => tex,
-                        BodyAtlas::Pending => continue,
-                    }
+                    )
+                };
+                match atlas {
+                    BodyAtlas::Ready(tex) => tex,
+                    BodyAtlas::Pending => continue,
                 }
             }
             None => None,
@@ -421,7 +433,7 @@ pub(super) fn attach_entity_visuals(
             } else if let Some(&super::mount::MountChild(child)) = mount_child {
                 // Dismounted while pending: drop the mount it ordered.
                 if let Ok(mut ec) = commands.get_entity(child) {
-                    ec.despawn();
+                    ec.try_despawn();
                 }
                 commands.entity(entity).remove::<super::mount::MountChild>();
             }
@@ -483,8 +495,11 @@ pub(super) fn attach_entity_visuals(
                     // dispatches on the mount's model (`0x7106c0`) and tilts through its node.
                     let mut joints_root = rider_root;
                     if d.terrain_tilt != 0 && rider_root == entity {
+                        // Child-side `ChildOf`, not `add_child`: a parent-side add panics against a
+                        // unit that a same-frame teardown despawned mid-build.
                         let node = commands
                             .spawn((
+                                ChildOf(entity),
                                 super::conform::ConformNode {
                                     // The ground and yaw source: the unit, or a mount child's
                                     // host.
@@ -495,7 +510,6 @@ pub(super) fn attach_entity_visuals(
                                 Visibility::default(),
                             ))
                             .id();
-                        commands.entity(entity).add_child(node);
                         joints_root = node;
                     }
                     setup_skinned_instance(
@@ -565,7 +579,7 @@ pub(super) fn attach_entity_visuals(
                 for m in &d.markers {
                     markers.entry(m.ident).or_insert((m.bone, m.offset));
                 }
-                commands.entity(entity).insert(super::BoneAttach {
+                commands.entity(entity).try_insert(super::BoneAttach {
                     points: d
                         .attachments
                         .iter()
@@ -584,7 +598,7 @@ pub(super) fn attach_entity_visuals(
                 if spine.is_some() || head.is_some() {
                     commands
                         .entity(entity)
-                        .insert(crate::creature_anim::BodyTwist::new(spine, head));
+                        .try_insert(crate::creature_anim::BodyTwist::new(spine, head));
                 }
             }
             // The worn geoset selectors, the helm's hide-mask rows included (`0x4799a0`).
@@ -642,7 +656,7 @@ pub(super) fn attach_entity_visuals(
                 .map(|c| bevy::camera::primitives::Aabb::from_min_max(c.bounds_min, c.bounds_max))
                 .or_else(|| union_aabb(model.unwrap_or_default().iter().filter_map(|p| p.aabb)));
             if let Some(aabb) = election_bound {
-                commands.entity(entity).insert(super::ModelBound(aabb));
+                commands.entity(entity).try_insert(super::ModelBound(aabb));
             }
             // A billboard card rides its live joint, so card anchors resolve here, over the spawn
             // loop's geoset predicate: a hidden variant's card bone spawns no anchor.
@@ -650,9 +664,9 @@ pub(super) fn attach_entity_visuals(
                 Some(rb) => parts
                     .iter()
                     .filter(|part| {
-                        !visible_geosets
+                        visible_geosets
                             .as_ref()
-                            .is_some_and(|vis| !vis.contains(&part.geoset_id))
+                            .is_none_or(|vis| vis.contains(&part.geoset_id))
                     })
                     .filter_map(|part| part.billboard.as_ref().map(|b| b.bone))
                     .filter_map(|bone| {
@@ -719,7 +733,7 @@ pub(super) fn attach_entity_visuals(
             } else if reattached {
                 commands
                     .entity(entity)
-                    .remove::<benilla_world::model_fade::UnitAppearFade>();
+                    .try_remove::<benilla_world::model_fade::UnitAppearFade>();
             }
             // Size is `OBJECT_FIELD_SCALE_X` alone: the server already folds the DBC scale into
             // it (vmangos `Unit::GetScaleForDisplayId`, `Unit.cpp:9579`), and the reference
@@ -734,25 +748,27 @@ pub(super) fn attach_entity_visuals(
             if let (EntityKind::Player, Some(e)) = (net.kind, equipment) {
                 commands
                     .entity(entity)
-                    .insert(super::equipment::AppliedEquipment(*e));
+                    .try_insert(super::equipment::AppliedEquipment(*e));
             }
             // The camera's framing pivot, model-local, before scale.
-            commands.entity(entity).insert(CameraPivot {
+            commands.entity(entity).try_insert(CameraPivot {
                 height_local: dm.map(|d| d.pivot_height_local).unwrap_or(0.0),
+                mounted_delta_local: dm.map(|d| d.mounted_pivot_delta_local).unwrap_or(0.0),
+                seat_z_local: dm.map(|d| d.mount_seat_z_local).unwrap_or(0.0),
                 // The pivot's drop while swimming, the reference's third preset `cam+0x124`
                 // (`0x50ccf6`); 0 without a Swim sequence.
                 swim_drop_local: dm.map(|d| d.swim_pivot_drop_local).unwrap_or(0.0),
             });
             // The overhead fallback for a model with no PlayerName attachment (`0x608640`).
-            commands.entity(entity).insert(super::OverheadFallback(
+            commands.entity(entity).try_insert(super::OverheadFallback(
                 dm.map(|d| d.bbox_z_local).unwrap_or(0.0),
             ));
             // The chat bubble's height: the Stand box's Z, not the posed PlayerName attachment.
-            commands.entity(entity).insert(super::StandBoxHeight(
+            commands.entity(entity).try_insert(super::StandBoxHeight(
                 dm.map(|d| d.stand_box_z_local).unwrap_or(0.0),
             ));
             // The selection ring's model-local radius, scaled by the unit's scale.
-            commands.entity(entity).insert(SelectionRadius(
+            commands.entity(entity).try_insert(SelectionRadius(
                 dm.map(|d| d.ground_radius_local).unwrap_or(0.0),
             ));
             // Emitters ride their host bone's anchor, origin rebased into the bone frame
@@ -798,9 +814,126 @@ pub(super) fn attach_entity_visuals(
                         .map(|a| (l.def.bone, a))
                 })
                 .collect();
-            super::spawn_carried_lights(&mut commands, model_lights, entity, |bone| {
+            // fork (perf): a GameObject that stays put is a placed fixture to the light grouping.
+            let placed_go = net.kind == EntityKind::GameObject
+                && crate::go_anim::go_type_stands_still(
+                    stores.get(entity).map_or(0, |s| s.0.gameobject_type_id()),
+                );
+            super::spawn_carried_lights(&mut commands, model_lights, entity, placed_go, |bone| {
                 light_anchors.get(&bone).copied()
             });
+            // fork: P8 — **and the GameObject brazier that authors no light at all.**
+            //
+            // The line above is the reference's law and it only ever spawns what an artist wrote
+            // down. A great many braziers, fire pits, forges and candelabra write down nothing:
+            // their fire is an additive emitter or a flame card over an unlit wall, which is what
+            // `modern::lights::emissive` exists to stand in for on Cinematic. The ADT-doodad and
+            // WMO-prop lanes have derived that light since P8 landed; **this lane never did**, so
+            // every brazier the SERVER spawns — which in a city is most of them — was dark while
+            // the identical model staked into an ADT lit the street. Reported against Orgrimmar.
+            //
+            // **GameObjects only, and that is a scope decision rather than an oversight.** A
+            // GameObject is a placed prop in everything but the mechanism that spawns it, so it is
+            // the same population the doodad lanes already derive for and it inherits their
+            // calibration. Creatures and players are a different one — numerous, moving, and
+            // carrying effect models whose additive emitters are spell visuals rather than
+            // fixtures — and turning every one of those into a table light is its own decision,
+            // with its own cap arithmetic, not a line to slip in here.
+            //
+            // No tier gate, exactly as at the doodad sites and for the same reason `item_glow`
+            // spells out: attach runs once and the lighting model latches later, so a question
+            // asked here is asked before the answer exists. The light is spawned and tagged;
+            // `global_light` drops it per frame on any tier below Cinematic.
+            // fork: only a fixture's type ([`crate::go_anim::go_type_derives_light`]), and only what
+            // fires or draws in the sequence the model rests in: an explosion keyed off in Stand, or
+            // a card hidden there, is not a lamp.
+            let go_type = stores.get(entity).map_or(0, |s| s.0.gameobject_type_id());
+            if net.kind == EntityKind::GameObject && crate::go_anim::go_type_derives_light(go_type)
+            {
+                if let Some(dm) = dm {
+                    use benilla_world::modern::lights::emissive;
+                    let idle = dm
+                        .animations
+                        .as_ref()
+                        .and_then(benilla_assets::ModelAnimations::idle_seq)
+                        .unwrap_or(0);
+                    let emitters = dm
+                        .emitters
+                        .iter()
+                        .filter(|em| emissive::emits_at_rest(&em.def.timing, idle));
+                    let parts = dm
+                        .parts
+                        .iter()
+                        .flatten()
+                        .filter(|p| emissive::shown_at_rest(p.alpha_anim.as_deref(), idle));
+                    // An invisible GameObject is one whose model draws nothing at rest (a
+                    // transparent or empty M2, the note above); its emitters alone light nothing.
+                    let drawn = parts.clone().next().is_some();
+                    if let Some(e) = emissive::combine(
+                        model_lights.iter().any(|l| l.def.casts()),
+                        emitters
+                            .clone()
+                            .map(|em| (em.def.blend, em.def.lit, &em.def.over_life)),
+                        parts
+                            .clone()
+                            .filter_map(|p| emissive::glow_of_geometry(&p.geometry)),
+                    )
+                    .filter(|_| drawn)
+                    {
+                        // The glowing part's own centroid, not the model origin — a brazier's fire
+                        // sits in its bowl, a yard or two up from the foot the origin is at, and a
+                        // light at the origin puts the glow inside the stand.
+                        if let Some((local, radius)) = emissive::glow_anchor(
+                            emitters.map(|em| em.def.position),
+                            parts.map(|p| p.geometry.as_ref()),
+                        ) {
+                            // Which GameObject derived a light, for pinning a stray one in the field.
+                            debug!(
+                                "gameobject derived light: display {:?} type {go_type} model {} \
+                                 colour {:?} × {:.2} at {local:?}",
+                                net.display_id,
+                                display_label(&dm.handle),
+                                e.color,
+                                e.intensity_scale,
+                            );
+                            let light = commands
+                                .spawn((
+                                    benilla_world::terrain_stream::point_light(
+                                        e.color,
+                                        e.intensity_scale,
+                                    ),
+                                    benilla_world::modern::lights::SynthesizedLight,
+                                    benilla_world::modern::lights::FixtureRadius(radius),
+                                    // The room this brazier is standing in — see `LightOwner`.
+                                    // A derived light is refused by an interior surface without
+                                    // it exactly as an authored one is.
+                                    benilla_world::lighting::LightOwner(entity),
+                                    Transform::from_translation(
+                                        benilla_assets::coords::wow_to_bevy(local),
+                                    ),
+                                    Visibility::default(),
+                                ))
+                                .id();
+                            // fork: a server-spawned brazier burns like a staked one.
+                            if let Some(flicker) = benilla_world::lighting::flame_flicker(
+                                e.flame,
+                                true,
+                                e.color,
+                                0.0,
+                                Vec3::from(local) + Vec3::splat((entity.to_bits() % 4096) as f32),
+                            ) {
+                                commands.entity(light).insert(flicker);
+                            }
+                            if placed_go {
+                                commands
+                                    .entity(light)
+                                    .insert(benilla_world::lighting::PlacedLight);
+                            }
+                            commands.entity(entity).add_child(light);
+                        }
+                    }
+                }
+            }
             // Ribbon trails, on the same host-bone ride; each despawns with its owner.
             {
                 for rb in dm.map(|d| d.ribbons.as_slice()).unwrap_or_default() {
@@ -826,7 +959,7 @@ pub(super) fn attach_entity_visuals(
             }
             // The pose lands last, with every anchor the build resolved into it.
             if let Some(rb) = skin {
-                commands.entity(entity).insert(rb.pose);
+                commands.entity(entity).try_insert(rb.pose);
             }
             // A GameObject with a hull collides; an anchored transport stays Kinematic, as its arm
             // labelled it, since its body moves every frame.
@@ -837,7 +970,7 @@ pub(super) fn attach_entity_visuals(
                     } else {
                         RigidBody::Static
                     };
-                    commands.entity(entity).insert((body, col));
+                    commands.entity(entity).try_insert((body, col));
                     // This lane bypasses the streamer's attach queue, so it stamps the collider
                     // set itself.
                     collider_epoch.bump();
@@ -880,19 +1013,21 @@ pub(super) fn attach_entity_visuals(
                     id: net.display_id.unwrap_or(0),
                     detail: String::new(),
                 };
-                commands.entity(entity).with_children(|parent| {
-                    parent.spawn((
-                        Mesh3d(mesh),
-                        MeshMaterial3d(material),
-                        Transform::from_translation(Vec3::Y * lift),
-                        object,
-                        benilla_world::interact::CreaturePickPart,
-                        // No `RenderSubmesh`: the picker casts against the cube's box.
-                        benilla_world::interact::PickBox,
-                        // Counted by `WOW_UNIT_VISUALS`.
-                        super::FallbackCube,
-                    ));
-                });
+                // Child-side `ChildOf`, like every model part in `dress`: the parent-side
+                // `with_children` would `add_related` against a unit that a same-frame teardown
+                // already despawned, and panic where the child spawn only warns.
+                commands.spawn((
+                    ChildOf(entity),
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    Transform::from_translation(Vec3::Y * lift),
+                    object,
+                    benilla_world::interact::CreaturePickPart,
+                    // No `RenderSubmesh`: the picker casts against the cube's box.
+                    benilla_world::interact::PickBox,
+                    // Counted by `WOW_UNIT_VISUALS`.
+                    super::FallbackCube,
+                ));
             }
         }
         // The mount the visual was built on, for `reseat_mounts` to diff; stamped on a cube too,
@@ -903,19 +1038,34 @@ pub(super) fn attach_entity_visuals(
                 .map_or(0, |s| s.0.unit_mount_display_id());
             commands
                 .entity(entity)
-                .insert(super::mount::AppliedMount(applied));
+                .try_insert(super::mount::AppliedMount(applied));
         }
         commands
             .entity(entity)
-            .insert(VisualAttached)
+            .try_insert(VisualAttached)
             // The display the visual was built with, for `refresh_live_display` to diff.
-            .insert(super::live_display::AppliedDisplay(net.display_id))
-            .remove::<(
+            .try_insert(super::live_display::AppliedDisplay(net.display_id))
+            .try_remove::<(
                 super::equipment::Reattached,
                 super::live_display::ShownRebuild,
             )>();
+        // Checked only after a build, so a unit still waiting (unsettled equipment, a loading
+        // model) spends none of it; the rest keep `Without<VisualAttached>` and build next frame,
+        // their appear fade still timed from `Arrival`.
+        if frame_start.elapsed() >= ATTACH_VISUAL_BUDGET {
+            break;
+        }
     }
 }
+
+/// How long a player's body waits for its equipment to settle before it is built with the armour
+/// known so far, seconds (see the gate in [`attach_entity_visuals`]).
+const EQUIPMENT_SETTLE_WAIT: f32 = 3.0;
+
+/// How long [`attach_entity_visuals`] may spend building arrivals before leaving the rest to the
+/// next frame, so a crowd arriving together is not one long frame; the terrain streamer's own
+/// `SPAWN_BUDGET`.
+const ATTACH_VISUAL_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 
 /// The union of a model's part boxes, its bind-pose extent: the election bound when the idle
 /// authors no CAaBox. Over-large only admits, never hides.

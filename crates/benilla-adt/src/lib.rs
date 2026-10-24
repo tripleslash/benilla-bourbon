@@ -191,6 +191,15 @@ pub struct WmoPlacement {
     /// `WMOAreaTable.NameSetID`: which name and audio variant of the WMO this placement is
     /// (Northshire Abbey and Tyr's Hand Abbey are one WMO).
     pub name_set: u16,
+    /// The placement's **world-space bounding box** (MODF `0x20..0x38`: min `[x,y,z]` then max),
+    /// in the same raw MODF frame as [`Self::position`].
+    ///
+    /// Authored per placement rather than derived from the root, so it is known the instant the
+    /// tile parses — *before* the `.wmo` itself has been fetched. That is the whole reason it is
+    /// decoded now: it is the only description of where a building's mass is that costs nothing to
+    /// have, and the streamer stands a body on it while the real hull is still on the wire
+    /// (`benilla_world::terrain_stream::provisional`).
+    pub bounds: [[f32; 3]; 2],
 }
 
 /// A parsed vanilla (monolithic) root ADT.
@@ -340,7 +349,19 @@ fn read_modf(data: &[u8]) -> Result<Vec<WmoPlacement>> {
                 r.f32_at(24).ok_or(Error::Truncated("MODF"))?,
                 r.f32_at(28).ok_or(Error::Truncated("MODF"))?,
             ],
-            // 0x20..0x38: the bounding box (6 f32), unread.
+            // 0x20..0x38: the placement's world-space bounding box (6 f32), min then max.
+            bounds: [
+                [
+                    r.f32_at(32).ok_or(Error::Truncated("MODF"))?,
+                    r.f32_at(36).ok_or(Error::Truncated("MODF"))?,
+                    r.f32_at(40).ok_or(Error::Truncated("MODF"))?,
+                ],
+                [
+                    r.f32_at(44).ok_or(Error::Truncated("MODF"))?,
+                    r.f32_at(48).ok_or(Error::Truncated("MODF"))?,
+                    r.f32_at(52).ok_or(Error::Truncated("MODF"))?,
+                ],
+            ],
             flags: r.u16_at(56).ok_or(Error::Truncated("MODF"))?,
             doodad_set: r.u16_at(58).ok_or(Error::Truncated("MODF"))?,
             name_set: r.u16_at(60).ok_or(Error::Truncated("MODF"))?,

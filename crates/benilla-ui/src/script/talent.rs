@@ -120,7 +120,7 @@ pub struct TalentUiState {
 impl super::UiScript {
     /// Push the whole talent snapshot.
     pub fn set_talents(&mut self, state: TalentUiState) {
-        self.model_mut().talents = state;
+        set_field!(self, talents, state);
     }
 
     /// The talent verbs a harness's VM kept ([`Self::keep_calls`]), in call order.
@@ -169,7 +169,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumTalentTabs",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.talents.tabs.len() as i64)
         })?,
     )?;
@@ -181,7 +183,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, i: Value| {
             // `is-number` else `Usage: GetTalentTabInfo(index)` (`0x84cdd4`, `0x4f3059`).
             let i = binding_abi::index_arg(lua, i, "Usage: GetTalentTabInfo(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(tab) = i.checked_sub(1).and_then(|n| model.talents.tabs.get(n)) else {
                 return Ok(super::binding_abi::tuple(&[None, None, Some(0), None]));
             };
@@ -202,7 +206,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, tab: Value| {
             // `is-number` else `Usage: GetNumTalents(tabIndex)` (`0x84cdf4`, `0x4f3177`).
             let tab = binding_abi::index_arg(lua, tab, "Usage: GetNumTalents(tabIndex)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let n = tab
                 .checked_sub(1)
                 .and_then(|t| model.talents.talents.get(t))
@@ -219,7 +225,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let tab =
                 binding_abi::index_arg(lua, tab, "Usage: GetTalentInfo(tabIndex, talentIndex)")?;
             let i = binding_abi::index_arg(lua, i, "Usage: GetTalentInfo(tabIndex, talentIndex)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(t) = talent_at(&model, tab, i) else {
                 // `0x4f3454`: nil, nil, 1, 1, 0, 0, nil, nil.
                 return Ok(super::binding_abi::tuple(&[
@@ -260,7 +268,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 binding_abi::index_arg(lua, tab, "Usage: GetTalentPrereqs(tabIndex, talentIndex)")?;
             let i =
                 binding_abi::index_arg(lua, i, "Usage: GetTalentPrereqs(tabIndex, talentIndex)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let mut out = Vec::new();
             if let Some(t) = talent_at(&model, tab, i) {
                 for p in &t.prereqs {
@@ -285,7 +295,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 binding_abi::index_arg(lua, tab, "Usage: LearnTalent(tabIndex, talentIndex)")?;
             let i = binding_abi::index_arg(lua, i, "Usage: LearnTalent(tabIndex, talentIndex)")?;
             let learn = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 talent_at(&model, tab, i)
                     .filter(|t| t.rank < t.max_rank)
                     .map(|t| TalentCall::Learn {
@@ -315,7 +327,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CheckTalentMasterDist",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.talent_master_pending))
         })?,
     )?;
@@ -325,7 +339,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitCharacterPoints",
         lua.create_function(|lua, _unit: String| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let (cp1, cp2) = model.talents.points;
             Ok((i64::from(cp1), i64::from(cp2)))
         })?,
@@ -344,7 +360,9 @@ pub(super) fn install_tooltip_method(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let tab = binding_abi::index_arg(lua, tab, "Usage: SetTalent(tabIndex, talentIndex)")?;
             let i = binding_abi::index_arg(lua, i, "Usage: SetTalent(tabIndex, talentIndex)")?;
             let (display, ranks, reqs, mut lines) = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let Some(t) = talent_at(&model, tab, i) else {
                     return Ok(());
                 };

@@ -776,6 +776,16 @@ pub(super) fn attach_missile_models(
         ) {
             continue;
         }
+        // fork: a luminous projectile carries its light with it — the Fireball's core lights the
+        // road it flies over; its arrival despawn takes the light.
+        super::spell_fx::spawn_spell_light(
+            &mut commands,
+            &key,
+            dm,
+            entity,
+            None,
+            super::spell_fx::SpellLightMode::Missile,
+        );
         missile.parts_spawned = true;
     }
 }

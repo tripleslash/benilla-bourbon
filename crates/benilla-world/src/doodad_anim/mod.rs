@@ -83,10 +83,24 @@ pub fn classify<'a>(
     // pose renders identically to the static mesh.
     match anims.first_seq.and_then(|i| anims.clips.get(i)) {
         Some(clip) => DoodadAnimTier::FirstSeq(clip),
+        // A transport prop is re-armed by its transport's motion (ShipStart, ShipMoving,
+        // ShipStop), so it rigs even when its idle holds bind pose: the zeppelin's rotor.
+        None if is_ship_prop(anims) => anims
+            .idle_clip()
+            .map_or(DoodadAnimTier::Static, DoodadAnimTier::FirstSeq),
         None if !anims.global_bones.is_empty() => DoodadAnimTier::GlobalSeqOnly,
         None => DoodadAnimTier::Static,
     }
 }
+
+/// Whether a model authors `AnimationData.dbc` 163 ShipMoving, the sequence a moving transport
+/// hands its props ([`benilla_formats::ShipMotion`]).
+pub fn is_ship_prop(anims: &ModelAnimations) -> bool {
+    anims.clips.iter().any(|c| c.anim_id == SHIP_MOVING)
+}
+
+/// `AnimationData.dbc` 163 ShipMoving.
+const SHIP_MOVING: u16 = 163;
 
 /// What [`spawn_anim_host`] set up for one placement; the [`RigPose`] rides here by value until
 /// [`Self::finish`], so anchors ([`Self::anchor`]) are minted only for bones something rides.
@@ -226,13 +240,40 @@ pub struct DoodadAnimHost {
     pub(crate) window_hi: f32,
     /// The animation id to re-roll over; `None` on the gseq-only tier, which has no window.
     pub(crate) anim_id: Option<u16>,
+    /// The id to arm when the current play-window ends, in place of a fresh roll of
+    /// [`Self::anim_id`]: an object's sequence-finished chain ([`Self::rearm`]).
+    pub(crate) then: Option<u16>,
     /// Whether the host was ticking last frame (edge-triggered pause/resume).
     pub active: bool,
     /// `Time::elapsed_secs` when `active` last went false: the reaper demotes the longest-parked.
     pub(crate) parked_at: f32,
 }
 
+/// On the anim root of a placement hosted on a streamed entity (a transport's cargo): its fade
+/// sphere's centre in the root's own frame. [`DoodadAnimHost::fade`] is built from the
+/// entity-local placement, which names no world point, so the gate re-centres it on the root's
+/// live pose each frame: a promoted rig parked on a wrong verdict draws its palette rows where it
+/// parked, and the boat sails without its sails.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct RidingSphere(pub(crate) Vec3);
+
 impl DoodadAnimHost {
+    /// The animation id the host plays; `None` on the gseq-only tier.
+    pub fn anim_id(&self) -> Option<u16> {
+        self.anim_id
+    }
+
+    /// Re-arm onto `anim_id`, as the reference's `ObjectSetSequence` sets a transport's sequence:
+    /// the window expires now, so `reroll_doodad_variation` snaps to a variation of it this or
+    /// next frame. With `then`, the play-window that follows ends on `then` instead of a fresh
+    /// roll of `anim_id`, as a sequence-finished handler moves a one-shot on (ShipStart plays once
+    /// and hands over to ShipMoving); without it, `anim_id` loops.
+    pub fn rearm(&mut self, anim_id: u16, then: Option<u16>) {
+        self.anim_id = Some(anim_id);
+        self.then = then;
+        self.window_hi = f32::NEG_INFINITY;
+    }
+
     /// The armed clip's `(node, seek)` on the shared clock, `(now − armed_at) mod duration`. It
     /// answers while parked, but the reference fires no events for a doodad culled out of its
     /// scene list (`[CM2Scene+0x20]`), so a consumer reads [`DoodadAnimHost::active`] beside it.
@@ -274,6 +315,16 @@ fn reroll_doodad_variation(
         if now < host.window_hi {
             continue;
         }
+        // A finished window with a chain hands over; a fresh arm (`NEG_INFINITY`) plays its own id
+        // first.
+        let anim_id = match host.then {
+            Some(next) if host.window_hi > f32::NEG_INFINITY => {
+                host.then = None;
+                host.anim_id = Some(next);
+                next
+            }
+            _ => anim_id,
+        };
         let Some(clip) = anims.pick_variation(anim_id, rng.draw()) else {
             // No chain for this id: stop asking.
             host.anim_id = None;
@@ -308,6 +359,7 @@ fn gate_doodad_anim(
         Has<crate::rig_palette::RigSkin>,
         Option<&mut AnimationPlayer>,
         Option<&mut GlobalSeqDrive>,
+        Option<&RidingSphere>,
     )>,
     vis: Query<&Visibility>,
     cam: Query<
@@ -347,7 +399,8 @@ fn gate_doodad_anim(
         !tf.is_changed() && !proj.is_changed() && !local.as_ref().is_some_and(|l| l.is_changed())
     }) && !scene.changed()
         && changed_vis.is_empty();
-    // Fixed at spawn (`EmitterFade`), so a reused verdict never sees the sphere move.
+    // Fixed at spawn (`EmitterFade`), so a reused verdict never sees the sphere move; a
+    // [`RidingSphere`] host is the exception and is judged every frame.
     let in_frustum = |frustum: &bevy::camera::primitives::Frustum,
                       fade: &crate::particles::EmitterFade| {
         frustum.intersects_sphere(
@@ -358,14 +411,20 @@ fn gate_doodad_anim(
             false,
         )
     };
-    for (entity, mut host, lazy, pose, has_rig, player, drive) in &mut hosts {
+    for (entity, mut host, lazy, pose, has_rig, player, drive, riding) in &mut hosts {
+        // A riding sphere at the root's propagated pose, last frame's as this runs before
+        // propagation; a mover never reuses a verdict, as its sphere moves under a still camera.
+        let riding_fade = riding.map(|r| crate::particles::EmitterFade {
+            center: worlds.get(entity).map_or(r.0, |g| g.transform_point(r.0)),
+            ..host.fade.clone()
+        });
+        let fade = riding_fade.as_ref().unwrap_or(&host.fade);
         // A host born this frame has no verdict to reuse (`active` starts false).
-        let drawn = if verdicts_still && !host.is_added() {
+        let drawn = if verdicts_still && !host.is_added() && riding.is_none() {
             host.active
         } else if host.meshes.is_empty() {
             // Meshless: the reference ticks any model in the draw set, and a 0-batch model is
             // admitted on its fade sphere like its emitters, through the same `in_draw_set`.
-            let fade = &host.fade;
             world_cam.as_ref().is_some_and(|(cam_tf, frustum, _, _)| {
                 fade.in_draw_set(
                     cam_tf.translation(),
@@ -385,7 +444,7 @@ fn gate_doodad_anim(
                 .any(|&e| vis.get(e).is_ok_and(|v| *v != Visibility::Hidden))
                 && world_cam
                     .as_ref()
-                    .is_none_or(|(_, frustum, _, _)| in_frustum(frustum, &host.fade))
+                    .is_none_or(|(_, frustum, _, _)| in_frustum(frustum, fade))
         };
         // The lazy-rig promote, retried every frame the host stays drawn so a full table is only
         // a delay. It needs a second drawn frame (`host.active`): on its first, a spawned part's
@@ -405,7 +464,12 @@ fn gate_doodad_anim(
                 );
             }
         }
-        if drawn == host.active {
+        // **A host's birth is an edge too.** Every spawn sets `active: false` without
+        // `AnimParked`, and the player looping, so a host never drawn since it spawned took no
+        // edge and posed every frame for ever. Journal 2026-10-17T154832, camera at the floor:
+        // 965 doodad rigs live, all 965 outside the frustum, 3 parked; `animParkAll` (which
+        // forces the park) took the frame 21.2 -> 18.0 ms.
+        if drawn == host.active && !host.is_added() {
             continue;
         }
         host.active = drawn;
@@ -719,6 +783,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::NEG_INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -791,6 +856,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::NEG_INFINITY,
                     anim_id: None,
+                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -887,6 +953,7 @@ mod tests {
                     // Far future: no window may expire and change the armed clip mid-test.
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -958,6 +1025,7 @@ mod tests {
                 world_from_local: bevy::math::Affine3A::IDENTITY,
                 name_set: 0,
                 visible: vec![true],
+                lit: vec![true],
                 interior_fog: vec![false],
                 liquid_visited: vec![false],
                 flooded: vec![None],
@@ -979,8 +1047,10 @@ mod tests {
             far: 5000.0,
             ..default()
         });
-        let frustum = bevy::camera::primitives::Frustum::from_clip_from_world(
-            &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
+        let frustum = bevy::camera::primitives::Frustum(
+            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
+            ),
         );
         app.world_mut().spawn((
             crate::view::WorldCamera,
@@ -1000,6 +1070,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: false,
                     parked_at: 0.0,
                 })
@@ -1056,8 +1127,10 @@ mod tests {
             far: 5000.0,
             ..default()
         });
-        let frustum = bevy::camera::primitives::Frustum::from_clip_from_world(
-            &(projection.get_clip_from_view() * GlobalTransform::from(far).affine().inverse()),
+        let frustum = bevy::camera::primitives::Frustum(
+            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &(projection.get_clip_from_view() * GlobalTransform::from(far).affine().inverse()),
+            ),
         );
         let cam = app
             .world_mut()
@@ -1088,6 +1161,7 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
+                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -1110,13 +1184,15 @@ mod tests {
 
         // The snap: the seat writes the local next to the host, facing it; the global stays stale.
         let near = Transform::from_xyz(0.0, 0.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
-        let near_frustum = bevy::camera::primitives::Frustum::from_clip_from_world(
-            &(bevy::camera::Projection::from(bevy::camera::PerspectiveProjection {
-                far: 5000.0,
-                ..default()
-            })
-            .get_clip_from_view()
-                * GlobalTransform::from(near).affine().inverse()),
+        let near_frustum = bevy::camera::primitives::Frustum(
+            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &(bevy::camera::Projection::from(bevy::camera::PerspectiveProjection {
+                    far: 5000.0,
+                    ..default()
+                })
+                .get_clip_from_view()
+                    * GlobalTransform::from(near).affine().inverse()),
+            ),
         );
         {
             let mut e = app.world_mut().entity_mut(cam);
@@ -1151,8 +1227,10 @@ mod tests {
             far: 5000.0,
             ..default()
         });
-        let frustum = bevy::camera::primitives::Frustum::from_clip_from_world(
-            &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
+        let frustum = bevy::camera::primitives::Frustum(
+            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
+            ),
         );
         app.world_mut().spawn((
             crate::view::WorldCamera,
@@ -1171,7 +1249,11 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
-                    active: true,
+                    then: None,
+                    // The born state every spawn site uses (`terrain_stream::spawn::assemble`).
+                    // This test once spawned `active: true`, so it passed while a host that was
+                    // never drawn was never parked either.
+                    active: false,
                     parked_at: 0.0,
                 })
                 .id()
@@ -1190,6 +1272,85 @@ mod tests {
         );
     }
 
+    /// A transport's prop: its spawn sphere is entity-local (behind the camera here), and the
+    /// gate must judge where the root is now, every frame, even with the camera still.
+    #[test]
+    fn a_riding_host_is_judged_where_its_root_is_now() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_resource::<crate::view::ViewDistance>();
+        app.init_resource::<crate::wmo_portal::ExteriorWindows>();
+        app.init_resource::<crate::wmo_portal::CameraInteriorClaim>();
+        app.init_resource::<crate::rig_palette::RigPalettes>();
+        app.init_asset::<SkinnedMeshInverseBindposes>();
+        app.add_systems(Update, gate_doodad_anim);
+
+        // Looking down -Z from the origin.
+        let seat =
+            Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::new(0.0, 0.0, -20.0), Vec3::Y);
+        let projection = bevy::camera::Projection::from(bevy::camera::PerspectiveProjection {
+            far: 5000.0,
+            ..default()
+        });
+        let frustum = bevy::camera::primitives::Frustum(
+            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
+            ),
+        );
+        app.world_mut().spawn((
+            crate::view::WorldCamera,
+            GlobalTransform::from(seat),
+            seat,
+            frustum,
+            projection,
+        ));
+        let mesh = app.world_mut().spawn(Visibility::Inherited).id();
+        // The root has docked 30 yd ahead; the spawn sphere names the entity-local point behind.
+        let host = app
+            .world_mut()
+            .spawn((
+                DoodadAnimHost {
+                    meshes: vec![mesh],
+                    fade: crate::particles::EmitterFade::sphere(2.0, Vec3::new(0.0, 0.0, 30.0)),
+                    clip: Some((AnimationNodeIndex::new(1), 2.0)),
+                    armed_at: 0.0,
+                    window_hi: f32::INFINITY,
+                    anim_id: Some(0),
+                    then: None,
+                    active: false,
+                    parked_at: 0.0,
+                },
+                RidingSphere(Vec3::ZERO),
+                GlobalTransform::from_xyz(0.0, 0.0, -30.0),
+            ))
+            .id();
+        let active = |app: &App| {
+            app.world()
+                .entity(host)
+                .get::<DoodadAnimHost>()
+                .unwrap()
+                .active
+        };
+        app.update();
+        assert!(
+            active(&app),
+            "the root is in front of the camera ⇒ drawn, whatever the spawn sphere said"
+        );
+        app.update();
+        assert!(active(&app), "still drawn while the root stays put");
+
+        // The boat sails behind the camera, which does not move.
+        *app.world_mut()
+            .entity_mut(host)
+            .get_mut::<GlobalTransform>()
+            .unwrap() = GlobalTransform::from_xyz(0.0, 0.0, 30.0);
+        app.update();
+        assert!(
+            !active(&app),
+            "a still camera does not freeze a mover's verdict: behind ⇒ parked"
+        );
+    }
+
     #[test]
     fn arm_clock_wraps_on_the_shared_clock() {
         let mut host = DoodadAnimHost {
@@ -1199,6 +1360,7 @@ mod tests {
             armed_at: 10.0,
             window_hi: f32::NEG_INFINITY,
             anim_id: Some(0),
+            then: None,
             // Parked, and the clock still answers: honouring the animate set is the caller's job.
             active: false,
             parked_at: 0.0,

@@ -185,7 +185,7 @@ impl super::UiScript {
 
     /// Carry the selection cells over from the last glue VM.
     pub fn set_glue_select_cells(&mut self, cells: GlueSelectCells) {
-        self.model_mut().glue.roster.cells = cells;
+        set_field!(self, glue.roster.cells, cells);
     }
 
     /// The file `SetCharSelectBackground` gave the model frame, while its scene still holds it: a
@@ -332,7 +332,7 @@ impl super::UiScript {
                 return true;
             }
         } else {
-            self.model_mut().glue.realms.cells.chosen = Some(0);
+            set_field!(self, glue.realms.cells.chosen, Some(0));
             self.select_glue_character(last);
         }
         self.fire_event("CHARACTER_LIST_UPDATE", Vec::new());
@@ -427,8 +427,9 @@ fn model_frame_handle(model: &Model) -> Option<crate::widget::FrameHandle> {
     .then_some(h)
 }
 
-fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, Model> {
-    lua.app_data_mut::<Model>().expect("model app_data")
+fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, crate::script::ModelCell> {
+    lua.app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data")
 }
 
 fn arg(args: &MultiValue, i: usize) -> Value {

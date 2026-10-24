@@ -32,7 +32,9 @@ fn this_minimap(lua: &Lua, this: &Value) -> mlua::Result<FrameHandle> {
     }
     let wrong = || mlua::Error::runtime("Wrong object type for member function");
     let h = frame_handle_of(lua, t).map_err(|_| wrong())?;
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     match model.arena.frame(h).map(|f| f.kind) {
         Some(FrameKind::Minimap) => Ok(h),
         _ => Err(wrong()),
@@ -49,7 +51,9 @@ fn this_minimap(lua: &Lua, this: &Value) -> mlua::Result<FrameHandle> {
 pub(crate) fn build_engine_children(lua: &Lua, minimap: FrameHandle) {
     use crate::layout::{Anchor, Point};
     let hide = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let Some((strata, level)) = model.arena.frame(minimap).map(|f| (f.strata, f.level)) else {
             return;
         };
@@ -245,7 +249,9 @@ pub(crate) fn apply_model_attrs(
     player: &str,
 ) -> mlua::Result<Vec<&'static str>> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let mut failed = Vec::new();
     if !load_arrow_model(&mut model, h, arrow) {
         failed.push("Invalid minimapArrowModel in Minimap.xml");
@@ -277,12 +283,18 @@ fn set_model(
         }
     };
     let loaded = load(
-        &mut lua.app_data_mut::<Model>().expect("model app_data"),
+        &mut lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data"),
         h,
         &path,
     );
     if !loaded {
-        let who = frame_name(&lua.app_data_ref::<Model>().expect("model app_data"), h);
+        let who = frame_name(
+            &lua.app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data"),
+            h,
+        );
         return Err(mlua::Error::runtime(format!(
             "{who}:{name}(): Couldn't load the file {path}"
         )));
@@ -347,7 +359,8 @@ fn set_art(
         MinimapArt::Null
     } else {
         match super::region::texture_name_verdict(
-            &lua.app_data_ref::<Model>().expect("model app_data"),
+            &lua.app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data"),
             &path,
         ) {
             super::region::FileLoad::Failed => MinimapArt::Missing,
@@ -355,12 +368,16 @@ fn set_art(
         }
     };
     let failed = art == MinimapArt::Missing;
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .minimap
         .set_art(slot, art);
     if failed {
-        let who = frame_name(&lua.app_data_ref::<Model>().expect("model app_data"), h);
+        let who = frame_name(
+            &lua.app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data"),
+            h,
+        );
         return Err(mlua::Error::runtime(format!(
             "{who}:{name}(): Couldn't load the file {path}"
         )));
@@ -376,7 +393,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         // The indoor index while inside a WMO, else the outdoor one (`0x6da980`); no `this`.
         lua.create_function(|lua, _: mlua::MultiValue| {
             Ok(lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .minimap
                 .active_zoom())
@@ -387,7 +404,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (_this, zoom): (Value, Value)| {
             // No `this` lookup; argument 2 passes `lua_isnumber` (`0x4eec68`) or raises (`0x4eec8d`).
             let level = number_arg(lua, zoom, "Usage: SetZoom(level)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             if let Some(cvar) = model.minimap.set_zoom_index(level) {
                 // The mode's CVar takes the new level, which is what survives a restart.
                 let text = model.minimap.active_zoom().to_string();
@@ -449,7 +468,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         // out through the host inside the call, and the ping applies at once (`0x4eefb5`).
         lua.create_function(|lua, args: mlua::MultiValue| {
             let player = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .minimap
                 .player;
@@ -463,7 +482,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let h = this_minimap(lua, &arg(0))?;
                 // Both arguments are stored by `S` (`0x4eede6`, `0x4eee11`) and divided by the
                 // frame's stored height and width, the layout slots 0x20 and 0x1c.
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let u = model.layout_units();
                 let (w, ht) = model
                     .layout_inputs
@@ -474,7 +495,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 second = stored(y as f32) / f64::from(w);
             }
             let (world, ground) = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let ground = model.spell_targeting && model.location_pick_armed;
                 let d = 2.0 * f64::from(model.minimap.radius_yd());
                 // Each fraction times the diameter is stored as a float (`0x4eee2e`, `0x4eee3d`).
@@ -520,7 +543,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         // every frame. No `this` lookup.
         lua.create_function(|lua, _: mlua::MultiValue| {
             Ok(lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .minimap
                 .ping_position())

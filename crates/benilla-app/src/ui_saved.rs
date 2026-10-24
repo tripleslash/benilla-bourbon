@@ -35,7 +35,9 @@ pub(crate) fn load_saved_variables(
 ) {
     // `None` in a capture or with no install: nothing is read, and the event still fires.
     if let Some(path) = crate::local_state::saved_variables_path() {
-        match std::fs::read(&path) {
+        // fork: through `local_state`, whose page store answers in the browser (`std::fs` is a
+        // silent no-op there) — and as bytes, which it hands back exactly as they were written.
+        match crate::local_state::read(&path) {
             Ok(bytes) => {
                 let lost = script.load_flat_saved_variables(&bytes);
                 info!("saved variables: loaded {}", path.display());
@@ -66,19 +68,15 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Copy a chunk-era file whose lines the reader dropped to `saved-variables.lua.bak` before the
 /// shutdown write replaces it, once: an existing copy is never overwritten. The copy is written
-/// whole beside it and then renamed into place, so a crash never leaves a partial one; if it cannot
-/// be written the file is held, so the write leaves it as it is.
+/// atomically ([`crate::local_state::write_atomic_bytes`], the page's store in the browser), so a
+/// crash never leaves a partial one; if it cannot be written the file is held, so the write leaves
+/// it as it is.
 fn keep_chunk_era_copy(script: &UiScript, path: &std::path::Path, bytes: &[u8], lost: usize) {
-    use std::io::Write as _;
     let bak = path.with_extension("lua.bak");
-    if bak.exists() {
+    if crate::local_state::read(&bak).is_ok() {
         return;
     }
-    let tmp = path.with_extension("lua.bak.tmp");
-    let copy = std::fs::File::create(&tmp)
-        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
-        .and_then(|()| std::fs::rename(&tmp, &bak));
-    let _ = std::fs::remove_file(&tmp);
+    let copy = crate::local_state::write_atomic_bytes(&bak, bytes);
     match copy {
         Ok(()) => warn!(
             "saved variables: {} has {lost} line(s) this build no longer reads; the file as it \

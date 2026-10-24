@@ -81,7 +81,7 @@ pub(crate) struct NpcWindowFeed;
 /// talent-wipe questions and the pet trainer's, as the reference re-runs its interact-range test
 /// against each one's latched guid. Each registers [`close_npc_session_out_of_range::<T>`] ahead
 /// of its feed.
-pub(crate) trait NpcSession: Resource {
+pub(crate) trait NpcSession: Resource<Mutability = bevy::ecs::component::Mutable> {
     /// The bound NPC's guid; `None` when nothing is open.
     fn npc(&self) -> Option<u64>;
     /// The client-side close, with no packet.

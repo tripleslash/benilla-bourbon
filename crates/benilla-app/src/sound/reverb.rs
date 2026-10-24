@@ -14,7 +14,8 @@ use bevy::prelude::*;
 
 use benilla_formats::SoundProviderCatalog;
 
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::zone::AreaSounds;
@@ -108,7 +109,7 @@ fn leave_world(mut applied: ResMut<AppliedPreset>, mut out: NonSendMut<SoundOutp
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<AppliedPreset>()
-        .add_systems(Startup, load_providers.after(AssetSet::Open))
+        .add_data_loaders(load_providers)
         .add_systems(
             Update,
             zone_reverb

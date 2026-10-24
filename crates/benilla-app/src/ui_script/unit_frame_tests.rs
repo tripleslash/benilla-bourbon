@@ -1144,7 +1144,7 @@ fn a_values_block_moves_the_target_health_bar_and_a_retarget_fires_no_unit_event
         .init_resource::<crate::sound::MessageSounds>()
         .init_resource::<crate::ui_guild::GuildState>()
         .insert_resource(NetCommands(crossbeam_channel::unbounded().0))
-        .insert_non_send_resource(s);
+        .insert_non_send(s);
     crate::ui_unit::add_unit_feed(&mut app);
     app.world_mut().spawn((
         SelfPlayer,
@@ -1174,7 +1174,7 @@ fn a_values_block_moves_the_target_health_bar_and_a_retarget_fires_no_unit_event
         .extend([(WOLF, wolf), (BOAR, boar)]);
 
     fn script(app: &mut App) -> Mut<'_, UiScript> {
-        app.world_mut().non_send_resource_mut()
+        app.world_mut().non_send_mut()
     }
     let seen = |app: &mut App| -> Vec<String> {
         let s = script(app);
@@ -1354,7 +1354,7 @@ fn a_forced_reaction_table_arriving_recolours_the_target_plate() {
         .init_resource::<crate::ui_guild::GuildState>()
         .insert_resource(NetCommands(crossbeam_channel::unbounded().0))
         .add_message::<FieldChanged>()
-        .insert_non_send_resource(s);
+        .insert_non_send(s);
     crate::ui_unit::add_unit_feed(&mut app);
     // A human warrior player: the guard's standing leg needs the player's type, flag `0x8` and
     // template (`0x606576`-`0x6065b6`).
@@ -1387,7 +1387,7 @@ fn a_forced_reaction_table_arriving_recolours_the_target_plate() {
     }
 
     fn script(app: &mut App) -> Mut<'_, UiScript> {
-        app.world_mut().non_send_resource_mut()
+        app.world_mut().non_send_mut()
     }
     let seen = |app: &mut App| -> Vec<String> {
         let s = script(app);

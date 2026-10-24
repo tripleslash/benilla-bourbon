@@ -2,6 +2,14 @@
 # shaders, Lua and XML and match them on "\n", so a Windows checkout must read the same bytes.
 * text=auto eol=lf
 
+# Binary blobs compiled into the client with `include_bytes!`: marked binary so no checkout ever
+# rewrites a byte of them (`liquid::art`'s committed bump map is one).
+*.rgba binary
+
+# The bundled third-party addons are vendored as their authors ship them, byte for byte: the
+# client reads them as files, and a checkout must not rewrite a line ending in a `.lua` or a `.tga`.
+third_party/addons/** -text
+
 # Vendored benilla-re tables are compared and read byte for byte; no line-ending conversion.
 reference/*.tsv -text
 

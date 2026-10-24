@@ -132,7 +132,7 @@ mod tests {
             .init_resource::<Items>()
             .insert_resource(NetCommands(tx))
             .add_systems(Update, recount_item_actions);
-        app.insert_non_send_resource(rx); // a send must not fail
+        app.insert_non_send(rx); // a send must not fail
         let world = app.world_mut();
         crate::items::test_spawn_item(
             world,
@@ -171,14 +171,14 @@ mod tests {
                 "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         crate::item_lane::seat_item_lane(app.world_mut());
         app
     }
 
     fn seen(app: &mut App) -> Vec<String> {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<String>>("local s = SEEN SEEN = {} return s")
             .unwrap()
     }
@@ -243,7 +243,7 @@ mod tests {
         let asked = |app: &App| {
             crate::query_cache::queries(
                 app.world()
-                    .non_send_resource::<crossbeam_channel::Receiver<crate::net::ClientCommand>>(),
+                    .non_send::<crossbeam_channel::Receiver<crate::net::ClientCommand>>(),
             )
             .len()
         };
@@ -280,7 +280,7 @@ mod tests {
         assert!(seen(&mut app).is_empty(), "no notice, no signal");
         let count = |app: &mut App| {
             app.world_mut()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<i64>("return GetActionCount(3)")
                 .unwrap()
         };
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(seen(&mut app), ["0=0"], "one signal, slot 0");
         let counts: (i64, i64, i64) = app
             .world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return GetActionCount(3), GetActionCount(50), GetActionCount(7)")
             .unwrap();
         assert_eq!(counts, (5, 5, 0));

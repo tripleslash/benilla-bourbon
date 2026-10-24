@@ -45,7 +45,13 @@ fn scope_world_art(mut scope: ArtScope, assets: Option<ResMut<WorldAssets>>) {
 
 /// Opens the patch chain found by [`benilla_formats::wow_data`] and inserts [`WorldAssets`] and
 /// [`RenderConfig`]; with no install, `WorldAssets` is absent and startup falls back to free-fly.
-fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
+fn open_world_assets(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    // For `WorldAssets::texture`'s web lane, which hands world-art loads to the AssetServer rather
+    // than decoding them on the frame thread — see that method.
+    server: Res<AssetServer>,
+) {
     // Inserted before the install lookup so no early return skips it: even with no install,
     // `particles::model::update_model_particles` takes it as a hard `Res<SharedLightBuffer>`.
     let shared_light = crate::lighting::new_shared_light_buffer(&device);
@@ -66,7 +72,7 @@ fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
     commands.insert_resource(RenderConfig { unload_budget });
 
     match open_chain(&data) {
-        Ok(chain) => commands.insert_resource(WorldAssets::open(chain, light_buf)),
+        Ok(chain) => commands.insert_resource(WorldAssets::open(chain, light_buf, server.clone())),
         Err(e) => error!("failed to open client data: {e:#}"),
     }
 }

@@ -8,8 +8,6 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::Model;
-
 /// The open bank's purchase row, pushed whole by the app.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BankState {
@@ -23,7 +21,7 @@ pub struct BankState {
 impl super::UiScript {
     /// Push (or clear, with `None`) the open bank's snapshot.
     pub fn set_bank(&mut self, state: Option<BankState>) {
-        self.model_mut().bank = state;
+        set_field!(self, bank, state);
     }
 
     /// The bank calls a harness's VM kept ([`Self::keep_calls`]), in call order.
@@ -55,7 +53,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetNumBankSlots",
         lua.create_function(|lua, ()| {
             let n = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.bank.as_ref().map_or(0, |b| b.num_purchased)
             };
             let full = if n >= 6 {
@@ -75,7 +75,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBankSlotCost",
         // Reads no argument at all (`0x4f8630`): any call shape answers.
         lua.create_function(|lua, _args: mlua::MultiValue| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.bank.as_ref().map_or(0, |b| b.next_cost)))
         })?,
     )?;

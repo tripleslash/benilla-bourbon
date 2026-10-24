@@ -2596,6 +2596,72 @@ fn a_scaled_creatures_walk_cycles_slower_than_an_unscaled_ones() {
     );
 }
 
+/// A slow such as Hamstring halves the run speed and moves no movement flag: 3.5 yd/s is not above
+/// twice the walk speed, so the unit walks (`0x5fd224`), and the slow ending is a speed change
+/// alone, which must take the gait back to Run.
+#[test]
+fn a_slow_wearing_off_takes_the_gait_back_to_run_with_no_flag_edge() {
+    let mut run = clip(5, 3, true);
+    run.move_speed = 7.0;
+    let mut model = walker_model();
+    model.clips.push(run);
+    let mut app = app();
+    let unit = app
+        .world_mut()
+        .spawn((
+            model,
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            MovementState {
+                flags: move_flags::FORWARD,
+                speed: 7.0,
+                ..Default::default()
+            },
+        ))
+        .id();
+    let gait = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().gait;
+    let main = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimationTransitions>()
+            .unwrap()
+            .get_main_animation()
+    };
+    let set_speed = |app: &mut App, speed: f32| {
+        app.world_mut()
+            .entity_mut(unit)
+            .get_mut::<MovementState>()
+            .unwrap()
+            .speed = speed;
+    };
+    app.update();
+    assert_eq!(gait(&app), Some(5), "at 7 yd/s it runs");
+    set_speed(&mut app, 3.5);
+    app.update();
+    assert_eq!(gait(&app), Some(4), "slowed to half, it walks");
+    for _ in 0..3 {
+        app.update();
+    }
+    set_speed(&mut app, 7.0);
+    app.update();
+    assert_eq!(gait(&app), Some(5), "the slow gone, it runs again");
+    assert_eq!(
+        main(&app),
+        Some(AnimationNodeIndex::new(3)),
+        "and the base plays the Run clip, not the Walk it held while slowed"
+    );
+    let rate = app
+        .world()
+        .entity(unit)
+        .get::<AnimationPlayer>()
+        .unwrap()
+        .animation(AnimationNodeIndex::new(3))
+        .expect("Run is playing")
+        .speed();
+    assert!((rate - 1.0).abs() < 1e-3, "at its authored speed: {rate}");
+}
+
 /// The divisor reads the mount model (`[unit+0xdc] ?: [unit+0xd8]`), scaled by the rider's
 /// `OBJECT_FIELD_SCALE_X` times its own display column (`0x613ef0`): 1.5 under 2.0 divides by 3.0.
 #[test]

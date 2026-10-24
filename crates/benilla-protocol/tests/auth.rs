@@ -2,6 +2,20 @@
 //! these read a back-to-back challenge, proof and realm-list stream from one cursor.
 
 use benilla_protocol::auth;
+use benilla_protocol::transport::ReadExactAsync;
+use futures_lite::future::block_on;
+
+/// The login readers are awaited now — a browser reads its WebSocket off the event loop, never out
+/// of a blocking call — so the fixture's byte cursor takes the same shape. It reads off the front
+/// of the slice and leaves the remainder behind, which is what the alignment assertion at the end
+/// of the test inspects.
+struct Cursor<'a>(&'a [u8]);
+
+impl ReadExactAsync for Cursor<'_> {
+    async fn read_exact_async(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        std::io::Read::read_exact(&mut self.0, buf)
+    }
+}
 
 const N: [u8; 32] = benilla_srp::LARGE_SAFE_PRIME_LITTLE_ENDIAN;
 
@@ -64,10 +78,10 @@ fn logon_read_sequence_stays_aligned() {
     buf.extend_from_slice(&proof_packet(&server_proof));
     buf.extend_from_slice(&realm_list_packet());
 
-    let mut stream: &[u8] = &buf;
+    let mut stream = Cursor(&buf);
 
     // The challenge read must consume the `crc_salt` + `security_flag` tail to land on opcode 0x01.
-    let reply = auth::read_challenge_reply(&mut stream)
+    let reply = block_on(auth::read_challenge_reply(&mut stream))
         .expect("challenge reply")
         .expect("a challenge with SRP inputs");
     assert_eq!(reply.server_public_key, server_public_key);
@@ -76,21 +90,21 @@ fn logon_read_sequence_stays_aligned() {
     assert_eq!(reply.salt, salt);
     assert_eq!(reply.crc_salt, CRC_SALT); // the proof's `crc_hash` is computed from this
 
-    let proof =
-        auth::read_proof_reply(&mut stream).expect("proof reply (stream desynced if this fails)");
+    let proof = block_on(auth::read_proof_reply(&mut stream))
+        .expect("proof reply (stream desynced if this fails)");
     assert_eq!(proof, Some(server_proof));
 
-    let realms =
-        auth::read_realm_list(&mut stream).expect("realm list (stream desynced if this fails)");
+    let realms = block_on(auth::read_realm_list(&mut stream))
+        .expect("realm list (stream desynced if this fails)");
     assert_eq!(realms.len(), 1);
     assert_eq!(realms[0].name, "Benilla");
     assert_eq!(realms[0].address, "127.0.0.1:8085");
     assert_eq!(realms[0].characters, 3);
 
     assert!(
-        stream.is_empty(),
+        stream.0.is_empty(),
         "{} trailing bytes — a reader over/under-consumed",
-        stream.len()
+        stream.0.len()
     );
 }
 

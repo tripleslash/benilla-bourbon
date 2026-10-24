@@ -2,7 +2,11 @@
 //! `0xceca88`), the queued on-next-swing strike, the running channel, the auto-repeat key
 //! (`0xceac30`), and the local abort on a move, jump or Esc (`AbortCast 0x6e4940`).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// fork: `bevy::platform::time::Instant`, not `std::time::Instant` — the deadlines here meet
+// `crate::ui_script::UiClock`'s anchor, which on wasm32 is the platform clock (std's panics there).
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
@@ -1094,7 +1098,7 @@ mod tests {
         #[test]
         fn esc_cannot_stop_a_channel() {
             let (mut app, rx) = harness(HashMap::new());
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             let now = Instant::now();
             app.world_mut()
                 .resource_mut::<ActiveChannel>()
@@ -1123,7 +1127,7 @@ mod tests {
         fn esc_cancels_the_auto_repeat_first_and_the_cast_on_the_next_press() {
             const AUTO_SHOT: u32 = 75;
             let (mut app, rx) = harness(HashMap::new());
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             app.world_mut().resource_mut::<AutoRepeatActive>().0 = Some(AUTO_SHOT);
             app.world_mut()
                 .resource_mut::<PendingCast>()
@@ -1182,7 +1186,7 @@ mod tests {
                     ..Default::default()
                 },
             )]));
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             fill_record(&mut app);
             app.world_mut()
                 .resource_mut::<QueuedMeleeSpell>()
@@ -1234,9 +1238,9 @@ mod tests {
                     ..Default::default()
                 },
             )]));
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             app.world_mut()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .run(
                     "STOPS, FAILS = 0, 0 \
                      local f = CreateFrame('Frame') \
@@ -1278,7 +1282,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(crate::ui_cast::signal_reports)
                 .unwrap();
-            let script = app.world().non_send_resource::<UiScript>();
+            let script = app.world().non_send::<UiScript>();
             assert_eq!(script.eval::<i64>("return STOPS").unwrap(), 1);
             assert_eq!(script.eval::<i64>("return FAILS").unwrap(), 0);
             assert_eq!(
@@ -1346,7 +1350,7 @@ mod tests {
         #[test]
         fn esc_takes_the_cast_first_and_the_strike_on_the_next_press() {
             let (mut app, rx) = harness(HashMap::new());
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             app.world_mut()
                 .resource_mut::<QueuedMeleeSpell>()
                 .arm(HEROIC_STRIKE);
@@ -1481,7 +1485,7 @@ mod tests {
                 (FIREBALL, SpellDisplay::default()),
                 (FROSTBOLT, SpellDisplay::default()),
             ]));
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             fill_record(&mut app);
             app.world_mut()
                 .resource_mut::<PendingCast>()
@@ -1580,7 +1584,7 @@ mod tests {
         #[test]
         fn a_cast_with_no_answer_holds_the_slot_until_esc() {
             let (mut app, rx) = harness(HashMap::from([(FIREBALL, SpellDisplay::default())]));
-            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.insert_non_send(UiScript::new().unwrap());
             let sent = Instant::now()
                 .checked_sub(Duration::from_secs(60))
                 .expect("a clock a minute old");

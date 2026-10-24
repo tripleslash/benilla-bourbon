@@ -231,7 +231,9 @@ pub(super) fn advances_current(lua: &Lua, h: FrameHandle) -> bool {
     let Some(rh) = super::ensure_text_region(lua, h) else {
         return false;
     };
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let Some(req) = stale_advances(&mut model, h, rh) else {
         return true;
     };

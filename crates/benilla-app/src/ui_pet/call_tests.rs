@@ -52,7 +52,7 @@ fn ui<R>(rig: &mut Rig, f: impl FnOnce(&mut benilla_ui::script::UiScript) -> R) 
     let mut script = rig
         .app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        .non_send_mut::<benilla_ui::script::UiScript>();
     f(&mut script)
 }
 

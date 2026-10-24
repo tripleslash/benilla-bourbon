@@ -181,8 +181,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Err(mlua::Error::runtime(NO_DRAW));
             }
             // `GetWallClockSeconds` (`0x429580`) less the stamp, pushed as a signed dword.
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            // `web_time`: std's wall clock panics on the page.
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()) as u32 as i32;
             Ok(MultiValue::from_vec(vec![
                 Value::Integer(0),

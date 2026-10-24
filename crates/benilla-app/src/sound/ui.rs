@@ -17,7 +17,8 @@ use benilla_ui::script::{CursorPayload, SoundRequest, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 use super::kit::{self, KitRef, SoundKits};
 use super::{SoundConfig, SoundOutput};
@@ -345,7 +346,7 @@ fn play_auto_equip_sounds(
 pub(super) fn plugin(app: &mut App) {
     app.add_message::<LootPickupSound>()
         .add_message::<AutoEquipSound>()
-        .add_systems(Startup, load_item_sounds.after(AssetSet::Open))
+        .add_data_loaders(load_item_sounds)
         .add_systems(
             Update,
             (

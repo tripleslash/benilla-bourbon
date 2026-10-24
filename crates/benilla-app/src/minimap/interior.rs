@@ -189,6 +189,7 @@ mod tests {
         };
         let model = WmoModel {
             wmo_id: 1,
+            ambient: [0.0; 3],
             submeshes: Vec::new(),
             submesh_group: Vec::new(),
             portal_vertices,
@@ -271,6 +272,7 @@ mod tests {
         // The connecting portal sits at z ≈ -300, far below the box floor (player.z - 1.5·25).
         let model = WmoModel {
             wmo_id: 1,
+            ambient: [0.0; 3],
             submeshes: Vec::new(),
             submesh_group: Vec::new(),
             portal_vertices: vec![

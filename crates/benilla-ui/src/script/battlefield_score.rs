@@ -6,7 +6,6 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::number_arg;
-use super::Model;
 
 /// One scoreboard row as the app resolved it, in wire order.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -131,7 +130,7 @@ impl super::UiScript {
 
     /// Whether a newer board waits on names the app is still resolving (`[0xb6ebd4]`).
     pub fn set_battlefield_score_names_pending(&mut self, pending: bool) {
-        self.model_mut().battlefield_board.names_pending = pending;
+        set_field!(self, battlefield_board.names_pending, pending);
     }
 
     /// The status-3 arm's `0x4aa5a0(-1)` (`0x4aaa5a`): the filter back to every team, and the
@@ -145,7 +144,7 @@ impl super::UiScript {
 
     /// `GetBattlefieldInstanceRunTime()`'s answer in ms, pushed each frame.
     pub fn set_battlefield_run_time_ms(&mut self, ms: u32) {
-        self.model_mut().battlefield_run_time_ms = ms;
+        set_field!(self, battlefield_run_time_ms, ms);
     }
 }
 
@@ -169,7 +168,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumBattlefieldScores",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.battlefield_board.filtered as i64)
         })?,
     )?;
@@ -179,7 +180,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBattlefieldScore",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldScore(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(r) = model.battlefield_board.row(index) else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
@@ -216,7 +219,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetBattlefieldWinner",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let b = &model.battlefield_board.scores;
             Ok(if b.ended {
                 Value::Integer(i64::from(b.winner))
@@ -248,7 +253,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumBattlefieldStats",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.battlefield_board.scores.columns.len() as i64)
         })?,
     )?;
@@ -258,7 +265,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBattlefieldStatInfo",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldStatInfo(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let col = usize::try_from(index)
                 .ok()
                 .and_then(|i| i.checked_sub(1))
@@ -286,7 +295,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let usage = "Usage: GetBattlefieldStatData(playerIndex, statIndex)";
             let player = number_arg(lua, player, usage)?;
             let stat = number_arg(lua, stat, usage)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let v = model
                 .battlefield_board
                 .row(player)
@@ -310,7 +321,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "LeaveBattlefield",
         lua.create_function(|lua, ()| {
             let ended = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.battlefield_board.scores.ended
             };
             if !ended {
@@ -324,7 +337,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetBattlefieldInstanceRunTime",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.battlefield_run_time_ms))
         })?,
     )?;

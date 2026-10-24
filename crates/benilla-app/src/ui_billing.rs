@@ -340,7 +340,7 @@ mod tests {
         let mut clock = Time::<Real>::new(start);
         clock.update_with_instant(start);
         let mut app = App::new();
-        app.insert_non_send_resource(s)
+        app.insert_non_send(s)
             .insert_resource(clock)
             .init_resource::<ChatLog>()
             .init_resource::<PlayTimeWarning>()
@@ -355,7 +355,7 @@ mod tests {
         };
 
         frame(&mut app, 16);
-        let s = app.world().non_send_resource::<UiScript>();
+        let s = app.world().non_send::<UiScript>();
         assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
         assert_eq!(
             s.eval::<String>("return StaticPopup1Text:GetText()")

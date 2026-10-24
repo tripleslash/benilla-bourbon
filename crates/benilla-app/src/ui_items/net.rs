@@ -161,7 +161,7 @@ mod tests {
         script.lock_item(A);
         script.lock_item(B);
         script.run("SEEN = {}").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         crate::net::handlers::dispatch(
             app.world_mut(),
             vec![SessionEvent::InventoryFailure {
@@ -173,9 +173,7 @@ mod tests {
             }],
         );
         crate::lanes::fire_in_order(app.world_mut());
-        let s = app
-            .world()
-            .non_send_resource::<benilla_ui::script::UiScript>();
+        let s = app.world().non_send::<benilla_ui::script::UiScript>();
         assert_eq!(
             s.eval::<Vec<String>>("return SEEN").unwrap(),
             ["UI_ERROR_MESSAGE", "ITEM_LOCK_CHANGED", "ITEM_LOCK_CHANGED"]
@@ -234,7 +232,7 @@ mod tests {
                  SEEN = SEEN .. tag[event] .. (HasKey() and 1 or 0) end)"
             ))
             .unwrap();
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         world
             .run_system_cached(super::super::feed::feed_containers)
             .unwrap();
@@ -310,7 +308,7 @@ mod tests {
         world
             .run_system_cached(super::super::feed::feed_containers)
             .unwrap();
-        between(&mut world.non_send_resource_mut::<UiScript>());
+        between(&mut world.non_send_mut::<UiScript>());
         crate::lanes::fire_in_order(world);
     }
 
@@ -320,7 +318,7 @@ mod tests {
     fn refusal_and_key(key_first: bool) -> (String, bool) {
         let mut app = keyring_client();
         refusal_and_key_frame(&mut app, key_first, |_| {});
-        let s = app.world().non_send_resource::<UiScript>();
+        let s = app.world().non_send::<UiScript>();
         (
             s.eval::<String>("return SEEN").unwrap(),
             s.eval::<bool>("return HasKey() == 1").unwrap(),
@@ -359,7 +357,7 @@ mod tests {
             packets_of(false),
             |_| {},
         );
-        let s = app.world().non_send_resource::<UiScript>();
+        let s = app.world().non_send::<UiScript>();
         assert_eq!(s.eval::<String>("return SEEN").unwrap(), "E0");
     }
 
@@ -371,7 +369,7 @@ mod tests {
         let mut app = keyring_client_without_the_record();
         let key = packets_of(true);
         frame(&mut app, Vec::new(), key[..4].to_vec(), |_| {});
-        let s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let s = app.world_mut().non_send_mut::<UiScript>();
         assert!(!s.eval::<bool>("return HasKey() == 1").unwrap());
         s.run("SEEN = ''").unwrap();
         let answer = SessionEvent::ItemTemplate {
@@ -379,7 +377,7 @@ mod tests {
             info: Some(Box::new(key_record())),
         };
         frame(&mut app, Vec::new(), vec![refusal(), answer], |_| {});
-        let s = app.world().non_send_resource::<UiScript>();
+        let s = app.world().non_send::<UiScript>();
         assert_eq!(s.eval::<String>("return SEEN").unwrap(), "E0");
         assert!(s.eval::<bool>("return HasKey() == 1").unwrap());
     }
@@ -396,7 +394,7 @@ mod tests {
             s.fire_world_enter();
             s.fire_event("BAG_UPDATE_COOLDOWN", vec![]);
         });
-        let s = app.world().non_send_resource::<UiScript>();
+        let s = app.world().non_send::<UiScript>();
         assert_eq!(s.eval::<String>("return SEEN").unwrap(), "W1C1E0");
         let c = census(
             &mut crate::game_plugins::schedule_tests::headless_client(),

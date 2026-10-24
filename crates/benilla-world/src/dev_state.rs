@@ -125,7 +125,8 @@ pub struct LightingDebug {
 impl Default for LightingDebug {
     fn default() -> Self {
         // `WOW_CLOCK=<minute 0..1439>` arms the manual scrub, to match a reference shot's hour.
-        let clock = std::env::var("WOW_CLOCK")
+        let clock = crate::launch_env::var("WOW_CLOCK")
+            .ok_or(()) /* fork: modern lighting — reachable from the browser (?clock=) */
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
             .map(|m| m % 1440);

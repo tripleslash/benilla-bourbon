@@ -125,7 +125,7 @@ fn feed_cost_per_invalidation() {
 
     let script = UiScript::new().expect("VM");
     crate::ui_script::load_ui_for_test(&script, "Interface\\FrameXML\\GlobalStrings.lua");
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
 
     let timed = |app: &mut App| {
         let start = Instant::now();

@@ -197,7 +197,7 @@ impl super::UiScript {
     /// the quest log's turn-in test reads (`0x4df6ce`, `0x4df6e3`). A faction left out reads 0, as
     /// one with no reputation index does (`0x4d6377`).
     pub fn set_faction_standings(&mut self, standings: HashMap<u32, i32>) {
-        self.model_mut().faction_standings = standings;
+        set_field!(self, faction_standings, standings);
     }
 
     /// Whether the list holds `state` as it stands, the flags its verbs wrote included.
@@ -576,7 +576,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumFactions",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.reputation_visible as i64)
         })?,
     )?;
@@ -592,7 +594,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetFactionInfo(index)` (`0x84a298`, `0x4d6509`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetFactionInfo(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let faction = faction_at(&model, index);
             let is_header = is_header_key(&model, faction);
             let collapsed = is_header && model.reputation_collapsed.contains(&faction);
@@ -638,7 +642,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSelectedFaction",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let shown = model.reputation_visible.min(model.reputation_rows.len());
             let found = model.reputation_rows[..shown]
                 .iter()
@@ -654,7 +660,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: SetSelectedFaction(index)` (`0x84a3b0`, `0x4d6bc1`).
             let index = binding_abi::index_arg(lua, index, "Usage: SetSelectedFaction(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.reputation_selected = faction_at(&model, index);
             Ok(())
         })?,
@@ -670,7 +678,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: CollapseFactionHeader(index)` (`0x84a320`, `0x4d6a61`).
             let index = binding_abi::index_arg(lua, index, "Usage: CollapseFactionHeader(index)")?;
             let sorted = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 set_collapsed(&mut model, index, true)
             };
             if sorted {
@@ -685,7 +695,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: ExpandFactionHeader(index)` (`0x84a344`, `0x4d6ab1`).
             let index = binding_abi::index_arg(lua, index, "Usage: ExpandFactionHeader(index)")?;
             let sorted = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 set_collapsed(&mut model, index, false)
             };
             if sorted {
@@ -705,7 +717,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: FactionToggleAtWar(index)` (`0x84a2b8`, `0x4d6961`).
             let index = binding_abi::index_arg(lua, index, "Usage: FactionToggleAtWar(index)")?;
             let call = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let faction = faction_at(&model, index);
                 (faction != 0)
                     .then(|| {
@@ -736,7 +750,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: IsFactionInactive(index)` (`0x84a368`, `0x4d6b01`).
             let index = binding_abi::index_arg(lua, index, "Usage: IsFactionInactive(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let faction = faction_at(&model, index);
             Ok(binding_abi::flag(
                 entry_of(&model, faction).is_some_and(|e| e.inactive),
@@ -761,7 +777,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // `is-number` else the usage (`0x84a2dc` at `0x4d69c1`, `0x84a300` at `0x4d6a11`).
                 let index = binding_abi::index_arg(lua, index, usage)?;
                 let slot = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     slot_of(&model, faction_at(&model, index))
                 };
                 match slot {
@@ -783,7 +801,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetWatchedFactionInfo",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let watched = model.reputation.watched.and_then(|slot| {
                 model
                     .reputation
@@ -823,7 +843,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: SetWatchedFactionIndex(index)` (`0x84a388`, `0x4d6b71`).
             let index = binding_abi::index_arg(lua, index, "Usage: SetWatchedFactionIndex(index)")?;
             let slot = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 entry_of(&model, faction_at(&model, index)).map_or(-1, |e| e.rep_list_id as i32)
             };
             submit(lua, ReputationCall::Watch(slot))

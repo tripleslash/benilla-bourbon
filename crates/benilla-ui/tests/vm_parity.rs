@@ -985,8 +985,14 @@ fn item_separator(name: &str) -> &'static str {
 /// A platform case checked item by item against `recorded`, each blessed platform's answer: the
 /// failures, how many items went unchecked because the platforms answer them differently, and
 /// how many there are. `None` when nothing was recorded, or the platforms' answers do not split
-/// alike.
-fn check_items(name: &str, got: &str, recorded: &[String]) -> Option<(Vec<String>, usize, usize)> {
+/// alike. On a platform no answer was blessed on (`unblessed`), whose libm the C build never ran
+/// on, a number one ulp from the recorded one is that libm's rounding and goes unchecked too.
+fn check_items(
+    name: &str,
+    got: &str,
+    recorded: &[String],
+    unblessed: bool,
+) -> Option<(Vec<String>, usize, usize)> {
     let sep = item_separator(name);
     let sets: Vec<Vec<&str>> = recorded.iter().map(|a| a.split(sep).collect()).collect();
     let n = sets.first()?.len();
@@ -1011,7 +1017,7 @@ fn check_items(name: &str, got: &str, recorded: &[String]) -> Option<(Vec<String
     };
     for (i, g) in got.iter().enumerate() {
         let w = sets[0][i];
-        if sets.iter().any(|s| s[i] != w || nan(s[i])) {
+        if sets.iter().any(|s| s[i] != w || nan(s[i])) || (unblessed && one_ulp_apart(g, w)) {
             unchecked += 1;
         } else if *g != w {
             failures.push(format!(
@@ -1022,6 +1028,17 @@ fn check_items(name: &str, got: &str, recorded: &[String]) -> Option<(Vec<String
         }
     }
     Some((failures, unchecked, n))
+}
+
+/// Whether two `ok <number>` items are adjacent doubles: the same call, rounded by two libms.
+fn one_ulp_apart(a: &str, b: &str) -> bool {
+    let num = |s: &str| s.strip_prefix("ok ")?.parse::<f64>().ok();
+    match (num(a), num(b)) {
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() && x.signum() == y.signum() => {
+            x.to_bits().abs_diff(y.to_bits()) == 1
+        }
+        _ => false,
+    }
 }
 
 /// The platform benilla-lua's pinned answers are the C build's on: Linux, x86-64, glibc.
@@ -1126,7 +1143,7 @@ fn every_case_answers_as_the_c_lua_build_recorded() {
                 .filter(|(k, _)| k.starts_with(&prefix))
                 .map(|(_, a)| unescape(a))
                 .collect();
-            match check_items(name, got, &recorded) {
+            match check_items(name, got, &recorded, own.is_none()) {
                 Some((f, unchecked, n)) => {
                     failures.extend(f);
                     unchecked_items += unchecked;

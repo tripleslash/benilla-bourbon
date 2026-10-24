@@ -180,7 +180,7 @@ struct GuildCellsCarry(benilla_ui::script::GuildCells);
 /// `/reload`'s VM gets back ([`seed_vm_guild`]).
 pub(crate) fn fold_dying_vm_guild(world: &mut World) {
     let Some(cells) = world
-        .get_non_send_resource_mut::<UiScript>()
+        .get_non_send_mut::<UiScript>()
         .map(|mut s| s.take_guild_cells())
     else {
         return;
@@ -1379,7 +1379,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let me = app
             .world_mut()
             .spawn((
@@ -1399,7 +1399,7 @@ mod tests {
                 ]));
             app.world_mut().run_system_once(feed::feed_guild).unwrap();
             assert_eq!(app.world().resource::<GuildState>().guild_id, id);
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             assert_eq!(s.eval::<i64>("return SEEN").unwrap(), 0, "{id}/{rank}");
         }
@@ -1421,7 +1421,7 @@ mod tests {
             .init_resource::<crate::sound::MessageSounds>()
             .insert_resource(commands)
             .add_systems(Update, feed::feed_guild);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.world_mut().spawn((
             crate::net::SelfPlayer,
             ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
@@ -1484,11 +1484,11 @@ mod tests {
         };
         let mut script = UiScript::new().unwrap();
         script.set_unit("target", Some(target(5)));
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let call = |app: &mut App| {
             let name = app
                 .world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<Option<String>>("return (GetGuildInfo('target'))")
                 .unwrap();
             assert_eq!(name, None, "the first answer of an uncached guild");
@@ -1523,7 +1523,7 @@ mod tests {
         assert!(drain(&mut app).is_empty(), "the waiters are spent");
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_unit("target", Some(target(6)));
         call(&mut app);
         app.update();

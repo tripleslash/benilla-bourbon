@@ -23,7 +23,9 @@
 //!   (`0x707aea`), exactly like `UnitRenderAlpha`. Unlit, no fog, no depth write; the texture is
 //!   `Rgba8Unorm`, so the multiply runs on raw bytes as the reference's does.
 //! - Registration: units, players and corpses cast one; game objects and dynamic objects never do
-//!   (`0x670e94`, `0x613e10`). The reference's `shadowLOD` toggle is not built: always on.
+//!   (`0x670e94`, `0x613e10`). The reference's `shadowLOD` toggle is not built. Deviation (this
+//!   fork): the lane hides under `worldShadows 1` or a modern-lighting frame, where the shadow map
+//!   owns unit shadows.
 //! - Deviation: the shadow is gated on `InheritedVisibility`, though the reference draws one under
 //!   an undrawn body (`0x48161d`), because benilla's exterior-scene election hides units the
 //!   reference never loads, and their shadows would stay on the floor below.
@@ -156,6 +158,7 @@ fn sync_shadows(
 /// reaches zero, or no receiving surface is in the box (the reference's no-ground gate).
 #[allow(clippy::type_complexity)]
 fn update_shadows(
+    video: Res<crate::video::VideoConfig>,
     time: Res<Time>,
     catalog: Option<Res<AnimData>>,
     shadow_assets: Option<Res<ShadowAssets>>,
@@ -181,6 +184,20 @@ fn update_shadows(
     // `RUST_LOG=benilla_app::blob_shadow=debug` (a `benilla::` filter matches nothing).
     mut census_at: Local<f32>,
 ) {
+    // `worldShadows 1`: the realtime shadow-map path owns unit shadows — every record hides so a
+    // unit never wears the oval underneath its cast shadow. The records themselves stay (spawned
+    // by `sync_shadows` as usual) and `hide` drops each cache key, so flipping the cvar back
+    // rebuilds every projection on the next frame. With the cvar off — the shipped default —
+    // this gate is a single false branch and the lane below is the untouched reference path.
+    // fork: modern lighting (FORK.md, P3) — a modern session's cascades own unit shadows too.
+    if video.world_shadows || benilla_world::modern::frame_is_modern() {
+        for (_, mut key, mut verts) in &mut shadows {
+            if key.shown || !verts.0.is_empty() {
+                hide(&mut key, &mut verts);
+            }
+        }
+        return;
+    }
     let now = time.elapsed_secs();
     let census = now >= *census_at;
     if census {

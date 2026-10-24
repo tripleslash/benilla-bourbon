@@ -107,8 +107,9 @@ fn the_stock_video_window_opens_saves_restores_defaults_and_cancels_clean() {
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     assert_clean(&s, "opening the window");
     assert!(s.eval::<bool>("return OptionsFrame:IsShown()").unwrap());
-    // Environment Detail: `GetWorldDetail`, stop 1 at the registered `SmallCull` 0.04.
-    assert_eq!(slider(&s, 3), 1.0);
+    // Environment Detail: `GetWorldDetail`, which reads `WorldDetail`: the fork boots it at the
+    // High stop, 2 (its `deviates` row).
+    assert_eq!(slider(&s, 3), 2.0);
     // Terrain Mip: `GetTerrainMip` is `1 - shadowLevel` (`0x488fbd`), `shadowLevel` "1".
     assert_eq!(slider(&s, 4), 0.0);
     // Texture Detail: `GetBaseMip` is `1 - baseMip` (`0x48928d`), `baseMip` "0".
@@ -145,7 +146,7 @@ fn the_stock_video_window_opens_saves_restores_defaults_and_cancels_clean() {
     for (i, v) in [
         (1, "1.0"),
         (2, "777"),
-        (3, "2"),
+        (3, "0"),
         (4, "1"),
         (5, "0"),
         (6, "0.5"),
@@ -162,10 +163,10 @@ fn the_stock_video_window_opens_saves_restores_defaults_and_cancels_clean() {
     s.run("OptionsFrameOkay:Click()").unwrap();
     assert_clean(&s, "Okay");
     assert!(!s.eval::<bool>("return OptionsFrame:IsShown()").unwrap());
-    // `SetWorldDetail(2)`: `frillDensity` 48 and `smallCull` "%f" of 0.01 (`0x488e1e`, `0x488e56`).
-    assert_eq!(cvar(&s, "frillDensity").as_deref(), Some("48"));
-    assert_eq!(cvar(&s, "SmallCull").as_deref(), Some("0.010000"));
-    assert_eq!(s.eval::<f64>("return GetWorldDetail()").unwrap(), 2.0);
+    // `SetWorldDetail(0)`: `frillDensity` 16 and `smallCull` "%f" of 0.07 (`0x488e1e`, `0x488e56`).
+    assert_eq!(cvar(&s, "frillDensity").as_deref(), Some("16"));
+    assert_eq!(cvar(&s, "SmallCull").as_deref(), Some("0.070000"));
+    assert_eq!(s.eval::<f64>("return GetWorldDetail()").unwrap(), 0.0);
     // `SetTerrainMip(1)` writes `1 - 1` as "%d" (`0x48901d`-`0x489025`).
     assert_eq!(cvar(&s, "shadowLevel").as_deref(), Some("0"));
     // `SetBaseMip(0)` writes `trunc(1 - 0)` as "%d" (`0x4892f5`-`0x489301`).
@@ -213,10 +214,11 @@ fn the_stock_video_window_opens_saves_restores_defaults_and_cancels_clean() {
     s.run("OptionsFrameDefaults:Click()").unwrap();
     assert_clean(&s, "Defaults");
     assert!(!s.eval::<bool>("return OptionsFrame:IsShown()").unwrap());
-    // `RestoreVideoDefaults` restores the graphics CVars benilla registers among `0x639a60`'s.
+    // `RestoreVideoDefaults` restores the graphics CVars benilla registers among `0x639a60`'s, to
+    // the fork's registered defaults: `farclip` 1000 and `SmallCull` 0.01 (their rows in `cvars`).
     for (name, default) in [
-        ("farclip", "350"),
-        ("SmallCull", "0.04"),
+        ("farclip", "1000"),
+        ("SmallCull", "0.01"),
         ("shadowLevel", "1"),
         ("baseMip", "0"),
         ("doodadAnim", "1"),

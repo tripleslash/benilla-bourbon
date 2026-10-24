@@ -188,6 +188,9 @@ pub struct UnitState {
     /// The city-protector title, `PLAYER_BYTES_3` byte 2 (0 none): `UnitPVPName` appends the
     /// `PVP_MEDAL<n>` line for a non-zero one (`0x6093ef`).
     pub pvp_medal: u8,
+    /// `UNIT_FIELD_MOUNTDISPLAYID` is set: the retail macro option `[mounted]` (this fork; 1.12
+    /// exposes no mounted verb).
+    pub mounted: bool,
     /// `UnitFactionGroup`'s first return, `"Alliance"` or `"Horde"`: `FactionGroup.dbc`'s English
     /// `InternalName` for the side bit of the faction template's group mask, which stock builds
     /// texture paths from (`PlayerFrame.lua:68`). `None` for a template with no side.
@@ -425,7 +428,7 @@ impl super::UiScript {
 
     /// Push the player's copper (`PLAYER_FIELD_COINAGE`), read by `GetMoney`.
     pub fn set_money(&mut self, copper: u64) {
-        self.model_mut().money = copper;
+        set_field!(self, money, copper);
     }
 
     /// Push `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP`, private fields that `UnitXP` and `UnitXPMax`
@@ -457,7 +460,7 @@ impl super::UiScript {
     /// Push `GetBillingTimeRested()`'s minutes, from the last `SMSG_AUTH_RESPONSE` that carried the
     /// billing group; nothing else on the wire writes it.
     pub fn set_billing_time_rested(&mut self, minutes: u32) {
-        self.model_mut().billing_time_rested = minutes;
+        set_field!(self, billing_time_rested, minutes);
     }
 
     /// Enter the UI-load sound-suppression scope (`0x458f50`): a depth every name-keyed
@@ -475,7 +478,7 @@ impl super::UiScript {
 
     /// Push whether a cinematic is playing, `InCinematic()`'s answer.
     pub fn set_in_cinematic(&mut self, playing: bool) {
-        self.model_mut().in_cinematic = playing;
+        set_field!(self, in_cinematic, playing);
     }
 
     /// Push `Exhaustion.dbc`'s (rest state, localized name, factor) rows, read as `0x48d350` and
@@ -539,7 +542,7 @@ impl super::UiScript {
     /// Drain `DropItemOnUnit`'s tokens; on the pet the app casts the learned Feed Pet spell at
     /// the held item (`0x48d960`).
     pub fn take_drop_item_on_unit(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().drop_item_on_unit)
+        drain_field!(self, drop_item_on_unit)
     }
 
     /// Take the `SpellTargetUnit` calls out of the call stream.
@@ -575,7 +578,9 @@ fn with_unit<T>(
     f: impl FnOnce(&UnitState) -> T,
 ) -> mlua::Result<T> {
     check_unit_token(token)?;
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     Ok(match token.as_ref().and_then(|t| model.unit(t)) {
         Some(u) => f(u),
         None => default,

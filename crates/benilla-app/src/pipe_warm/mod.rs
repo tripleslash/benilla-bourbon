@@ -10,6 +10,12 @@
 //! - [`watch_pipelines`]: the tripwire, a `warn!` for every pipeline compiled uncovered, which
 //!   means the menagerie has a coverage hole.
 //! - `WOW_PIPE_TRACE=<path>`: one line per pipeline created, with its full variant identity.
+//!
+//! fork: fsr (FORK.md) — FSR's lanes warm themselves at `RenderStartup`, behind the entry
+//! cover: the upscaler's and frame generation's compute chains queue there, `FgPresentPipeline`
+//! specialises the player-UI camera's one target, and `EffectVelocityPipeline` every coverage rule
+//! at the free-floating depth state. A model part's velocity pipeline keys on its mesh layout and
+//! compiles on first sight, which the menagerie's rigs give it while FSR is on during the pass.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -137,6 +143,12 @@ fn watch_pipelines(
             } else {
                 // The tripwire: a live compile is a visible stall, and a warm pass coverage hole.
                 warn!("pipeline compiled LIVE [{id}] {line}");
+                // The same line, on the console the web build actually has. `quiet_console_on_web`
+                // takes `LogPlugin` off whenever the probe is armed, so the `warn!` above reaches
+                // nobody there — on the one target where a live compile is worst, because
+                // `bevy_render`'s `create_pipeline_task` `block_on`s the build on `wasm32`. No-op
+                // off wasm and when the probe is not armed.
+                crate::webdiag::note_live_pipeline(id, &line);
             }
             if let Ok(path) = std::env::var("WOW_PIPE_TRACE") {
                 use std::io::Write;
@@ -198,7 +210,7 @@ fn describe(desc: &PipelineDescriptor) -> String {
                 |ds| {
                     (
                         ds.bias.constant,
-                        ds.depth_write_enabled,
+                        ds.depth_write_enabled.unwrap_or(false),
                         format!("{:?}", ds.depth_compare),
                     )
                 },
@@ -269,6 +281,10 @@ pub(crate) struct WarmPass {
     last_reveal: f32,
     reveal_frames: u32,
     showing: Vec<Entity>,
+    /// Stall state: when a rig was last revealed or a pipeline last settled, and the settled count
+    /// then, for [`WARM_STALL_SECS`].
+    last_progress: f32,
+    last_settled: usize,
 }
 
 impl WarmPass {
@@ -317,9 +333,12 @@ type WarmRigVis<'w, 's> = Query<
     (With<WarmRig>, Without<WarmBoothCam>),
 >;
 
-/// Never hold a cover unbounded: on timeout the pass warns and releases, and what remains
-/// compiles live.
-const WARM_TIMEOUT_SECS: f32 = 10.0;
+/// Never hold a cover unbounded: when no rig is revealed and no pipeline settles for this long the
+/// pass warns and releases, and what remains compiles live. A stall bound, not a total one: the
+/// browser compiles each pipeline synchronously on the frame thread, so its warm set takes far
+/// longer to drain than a desktop's, and a total bound sent the rest of it to compile in play. The
+/// pass stays bounded, as the rigs are finite and every advancing frame reveals or settles one.
+const WARM_STALL_SECS: f32 = 10.0;
 fn run_warm_pass(
     mut commands: Commands,
     mut warm: ResMut<WarmPass>,
@@ -370,6 +389,8 @@ fn run_warm_pass(
         }
         warm.spawned_at = Some(now);
         warm.last_reveal = now;
+        warm.last_progress = now;
+        warm.last_settled = watch.0.settled.load(Ordering::Relaxed);
         warm.revealed = 0;
         warm.reveal_frames = 0;
         // The twin booth warms the custom-projection view key real bakes install; the real
@@ -399,14 +420,16 @@ fn run_warm_pass(
             &mut cache,
             &light.0,
         );
-        info!("pipeline warm: menagerie up ({count} variants, {WARM_REVEAL_PER_FRAME}/frame)");
+        let line = format!("menagerie up ({count} variants, {}/frame)", reveal_slice());
+        info!("pipeline warm: {line}");
+        crate::webdiag::note_warm(&line);
         return;
     };
     if warm.done {
         return;
     }
-    // Gizmos are immediate-mode, so each frame draws one tiny line in the default config group,
-    // the bowstring's, to compile the `LineGizmo` pipeline.
+    // Gizmos are immediate-mode, so each frame draws one tiny line in the default config group to
+    // compile the bowstring's `LineGizmo` pipeline; a group's width is a uniform, not a key.
     gizmos.line(
         Vec3::new(0.0, 0.0, -0.5),
         Vec3::new(0.001, 0.0, -0.5),
@@ -440,27 +463,41 @@ fn run_warm_pass(
     }
     let all_revealed = revealed_now == 0;
     let last_reveal = warm.last_reveal;
+    let settled = watch.0.settled.load(Ordering::Relaxed);
     let pending = watch
         .0
         .created
         .load(Ordering::Relaxed)
-        .saturating_sub(watch.0.settled.load(Ordering::Relaxed));
+        .saturating_sub(settled);
+    if revealed_now > 0 || settled != warm.last_settled {
+        warm.last_settled = settled;
+        warm.last_progress = now;
+    }
     if all_revealed && pending == 0 && now - last_reveal >= WARM_SETTLE_SECS {
         warm.done = true;
         warm.warmed_once = true;
         warm.effect_tex = None;
         despawn_rigs(&mut commands, &rigs);
-        info!(
-            "pipeline warm: {} rigs drained in {:.2}s over {} paced frames",
+        let line = format!(
+            "{} rigs drained in {:.2}s over {} paced frames",
             warm.revealed,
             now - spawned,
             warm.reveal_frames,
         );
-    } else if now - spawned >= WARM_TIMEOUT_SECS {
+        info!("pipeline warm: {line}");
+        crate::webdiag::note_warm(&line);
+    } else if now - warm.last_progress >= WARM_STALL_SECS {
         warm.done = true;
         warm.effect_tex = None;
         despawn_rigs(&mut commands, &rigs);
-        warn!("pipeline warm: TIMED OUT with {pending} pipelines pending — cover released");
+        let line = format!(
+            "TIMED OUT, no progress for {WARM_STALL_SECS}s after {:.2}s, with {pending} pipelines \
+             pending and {} rigs revealed — cover released, the rest compile live",
+            now - spawned,
+            warm.revealed
+        );
+        warn!("pipeline warm: {line}");
+        crate::webdiag::note_warm(&line);
     }
 }
 
@@ -505,7 +542,7 @@ type ViewCamQuery<'w, 's> = Query<
         Option<&'static Name>,
         Option<&'static Projection>,
         Option<&'static Msaa>,
-        Has<bevy::render::view::Hdr>,
+        Has<bevy::camera::Hdr>,
     ),
     With<Camera3d>,
 >;
@@ -553,7 +590,7 @@ type AnchorViewQuery<'w, 's> = Query<
         Entity,
         Option<&'static Projection>,
         Option<&'static Msaa>,
-        Has<bevy::render::view::Hdr>,
+        Has<bevy::camera::Hdr>,
     ),
     With<Camera3d>,
 >;
@@ -674,6 +711,7 @@ fn warm_effect_lane(
                             main_entity: cam,
                             light: None,
                             clip: None,
+                            motion: benilla_world::particles::buffer::EffectMotion::Static,
                         },
                     );
                 }
@@ -706,6 +744,7 @@ fn warm_effect_lane(
                 main_entity: cam,
                 light: None,
                 clip: None,
+                motion: benilla_world::particles::buffer::EffectMotion::Static,
             },
         );
     }

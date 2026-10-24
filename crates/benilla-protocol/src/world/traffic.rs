@@ -2,7 +2,11 @@
 //! it connected, and the rates they make (`0x537f20`).
 
 use std::sync::atomic::{AtomicU32, Ordering};
+// `web_time::Instant` on the page, whose `std` clock panics (`movement::client_uptime_ms`'s reason).
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 /// One link's byte counts and connect time, the reference's `NetClient` `+0x1ab8` (received),
 /// `+0x1ab4` (sent) and `+0x1abc`, which its connect hook `0x537b90` zeroes and stamps. A received

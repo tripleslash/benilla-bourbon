@@ -11,8 +11,10 @@ ScrollTemplates.xml
 KeyBindingsPage.xml
 # `BenillaOptionsFrame`; its rows read the option globals the stock options windows set.
 OptionsFrame.xml
-# The ESC menu's era look on the stock `GameMenuFrame`, whose Options rung opens ours.
-GameMenuAdapters.xml
+# The ESC menu, ours in place of the stock one: its Options rung opens ours, or Turtle WoW's own
+# window on a Turtle realm. After OptionsFrame.xml, which sets `BENILLA_TURTLE_OPTIONS`; it wraps
+# `ToggleGameMenu`, `IsOptionFrameOpen` and `UpdateMicroButtons` to count `BenillaOptionsFrame`.
+GameMenuFrame.xml
 # `OpenBackpack` and `CloseBackpack` over every equipped bag, for the vendor and the mailbox.
 ContainerFrameAdapters.xml
 # The pet page's autocast widgets in the pet action button's proportions.

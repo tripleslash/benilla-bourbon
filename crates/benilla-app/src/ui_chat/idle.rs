@@ -477,6 +477,7 @@ mod tests {
         assert_eq!(
             stamped(&|app| {
                 app.world_mut().write_message(MouseWheel {
+                    phase: bevy::input::touch::TouchPhase::Moved,
                     unit: MouseScrollUnit::Line,
                     x: 0.0,
                     y: 1.0,
@@ -491,6 +492,7 @@ mod tests {
         let scrolled = |x: f32, y: f32| {
             stamped(&|app| {
                 app.world_mut().write_message(MouseWheel {
+                    phase: bevy::input::touch::TouchPhase::Moved,
                     unit: MouseScrollUnit::Line,
                     x,
                     y,
@@ -569,7 +571,7 @@ mod tests {
                  button.\"",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 
@@ -590,14 +592,14 @@ mod tests {
         let (mut scratch, _) = world(idle_ms, &[]);
         let script = scratch
             .world_mut()
-            .remove_non_send_resource::<benilla_ui::script::UiScript>()
+            .remove_non_send::<benilla_ui::script::UiScript>()
             .expect("the scratch world's VM");
         app.world_mut()
             .resource_mut::<Time<Real>>()
             .advance_by(Duration::from_millis(idle_ms));
         app.world_mut()
             .spawn((SelfPlayer, ObjectStore(ObjectFields::from_pairs(&[]))));
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 

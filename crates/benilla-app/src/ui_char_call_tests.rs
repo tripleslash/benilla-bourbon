@@ -39,7 +39,7 @@ fn client() -> (App, Receiver<ClientCommand>) {
             entry(129, "First Aid", 2, "Professions"),
         ],
     });
-    app.world_mut().insert_non_send_resource(script);
+    app.world_mut().insert_non_send(script);
     (app, rx)
 }
 

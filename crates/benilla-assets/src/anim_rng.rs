@@ -43,8 +43,9 @@ impl AnimRng {
             return;
         }
         // `GetTickCount` counts milliseconds since boot; wall-clock milliseconds stand in for it.
-        self.0 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        // `web_time`, because std's clock panics on wasm32.
+        self.0 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map_or(1, |d| d.as_millis() as u32);
     }
 }

@@ -22,7 +22,7 @@
 //! bare `ret`s, and past the event the camera's detach (`0x490b52`-`0x490b5a`, `0x4841a0` →
 //! `0x50d0f0(0)`).
 
-use bevy::ecs::schedule::{ExecutorKind, ScheduleConfigs, ScheduleLabel};
+use bevy::ecs::schedule::{ScheduleConfigs, ScheduleLabel};
 use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 
@@ -196,7 +196,7 @@ impl SweepApp for App {
 fn sweep_schedule() -> Schedule {
     let mut schedule = Schedule::new(WorldLeaveSweep);
     schedule
-        .set_executor_kind(ExecutorKind::SingleThreaded)
+        .set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new())
         // Two chains joined at the meeting stone: a tuple chains at most twenty.
         .configure_sets(
             (
@@ -311,7 +311,7 @@ pub(crate) mod test_support {
 
     /// The spy of the VM in the world.
     pub(crate) fn seen_in(app: &App) -> Vec<String> {
-        seen(app.world().non_send_resource::<UiScript>())
+        seen(app.world().non_send::<UiScript>())
     }
 
     /// A worldport's sweep (`0x5dd543`): the latch armed as our own create arms it, the sweep on
@@ -329,9 +329,9 @@ pub(crate) mod test_support {
         sweep_in_place(app);
         let dying = app
             .world_mut()
-            .remove_non_send_resource::<UiScript>()
+            .remove_non_send::<UiScript>()
             .expect("a VM in the world");
-        app.insert_non_send_resource(spied_vm(events));
+        app.insert_non_send(spied_vm(events));
         dying
     }
 }

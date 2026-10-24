@@ -82,6 +82,28 @@ struct CachedAura {
 #[derive(Resource, Default)]
 pub(crate) struct PlayerAuraCache {
     auras: Vec<CachedAura>,
+    /// The session's first rebuild with an avatar has run: the login snapshot is in.
+    seeded: bool,
+}
+
+/// The `appeared_at` of an aura in the login snapshot: the avatar's first descriptor carries the
+/// auras the character logged in with, and their remaining times (`Map::ExistingPlayerLogin`) can
+/// land while the world is still loading, seconds before that first feed. Every stamp of the
+/// session joins them; a slot filled later keeps [`DURATION_SLACK`]. The reference reader has no
+/// freshness test at all (`0x4e4450`), so this only narrows our own gate to where it is needed.
+const LOGIN_SNAPSHOT: f64 = f64::NEG_INFINITY;
+
+impl PlayerAuraCache {
+    /// The `appeared_at` of a rebuild at `now`: [`LOGIN_SNAPSHOT`] for the session's first, the
+    /// world entry's or the watcher's, whichever runs first.
+    fn appeared_at(&mut self, now: f64) -> f64 {
+        let seeded = std::mem::replace(&mut self.seeded, true);
+        if seeded {
+            now
+        } else {
+            LOGIN_SNAPSHOT
+        }
+    }
 }
 
 /// [`feed_auras`] seats the unit tokens the field events fan out over, and fires the world entry's
@@ -290,7 +312,11 @@ struct AuraInput {
 /// `PLAYER_FIELD_BYTES2` byte 1 is set, the shift's count taken mod 32 and its low byte tested
 /// (`0x5198a8`-`0x5198b6`). `vision` is that byte, `None` with no active player (`0x51989a`). A
 /// spell the catalog lacks keeps the display filter's deviation and shows.
-fn vision_hides(catalog: Option<&SpellCatalog>, spell_id: u32, vision: Option<u8>) -> bool {
+pub(crate) fn vision_hides(
+    catalog: Option<&SpellCatalog>,
+    spell_id: u32,
+    vision: Option<u8>,
+) -> bool {
     let need = catalog
         .and_then(|c| c.get(spell_id))
         .map_or(0, |d| d.required_aura_vision);
@@ -588,7 +614,8 @@ fn feed_auras(
         let entering = memo.entered != Some(me_entity);
         if entering {
             memo.entered = Some(me_entity);
-            let tracking = rebuild(&mut cache.auras, store, catalog, bevy_now);
+            let appeared_at = cache.appeared_at(bevy_now);
+            let tracking = rebuild(&mut cache.auras, store, catalog, appeared_at);
             script.set_tracking(tracking);
         }
 
@@ -816,7 +843,8 @@ impl PlayerAuraWatch<'_, '_> {
         };
         let catalog = self.spells.as_ref().map(|s| &s.catalog);
         let now = self.time.as_ref().map_or(0.0, |t| t.elapsed_secs_f64());
-        let tracking = rebuild(&mut cache.auras, store, catalog, now);
+        let appeared_at = cache.appeared_at(now);
+        let tracking = rebuild(&mut cache.auras, store, catalog, appeared_at);
         let stamp_now = self.step.as_ref().map_or(0.0, |s| s.before_step().1);
         let list = player_list(
             &cache.auras,
@@ -908,6 +936,7 @@ fn end_session_aura_state(
             script.set_tracking(None);
         }
         cache.auras.clear();
+        cache.seeded = false;
         durations.by_slot.clear();
         // No `AuraFeedMemory` reset: its edge keys die with the VM.
     })
@@ -1076,7 +1105,7 @@ mod tests {
         let mut script = UiScript::new().unwrap();
         // The VM clock after the last tick.
         script.set_now(100.0);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let fields = benilla_protocol::messages::ObjectFields::from_pairs(&[
             (AURA + 32, 11976),
             (AURAFLAGS + 4, 0x8),
@@ -1099,7 +1128,7 @@ mod tests {
         app.update();
         let left: f64 = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return GetPlayerBuffTimeLeft(GetPlayerBuff(0, \"HARMFUL\"))")
             .unwrap();
         assert!(
@@ -1136,6 +1165,10 @@ mod tests {
             .set(ClientState::CharSelect);
         app.update();
         assert!(app.world().resource::<PlayerAuraCache>().auras.is_empty());
+        assert!(
+            !app.world().resource::<PlayerAuraCache>().seeded,
+            "the next login's snapshot is a snapshot again"
+        );
         assert!(app.world().resource::<AuraDurations>().by_slot.is_empty());
     }
 
@@ -1267,6 +1300,8 @@ mod tests {
         assert_eq!(cache[1].flags, AURA_FLAG_CANCELABLE | 0x8);
     }
 
+    /// A login's remaining times land while the world loads, seconds before the avatar's first
+    /// feed: the snapshot's auras join them, and a slot filled later keeps the freshness gate.
     #[test]
     fn a_duration_is_rebased_onto_the_script_clock() {
         let stamp = DurationStamp {

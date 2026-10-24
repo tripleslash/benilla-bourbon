@@ -9,16 +9,18 @@
 //! samples anyway.
 //!
 //! After a teardown sample, an [`EXIT_KILL_MS`] backstop `libc::_exit`s the wedged process with
-//! the code [`AppExit`] asked for; `_exit` skips the atexit teardown the hang may own. The
-//! watchdog and its backstop always run; the sample file is written only where
+//! the code [`AppExit`] asked for; `_exit` skips the atexit teardown the hang may own. Natively
+//! the watchdog and its backstop always run (on wasm32 neither does: a stalled page just freezes
+//! the tab); the sample file is written only where
 //! `benilla-config/` exists, never under `$WOW_CAPTURE`.
 //!
 //! Two injectors test it end to end: `WOW_STALL_INJECT=<at_secs>:<ms>` sleeps the main thread
 //! mid-run, and `WOW_TEARDOWN_INJECT=<ms>` wedges World drop.
 
+use bevy::platform::time::Instant;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::time::Real;
@@ -63,7 +65,14 @@ fn beat(mut exits: MessageReader<AppExit>) {
     HEARTBEAT_MS.store(since_start_ms().max(1), Ordering::SeqCst);
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
 pub(super) fn plugin(app: &mut App) {
+    // No watchdog thread on wasm32 (single-threaded there without COOP/COEP + SharedArrayBuffer,
+    // and there is no `sample`/`_exit` to shell out to on a browser tab anyway) — a hung main
+    // thread on web just freezes the tab, which needs no separate diagnosis. The injectors below
+    // are standing test affordances for exercising the native watchdog, so they stay off too.
+    #[cfg(target_arch = "wasm32")]
+    return;
     // Armed before the off-switch, so "same wedge, watchdog off" still wedges.
     arm_injectors(app);
     if std::env::var("WOW_STALL_SAMPLE").is_ok_and(|v| v == "0") {

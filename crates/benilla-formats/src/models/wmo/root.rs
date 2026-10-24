@@ -361,6 +361,25 @@ pub fn wmo_root_id(root_bytes: &[u8]) -> u32 {
         .unwrap_or(0)
 }
 
+/// The root's `MOHD.ambColor` @ `0x1c` — the building's authored **interior ambient**. It is a
+/// `CImVector`, which is B, G, R, A in memory, so the four bytes at `0x1c..0x20` read
+/// blue, green, red, alpha. Returned as file RGB `0..1`. The 1.12.1
+/// client feeds it to `GL_LIGHT_MODEL_AMBIENT` while the camera stands in an interior group; the
+/// fork's modern lighting uses it as what an interior probe's escaped rays see instead of the sky
+/// (`benilla_world::modern::gi`). `[0,0,0]` when the header is too short (no 5875 root is).
+pub fn wmo_root_ambient(root_bytes: &[u8]) -> [f32; 3] {
+    find_wmo_chunk(root_bytes, b"DHOM")
+        .filter(|mohd| mohd.len() >= 0x20)
+        .map(|mohd| {
+            [
+                f32::from(mohd[0x1e]) / 255.0,
+                f32::from(mohd[0x1d]) / 255.0,
+                f32::from(mohd[0x1c]) / 255.0,
+            ]
+        })
+        .unwrap_or([0.0; 3])
+}
+
 /// Parse MODS (32 B: `name[20], start: u32, count: u32, pad`), MODN and MODD (40 B: `nameOff +
 /// flags: u32, pos: 3×f32, quat: 4×f32, scale: f32, color: 4×u8`) from the raw bytes: an MODD name
 /// is a byte offset into MODN, which `benilla-wmo`'s split `Vec<String>` loses.

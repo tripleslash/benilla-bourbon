@@ -21,24 +21,29 @@
 //! The bed is a looping stream read from the archive as it plays (`0x7a54d0`), opened on the IO
 //! pool so the frame that changes it reads and decodes nothing.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
 
 use anyhow::Context;
 use bevy::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use bevy::tasks::futures_lite::future;
+#[cfg(not(target_arch = "wasm32"))]
 use bevy::tasks::{block_on, IoTaskPool, Task};
-use kira::sound::streaming::StreamingSoundData;
 use kira::sound::FromFileError;
 
-use benilla_formats::{AreaSoundCatalog, Chain};
+#[cfg(not(target_arch = "wasm32"))]
+use benilla_formats::Chain;
+use benilla_formats::{AreaSoundCatalog, TryRead};
 
 use crate::net::{ServerSoundKind, ServerSoundMessage};
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::lighting::GameClock;
 use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit_ext, KitRef, Latch, PlayExtras, SoundCategory, SoundKits};
-use super::mixer::{self, StreamingSoundHandle};
+use super::mixer::{self, StreamingSoundData, StreamingSoundHandle};
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 /// The zone-to-audio catalog; absent when the client data did not load.
@@ -180,6 +185,21 @@ pub(super) struct ZoneAudio {
     /// `SetLoopCount(-1)` (`0x7a5592`), where this slot restarts it.
     lua_music_path: Option<String>,
     lua_music_watch: mixer::StreamWatch,
+    /// [`Self::music_pending`] for the **override slot**: the path a `PlayMusic` asked for while
+    /// its pack is still warming. Same argument as the zone track's latch — a multi-megabyte
+    /// track read from a system would block the frame on a fetch — and the same retry, except
+    /// that it is [`lua_music`] that drives it rather than [`retry_deferred`], because that
+    /// system is unconditional and this slot is the caller's rather than the world's.
+    ///
+    /// [`Self::lua_music_path`] is set alongside it, so [`Self::lua_slot_live`] answers `true`
+    /// for the whole wait: the slot is *taken* by a track a few frames out, and the zone pump's
+    /// five gates must see that or they would start a track underneath it.
+    ///
+    /// Always `None` on native, where a chain read never defers.
+    lua_music_pending: Option<String>,
+    /// [`Self::music_decode`] for the override slot — the browser half of the same wait.
+    #[cfg(target_arch = "wasm32")]
+    lua_music_decode: Option<(String, super::web_decode::Pending)>,
     /// When the next zone track starts (`Time::elapsed_secs_f64`); `None` while one plays or the
     /// zone has no music. A due start that plays nothing leaves it set, so the next frame retries
     /// (`0x460240` never writes `[0x836400]` on a failure).
@@ -195,7 +215,48 @@ pub(super) struct ZoneAudio {
     ambience_kit_vol: f32,
     /// The incoming leg of an ambience crossfade, while the new bed ramps up.
     ambience_fade_in: Option<FadeIn>,
+    /// **The web target's "not here yet" latch for the music slot** (kit id), retried every frame
+    /// by [`retry_deferred`] until the bytes are in memory.
+    ///
+    /// It exists because a track is a multi-megabyte object and the slot is opened from a *system*:
+    /// reading one that is not resident would block the frame on a fetch — seconds of frozen tab in
+    /// the middle of walking across a zone border. So the open is refused, the pack starts warming,
+    /// and the intent is remembered here rather than lost. Every scheduling decision around it
+    /// (`zone_music`, `intro_last`, `next_track_at`) is unchanged and already committed; the only
+    /// difference is that the track begins a few frames later than it asked to.
+    ///
+    /// Always `None` on native, where a chain read is a file read and nothing ever defers.
+    ///
+    /// It holds the whole **pick** — kit, file and kit volume — not just the kit id, because
+    /// `pick_stream` depletes: re-rolling the kit on every frame of the wait would scatter the warm
+    /// across variations and never finish one. See [`open_music_stream`].
+    music_pending: Option<(u32, String, f32)>,
+    /// fork: web — [`Self::music_pending`] for the ambience bed: the pick (kit, file, kit volume)
+    /// and the fade it was asked to arrive with, retried by [`land_ambience`]. `ambience_kit` is
+    /// already committed when this is set. Native beds open on the IO pool instead
+    /// ([`Self::ambience_opening`]).
+    #[cfg(target_arch = "wasm32")]
+    ambience_pending: Option<(u32, String, f32, u64)>,
+    /// **The browser's decode in flight for the music slot** — the second half of the same wait
+    /// [`Self::music_pending`] is the first half of.
+    ///
+    /// Deferring the *read* took the fetch off the frame and left the decode on it, and on this
+    /// target the decode is the bigger number: kira has no streaming module on wasm32, so
+    /// `stream_from_bytes` decodes a whole multi-megabyte track up front, measured at ~91 ms for
+    /// a 1.1 MB tavern MP3 against ~60 ms for its fetch. The bytes now go to the browser instead
+    /// ([`super::web_decode`]) and the slot opens on the frame the PCM comes back.
+    ///
+    /// Carries the same pick the read latch does, for the same reason: nothing is re-decided
+    /// while a wait is in progress.
+    #[cfg(target_arch = "wasm32")]
+    music_decode: Option<(u32, String, f32, super::web_decode::Pending)>,
+    /// [`Self::music_decode`] for the ambience bed, carrying the fade it was asked to arrive
+    /// under as well. The bed absorbs the extra frames by construction — its incoming leg is a
+    /// per-frame envelope that simply starts later.
+    #[cfg(target_arch = "wasm32")]
+    ambience_decode: Option<(u32, String, f32, u64, super::web_decode::Pending)>,
     /// The next bed, opening off the main thread; the playing one holds until it lands.
+    #[cfg(not(target_arch = "wasm32"))]
     ambience_opening: Option<OpeningBed>,
     /// The playing bed's starvation meter: it reads from the archive as it plays.
     ambience_watch: mixer::StreamWatch,
@@ -225,6 +286,9 @@ impl Default for ZoneAudio {
             lua_music: None,
             lua_music_path: None,
             lua_music_watch: mixer::StreamWatch::new("Lua music"),
+            lua_music_pending: None,
+            #[cfg(target_arch = "wasm32")]
+            lua_music_decode: None,
             next_track_at: None,
             unplayable: std::collections::HashSet::new(),
             music_suppressed: false,
@@ -232,6 +296,14 @@ impl Default for ZoneAudio {
             ambience: None,
             ambience_kit_vol: 1.0,
             ambience_fade_in: None,
+            music_pending: None,
+            #[cfg(target_arch = "wasm32")]
+            ambience_pending: None,
+            #[cfg(target_arch = "wasm32")]
+            music_decode: None,
+            #[cfg(target_arch = "wasm32")]
+            ambience_decode: None,
+            #[cfg(not(target_arch = "wasm32"))]
             ambience_opening: None,
             ambience_watch: mixer::StreamWatch::new("ambience"),
             intro_last: std::collections::HashMap::new(),
@@ -386,7 +458,13 @@ fn zone_audio(
         swap_ambience(zone, &out, &mut kits, &assets, desired, fade_ms);
     }
     zone.was_underwater = world.submersion().is_water();
-    land_ambience(zone, &mut out, &config, now);
+    land_ambience(zone, &mut out, &assets, &config, now);
+
+    // ---- deferred opens (web target) ----
+    // A slot that refused to block on a cold pack left its intent latched; the packs it asked for
+    // have been warming since. Retried before the transport below so a track that lands this frame
+    // is playing before anything looks at whether one is.
+    retry_deferred(zone, &mut out, &assets, &config);
 
     // ---- music transport ----
     // A server track holds the zone pump while it plays (`0x46005d`); when it ends it is
@@ -607,39 +685,163 @@ fn start_music_stream(
     if zone.lua_slot_live() {
         return false;
     }
-    let Some((h, kit_vol, path)) = open_music_kit(zone, out, kits, assets, config, kit_id) else {
+    if out.mixer.is_none() {
+        return false;
+    }
+    let Some((path, kit_vol)) = kits.pick_stream(kit_id) else {
         return false;
     };
-    // One stream per slot: a dropped kira handle keeps playing, so the old one fades.
-    if let Some(mut outgoing) = zone.music.replace(h) {
-        outgoing.stop(mixer::fade(MUSIC_FADE_OUT_MS));
+    // Deviation: Turtle WoW's radio kits (60401, 60423, Everlook's `.radio` stations) name an
+    // http stream, which its client plays off the network; this one reads the chain only, so the
+    // kit is dropped, reported once, however often the server re-pushes it. No chain path holds
+    // "://", and the flavor is read only for one that does.
+    if path.contains("://") && crate::flavor::turtle() {
+        if kits.first_unplayable(kit_id) {
+            warn!("zone music: kit {kit_id} streams {path} — no network music, dropped");
+        }
+        return false;
     }
-    zone.music_path = path;
-    zone.music_kit = kit_id;
-    zone.music_kit_vol = kit_vol;
-    zone.music_intro = false;
-    true
+    // A start ends any intro's hold here, not at the play: on the web target the play lands
+    // frames later ([`retry_deferred`]), after an intro's caller marked its own start.
+    let started = open_music_stream(zone, out, assets, config, kit_id, path, kit_vol);
+    if started {
+        zone.music_intro = false;
+    }
+    started
 }
 
-/// Open a music kit's stream at its volume under the Music slider: the kit's next file
-/// (`0x45bb70`), a loose-flagged open (`0x7a8860`) and the play; the handle and the kit's volume,
-/// or `None` when nothing started, a bad file reported once.
-fn open_music_kit(
+/// Open a music track that has **already been picked** — the half of [`start_music_stream`] past the
+/// variation roll, split out so the web target's retry ([`retry_deferred`]) can re-enter it with the
+/// same file rather than rolling the kit again.
+///
+/// That distinction is the whole reason for the split. `pick_stream` *depletes*: rolling a kit once
+/// per frame while its pack downloads would churn the pool and scatter warms across every variation
+/// instead of finishing the one that was chosen. The slot's own guards are re-checked here rather
+/// than assumed from the first call — a latch can outlive the state that made it, and a cinematic
+/// that started during the wait must still silence the track.
+fn open_music_stream(
     zone: &mut ZoneAudio,
     out: &mut SoundOutput,
-    kits: &mut SoundKits,
     assets: &WorldAssets,
     config: &SoundConfig,
     kit_id: u32,
-) -> Option<(StreamingSoundHandle<FromFileError>, f32, String)> {
-    out.mixer.as_ref()?;
-    let (path, kit_vol) = kits.pick_stream(kit_id)?;
-    let h = open_music_file(zone, out, assets, config, &path, kit_vol)?;
-    Some((h, kit_vol, path))
+    path: String,
+    kit_vol: f32,
+) -> bool {
+    if config.music_suppressed {
+        return false;
+    }
+    // …and the override slot, re-checked for the same reason suppression is: a latch made frames
+    // ago can outlive the state that made it, and a `PlayMusic` that landed during the wait owns
+    // the music slot now. Without this the zone track would come back up underneath a Lua track on
+    // the web target only — the one arrival the reference's five gates have no frame gap to miss.
+    if zone.lua_slot_live() {
+        zone.music_pending = None;
+        return false;
+    }
+    // Checked, not borrowed: the mixer is taken by the tail ([`play_music_data`]), which on this
+    // target runs frames later. No point reading a track for a device that is not there.
+    if out.mixer.is_none() {
+        return false;
+    }
+    // Every file FMOD opens is a loose-flagged open (`0x7a8860`).
+    let bytes = match assets.try_read_loose_or_chain(&path) {
+        TryRead::Ready(bytes) => bytes,
+        // Not in memory yet (web only): the read has started the warm. Remember the pick — file and
+        // all — so the retry opens this track rather than re-rolling the kit, and leave the frame.
+        //
+        // **`true`, not `false`** — the slot IS taken, by a track that has not started yet. The
+        // caller reads this as "did this track get the slot?", and answering `false` would let the
+        // zone track start on the same edge and overwrite the latch the fanfare just made, so the
+        // fanfare could never play on this target. The **disclosed divergence** is the other side
+        // of that coin: `MinDelayMinutes` is stamped when the load starts rather than when the
+        // track sounds, so a load that fails consumes the cooldown.
+        TryRead::Pending => {
+            zone.music_pending = Some((kit_id, path, kit_vol));
+            return true;
+        }
+        TryRead::Missing => {
+            if first_unplayable(zone, &path) {
+                warn!("zone music: {path} — not in the loose files or the patch chain");
+            }
+            zone.music_pending = None;
+            return false;
+        }
+    };
+    zone.music_pending = None;
+    // The browser decodes it (`super::web_decode`) and [`retry_deferred`] opens the slot on the
+    // frame the PCM lands. This is the decode half of the same wait the read half above just
+    // finished: a whole track decoded here would cost more frame than the fetch did.
+    #[cfg(target_arch = "wasm32")]
+    {
+        zone.music_decode = Some((
+            kit_id,
+            path,
+            kit_vol,
+            super::web_decode::begin(bytes, false),
+        ));
+        // `true` for the same reason the `Pending` arm above answers `true`: the slot is spoken
+        // for, by a track a few frames away.
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let data = match mixer::stream_from_bytes(bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("zone music: {path} — {e:#}");
+                return false;
+            }
+        };
+        play_music_data(zone, out, config, kit_id, &path, kit_vol, data)
+    }
 }
 
-/// Open one music file at `kit_vol` under the Music slider: a loose-flagged open (`0x7a8860`) and
-/// the play; `None` when nothing started, a bad file reported once.
+/// The tail of [`open_music_stream`]: a **decoded** track into the slot.
+///
+/// Split out because on the web target the decode happens between the two halves, off the frame —
+/// so the tail has to be reachable from [`retry_deferred`] as well. The slot's guards were checked
+/// by the head and are not re-checked here: this is one open, not two.
+fn play_music_data(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    config: &SoundConfig,
+    kit_id: u32,
+    path: &str,
+    kit_vol: f32,
+    data: mixer::StreamingSoundData<kira::sound::FromFileError>,
+) -> bool {
+    let Some(mixer_ref) = out.mixer.as_mut() else {
+        return false;
+    };
+    let start_amp = config.category_amp(SoundCategory::Music) * kit_vol;
+    match mixer_ref.play_stream(data.volume(mixer::amp_to_db(start_amp))) {
+        Ok(h) => {
+            info!("zone music: {path}");
+            // One stream per slot: a dropped kira handle keeps playing, so the old one fades.
+            if let Some(mut outgoing) = zone.music.replace(h) {
+                outgoing.stop(mixer::fade(MUSIC_FADE_OUT_MS));
+            }
+            zone.music_path = path.to_owned();
+            zone.music_kit = kit_id;
+            zone.music_kit_vol = kit_vol;
+            true
+        }
+        Err(e) => {
+            if first_unplayable(zone, path) {
+                warn!("zone music: {path} — {e:#}");
+            }
+            false
+        }
+    }
+}
+
+/// Open one music file at `kit_vol` under the Music slider for the server's slot: a loose-flagged
+/// open (`0x7a8860`) and the play; `None` when nothing started, a bad file reported once.
+///
+/// Deviation: on the web target a server push plays only a file already in memory and decoded on
+/// the frame; one not yet read starts its warm and is dropped, as the server slot has no deferred
+/// latch like the zone and Lua slots' ([`retry_deferred`], [`retry_lua_music`]).
 fn open_music_file(
     zone: &mut ZoneAudio,
     out: &mut SoundOutput,
@@ -648,11 +850,18 @@ fn open_music_file(
     path: &str,
     kit_vol: f32,
 ) -> Option<StreamingSoundHandle<FromFileError>> {
-    let mixer_ref = out.mixer.as_mut()?;
-    let bytes = assets
-        .read_file_or_loose(path)
-        .ok_or_else(|| anyhow::anyhow!("not in the loose files or the patch chain"));
-    let data = match bytes.and_then(mixer::stream_from_bytes) {
+    out.mixer.as_ref()?;
+    let bytes = match assets.try_read_loose_or_chain(path) {
+        TryRead::Ready(bytes) => bytes,
+        TryRead::Pending => return None,
+        TryRead::Missing => {
+            if first_unplayable(zone, path) {
+                warn!("music: {path} — not in the loose files or the patch chain");
+            }
+            return None;
+        }
+    };
+    let data = match mixer::stream_from_bytes(bytes) {
         Ok(d) => d,
         Err(e) => {
             if first_unplayable(zone, path) {
@@ -661,6 +870,7 @@ fn open_music_file(
             return None;
         }
     };
+    let mixer_ref = out.mixer.as_mut()?;
     let start_amp = config.category_amp(SoundCategory::Music) * kit_vol;
     match mixer_ref.play_stream(data.volume(mixer::amp_to_db(start_amp))) {
         Ok(h) => {
@@ -698,14 +908,14 @@ fn set_lua_music(
     let (Some(path), Some(assets)) = (path, assets) else {
         return;
     };
-    // The reference re-reads its own slot (`0x4604cb`/`0x4604d2`) and the zone's (`0x4604da`).
-    if open_lua_music(zone, out, assets, config, path) {
-        // The same `0x7a5a10(4.0f)` a zone-music change makes.
-        if let Some(mut h) = zone.music.take() {
-            h.stop(mixer::fade(MUSIC_FADE_OUT_MS));
-            info!("zone music: faded out under a Lua PlayMusic");
-        }
-    }
+    // Step 4 — *only a stream that actually opened takes the zone track down* (`0x4604bd`'s
+    // return) — lives in [`play_lua_music_data`], the tail, and not here. On native that is the
+    // same instant: the tail runs inside this call. On the web target the open can defer for a
+    // few frames while the pack fetches, and taking the zone track down *now* would be the one
+    // reading of the reference this seam can get wrong in a way the player hears — a gap of
+    // silence where the reference has a 4 s overlap, and a dead zone track if the file turns out
+    // not to resolve at all. Deferring the fade with the open keeps both branches faithful.
+    open_lua_music(zone, out, assets, config, path);
 }
 
 /// `0x460450`'s shared head: fade the server track over 3.0 s and this slot over 4.0 s (`0x460480`,
@@ -724,6 +934,14 @@ fn take_lua_music_slot(zone: &mut ZoneAudio, now: f64) {
     }
     zone.lua_music_path = None;
     zone.lua_music_watch.reset();
+    // A load still in flight for the slot this call is clearing is abandoned here — a `StopMusic`
+    // during the wait must not be overtaken by the track it stopped. The pack keeps warming; only
+    // the intent is dropped.
+    zone.lua_music_pending = None;
+    #[cfg(target_arch = "wasm32")]
+    {
+        zone.lua_music_decode = None;
+    }
     zone.next_track_at = Some(now + LUA_MUSIC_SCHEDULE_SECS);
 }
 
@@ -732,28 +950,96 @@ fn take_lua_music_slot(zone: &mut ZoneAudio, now: f64) {
 ///
 /// Opened paused under a cinematic: the reference still opens the file and gates only the
 /// deferred `_FSOUND_Stream_PlayEx` (`0x4604f2`/`0x4604f9`), starting it when music comes back.
+// `config` only ever reaches the tail, and on the web target the tail runs from the retry instead
+// — so on that target this really is a parameter this function does not read.
+#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
 fn open_lua_music(
     zone: &mut ZoneAudio,
     out: &mut SoundOutput,
     assets: &WorldAssets,
     config: &SoundConfig,
     path: &str,
-) -> bool {
-    let Some(mixer_ref) = out.mixer.as_mut() else {
-        return false;
-    };
+) {
+    // Checked, not borrowed: on the web target the mixer is taken by the tail
+    // ([`play_lua_music_data`]), which runs frames later.
+    if out.mixer.is_none() {
+        return;
+    }
     // The addon folder, then the chain: an addon's own track has an `Interface\AddOns\…` path.
-    let Some(bytes) = assets.read_file_or_loose(path) else {
-        // Silent, as the reference's; the name is used verbatim (`0x458720` appends nothing).
-        debug!("Lua music: {path} — not in the patch chain or the AddOns folder");
-        return false;
-    };
-    let data = match mixer::stream_from_bytes(bytes) {
-        Ok(d) => d,
-        Err(e) => {
-            debug!("Lua music: {path} — {e:#}");
-            return false;
+    //
+    // The chain half is the **non-blocking** read, for the reason the zone track's is
+    // ([`open_music_stream`]): a track is megabytes, this runs from a system, and on the page a
+    // non-resident pack makes that read a synchronous fetch on the thread that draws. The loose
+    // half stays a plain read — it is a local file, and the page never has an AddOns folder.
+    let attempt = assets.try_read_loose_or_chain(path);
+    let bytes = match attempt {
+        TryRead::Ready(bytes) => bytes,
+        // Not in memory yet (web only). The read has started the warm; remember the path and
+        // **take the slot now** — `lua_music_path` is what [`ZoneAudio::lua_slot_live`] answers
+        // from, and the zone pump's gates have to see this frame that the override is spoken for.
+        TryRead::Pending => {
+            zone.lua_music_pending = Some(path.to_owned());
+            zone.lua_music_path = Some(path.to_owned());
+            zone.lua_music_watch.reset();
+            return;
         }
+        TryRead::Missing => {
+            // A file that does not resolve is the client's own silent nothing: the binding
+            // has already returned, so there is nobody left to raise at, and the name went to
+            // the file layer verbatim (no extension appended, no normalisation —
+            // `0x458720` does neither). The zone track is left exactly where it was, which is
+            // `0x4604bd`'s early return.
+            debug!("Lua music: {path} — not in the AddOns folder or the patch chain");
+            zone.lua_music_pending = None;
+            // Hand the slot back. On the first call it is already clear
+            // ([`take_lua_music_slot`] ran a line earlier); this matters on the two calls
+            // that reach here holding it — a deferred open whose pack turned out not to
+            // carry the file, and the loop's reopen of a file that has since gone — where
+            // leaving it set would gate the zone pump on a track that can never sound.
+            zone.lua_music_path = None;
+            return;
+        }
+    };
+    zone.lua_music_pending = None;
+    // The decode half of the same wait: kira has no streaming module on wasm32, so
+    // `stream_from_bytes` would decode a whole track on the frame. The browser does it instead
+    // ([`super::web_decode`]) and the slot opens when the PCM lands.
+    #[cfg(target_arch = "wasm32")]
+    {
+        zone.lua_music_decode = Some((path.to_owned(), super::web_decode::begin(bytes, false)));
+        zone.lua_music_path = Some(path.to_owned());
+        zone.lua_music_watch.reset();
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let data = match mixer::stream_from_bytes(bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                debug!("Lua music: {path} — {e:#}");
+                return;
+            }
+        };
+        play_lua_music_data(zone, out, config, path, data);
+    }
+}
+
+/// The tail of [`open_lua_music`]: a **decoded** track onto the override slot, and — because this
+/// is the only place that knows a stream really started — `0x4604d4`'s fade-out of the zone track
+/// underneath it.
+///
+/// Split out for the reason [`play_music_data`] is: on the web target the decode happens between
+/// the two halves, off the frame, so the tail has to be reachable from the retry as well. The
+/// slot's guards were checked by the head and are not re-checked here: this is one open, not two.
+fn play_lua_music_data(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    config: &SoundConfig,
+    path: &str,
+    data: mixer::StreamingSoundData<kira::sound::FromFileError>,
+) {
+    let Some(mixer_ref) = out.mixer.as_mut() else {
+        return;
     };
     let start_amp = config.category_amp(SoundCategory::Music) * LUA_MUSIC_VOLUME;
     match mixer_ref.play_stream(data.volume(mixer::amp_to_db(start_amp))) {
@@ -769,12 +1055,17 @@ fn open_lua_music(
             }
             zone.lua_music_path = Some(path.to_owned());
             zone.lua_music_watch.reset();
-            true
+            // The zone track's own 4.0 s fade-stop — handed to the backend, handle dropped,
+            // exactly as a zone-music change arms it (`0x7a5a10(4.0f)` there and here are the
+            // same call). The incoming stream is already at full, so this is an overlap, not a
+            // gap. It happens here and not in [`set_lua_music`] because only this point knows the
+            // stream opened; see that function's step 4.
+            if let Some(mut h) = zone.music.take() {
+                h.stop(mixer::fade(MUSIC_FADE_OUT_MS));
+                info!("zone music: faded out under a Lua PlayMusic");
+            }
         }
-        Err(e) => {
-            warn!("Lua music: {path} — {e:#}");
-            false
-        }
+        Err(e) => warn!("Lua music: {path} — {e:#}"),
     }
 }
 
@@ -785,6 +1076,12 @@ fn drop_lua_music(zone: &mut ZoneAudio) {
     }
     zone.lua_music_path = None;
     zone.lua_music_watch.reset();
+    // …and a load still in flight for it: nothing is coming back, so nothing should arrive.
+    zone.lua_music_pending = None;
+    #[cfg(target_arch = "wasm32")]
+    {
+        zone.lua_music_decode = None;
+    }
 }
 
 /// Crossfade the looping ambience bed to a new kit (0 = stop) over `fade_ms`. The new bed opens
@@ -804,7 +1101,16 @@ fn swap_ambience(
         return;
     }
     zone.ambience_kit = kit_id;
-    zone.ambience_opening = None;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        zone.ambience_opening = None;
+    }
+    // A read or a decode still running for the bed swapped away from is abandoned here.
+    #[cfg(target_arch = "wasm32")]
+    {
+        zone.ambience_pending = None;
+        zone.ambience_decode = None;
+    }
     let pick = if kit_id != 0 && out.mixer.is_some() {
         kits.pick_stream(kit_id)
     } else {
@@ -816,14 +1122,54 @@ fn swap_ambience(
         fade_out_ambience(zone, fade_ms);
         return;
     };
-    let chain = assets.chain.clone();
-    let open_path = path.clone();
-    begin_bed_open(zone, path, kit_vol, fade_ms, move || {
-        open_bed(&chain, &open_path)
-    });
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let chain = assets.chain.clone();
+        let open_path = path.clone();
+        begin_bed_open(zone, path, kit_vol, fade_ms, move || {
+            open_bed(&chain, &open_path)
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    read_web_bed(zone, assets, kit_id, path, kit_vol, fade_ms);
+}
+
+/// fork: web — read a picked bed off the page's chain and hand it to the browser to decode
+/// ([`super::web_decode`], `true` the whole-file loop a bed needs). A pack still on the wire
+/// latches the pick for [`land_ambience`] to retry, rather than block the frame on a fetch. A bed
+/// that does not read leaves silence behind the old one's fade, as a failed open does.
+#[cfg(target_arch = "wasm32")]
+fn read_web_bed(
+    zone: &mut ZoneAudio,
+    assets: &WorldAssets,
+    kit_id: u32,
+    path: String,
+    kit_vol: f32,
+    fade_ms: u64,
+) {
+    let bytes = match assets.chain.lock_recover().try_read(&path) {
+        TryRead::Ready(bytes) => bytes,
+        TryRead::Pending => {
+            zone.ambience_pending = Some((kit_id, path, kit_vol, fade_ms));
+            return;
+        }
+        TryRead::Missing => {
+            warn!("ambience: {path} — not readable from the patch chain");
+            fade_out_ambience(zone, fade_ms);
+            return;
+        }
+    };
+    zone.ambience_decode = Some((
+        kit_id,
+        path,
+        kit_vol,
+        fade_ms,
+        super::web_decode::begin(bytes, true),
+    ));
 }
 
 /// An ambience bed opening off the main thread, and how it goes in once open.
+#[cfg(not(target_arch = "wasm32"))]
 struct OpeningBed {
     path: String,
     kit_vol: f32,
@@ -840,6 +1186,7 @@ struct OpenedBed {
 }
 
 /// Run `open` on the IO pool as the next bed, replacing any open in flight.
+#[cfg(not(target_arch = "wasm32"))]
 fn begin_bed_open(
     zone: &mut ZoneAudio,
     path: String,
@@ -857,6 +1204,7 @@ fn begin_bed_open(
 }
 
 /// The open in flight, once it has finished.
+#[cfg(not(target_arch = "wasm32"))]
 fn poll_bed_open(zone: &mut ZoneAudio) -> Option<OpenedBed> {
     let stream = block_on(future::poll_once(&mut zone.ambience_opening.as_mut()?.task))?;
     let OpeningBed {
@@ -873,10 +1221,47 @@ fn poll_bed_open(zone: &mut ZoneAudio) -> Option<OpenedBed> {
     })
 }
 
+/// fork: web — the bed whose read and decode finished: a latched read is retried first (its pack
+/// has been warming), then the browser's decode is polled. A result for a kit swapped away from
+/// is dropped.
+#[cfg(target_arch = "wasm32")]
+fn poll_bed_open(zone: &mut ZoneAudio, assets: &WorldAssets) -> Option<OpenedBed> {
+    if let Some((kit, path, kit_vol, fade_ms)) = zone.ambience_pending.take() {
+        if kit == zone.ambience_kit {
+            read_web_bed(zone, assets, kit, path, kit_vol, fade_ms);
+        }
+    }
+    let (kit, path, kit_vol, fade_ms, mut pending) = zone.ambience_decode.take()?;
+    let Some(decoded) = pending.take() else {
+        zone.ambience_decode = Some((kit, path, kit_vol, fade_ms, pending));
+        return None;
+    };
+    if kit != zone.ambience_kit {
+        return None;
+    }
+    Some(OpenedBed {
+        path,
+        kit_vol,
+        fade_ms,
+        stream: decoded
+            .map(mixer::stream_from_decoded)
+            .map_err(|e| anyhow::anyhow!(e)),
+    })
+}
+
+/// Whether a bed is on its way in: the open in flight (native), or its read or decode (web).
+fn bed_opening(zone: &ZoneAudio) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    return zone.ambience_opening.is_some();
+    #[cfg(target_arch = "wasm32")]
+    return zone.ambience_pending.is_some() || zone.ambience_decode.is_some();
+}
+
 /// Open `path` as a looping ambience stream, read from its archive a sector at a time as it
 /// plays: the reference opens a bed with `FSOUND_Stream_Open` in mode `0x82002`, its `0x2` the
 /// loop bit, and loop count −1 (`0x458900` → `0x7a5620` → `0x7a54d0`, `0x7a5592`), reading
 /// through its MPQ file callbacks. The chain's lock covers the archive lookup alone.
+#[cfg(not(target_arch = "wasm32"))]
 fn open_bed(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<StreamingSoundData<FromFileError>> {
     let archive = chain.lock_recover().archive_for(path)?;
     let file = archive
@@ -890,8 +1275,20 @@ fn open_bed(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<StreamingSoundDa
 /// new one starts under the per-frame fade-in envelope (`0x460b31`, `0x460b76`–`0x460b8c`), or at
 /// full with the old one cut when the swap is instant. A bed that failed to open leaves silence,
 /// as the reference's failed open leaves `[0xb06d3c]` empty behind the fade.
-fn land_ambience(zone: &mut ZoneAudio, out: &mut SoundOutput, config: &SoundConfig, now: f64) {
-    let Some(opened) = poll_bed_open(zone) else {
+fn land_ambience(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    assets: &WorldAssets,
+    config: &SoundConfig,
+    now: f64,
+) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = assets;
+    #[cfg(not(target_arch = "wasm32"))]
+    let opened = poll_bed_open(zone);
+    #[cfg(target_arch = "wasm32")]
+    let opened = poll_bed_open(zone, assets);
+    let Some(opened) = opened else {
         return;
     };
     let ambience_amp = config.category_amp(SoundCategory::Ambience);
@@ -938,6 +1335,61 @@ fn start_bed(
     }
 }
 
+/// Re-attempt the music opens the **web target** deferred: a track whose bytes were not in memory
+/// when the scheduler asked for them. The ambience bed's retry is [`land_ambience`]'s.
+///
+/// It is a per-frame poll and not a callback because that is all it needs to be — the read that
+/// deferred also started the pack warming, so this converges in the handful of frames a fetch takes,
+/// and the poll itself is a `Map` lookup through the resident bridge. **On native the latch is
+/// permanently `None`** (`Chain::try_read` never answers `Pending` there), so this is an `Option`
+/// test and a return.
+///
+/// Nothing here re-decides anything: the scheduling was settled when the intent was latched, and
+/// this only carries it out. A latch is dropped the moment its open succeeds or the file turns out
+/// to be missing, both inside the openers.
+fn retry_deferred(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    assets: &WorldAssets,
+    config: &SoundConfig,
+) {
+    // `take`, not `clone`: the openers re-latch on a second `Pending`, so taking it here avoids
+    // cloning the path on every frame of the wait and leaves exactly one owner of the intent.
+    if let Some((kit, path, kit_vol)) = zone.music_pending.take() {
+        // Suppression (a cinematic) is re-checked inside `open_music_stream`, which is the one place
+        // that owns the slot's gate — a latch that outlives the reason it was made must not route
+        // around it.
+        open_music_stream(zone, out, assets, config, kit, path, kit_vol);
+    }
+    // The decode half of the same wait (`super::web_decode`). Polled here rather than woken by a
+    // callback for the reason the read half is: this system already runs every frame, and a poll
+    // of an `Option` is cheaper than the machinery a callback would need to reach a `NonSend`.
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some((kit, path, kit_vol, mut pending)) = zone.music_decode.take() {
+            match pending.take() {
+                None => zone.music_decode = Some((kit, path, kit_vol, pending)),
+                Some(Ok(data)) => {
+                    // Re-checked here and not assumed: a cinematic that started during the decode
+                    // must still silence the track, which is the same rule the read half follows.
+                    if !config.music_suppressed {
+                        play_music_data(
+                            zone,
+                            out,
+                            config,
+                            kit,
+                            &path,
+                            kit_vol,
+                            mixer::stream_from_decoded(data),
+                        );
+                    }
+                }
+                Some(Err(e)) => warn!("zone music: {path} — {e}"),
+            }
+        }
+    }
+}
+
 /// Drop a bed that stopped by itself, which a looping stream does only on a read or decode
 /// error, and clear its kit so the selection reopens it next; whether one was reaped. An open in
 /// flight replaces it anyway, so its kit is kept.
@@ -958,7 +1410,7 @@ fn reap_stopped_bed(zone: &mut ZoneAudio) -> bool {
     zone.ambience = None;
     zone.ambience_fade_in = None;
     zone.ambience_watch.reset();
-    if zone.ambience_opening.is_none() {
+    if !bed_opening(zone) {
         zone.ambience_kit = 0;
     }
     true
@@ -1008,6 +1460,16 @@ fn lua_music(
             }
         }
 
+        // ---- the deferred open (web target) ----
+        // A start that refused to block on a cold pack left its intent latched; the pack it asked for
+        // has been warming since. Driven from HERE rather than from [`retry_deferred`] because this
+        // system is the slot's owner and is unconditional, where the zone scheduler runs only while
+        // the world's soundscape is live — and an addon's track is the caller's, not the world's.
+        // After the drain above, so a `StopMusic` this frame has already dropped the latch it stops.
+        if let Some(assets) = assets.as_deref() {
+            retry_lua_music(zone, &mut out, assets, &config);
+        }
+
         // The loop: `SetLoopCount(-1)` in the reference, an explicit restart here.
         if zone
             .lua_music
@@ -1031,6 +1493,44 @@ fn lua_music(
             zone.lua_music_watch.feed(h, f64::from(real.delta_secs()));
         }
     })
+}
+
+/// [`retry_deferred`] for the override slot — the read that answered `Pending` and, on the page,
+/// the browser decode behind it.
+///
+/// Re-enters [`open_lua_music`] with the **same path** rather than re-deciding anything: the verb
+/// committed to this file when it ran, the slot has been held for it since
+/// ([`ZoneAudio::lua_music_pending`]), and a `StopMusic` in the meantime dropped the latch instead
+/// of racing it. **On native both latches are permanently `None`** — `Chain::try_read` never
+/// answers `Pending` there — so this is two `Option` tests and a return.
+fn retry_lua_music(
+    zone: &mut ZoneAudio,
+    out: &mut SoundOutput,
+    assets: &WorldAssets,
+    config: &SoundConfig,
+) {
+    // `take`, not `clone`: the opener re-latches on a second `Pending`, so this leaves exactly one
+    // owner of the intent.
+    if let Some(path) = zone.lua_music_pending.take() {
+        open_lua_music(zone, out, assets, config, &path);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some((path, mut pending)) = zone.lua_music_decode.take() {
+            match pending.take() {
+                None => zone.lua_music_decode = Some((path, pending)),
+                Some(Ok(data)) => {
+                    play_lua_music_data(zone, out, config, &path, mixer::stream_from_decoded(data))
+                }
+                Some(Err(e)) => {
+                    warn!("Lua music: {path} — {e}");
+                    // The slot was held for a track that will never sound; hand it back so the
+                    // zone pump is not gated on it forever.
+                    zone.lua_music_path = None;
+                }
+            }
+        }
+    }
 }
 
 /// Whether an area change only records its music row (`0x460306`), leaving the zone slot and the
@@ -1226,7 +1726,15 @@ fn stop_world_soundscape(zone: &mut ZoneAudio, reason: &str) {
         h.stop(mixer::fade(WORLD_TEARDOWN_FADE_MS));
     }
     // An open still in flight lands nowhere.
-    zone.ambience_opening = None;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        zone.ambience_opening = None;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        zone.ambience_pending = None;
+        zone.ambience_decode = None;
+    }
     zone.ambience_watch.reset();
     zone.zone_music = 0;
     zone.music_kit = 0;
@@ -1256,8 +1764,8 @@ fn report_stream_voices(zone: NonSend<ZoneAudio>, mut out: NonSendMut<super::Sou
 }
 
 pub(super) fn plugin(app: &mut App) {
-    app.insert_non_send_resource(ZoneAudio::default())
-        .add_systems(Startup, load_area_sounds.after(AssetSet::Open))
+    app.insert_non_send(ZoneAudio::default())
+        .add_data_loaders(load_area_sounds)
         .add_systems(
             Update,
             (server_sounds, zone_audio)

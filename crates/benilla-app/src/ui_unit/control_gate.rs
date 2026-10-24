@@ -255,7 +255,7 @@ mod tests {
             }),
         );
         script.set_player_control(false);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let me = app
             .world_mut()
             .spawn((
@@ -269,7 +269,7 @@ mod tests {
         app.update();
 
         let calls = |app: &mut App| {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.run("UseContainerItem(0, 1)").unwrap();
             let errors = s.take_ui_errors();
             (s.take_script_calls().len(), errors)

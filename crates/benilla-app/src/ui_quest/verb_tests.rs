@@ -62,7 +62,7 @@ impl Client {
             let npc = world.spawn((Guid(NPC), ObjectStore(fields))).id();
             world.resource_mut::<GuidIndex>().0.insert(NPC, npc);
         }
-        world.insert_non_send_resource(UiScript::new().expect("a VM"));
+        world.insert_non_send(UiScript::new().expect("a VM"));
         Self { app, rx }
     }
 
@@ -102,7 +102,7 @@ impl Client {
     pub(crate) fn eval(&self, lua: &str) -> String {
         self.app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<String>(lua)
             .expect("the chunk runs")
     }
@@ -345,7 +345,7 @@ fn the_escort_confirm_is_on_the_wire_before_the_next_line() {
 fn the_log_verbs_are_on_the_wire_before_the_next_line() {
     let mut c = Client::new(0);
     {
-        let mut script = c.app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = c.app.world_mut().non_send_mut::<UiScript>();
         let mut q = crate::ui_quest_log::fixture::quest(7, "Deliver the Message", 1);
         q.record.pushable = true;
         crate::ui_quest_log::fixture::seat(&mut script, &[q]);

@@ -38,12 +38,13 @@
 use bevy::prelude::*;
 
 use benilla_assets::coords::bevy_to_wow;
+use benilla_assets::DataLoadAppExt;
 use benilla_formats::{DeathThudCatalog, FootstepCatalog};
 
 use crate::creature_anim::AnimSoundEvent;
 use crate::entities::Creatures;
 use crate::net::NetEntity;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::footsteps::Footsteps;
@@ -166,7 +167,7 @@ fn death_thud_sounds(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, load_death_thuds.after(AssetSet::Open))
+    app.add_data_loaders(load_death_thuds)
         .add_systems(Update, death_thud_sounds.in_set(WorldStage::Present));
 }
 

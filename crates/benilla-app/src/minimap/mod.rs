@@ -36,7 +36,7 @@ use benilla_ui::widget::{MinimapArt, MinimapArtSlot, MINIMAP_DEFAULT_ZOOM};
 use crate::player::Player;
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuadMask, UiQuads, UvRect};
 use benilla_assets::MapCatalogRes;
-use benilla_assets::{AssetSet, LockRecover, LooseOpen, WorldAssets};
+use benilla_assets::{DataLoadAppExt, LockRecover, LooseOpen, WorldAssets};
 use benilla_world::wmo_portal::{
     down_ray_seeds, terrain_z_local, WmoPortalInstance, INTERIOR_PROBE_HEIGHT,
 };
@@ -106,12 +106,12 @@ fn minimap_day_tint(ambient: [f32; 3], diffuse: [f32; 3]) -> [f32; 3] {
 /// alpha-test arm decodes itself.
 fn load_tile(asset_server: &AssetServer) -> impl Fn(&str) -> Handle<Image> + '_ {
     move |hash: &str| {
-        asset_server.load_with_settings(
-            format!("mpq://textures/Minimap/{hash}"),
-            |s: &mut benilla_assets::BlpLoaderSettings| {
+        asset_server
+            .load_builder()
+            .with_settings(|s: &mut benilla_assets::BlpLoaderSettings| {
                 s.variant = benilla_assets::BlpVariant::MapTile;
-            },
-        )
+            })
+            .load(format!("mpq://textures/Minimap/{hash}"))
     }
 }
 
@@ -202,6 +202,15 @@ struct MinimapAssets {
     forms: Option<HashMap<u32, benilla_formats::ShapeshiftForm>>,
 }
 
+/// A change of the data the chain answers from re-maps tiles to files (`md5translate.trs`), so the
+/// resolved handles go.
+fn forget_minimap_tiles(
+    _: On<benilla_assets::ChainDataChanged>,
+    mut cache: ResMut<MinimapTileCache>,
+) {
+    *cache = MinimapTileCache::default();
+}
+
 /// One of the minimap's process-wide textures as drawn.
 #[derive(Default, Clone)]
 struct MinimapTex {
@@ -240,7 +249,8 @@ struct MinimapTileCache {
     interior: HashMap<(usize, u32, u32), Option<Handle<Image>>>,
 }
 
-/// Load the translate catalog and the minimap art once the patch chain is open.
+/// Load the translate catalog, the shapeshift table and the minimap art from the chain: at startup
+/// and again when its data changes (Turtle WoW changes both tables).
 fn setup_minimap(
     mut commands: Commands,
     world_assets: Option<ResMut<WorldAssets>>,
@@ -256,7 +266,10 @@ fn setup_minimap(
     match translate {
         Ok(translate) => {
             info!("minimap: md5translate.trs — {} tiles", translate.len());
-            // The default mask and icons open from the archives alone, as `0x4ed810`'s
+            // Every read here is BLOCKING: it builds one resource, once, and each handle in
+            // it lives for the session with nothing to ask again. See
+            // `WorldAssets::sprite_texture_blocking`. The default mask and icons open from
+            // the archives alone, as `0x4ed810`'s
             // `TextureCreate` calls pass file flag 0 (`0x4ed862`, `0x4ed88b`, `0x4ed8b4`).
             let archives = LooseOpen::Archives;
             // The three defaults (`0x84c6e4`, `0x84c6c8`, `0x84c6a8`); one that does not load is
@@ -271,9 +284,9 @@ fn setup_minimap(
                 let missing = images.add(green_solid(is_mask));
                 let path = default_art_path(slot);
                 let loaded = if is_mask {
-                    assets.mask_texture(path, archives, &mut images)
+                    assets.mask_texture_blocking(path, archives, &mut images)
                 } else {
-                    assets.sprite_texture_opened(path, archives, &mut images)
+                    assets.sprite_texture_opened_blocking(path, archives, &mut images)
                 };
                 if loaded.is_none() {
                     warn!("minimap: {path} missing — the green placeholder stands in");
@@ -786,12 +799,14 @@ fn feed_minimap_art(
             applied[slot as usize] = stamp;
             let tex = &mut assets.art[slot as usize];
             tex.current = match art {
+                // Blocking: the stamp is committed above, so a deferred read would leave the file
+                // unfetched with nothing to ask again. See `WorldAssets::sprite_texture_blocking`.
                 MinimapArt::File(path) => {
                     let loaded = world_assets.as_mut().and_then(|w| {
                         if slot == MinimapArtSlot::Mask {
-                            w.mask_texture(&path, LooseOpen::Index, &mut images)
+                            w.mask_texture_blocking(&path, LooseOpen::Index, &mut images)
                         } else {
-                            w.sprite_texture_opened(&path, LooseOpen::Index, &mut images)
+                            w.sprite_texture_opened_blocking(&path, LooseOpen::Index, &mut images)
                         }
                     });
                     loaded.or_else(|| tex.missing.clone())
@@ -910,16 +925,19 @@ fn feed_minimap_player_facing(mut hosted_vm: crate::script_calls::HostedVm, play
 }
 
 /// Push the game clock `GetGameTime()` answers when its hour or minute changes, the API's own
-/// resolution: the clock's fields as they stand (`0x515ee0`), -1, -1 while it is unset.
+/// resolution: the clock's fields as they stand (`0x515ee0`), -1, -1 while it is unset. fork: moved
+/// by the `serverTimeOffset` hours.
 fn feed_game_time(
     mut hosted_vm: crate::script_calls::HostedVm,
     time: Res<crate::net::ServerTime>,
+    offset: Option<Res<crate::net::TimeOffset>>,
     mut last: Local<crate::ui_script::VmMemo<Option<(i32, i32)>>>,
 ) {
+    let offset = offset.map_or_else(Default::default, |o| *o);
     hosted_vm.run(|script| {
         let Some(script) = script else { return };
         let last = last.get(script);
-        let now = (time.0.hour(), time.0.minute());
+        let now = offset.shown(time.0.hour(), time.0.minute());
         if *last == Some(now) {
             return;
         }
@@ -945,7 +963,8 @@ impl Plugin for MinimapPlugin {
             .init_resource::<MinimapPing>()
             .init_resource::<MinimapCorpse>()
             .init_resource::<composite::MinimapComposite>()
-            .add_systems(Startup, setup_minimap.after(AssetSet::Open))
+            .add_data_loaders(setup_minimap)
+            .add_observer(forget_minimap_tiles)
             .add_systems(Startup, composite::setup_composite)
             .add_systems(
                 Update,
@@ -1075,15 +1094,12 @@ mod art_tests {
         script
             .run(r#"m = CreateFrame("Minimap", "Minimap")"#)
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app
     }
 
     fn run(app: &mut App, chunk: &str) {
-        let _ = app
-            .world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .run(chunk);
+        let _ = app.world_mut().non_send_mut::<UiScript>().run(chunk);
         app.update();
     }
 
@@ -1107,7 +1123,7 @@ mod art_tests {
             "no texture, no map"
         );
 
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.update();
         assert_eq!(
             drawn(&app, MinimapArtSlot::Mask),

@@ -22,9 +22,9 @@ use crate::bone_target_id;
 use crate::coords::wow_to_bevy;
 use crate::model::{
     arm_subtree_roots, billboard_info, build_animation_clip, build_attachments, build_global_bones,
-    build_grip_clip, build_skeleton, finger_subtree_roots, in_subtree, skeleton_pivots,
-    upper_subtree_root, AnimClip, ModelAnimations, ModelAttachment, ModelSkeleton, ModelSubmesh,
-    Stage1,
+    build_grip_clip, build_skeleton, build_string_tip, finger_subtree_roots, in_subtree,
+    skeleton_pivots, upper_subtree_root, AnimClip, ModelAnimations, ModelAttachment, ModelSkeleton,
+    ModelSubmesh, PoseClip, Stage1,
 };
 
 /// A loaded M2: its batches, bounds, collision hull, rig, animations, effects and cameras.
@@ -65,9 +65,9 @@ pub struct M2Model {
     /// The whole camera table by raw index, for `SetCamera(n)`; an index past its end leaves the
     /// pane on the orthographic leg.
     pub cameras: Vec<PaneCamera>,
-    /// A bow's `$WTT`/`$WTB` string ends `[top, bottom]` as (bone, Bevy-space point), for the
-    /// string drawer `0x611ff0`.
-    pub string_anchors: Option<[(u16, Vec3); 2]>,
+    /// A bow's `$WTT`/`$WTB` string ends `[top, bottom]`, each tip bone-local and model-local
+    /// ([`crate::StringTip`]), for the string drawer `0x611ff0`. `None` for every non-bow model.
+    pub string_anchors: Option<[crate::StringTip; 2]>,
     /// The fishing pole's `$CCH` rod tip, Bevy space, where the line draw `0x61f780` starts.
     pub cch_marker: Option<Vec3>,
     /// The header's `GlobalModelFlags` (`+0x10`); bits `&3` conform the model to the ground
@@ -208,6 +208,146 @@ pub struct ModelLight {
     pub bone_pivot: [f32; 3],
 }
 
+/// The animation graph's mask groups: 0 and 1 hold every joint outside the right and the left arm,
+/// 2 every joint outside the upper body, 3 and 4 every joint outside the right and the left
+/// fingers.
+const MASK_GROUPS: u32 = 5;
+
+/// The rig and animations as far as the bytes alone decide them: everything but the `ctx`
+/// registrations and the graph that names their handles, so it builds off the frame
+/// ([`crate::frame_budget::offload`]).
+struct RigParse {
+    skeleton_raw: benilla_formats::Skeleton,
+    skeleton: ModelSkeleton,
+    inverse_bindposes: Vec<Mat4>,
+    attachments: Vec<ModelAttachment>,
+    markers: Vec<crate::ModelMarker>,
+    /// The pivots the joints were built from, which clip events take too.
+    pivots: Vec<Vec3>,
+    sequences: Vec<benilla_formats::ModelAnimation>,
+    /// One built clip per sequence, index-parallel with `sequences`: the clip, its pose twin and
+    /// whether it poses a bone.
+    clips: Vec<(AnimationClip, PoseClip, bool)>,
+    /// The loader-idle seed's clip when its pose needs a rig ([`ModelAnimations::first_seq`]).
+    first_seq: Option<usize>,
+    /// Per bone, the mask groups that hold it, a bit per group ([`MASK_GROUPS`]).
+    bone_masks: Vec<u64>,
+    /// Both arm roots resolved: groups 0 and 1 are populated.
+    arms: bool,
+    /// An upper-body root resolved: group 2 is populated.
+    upper: bool,
+    /// Per hand `(right, left)`, whether it has finger key-bones (groups 3 and 4).
+    fingers: [bool; 2],
+    playable_animation_lookup: Vec<benilla_formats::PlayableAnim>,
+    animation_lookup: Vec<u16>,
+    /// The weapon-grip clip and its pose twin, when the model keys `HandsClosed` fingers.
+    grip: Option<(AnimationClip, PoseClip)>,
+    global_bones: Vec<crate::model::GlobalBone>,
+}
+
+/// Parse the rig and build every clip from the file's bytes.
+fn parse_rig(bytes: &[u8]) -> RigParse {
+    let skeleton_raw = parse_m2_skeleton(bytes).unwrap_or_default();
+    let (skeleton, inverse_bindposes) = build_skeleton(&skeleton_raw);
+    // Attachments, markers and clip events all take the pivots the joints were built from.
+    let pivots = skeleton_pivots(&skeleton_raw);
+    let attachments = build_attachments(&parse_m2_attachments(bytes).unwrap_or_default(), &pivots);
+    let markers = crate::model::build_markers(
+        &benilla_formats::parse_m2_event_markers(bytes).unwrap_or_default(),
+        &pivots,
+    );
+
+    let bones = skeleton_raw.bones.len();
+    let mut bone_masks = vec![0u64; bones];
+    // Groups 0 and 1, so a node masked with one animates only that arm.
+    let arm_roots = arm_subtree_roots(&skeleton_raw, &attachments);
+    if let Some((right_root, left_root)) = arm_roots {
+        for (i, mask) in bone_masks.iter_mut().enumerate() {
+            if !in_subtree(&skeleton_raw, i, right_root) {
+                *mask |= 1 << 0;
+            }
+            if !in_subtree(&skeleton_raw, i, left_root) {
+                *mask |= 1 << 1;
+            }
+        }
+    }
+    // Group 2: the legs and the pelvis.
+    let upper_root = upper_subtree_root(&skeleton_raw);
+    if let Some(upper_root) = upper_root {
+        for (i, mask) in bone_masks.iter_mut().enumerate() {
+            if !in_subtree(&skeleton_raw, i, upper_root) {
+                *mask |= 1 << 2;
+            }
+        }
+    }
+    // Groups 3 and 4, for the weapon grip (`CloseHand`, `0x479660`).
+    let finger_roots = finger_subtree_roots(&skeleton_raw);
+    for (i, mask) in bone_masks.iter_mut().enumerate() {
+        for (hand, roots) in finger_roots.iter().enumerate() {
+            if !roots.is_empty() && !roots.iter().any(|&r| in_subtree(&skeleton_raw, i, r)) {
+                *mask |= 1 << (3 + hand);
+            }
+        }
+    }
+
+    // Read before the clip walk: the loader-idle seed resolves through it.
+    let playable_animation_lookup = parse_m2_playable_animation_lookup(bytes).unwrap_or_default();
+    let animation_lookup = benilla_formats::parse_m2_animation_lookup(bytes).unwrap_or_default();
+    // The loader-idle seed (`0x71019b`): id 0 via the playable lookup, not file slot 0.
+    let idle_id = playable_animation_lookup
+        .first()
+        .map_or(0, |p: &benilla_formats::PlayableAnim| p.resolved_id);
+    let sequences = parse_m2_animations(bytes);
+    // `first_seq` asks whether the seed needs a rig; `ModelAnimations::idle_seq` makes the same
+    // selection without that gate.
+    let first_seq = sequences
+        .iter()
+        .position(|a| a.anim_id == idle_id && idle_pose_differs(a));
+    // Every sequence becomes a clip, since the clip is the sequence clock; `poses_bones` says
+    // whether it also needs a rig.
+    let clips = sequences
+        .iter()
+        .map(|anim| build_animation_clip(anim, &skeleton))
+        .collect();
+
+    // The grip is its own clip of clamped `HandsClosed` finger poses: the sequence read drops
+    // fingers keyed off that frame, which `hand_grip_finger_poses` clamps. Every bone of each
+    // finger subtree, tips included, since `HandsClosed` keys them too.
+    let finger_bones: Vec<u16> = (0..bones)
+        .filter(|&i| {
+            finger_roots
+                .iter()
+                .flatten()
+                .any(|&r| in_subtree(&skeleton_raw, i, r))
+        })
+        .map(|i| i as u16)
+        .collect();
+    let grip_poses = hand_grip_finger_poses(bytes, &finger_bones);
+    let grip = (!grip_poses.is_empty()).then(|| build_grip_clip(&grip_poses));
+    // Global-sequence channels alone earn `ModelAnimations` (the `GlobalSeqOnly` tier).
+    let global_bones = build_global_bones(&parse_m2_global_sequence_bones(bytes), &skeleton);
+
+    RigParse {
+        skeleton_raw,
+        skeleton,
+        inverse_bindposes,
+        attachments,
+        markers,
+        pivots,
+        sequences,
+        clips,
+        first_seq,
+        bone_masks,
+        arms: arm_roots.is_some(),
+        upper: upper_root.is_some(),
+        fingers: [!finger_roots[0].is_empty(), !finger_roots[1].is_empty()],
+        playable_animation_lookup,
+        animation_lookup,
+        grip,
+        global_bones,
+    }
+}
+
 /// Bevy [`AssetLoader`] decoding `*.m2` → [`M2Model`].
 #[derive(Default, TypePath)]
 pub struct M2ModelLoader;
@@ -225,11 +365,56 @@ impl AssetLoader for M2ModelLoader {
     ) -> Result<M2Model, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
+        // **`Arc`, so the heavy half can leave.** This loader reads `bytes` at a dozen points
+        // spread over four hundred lines, interleaved with `ctx.load::<Image>` calls that cannot
+        // leave the page's thread — which is why it stayed metered when `blp`, `adt` and the WMO
+        // root moved. Sharing the buffer instead of moving it is what lets the expensive parses go
+        // to a worker while the `ctx` half stays here, with no second copy of the file.
+        let bytes = std::sync::Arc::new(bytes);
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
 
-        // Skins fill at the spawn site, so no skin directory or list is passed.
-        let subs = parse_m2_render_submeshes(&bytes, "", &[]).map_err(to_io)?;
-        let bounds = parse_m2_bounds(&bytes).ok();
+        // The geometry and rig parses run off the frame, one crossing for all of them: `offload`
+        // costs a frame of latency per crossing, and a character model's clip build is the most
+        // expensive single slot a streaming window grants (a hundred-odd sequences over a
+        // hundred-odd bones). Skins fill at the spawn site, so no skin directory or list is passed.
+        let parsed = {
+            let bytes = bytes.clone();
+            crate::frame_budget::offload(crate::frame_budget::Lane::Geometry, move || {
+                let subs = parse_m2_render_submeshes(&bytes, "", &[])?;
+                let bounds = parse_m2_bounds(&bytes).ok();
+                // An empty hull is no hull: the model does not collide.
+                let collision = parse_m2_collision_hull(&bytes)
+                    .ok()
+                    .filter(|c| !c.is_empty());
+                Ok::<_, anyhow::Error>((subs, bounds, collision, parse_rig(&bytes)))
+            })
+            .await
+            .map_err(to_io)?
+        };
+        let (subs, bounds, collision, rig) = parsed;
+        let RigParse {
+            skeleton_raw,
+            skeleton,
+            inverse_bindposes,
+            attachments,
+            markers,
+            pivots,
+            sequences,
+            clips: built_clips,
+            first_seq,
+            bone_masks,
+            arms,
+            upper,
+            fingers,
+            playable_animation_lookup,
+            animation_lookup,
+            grip,
+            global_bones,
+        } = rig;
+
+        // The `ctx`-touching half and the small header parses stay metered: on a build with no
+        // workers the offload above ran inline, and this is one thread either way.
+        let _slot = crate::frame_budget::slot_in(crate::frame_budget::Lane::Geometry).await;
         // One owner bound for every effect: the reference draws them all after the batches.
         let owner_reach = benilla_formats::m2_owner_reach(&subs);
         // The water-plane sphere: the header box's midpoint and the header sphere's radius.
@@ -243,11 +428,6 @@ impl AssetLoader for M2ModelLoader {
                 b.sphere_radius,
             )
         });
-        // An empty hull is no hull: the model does not collide.
-        let collision = parse_m2_collision_hull(&bytes)
-            .ok()
-            .filter(|c| !c.is_empty());
-
         // The textures open as the model did (`0x71da64` pushes the model's own flag).
         let source = match ctx.path().source() {
             bevy::asset::io::AssetSourceId::Name(name) if &**name == crate::MPQ_LOOSE_SOURCE => {
@@ -262,20 +442,27 @@ impl AssetLoader for M2ModelLoader {
             let texture = sub.texture.as_deref().map(|t| {
                 ctx.load::<Image>(crate::texture_url_on(source, t, (sub.wrap_x, sub.wrap_y)))
             });
-            // Stage 1 at the generated coordinate, the only kind a stock unit authors. Not built: a
-            // stage 1 reading the vertex's second UV set, which the mesh does not carry; such a
-            // unit draws its stage 0 alone.
-            let stage1 = sub.stage1.as_ref().filter(|s| s.env_map).and_then(|s| {
-                let t = s.texture.as_deref()?;
-                Some(Stage1 {
-                    texture: ctx.load::<Image>(crate::texture_url_on(
-                        source,
-                        t,
-                        (s.wrap_x, s.wrap_y),
-                    )),
-                    combine: s.combine,
-                })
-            });
+            // Stage 1 at the generated coordinate, the only kind a stock unit authors, or
+            // (tortoise) on a UV set the mesh carries as UV set B (`build_submesh_mesh`).
+            let uv_stage = |s: &&benilla_formats::TextureStage| {
+                !s.env_map && s.uvs.len() == sub.positions.len()
+            };
+            let stage1 = sub
+                .stage1
+                .as_ref()
+                .filter(|s| s.env_map || uv_stage(s))
+                .and_then(|s| {
+                    let t = s.texture.as_deref()?;
+                    Some(Stage1 {
+                        texture: ctx.load::<Image>(crate::texture_url_on(
+                            source,
+                            t,
+                            (s.wrap_x, s.wrap_y),
+                        )),
+                        combine: s.combine,
+                        uv_set: !s.env_map,
+                    })
+                });
             submeshes.push(ModelSubmesh {
                 texture,
                 stage1,
@@ -310,8 +497,6 @@ impl AssetLoader for M2ModelLoader {
         }
         // The spawn site keeps the casting point lights (`M2Light::casts`).
         let light_defs = parse_m2_lights(&bytes);
-
-        let skeleton_raw = parse_m2_skeleton(&bytes).unwrap_or_default();
 
         let mut emitters: Vec<ModelEmitter> = parse_m2_particle_emitters(&bytes)
             .unwrap_or_default()
@@ -391,24 +576,11 @@ impl AssetLoader for M2ModelLoader {
                 def,
             })
             .collect();
-        let (skeleton, inverse_bindposes) = build_skeleton(&skeleton_raw);
         let inverse_bindposes = ctx.add_labeled_asset(
             "inverse_bindposes".to_string(),
             SkinnedMeshInverseBindposes::from(inverse_bindposes),
         );
 
-        // Attachments, markers and clip events all take the pivots the joints were built from.
-        let attachments = build_attachments(
-            &parse_m2_attachments(&bytes).unwrap_or_default(),
-            &skeleton_pivots(&skeleton_raw),
-        );
-        let markers = crate::model::build_markers(
-            &benilla_formats::parse_m2_event_markers(&bytes).unwrap_or_default(),
-            &skeleton_pivots(&skeleton_raw),
-        );
-        let pivots = skeleton_pivots(&skeleton_raw);
-
-        let sequences = parse_m2_animations(&bytes);
         let first_seq_span = sequences.first().map(|a| a.duration).filter(|d| *d > 0.0);
         let sequence_infos: Vec<M2SequenceInfo> = sequences
             .iter()
@@ -423,180 +595,102 @@ impl AssetLoader for M2ModelLoader {
         let animations = {
             let mut graph = AnimationGraph::new();
             let root = graph.root;
-            // The pose bake mirrors the graph: update it beside every mask group and `add_clip*`.
+            // The mask groups the parse settled (see [`RigParse::bone_masks`]), as the graph's.
+            for (i, &mask) in bone_masks.iter().enumerate() {
+                for group in 0..MASK_GROUPS {
+                    if mask & (1 << group) != 0 {
+                        graph.add_target_to_mask_group(bone_target_id(i as u16), group);
+                    }
+                }
+            }
+            // The pose bake mirrors the graph: update it beside every `add_clip*`.
             let mut pose = crate::model::PoseSource {
-                bone_masks: vec![0u64; skeleton_raw.bones.len()],
+                bone_masks,
                 ..Default::default()
             };
-            // Groups 0 and 1 hold every joint outside the right and the left arm, so a node masked
-            // with one animates only that arm.
-            let arm_roots = arm_subtree_roots(&skeleton_raw, &attachments);
-            if let Some((right_root, left_root)) = arm_roots {
-                for i in 0..skeleton_raw.bones.len() {
-                    let target = bone_target_id(i as u16);
-                    if !in_subtree(&skeleton_raw, i, right_root) {
-                        graph.add_target_to_mask_group(target, 0);
-                        pose.bone_masks[i] |= 1 << 0;
-                    }
-                    if !in_subtree(&skeleton_raw, i, left_root) {
-                        graph.add_target_to_mask_group(target, 1);
-                        pose.bone_masks[i] |= 1 << 1;
-                    }
-                }
-            }
-            // Group 2 holds every joint outside the upper body: the legs and the pelvis.
-            let upper_root = upper_subtree_root(&skeleton_raw);
-            if let Some(upper_root) = upper_root {
-                for i in 0..skeleton_raw.bones.len() {
-                    if !in_subtree(&skeleton_raw, i, upper_root) {
-                        graph.add_target_to_mask_group(bone_target_id(i as u16), 2);
-                        pose.bone_masks[i] |= 1 << 2;
-                    }
-                }
-            }
-            // Groups 3 and 4 hold every joint outside the right and the left fingers, for the
-            // weapon grip (`CloseHand`, `0x479660`).
-            let finger_roots = finger_subtree_roots(&skeleton_raw);
-            for i in 0..skeleton_raw.bones.len() {
-                let target = bone_target_id(i as u16);
-                if !finger_roots[0].is_empty()
-                    && !finger_roots[0]
+            let mut clips = Vec::with_capacity(sequences.len());
+            for (i, (anim, (clip, pose_clip, poses_bones))) in
+                sequences.iter().zip(built_clips).enumerate()
+            {
+                let pose_idx = pose.clips.len() as u32;
+                pose.clips.push(pose_clip);
+                let clip = ctx.add_labeled_asset(format!("clip{i}"), clip);
+                let node = graph.add_clip(clip.clone(), 1.0, root);
+                pose.set_node(node, pose_idx, 0);
+                // The key bone's blend slot keeps the outgoing sequence on its own clock
+                // (`0x7125ea`), and it can be the sequence the primary re-arms.
+                let blend_node = graph.add_clip(clip.clone(), 1.0, root);
+                pose.set_node(blend_node, pose_idx, 0);
+                // The sheath family (89/90) gets per-arm masked nodes.
+                let arm_nodes = (matches!(anim.anim_id, 89 | 90) && arms).then(|| {
+                    let nodes = (
+                        graph.add_clip_with_mask(clip.clone(), 1 << 0, 1.0, root),
+                        graph.add_clip_with_mask(clip.clone(), 1 << 1, 1.0, root),
+                    );
+                    pose.set_node(nodes.0, pose_idx, 1 << 0);
+                    pose.set_node(nodes.1, pose_idx, 1 << 1);
+                    nodes
+                });
+                // With an upper-body root, every clip gets an upper-body node, so a one-shot can
+                // play over a live base.
+                let upper_node = upper.then(|| {
+                    let n = graph.add_clip_with_mask(clip.clone(), 1 << 2, 1.0, root);
+                    pose.set_node(n, pose_idx, 1 << 2);
+                    n
+                });
+                clips.push(AnimClip {
+                    anim_id: anim.anim_id,
+                    seq_index: anim.seq_index,
+                    node,
+                    blend_node: Some(blend_node),
+                    looping: anim.looping,
+                    duration: anim.duration,
+                    move_speed: anim.move_speed,
+                    blend_time: anim.blend_time,
+                    // Into the mesh vertices' frame, so the pick's world math is one transform.
+                    bounds_center: wow_to_bevy(anim.bounds_center),
+                    bounds_radius: anim.bounds_radius,
+                    // The axis mapping flips signs, so min/max are re-derived componentwise.
+                    bounds_min: wow_to_bevy(anim.bounds_min).min(wow_to_bevy(anim.bounds_max)),
+                    bounds_max: wow_to_bevy(anim.bounds_min).max(wow_to_bevy(anim.bounds_max)),
+                    // `offset` and `point` both use the record's own bone, never a by-4CC lookup:
+                    // a model may author a tag more than once.
+                    events: anim
+                        .events
                         .iter()
-                        .any(|&r| in_subtree(&skeleton_raw, i, r))
-                {
-                    graph.add_target_to_mask_group(target, 3);
-                    pose.bone_masks[i] |= 1 << 3;
-                }
-                if !finger_roots[1].is_empty()
-                    && !finger_roots[1]
-                        .iter()
-                        .any(|&r| in_subtree(&skeleton_raw, i, r))
-                {
-                    graph.add_target_to_mask_group(target, 4);
-                    pose.bone_masks[i] |= 1 << 4;
-                }
+                        .map(|e| crate::ClipEvent {
+                            time: e.time,
+                            ident: e.ident,
+                            data: e.data,
+                            bone: e.bone,
+                            offset: wow_to_bevy(e.position)
+                                - pivots.get(e.bone as usize).copied().unwrap_or(Vec3::ZERO),
+                            point: wow_to_bevy(e.position),
+                        })
+                        .collect::<Vec<_>>()
+                        .into(),
+                    arm_nodes,
+                    upper_node,
+                    frequency: anim.frequency,
+                    replay: (anim.min_replay, anim.max_replay),
+                    poses_bones,
+                });
             }
-            // Read before the clip walk: the loader-idle seed resolves through it.
-            let playable_animation_lookup =
-                parse_m2_playable_animation_lookup(&bytes).unwrap_or_default();
-            let animation_lookup =
-                benilla_formats::parse_m2_animation_lookup(&bytes).unwrap_or_default();
-            let mut clips = Vec::new();
-            // The loader-idle seed (`0x71019b`): id 0 via the playable lookup, not file slot 0.
-            let idle_id = playable_animation_lookup
-                .first()
-                .map_or(0, |p: &benilla_formats::PlayableAnim| p.resolved_id);
-            let mut first_seq = None;
-            for (i, anim) in sequences.iter().enumerate() {
-                // Every sequence becomes a clip, since the clip is the sequence clock;
-                // `poses_bones` says whether it also needs a rig.
-                {
-                    let (clip, pose_clip, poses_bones) = build_animation_clip(anim, &skeleton);
-                    // `first_seq` asks whether the seed needs a rig; `ModelAnimations::idle_seq`
-                    // makes the same selection without that gate.
-                    if first_seq.is_none() && anim.anim_id == idle_id && idle_pose_differs(anim) {
-                        first_seq = Some(clips.len());
-                    }
-                    let pose_idx = pose.clips.len() as u32;
-                    pose.clips.push(pose_clip);
-                    let clip = ctx.add_labeled_asset(format!("clip{i}"), clip);
-                    let node = graph.add_clip(clip.clone(), 1.0, root);
-                    pose.set_node(node, pose_idx, 0);
-                    // The key bone's blend slot keeps the outgoing sequence on its own clock
-                    // (`0x7125ea`), and it can be the sequence the primary re-arms.
-                    let blend_node = graph.add_clip(clip.clone(), 1.0, root);
-                    pose.set_node(blend_node, pose_idx, 0);
-                    // The sheath family (89/90) gets per-arm masked nodes.
-                    let arm_nodes =
-                        (matches!(anim.anim_id, 89 | 90) && arm_roots.is_some()).then(|| {
-                            let nodes = (
-                                graph.add_clip_with_mask(clip.clone(), 1 << 0, 1.0, root),
-                                graph.add_clip_with_mask(clip.clone(), 1 << 1, 1.0, root),
-                            );
-                            pose.set_node(nodes.0, pose_idx, 1 << 0);
-                            pose.set_node(nodes.1, pose_idx, 1 << 1);
-                            nodes
-                        });
-                    // With an upper-body root, every clip gets an upper-body node, so a one-shot
-                    // can play over a live base.
-                    let upper_node = upper_root.map(|_| {
-                        let n = graph.add_clip_with_mask(clip.clone(), 1 << 2, 1.0, root);
-                        pose.set_node(n, pose_idx, 1 << 2);
-                        n
-                    });
-                    clips.push(AnimClip {
-                        anim_id: anim.anim_id,
-                        seq_index: anim.seq_index,
-                        node,
-                        blend_node: Some(blend_node),
-                        looping: anim.looping,
-                        duration: anim.duration,
-                        move_speed: anim.move_speed,
-                        blend_time: anim.blend_time,
-                        // Into the mesh vertices' frame, so the pick's world math is one transform.
-                        bounds_center: wow_to_bevy(anim.bounds_center),
-                        bounds_radius: anim.bounds_radius,
-                        // The axis mapping flips signs, so min/max are re-derived componentwise.
-                        bounds_min: wow_to_bevy(anim.bounds_min).min(wow_to_bevy(anim.bounds_max)),
-                        bounds_max: wow_to_bevy(anim.bounds_min).max(wow_to_bevy(anim.bounds_max)),
-                        // `offset` and `point` both use the record's own bone, never a by-4CC
-                        // lookup: a model may author a tag more than once.
-                        events: anim
-                            .events
-                            .iter()
-                            .map(|e| crate::ClipEvent {
-                                time: e.time,
-                                ident: e.ident,
-                                data: e.data,
-                                bone: e.bone,
-                                offset: wow_to_bevy(e.position)
-                                    - pivots.get(e.bone as usize).copied().unwrap_or(Vec3::ZERO),
-                                point: wow_to_bevy(e.position),
-                            })
-                            .collect::<Vec<_>>()
-                            .into(),
-                        arm_nodes,
-                        upper_node,
-                        frequency: anim.frequency,
-                        replay: (anim.min_replay, anim.max_replay),
-                        poses_bones,
-                    });
-                }
-            }
-            // The grip is its own clip of clamped `HandsClosed` finger poses: the sequence read
-            // drops fingers keyed off that frame, which `hand_grip_finger_poses` clamps.
+            // The grip clip, one masked node per hand that has fingers.
             let mut hand_close: [Option<bevy::animation::graph::AnimationNodeIndex>; 2] =
                 [None, None];
-            // Every bone of each finger subtree, tips included, since `HandsClosed` keys them too.
-            let finger_bones: Vec<u16> = (0..skeleton_raw.bones.len())
-                .filter(|&i| {
-                    finger_roots
-                        .iter()
-                        .flatten()
-                        .any(|&r| in_subtree(&skeleton_raw, i, r))
-                })
-                .map(|i| i as u16)
-                .collect();
-            let grip_poses = hand_grip_finger_poses(&bytes, &finger_bones);
-            if !grip_poses.is_empty() {
-                let (grip_clip, grip_pose) = build_grip_clip(&grip_poses);
+            if let Some((grip_clip, grip_pose)) = grip {
                 let grip_idx = pose.clips.len() as u32;
                 pose.clips.push(grip_pose);
                 let grip = ctx.add_labeled_asset("grip_clip".to_string(), grip_clip);
-                if !finger_roots[0].is_empty() {
-                    let n = graph.add_clip_with_mask(grip.clone(), 1 << 3, 1.0, root);
-                    pose.set_node(n, grip_idx, 1 << 3);
-                    hand_close[0] = Some(n);
-                }
-                if !finger_roots[1].is_empty() {
-                    let n = graph.add_clip_with_mask(grip.clone(), 1 << 4, 1.0, root);
-                    pose.set_node(n, grip_idx, 1 << 4);
-                    hand_close[1] = Some(n);
+                for (hand, group) in [(0, 3), (1, 4)] {
+                    if fingers[hand] {
+                        let n = graph.add_clip_with_mask(grip.clone(), 1 << group, 1.0, root);
+                        pose.set_node(n, grip_idx, 1 << group);
+                        hand_close[hand] = Some(n);
+                    }
                 }
             }
-            // Global-sequence channels alone earn `ModelAnimations` (the `GlobalSeqOnly` tier).
-            let global_bones =
-                build_global_bones(&parse_m2_global_sequence_bones(&bytes), &skeleton);
             // A model animates if a bone poses, a global sequence runs, or something samples the
             // sequence clock: emitters, ribbons, or a material's alpha, colour or UV loop.
             let samples_sequence = !emitters.is_empty()
@@ -647,11 +741,13 @@ impl AssetLoader for M2ModelLoader {
             })
             .collect();
 
-        let string_anchors = benilla_formats::parse_m2_string_anchors(&bytes).map(|a| {
-            [
-                (a.top.0, wow_to_bevy(a.top.1)),
-                (a.bottom.0, wow_to_bevy(a.bottom.1)),
-            ]
+        // The bowstring anchors, kept model-local and rebased onto the tip bone's pivot:
+        // `posed_point` composes a bone-local offset.
+        let string_anchors = benilla_formats::parse_m2_string_anchors(&bytes).and_then(|a| {
+            Some([
+                build_string_tip(a.top, &pivots)?,
+                build_string_tip(a.bottom, &pivots)?,
+            ])
         });
 
         let cch_marker = benilla_formats::parse_m2_cch_marker(&bytes).map(|(_, p)| wow_to_bevy(p));

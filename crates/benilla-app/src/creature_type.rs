@@ -73,7 +73,16 @@ impl<'a> CreatureTypeSources<'a> {
 /// `ChrRaces.dbc` column 9 by race id: Humanoid on all nine shipped rows, and 0 where the table
 /// has no row (`0x6055b3`-`0x6055d1`).
 fn race_creature_type(race: u8) -> u32 {
-    if (1..=9).contains(&race) {
+    race_creature_type_in(race, crate::flavor::turtle())
+}
+
+/// [`race_creature_type`] under a given flavor: Turtle WoW's `ChrRaces.dbc` has a tenth row, the
+/// High Elf (10), Humanoid like the rest. Without it a High Elf read as no creature type, so
+/// `BindTarget`'s `TargetCreatureType` gate refused every spell with a mask (Polymorph, Sap) on
+/// one with "Invalid target".
+fn race_creature_type_in(race: u8, turtle: bool) -> u32 {
+    let rows = if turtle { 1..=10 } else { 1..=9 };
+    if rows.contains(&race) {
         CREATURE_TYPE_HUMANOID
     } else {
         0
@@ -326,6 +335,16 @@ mod tests {
         }
         assert_eq!(sources.word(0), None);
         assert_eq!(sources.word(12), None);
+    }
+
+    /// Turtle WoW's tenth row: a High Elf is Humanoid there, and has no row on 1.12.1.
+    #[test]
+    fn a_high_elf_is_humanoid_under_the_turtle_flavor_alone() {
+        assert_eq!(race_creature_type_in(10, true), CREATURE_TYPE_HUMANOID);
+        assert_eq!(race_creature_type_in(10, false), 0);
+        assert_eq!(race_creature_type_in(9, true), CREATURE_TYPE_HUMANOID);
+        assert_eq!(race_creature_type_in(11, true), 0);
+        assert_eq!(race_creature_type_in(0, true), 0);
     }
 
     /// The frozen race table against the shipped `ChrRaces.dbc`.

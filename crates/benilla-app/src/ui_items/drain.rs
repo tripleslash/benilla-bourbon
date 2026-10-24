@@ -627,15 +627,15 @@ mod tests {
             }),
         );
 
-        app.insert_non_send_resource(harness_vm());
+        app.insert_non_send(harness_vm());
         feed_clam(&mut app);
         crate::ui_loot::seat_loot_steps(app.world_mut());
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_modifiers(shift, false, false);
         setup(&mut app);
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("UseContainerItem(0, 1)")
             .unwrap();
         run_container_clicks(app.world_mut());
@@ -661,16 +661,14 @@ mod tests {
             use_fork: use_fork(&t, 0, 0),
             ..Default::default()
         };
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .set_container(
-                0,
-                Some(benilla_ui::script::ContainerState {
-                    num_slots: 16,
-                    slots: std::collections::HashMap::from([(1, slot)]),
-                    ..Default::default()
-                }),
-            );
+        app.world_mut().non_send_mut::<UiScript>().set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                num_slots: 16,
+                slots: std::collections::HashMap::from([(1, slot)]),
+                ..Default::default()
+            }),
+        );
     }
 
     /// Open a vendor, or close it with `None`, as the app holds it and as the merchant feed
@@ -680,7 +678,7 @@ mod tests {
             .resource_mut::<crate::ui_merchant::MerchantOpen>()
             .vendor = vendor;
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_merchant(vendor.map(|_| benilla_ui::script::MerchantState::default()));
     }
 
@@ -690,7 +688,7 @@ mod tests {
             .resource_mut::<crate::ui_bank::BankOpen>()
             .open(banker);
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_bank(Some(benilla_ui::script::BankState::default()));
     }
 
@@ -716,9 +714,7 @@ mod tests {
         );
         // The grey lock, the reference's other pre-send write (`0x5edcd9`).
         assert!(
-            app.world()
-                .non_send_resource::<UiScript>()
-                .item_locked(CLAM),
+            app.world().non_send::<UiScript>().item_locked(CLAM),
             "the slot greys at the click"
         );
     }
@@ -767,7 +763,7 @@ mod tests {
             );
             world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(CORPSE);
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .run(
                     "SEEN = {} local f = CreateFrame('Frame') \
                      f:RegisterEvent('LOOT_OPENED') f:RegisterEvent('ITEM_LOCK_CHANGED') \
@@ -777,7 +773,7 @@ mod tests {
         });
         let seen: String = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return table.concat(SEEN, ',')")
             .unwrap();
         assert_eq!(
@@ -808,7 +804,7 @@ mod tests {
             .resource_mut::<crate::ui_merchant::MerchantOpen>()
             .vendor = Some(VENDOR);
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.take_sounds();
             let mut bag = benilla_ui::script::ContainerState {
                 num_slots: 16,
@@ -841,7 +837,7 @@ mod tests {
             })
         ));
         assert!(rx.try_recv().is_err(), "the repair alone: no use or sale");
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         assert_eq!(
             script.take_sounds(),
             vec![benilla_ui::script::SoundRequest::KitName(
@@ -871,16 +867,13 @@ mod tests {
             ])));
         set_vendor(&mut app, Some(VENDOR));
         {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.unlock_item(CLAM);
             s.run("UseContainerItem(0, 1)").unwrap();
         }
         run_container_clicks(app.world_mut());
         assert!(rx.try_recv().is_err(), "nothing sold");
-        assert!(!app
-            .world()
-            .non_send_resource::<UiScript>()
-            .item_locked(GHOST));
+        assert!(!app.world().non_send::<UiScript>().item_locked(GHOST));
     }
 
     /// Two uses in one frame: the first's sale locks the item in its call (`0x4fa37f`), so the
@@ -890,12 +883,10 @@ mod tests {
         const VENDOR: u64 = 0xF130_0000_0000_0042;
         let (mut app, rx) = open_the_clam();
         while rx.try_recv().is_ok() {} // drain the clam's own send
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .unlock_item(CLAM);
+        app.world_mut().non_send_mut::<UiScript>().unlock_item(CLAM);
         set_vendor(&mut app, Some(VENDOR));
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("UseContainerItem(0, 1) UseContainerItem(0, 1)")
             .unwrap();
         run_container_clicks(app.world_mut());
@@ -922,7 +913,7 @@ mod tests {
         );
         feed_clam(&mut app);
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.unlock_item(CLAM);
             script
                 .run("UseContainerItem(0, 1) PickupContainerItem(0, 1)")
@@ -930,7 +921,7 @@ mod tests {
         }
         run_container_clicks(app.world_mut());
         assert!(rx.try_recv().is_ok(), "the use went out");
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert!(
             script.cursor_item().is_some() && script.item_locked(CLAM),
             "and the pickup held"
@@ -946,19 +937,15 @@ mod tests {
         while rx.try_recv().is_ok() {} // drain the clam's own send
         let click = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .run("UseContainerItem(0, 1)")
                 .unwrap();
             run_container_clicks(app.world_mut());
         };
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .unlock_item(CLAM);
+        app.world_mut().non_send_mut::<UiScript>().unlock_item(CLAM);
         click(&mut app);
         assert!(
-            app.world()
-                .non_send_resource::<UiScript>()
-                .item_locked(CLAM),
+            app.world().non_send::<UiScript>().item_locked(CLAM),
             "locked in the call, before any send"
         );
         click(&mut app);
@@ -971,13 +958,11 @@ mod tests {
     fn a_banker_takes_the_click_before_a_vendor() {
         let (mut app, rx) = open_the_clam();
         while rx.try_recv().is_ok() {} // drain the clam's own send
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .unlock_item(CLAM);
+        app.world_mut().non_send_mut::<UiScript>().unlock_item(CLAM);
         set_vendor(&mut app, Some(0xF130_0000_0000_0042));
         open_banker(&mut app, 0xF130_0000_0000_0043);
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("UseContainerItem(0, 1)")
             .unwrap();
         run_container_clicks(app.world_mut());
@@ -1007,7 +992,7 @@ mod tests {
                 quality: cached.then_some(1),
                 ..Default::default()
             };
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.set_container(
                 0,
                 Some(benilla_ui::script::ContainerState {
@@ -1018,13 +1003,11 @@ mod tests {
             );
             script.seat_item_records();
         };
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .unlock_item(CLAM);
+        app.world_mut().non_send_mut::<UiScript>().unlock_item(CLAM);
         // The slot as the feed pushes it with the record in flight.
         push(&mut app, false);
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("PickupContainerItem(0, 1) AutoEquipCursorItem()")
             .unwrap();
         app.world_mut().resource_mut::<Items>().insert_template(
@@ -1037,7 +1020,7 @@ mod tests {
         crate::ui_items::calls::apply_kept_item_calls(app.world_mut());
         assert!(rx.try_recv().is_err(), "nothing sent while it waits");
         {
-            let script = app.world().non_send_resource::<UiScript>();
+            let script = app.world().non_send::<UiScript>();
             assert_eq!(script.cursor_item().map(|i| i.guid), Some(CLAM), "held");
             assert!(script.item_locked(CLAM), "the pickup's lock");
         }
@@ -1051,7 +1034,7 @@ mod tests {
             rx.try_recv(),
             Ok(ClientCommand::SetAmmo { entry: CLAM_ENTRY })
         ));
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert!(script.cursor_item().is_none());
         assert!(!script.item_locked(CLAM));
     }
@@ -1130,24 +1113,18 @@ mod tests {
         while rx.try_recv().is_ok() {} // drain the clam's own send
         let click = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .run("UseContainerItem(0, 1)")
                 .unwrap();
             run_container_clicks(app.world_mut());
         };
-        let locked = |app: &App| {
-            app.world()
-                .non_send_resource::<UiScript>()
-                .item_locked(CLAM)
-        };
+        let locked = |app: &App| app.world().non_send::<UiScript>().item_locked(CLAM);
         assert!(locked(&app), "the open click's own lock");
         set_vendor(&mut app, Some(VENDOR));
         click(&mut app);
         assert!(rx.try_recv().is_err(), "a locked item sells nothing");
 
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .unlock_item(CLAM);
+        app.world_mut().non_send_mut::<UiScript>().unlock_item(CLAM);
         click(&mut app);
         assert!(matches!(
             rx.try_recv(),
@@ -1161,9 +1138,7 @@ mod tests {
             "the sale locks it until SMSG_SELL_ITEM or the slot moves"
         );
 
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .unlock_item(CLAM);
+        app.world_mut().non_send_mut::<UiScript>().unlock_item(CLAM);
         set_vendor(&mut app, None);
         open_banker(&mut app, 0xF130_0000_0000_0043);
         click(&mut app);
@@ -1192,7 +1167,7 @@ mod tests {
             );
             feed_clam(&mut app);
             {
-                let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+                let mut script = app.world_mut().non_send_mut::<UiScript>();
                 // The record feed's copy of the template, which the equip question reads.
                 script.seat_item_records();
                 script.unlock_item(CLAM);
@@ -1214,9 +1189,7 @@ mod tests {
             run_container_clicks(app.world_mut());
             assert!(rx.try_recv().is_ok(), "class {class}: the equip went out");
             assert_eq!(
-                app.world()
-                    .non_send_resource::<UiScript>()
-                    .item_locked(CLAM),
+                app.world().non_send::<UiScript>().item_locked(CLAM),
                 want,
                 "class {class}"
             );
@@ -1264,12 +1237,12 @@ mod tests {
             ..Default::default()
         });
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_inventory_slots(worn);
         let use_head = |app: &mut App| {
             use bevy::ecs::system::RunSystemOnce;
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .run("UseInventoryItem(1)")
                 .unwrap();
             app.world_mut()
@@ -1289,14 +1262,10 @@ mod tests {
                 )
                 .unwrap();
         };
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .lock_item(HELM);
+        app.world_mut().non_send_mut::<UiScript>().lock_item(HELM);
         use_head(&mut app);
         assert!(rx.try_recv().is_err(), "a locked item is not used");
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .unlock_item(HELM);
+        app.world_mut().non_send_mut::<UiScript>().unlock_item(HELM);
         use_head(&mut app);
         assert!(rx.try_recv().is_ok(), "unlocked, the use goes out");
     }
@@ -1325,7 +1294,7 @@ mod tests {
                 (head + 1, (HELM >> 32) as u32),
             ])));
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.take_sounds();
             let mut slots: benilla_ui::script::InventorySlots = Default::default();
             slots[1] = Some(benilla_ui::script::InvSlotView {
@@ -1350,7 +1319,7 @@ mod tests {
                 item_guid: HELM
             })
         ));
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         assert_eq!(
             script.take_sounds(),
             vec![benilla_ui::script::SoundRequest::KitName(
@@ -1391,7 +1360,7 @@ mod tests {
             .entity_mut(me)
             .insert((player(slot_field, money), crate::net::Guid(0x5e1f)));
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.take_sounds();
             record_errors(&script);
             script.set_merchant(Some(benilla_ui::script::MerchantState {
@@ -1426,7 +1395,7 @@ mod tests {
         }
         run_container_clicks(app.world_mut());
         let sounded = crate::ui_merchant::purse_fixture::sounded(app.world());
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         RepairClick {
             sent: rx.try_iter().collect(),
             sounds: script.take_sounds(),
@@ -1504,7 +1473,7 @@ mod tests {
         );
         feed_clam(&mut app);
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             // The open click's lock, which a locked item's click would stop at (`0x4fa1cd`).
             script.unlock_item(CLAM);
             script.run("UseContainerItem(0, 1)").unwrap();
@@ -1516,7 +1485,7 @@ mod tests {
             "the begin-wrap arm is purely local — nothing goes on the wire until a container \
              click spends it"
         );
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert_eq!(
             script.gift_wrap_armed(),
             Some(benilla_ui::script::PendingWrap {
@@ -1697,14 +1666,14 @@ mod bind_confirm_tests {
         // Pick up and drop on the main hand: the swap's call, kept for the host.
         script.run("PickupContainerItem(0, 1)").unwrap();
         script.run("PickupInventoryItem(16)").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         crate::ui_items::calls::apply_kept_item_calls(app.world_mut());
         (app, rx)
     }
 
     fn shown(app: &mut App, which: &str) -> bool {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<bool>(&format!(
                 "return StaticPopup_FindVisible(\"{which}\") ~= nil"
             ))
@@ -1725,7 +1694,7 @@ mod bind_confirm_tests {
         );
         assert!(shown(&mut app, "EQUIP_BIND"), "up inside the call");
         {
-            let script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let script = app.world_mut().non_send_mut::<UiScript>();
             assert_eq!(script.cursor_item().map(|i| i.guid), Some(AXE_GUID));
             assert!(script.item_locked(AXE_GUID), "held and locked");
             assert!(script.eval::<bool>("return CursorHasItem() == 1").unwrap());
@@ -1739,14 +1708,12 @@ mod bind_confirm_tests {
         }
 
         // A quiet frame changes nothing.
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(shown(&mut app, "EQUIP_BIND"), "and stays up");
 
         // A later cursor change retires it, and its OnHide cancels the record.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .fire_event("CURSOR_UPDATE", vec![]);
         assert!(
             !shown(&mut app, "EQUIP_BIND"),
@@ -1791,14 +1758,14 @@ mod bind_confirm_tests {
         );
         assert_eq!(
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .cursor_item()
                 .map(|i| i.guid),
             Some(AXE_GUID)
         );
         // The bag view takes the record, then the callback replays the swap.
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.set_container(0, Some(bag_with_the_axe(4)));
             script.seat_item_records();
         }
@@ -1825,7 +1792,7 @@ mod bind_confirm_tests {
         assert!(shown(&mut app, "EQUIP_BIND"));
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("StaticPopup_OnClick(StaticPopup_FindVisible(\"EQUIP_BIND\"), 1)")
             .unwrap();
         crate::ui_items::calls::apply_kept_item_calls(app.world_mut());
@@ -1854,10 +1821,7 @@ mod bind_confirm_tests {
             "and no second question: the re-issue was confirmed"
         );
         assert!(
-            app.world()
-                .non_send_resource::<UiScript>()
-                .cursor_item()
-                .is_none(),
+            app.world().non_send::<UiScript>().cursor_item().is_none(),
             "the re-issue's send clears the cursor"
         );
     }
@@ -1870,17 +1834,16 @@ mod bind_confirm_tests {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_on_the_doll();
         assert!(
-            app.world()
-                .non_send_resource::<UiScript>()
-                .item_locked(AXE_GUID),
+            app.world().non_send::<UiScript>().item_locked(AXE_GUID),
             "the pickup's lock holds under the question"
         );
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("StaticPopup_OnClick(StaticPopup_FindVisible(\"EQUIP_BIND\"), 2)")
             .unwrap();
         {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             let answers = s.take_pending_equip_answers();
             assert_eq!(answers.len(), 2, "OnCancel and OnHide both fire");
             // Answered again as calls, as the popup made them.
@@ -1890,10 +1853,7 @@ mod bind_confirm_tests {
         }
         crate::ui_items::calls::apply_kept_item_calls(app.world_mut());
         assert!(rx.try_iter().next().is_none(), "a cancel never sends");
-        assert!(!app
-            .world()
-            .non_send_resource::<UiScript>()
-            .item_locked(AXE_GUID));
+        assert!(!app.world().non_send::<UiScript>().item_locked(AXE_GUID));
     }
 
     /// The equip predicate is `bonding == 2` alone, with no quality leg (`0x5e0e54`).
@@ -1907,9 +1867,7 @@ mod bind_confirm_tests {
             (4, "quest item"),
         ] {
             let (mut app, rx) = place_the_axe_with_bonding(bonding);
-            app.world_mut()
-                .non_send_resource_mut::<UiScript>()
-                .tick(0.01);
+            app.world_mut().non_send_mut::<UiScript>().tick(0.01);
             assert!(
                 !shown(&mut app, "EQUIP_BIND"),
                 "bonding {bonding} must not ask ({why})"
@@ -1925,9 +1883,7 @@ mod bind_confirm_tests {
     fn a_white_bind_on_equip_item_still_asks() {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_with(2, 1, false);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             shown(&mut app, "EQUIP_BIND"),
             "quality 1 is irrelevant to the equip arm"
@@ -1940,9 +1896,7 @@ mod bind_confirm_tests {
     fn an_already_bound_item_places_without_asking() {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = place_the_axe_with(2, 4, true);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             !shown(&mut app, "EQUIP_BIND"),
             "there is nothing left to bind"
@@ -1993,7 +1947,7 @@ mod bind_confirm_tests {
         script.seat_item_records();
         script.run("PickupContainerItem(0, 1)").unwrap();
         script.run("AutoEquipCursorItem()").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         crate::ui_items::calls::apply_kept_item_calls(app.world_mut());
 
         assert!(
@@ -2001,7 +1955,7 @@ mod bind_confirm_tests {
             "the deferred equip sends nothing"
         );
         {
-            let script = app.world().non_send_resource::<UiScript>();
+            let script = app.world().non_send::<UiScript>();
             assert_eq!(
                 script.cursor_item().map(|i| i.guid),
                 Some(AXE_GUID),
@@ -2009,9 +1963,7 @@ mod bind_confirm_tests {
             );
             assert!(script.item_locked(AXE_GUID), "and locked");
         }
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             shown(&mut app, "AUTOEQUIP_BIND"),
             "the auto-equip arm raises its OWN dialog, not the placement one"
@@ -2022,7 +1974,7 @@ mod bind_confirm_tests {
         );
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("StaticPopup_OnClick(StaticPopup_FindVisible(\"AUTOEQUIP_BIND\"), 1)")
             .unwrap();
         crate::ui_items::calls::apply_kept_item_calls(app.world_mut());
@@ -2043,7 +1995,7 @@ mod bind_confirm_tests {
                 .live(),
             0
         );
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert!(
             script.cursor_item().is_none(),
             "the accept's pick-up and send leave the cursor empty"
@@ -2100,17 +2052,15 @@ mod bind_confirm_tests {
         script.seat_item_records();
         script.run("PickupContainerItem(0, 1)").unwrap();
         script.run("AutoEquipCursorItem()").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         crate::ui_items::calls::apply_kept_item_calls(app.world_mut());
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("StaticPopup_OnClick(StaticPopup_FindVisible(\"AUTOEQUIP_BIND\"), 2)")
             .unwrap();
         {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             for a in s.take_pending_equip_answers() {
                 s.run(&format!("CancelPendingEquip({})", a.index)).unwrap();
             }
@@ -2118,7 +2068,7 @@ mod bind_confirm_tests {
         crate::ui_items::calls::apply_kept_item_calls(app.world_mut());
 
         assert!(rx.try_iter().next().is_none(), "a cancel sends nothing");
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert_eq!(
             script.cursor_item().map(|i| i.guid),
             Some(AXE_GUID),
@@ -2240,7 +2190,7 @@ mod bind_confirm_tests {
             let mut script = harness_vm();
             script.set_container(0, Some(bag_with_the_axe(1)));
             script.run(chunk).unwrap();
-            app.insert_non_send_resource(script);
+            app.insert_non_send(script);
             run_container_clicks(app.world_mut());
             rx.try_iter()
                 .find_map(|c| match c {
@@ -2312,7 +2262,7 @@ mod bind_confirm_tests {
         load_ui(&script);
         script.set_container(0, Some(bag_with_the_axe(3)));
         script.run("UseContainerItem(0, 1)").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         run_container_clicks(app.world_mut());
         (app, rx)
     }
@@ -2325,13 +2275,11 @@ mod bind_confirm_tests {
             rx.try_iter().next().is_none(),
             "the deferred use sends nothing"
         );
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(shown(&mut app, "USE_BIND"), "USE_BIND is raised");
         assert_eq!(
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<String>(
                     "return getglobal(StaticPopup_FindVisible(\"USE_BIND\"):GetName() .. \"Text\"):GetText()"
                 )
@@ -2342,7 +2290,7 @@ mod bind_confirm_tests {
 
         // Accept → ConfirmBindOnUse() → the use is re-issued with suppress set.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("StaticPopup_OnClick(StaticPopup_FindVisible(\"USE_BIND\"), 1)")
             .unwrap();
         crate::ui_items::calls::apply_kept_calls(app.world_mut());
@@ -2425,7 +2373,7 @@ mod bind_confirm_tests {
         script.set_container(0, Some(bag));
         script.seat_item_records();
         script.run("UseContainerItem(0, 1)").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         // A move applied before the question's call: the slot is empty now.
         app.world_mut()
             .entity_mut(me)
@@ -2439,7 +2387,7 @@ mod bind_confirm_tests {
             1,
             "the question is filed"
         );
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert_eq!(script.cursor_item().map(|i| i.guid), Some(AXE_GUID));
         assert!(script.item_locked(AXE_GUID), "still locked, still held");
     }
@@ -2451,20 +2399,18 @@ mod bind_confirm_tests {
     fn a_refused_bind_on_use_confirm_spends_the_pending_use_and_sends_nothing() {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = right_click_a_bind_on_use_item(false);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(shown(&mut app, "USE_BIND"));
         let _ = rx.try_iter().count();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(r#"RunScript("ConfirmBindOnUse()")"#)
             .unwrap();
         crate::ui_items::calls::apply_kept_calls(app.world_mut());
         let sent: Vec<String> = rx.try_iter().map(|c| format!("{c:?}")).collect();
         assert_eq!(sent, Vec::<String>::new(), "the cast is refused");
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("ConfirmBindOnUse()")
             .unwrap();
         crate::ui_items::calls::apply_kept_calls(app.world_mut());
@@ -2478,7 +2424,7 @@ mod bind_confirm_tests {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = right_click_a_bind_on_use_item(false);
         {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.tick(0.01);
             s.lock_item(AXE_GUID);
             s.run("StaticPopup_OnClick(StaticPopup_FindVisible(\"USE_BIND\"), 1)")
@@ -2492,9 +2438,7 @@ mod bind_confirm_tests {
     fn a_bind_on_use_item_with_no_on_use_spell_still_asks() {
         benilla_formats::wow_data_or_skip!();
         let (mut app, rx) = right_click_a_bind_on_use_item(true);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.01);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.01);
         assert!(
             shown(&mut app, "USE_BIND"),
             "the reference's bind arm sits BELOW the on-use lookup's failure exits, not above them"

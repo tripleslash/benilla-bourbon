@@ -286,7 +286,7 @@ pub(crate) fn register_dev_commands(script: &benilla_ui::script::UiScript, dev: 
 /// ([`crate::ui_script::strings_vm`]).
 pub(crate) fn build_slash_commands(world: &mut World) {
     let glue_side = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .is_some_and(|s| s.vm_kind() == benilla_ui::script::VmKind::Glue);
     let own = if glue_side {
         crate::ui_script::strings_vm(world)
@@ -295,7 +295,7 @@ pub(crate) fn build_slash_commands(world: &mut World) {
     };
     let script = own
         .as_ref()
-        .or_else(|| world.get_non_send_resource::<benilla_ui::script::UiScript>());
+        .or_else(|| world.get_non_send::<benilla_ui::script::UiScript>());
     let emotes = world.get_resource::<crate::sound::EmoteSounds>();
     let (Some(script), Some(emotes)) = (script, emotes) else {
         warn!("chat: no UI VM or emote catalog — the slash-command table is EMPTY");

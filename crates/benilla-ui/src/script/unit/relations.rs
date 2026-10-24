@@ -98,7 +98,9 @@ fn ask_pair<T>(
     b: &str,
     ask: impl FnOnce(&dyn UnitRelations, u64, u64) -> Option<T>,
 ) -> mlua::Result<Option<T>> {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     let (ga, gb) = (guid_of(&model, a)?, guid_of(&model, b)?);
     let (Some(ga), Some(gb)) = (held(&model, ga), held(&model, gb)) else {
         return Ok(None);
@@ -119,7 +121,9 @@ fn predicate_or_group(
     b: &str,
     predicate: impl FnOnce(&dyn UnitRelations, u64, u64) -> Option<bool>,
 ) -> mlua::Result<bool> {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     let (ga, gb) = (guid_of(&model, a)?, guid_of(&model, b)?);
     let hit = held(&model, ga)
         .zip(held(&model, gb))
@@ -136,7 +140,9 @@ fn predicate_or_group(
 /// a party member out of view, the roster's PvP bit (`0x5164f9`), which its snapshot carries. An
 /// unknown token raises (`0x515c14`).
 pub(super) fn unit_is_pvp(lua: &Lua, token: &str) -> mlua::Result<Value> {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     let guid = guid_of(&model, token)?;
     let answer = match held(&model, guid) {
         Some(guid) => model

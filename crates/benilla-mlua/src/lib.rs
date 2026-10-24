@@ -1331,7 +1331,13 @@ fn pointer_of(r: &RefH) -> *const c_void {
         V::Str(s) => (3, s.id as usize),
         _ => (0, 0),
     };
-    ((kind << 40) | (id << 4) | 8) as *const c_void
+    #[cfg(target_pointer_width = "64")]
+    let address = (kind << 40) | (id << 4) | 8;
+    // A 32-bit pointer (the browser's wasm32) has no bit 40, so the kind takes the top two bits and
+    // the handle the 27 below them; distinct while a handle stays under 2^27.
+    #[cfg(target_pointer_width = "32")]
+    let address = (kind << 30) | ((id & 0x07ff_ffff) << 3) | 4;
+    address as *const c_void
 }
 
 // ── tables ───────────────────────────────────────────────────────────────────────────────────

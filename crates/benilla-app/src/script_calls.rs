@@ -543,9 +543,12 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::SpellStopTargeting => appliers.cursor().stop_targeting(),
             ScriptCall::SpellStopCasting => appliers.self_cancel().stop_casting(),
             ScriptCall::CastSpell {
-                spell_id, on_self, ..
+                spell_id,
+                on_self,
+                unit,
+                ..
             } => {
-                crate::ui_spellbook::cast_spell(&mut appliers.cast(), spell_id, on_self);
+                crate::ui_spellbook::cast_spell(&mut appliers.cast(), spell_id, on_self, unit);
             }
             ScriptCall::CastShapeshiftForm { spell_id, .. } => {
                 crate::ui_shapeshift::cast_form(&mut appliers.cast(), spell_id);
@@ -1007,7 +1010,7 @@ pub(crate) fn with_hosted_vm<R>(
     f: impl FnOnce(Option<&mut UiScript>) -> R,
 ) -> R {
     let mut state = bevy::ecs::system::SystemState::<HostedVm>::new(world);
-    let r = state.get_mut(world).run(f);
+    let r = state.get_mut(world).expect("`HostedVm` validates").run(f);
     state.apply(world);
     crate::creature_anim::apply_unit_edits(world);
     r
@@ -1016,21 +1019,21 @@ pub(crate) fn with_hosted_vm<R>(
 /// A fresh VM in `world`, for a test of an engine entry outside the feeds.
 #[cfg(test)]
 pub(crate) fn insert_test_vm(world: &mut World) {
-    world.insert_non_send_resource(UiScript::new().expect("a VM"));
+    world.insert_non_send(UiScript::new().expect("a VM"));
 }
 
 /// Defer what the world's VM fires while the guard lives ([`UiScript::defer`]), with the mark to
 /// park it from ([`park_since`]); `None` with no VM.
 pub(crate) fn defer_vm(world: &World) -> Option<(benilla_ui::script::Deferring, usize)> {
     world
-        .get_non_send_resource::<UiScript>()
+        .get_non_send::<UiScript>()
         .map(|vm| (vm.defer(), vm.waiting_mark()))
 }
 
 /// Park what the world's VM has held since `mark` ([`UiScript::park_since`]); the VM's session
 /// and the key, `None` with nothing held or no VM.
 pub(crate) fn park_since(world: &mut World, mark: usize) -> Option<(u64, u64)> {
-    let mut vm = world.get_non_send_resource_mut::<UiScript>()?;
+    let mut vm = world.get_non_send_mut::<UiScript>()?;
     let key = vm.park_since(mark)?;
     Some((vm.session(), key))
 }
@@ -1054,7 +1057,7 @@ pub(crate) fn run_parked(world: &mut World, session: u64, key: u64) {
 #[cfg(test)]
 pub(crate) fn eval_in_vm<T: benilla_ui::mlua::FromLuaMulti>(world: &World, chunk: &str) -> T {
     world
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval(chunk)
         .expect("the chunk runs")
 }
@@ -1070,7 +1073,7 @@ pub(crate) fn lent_by_world<R>(
 ) -> R {
     let mut state = bevy::ecs::system::SystemState::<Option<ScriptCallHost>>::new(world);
     let r = {
-        let mut host = state.get_mut(world);
+        let mut host = state.get_mut(world).expect("an optional host validates");
         match host.as_mut() {
             Some(host) => script.hosted(host, f),
             None => script.refusing(f),
@@ -1242,7 +1245,7 @@ mod tests {
             );
         }
         record_reports(&script);
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         Frame { app, rx }
     }
 
@@ -1284,7 +1287,7 @@ mod tests {
     fn reports(f: &mut Frame) -> Vec<String> {
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<Vec<String>>("local r = REPORTS REPORTS = {} return r")
             .expect("the recorder reads")
     }
@@ -1411,7 +1414,7 @@ mod tests {
     fn errors(f: &Frame) -> Vec<String> {
         f.app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<String>>("return LINES")
             .expect("the recorder reads")
     }
@@ -1459,7 +1462,7 @@ mod tests {
             ..crate::ui_action::Spells::empty_for_tests()
         });
         world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_spellbook(SpellBookState {
                 tabs: vec![SpellTabView {
                     name: "Priest".into(),
@@ -1535,7 +1538,7 @@ mod tests {
                 .pet_guid = PET;
             f.app
                 .world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .set_pet_book(PetBookState {
                     token: Some("PET".into()),
                     slots: vec![SpellSlotView {
@@ -1565,16 +1568,14 @@ mod tests {
             .resource_mut::<crate::ui_pet::PetBar>()
             .spells
             .pet_guid = PET;
-        world
-            .non_send_resource_mut::<UiScript>()
-            .set_pet_book(PetBookState {
-                token: Some("PET".into()),
-                slots: vec![SpellSlotView {
-                    spell_id: GROWL,
-                    name: "Growl".into(),
-                    ..Default::default()
-                }],
-            });
+        world.non_send_mut::<UiScript>().set_pet_book(PetBookState {
+            token: Some("PET".into()),
+            slots: vec![SpellSlotView {
+                spell_id: GROWL,
+                name: "Growl".into(),
+                ..Default::default()
+            }],
+        });
         world.resource_mut::<crate::spell::SpellTargeting>().enter(
             GROWL,
             crate::spell::CastCommit::Pet { caster: PET },
@@ -1651,7 +1652,7 @@ mod tests {
                 (16, ME as u32),
                 (17, 0),
             ])));
-        let mut script = world.non_send_resource_mut::<UiScript>();
+        let mut script = world.non_send_mut::<UiScript>();
         let named = |guid, name: &str| UnitState {
             exists: true,
             has_object: true,
@@ -1846,7 +1847,7 @@ mod tests {
             shadow_offset: 1.0,
         };
         {
-            let mut script = world.non_send_resource_mut::<UiScript>();
+            let mut script = world.non_send_mut::<UiScript>();
             script.run(r#"CreateFrame("Frame", "WorldFrame")"#).unwrap();
             script.sync_nameplates(geometry, &[plate(OLD), plate(NEW)]);
             script
@@ -1897,7 +1898,7 @@ mod tests {
             |_| None,
         ));
         world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .push_chat_input(r#"/script TargetUnit("party1") SEEN = UnitName("target")"#.into());
         crate::ui_chat::drain_chat_input_once(world);
         let seen = eval::<Option<String>>(&mut f, "return SEEN");
@@ -2023,7 +2024,7 @@ mod tests {
             world
                 .run_system_once(crate::ui_unit::feed_name_candidates)
                 .expect("the candidate feed runs as a one-shot system");
-            let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = f.app.world_mut().non_send_mut::<UiScript>();
             script.set_party(PartyState {
                 members: vec![PartyMemberInfo {
                     name: "Olly".into(),
@@ -2087,7 +2088,7 @@ mod tests {
             world
                 .run_system_once(crate::ui_unit::feed_name_candidates)
                 .expect("the candidate feed runs as a one-shot system");
-            let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = f.app.world_mut().non_send_mut::<UiScript>();
             script.set_party(PartyState {
                 members: vec![benilla_ui::script::PartyMemberInfo {
                     name: "Olly".into(),
@@ -2330,7 +2331,7 @@ mod tests {
         let mut f = frame(true);
         {
             let world = f.app.world_mut();
-            let script = world.non_send_resource::<UiScript>();
+            let script = world.non_send::<UiScript>();
             // `ChatFrame1`'s `EXECUTE_CHAT_LINE` handler (`ChatFrame.lua:1343`) sends the line
             // through the edit box; this one runs it as Lua, which is all the order needs.
             script
@@ -2371,7 +2372,7 @@ mod tests {
             let mut f = frame(true);
             {
                 let world = f.app.world_mut();
-                let script = world.non_send_resource::<UiScript>();
+                let script = world.non_send::<UiScript>();
                 script
                     .run(
                         r#"local f = CreateFrame("Frame")
@@ -2455,7 +2456,7 @@ mod tests {
             .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(
                 &pairs,
             )));
-        let mut script = world.non_send_resource_mut::<UiScript>();
+        let mut script = world.non_send_mut::<UiScript>();
         script.set_spellbook(SpellBookState {
             tabs: vec![SpellTabView {
                 name: "Druid".into(),
@@ -2564,7 +2565,7 @@ mod tests {
                 ..Default::default()
             }],
         });
-        f.app.world_mut().insert_non_send_resource(script);
+        f.app.world_mut().insert_non_send(script);
     }
 
     /// The unit feed, which signals the selection's change; the calls its handlers make apply
@@ -2623,7 +2624,7 @@ mod tests {
             with_factions(&mut f, FRIEND, &[]);
             f.app
                 .world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .run(
                     r#"local h = CreateFrame("Frame")
                     h:RegisterEvent("UI_ERROR_MESSAGE")
@@ -2643,7 +2644,7 @@ mod tests {
             let inputs = f
                 .app
                 .world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .take_binding_input();
             assert_eq!(!inputs.is_empty(), moved, "pressed: {pressed}");
         }
@@ -2876,7 +2877,7 @@ mod tests {
                     kind: benilla_protocol::messages::ACTION_KIND_ITEM,
                 },
             );
-        world.non_send_resource_mut::<UiScript>().set_container(
+        world.non_send_mut::<UiScript>().set_container(
             0,
             Some(benilla_ui::script::ContainerState {
                 num_slots: 16,
@@ -2895,9 +2896,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        world
-            .non_send_resource_mut::<UiScript>()
-            .seat_item_records();
+        world.non_send_mut::<UiScript>().seat_item_records();
         let _ = f.rx.try_iter().count();
     }
 
@@ -2970,9 +2969,7 @@ mod tests {
                     use_spell: 4321,
                     ..Default::default()
                 });
-                world
-                    .non_send_resource_mut::<UiScript>()
-                    .set_inventory_slots(slots);
+                world.non_send_mut::<UiScript>().set_inventory_slots(slots);
                 let _ = f.rx.try_iter().count();
                 run(&mut f, &call);
                 assert_eq!(uses(&f), want, "{call}");
@@ -3025,7 +3022,7 @@ mod tests {
         );
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(
                 "SIGNALS = 0 local f = CreateFrame('Frame') f:RegisterEvent('ITEM_LOCK_CHANGED') \
                  f:SetScript('OnEvent', function() SIGNALS = SIGNALS + 1 end)",
@@ -3042,7 +3039,7 @@ mod tests {
             )),
             "{sent:?}"
         );
-        let script = f.app.world().non_send_resource::<UiScript>();
+        let script = f.app.world().non_send::<UiScript>();
         assert_eq!(script.eval::<i64>("return SIGNALS").unwrap(), 1);
         assert!(!script.item_locked(POTION));
     }
@@ -3089,14 +3086,14 @@ mod tests {
                         kind: benilla_protocol::messages::ACTION_KIND_ITEM,
                     },
                 );
-            world.non_send_resource_mut::<UiScript>().lock_item(POTION);
+            world.non_send_mut::<UiScript>().lock_item(POTION);
         }
         let _ = f.rx.try_iter().count();
         run(&mut f, "UseAction(1)");
         assert_eq!(f.rx.try_iter().count(), 0, "a locked copy is not used");
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .unlock_item(POTION);
         run(&mut f, "UseAction(1)");
         assert!(f.rx.try_iter().count() > 0, "unlocked, the use goes out");
@@ -3166,7 +3163,7 @@ mod tests {
         let mut slots = std::collections::HashMap::new();
         slots.insert(1, slot(HELD, HELD_ENTRY, vec![], 0));
         slots.insert(2, slot(HELM, HELM_ENTRY, vec![1], bonding));
-        let mut script = world.non_send_resource_mut::<UiScript>();
+        let mut script = world.non_send_mut::<UiScript>();
         script.set_container(
             0,
             Some(benilla_ui::script::ContainerState {
@@ -3188,7 +3185,7 @@ mod tests {
         // Hold the first item, then press the bar key (`checkCursor` 0).
         run(&mut f, "PickupContainerItem(0, 1) UseAction(1, 0)");
 
-        let script = f.app.world().non_send_resource::<UiScript>();
+        let script = f.app.world().non_send::<UiScript>();
         assert!(
             script.cursor_item().is_none(),
             "the held item was dropped and the bar's item sent off the cursor"
@@ -3225,7 +3222,7 @@ mod tests {
         with_bar_helm(&mut f, 2);
         run(&mut f, "PickupContainerItem(0, 1) UseAction(1, 0)");
 
-        let script = f.app.world().non_send_resource::<UiScript>();
+        let script = f.app.world().non_send::<UiScript>();
         assert_eq!(script.cursor_item().map(|i| i.guid), Some(HELM));
         assert!(!script.item_locked(HELM));
         assert!(!script.item_locked(HELD), "the held item went back");
@@ -3258,11 +3255,11 @@ mod tests {
         with_bar_helm(&mut f, 0);
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_player_control(false);
         run(&mut f, "UseAction(1, 0)");
         assert_eq!(f.rx.try_iter().count(), 0, "nothing is sent");
-        let script = f.app.world().non_send_resource::<UiScript>();
+        let script = f.app.world().non_send::<UiScript>();
         assert!(script.cursor_item().is_none());
     }
 
@@ -3275,7 +3272,7 @@ mod tests {
         with_bar_helm(&mut f, 0);
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_player_control(false);
         run(&mut f, "PickupContainerItem(0, 1) UseAction(1, 0)");
         let sent: Vec<_> = f.rx.try_iter().collect();
@@ -3289,7 +3286,7 @@ mod tests {
             ),
             "the held item from backpack slot 1 goes, not the helm: {sent:?}"
         );
-        let script = f.app.world().non_send_resource::<UiScript>();
+        let script = f.app.world().non_send::<UiScript>();
         assert!(script.cursor_item().is_none());
     }
 
@@ -3299,7 +3296,7 @@ mod tests {
         let mut f = frame(false);
         with_bar_helm(&mut f, 0);
         {
-            let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = f.app.world_mut().non_send_mut::<UiScript>();
             script.set_player_control(false);
             script.set_on_taxi(true);
         }
@@ -3327,7 +3324,7 @@ mod tests {
         // The refusal tests the partner cell first (`0x4bfd23`): the window is open.
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .open_trade_window();
         run(
             &mut f,
@@ -3341,7 +3338,7 @@ mod tests {
             eval::<String>(&mut f, "return SEEN"),
             "ERR_EQUIP_TRADE_ITEM"
         );
-        let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = f.app.world_mut().non_send_mut::<UiScript>();
         assert_eq!(script.cursor_item().map(|i| i.guid), Some(HELD));
         assert!(
             script.take_ui_errors().is_empty(),
@@ -3368,7 +3365,7 @@ mod tests {
         );
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_player_control(false);
         let _ = f.rx.try_iter().count();
         run(&mut f, "UseAction(1)");
@@ -3378,7 +3375,7 @@ mod tests {
         // The spell is one the app fed as passing: the gate lets the use on to the cast.
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_control_bypass([4321].into());
         run(&mut f, "UseAction(1)");
         let shown = reports(&mut f);
@@ -3399,7 +3396,7 @@ mod tests {
             .enter(HEAL, crate::spell::CastCommit::Spell, 0x0002);
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_spell_targeting(true);
     }
 
@@ -3737,7 +3734,7 @@ mod tests {
             ..crate::ui_action::Spells::empty_for_tests()
         });
         world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_spellbook(SpellBookState {
                 tabs: vec![SpellTabView {
                     name: "Book".into(),
@@ -3788,7 +3785,7 @@ mod tests {
     fn global(f: &mut Frame, name: &str) -> Option<i64> {
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<Option<i64>>(&format!("return {name}"))
             .expect("the global reads")
     }
@@ -3948,7 +3945,7 @@ mod tests {
         );
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(
                 r#"local f = CreateFrame("Frame")
                 f:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
@@ -3998,7 +3995,7 @@ mod tests {
         );
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(
                 r#"SEEN = {}
                 local f = CreateFrame("Frame")
@@ -4010,7 +4007,7 @@ mod tests {
         let seen = |f: &mut Frame| {
             f.app
                 .world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<Vec<String>>("return SEEN")
                 .unwrap()
         };
@@ -4060,7 +4057,7 @@ mod tests {
         );
         let world = f.app.world_mut();
         {
-            let mut script = world.non_send_resource_mut::<UiScript>();
+            let mut script = world.non_send_mut::<UiScript>();
             script.set_default_bindings(benilla_ui::script::keybind::parse_bindings_wtf(
                 "bind F SMARTRES\r\n",
             ));
@@ -4110,7 +4107,7 @@ mod tests {
         );
         let world = f.app.world_mut();
         {
-            let mut script = world.non_send_resource_mut::<UiScript>();
+            let mut script = world.non_send_mut::<UiScript>();
             script.set_screen_size(1024.0, 768.0);
             script
                 .run(
@@ -4182,7 +4179,7 @@ mod tests {
         let mut f = cork_frame();
         let world = f.app.world_mut();
         world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(&format!(
                 r#"local u = CreateFrame("Frame")
                 u:SetScript("OnUpdate", function()
@@ -4207,7 +4204,7 @@ mod tests {
         let mut f = cork_frame();
         let world = f.app.world_mut();
         world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(&format!(
                 r#"local e = CreateFrame("Frame")
                 e:RegisterEvent("CHAT_MSG_SYSTEM")
@@ -4235,7 +4232,7 @@ mod tests {
         let mut f = cork_frame();
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(&format!(
                 r#"local e = CreateFrame("Frame")
                 e:RegisterEvent("{event}")
@@ -4281,17 +4278,16 @@ mod tests {
     fn the_chat_drains_unit_combat_names_the_target_as_it_signals() {
         let mut f = frame(true);
         // The VM shows the selection the frame's feed would have pushed.
-        f.app
-            .world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .set_unit_guids(&benilla_ui::script::UnitGuids {
+        f.app.world_mut().non_send_mut::<UiScript>().set_unit_guids(
+            &benilla_ui::script::UnitGuids {
                 player: ME,
                 target: OLD,
                 ..Default::default()
-            });
+            },
+        );
         f.app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(
                 r#"ORDER = {}
                 local e = CreateFrame("Frame")
@@ -4332,7 +4328,7 @@ mod tests {
         let order = f
             .app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<Vec<String>>("return ORDER")
             .expect("the order reads");
         assert_eq!(order, ["target DODGE", "CHAT_MSG_SYSTEM"]);
@@ -4359,17 +4355,21 @@ mod tests {
                 schedule.graph_mut().systems.initialize(world);
                 let Some(vm) = world
                     .components()
-                    .get_resource_id(std::any::TypeId::of::<UiScript>())
+                    .get_id(std::any::TypeId::of::<UiScript>())
                 else {
                     return;
                 };
+                let accesses = crate::vm_pass::system_accesses(schedule, world);
                 let graph = schedule.graph();
                 for (key, system, _) in graph.systems.iter() {
-                    let Some(declared) = graph.systems.get(key) else {
+                    let Some(declared) = accesses.get(&key) else {
                         continue;
                     };
-                    let access = declared.access.combined_access();
-                    if system.is_exclusive() || !access.has_resource_write(vm) {
+                    let access = declared.combined_access();
+                    // A write by name: an unbounded one names no resource in particular.
+                    if system.is_exclusive()
+                        || !access.try_writes().is_ok_and(|set| set.contains(vm))
+                    {
                         continue;
                     }
                     writers.push(system.name().to_string());

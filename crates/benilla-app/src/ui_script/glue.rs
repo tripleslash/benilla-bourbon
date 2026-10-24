@@ -331,7 +331,7 @@ pub(crate) fn run_pending_glue_rebuild(world: &mut World) {
         return;
     }
     let idle = world
-        .get_non_send_resource::<super::glue_mgr::SharedGlueMgr>()
+        .get_non_send::<super::glue_mgr::SharedGlueMgr>()
         .is_none_or(|m| m.get().state == super::glue_mgr::ScreenState::Idle);
     if !idle {
         return;
@@ -341,7 +341,7 @@ pub(crate) fn run_pending_glue_rebuild(world: &mut World) {
         .get_resource::<State<crate::client_state::ClientState>>()
         .is_some_and(|s| *s.get() == crate::client_state::ClientState::InWorld);
     let screen = world
-        .get_non_send_resource::<UiScript>()
+        .get_non_send::<UiScript>()
         .filter(|s| s.vm_kind() == benilla_ui::script::VmKind::Glue)
         .map(|s| s.glue_screen());
     let Some(screen) = screen.filter(|_| !in_world) else {
@@ -356,7 +356,7 @@ pub(crate) fn run_pending_glue_rebuild(world: &mut World) {
 /// run as the in-game drain runs its own, their output to the log: the glue has no chat to print
 /// to.
 pub(crate) fn drain_glue_console(world: &mut World) {
-    let lines = match world.get_non_send_resource_mut::<UiScript>() {
+    let lines = match world.get_non_send_mut::<UiScript>() {
         Some(mut s) if s.vm_kind() == benilla_ui::script::VmKind::Glue => s.take_console_lines(),
         _ => return,
     };
@@ -376,9 +376,9 @@ mod tests {
     /// list only shrinks: a name built, or no longer reached, comes off it.
     const UNBUILT_CALLED: &[&str] = &[];
 
-    /// What the player's own files make the reference report too: their `tos.html` uses `<H4>`,
-    /// which 1.12's SimpleHTML does not know (`"Frame %s: Unknown element type: %s"`,
-    /// `0x87a95c`, and the walk goes on).
+    /// What the player's own files make the reference report too: their `tos.html` uses `<H4>`
+    /// (`<h4>` in a US install), which 1.12's SimpleHTML does not know (`"Frame %s: Unknown
+    /// element type: %s"`, `0x87a95c`, the tag as written, and the walk goes on).
     const INSTALL_WARNINGS: &[&str] = &["Frame TOSText: Unknown element type: H4"];
 
     /// The frames each stock glue screen and dialog is, which the load must build.
@@ -466,7 +466,7 @@ mod tests {
                     called.insert(name);
                     return false;
                 }
-                if INSTALL_WARNINGS.contains(&e.as_str()) {
+                if INSTALL_WARNINGS.iter().any(|w| w.eq_ignore_ascii_case(e)) {
                     return false;
                 }
                 true
@@ -656,14 +656,14 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(commands);
         world.insert_resource(State::new(crate::client_state::ClientState::Login));
-        world.init_non_send_resource::<super::super::glue_mgr::SharedGlueMgr>();
+        world.init_non_send::<super::super::glue_mgr::SharedGlueMgr>();
         world.init_resource::<GlueRebuild>();
         super::super::lifecycle::setup_script(&mut world);
         world
     }
 
     fn session(world: &World) -> u64 {
-        world.non_send_resource::<UiScript>().session()
+        world.non_send::<UiScript>().session()
     }
 
     /// `ConsoleExec("reloadUI")` at the login screens reaches the console (`0x515f10`), whose
@@ -678,10 +678,10 @@ mod tests {
         let _ = benilla_formats::wow_data_or_skip!();
         let mut world = glue_world();
         let set_state = |world: &World, state: ScreenState| {
-            world.non_send_resource::<SharedGlueMgr>().get_mut().state = state;
+            world.non_send::<SharedGlueMgr>().get_mut().state = state;
         };
         world
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run("SetGlueScreen('credits') ConsoleExec('reloadUI')")
             .unwrap();
         drain_glue_console(&mut world);
@@ -695,7 +695,7 @@ mod tests {
         set_state(&world, ScreenState::Idle);
         run_pending_glue_rebuild(&mut world);
         assert_ne!(session(&world), old, "state 0 rebuilds the glue");
-        let s = world.non_send_resource::<UiScript>();
+        let s = world.non_send::<UiScript>();
         assert_eq!(s.vm_kind(), VmKind::Glue);
         assert_eq!(s.glue_screen(), "credits");
         assert_eq!(
@@ -800,6 +800,7 @@ mod tests {
                 display: DisplayMode::Windowed,
                 maximize: false,
                 windowed: UVec2::new(1024, 768),
+                world_shadows: false,
             })
             .add_systems(PreUpdate, show_screen_size);
         assert!(!c.frame(1024.0, 768.0), "the size it was built at");

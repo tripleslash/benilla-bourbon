@@ -165,26 +165,37 @@ impl GlueSceneFile {
     }
 }
 
-/// The `WOW_CREATE_TEST` harness's stage for `race`: `GlueParent.lua`'s `SetBackgroundModel`
-/// remap (Gnome in Dwarf's, Troll in Orc's) and its `CharModelFogInfo` row, near 0.
-fn stock_scene(race: u8) -> (GlueSceneFile, SceneFog) {
-    let (token, rgb, far) = match race {
-        2 | 8 => ("Orc", [0.5, 0.5, 0.5], 270.0),
-        3 | 7 => ("Dwarf", [0.85, 0.88, 1.0], 500.0),
-        4 => ("NightElf", [0.25, 0.22, 0.55], 611.0),
-        5 => ("Scourge", [0.0, 0.22, 0.22], 26.0),
-        6 => ("Tauren", [1.0, 0.61, 0.42], 153.0),
-        _ => ("Human", [0.8, 0.65, 0.73], 222.0),
+/// The `WOW_CREATE_TEST` harness's stage for `race` under the flavor in force
+/// ([`stock_scene_in`]).
+fn stock_scene(race: u8) -> (GlueSceneFile, Option<SceneFog>) {
+    stock_scene_in(race, crate::flavor::turtle())
+}
+
+/// A race's stage: `GlueParent.lua`'s `SetBackgroundModel` remap and its `CharModelFogInfo` row,
+/// near 0. 1.12.1's stands Gnome in Dwarf's and Troll in Orc's; Turtle WoW's (`turtle`) folds
+/// only Troll, into `UI_CharacterSelect`, gives Gnome, Goblin and High Elf their own file
+/// string's scene (`UI_Gnome`, `UI_Goblin`, `UI_BloodElf`), and none of those four a fog row, so
+/// the fog clears (`ClearFog`).
+fn stock_scene_in(race: u8, turtle: bool) -> (GlueSceneFile, Option<SceneFog>) {
+    let (token, fog) = match (race, turtle) {
+        (2, _) | (8, false) => ("Orc", Some(([0.5, 0.5, 0.5], 270.0))),
+        (3, _) | (7, false) => ("Dwarf", Some(([0.85, 0.88, 1.0], 500.0))),
+        (4, _) => ("NightElf", Some(([0.25, 0.22, 0.55], 611.0))),
+        (5, _) => ("Scourge", Some(([0.0, 0.22, 0.22], 26.0))),
+        (6, _) => ("Tauren", Some(([1.0, 0.61, 0.42], 153.0))),
+        (7, true) => ("Gnome", None),
+        (8, true) => ("CharacterSelect", None),
+        (9, true) => ("Goblin", None),
+        (10, true) => ("BloodElf", None),
+        _ => ("Human", Some(([0.8, 0.65, 0.73], 222.0))),
     };
     let path = format!("Interface\\Glues\\Models\\UI_{token}\\UI_{token}.mdx");
-    (
-        GlueSceneFile::new(&path),
-        SceneFog {
-            rgb,
-            near: 0.0,
-            far,
-        },
-    )
+    let fog = fog.map(|(rgb, far)| SceneFog {
+        rgb,
+        near: 0.0,
+        far,
+    });
+    (GlueSceneFile::new(&path), fog)
 }
 
 /// A scene's fog: the colour and the span the fog fill callback (`0x76d680`) reads off the pane.
@@ -284,7 +295,7 @@ impl GluePreview {
         });
         self.scene = Some(scene);
         self.look = Some(GlueLook::Create(look));
-        self.fog = Some(fog);
+        self.fog = fog;
     }
 }
 
@@ -1682,8 +1693,7 @@ pub(super) fn sync_glue_booth(
                 static_mesh: p.static_mesh.clone(),
                 material: relight(&p.material, &mut scene, &mut booth_light, &mut materials),
                 twins: relight_twins(&p.twins, &mut scene, &mut booth_light, &mut materials),
-                // `None`: the character assembly does not carry its alpha loops.
-                alpha_anim: None,
+                alpha_anim: p.alpha_anim.clone(),
                 mat_anim: false,
             });
         }
@@ -1695,6 +1705,7 @@ pub(super) fn sync_glue_booth(
                 material: relight(&r.material, &mut scene, &mut booth_light, &mut materials),
                 bone: r.bone,
                 offset: r.offset,
+                idle: Transform::IDENTITY,
                 twins: relight_twins(&r.twins, &mut scene, &mut booth_light, &mut materials),
                 mat_anim: false,
             })
@@ -2309,6 +2320,48 @@ mod tests {
     use benilla_assets::ModelLight;
     use benilla_formats::M2Light;
 
+    /// 1.12.1 folds Gnome into Dwarf and Troll into Orc; Turtle WoW gives Gnome, Goblin and High Elf
+    /// their own scenes, Troll `UI_CharacterSelect`, and none of those four a fog row.
+    #[test]
+    fn a_race_scene_follows_its_clients_background_model() {
+        let scene = |r, turtle| {
+            let (file, _) = stock_scene_in(r, turtle);
+            let name = file.path().rsplit('\\').next().unwrap().to_string();
+            name.trim_start_matches("UI_")
+                .trim_end_matches(".mdx")
+                .to_string()
+        };
+        let vanilla: Vec<_> = (1..=8).map(|r| scene(r, false)).collect();
+        assert_eq!(
+            vanilla,
+            ["Human", "Orc", "Dwarf", "NightElf", "Scourge", "Tauren", "Dwarf", "Orc"]
+        );
+        let turtle: Vec<_> = (1..=10).map(|r| scene(r, true)).collect();
+        assert_eq!(
+            turtle,
+            [
+                "Human",
+                "Orc",
+                "Dwarf",
+                "NightElf",
+                "Scourge",
+                "Tauren",
+                "Gnome",
+                "CharacterSelect",
+                "Goblin",
+                "BloodElf"
+            ]
+        );
+        for race in 7..=10 {
+            assert!(
+                stock_scene_in(race, true).1.is_none(),
+                "{race} clears the fog"
+            );
+        }
+        assert_eq!(stock_scene_in(1, true).1.map(|f| f.far), Some(222.0));
+        assert_eq!(stock_scene_in(7, false).1.map(|f| f.far), Some(500.0));
+    }
+
     /// `GlueParent`'s rect on a window of `aspect` (`GlueParent.lua:78-84`): the whole screen up to
     /// 16:9, a centred 16:9 box past it; as window fractions from the top-left.
     fn glue_parent(aspect: f32) -> [f32; 4] {
@@ -2450,7 +2503,7 @@ mod tests {
             custom.url(),
             "mpq-loose://interface/glues/models/custom/ui_orc.m2"
         );
-        assert_ne!(custom, stock_scene(2).0, "not the stock UI_Orc");
+        assert_ne!(custom, stock_scene_in(2, false).0, "not the stock UI_Orc");
         // Case and extension fold; the separators do not.
         let night_elf = "Interface\\Glues\\Models\\UI_NightElf\\UI_NightElf.MDX";
         assert_eq!(
@@ -2466,10 +2519,14 @@ mod tests {
             "Interface\\Glues\\Models\\UI_Gnome\\UI_Gnome.mdx"
         );
         assert_eq!(
-            stock_scene(8).0.url(),
+            stock_scene_in(8, false).0.url(),
             "mpq-loose://interface/glues/models/ui_orc/ui_orc.m2"
         );
-        assert_eq!(stock_scene(7).0, stock_scene(3).0, "a gnome in Dwarf's");
+        assert_eq!(
+            stock_scene_in(7, false).0,
+            stock_scene_in(3, false).0,
+            "a gnome in Dwarf's"
+        );
         // A file the cache refuses stands the error cube, off the archives (`0x70737f`).
         assert_eq!(
             GlueSceneFile::new("Interface\\Glues\\Models\\UI_Orc\\UI_Orc.blp").url(),
@@ -2692,7 +2749,7 @@ mod tests {
             images.add(Image::new_target_texture(
                 64,
                 64,
-                bevy::render::render_resource::TextureFormat::bevy_default(),
+                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
                 None,
             ))
         };

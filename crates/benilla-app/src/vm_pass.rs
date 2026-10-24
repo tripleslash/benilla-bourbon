@@ -24,6 +24,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 
 use bevy::ecs::component::ComponentId;
+use bevy::ecs::query::{Access, FilteredAccessSet};
 use bevy::ecs::schedule::graph::Direction;
 use bevy::ecs::schedule::{InternedSystemSet, NodeId, ScheduleLabel, SystemKey, SystemSetKey};
 use bevy::ecs::system::{IntoSystem, System};
@@ -108,7 +109,7 @@ impl Plugin for VmPassPlugin {
 fn flush_unit_edits_elsewhere(world: &mut World) {
     let Some(edits) = world
         .components()
-        .get_resource_id(std::any::TypeId::of::<crate::creature_anim::UnitEdits>())
+        .get_id(std::any::TypeId::of::<crate::creature_anim::UnitEdits>())
     else {
         return;
     };
@@ -121,13 +122,14 @@ fn flush_unit_edits_elsewhere(world: &mut World) {
     for label in labels {
         world.schedule_scope(label, |world, schedule| {
             schedule.graph_mut().systems.initialize(world);
+            let accesses = system_accesses(schedule, world);
             let graph = schedule.graph();
             let (exclusive, users): (Vec<_>, Vec<_>) = graph
                 .systems
                 .iter()
                 .filter(|(key, system, _)| {
-                    graph.systems.get(*key).is_some_and(|s| {
-                        system.is_exclusive() || s.access.combined_access().has_resource_read(edits)
+                    accesses.get(key).is_some_and(|a| {
+                        system.is_exclusive() || names_read(a.combined_access(), edits)
                     })
                 })
                 .filter_map(|(_, system, _)| {
@@ -148,6 +150,29 @@ fn flush_unit_edits_elsewhere(world: &mut World) {
     }
 }
 
+/// Every system's declared access in `schedule`, read back by initializing each again: 0.19
+/// keeps the stored access private, and a function system's `initialize` keeps its state and
+/// only recomputes the access.
+pub(crate) fn system_accesses(
+    schedule: &mut Schedule,
+    world: &mut World,
+) -> HashMap<SystemKey, FilteredAccessSet> {
+    let systems = &mut schedule.graph_mut().systems;
+    let keys: Vec<SystemKey> = systems.iter().map(|(key, _, _)| key).collect();
+    keys.into_iter()
+        .filter_map(|key| Some((key, System::initialize(systems.get_mut(key)?, world))))
+        .collect()
+}
+
+/// Whether `access` reads `id` by name. 0.19 keeps resources as components, so an unbounded
+/// read (an `EntityRef` query, an `EntityMutExcept`) reaches every resource while naming none;
+/// 0.18's resource access never counted those.
+pub(crate) fn names_read(access: &Access, id: ComponentId) -> bool {
+    access
+        .try_reads_and_writes()
+        .is_ok_and(|set| set.contains(id))
+}
+
 /// The host's append-only sinks, which it and their other users share by `&self`: the chat log,
 /// the refusal keys, the message sounds and the unit edits. Each user's declared access reads
 /// them only, so [`order_the_pass`] takes every user in as though it wrote them: one runs at a
@@ -162,7 +187,7 @@ pub(crate) fn shared_sinks(world: &World) -> Vec<ComponentId> {
         std::any::TypeId::of::<crate::player::FarSight>(),
     ]
     .into_iter()
-    .filter_map(|t| world.components().get_resource_id(t))
+    .filter_map(|t| world.components().get_id(t))
     .collect()
 }
 
@@ -194,6 +219,7 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
     let sinks = shared_sinks(world);
     world.schedule_scope(label, |world, schedule| {
         schedule.graph_mut().systems.initialize(world);
+        let accesses = system_accesses(schedule, world);
         let graph = schedule.graph();
         let keys: Vec<SystemKey> = graph.systems.iter().map(|(key, _, _)| key).collect();
         let index: HashMap<SystemKey, usize> =
@@ -251,7 +277,7 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
             .systems
             .iter()
             .map(|(key, system, _)| {
-                let Some(declared) = graph.systems.get(key).map(|s| &s.access) else {
+                let Some(declared) = accesses.get(&key) else {
                     return Joins::No;
                 };
                 if system.is_exclusive() {
@@ -263,7 +289,7 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
                 let hosted = with_host == *combined;
                 if hosted || (in_phase[index[&key]] && !declared.is_compatible(&host)) {
                     Joins::Always
-                } else if sinks.iter().any(|id| combined.has_resource_read(*id)) {
+                } else if sinks.iter().any(|id| names_read(combined, *id)) {
                     Joins::Sink
                 } else {
                     Joins::No
@@ -487,7 +513,7 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
                 None => graph
                     .systems
                     .get(keys[i])
-                    .map(|s| s.system.name().to_string())
+                    .map(|s| s.system().name().to_string())
                     .unwrap_or_default(),
             };
             // An unplaced node waits on an unplaced one; walking back from any closes a cycle.
@@ -547,7 +573,7 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
                 graph
                     .systems
                     .get(keys[*i])
-                    .map(|s| s.system.name().to_string())
+                    .map(|s| s.system().name().to_string())
                     .unwrap_or_default()
             })
             .collect();
@@ -750,16 +776,17 @@ mod tests {
         let mut found = Vec::new();
         world.schedule_scope(Update, |world, schedule| {
             schedule.graph_mut().systems.initialize(world);
+            let accesses = super::system_accesses(schedule, world);
             let graph = schedule.graph();
             for (key, system, _) in graph.systems.iter() {
                 let name = system.name().to_string();
                 if !order.contains(&name) {
                     continue;
                 }
-                let declared = &graph.systems.get(key).expect("initialized").access;
+                let declared = accesses.get(&key).expect("initialized");
                 let combined = declared.combined_access();
                 for (edit, id) in &writes {
-                    if combined.has_component_read(*id)
+                    if combined.has_read(*id)
                         || declared
                             .filtered_accesses()
                             .iter()
@@ -797,7 +824,7 @@ mod tests {
         let edits = app
             .world()
             .components()
-            .get_resource_id(std::any::TypeId::of::<crate::creature_anim::UnitEdits>())
+            .get_id(std::any::TypeId::of::<crate::creature_anim::UnitEdits>())
             .expect("the queue is registered");
         let labels: Vec<_> = app
             .world()
@@ -806,7 +833,7 @@ mod tests {
             .map(|(_, schedule)| schedule.label())
             .collect();
         // By identity, not by name: a build without type names has none.
-        let flush = System::type_id(&IntoSystem::into_system(
+        let flush = System::system_type(&IntoSystem::into_system(
             crate::creature_anim::flush_unit_edits,
         ));
         let (mut users, mut exclusives) = (0, 0);
@@ -816,17 +843,18 @@ mod tests {
             let queues: Vec<(SystemKey, String, Kind)> =
                 app.world_mut().schedule_scope(label, |world, schedule| {
                     schedule.graph_mut().systems.initialize(world);
+                    let accesses = super::system_accesses(schedule, world);
                     let graph = schedule.graph();
                     graph
                         .systems
                         .iter()
                         .filter_map(|(key, system, _)| {
-                            let access = &graph.systems.get(key).expect("initialized").access;
+                            let access = accesses.get(&key).expect("initialized");
                             let kind = if system.is_exclusive() {
                                 Kind::Exclusive
-                            } else if System::type_id(&**system) == flush {
+                            } else if System::system_type(&**system) == flush {
                                 Kind::Flush
-                            } else if access.combined_access().has_resource_read(edits) {
+                            } else if super::names_read(access.combined_access(), edits) {
                                 Kind::User
                             } else {
                                 return None;
@@ -881,18 +909,15 @@ mod tests {
         assert_eq!(sinks.len(), 5, "the sinks are registered");
         let users: Vec<SystemKey> = app.world_mut().schedule_scope(Update, |world, schedule| {
             schedule.graph_mut().systems.initialize(world);
+            let accesses = super::system_accesses(schedule, world);
             let graph = schedule.graph();
             graph
                 .systems
                 .iter()
                 .filter(|(key, system, _)| {
-                    let combined = graph
-                        .systems
-                        .get(*key)
-                        .expect("initialized")
-                        .access
-                        .combined_access();
-                    !system.is_exclusive() && sinks.iter().any(|id| combined.has_resource_read(*id))
+                    let combined = accesses.get(key).expect("initialized").combined_access();
+                    !system.is_exclusive()
+                        && sinks.iter().any(|id| super::names_read(combined, *id))
                 })
                 .map(|(key, _, _)| key)
                 .collect()

@@ -492,13 +492,24 @@ pub(super) const CAM_PIVOT_FALLBACK: f32 = 1.8;
 /// `cam+0x124`. Its third preset is not built: `cam+0x11c`/`cam+0x120`, split on
 /// `cam+0x198 < 1.8315` (`[0x8089b0]`), are both 1.9002692 on a scale-1 human, and what sets them
 /// apart is untraced.
+///
+/// The **mounted** preset does not come through here: it is this same band applied to a different
+/// sum (the saddle is inside the clamp), so it calls [`clamp_pivot_height`] directly. See
+/// [`super::body_pose::pivot_target`].
 pub(super) fn model_pivot_height(pivot: &CameraPivot, scale: f32, swimming: bool) -> f32 {
     let local = if swimming {
         pivot.height_local - pivot.swim_drop_local
     } else {
         pivot.height_local
     };
-    (local * scale).clamp(CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL)
+    clamp_pivot_height(local * scale)
+}
+
+/// The reference's per-preset clamp on a world pivot height (`0x50ca90`), split out so the mounted
+/// preset — which is the same height plus [`CameraPivot::mounted_delta_local`] plus the saddle —
+/// cannot end up clamped differently from the standing and swimming ones.
+pub(super) fn clamp_pivot_height(h: f32) -> f32 {
+    h.clamp(CAM_PIVOT_FLOOR, CAM_PIVOT_CEIL)
 }
 
 /// World head height above a unit's feet: the standing preset, or [`CAM_PIVOT_FALLBACK`] with no
@@ -840,9 +851,28 @@ impl FlyCam {
 /// height (`0x50cbc0`): `attach17.z + 0.0972` from M2 attachment 17 where the model has one, else
 /// `0.9 ×` the vertex box's Z extent; `0.0` for a display with no bounds. Stamped on every modeled
 /// unit at attach; [`model_pivot_height`] makes it the world pivot.
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, Default)]
 pub(crate) struct CameraPivot {
     pub height_local: f32,
+    /// The **mounted** correction to that height, model-local and pre-scale
+    /// ([`benilla_formats::M2Bounds::mounted_pivot_delta`]): `Mount.max.z − Stand.max.z` off the
+    /// model's own sequence boxes, which the reference adds to the preset whenever
+    /// `UNIT_FIELD_MOUNTDISPLAYID` is non-zero (`0x50cba8` picks animation 91, `0x50cddf` applies
+    /// the difference). Negative on every character, and paired with
+    /// [`Player::mount_seat_lift`][crate::player::Player] — the correction alone would sink the
+    /// camera into the mount, the seat alone would ride a head too high.
+    ///
+    /// `0.0` for a model authoring no `Mount` sequence, which is every model that cannot be
+    /// ridden.
+    pub mounted_delta_local: f32,
+    /// **Where a rider sits on this model** — attachment 0's model-space Z, pre-scale
+    /// ([`benilla_formats::M2Bounds::mount_seat_z`]), `0.0` for anything that is not a mount.
+    ///
+    /// Read off the MOUNT CHILD, not off the body: `0x50ce1c` fetches it from the mount's own
+    /// model. It is the model's authored record and never a posed bone, so the mounted pivot does
+    /// not breathe with the idle, does not lift on a MountSpecial, and arrives in one step when the
+    /// mount model does.
+    pub seat_z_local: f32,
     /// How far that height drops while swimming, model-local before scale
     /// ([`benilla_formats::M2Bounds::swim_pivot_drop`], `StandSeq.max.z − SwimSeq.max.z`,
     /// `0x50ccf6`); `0.0` with no Swim sequence, where the two presets coincide.
@@ -1063,6 +1093,30 @@ fn disengage_look(rig: &mut CameraControl, window: &mut Window, cursor_opts: &mu
         release_cursor(cursor_opts);
         if let Some(pos) = stash {
             window.set_cursor_position(Some(pos));
+        }
+    }
+}
+
+/// `OnExit(InWorld)`: a `/logout` or a lost session ends a look session in flight, as the glue
+/// screens own a visible pointer and `control`, which would see the button's release, no longer
+/// runs. The world mouse word goes with it: the next world enter starts with nothing held.
+pub(super) fn end_look_on_session_end(
+    mut rig: ResMut<CameraControl>,
+    mut window: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
+) {
+    rig.world_mouse = WorldMouse::default();
+    rig.freelook = false;
+    if rig.look.is_none() {
+        return;
+    }
+    match window.single_mut() {
+        Ok((mut window, mut cursor_opts)) => {
+            disengage_look(&mut rig, &mut window, &mut cursor_opts)
+        }
+        Err(_) => {
+            rig.look = None;
+            rig.cursor_stash = None;
+            rig.cursor_released = false;
         }
     }
 }
@@ -1723,7 +1777,7 @@ mod tests {
     fn the_pivot_target_is_clamped_to_the_references_band() {
         let p = CameraPivot {
             height_local: 2.0,
-            swim_drop_local: 0.0,
+            ..CameraPivot::default()
         };
         assert_eq!(model_pivot_height(&p, 1.0, false), 2.0);
         assert_eq!(model_pivot_height(&p, 0.01, false), CAM_PIVOT_FLOOR);
@@ -1738,6 +1792,7 @@ mod tests {
         let human = CameraPivot {
             height_local: 1.9002692,
             swim_drop_local: 0.3882572,
+            ..CameraPivot::default()
         };
         assert!((model_pivot_height(&human, 1.0, false) - 1.9002692).abs() < 1e-5);
         assert!((model_pivot_height(&human, 1.0, true) - 1.512_012).abs() < 1e-5);
@@ -1757,12 +1812,73 @@ mod tests {
         let chicken = CameraPivot {
             height_local: 1.2,
             swim_drop_local: 0.0,
+            ..CameraPivot::default()
         };
         assert_eq!(
             model_pivot_height(&chicken, 1.0, true),
             model_pivot_height(&chicken, 1.0, false),
         );
         assert_eq!(model_pivot_height(&chicken, 1.0, true), 1.2);
+    }
+
+    /// **Mounting raises the framing pivot once, to a fixed height** — the reported bug, all
+    /// three faces of it.
+    ///
+    /// The reference's preset moves two things when `UNIT_FIELD_MOUNTDISPLAYID` goes non-zero: the
+    /// pose the rider's pivot is measured in (`0x50cba8` forces animation 91 `Mount`, `0x50cddf`
+    /// corrects by that box against Stand's) and the origin it is measured from (`0x50ce1c` adds
+    /// the MOUNT model's attachment 0, and `0x50cf77` folds it into all three presets). Only then
+    /// does `0x50cfa4` clamp.
+    ///
+    /// Every number here is read off the shipped files: a gnome female's attachment 17 is 0.711 so
+    /// her pivot is 0.8082, her `Mount.max.z − Stand.max.z` is −0.21209
+    /// (`benilla-formats` `mounted_pivot_delta`), and `Creature\RidingSilithid\RidingSilithid.m2`
+    /// — the Black Qiraji Resonating Crystal — authors attachment 0 at z 1.817.
+    ///
+    /// The three assertions are the three reports. It rises (it used not to move at all); it lands
+    /// on a FIXED height, because the seat is the model's authored record and not the posed joint
+    /// (the first version read the live seat, so the camera crept up over seconds, wobbled with the
+    /// idle and lifted again on a MountSpecial); and the clamp runs on the total, because a gnome's
+    /// Mount-pose pivot is 0.596 — under the `5/6` floor — so clamping the halves separately would
+    /// floor that and ride 0.24 yd high on exactly the race the correction matters most for.
+    #[test]
+    fn mounting_measures_the_pivot_in_the_mount_pose_from_the_saddle() {
+        let gnome = CameraPivot {
+            height_local: 0.8082,
+            mounted_delta_local: -0.212_09,
+            seat_z_local: 0.0, // a character model seats nobody
+            ..CameraPivot::default()
+        };
+        // The saddle comes off the MOUNT's own `CameraPivot`, scaled — `player::mirror_mount_seat_lift`
+        // reads it there, off the mount child, and never off the rider.
+        let qiraji_tank = 1.817_f32;
+        let target = |lift| crate::player::body_pose::pivot_target(Some(&gnome), None, lift, false);
+
+        let standing = target(None).expect("a modeled body always has a target");
+        assert_eq!(
+            standing, CAM_PIVOT_FLOOR,
+            "a gnome's 0.8082 is under the reference's own floor"
+        );
+
+        let mounted = target(Some(qiraji_tank)).expect("mounted target");
+        let want = 0.8082 - 0.212_09 + qiraji_tank;
+        assert!(
+            (mounted - want).abs() < 1e-4,
+            "saddle + Mount-pose neck, got {mounted}"
+        );
+        assert!(mounted > standing, "the camera RISES on a mount");
+
+        // The clamp is on the total. Floored separately the rider's half would be 5/6 rather than
+        // 0.596, and the answer 0.237 too high — a real, visible difference on a gnome.
+        let halves_clamped = CAM_PIVOT_FLOOR + qiraji_tank;
+        assert!(
+            mounted < halves_clamped - 0.2,
+            "clamping the halves apart rides high: {mounted} vs {halves_clamped}"
+        );
+
+        // A seat of 0 is a mount whose model authors no attachment 0 — the rider stays at the unit
+        // matrix, and the pivot is then the Mount pose alone, floored.
+        assert_eq!(target(Some(0.0)).unwrap(), CAM_PIVOT_FLOOR);
     }
 
     /// A press that has travelled `yaw`/`pitch` degrees of camera rotation.
@@ -2252,14 +2368,14 @@ mod tests {
             }));
             script.run("ShowRepairCursor()").unwrap();
             assert!(script.repair_mode(), "the repair vendor arms repair mode");
-            world.insert_non_send_resource(script);
+            world.insert_non_send(script);
 
             world.run_system_once(latch_world_mouse).unwrap();
             world.run_system_once(send_world_right_press).unwrap();
             world
                 .run_system_once(crate::ui_merchant::end_repair_mode_on_right_press)
                 .unwrap();
-            world.non_send_resource::<UiScript>().repair_mode()
+            world.non_send::<UiScript>().repair_mode()
         };
 
         assert!(
@@ -2390,6 +2506,7 @@ mod tests {
             pivot: Vec3::new(0.0, 2.14, 0.0), // the eye-glow bone, head height
             kind: BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: vec![],
         };
         let mut app = App::new();

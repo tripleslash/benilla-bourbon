@@ -308,6 +308,7 @@ pub(super) fn spawn_part(
             static_mesh: part.mesh.clone(),
             skinned_mesh: part.skinned_mesh.clone(),
             material: mats.steady.clone(),
+            alpha_anim: part.alpha_anim.clone(),
         },
         dress.object.clone(),
         // The render meshes are `RENDER_WORLD`-only, so the ray pickers read this geometry.
@@ -639,6 +640,7 @@ mod tests {
             bone: 1,
             kind: benilla_formats::BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: Vec::new(),
         });
         let anchors: std::collections::HashMap<u16, Entity> = std::collections::HashMap::new();
@@ -717,6 +719,7 @@ mod tests {
                 bone: 1,
                 kind: benilla_formats::BillboardKind::Spherical,
                 scale_anim: None,
+                carriers: Vec::new(),
                 seq_translations: Vec::new(),
             });
             let object = WorldObject {

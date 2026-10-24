@@ -105,6 +105,7 @@ impl EntityPart {
             single: self.uv_anim.clone(),
             rot: self.uv_rot_seq.clone(),
             scale: self.uv_scale_seq.clone(),
+            stage1: benilla_world::doodad_anim::UvLoops::stage1_of(&self.geometry),
         }
     }
 }
@@ -159,9 +160,10 @@ pub(crate) struct DisplayModel {
     /// widget renders through (`0x505890`), else the reference's fixed fallback camera, and
     /// `SetCamera(n)` names any (`0x76cec0`).
     pub(super) cameras: std::sync::Arc<[benilla_assets::PortraitCamera]>,
-    /// A bow's `$WTT`/`$WTB` string anchors (`0x611ff0`), `[top, bottom]` as
-    /// `(bone, model-local Bevy position)`.
-    pub(super) string_anchors: Option<[(u16, Vec3); 2]>,
+    /// A bow display's `$WTT`/`$WTB` bowstring anchors (`0x611ff0`), captured with `parts`:
+    /// `[top, bottom]`, each bone-local and model-local. The held-item attach marks the prop root
+    /// with them so the string drawer can span the tips. `None` for every non-bow model.
+    pub(super) string_anchors: Option<[benilla_assets::StringTip; 2]>,
     /// A fishing pole's `$CCH` line anchor (`0x61f780`) in mesh-frame Bevy space.
     pub(super) cch_marker: Option<Vec3>,
     /// The authored bbox z-extent in model-local yards before scale: a model with no PlayerName
@@ -170,6 +172,16 @@ pub(crate) struct DisplayModel {
     /// The Stand sequence box's z-extent, the chat bubble's anchor height (`0x711a20`): a file
     /// constant, so the bubble never moves with the pose as the overhead name does.
     pub(super) stand_box_z_local: f32,
+    /// The **mounted** camera-pivot correction (model-local yards, pre-scale) —
+    /// `Mount.max.z − Stand.max.z` off the same `M2Sequence` boxes `stand_box_z_local` reads
+    /// ([`benilla_formats::M2Bounds::mounted_pivot_delta`]). Stamped onto each instance as part of
+    /// [`CameraPivot`]. `0.0` for a display whose model authors no `Mount` sequence.
+    pub(super) mounted_pivot_delta_local: f32,
+    /// **Where a rider sits on this model** — attachment 0's model-space Z, model-local yards,
+    /// pre-scale ([`benilla_formats::M2Bounds::mount_seat_z`]). Stamped onto each instance as part
+    /// of [`CameraPivot`], where the camera reads it off the MOUNT CHILD rather than off the body.
+    /// `0.0` for everything that is not a mount.
+    pub(super) mount_seat_z_local: f32,
     /// The vertex-box centre in Bevy model space, the interior fold's MOLR reference point for a
     /// GameObject (the reference's `[def+0x5c]` anchor).
     pub(super) bake_center_local: Vec3,
@@ -211,22 +223,28 @@ impl DisplayModel {
     }
 
     /// Whether the display names a model file. An empty `parts` from a named model is that model's
-    /// answer, draw nothing; [`empty_display`] (no catalog row, a zero-scale row, no model path) is
-    /// an unresolved display, and earns the debug cube.
+    /// answer, draw nothing; [`empty_display`] (no catalog row, no model path) is an unresolved
+    /// display, and earns the debug cube.
     pub(super) fn names_a_model(&self) -> bool {
         !matches!(self.handle, ModelHandle::None)
     }
 }
 
-/// A creature display's M2, its skins filled at build; a missing or zero-scale row is empty.
+/// A creature display's M2, its skins filled at build; a missing row is empty. The row's
+/// `creatureModelScale` gates nothing: `OBJECT_FIELD_SCALE_X` alone scales a unit (`0x613ef0`), and
+/// a row of 0 draws at that scale (Turtle WoW's Hyjal guards, display 20356, are such rows).
 pub(super) fn new_creature_display(
     catalog: &CreatureCatalog,
     display_id: u32,
     asset_server: &AssetServer,
 ) -> DisplayModel {
     match catalog.model(display_id) {
-        Some(m) if m.scale > 0.0 => DisplayModel {
-            handle: ModelHandle::M2(asset_server.load(m2_url(&m.model_path))),
+        Some(m) => DisplayModel {
+            handle: {
+                // A server entity is within visibility range: its model outranks the scenery.
+                benilla_formats::web::mark_urgent_model(&m.model_path);
+                ModelHandle::M2(asset_server.load(m2_url(&m.model_path)))
+            },
             dir: model_dir(&m.model_path).to_string(),
             skins: m.textures,
             npc_appearance: m.npc_appearance,
@@ -236,7 +254,7 @@ pub(super) fn new_creature_display(
                 .is_some_and(|p| p.eq_ignore_ascii_case("character\\")),
             ..empty_shell()
         },
-        _ => empty_display(),
+        None => empty_display(),
     }
 }
 
@@ -249,6 +267,9 @@ pub(super) fn new_gameobject_display(
     let Some(path) = catalog.model_path(display_id) else {
         return empty_display();
     };
+    // A server entity is within visibility range: its model outranks the scenery, and a Turtle
+    // building spawned as a GameObject is otherwise walk-through until the zone's doodads land.
+    benilla_formats::web::mark_urgent_model(path);
     let handle = if path.to_ascii_lowercase().ends_with(".wmo") {
         ModelHandle::Wmo(asset_server.load(wmo_url(path)))
     } else {
@@ -288,6 +309,8 @@ pub(crate) fn empty_shell() -> DisplayModel {
         cameras: std::sync::Arc::new([]),
         bbox_z_local: 0.0,
         stand_box_z_local: 0.0,
+        mounted_pivot_delta_local: 0.0,
+        mount_seat_z_local: 0.0,
         bake_center_local: Vec3::ZERO,
         terrain_tilt: 0,
         is_character_body: false,
@@ -340,6 +363,8 @@ pub(super) fn build_parts(
     let mut cameras: std::sync::Arc<[benilla_assets::PortraitCamera]> = std::sync::Arc::new([]);
     let mut bbox_z_local = 0.0;
     let mut stand_box_z_local = 0.0;
+    let mut mounted_pivot_delta_local = 0.0;
+    let mut mount_seat_z_local = 0.0;
     let mut bake_center_local = Vec3::ZERO;
     let parts = match &dm.handle {
         ModelHandle::M2(h) => {
@@ -348,7 +373,7 @@ pub(super) fn build_parts(
             };
             // Every M2 lane can rig, so both forms are requested; static instances and billboard
             // cards draw the static one.
-            if !forms.require_rigged(h, 0) {
+            if !forms.require_rigged(h, &model.submeshes, 0) {
                 return; // forms still building
             }
             emitters = model.emitters.clone();
@@ -370,6 +395,10 @@ pub(super) fn build_parts(
                 .map_or(0.0, |b| (b.bbox_max[2] - b.bbox_min[2]).max(0.0));
             // The same Stand box the ring's footprint reads.
             stand_box_z_local = model.bounds.map_or(0.0, |b| b.stand_box_z);
+            // The mounted pivot correction, off the same sequence-box read (see the field).
+            mounted_pivot_delta_local = model.bounds.map_or(0.0, |b| b.mounted_pivot_delta);
+            // The saddle — a file constant, which is the whole point (see the field).
+            mount_seat_z_local = model.bounds.map_or(0.0, |b| b.mount_seat_z);
             bake_center_local = model.bounds.map_or(Vec3::ZERO, |b| {
                 benilla_assets::coords::wow_to_bevy([
                     (b.bbox_min[0] + b.bbox_max[0]) * 0.5,
@@ -448,7 +477,7 @@ pub(super) fn build_parts(
                 return;
             };
             // WMO-display GameObjects never skin: static forms only.
-            if !forms.require_static(h, 0) {
+            if !forms.require_static(h, &model.submeshes, 0) {
                 return;
             }
             if gameobject {
@@ -517,6 +546,8 @@ pub(super) fn build_parts(
     dm.cameras = cameras;
     dm.bbox_z_local = bbox_z_local;
     dm.stand_box_z_local = stand_box_z_local;
+    dm.mounted_pivot_delta_local = mounted_pivot_delta_local;
+    dm.mount_seat_z_local = mount_seat_z_local;
     dm.bake_center_local = bake_center_local;
     dm.terrain_tilt = terrain_tilt;
 }

@@ -55,6 +55,13 @@ pub struct SkyExt {
     /// none), `y` the sun azimuth `atan2(sun.z, sun.x)` in radians, `zw` reserved.
     #[uniform(100)]
     pub(crate) warp: Vec4,
+    /// fork: modern lighting (FORK.md, P4) — `xyz` = camera→sun, `w` = the modern flag
+    /// (`modern::sky` writes it; zero keeps the classic dome).
+    #[uniform(100)]
+    pub(crate) modern: Vec4,
+    /// fork: modern lighting (P4) — `rgb` = the sun glow's linear radiance, `w` = its Mie g.
+    #[uniform(100)]
+    pub(crate) glow: Vec4,
 }
 
 impl MaterialExtension for SkyExt {
@@ -76,7 +83,7 @@ impl MaterialExtension for SkyExt {
         _key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = false;
+            depth.depth_write_enabled = Some(false);
         }
         crate::sky_order::sky_pipeline_state(descriptor);
         Ok(())
@@ -182,7 +189,9 @@ fn setup_sky(
             sky3: col([0.68, 0.80, 0.93]),
             sky4: col([0.78, 0.86, 0.95]),
             fog: col([0.55, 0.72, 0.92]),
-            warp: Vec4::ZERO, // update_sky_colors fills S + sun azimuth each frame
+            warp: Vec4::ZERO,   // update_sky_colors fills S + sun azimuth each frame
+            modern: Vec4::ZERO, // fork: modern lighting (FORK.md, P4)
+            glow: Vec4::ZERO,
         },
     });
     commands.spawn((
@@ -241,6 +250,34 @@ fn apply_sky_visibility(
     }
 }
 
+/// The dome's five gradient stops (zenith → 1.8°) and its horizon/fog colour, exactly as the dome
+/// draws them this frame: the zone look's tints on a modern frame, byte-quantized, and decoded to
+/// linear when the frame is. `w` is 1 on the stops and 0 on the fog.
+///
+/// Byte-quantized (`quant255` — Light.dbc stops are byte colors) so the dome's write gate only fires
+/// when a display-visible band actually moves. fork: the one derivation both the dome and the water's
+/// sky reflection (`liquid::ripple`'s sky rows) read, so the water reflects the sky that is drawn.
+pub(crate) fn dome_stops(light: &WowLighting) -> ([Vec4; 5], Vec4) {
+    // fork: modern lighting (FORK.md) — the zone look's sky and fog tints (1 in classic).
+    let (sky_tint, fog_tint) = if crate::modern::frame_is_modern() {
+        (
+            crate::modern::look::sky_tint(),
+            crate::modern::look::fog_tint(),
+        )
+    } else {
+        ([1.0; 3], [1.0; 3])
+    };
+    let tint = |c: [f32; 3], t: [f32; 3]| [c[0] * t[0], c[1] * t[1], c[2] * t[2]];
+    // fork: modern lighting
+    let sky = std::array::from_fn(|i| {
+        crate::modern::decode_if_modern(col(benilla_assets::quant255(tint(light.sky[i], sky_tint))))
+    });
+    let f = benilla_assets::quant255(tint(light.fog_color, fog_tint));
+    // `fog.w` unused by the shader (the old raw-vs-linearised A/B is gone — GAMMA LANE, 0161).
+    let fog = crate::modern::decode_if_modern(Vec4::new(f[0], f[1], f[2], 0.0)); // fork: modern lighting
+    (sky, fog)
+}
+
 /// Push the time-of-day sky stops and fog colour (`WowLighting`) into the dome material.
 fn update_sky_colors(
     light: Res<WowLighting>,
@@ -250,16 +287,7 @@ fn update_sky_colors(
     let Ok(handle) = dome.single() else {
         return;
     };
-    // Quantized to bytes (Light.dbc stops are byte colours) and write-gated, since a `get_mut`
-    // alone re-uploads the material.
-    let sky: Vec<Vec4> = light
-        .sky
-        .iter()
-        .map(|c| col(benilla_assets::quant255(*c)))
-        .collect();
-    let f = benilla_assets::quant255(light.fog_color);
-    // `fog.w` is unused by the shader.
-    let fog = Vec4::new(f[0], f[1], f[2], 0.0);
+    let (sky, fog) = dome_stops(&light);
     // Dawn/dusk warp: strength S and the sun's azimuth `atan2(z, x)`, quantized to 1/4096; S = 0
     // (midday, or a `highlightSky` 0 zone) leaves the gradient untouched.
     let s = light.celestial_dir;

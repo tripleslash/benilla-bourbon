@@ -9,7 +9,7 @@ use bevy::mesh::{Indices, MeshTag, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::Buffer;
 
-use benilla_assets::materials::{LiquidMaterial, WowModelMaterial};
+use benilla_assets::materials::{LiquidCataMaterial, LiquidMaterial, WowModelMaterial};
 use benilla_world::clouds::CloudMaterial;
 use benilla_world::model_render::{
     far_twin_of, model_material, zfill_material, MaterialCache, ShadeSel,
@@ -35,6 +35,13 @@ pub(super) struct WarmLanes<'w> {
     clouds: ResMut<'w, Assets<CloudMaterial>>,
     sky: ResMut<'w, Assets<SkyMaterial>>,
     liquid: ResMut<'w, Assets<LiquidMaterial>>,
+    /// The Cataclysm liquid materials (`waterDetail 2`). A SECOND lane rather than more
+    /// handles on the one above, because the two renderers are different material types with
+    /// different bind groups and therefore different pipelines. Both are warmed whichever way
+    /// the setting currently points: a player who flips it mid-session must not pay a
+    /// compile stall for the privilege, and flipping it is exactly the moment they are
+    /// looking at water.
+    liquid_cata: ResMut<'w, Assets<LiquidCataMaterial>>,
     /// For representatives of the on-demand nameplate and raid-mark materials.
     standard: ResMut<'w, Assets<StandardMaterial>>,
     /// The fallback cube: production mesh + materials, drawn while a model streams.
@@ -219,6 +226,7 @@ pub(super) fn spawn_menagerie(
     // The ground-clutter lane, both sidednesses and all three alpha modes its builder maps to
     // (Opaque, Mask, Blend). The pipeline sees only key bits, so `clutter_fade` is armed on a
     // copy of the plain material, leaving the dedup cache's entry untouched.
+    let mut clutter_mats: Vec<Handle<WowModelMaterial>> = Vec::new();
     for two_sided in [false, true] {
         for blend in [ModelBlend::Opaque, ModelBlend::AlphaTest, ModelBlend::Blend] {
             let plain = model_material(
@@ -256,6 +264,8 @@ pub(super) fn spawn_menagerie(
                 let mut m = m.clone();
                 m.extension.clutter_fade = Vec4::new(52.5, 70.0, 0.0, 1.0);
                 let clutter = materials.add(m);
+                // fork: also on the clutter mesh's own layout (UV_1, the wind height and phase).
+                clutter_mats.push(clutter.clone());
                 mats.push(clutter);
             }
         }
@@ -402,9 +412,23 @@ pub(super) fn spawn_menagerie(
     // layout. `layouts` is [static plain, skinned plain, static colours, skinned colours].
     let (plain_mesh, plain_aabb, _) = layouts[0].clone();
     let (colours_mesh, colours_aabb, _) = layouts[2].clone();
-    let posuv = meshes.add(warm_pos_uv_mesh());
+    let posuv = meshes.add(warm_pos_uv_mesh(false));
+    let posuv2 = meshes.add(warm_pos_uv_mesh(true));
     let liquid_mesh = meshes.add(warm_liquid_mesh(false));
-    let liquid_color_mesh = meshes.add(warm_liquid_mesh(true));
+    let liquid_mesh_colored = meshes.add(warm_liquid_mesh(true));
+    // fork: clutter meshes carry POS + NORMAL + UV_0 + UV_1 (wind) + COLOR, a layout (and
+    // `VERTEX_UVS_B`) the model quads lack; the liquid colour quad has exactly that set.
+    for mat in &clutter_mats {
+        spawn_lane_rig(
+            commands,
+            cam,
+            None,
+            &liquid_mesh_colored,
+            None,
+            mat.clone(),
+            &mut count,
+        );
+    }
     // Celestial discs and glares (`sun::setup` quads: position, normal, UV).
     for mat in lane_handles(&mut lanes.celestial) {
         spawn_lane_rig(
@@ -417,9 +441,11 @@ pub(super) fn spawn_menagerie(
             &mut count,
         );
     }
-    // Stars: `Stars.m2` patches carry position and UV; the assetless fallback adds normals.
+    // Stars: `Stars.m2` patches carry position and UV, a two-texture batch a second UV set; the
+    // assetless fallback adds normals.
     for mat in lane_handles(&mut lanes.stars) {
         spawn_lane_rig(commands, cam, None, &posuv, None, mat.clone(), &mut count);
+        spawn_lane_rig(commands, cam, None, &posuv2, None, mat.clone(), &mut count);
         spawn_lane_rig(
             commands,
             cam,
@@ -453,28 +479,17 @@ pub(super) fn spawn_menagerie(
             &mut count,
         );
     }
-    // Liquid: every material on both grid layouts. An interior WMO pool bakes `MOMT.diffColor`
-    // into `ATTRIBUTE_COLOR`, read behind `#ifdef VERTEX_COLORS` (`liquid.wgsl:275`), a separate
+    // Liquid: every material on both renderers (`waterDetail` moves at any time, and each is its
+    // own pipeline) and both grid layouts. An interior WMO pool bakes `MOMT.diffColor` into
+    // `ATTRIBUTE_COLOR`, read behind `#ifdef VERTEX_COLORS` (`liquid.wgsl:275`), a separate
     // pipeline.
-    for mat in lane_handles(&mut lanes.liquid) {
-        spawn_lane_rig(
-            commands,
-            cam,
-            None,
-            &liquid_mesh,
-            None,
-            mat.clone(),
-            &mut count,
-        );
-        spawn_lane_rig(
-            commands,
-            cam,
-            None,
-            &liquid_color_mesh,
-            None,
-            mat,
-            &mut count,
-        );
+    for mesh in [&liquid_mesh, &liquid_mesh_colored] {
+        for mat in lane_handles(&mut lanes.liquid) {
+            spawn_lane_rig(commands, cam, None, mesh, None, mat, &mut count);
+        }
+        for mat in lane_handles(&mut lanes.liquid_cata) {
+            spawn_lane_rig(commands, cam, None, mesh, None, mat, &mut count);
+        }
     }
     // The plain-`StandardMaterial` lanes. The fallback cube, drawn while a model streams, goes on
     // the world camera and the booths but not the tile camera, as `ui_models` has no cube. The
@@ -658,9 +673,9 @@ fn spawn_lane_rig<M: Material>(
     *count += 1;
 }
 
-/// A tiny triangle with POSITION + UV_0 only, the `Stars.m2` layout. Main-world-resident, so
-/// `calculate_bounds` covers it.
-fn warm_pos_uv_mesh() -> Mesh {
+/// A tiny triangle with POSITION + UV_0, plus UV_1 when `uv1` is set: the `Stars.m2` layouts.
+/// Main-world-resident, so `calculate_bounds` covers it.
+fn warm_pos_uv_mesh(uv1: bool) -> Mesh {
     let mut m = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -669,10 +684,11 @@ fn warm_pos_uv_mesh() -> Mesh {
         Mesh::ATTRIBUTE_POSITION,
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
     );
-    m.insert_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
-    );
+    let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]];
+    if uv1 {
+        m.insert_attribute(Mesh::ATTRIBUTE_UV_1, uvs.clone());
+    }
+    m.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     m.insert_indices(Indices::U32(vec![0, 1, 2]));
     m
 }
@@ -865,8 +881,15 @@ mod tests {
         // Lanes that never need the menagerie:
         // - TerrainMaterial / WdlMaterial: always drawn under the entry cover, no variant axis.
         // - AddUiMaterial: glue screens only, and every pre-world frame counts as covered.
+        // - ShadowCasterMaterial (fork: `player_shadow`): one depth-only material on the shadow
+        //   map's private render layer, with no key axis of its own; its casters are collected
+        //   from the world the entry cover is already hiding. NOT measured against the
+        //   live-compile tripwire yet — a fork-side follow-up, recorded here rather than hidden.
         let families: [(&str, &[&str]); 3] = [
-            ("MaterialPlugin::<", &["TerrainMaterial", "WdlMaterial"]),
+            (
+                "MaterialPlugin::<",
+                &["TerrainMaterial", "WdlMaterial", "ShadowCasterMaterial"],
+            ),
             ("Material2dPlugin::<", &[]),
             ("UiMaterialPlugin::<", &["AddUiMaterial"]),
         ];

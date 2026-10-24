@@ -264,7 +264,7 @@ fn hosted(channels: ChannelState) -> bevy::prelude::World {
 
 fn eval<T: benilla_ui::mlua::FromLuaMulti>(world: &bevy::prelude::World, lua: &str) -> T {
     world
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval(lua)
         .expect("the chunk runs")
 }
@@ -340,7 +340,7 @@ fn the_cascades_join_is_pending_until_the_server_confirms_it() {
     channels.confirm_slot("General - Orgrimmar");
     let mut world = hosted(channels);
     {
-        let mut script = world.non_send_resource_mut::<UiScript>();
+        let mut script = world.non_send_mut::<UiScript>();
         script.set_guild_recruitment_plan(benilla_ui::script::RecruitmentPlan::Join {
             name: "GuildRecruitment - City".into(),
             shortcut: "GuildRecruitment".into(),
@@ -372,12 +372,7 @@ fn the_cascades_join_is_pending_until_the_server_confirms_it() {
             .slot_state("GuildRecruitment - City"),
         Some(SlotState::Pending)
     );
-    assert_eq!(
-        world
-            .non_send_resource::<UiScript>()
-            .guild_recruitment_mode(),
-        1
-    );
+    assert_eq!(world.non_send::<UiScript>().guild_recruitment_mode(), 1);
 }
 
 /// The whole client headless, whose call host every entry that runs Lua lends, holding `held` as
@@ -408,7 +403,7 @@ impl Client {
         // What the startup builds, which the line drain reads.
         app.insert_resource(super::commands::SlashCommands::build(|_| None, |_| None));
         benilla_world::world_point::init_world_point_resources(app.world_mut());
-        app.world_mut().insert_non_send_resource(script);
+        app.world_mut().insert_non_send(script);
         Client { app, sent }
     }
 
@@ -664,12 +659,10 @@ fn only_the_composed_name_leaving_guild_recruitment_turns_its_auto_join_off() {
     let mut world = hosted(channels);
     let after = |world: &mut bevy::prelude::World, lua: &str| {
         world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_guild_recruitment_mode(1);
         super::run_chat(world, lua).expect("the verb runs");
-        world
-            .non_send_resource::<UiScript>()
-            .guild_recruitment_mode()
+        world.non_send::<UiScript>().guild_recruitment_mode()
     };
     assert_eq!(
         after(&mut world, "LeaveChannelByName('GuildRecruitment')"),
@@ -709,7 +702,7 @@ fn list_channels_shows_its_line_inside_the_call() {
     channels.confirm_slot("MyChan");
     let mut world = hosted(channels);
     world
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run(
             r#"
             local f = CreateFrame("Frame")

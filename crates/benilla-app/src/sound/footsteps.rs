@@ -36,6 +36,7 @@
 use bevy::prelude::*;
 
 use benilla_assets::coords::bevy_to_wow;
+use benilla_assets::DataLoadAppExt;
 use benilla_formats::FootstepCatalog;
 
 use crate::creature_anim::{is_footstep_sound, move_flags, AnimSoundEvent, MovementState};
@@ -43,7 +44,7 @@ use crate::entities::{CollisionHeight, Creatures};
 use crate::items::Items;
 use crate::net::{NetEntity, ObjectStore};
 use crate::player::swim_enter_depth;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_protocol::EntityKind;
 use benilla_world::schedule::WorldStage;
 
@@ -217,6 +218,6 @@ fn footstep_sounds(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, load_footsteps.after(AssetSet::Open))
+    app.add_data_loaders(load_footsteps)
         .add_systems(Update, footstep_sounds.in_set(WorldStage::Present));
 }

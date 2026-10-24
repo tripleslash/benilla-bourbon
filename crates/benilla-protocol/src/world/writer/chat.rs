@@ -9,6 +9,13 @@ use crate::messages::{self, opcode};
 use super::WorldWriter;
 
 impl WorldWriter {
+    /// Speak `language` from now on: the race's `ChrRaces.BaseLanguage`, which the app reads
+    /// from the install, so a race the id table in [`messages::faction_language`] misses (a
+    /// custom server's Goblin) still speaks its own tongue.
+    pub fn set_chat_language(&mut self, language: u32) {
+        self.chat_language = language;
+    }
+
     /// Send a `/say` line; dot-commands go out this way, parsed after the language gate.
     pub fn send_chat(&mut self, message: &str) -> Result<()> {
         self.send(

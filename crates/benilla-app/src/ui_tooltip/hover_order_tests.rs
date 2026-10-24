@@ -11,7 +11,7 @@ use crate::target::{Hovered, HoveredObject};
 /// `anchor`, and a bag button at (100, 100)–(140, 140) whose `OnEnter` records what it found and
 /// takes the tooltip, as a stock slot does.
 fn world_and_bag(app: &mut App, anchor: &str) {
-    let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+    let mut script = app.world_mut().non_send_mut::<UiScript>();
     script.set_screen_size(800.0, 600.0);
     crate::ui_script::test_ui::load_tooltip_template(&script);
     script
@@ -41,7 +41,7 @@ fn world_and_bag(app: &mut App, anchor: &str) {
 }
 
 fn script(app: &mut App) -> Mut<'_, UiScript> {
-    app.world_mut().non_send_resource_mut::<UiScript>()
+    app.world_mut().non_send_mut::<UiScript>()
 }
 
 /// From a world unit onto a window: the walk runs the WorldFrame's leave before the button's

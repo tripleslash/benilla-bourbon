@@ -29,7 +29,7 @@ fn invites(rx: &crossbeam_channel::Receiver<ClientCommand>) -> Vec<String> {
 /// The resolver's guids: us, `mouseover` and `target` on `at`, held, and the party slots.
 fn resolve(app: &mut App, at: u64, party: [u64; 4]) {
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_unit_guids(&benilla_ui::script::UnitGuids {
             player: ME,
             target: at,
@@ -52,7 +52,7 @@ fn lua(app: &mut App, code: &str) {
 /// The red lines a verb showed inside its call (`0x496720`), by key, since [`tap_errors`].
 fn errors(app: &App) -> Vec<String> {
     app.world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<Vec<String>>("return SHOWN")
         .expect("the tap reads")
 }

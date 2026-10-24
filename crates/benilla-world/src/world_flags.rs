@@ -31,7 +31,11 @@ impl WorldFlags {
 }
 
 impl Default for WorldFlags {
+    /// [`Self::START`]; `$WOW_HORIZON=0` starts with [`Self::CULL`] clear.
     fn default() -> Self {
-        Self(Self::START)
+        match crate::launch_env::var("WOW_HORIZON").as_deref() {
+            Some("0") => Self(Self::START & !Self::CULL),
+            _ => Self(Self::START),
+        }
     }
 }

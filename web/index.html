@@ -1,0 +1,285 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>World of Warcraft</title>
+<!-- Trunk's build description (Trunk.toml points `target` here). Paths are relative to THIS file,
+     which is why the crate is reached with `../`.
+
+     `data-bindgen-target="web"` is mandatory: Trunk defaults to `no-modules`, which breaks both
+     the import map below and `import init from './wenilla.js'`.
+
+     The wasm-opt flags reproduce what `scripts/web-build.sh` did by hand. `-O3` is a SPEED pass,
+     not a size pass — the client is CPU-bound on its one wasm thread and it measured +6% in-world
+     (2026-08-29) — and the feature list must match what rustc emitted or wasm-opt refuses the
+     module.
+
+     `--enable-threads` is on both links unconditionally and is NOT a statement that this build has
+     threads. wasm-opt refuses a module that uses a feature it was not told about, but permitting an
+     unused one costs nothing — so one flag list serves the plain build and the shared-memory one
+     (`scripts/web-build-threads.sh`) alike, and there is no second `index.html` to keep in step.
+
+     `--strip-debug --strip-producers` stands in for the old wasm-bindgen
+     `--remove-name-section --remove-producers-section`, which Trunk does not expose: wasm-opt's
+     `--strip-debug` drops the names section too, so the result is the same and it happens in the
+     pass that was running anyway. **Verified on the output, not assumed** — the emitted module's
+     only custom section is the 184-byte `target_features`, with no `name`, `producers` or DWARF,
+     and it is 77.2 MB against the old pipeline's ~90 MB. A second `wasm-opt -O3` over it removes
+     0.036%, which is what an already-converged module looks like; that is the check to repeat if a
+     Trunk upgrade ever makes these attributes stop being honoured, because the failure mode is
+     silent. -->
+<link data-trunk rel="rust" href="../crates/wenilla/Cargo.toml"
+      data-bindgen-target="web"
+      data-cargo-no-default-features data-cargo-features="webgpu"
+      data-target-name="wenilla" data-wasm-opt="3"
+      data-wasm-opt-params="--enable-bulk-memory --enable-threads --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --strip-debug --strip-producers"
+      data-no-demangle />
+<!-- The pack fetch/decode Web Worker's wasm half (phase 6): `benilla-pack`'s reader on its own, so
+     a pack's zstd stream is undone off the frame thread. `data-type="worker"` is what lets a second
+     `rel="rust"` link exist at all — Trunk allows exactly one `main` — and it emits the
+     `no-modules` bundle a classic worker's `importScripts` can take. The files land as
+     `wenilla-packdecode.js` + `wenilla-packdecode_bg.wasm` — Trunk names the emitted pair after
+     the PACKAGE, not the `[lib] name` the cargo artifact carries (verified on the build output:
+     `target/.../packdecode.wasm` in, `wenilla-packdecode*` out) — which `web/packworker.js` names;
+     with
+     `filehash = false` those names are stable and are part of that contract. Same wasm-opt flags as
+     the client for the same reason (the feature list must match what rustc emitted). -->
+<link data-trunk rel="rust" href="../crates/wenilla-packdecode/Cargo.toml"
+      data-type="worker" data-target-name="packdecode" data-wasm-opt="3"
+      data-wasm-opt-params="--enable-bulk-memory --enable-threads --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --strip-debug --strip-producers" />
+<link data-trunk rel="copy-file" href="wasi_stubs.js" />
+<link data-trunk rel="copy-file" href="boot.js" />
+<link data-trunk rel="copy-file" href="packs.js" />
+<link data-trunk rel="copy-file" href="packworker.js" />
+<!-- The task pools' thread spawner and the worker it starts. `threads.js` installs the page
+     contract `window.__wenilla_threads`; `threadworker.js` is one pool thread, and it imports
+     `./wenilla.js` by name, so both must land beside it at the dist root. Shipped in EVERY
+     build: a module without shared memory simply never asks for a thread, and a page that
+     carries two unused scripts is cheaper than two index.html files to keep in step. -->
+<link data-trunk rel="copy-file" href="threads.js" />
+<link data-trunk rel="copy-file" href="threadworker.js" />
+<!-- The render worker (`benilla_app::render_worker`): `threads.js` starts it with the canvas
+     transferred to it, and like `threadworker.js` it imports `./wenilla.js` by name. -->
+<link data-trunk rel="copy-file" href="renderworker.js" />
+<link data-trunk rel="copy-file" href="gpucensus.js" />
+<!-- The output. `audio.js` installs `window.__wenilla_audio`; `audioworklet.js` is loaded by
+     `audioWorklet.addModule` at a URL resolved relative to `audio.js`, so both must land beside
+     each other at the dist root. Shipped in EVERY build, like the thread pair above: a module
+     that cannot use them (no shared memory, no AudioContext) simply falls back to kira's cpal
+     backend and never asks. -->
+<link data-trunk rel="copy-file" href="audio.js" />
+<link data-trunk rel="copy-file" href="audioworklet.js" />
+<link data-trunk rel="copy-file" href="platform.js" />
+<!-- The GPU guard: the resize governor that keeps a window drag from reallocating the frame's
+     whole memory sixty times a second, and the device-lost watchdog that recovers from the TDR
+     that used to cause. Loaded by the page ahead of `boot(init)` — it has to wrap `requestDevice`
+     before wgpu asks for a device, own the canvas box before winit reads it, and put its recovery
+     tier into `__wenilla_env` before the client looks. See `web/gpu.js`'s own header. -->
+<link data-trunk rel="copy-file" href="gpu.js" />
+<!-- Must land at the DIST ROOT, not in a subdirectory: a worker's default scope is its own
+     directory, and this one has to see `/data/*` from `/` and from the realm's `/play` alike. -->
+<link data-trunk rel="copy-file" href="sw.js" />
+<!-- The site's own configuration — the gateway address and the realmlist. It ships with the BUILD,
+     not with the container: `web/packs/` is 3.3 GiB regenerated from a WoW install and is nobody's
+     idea of where an operator edits a setting, while this is checked in beside the page it
+     configures and lands at the dist root, which is what a static host serves. -->
+<link data-trunk rel="copy-file" href="config.json" />
+<link data-trunk rel="copy-file" href="_headers" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
+  /* `width`/`height` here are the FALLBACK, for a page that failed to install web/gpu.js: the
+     resize governor overrides both with an inline pixel size it commits only once a resize has
+     settled, and stretches the gap with `transform` (see gpu.js's header). `position: fixed` +
+     `transform-origin: 0 0` are what let a canvas smaller than the viewport still cover it. */
+  #benilla { display: block; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+             transform-origin: 0 0; }
+  /* Top-right, over the canvas: the canvas is the whole viewport, so there is no bar to sit in. */
+  #fs { position: fixed; top: 0; right: 0; z-index: 10; padding: .3rem .6rem; color: #ddd;
+        background: rgba(0,0,0,.55); border: 0; border-bottom-left-radius: 6px; cursor: pointer;
+        font: 12px system-ui, sans-serif; text-decoration: underline; }
+</style>
+<script>
+  // Sound: the browser suspends any AudioContext created before the first user gesture (autoplay
+  // policy), and the mixer (kira/cpal) creates its at startup and never resumes it — so the tab
+  // stayed silent. Remember every context the page creates and resume them on the first
+  // click/key, which is the only place a browser lets that happen.
+  (() => {
+    const contexts = [];
+    for (const name of ['AudioContext', 'webkitAudioContext']) {
+      const Orig = window[name];
+      if (!Orig) continue;
+      const Patched = function (...args) {
+        const ctx = new Orig(...args);
+        contexts.push(ctx);
+        return ctx;
+      };
+      Patched.prototype = Orig.prototype;
+      window[name] = Patched;
+    }
+    // The listener has to outlive the first gesture — the wasm mixer usually creates its context
+    // *after* the click that started the run — but it must go quiet once there is nothing left to
+    // wake, or every keydown (and every key-repeat while a key is held) prints a line.
+    const events = ['pointerdown', 'keydown', 'touchstart'];
+    const resume = () => {
+      const asleep = contexts.filter((c) => c.state !== 'running');
+      if (!asleep.length) {
+        // Nothing to do. Once a context exists and all of them run, the job is done for good.
+        if (contexts.length) {
+          for (const ev of events) window.removeEventListener(ev, resume, { capture: true });
+        }
+        return;
+      }
+      // Silent: this fires on gestures, and diagnostic mode keeps the console for `[diag]` lines
+      // alone (see `perf::webdiag`). Everything else left on this page speaks only on an error.
+      for (const ctx of asleep) {
+        ctx.resume().then(() => {}, () => {});
+      }
+    };
+    for (const ev of events) {
+      window.addEventListener(ev, resume, { capture: true, passive: true });
+    }
+  })();
+</script>
+<!-- A FALLBACK now, not the mechanism. `wasm-bindgen` emits the Lua VM's WASI imports as the
+     bare specifier `wasi_snapshot_preview1` (it is the wasm import module's name), and this map
+     is what used to resolve it. It only ever worked for the page: import maps are a document
+     feature and a Web Worker inherits none, so every task-pool thread importing `./wenilla.js`
+     died at module resolution with an error event carrying no message. `scripts/stage-packs.sh`
+     now rewrites the specifier to `./wasi_stubs.js` in the built glue, which the page and a
+     worker resolve identically. Kept for a build driven by cargo + wasm-bindgen by hand, with
+     no stage-packs run to do the rewrite. -->
+<script type="importmap">{"imports":{"wasi_snapshot_preview1":"./wasi_stubs.js"}}</script>
+<script>
+  // WGSL compile errors are otherwise invisible: wgpu's browser backend never asks the module for
+  // its compilation info, so Chrome only prints the "[Invalid ShaderModule] … previous error"
+  // cascade. Ask on its behalf and print the real diagnostics — cheap, and only speaks on errors.
+  if (navigator.gpu && window.GPUDevice) {
+    const orig = GPUDevice.prototype.createShaderModule;
+    GPUDevice.prototype.createShaderModule = function (desc) {
+      const m = orig.call(this, desc);
+      m.getCompilationInfo().then((info) => {
+        const errs = info.messages.filter((x) => x.type === 'error');
+        if (!errs.length) return;
+        const lines = (desc.code || '').split('\n');
+        for (const e of errs) {
+          console.error(`WGSL error in ${desc.label || '(unlabeled)'} @${e.lineNum}:${e.linePos}: ${e.message}\n    ${lines[e.lineNum - 1] || ''}`);
+        }
+      });
+      return m;
+    };
+  }
+</script>
+<script>
+  // **The sampler census.** The fault is `CreatePipelineLayout` rejecting 17 fragment samplers
+  // against WebGPU's per-stage limit of 16 — a limit native never applies, because Vulkan/D3D12
+  // report it in the hundreds of thousands and Bevy asks the adapter for whatever it has.
+  //
+  // The rejection names no group and no material, so tag every bind group layout with what it holds
+  // as it is created, then add them up when a pipeline layout binds them together. Group 3 is the
+  // material; groups 0-2 are Bevy's view, view-binding-arrays and mesh, and they are the fixed cost
+  // every material pays.
+  if (navigator.gpu && window.GPUDevice) {
+    const info = new WeakMap();
+    const origBGL = GPUDevice.prototype.createBindGroupLayout;
+    GPUDevice.prototype.createBindGroupLayout = function (d) {
+      const bgl = origBGL.call(this, d);
+      const n = { sampler: 0, texture: 0, buffer: 0, storageTexture: 0 };
+      for (const e of (d && d.entries) || []) {
+        const c = e.count || 1;
+        if (e.sampler) n.sampler += c;
+        else if (e.texture || e.externalTexture) n.texture += c;
+        else if (e.storageTexture) n.storageTexture += c;
+        else if (e.buffer) n.buffer += c;
+      }
+      info.set(bgl, { label: (d && d.label) || '(unlabeled)', n, entries: ((d && d.entries) || []).length });
+      return bgl;
+    };
+
+    const seen = new Set();
+    const origPL = GPUDevice.prototype.createPipelineLayout;
+    GPUDevice.prototype.createPipelineLayout = function (d) {
+      const groups = ((d && d.bindGroupLayouts) || []).map((b) => info.get(b));
+      const tot = groups.reduce((a, g) => a + ((g && g.n.sampler) || 0), 0);
+      const key = groups.map((g) => (g ? `${g.label}:${g.n.sampler}` : '?')).join('|');
+      // Only speak for layouts at or over the limit — the passing ones are noise.
+      if (tot >= 16 && !seen.has(key)) {
+        seen.add(key);
+        let s = `\n>>> PIPELINE LAYOUT: ${tot} fragment samplers (limit 16) <<<\n`;
+        groups.forEach((g, i) => {
+          s += g
+            ? `  group ${i}: samplers=${String(g.n.sampler).padStart(2)}  textures=${String(g.n.texture).padStart(2)}  buffers=${String(g.n.buffer).padStart(2)}  "${g.label}"\n`
+            : `  group ${i}: (not seen at creation)\n`;
+        });
+        console.error(s);
+      }
+      return origPL.call(this, d);
+    };
+
+    const origReq = GPUAdapter.prototype.requestDevice;
+    GPUAdapter.prototype.requestDevice = async function (desc) {
+      const dev = await origReq.call(this, desc);
+      const shown = new Set();
+      dev.addEventListener('uncapturederror', (e) => {
+        const m = e.error.message;
+        if (shown.has(m.slice(0, 120))) return;
+        shown.add(m.slice(0, 120));
+        console.error(`WebGPU ${e.error.constructor.name}\n    ${m}`);
+      });
+      return dev;
+    };
+  }
+</script>
+<button type="button" id="fs" title="Full screen. Captures Esc, Tab and Ctrl+W for the game — press and hold Esc to leave.">full screen</button>
+<canvas id="benilla"></canvas>
+<script>
+  // Dev page: allow `?user=&pass=&char=` links to log in. A hosting page that fetched the
+  // credentials itself sets `window.__wenilla_env = {user, pass, host}` here instead, and the
+  // client then never reads credentials from the URL (`benilla_app::webenv`).
+  window.__wenilla_env = { dev_query_creds: '1' };
+</script>
+<script type="module">
+  import init from './wenilla.js';
+  import { bind } from './wasi_stubs.js';
+  import { boot } from './boot.js';
+  // `boot(init)` is the loading overlay + parallel data prefetch (see boot.js's header); it calls
+  // `init()` with a byte-counted Response, and `init()` instantiates the wasm module, which runs
+  // `#[wasm_bindgen(start)] start()` as part of instantiation (`wenilla/src/lib.rs`) — that's the
+  // whole boot, canvas included (`boot.rs` binds to `#benilla` by id, so no query/lookup belongs
+  // here). `bind(w.memory)` comes AFTER on purpose: the wasm Lua VM's WASI shims
+  // (`wasi_stubs.js`'s own header) can only zero a WASI caller's out-pointers once the module's
+  // linear memory exists to write into, and `init()` is what creates it.
+  // **First, and before `boot(init)`.** The guard wraps `GPUAdapter.prototype.requestDevice`
+  // (which wgpu calls from inside `init()`), commits the canvas's size (which winit reads when it
+  // creates the window), and writes its recovery tier into `__wenilla_env` (which `webenv` reads
+  // once). All three are one-shot and all three land inside `init()`, so "before" is the whole
+  // contract. Awaited rather than fired off: a guard installed a frame late would miss the device
+  // it exists to watch.
+  const { installGpuGuard } = await import('./gpu.js');
+  installGpuGuard(document.getElementById('benilla'));
+  // Full-screen key capture: in full screen the page also takes a Keyboard Lock, so Esc, Tab and
+  // Ctrl+W reach the game instead of the browser. Dynamic, unawaited and never load-bearing —
+  // see web/platform.js. Durable storage is not asked for here; `packs.js::bootstrap` does it on
+  // the boot path, ahead of the service worker's first write.
+  import('./platform.js')
+    .then(({ installFullscreenToggle, holdMouseNavigationButtons }) => {
+      installFullscreenToggle(document.getElementById('fs'), {
+        focusTarget: document.getElementById('benilla'),
+      });
+      // Optional-called: a cached platform.js from before this export must not throw here.
+      holdMouseNavigationButtons?.();
+    })
+    .catch((e) => console.warn('platform.js:', e));
+  // **Before `boot(init)`, and that ordering is load-bearing.** `init()` builds the plugin graph,
+  // and `TaskPoolPlugin` creates all three task pools inside it — so the spawner has to be on the
+  // page before the module starts, not merely early. A bridge installed afterwards would find every
+  // pool already built and empty. Cheap and total: on a build without shared memory this installs a
+  // global nothing ever calls.
+  const { installThreads } = await import('./threads.js');
+  installThreads();
+  // Beside the threads and for the same reason: the mixer is built inside the plugin graph
+  // `init()` constructs, so `window.__wenilla_audio` has to be on the page before the module
+  // starts. A bridge installed afterwards would find the device already opened kira's cpal way —
+  // the main-thread `ScriptProcessorNode` that makes every frame hitch audible.
+  const { installAudio } = await import('./audio.js');
+  installAudio();
+  const w = await boot(init);
+  bind(w.memory);
+</script>

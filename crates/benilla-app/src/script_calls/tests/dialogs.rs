@@ -104,7 +104,7 @@ fn unit_at(app: &mut App, guid: u64, yards: f32) {
 }
 
 fn vm(app: &mut App) -> Mut<'_, UiScript> {
-    app.world_mut().non_send_resource_mut::<UiScript>()
+    app.world_mut().non_send_mut::<UiScript>()
 }
 
 /// A slot of the queue, as the status handler stores it (`0x4aa850`).

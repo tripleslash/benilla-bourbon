@@ -23,9 +23,9 @@ mod pool;
 mod render;
 mod wind;
 use census::{census, profile};
-use mist::{push_mist, run_mist, Mist};
+use mist::{puff_shape, push_mist, run_mist, Mist, REFERENCE_PUFF};
 use pool::{run_kind, HeightCache, Pool};
-use render::{push_flakes, push_patters, push_streaks, FlakeView};
+use render::{flake_shape, push_flakes, push_patters, push_streaks, streak_shape, PATTER_SHAPE};
 pub(crate) use wind::{wow_azimuth_to_bevy, WeatherWind};
 
 // ===== The reference's constants =====
@@ -164,7 +164,7 @@ pub(super) struct Precip {
 /// exterior group seen through a portal (`0x6b42d9`). The reference's dispatchers update the
 /// drops first and gate only the draw and the mist on it (`0x677380`, `0x6790b0`, `0x67a520`).
 #[derive(Resource, Default)]
-pub(super) struct WeatherIndoors(bool);
+pub(crate) struct WeatherIndoors(pub(crate) bool);
 
 /// Resolves [`WeatherIndoors`] from the portal pass's [`CameraInteriorClaim`] this frame.
 fn gate_weather_indoors(claim: Res<CameraInteriorClaim>, mut indoors: ResMut<WeatherIndoors>) {
@@ -215,10 +215,17 @@ fn setup_precip(
     commands.insert_resource(PrecipAssets {
         streak: asset_server.load("mpq://textures/weather/raindrop01.blp"),
         splash: asset_server
-            .load_with_settings("mpq://textures/weather/raindropsplash01.blp", effect),
+            .load_builder()
+            .with_settings(effect)
+            .load("mpq://textures/weather/raindropsplash01.blp"),
         flake: asset_server
-            .load_with_settings("mpq://textures/weather/snowflake01.blp", point_sprite),
-        mist: asset_server.load_with_settings("mpq://textures/weather/snowmist01.blp", effect),
+            .load_builder()
+            .with_settings(point_sprite)
+            .load("mpq://textures/weather/snowflake01.blp"),
+        mist: asset_server
+            .load_builder()
+            .with_settings(effect)
+            .load("mpq://textures/weather/snowmist01.blp"),
     });
     commands.insert_resource(Precip {
         rain: Pool::default(),
@@ -229,6 +236,46 @@ fn setup_precip(
 }
 
 /// Per frame: wind, spawn budgets, integrate, land; [`push_precip`] draws in `PostUpdate`.
+/// fork: perf — `WOW_PRECIP_PROFILE=1`: every two seconds, the simulation's mean CPU ms a frame,
+/// the ground rays it cast a frame, the height-cache clears and the stale columns it re-cast, so
+/// a rain frame's cost is read from numbers.
+#[derive(Default)]
+struct PrecipProfile {
+    on: Option<bool>,
+    since: Option<bevy::platform::time::Instant>,
+    frames: u32,
+    busy: std::time::Duration,
+}
+
+impl PrecipProfile {
+    fn enabled(&mut self) -> bool {
+        *self.on.get_or_insert_with(|| {
+            crate::launch_env::var("WOW_PRECIP_PROFILE").is_some_and(|v| v == "1")
+        })
+    }
+
+    /// Logs every two seconds, counts this frame, and returns its start.
+    fn frame(&mut self, heights: &mut HeightCache) -> bevy::platform::time::Instant {
+        let now = bevy::platform::time::Instant::now();
+        let since = *self.since.get_or_insert(now);
+        if now - since >= std::time::Duration::from_secs(2) && self.frames > 0 {
+            let f = self.frames as f32;
+            info!(
+                "PRECIP_PROFILE sim_ms={:.3} rays_per_frame={:.0} clears={} recasts={}",
+                self.busy.as_secs_f32() * 1000.0 / f,
+                heights.rays as f32 / f,
+                heights.clears,
+                heights.recasts,
+            );
+            (heights.rays, heights.clears, heights.recasts, self.frames) = (0, 0, 0, 0);
+            self.busy = std::time::Duration::ZERO;
+            self.since = Some(now);
+        }
+        self.frames += 1;
+        now
+    }
+}
+
 fn simulate_precip(
     time: Res<Time>,
     weather: Res<WeatherState>,
@@ -238,16 +285,27 @@ fn simulate_precip(
     viewer: Res<crate::view::Viewer>,
     spatial: SpatialQuery,
     indoors: Res<WeatherIndoors>,
+    // fork: where the collider set changed, which dates the ground columns; absent, nothing
+    // ever does.
+    mut colliders: Option<ResMut<crate::collision::ColliderChanges>>,
     mut wind: ResMut<WeatherWind>,
     mut heights: ResMut<HeightCache>,
     mut precip: Option<ResMut<Precip>>,
     mut last_cut: Local<u32>,
     // Frames since the previous census line.
     mut census_frames: Local<u32>,
+    mut prof: Local<PrecipProfile>,
 ) {
+    // Drained every frame, whatever stops the simulation below.
+    let eye = cam.single().ok().map(GlobalTransform::translation);
+    let colliders_changed = colliders
+        .as_deref_mut()
+        .is_some_and(|c| c.take_near(eye, pool::NEAR_REACH));
+    heights.begin_frame(colliders_changed);
     let Some(precip) = precip.as_deref_mut() else {
         return;
     };
+    let started = prof.enabled().then(|| prof.frame(&mut heights));
     // Indoors this freezes the whole effect, where the reference keeps simulating drops unseen
     // and freezes only the mist.
     if indoors.0 {
@@ -269,6 +327,7 @@ fn simulate_precip(
     wind.update(wind_pos, facing, viewer.planar_speed, dt);
 
     let filter = crate::collision::WorldCollision::body_filter();
+    heights.evict_far(cam_pos);
     let Precip {
         rain,
         snow,
@@ -364,16 +423,22 @@ fn simulate_precip(
             cam_pos,
         );
     }
+    if let Some(t) = started {
+        prof.busy += t.elapsed();
+    }
 }
 
 /// Pushes the frame's precip onto the effect stream after its clear: rain as Mod2x triangles
 /// under the forced grey fog (both textures' grounds are exactly RGB 128), snow and mist as
 /// alpha quads with fog off (`0x678610`, `0x67ae20`). Anchored at the camera, they sort after
 /// every world transparent and before the biased glare and nameplate rungs.
+///
+/// fork: perf — as point draws: a point a particle, its geometry built by the vertex stage.
 fn push_precip(
     precip: Option<Res<Precip>>,
     assets: Option<Res<PrecipAssets>>,
     indoors: Res<WeatherIndoors>,
+    underwater: Option<Res<crate::liquid::Underwater>>,
     lighting: Res<WowLighting>,
     wind: Res<WeatherWind>,
     cam: Query<(Entity, &GlobalTransform, &Camera, &Projection), With<WorldCamera>>,
@@ -382,30 +447,14 @@ fn push_precip(
     let (Some(precip), Some(assets)) = (precip, assets) else {
         return;
     };
-    if indoors.0 {
+    // fork: a submerged eye draws no precipitation; the drops keep simulating for the surfacing.
+    if indoors.0 || underwater.is_some_and(|u| u.0.any()) {
         return;
     }
     let Ok((cam_entity, cam_tf, camera, proj)) = cam.single() else {
         return;
     };
     let cam_pos = cam_tf.translation();
-    let cam_right = cam_tf.right().as_vec3();
-    let cam_up = cam_tf.up().as_vec3();
-    // The live viewport only gates whether this camera draws: flakes are sized in era pixels.
-    let flake_view = camera
-        .physical_viewport_size()
-        .filter(|vp| vp.y > 0)
-        .map(|_| FlakeView {
-            eye: cam_pos,
-            forward: cam_tf.forward().as_vec3(),
-            right: cam_right,
-            up: cam_up,
-            world_per_px: match proj {
-                Projection::Perspective(p) => (p.fov * 0.5).tan(),
-                // The reference has no orthographic mode; this keeps the sprites sane.
-                _ => (crate::view::CAM_FOVY * 0.5).tan(),
-            } / SNOW_PX_REF_HEIGHT,
-        });
     let spec = |texture: &Handle<Image>, blend: EffectBlend, fog: EffectFog| EffectDrawSpec {
         cam: cam_entity,
         texture: texture.id(),
@@ -417,53 +466,54 @@ fn push_precip(
         bias: 0.0,
         raster_bias: 0,
         raster_slope: 0.0,
-        // Absolute verts suit centimetre-scale geometry; the flakes override this.
         cam_relative: false,
         no_depth_test: false,
         main_entity: Entity::PLACEHOLDER,
         light: None,
         clip: None,
+        // fork: fsr (FORK.md) — rain draws as a modulate, which the velocity pass skips; snow and mist
+        // fall slowly enough for the camera's reprojection.
+        motion: crate::particles::buffer::EffectMotion::Static,
     };
-    let start = quads.begin();
-    push_streaks(&mut quads.verts, &precip.rain.drops, wind.tilt, cam_pos);
-    quads.commit_tris(
+    let start = quads.begin_points();
+    push_streaks(&mut quads.points, &precip.rain.drops);
+    quads.commit_points(
         start,
+        streak_shape(wind.tilt),
         spec(&assets.streak, EffectBlend::Mod2x, EffectFog::Rain),
     );
-    let start = quads.begin();
-    push_patters(&mut quads.verts, &precip.rain.patters, cam_right, cam_up);
-    quads.commit_tris(
+    let start = quads.begin_points();
+    push_patters(&mut quads.points, &precip.rain.patters);
+    quads.commit_points(
         start,
+        PATTER_SHAPE,
         spec(&assets.splash, EffectBlend::Mod2x, EffectFog::Rain),
     );
-    if let Some(view) = &flake_view {
-        let start = quads.begin();
-        push_flakes(
-            &mut quads.verts,
-            &precip.snow.drops,
-            &precip.snow.patters,
-            view,
-        );
-        quads.commit_quads(
+    // The live viewport only gates whether this camera draws: flakes are sized in era pixels.
+    if camera.physical_viewport_size().is_some_and(|vp| vp.y > 0) {
+        let fov_y = match proj {
+            Projection::Perspective(p) => p.fov,
+            // The reference has no orthographic mode; this keeps the sprites sane.
+            _ => crate::view::CAM_FOVY,
+        };
+        let start = quads.begin_points();
+        push_flakes(&mut quads.points, &precip.snow.drops, &precip.snow.patters);
+        quads.commit_points(
             start,
-            EffectDrawSpec {
-                // `push_flakes` wrote camera-relative offsets: its millimetre quads need them.
-                cam_relative: true,
-                ..spec(&assets.flake, EffectBlend::Alpha, EffectFog::Off)
-            },
+            flake_shape(fov_y),
+            spec(&assets.flake, EffectBlend::Alpha, EffectFog::Off),
         );
     }
-    let start = quads.begin();
-    push_mist(
-        &mut quads.verts,
-        &precip.mist,
-        cam_right,
-        cam_up,
-        cam_pos,
-        lighting.fog_color,
-    );
-    quads.commit_quads(
+    // fork: modern weather — a modern frame's puff is a smaller, fainter wisp in the haze's colour.
+    let (puff, mist_color) = match crate::modern::weather::puff_look() {
+        Some(puff) => (puff, crate::modern::weather::puff_color(lighting.fog_color)),
+        None => (REFERENCE_PUFF, lighting.fog_color),
+    };
+    let start = quads.begin_points();
+    push_mist(&mut quads.points, &precip.mist, puff);
+    quads.commit_points(
         start,
+        puff_shape(puff, mist_color),
         spec(&assets.mist, EffectBlend::Alpha, EffectFog::Off),
     );
 }

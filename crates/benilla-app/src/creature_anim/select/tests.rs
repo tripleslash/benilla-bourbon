@@ -912,7 +912,8 @@ fn a_flying_spline_is_fly_before_backward_and_speed() {
 
 #[test]
 fn unify_stamps_flying_from_the_live_spline_on_every_leg() {
-    use std::time::{Duration, Instant};
+    use bevy::platform::time::Instant;
+    use std::time::Duration;
     let spline = |grounded| crate::net::Spline {
         deck: None,
         points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],

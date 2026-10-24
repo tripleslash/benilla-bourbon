@@ -752,7 +752,39 @@ fn create_character_checks_the_name_then_asks_the_host() {
                 hair_style: 3,
                 hair_color: 4,
                 facial_hair: 5,
+                challenge_modes: 0,
             })] if name == "Zoë"
+        ),
+        "{queued:?}"
+    );
+}
+
+/// Turtle WoW's glue VM holds the challenge modes `ChallengeList.lua` stores, and the create sends
+/// them; a 1.12.1 glue VM has no such verb.
+#[test]
+fn a_turtle_glue_vm_sends_its_challenge_modes() {
+    let vanilla = vm();
+    assert!(vanilla
+        .eval::<bool>("return SetSelectedChallengeModes == nil")
+        .unwrap());
+
+    let mut s = human([1, 2, 3, 4, 5]);
+    s.set_flavor(crate::script::UiFlavor::Turtle);
+    s.run("SetSelectedChallengeModes(1 + 8 + 512)").unwrap();
+    assert_eq!(
+        s.eval::<f64>("return GetSelectedChallengeModes()").unwrap(),
+        521.0
+    );
+    s.take_glue_calls();
+    s.run("CreateCharacter('Turtle')").unwrap();
+    let queued = s.take_glue_calls();
+    assert!(
+        matches!(
+            queued.as_slice(),
+            [GlueCall::CreateCharacter(GlueCreateRequest {
+                challenge_modes: 521,
+                ..
+            })]
         ),
         "{queued:?}"
     );

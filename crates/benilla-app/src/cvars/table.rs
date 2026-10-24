@@ -174,8 +174,8 @@ pub(crate) fn all_rows() -> impl Iterator<Item = &'static Registered> {
 
 /// The host-backed CVars, one row per knob that has a reader: a host knob, or a Lua consumer
 /// such as the stock Video Options window's verbs. The reference's other script-visible CVars,
-/// which nothing here reads, are `super::inert::INERT`: `lodDist`, `footstepBias`,
-/// `mapObjLightLOD`, `SkyCloudLOD` and `DistCull` among them, which pfUI's `hdgraphic` writes.
+/// which nothing here reads, are `super::inert::INERT`: `footstepBias`, `mapObjLightLOD`,
+/// `SkyCloudLOD` and `DistCull` among them, which pfUI's `hdgraphic` writes.
 /// `maxLOD` is no 1.12 CVar and stays unregistered.
 pub(crate) const REGISTERED: &[Registered] = &[
     // `realmName` (`0x83f2d0`): registered `""` (`0x882748`), help "Last realm connected to"
@@ -264,8 +264,16 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `ContainerFrame.lua:483` and `UIDropDownMenu.lua:525` branch on it and `OptionsFrame.lua:13`
     // gives it a checkbox.
     same("useUiScale", "0"),
-    // `farclip` (`0x688654`, "350", callback `0x688d40`), which refuses outside [177, 777].
-    same("farclip", "350").checked(benilla_ui::script::check_farclip),
+    // fork: modern lighting (FORK.md) — the reference registers 350. The modern
+    // look's long-range height fog shows the world past it (Orgrimmar's gate from the Durotar road
+    // sits ~450 yd out), so the default view reaches 1000 yd; the slider still lowers it. The
+    // callback is the reference's `0x688d40` with the fork's raised ceiling.
+    ours(
+        "farclip",
+        "1000",
+        "the modern look's horizon: detailed terrain to 1000 yd (reference registers 350, clamps at 777)",
+    )
+    .checked(benilla_ui::script::check_farclip),
     // `nearclip` (`0x68867a`: name `0x84ffb0`, default `0x84fb48` "0.1", flags 1, callback
     // `0x688d90`, record `[0xc7f348]`). The camera re-reads the record every frame: `0x511bc0`
     // (sole caller `0x483094`) stamps `[cam+0x38]` from it through the handle `[0xbe1078]` that
@@ -395,32 +403,44 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `WorldDetail` is no 1.12 CVar but the `GetWorldDetail`/`SetWorldDetail` verb name
     // (`OptionsFrame.lua:27`); stops 0/1/2 are `frillDensity` 16/32/48. `SetWorldDetail 0x488dd0`
     // also writes `SmallCull` {0.07, 0.04, 0.01}, and `GetWorldDetail` reads only `SmallCull`,
-    // whose registered 0.04 is stop 1: the reference's slider boots at Medium.
+    // whose registered 0.04 is stop 1: the reference's slider boots at Medium. Welded to
+    // `ClutterConfig::default().density` (stop = density - 1). Ours boots at High (the director's
+    // call, 2026-09-08), `SmallCull` with it below.
     ours(
         "WorldDetail",
-        "1",
+        "2",
         "the Environment Detail stop our Graphics page and `GetWorldDetail` read; 1.12 keeps the \
-         stop in `smallCull` and `frillDensity` and registers no CVar of this name",
+         stop in `smallCull` and `frillDensity` and registers no CVar of this name. Ours starts at \
+         High where the reference's own slider reads Medium, because ground cover is most of what \
+         the world looks like, and the stop is one drag away either way",
     ),
     // `SmallCull` (`0x68854a`: name `0x8696f8`, default `0x869718` "0.04", flags 1, callback
     // `0x688b10`, record `[0xc7f330]`). The callback refuses outside [0.001, 2.0] and stores into
     // `[0x868620]`, which nothing reads: no mechanism here either. Its readers are Lua ones:
     // `SetWorldDetail` writes it per stop, and `OptionsFrame_SetDefaults` reads its default
     // (`OptionsFrame.lua:431`). `hwDetect` sets 0.04 on the fallback row a modern GPU reaches.
-    same(benilla_ui::script::CVAR_SMALL_CULL, "0.04").checked(benilla_ui::script::check_small_cull),
+    deviates(
+        benilla_ui::script::CVAR_SMALL_CULL,
+        "0.01",
+        "0.04",
+        "the High stop's `SetWorldDetail` value, so the pair boots consistent with `WorldDetail` \
+         \"2\" above and the stock window's Defaults lands on the same stop as ours",
+    )
+    .checked(benilla_ui::script::check_small_cull),
     // `frillDensity` (`0x68862e`: name `0x8423d8`, default `0x864644` "16", flags 1, callback
     // `0x688de0`, record `[0xc7f2f4]`): detail-doodad cells visited per chunk; the callback refuses
     // outside [1, 256] and hands the rest through `0x6725a0` to `[0xc7b494]`, the bound of the
     // scatter loop at `0x6bfcfb`/`0x6bff1c`. One knob with `WorldDetail`. `hwDetect`
     // (`0x639a60`) sets it from `VideoHardware.dbc` field `+0x18`, 24 on videoID 170. pfUI's
-    // `hdgraphic` reads `GetCVar("frillDensity") > 48` and writes up to 256.
+    // `hdgraphic` reads `GetCVar("frillDensity") > 48` and writes up to 256. Ours ships 48, not
+    // 32: `cvars::tests` welds it to `(WorldDetail + 1) x FRILL_DENSITY`, so it follows the High stop.
     deviates(
         "frillDensity",
-        "32",
+        "48",
         "16",
         "the reference's registered 16 is stop 0 and its post-`hwDetect` 24 is on no \
-         stop at all, so every stop diverges; Medium (32) is the nearest one no sparser than a \
-         fresh install, and erring sparse is the worse failure for ground cover",
+         stop at all, so every stop diverges; this is whatever stop `WorldDetail` starts on, in \
+         the reference's own cells-per-chunk, and the two are welded rather than chosen apart",
     )
     .checked(benilla_ui::script::check_frill_density),
     // ── Combat log display ranges, in yards ──────────────────────────────────────────────────────
@@ -588,7 +608,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `0x882654`): the Lua state's limit in KB, shown in MB by the glue AddOns screen
     // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`) and watched each frame in the
     // world (`0x495599`), [`crate::ui_memory`].
-    same("scriptMemory", "49152"),
+    if cfg!(target_arch = "wasm32") {
+        deviates(
+            "scriptMemory",
+            "0",
+            "49152",
+            "The page enforces no script memory limit, whatever is set (`ui_memory`: it cannot \
+             quit), so its AddOns screen shows 0, no limit; native keeps 49152.",
+        )
+    } else {
+        same("scriptMemory", "49152")
+    },
     // `widescreen` (`0x63a74f`: name `0x837050`, "1", flags 0, record `[0xc4ec08]`): off, the
     // resolution list is the four fixed sizes (`0x48bcac`, [`crate::video`]) and the glue's and
     // the interface's aspect is 4/3 (`0x46ab40`, `0x4901e0`; `crate::ui_script::glue`,
@@ -611,6 +641,19 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // [`crate::video::VideoConfig::vsync`], which the window's present mode follows at the
     // `RestartGx` commit. `$WOW_NOVSYNC=1` overrides it for the session.
     same("gxVSync", "1").latched(),
+    // Benilla's opt-in Wrath-style character shadow-map path. Static world assets keep their
+    // authored shading; players, NPCs, creatures and mounts cast realtime silhouettes.
+    // **Default "1" since 2026-09-08** (the director's call), where it was "0". The old note said
+    // "0 is the default no frame moves at", which was the right reason for a path that had just
+    // landed and is not the question any more: what the client should LOOK like out of the box is,
+    // and the answer is with the shadows on. Welded to `VideoConfig::default().world_shadows`
+    // below, so the registered string and the knob cannot drift.
+    ours(
+        "worldShadows",
+        "1",
+        "benilla's own — 1.12 has no shadow map to switch on; the unit shadow it does draw is \
+         the blob decal `blob_shadow.rs` still owns at 0",
+    ),
     // `gxWindow` (`0x63a889`): "1" when the locale is zhCN (`0x63a738`, `0x63a74c`), else "0"
     // (`0x63a865`-`0x63a86c`). The knob is [`crate::video::VideoConfig::display`]. Deviation: "0"
     // raises a borderless fullscreen window instead of mode-setting the display, because Wayland
@@ -678,9 +721,15 @@ pub(crate) const REGISTERED: &[Registered] = &[
          that field is 1 on both fallback rows an unlisted modern GPU can reach — measured on the \
          reference's own `Logs/gx.log` (`videoID: 170`)",
     ),
-    // Not one of `hwDetect`'s sixteen (`[0x639a60, 0x639b80)` never reads `0xc7f2e4`), so the
-    // registered "1", off, stands.
-    same("anisotropic", "1"),
+    // `anisotropic` registers `"1"` (off) and `hwDetect` never sets it (`0xc7f2e4` is absent from
+    // `[0x639a60, 0x639b80)`).
+    deviates(
+        "anisotropic",
+        "16",
+        "1",
+        "maintainer's call, reversing 1642: at mode 4 an oblique surface takes the mip of its long \
+         axis and smears; 16x anisotropy costs nothing measurable on a current GPU",
+    ),
     // The four video CVars the stock window's verbs read and write (`benilla_ui` `video_pairs`);
     // benilla has no mechanism behind any of them. `shadowLevel` (`0x6885bc`, "1", flags 1,
     // callback `0x688c10`, record `[0xc7f350]`) is behind `Get/SetTerrainMip` as `1 − level`: the
@@ -738,6 +787,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // the stock window ticks this box whenever Windowed Mode is (`:399-408`), so honouring it would
     // drop the gamma of every windowed player who opens that window.
     same("DesktopGamma", "0"),
+    // `brightness` — the Graphics page's level control beside Gamma, applied after the ramp in the
+    // same composite pass ([`crate::ui_gamma::DisplayBrightness`]). 0.5 is the identity, so the
+    // default image is the reference's at `gamma` 1.0. Applies to the next frame.
+    ours(
+        "brightness",
+        "0.5",
+        "benilla's own (the maintainer's call) — 1.12's one whole-frame grade is the `gamma`          ramp, which bends the midtones; this lifts the blacks or dims the whites instead",
+    ),
     // ── The stock Video Options window's other boxes (`OptionsFrame.lua:5-22`) ───────────────────
     //
     // `ffx` (`0x6ccfe3`: name `0x86f2ac`, record `[0xce8a04]`), `ffxGlow` (`0x6cc17d`, name
@@ -782,9 +839,21 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("M2UseShaders", "1"),
     same("M2UsePixelShaders", "0"),
     // `lod` (`0x68848c`: name `0x8697d0`, "1", flags 1, callback `0x688920`, record `[0xc7f314]`),
-    // World LOD: bit 2 of `[0xc7b2a4]`, which gates the doodad LOD distance test at `0x6afb11`. No
-    // effect here: benilla has no doodad LOD swap, as `lodDist` above has no row.
+    // World LOD: bit 2 of `[0xc7b2a4]`, which gates the chunk level's distance test at
+    // `0x6afb11`. The knob is `benilla_world::horizon::HorizonCulling::lod`: a chunk's level
+    // picks its drawn mesh (`0x6beb50`) and how many vertices its horizon rows add (`0x6c15d0`).
     same("lod", "1"),
+    // `lodDist` (`0x688524`, "100.0", callback `0x688ab0` into `[0x867960]`): the view depth past
+    // which a chunk drops to level 2 while `lod` is on. The knob is
+    // `benilla_world::horizon::HorizonCulling::lod_dist`; the callback's range is widened to
+    // 1000 with it.
+    deviates(
+        "lodDist",
+        "500.0",
+        "100.0",
+        "farclip default 1000 yd; 100 switches most visible relief to level 2",
+    )
+    .checked(benilla_ui::script::check_lod_dist),
     // `movieSubtitle` (`0x402c18`: name `0x82e9d8`, "0", flags 0, record `[0x882640]`), Cinematic
     // Subtitles: the pre-rendered movies' subtitles, read by the glue's `GetMovieSubtitles`
     // (`0x46dbc0`). No effect here: benilla plays no pre-rendered movie.
@@ -835,6 +904,198 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "benilla's own — the reference has no off-screen buffer to hang a resolution dial \
          on; its nearest equivalent, `gxResolution`, drops the interface with the world",
+    ),
+    // **Screen-space indirect lighting** — benilla's own pair, no 1.12 counterpart in the same
+    // sense `renderScale` has none: the reference renders straight to the backbuffer with no depth
+    // it could gather over, and its ambient IS the authored `LightParams` row. One pass computes
+    // both halves off one swept horizon (`benilla_world::ssilvb`), so they are two CVars rather
+    // than one only because a player wants to move them apart: contact darkening is a fidelity
+    // choice, colour bleed is a taste one.
+    //
+    // `ssaoStrength` — how much of the gathered occlusion to apply. `0` is off, and off is exact:
+    // the fragment returns its source untouched rather than through a lossy decode/encode pair.
+    //
+    // **Registered at 0 since 2026-09-08** (the director's call), where it was 0.5. It now sits with
+    // `worldShadows` and `renderScale`: a default at the value where no frame moves, and an effect a
+    // player opts into rather than one they have to find and switch off. The reasoning lives on the
+    // engine constant; the engine owns the number ([`AO_DEFAULT`]) and this string is welded to it
+    // below, so the two cannot drift. `$WOW_SSAO` overrides session-only.
+    // fork: 0.4 since 2026-10-12 (the director's call), welded to `AO_DEFAULT` below.
+    ours(
+        "ssaoStrength",
+        "0.4",
+        "benilla's own — the reference renders straight to the backbuffer with no depth to \
+         gather over, and its ambient IS the authored `LightParams` row",
+    ),
+    // `ssgiStrength` — how much of the single bounce to add back, tinted by what bounced it. `0` is
+    // off and is exact, on the same terms. `$WOW_SSGI` overrides session-only.
+    // fork: 0 since 2026-10-14 (perf), welded to `GI_DEFAULT` below.
+    ours(
+        "ssgiStrength",
+        "0",
+        "benilla's own, on `ssaoStrength`'s terms — one swept horizon feeds both halves, \
+         split across two rows only so a player can move them apart",
+    ),
+    // ── fork-owned block: modern lighting (FORK.md) ──
+    // `lightingModel` — 0 classic (upstream's 1.12.1 reproduction), 1 modern (the default).
+    // `lightingQuality` — the modern tier, 0 low … 4 cinematic (the default, on every platform).
+    // Cinematic (P8) is the local-light tier: every authored lamp and every glowing
+    // weapon emits, twelve of them cast soft cube shadows, and entities cast into those cubes.
+    // Both apply to the next frame in the world.
+    // `$WOW_LIGHTING` / `$WOW_LIGHTING_QUALITY` override session-only.
+    ours(
+        "lightingModel",
+        "1",
+        "the fork's own — the reference has one lighting model; this selects the parallel one",
+    ),
+    ours(
+        "lightingQuality",
+        "4",
+        "the fork's own — the modern model's quality tier",
+    ),
+    // `autoExposure` — the modern model's auto-exposure: a dark picture (night, a dark zone, deep
+    // shade), metered off the screen, is lifted toward visible, at most ~1.2 stop. 0 holds the exposure fixed. Applies to the
+    // next frame; a classic frame has no exposure and ignores it.
+    ours(
+        "autoExposure",
+        "1",
+        "the fork's own — the reference's exposure never moves",
+    ),
+    // `serverTimeOffset` — whole hours, -12 to 12, added to the server's time of day for the sky,
+    // the light and the clock the UI reads (`net::game_time::TimeOffset`); the session clock
+    // itself and the daytime gate the server checks stay on its time. Applies to the next frame.
+    ours(
+        "serverTimeOffset",
+        "0",
+        "the fork's own — 1.12 draws and shows the server's time of day",
+    ),
+    // ── end fork-owned block ──
+    // ── fork-owned block: fsr (FORK.md) ──
+    // fork: fsr (FORK.md)
+    // `frameGeneration` — FSR 3.1.5 frame generation: one generated frame presented between every
+    // two rendered ones, FSR's upscaler at 1:1 at least (`renderScale` is capped at 1 while on).
+    // On by default; applies to the next frame.
+    ours(
+        "frameGeneration",
+        "1",
+        "benilla's own — 1.12 presents every frame it draws and no frame it did not",
+    ),
+    // `rcasSharpness` — FSR 3.1's RCAS sharpening on the SDK's 0..1 dial, `2 − 2·x` stops; the
+    // knob is `benilla_world::fsr::RcasSharpness`, its default `RCAS_SHARPNESS_DEFAULT` (welded
+    // below). Applies to the next frame.
+    ours(
+        "rcasSharpness",
+        "0.875",
+        "benilla's own — 1.12 has no upscaler to sharpen",
+    ),
+    // ── end fork-owned block ──
+    // ── fork-owned block: the Everwood port (FORK.md) ──
+    // `foliageWind` — 0 off (no vertex displacement, the reference's still image), 1 grass, 2
+    // grass and classified tree and bush foliage (the default). `foliageWindStrength` — the sway
+    // gain, 0.25..3, 1 the shipped tuning. Both apply to the next frame.
+    ours(
+        "foliageWind",
+        "2",
+        "the fork's own — 1.12 draws ground clutter and tree foliage still",
+    ),
+    ours(
+        "foliageWindStrength",
+        "1",
+        "the fork's own — the gain on `foliageWind`'s sway",
+    ),
+    // `rainSurfaces` — rain soaks sky-exposed surfaces (darker, puddles, a wet sheen) and they dry
+    // after it stops; 0 is the reference's dry look, exactly. Applies to the next frame.
+    ours(
+        "rainSurfaces",
+        "1",
+        "the fork's own — 1.12's rain leaves every surface as it was",
+    ),
+    // `graphicsQuality` — the Graphics Preset: a NAME for a combination of the graphics rows
+    // ([`super::presets`]), re-derived every frame. A string row, so `config.toml` and
+    // `/console set graphicsQuality Medium` read as what they mean. Cinematic is the registered
+    // defaults of the rows it names.
+    ours(
+        "graphicsQuality",
+        "Cinematic",
+        "the fork's own — a preset ladder over the graphics rows (Classic / Low / Medium / High / \
+         Ultra / Cinematic, or Custom); the reference's options have no such preset",
+    ),
+    // `lavaLight` — magma surfaces light the rock and ground around them; 0 is the reference,
+    // where lava glows and lights nothing. No options row: the Graphics Preset governs it.
+    ours(
+        "lavaLight",
+        "1",
+        "the fork's own — 1.12's lava is fullbright and casts no light",
+    ),
+    // ── end fork-owned block ──
+    // **`waterDetail` — which liquid renderer draws the world's water** (the Cataclysm liquid port).
+    //
+    // The name and the value space are the REFERENCE's, taken from a later client rather than
+    // invented here: `Liquid::CMaterialWater::InitResources` (WoW 4.1.0) switches on exactly this
+    // CVar, binding `Water` at 0, `MediumWater` at 1 and `ProcWaterAbove`/`ProcWaterBelow` at 2.
+    // benilla implements 0 (its 1.12.1 renderer, `liquid.wgsl`) and 2 (`liquid_cata.wgsl`), and
+    // deliberately leaves the 1 slot EMPTY rather than renumbering to a dense 0/1 — a medium tier
+    // is a real thing that could land later, and it should land on its own number instead of
+    // shifting a value players already have in `config.toml`. (fork: 1 is since the SSR-only cata
+    // tier, and 3 the experimental modern combine — `liquid::WATER_DETAIL_EXPERIMENTAL`.)
+    //
+    // **Registered at 2**, so cata water is what the client looks like out of the box. That is a
+    // benilla choice, not a reference default (1.12.1 has no such CVar at all: its water is the
+    // only water it has), which is why this is an `ours` row. `$WOW_WATER_DETAIL` overrides
+    // session-only.
+    ours(
+        "waterDetail",
+        "3",
+        "the reference's own CVar and value space, from 4.1.0's liquid system - benilla ports          its tier 2 (ProcWater + ProcWaterAbove/Below), ships the fork's Modern (Experimental) tier 3 by default, and keeps 1.12.1's renderer on tier 0",
+    ),
+    // **`hdCharacterModels` — the updated-character-model layer, ON by default.**
+    //
+    // benilla's own, on `waterDetail`'s terms but for a different kind of thing: the rows above
+    // choose between renderers we ship, and this one chooses whether a body of ART is in the
+    // composite at all. `patch-A.MPQ` natively, a second BENPACK container (`/data-hd`) in the
+    // browser; either way [`benilla_formats::layers`] is what reads it and
+    // [`benilla_formats::Chain::open`] is where it lands.
+    //
+    // **Registered "1", so the row is an OPT-OUT.** It was registered "0" until 2026-09-09, on
+    // three recorded reasons; the flip answers each rather than overruling it:
+    //
+    //  1. *"On the web build the layer is another 1.7 GiB download, and a player who never asked
+    //     for it must never pay for it."* Still true, and still the only reason the layer is a
+    //     separate container at all — turning the box OFF fetches no index and no pack, exactly as
+    //     before. What changed is which way round the question is asked: this site ships the
+    //     layer, so the art a player gets by default is the art the site is for. The tooltip
+    //     states the size before the click either way.
+    //  2. *"Every visual golden in this tree is denominated in the original character models."*
+    //     Still true, and untouched — the goldens do not read this row. `benilla_formats::layers`'
+    //     own static stays **off**, so every test, tool and `benilla-worldview` probe keeps
+    //     asserting 1.12 art unless `$WOW_HD_MODELS` says otherwise. This row moves the CLIENT's
+    //     answer and nothing else.
+    //  3. *"A player with no `patch-A.MPQ` and no `/data-hd` would take a warning line every
+    //     boot."* Measured: they do not. Natively the archive is simply not in the folder and
+    //     `Chain::open`'s layer filter has nothing to skip — no warning, original art. On the web
+    //     `Chain::open_layered` warns **once to the console** and runs on the original art, which
+    //     is the state that arm was written for.
+    //
+    // **Read at boot** ([`crate::cvars::boot_cvar`], like `gxWindow`), for the chains the client
+    // opens then. On the web build the layer is a live mount afterwards too: a change of the row
+    // swaps it at that edge ([`crate::hd_models`]). A native chain decides its archives as it
+    // opens, so there the next start reads it, and the tooltip says which. `$WOW_HD_MODELS`
+    // overrides session-only, which is how the model test suite runs against the layer.
+    ours(
+        "hdCharacterModels",
+        "1",
+        "benilla's own — 1.12 has no optional content layer to switch on; the reference mounts          whatever `patch-?.MPQ` archives it finds and never asks",
+    ),
+    // **`reforgedModels` — the reforged game models and textures, ON by default.** Turtle WoW's
+    // Project Reforged art (its letter patches, a `/data-reforged` container in the browser),
+    // mounted over the Turtle layer on a 1.18.1 realm and never on a 1.12.1 one; its row is in
+    // Turtle's own options window only. **Read at boot** ([`apply_boot_layers`]) and latched for
+    // the session, so a change takes effect on the next load, which the row's popup says.
+    ours(
+        "reforgedModels",
+        "1",
+        "benilla's own — 1.12 has no optional content layer to switch on; the reference mounts \
+         whatever `patch-?.MPQ` archives it finds and never asks",
     ),
     // benilla's own: `/console fpsJournal 1` appends a per-second row of position, frame cost and
     // per-pass GPU time to `benilla-config/Diagnostics/fps-journal.csv`. The knob is

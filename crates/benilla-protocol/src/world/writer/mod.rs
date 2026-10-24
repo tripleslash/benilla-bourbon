@@ -1,10 +1,10 @@
 //! The world session's write half: [`WorldWriter`] and one method per thing the player can do.
 //! Each family module mirrors its namesake in `crate::messages`, which builds the bodies.
 
-use std::net::TcpStream;
-
 use anyhow::Result;
 use benilla_srp::vanilla_header::EncrypterHalf;
+
+use crate::transport::ConnWriter;
 
 use super::send_packet;
 
@@ -55,12 +55,12 @@ mod tutorial;
 mod unserved;
 mod vendor;
 
-/// Write half of a split [`WorldSession`](super::WorldSession): a cloned socket and the encrypter.
-/// Movement sends need the active player confirmed as mover first
+/// Write half of a split [`WorldSession`](super::WorldSession): the connection's write half and the
+/// encrypter. Movement sends need the active player confirmed as mover first
 /// ([`WorldSession::set_active_mover`](super::WorldSession::set_active_mover)). Positions are raw
 /// WoW yards; `orientation` is radians.
 pub struct WorldWriter {
-    pub(super) stream: TcpStream,
+    pub(super) writer: ConnWriter,
     pub(super) encrypter: EncrypterHalf,
     /// The character's faction language, set at login from its race, which a chat send naming no
     /// language carries. vmangos drops the whole message, dot-commands included, when the
@@ -73,7 +73,7 @@ impl WorldWriter {
     /// Frame, encrypt and write one packet: the sole write path every verb goes through.
     fn send(&mut self, opcode: u16, body: &[u8]) -> Result<()> {
         send_packet(
-            &mut self.stream,
+            &mut self.writer,
             Some(&mut self.encrypter),
             &self.traffic,
             opcode,

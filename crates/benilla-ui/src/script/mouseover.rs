@@ -126,8 +126,9 @@ pub(super) fn minimap_probe_miss(lua: &Lua) {
     }
 }
 
-fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, Model> {
-    lua.app_data_mut::<Model>().expect("model app_data")
+fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, crate::script::ModelCell> {
+    lua.app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data")
 }
 
 impl UiScript {
@@ -174,7 +175,7 @@ impl UiScript {
     /// The probe found no blip under the cursor inside the Minimap: it drops the held one and hides
     /// `GameTooltip`, whoever holds it (`0x4eb54c`–`0x4eb567`).
     pub fn minimap_blip_lost(&mut self) {
-        if self.model_mut().minimap_blip.take().is_some() {
+        if drain_field!(self, minimap_blip).is_some() {
             hide_tooltip(&self.lua);
         }
     }

@@ -13,9 +13,9 @@
 //!
 //! This module only moves the streamed GameObject; riding keys on [`Transport`], not the drive.
 
+use bevy::platform::time::Instant;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 // avian's own AABB and collider-tree refresh, run a second time each frame in the chain below.
 use avian3d::collider_tree::update_moved_collider_aabbs as republish_moved_collider_aabbs;
@@ -28,6 +28,7 @@ use bevy::prelude::*;
 
 use crate::go_templates::GameObjectTemplates;
 use crate::net::{Guid, ObjectStore};
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::ride_frame::RideFrame;
 use benilla_world::vis_chain::VisChainOnly;
@@ -39,18 +40,15 @@ impl Plugin for TransportPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Timetables>()
             .add_message::<TransportLegLeft>()
-            // After `AssetSet::Open`, whose Commands insert `WorldAssets`; unordered, this finds
-            // none and silently does nothing.
-            .add_systems(
-                Startup,
-                setup_taxi_nodes.after(benilla_assets::AssetSet::Open),
-            )
+            // After `AssetSet::Open`, whose Commands insert `WorldAssets` (unordered, this finds
+            // none and silently does nothing), and again when the chain's data changes.
+            .add_data_loaders(setup_taxi_nodes)
             .add_systems(
                 Update,
                 // After the net drain and before input, so the deck is posed before the mover
-                // reads the world. avian refreshes collider AABBs in `FixedPostUpdate`, before
-                // `Update`, so without [`republish_moved_collider_aabbs`] the mover's casts see the
-                // deck's previous-frame box, above its rider after one long frame. It writes no
+                // reads the world. avian refreshes collider AABBs in `PostUpdate`, after `Update`,
+                // so without [`republish_moved_collider_aabbs`] the mover's casts see the deck's
+                // previous-frame box, above its rider after one long frame. It writes no
                 // tick resource, so a second run is idempotent; it sweeps every collider.
                 (
                     deck_ticks(),
@@ -80,6 +78,7 @@ fn deck_ticks() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::Sched
         arm_transports,
         attach_transport_volumes,
         tick_transports,
+        drive_ship_props,
         watch_ridden_transport_map,
     )
         .chain()
@@ -385,11 +384,16 @@ fn arm_transports(
         }
 
         // The boat arm.
-        let Some(mo) = store
-            .and_then(|s| templates.of(&s.0))
-            .and_then(|t| t.mo_transport)
-        else {
+        let Some(store) = store else {
+            continue; // no descriptor yet: next frame
+        };
+        // Read, never asked: the create asked, and a refused (invalidated) template is asked
+        // again by the next create (`GameObjectTemplates::request_at_create`).
+        let Some(template) = templates.of(&store.0) else {
             continue; // template answer not in yet: next frame
+        };
+        let Some(mo) = template.mo_transport else {
+            continue;
         };
         let Timetables { nodes, built, .. } = &mut *timetables;
         let Some(nodes) = nodes.as_ref() else {
@@ -520,6 +524,63 @@ fn tick_transports(
     }
 }
 
+/// The travel phase last handed to a ship prop, the reference's `[transport+0x38]` (4.1.0): the
+/// sequence is set only when the phase changes, so a one-shot runs its own course in between.
+#[derive(Component)]
+struct ShipPropPhase(ShipAnim);
+
+/// The world object's sequence-finished handler (4.1.0 `CGGameObject_C_Type_WorldObj::
+/// SequenceFinishedHandler`): ShipStart hands over to ShipMoving, ShipStop to Stand. Without it a
+/// long acceleration or approach replays the 2 s spin-up or 3 s spin-down from its start.
+fn ship_sequence_then(anim_id: u16) -> Option<u16> {
+    match anim_id {
+        0xa2 => Some(0xa3),
+        0xa4 => Some(0),
+        _ => None,
+    }
+}
+
+/// Play each ship's travel phase, as its tick last stored it (`Transport::anim`, `0x5f52bd`), on
+/// its props (the zeppelin's rotor, the ship's sails): Stand docked, then ShipStart, ShipMoving and
+/// ShipStop, the sequence handed over only when it changes, and each one-shot chaining on as it
+/// finishes. A prop that finishes loading mid-voyage takes the phase it arrives in.
+fn drive_ship_props(
+    mut commands: Commands,
+    transports: Query<(&Transport, &Children)>,
+    mut hosts: Query<(
+        &mut benilla_world::doodad_anim::DoodadAnimHost,
+        &benilla_assets::ModelAnimations,
+        Option<&mut ShipPropPhase>,
+    )>,
+) {
+    for (transport, children) in &transports {
+        let Some(anim) = transport.anim else {
+            continue;
+        };
+        for &child in children {
+            let Ok((mut host, anims, phase)) = hosts.get_mut(child) else {
+                continue;
+            };
+            if phase.as_ref().is_some_and(|p| p.0 == anim)
+                || !benilla_world::doodad_anim::is_ship_prop(anims)
+            {
+                continue;
+            }
+            match phase {
+                Some(mut p) => p.0 = anim,
+                None => {
+                    commands.entity(child).insert(ShipPropPhase(anim));
+                }
+            }
+            let want = anim.id() as u16;
+            // Already playing it (ShipStart's own hand-over to ShipMoving): no restart.
+            if host.anim_id() != Some(want) && anims.clips.iter().any(|c| c.anim_id == want) {
+                host.rearm(want, ship_sequence_then(want));
+            }
+        }
+    }
+}
+
 /// Write a sampled pose into the transform and avian's `Position`/`Rotation`: avian syncs
 /// `Transform` before `Update`, so without the mirror this frame's casts see last frame's deck.
 /// Takes `&mut Mut<Transform>` so the change flag is set only on a real change; a plain
@@ -607,8 +668,9 @@ fn watch_ridden_transport_map(
 }
 
 /// An observed mover's pose in a transport's frame, the `MOVEFLAG_ONTRANSPORT` tail of its
-/// `LIVING` create block or `MSG_MOVE_*` relay. [`compose_riders`] carries it every frame; the
-/// local pose changes only per packet, with no extrapolation in the deck frame.
+/// `LIVING` create block or `MSG_MOVE_*` relay. [`compose_riders`] carries it every frame; between
+/// packets `net::extrapolate_remote_units` dead-reckons it in the deck frame, and a deck spline
+/// samples into it.
 #[derive(Component)]
 pub(crate) struct TransportRider {
     pub(crate) transport_guid: u64,
@@ -619,8 +681,10 @@ pub(crate) struct TransportRider {
 }
 
 /// Compose each observed rider's world pose through its transport's this-frame pose, after
-/// [`tick_transports`], and refresh [`RemoteMotion`]'s WoW pose to match. A rider whose transport
-/// is not streamed keeps its last world pose; the server despawns the pair together.
+/// [`tick_transports`], and refresh [`RemoteMotion`]'s WoW pose to match. A relayed mover's body
+/// pose past its facing (the strafe lean, the swim pitch) rides along: its rotation is always its
+/// facing composed with that remainder. A rider whose transport is not streamed keeps its last
+/// world pose; the server despawns the pair together.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn compose_riders(
     guid_index: Res<crate::net::GuidIndex>,
@@ -646,10 +710,14 @@ fn compose_riders(
         let world = boat.translation + boat.rotation * local;
         let yaw = rider.local_orientation + boat.rotation.to_euler(EulerRot::YXZ).0;
         transform.translation = world;
-        transform.rotation = Quat::from_rotation_y(yaw);
-        if let Some(mut rm) = motion {
-            rm.wow_pos = benilla_assets::coords::bevy_to_wow(world);
-            rm.orientation = yaw;
+        match motion {
+            Some(mut rm) => {
+                let body = Quat::from_rotation_y(-rm.orientation) * transform.rotation;
+                transform.rotation = (Quat::from_rotation_y(yaw) * body).normalize();
+                rm.wow_pos = benilla_assets::coords::bevy_to_wow(world);
+                rm.orientation = yaw;
+            }
+            None => transform.rotation = Quat::from_rotation_y(yaw),
         }
     }
 }
@@ -1019,6 +1087,64 @@ mod tests {
             .drain()
             .collect();
         assert_eq!(left, []);
+    }
+
+    /// A relayed rider's body pose past its facing, here a swim pitch, survives the carry.
+    #[test]
+    fn compose_carries_a_riders_body_pose_with_its_facing() {
+        use bevy::ecs::system::RunSystemOnce;
+        const BOAT: u64 = 0xF110_0000_0000_0003;
+        let mut w = World::new();
+        let boat = w
+            .spawn((
+                Transport::new(Drive::Lift(parked_lift())),
+                Transform::from_xyz(10.0, 0.0, 0.0).with_rotation(Quat::from_rotation_y(0.5)),
+            ))
+            .id();
+        let mut index = crate::net::GuidIndex::default();
+        index.0.insert(BOAT, boat);
+        w.insert_resource(index);
+        // Drawn facing 1.0 pitched 0.3, as the extrapolator left it through last frame's deck.
+        let pitch = Quat::from_rotation_x(0.3);
+        let rider = w
+            .spawn((
+                TransportRider {
+                    transport_guid: BOAT,
+                    local_pos: [0.0; 3],
+                    local_orientation: 0.25,
+                },
+                crate::net::RemoteMotion {
+                    wow_pos: [0.0; 3],
+                    orientation: 1.0,
+                    flags: 0,
+                    pitch: 0.3,
+                    speed: 0.0,
+                    vertical_velocity: 0.0,
+                    jump_xy_vel: [0.0; 2],
+                    fall_start: None,
+                    pending: std::collections::VecDeque::new(),
+                    relay: Default::default(),
+                    last_apply_ms: 0.0,
+                    last_apply_pos: [0.0; 3],
+                },
+                Transform::from_rotation(Quat::from_rotation_y(1.0) * pitch),
+            ))
+            .id();
+        w.run_system_once(compose_riders).unwrap();
+        let want = Quat::from_rotation_y(0.75) * pitch;
+        let got = w.get::<Transform>(rider).unwrap().rotation;
+        assert!(
+            got.dot(want).abs() > 0.99999,
+            "facing 0.25 on a deck at 0.5, still pitched: {got:?} vs {want:?}"
+        );
+        assert!(
+            (w.get::<crate::net::RemoteMotion>(rider)
+                .unwrap()
+                .orientation
+                - 0.75)
+                .abs()
+                < 1e-6
+        );
     }
 
     /// A two-frame pause path at `base_pos`.

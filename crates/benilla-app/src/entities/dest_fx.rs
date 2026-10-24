@@ -274,6 +274,21 @@ pub(super) fn attach_ground_fx_models(
                 continue; // model still building
             }
             inst.spawned = true;
+            // fork: the IMPACT flash — lights the ground it lands on and is gone, over the model's
+            // own first-sequence span (a looping ground aura takes the short default: "as long as
+            // the aura lasts" is exactly what a burst must not be).
+            let span = dm
+                .first_seq_span
+                .filter(|_| !inst.looping)
+                .unwrap_or(super::spell_fx::SPELL_BURST_SPAN);
+            super::spell_fx::spawn_spell_light(
+                &mut commands,
+                &inst.path,
+                dm,
+                entity,
+                None,
+                super::spell_fx::SpellLightMode::Burst { span },
+            );
             if !inst.looping {
                 // One pass of the first sequence, as `spell_fx`'s span clock times a kit.
                 let span = dm.first_seq_span.unwrap_or(super::spell_fx::FALLBACK_SPAN);

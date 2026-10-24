@@ -6,7 +6,6 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::number_arg;
-use super::Model;
 
 /// One teammate: map-normalized position, `(0, 0)` off the displayed map, and name if known.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -40,7 +39,7 @@ impl super::UiScript {
     /// The 0-based rows `GetBattlefieldPosition` read with no name since the last drain, in call
     /// order: each call's lookup passes a callback (`0x4ac118`), which the app makes.
     pub fn take_battlefield_position_lookups(&mut self) -> Vec<usize> {
-        std::mem::take(&mut self.model_mut().battlefield_position_lookups)
+        drain_field!(self, battlefield_position_lookups)
     }
 
     /// The positions request's clear with no active slot (`0x4aa5df`): the teammate count
@@ -67,7 +66,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumBattlefieldPositions",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.battlefield_positions.len() as i64)
         })?,
     )?;
@@ -77,7 +78,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBattlefieldPosition",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldPosition(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let i = usize::try_from(index).ok().and_then(|i| i.checked_sub(1));
             let row = i.and_then(|i| model.battlefield_positions.get(i)).cloned();
             match (i, row) {
@@ -100,7 +103,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumBattlefieldFlagPositions",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.battlefield_flag.is_some()))
         })?,
     )?;
@@ -109,7 +114,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBattlefieldFlagPosition",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetBattlefieldFlagPosition(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             match model.battlefield_flag.as_ref().filter(|_| index == 1) {
                 Some(f) => three(lua, f.uv, f.token.as_deref()),
                 None => three(lua, (0.0, 0.0), None),
@@ -121,7 +128,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetBattlefieldMapIconScale",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(f64::from(model.battlefield_icon_scale))
         })?,
     )?;

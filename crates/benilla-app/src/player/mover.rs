@@ -137,11 +137,10 @@ pub(super) fn step(
     // reach includes the hover offset: the finalize probe (`0x636e45` → `0x632ba0` → `0x631e70`)
     // measures to the water, so hover rests a yard over it. Feet under the surface count too.
     let on_water = water_floor.is_some_and(|s| center.y - half_h.y - s <= ground_reach);
-    let mut ground_entity = if on_walkable {
-        classify.map(|h| h.entity)
-    } else {
-        None
-    };
+    let classify_entity = classify.as_ref().map(|h| h.entity);
+    // Whether the liquid plane, which has no collider, is what holds the body this frame.
+    let mut on_liquid = on_water;
+    let mut ground_entity = if on_walkable { classify_entity } else { None };
     // The settle hold after a teleport or login: the world streams in over several frames, so the
     // body is frozen with gravity off. The terrain streamer releases it on the destination's
     // residency, never on ground contact, which a flyer or a swimmer never makes.
@@ -302,8 +301,14 @@ pub(super) fn step(
         climb = g.climb;
         snap_probe = g.snap;
         player.steep_support = g.steep_support;
+        on_liquid |= g.liquid;
         if let Some(e) = g.ground {
             ground_entity = Some(e);
+        } else if g.steep_support && ground_entity.is_none() {
+            // A body held up by the edge it climbs, or by the bank it is descending, stands on that
+            // collider: a step-up on a moving deck stays in the deck's frame. With no entity the
+            // attachment read the climb as world geometry and deboarded the rider mid-step.
+            ground_entity = g.contact.or(classify_entity);
         }
     } else {
         let velocity = if held || anchored {
@@ -349,7 +354,8 @@ pub(super) fn step(
     // (`0x636e52`, `0x636e74`), yielding to a walkable collider, the nearer floor; up is the
     // rate-limited climb below (`0x636fa1`). The one push up is ours: the body may not end the
     // frame under the surface, which the reference's swept surface never lets it reach, and only
-    // a body that is not rising is caught, so a hover launch under the waterline flies clear.
+    // a body that is not rising is caught, so a hover launch under the waterline flies clear and a
+    // jump off the water is not pulled back down by the snap on its first frames.
     // `SetPitch`'s standstill dive kick (`0x7c6f70`) is not built: it serves a walk resolver that
     // skips a body at rest, and our classify runs every frame, so dropping the layers is the dive.
     if let Some(surface) = water_floor {
@@ -360,11 +366,17 @@ pub(super) fn step(
             player.vel_y = 0.0;
             player.wedged = false;
             grounded = true;
-        } else if !on_walkable && feet > rest && feet - surface <= ground_reach {
+            on_liquid = true;
+        } else if !on_walkable
+            && player.vel_y <= 0.0
+            && feet > rest
+            && feet - surface <= ground_reach
+        {
             center.y = rest + half_h.y;
             player.vel_y = 0.0;
             player.wedged = false;
             grounded = true;
+            on_liquid = true;
         }
     }
 
@@ -398,6 +410,14 @@ pub(super) fn step(
     // The mover's own airborne record: a launch frame counts though the body still stands, or the
     // next frame reads as a fresh step-off and re-seeds the arc.
     player.airborne_prev = !held && !anchored && (jumped || !grounded);
+    // A grounded frame with no collider named stands on what it stood on, unless the liquid plane
+    // holds it: a body held by an edge it climbs, wedged, taking off, or on the frame a failed
+    // step-up finds no floor and elects its fall (still grounded, falling from the next frame).
+    // Each of those read as world geometry and deboarded the rider from a moving transport, which
+    // then sailed on through a body falling in the world frame.
+    if ground_entity.is_none() && !on_liquid {
+        ground_entity = player.ride_entity();
+    }
     Outcome {
         held,
         grounded,
@@ -449,6 +469,11 @@ pub(crate) struct GroundedStep {
     pub(crate) center: Vec3,
     /// The walkable floor's collider the snap settled onto; `None` keeps what the caller believed.
     pub(crate) ground: Option<Entity>,
+    /// The collider the snap touched below, walkable or not: what holds a
+    /// [`Self::steep_support`] body up when [`Self::ground`] is `None`.
+    pub(crate) contact: Option<Entity>,
+    /// The snap settled onto the liquid plane ([`Support::water`]), which has no collider.
+    pub(crate) liquid: bool,
     /// The height (yd) this frame's pop or cone ride gained.
     pub(crate) climb: Option<f32>,
     /// On a certified steep contact, the reference's `0x4000000`: riding a cone up, or following a
@@ -581,6 +606,7 @@ pub(crate) fn grounded_step(
         }
         + surface_offset;
     let hit = cast(slid, Vec3::NEG_Y * reach);
+    let contact = hit.as_ref().map(|h| h.entity);
     // The water is one more candidate within the same reach, flat, nearest wins, as in the
     // reference's one masked trace; with no entity it keeps the caller's support.
     let water = support.water.and_then(|s| {
@@ -595,6 +621,7 @@ pub(crate) fn grounded_step(
     };
     let snap = Some((reach, floor.map(|(d, n, _)| (d, n))));
     let mut ground = None;
+    let mut liquid = false;
     let mut steep_support = false;
     let mut unsupported = None;
     // A ride's height is earned. The reference's cone rests on the edge it climbs, but our capsule
@@ -619,6 +646,7 @@ pub(crate) fn grounded_step(
                 steep_support = true;
             } else if walkable {
                 ground = entity;
+                liquid = entity.is_none();
             } else {
                 // Support is earned by descending, not by touching: within reach alone would perch
                 // a motionless body on a steep bank.
@@ -637,6 +665,8 @@ pub(crate) fn grounded_step(
         // A ride or a pop that found no walkable floor is held up by the edge it climbs.
         steep_support: ((rode || popped.is_some()) && ground.is_none()) || steep_support,
         ground,
+        contact,
+        liquid,
         snap,
         unsupported,
     }
@@ -916,7 +946,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>();
@@ -939,6 +969,9 @@ mod tests {
             Collider::trimesh(verts, tris),
             Transform::default(),
         ));
+        // `update()` never runs plugin `finish()`, where avian adds its diagnostics resources.
+        app.finish();
+        app.cleanup();
         app.update(); // one frame builds Position/Rotation and the spatial-query trees
         app
     }
@@ -1795,6 +1828,63 @@ mod tests {
         assert!(
             idle.distance(north) < 1.0e-3,
             "released keys must stop a water-walker dead: {north:?} -> {idle:?}"
+        );
+    }
+
+    /// A water-walker (a ghost over a lake) jumps off the surface and lands back on it: the water
+    /// snap catches only a body that is not rising, or the launch's first frames are pulled down.
+    #[test]
+    fn a_water_walker_jumps_off_the_surface() {
+        const SURFACE: f32 = 0.0;
+        const OPEN: [(f32, f32); 2] = [(-3.0, -40.0), (3.0, -40.0)];
+        let (jumped, apex, landed) = world_from_profile(&OPEN)
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let mut player = Player {
+                    modes: super::super::state::MoveModes {
+                        water_walking: true,
+                        ..Default::default()
+                    },
+                    pos: Vec3::new(0.0, SURFACE, 0.0),
+                    ..Default::default()
+                };
+                let press = |player: &mut Player, jump: bool| {
+                    step(
+                        player,
+                        &time,
+                        &world,
+                        &capsule,
+                        false,
+                        Vec3::ZERO,
+                        7.0,
+                        jump,
+                        false,
+                        None,
+                        Some(SURFACE),
+                        AIR_NUDGE_SPEED,
+                    )
+                };
+                let jumped = press(&mut player, true).jumped;
+                let mut apex = player.pos.y;
+                for _ in 0..120 {
+                    press(&mut player, false);
+                    apex = apex.max(player.pos.y);
+                }
+                (jumped, apex, player.pos.y)
+            })
+            .unwrap();
+        assert!(jumped, "the press on the water must take off");
+        let analytic = JUMP_SPEED * JUMP_SPEED / (2.0 * GRAVITY);
+        assert!(
+            apex > analytic * 0.9,
+            "the jump must reach its apex ({analytic} yd), not be snapped back: {apex}"
+        );
+        assert!(
+            (landed - SURFACE).abs() < 1.0e-3,
+            "the arc lands back on the surface: {landed}"
         );
     }
 

@@ -270,7 +270,7 @@ pub(super) fn engaged_inserted(world: DeferredWorld, ctx: HookContext) {
     }
 }
 
-/// [`Engaged`]'s replace hook, ahead of a re-insert or a removal: the mirror drops it.
+/// [`Engaged`]'s discard hook, ahead of a re-insert or a removal: the mirror drops it.
 pub(super) fn engaged_replaced(world: DeferredWorld, ctx: HookContext) {
     if let Some(edits) = world.get_resource::<UnitEdits>() {
         edits.mirror_attack(ctx.entity, None);

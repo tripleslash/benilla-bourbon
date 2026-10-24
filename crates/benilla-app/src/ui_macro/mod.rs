@@ -78,7 +78,10 @@ pub(crate) fn install_icon_source(world: &World, script: &mut UiScript) {
     let chain = world
         .get_resource::<WorldAssets>()
         .map(|assets| assets.chain.clone());
-    script.set_macro_icon_source(icon_source(chain, benilla_formats::wow_data()));
+    // The page has no install folder to scan: its `wow_data` is a URL root, and the container's
+    // listing holds the icons the loose folders would.
+    let data = benilla_formats::wow_data().filter(|_| cfg!(not(target_arch = "wasm32")));
+    script.set_macro_icon_source(icon_source(chain, data));
 }
 
 /// The icon chooser's lister over `chain` and the `Data` folder `data`.
@@ -87,7 +90,7 @@ fn icon_source(
     data: Option<std::path::PathBuf>,
 ) -> Box<dyn Fn() -> Vec<String>> {
     Box::new(move || {
-        let start = std::time::Instant::now();
+        let start = bevy::platform::time::Instant::now();
         let icons = match &chain {
             Some(chain) => {
                 benilla_formats::load_macro_icons(Some(&chain.lock_recover()), data.as_deref())
@@ -137,7 +140,7 @@ fn load_macros(
                     per_character: bool|
          -> Vec<benilla_ui::script::MacroView> {
             let Some(path) = path else { return Vec::new() };
-            match std::fs::read_to_string(path) {
+            match crate::local_state::read_to_string(path) {
                 Ok(text) => store::parse(&text, per_character),
                 // Absent is the first run, not a failure.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -237,6 +240,9 @@ fn save_dirty_macros(mut hosted_vm: crate::script_calls::HostedVm, files: Res<Ma
 struct BindingsSeen {
     macros: Option<u64>,
     pet_book: Option<u32>,
+    /// Whether a macro reads retail options, whose choice moves with the world (this fork), so
+    /// every pass derives again.
+    conditional: bool,
 }
 
 /// Derive the bound spells the engine's verbs do not (they derive the record a create or an edit
@@ -257,7 +263,8 @@ struct BindingsSeen {
 #[allow(clippy::type_complexity)] // the bar, the records and the pet book's sorts, as one param
 fn rebind_macro_spells(
     // The bar, whose supersede queue this drains, and the records, which the call host's presses
-    // and usable refresh read, so a turn: no Lua runs here.
+    // and usable refresh read, so a turn: a call the Lua it runs makes (this fork's options
+    // evaluator, a `#show` slot's redraw) waits for the turn's end.
     mut vm: crate::script_calls::VmWith<(
         ResMut<'static, crate::ui_action::PlayerActions>,
         Res<'static, crate::ui_action::ActionSlots>,
@@ -279,7 +286,12 @@ fn rebind_macro_spells(
         let book_sorts = pet_bar.map_or(0, |b| b.book_sorts);
         let table_moved = seen.macros != Some(generation);
         let pet_moved = seen.pet_book != Some(book_sorts);
-        if !table_moved && !pet_moved && !*arrived && actions.superseded.is_empty() {
+        if !table_moved
+            && !pet_moved
+            && !*arrived
+            && actions.superseded.is_empty()
+            && !seen.conditional
+        {
             return;
         }
         seen.macros = Some(generation);
@@ -307,13 +319,33 @@ fn rebind_macro_spells(
             }
             script.set_macro_bindings(records);
         }
-        script.derive_macro_bindings(|_, b| every || (pet_moved && b.follows_the_pet_book()));
+        // fork: a macro that reads retail options is derived again at every pass, as its choice
+        // moves with the world.
+        let conditional: std::collections::HashSet<u32> = script
+            .macros()
+            .views()
+            .filter(|m| benilla_ui::script::macro_reads_options(&m.body))
+            .map(|m| m.id)
+            .collect();
+        seen.conditional = !conditional.is_empty();
+        script.derive_macro_bindings(|id, b| {
+            every || conditional.contains(&id) || (pet_moved && b.follows_the_pet_book())
+        });
 
         let records = script.macro_bindings();
         let fresh: std::collections::HashMap<u32, Bound> = script
             .macros()
             .views()
             .map(|m| (m.id, records.get(&m.id).copied().unwrap_or_default().into()))
+            .collect();
+        // A `#show` button draws its bound spell's icon (`GetActionTexture`), so a slot whose macro
+        // moved to another spell is told to redraw, as an edit would (this fork).
+        let moved: Vec<u32> = slots
+            .buttons
+            .iter()
+            .filter(|(_, b)| b.kind == ACTION_KIND_MACRO)
+            .filter(|(_, b)| !bound.0.is_empty() && fresh.get(&b.action) != bound.0.get(&b.action))
+            .map(|(slot, _)| u32::from(*slot) + 1)
             .collect();
         if fresh != bound.0 {
             let spells = fresh
@@ -325,6 +357,12 @@ fn rebind_macro_spells(
                 fresh.len()
             );
             bound.0 = fresh;
+        }
+        for slot in moved {
+            script.fire_event(
+                "ACTIONBAR_SLOT_CHANGED",
+                vec![ScriptValue::Int(i64::from(slot))],
+            );
         }
     })
 }
@@ -341,7 +379,12 @@ pub(crate) fn run_macro(script: &mut UiScript, id: u32) -> bool {
     let Some(body) = script.macros().by_id(id).map(|m| m.body.clone()) else {
         return false;
     };
-    let lines: Vec<String> = run::macro_lines(&body).map(str::to_string).collect();
+    // Deviation (this fork): a `#` line (`#showtooltip`) is the button's, never sent, as retail
+    // keeps it; 1.12 would send it as chat.
+    let lines: Vec<String> = run::macro_lines(&body)
+        .filter(|l| !l.starts_with('#'))
+        .map(str::to_string)
+        .collect();
     if lines.is_empty() {
         return false;
     }

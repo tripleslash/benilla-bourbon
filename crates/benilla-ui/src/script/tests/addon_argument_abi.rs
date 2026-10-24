@@ -234,3 +234,40 @@ fn get_addon_metadata_answers_the_last_value_of_a_repeated_key() {
         "2"
     );
 }
+
+/// fork: a pinned row, a flavor's own interface addon, is out of the index space and stays
+/// enabled through `DisableAddOn`.
+#[test]
+fn a_pinned_addon_is_never_listed_and_never_disabled() {
+    let mut s = UiScript::new().unwrap();
+    s.register_addons(
+        vec![
+            AddOnInfo {
+                name: "Listed".into(),
+                interface: 11200,
+                enabled: true,
+                ..Default::default()
+            },
+            AddOnInfo {
+                name: "Pinned".into(),
+                interface: 11200,
+                enabled: true,
+                pinned: true,
+                ..Default::default()
+            },
+        ],
+        None,
+        None,
+        None,
+    );
+    s.note_addon_info_reply(&[]);
+    assert_eq!(s.eval::<i64>("return GetNumAddOns()").unwrap(), 1);
+    assert_eq!(
+        s.eval::<String>("return (GetAddOnInfo(1))").unwrap(),
+        "Listed"
+    );
+    s.eval::<()>("DisableAddOn('Pinned')").unwrap();
+    assert!(s
+        .eval::<bool>("local _, _, _, enabled = GetAddOnInfo('Pinned') return enabled ~= nil")
+        .unwrap());
+}

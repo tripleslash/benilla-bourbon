@@ -661,7 +661,7 @@ mod tests {
                 .add_systems(Update, (missile_miss_text, float_combat_text).chain());
             let script = UiScript::new().expect("VM");
             script.run(assign).expect("assign RESIST");
-            app.insert_non_send_resource(script);
+            app.insert_non_send(script);
             let me = app
                 .world_mut()
                 .spawn((SelfPlayer, ObjectStore::default(), Transform::default()))

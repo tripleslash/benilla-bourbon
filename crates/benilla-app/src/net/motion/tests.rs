@@ -1,7 +1,8 @@
 //! Tests for the motion kernels: the spline sampler, dead-reckoning, jump ballistics, the relay
 //! chain, facing and gameobject placement.
 
-use std::time::{Duration, Instant};
+use bevy::platform::time::Instant;
+use std::time::Duration;
 
 use benilla_protocol::{JumpInfo, MonsterMoveFacing, MoveSpeeds};
 use bevy::prelude::Quat;
@@ -1017,12 +1018,13 @@ fn a_flag_still_remote_is_left_where_the_wire_put_it() {
 
     let mut app = App::new();
     // `WorldCollision` needs the trace exclusions the world plugins would initialise.
-    app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
+    app.init_resource::<benilla_world::collision::MoverTraceExclusions>()
+        .init_resource::<crate::net::GuidIndex>();
     app.add_plugins((
         MinimalPlugins,
         TransformPlugin,
         bevy::asset::AssetPlugin::default(),
-        bevy::scene::ScenePlugin,
+        bevy::world_serialization::WorldSerializationPlugin,
         avian3d::prelude::PhysicsPlugins::new(bevy::app::PostUpdate),
     ));
     app.init_asset::<Mesh>()

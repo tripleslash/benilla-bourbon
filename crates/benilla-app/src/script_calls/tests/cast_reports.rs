@@ -75,7 +75,7 @@ fn is_current_action_on_the_next_line_reads_the_use_just_made() {
 fn seen(f: &mut Frame) -> String {
     f.app
         .world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .eval::<Option<String>>("return SEEN")
         .expect("the global reads")
         .unwrap_or_default()
@@ -172,7 +172,7 @@ fn with_heal_and_motw(f: &mut Frame) {
     };
     f.app
         .world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_spellbook(SpellBookState {
             tabs: vec![SpellTabView {
                 name: "Book".into(),
@@ -242,7 +242,7 @@ fn a_cancelled_cursor_fails_inside_the_call() {
 fn record_changes(f: &mut Frame) {
     f.app
         .world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"CHANGES = {}
             local c = CreateFrame("Frame")

@@ -17,17 +17,27 @@ tracy = ["bevy/trace_tracy"]
 # Writes every system's per-run span to `trace-<ts>.json` in the cwd.
 trace_chrome = ["bevy/trace_chrome"]
 # Links Bevy as a shared library so an incremental rebuild relinks faster. The binary then starts
-# only through `cargo run`, which puts the toolchain's libstd on the loader path.
+# only through `cargo run`, which puts the toolchain's libstd on the loader path. Native only: the
+# `benilla` launcher forwards it and `wenilla` does not, a wasm module having no shared libraries.
 bevy_dynamic_linking = ["bevy/dynamic_linking"]
+# Tuning only: embedded shaders reload from the source tree on save (`benilla-world`'s).
+shader_reload = ["benilla-world/shader_reload"]
+# fork: perf — per-system CPU time (`benilla-world`'s `trace_systems`, `WOW_SYSTEM_PROFILE=1`).
+trace_systems = ["benilla-world/trace_systems"]
+# Browser render backend, forwarded from `wenilla` (see benilla-world's note on why the world
+# needs WebGPU).
+webgl2 = ["bevy/webgl2", "benilla-world/webgl2"]
+webgpu = ["bevy/webgpu", "benilla-world/webgpu"]
 
 [dependencies]
+# Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
+# `Date.now()` in a browser, where std's panics on first use.
+web-time = "1"
 anyhow.workspace = true
-# The EditBox clipboard, on the main thread as NSPasteboard requires; bevy_egui's 3.x.
-arboard = "3"
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true
 wgpu.workspace = true
-bevy_egui = { version = "0.39", optional = true }
+bevy_egui = { version = "0.42", optional = true }
 bytemuck = { version = "1", features = ["derive"] }
 # `f16` decode for the `WOW_BOOTH_DUMP` dump of the `Rgba16Float` booth targets.
 half = "2"
@@ -43,12 +53,14 @@ fancy-regex = { version = "0.18", default-features = false, features = ["std", "
 libc = "0.2"
 # PNG encoding only: the macOS cursor's NSImage data and screenshots.
 image = { version = "0.25", default-features = false, features = ["png"] }
-# The "no WoW install" error dialog (`no_install`): AppKit, Win32 and, on Linux, `zenity`; no GTK.
-# `xdg-portal` is the Linux backend that carries the message dialog; `wayland` is its file-dialog
-# parent handle, which a message dialog without a parent never reads.
-rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # Thread-to-ECS channels: crossbeam's `Receiver` is `Sync`, so it is a resource without a mutex.
 crossbeam-channel = "0.5"
+# The two channels the sequencer *waits* at (credentials, character pick). crossbeam's `recv` parks
+# the calling thread, which the browser build has none of — `async_channel`'s awaits instead, and the
+# ECS side keeps `try_send`ing into an unbounded queue exactly as before. `futures-lite` drives the
+# sequencer future to completion on the native net thread, so that thread's behaviour is unchanged.
+async-channel = "2.5"
+futures-lite = "2.6.1"
 benilla-assets = { path = "../benilla-assets", default-features = false }
 benilla-formats = { path = "../benilla-formats", default-features = false }
 benilla-protocol = { path = "../benilla-protocol" }
@@ -57,7 +69,7 @@ benilla-world = { path = "../benilla-world", default-features = false }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Collision for our kinematic character controller; 0.6 targets Bevy 0.18, 0.7 moves to 0.19.
-avian3d = "0.6"
+avian3d = "0.7"
 # Shapes and rasterizes `FontString` text standalone (`ui_text`), at bevy_text's own 0.16.
 cosmic-text = "0.16"
 # The smooth scan converter `ui_text` rasterizes anti-aliased glyphs with; `swash`'s own version.
@@ -67,7 +79,12 @@ zeno = "0.3.3"
 winit = { version = "0.30", default-features = false }
 # `cosmic-text`'s font database, named by `ui_text`; must stay the version it depends on.
 fontdb = "0.23"
-# The mixer. Its `cpal` backend stays off on every target: `sound::output` is our own backend.
+# kira renders the mix; the device it plays through is OURS (`sound::output`, decisions 1857 and
+# 1920) on every target that has threads — CoreAudio on macOS, cpal elsewhere. The wasm32 browser
+# build is the one exception: the owned layer runs a render thread the page does not have, so
+# there kira's OWN cpal backend is the device, which on wasm32 is Web Audio. That is the whole of
+# the web build's sound. See `mixer::PlatformBackend`, and the wasm32 target table at the bottom
+# of this file — it is what turns the `cpal` feature on, and only there.
 kira = { version = "0.12", default-features = false, features = ["mp3", "wav", "pcm", "adpcm"] }
 # Aborts a debug build on an allocation in the audio IO callback or render pass; off in release.
 assert_no_alloc = "1.1"
@@ -78,6 +95,50 @@ rtrb = "0.3"
 mint = "0.5"
 # The gossip greeting's weighted draw, re-rolled per open as in the reference.
 rand = "0.8"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The EditBox clipboard, on the main thread as NSPasteboard requires; bevy_egui's 3.x. Native
+# only: arboard has no wasm32 backend (`textinput/clipboard.rs` has no pasteboard there).
+arboard = "3"
+# The "no WoW install" error dialog (`no_install`): AppKit, Win32 and, on Linux, `zenity`; no GTK.
+# `xdg-portal` is the Linux backend that carries the message dialog; `wayland` is its file-dialog
+# parent handle, which a message dialog without a parent never reads. Native only: the page has
+# no native dialog to raise.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# The native release allocator (`lib.rs`): the OS heap (Windows HeapAlloc, glibc malloc)
+# serializes under Bevy's per-frame churn. Native only: the web build has its own page allocator.
+mimalloc = { version = "0.1", default-features = false }
+
+# The audio device layer off macOS (`sound::output::cpal`); on macOS cpal cannot rebuild on a
+# lost default device and drops the IO-cycle timestamp. wasm32 is in this table too: `mixer` names
+# cpal's `SupportedBufferSize` and `StreamConfig` when it probes the browser's device for kira's
+# backend, so cpal must be the version kira resolves.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cpal = "0.17"
+
+[dev-dependencies]
+# tests/boot_manifest.rs parses web/boot-manifest.json (the boot-prefetch read-set). Dev-only:
+# the 0978 decision to keep serde_json out of the shipped app stands.
+serde_json = "1"
+
+# Same test, second job: the manifests are now translated into the page's pack prefetch AND fed
+# into the packer's grouping, so it checks every name against a built container's `index.bpi`
+# (`pack_index_or_skip!`) rather than only checking the file's shape. Dev-only on every target —
+# the browser reaches the reader through `benilla-formats`, not from here.
+benilla-pack = { path = "../benilla-pack" }
+benilla-mpq = { path = "../benilla-mpq" }
+
+# The login cycle's fake realmd runs the server half of SRP6 (`net::io::cycle_tests`).
+benilla-srp = { path = "../benilla-srp" }
+num-bigint = "0.4.6"
+sha1.workspace = true
+
+# The UI's geometry comparisons (`benilla_ui::assert_near!`).
+benilla-ui = { path = "../benilla-ui", features = ["test-support"] }
+
+# The schedule census keeps the build's own graph, sync points included, through a build pass,
+# whose signature names the `IndexSet` bevy already builds (`game_plugins::schedule_tests`).
+indexmap = "2.14.0"
 
 # Wayland clipboard over the standard `wl_data_device`; arboard's speaks `wlr-data-control`,
 # which GNOME does not implement.
@@ -104,10 +165,44 @@ objc2-app-kit = { version = "0.2", features = [
 ] }
 objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeometry"] }
 
-# The audio device layer off macOS (`sound::output::cpal`); on macOS cpal cannot rebuild on a
-# lost default device and drops the IO-cycle timestamp.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-cpal = "0.17"
+# The web build has no threads: the net sequencer is one `spawn_local` task on the browser's event
+# loop, and the write half is pumped by a Bevy system instead of a sibling thread. `crate::webenv`
+# (the wasm32 half — reading the page's own query string) and `boot.rs`'s canvas binding use the
+# `web-sys` window/location. wasm-bindgen is pinned exact per the plan: a newer wasm-bindgen crate
+# + the 0.2.126 CLI emits broken glue — verified, so this must track the CLI to the digit. That
+# CLI is now Trunk's (`Trunk.toml`'s `[tools] wasm_bindgen`), not one installed by a script.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.126"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+# `OfflineAudioContext` + `AudioBuffer` (and the `BaseAudioContext` that carries
+# `decodeAudioData`) are the browser's decoder — `sound::web_decode`, the lane that keeps a whole
+# MP3 decode off the frame. The context is never started, so it is outside the autoplay policy and
+# cannot perturb the device the mixer owns.
+web-sys = { version = "0.3", features = [
+    "Window",
+    # `navigator.hardwareConcurrency` — how many worker threads the task pools ask for
+    # (`web_threads`). The only thing this crate reads off Navigator.
+    "Navigator",
+    # A login failure has to be visible even if the log subscriber is not: `net::io` reports it
+    # through bevy's log AND straight to the console, because the one place a bug report has
+    # nothing to carry is a page that failed silently.
+    "console",
+    "Location",
+    "Storage",
+    "AudioBuffer",
+    "BaseAudioContext",
+    "OfflineAudioContext",
+    # The UI EditBoxes' copy and paste in the browser (`textinput::clipboard`'s `web`).
+    "Navigator",
+    "Clipboard",
+] }
+# The browser's device, and the ONLY place the `cpal` feature is asked for: on wasm32 the owned
+# output layer cannot run (no render thread), so kira's own backend is what opens Web Audio.
+# Cargo unions features across target tables, so this adds `cpal` to the common kira above on
+# wasm32 alone. Named `CpalBackend` rather than `DefaultBackend` in `mixer` on purpose — the
+# default backend degrades *silently* to a mock when the feature is off.
+kira = { version = "0.12", default-features = false, features = ["cpal"] }
 
 # Windows CPU clocks for `perf::clock`; `GetLocalTime` for the log stamp (`ui_chat::logging`); the
 # layout's virtual keys for `bindings::layout`; the MTA cpal's device enumerator is made in
@@ -121,21 +216,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
-# The login cycle's fake realmd runs the server half of SRP6 (`net::io::cycle_tests`).
-[dev-dependencies]
-benilla-srp = { path = "../benilla-srp" }
-# The UI's geometry comparisons (`benilla_ui::assert_near!`).
-benilla-ui = { path = "../benilla-ui", features = ["test-support"] }
-# The schedule census keeps the build's own graph, sync points included, through a build pass,
-# whose signature names the `IndexSet` bevy already builds (`game_plugins::schedule_tests`).
-indexmap = "2.14.0"
-num-bigint = "0.4.6"
-sha1.workspace = true
-
 # The shader translation test writes the backend this platform renders with, through the naga
-# bevy already builds (`shaders.rs`).
+# bevy already builds (`shaders.rs`): Bevy 0.19's wgpu 29 builds naga 29.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-naga = { version = "27.0.3", features = ["msl-out"] }
+naga = { version = "29.0.4", features = ["msl-out"] }
 
 [target.'cfg(not(target_os = "macos"))'.dev-dependencies]
-naga = { version = "27.0.3", features = ["spv-out"] }
+naga = { version = "29.0.4", features = ["spv-out"] }

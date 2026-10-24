@@ -113,7 +113,7 @@ fn log_in_as(world: &mut World, name: &str, guid: u64) {
 /// What the probe addon captured at file scope this session.
 fn probe_saw(world: &World) -> Option<String> {
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .and_then(|s| s.eval::<Option<String>>("SwitchProbeFileScope").ok())
         .flatten()
 }
@@ -121,7 +121,7 @@ fn probe_saw(world: &World) -> Option<String> {
 /// Is the named frame present in the live VM?
 fn frame_exists(world: &World, name: &str) -> bool {
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .and_then(|s| s.eval::<bool>(&format!("return {name} ~= nil")).ok())
         .unwrap_or(false)
 }
@@ -129,7 +129,7 @@ fn frame_exists(world: &World, name: &str) -> bool {
 /// How many times the probe's file scope ran in the live VM.
 fn probe_loads(world: &World) -> u32 {
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .and_then(|s| s.eval::<Option<u32>>("SwitchProbeLoads").ok())
         .flatten()
         .unwrap_or(0)
@@ -226,7 +226,7 @@ fn quitting_from_the_character_screen_does_not_blank_the_session_it_wrote() {
     // Quit: `shutdown_on_exit`'s body, against the glue VM the logout left.
     let identity = world.resource::<super::AddOnIdentity>().0.clone();
     let mut script = world
-        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("the glue VM is live at the character screen");
     // At the character screen there is no active player and no world to sweep.
     super::shutdown_ui_state(&mut script, identity.as_ref());
@@ -295,13 +295,13 @@ fn the_realm_cvars_are_read_only_to_lua_only_in_the_world() {
     let mut world = booted_world();
     world.init_resource::<super::LeavingWorldArmed>();
     let set = |world: &World, chunk: &str| {
-        let s = world.non_send_resource::<benilla_ui::script::UiScript>();
+        let s = world.non_send::<benilla_ui::script::UiScript>();
         // A bare test world has no registry to seed the VM from.
         s.register_cvars(crate::cvars::registered_pairs());
         s.run(chunk).map_err(|e| e.to_string())
     };
     let glue_has_no_set_cvar = |world: &World| {
-        let s = world.non_send_resource::<benilla_ui::script::UiScript>();
+        let s = world.non_send::<benilla_ui::script::UiScript>();
         s.vm_kind() == benilla_ui::script::VmKind::Glue
             && s.eval::<bool>("return SetCVar == nil").unwrap()
     };
@@ -347,7 +347,7 @@ fn a_shutdown_with_no_world_fires_logout_without_leaving_world() {
     // arm the latch (`0x490166`).
     log_in_as(&mut world, "Onehunter", 1);
     let script = world
-        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("the entry's VM");
 
     script
@@ -369,18 +369,18 @@ fn a_shutdown_with_no_world_fires_logout_without_leaving_world() {
         .expect("the probe frame registers");
     let mut app = App::new();
     app.init_world_leave_sweep();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     // A root's order: the sweep, then the tail.
     let root = |app: &mut App| {
         super::run_leave_world_sweep(app.world_mut());
         let mut script = app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+            .non_send_mut::<benilla_ui::script::UiScript>();
         super::shutdown_ui_state(&mut script, None);
     };
     let seen = |app: &App, global: &str| {
         app.world()
-            .non_send_resource::<benilla_ui::script::UiScript>()
+            .non_send::<benilla_ui::script::UiScript>()
             .eval::<i64>(&format!("return {global}"))
             .unwrap()
     };
@@ -445,7 +445,7 @@ fn logging_out_leaves_no_in_game_frames_behind() {
     );
     assert!(
         world
-            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .get_non_send::<benilla_ui::script::UiScript>()
             .is_some(),
         "the glue VM stands in its place"
     );
@@ -508,14 +508,14 @@ fn item_locks_cross_a_reload_as_its_sweep_leaves_them() {
     sweep_lock_legs(&mut world);
     let locked = |world: &World, guid: u64| {
         world
-            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .get_non_send::<benilla_ui::script::UiScript>()
             .expect("in-world VM")
             .item_locked(guid)
     };
 
     log_in_as(&mut world, "Onehunter", 1);
     {
-        let mut s = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        let mut s = world.non_send_mut::<benilla_ui::script::UiScript>();
         s.lock_item(CLAM); // the open-item send's lock (`0x5edcd9`)
                            // A letter's attachment, an auction's sell item and a trade offer, each holding its
                            // pickup's lock, then an item held on the cursor and a wrap armed.
@@ -575,7 +575,7 @@ fn item_locks_cross_a_reload_as_its_sweep_leaves_them() {
         "the sweep's auction close unlocks it (`0x4cd5f0` → `0x4cd640`)"
     );
     {
-        let s = world.non_send_resource::<benilla_ui::script::UiScript>();
+        let s = world.non_send::<benilla_ui::script::UiScript>();
         assert_eq!(
             s.cursor_item().map(|i| i.guid),
             Some(HELD),
@@ -586,7 +586,7 @@ fn item_locks_cross_a_reload_as_its_sweep_leaves_them() {
     assert!(locked(&world, TRADED));
     // An armed wrap is engine state too (`[0xc4d778]`): it stays armed, its paper locked.
     {
-        let mut s = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        let mut s = world.non_send_mut::<benilla_ui::script::UiScript>();
         s.run("ClearCursor()").unwrap();
         // The bag as the container feed re-pushes it into the new VM.
         s.set_container(
@@ -610,7 +610,7 @@ fn item_locks_cross_a_reload_as_its_sweep_leaves_them() {
     arm_world(&mut world);
     reload(&mut world, crate::client_state::ClientState::InWorld);
     {
-        let s = world.non_send_resource::<benilla_ui::script::UiScript>();
+        let s = world.non_send::<benilla_ui::script::UiScript>();
         assert_eq!(s.gift_wrap_armed().map(|w| w.guid), Some(PAPER));
         assert!(s.item_locked(PAPER), "the armed paper stays locked");
         assert!(
@@ -620,7 +620,7 @@ fn item_locks_cross_a_reload_as_its_sweep_leaves_them() {
     }
     // A held vendor row, mode 5, goes with the sweep's merchant close (`0x4fadf0`, `0x4fae4a`).
     {
-        let mut s = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        let mut s = world.non_send_mut::<benilla_ui::script::UiScript>();
         s.run("ClearCursor()").unwrap();
         s.set_merchant(Some(benilla_ui::script::MerchantState {
             items: vec![benilla_ui::script::MerchantItem {
@@ -645,7 +645,7 @@ fn item_locks_cross_a_reload_as_its_sweep_leaves_them() {
     arm_world(&mut world);
     reload(&mut world, crate::client_state::ClientState::InWorld);
     assert!(world
-        .non_send_resource::<benilla_ui::script::UiScript>()
+        .non_send::<benilla_ui::script::UiScript>()
         .cursor_payload()
         .is_none());
 
@@ -673,7 +673,7 @@ fn reload_ui_is_a_fresh_login_in_place() {
 
     log_in_as(&mut world, "Onehunter", 1);
     let first_session = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .session();
 
@@ -691,7 +691,7 @@ fn reload_ui_is_a_fresh_login_in_place() {
     );
     assert_ne!(
         world
-            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .get_non_send::<benilla_ui::script::UiScript>()
             .expect("in-world VM")
             .session(),
         first_session,
@@ -731,9 +731,7 @@ fn a_ready_check_outlives_a_reload_and_not_a_login() {
         ..PartyState::default()
     };
     let vm = |world: &mut World| -> UiScript {
-        world
-            .remove_non_send_resource::<UiScript>()
-            .expect("in-world VM")
+        world.remove_non_send::<UiScript>().expect("in-world VM")
     };
 
     log_in_as(&mut world, "Onehunter", 1);
@@ -747,7 +745,7 @@ fn a_ready_check_outlives_a_reload_and_not_a_login() {
             .contains(&PartyRequest::ReadyCheckStart),
         "the check starts"
     );
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
 
     reload(&mut world, crate::client_state::ClientState::InWorld);
     let mut script = vm(&mut world);
@@ -765,7 +763,7 @@ fn a_ready_check_outlives_a_reload_and_not_a_login() {
         [PartyRequest::ReadyCheckAnswer(1)],
         "and its answer sends"
     );
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
 
     super::end_ui_session(&mut world);
     log_in_as(&mut world, "Onehunter", 1);
@@ -778,7 +776,7 @@ fn a_ready_check_outlives_a_reload_and_not_a_login() {
         [],
         "a login's group init zeroed it"
     );
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
 
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
@@ -806,7 +804,7 @@ fn the_roster_flag_outlives_a_reload_and_not_a_login() {
     let mut world = booted_world();
     let seen = |world: &World| -> i64 {
         world
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return GuildCellsSeen")
             .unwrap()
     };
@@ -818,7 +816,7 @@ fn the_roster_flag_outlives_a_reload_and_not_a_login() {
         "a login's file scope finds the flag zeroed"
     );
     world
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run("SetGuildRosterShowOffline(1)")
         .unwrap();
 
@@ -861,7 +859,7 @@ fn the_billing_group_reaches_each_vm_and_arms_at_entry_only() {
     };
     let rested = |world: &World| {
         world
-            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .get_non_send::<benilla_ui::script::UiScript>()
             .expect("in-world VM")
             .eval::<f64>("return GetBillingTimeRested()")
             .unwrap()
@@ -913,7 +911,7 @@ fn a_disable_staged_in_the_session_applies_at_the_reload() {
         "the probe loaded to begin with"
     );
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .run("DisableAddOn('SwitchProbe')")
         .expect("DisableAddOn");
@@ -953,7 +951,7 @@ fn saved_variables_round_trip_through_a_reload() {
 
     log_in_as(&mut world, "Onehunter", 1);
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .run("SwitchProbeDB.mark = 41")
         .expect("mutate the saved table");
@@ -961,7 +959,7 @@ fn saved_variables_round_trip_through_a_reload() {
     reload(&mut world, crate::client_state::ClientState::InWorld);
 
     let mark = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .eval::<Option<u32>>("return SwitchProbeDB and SwitchProbeDB.mark")
         .expect("read back")
@@ -999,7 +997,7 @@ fn a_reload_keeps_the_quest_folds_and_the_repeat() {
         )]
     };
     let visible = |world: &mut World| {
-        let mut script = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        let mut script = world.non_send_mut::<benilla_ui::script::UiScript>();
         crate::ui_quest_log::fixture::seat(&mut script, &rows());
         script
             .eval::<u32>("return (GetNumQuestLogEntries())")
@@ -1007,7 +1005,7 @@ fn a_reload_keeps_the_quest_folds_and_the_repeat() {
     };
     assert_eq!(visible(&mut world), 2);
     {
-        let mut script = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        let mut script = world.non_send_mut::<benilla_ui::script::UiScript>();
         // A selection, so the stock `QuestLog_Update` does not re-select the folded header, which
         // would open it (`QuestLogFrame.lua:294`, `:323`).
         script
@@ -1039,7 +1037,7 @@ fn a_reload_keeps_the_quest_folds_and_the_repeat() {
         }));
     }
     {
-        let mut script = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        let mut script = world.non_send_mut::<benilla_ui::script::UiScript>();
         // No engine behind this world: the cast is kept, the repeat armed in the verb.
         script.keep_calls();
         script.run("DoTradeSkill(2, 3)").expect("arm the batch");
@@ -1050,7 +1048,7 @@ fn a_reload_keeps_the_quest_folds_and_the_repeat() {
     assert_eq!(visible(&mut world), 1, "the reload unfolded the header");
     assert_eq!(
         world
-            .non_send_resource::<benilla_ui::script::UiScript>()
+            .non_send::<benilla_ui::script::UiScript>()
             .eval::<u32>("return GetQuestLogSelection()")
             .expect("selection"),
         2,
@@ -1058,7 +1056,7 @@ fn a_reload_keeps_the_quest_folds_and_the_repeat() {
     );
     assert_eq!(
         world
-            .non_send_resource::<benilla_ui::script::UiScript>()
+            .non_send::<benilla_ui::script::UiScript>()
             .trade_skill_repeat(),
         (0, 3),
         "the world-enter init disarms the spell and keeps the count (`0x4fc76b`)"
@@ -1129,7 +1127,7 @@ fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads()
 
     // The app's per-frame drain runs the dispatch; the test runs the same call.
     let mut script = world
-        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
     script.dispatch_script_errors_to_handler();
     assert!(
@@ -1175,7 +1173,7 @@ fn a_looping_addon_cannot_freeze_world_entry() {
     );
     // The budget raise reaches the handler queue, so the dialog names the loop.
     let mut script = world
-        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
     script.dispatch_script_errors_to_handler();
     let shown: String = script
@@ -1207,7 +1205,7 @@ fn the_entry_load_waits_for_the_cover_to_present() {
     world.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
     world.insert_resource(crate::loading_screen::EntryCover::default());
     world.insert_resource(roster_named("Onehunter", 1));
-    world.insert_resource(super::PendingEntryUiLoad);
+    world.insert_resource(super::PendingEntryUiLoad::default());
 
     // Covered frames 1 and 2: the cover has not presented yet.
     for frame in 1..=2 {
@@ -1221,15 +1219,22 @@ fn the_entry_load_waits_for_the_cover_to_present() {
             "covered frame {frame}: the burst must wait for the cover to reach the glass"
         );
     }
-    // Covered frame 3: two cover renders have committed, so the load runs.
-    world
-        .resource_mut::<crate::loading_screen::EntryCover>()
-        .tick(true);
-    super::lifecycle::run_pending_entry_load(&mut world);
+    // Covered frame 3 onward: two cover renders have committed — the load starts, behind a
+    // presented cover, and (since the slicing) spreads over as many frames as its budget needs;
+    // the latch stays up the whole way so the clear condition keeps waiting on it.
+    let mut frames = 0;
+    while world.get_resource::<super::PendingEntryUiLoad>().is_some() {
+        world
+            .resource_mut::<crate::loading_screen::EntryCover>()
+            .tick(true);
+        super::lifecycle::run_pending_entry_load(&mut world);
+        frames += 1;
+        assert!(frames < 10_000, "the sliced entry load never finished");
+    }
     assert_eq!(
         probe_saw(&world).as_deref(),
         Some("Onehunter"),
-        "the third covered frame pays the load, behind a presented cover"
+        "the load ran behind a presented cover, over {frames} frame(s)"
     );
     assert!(
         world.get_resource::<super::PendingEntryUiLoad>().is_none(),
@@ -1252,13 +1257,27 @@ fn no_cover_means_the_entry_load_runs_at_once() {
     world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
     world.insert_resource(crate::loading_screen::LoadingScreen::default());
     world.insert_resource(roster_named("Onehunter", 1));
-    world.insert_resource(super::PendingEntryUiLoad);
+    world.insert_resource(super::PendingEntryUiLoad::default());
 
     super::lifecycle::run_pending_entry_load(&mut world);
+    // "At once" = the first frame takes real steps instead of counting cover frames that never
+    // come. Since the slicing, finishing takes as many frames as the budget needs.
+    assert!(
+        world
+            .get_resource::<super::PendingEntryUiLoad>()
+            .is_none_or(|p| p.fraction() > 0.0),
+        "uncovered: the load starts on the first frame"
+    );
+    let mut frames = 1;
+    while world.get_resource::<super::PendingEntryUiLoad>().is_some() {
+        super::lifecycle::run_pending_entry_load(&mut world);
+        frames += 1;
+        assert!(frames < 10_000, "the sliced entry load never finished");
+    }
     assert_eq!(
         probe_saw(&world).as_deref(),
         Some("Onehunter"),
-        "uncovered: the load runs immediately"
+        "uncovered: the load ran, over {frames} frame(s)"
     );
 
     drop(world);
@@ -1278,7 +1297,7 @@ fn leaving_inside_the_deferral_window_drops_the_load_and_writes_nothing() {
     world.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
     world.insert_resource(roster_named("Onehunter", 1));
     world.insert_resource(crate::loading_screen::EntryCover::default());
-    world.insert_resource(super::PendingEntryUiLoad);
+    world.insert_resource(super::PendingEntryUiLoad::default());
 
     world
         .resource_mut::<crate::loading_screen::EntryCover>()
@@ -1350,10 +1369,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
             )
             .expect("probe frame");
     };
-    probe(
-        app.world()
-            .non_send_resource::<benilla_ui::script::UiScript>(),
-    );
+    probe(app.world().non_send::<benilla_ui::script::UiScript>());
 
     // Our own descriptor has landed, the feed's condition for the one-shots.
     app.world_mut().spawn((
@@ -1367,7 +1383,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
 
     let seen = |app: &App| -> i64 {
         app.world()
-            .non_send_resource::<benilla_ui::script::UiScript>()
+            .non_send::<benilla_ui::script::UiScript>()
             .eval::<i64>("return EnteringWorldSeen")
             .expect("probe global")
     };
@@ -1384,7 +1400,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
 
     // The transition ran and the load is still owed: three frames inside the deferral window.
     app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
-    app.insert_resource(super::PendingEntryUiLoad);
+    app.insert_resource(super::PendingEntryUiLoad::default());
     for frame in 1..=3 {
         app.update();
         assert_eq!(
@@ -1397,7 +1413,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
     // The entry load has run, its VM in place of the glue's: the next feed delivers the one-shots.
     let ingame = benilla_ui::script::UiScript::new().expect("the entry's VM");
     probe(&ingame);
-    app.world_mut().insert_non_send_resource(ingame);
+    app.world_mut().insert_non_send(ingame);
     app.world_mut()
         .remove_resource::<super::PendingEntryUiLoad>();
     app.update();
@@ -1444,7 +1460,7 @@ fn an_addon_that_fails_to_load_without_raising_is_readable_in_the_error_log() {
     );
 
     let script = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
 
     // 1. Retained, tagged as a load failure.
@@ -1529,7 +1545,7 @@ fn a_repeating_error_is_one_row_with_a_count_not_a_flood() {
     log_in_as(&mut world, "Onehunter", 1);
 
     let mut script = world
-        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
     let before = script.diagnostics().len();
     // The same failure through the engine's catch path: a slash command whose body raises.
@@ -1567,7 +1583,7 @@ fn a_repeating_error_is_one_row_with_a_count_not_a_flood() {
 /// frame and `W:`/`H:` only for a resizable one.
 fn place_a_window(world: &mut World) {
     world
-        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .get_non_send_mut::<benilla_ui::script::UiScript>()
         .expect("a VM to place a window in")
         .run(
             "local f = CreateFrame(\"Frame\", \"LayoutProbe\") \
@@ -1713,7 +1729,7 @@ fn an_anchor_form_file_is_restored_and_rewritten_as_the_rect() {
 /// authored `movable`/`resizable` pair the cache's apply reads off the live frame.
 fn author_a_window(world: &mut World) {
     world
-        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .get_non_send_mut::<benilla_ui::script::UiScript>()
         .expect("a VM to author a window in")
         .run(
             "local f = CreateFrame(\"Frame\", \"LayoutProbe\") \
@@ -1727,7 +1743,7 @@ fn author_a_window(world: &mut World) {
 /// The probe window's live geometry, as the player sees it: its size, left and top.
 fn window_geometry(world: &World) -> (f32, f32, f32, f32) {
     world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("a VM")
         .eval::<(f32, f32, f32, f32)>(
             "return LayoutProbe:GetWidth(), LayoutProbe:GetHeight(), \
@@ -1787,7 +1803,7 @@ fn a_clean_world_entry_raises_only_the_warnings_we_have_named() {
     world.init_resource::<crate::ui_chat::ChatLog>();
     log_in_as(&mut world, "Onehunter", 1);
     let script = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
 
     // Every gap of ours this entry still warns about, by a fragment of its line; none now.
@@ -1824,7 +1840,7 @@ fn the_ui_is_not_up_in_the_frame_between_the_wire_and_the_state() {
 
     // The transition ran: `OnEnter` parked the VM and armed the latch.
     world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
-    world.insert_resource(super::PendingEntryUiLoad);
+    world.insert_resource(super::PendingEntryUiLoad::default());
     assert!(
         !run_ingame_ui_up(&mut world),
         "the deferral window — a parked VM, and nothing to receive an event"
@@ -1889,7 +1905,7 @@ MapProbeZones = table.getn({ GetMapZones(1) })
 
     let read = |expr: &str| {
         world
-            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .get_non_send::<benilla_ui::script::UiScript>()
             .and_then(|s| s.eval::<Option<u32>>(expr).ok())
             .flatten()
     };
@@ -1931,7 +1947,7 @@ BindProbeSet = SetBinding(\"J\", \"TOGGLEWORLDMAP\")
     log_in_as(&mut world, "Onewarrior", 1);
 
     let script = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
     // The defaults are the install's `WTF\DefaultBindings.wtf`: none without one.
     assert_eq!(
@@ -2038,7 +2054,7 @@ ScreenProbeHeight = GetScreenHeight()
     log_in_as(&mut world, "Onewarrior", 1);
 
     let script = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
     let read = |expr: &str| script.eval::<Option<f32>>(expr).ok().flatten();
     let width = read("ScreenProbeWidth").expect("the probe ran at file scope");
@@ -2077,7 +2093,7 @@ fn the_entry_load_seeds_a_record_the_feed_cannot_take_away() {
     );
 
     let mut script = world
-        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .get_non_send_mut::<benilla_ui::script::UiScript>()
         .expect("a VM");
     // The feed's push when the name cache misses our own guid: a nameless snapshot.
     script.set_unit(
@@ -2124,7 +2140,7 @@ fn the_entry_load_seeds_a_record_the_feed_cannot_take_away() {
 /// Every kit name the live VM has queued since the last drain.
 fn taken_kit_names(world: &mut World) -> Vec<String> {
     world
-        .get_non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .get_non_send_mut::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .take_sounds()
         .into_iter()
@@ -2218,7 +2234,7 @@ fn spawn_self_player(world: &mut World) -> Entity {
 /// A probe global off the live VM, as a string.
 fn login_probe(app: &App, field: &str) -> String {
     app.world()
-        .non_send_resource::<benilla_ui::script::UiScript>()
+        .non_send::<benilla_ui::script::UiScript>()
         .eval::<Option<String>>(&format!("return tostring(LoginProbe.{field})"))
         .ok()
         .flatten()
@@ -2317,7 +2333,7 @@ fn a_call_a_file_makes_at_the_load_applies_inside_its_verb() {
     world.resource_mut::<SelfGuid>().0 = Some(ME);
     super::load_ingame_ui_on_world_entry(world);
     let seen = world
-        .non_send_resource::<benilla_ui::script::UiScript>()
+        .non_send::<benilla_ui::script::UiScript>()
         .eval::<Option<i64>>("return LoadCallSeen")
         .unwrap();
     assert_eq!(seen, Some(1), "the file reads the target it selected");
@@ -2355,9 +2371,7 @@ fn the_world_enter_cascade_resolves_the_player_for_its_handlers() {
     spawn_self_player(app.world_mut());
     app.update();
 
-    let s = app
-        .world()
-        .non_send_resource::<benilla_ui::script::UiScript>();
+    let s = app.world().non_send::<benilla_ui::script::UiScript>();
     let doll = s.frame_handle("PaneProbeDoll").expect("the probe loaded");
     assert_eq!(
         s.character_pane(doll).map(|c| c.guid),
@@ -2401,6 +2415,66 @@ fn a_reload_fires_player_login_once_against_the_live_player() {
         "LOGIN:1:17:1234 PEW ",
         "the new VM gets PLAYER_LOGIN then PLAYER_ENTERING_WORLD, once each"
     );
+
+    drop(app);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// fork: the sliced entry load ([`super::lifecycle::run_pending_entry_load`]) is the world-entry
+/// edge too. Its files run under the roster's stand-in even when the player's create lands
+/// mid-load, it only arms `PLAYER_LOGIN`, and the VM stays parked until the last slice, so the
+/// feed fires the cascade once, on the published VM with the player seated.
+#[test]
+fn the_sliced_entry_load_arms_player_login_for_the_feed() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon("sliced", "LoginProbe", LOGIN_PROBE_TOC, LOGIN_PROBE_LUA);
+    let (mut app, _rx) = unit_feed_app();
+    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+    app.insert_resource(crate::loading_screen::LoadingScreen::default());
+    app.insert_resource(roster_named("Probelogin", 1));
+    app.insert_resource(super::PendingEntryUiLoad::default());
+    // The player's create beats the load's first slice.
+    spawn_self_player(app.world_mut());
+
+    let mut frames = 0;
+    while app
+        .world()
+        .get_resource::<super::PendingEntryUiLoad>()
+        .is_some()
+    {
+        super::lifecycle::run_pending_entry_load(app.world_mut());
+        frames += 1;
+        assert!(frames < 10_000, "the sliced entry load never finished");
+        if app
+            .world()
+            .get_resource::<super::PendingEntryUiLoad>()
+            .is_some()
+        {
+            // Mid-load: the VM is parked, so the feed has nothing to fire at.
+            app.update();
+        }
+    }
+    assert_eq!(
+        login_probe(&app, "fileExists"),
+        "nil",
+        "the entry's file scope runs under the roster's stand-in, as before the player's create"
+    );
+    assert_eq!(
+        login_probe(&app, "order"),
+        "",
+        "the sliced load arms PLAYER_LOGIN; nothing fired over its {frames} frame(s)"
+    );
+
+    app.update();
+    assert_eq!(
+        login_probe(&app, "order"),
+        "LOGIN:1:17:1234 PEW ",
+        "the feed's first pass over the published VM fires both, the player seated"
+    );
+    app.update();
+    assert_eq!(login_probe(&app, "order"), "LOGIN:1:17:1234 PEW ");
 
     drop(app);
     let _ = std::fs::remove_dir_all(&tmp);
@@ -2509,7 +2583,7 @@ fn addons_load_against_the_buff_anchors_the_xml_gives() {
 
     log_in_as(&mut world, "Onehunter", 1);
     let s = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("in-world VM");
     let probe = |field: &str| {
         s.eval::<String>(&format!("return tostring(BuffProbe.{field})"))
@@ -2554,7 +2628,7 @@ fn hog_world(tag: &str, limit_kb: &str) -> (World, std::path::PathBuf, EnvGuard,
     world.insert_resource(Time::<bevy::time::Real>::default());
     world.spawn(crate::net::SelfPlayer);
     log_in_as(&mut world, "Onehunter", 1);
-    let mut s = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+    let mut s = world.non_send_mut::<benilla_ui::script::UiScript>();
     s.register_cvars(crate::cvars::registered_pairs());
     // The limit as the saved file holds it: in the world the row is read-only (`0x48f566`), so
     // only the mirror sync moves it.
@@ -2577,7 +2651,7 @@ fn watch_frame(world: &mut World) {
 /// The text of the shown `MEMORY_EXHAUSTED` popup, if one is shown.
 fn memory_popup(world: &World) -> Option<String> {
     world
-        .non_send_resource::<benilla_ui::script::UiScript>()
+        .non_send::<benilla_ui::script::UiScript>()
         .eval::<Option<String>>(
             "local f = StaticPopup_Visible(\"MEMORY_EXHAUSTED\") \
              return f and getglobal(f .. \"Text\"):GetText()",
@@ -2587,7 +2661,7 @@ fn memory_popup(world: &World) -> Option<String> {
 
 /// What the whole state counts, in KB, after a full collection.
 fn collected_kb(world: &World) -> usize {
-    let s = world.non_send_resource::<benilla_ui::script::UiScript>();
+    let s = world.non_send::<benilla_ui::script::UiScript>();
     s.lua().gc_collect().unwrap();
     s.lua().used_memory() >> 10
 }
@@ -2619,12 +2693,12 @@ fn a_state_over_script_memory_shows_the_stock_warning_and_recovers() {
 
     // Within the limit again: a limit above the stock interface, with the hog freed.
     world
-        .non_send_resource::<benilla_ui::script::UiScript>()
+        .non_send::<benilla_ui::script::UiScript>()
         .run("MemoryHog = nil")
         .unwrap();
     let stock_kb = collected_kb(&world);
     world
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .set_cvar_host("scriptMemory", &(stock_kb + 1024).to_string());
     watch_frame(&mut world);
     assert_eq!(memory_popup(&world), None, "MEMORY_RECOVERED hides it");
@@ -2649,7 +2723,7 @@ fn a_state_within_script_memory_shows_nothing() {
     assert_eq!(memory_popup(&world), None);
 
     world
-        .non_send_resource::<benilla_ui::script::UiScript>()
+        .non_send::<benilla_ui::script::UiScript>()
         .run("MemoryHog = nil")
         .unwrap();
     let stock_kb = collected_kb(&world);
@@ -2702,7 +2776,7 @@ fn a_reload_keeps_the_damage_text_font_the_login_read() {
     std::fs::write(&file, lua("SECOND")).expect("the addon's new face");
     reload(&mut world, crate::client_state::ClientState::InWorld);
     let assigned: String = world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .expect("in-world VM")
         .eval("return DAMAGE_TEXT_FONT")
         .expect("the global");

@@ -6,7 +6,8 @@
 //! LightIntBand sub-9, alpha 0xFF) tints every disc and glare but moon02, which has no colour
 //! writer; the white moon's teal rim is the dome's night bands (sub-3..6) through its feathered
 //! edge. Every body takes the sky's far-depth pin. The bodies are placed in plain world space, so
-//! they project through our camera's 45° fovy, where the reference's is 44.1° at 16:9.
+//! they project through our camera's fovy (`view::CAM_FOVY`, 58.7°), where the reference's is
+//! 44.1° at 16:9.
 
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
@@ -60,6 +61,8 @@ struct StarDome {
     /// The patch's authored transparency weight (`Stars.m2` keys 1.0 to 0.25 over its seven
     /// batches, `A = colorAlpha × weight`), under the star-curve alpha; 1.0 for the fallback.
     weight: f32,
+    /// Stage 0's texture-transform translation loop (patch-Y's nebulae drift), `None` when still.
+    scroll: Option<benilla_formats::UvAnim>,
 }
 
 /// Both glares' enabled word (`+0x8` of the sun's `0xce97a8` and the moon's `0xce96f8`), which
@@ -147,22 +150,17 @@ fn apply_celestial_visibility(
             Visibility::Inherited
         }
     };
-    let set = |vis: &mut Visibility, target: Visibility| {
-        if *vis != target {
-            *vis = target;
-        }
-    };
     for (sprite, mut vis) in &mut suns {
-        set(&mut vis, want(matches!(sprite.part, SunPart::Disc)));
+        vis.set_if_neq(want(matches!(sprite.part, SunPart::Disc)));
     }
     for (sprite, mut vis) in &mut moons {
-        set(
-            &mut vis,
-            want(matches!(sprite.part, MoonPart::Disc | MoonPart::Moon02)),
-        );
+        vis.set_if_neq(want(matches!(
+            sprite.part,
+            MoonPart::Disc | MoonPart::Moon02
+        )));
     }
     for mut vis in &mut stars {
-        set(&mut vis, want(true));
+        vis.set_if_neq(want(true));
     }
 }
 

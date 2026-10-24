@@ -10,7 +10,6 @@ use std::collections::{HashMap, HashSet};
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi;
-use super::Model;
 
 /// An item template's tooltip view: the `SMSG_ITEM_QUERY_SINGLE_RESPONSE` fields the tooltip reads,
 /// plus app-resolved display strings.
@@ -431,24 +430,24 @@ impl super::UiScript {
         &mut self,
         rows: std::collections::HashMap<u32, super::RandomPropertyView>,
     ) {
-        self.model_mut().random_properties = rows;
+        set_field!(self, random_properties, rows);
     }
 
     /// Pushes the `SpellItemEnchantment` names once, at load, keyed by id: a chat link carries a
     /// bare enchant id, and a clicked tooltip cannot repaint on a late answer.
     pub fn set_enchant_names(&mut self, names: HashMap<u32, String>) {
-        self.model_mut().enchant_names = names;
+        set_field!(self, enchant_names, names);
     }
 
     /// Pushes every spell the player knows (`SMSG_INITIAL_SPELLS` and its updates), the set the
     /// known-recipe line asks (`0x60c740`'s bits at `0xb710fc`), passives and recipes included.
     pub fn set_known_spells(&mut self, spells: HashSet<u32>) {
-        self.model_mut().known_spells = spells;
+        set_field!(self, known_spells, spells);
     }
 
     /// Pushes the player state the red lines compare against.
     pub fn set_player_req_state(&mut self, state: PlayerReqState) {
-        self.model_mut().player_req = state;
+        set_field!(self, player_req, state);
     }
 }
 
@@ -560,7 +559,9 @@ fn parse_item_arg(v: &Value) -> mlua::Result<(i64, i32, i32, i32)> {
 /// (`0x5d8ba5`).
 fn suffixed_name(lua: &Lua, name: &str, property: i32) -> String {
     let suffix = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         u32::try_from(property)
             .ok()
             .filter(|&p| p != 0)
@@ -628,7 +629,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(MultiValue::new()); // no record holds a negative or past-u32 id
             };
             let view = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let v = model.item_templates.get(&item_id).cloned();
                 if v.is_none() && item_id != 0 {
                     model.item_stat_reads.insert(item_id);

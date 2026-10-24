@@ -1,0 +1,61 @@
+# Trunk replaces `scripts/web-build.sh` as the browser build.
+#
+# The script did the same five things by hand — cargo build, wasm-bindgen, wasm-opt, copy the page
+# files, precompress — and each was a version pin or a flag list maintained in a comment. Trunk owns
+# the tool versions (and downloads them itself, so `scripts/web-setup.sh` no longer installs
+# wasm-bindgen-cli) and reads the build's shape out of `web/index.html`; the pack staging runs after
+# it, not as a hook (see the end of this file).
+#
+# What Trunk does NOT own is `web/packs/` — 3.3 GiB of container that must not be rebuilt, copied,
+# or (Trunk clears `dist/` on every build) deleted. Hence the three-directory layout that
+# `scripts/stage-packs.sh` assembles; see its header.
+
+trunk-version = ">=0.21.14"
+
+[build]
+target = "web/index.html"
+dist = "web/dist"
+release = true
+# The page imports `./wenilla.js` by name and `_headers` matches on paths, so a content hash in the
+# filename would break both on every build. The bundle is served `no-cache` for exactly this reason
+# (`wenilla-host::static_site`), and on the site it is the one thing under `/*` rather than the
+# immutable `/data/p/*` rule.
+filehash = false
+# `web/index.html` already carries its own module script (`boot(init)` then `bind(w.memory)`, in
+# that order — the Lua WASI shims need the module's linear memory and it does not exist until
+# `init()` has run). Trunk's injected loader would run instead of it.
+inject_scripts = false
+# The inline scripts are the AudioContext resume hook and the WGSL diagnostic printer; both are
+# read by people far more often than they are shipped, and neither is on a size-critical path
+# beside a 90 MB wasm module.
+minify = "never"
+# The `wasm-bindgen = "=0.2.126"` pin is load-bearing — a crate newer than the CLI emits glue the
+# CLI cannot match — so a build that silently updated the lock would be a build that silently
+# breaks the page.
+#
+# `locked`, not `frozen`, and the difference is the whole reason this line changed: `--frozen` is
+# `--locked --offline`, and the threaded build (`scripts/web-build-threads.sh`) compiles std from
+# source with `-Zbuild-std`, which has to resolve and fetch std's OWN dependencies at least once.
+# `--locked` keeps the property the paragraph above asks for — the lock cannot move under the
+# build — and drops only the offline half, which was never what the pin was protecting.
+locked = true
+
+[tools]
+# MUST equal the Cargo.lock pin. Trunk downloads this itself; that is the whole reason
+# `scripts/web-setup.sh` stopped installing it.
+wasm_bindgen = "0.2.126"
+wasm_opt = "version_130"
+
+# `trunk serve`'s dev server. The two headers are the same pair `web/_headers` sets on the site
+# and `wenilla-host::static_site` sets for `--www`, and they are not optional for the threaded
+# build: its linear memory is a `SharedArrayBuffer`, which a page that is not cross-origin isolated
+# cannot construct, so without them the module fails to instantiate and says only
+# `WebAssembly.Memory(): shared memory is not enabled`. Three servers, one rule — a threading bug
+# must reproduce on all three or the local loop is a lie.
+[serve]
+headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder-Policy" = "require-corp" }
+
+# Assemble `web/site/` - the directory a static host serves - from this build plus the
+# container: not a Trunk hook, since a hook names one interpreter for every caller. Each build
+# script stages in its own language once `trunk build` returns (`scripts/stage-packs.{sh,ps1,py}`),
+# and a bare `trunk build` is followed by one of those by hand.

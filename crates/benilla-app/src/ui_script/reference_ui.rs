@@ -20,9 +20,8 @@ use super::addons::{Addon, Source};
 /// does, so an addon's `\AddOns\` debugstack pattern never matches a FrameXML frame.
 pub(super) const NAME: &str = "FrameXML";
 
-/// Whether a test kit's entry comes off the player's chain: it has a path separator. Decidable
-/// because `assets/ui` is flat, which `manifest::tests` pins.
-#[cfg(test)]
+/// Whether an entry (the sliced entry load's, or a test kit's) comes off the player's chain: it
+/// has a path separator. Decidable because `assets/ui` is flat, which `manifest::tests` pins.
 pub(super) fn is_chain_entry(entry: &str) -> bool {
     entry.contains('\\') || entry.contains('/')
 }
@@ -78,7 +77,6 @@ fn toc_addon(name: &str, toc_path: &str, toc_text: &str) -> Addon {
 }
 
 /// The stock interface as an [`Addon`] over the chain; `files` are full chain paths.
-#[cfg(test)]
 pub(super) fn addon(files: Vec<String>) -> Addon {
     named_addon(NAME, files)
 }
@@ -103,8 +101,13 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     if let Some(overlaid) = fixture::read(req) {
         return overlaid;
     }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(answer) = read_loose(&benilla_formats::install_index().get(), req) {
         return answer;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let Some(bytes) = read_loose_web(req) {
+        return Some(bytes);
     }
     let chain = chain()?;
     match chain.read(req) {
@@ -116,6 +119,20 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// **Are this file's bytes already in memory?** — and if not, start the warm that puts them there.
+///
+/// The web target's chain reads a pack at a time and [`read`] below is synchronous, so a caller
+/// that reads an interface file whose pack has not arrived pays a fetch on the frame. This is the
+/// ask that lets it not: `Chain::ready` answers without blocking and starts the pack warming when
+/// the answer is no, so a caller can yield the frame and come back. `true` on native, where every
+/// read is a file read, and `true` for a name the container does not hold — a miss is a miss now,
+/// not later, and the caller should go ahead and get its `None` from [`read`].
+///
+/// The caller is the sliced entry load ([`super::lifecycle`]), which walks its rows in order.
+pub(super) fn ready(req: &str) -> bool {
+    chain().is_none_or(|chain| chain.ready(req))
+}
+
 /// The install's answer for `req`, read-only, or `None` to ask the chain: Storm's open asks its
 /// index of the install folder and its `Data\` (`0x647f89`) before the archives (`0x648116`), so
 /// a loose copy of an interface file shadows the archive's, and the login screen's agreements
@@ -124,9 +141,43 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
 /// where the index misses a name written with `/`: a `.toc` line and an `<Include>` or
 /// `<Script file=>` reach here joined by `benilla_ui::loader::join_ref`, which writes every
 /// separator as `/`, so the name's own is gone.
+#[cfg(not(target_arch = "wasm32"))]
 fn read_loose(index: &benilla_formats::LooseIndex, req: &str) -> Option<Option<Vec<u8>>> {
     let file = index.resolve(&req.replace('/', "\\"), benilla_formats::LooseOpen::Index)?;
     Some(file.read())
+}
+
+/// [`read_loose`] on the page, which has no install folder: the site serves the install's loose
+/// top-level files beside each container, lowercased, at `<container>/loose/<name>`
+/// (`Credits.html`, `eula.html`, `tos.html`), the Turtle WoW layer's ahead of the corpus while it
+/// is mounted. Only a bare name is asked; each is fetched once per layer, and a miss is
+/// remembered too.
+#[cfg(target_arch = "wasm32")]
+fn read_loose_web(req: &str) -> Option<Vec<u8>> {
+    use std::collections::HashMap;
+    if req.is_empty() || req.contains(['\\', '/']) || req.contains("..") {
+        return None;
+    }
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<(bool, String), Option<Vec<u8>>>> =
+            Default::default();
+    }
+    let name = req.to_ascii_lowercase();
+    let turtle = benilla_formats::layers::turtle_mounted();
+    let key = (turtle, name.clone());
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let mut bases = Vec::new();
+    if turtle {
+        bases.push(benilla_formats::web::turtle_data_base());
+    }
+    bases.push(benilla_formats::web::data_base());
+    let bytes = bases
+        .iter()
+        .find_map(|base| benilla_formats::web::fetch_sync(&format!("{base}/loose/{name}")).ok());
+    CACHE.with(|c| c.borrow_mut().insert(key, bytes.clone()));
+    bytes
 }
 
 /// What opening the chain has to say, kept until something can log it.
@@ -197,6 +248,7 @@ fn chain() -> Option<&'static Chain> {
 
 /// [`client_locale`] for the one caller that runs before the log plugin: the primary window's
 /// birth. It opens the same chain, but whatever the open has to say waits for [`chain`].
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn boot_client_locale() -> benilla_formats::Locale {
     chain_quiet().map(Chain::locale).unwrap_or_default()
 }

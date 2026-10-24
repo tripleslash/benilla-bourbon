@@ -143,7 +143,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             {
                 return Ok(());
             }
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             if !run_cvar_command(&mut model, word, rest) {
                 model.console_lines.push(line.to_string());
             }

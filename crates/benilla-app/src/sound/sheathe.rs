@@ -17,7 +17,8 @@ use benilla_formats::SheatheSoundCatalog;
 
 use crate::creature_anim::{SheathSwapMessage, Wielded};
 use crate::net::NetEntity;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
@@ -101,6 +102,6 @@ fn sheathe_sounds(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, load_sheathe_sounds.after(AssetSet::Open))
+    app.add_data_loaders(load_sheathe_sounds)
         .add_systems(Update, sheathe_sounds.in_set(WorldStage::Present));
 }

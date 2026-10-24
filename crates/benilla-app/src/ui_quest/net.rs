@@ -467,7 +467,7 @@ mod tests {
         let mut q = crate::ui_quest_log::fixture::quest(7, "Deliver the Message", 1);
         q.record.objectives[0] = crate::ui_quest_log::fixture::kill(40, 3);
         crate::ui_quest_log::fixture::seat(&mut script, &[q]);
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         let epoch = world.resource::<QuestGiver>().reask_epoch();
         let mut fail = |timed| {
             world
@@ -476,7 +476,7 @@ mod tests {
             let mut quest = world.resource_mut::<QuestGiver>();
             let lines = quest.take_messages().len();
             let reasked = quest.reask_epoch();
-            let mut script = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+            let mut script = world.non_send_mut::<benilla_ui::script::UiScript>();
             let refreshes = script.take_quest_giver_refreshes();
             (lines, script.quest_log_latched(7), reasked, refreshes)
         };

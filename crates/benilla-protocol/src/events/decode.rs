@@ -1,6 +1,6 @@
 //! The [`ServerPacket`] to [`SessionEvent`] mapping: pure functions of the packet, no state.
 
-use crate::messages::{CastOutcome, Object, ObjectFields, ObjectType, ServerPacket};
+use crate::messages::{CastOutcome, MovementBlock, Object, ObjectFields, ObjectType, ServerPacket};
 use crate::wire::Vector3d;
 
 use super::{EntityKind, MoveSpeeds, NotifyBlock, SessionEvent, TransportClock};
@@ -1221,10 +1221,9 @@ fn create_event(
             fields: mask,
         });
     }
-    // The block's own position, for every type: the GameObject constructor copies it over
-    // `GAMEOBJECT_POS_X`..`FACING` (`0x5f7046`..`0x5f706b`), so the descriptor's copy never
-    // places anything.
-    let (position, orientation) = movement.position?;
+    // The block's own position, for every type ([`create_placement`], which also creates a
+    // Turtle core's pose-less ship).
+    let (position, orientation) = create_placement(object_type, &movement)?;
     Some(SessionEvent::ObjectCreate {
         guid,
         kind: entity_kind(object_type),
@@ -1286,4 +1285,60 @@ fn object_scale(t: ObjectType, mask: &ObjectFields) -> f32 {
         _ => None,
     };
     raw.filter(|s| *s > 0.0).unwrap_or(1.0)
+}
+
+/// A create's pose: the block's own position, for every type, as the GameObject constructor copies
+/// it over `GAMEOBJECT_POS_X`..`FACING` (`0x5f7046`..`0x5f706b`), so the descriptor's copy never
+/// places anything.
+///
+/// A Turtle core sends every ship and zeppelin at login with its path progress alone. Its pose is
+/// the timetable's from the first tick, so it is created at the origin (spawned hidden until that
+/// tick); any other object with no pose is dropped.
+fn create_placement(object_type: ObjectType, movement: &MovementBlock) -> Option<(Vector3d, f32)> {
+    movement.position.or_else(|| {
+        (object_type == ObjectType::GameObject && movement.transport_progress.is_some()).then_some(
+            (
+                Vector3d {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                0.0,
+            ),
+        )
+    })
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    fn block(position: Option<(Vector3d, f32)>, transport_progress: Option<u32>) -> MovementBlock {
+        MovementBlock {
+            position,
+            mover: None,
+            speeds: None,
+            transport_progress,
+            transport: None,
+            spline: None,
+        }
+    }
+
+    /// A ship sent with its path progress and no pose is still created: the timetable places it.
+    /// Anything else without a pose has nowhere to be and is dropped.
+    #[test]
+    fn a_transport_without_a_pose_is_created_at_the_origin() {
+        let ship = create_placement(ObjectType::GameObject, &block(None, Some(47_030)));
+        assert!(ship.is_some_and(|(p, yaw)| (p.x, p.y, p.z, yaw) == (0.0, 0.0, 0.0, 0.0)));
+        assert!(create_placement(ObjectType::GameObject, &block(None, None)).is_none());
+        assert!(create_placement(ObjectType::Unit, &block(None, Some(1))).is_none());
+        // A pose that was sent is kept.
+        let at = Vector3d {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+        };
+        let placed = create_placement(ObjectType::GameObject, &block(Some((at, 0.5)), Some(1)));
+        assert!(placed.is_some_and(|(p, yaw)| (p.x, p.y, p.z, yaw) == (1.0, 2.0, 3.0, 0.5)));
+    }
 }

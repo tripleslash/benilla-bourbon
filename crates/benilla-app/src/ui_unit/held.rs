@@ -108,11 +108,48 @@ impl HeldUnits<'_> {
     }
 }
 
+/// The objects a gated feed's last run read by descriptor, beside our own. The feed's gate opens
+/// on a change to one of them, where a change to any unit's would hold it open on every frame of
+/// a crowd. A guid that named no object is kept and opens the gate once the object manager holds
+/// it. It is every such input because which objects a run reads is decided by the feed's other
+/// gate inputs and by these descriptors themselves.
+#[derive(Default)]
+pub(super) struct StoreReads {
+    held: Vec<Entity>,
+    missing: Vec<u64>,
+}
+
+impl StoreReads {
+    /// A read of the object `entity`.
+    pub(super) fn held(&mut self, entity: Entity) {
+        self.held.push(entity);
+    }
+
+    /// A read of `guid`'s object, `entity` when the object manager holds it.
+    pub(super) fn looked_up(&mut self, guid: u64, entity: Option<Entity>) {
+        match entity {
+            Some(entity) => self.held.push(entity),
+            None => self.missing.push(guid),
+        }
+    }
+
+    /// Whether a read object's descriptor `changed`, or the manager now `holds` a missing one.
+    pub(super) fn moved(
+        &self,
+        changed: impl Fn(Entity) -> bool,
+        holds: impl Fn(u64) -> bool,
+    ) -> bool {
+        self.held.iter().any(|e| changed(*e)) || self.missing.iter().any(|g| holds(*g))
+    }
+}
+
 /// [`feed_chain_units`]' per-VM memory.
 #[derive(Default)]
 pub(super) struct ChainMemo {
     names_generation: gate::Watch,
     guild_generation: gate::Watch,
+    /// The descriptors the last build read: the ends' and what their relations reached.
+    reads: StoreReads,
     /// The guids the last build covered, sorted.
     ends: Vec<u64>,
     /// What each was last pushed as.
@@ -144,6 +181,8 @@ pub(super) fn feed_chain_units(
     guild: Res<crate::ui_guild::GuildState>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     changed: Query<(), (Changed<ObjectStore>, Without<crate::items::ItemObject>)>,
+    // Our own descriptor's edge: every end's reaction reads it.
+    own_changed: Query<(), (Changed<ObjectStore>, With<SelfPlayer>)>,
     mut removed: RemovedComponents<Guid>,
     mut memo: Local<VmMemo<ChainMemo>>,
 ) {
@@ -165,7 +204,12 @@ pub(super) fn feed_chain_units(
         let names_moved = memo.names_generation.moved(names.generation());
         let guild_moved = memo.guild_generation.moved(guild.identity_generation());
         let ends_moved = memo.ends != ends;
-        let stores_changed = !changed.is_empty();
+        // The descriptors the last build read and ours, not any unit's ([`StoreReads`]).
+        let stores_changed = !own_changed.is_empty()
+            || memo.reads.moved(
+                |e| changed.contains(e),
+                |guid| index.as_ref().is_some_and(|i| i.0.contains_key(&guid)),
+            );
         let stores_removed = !removed.is_empty();
         let group_changed = group.is_changed();
         let relations_changed = world.inputs_changed();
@@ -184,10 +228,14 @@ pub(super) fn feed_chain_units(
             return;
         }
 
-        let object = |guid: u64| {
-            let entity = *index.as_ref()?.0.get(&guid)?;
-            stores.get(entity).ok()
+        let reads = std::cell::RefCell::new(StoreReads::default());
+        let entity_of = |guid: u64| {
+            let entity = index.as_ref().and_then(|i| i.0.get(&guid).copied());
+            reads.borrow_mut().looked_up(guid, entity);
+            entity
         };
+        // The tooltip facts' object lookup, through the tracked one so the gate sees its reads.
+        let object = |guid: u64| stores.get(entity_of(guid)?).ok();
         let held = HeldUnits {
             names: &names,
             commands: &commands,
@@ -208,13 +256,14 @@ pub(super) fn feed_chain_units(
         let built: HashMap<u64, UnitState> = ends
             .iter()
             .filter_map(|&guid| {
-                let store = match index.as_ref().and_then(|i| i.0.get(&guid)) {
-                    Some(&entity) => Some(stores.get(entity).ok()?),
+                let store = match entity_of(guid) {
+                    Some(entity) => Some(stores.get(entity).ok()?),
                     None => None,
                 };
                 Some((guid, held.chain_end(guid, store)?))
             })
             .collect();
+        memo.reads = reads.take();
 
         memo.pushed.retain(|guid, _| {
             let keep = built.contains_key(guid);
@@ -302,9 +351,9 @@ pub(crate) struct CandidateMemo {
 /// creature record moved, or an input every snapshot reads did; another name's answer rebuilds
 /// nothing. It is a view for the rest of a chunk, which [`super::feed_units`] replaces with the
 /// committed selection's next frame.
-/// A move of our own descriptor does not rebuild the rest, so a reaction can lag our own faction
-/// change until the unit's next update. Without an active player object nothing is a candidate,
-/// as the reference resolves nothing then (`0x493ae0`).
+/// A move of our own descriptor, or of a pet's owner, does not rebuild the rest, so a reaction or
+/// `CanAssist` can lag until the unit's next update. Without an active player object nothing is a
+/// candidate, as the reference resolves nothing then (`0x493ae0`).
 pub(crate) fn feed_name_candidates(
     mut vm: crate::script_calls::VmWith<crate::target::RelationWorld<'static, 'static>>,
     tables: super::SnapshotTables,
@@ -520,7 +569,7 @@ mod tests {
             .insert_resource(NetCommands(tx))
             .add_plugins(crate::ui_aura::UiAuraPlugin)
             .add_systems(Update, feed_chain_units.after(crate::ui_aura::AuraEvents));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         {
             let mut names = app.world_mut().resource_mut::<NameCache>();
             for (guid, name) in [(ME, "Meg"), (A, "Alia"), (B, "Bram"), (C, "Cole")] {
@@ -587,7 +636,7 @@ mod tests {
     }
 
     fn script(app: &App) -> &UiScript {
-        app.world().non_send_resource::<UiScript>()
+        app.world().non_send::<UiScript>()
     }
 
     fn name(app: &App, token: &str) -> Option<String> {
@@ -668,16 +717,14 @@ mod tests {
         // alone reads its guid as a chain does, for a selection with no object has no push.
         assert_eq!(name(&app, "raid1"), None);
         assert_eq!(name(&app, "target").as_deref(), Some("Mob"));
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .set_unit(
-                "target",
-                Some(UnitState {
-                    exists: true,
-                    name: Some("Pushed".into()),
-                    ..Default::default()
-                }),
-            );
+        app.world_mut().non_send_mut::<UiScript>().set_unit(
+            "target",
+            Some(UnitState {
+                exists: true,
+                name: Some("Pushed".into()),
+                ..Default::default()
+            }),
+        );
         assert_eq!(name(&app, "target").as_deref(), Some("Pushed"));
     }
 
@@ -748,7 +795,7 @@ mod tests {
         app.init_resource::<crate::ui_party::PartyLane>()
             .add_systems(Update, crate::ui_party::feed_party);
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.run(r#"UNKNOWNOBJECT = "Unknown""#).unwrap();
             // Level 60, so the level 0 of a unit with no object would read grey.
             script.set_player_req_state(benilla_ui::script::PlayerReqState {
@@ -965,16 +1012,14 @@ mod tests {
             with(&[(TEMPLATE, 1), (FLAGS, 0x1000)], GONE, 0x09),
         );
         put(&mut app, ADD, with(&[(TEMPLATE, 1)], 0, 0x09));
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .set_unit(
-                "player",
-                Some(UnitState {
-                    exists: true,
-                    guid: ME,
-                    ..Default::default()
-                }),
-            );
+        app.world_mut().non_send_mut::<UiScript>().set_unit(
+            "player",
+            Some(UnitState {
+                exists: true,
+                guid: ME,
+                ..Default::default()
+            }),
+        );
         app.update();
         assert!(
             holds(&app, r#"UnitCanAssist("player", "party1target") == 1"#),

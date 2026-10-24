@@ -27,7 +27,9 @@ fn with_colorselect<T>(
     f: impl FnOnce(&mut ColorSelectState) -> T,
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let frame = model
         .arena
         .frame_mut(h)
@@ -154,7 +156,9 @@ pub(super) fn install_loaded(
 /// and nothing else; with none, a texture that loads is installed.
 fn set_marker_path(lua: &Lua, this: &Table, slot: Slot, path: &str) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let existing = match &model
         .arena
         .frame(h)
@@ -195,11 +199,15 @@ fn install_slot_texture(
             let h = frame_handle_of(lua, &this)?;
             match arg {
                 SlotArg::Object(rh) => {
-                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     install_slot_model(&mut model, h, slot, Some(rh))
                 }
                 SlotArg::Clear => {
-                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     install_slot_model(&mut model, h, slot, None)
                 }
                 SlotArg::Path(path) => set_marker_path(lua, &this, slot, &path),
@@ -211,7 +219,9 @@ fn install_slot_texture(
         lua.create_function(move |lua, this: Table| {
             let existing = with_colorselect(lua, &this, |s| slot.get(s))?;
             let id = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 existing.map(|rh| model.region_id(rh))
             };
             match id {
@@ -311,7 +321,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 fn fire_color_select(lua: &Lua, this: &Table, r: f64, g: f64, b: f64) -> mlua::Result<()> {
     let id = {
         let h = frame_handle_of(lua, this)?;
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.frame_id(h)
     };
     if let Err(e) = event::fire_widget_handler(
@@ -320,7 +332,7 @@ fn fire_color_select(lua: &Lua, this: &Table, r: f64, g: f64, b: f64) -> mlua::R
         "OnColorSelect",
         vec![Value::Number(r), Value::Number(g), Value::Number(b)],
     ) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }

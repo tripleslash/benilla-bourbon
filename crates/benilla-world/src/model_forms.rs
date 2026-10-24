@@ -4,11 +4,12 @@
 //! nearest requester first, uncapped behind the loading cover. One [`Entry`] per model asset
 //! serves every instance.
 
+use bevy::platform::time::Instant;
 use std::collections::HashMap;
-use std::time::Instant;
 
 use benilla_assets::{
-    submesh_to_skinned_mesh, submesh_to_static_mesh, M2Model, ModelSubmesh, WmoModel,
+    submesh_to_palette_billboard, submesh_to_skinned_mesh, submesh_to_static_mesh, M2Model,
+    ModelSubmesh, WmoModel,
 };
 use bevy::asset::AssetId;
 use bevy::camera::primitives::{Aabb, MeshAabb};
@@ -47,6 +48,10 @@ impl From<&Handle<WmoModel>> for ModelKey {
 /// One model's built forms; `stat.len()` and `skin.len()` are the build cursors across frames.
 #[derive(Default)]
 struct Entry {
+    /// The geometry the forms are built from: the model's first submesh, held so the entry can tell
+    /// its model from the one a reload puts under the same asset id (a layer mounted or unmounted),
+    /// and so that geometry is never freed while it is the comparison.
+    source: Option<std::sync::Arc<benilla_formats::RenderSubmesh>>,
     /// The static form per submesh with its build-time `Aabb` (`None`: degenerate), which
     /// consumers insert themselves: `calculate_bounds` races a `RENDER_WORLD` mesh, and the
     /// exterior cull fails open without a bound.
@@ -54,12 +59,50 @@ struct Entry {
     /// The skinned twin per submesh, for rigged lanes only; it keeps main-world data because the
     /// mouseover picker skins it on the CPU (`target::hover`).
     skin: Vec<Handle<Mesh>>,
+    /// Per submesh, beside the skinned twin: a billboard batch's palette forms (`None` for any
+    /// other batch), so a rigged placement draws its billboards through the palette.
+    billboard: Vec<Option<PaletteBillboard>>,
     /// Kinds ever requested (`WANT_*` bits), sticky until the asset frees.
     want: u8,
     /// Kinds fully built.
     done: u8,
     /// This frame's most urgent requester (lower is sooner), reset after each furnish pass.
     priority: i32,
+}
+
+impl Entry {
+    /// Start the entry over when `submeshes` is not the geometry it was built from. A reload keeps
+    /// the asset id and replaces the model under it the frame it lands, while the `Modified` that
+    /// drops the entry is read a frame later: a consumer in between would be handed the old
+    /// model's meshes, index-parallel with the new model's submeshes and skinned by its skeleton.
+    fn track(&mut self, submeshes: &[ModelSubmesh]) {
+        self.track_geometry(submeshes.first().map(|s| &s.geometry));
+    }
+
+    /// [`Self::track`] by the first submesh's geometry alone.
+    fn track_geometry(&mut self, now: Option<&std::sync::Arc<benilla_formats::RenderSubmesh>>) {
+        let same = match (&self.source, now) {
+            (Some(was), Some(now)) => std::sync::Arc::ptr_eq(was, now),
+            (was, now) => was.is_none() && now.is_none(),
+        };
+        if !same {
+            *self = Entry {
+                source: now.cloned(),
+                want: self.want,
+                priority: self.priority,
+                ..Default::default()
+            };
+        }
+    }
+}
+
+/// A billboard batch drawn through the rig palette: its model-space skinned form, the unrigged
+/// twin that draws nothing, and a bound that holds the quad at any facing about its pivot.
+#[derive(Clone)]
+pub struct PaletteBillboard {
+    pub skinned: Handle<Mesh>,
+    pub collapsed: Handle<Mesh>,
+    pub aabb: Aabb,
 }
 
 /// The per-asset render-form cache; an entry drops when its model asset leaves the store.
@@ -73,13 +116,23 @@ pub struct ModelForms {
 pub struct FormSlices<'a> {
     pub stat: &'a [(Handle<Mesh>, Option<Aabb>)],
     pub skin: Option<&'a [Handle<Mesh>]>,
+    /// Built with [`Self::skin`]: per submesh, its palette billboard forms.
+    pub billboard: Option<&'a [Option<PaletteBillboard>]>,
 }
 
 impl ModelForms {
-    /// Record that a consumer needs `kinds` at `priority` (the requester's tile distance, lower is
-    /// sooner); `true` once every requested kind is built.
-    pub(crate) fn require(&mut self, key: ModelKey, kinds: u8, priority: i32) -> bool {
+    /// Record that a consumer needs `kinds` of the model whose submeshes are `submeshes` at
+    /// `priority` (the requester's tile distance, lower is sooner); `true` once every requested
+    /// kind is built from those submeshes.
+    pub(crate) fn require(
+        &mut self,
+        key: ModelKey,
+        submeshes: &[ModelSubmesh],
+        kinds: u8,
+        priority: i32,
+    ) -> bool {
         let e = self.entries.entry(key).or_default();
+        e.track(submeshes);
         e.want |= kinds;
         e.priority = e.priority.min(priority);
         e.done & kinds == kinds
@@ -97,14 +150,35 @@ impl ModelForms {
         (e.done & WANT_SKINNED != 0).then_some(e.skin.as_slice())
     }
 
+    /// The built palette billboard forms, beside [`Self::skinned_meshes`].
+    pub(crate) fn palette_billboards(&self, key: ModelKey) -> Option<&[Option<PaletteBillboard>]> {
+        let e = self.entries.get(&key)?;
+        (e.done & WANT_SKINNED != 0).then_some(e.billboard.as_slice())
+    }
+
     /// Request both forms, `true` once built: the gate every lane whose instances can rig polls.
-    pub fn require_rigged(&mut self, model: impl Into<ModelKey>, priority: i32) -> bool {
-        self.require(model.into(), WANT_STATIC | WANT_SKINNED, priority)
+    pub fn require_rigged(
+        &mut self,
+        model: impl Into<ModelKey>,
+        submeshes: &[ModelSubmesh],
+        priority: i32,
+    ) -> bool {
+        self.require(
+            model.into(),
+            submeshes,
+            WANT_STATIC | WANT_SKINNED,
+            priority,
+        )
     }
 
     /// Request the static form only, for lanes whose instances never skin.
-    pub fn require_static(&mut self, model: impl Into<ModelKey>, priority: i32) -> bool {
-        self.require(model.into(), WANT_STATIC, priority)
+    pub fn require_static(
+        &mut self,
+        model: impl Into<ModelKey>,
+        submeshes: &[ModelSubmesh],
+        priority: i32,
+    ) -> bool {
+        self.require(model.into(), submeshes, WANT_STATIC, priority)
     }
 
     /// One model's built forms, empty until the matching `require_*` returns `true`.
@@ -113,6 +187,7 @@ impl ModelForms {
         FormSlices {
             stat: self.static_meshes(key).unwrap_or(&[]),
             skin: self.skinned_meshes(key),
+            billboard: self.palette_billboards(key),
         }
     }
 
@@ -146,6 +221,7 @@ impl ModelForms {
         meshes: &mut Assets<Mesh>,
     ) {
         let e = self.entries.entry(key).or_default();
+        e.track(submeshes);
         e.want |= kinds;
         build_entry(e, kinds, submeshes, meshes, usize::MAX, &mut 0);
     }
@@ -193,6 +269,7 @@ fn build_entry(
             let geo = &submeshes[e.skin.len()].geometry;
             *verts += geo.positions.len();
             e.skin.push(meshes.add(submesh_to_skinned_mesh(geo)));
+            e.billboard.push(palette_billboard(geo, meshes));
             built += 1;
         }
         e.done |= WANT_SKINNED;
@@ -264,6 +341,7 @@ pub(crate) fn furnish_model_forms(
         let Some(e) = forms.entries.get_mut(&key) else {
             continue;
         };
+        e.track(submeshes);
         let want = e.want;
         built += build_entry(e, want, submeshes, &mut meshes, cap - built, &mut verts);
         e.priority = i32::MAX; // re-asserted by next frame's require() calls
@@ -272,8 +350,68 @@ pub(crate) fn furnish_model_forms(
     activity.mfurnish_ms += t0.elapsed().as_secs_f32() * 1000.0;
 }
 
+/// A billboard batch's [`PaletteBillboard`], `None` for any other batch. The bound is the
+/// model-space quad's widened by its reach about the pivot, the farthest any facing carries it.
+fn palette_billboard(
+    geo: &benilla_formats::RenderSubmesh,
+    meshes: &mut Assets<Mesh>,
+) -> Option<PaletteBillboard> {
+    let bb = geo.billboard.as_ref()?;
+    let pivot = benilla_assets::coords::wow_to_bevy(bb.pivot);
+    let reach = geo
+        .positions
+        .iter()
+        .map(|p| benilla_assets::coords::wow_to_bevy(*p).distance(pivot))
+        .fold(0.0f32, f32::max);
+    let (skinned, collapsed) = submesh_to_palette_billboard(geo);
+    let aabb = Aabb::from_min_max(pivot - Vec3::splat(reach), pivot + Vec3::splat(reach));
+    Some(PaletteBillboard {
+        skinned: meshes.add(skinned),
+        collapsed: meshes.add(collapsed),
+        aabb,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// A reload replaces the model under one asset id: the entry built from the old geometry
+    /// starts over, keeping what was asked for, and the same geometry keeps what was built.
+    #[test]
+    fn an_entry_built_from_other_geometry_starts_over() {
+        let old = Arc::new(benilla_formats::RenderSubmesh::default());
+        let new = Arc::new(benilla_formats::RenderSubmesh::default());
+        let mut e = Entry::default();
+        e.track_geometry(Some(&old));
+        e.want = WANT_STATIC | WANT_SKINNED;
+        e.done = WANT_STATIC | WANT_SKINNED;
+        e.skin.push(Handle::default());
+        e.priority = 3;
+
+        e.track_geometry(Some(&old));
+        assert_eq!(
+            e.done,
+            WANT_STATIC | WANT_SKINNED,
+            "the same model keeps its forms"
+        );
+        assert_eq!(e.skin.len(), 1);
+
+        e.track_geometry(Some(&new));
+        assert_eq!(
+            e.done, 0,
+            "a reloaded model's forms are not the old model's"
+        );
+        assert!(e.skin.is_empty() && e.stat.is_empty());
+        assert_eq!((e.want, e.priority), (WANT_STATIC | WANT_SKINNED, 3));
+        assert!(Arc::ptr_eq(e.source.as_ref().unwrap(), &new));
+        // The old geometry is no longer held, so its address may be reused — by a model the entry
+        // now compares against by identity, not by address.
+        assert_eq!(Arc::strong_count(&old), 1);
+    }
+
     /// The measured Stormwind crossing burst, ~3200 meshes, lands inside the fog margin at 60 Hz.
     #[test]
     fn a_city_crossing_furnishes_in_under_a_second() {

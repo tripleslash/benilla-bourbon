@@ -107,7 +107,7 @@ impl House {
             ..Default::default()
         };
         script.set_auction(state);
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         Self { app, rx }
     }
 
@@ -410,7 +410,7 @@ fn usable_and_quality_read_as_numbers() {
 fn a_start_sends_and_empties_the_slot_inside_the_call() {
     let mut h = House::new(0);
     {
-        let mut script = h.app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = h.app.world_mut().non_send_mut::<UiScript>();
         script.set_container(
             0,
             Some(ContainerState {
@@ -458,7 +458,7 @@ fn a_start_sends_and_empties_the_slot_inside_the_call() {
 fn a_damaged_items_start_is_refused_inside_the_call() {
     let mut h = House::new(0);
     {
-        let mut script = h.app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = h.app.world_mut().non_send_mut::<UiScript>();
         script.set_container(
             0,
             Some(ContainerState {

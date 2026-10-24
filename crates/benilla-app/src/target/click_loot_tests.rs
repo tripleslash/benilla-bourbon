@@ -173,7 +173,7 @@ fn client() -> Client {
             f:SetScript("OnEvent", function() tinsert(SEEN, event) end)"#,
         )
         .expect("the recorder installs");
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     Client {
         app,
         rx,

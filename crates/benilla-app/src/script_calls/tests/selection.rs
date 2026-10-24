@@ -423,11 +423,7 @@ fn eight_nested_switches_fit_a_two_megabyte_stack() {
                     .filter(|c| matches!(c, ClientCommand::SetSelection { .. }))
                     .count();
             assert_eq!(selections, 8);
-            let errors = f
-                .app
-                .world_mut()
-                .non_send_resource_mut::<UiScript>()
-                .take_errors();
+            let errors = f.app.world_mut().non_send_mut::<UiScript>().take_errors();
             assert_eq!(errors.len(), 1, "{errors:?}");
             assert!(errors[0].contains("nested too deep"), "{errors:?}");
         })
@@ -725,7 +721,7 @@ fn with_pet(f: &mut Frame, possessed: bool, slot1: u32) {
     let mut bar = world.resource_mut::<crate::ui_pet::PetBar>();
     bar.spells.pet_guid = PET;
     bar.spells.bar[0] = benilla_protocol::messages::PetActionEntry::from(slot1);
-    world.non_send_resource_mut::<UiScript>().set_pet_actions(
+    world.non_send_mut::<UiScript>().set_pet_actions(
         true,
         true,
         false,

@@ -228,7 +228,7 @@ pub(crate) struct ReadyCheckCarry(benilla_ui::script::ReadyCheckState);
 /// pending flags are engine state, which no reload path writes.
 pub(crate) fn fold_dying_vm_ready_check(world: &mut World) {
     let Some(state) = world
-        .get_non_send_resource_mut::<UiScript>()
+        .get_non_send_mut::<UiScript>()
         .map(|mut s| s.take_ready_check())
     else {
         return;
@@ -1943,7 +1943,7 @@ mod tests {
             frame(&mut app);
             let info = |app: &mut App| -> (Option<String>, i64) {
                 app.world_mut()
-                    .non_send_resource::<UiScript>()
+                    .non_send::<UiScript>()
                     .eval::<(Option<String>, Option<String>, i64)>(&format!(
                         "return GetGuildInfo({token:?})"
                     ))
@@ -2117,7 +2117,7 @@ mod tests {
 
     /// A frame that counts the `PARTY_MEMBERS_CHANGED`s the VM is told of; [`changed`] takes them.
     fn watch_members_changed(app: &mut App) {
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         script
             .run(
                 r#"
@@ -2133,7 +2133,7 @@ mod tests {
     /// Run a frame and count the `PARTY_MEMBERS_CHANGED`s it fired.
     fn changed(app: &mut App) -> u32 {
         frame(app);
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let fired: f64 = script.eval("return CHANGED").unwrap();
         script.run("CHANGED = 0").unwrap();
         fired as u32
@@ -2332,7 +2332,7 @@ mod tests {
             Update,
             (mark.after(super::fire_party_lane), drain_party.after(mark)),
         );
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         script
             .run(
                 r#"
@@ -2345,7 +2345,7 @@ mod tests {
             .unwrap();
         let marks = |app: &mut App| {
             frame(app);
-            let script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let script = app.world_mut().non_send_mut::<UiScript>();
             let n: f64 = script.eval("return MARKS").unwrap();
             script.run("MARKS = 0").unwrap();
             n as u32
@@ -2426,7 +2426,7 @@ mod tests {
         let mut app = app_with(script);
         let bar = |app: &mut App| {
             app.world_mut()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<(f64, f64, f64)>("return PartyMemberFrame1ManaBar:GetStatusBarColor()")
                 .unwrap()
         };
@@ -2462,7 +2462,7 @@ mod tests {
             flag(&mut app, "PartyMemberFrame1PetFrame:IsShown()"),
             Some(1.0)
         );
-        let errors = app.world().non_send_resource::<UiScript>().errors();
+        let errors = app.world().non_send::<UiScript>().errors();
         assert!(errors.is_empty(), "script errors: {errors:?}");
     }
 
@@ -2815,6 +2815,60 @@ mod tests {
         assert_eq!(group.members.len(), n - 1);
     }
 
+    /// A held member answers `UnitCanAssist` off its descriptor, as the same player under
+    /// `mouseover` does, so a `[@mouseover,help,nodead]` macro over its party frame, which takes
+    /// the frame's `partyN`, holds; an unstreamed member has no object and is not assistable.
+    #[test]
+    fn a_held_member_is_assistable_through_its_party_token() {
+        let mut app = app();
+        app.insert_resource(crate::spell::targeting::corpse_fixture::factions());
+        app.init_resource::<crate::net::Reputations>();
+        // The relation functions the verbs ask, pushed as the client's unit feed pushes them.
+        app.add_systems(Update, crate::ui_unit::relations::feed_unit_relations);
+        // Field 2 the type word (a player), 35 the faction template (Human), 46 the flags
+        // (player-controlled).
+        let human_player = [PLAYER_TYPE[0], (35, 1), (46, 0x8)];
+        let me = stream(&mut app, ME, &human_player);
+        app.world_mut().entity_mut(me).insert(SelfPlayer);
+        party(&mut app, 2, true);
+        stream(&mut app, member(1), &human_player);
+        frame(&mut app);
+        let mut s = app.world_mut().non_send_mut::<UiScript>();
+        // `UnitCanAssist` resolves both tokens before judging (`0x515940`), and `ui_unit`, which
+        // pushes `player` in the client, is not in this app.
+        s.set_unit(
+            "player",
+            Some(UnitState {
+                guid: ME,
+                ..Default::default()
+            }),
+        );
+        let assist = |token: &str| {
+            s.eval::<Option<i64>>(&format!(r#"return UnitCanAssist("player", "{token}")"#))
+                .unwrap()
+        };
+        assert_eq!(assist("party1"), Some(1), "held: its descriptor answers");
+        assert_eq!(assist("party2"), None, "unstreamed: no object to ask");
+
+        s.run(
+            r#"HOVER = CreateFrame("Button")
+               GetMouseFocus = function() return HOVER end"#,
+        )
+        .unwrap();
+        let parse = |unit: &str| {
+            s.run(&format!(r#"HOVER.unit = "{unit}""#)).unwrap();
+            s.eval::<(Option<String>, Option<String>)>(
+                r#"return SecureCmdOptionParse("[@mouseover,help,nodead] Flash Heal")"#,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            parse("party1"),
+            (Some("Flash Heal".into()), Some("party1".into()))
+        );
+        assert_eq!(parse("party2"), (None, None));
+    }
+
     /// Hold our own player: the feed reads our guid off the `SelfPlayer` entity, and the object
     /// manager finds a player object by its type word (`0x468460`, mask `0x10`).
     fn seat_self(app: &mut App) -> Entity {
@@ -2974,7 +3028,7 @@ mod tests {
             frame(app);
         };
         let loot = |app: &mut App| -> (String, Option<f64>, f64) {
-            let script = app.world_mut().non_send_resource::<UiScript>();
+            let script = app.world_mut().non_send::<UiScript>();
             let (method, master): (String, Option<f64>) =
                 script.eval("return GetLootMethod()").unwrap();
             (
@@ -3034,18 +3088,21 @@ mod tests {
     pub(super) fn hosted_run(app: &mut App, chunk: &str) {
         use bevy::ecs::system::SystemState;
         let world = app.world_mut();
-        let mut script = world.remove_non_send_resource::<UiScript>().expect("a VM");
+        let mut script = world.remove_non_send::<UiScript>().expect("a VM");
         let mut state = SystemState::<super::super::calls::PartyCalls>::new(world);
         let ran = {
             let mut host = crate::script_calls::FnHost(|s: &mut UiScript, call| {
                 if let benilla_ui::script::ScriptCall::Party(request) = call {
-                    state.get_mut(world).apply(s, request);
+                    state
+                        .get_mut(world)
+                        .expect("the party calls validate")
+                        .apply(s, request);
                 }
             });
             script.hosted(&mut host, |s| s.run(chunk))
         };
         state.apply(world);
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         ran.expect("the chunk runs");
     }
 
@@ -3092,7 +3149,7 @@ mod tests {
     /// The token resolver's guids as `ui_unit`'s feed pushes them: us, and the party slots.
     fn resolve_party(app: &mut App, party: [u64; 4]) {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_unit_guids(&benilla_ui::script::UnitGuids {
                 player: ME,
                 party,
@@ -3167,7 +3224,7 @@ mod tests {
         party(&mut app, 1, true);
         resolve_party(&mut app, [member(1), 0, 0, 0]);
         stream(&mut app, member(1), &PLAYER_TYPE);
-        let script = app.world_mut().non_send_resource::<UiScript>();
+        let script = app.world_mut().non_send::<UiScript>();
         script.run(r#"UNKNOWNOBJECT = "Unknown Entity""#).unwrap();
         frame(&mut app);
         let _ = kicks(&rx);
@@ -3240,7 +3297,7 @@ mod tests {
         );
         frame(&mut app);
         let _ = rx.try_iter().count();
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.set_unit_guids(&benilla_ui::script::UnitGuids {
             player: ME,
             target: member(2),
@@ -3278,7 +3335,7 @@ mod tests {
         let mut app = app();
         party(&mut app, 2, true);
         frame(&mut app);
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.keep_calls();
         script
             .run(
@@ -3294,7 +3351,7 @@ mod tests {
         frame(&mut app);
         assert_eq!(
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .take_party_requests(),
             [PartyRequest::ReadyCheckAnswer(1)]
         );
@@ -3312,7 +3369,7 @@ mod tests {
         let (mut app, _rx) = drain_app();
         resolve_party(&mut app, [0; 4]);
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run(
                 r#"ERR_INVITED_TO_GROUP_S = "%s has invited you to join a group."
                    HEARD = {}
@@ -3333,7 +3390,7 @@ mod tests {
         frame(&mut app);
         let heard: Vec<String> = app
             .world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return HEARD")
             .unwrap();
         assert_eq!(
@@ -3350,7 +3407,7 @@ mod tests {
         let (mut app, _rx) = drain_app();
         resolve_party(&mut app, [0; 4]);
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run(
                 r#"INVITES = {}
                    local f = CreateFrame("Frame")
@@ -3363,7 +3420,7 @@ mod tests {
             .unwrap();
         let invites = |app: &mut App| -> Vec<String> {
             app.world_mut()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval("local i = INVITES; INVITES = {}; return i")
                 .unwrap()
         };
@@ -3398,7 +3455,7 @@ mod tests {
     /// The group events a VM heard, in order, once [`hear_group_events`] is installed.
     fn heard(app: &mut App) -> Vec<String> {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<String>>("local h = HEARD; HEARD = {}; return h")
             .unwrap()
     }
@@ -3442,11 +3499,11 @@ mod tests {
             .run(r#"LOADED = GetNumPartyMembers() .. "," .. tostring(UnitName("party2"))"#)
             .unwrap();
         hear_group_events(&reloaded);
-        app.insert_non_send_resource(reloaded);
+        app.insert_non_send(reloaded);
         frame(&mut app);
         let loaded: String = app
             .world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return LOADED")
             .unwrap();
         assert_eq!(loaded, "2,M2", "the group is there for the files");
@@ -3466,7 +3523,7 @@ mod tests {
 
         let entry = UiScript::new().unwrap();
         hear_group_events(&entry);
-        app.insert_non_send_resource(entry);
+        app.insert_non_send(entry);
         frame(&mut app);
         assert_eq!(
             heard(&mut app),
@@ -3489,11 +3546,11 @@ mod tests {
         let failures = crate::ui_script::load_default_ui(&script);
         assert!(failures.is_empty(), "load failures: {failures:?}");
         script.run("SEEN = {}").unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         assert_eq!(flag(&mut app, "PartyMemberFrame1:IsShown()"), Some(1.0));
         assert_eq!(
             app.world_mut()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<Option<String>>("return PartyMemberFrame1Name:GetText()")
                 .unwrap()
                 .as_deref(),

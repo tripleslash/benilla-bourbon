@@ -5,13 +5,14 @@
 //! never, starting with `SMSG_AUTH_RESPONSE`. A header is the size, two bytes or three, then the
 //! opcode, two bytes from the server and four from the client.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, bail, Result};
 use benilla_srp::vanilla_header::{DecrypterHalf, EncrypterHalf};
 
 use crate::messages::{self, ServerPacket};
+use crate::transport::ReadExactAsync;
 
 mod movement;
 mod reader;
@@ -37,16 +38,21 @@ const LONG_SIZE_MAX: usize = 0x7f_ffff;
 
 /// One frame off the world socket: its opcode and body, the header decrypted when `decrypter` is
 /// set (`None` only for `SMSG_AUTH_CHALLENGE`). The size counts the 2-byte opcode and the body.
-pub(super) fn read_frame(
-    r: &mut impl Read,
+///
+/// Awaited rather than blocking (see [`crate::transport`]): on the web the bytes arrive through the
+/// event loop, and natively the future is ready the instant it is polled.
+pub(super) async fn read_frame(
+    r: &mut impl ReadExactAsync,
     mut decrypter: Option<&mut DecrypterHalf>,
     traffic: &LinkTraffic,
 ) -> Result<(u16, Vec<u8>)> {
-    let (size, opcode) =
-        read_header(r, &mut decrypter).map_err(|e| anyhow!("reading world header: {e}"))?;
+    let (size, opcode) = read_header(r, &mut decrypter)
+        .await
+        .map_err(|e| anyhow!("reading world header: {e}"))?;
     let body_len = size.saturating_sub(2);
     let mut body = vec![0u8; body_len];
-    r.read_exact(&mut body)
+    r.read_exact_async(&mut body)
+        .await
         .map_err(|e| anyhow!("reading world body (opcode {opcode:#x}, {body_len} bytes): {e}"))?;
     traffic.add_received(size);
     Ok((opcode, body))
@@ -57,30 +63,30 @@ pub(super) fn read_frame(
 /// (`0x5b6765`-`0x5b6772`); the opcode after it is little-endian. The cipher runs a byte at a
 /// time over both (`0x5b6848`), so the first size byte is deciphered before the size's length is
 /// known, as the receive loop `0x5b65f0` reads it.
-fn read_header(
-    r: &mut impl Read,
+async fn read_header(
+    r: &mut impl ReadExactAsync,
     decrypter: &mut Option<&mut DecrypterHalf>,
 ) -> std::io::Result<(usize, u16)> {
     let mut size = [0u8; 3];
-    read_header_bytes(r, decrypter, &mut size[..2])?;
+    read_header_bytes(r, decrypter, &mut size[..2]).await?;
     let size = if size[0] & 0x80 == 0 {
         usize::from(size[0]) << 8 | usize::from(size[1])
     } else {
-        read_header_bytes(r, decrypter, &mut size[2..])?;
+        read_header_bytes(r, decrypter, &mut size[2..]).await?;
         usize::from(size[0] & 0x7f) << 16 | usize::from(size[1]) << 8 | usize::from(size[2])
     };
     let mut opcode = [0u8; 2];
-    read_header_bytes(r, decrypter, &mut opcode)?;
+    read_header_bytes(r, decrypter, &mut opcode).await?;
     Ok((size, u16::from_le_bytes(opcode)))
 }
 
 /// Read `buf.len()` header bytes and decrypt them in place, the cipher running byte by byte.
-fn read_header_bytes(
-    r: &mut impl Read,
+async fn read_header_bytes(
+    r: &mut impl ReadExactAsync,
     decrypter: &mut Option<&mut DecrypterHalf>,
     buf: &mut [u8],
 ) -> std::io::Result<()> {
-    r.read_exact(buf)?;
+    r.read_exact_async(buf).await?;
     if let Some(d) = decrypter.as_deref_mut() {
         d.decrypt(buf);
     }
@@ -88,12 +94,14 @@ fn read_header_bytes(
 }
 
 /// Read, decrypt and parse one packet; `decrypter` is `None` only for `SMSG_AUTH_CHALLENGE`.
-pub(super) fn recv_packet(
-    stream: &mut impl Read,
+///
+/// Awaited, as [`read_frame`] is.
+pub(super) async fn recv_packet(
+    stream: &mut impl ReadExactAsync,
     decrypter: Option<&mut DecrypterHalf>,
     traffic: &LinkTraffic,
 ) -> Result<ServerPacket> {
-    let (opcode, body) = read_frame(stream, decrypter, traffic)?;
+    let (opcode, body) = read_frame(stream, decrypter, traffic).await?;
     messages::parse_server(opcode, &body).map_err(|e| {
         Unparsed {
             opcode,
@@ -195,6 +203,8 @@ mod frame_tests {
     use benilla_srp::vanilla_header::HeaderCrypto;
     use benilla_srp::SESSION_KEY_LENGTH;
 
+    use futures_lite::future::block_on;
+
     use super::{read_frame, send_packet, LinkTraffic};
 
     const KEY: [u8; SESSION_KEY_LENGTH] = [0x5a; SESSION_KEY_LENGTH];
@@ -231,10 +241,12 @@ mod frame_tests {
         let mut client = HeaderCrypto::from_session_key(KEY);
         let traffic = LinkTraffic::new();
         let mut r = wire.as_slice();
-        let (opcode, got) = read_frame(&mut r, Some(client.decrypter()), &traffic).unwrap();
+        let (opcode, got) =
+            block_on(read_frame(&mut r, Some(client.decrypter()), &traffic)).unwrap();
         assert_eq!((opcode, got.len()), (SMSG_UPDATE_OBJECT, 0x7fff));
         assert_eq!(got, big);
-        let (opcode, got) = read_frame(&mut r, Some(client.decrypter()), &traffic).unwrap();
+        let (opcode, got) =
+            block_on(read_frame(&mut r, Some(client.decrypter()), &traffic)).unwrap();
         assert_eq!((opcode, got), (SMSG_PONG, vec![1, 2, 3]));
         assert!(r.is_empty());
     }
@@ -249,9 +261,9 @@ mod frame_tests {
         wire.extend([0x7f, 0xff, 0xdd, 0x01]);
         wire.extend(body(0x7ffd));
         let mut r = wire.as_slice();
-        let (opcode, got) = read_frame(&mut r, None, &traffic).unwrap();
+        let (opcode, got) = block_on(read_frame(&mut r, None, &traffic)).unwrap();
         assert_eq!((opcode, got.len()), (SMSG_UPDATE_OBJECT, 0x12343));
-        let (opcode, got) = read_frame(&mut r, None, &traffic).unwrap();
+        let (opcode, got) = block_on(read_frame(&mut r, None, &traffic)).unwrap();
         assert_eq!((opcode, got.len()), (SMSG_PONG, 0x7ffd));
         assert!(r.is_empty());
     }
@@ -344,9 +356,9 @@ mod frame_tests {
         wire.extend([0x80, 0x80, 0x01, 0xa9, 0x00]);
         wire.extend(body(0x7fff));
         let mut r = wire.as_slice();
-        read_frame(&mut r, None, &traffic).unwrap();
+        block_on(read_frame(&mut r, None, &traffic)).unwrap();
         assert_eq!(traffic.received(), 5);
-        read_frame(&mut r, None, &traffic).unwrap();
+        block_on(read_frame(&mut r, None, &traffic)).unwrap();
         assert_eq!(traffic.received(), 5 + 0x8001);
 
         let mut out = Vec::new();

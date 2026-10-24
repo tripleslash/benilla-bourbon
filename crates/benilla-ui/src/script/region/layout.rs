@@ -34,7 +34,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetWidth",
         |lua, (this, w): (Table, f32)| {
             let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let d = model.region_data.entry(rh).or_default();
             let new = Some((Len::Script(w), d.size.map_or(Len::Script(0.0), |s| s.1)));
             let changed = !size_bits_eq(d.size, new);
@@ -56,7 +58,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetHeight",
         |lua, (this, h): (Table, f32)| {
             let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let d = model.region_data.entry(rh).or_default();
             let new = Some((d.size.map_or(Len::Script(0.0), |s| s.0), Len::Script(h)));
             let changed = !size_bits_eq(d.size, new);
@@ -97,7 +101,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         set_shared(lua, m, Side::Region, name, move |lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             crate::script::object::settle_region(lua, rh);
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let (units, s) = (model.layout_units(), owner_scale(&model, rh));
             Ok(model.region_rects.get(&rh).map(|r| {
                 let e = match pick {
@@ -128,7 +134,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "ClearAllPoints",
         |lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             clear_points(&mut model, rh);
             Ok(())
         },
@@ -144,7 +152,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // `who` and `$parent` first, then the `_G` read, then the guard.
             let (who, base) = region_ladder_context(lua, rh);
             let target = parse_set_all_points(lua, rest.front(), &base);
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let me = model.region_id(rh);
             let owner = region_owner_id(&mut model, rh);
             let rel_id = resolve_rel_target(&model, &target, &who, "SetAllPoints", me, owner)?;
@@ -171,7 +181,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     set_shared(lua, m, Side::Region, "GetParent", |lua, this: Table| {
         let rh = region_handle_of(lua, &this)?;
         let owner = {
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             region_owner_id(&mut model, rh)
         };
         frame_wrapper(lua, owner)
@@ -183,7 +195,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     set_shared(lua, m, Side::Region, "GetCenter", |lua, this: Table| {
         let rh = region_handle_of(lua, &this)?;
         crate::script::object::settle_region(lua, rh);
-        let model = lua.app_data_ref::<Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let (units, s) = (model.layout_units(), owner_scale(&model, rh));
         Ok(match model.region_rects.get(&rh) {
             Some(r) => (
@@ -196,7 +210,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 
     set_shared(lua, m, Side::Region, "GetNumPoints", |lua, this: Table| {
         let rh = region_handle_of(lua, &this)?;
-        let model = lua.app_data_ref::<Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         Ok(model
             .region_data
             .get(&rh)
@@ -215,7 +231,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let rh = region_handle_of(lua, &this)?;
             let idx = get_point_index(lua, n)?;
             let (anchor, units) = {
-                let model = lua.app_data_ref::<Model>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 let anchor = model
                     .region_data
                     .get(&rh)
@@ -225,7 +243,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             get_point_values(lua, anchor, units, |rel| {
                 let is_frame = {
-                    let model = lua.app_data_ref::<Model>().expect("model");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model");
                     model.id_to_frame.contains_key(&rel)
                 };
                 Ok(if rel == SCREEN {
@@ -260,7 +280,9 @@ fn region_size_read(lua: &Lua, this: &Table, width: bool) -> mlua::Result<f64> {
     // current measure.
     crate::script::measure::ensure_measured(lua, rh);
     let (units, text, slot) = {
-        let model = lua.app_data_ref::<Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let text = model
             .arena
             .region(rh)
@@ -276,7 +298,9 @@ fn region_size_read(lua: &Lua, this: &Table, width: bool) -> mlua::Result<f64> {
         return Ok(units.load(stored));
     }
     crate::script::object::settle_region(lua, rh);
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     Ok(model.region_rects.get(&rh).map_or(0.0, |r| {
         if width {
             units.span(r.left, r.right)

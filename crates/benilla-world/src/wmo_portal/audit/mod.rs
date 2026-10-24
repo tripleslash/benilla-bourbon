@@ -250,6 +250,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         portal_infos: portals.infos.clone(),
         portal_refs: portals.refs.clone(),
         group_nav,
+        ambient: benilla_formats::wmo_root_ambient(&root_bytes),
         fogs: root.fogs().to_vec(),
         skybox: root.skybox().map(str::to_owned),
         group_collision_grids: benilla_assets::collision_tri_grids(&group_collision_tris),

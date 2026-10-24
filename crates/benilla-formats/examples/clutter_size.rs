@@ -4,10 +4,10 @@
 
 use std::collections::BTreeSet;
 
-/// Pixels per yard at `distance` for benilla's 45° vertical FOV (the reference's is ≈44.1° at
-/// 16:9) on a 1080-tall viewport, the same basis as `clutter_state`.
+/// Pixels per yard at `distance` for benilla's 58.7° vertical FOV, 90° across at 16:9 (the
+/// reference's is ≈44.1° at 16:9), on a 1080-tall viewport, the same basis as `clutter_state`.
 fn px_per_yard(distance: f32) -> f32 {
-    let fov: f32 = std::f32::consts::PI / 4.0;
+    let fov: f32 = 1.024_779;
     (1080.0 / 2.0) / ((fov / 2.0).tan() * distance)
 }
 

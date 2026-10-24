@@ -71,7 +71,9 @@ fn lift(model: &Model, id: u32) -> Option<Option<CursorPayload>> {
 /// setter takes the action (`0x4e62ba`). Returns whether to repaint.
 pub(super) fn pickup_action(lua: &Lua, id: u32) -> mlua::Result<bool> {
     let picked = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         if matches!(
             model.cursor,
             Some(
@@ -153,7 +155,11 @@ fn raise_slot_changed(model: &mut Model, id: u32) {
 /// the slot as it was. Returns whether to repaint.
 pub(crate) fn place_action(lua: &Lua, id: u32) -> mlua::Result<bool> {
     // A bar item's state, carried from its source slot, read before the place hops anything.
-    let state = match &lua.app_data_ref::<Model>().expect("model app_data").cursor {
+    let state = match &lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data")
+        .cursor
+    {
         Some(CursorPayload::Action(a)) => a.state,
         _ => None,
     };

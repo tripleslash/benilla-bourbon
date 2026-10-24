@@ -13,7 +13,7 @@ use benilla_ui::script::{widget_method_census, UiScript};
 use crate::local_state::test_env::ENV_LOCK;
 
 /// `reference/lua_globals.tsv`'s names.
-fn reference_globals() -> HashSet<&'static str> {
+pub(super) fn reference_globals() -> HashSet<&'static str> {
     let tsv = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../reference/lua_globals.tsv"
@@ -64,6 +64,21 @@ fn layer_prefixed(n: &str) -> bool {
     n.starts_with("Benilla") || n.starts_with("BENILLA_") || n.starts_with("SLASH_BENILLA_")
 }
 
+/// The stock `Localization.lua`'s locale symbol (`LOCALE_enUS = true;`): one per locale, and the
+/// reference table holds the one its capture's client defined (`LOCALE_enGB`), so the player's own
+/// locale's stands in for it.
+fn locale_symbol(n: &str, reference: &HashSet<&str>) -> bool {
+    let is_locale = |n: &str| {
+        n.strip_prefix("LOCALE_").is_some_and(|l| {
+            let b = l.as_bytes();
+            b.len() == 4
+                && b[..2].iter().all(u8::is_ascii_lowercase)
+                && b[2..].iter().all(u8::is_ascii_uppercase)
+        })
+    };
+    is_locale(n) && reference.iter().any(|r| is_locale(r))
+}
+
 /// What the production load adds past 1.12 and past the engine, and the layer's own names: the
 /// globals (`Benilla`-prefixed ones the engine does not also define passing) and the methods.
 fn production_beyond(s: &UiScript, engine: &UiScript) -> (Vec<String>, Vec<String>) {
@@ -72,6 +87,7 @@ fn production_beyond(s: &UiScript, engine: &UiScript) -> (Vec<String>, Vec<Strin
     let globals = globals_of(s)
         .into_iter()
         .filter(|n| !reference.contains(n.as_str()) && !engine_globals.contains(n))
+        .filter(|n| !locale_symbol(n, &reference))
         .filter(|n| !layer_prefixed(n))
         .collect();
     let engine_methods = methods_of(engine);

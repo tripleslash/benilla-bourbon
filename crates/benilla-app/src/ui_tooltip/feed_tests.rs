@@ -100,7 +100,7 @@ impl FeedApp {
                 "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let mut feed = FeedApp {
             app,
             player,
@@ -132,7 +132,7 @@ impl FeedApp {
 
     /// The generation each spell's tooltip shows, in book order.
     fn generations(&mut self) -> Vec<u32> {
-        let script = self.app.world().non_send_resource::<UiScript>();
+        let script = self.app.world().non_send::<UiScript>();
         (1..=self.ids.len())
             .map(|i| {
                 let text: String = script.eval(&format!("return TEXT({i})")).unwrap();
@@ -423,10 +423,10 @@ fn a_pet_view_reads_the_pets_and_its_targets_run() {
             "#,
         )
         .unwrap();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     let range = |app: &mut App| {
         app.update();
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         script.eval::<Option<String>>("return RANGE()").unwrap()
     };
     let _ = range(&mut app);
@@ -486,7 +486,7 @@ fn a_reagent_is_red_only_when_no_copy_is_carried() {
         let text: String = feed
             .app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return TEXT(1)")
             .unwrap();
         text.split(" | ")

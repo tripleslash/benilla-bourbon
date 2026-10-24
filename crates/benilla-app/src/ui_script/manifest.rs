@@ -1,7 +1,8 @@
 //! The in-game interface: the core, the player's own stock FrameXML as their chain's
 //! `FrameXML.toc` lists it ([`reference_ui::core`]) and then its `Bindings.xml`
 //! ([`load_core_bindings`]), then benilla's layer, [`LAYER_MANIFEST`], every entry of which is
-//! ours and loads after the whole core.
+//! ours and loads after the whole core. On a Turtle WoW realm the chain answers Turtle's own
+//! `FrameXML.toc`, so its core is Turtle's rows in Turtle's order.
 
 use bevy::prelude::*;
 
@@ -46,11 +47,82 @@ pub(super) fn shipped_manifest_files() -> Vec<String> {
         .collect()
 }
 
+/// The stock ESC menu's row, which the core leaves to the layer's own `GameMenuFrame.xml`.
+const STOCK_MENU: &str = "gamemenuframe.xml";
+
+/// The folder of Turtle WoW's donation shop in its `FrameXML.toc`: `Turtle_ShopUI.xml` builds
+/// `ShopFrame`, the minimap's `MinimapShopFrame` and `/shop`, and its templates file.
+const SHOP_FOLDER: &str = "turtle_shopui\\";
+
+/// The core this run loads: the chain's own `FrameXML.toc` ([`reference_ui::core`]) less the rows
+/// [`fork_rows`] leaves out, or `None` when the chain has no toc.
+pub(super) fn core(layer: bool) -> Option<Addon> {
+    let mut core = reference_ui::core()?;
+    core.toc.files = fork_rows(std::mem::take(&mut core.toc.files), layer);
+    Some(core)
+}
+
+/// `rows` without two sets of the chain's rows.
+/// Deviation (this fork): with the layer, no stock `GameMenuFrame.xml`: the layer's own
+/// `GameMenuFrame.xml` is the ESC menu, on a Turtle WoW realm too, where it opens Turtle's options
+/// window. A run without the layer keeps the stock row, as the stock `ToggleGameMenu` and
+/// `UpdateMicroButtons` read `GameMenuFrame` unguarded.
+/// Deviation (this fork): no Turtle WoW donation shop ([`SHOP_FOLDER`]). It sells Turtle WoW's own
+/// donation rewards, which no other server offers; nothing else in its FrameXML reads it, and the
+/// layer's ESC menu has no Donation Rewards rung to open it.
+fn fork_rows(rows: Vec<String>, layer: bool) -> Vec<String> {
+    rows.into_iter()
+        .filter(|row| {
+            let key = row.replace('/', "\\").to_ascii_lowercase();
+            let leaf = key.strip_prefix("interface\\framexml\\").unwrap_or(&key);
+            !(layer && leaf == STOCK_MENU) && !leaf.starts_with(SHOP_FOLDER)
+        })
+        .collect()
+}
+
+/// Every in-game entry in load order, for the sliced entry load (`lifecycle`), which walks it one
+/// file a step through [`load_entry`]: the core's rows ([`core`]), then the layer's files when
+/// `layer` is set; and how many of them are the core's, `None` for a chain without the toc, which
+/// is reported as [`load_core_with`] reports it. After the core's last row the walk runs
+/// [`close_core`], or [`load_core_bindings`] alone without a toc, as [`load_core_with`] does.
+pub(super) fn ingame_entries(script: &UiScript, layer: bool) -> (Vec<String>, Option<usize>) {
+    let (mut files, core_rows) = match core(layer) {
+        Some(core) => {
+            let n = core.toc.files.len();
+            (core.toc.files, Some(n))
+        }
+        None => {
+            report_missing_core(script);
+            (Vec::new(), None)
+        }
+    };
+    if layer {
+        files.extend(Addon::layer().toc.files);
+    }
+    (files, core_rows)
+}
+
+/// Loads one of [`ingame_entries`]: a core row off the chain, reporting into `toc`, the core's
+/// `FrameXML.toc` record, or a bare name from the layer's shipped tree
+/// ([`reference_ui::is_chain_entry`]), whose record is dropped as [`load_layer`] drops it.
+pub(super) fn load_entry(
+    script: &UiScript,
+    entry: &str,
+    toc: &mut benilla_ui::status::Status,
+) -> Vec<String> {
+    let file = [entry.to_string()];
+    if reference_ui::is_chain_entry(entry) {
+        reference_ui::addon(file.to_vec()).load_files_into(script, &file, toc)
+    } else {
+        Addon::layer().load_files(script, &file)
+    }
+}
+
 /// Runs `UIParent_ManageFramePositions` after the interface has loaded. The buff rows keep
 /// `BuffFrame.xml`'s anchors past it: `BuffFrame_OnLoad` never pitches them, and the stock
 /// `UIOptionsFrame.lua` does it on `VARIABLES_LOADED` (l.206), after every addon (`0x4900a3`, then
 /// `0x4900b2`).
-fn bootstrap_positions(script: &UiScript) -> Vec<String> {
+pub(super) fn bootstrap_positions(script: &UiScript) -> Vec<String> {
     if let Err(e) = script.run("UIParent_ManageFramePositions()") {
         error!("ui_script: managed-positions bootstrap: {e}");
         return vec![format!("managed-positions bootstrap: {e}")];
@@ -133,9 +205,10 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
     // and a bare `UiScript::new()` has only `benilla-ui`'s own. A re-register only refreshes
     // defaults.
     script.register_cvars(crate::cvars::registered_pairs());
+    let layer = layer_enabled();
     let mut failures = silenced_ui_load(&mut &*script, |script| {
-        let mut failures = load_core(script);
-        if layer_enabled() {
+        let mut failures = load_core_with(script, layer);
+        if layer {
             failures.extend(load_layer(script));
         }
         failures.extend(bootstrap_positions(script));
@@ -152,43 +225,44 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
     failures
 }
 
-/// The core: every row of the chain's `FrameXML.toc`, in its order, each file in document order,
-/// then the chain's `Bindings.xml`. A chain without the toc builds no stock interface: the runner
-/// reports `"Couldn't open %s"` (`0x846ff4`) at severity 2 (`0x6edc3f`) and returns 0, which
-/// `UI_Init` never reads (`0x48fff2`), going on to `Bindings.xml` and the addons. benilla goes on
-/// the same way and reports it as a load failure, an `ERROR` line and a row in `/errors`.
+/// [`load_core_with`] under [`layer_enabled`], for the tests.
+#[cfg(test)]
+pub(super) fn load_core(script: &UiScript) -> Vec<String> {
+    load_core_with(script, layer_enabled())
+}
+
+/// The core: every row of the chain's `FrameXML.toc` [`core`] keeps under `layer`, in its order,
+/// each file in document order, then the chain's `Bindings.xml` ([`close_core`]). A chain without
+/// the toc builds no stock interface: the runner reports `"Couldn't open %s"` (`0x846ff4`) at
+/// severity 2 (`0x6edc3f`) and returns 0, which `UI_Init` never reads (`0x48fff2`), going on to
+/// `Bindings.xml` and the addons. benilla goes on the same way and reports it as a load failure,
+/// an `ERROR` line and a row in `/errors`.
 ///
 /// Deviation: no `FrameXML.toc` signature check, where `UI_Init` loads on a failed one and then
 /// quits (`0x401560(0xa)` at `0x48ff90`), because the check verifies Blizzard's signature with a key
 /// carried in the client binary, which benilla does not ship, and a modified interface file is
 /// loaded rather than refused.
-pub(super) fn load_core(script: &UiScript) -> Vec<String> {
-    let Some(core) = reference_ui::core() else {
-        let e = format!(
-            "{}: not found — the stock interface is not built",
-            reference_ui::TOC
-        );
-        error!("ui_script: {e}");
-        script.report_load_failure(&e);
-        // Into the UI load's own record, before any banner (`0x6edc3f`).
-        let mut log = benilla_ui::status::Status::default();
-        log.report(
-            benilla_ui::status::FAILURE,
-            benilla_ui::status::missing(reference_ui::TOC, false),
-        );
-        script.report_load_status(log);
-        let mut failures = vec![e];
+fn load_core_with(script: &UiScript, layer: bool) -> Vec<String> {
+    let Some(core) = core(layer) else {
+        let mut failures = vec![report_missing_core(script)];
         failures.extend(load_core_bindings(script));
         return failures;
     };
     let mut toc = benilla_ui::status::Status::default();
     let mut failures = core.load_files_into(script, &core.toc.files, &mut toc);
+    failures.extend(close_core(script, toc));
+    failures
+}
+
+/// The core's close after its last row, shared with the sliced entry load (`lifecycle`): the
+/// toc's record under its banner into the UI load's (`0x6eddc8`), then the chain's `Bindings.xml`
+/// ([`load_core_bindings`]).
+pub(super) fn close_core(script: &UiScript, toc: benilla_ui::status::Status) -> Vec<String> {
     let mut log = benilla_ui::status::Status::default();
     let banner = benilla_ui::status::toc_banner(reference_ui::TOC);
     toc.close_into(&mut log, script.framexml_debug(), banner);
     script.report_load_status(log);
-    failures.extend(load_core_bindings(script));
-    failures
+    load_core_bindings(script)
 }
 
 /// The stock key-binding commands, `UI_Init`'s next step after the toc walk: the chain's
@@ -259,6 +333,25 @@ pub(crate) fn load_stock_bindings(script: &mut UiScript) {
     );
 }
 
+/// Reports a chain without `FrameXML.toc` as [`load_core_with`] documents, and returns the
+/// failure. The caller loads `Bindings.xml` after it, as `UI_Init` does.
+fn report_missing_core(script: &UiScript) -> String {
+    let e = format!(
+        "{}: not found — the stock interface is not built",
+        reference_ui::TOC
+    );
+    error!("ui_script: {e}");
+    script.report_load_failure(&e);
+    // Into the UI load's own record, before any banner (`0x6edc3f`).
+    let mut log = benilla_ui::status::Status::default();
+    log.report(
+        benilla_ui::status::FAILURE,
+        benilla_ui::status::missing(reference_ui::TOC, false),
+    );
+    script.report_load_status(log);
+    e
+}
+
 /// Every [`LAYER_MANIFEST`] entry, in order, after the whole core: the layer loads as more of the
 /// stock load, with no `ADDON_LOADED` and no registry row, as FrameXML does (`0x48ffed`).
 fn load_layer(script: &UiScript) -> Vec<String> {
@@ -295,7 +388,7 @@ pub(super) fn load_ingame_ui_with(
     // Bounded, addons included: a chunk that never returns fails as a load error instead of
     // freezing the loading screen. The caller disarms the budget once the edge is done.
     script.set_instruction_budget(super::addons::LOAD_INSTRUCTION_BUDGET);
-    let mut failures = load_core(script);
+    let mut failures = load_core_with(script, layer);
     if layer {
         failures.extend(load_layer(script));
     }
@@ -478,6 +571,65 @@ mod tests {
         s.fire_event("PLAYER_UPDATE_RESTING", vec![]);
         let order: Vec<String> = s.eval("return EVENT_ORDER").unwrap();
         assert_eq!(order, ["ExhaustionTick", "PlayerFrame"]);
+    }
+
+    /// With the layer, the core leaves the stock ESC menu to the layer's own; without it, the
+    /// stock row stays in the toc's place. Turtle WoW's donation shop rows never load, in either
+    /// separator and any case; the rows around them keep their order.
+    #[test]
+    fn the_core_leaves_the_stock_menu_to_the_layer_and_turtles_shop_out() {
+        let toc =
+            "UIPanelTemplates.xml\nGameMenuFrame.xml\nTurtle_BarbershopUI\\Turtle_Barbershop.xml\n\
+                   Turtle_ShopUI\\Turtle_ShopUITemplates.xml\nturtle_shopui/Turtle_ShopUI.xml\n\
+                   Turtle_TransmogUI\\Turtle_TransmogUI.xml\n";
+        let _chain = fixture::lay(&[(reference_ui::TOC, Some(toc.as_bytes()))]);
+        let rows = |layer| core(layer).expect("the laid toc").toc.files;
+        assert_eq!(
+            rows(true),
+            [
+                r"Interface\FrameXML\UIPanelTemplates.xml",
+                r"Interface\FrameXML\Turtle_BarbershopUI\Turtle_Barbershop.xml",
+                r"Interface\FrameXML\Turtle_TransmogUI\Turtle_TransmogUI.xml",
+            ]
+        );
+        assert_eq!(
+            rows(false),
+            [
+                r"Interface\FrameXML\UIPanelTemplates.xml",
+                r"Interface\FrameXML\GameMenuFrame.xml",
+                r"Interface\FrameXML\Turtle_BarbershopUI\Turtle_Barbershop.xml",
+                r"Interface\FrameXML\Turtle_TransmogUI\Turtle_TransmogUI.xml",
+            ]
+        );
+    }
+
+    /// The sliced entry load's list is the core's rows then the layer's files, and walking it one
+    /// entry at a time loads what the one-shot core load does, in the same order.
+    #[test]
+    fn the_sliced_entries_load_as_the_one_shot_core_does() {
+        let _chain = lay_letters("b.lua\nx.xml\na.lua\n");
+        let s = UiScript::new().unwrap();
+        let (entries, core_rows) = ingame_entries(&s, false);
+        assert_eq!(
+            entries,
+            [
+                r"Interface\FrameXML\b.lua",
+                r"Interface\FrameXML\x.xml",
+                r"Interface\FrameXML\a.lua"
+            ]
+        );
+        assert_eq!(core_rows, Some(3));
+        let mut toc = benilla_ui::status::Status::default();
+        for entry in &entries {
+            let failures = load_entry(&s, entry, &mut toc);
+            assert!(failures.is_empty(), "{entry}: {failures:#?}");
+        }
+        // The core's close: its toc record and the chain's `Bindings.xml`, as the one-shot's.
+        let _ = close_core(&s, toc);
+        assert_eq!(s.eval::<String>("return LOAD_LOG").unwrap(), "bxa");
+        let (layered, _) = ingame_entries(&s, true);
+        assert_eq!(&layered[..3], &entries[..]);
+        assert_eq!(&layered[3..], &Addon::layer().toc.files[..]);
     }
 
     /// A shipped `.xml` the layer does not list never loads, with no error to say so; the one

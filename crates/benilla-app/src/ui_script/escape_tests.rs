@@ -202,12 +202,11 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     load_xml(&s, "Interface\\FrameXML\\UIDropDownMenu.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, r"Interface\FrameXML\GameMenuFrame.xml");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
     load_xml(&s, "ScrollTemplates.xml"); // the Keybindings page's faux-scroll kit
     load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
-    load_xml(&s, "GameMenuAdapters.xml");
+    load_xml(&s, "GameMenuFrame.xml");
 
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     assert!(s
@@ -532,9 +531,8 @@ fn an_addon_frame_registered_in_uispecialframes_closes_on_escape() {
     load_xml(&s, r"Interface\FrameXML\MoneyFrame.xml");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.lua");
     load_xml(&s, r"Interface\FrameXML\UIPanelTemplates.xml");
-    load_xml(&s, r"Interface\FrameXML\GameMenuFrame.xml");
     load_xml(&s, r"Interface\FrameXML\StaticPopup.xml");
-    load_xml(&s, "GameMenuAdapters.xml");
+    load_xml(&s, "GameMenuFrame.xml");
 
     s.run(
         r#"

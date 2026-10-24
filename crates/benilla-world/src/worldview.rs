@@ -3,14 +3,19 @@
 //! so a game concept wired back into the engine breaks it. A crate boundary alone cannot hold that
 //! line: two Bevy systems couple through a runtime resource with no symbol crossing between them.
 
+use bevy::camera::Hdr;
 use bevy::camera::{PerspectiveProjection, Projection};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use benilla_assets::coords::wow_to_bevy;
+
+// fork: fsr (FORK.md) — `WOW_RENDER_SCALE` / `WOW_FRAME_GENERATION`: FSR without a login.
+mod fly_path;
+mod fsr_view;
+mod wade_probe;
 
 use crate::boot;
 use crate::build_id::BuildId;
@@ -25,18 +30,17 @@ const VIEW_START: (f32, f32) = SPAWN_XY;
 const VIEW_START_HEIGHT: f32 = 60.0;
 
 /// `WOW_WORLDVIEW_AT=<x>,<y>[,<z>]` opens the viewer elsewhere (raw WoW coords, `z` defaulting to
-/// [`VIEW_OPEN_Z`]); unparseable or absent stays at [`VIEW_START`], which must remain the default.
-fn view_start() -> [f32; 3] {
-    let Some(v) = std::env::var("WOW_WORLDVIEW_AT").ok() else {
-        return [VIEW_START.0, VIEW_START.1, VIEW_OPEN_Z];
-    };
+/// [`VIEW_OPEN_Z`]); `None`, unparseable or absent, stays at [`VIEW_START`] in its opening pose
+/// ([`start_pose`]), which must remain the default.
+fn view_start() -> Option<[f32; 3]> {
+    let v = crate::launch_env::var("WOW_WORLDVIEW_AT")?;
     let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
     match c.len() {
-        2 => [c[0], c[1], VIEW_OPEN_Z],
-        3 => [c[0], c[1], c[2]],
+        2 => Some([c[0], c[1], VIEW_OPEN_Z]),
+        3 => Some([c[0], c[1], c[2]]),
         _ => {
             warn!("worldview: WOW_WORLDVIEW_AT wants `x,y[,z]` — staying at the default anchor");
-            [VIEW_START.0, VIEW_START.1, VIEW_OPEN_Z]
+            None
         }
     }
 }
@@ -55,6 +59,10 @@ pub fn run(build: BuildId) -> AppExit {
     // The install resolves from the launcher's folder when its stamp names one, as the client's
     // does; this shim has no `dev` feature, so it stamps none and the viewer keeps benilla's.
     benilla_formats::set_project_folder(build.project_dir);
+    // fork: perf — the profiler's subscriber before any system exists, so every system's span
+    // (made when the system is built) records.
+    #[cfg(feature = "trace_systems")]
+    crate::system_profile::install();
     let mut app = App::new();
     app.insert_resource(build);
 
@@ -73,6 +81,13 @@ pub fn run(build: BuildId) -> AppExit {
         app.insert_resource(CheckDeadline(secs))
             .add_systems(Update, end_check);
     }
+
+    // Optional content layers, before either chain opens. `$WOW_HD_MODELS` is the whole of the
+    // ladder here: this probe has no CVar host and no `config.toml`, so the environment is the only
+    // thing that could name a layer — which is exactly what the env arm exists for.
+    benilla_formats::set_hd_character_models(
+        benilla_formats::layers::hd_models_env().unwrap_or(false),
+    );
 
     // The `mpq://` source must be registered before `AssetPlugin` (in `DefaultPlugins`) builds.
     match benilla_formats::wow_data() {
@@ -125,6 +140,13 @@ pub fn run(build: BuildId) -> AppExit {
 
     // The cut line: the engine's whole plugin group, the same one the client adds.
     app.add_plugins(crate::world_plugins::WorldPlugins);
+    // `WOW_GPU_PASSES=1` — bevy's per-pass GPU spans, so the perf probe can print what each pass
+    // cost beside its wall-time line (`perf_probe`'s `PERF_PASSES`). The client registers the same
+    // plugin for its journal; the viewer has no journal, so this is the only way it times a pass.
+    // Needs a device that times inside passes (Vulkan, DX12); elsewhere the line never prints.
+    if crate::launch_env::var("WOW_GPU_PASSES").is_some() {
+        app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+    }
     stubs(&mut app);
 
     app.add_plugins(plugin);
@@ -218,7 +240,32 @@ fn plugin(app: &mut App) {
         Startup,
         spawn_view_camera.after(benilla_assets::AssetSet::Open),
     )
-    .add_systems(Update, fly.in_set(crate::schedule::WorldStage::Input));
+    .add_systems(
+        Update,
+        (
+            fly,
+            live_pose.after(fly),
+            toggle_indirect,
+            cycle_lighting_tier,
+            wade_probe::toggle_wade_probe,
+        )
+            .in_set(crate::schedule::WorldStage::Input),
+    )
+    // The wade probe MOVES in the ordinary update, not the input stage: `water_fx`'s emitter reads
+    // its `Transform` and differentiates it for the wake heading, so it has to be walking by the
+    // time the emitter looks.
+    .add_systems(
+        Update,
+        (wade_probe::auto_spawn_probe, wade_probe::drive_probe),
+    );
+
+    // fork: fsr (FORK.md) — the FSR mode, when its knobs are set.
+    fsr_view::plugin(app);
+    // fork: perf — a scripted flight (`WOW_WORLDVIEW_FLY`), when its waypoints are set.
+    fly_path::plugin(app);
+    // fork: perf — the per-system CPU profile, in a `trace_systems` build.
+    #[cfg(feature = "trace_systems")]
+    crate::system_profile::plugin(app);
 
     // `WOW_WORLDVIEW_SHOT=<png>` (at `WOW_WORLDVIEW_SHOT_AT` seconds, default 20) writes one frame
     // and exits, with no subject gate: the client's live shot needs a player the engine lacks.
@@ -227,31 +274,113 @@ fn plugin(app: &mut App) {
     }
 }
 
-/// Fires the `WOW_WORLDVIEW_SHOT` screenshot once and exits two seconds later: the write is
-/// asynchronous, and an immediate exit loses the PNG.
+/// **`G` flips screen-space indirect lighting between full strength and off** — the viewer's A/B
+/// lever, and the reason it is a hotkey rather than another `$WOW_*` variable: the two states have
+/// to be seen in the SAME frame, over the same trunk or the same doorway, or the eye simply agrees
+/// with whichever it saw last. Relaunching for each half cannot do that.
+///
+/// It flips between the SHIPPED strengths and off, not between a maximum and off. Since both halves
+/// carry a gain that puts the intended look at the sliders' midpoint, the shipped 0.5 already is
+/// the gather's own term applied whole; 1.0 is a deliberate over-drive, and A/B-ing against an
+/// over-drive tells you what the exaggeration looks like rather than what the game looks like.
+///
+/// Toggling is safe mid-run. The first enable re-allocates the depth buffer to be sampleable, and
+/// the render node stands that one frame down rather than bind a texture that is not armed yet;
+/// the flag is never cleared again, so every later toggle is free.
+fn toggle_indirect(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut lighting: ResMut<crate::ssilvb::IndirectLighting>,
+) {
+    if !keys.just_pressed(KeyCode::KeyG) {
+        return; // never touch the resource on a quiet frame — that would re-extract it every tick
+    }
+    let shipped = crate::ssilvb::IndirectLighting {
+        ao: crate::ssilvb::AO_DEFAULT,
+        gi: crate::ssilvb::GI_DEFAULT,
+    };
+    let off = crate::ssilvb::IndirectLighting { ao: 0.0, gi: 0.0 };
+    *lighting = if lighting.enabled() { off } else { shipped };
+    info!(
+        "worldview: indirect lighting {} (ao {:.2}, gi {:.2})",
+        if lighting.enabled() { "ON" } else { "OFF" },
+        lighting.ao,
+        lighting.gi,
+    );
+}
+
+/// **`T` cycles the lighting tier** — Low → Medium → High → Ultra → Cinematic → Low.
+///
+/// The worldview has no CVar host, so `?lighting_quality=` is the only tier knob it has and it is
+/// read once, at startup. That was fine while the tier latched at world entry and a change meant a
+/// reload anyway; now that the tier is live (`modern::ActiveLighting`), a relaunch is exactly the
+/// wrong instrument — it re-streams the zone, re-fits the probe field and re-seeds the fly camera,
+/// so the one thing the change is about, *the same frame rendered at two tiers*, is the one thing
+/// it cannot show. This is `toggle_indirect`'s reasoning, one knob over.
+///
+/// It writes [`LightingSettings`], not `ActiveLighting` — the same door the options dropdown pushes
+/// on, so what the key exercises is the real path and not a shortcut past it.
+fn cycle_lighting_tier(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<crate::modern::LightingSettings>,
+) {
+    if !keys.just_pressed(KeyCode::KeyT) {
+        return; // never touch the resource on a quiet frame — the latch keys off a real change
+    }
+    let all = crate::modern::LightingQuality::ALL;
+    let next = all[(settings.quality as usize + 1) % all.len()];
+    settings.quality = next;
+    info!("worldview: lighting tier -> {next:?}");
+}
+
+/// The frame writer behind `WOW_WORLDVIEW_SHOT` — fires, then gives the screenshot observer a
+/// couple of seconds to reach the disk before exiting (the write is asynchronous; an immediate exit
+/// is how a "clean run" ends with no PNG, decision 0743).
+///
+/// **`WOW_WORLDVIEW_SHOT_COUNT=<n>` makes it a burst** — `n` frames written as `<stem>-000.png`,
+/// `<stem>-001.png`, … , spaced by `WOW_WORLDVIEW_SHOT_EVERY` seconds (**default 0 = one per
+/// frame**, i.e. adjacent frames). One shot still writes the bare path, so every existing
+/// invocation is unchanged. This is the client burst's twin (`capture::live_shot`,
+/// `WOW_LIVE_SHOT_COUNT`) for the engine binary, and it exists for the same reason: **a flicker is
+/// a temporal artefact and a single frame cannot show one** (decision 0653). The viewer parks its
+/// own camera, so a burst from it is already the still subject the arithmetic wants —
+/// `benilla-visual flicker <dir>` collapses it to the envelope of what would not hold still, and
+/// the lit pixels are the defect.
 fn shoot_and_exit(
     time: Res<Time>,
     mut commands: Commands,
-    mut fired_at: Local<Option<f32>>,
+    mut shots: Local<(u32, Option<f32>)>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let at = std::env::var("WOW_WORLDVIEW_SHOT_AT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20.0);
-    match *fired_at {
-        None if time.elapsed_secs() >= at => {
-            let path = std::env::var("WOW_WORLDVIEW_SHOT").unwrap_or_default();
-            info!("worldview: writing {path}");
-            commands
-                .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
-                .observe(bevy::render::view::screenshot::save_to_disk(path));
-            *fired_at = Some(time.elapsed_secs());
-        }
-        Some(t) if time.elapsed_secs() >= t + 2.0 => {
-            exit.write(AppExit::Success);
-        }
-        _ => {}
+    let knob = |k: &str, d: f32| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let at = knob("WOW_WORLDVIEW_SHOT_AT", 20.0);
+    let every = knob("WOW_WORLDVIEW_SHOT_EVERY", 0.0);
+    let count = knob("WOW_WORLDVIEW_SHOT_COUNT", 1.0).max(1.0) as u32;
+    let now = time.elapsed_secs();
+    let (taken, last) = *shots;
+    // Every frame of the burst is written the same way; only the name changes with `count`.
+    if taken < count && last.is_none_or(|t| now >= t + every) && now >= at {
+        let stem = std::env::var("WOW_WORLDVIEW_SHOT").unwrap_or_default();
+        let path = if count > 1 {
+            let (base, ext) = stem.rsplit_once('.').unwrap_or((stem.as_str(), "png"));
+            format!("{base}-{taken:03}.{ext}")
+        } else {
+            stem
+        };
+        info!("worldview: writing {path}");
+        commands
+            .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+            .observe(bevy::render::view::screenshot::save_to_disk(path));
+        *shots = (taken + 1, Some(now));
+        return;
+    }
+    // The observer writes asynchronously, so the last shot gets the same grace the single one had.
+    if taken >= count && last.is_some_and(|t| now >= t + 2.0) {
+        exit.write(AppExit::Success);
     }
 }
 
@@ -263,9 +392,44 @@ struct ViewCam {
     speed: f32,
 }
 
+/// The eye [`view_start`] names, aimed by `WOW_WORLDVIEW_FACE` (heading degrees, 0 = +X,
+/// counter-clockwise) and `WOW_WORLDVIEW_PITCH` (degrees, + = up). The client's
+/// `WOW_CAPTURE=vista` twin, for the engine binary: `WOW_MAP` picks the continent, so one launch
+/// frames any doodad in the world.
+///
+/// With no position named the viewer keeps the pose it has always opened in — above the anchor,
+/// looking down at it — rather than the horizontal one the aim knobs default to. The two knobs
+/// only make sense against a point someone chose, and defaulting them over the anchor would move
+/// the enforcer's own opening frame.
+fn start_pose() -> (Vec3, f32, f32) {
+    let Some(at) = view_start() else {
+        let start = wow_to_bevy([VIEW_START.0, VIEW_START.1, VIEW_OPEN_Z]);
+        return (
+            start + Vec3::new(0.0, VIEW_START_HEIGHT, VIEW_START_HEIGHT),
+            0.0,
+            -0.5,
+        );
+    };
+    let deg = |k: &str| {
+        // fork: modern lighting — reachable from the browser (?worldview_face= / ?worldview_pitch=).
+        crate::launch_env::var(k)
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(0.0)
+            .to_radians()
+    };
+    // WoW heading 0 = +X, which `wow_to_bevy` lands on −Z; the fly controller's yaw is measured
+    // the same way its own look-drag writes it, so the two agree on the first frame.
+    (
+        wow_to_bevy(at),
+        deg("WOW_WORLDVIEW_FACE"),
+        deg("WOW_WORLDVIEW_PITCH"),
+    )
+}
+
 fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>) {
-    let start = wow_to_bevy(view_start());
+    let (eye, yaw, pitch) = start_pose();
     let far = crate::view::CAM_FAR;
+    let look = eye + Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0) * Vec3::NEG_Z;
     commands.spawn((
         Camera3d::default(),
         crate::view::WorldCamera,
@@ -279,17 +443,100 @@ fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>
         Hdr,
         Tonemapping::None,
         crate::ffx_glow::FfxGlow::WORLD,
-        Transform::from_translation(start + Vec3::new(0.0, VIEW_START_HEIGHT, VIEW_START_HEIGHT))
-            .looking_at(start, Vec3::Y),
+        // One cluster, as the client's world camera (`view::cpu_light_clusters`).
+        bevy::light::cluster::ClusterConfig::Single,
+        Transform::from_translation(eye).looking_at(look, Vec3::Y),
         ViewCam {
-            yaw: 0.0,
-            pitch: -0.5,
+            yaw,
+            pitch,
             speed: 100.0,
         },
     ));
 }
 
-/// WASD, Space and C fly, a right or left drag looks, Ctrl boosts, the wheel sets speed.
+/// fork: modern lighting — `?worldview_pose=x,y,z,face,pitch[,ground]` (raw WoW coords, degrees),
+/// read LIVE (`launch_env::live_var`), so a reference framing can be dialled in from the page with
+/// `history.replaceState` while the streamed world stays loaded. With `ground`, `z` is ignored once
+/// the terrain under the eye has streamed and the eye sits that many yards above it.
+#[allow(clippy::type_complexity)]
+fn live_pose(
+    streamer: Option<Res<crate::terrain_stream::TerrainStreamer>>,
+    tiles: Option<Res<Assets<benilla_assets::AdtTile>>>,
+    mut cam: Query<(&mut Transform, &mut ViewCam)>,
+    mut last: Local<Option<(String, bool)>>,
+    debug: Option<ResMut<crate::dev_state::DebugState>>,
+    time: Res<Time>,
+    mut reported: Local<(f32, Vec3, f32, f32)>,
+) {
+    // Report where the viewer stands when it has settled somewhere new, in `?worldview_pose=` form.
+    if let Ok((xf, view)) = cam.single() {
+        reported.0 += time.delta_secs();
+        let moved = xf.translation.distance(reported.1) > 1.0
+            || (view.yaw - reported.2).abs() > 0.02
+            || (view.pitch - reported.3).abs() > 0.02;
+        if moved && reported.0 > 2.0 {
+            reported.0 = 0.0;
+            reported.1 = xf.translation;
+            reported.2 = view.yaw;
+            reported.3 = view.pitch;
+            let w = benilla_assets::coords::bevy_to_wow(xf.translation);
+            info!(
+                "worldview pose: {:.1},{:.1},{:.1},{:.1},{:.1}",
+                w[0],
+                w[1],
+                w[2],
+                view.yaw.to_degrees(),
+                view.pitch.to_degrees()
+            );
+        }
+    }
+
+    // The clock follows the page too (`?clock=`).
+    if let (Some(mut d), Some(m)) = (
+        debug,
+        crate::launch_env::live_var("WOW_CLOCK").and_then(|c| c.trim().parse::<u32>().ok()),
+    ) {
+        if d.lighting.follow_server_time || d.lighting.manual_minute != m % 1440 {
+            d.lighting.follow_server_time = false;
+            d.lighting.manual_minute = m % 1440;
+        }
+    }
+    let Some(v) = crate::launch_env::live_var("WOW_WORLDVIEW_POSE") else {
+        return;
+    };
+    let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    if c.len() < 5 {
+        return;
+    }
+    let wants_ground = c.len() >= 6;
+    if last
+        .as_ref()
+        .is_some_and(|(s, grounded)| *s == v && (*grounded || !wants_ground))
+    {
+        return;
+    }
+    let Ok((mut xf, mut view)) = cam.single_mut() else {
+        return;
+    };
+    let mut eye = wow_to_bevy([c[0], c[1], c[2]]);
+    let mut grounded = false;
+    if wants_ground {
+        if let (Some(s), Some(t)) = (streamer.as_deref(), tiles.as_deref()) {
+            if let Some(h) = crate::terrain_stream::terrain_height_under(s, t, eye) {
+                eye.y = h + c[5];
+                grounded = true;
+            }
+        }
+    }
+    view.yaw = c[3].to_radians();
+    view.pitch = c[4].to_radians();
+    xf.translation = eye;
+    xf.rotation = Quat::from_euler(EulerRot::YXZ, view.yaw, view.pitch, 0.0);
+    *last = Some((v, grounded));
+}
+
+/// WASD, Space and C fly, a right or left drag looks, Ctrl boosts, the wheel sets speed; `G`
+/// toggles indirect lighting ([`toggle_indirect`]).
 fn fly(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,

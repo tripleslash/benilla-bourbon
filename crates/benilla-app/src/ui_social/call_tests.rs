@@ -88,7 +88,7 @@ fn client() -> Social {
             end)"#,
         )
         .expect("the recorder installs");
-    app.world_mut().insert_non_send_resource(script);
+    app.world_mut().insert_non_send(script);
     let feed = app.world_mut().register_system(super::feed::feed_social);
     let mut s = Social { app, rx, feed };
     feed_once(&mut s);

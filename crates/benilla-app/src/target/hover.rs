@@ -18,21 +18,25 @@ use crate::ui_script::PointerOverUi;
 use benilla_world::billboard::BillboardCard;
 use benilla_world::collision::PickOccluder;
 use benilla_world::interact::{
-    ray_mesh_bounds, ray_posed_mesh, CreaturePickPart, GoPickPart, PickParts,
+    ray_mesh_bounds, CreaturePickPart, GoPickPart, PickParts, PosedPickScratch,
 };
 use benilla_world::view::WorldCamera;
 
 use super::{Hovered, HoveredObject, PickOcclusion};
 
 /// Trace this frame's world hit, the reference's `CWorld::Intersect` leg of the scene trace
-/// (`0x480df0`), through the [`PickOccluder`] set: terrain, the WMO walk-bake faces (about the
-/// `0x84` reject mask) and static doodad hulls. Net entities are the object trace, not occluders,
-/// so a chest never occludes itself. The picks run unbounded and compare against it after.
+/// (`0x480df0`): the [`PickOccluder`] colliders (terrain and the WMO faces outside MOPY mask
+/// `0x84`) and the static doodads' drawn opaque batches
+/// ([`benilla_world::interact::WorldPick::doodad_occluder`]), never a doodad's collision hull: the
+/// render-less `KL_AuctionHouseCollide.m2` walls Orgrimmar's auctioneers off from the floor below,
+/// yet a click reaches them over it. Net entities are the object trace, not occluders, so a chest
+/// never occludes itself. The picks run unbounded and compare against the nearer of the two after.
 pub(super) fn update_pick_occlusion(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     window: Query<&Window, With<PrimaryWindow>>,
     spatial: avian3d::prelude::SpatialQuery,
     occluders: Query<(), With<PickOccluder>>,
+    pick: benilla_world::interact::WorldPick,
     mut occlusion: ResMut<PickOcclusion>,
 ) {
     *occlusion = PickOcclusion::default();
@@ -58,6 +62,12 @@ pub(super) fn update_pick_occlusion(
         occlusion.distance = hit.distance;
         occlusion.point = Some(ray.origin + *ray.direction * hit.distance);
     }
+    if let Some(hit) = pick.doodad_occluder(ray) {
+        if hit.distance < occlusion.distance {
+            occlusion.distance = hit.distance;
+            occlusion.point = Some(hit.point);
+        }
+    }
 }
 
 /// The model instances whose parts are `unit`'s pick geometry: the body, everything it wears, and
@@ -81,6 +91,8 @@ pub(super) struct PickPose<'w, 's> {
     /// The world-space matrices the vertex stage skins with, read from the CPU rows.
     palettes: Res<'w, benilla_world::rig_palette::RigPalettes>,
     rigs: Query<'w, 's, &'static benilla_world::rig_palette::RigSkin>,
+    /// Pass 1's skinned parts, which pass 2 casts against instead of skinning again.
+    scratch: Local<'s, PosedPickScratch>,
 }
 
 /// The local identity and what of it and of the corpses the pick takes, one [`SystemParam`] under
@@ -186,7 +198,7 @@ pub(super) fn update_hover(
     plate_hover: Res<crate::vplates::PlateHover>,
     mut hovered: ResMut<Hovered>,
     mesh_assets: Res<Assets<Mesh>>,
-    pose: PickPose,
+    mut pose: PickPose,
     // Our own body joins the pick only while a targeting word takes it (`0x6e61a0`).
     target_state: TargetHoverState,
     // Last frame's pick, which outranks everything in pass 2 (the reference's anti-flicker cache).
@@ -347,9 +359,13 @@ pub(super) fn update_hover(
     // Pass 1: the exact posed mesh, nearest wins, unbounded as in the reference; occlusion is one
     // compare on the result, below.
     let mut best: Option<(f32, Entity)> = None;
+    pose.scratch.clear();
     for (entity, _, mesh_ids, palette) in &candidates {
         for id in mesh_ids {
-            let Some(t) = ray_posed_mesh(&mesh_assets, *id, palette, origin, dir, false) else {
+            let hit = pose
+                .scratch
+                .ray_exact(&mesh_assets, *id, palette, origin, dir);
+            let Some(t) = hit else {
                 continue;
             };
             if best.is_none_or(|(bt, _)| t < bt) {
@@ -391,10 +407,13 @@ pub(super) fn update_hover(
     // Pass 2, when nothing hit exactly: the halo, won by the priority ladder, not distance.
     if best.is_none() {
         let mut best2: Option<(f32, u32, Entity)> = None;
-        for (entity, priority, mesh_ids, palette) in &candidates {
-            let hit = mesh_ids
-                .iter()
-                .filter_map(|id| ray_posed_mesh(&mesh_assets, *id, palette, origin, dir, true))
+        // Pass 1 skinned one span per mesh, in this order.
+        let mut span = 0;
+        for (entity, priority, mesh_ids, _) in &candidates {
+            let first = span;
+            span += mesh_ids.len();
+            let hit = (first..span)
+                .filter_map(|i| pose.scratch.ray_halo(&mesh_assets, i, origin, dir))
                 .min_by(f32::total_cmp);
             let Some(t) = hit else { continue };
             let prio = if *last_pick == Some(*entity) {
@@ -536,6 +555,8 @@ pub(crate) struct GoGateInputs<'w> {
     pub(crate) factions: Option<Res<'w, super::ring::Factions>>,
     /// Absent in a net-less build, read as the reference's zeroed `[0xb72038]`: not queued.
     pub(crate) stone: Option<Res<'w, crate::ui_dialog_verbs::MeetingStone>>,
+    /// Whether the player is in a battleground, whose objective faction term the gate skips.
+    pub(crate) battleground: super::cursor_mode::BattlegroundMap<'w>,
 }
 
 impl GoGateInputs<'_> {
@@ -580,13 +601,19 @@ pub(super) fn update_hovered_object(
     // Transports (TRANSPORT 11, MAP_OBJECT 14, MO_TRANSPORT 15) never join: the reference's model
     // resolver `0x5f80e0` gives them no pick geometry and their interaction predicates are
     // constant false, so a ship's hull never swallows the pick of an NPC on deck.
+    //
+    // TRAP (6) never joins either: a trap is proximity-triggered, never clicked, so the reference
+    // registers no mouse geometry for one. Arathi Basin's visual-only aura GameObjects
+    // (180100-180102, type 6) otherwise sit at the node banner's centre and win the pick from it —
+    // their faction is hostile to everyone, so the inverted TRAP term keeps them highlightable and
+    // the banner is never reached, whatever the battleground gate does.
     if removed_parts.read().next().is_some() || !added_parts.is_empty() {
         pickable.clear();
         pickable.extend(go_parts.iter().filter(|&e| {
             // Through the hit's own resolver, so a card and its mesh siblings agree.
             !stores
                 .get(resolve_net(e))
-                .is_ok_and(|s| matches!(s.0.gameobject_type_id(), 11 | 14 | 15))
+                .is_ok_and(|s| matches!(s.0.gameobject_type_id(), 6 | 11 | 14 | 15))
         }));
     }
     hovered.target = None;
@@ -623,6 +650,41 @@ pub(super) fn update_hovered_object(
         return;
     };
     let self_store = self_q.single().ok();
+    // The mouseover-eligibility gate (`+0x54`), as a predicate over a picked entity: a GameObject
+    // the cursor will never publish must not win the pick and bury the interactable behind it. A
+    // battleground's visual-only aura GameObjects (Arathi Basin 180100-180102, type 6 TRAP, never
+    // highlightable to a friendly or neutral player) sit at the node banner's centre, so without
+    // this they take every pick and the banner is unreachable. A store not yet streamed reads
+    // eligible, the gate's own default.
+    let mouseover_ok = |net: Entity| -> bool {
+        let Ok(store) = stores.get(net) else {
+            return true;
+        };
+        let go_guid = guids.get(net).ok().map(|g| g.0);
+        let tmpl = go_gate.templates.of(&store.0);
+        let reaction = crate::target::cursor_mode::go_reaction(
+            go_gate.factions.as_deref(),
+            store.0.gameobject_faction(),
+            self_store,
+        );
+        crate::target::cursor_mode::mouseover_eligible(
+            store.0.gameobject_type_id(),
+            store.0.gameobject_flags(),
+            store.0.gameobject_dynamic_flags(),
+            tmpl.map(|t| t.highlight_column),
+            reaction,
+            crate::target::cursor_mode::GoOverrides {
+                channel_owned: crate::target::cursor_mode::fishing_channel_owned(
+                    self_store, go_guid,
+                ),
+                meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
+                    tmpl.and_then(|t| t.meeting_stone).map(|m| m.area),
+                    go_gate.queued_area(),
+                ),
+                battleground: go_gate.battleground.active(),
+            },
+        )
+    };
     // While a word stands, only the objects `0x480780`'s GameObject arm admits are candidates: none
     // for a word outside `0x4800`, else those whose lock the spell passes.
     let admitted: bevy::platform::collections::HashSet<Entity>;
@@ -671,12 +733,16 @@ pub(super) fn update_hovered_object(
         );
     }
 
-    // Pass 1: the exact resident geometry, nearest wins.
-    let mut best: Option<(f32, Entity)> =
-        benilla_world::interact::cast_pick_ray(ray, pickable, &parts, false)
-            .into_iter()
-            .next()
-            .map(|(e, h)| (h.distance, e));
+    // Pass 1: the nearest resident geometry the eligibility gate will publish, nearest wins. Every
+    // hit is asked for, nearest-first, so an ineligible front object is skipped rather than allowed
+    // to bury the eligible one behind it.
+    let mut best: Option<(f32, Entity)> = None;
+    for (part, hit) in benilla_world::interact::cast_pick_ray(ray, pickable, &parts, true) {
+        if mouseover_ok(resolve_net(part)) {
+            best = Some((hit.distance, part));
+            break;
+        }
+    }
 
     // Pass 2, only when nothing hit anywhere, units included (one resolve in the reference): the
     // geometry pushed 1 model unit along its normals, a halo of about a yard that makes a wispy
@@ -691,6 +757,9 @@ pub(super) fn update_hovered_object(
         let mut best2: Option<(f32, u32, Entity)> = None;
         for (part, hit) in benilla_world::interact::cast_pick_ray_inflated(ray, pickable, &parts) {
             let net = resolve_net(part);
+            if !mouseover_ok(net) {
+                continue;
+            }
             let prio = if *last_pick == Some(net) {
                 u32::MAX // the sticky-hover cache outranks everything
             } else {
@@ -715,6 +784,7 @@ pub(super) fn update_hovered_object(
                                 .map(|m| m.area),
                             go_gate.queued_area(),
                         ),
+                        battleground: go_gate.battleground.active(),
                     };
                     u32::from(crate::target::cursor_mode::go_highlightable(
                         s, reaction, overrides,
@@ -749,34 +819,13 @@ pub(super) fn update_hovered_object(
         return;
     };
     // The mouseover-eligibility gate (vtable `+0x54` at `0x482982`): an ineligible object
-    // publishes the null mouseover, so no tooltip, brighten or cursor; the reference reaches
-    // `0x492890`, `0x52aa20` and `0x4945e0` only past it. Its null mouseover also hides a unit
-    // behind the object, which our split picks leave hoverable. While a word stands the grader
-    // forks before it (`0x4828f4`) and publishes what the pick admitted (`0x4829d4`).
+    // publishes the null mouseover, so no tooltip, brighten or cursor. The pick above already skips
+    // an ineligible object, so this normally passes; it stays as the probe's report. While a word
+    // stands the grader forks before it (`0x4828f4`) and publishes what the pick admitted
+    // (`0x4829d4`).
     if let Some(store) = stores.get(net_entity).ok().filter(|_| !word.targeting()) {
         let tmpl = go_gate.templates.of(&store.0);
-        let reaction = crate::target::cursor_mode::go_reaction(
-            go_gate.factions.as_deref(),
-            store.0.gameobject_faction(),
-            self_store,
-        );
-        if !crate::target::cursor_mode::mouseover_eligible(
-            store.0.gameobject_type_id(),
-            store.0.gameobject_flags(),
-            store.0.gameobject_dynamic_flags(),
-            tmpl.map(|t| t.highlight_column),
-            reaction,
-            crate::target::cursor_mode::GoOverrides {
-                channel_owned: crate::target::cursor_mode::fishing_channel_owned(
-                    self_store,
-                    Some(guid.0),
-                ),
-                meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
-                    tmpl.and_then(|t| t.meeting_stone).map(|m| m.area),
-                    go_gate.queued_area(),
-                ),
-            },
-        ) {
+        if !mouseover_ok(net_entity) {
             if probing {
                 cache.report.say(format!(
                     "guid {:#x} type {} at {distance:.1} yd — hover ✗ (tmpl {:?}, highlight {:?}): \
@@ -839,6 +888,7 @@ mod tests {
             bone,
             kind: benilla_formats::BillboardKind::LockZ,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: vec![],
         };
         BillboardCard::following(&info, owner)

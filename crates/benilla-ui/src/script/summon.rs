@@ -5,8 +5,6 @@
 
 use mlua::Lua;
 
-use super::Model;
-
 /// The dialog's three reads, never nil: with nothing pending or resolved they are `""`, `""` and
 /// 0, as the reference's getters answer (`0x882748` is its shared `""`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,7 +43,7 @@ impl super::UiScript {
     /// `GetSummonConfirmSummoner()` calls since the last drain that answered no name; the app
     /// looks the summoner up for them, as each call's lookup with a callback does (`0x48b6e1`).
     pub fn take_summon_summoner_lookups(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().summon_summoner_lookups)
+        drain_field!(self, summon_summoner_lookups)
     }
 }
 
@@ -56,7 +54,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSummonConfirmSummoner",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             // A miss is the lookup's ask (`0x48b6e1`, callback `0x48b710`), which the app makes.
             if model.summon_confirm.summoner.is_empty() {
                 model.summon_summoner_lookups += 1;
@@ -70,7 +70,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSummonConfirmAreaName",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             lua.create_string(&model.summon_confirm.area)
         })?,
     )?;
@@ -80,7 +82,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSummonConfirmTimeLeft",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(f64::from(model.summon_confirm.time_left_ms / 1000))
         })?,
     )?;

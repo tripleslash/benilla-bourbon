@@ -35,7 +35,7 @@ use mlua::Lua;
 
 use super::taint::{self, Context};
 use super::tick::fire_event_into;
-use super::{Model, ScriptValue, UiScript};
+use super::{ScriptValue, UiScript};
 
 /// A gate tag, the `ecx` every caller loads before `call 0x494a50`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,7 +153,7 @@ pub(crate) struct Raised {
 
 impl Raised {
     fn end(&self) {
-        if let Some(mut model) = self.lua.app_data_mut::<Model>() {
+        if let Some(mut model) = self.lua.app_data_mut::<crate::script::ModelCell>() {
             let counter = model.protected.counter(self.event);
             *counter = counter.saturating_sub(1);
         }
@@ -168,7 +168,7 @@ impl Drop for Raised {
 
 /// Raise `event` until the returned guard drops.
 pub(crate) fn raise(lua: &Lua, event: Event) -> Raised {
-    if let Some(mut model) = lua.app_data_mut::<Model>() {
+    if let Some(mut model) = lua.app_data_mut::<crate::script::ModelCell>() {
         *model.protected.counter(event) += 1;
     }
     Raised {
@@ -179,7 +179,7 @@ pub(crate) fn raise(lua: &Lua, event: Event) -> Raised {
 
 /// The input events running now.
 pub(crate) fn events(lua: &Lua) -> InputEvents {
-    lua.app_data_ref::<Model>()
+    lua.app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .protected
         .events()
@@ -244,7 +244,9 @@ pub(crate) fn select_may_cast(lua: &Lua) -> bool {
 /// context, else `ADDON_ACTION_FORBIDDEN` (`0x1b0`) with the context's text, signalled in place.
 fn refuse(lua: &Lua, context: &Context) {
     {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         if std::mem::replace(&mut model.protected.refusing, true) {
             return;
         }
@@ -258,7 +260,7 @@ fn refuse(lua: &Lua, context: &Context) {
         ),
         Context::Client => {}
     }
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .protected
         .refusing = false;
@@ -294,7 +296,9 @@ struct Exactly {
 
 impl Exactly {
     fn raise(lua: &Lua, events: InputEvents) -> Exactly {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let flags = &mut model.protected;
         let before = (flags.binding, flags.enter, flags.click);
         (flags.binding, flags.enter, flags.click) = (
@@ -311,7 +315,7 @@ impl Exactly {
 
 impl Drop for Exactly {
     fn drop(&mut self) {
-        if let Some(mut model) = self.lua.app_data_mut::<Model>() {
+        if let Some(mut model) = self.lua.app_data_mut::<crate::script::ModelCell>() {
             let flags = &mut model.protected;
             (flags.binding, flags.enter, flags.click) = self.before;
         }

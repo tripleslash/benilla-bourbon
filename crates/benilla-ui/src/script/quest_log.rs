@@ -874,7 +874,7 @@ impl super::UiScript {
     /// The slots as the descriptor now holds them, with no rebuild: a VM's seat before the world
     /// entry's.
     pub fn set_quest_slots(&mut self, slots: [QuestSlotView; QUEST_LOG_SLOTS]) {
-        self.model_mut().quest_store.slots = slots;
+        set_field!(self, quest_store.slots, slots);
     }
 
     /// `0x4df4b0(quest)`: whether the quest's row holds the expiry latch, which the quest-update
@@ -910,12 +910,12 @@ impl super::UiScript {
 
     /// The quest-giver refreshes the latch asked for (`0x4df531`) since the last drain.
     pub fn take_quest_giver_refreshes(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().quest_store.giver_refreshes)
+        drain_field!(self, quest_store.giver_refreshes)
     }
 
     /// Whether the active player is in the world, which the rebuild needs (`0x4de568`).
     pub fn set_quest_log_player(&mut self, present: bool) {
-        self.model_mut().quest_store.player = present;
+        set_field!(self, quest_store.player, present);
     }
 
     /// `SMSG_QUERY_TIME_RESPONSE` (`0x4de400` into `0x4deef0`): the clock offset is set, then
@@ -1003,7 +1003,7 @@ impl super::UiScript {
 
     /// The quests the rebuild missed since the last drain: the app asks each.
     pub fn take_quest_record_asks(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().quest_store.record_asks)
+        drain_field!(self, quest_store.record_asks)
     }
 
     /// `0x4df7b0(entry)`, which an item of ours runs when its record is set up (`0x5d85d9`), its
@@ -1029,12 +1029,12 @@ impl super::UiScript {
     /// The held count of each item the log's quests need, as `0x622130(inventory, item, 8)`
     /// counts it, banked copies included.
     pub fn set_quest_item_counts(&mut self, counts: HashMap<u32, u32>) {
-        self.model_mut().quest_store.held = counts;
+        set_field!(self, quest_store.held, counts);
     }
 
     /// The creature entries the leaderboard missed since the last drain: the app asks each.
     pub fn take_quest_creature_asks(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().quest_store.creature_asks)
+        drain_field!(self, quest_store.creature_asks)
     }
 
     /// A creature's name landed: held, and each callback the leaderboard left on it is due
@@ -1058,7 +1058,7 @@ impl super::UiScript {
     // `0x55bdb0` from `0x555140`; `0x4e07ea`, `0x4e083a`), 2^k - 1 updates for a walking handler
     // over k first-seen records.
     pub fn flush_quest_log_refires(&mut self) {
-        let due = std::mem::take(&mut self.model_mut().quest_store.due);
+        let due = drain_field!(self, quest_store.due);
         for _ in 0..due {
             self.fire_event("QUEST_LOG_UPDATE", Vec::new());
         }
@@ -1103,7 +1103,7 @@ impl super::UiScript {
 
     /// Set the selection.
     pub fn set_quest_log_selection(&mut self, i: u32) {
-        self.model_mut().quest_log_selection = i;
+        set_field!(self, quest_log_selection, i);
     }
 
     /// Push the server clock in unix seconds each frame: the app's `SMSG_QUERY_TIME_RESPONSE`
@@ -1112,20 +1112,20 @@ impl super::UiScript {
     /// step mid-session (an NTP correction) jumps the reference's countdown but not ours, because
     /// the step changes no time the quest has left.
     pub fn set_server_unix_time(&mut self, unix_secs: f64) {
-        self.model_mut().server_unix_time = Some(unix_secs);
+        set_field!(self, server_unix_time, Some(unix_secs));
     }
 
     /// Whether the last sync found the local and server clocks equal to the whole second, which
     /// the reference stores as `G = 1` (`0x4def02`): its countdowns then read one second more.
     pub fn set_clock_sync_zero(&mut self, zero: bool) {
-        self.model_mut().clock_sync_zero = zero;
+        set_field!(self, clock_sync_zero, zero);
     }
 
     /// Push the local clock in unix seconds each frame, `time(NULL)` (`0x429580`). Before the first
     /// sync the reference's offset `G` is 0 (`0x4de3d3`), so the log's rebuild and the timer
     /// verbs count a deadline down by this clock (`0x4de6b6`, `0x4e14b9`, `0x4e16c9`).
     pub fn set_local_unix_time(&mut self, unix_secs: f64) {
-        self.model_mut().local_unix_time = Some(unix_secs);
+        set_field!(self, local_unix_time, Some(unix_secs));
     }
 }
 
@@ -1233,7 +1233,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumQuestLogEntries",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok((
                 visible_rows(&model) as i64,
                 i64::from(model.quest_log.num_quests),
@@ -1251,7 +1253,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetQuestLogTitle",
         lua.create_function(|lua, i: Value| {
             let n = number_arg(lua, i, "Usage: GetQuestLogTitle(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(row) = usize::try_from(n).ok().and_then(|n| model.quest_row(n)) else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
@@ -1310,7 +1314,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             ]);
             drop(model);
             if passed {
-                owe_turn_in_tutorial(&mut lua.app_data_mut::<Model>().expect("model app_data"));
+                owe_turn_in_tutorial(
+                    &mut lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data"),
+                );
             }
             Ok(out)
         })?,
@@ -1324,7 +1332,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, i: Value| {
             // `is-number` else `Usage: SelectQuestLogEntry(index)` (`0x84b540`, `0x4dfb0e`).
             let i = binding_abi::index_arg32(lua, i, "Usage: SelectQuestLogEntry(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             if model.quest_row(i as usize).is_some_and(|r| !r.is_header) {
                 model.quest_log_selection = i;
             }
@@ -1336,7 +1346,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetQuestLogSelection",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.quest_log_selection))
         })?,
     )?;
@@ -1344,7 +1356,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetQuestLogQuestText",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             // Two nils when the record is not held (`0x4dffdb`).
             let Some(r) = model.selected_quest_record() else {
                 return Ok((Value::Nil, Value::Nil));
@@ -1363,7 +1377,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, i: Value| {
             // A non-number reads the selection (`0x4e0056` → `0x4e0073`); it never raises.
             let i = binding_abi::index_or(lua, i)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let index = i.unwrap_or(model.quest_log_selection) as usize;
             Ok(model
                 .quest_row_parts(index)
@@ -1385,7 +1401,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let i = binding_abi::index_arg(lua, i, "Usage: GetQuestLogLeaderBoard(index)")?;
             let quest = binding_abi::index_or(lua, quest)?;
             let parts = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let index = quest.unwrap_or(model.quest_log_selection) as usize;
                 line_parts(&mut model, index, i)
             };
@@ -1450,7 +1468,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.globals().set(
             name,
             lua.create_function(move |lua, ()| {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 Ok(model.selected_quest_record().map_or(0, pick))
             })?,
         )
@@ -1468,7 +1488,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetQuestLogRewardMoney",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let top = model
                 .unit("player")
                 .is_some_and(|p| p.exists && p.level as i32 >= 60);
@@ -1498,7 +1520,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .ok_or_else(|| mlua::Error::runtime("Usage: GetQuestLogRewardInfo(index)"))?;
                 let row = i.trunc() as i64 - 1;
                 let item = {
-                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     let pair = model.selected_quest_record().and_then(|r| {
                         let list = if choices { &r.choices } else { &r.rewards };
                         usize::try_from(row).ok().and_then(|n| list.get(n)).copied()
@@ -1556,7 +1580,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let index =
                 binding_abi::index_arg(lua, index, r#"Usage: GetQuestLogItemLink("type", index)"#)?;
             let link = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 selected_quest_item(&model, &kind, index).and_then(|it| it.link)
             };
             match link {
@@ -1573,7 +1599,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsCurrentQuestFailed",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let selected = model
                 .quest_row(model.quest_log_selection as usize)
                 .filter(|r| !r.is_header);
@@ -1613,7 +1641,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "SetAbandonQuest",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.quest_log_abandon_mark = model
                 .quest_row(model.quest_log_selection as usize)
                 .filter(|e| !e.is_header)
@@ -1627,7 +1657,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetAbandonQuestName",
         lua.create_function(|lua, ()| {
             let title = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let mark = model.quest_log_abandon_mark;
                 (mark != 0)
                     .then(|| model.quest_store.records.get(&mark))
@@ -1645,7 +1677,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetAbandonQuestItems",
         lua.create_function(|lua, ()| {
             let names = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 abandon_items(&model)
             };
             if names.is_empty() {
@@ -1666,7 +1700,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "AbandonQuest",
         lua.create_function(|lua, ()| {
             let slot = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let mark = model.quest_log_abandon_mark;
                 let slot = (mark != 0)
                     .then(|| {
@@ -1702,7 +1738,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetQuestTimers",
         lua.create_function(|lua, ()| {
             let rows: Vec<(u32, u8)> = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 if !model.quest_store.player {
                     return Ok(MultiValue::new());
                 }
@@ -1718,7 +1756,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut latched = false;
             for (quest_id, slot) in rows {
                 let title = {
-                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     if model.quest_store.is_latched(quest_id) {
                         continue;
                     }
@@ -1769,7 +1809,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, t: Value| {
             // `is-number` else `Usage: GetQuestIndexForTimer(index)` (`0x84b6fc`, `0x4e160c`).
             let t = binding_abi::index_arg(lua, t, "Usage: GetQuestIndexForTimer(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             // Nil without a player (`0x4e165f`).
             let index = t
                 .checked_sub(1)
@@ -1798,7 +1840,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetQuestLogTimeLeft",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let synced = model.server_unix_time.is_some();
             let left = selected_slot(&model)
                 .filter(|_| model.quest_store.player && synced)
@@ -1817,7 +1861,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetQuestLogRewardSpell",
         lua.create_function(|lua, ()| {
             let spell = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .selected_quest_record()
                     .and_then(|r| r.reward_spell.clone())
@@ -1835,7 +1881,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // (`0x4dfe32`); the index is `_ftol`'d (`0x4dfe4d`).
             let n = number_arg(lua, index, USAGE)?;
             let token = super::binding_abi::string_arg(lua, token, USAGE)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             // The row's quest id (`0x4df150`): 0 for a header or a row past the list, which
             // answers nil before the token is resolved (`0x4dfe5e`).
             let quest_id = usize::try_from(n)
@@ -1888,7 +1936,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetQuestLogPushable",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(
                 model.selected_quest_record().is_some_and(|r| r.pushable),
             ))
@@ -1900,7 +1950,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // The verb checks the party and the sharable bit itself (`0x4e13a6`), as a macro can
             // call it solo; a header has no quest and sends nothing.
             let id = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let index = model.quest_log_selection as usize;
                 (!model.party.members.is_empty())
                     .then(|| {
@@ -1924,7 +1976,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumQuestWatches",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.quest_log_watched.len() as i64)
         })?,
     )?;
@@ -1933,7 +1987,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, i: Value| {
             // `is-number` else `Usage: IsQuestWatched(index)` (`0x84b764`, `0x4e18a1`).
             let i = binding_abi::index_arg32(lua, i, "Usage: IsQuestWatched(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(
                 watch_id_at(&model, i).is_some_and(|id| model.quest_log_watched.contains(&id)),
             ))
@@ -1942,7 +1998,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "AddQuestWatch",
         lua.create_function(|lua, i: Value| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             // `0x4dede0`: the id is appended while the list holds fewer than 5 (`0x4dede5`), with no
             // test for it already being there; the stock Lua checks `IsQuestWatched` itself.
             if let Some(id) = watch_target(lua, &model, i) {
@@ -1956,7 +2014,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "RemoveQuestWatch",
         lua.create_function(|lua, i: Value| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             // `0x4dee00` removes the first entry equal to the id (`0x4dee10`) and closes the gap.
             if let Some(id) = watch_target(lua, &model, i) {
                 if let Some(at) = model.quest_log_watched.iter().position(|w| *w == id) {
@@ -1972,7 +2032,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, w: Value| {
             // `is-number` else `Usage: GetQuestIndexForWatch(index)` (`0x84b784`, `0x4e19c9`).
             let w = binding_abi::index_arg(lua, w, "Usage: GetQuestIndexForWatch(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let index = w
                 .checked_sub(1)
                 .and_then(|n| model.quest_log_watched.get(n))
@@ -2343,6 +2405,39 @@ mod tests {
             walk, "1=nil|2=Speak with Marshal McBride.|3=The kobolds have overrun the camp.|",
             "each entry must answer with its OWN detail inside a single frame"
         );
+    }
+
+    /// A quest whose template has an end text leads its leaderboard with it (`0x4e0278`): typed
+    /// `"event"`, its text raw, done only by the slot's complete bit, ahead of the creature line.
+    /// The druid's Body and Heart has nothing else, and an addon that counts no lines takes it for
+    /// finished (this fork, from Adrinalin4ik/manila#3).
+    #[test]
+    fn an_end_text_is_the_first_leaderboard_line_and_follows_the_complete_bit() {
+        let mut lunaclaw = threat_within();
+        lunaclaw.end_text = "Face Lunaclaw and earn the strength of body and heart.".into();
+        for (state, done) in [(0, "nil"), (SLOT_COMPLETE, "1")] {
+            let mut s = UiScript::new().unwrap();
+            caches(&mut s);
+            seat(&mut s, &[(6001, lunaclaw.clone(), slot(6001, 3, state))]);
+            assert_eq!(
+                s.eval::<i64>("return GetNumQuestLeaderBoards(2)").unwrap(),
+                2
+            );
+            assert_eq!(
+                s.eval::<String>(
+                    "local t, k, f = GetQuestLogLeaderBoard(1, 2) \
+                     return t .. '|' .. k .. '|' .. tostring(f)"
+                )
+                .unwrap(),
+                format!("{}|event|{done}", lunaclaw.end_text)
+            );
+            assert_eq!(
+                s.eval::<String>("local t, k = GetQuestLogLeaderBoard(2, 2) return k")
+                    .unwrap(),
+                "monster",
+                "the creature line follows it"
+            );
+        }
     }
 
     #[test]

@@ -34,8 +34,7 @@ crate of its own or a fork, and benilla opens a piece of itself to such a crate 
 5. **Prove the run before reading the result.** A live result is evidence once the run is valid
    from numbers: preflight banner clean, camera and body where intended, the subject in frame,
    the window long enough. A negative from an unproven run is not evidence.
-6. **Commit small and often; land by pull request.** Atomic commits, explicit paths, on a
-   branch; main moves only by a squash-merged pull request, one commit per piece of work.
+6. **Commit small and often.** Atomic units, explicit paths; main only advances by fast-forward.
    No "done" and no commit without saying what was verified and how the result was judged.
 
 ## Hard rules
@@ -45,7 +44,8 @@ crate of its own or a fork, and benilla opens a piece of itself to such a crate 
   exception: FrameXML and GlueXML run off the player's own patch chain, and `assets/ui` holds
   only benilla's own files.
 - **The install is read-only.** benilla never writes into the WoW folder: no screenshot, log,
-  cache or scratch file. `scripts/smoke.sh` fails a run that leaves the install changed.
+  cache or scratch file. A hook blocks such a write at the tool call, and `scripts/smoke.sh`
+  fails a run that leaves the install changed.
 - **Local state lives in one folder**, `benilla-config/`, at the repo root in a dev build and
   beside the binary in the player build; every path to it resolves through `crate::local_state`.
   Player settings are CVars persisted as a diff in `benilla-config/config.toml`.
@@ -73,6 +73,8 @@ crate of its own or a fork, and benilla opens a piece of itself to such a crate 
 - git: the history. No changelogs, no status docs, no "what we did" narratives.
 - The code: a comment says what the code does and the 1.12 fact behind it, in a line. No
   history, no stories.
+- `.claude/skills/`: procedures with steps. `probe` runs the client unattended against the local
+  server.
 
 ## Gates
 
@@ -94,6 +96,7 @@ crate of its own or a fork, and benilla opens a piece of itself to such a crate 
 - **Platform seams**: a `cfg(target_os)`, a `[target.'cfg(…)']` dependency, a `#[link]` or an
   `extern "system"` is invisible to the gates of the platform you are on. Say in the commit
   which platforms you built.
+- One hook: no writes into the install. Everything else is a gate or discipline.
 
 ## The local server
 
@@ -111,4 +114,19 @@ account. These bind every session and every agent:
   `WOW_GM=off`.
 - Read the preflight banner before debugging anything else.
 
-The switches for such a run are `docs/CONTRIBUTING.md`, "Running it unattended".
+The mechanics are the `probe` skill.
+
+## This fork
+
+This tree is benilla-bourbon, a fork of benilla kept current by merging upstream's `main`. These bind every
+session here:
+
+- **A merge keeps one mechanism per problem.** Where upstream and the fork both solve the same
+  problem, the merge takes the better approach or combines the two, in what merged cleanly as
+  much as in the conflicts; it never leaves both standing. An upstream change that contradicts a
+  decision the fork made is listed for the maintainer, never merged in silently. `FORK.md` says
+  what the fork changes.
+- **A full disk is cleared of stale build artifacts, and of nothing else.** When a build fails
+  for want of space, remove the build artifacts under `target/`'s profile folders that no build
+  touched today and run it again. Free space is read with `df`, never `du`, which walks the whole
+  tree.

@@ -2,14 +2,59 @@
 //! list, the three exchanges [`crate::logon`] performs. Login packets are not header-encrypted and
 //! each is self-delimiting, so they are read in request/response order.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::Ipv4Addr;
 
 use anyhow::{bail, Result};
 use sha1::{Digest, Sha1};
 
-use crate::wire::{read_array, read_cstring, read_f32_le, read_u16_le, read_u32_le, read_u8};
+use crate::transport::ReadExactAsync;
 use crate::RealmInfo;
+
+// ── The awaited wire readers ──────────────────────────────────────────────────────────────────────
+//
+// [`crate::wire`]'s readers take `impl Read`, which the browser cannot supply: a WebSocket frame
+// arrives on the very event loop a blocking read would be sitting on. These are the same four
+// encodings this protocol needs, byte for byte, over [`ReadExactAsync`] instead — every login field
+// is fixed-width or length-prefixed, so each one is a `read_exact` and the parsing below is
+// unchanged. Private: the world protocol reads its bodies out of a buffer, so this is the only
+// place that decodes straight off the wire.
+
+/// Read a fixed-length byte array.
+async fn read_array_async<const N: usize>(r: &mut impl ReadExactAsync) -> std::io::Result<[u8; N]> {
+    let mut b = [0u8; N];
+    r.read_exact_async(&mut b).await?;
+    Ok(b)
+}
+
+async fn read_u8_async(r: &mut impl ReadExactAsync) -> std::io::Result<u8> {
+    Ok(read_array_async::<1>(r).await?[0])
+}
+
+async fn read_u16_le_async(r: &mut impl ReadExactAsync) -> std::io::Result<u16> {
+    Ok(u16::from_le_bytes(read_array_async::<2>(r).await?))
+}
+
+async fn read_u32_le_async(r: &mut impl ReadExactAsync) -> std::io::Result<u32> {
+    Ok(u32::from_le_bytes(read_array_async::<4>(r).await?))
+}
+
+async fn read_f32_le_async(r: &mut impl ReadExactAsync) -> std::io::Result<f32> {
+    Ok(f32::from_bits(read_u32_le_async(r).await?))
+}
+
+/// Read a NUL-terminated string (the realm list's names and addresses).
+async fn read_cstring_async(r: &mut impl ReadExactAsync) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let b = read_u8_async(r).await?;
+        if b == 0 {
+            break;
+        }
+        bytes.push(b);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
 
 const CMD_AUTH_LOGON_CHALLENGE: u8 = 0x00;
 const CMD_AUTH_LOGON_PROOF: u8 = 0x01;
@@ -98,6 +143,19 @@ mod zone {
             libc::get_timezone(&mut west)
         };
         (err == 0).then_some(-i64::from(west))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+mod zone {
+    /// The page's zone through JS `Date`: `getTimezoneOffset` on the year's 1 January and 1 July,
+    /// minutes west, the larger being standard time.
+    pub(super) fn standard_offset_east() -> Option<i64> {
+        let year = js_sys::Date::new_0().get_full_year();
+        let west =
+            |month| js_sys::Date::new_with_year_month_day(year, month, 1).get_timezone_offset();
+        let standard = west(0).max(west(6));
+        (!standard.is_nan()).then_some(-(standard * 60.0) as i64)
     }
 }
 
@@ -193,13 +251,13 @@ pub fn write_logon_challenge(
 
 /// Read the challenge reply: the SRP6 inputs, `None` for [`SUCCESS_SURVEY`] (a success that
 /// carries none), or an [`AuthReject`].
-pub fn read_challenge_reply(r: &mut impl Read) -> Result<Option<ChallengeReply>> {
-    let opcode = read_u8(r)?;
+pub async fn read_challenge_reply(r: &mut impl ReadExactAsync) -> Result<Option<ChallengeReply>> {
+    let opcode = read_u8_async(r).await?;
     if opcode != CMD_AUTH_LOGON_CHALLENGE {
         bail!("expected CMD_AUTH_LOGON_CHALLENGE (0x00), got {opcode:#x}");
     }
-    let _protocol_version = read_u8(r)?;
-    let result = read_u8(r)?;
+    let _protocol_version = read_u8_async(r).await?;
+    let result = read_u8_async(r).await?;
     if result == SUCCESS_SURVEY {
         return Ok(None);
     }
@@ -210,30 +268,30 @@ pub fn read_challenge_reply(r: &mut impl Read) -> Result<Option<ChallengeReply>>
         }
         .into());
     }
-    let server_public_key = read_array::<32>(r)?;
-    let generator_len = read_u8(r)?;
+    let server_public_key = read_array_async::<32>(r).await?;
+    let generator_len = read_u8_async(r).await?;
     let mut generator = vec![0u8; generator_len as usize];
-    r.read_exact(&mut generator)?;
+    r.read_exact_async(&mut generator).await?;
     let generator = match generator.first() {
         Some(&g) => g,
         None => bail!("server sent an empty generator"),
     };
-    let prime_len = read_u8(r)? as usize;
+    let prime_len = read_u8_async(r).await? as usize;
     let mut prime = vec![0u8; prime_len];
-    r.read_exact(&mut prime)?;
+    r.read_exact_async(&mut prime).await?;
     let large_safe_prime: [u8; 32] = prime
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("large safe prime was {prime_len} bytes, expected 32"))?;
-    let salt = read_array::<32>(r)?;
+    let salt = read_array_async::<32>(r).await?;
     // Read to the end: login packets are not length-framed, so leftover bytes desync the next
     // read. `security_flag` and the PIN block are unused but must be consumed.
-    let crc_salt = read_array::<16>(r)?;
-    let security_flag = read_u8(r)?;
+    let crc_salt = read_array_async::<16>(r).await?;
+    let security_flag = read_u8_async(r).await?;
     if security_flag & 0x01 != 0 {
         // PIN: pin_grid_seed (u32) + pin_salt[16]; vmangos always sends security_flag 0.
-        let _pin_grid_seed = read_u32_le(r)?;
-        let _pin_salt = read_array::<16>(r)?;
+        let _pin_grid_seed = read_u32_le_async(r).await?;
+        let _pin_salt = read_array_async::<16>(r).await?;
     }
     Ok(Some(ChallengeReply {
         server_public_key,
@@ -317,12 +375,12 @@ pub fn write_logon_proof(
 
 /// Read the proof reply: the server's `M2`, `None` for [`SUCCESS_SURVEY`] (a success with no `M2`
 /// read), or an [`AuthReject`].
-pub fn read_proof_reply(r: &mut impl Read) -> Result<Option<[u8; 20]>> {
-    let opcode = read_u8(r)?;
+pub async fn read_proof_reply(r: &mut impl ReadExactAsync) -> Result<Option<[u8; 20]>> {
+    let opcode = read_u8_async(r).await?;
     if opcode != CMD_AUTH_LOGON_PROOF {
         bail!("expected CMD_AUTH_LOGON_PROOF (0x01), got {opcode:#x}");
     }
-    let result = read_u8(r)?;
+    let result = read_u8_async(r).await?;
     if result == SUCCESS_SURVEY {
         return Ok(None);
     }
@@ -334,12 +392,12 @@ pub fn read_proof_reply(r: &mut impl Read) -> Result<Option<[u8; 20]>> {
         }
         .into());
     }
-    let server_proof = read_array::<20>(r)?;
+    let server_proof = read_array_async::<20>(r).await?;
     // Deviation: the survey id is read and dropped, and no survey runs, where the reference keeps
     // it on the link (`0x5bad53`) for the `Survey.dll` it downloads and calls (`GetSurveyId
     // 0x5ab620`, passed at `0x47404f`). benilla runs no code a server sends
     // ([`AuthReject::reply`] gives the rule).
-    let _hardware_survey_id = read_u32_le(r)?;
+    let _hardware_survey_id = read_u32_le_async(r).await?;
     Ok(Some(server_proof))
 }
 
@@ -348,6 +406,46 @@ pub fn write_realm_list_request(w: &mut impl Write) -> std::io::Result<()> {
     let mut packet = [0u8; 5];
     packet[0] = CMD_REALM_LIST;
     w.write_all(&packet)
+}
+
+/// `REALM_FLAG_SPECIFYBUILD`: the realm's name carries its client version. 1.x clients have no
+/// field for it, so a mangos-family realmd appends it to the name, which the list shows verbatim.
+pub const REALM_FLAG_SPECIFYBUILD: u8 = 0x04;
+
+/// A realm's advertised client version, read off its [`REALM_FLAG_SPECIFYBUILD`] tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RealmVersion {
+    pub major: u8,
+    pub minor: u8,
+    pub patch: u8,
+    /// The build, when the tag carries one (`(1.18.1.7272)`); mangos's stock `(1,12,1)` has none.
+    pub build: Option<u16>,
+}
+
+impl RealmVersion {
+    /// A Turtle WoW 1.18 realm: the client version whose data and logic benilla layers on for it.
+    pub fn is_turtle(&self) -> bool {
+        self.major == 1 && self.minor == 18
+    }
+}
+
+/// The version a realm name's trailing tag spells: ` (major.minor.patch[.build])`, or mangos's
+/// stock ` (major,minor,patch)`. `None` for a name without a well-formed tag.
+pub fn realm_version_tag(name: &str) -> Option<RealmVersion> {
+    let inner = name.strip_suffix(')')?.rsplit_once(" (")?.1;
+    let parts: Vec<&str> = inner.split(['.', ',']).collect();
+    let byte = |i: usize| parts.get(i)?.parse::<u8>().ok();
+    let build = match parts.len() {
+        3 => None,
+        4 => Some(parts[3].parse::<u16>().ok()?),
+        _ => return None,
+    };
+    Some(RealmVersion {
+        major: byte(0)?,
+        minor: byte(1)?,
+        patch: byte(2)?,
+        build,
+    })
 }
 
 /// The magic populations the 1.12 realm-list parser (`0x5b2230`) rewrites, as `(population sent,
@@ -378,24 +476,24 @@ fn clean_realm_name(name: &str) -> String {
 /// as the reference parser does: the realm-list screen averages every realm's population, and an
 /// unswapped Recommended `600.0` would skew that mean for every row. Each name is cleaned
 /// ([`clean_realm_name`]) before anything shows it.
-pub fn read_realm_list(r: &mut impl Read) -> Result<Vec<RealmInfo>> {
-    let opcode = read_u8(r)?;
+pub async fn read_realm_list(r: &mut impl ReadExactAsync) -> Result<Vec<RealmInfo>> {
+    let opcode = read_u8_async(r).await?;
     if opcode != CMD_REALM_LIST {
         bail!("expected CMD_REALM_LIST (0x10), got {opcode:#x}");
     }
-    let _size = read_u16_le(r)?;
-    let _header_padding = read_u32_le(r)?;
-    let number_of_realms = read_u8(r)?;
+    let _size = read_u16_le_async(r).await?;
+    let _header_padding = read_u32_le_async(r).await?;
+    let number_of_realms = read_u8_async(r).await?;
     let mut realms = Vec::with_capacity(number_of_realms as usize);
     for _ in 0..number_of_realms {
-        let realm_type = read_u32_le(r)?;
-        let mut flags = read_u8(r)?;
-        let name = read_cstring(r)?;
-        let address = read_cstring(r)?;
-        let mut population = read_f32_le(r)?;
-        let characters = read_u8(r)?;
-        let category = read_u8(r)?;
-        let id = read_u8(r)?;
+        let realm_type = read_u32_le_async(r).await?;
+        let mut flags = read_u8_async(r).await?;
+        let name = read_cstring_async(r).await?;
+        let address = read_cstring_async(r).await?;
+        let mut population = read_f32_le_async(r).await?;
+        let characters = read_u8_async(r).await?;
+        let category = read_u8_async(r).await?;
+        let id = read_u8_async(r).await?;
         // The sentinel swap, before anyone can average this number.
         if let Some(&(_, rewritten, bit)) = MAGIC_POPULATIONS
             .iter()
@@ -404,6 +502,9 @@ pub fn read_realm_list(r: &mut impl Read) -> Result<Vec<RealmInfo>> {
             population = f32::from_bits(rewritten);
             flags |= bit;
         }
+        let version = (flags & REALM_FLAG_SPECIFYBUILD != 0)
+            .then(|| realm_version_tag(&name))
+            .flatten();
         realms.push(RealmInfo {
             name: clean_realm_name(&name),
             address,
@@ -413,9 +514,10 @@ pub fn read_realm_list(r: &mut impl Read) -> Result<Vec<RealmInfo>> {
             flags,
             category,
             id,
+            version,
         });
     }
-    let _footer_padding = read_u16_le(r)?; // consume so the stream stays aligned
+    let _footer_padding = read_u16_le_async(r).await?; // consume so the stream stays aligned
     Ok(realms)
 }
 
@@ -437,7 +539,7 @@ mod tests {
 
     /// Holds `TZ` for a test: the lock keeps two zone tests apart, the drop restores it.
     struct Zone {
-        old: Option<std::ffi::OsString>,
+        old: Option<String>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -445,18 +547,31 @@ mod tests {
         fn set(tz: &str) -> Self {
             static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let old = std::env::var_os("TZ");
-            std::env::set_var("TZ", tz);
+            let old = std::env::var("TZ").ok();
+            set_tz(Some(tz));
             Self { old, _lock: lock }
         }
     }
 
     impl Drop for Zone {
         fn drop(&mut self) {
-            match self.old.take() {
-                Some(v) => std::env::set_var("TZ", v),
-                None => std::env::remove_var("TZ"),
-            }
+            set_tz(self.old.as_deref());
+        }
+    }
+
+    /// `TZ` for the process and for the Windows runtime's own copy of the environment, which
+    /// `std::env::set_var` never reaches: the runtime takes it once, at its first read.
+    fn set_tz(tz: Option<&str>) {
+        match tz {
+            Some(v) => std::env::set_var("TZ", v),
+            None => std::env::remove_var("TZ"),
+        }
+        #[cfg(windows)]
+        {
+            let value = std::ffi::CString::new(tz.unwrap_or("")).expect("a zone has no NUL");
+            // SAFETY: both arguments are NUL-terminated and outlive the call, which copies them;
+            // an empty value removes the variable.
+            unsafe { libc::putenv_s(c"TZ".as_ptr(), value.as_ptr()) };
         }
     }
 
@@ -579,7 +694,8 @@ mod tests {
         packet.extend_from_slice(&body);
         packet.extend_from_slice(&0u16.to_le_bytes()); // footer padding
 
-        let realms = read_realm_list(&mut packet.as_slice()).unwrap();
+        let realms =
+            futures_lite::future::block_on(read_realm_list(&mut packet.as_slice())).unwrap();
         assert_eq!(realms.len(), 1);
         let r = &realms[0];
         assert_eq!(r.name, "Onyxia");
@@ -590,6 +706,67 @@ mod tests {
         assert_eq!(r.characters, 3);
         assert_eq!(r.category, 2);
         assert_eq!(r.id, 9);
+        assert_eq!(r.version, None, "an untagged realm advertises no version");
+    }
+
+    /// One realm with `flags` and `name`, through the real parser.
+    fn one_realm(flags: u8, name: &str) -> RealmInfo {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.push(flags);
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(b"h:8086\0");
+        body.extend_from_slice(&1.0f32.to_le_bytes());
+        body.extend_from_slice(&[0, 1, 2]);
+        let mut packet = vec![CMD_REALM_LIST];
+        packet.extend_from_slice(&(body.len() as u16 + 3).to_le_bytes());
+        packet.extend_from_slice(&0u32.to_le_bytes());
+        packet.push(1);
+        packet.extend_from_slice(&body);
+        packet.extend_from_slice(&0u16.to_le_bytes());
+        futures_lite::future::block_on(read_realm_list(&mut packet.as_slice()))
+            .unwrap()
+            .remove(0)
+    }
+
+    /// Both tag shapes read, the name is kept as sent, and only a SPECIFYBUILD realm is read at all.
+    #[test]
+    fn a_specifybuild_realm_advertises_its_version_in_its_name() {
+        let turtle = one_realm(0x04, "TurtleWoW (1.18.1.7272)");
+        assert_eq!(
+            turtle.name, "TurtleWoW (1.18.1.7272)",
+            "the name is kept as sent"
+        );
+        let v = turtle.version.expect("tagged");
+        assert_eq!((v.major, v.minor, v.patch, v.build), (1, 18, 1, Some(7272)));
+        assert!(v.is_turtle());
+
+        let classic = one_realm(0x04, "Classic (1.12.1.5875)").version.unwrap();
+        assert_eq!(classic.build, Some(5875));
+        assert!(!classic.is_turtle());
+
+        // mangos's stock 1.x form: commas, no build.
+        let stock = one_realm(0x04, "Nostalrius (1,12,1)").version.unwrap();
+        assert_eq!((stock.minor, stock.build), (12, None));
+
+        // No flag, no version: a realm merely named like a tag is not one.
+        assert_eq!(one_realm(0x00, "Odd (1.18.1.7272)").version, None);
+    }
+
+    #[test]
+    fn a_malformed_tag_is_no_version() {
+        for name in [
+            "Classic",
+            "Classic (1.12)",
+            "Classic (1.12.1.5875.1)",
+            "Classic (one.12.1)",
+            "Classic (1.12.1.70000)",
+            "Classic 1.12.1",
+            "Classic (1.12.1",
+        ] {
+            assert_eq!(realm_version_tag(name), None, "{name}");
+        }
     }
 
     /// The rewritten values are the reference parser's own, bit for bit.
@@ -609,7 +786,9 @@ mod tests {
             packet.push(1);
             packet.extend_from_slice(&body);
             packet.extend_from_slice(&0u16.to_le_bytes());
-            read_realm_list(&mut packet.as_slice()).unwrap().remove(0)
+            futures_lite::future::block_on(read_realm_list(&mut packet.as_slice()))
+                .unwrap()
+                .remove(0)
         };
 
         let recommended = one(600.0);
@@ -646,7 +825,9 @@ mod tests {
         packet.push(1);
         packet.extend_from_slice(&body);
         packet.extend_from_slice(&0u16.to_le_bytes());
-        read_realm_list(&mut packet.as_slice()).unwrap().remove(0)
+        futures_lite::future::block_on(read_realm_list(&mut packet.as_slice()))
+            .unwrap()
+            .remove(0)
     }
 
     /// The realm record fill (`0x5b2230`) turns each of `"*/:<>?\|` in a name into a space

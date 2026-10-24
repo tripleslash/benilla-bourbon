@@ -62,8 +62,15 @@ use crate::ui_mail::MailOpen;
 use crate::ui_petition::PetitionRecords;
 use crate::ui_quest_log::QuestLog;
 
-/// Seconds between writes: answers arrive in bursts on zone-in, and a crash costs only re-asking.
+/// The shortest gap between writes: answers arrive in bursts on zone-in, and a crash costs only
+/// re-asking.
 const SAVE_DEBOUNCE: f32 = 10.0;
+
+/// fork: the gap after a write that took `T` is at least `T` times this, so persisting can never
+/// take more than its inverse of wall time at any store size: every write encodes the whole store,
+/// which only grows, and on the web it lands in `localStorage`, synchronously on the thread that
+/// draws the frame. 1000 = 0.1%: a 10 ms write keeps the 10 s floor, a 40 ms one waits 40 s.
+const SAVE_COST_RATIO: f32 = 1000.0;
 
 /// The client build, the header's second dword (`0x5567cc`).
 const BUILD: u32 = 0x16f3;
@@ -74,7 +81,9 @@ const FORMAT: u32 = 1;
 
 /// A store the reference saves: the answer whose body is its record, and how a record read off
 /// disk is filed.
-pub(crate) trait SavedCache: Resource + Default {
+pub(crate) trait SavedCache:
+    Resource<Mutability = bevy::ecs::component::Mutable> + Default
+{
     /// The reference's file name, without `.wdb`.
     const FILE: &'static str;
     /// The reference's tag, the header's first dword (the constructor's first argument, `BOMW` for
@@ -366,6 +375,9 @@ pub(crate) struct WdbFile<T> {
     /// Bytes have landed since the last write, which the generation does not count.
     dirty: bool,
     since_save: f32,
+    /// The gap [`Self::since_save`] races: [`SAVE_DEBOUNCE`] until a write is timed, then what
+    /// [`SAVE_COST_RATIO`] makes of the last one.
+    save_gap: f32,
     _store: PhantomData<T>,
 }
 
@@ -378,6 +390,7 @@ impl<T> Default for WdbFile<T> {
             saved: 0,
             dirty: false,
             since_save: 0.0,
+            save_gap: SAVE_DEBOUNCE,
             _store: PhantomData,
         }
     }
@@ -422,13 +435,14 @@ fn load<T: SavedCache>(roster: Res<Roster>, mut file: ResMut<WdbFile<T>>, mut ca
     file.path = crate::local_state::template_cache_path(&realm, T::FILE);
     // An earlier build's creature names, which the creature store's file replaces.
     if let Some(retired) = crate::local_state::retired_name_cache_path(&realm) {
-        let _ = std::fs::remove_file(retired);
+        let _ = crate::local_state::remove_file(&retired);
     }
     file.saved = cache.store().generation();
     let Some(path) = file.path.clone() else {
         return; // a hermetic capture, or no state folder: session-only
     };
-    let Ok(bytes) = std::fs::read(&path) else {
+    // Through `local_state`, not `std::fs`: on the web the state folder is `localStorage`.
+    let Ok(bytes) = crate::local_state::read(&path) else {
         return; // no file yet
     };
     let Some(entries) = decode(&bytes, T::TAG, &realm) else {
@@ -461,7 +475,7 @@ fn load<T: SavedCache>(roster: Res<Roster>, mut file: ResMut<WdbFile<T>>, mut ca
 /// Writes the store when its records have changed and the debounce has elapsed.
 fn save<T: SavedCache>(time: Res<Time>, mut file: ResMut<WdbFile<T>>, cache: Res<T>) {
     file.since_save += time.delta_secs();
-    if file.since_save < SAVE_DEBOUNCE {
+    if file.since_save < file.save_gap {
         return;
     }
     file.since_save = 0.0;
@@ -486,9 +500,11 @@ fn write_now<T: SavedCache>(file: &mut WdbFile<T>, cache: &T) {
     let entries = keys
         .into_iter()
         .filter_map(|k| file.bodies.get(&k).map(|b| (k, b.as_slice())));
+    let started = bevy::platform::time::Instant::now();
     let bytes = encode(T::TAG, realm, entries);
     match crate::local_state::write_atomic_bytes(path, &bytes) {
         Ok(()) => {
+            file.save_gap = SAVE_DEBOUNCE.max(started.elapsed().as_secs_f32() * SAVE_COST_RATIO);
             file.saved = generation;
             file.dirty = false;
             debug!("wdb: wrote {}", path.display());

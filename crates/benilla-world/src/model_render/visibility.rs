@@ -50,6 +50,7 @@ pub(super) fn apply_model_visibility(
         &ModelPart,
         Ref<GlobalTransform>,
         &mut Visibility,
+        &mut super::ShadowOccluder,
         Option<&DoodadFade>,
         Option<&mut MeshTag>,
         Option<&mut MeshMaterial3d<WowModelMaterial>>,
@@ -73,6 +74,8 @@ pub(super) fn apply_model_visibility(
         ),
         Without<ModelPart>,
     >,
+    horizon: Option<Res<crate::horizon::Horizon>>,
+    census: Option<ResMut<crate::horizon::HorizonCensus>>,
 ) {
     let m = &debug.models;
     let cam_view = cam.iter().next();
@@ -87,6 +90,7 @@ pub(super) fn apply_model_visibility(
         && !windows.is_changed()
         && !claim.is_changed()
         && !far_twins.is_changed()
+        && !horizon.as_ref().is_some_and(|h| h.is_changed())
         && new_portals.is_empty()
         && owner_flips.is_empty();
     let cam_pos = cam_t.map(|t| t.translation());
@@ -100,12 +104,17 @@ pub(super) fn apply_model_visibility(
     // Parallel over every resident model submesh (~100k in a city); every write is change-gated.
     let unmarked: bevy::platform::collections::HashSet<Entity> = unmarked.read().collect();
     let unmarked = &unmarked;
+    let behind_horizon = std::sync::atomic::AtomicUsize::new(0);
+    let behind_horizon = &behind_horizon;
+    let no_horizon = crate::horizon::Horizon::default();
+    let horizon = horizon.as_deref().unwrap_or(&no_horizon);
     q.par_iter_mut().for_each(
         |(
             entity,
             part,
             xf,
             mut vis,
+            mut occluder,
             fade,
             tag,
             mat,
@@ -189,6 +198,26 @@ pub(super) fn apply_model_visibility(
             // (units, GameObjects) and the camera's own building are exempt.
             let own_building = group_vis.is_some_and(|gv| Some(gv.instance) == own_instance);
             let exterior_ok = !exterior || own_building || gate.admits(&xf, aabb);
+            // Exterior doodads by their sphere (`0x683700`), map objects by their box with flags 1
+            // (`0x6856c0`); per submesh, as the window gate tests them.
+            let behind = exterior_ok
+                && exterior
+                && !own_building
+                && horizon.active()
+                && aabb.is_some_and(|a| {
+                    let (min, max) = crate::horizon::world_box(&xf, a);
+                    match part.kind {
+                        ModelKind::Doodad => {
+                            horizon.hides_sphere((min + max) * 0.5, (max - min).length() * 0.5)
+                        }
+                        ModelKind::Wmo => horizon.hides_box(min, max, 1),
+                        _ => false,
+                    }
+                });
+            if behind {
+                behind_horizon.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let exterior_ok = exterior_ok && !(behind && horizon.enforced());
 
             // A billboard card draws only while its model does, by the owner's last-frame verdict.
             // Entity-lane cards only: a placement's card is `ExteriorScene` and gated above. An
@@ -213,6 +242,15 @@ pub(super) fn apply_model_visibility(
             };
             if *vis != desired {
                 *vis = desired;
+            }
+
+            // The shadow-caster verdict: the CONTENT terms only. `portal_visible`, `exterior_ok`
+            // and `owner_hidden` are all functions of where the camera looks, and geometry the
+            // camera cannot see still blocks the sun — folding them in made entity-lane shadows
+            // swing with view direction. Change-gated like every write in this walk.
+            let occludes = toggled_on && in_range && fade_alpha > 0.0 && mat_factor > 0.0;
+            if occluder.0 != occludes {
+                occluder.0 = occludes;
             }
 
             // The two tag fields this system owns, in one read-modify-write: the alpha (fade ×
@@ -241,14 +279,11 @@ pub(super) fn apply_model_visibility(
                     } else {
                         &f.cutout
                     };
-                    // A feathering doodad beyond the water plane takes its pick's far twin
-                    // (`sky_order::FAR_SIDE_BIAS`); an opaque draw settles by depth. A twin not
-                    // built yet keeps the base until next frame.
-                    let want = if far_side && fade_alpha < 1.0 {
-                        far_twins.far_of(base).unwrap_or(base)
-                    } else {
-                        base
-                    };
+                    // A transparent pick beyond the water plane takes its far twin
+                    // (`sky_order::FAR_SIDE_BIAS`), feathering or steady in an authored blend mode
+                    // (`0x707680` lists every transparent batch); an opaque pick has no twin and
+                    // settles by depth. A twin not built yet keeps the base until next frame.
+                    let want = super::far_resolved(base, far_side, &far_twins);
                     if mat.0 != *want {
                         mat.0 = want.clone();
                     }
@@ -256,6 +291,9 @@ pub(super) fn apply_model_visibility(
             }
         },
     );
+    if let (false, Some(mut census)) = (scene_still, census) {
+        census.parts = behind_horizon.load(std::sync::atomic::Ordering::Relaxed);
+    }
 
     // A building's MLIQ surfaces, gated by the ever-visited latch, not this frame's PVS: a group's
     // liquid draws from its first visit for the rest of the placement's residency. An index past
@@ -417,6 +455,7 @@ mod tests {
             pivot: Vec3::ZERO,
             kind: BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: vec![],
         };
         let card = app
@@ -463,6 +502,71 @@ mod tests {
             Visibility::Inherited,
             "an unreadable owner fails OPEN"
         );
+    }
+
+    /// A doodad batch authored `Blend` is a transparent at fade 1 too, so beyond the water plane it
+    /// draws on the far list (`0x707680`), under the water, as a feathering one does.
+    #[test]
+    fn a_steady_blend_doodad_beyond_the_water_takes_its_far_twin() {
+        let cutout: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("c0000000-0000-4000-8000-0000000000a1");
+        let blend: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("b1000000-0000-4000-8000-0000000000a2");
+        let far: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("fa000000-0000-4000-8000-0000000000a3");
+        // The pair `classify_water_side` builds for the authored-blend steady material.
+        let mut twins = super::super::FarSideTwins::default();
+        twins.to_far.insert(cutout.id(), far.clone());
+        twins.to_near.insert(far.id(), cutout.clone());
+
+        let mut app = App::new();
+        app.init_resource::<DebugState>()
+            .init_resource::<ViewDistance>()
+            .init_resource::<crate::wmo_portal::ExteriorWindows>()
+            .init_resource::<crate::wmo_portal::CameraInteriorClaim>()
+            .insert_resource(twins)
+            .add_systems(Update, apply_model_visibility);
+        let part = app
+            .world_mut()
+            .spawn((
+                ModelPart {
+                    kind: ModelKind::Doodad,
+                    blend: ModelBlend::Blend,
+                },
+                GlobalTransform::IDENTITY,
+                Visibility::Inherited,
+                // Past `NEVER_FADE_RADIUS`: the fade is 1 at any distance.
+                DoodadFade {
+                    radius: 20.0,
+                    local_center: Vec3::ZERO,
+                    cutout: cutout.clone(),
+                    blend,
+                },
+                MeshMaterial3d(cutout.clone()),
+                super::super::FarSideOfWater,
+            ))
+            .id();
+        let drawn = |app: &App| {
+            app.world()
+                .entity(part)
+                .get::<MeshMaterial3d<WowModelMaterial>>()
+                .unwrap()
+                .0
+                .clone()
+        };
+        app.update();
+        assert_eq!(
+            drawn(&app),
+            far,
+            "a steady blended batch under the water must draw before the water pass"
+        );
+
+        // The control: off the far side it is back on its authored material.
+        app.world_mut()
+            .entity_mut(part)
+            .remove::<super::super::FarSideOfWater>();
+        app.update();
+        assert_eq!(drawn(&app), cutout, "the near side keeps the authored pick");
     }
 
     /// The reference's WMO liquid drain `0x684cd0` gates on the "Map objects" bit

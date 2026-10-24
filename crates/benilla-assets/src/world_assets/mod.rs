@@ -12,9 +12,12 @@ use bevy::render::render_resource::{Buffer, Face};
 
 use crate::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF};
 use crate::SpatialCache;
+/// Native only: the web target's [`WorldAssets::texture`] hands the same read to the `AssetServer`
+/// instead of decoding it here.
+#[cfg(not(target_arch = "wasm32"))]
+use benilla_formats::read_texture_native_chain;
 use benilla_formats::{
-    blp_to_rgba, read_texture_native_chain, tga_texture_size, tga_to_rgba, Chain, ModelBlend,
-    TGA_GATE_PREFIX,
+    blp_to_rgba, tga_texture_size, tga_to_rgba, Chain, ModelBlend, TryRead, TGA_GATE_PREFIX,
 };
 pub use benilla_formats::{LooseFile, LooseIndex, LooseIndexCell, LooseOpen};
 
@@ -22,10 +25,31 @@ pub use benilla_formats::{LooseFile, LooseIndex, LooseIndexCell, LooseOpen};
 mod images;
 pub use images::*;
 
+/// How many times a sprite resolution has answered [`SpriteLoad::Pending`]: the signal that a
+/// cached UI conversion is stale. A caller that draws once and keeps the result while its inputs
+/// stay equal (the FrameXML extract gate) would otherwise hold the placeholder for as long as a
+/// window is open. Snapshotted around a conversion, it tells that conversion whether anything it
+/// resolved has yet to arrive. Bumped inside [`decode_sprite`], so it counts every sprite lane.
+static SPRITE_DEFERRALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Read [`SPRITE_DEFERRALS`]. Snapshot it before a conversion and compare after: unequal means
+/// something that conversion drew is still coming, and the result must not be cached as final.
+pub fn sprite_deferrals() -> u64 {
+    SPRITE_DEFERRALS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// [`WorldAssets::pending_sprite`]'s slot in the `generated` cache. A reserved name, not a path: no
+/// BLP is ever asked for under it.
+const PENDING_SPRITE_KEY: &str = "@pending";
+
 /// The shared asset store: the one open patch chain and the dedup caches, so each BLP decodes once
 /// and submeshes sharing a texture and blend share a material that Bevy batches.
 #[derive(Resource)]
 pub struct WorldAssets {
+    /// The [`AssetServer`], which [`Self::texture`] hands its loads to on the web target. Held on
+    /// every target so `open`'s signature does not fork.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    server: AssetServer,
     /// The one open patch chain. The `Mutex` is `Send + Sync` glue for the streaming loaders'
     /// `&mut Chain`, not a read serializer: `Chain` reads are `&self` on a fresh OS handle.
     pub chain: Arc<Mutex<Chain>>,
@@ -89,13 +113,27 @@ pub fn sprite_candidates(path: &str) -> [String; 2] {
 /// The texel size of a UI sprite, which `CSimpleTexture`'s size getters read (`[tex+0x144]`,
 /// `[tex+0x148]`; `0x770720`, `0x770790`) for a region with no authored size, one texel per
 /// FrameXML unit. Decoded, so layout gets the size the screen shows, and read by an
-/// interface texture's open ([`LooseOpen::Index`]).
-pub fn sprite_dimensions(
-    chain: &Mutex<Chain>,
-    loose: &LooseFiles,
-    path: &str,
-) -> Option<(u32, u32)> {
-    decode_texture(chain, loose, path, LooseOpen::Index).map(|(w, h, _)| (w, h))
+/// interface texture's open ([`LooseOpen::Index`]) as `TextureCreate` makes it ([`decode_texture`]);
+/// three-valued, because the art can still be coming ([`SpriteDims`]).
+pub fn sprite_dimensions(chain: &Mutex<Chain>, loose: &LooseFiles, path: &str) -> SpriteDims {
+    match decode_texture(chain, loose, path, LooseOpen::Index, ReadMode::Defer) {
+        SpriteLoad::Ready((w, h, _)) => SpriteDims::Ready(w, h),
+        SpriteLoad::Pending => SpriteDims::Pending,
+        SpriteLoad::Missing => SpriteDims::Missing,
+    }
+}
+
+/// [`sprite_dimensions`]'s answer, three-valued for the same reason the sprite caches' is: the
+/// caller **memoises**, and a measurement taken while the art was still in flight must not be the
+/// number a region keeps for the rest of the session.
+///
+/// A `Missing` is worth remembering — a path that resolves to nothing measures nothing however often
+/// it is asked. A `Pending` is worth nothing at all. On native only the first and last arms occur.
+pub enum SpriteDims {
+    Ready(u32, u32),
+    /// The art exists but has not arrived. Ask again; do not remember this.
+    Pending,
+    Missing,
 }
 
 /// Decode the first of [`sprite_candidates`] that reads and decodes, each read by
@@ -107,8 +145,9 @@ fn decode_sprite(
     loose: &LooseFiles,
     path: &str,
     open: LooseOpen,
-) -> Option<(u32, u32, Vec<u8>)> {
-    decode_sprite_as(chain, loose, path, open, OnRefusal::Miss)
+    mode: ReadMode,
+) -> SpriteLoad {
+    decode_sprite_as(chain, loose, path, open, mode, OnRefusal::Miss)
 }
 
 /// [`decode_sprite`] for a load that `TextureCreate` (`0x449d90`) makes: the first candidate that
@@ -119,8 +158,9 @@ fn decode_texture(
     loose: &LooseFiles,
     path: &str,
     open: LooseOpen,
-) -> Option<(u32, u32, Vec<u8>)> {
-    decode_sprite_as(chain, loose, path, open, OnRefusal::WhiteDefault)
+    mode: ReadMode,
+) -> SpriteLoad {
+    decode_sprite_as(chain, loose, path, open, mode, OnRefusal::WhiteDefault)
 }
 
 /// What a candidate file that opens but will not decode becomes.
@@ -144,32 +184,54 @@ fn decode_sprite_as(
     loose: &LooseFiles,
     path: &str,
     open: LooseOpen,
+    mode: ReadMode,
     on_refusal: OnRefusal,
-) -> Option<(u32, u32, Vec<u8>)> {
+) -> SpriteLoad {
     let open = loose_open_for(path, open);
     let candidates = sprite_candidates(path);
     // Asked before the chain's lock, so an index build never stalls an archive reader.
     let hits: Vec<Option<LooseFile>> = candidates.iter().map(|c| loose.find(c, open)).collect();
-    let mut chain = chain.lock_recover();
+    let chain = chain.lock_recover();
+    // Set by any candidate the store has but has not got here yet. It does not short-circuit the
+    // walk — a later candidate may be resident and answer outright — but it does decide the verdict
+    // if none is, because "not yet" and "not there" must not produce the same cached answer.
+    let mut waiting = false;
+    // Candidates that a store DID answer and the decoder then refused — the difference between
+    // "no such file" and "that file is broken", which the miss warning below reports apart.
+    let mut undecodable: Vec<&str> = Vec::new();
     for (candidate, hit) in candidates.iter().zip(&hits) {
-        // A loose file answers the candidate whether or not it decodes ([`read_loose_or_chain`]).
-        let bytes = match hit {
-            Some(file) => file.read(),
-            None => chain.read_file(candidate).ok(),
+        // A loose file answers the candidate whether or not it decodes, and one that will not
+        // read is a miss with no turn to the chain ([`read_loose_or_chain`]).
+        let bytes = if let Some(file) = hit {
+            match file.read() {
+                Some(bytes) => bytes,
+                None => continue,
+            }
+        } else {
+            match mode.read(&chain, candidate) {
+                TryRead::Ready(bytes) => bytes,
+                TryRead::Pending => {
+                    waiting = true;
+                    continue;
+                }
+                TryRead::Missing => continue,
+            }
         };
-        match bytes.map(|b| decode_candidate(candidate, &b, on_refusal)) {
-            Some(Candidate::Pixels(width, height, rgba)) => return Some((width, height, rgba)),
-            Some(Candidate::Next) | None => {}
+        match decode_candidate(candidate, &bytes, on_refusal) {
+            Candidate::Pixels(width, height, rgba) => {
+                return SpriteLoad::Ready((width, height, rgba));
+            }
+            Candidate::Next => undecodable.push(candidate),
         }
     }
-    // "Not there" and "there but would not decode" are different faults; say which.
-    let found_but_undecodable: Vec<&String> = candidates
-        .iter()
-        .zip(&hits)
-        .filter(|(c, hit)| hit.is_some() || chain.read_file(c).is_ok())
-        .map(|(c, _)| c)
-        .collect();
-    if found_but_undecodable.is_empty() {
+    if waiting {
+        SPRITE_DEFERRALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return SpriteLoad::Pending;
+    }
+    // "Not there" and "there but would not decode" are different faults; say which. The walk
+    // above already read every candidate and collected the undecodable ones, so nothing is
+    // re-read here (a browser re-read would be a second trip for bytes already in hand).
+    if undecodable.is_empty() {
         warn!(
             "texture miss: '{path}' does not resolve in the patch chain{} (tried {})",
             if open == LooseOpen::Archives {
@@ -183,14 +245,59 @@ fn decode_sprite_as(
         warn!(
             "texture miss: '{path}' RESOLVES but will not decode ({}) — the file is there and the \
              decoder refused it",
-            found_but_undecodable
-                .iter()
-                .map(|c| c.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            undecodable.join(", ")
         );
     }
-    None
+    SpriteLoad::Missing
+}
+
+/// Which read lane a sprite resolution takes — the answer to "**can this caller come back?**".
+///
+/// [`ReadMode::Defer`] is right for anything asked per frame: the FrameXML extract re-resolves every
+/// texture on every conversion, so a `Pending` costs a frame or two of transparent placeholder and
+/// nothing else.
+///
+/// [`ReadMode::Block`] is for the **one-shot warmers** — the glue screens' art, the chat-bubble and
+/// V-plate boot sets, the loading-screen backdrop — which resolve a fixed set once and then keep the
+/// handles (and, in two cases, bake pixel sizes off them) for the rest of the session. A placeholder
+/// reaching one of those is permanent: the art never appears, and the size baked from a 1x1 image is
+/// wrong forever. They pay a blocking read instead, which costs what it has always cost and lands on
+/// a boot or loading frame where there is no smooth animation to protect.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadMode {
+    /// May answer [`SpriteLoad::Pending`]. The caller must ask again and cache nothing.
+    Defer,
+    /// Never answers `Pending`; blocks until the bytes are in hand (on native both are the same read).
+    Block,
+}
+
+impl ReadMode {
+    fn read(self, chain: &Chain, name: &str) -> TryRead {
+        match self {
+            ReadMode::Defer => chain.try_read(name),
+            ReadMode::Block => match chain.read(name) {
+                Ok(bytes) => TryRead::Ready(bytes),
+                Err(_) => TryRead::Missing,
+            },
+        }
+    }
+}
+
+/// What [`decode_sprite`] found. The third arm exists for the browser, where a texture whose pack
+/// is not resident is neither a hit nor a miss: it is a fetch in flight, and the caller's job is to
+/// draw without it for a frame or two and ask again.
+///
+/// It matters because every sprite cache below stores **misses as well as hits** — the UI extractor
+/// asks per quad per frame, so an uncached miss would re-walk the chain forever. Caching a `Pending`
+/// under that rule would be permanent: the icon would arrive in the resident map a moment later and
+/// nothing would ever look again.
+enum SpriteLoad {
+    Ready((u32, u32, Vec<u8>)),
+    /// In flight. Do not cache; ask again next frame.
+    Pending,
+    /// Nothing in the chain (or the AddOns folder) resolves this path, or everything that did
+    /// refused to decode. Cached, and warned about once.
+    Missing,
 }
 
 /// The open a name makes: `open`, unless the name is written with `/`, which no loose file
@@ -241,22 +348,30 @@ impl SpriteProbe {
                 Some(file) => source_key(file),
                 None => format!("chain:{candidate}"),
             };
+            // Per frame, so the chain is asked on the lane that never blocks ([`ReadMode::Defer`]).
             self.gate(&key, candidate, || match hit {
-                Some(file) => file.read_prefix(TGA_GATE_PREFIX),
-                None => chain.lock_recover().read_file(candidate).ok(),
+                Some(file) => match file.read_prefix(TGA_GATE_PREFIX) {
+                    Some(bytes) => TryRead::Ready(bytes),
+                    None => TryRead::Missing,
+                },
+                None => chain.lock_recover().try_read(candidate),
             })
         })
     }
 
     /// Whether a `.tga` candidate makes a texture, from the bytes `read` gives, for the resolved
     /// file `key` names.
-    fn gate(&self, key: &str, candidate: &str, read: impl FnOnce() -> Option<Vec<u8>>) -> bool {
+    fn gate(&self, key: &str, candidate: &str, read: impl FnOnce() -> TryRead) -> bool {
         if let Some(&answer) = self.gate.borrow().get(key) {
             return answer;
         }
         self.header_reads.set(self.header_reads.get() + 1);
-        let Some(bytes) = read() else {
-            return false;
+        let bytes = match read() {
+            TryRead::Ready(bytes) => bytes,
+            // Deviation (browser): a header still in flight answers by its open alone and is not
+            // remembered, where the reference reads it at once; the gate decides once it lands.
+            TryRead::Pending => return true,
+            TryRead::Missing => return false,
         };
         let answer = makes_texture(candidate, &bytes);
         self.gate.borrow_mut().insert(key.to_string(), answer);
@@ -355,8 +470,9 @@ fn mask_rgba(
     loose: &LooseFiles,
     path: &str,
     open: LooseOpen,
-) -> Option<(u32, u32, Vec<u8>)> {
-    decode_texture(chain, loose, path, open)
+    mode: ReadMode,
+) -> SpriteLoad {
+    decode_texture(chain, loose, path, open, mode)
 }
 
 /// One BLP file decoded, read with the loose flag ([`LooseOpen::Index`], or the archives for a
@@ -366,17 +482,28 @@ fn decode_blp_file(
     loose: &LooseFiles,
     path: &str,
     name: &str,
-) -> Option<(u32, u32, Vec<u8>)> {
-    let bytes = read_loose_or_chain(chain, loose, name, loose_open_for(path, LooseOpen::Index));
+    mode: ReadMode,
+) -> SpriteLoad {
+    let bytes = match loose.find(name, loose_open_for(path, LooseOpen::Index)) {
+        Some(file) => file.read(),
+        None => match mode.read(&chain.lock_recover(), name) {
+            TryRead::Ready(bytes) => Some(bytes),
+            TryRead::Pending => {
+                SPRITE_DEFERRALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return SpriteLoad::Pending;
+            }
+            TryRead::Missing => None,
+        },
+    };
     match bytes.map(|b| blp_to_rgba(&b)) {
-        Some(Ok(decoded)) => Some(decoded),
+        Some(Ok(decoded)) => SpriteLoad::Ready(decoded),
         Some(Err(e)) => {
             warn!("texture miss: '{name}' RESOLVES but will not decode as a BLP: {e:#}");
-            None
+            SpriteLoad::Missing
         }
         None => {
             warn!("texture miss: '{name}' does not resolve");
-            None
+            SpriteLoad::Missing
         }
     }
 }
@@ -389,12 +516,25 @@ fn emblem_names(path: &str) -> Vec<String> {
 
 /// The pixels of a tabard emblem cell, read from the archives alone (`0x5a7b40` with flag 0) and
 /// decoded as a BLP ([`emblem_names`]).
-fn emblem_rgba(chain: &Mutex<Chain>, path: &str) -> Option<(u32, u32, Vec<u8>)> {
+fn emblem_rgba(chain: &Mutex<Chain>, path: &str, mode: ReadMode) -> SpriteLoad {
     let chain = chain.lock_recover();
-    emblem_names(path).into_iter().find_map(|name| {
-        let bytes = chain.read(&name).ok()?;
-        decode_by_name(&name, &bytes).ok()
-    })
+    let mut waiting = false;
+    for name in emblem_names(path) {
+        match mode.read(&chain, &name) {
+            TryRead::Ready(bytes) => {
+                if let Ok(decoded) = decode_by_name(&name, &bytes) {
+                    return SpriteLoad::Ready(decoded);
+                }
+            }
+            TryRead::Pending => waiting = true,
+            TryRead::Missing => {}
+        }
+    }
+    if waiting {
+        SPRITE_DEFERRALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return SpriteLoad::Pending;
+    }
+    SpriteLoad::Missing
 }
 
 /// The pixels of a portrait: the sink `0x525d30` formats `%s.blp` onto the name as written
@@ -404,21 +544,29 @@ fn portrait_rgba(
     chain: &Mutex<Chain>,
     loose: &LooseFiles,
     path: &str,
-) -> Option<(u32, u32, Vec<u8>)> {
-    decode_blp_file(chain, loose, path, &format!("{}.blp", normalize_path(path)))
+    mode: ReadMode,
+) -> SpriteLoad {
+    let name = format!("{}.blp", normalize_path(path));
+    decode_blp_file(chain, loose, path, &name, mode)
 }
 
 /// The pixels of a picture the cursor code opens through `0x449610`: `SetCursor`'s custom cursor
 /// (`0x523c86`) and the dragged icon (`0x5239f7`, `0x523a3e`, `0x523af7`, `0x523bb1`), all with the
 /// loose flag. It strips a three-letter extension (`0x449590` at `0x44963c`) and appends `.blp`
 /// (`0x449641`), and the bytes decode as a BLP (`0x449840`): `Foo.tga` opens `Foo.blp`, and no
-/// `.tga` is read.
+/// `.tga` is read. Blocking: `0x523c98` waits on the load, and the dragged composite is a hardware
+/// cursor for the whole drag, asked once.
 pub fn file_texture_rgba(
     chain: &Mutex<Chain>,
     loose: &LooseFiles,
     path: &str,
 ) -> Option<(u32, u32, Vec<u8>)> {
-    decode_blp_file(chain, loose, path, &format!("{}.blp", sprite_key(path)))
+    let name = format!("{}.blp", sprite_key(path));
+    match decode_blp_file(chain, loose, path, &name, ReadMode::Block) {
+        SpriteLoad::Ready(decoded) => Some(decoded),
+        // `Block` never defers; the arm exists because the enum has three of them.
+        SpriteLoad::Pending | SpriteLoad::Missing => None,
+    }
 }
 
 /// The loose files an open that sets the loose flag reads before the archive chain, as the
@@ -585,6 +733,14 @@ struct SpriteCaches {
 }
 
 impl SpriteCaches {
+    /// Drop every entry, hit or miss, keeping the index generation they were synced to.
+    fn clear(&mut self) {
+        *self = SpriteCaches {
+            loose_generation: self.loose_generation,
+            ..SpriteCaches::default()
+        };
+    }
+
     /// Drop every entry opened with the loose flag when the install's index was emptied since
     /// they filled, so the next request opens again, as the reference opens a texture again once
     /// it was released (every UI texture at a `ReloadUI` or a logout, the moments that empty the
@@ -629,8 +785,8 @@ pub fn write_gated<M: bevy::asset::Asset>(
     apply: impl FnOnce(&mut M),
 ) {
     if assets.get(handle).is_none_or(differs) {
-        if let Some(m) = assets.get_mut(handle) {
-            apply(m);
+        if let Some(mut m) = assets.get_mut(handle) {
+            apply(&mut m);
         }
     }
 }
@@ -663,10 +819,21 @@ impl<T> LockRecover<T> for Mutex<T> {
 }
 
 impl WorldAssets {
+    /// Drop every cache filled from the chain — decoded textures, UI sprites and their misses, the
+    /// derived images and the materials over them — for a change of the data the chain answers
+    /// from (the Turtle layer mounted or unmounted). The next request re-reads the chain; a miss is
+    /// forgotten too, since the new data may hold what the old did not. Procedural sprites stay.
+    pub fn forget_chain_art(&mut self) {
+        self.textures.clear();
+        self.model_materials.clear();
+        self.cache.clear();
+    }
+
     /// Open the store over an opened patch chain. `shared_light` is a raw `Buffer`, not the
     /// client's `SharedLightBuffer`, which keeps this crate below the renderer.
-    pub fn open(chain: Chain, shared_light: Buffer) -> Self {
+    pub fn open(chain: Chain, shared_light: Buffer, server: AssetServer) -> Self {
         Self {
+            server,
             chain: Arc::new(Mutex::new(chain)),
             textures: SpatialCache::default(),
             cache: SpriteCaches::default(),
@@ -677,9 +844,20 @@ impl WorldAssets {
         }
     }
 
-    /// [`read_loose_or_chain`] over this store with the loose flag set ([`LooseOpen::Index`]), for
-    /// an open with no decoder here: every sound file (`0x7a8860`), as FMOD's file callbacks open
-    /// with flag 1, and the glue's own interface files.
+    /// [`read_loose_or_chain`]'s rule with the loose flag set ([`LooseOpen::Index`]) and the chain
+    /// half non-blocking ([`TryRead`]), for an open with no decoder here: every sound file
+    /// (`0x7a8860`), as FMOD's file callbacks open with flag 1, and the glue's own interface files.
+    /// Such a read must not fetch a pack synchronously on the page. A loose file that will not
+    /// read is `Missing`, with no turn to the chain; the page has no loose files.
+    pub fn try_read_loose_or_chain(&self, path: &str) -> TryRead {
+        match self.loose.find(path, LooseOpen::Index) {
+            Some(file) => file.read().map_or(TryRead::Missing, TryRead::Ready),
+            None => self.chain.lock_recover().try_read(path),
+        }
+    }
+
+    /// [`Self::try_read_loose_or_chain`]'s blocking twin, for a one-shot read at boot that has no
+    /// frame to come back on: the glue's own interface files (`SFile::Load`, flag 1).
     pub fn read_file_or_loose(&self, path: &str) -> Option<Vec<u8>> {
         read_loose_or_chain(&self.chain, &self.loose, path, LooseOpen::Index)
     }
@@ -717,11 +895,43 @@ impl WorldAssets {
         if let Some(handle) = self.textures.fetch(&key) {
             return Some(handle);
         }
-        // World art uploads as the BLP stores it; nothing reads it main-side.
-        let chain = read_texture_native_chain(&mut self.chain.lock_recover(), &key.0).ok()?;
-        let handle = images.add(repeat_texture_authored(crate::for_upload(chain), wrap));
+        let handle = self.upload_world_texture(&key.0, wrap, images)?;
         self.textures.insert(key, handle.clone());
         Some(handle)
+    }
+
+    /// [`Self::texture`]'s decode where loaders run on their own threads: read the BLP out of the
+    /// chain and upload it now. World art uploads as the BLP stores it; nothing reads it main-side.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn upload_world_texture(
+        &self,
+        key: &str,
+        wrap: (bool, bool),
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let chain = read_texture_native_chain(&mut self.chain.lock_recover(), key).ok()?;
+        Some(images.add(repeat_texture_authored(crate::for_upload(chain), wrap)))
+    }
+
+    /// [`Self::texture`]'s decode in a browser, where a chain read on the frame thread is a
+    /// blocking fetch of a pack nothing warmed. The load goes to the [`AssetServer`] at the same
+    /// `mpq://` URL every other texture uses, which resolves to [`crate::BlpImageLoader`]'s
+    /// `WorldArt` variant, this function's twin (the address mode rides the URL), so the `Image` is
+    /// identical and only arrives later: the batch draws a few frames late instead of stalling.
+    /// `contains` first: a path no archive holds must still return `None`, so `model_material`
+    /// falls back to an untextured material instead of a handle that never loads.
+    #[cfg(target_arch = "wasm32")]
+    fn upload_world_texture(
+        &self,
+        key: &str,
+        wrap: (bool, bool),
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let _ = images; // the AssetServer owns the upload on this target
+        if !self.chain.lock_recover().contains(key) {
+            return None;
+        }
+        Some(self.server.load(crate::texture_url(key, wrap)))
     }
 
     /// A clamp-sampled sRGB sprite, mip 0 only, opened as an interface texture
@@ -750,8 +960,13 @@ impl WorldAssets {
         if let Some(cached) = self.cache.sprites.get(&key) {
             return cached;
         }
-        let loaded = decode_texture(&self.chain, &self.loose, path, open)
-            .map(|(w, h, rgba)| images.add(sprite_image(w, h, rgba)));
+        let loaded = match decode_texture(&self.chain, &self.loose, path, open, ReadMode::Defer) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(sprite_image(w, h, rgba))),
+            // In flight: hand back the transparent placeholder and cache NOTHING, so the next
+            // frame asks again and gets the real art the moment it lands.
+            SpriteLoad::Pending => return Some(self.pending_sprite(images)),
+            SpriteLoad::Missing => None,
+        };
         let open = loose_open_for(path, open);
         self.cache.sprites.insert(key, open, loaded.clone());
         loaded
@@ -760,7 +975,12 @@ impl WorldAssets {
     /// Decode a sprite to raw RGBA8 without uploading or caching, for a caller that resamples,
     /// read by `open`.
     pub fn decode_rgba(&mut self, path: &str, open: LooseOpen) -> Option<(u32, u32, Vec<u8>)> {
-        decode_sprite(&self.chain, &self.loose, path, open)
+        match decode_sprite(&self.chain, &self.loose, path, open, ReadMode::Defer) {
+            SpriteLoad::Ready(decoded) => Some(decoded),
+            // Uncached and one-shot, so `Pending` folds into `None` here: the caller asks at load
+            // and asks again if it needs to, and there is no cache entry to poison either way.
+            SpriteLoad::Pending | SpriteLoad::Missing => None,
+        }
     }
 
     /// A UI sprite resampled to an exact pixel size by the caller's kernel, cached by size: the
@@ -778,7 +998,22 @@ impl WorldAssets {
             return cached.clone();
         }
         if !self.cache.resample_sources.contains_key(path) {
-            let decoded = decode_texture(&self.chain, &self.loose, path, LooseOpen::Index);
+            // `Defer`, and **a `Pending` caches nothing** — not the source and not the resampled
+            // handle. A plate re-asks for its border every frame it is up, so a fetch in flight
+            // costs a frame or two of unbordered plate and then resolves itself; writing either
+            // cache under `Pending` would make that permanent, because the pack lands in the
+            // resident map a moment later and nothing would ever look again. See [`ReadMode`].
+            let decoded = match decode_texture(
+                &self.chain,
+                &self.loose,
+                path,
+                LooseOpen::Index,
+                ReadMode::Defer,
+            ) {
+                SpriteLoad::Ready(decoded) => Some(decoded),
+                SpriteLoad::Pending => return None,
+                SpriteLoad::Missing => None,
+            };
             self.cache
                 .resample_sources
                 .insert(path.to_string(), decoded);
@@ -796,15 +1031,104 @@ impl WorldAssets {
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
+        self.wrapped_sprite(path, images, ReadMode::Defer)
+    }
+
+    /// [`Self::sprite_texture_wrapped`] for a one-shot warmer ([`Self::sprite_texture_blocking`]):
+    /// the glue screens' tiled backdrops.
+    pub fn sprite_texture_wrapped_blocking(
+        &mut self,
+        path: &str,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        self.wrapped_sprite(path, images, ReadMode::Block)
+    }
+
+    fn wrapped_sprite(
+        &mut self,
+        path: &str,
+        images: &mut Assets<Image>,
+        mode: ReadMode,
+    ) -> Option<Handle<Image>> {
         self.sync_loose();
         let key = sprite_key(path);
         if let Some(cached) = self.cache.tiled.get(&key) {
             return cached;
         }
-        let loaded = decode_texture(&self.chain, &self.loose, path, LooseOpen::Index)
-            .map(|(w, h, rgba)| images.add(sprite_image_tiled(w, h, rgba)));
+        let loaded = match decode_texture(&self.chain, &self.loose, path, LooseOpen::Index, mode) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(sprite_image_tiled(w, h, rgba))),
+            // In flight: hand back the transparent placeholder and cache NOTHING, so the next
+            // frame asks again and gets the real art the moment it lands.
+            SpriteLoad::Pending => return Some(self.pending_sprite(images)),
+            SpriteLoad::Missing => None,
+        };
         let open = loose_open_for(path, LooseOpen::Index);
         self.cache.tiled.insert(key, open, loaded.clone());
+        loaded
+    }
+
+    /// The stand-in a sprite cache hands back while its real art is still coming: 1x1, fully
+    /// transparent. Not `None`: a UI quad with no texture draws the shared white image, an opaque
+    /// white rectangle at an icon's rect. One image for the process, in the `generated` cache, so
+    /// the handle is stable and the quad-list dirty check does not see a new texture every frame.
+    fn pending_sprite(&mut self, images: &mut Assets<Image>) -> Handle<Image> {
+        self.generated_sprite(PENDING_SPRITE_KEY, images, || (1, 1, vec![0, 0, 0, 0]))
+    }
+
+    /// [`Self::sprite_texture`] for a one-shot warmer, a caller that resolves its art once and
+    /// keeps the handle, so it cannot take a placeholder ([`ReadMode::Block`]): the glue screens'
+    /// art table, the V-plate boot set, and the loading-screen backdrop, all on a
+    /// boot or loading frame.
+    pub fn sprite_texture_blocking(
+        &mut self,
+        path: &str,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        self.sprite_texture_opened_blocking(path, LooseOpen::Index, images)
+    }
+
+    /// [`Self::sprite_texture_blocking`] with the open the caller's reference load makes
+    /// ([`Self::sprite_texture_opened`]): the loading screen and the minimap's default art.
+    pub fn sprite_texture_opened_blocking(
+        &mut self,
+        path: &str,
+        open: LooseOpen,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        self.sync_loose();
+        let key = sprite_key(path);
+        if let Some(cached) = self.cache.sprites.get(&key) {
+            return cached;
+        }
+        let loaded = match decode_texture(&self.chain, &self.loose, path, open, ReadMode::Block) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(sprite_image(w, h, rgba))),
+            // `Block` never defers; the arm exists because the enum has three of them.
+            SpriteLoad::Pending | SpriteLoad::Missing => None,
+        };
+        let open = loose_open_for(path, open);
+        self.cache.sprites.insert(key, open, loaded.clone());
+        loaded
+    }
+
+    /// [`Self::mask_texture`]'s blocking twin, for the minimap's boot art table and
+    /// `SetMaskTexture`, which commits the requested path before it resolves.
+    pub fn mask_texture_blocking(
+        &mut self,
+        path: &str,
+        open: LooseOpen,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        self.sync_loose();
+        let key = sprite_key(path);
+        if let Some(cached) = self.cache.masks.get(&key) {
+            return cached;
+        }
+        let loaded = match mask_rgba(&self.chain, &self.loose, path, open, ReadMode::Block) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(mask_image(w, h, rgba))),
+            SpriteLoad::Pending | SpriteLoad::Missing => None,
+        };
+        let open = loose_open_for(path, open);
+        self.cache.masks.insert(key, open, loaded.clone());
         loaded
     }
 
@@ -838,8 +1162,13 @@ impl WorldAssets {
         if let Some(cached) = self.cache.portraits.get(&key) {
             return cached;
         }
-        let loaded = portrait_rgba(&self.chain, &self.loose, path)
-            .map(|(w, h, rgba)| images.add(portrait_image(w, h, rgba)));
+        let loaded = match portrait_rgba(&self.chain, &self.loose, path, ReadMode::Defer) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(portrait_image(w, h, rgba))),
+            // In flight: hand back the transparent placeholder and cache NOTHING, so the next
+            // frame asks again and gets the real art the moment it lands.
+            SpriteLoad::Pending => return Some(self.pending_sprite(images)),
+            SpriteLoad::Missing => None,
+        };
         let open = loose_open_for(path, LooseOpen::Index);
         self.cache.portraits.insert(key, open, loaded.clone());
         loaded
@@ -859,14 +1188,21 @@ impl WorldAssets {
             return cached;
         }
         let open = LooseOpen::Archives;
-        let loaded = emblem_rgba(&self.chain, path).map(|(w, h, mut rgba)| {
-            for px in rgba.as_chunks_mut::<4>().0 {
-                px[0] = 0xFF;
-                px[1] = 0xFF;
-                px[2] = 0xFF;
+        let loaded = match emblem_rgba(&self.chain, path, ReadMode::Defer) {
+            SpriteLoad::Ready((w, h, mut rgba)) => {
+                for px in rgba.as_chunks_mut::<4>().0 {
+                    px[0] = 0xFF;
+                    px[1] = 0xFF;
+                    px[2] = 0xFF;
+                }
+                Some(images.add(sprite_image(w, h, rgba)))
             }
-            images.add(sprite_image(w, h, rgba))
-        });
+            // In flight: hand back the transparent placeholder and cache NOTHING, so the next
+            // frame asks again and gets the real art the moment it lands. The caller is the
+            // FrameXML extract, which re-resolves every texture per conversion.
+            SpriteLoad::Pending => return Some(self.pending_sprite(images)),
+            SpriteLoad::Missing => None,
+        };
         self.cache.sprites.insert(key, open, loaded.clone());
         loaded
     }
@@ -884,8 +1220,13 @@ impl WorldAssets {
         if let Some(cached) = self.cache.masks.get(&key) {
             return cached;
         }
-        let loaded = mask_rgba(&self.chain, &self.loose, path, open)
-            .map(|(w, h, rgba)| images.add(mask_image(w, h, rgba)));
+        let loaded = match mask_rgba(&self.chain, &self.loose, path, open, ReadMode::Defer) {
+            SpriteLoad::Ready((w, h, rgba)) => Some(images.add(mask_image(w, h, rgba))),
+            // In flight: hand back the transparent placeholder and cache NOTHING, so the next
+            // frame asks again and gets the real art the moment it lands.
+            SpriteLoad::Pending => return Some(self.pending_sprite(images)),
+            SpriteLoad::Missing => None,
+        };
         let open = loose_open_for(path, open);
         self.cache.masks.insert(key, open, loaded.clone());
         loaded
@@ -986,6 +1327,9 @@ impl WorldAssets {
         let handle = materials.add(WowModelMaterial {
             base,
             extension: WowModelExt {
+                modern_shadow: crate::materials::MODERN_SHADOW_MAP, // fork: modern lighting (FORK.md, P2)
+                modern_cascades: crate::materials::MODERN_SHADOW_CASCADES,
+                modern_fog: crate::materials::MODERN_FOG_VOLUME, // fork: modern lighting (FORK.md, P4)
                 clutter_fade,
                 // x = WMO (FFP N·L × MOCV), y = the fade blend twin (no caller passes it here).
                 model_flags: Vec4::new(
@@ -1020,10 +1364,63 @@ pub struct RenderConfig {
 }
 
 /// Startup ordering: the patch chain opens in [`AssetSet::Open`], so other startup systems run
-/// after it and borrow [`WorldAssets`].
+/// after it and borrow [`WorldAssets`]; the catalogs are built from it in [`AssetSet::Catalogs`].
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssetSet {
     Open,
+    /// The one run of [`DataLoad`] at startup, right after [`AssetSet::Open`].
+    Catalogs,
+}
+
+/// **The schedule every catalog loader runs in**: once at startup, in [`AssetSet::Catalogs`], and
+/// again whenever the data the chain answers from changes — the Turtle WoW 1.18.1 layer mounted or
+/// unmounted (`benilla_formats::layers::data_generation`) — so every catalog is rebuilt from the
+/// chain it will be read against. A loader here replaces what it inserts and spawns nothing, which
+/// is what makes a second run safe.
+#[derive(bevy::ecs::schedule::ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DataLoad;
+
+/// **The data the chain answers from changed** — the Turtle WoW 1.18.1 layer mounted or unmounted —
+/// and [`DataLoad`] has already rerun. Triggered once per change, never per frame: a cache of
+/// chain-derived data that outlives the change registers an observer that forgets it, and the
+/// next use rebuilds it from the new data.
+#[derive(bevy::ecs::event::Event, Debug, Clone, Copy)]
+pub struct ChainDataChanged;
+
+/// Marks an `App` whose [`DataLoad`] schedule and startup run are installed.
+#[derive(Resource)]
+struct DataLoadInstalled;
+
+/// Run [`DataLoad`]: at startup and on every data change. Its commands apply when the run ends,
+/// so a caller sees every catalog the run built.
+pub fn run_data_load(world: &mut World) {
+    world.try_run_schedule(DataLoad).ok();
+}
+
+/// Registering a catalog loader.
+pub trait DataLoadAppExt {
+    /// Add `systems` to [`DataLoad`], installing the schedule and its startup run the first time
+    /// any plugin does, so every `App` that has a loader also runs it — a test `App` with one
+    /// plugin included.
+    fn add_data_loaders<M>(
+        &mut self,
+        systems: impl bevy::ecs::schedule::IntoScheduleConfigs<bevy::ecs::system::ScheduleSystem, M>,
+    ) -> &mut Self;
+}
+
+impl DataLoadAppExt for App {
+    fn add_data_loaders<M>(
+        &mut self,
+        systems: impl bevy::ecs::schedule::IntoScheduleConfigs<bevy::ecs::system::ScheduleSystem, M>,
+    ) -> &mut Self {
+        if !self.world().contains_resource::<DataLoadInstalled>() {
+            self.insert_resource(DataLoadInstalled)
+                .init_schedule(DataLoad)
+                .configure_sets(Startup, AssetSet::Catalogs.after(AssetSet::Open))
+                .add_systems(Startup, run_data_load.in_set(AssetSet::Catalogs));
+        }
+        self.add_systems(DataLoad, systems)
+    }
 }
 
 #[cfg(test)]
@@ -1292,9 +1689,15 @@ mod tests {
         let back = "Interface\\Glues\\Loose\\Custom";
         let slash = "Interface/Glues/Loose/Custom";
         assert!(sprite_found(&chain, &loose, back));
-        assert!(sprite_dimensions(&chain, &loose, back).is_some());
+        assert!(matches!(
+            sprite_dimensions(&chain, &loose, back),
+            SpriteDims::Ready(..)
+        ));
         assert!(!sprite_found(&chain, &loose, slash));
-        assert!(sprite_dimensions(&chain, &loose, slash).is_none());
+        assert!(matches!(
+            sprite_dimensions(&chain, &loose, slash),
+            SpriteDims::Missing
+        ));
     }
 
     /// An emptied index drops every sprite opened with the loose flag, hit or miss, and keeps those
@@ -1433,6 +1836,50 @@ mod tests {
     /// The addon corpus' three `BigWigs` ready-check icons are 32-bit TGAs with no alpha bits:
     /// `0x44a140` returns each as a texture of its header's size once the header opens, and the
     /// refused decode leaves it white (`0x44a2eb`).
+    /// [`sprite_dimensions`] as a size: a native chain never answers `Pending`.
+    fn dims(chain: &Mutex<Chain>, loose: &LooseFiles, path: &str) -> Option<(u32, u32)> {
+        match sprite_dimensions(chain, loose, path) {
+            SpriteDims::Ready(w, h) => Some((w, h)),
+            SpriteDims::Missing => None,
+            SpriteDims::Pending => panic!("a native chain never defers"),
+        }
+    }
+
+    /// A load's pixels, `None` for a miss: a native chain never answers `Pending`.
+    fn loaded(load: SpriteLoad) -> Option<(u32, u32, Vec<u8>)> {
+        match load {
+            SpriteLoad::Ready(decoded) => Some(decoded),
+            SpriteLoad::Missing => None,
+            SpriteLoad::Pending => panic!("a native chain never defers"),
+        }
+    }
+
+    /// [`decode_texture`]'s pixels, by the interface open.
+    fn texture(
+        chain: &Mutex<Chain>,
+        loose: &LooseFiles,
+        path: &str,
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        loaded(decode_texture(
+            chain,
+            loose,
+            path,
+            LooseOpen::Index,
+            ReadMode::Block,
+        ))
+    }
+
+    /// [`decode_sprite`]'s pixels, by the interface open.
+    fn sprite(chain: &Mutex<Chain>, loose: &LooseFiles, path: &str) -> Option<(u32, u32, Vec<u8>)> {
+        loaded(decode_sprite(
+            chain,
+            loose,
+            path,
+            LooseOpen::Index,
+            ReadMode::Block,
+        ))
+    }
+
     #[test]
     fn the_corpus_ready_check_icons_are_textures_of_their_size() {
         let data = benilla_formats::wow_data_or_skip!();
@@ -1445,12 +1892,8 @@ mod tests {
         for name in ["Ready", "Waiting", "NotReady"] {
             let path = format!("Interface\\AddOns\\BigWigs\\Icons\\ReadyCheck-{name}");
             assert!(sprite_found(&chain, &loose, &path), "{name}");
-            assert_eq!(
-                sprite_dimensions(&chain, &loose, &path),
-                Some((64, 64)),
-                "{name}"
-            );
-            let (_, _, rgba) = decode_texture(&chain, &loose, &path, LooseOpen::Index).unwrap();
+            assert_eq!(dims(&chain, &loose, &path), Some((64, 64)), "{name}");
+            let (_, _, rgba) = texture(&chain, &loose, &path).unwrap();
             assert!(rgba.iter().all(|&b| b == 0xff), "{name}: opaque white");
         }
     }
@@ -1473,12 +1916,12 @@ mod tests {
         };
         let icon = "Interface\\AddOns\\Foo\\Icon";
         assert!(sprite_found(&chain, &loose, icon));
-        assert_eq!(sprite_dimensions(&chain, &loose, icon), Some((16, 8)));
-        let (w, h, rgba) = decode_texture(&chain, &loose, icon, LooseOpen::Index).unwrap();
+        assert_eq!(dims(&chain, &loose, icon), Some((16, 8)));
+        let (w, h, rgba) = texture(&chain, &loose, icon).unwrap();
         assert_eq!((w, h, rgba.len()), (16, 8, 16 * 8 * 4));
         assert!(rgba.iter().all(|&b| b == 0xff));
         // A load that is not `TextureCreate`'s still gets no pixels.
-        assert!(decode_sprite(&chain, &loose, icon, LooseOpen::Index).is_none());
+        assert!(sprite(&chain, &loose, icon).is_none());
         // Not a size `0x448450` makes (`0x4484ae`-`0x4484d0`): `TextureCreate` fails the candidate
         // whether its pixels decode or not, and `SetTexture` answers nil.
         std::fs::write(dir.join("Wide.tga"), decodable_tga(24, 8)).unwrap();
@@ -1494,7 +1937,7 @@ mod tests {
         ] {
             let path = format!("Interface\\AddOns\\Foo\\{name}");
             assert_eq!(sprite_found(&chain, &loose, &path), found, "{name}");
-            assert_eq!(sprite_dimensions(&chain, &loose, &path), size, "{name}");
+            assert_eq!(dims(&chain, &loose, &path), size, "{name}");
         }
     }
 
@@ -1575,14 +2018,7 @@ mod tests {
             addons: Some(addons.0.clone()),
             install: None,
         };
-        let load = |name: &str| {
-            decode_texture(
-                &chain,
-                &loose,
-                &format!("Interface\\AddOns\\Foo\\{name}"),
-                LooseOpen::Index,
-            )
-        };
+        let load = |name: &str| texture(&chain, &loose, &format!("Interface\\AddOns\\Foo\\{name}"));
         let (w, h, rgba) = load("Art.tga").unwrap();
         assert_eq!((w, h, rgba[0]), (8, 8, 2), "the .blp beside it draws");
         let (w, h, rgba) = load("Pic").unwrap();
@@ -1611,23 +2047,20 @@ mod tests {
             addons: Some(addons.0.clone()),
             install: None,
         };
-        let (w, h, rgba) = mask_rgba(
-            &chain,
-            &loose,
-            "Interface\\AddOns\\Foo\\Mask",
-            LooseOpen::Index,
-        )
-        .unwrap();
+        let mask = |name: &str| {
+            loaded(mask_rgba(
+                &chain,
+                &loose,
+                &format!("Interface\\AddOns\\Foo\\{name}"),
+                LooseOpen::Index,
+                ReadMode::Block,
+            ))
+        };
+        let (w, h, rgba) = mask("Mask").unwrap();
         assert_eq!((w, h), (16, 8));
         assert!(rgba.iter().all(|&b| b == 0xff));
         assert!(
-            mask_rgba(
-                &chain,
-                &loose,
-                "Interface\\AddOns\\Foo\\None",
-                LooseOpen::Index
-            )
-            .is_none(),
+            mask("None").is_none(),
             "a name that resolves nowhere stays the minimap's green"
         );
     }
@@ -1651,7 +2084,8 @@ mod tests {
             install: None,
         };
         let red = |name: &str| {
-            portrait_rgba(&chain, &loose, &format!("Interface\\AddOns\\Foo\\{name}"))
+            let path = format!("Interface\\AddOns\\Foo\\{name}");
+            loaded(portrait_rgba(&chain, &loose, &path, ReadMode::Block))
                 .map(|(_, _, rgba)| rgba[0])
         };
         assert_eq!(red("Icon"), None, "no Icon.blp, and the .tga is not read");
@@ -1702,7 +2136,8 @@ mod tests {
         );
         let data = benilla_formats::wow_data_or_skip!();
         let chain = Mutex::new(Chain::open(&data).expect("open the chain"));
-        let (w, h, _) = emblem_rgba(&chain, stem).expect("the emblem BLP decodes");
+        let (w, h, _) =
+            loaded(emblem_rgba(&chain, stem, ReadMode::Block)).expect("the emblem BLP decodes");
         assert!(w > 0 && h > 0);
     }
 
@@ -1712,6 +2147,7 @@ mod tests {
         out[17] = 0x28;
         out
     }
+
     /// `SetTexture` runs per frame in the addons that set an icon every `OnUpdate`: a TGA's header
     /// is read once for a resolved file, and a read that fails is asked again.
     #[test]
@@ -1722,7 +2158,7 @@ mod tests {
         let reads = std::cell::Cell::new(0);
         let read = |bytes: Option<&Vec<u8>>| {
             reads.set(reads.get() + 1);
-            bytes.cloned()
+            bytes.cloned().map_or(TryRead::Missing, TryRead::Ready)
         };
         for _ in 0..3 {
             assert!(probe.gate("loose", tga, || read(Some(&good))));

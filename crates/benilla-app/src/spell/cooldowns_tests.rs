@@ -1,6 +1,8 @@
 //! The list's flush sites and the values its inserts take, each pinned to the reference's site.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use bevy::platform::time::Instant;
 
 use benilla_formats::SpellDisplay;
 use benilla_protocol::messages::{ItemUseSpell, SpellCooldown};

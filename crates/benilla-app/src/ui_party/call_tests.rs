@@ -17,7 +17,7 @@ fn client() -> (App, Receiver<ClientCommand>) {
     let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let (tx, rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
-    app.insert_non_send_resource(UiScript::new().expect("a VM"));
+    app.insert_non_send(UiScript::new().expect("a VM"));
     (app, rx)
 }
 
@@ -53,7 +53,7 @@ fn a_chunks_party_verbs_send_in_call_order_with_every_other_verb() {
     let (mut app, rx) = client();
     // Our player's object and a party we lead: `LeaveParty` (`0x4e9196`) and `ConvertToRaid`
     // (`0x4bbc96`-`0x4bbcbc`) send only then.
-    let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+    let mut script = app.world_mut().non_send_mut::<UiScript>();
     script.set_unit_guids(&benilla_ui::script::UnitGuids {
         player: 0x10,
         ..Default::default()
@@ -113,7 +113,7 @@ fn invite_to_party_flags_the_grouping_tutorial_before_its_invite() {
         .resource_mut::<crate::names::NameCache>()
         .insert_player(BOB, "Bob".into(), None);
     world
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_unit_guids(&benilla_ui::script::UnitGuids {
             player: ME,
             target: BOB,
@@ -149,7 +149,7 @@ fn invite_to_party_flags_the_grouping_tutorial_before_its_invite() {
 fn do_ready_check_shows_its_start_line_inside_the_call() {
     let (mut app, rx) = client();
     let world = app.world_mut();
-    let mut script = world.non_send_resource_mut::<UiScript>();
+    let mut script = world.non_send_mut::<UiScript>();
     script.set_party(benilla_ui::script::PartyState {
         leader_guid: 0x10,
         own_guid: 0x10,

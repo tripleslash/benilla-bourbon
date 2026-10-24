@@ -54,7 +54,7 @@ fn client() -> Who {
             WHO_TAG_RACE = "r-" WHO_TAG_CLASS = "c-""#,
         )
         .expect("the strings install");
-    app.world_mut().insert_non_send_resource(script);
+    app.world_mut().insert_non_send(script);
     let feed = app.world_mut().register_system(super::feed::feed_social);
     let mut w = Who { app, rx, feed };
     w.app
@@ -193,7 +193,7 @@ fn set_who_to_ui_routes_the_next_answer() {
 fn the_lfg_verbs_send_inside_their_call() {
     let mut w = client();
     {
-        let mut script = w.app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = w.app.world_mut().non_send_mut::<UiScript>();
         script.set_lfg_dungeons(vec![benilla_ui::script::LfgDungeon {
             name: "Deadmines".into(),
             min_level: 15,

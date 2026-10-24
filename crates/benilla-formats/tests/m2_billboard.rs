@@ -61,3 +61,40 @@ fn lamppost_glow_is_spherical_billboard() {
         anim.duration_ms
     );
 }
+
+/// `Misc_1H_Lantern_B_01.m2`'s glow card rides bone 4, a spherical billboard under bone 1, itself
+/// spherical: the card names that bone as its carrier, 0.062 yd up its own +X.
+#[test]
+fn a_glow_card_under_a_billboard_bone_names_its_carrier() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+    let subs = load_m2_mesh(
+        &mut chain,
+        "Item\\ObjectComponents\\Weapon\\Misc_1H_Lantern_B_01.m2",
+    )
+    .expect("load the lantern");
+    let bb = subs
+        .iter()
+        .filter_map(|s| s.billboard.as_ref())
+        .find(|b| b.bone == 4)
+        .expect("the lantern's glow card rides bone 4");
+    let [(pivot, kind)] = bb.carriers.as_slice() else {
+        panic!("one billboard bone above the glow's, got {:?}", bb.carriers);
+    };
+    assert_eq!(*kind, BillboardKind::Spherical);
+    assert!(
+        (pivot[0] - bb.pivot[0] - 0.0621).abs() < 1e-3,
+        "the carrier sits 0.062 yd up the card's +X: {pivot:?} over {:?}",
+        bb.pivot
+    );
+    // The Elwynn lamppost's glow bone hangs under no billboard bone: its pivot is its seat.
+    let subs = load_m2_mesh(
+        &mut chain,
+        "World\\Azeroth\\Elwynn\\PassiveDoodads\\Lamppost\\Lamppost.m2",
+    )
+    .expect("load Lamppost");
+    assert!(subs
+        .iter()
+        .filter_map(|s| s.billboard.as_ref())
+        .all(|b| b.carriers.is_empty()));
+}

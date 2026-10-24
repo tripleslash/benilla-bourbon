@@ -206,7 +206,7 @@ mod tests {
         // No engine behind it: the VM keeps its calls for the test to apply.
         let mut script = UiScript::new().expect("a bare VM");
         script.keep_calls();
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         world
     }
 
@@ -250,7 +250,7 @@ mod tests {
 
         let run = |world: &mut World, lua: &str| {
             world
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<()>(lua)
                 .expect("the binding runs");
             world
@@ -280,7 +280,7 @@ mod tests {
 
         // An unknown token raises in the resolver (`0x515940` → `0x515970`) before any select.
         assert!(world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<()>(r#"AssistUnit("nosuchunit")"#)
             .is_err());
         assert_eq!(
@@ -289,7 +289,7 @@ mod tests {
         );
         // `TargetUnit`'s resolver raises alike (`0x489a08` → `0x515970`).
         assert!(world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<()>(r#"TargetUnit("nosuchunit")"#)
             .is_err());
 
@@ -369,7 +369,7 @@ mod tests {
 
         let run = |world: &mut World, lua: &str| {
             world
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<()>(lua)
                 .expect("the binding runs");
             world
@@ -468,7 +468,7 @@ mod tests {
 
         let run = |world: &mut World, lua: &str| {
             world
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<()>(lua)
                 .expect("the binding runs");
             world
@@ -513,7 +513,7 @@ mod tests {
         }
         // `npc` is compared whole, so `npctarget` is no token and raises (`0x515c14`).
         assert!(world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<()>(r#"TargetUnit("npctarget")"#)
             .is_err());
 
@@ -581,7 +581,7 @@ mod tests {
 
         let run = |world: &mut World, lua: &str| {
             world
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<()>(lua)
                 .expect("the binding runs");
             world
@@ -642,7 +642,7 @@ mod tests {
         let mut world = script_world();
         let mut chat = crate::ui_script::chat_tests::chat_frame();
         chat.keep_calls();
-        world.insert_non_send_resource(chat);
+        world.insert_non_send(chat);
         world.spawn((SelfPlayer, Guid(ME), unit()));
         let vendor = world.spawn((Guid(VENDOR), unit())).id();
         world
@@ -651,7 +651,7 @@ mod tests {
             .insert(VENDOR, vendor);
         world.insert_resource(InteractNpc(Some(vendor), Some(VENDOR)));
 
-        let mut script = world.non_send_resource_mut::<UiScript>();
+        let mut script = world.non_send_mut::<UiScript>();
         assert!(script.focus_editbox("ChatFrameEditBox"));
         script.char_input(r#"/script TargetUnit("npc")"#);
         assert!(script.key_input("ENTER"), "the box consumes ENTER");

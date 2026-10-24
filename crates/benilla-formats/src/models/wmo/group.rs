@@ -494,9 +494,12 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
     let mut out = Vec::new();
     {
         let has_normals = group.vertex_normals.len() == group.vertex_positions.len();
-        let has_colors = colors.len() == group.vertex_positions.len();
         // Neither exterior (`0x8`) nor exterior-lit (`0x40`): the reference's interior test.
         let interior = (group.flags & 0x48) == 0;
+        // An exterior group draws unshaded by MOCV. 1.12.1's own data never pairs the two (every
+        // exterior group ships without one); Turtle WoW's does, 41 groups, and its 1.12 engine
+        // draws `SW_Harbor_Lowmain_000`, whose exterior bake averages 0.07, fully lit.
+        let has_colors = interior && colors.len() == group.vertex_positions.len();
         let vertex = |g: u32| {
             let p = &group.vertex_positions[g as usize];
             let n = group
@@ -719,6 +722,57 @@ mod tests {
             "0x34 is read raw: a zeroed header says liquid type 0, NOT the 0xf sentinel — the \
              reader must never conflate 'no liquid' with 'this whole group is water'"
         );
+    }
+
+    /// An exterior group's MOCV never reaches its batches, however dark (Turtle WoW's
+    /// `SW_Harbor_Lowmain_000` bakes ~0.07 and draws lit); an interior group's does.
+    #[test]
+    fn an_exterior_group_draws_unshaded_by_its_mocv() {
+        let mut mohd = vec![0u8; 64];
+        mohd[4..8].copy_from_slice(&1u32.to_le_bytes()); // one group
+        let mut root_bytes = chunk(b"DHOM", &mohd);
+        root_bytes.extend(chunk(b"XTOM", b"a.blp\0\0\0"));
+        root_bytes.extend(chunk(b"TMOM", &[0u8; 64])); // texture_1 at MOTX offset 0
+        let root = super::super::parse_wmo_root(&root_bytes).expect("root");
+
+        let group_with = |flags: u32| {
+            let mut mogp = vec![0u8; 68];
+            mogp[8..12].copy_from_slice(&flags.to_le_bytes());
+            let verts: Vec<u8> = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+                .iter()
+                .flat_map(|v| super::super::test_bytes::f3(*v))
+                .collect();
+            mogp.extend(chunk(b"TVOM", &verts));
+            mogp.extend(chunk(b"IVOM", &[0, 0, 1, 0, 2, 0]));
+            let mut moba = [0u8; 24];
+            moba[16..18].copy_from_slice(&3u16.to_le_bytes()); // count; start 0, material 0
+            mogp.extend(chunk(b"ABOM", &moba));
+            mogp.extend(chunk(b"VCOM", &[0, 0, 0, 0xff].repeat(3))); // a black bake
+            chunk(b"PGOM", &mogp)
+        };
+        let colors = |flags: u32| {
+            let subs = wmo_group_submeshes(&group_with(flags), &root).expect("submeshes");
+            assert_eq!(subs.len(), 1);
+            subs[0].vertex_colors.clone()
+        };
+        assert!(colors(0x8).is_empty(), "EXTERIOR: no MOCV stream");
+        assert!(colors(0x40).is_empty(), "exterior-lit: no MOCV stream");
+        assert_eq!(colors(0x0).len(), 3, "interior: the bake is the light");
+    }
+
+    /// Shadowmoon_Slagpit01_00x: MOGP declares 0x40 (short of the 0x44 header) and its sub-chunks
+    /// follow as top-level siblings to EOF — they still belong to the group.
+    #[test]
+    fn mogp_declaring_less_than_its_header_still_owns_the_sibling_chunks() {
+        let mut hdr = vec![0u8; 68];
+        hdr[8..12].copy_from_slice(&0x8u32.to_le_bytes());
+        let mut group = chunk(b"REVM", &17u32.to_le_bytes());
+        group.extend_from_slice(b"PGOM");
+        group.extend_from_slice(&64u32.to_le_bytes());
+        group.extend_from_slice(&hdr);
+        group.extend(chunk(b"RDOM", &[3, 0, 9, 0])); // MODR: doodad refs 3, 9
+        assert_eq!(wmo_group_doodad_refs(&group), vec![3, 9]);
+        assert_eq!(wmo_group_header(&group).expect("group header").flags, 0x8);
     }
 
     /// All 13 shipped overrides are `0`, water, so the no-liquid sentinel cannot be zero.

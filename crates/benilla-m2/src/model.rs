@@ -106,7 +106,7 @@ impl M2Bone {
 }
 
 /// One M2 vertex, 48 bytes: position @0, weights @0x0c, indices @0x10, normal @0x14, UV @0x20,
-/// and an unread second UV @0x28.
+/// second UV @0x28.
 pub struct M2Vertex {
     pub position: C3,
     /// Per-vertex bone influence weights (`/255`), paired with [`Self::bone_indices`].
@@ -114,6 +114,8 @@ pub struct M2Vertex {
     pub bone_indices: [u8; 4],
     pub normal: C3,
     pub tex_coords: C2,
+    /// The second coordinate set, a texture stage's when `texture_unit_lookup` names set 1.
+    pub tex_coords2: C2,
 }
 
 /// The texture lookup table and the collision hull's raw bytes.
@@ -224,6 +226,9 @@ pub struct M2Model {
     /// The texture-unit lookup (header `0x9c`), by `texture_coord_combo_index`: a UV channel or a
     /// generated environment coordinate (see [`Self::stage_is_env_mapped`]).
     pub texture_unit_lookup: Vec<u16>,
+    /// The file's u16s just past [`Self::texture_unit_lookup`], which the reference reads for an
+    /// index past its end ([`Self::stage_coord`]); empty where the file ends there.
+    pub texture_unit_lookup_past: Vec<u16>,
     /// The texture transforms, reached through [`Self::texture_transform_lookup`].
     pub texture_transforms: Vec<M2TextureTransform>,
     /// The texture combiner presets (header `0x144`, u16), read in version 0x101 alone: there a
@@ -263,15 +268,31 @@ pub struct M2Model {
 }
 
 impl M2Model {
-    /// Whether `batch`'s stage `stage` takes generated environment coordinates: a
-    /// [`Self::texture_unit_lookup`] entry above 2 (art: `0xffff`), and an out-of-range index,
-    /// gives the stage digit 2 of the vertex shader id (`0x71de50`, the test at `0x71deaa`), whose
-    /// `Shaders\Vertex\Model2.bls` program writes the sphere map `0.5 + 0.5·R.xy/|R|` of the
-    /// view-space reflection `R`, which no texture transform drives. The draw's gate `0x70b8bd`
-    /// makes the same test; the constants it then writes (`0x70b8d0`) that program does not read.
-    pub fn stage_is_env_mapped(&self, batch: &crate::SkinBatch, stage: u16) -> bool {
+    /// The coordinate source of `batch`'s stage `stage`: the [`Self::texture_unit_lookup`] entry
+    /// at `texture_coord_combo_index + stage`. The 1.12.1 draw's gate `0x70b8bd` reads it
+    /// unchecked, so an index past the table reads the file's next u16s
+    /// ([`Self::texture_unit_lookup_past`]).
+    ///
+    /// tortoise deviation: past the table a stage reads the UV set of its own number, as the Turtle
+    /// WoW client draws it. HD model packs (OctoWoW HD's `UI_MainMenu.m2`) ship two-texture units
+    /// over a one-entry table; on the Turtle client their stage 1 reads UV set 1, where the
+    /// clamped masks fit (the pillar swirls' `T_VFX_Border_256`, the portal's door masks). 1.12.1's
+    /// read-past gives UV set 0 there, which hides the swirls entirely.
+    pub fn stage_coord(&self, batch: &crate::SkinBatch, stage: u16) -> Option<u16> {
         let idx = batch.texture_coord_combo_index as usize + stage as usize;
-        self.texture_unit_lookup.get(idx).is_none_or(|&v| v > 2)
+        self.texture_unit_lookup.get(idx).copied().or(Some(stage))
+    }
+
+    /// Whether `batch`'s stage `stage` takes generated environment coordinates: a coordinate source
+    /// ([`Self::stage_coord`]) above 2 (art: `0xffff`), or none at all, gives the stage digit 2 of
+    /// the vertex shader id (`0x71de50`, the test at `0x71deaa`), whose `Shaders\Vertex\Model2.bls`
+    /// program writes the sphere map `0.5 + 0.5·R.xy/|R|` of the view-space reflection `R`, which
+    /// no texture transform drives. The draw's gate `0x70b8bd` makes the same test; the constants
+    /// it then writes (`0x70b8d0`) that program does not read. A table too short for the stage
+    /// (the OctoWoW HD pack's `UI_MainMenu.m2`: one entry, two-texture batches) reads on into the
+    /// file, where that file holds a 0: UV set 0, not the sphere map.
+    pub fn stage_is_env_mapped(&self, batch: &crate::SkinBatch, stage: u16) -> bool {
+        self.stage_coord(batch, stage).is_none_or(|v| v > 2)
     }
 
     /// The combine preset (0 to 5, gx render states `0x1f + k`) stage `stage` of `batch` binds

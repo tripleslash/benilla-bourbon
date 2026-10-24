@@ -1,11 +1,21 @@
 //! The realmlist: the `host[:port]`, or several separated by `;`, benilla dials for the logon
 //! handshake.
 //!
-//! The reference registers the CVar `realmList` (help "Address of realm list server", at
-//! `0x5ab6a6`) and loads it from `realmlist.wtf` beside the executable, with no UI. benilla keeps
-//! the name, the shape and the help string. Deviation: the value lives in `config.toml` with every
-//! other CVar and is edited from a login-screen control, because local state is one folder and one
-//! config file.
+//! The reference client has no UI for this at all: it registers a CVar named `realmList` — help
+//! text *"Address of realm list server"*, default `us.logon.worldofwarcraft.com:3724` — and loads
+//! it from a plain-text `realmlist.wtf` beside the executable, which every private server's setup
+//! page tells you to open in Notepad. (All four strings are byte-verified in `WoW.exe`, adjacent
+//! in the string table at the CVar's registration site, `0x5ab6a6`.) benilla keeps the
+//! **name, the `host[:port]` shape and the help string**, and replaces the text file with the
+//! config it already has.
+//!
+//! **Where the address comes from, per target.** Natively it is a CVar like every other:
+//! `config.toml`, `SetCVar("realmList")`, `$WOW_HOST` for a session. On the page it is
+//! `/config.json`'s `realmlist` and nothing else: the hosted tree's own configuration, fetched
+//! by `web/boot.js` and applied in [`crate::cvars::load_config`] as a session override, so a
+//! re-upload of one small asset repoints every client, including returning ones. The page has no
+//! login-screen editor: an address a visitor typed would be saved into `config.toml` and outrank
+//! the hosted one, so one source beats two.
 //!
 //! `$WOW_HOST` wins for the session, is never written to the file, and is taken verbatim, not
 //! through [`normalize`].
@@ -24,7 +34,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut realmlist: ResMut<R
         Some(address) => realmlist.set(&address),
         None => {
             warn!("cvar realmList: unusable realmlist '{}' ignored", ev.new);
-            realmlist.refused = Some(ev.new.clone());
         }
     }
 }
@@ -43,8 +52,10 @@ pub(crate) const CVAR_REALMLIST: &str = "realmList";
 /// `us.logon.worldofwarcraft.com:3724`, because that host no longer resolves.
 pub(crate) const DEFAULT_REALMLIST: &str = "localhost";
 
-/// The dialog box's `letters` cap. Deviation: 64, where the reference's login boxes cap at 16
-/// (`AccountLogin.xml`), because a hostname needs more.
+/// The longest address [`normalize`] accepts. It was the realmlist dialog's `letters` cap
+/// (the reference's login boxes are 16 in `AccountLogin.xml`; a hostname needs far more) and it
+/// outlived the dialog as the value's own bound: 64 covers any real DNS name — 253 is the protocol
+/// limit, but nothing an operator writes into `config.json` by hand approaches it.
 pub(crate) const MAX_LETTERS: usize = 64;
 
 /// The address the next logon attempt dials, as `host[:port]` (the port defaults to
@@ -53,26 +64,26 @@ pub(crate) const MAX_LETTERS: usize = 64;
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Realmlist {
     address: String,
-    /// `$WOW_HOST` owns this session: the address shows, the control is disabled, nothing persists.
+    /// `$WOW_HOST` owns this session. The screen still shows the address (a harness run that
+    /// dialed the wrong server should say so on its face), but nothing — a saved `config.toml`
+    /// value, a `SetCVar`, the page's `/config.json` — can move it, and nothing is written back.
     pinned_by_env: bool,
-    /// The last `realmList` value that was not an address, for the stock login screen's
-    /// realmlist dialog to reopen on ([`crate::ui_script::glue_mgr`]).
-    refused: Option<String>,
 }
 
 impl Default for Realmlist {
     fn default() -> Self {
-        match std::env::var("WOW_HOST") {
+        // Through `webenv`: on the page `?host=` is the pin. The value below it is only the
+        // fallback — `cvars::load_config` applies `/config.json`'s `realmlist` over it at Startup,
+        // and `default_realmlist` is what a page that names none is left with.
+        match crate::webenv::var("WOW_HOST").ok_or(()) {
             // Verbatim, not normalized.
             Ok(host) if !host.trim().is_empty() => Realmlist {
                 address: host,
                 pinned_by_env: true,
-                refused: None,
             },
             _ => Realmlist {
-                address: DEFAULT_REALMLIST.to_string(),
+                address: default_realmlist(),
                 pinned_by_env: false,
-                refused: None,
             },
         }
     }
@@ -85,7 +96,6 @@ impl Realmlist {
         Realmlist {
             address: address.to_string(),
             pinned_by_env: false,
-            refused: None,
         }
     }
 
@@ -97,11 +107,6 @@ impl Realmlist {
         self.pinned_by_env
     }
 
-    /// The last value refused as no address, taken once.
-    pub(crate) fn take_refused(&mut self) -> Option<String> {
-        self.refused.take()
-    }
-
     /// Points at an already normalized `address`; ignored while pinned by the env.
     pub(crate) fn set(&mut self, address: &str) {
         if self.pinned_by_env || self.address == address {
@@ -111,9 +116,19 @@ impl Realmlist {
     }
 }
 
-/// Normalizes typed or pasted text into a `host[:port]`, checking syntax only; reachability
-/// surfaces in the `LOGIN_FAILED` dialog. A pasted `realmlist.wtf` line
-/// (`SET realmlist "logon.example.org"`) is unwrapped to its value.
+/// Normalize a written address into a `host[:port]`, or `None` if there is nothing usable in it —
+/// `/config.json`'s `realmlist`, a `config.toml` line, a Lua `SetCVar("realmList")`.
+///
+/// **Syntax only, never reachability** — the deliberate line every comparable client draws
+/// (Veloren, ClassiCube, Terraria, Minecraft): a name that does not resolve, a closed port and a
+/// firewalled box are all indistinguishable without dialing, and a pre-connect probe would report
+/// a false negative on exactly the LAN/VPN-hosted vmangos box this client exists for. Those
+/// failures surface where they always have — the authored `LOGIN_FAILED` dialog, with the address
+/// on screen behind it.
+///
+/// It accepts a **`realmlist.wtf` line** verbatim (`SET realmlist "logon.example.org"`), because
+/// that is the literal string every private server's setup page tells you to copy, and pasting it
+/// into whichever config is at hand is what anyone will try first.
 pub(crate) fn normalize(input: &str) -> Option<String> {
     let mut s = input.trim();
 
@@ -162,6 +177,21 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     s.get(..prefix.len())
         .filter(|head| head.eq_ignore_ascii_case(prefix))
         .map(|_| &s[prefix.len()..])
+}
+
+/// The address dialed when nothing has configured one: [`DEFAULT_REALMLIST`] natively; on the
+/// page — a site whose `config.json` names no `realmlist`, which is how the checked-in one
+/// ships — the gateway's host, or the origin that served the page
+/// (see `crate::webenv::default_wow_host`).
+fn default_realmlist() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::webenv::default_wow_host()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        DEFAULT_REALMLIST.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -267,11 +297,10 @@ mod tests {
         let mut r = Realmlist {
             address: "harness.example.org".into(),
             pinned_by_env: true,
-            refused: None,
         };
         r.set("somewhere.else.org");
         assert_eq!(r.address(), "harness.example.org");
-        assert!(r.pinned_by_env());
+        assert!(r.pinned_by_env);
     }
 
     #[test]
@@ -279,7 +308,6 @@ mod tests {
         let mut r = Realmlist {
             address: DEFAULT_REALMLIST.into(),
             pinned_by_env: false,
-            refused: None,
         };
         r.set("logon.example.org");
         assert_eq!(r.address(), "logon.example.org");

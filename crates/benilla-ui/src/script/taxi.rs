@@ -69,7 +69,7 @@ pub struct TaxiUiState {
 impl super::UiScript {
     /// Push (or clear, with `None`) the open taxi map's snapshot.
     pub fn set_taxi(&mut self, state: Option<TaxiUiState>) {
-        self.model_mut().taxi = state;
+        set_field!(self, taxi, state);
     }
 
     /// The close (`0x4dc0f0`) clears the flight master's cell but keeps the slot count
@@ -93,7 +93,7 @@ impl super::UiScript {
 
     /// Whether the player is riding a taxi, for `UnitOnTaxi("player")`.
     pub fn set_on_taxi(&mut self, riding: bool) {
-        self.model_mut().taxi_riding = riding;
+        set_field!(self, taxi_riding, riding);
     }
 
     /// The taxi calls a harness's VM kept ([`Self::keep_calls`]), in call order.
@@ -139,7 +139,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "NumTaxiNodes",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(model.taxi.as_ref().map_or(0, |t| t.nodes.len()) as i64)
         })?,
     )?;
@@ -154,7 +156,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 i,
                 "Usage: TaxiNodeGetType(slot)",
             )?);
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(node(&model, i).map_or("NONE", |n| n.node_type.era_str()))
         })?,
     )?;
@@ -168,7 +172,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 i,
                 "Usage: TaxiNodeTaxiNodeLocation(slot)",
             )?);
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let n =
                 node(&model, i).ok_or_else(|| mlua::Error::RuntimeError(INVALID_SLOT.into()))?;
             Ok(n.pos)
@@ -184,7 +190,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 i,
                 "Usage: TaxiNodeName(slot)",
             )?);
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             // `INVALID` (`0x84afc8`) out of range (`0x4dc388`).
             Ok(node(&model, i).map_or_else(|| "INVALID".to_owned(), |n| n.name.clone()))
         })?,
@@ -199,7 +207,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 i,
                 "Usage: TaxiNodeCost(slot)",
             )?);
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let n =
                 node(&model, i).ok_or_else(|| mlua::Error::RuntimeError(INVALID_SLOT.into()))?;
             Ok(i64::from(n.cost))
@@ -225,7 +235,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         // (index - 1 as unsigned) answers 0 for, as for any out-of-range node.
         lua.create_function(|lua, i: Value| {
             let i = i64::from(binding_abi::ftol(binding_abi::coerced_number(lua, Some(i))));
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(node(&model, i).map_or(0, |n| i64::from(n.num_routes)))
         })?,
     )?;
@@ -245,7 +257,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let index =
                     |v| i64::from(binding_abi::ftol(binding_abi::coerced_number(lua, Some(v))));
                 let (hop, i) = (index(hop), index(i));
-                let model = lua.app_data_ref::<Model>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 let coord = node(&model, i)
                     .zip(usize::try_from(hop).ok().and_then(|h| h.checked_sub(1)))
                     .and_then(|(n, h)| n.routes.get(h))
@@ -276,14 +290,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetTaxiMap",
         lua.create_function(|lua, this: Value| {
             let art = {
-                let model = lua.app_data_ref::<Model>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 model.taxi.as_ref().map(|t| t.art.clone())
             };
             let Some(art) = art else {
                 return Ok(());
             };
             let rh = super::region::this_texture(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             model.set_texel(rh, crate::script::texel::TexSet::File(art));
             model.note_art(rh);
             Ok(())
@@ -298,7 +316,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, unit: mlua::Value| {
             let unit =
                 crate::script::binding_abi::string_arg(lua, unit, r#"Usage: UnitOnTaxi("unit")"#)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(crate::script::binding_abi::flag(
                 unit.eq_ignore_ascii_case("player") && model.taxi_riding,
             ))

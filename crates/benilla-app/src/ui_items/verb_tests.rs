@@ -250,7 +250,7 @@ impl Bags {
                 },
             );
         }
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         Self { app, rx }
     }
 
@@ -286,7 +286,7 @@ impl Bags {
     }
 
     fn script(&mut self) -> Mut<'_, UiScript> {
-        self.app.world_mut().non_send_resource_mut::<UiScript>()
+        self.app.world_mut().non_send_mut::<UiScript>()
     }
 
     /// What went on the wire, the name and item queries aside.

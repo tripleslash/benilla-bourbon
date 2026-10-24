@@ -127,43 +127,34 @@ fn escape_on_a_playing_movie_returns_to_login_on_the_key_up() {
     assert_eq!(s.take_errors(), Vec::<String>::new());
 }
 
-/// The Realmlist dialog widens the stock edit box, whose border is two 75-pixel caps that meet at
-/// its own 130 pixels: while it is wide the stretched middle fills the gap between the caps, as the
-/// chat box's does (`ChatFrame.xml:41-55`), and the stock box comes back untouched.
+/// This fork's login layer: the stock Quit button and the web-link buttons are gone and stay gone
+/// through the screen's own `OnShow`.
 #[test]
-fn the_widened_realmlist_box_has_a_border_between_its_caps() {
+fn the_stock_login_shows_no_quit_button() {
     let _ = benilla_formats::wow_data_or_skip!();
     let mut s = glue_on(GlueScreen::Login);
-    s.run("BENILLA_REALMLIST = 'logon.example.org' BenillaRealmlistButton:Click()")
-        .unwrap();
-    s.resolve();
-    let span = |s: &UiScript| {
-        s.eval::<(f64, f64, f64, f64)>(
-            "return GlueDialogEditBox:GetLeft(), GlueDialogEditBox:GetRight(), \
-             BenillaRealmlist_Middle:GetLeft(), BenillaRealmlist_Middle:GetRight()",
-        )
-        .unwrap()
-    };
-    let (box_left, box_right, mid_left, mid_right) = span(&s);
-    benilla_ui::assert_near!(box_right - box_left, 300.0);
-    benilla_ui::assert_near!(
-        (mid_left - box_left, box_right - mid_right),
-        (65.0, 65.0),
-        "the middle starts where the left cap ends and ends where the right one starts"
-    );
-    assert!(s
-        .eval::<bool>("return BenillaRealmlist_Middle:IsShown() == 1")
-        .unwrap());
-
-    s.run("GlueDialogButton2:Click()").unwrap();
     s.resolve();
     assert!(!s
-        .eval::<bool>("return BenillaRealmlist_Middle:IsShown() == 1")
+        .eval::<bool>("return AccountLoginExitButton:IsShown() == 1")
         .unwrap());
-    benilla_ui::assert_near!(
-        s.eval::<f64>("return GlueDialogEditBox:GetWidth()")
-            .unwrap(),
-        130.0
-    );
-    benilla_ui::assert_near!(s.take_errors(), Vec::<String>::new());
+    s.run("AccountLoginExitButton:Show()").unwrap();
+    assert!(!s
+        .eval::<bool>("return AccountLoginExitButton:IsShown() == 1")
+        .unwrap());
+    // Nor the stock screen's web links; Credits takes the Terms of Use button's place.
+    for name in [
+        "AccountLoginTOSButton",
+        "AccountLoginCommunityButton",
+        "AccountLoginManageAccountButton",
+    ] {
+        assert!(
+            !s.eval::<bool>(&format!("return {name} ~= nil and {name}:IsShown() == 1"))
+                .unwrap(),
+            "{name}"
+        );
+    }
+    assert!(s
+        .eval::<bool>("return AccountLoginCreditsButton:IsShown() == 1")
+        .unwrap());
+    assert_eq!(s.take_errors(), Vec::<String>::new());
 }

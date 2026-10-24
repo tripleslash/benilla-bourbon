@@ -12,7 +12,13 @@ use benilla_dbc::{DbcParser, FieldType, Schema, SchemaField};
 pub use benilla_blp::BlpTexels;
 
 mod chain;
-pub use chain::{Chain, ChainEntry};
+pub use chain::{Chain, ChainEntry, StoredBlob, TryRead};
+/// The optional content layers a chain may carry — today the updated character models. Paired with
+/// [`Chain`]: this says *whether*, that mounts it.
+pub mod layers;
+pub use layers::{hd_character_models, set_hd_character_models, HD_MODELS_ARCHIVE};
+/// The third-party addons benilla ships, which the chain answers after its archives miss.
+pub mod bundled_addons;
 /// Loose `.tga` art, as addon folders ship it.
 mod tga;
 pub use tga::{tga_texture_size, tga_to_rgba, TGA_GATE_PREFIX};
@@ -29,11 +35,20 @@ pub use loose::{
     LooseOpen,
 };
 mod characters;
+/// Web-target HTTP plumbing (bytes and byte ranges, in place of a filesystem). Always compiled
+/// (`encode_name` is plain Rust and tested natively); the browser-only pieces are gated to `wasm32`
+/// inside the module itself.
+pub mod web;
+/// The web target's game-data store: the BENPACK container behind the wasm [`Chain`]. `wasm32`
+/// only — it is entirely browser plumbing (a JS-heap pack map, a `Range`-support probe), with no
+/// half that would mean anything natively.
+#[cfg(target_arch = "wasm32")]
+pub mod webpack;
 pub use characters::{
-    equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
-    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, ChrRaceRow, CompositePlan,
-    DialRanges, EmblemLayer, EquipBlit, EquipGeosets, GuildEmblem, NameGenRow, StartOutfitItem,
-    VisibleGeosets,
+    composite_input_at_1x, equip_blits, equip_column, equip_region_candidates, equip_tex_dir,
+    equip_tile, forearm_dressed, BlitSource, CharCreateCatalog, CharSections, CharacterGeosets,
+    ChrRaceRow, CompositeBlobs, CompositePlan, DialRanges, EmblemLayer, EquipBlit, EquipGeosets,
+    GuildEmblem, NameGenRow, StartOutfitItem, VisibleGeosets,
 };
 mod camera_shakes;
 mod cinematics;
@@ -262,6 +277,8 @@ pub use spell_visual::{
     KIT_CHAR_PROCS, KIT_SLOT_TAGS, MISSILE_ATTACH_TABLE, WORLD_EFFECT_TAG,
 };
 mod emit_timing;
+/// fork: which spell effects throw light, and what light (ported from pkuzic's benilla-lighting).
+pub mod spell_light;
 pub use emit_timing::{EmitParams, EmitTiming, ParamsNow};
 mod particles;
 pub use particles::{
@@ -279,7 +296,7 @@ pub use models::{
     accumulate_wmo_group_collision, hand_grip_finger_poses, load_m2_animation_summary,
     load_m2_bone_spins, load_m2_bounds, load_m2_collision_hull, load_m2_mesh, load_m2_mesh_skinned,
     load_object_model, load_wmo, load_wmo_collision_tris, m2_bone_spins, m2_file_name,
-    m2_owner_reach, m2_ribbon_emitter_count, m2_sequence_visible_textures,
+    m2_owner_reach, m2_ready, m2_ribbon_emitter_count, m2_sequence_visible_textures,
     m2_texture_transform_count, non_separable_billboard_bones, owner_last_rung,
     owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
     parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,
@@ -290,20 +307,22 @@ pub use models::{
     parse_wmo_portals, parse_wmo_root, point_in_convex_volume, rotation_2x2, uv_transform,
     wmo_group_doodad_refs, wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header,
     wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes,
-    wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim,
-    BoneSpin, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris,
-    GlobalSeqBone, GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds,
-    M2CameraTracks, M2Light, M2PaneCamera, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm,
-    ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton,
-    SkeletonBone, StringAnchors, TextureStage, UvAnim, UvRotAnim, WmoBatchClass, WmoDoodad,
-    WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
-    WmoPortals, WmoRoot, DEGENERATE_RING_FOOTPRINT, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
+    wmo_root_ambient, wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind,
+    BoneKeys, BoneScaleAnim, BoneSpin, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker,
+    FogPolicy, FootprintTris, GlobalSeqBone, GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary,
+    M2Attachment, M2Bounds, M2CameraTracks, M2Light, M2PaneCamera, M2PortraitCamera,
+    ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim,
+    ScalarAnim, SeqLoops, Skeleton, SkeletonBone, StringAnchors, TextureStage, UvAnim, UvRotAnim,
+    WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight,
+    WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot, DEGENERATE_RING_FOOTPRINT, NO_GROUP_LIQUID,
+    OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{
-    adt_to_tile_mesh, area_id_at, find_tile_near, ground_effect_at, impassable_at, load_tile_mesh,
-    load_tiles_around, mcsh_shadowed_at, terrain_height_at, triangle_z_at, ChunkMesh, Doodad,
-    MapTiles, TileMesh, WmoInstance, ALPHA_MAP_SIZE, CHUNK_SIZE, SHADOW_MAP_SIZE, STORMWIND_XY,
+    adt_to_tile_mesh, area_id_at, chunk_lod_indices, find_tile_near, ground_effect_at,
+    impassable_at, load_tile_mesh, load_tiles_around, mcsh_shadowed_at, terrain_height_at,
+    triangle_z_at, ChunkMesh, Doodad, MapTiles, TileMesh, WmoInstance, ALPHA_MAP_SIZE,
+    CHUNK_LEVEL_FAR, CHUNK_LEVEL_NEAR, CHUNK_SIZE, SHADOW_MAP_SIZE, STORMWIND_XY,
     TERRAIN_LAYER_TILES, TILE_SIZE,
 };
 mod wdl;
@@ -311,7 +330,7 @@ mod wdl;
 pub use benilla_wdt::{
     tile_to_world, world_to_chunk, world_to_tile, GlobalWmo, WdtFile, WdtReader, WowVersion,
 };
-pub use wdl::{WdlFile, WdlTileMesh};
+pub use wdl::{WdlFile, WdlTileGrid, WdlTileMesh};
 
 // The minimap tile hash catalog and the world-map DBCs.
 mod minimap_translate;

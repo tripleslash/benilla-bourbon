@@ -28,7 +28,9 @@ use render::BuilderFlags;
 
 /// The cached template; a miss records the ask and waits for its answer (`0x52b716`).
 fn view_of(lua: &Lua, item_id: u32) -> Option<ItemTemplateView> {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let v = model.item_templates.get(&item_id).cloned();
     if v.is_none() && item_id != 0 {
         model.item_stat_asks.insert(item_id);
@@ -40,7 +42,9 @@ fn view_of(lua: &Lua, item_id: u32) -> Option<ItemTemplateView> {
 /// A random-suffix roll's enchant lines: the reference copies the suffix row's five ids into
 /// enchant slots 2..6 (`0x52b7bf`) for a block source with no item object.
 fn roll_enchants(lua: &Lua, random_property_id: u32) -> Vec<crate::script::EnchantView> {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     model
         .random_properties
         .get(&random_property_id)
@@ -57,7 +61,9 @@ fn link_name(link: &str) -> Option<&str> {
 /// Fire `OnTooltipAddMoney(copper)`: the engine computes, FrameXML's `SetTooltipMoney` draws.
 fn fire_add_money(lua: &Lua, h: crate::widget::FrameHandle, copper: i64) {
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.frame_id(h)
     };
     if let Err(e) = super::event::fire_widget_handler(
@@ -66,7 +72,7 @@ fn fire_add_money(lua: &Lua, h: crate::widget::FrameHandle, copper: i64) {
         "OnTooltipAddMoney",
         vec![Value::Number(copper as f64)],
     ) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }
@@ -98,7 +104,9 @@ fn hyperlink_item_fields(link: &str) -> Option<(u32, i32, u32)> {
 /// `SpellItemEnchantment` row, and a negative id paints slots 0 and 1 red. An id with no named row
 /// adds nothing.
 fn block_enchant(lua: &Lua, slot: u8, id: i32) -> Option<crate::script::EnchantView> {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     let name = model.enchant_names.get(&id.unsigned_abs())?.clone();
     (id != 0).then_some(crate::script::EnchantView {
         slot,
@@ -283,7 +291,9 @@ pub(super) fn render_owned(
 ) -> mlua::Result<bool> {
     let h = frame_handle_of(lua, this)?;
     let sell_count = inst.as_ref().filter(|i| i.object).and_then(|i| {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         build::container_object(&model, i.guid).map(|s| s.count.max(1))
     });
     build_item(
@@ -358,7 +368,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let kind = binding_abi::string_arg(lua, kind, LINE)?;
             let index = binding_abi::index_arg(lua, index, LINE)?;
             let item = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.quest.as_ref().and_then(|q| {
                     crate::script::quest::item_vec(q, &kind)
                         .and_then(|v| index.checked_sub(1).and_then(|n| v.get(n)))
@@ -377,7 +389,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let kind = binding_abi::string_arg(lua, kind, LINE)?;
             let index = binding_abi::index_arg(lua, index, LINE)?;
             let item = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 crate::script::quest_log::selected_quest_item(&model, &kind, index)
             };
             set_quest_item_view(lua, &this, item)
@@ -409,7 +423,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // shown bit (`+0xd0`) and the kept entry (`+0x398`), so the same link clicked twice
             // closes the plate, whatever its other fields.
             let holds = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let shown = model.arena.frame(h).is_some_and(|f| f.shown);
                 shown && model.item_builds.get(&h).is_some_and(|b| b.item_id == id)
             };
@@ -487,7 +503,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 // `CanReadUnitInventory` (`0x53306a`), through `Model::inv_slot`.
                 super::unit::check_unit_token(&Some(unit.clone()))?;
                 let (item_id, name, quality, inst, count, repair_cost, currently_equipped) = {
-                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     // Only the active player's slots hold item objects; another player's item is
                     // a block (`0x533354`).
                     let player =
@@ -619,7 +637,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let bag = i64::from(crate::script::binding_abi::ftol(bag));
             let slot = crate::script::binding_abi::ftol(slot) as u32;
             let (item_id, count, link, quality, inst, repair_cost) = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // The cooldown query asks a missing record with the callback `0x6e2f70`
                 // (`0x53483a`, `0x6e2efb`).
                 // Its bag lookup, `0x4f93e0` (`0x534747`).
@@ -704,7 +724,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     .checked_sub(1)
                     .filter(|&n| n < super::trade::TRADE_SLOTS);
                 let source = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     let trade = model.trade.as_ref();
                     let side = trade.map(|t| if player_side { &t.player } else { &t.target });
                     // The seventh slot alone proposes the spell cast on it (`0x534391`,
@@ -785,7 +807,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // naming the other method (`0x855310`, `0x533528`).
             let slot = binding_abi::index_arg(lua, slot, "Invalid loot slot in SetInventoryItem")?;
             let row = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .loot
                     .as_ref()
@@ -819,7 +843,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let roll_id = binding_abi::index_arg32(lua, roll_id, "Usage: SetLootRollItem(id)")?;
             let h = frame_handle_of(lua, &this)?;
             let entry = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .loot_rolls
                     .rolls
@@ -872,7 +898,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 };
                 let h = frame_handle_of(lua, &this)?;
                 let row = {
-                    let model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     let Some(merchant) = &model.merchant else {
                         return Ok(());
                     };
@@ -933,7 +961,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let index = binding_abi::index_arg(lua, index, "Usage: SetInboxItem(index)")?;
             let h = frame_handle_of(lua, &this)?;
             let row = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let Some(mail) = &model.mail else {
                     return Ok(Value::Nil);
                 };
@@ -980,7 +1010,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 binding_abi::index_arg(lua, index, r#"Usage: SetAuctionItem("type", index)"#)?;
             let h = frame_handle_of(lua, &this)?;
             let (item_id, roll, name, charges) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let Some(auction) = &model.auction else {
                     return Ok(Value::Nil);
                 };
@@ -1027,7 +1059,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // The slot's item is a live object (`0x5357b4`, `0x5353a0`), so its LOCKED gate,
             // expiry and temporary enchants follow the bag slot it came from.
             let (item_id, inst) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 match model.auction_sell_item.as_ref() {
                     Some(it) => (it.item_id, held_instance(&model, it.bag, it.slot)),
                     None => (0, None),
@@ -1059,7 +1093,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // The slot's item is a live object (`0x5357b4`, `0x5353a0`), so its LOCKED gate,
             // expiry and temporary enchants follow the bag slot it came from.
             let (item_id, inst) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 match model.mail_send_item.as_ref() {
                     Some(it) => (it.item_id, held_instance(&model, it.bag, it.slot)),
                     None => (0, None),
@@ -1098,7 +1134,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 )?;
                 let reagent_index = binding_abi::index_or(lua, reagent_index)?.map(|i| i as usize);
                 let found = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     // A visible-row index, headers included (`0x4fca20`); a header is None.
                     let Some(recipe) = super::tradeskill::recipe_at(&model, skill_index) else {
                         return Ok(());
@@ -1132,7 +1170,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 let craft_index = binding_abi::index_arg(lua, craft_index, LINE)?;
                 let reagent_index = binding_abi::index_arg(lua, reagent_index, LINE)?;
                 let found = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     let Some(recipe) = crate::script::craft::recipe(&model, craft_index) else {
                         return Ok(());
                     };

@@ -3,6 +3,7 @@
 //! composer to the docked windows, and [`input`] is the outbound side over [`commands`]' table of
 //! every `/command`, built from the reference's own alias strings.
 
+use benilla_assets::DataLoadAppExt;
 use bevy::prelude::*;
 
 use crate::ui_script::{UiFeed, UiInput};
@@ -140,17 +141,13 @@ impl Plugin for UiChatPlugin {
             // `combat::on_cvar` writes this and the range set: a missing one panics on the first
             // write, which only `scripts/smoke.sh` sees (the unit suites build their own worlds).
             .init_resource::<combat::LogPeriodicSpells>()
-            // These DBC loads must follow `AssetSet::Open`: before it there is no chain, and each
-            // silently loads nothing.
-            .add_systems(
-                Startup,
-                (
-                    channels::load_chat_channels,
-                    feed::load_emote_texts,
-                    broadcast::load_server_messages,
-                )
-                    .after(benilla_assets::AssetSet::Open),
-            )
+            // Catalog loads: they follow `AssetSet::Open` (before it there is no chain, and each
+            // silently loads nothing) and run again when the chain's data changes.
+            .add_data_loaders((
+                channels::load_chat_channels,
+                feed::load_emote_texts,
+                broadcast::load_server_messages,
+            ))
             // The slash-command table needs the VM's globals and the emote catalog, both `Startup`.
             .add_systems(PostStartup, commands::build_slash_commands)
             // The language gate's feeds, ahead of the chat lane that reads them.
@@ -160,6 +157,8 @@ impl Plugin for UiChatPlugin {
                     language::load_language_words,
                     language::feed_language_skills,
                     language::feed_default_language,
+                    // After the self tag, whose `SelfPlayer` it reads.
+                    language::feed_chat_language.after(benilla_world::schedule::WorldStage::Net),
                 )
                     .before(crate::lanes::UiLanes),
             )

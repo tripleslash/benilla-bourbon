@@ -5,8 +5,6 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::Model;
-
 /// A GM verb the host applies inside its call ([`super::ScriptCall::GmTicket`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GmTicketCall {
@@ -46,7 +44,7 @@ impl super::UiScript {
     /// The `GMTicketCategory.dbc` rows in file order, pushed once; the ids are the wire's values,
     /// so renumbering them would misfile every ticket.
     pub fn set_gm_ticket_categories(&mut self, categories: Vec<(u32, String)>) {
-        self.model_mut().gm_ticket_categories = categories;
+        set_field!(self, gm_ticket_categories, categories);
     }
 
     /// The ticket verbs a harness's VM kept ([`Self::keep_calls`]), in call order, one packet
@@ -77,7 +75,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetGMTicketCategories",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let mut out = Vec::with_capacity(model.gm_ticket_categories.len() * 2);
             for (id, name) in &model.gm_ticket_categories {
                 out.push(Value::Integer(i64::from(*id)));
@@ -100,7 +100,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             lua.create_function(move |lua, ()| {
                 if needs_player
                     && !super::battlefield_queue::player_exists(
-                        &lua.app_data_ref::<Model>().expect("model app_data"),
+                        &lua.app_data_ref::<crate::script::ModelCell>()
+                            .expect("model app_data"),
                     )
                 {
                     return Ok(());
@@ -121,7 +122,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // With no active player the binding calls nothing (`0x48ca29`-`0x48ca30`,
                 // `0x48cab9`-`0x48cac0`).
                 if !super::battlefield_queue::player_exists(
-                    &lua.app_data_ref::<Model>().expect("model app_data"),
+                    &lua.app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data"),
                 ) {
                     return Ok(());
                 }

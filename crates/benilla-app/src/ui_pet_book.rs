@@ -13,7 +13,8 @@
 //! `ToggleSpellAutocast(id, "pet")` sends `CMSG_PET_SPELL_AUTOCAST` (0x2F3) after `0x4bccb0` flips
 //! bit 30 locally, mirrors it onto the bar and fires `PET_BAR_UPDATE`.
 
-use std::time::Instant;
+// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 

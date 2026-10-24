@@ -13,7 +13,7 @@ use super::binding_abi;
 use super::object::frame_handle_of;
 use super::tooltip::{append_line, clear};
 use super::tooltip_spell::{insert_wait, WaitFor};
-use super::{Model, TooltipText};
+use super::TooltipText;
 use crate::widget::FrameHandle;
 
 /// The gold wrapper `0x530380`'s `0xffffd200`, the name's and the dispel class's.
@@ -112,7 +112,9 @@ fn tracking_key(spell_id: u32) -> AuraKey {
 
 /// Look up an aura's view; a miss records the ask.
 fn aura_view_of(lua: &Lua, key: AuraKey) -> Option<AuraTooltipView> {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let v = model.aura_tooltips.get(&key).cloned();
     if v.is_none() && key.spell_id != 0 {
         model.aura_tooltip_asks.insert(key);
@@ -166,7 +168,7 @@ pub(super) fn fill_aura(
             insert_wait(lua, h, WaitFor::Aura { key, remaining }, fallback_name)?;
         }
     }
-    super::tooltip::show_or_hide_empty(lua, h);
+    super::tooltip::show_or_hide_empty_spell(lua, h);
     Ok(())
 }
 
@@ -209,7 +211,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             let now = crate::script::clock::now(lua);
             let (key, name, remaining_ms) = {
-                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 match model.player_auras.get(pos) {
                     Some(a) => {
                         // The gate is `untilCancelled`, not a known duration: `0x532b00` skips
@@ -286,7 +290,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 // The token resolves before the index is read (`0x534b8b`), as `UnitBuff`'s does,
                 // so an unknown one raises at any index.
                 let hit = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     let list = crate::script::aura::auras_of(&model, &token)?;
                     // `_ftol`, then `index - 1` compared unsigned, so 0 and a negative index are
                     // past the range (`0x534bc4`).
@@ -326,7 +332,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetTrackingSpell",
         lua.create_function(|lua, this: Table| {
             let hit = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .tracking
                     .as_ref()

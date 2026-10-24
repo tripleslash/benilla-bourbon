@@ -1,6 +1,8 @@
-//! The background networking threads, the socket half of the net bridge.
+//! The network sequencer, the socket half of the net bridge. Natively it runs on a read thread
+//! (every await a blocking socket read) beside one long-lived write thread; on wasm32 it is one
+//! `spawn_local` task and `crate::net`'s `web_writer_pump` drains the writes.
 //!
-//! [`spawn_net`]'s read thread parks pre-logon for a [`LoginRequest`], logs on to realmd, then
+//! [`spawn_net`]'s sequencer parks pre-logon for a [`LoginRequest`], logs on to realmd, then
 //! holds the realmd link at the logon park, serving realm list queries, until the app names a realm
 //! or closes the logon; a world attempt that fails returns there. Past the world handshake it
 //! parks at character select until the app picks a guid; a new login supersedes either park. The
@@ -15,17 +17,23 @@
 //! A logout or a later `SMSG_CHARACTER_LOGIN_FAILED` ends the world session, announced as a
 //! [`SessionEvent::Disconnected`] with [`SessionEnd::LoggedOut`], and parks at character select
 //! again on the same link. A stream failure emits it with [`SessionEnd::Lost`] and re-parks for
-//! credentials. All policy lives in [`crate::glue_session`]; this thread only
+//! credentials. All policy lives in [`crate::glue_session`]; the sequencer only
 //! sequences and never sleeps.
 //!
-//! One long-lived write thread drains [`ClientCommand`](super::ClientCommand)s; each world entry
-//! hands it the [`WorldWriter`] over a swap channel, and a logout takes it back, so there is only
-//! ever one writer.
+//! Natively one long-lived write thread drains [`ClientCommand`](super::ClientCommand)s; each world
+//! entry hands it the [`WorldWriter`] over a swap channel ([`WriterSwap`]), and a logout takes it
+//! back, so there is only ever one writer.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// Not `bevy::platform::time::Instant`: a browser has no monotonic clock behind that name (it panics), and this
+// one is the ping clock's stopwatch. `bevy::platform` is std's `Instant` natively and `performance
+// .now()` in a page.
+use bevy::platform::time::Instant;
 
 use anyhow::{anyhow, Result};
 use benilla_assets::LockRecover;
@@ -36,6 +44,19 @@ use benilla_protocol::{
 use crossbeam_channel::{Receiver, Sender};
 
 use super::{CharRequest, ClientCommand, ParkRequest, ParkSender, RealmRequest};
+
+/// Say a login failure out loud, on every path that ends one.
+///
+/// Through bevy's log **and**, on the web, straight to the browser console. The duplication is
+/// deliberate: the screen shows a mapped, player-facing string and the chain that produced it used
+/// to go nowhere, so a login could fail with an empty console — the one situation where a bug
+/// report has nothing to carry. Going direct as well means the message survives a log subscriber
+/// that is missing, filtered, or wedged.
+fn say_login_failed(what: &str) {
+    bevy::log::warn!("{what}");
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(what));
+}
 
 /// The inbound census: every packet off the world socket, and the unix ms of the latest, which
 /// tell a silent server from a dead socket for the runaway watch ([`crate::net::motion`]).
@@ -50,8 +71,8 @@ fn note_inbound() {
 
 /// Wall-clock unix ms, the clock two processes' traces share (the trace header's `t0`).
 fn unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
 }
 
@@ -82,8 +103,8 @@ pub(crate) struct LoginRequest {
 /// The park-answer receivers: credentials, and the realm and character requests on the one
 /// ordered channel ([`ParkRequest`]).
 pub(super) struct Parks {
-    pub(super) login_rx: Receiver<LoginRequest>,
-    pub(super) park_rx: Receiver<ParkRequest>,
+    pub(super) login_rx: async_channel::Receiver<LoginRequest>,
+    pub(super) park_rx: async_channel::Receiver<ParkRequest>,
 }
 
 /// World sessions begun this process, each numbered from 1; the events a session sends carry its
@@ -95,7 +116,7 @@ const REALM_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The reference's 30 s ping timer (`0x537ff0`). vmangos kicks a socket whose pings come faster
 /// than 27 s apart more than twice (`WorldSocket::_HandlePing`), so this must not shrink.
-const PING_INTERVAL: Duration = Duration::from_secs(30);
+pub(super) const PING_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Round trips [`PingClock`] keeps: 15. The reference's ring (`conn+0x1a6c`) has 16 slots, but
 /// `read == write` means empty (`0x537fa8`) and `HandlePong` advances the read index (`0x537de8`),
@@ -169,7 +190,7 @@ impl PingClock {
 }
 
 /// Cap on send warnings per connection, so a movement stream during an outage cannot flood the log.
-const SEND_WARN_CAP: u32 = 8;
+pub(super) const SEND_WARN_CAP: u32 = 8;
 
 /// How often the character park looks at the world socket for a server that dropped it.
 const PARK_LINK_CHECK: Duration = Duration::from_millis(500);
@@ -237,14 +258,15 @@ impl AddonNews {
 /// How one connection cycle ended; a stream failure is the `Err` of `Result`. A logout and a
 /// refused character login end no cycle: the link goes back to character select.
 enum Cycle {
-    /// The app dropped a channel end: end the read thread.
+    /// The app dropped a channel end: end the sequencer.
     Exit,
     /// Back to the pre-logon park with nothing to announce: a pre-roster failure (already
     /// reported), a canceled attempt, or select's Back ([`CharRequest::Abandon`]).
     Repark,
 }
 
-/// What the read thread hands the write thread on the swap channel, in order.
+/// What the sequencer hands the write half on the swap channel, in order: the native write thread,
+/// or on wasm32 `crate::net`'s `web_writer_pump`.
 pub(super) enum WriterSwap {
     /// A world entry's writer. `fresh_link` is the connection's first entry, whose ping block
     /// starts empty; a later entry on the same link keeps it, as the reference's lives on the
@@ -253,23 +275,36 @@ pub(super) enum WriterSwap {
         writer: WorldWriter,
         fresh_link: bool,
     },
-    /// The world session is over and the link kept: the writer goes back to the read thread on
-    /// this reply, and commands drop until the next install.
-    Reclaim(Sender<WorldWriter>),
+    /// The world session is over and the link kept: the writer goes back to the sequencer on this
+    /// reply, and commands drop until the next install. `async_channel`, since the sequencer awaits
+    /// the reply (a page's task cannot block for it).
+    Reclaim(async_channel::Sender<WorldWriter>),
 }
 
 /// Everything [`spawn_net`] hands the app.
 pub(super) struct NetHandles {
     pub(super) events: Receiver<SessionEvent>,
     pub(super) commands: Sender<ClientCommand>,
+    // The three park channels are `async_channel`: they are the points the sequencer
+    // *waits* at, and a browser task cannot block a thread to wait. The ECS side never
+    // waits on them — it `try_send`s into unbounded queues — so nothing above this line
+    // changed shape.
     pub(super) pick: ParkSender<CharRequest>,
     pub(super) realm: ParkSender<RealmRequest>,
-    pub(super) login: Sender<LoginRequest>,
+    pub(super) login: async_channel::Sender<LoginRequest>,
     pub(super) login_abandon: Arc<AtomicU64>,
     pub(super) ping: Arc<Mutex<PingClock>>,
+    /// The write half's two inputs — **web only**. A page has no threads, so what
+    /// [`writer_loop`] owns natively is owned instead by `crate::net`'s per-frame pump, and these
+    /// are how it gets hold of them.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) writer_rx: Receiver<WriterSwap>,
+    #[cfg(target_arch = "wasm32")]
+    pub(super) commands_rx: Receiver<ClientCommand>,
 }
 
-/// Spawns the read thread with its park and cycle loop, and the one long-lived write thread.
+/// Spawns the sequencer with its park and cycle loop: natively on a read thread beside the one
+/// long-lived write thread, on wasm32 as a `spawn_local` task.
 pub(super) fn spawn_net(connect: bool) -> NetHandles {
     // The outbound opcode trace (tag `out`), armed before any thread can send.
     if benilla_assets::trace::enabled_for("out") {
@@ -277,69 +312,54 @@ pub(super) fn spawn_net(connect: bool) -> NetHandles {
     }
     let (events_tx, events_rx) = crossbeam_channel::unbounded();
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-    let (park_tx, park_rx) = crossbeam_channel::unbounded::<ParkRequest>();
-    let (login_tx, login_rx) = crossbeam_channel::unbounded::<LoginRequest>();
+    let (park_tx, park_rx) = async_channel::unbounded::<ParkRequest>();
+    let (login_tx, login_rx) = async_channel::unbounded::<LoginRequest>();
+    // The writer outlives connections; the sequencer hands it each world entry's WorldWriter
+    // across here and takes it back after a logout.
+    let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
     let login_abandon = Arc::new(AtomicU64::new(0));
     let ping_clock = Arc::new(Mutex::new(PingClock::default()));
+    let parks = Parks { login_rx, park_rx };
     if connect {
-        // The writer thread outlives connections; the read thread hands it each world entry's
-        // WorldWriter and takes it back after a logout.
-        let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
-        let clock = Arc::clone(&ping_clock);
-        // `SMSG_PONG` is timed on the read thread, where it lands ([`PingClock`]).
-        let read_clock = Arc::clone(&ping_clock);
-        let abandon = Arc::clone(&login_abandon);
-        thread::Builder::new()
-            .name("wow-net-write".into())
-            .spawn(move || {
-                // Latency-sensitive: movement packets queue here (thread QoS).
-                benilla_world::thread_qos::promote_current_thread(
-                    benilla_world::thread_qos::QosClass::UserInitiated,
-                );
-                writer_loop(&cmd_rx, writer_rx, &clock)
-            })
-            .expect("spawn wow-net-write thread");
-        thread::Builder::new()
-            .name("wow-net".into())
-            .spawn(move || {
-                benilla_world::thread_qos::promote_current_thread(
-                    benilla_world::thread_qos::QosClass::UserInitiated,
-                );
-                let parks = Parks { login_rx, park_rx };
-                // Opcodes already reported for trailing bytes, once per process.
-                let mut tails_announced = std::collections::HashSet::new();
-                loop {
-                    // A cycle starts with no round trips. `writer_loop` clears again on the new
-                    // writer, since the keepalive can still fire on the stale one until then.
-                    read_clock.lock_recover().clear();
-                    match run(
-                        &events_tx,
-                        &writer_tx,
-                        &parks,
-                        &abandon,
-                        &read_clock,
-                        &mut tails_announced,
-                    ) {
-                        Ok(Cycle::Exit) => return,
-                        Ok(Cycle::Repark) => {}
-                        Err(e) => {
-                            // A stream failure; a displacement kick arrives as a bare EOF. No
-                            // sleep: what follows is the app's policy.
-                            bevy::log::error!("net: {e:#}");
-                            if events_tx
-                                .send(SessionEvent::Disconnected {
-                                    reason: format!("disconnected: {e:#}"),
-                                    end: SessionEnd::Lost,
-                                })
-                                .is_err()
-                            {
-                                return; // app exited mid-failure
-                            }
-                        }
-                    }
-                }
-            })
-            .expect("spawn wow-net thread");
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let clock = Arc::clone(&ping_clock);
+            // `SMSG_PONG` is timed on the read side, where it lands ([`PingClock`]).
+            let read_clock = Arc::clone(&ping_clock);
+            let abandon = Arc::clone(&login_abandon);
+            thread::Builder::new()
+                .name("wow-net-write".into())
+                .spawn(move || {
+                    // Latency-sensitive: movement packets queue here (thread QoS).
+                    benilla_world::thread_qos::promote_current_thread(
+                        benilla_world::thread_qos::QosClass::UserInitiated,
+                    );
+                    writer_loop(&cmd_rx, writer_rx, &clock)
+                })
+                .expect("spawn wow-net-write thread");
+            thread::Builder::new()
+                .name("wow-net".into())
+                .spawn(move || {
+                    benilla_world::thread_qos::promote_current_thread(
+                        benilla_world::thread_qos::QosClass::UserInitiated,
+                    );
+                    // Every await in the sequencer is a blocking socket read on this thread.
+                    futures_lite::future::block_on(sequencer(
+                        events_tx, writer_tx, parks, abandon, read_clock,
+                    ));
+                })
+                .expect("spawn wow-net thread");
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // No threads in a page: the sequencer is one task on the browser's own event loop, and
+            // the writer is drained by a Bevy system instead of a sibling thread (`crate::net`).
+            let abandon = Arc::clone(&login_abandon);
+            let read_clock = Arc::clone(&ping_clock);
+            wasm_bindgen_futures::spawn_local(sequencer(
+                events_tx, writer_tx, parks, abandon, read_clock,
+            ));
+        }
     }
     // Not connecting (capture mode): the channel ends drop here, sends become ignored `Err`s and
     // the event stream stays empty.
@@ -351,6 +371,64 @@ pub(super) fn spawn_net(connect: bool) -> NetHandles {
         login: login_tx,
         login_abandon,
         ping: ping_clock,
+        #[cfg(target_arch = "wasm32")]
+        writer_rx,
+        #[cfg(target_arch = "wasm32")]
+        commands_rx: cmd_rx,
+    }
+}
+
+/// The sequencer's outer loop: run one connection cycle, say how it ended, park again. Shared by
+/// both spawns — a thread under `block_on` natively, a `spawn_local` task on the web — so the two
+/// targets cannot drift on what a lost connection means.
+async fn sequencer(
+    events_tx: Sender<SessionEvent>,
+    writer_tx: Sender<WriterSwap>,
+    parks: Parks,
+    abandon: Arc<AtomicU64>,
+    ping_clock: Arc<Mutex<PingClock>>,
+) {
+    // Opcodes whose decoder has already been caught leaving bytes behind — one announcement per
+    // opcode for the life of the process, like the dropped-packet tally's first-occurrence line.
+    // Lives here, above the cycle loop, so a reconnect does not re-announce what the log already
+    // says.
+    let mut tails_announced = std::collections::HashSet::new();
+    loop {
+        // **A cycle starts with no measurements.** Every way the last one ended — a stream
+        // failure or a re-park — lands here, so one clear covers them all, and it runs on the side
+        // that owns the connection instead of racing in from the app's drain a frame later. A
+        // logout ends no cycle: the link and its ping block are kept. (The write half clears again
+        // when a fresh link's writer arrives, and still has to: between the old socket dying and
+        // that handover the keepalive tick can still fire on the stale writer.)
+        ping_clock.lock_recover().clear();
+        match run(
+            &events_tx,
+            &writer_tx,
+            &parks,
+            &abandon,
+            &ping_clock,
+            &mut tails_announced,
+        )
+        .await
+        {
+            Ok(Cycle::Exit) => return,
+            Ok(Cycle::Repark) => {}
+            Err(e) => {
+                // A live-stream failure — including a displacement kick, which reaches us as a bare
+                // EOF and nothing else (decision 1262). No sleep: what happens next is the app's
+                // policy, not this task's (0539 §3).
+                bevy::log::error!("net: {e:#}");
+                if events_tx
+                    .send(SessionEvent::Disconnected {
+                        reason: format!("disconnected: {e:#}"),
+                        end: SessionEnd::Lost,
+                    })
+                    .is_err()
+                {
+                    return; // app exited mid-failure
+                }
+            }
+        }
     }
 }
 
@@ -362,7 +440,7 @@ enum LogonAnswer {
     /// A new login supersedes the logon, as `CGlueMgr::Login` (`0x46afb0`) starts the next logon
     /// whatever link the last one left.
     Login(LoginRequest),
-    /// `CLoginMgr::Cancel` (`0x5b3320`): the realmd link closes and the thread parks for
+    /// `CLoginMgr::Cancel` (`0x5b3320`): the realmd link closes and the sequencer parks for
     /// credentials.
     Close,
     /// The app dropped a channel end.
@@ -411,14 +489,14 @@ fn publish(
 /// any failure, with a full logon from the cycle's credentials, because benilla's logon has no
 /// reconnect exchange and a connect that can never complete is a dead end, not a behaviour; the
 /// new session key serves the next world dial as the reconnect's would.
-fn query(
+async fn query(
     logon: &mut benilla_protocol::Logon,
     req: &LoginRequest,
     events_tx: &Sender<SessionEvent>,
 ) -> bool {
-    let mut ok = logon.refresh_realms(REALM_REFRESH_TIMEOUT);
+    let mut ok = logon.refresh_realms_async(REALM_REFRESH_TIMEOUT).await;
     if !ok {
-        match benilla_protocol::logon(&req.host, &req.user, &req.pass, req.locale) {
+        match benilla_protocol::logon_async(&req.host, &req.user, &req.pass, req.locale).await {
             Ok(fresh) => {
                 *logon = fresh;
                 ok = true;
@@ -429,28 +507,56 @@ fn query(
     publish(events_tx, &logon.realms, !ok)
 }
 
+/// What a park woke to first: credentials, a realm request or a character request; `None` is a
+/// dropped channel end (the app is gone), the park channel's reported as `Realm(None)`.
+enum Woke {
+    Login(Option<LoginRequest>),
+    Realm(Option<RealmRequest>),
+    Pick(CharRequest),
+    /// The character park's tick: look at the link ([`PARK_LINK_CHECK`]).
+    LinkCheck,
+}
+
+/// One wait at a park: the credentials channel and the park channel, whose realm and character
+/// requests arrive in the order the app made them ([`ParkRequest`]).
+///
+/// **`race`, not `select!`.** The sequencer awaits rather than blocks (a browser task has no
+/// thread to park on), so the receivers are futures and the park is whichever resolves first.
+/// `futures_lite::future::race` is the one with `select!`'s semantics: it polls the pair in random
+/// order, so neither channel takes precedence when both are ready (`or` is the biased sibling).
+/// `async_channel`'s `recv` only takes a message when it resolves, so dropping the loser drops
+/// nothing with it.
+///
+/// **Only the receives race.** What a message asks for runs in the caller, after the race, to
+/// completion: a realm query or a character create holds a socket mid-reply, and a second channel
+/// waking must not drop it there.
+async fn woke(parks: &Parks) -> Woke {
+    let login = async { Woke::Login(parks.login_rx.recv().await.ok()) };
+    let park = async {
+        match parks.park_rx.recv().await {
+            Ok(ParkRequest::Realm(r)) => Woke::Realm(Some(r)),
+            Ok(ParkRequest::Char(c)) => Woke::Pick(c),
+            Err(_) => Woke::Realm(None),
+        }
+    };
+    futures_lite::future::race(login, park).await
+}
+
 /// The pre-logon park: waits for credentials. With no realmd link, a realm list query fails at
 /// once and a dial or a close has nothing to act on. `None` once the app is gone.
-fn login_park(parks: &Parks, events_tx: &Sender<SessionEvent>) -> Option<LoginRequest> {
+async fn login_park(parks: &Parks, events_tx: &Sender<SessionEvent>) -> Option<LoginRequest> {
     bevy::log::info!("net: parked at the login screen — waiting for credentials");
-    let Parks {
-        login_rx, park_rx, ..
-    } = parks;
     loop {
-        // No `break` or `continue` inside the `select!` arms: the macro expands into a loop of its
-        // own, which they would bind to.
-        let answer = crossbeam_channel::select! {
-            recv(login_rx) -> req => Some(req.ok()),
-            recv(park_rx) -> msg => match msg {
-                Err(_) => Some(None),
-                Ok(ParkRequest::Realm(RealmRequest::Refresh)) => {
-                    (!publish(events_tx, &[], true)).then_some(None)
+        match woke(parks).await {
+            Woke::Login(req) => return req,
+            Woke::Realm(None) => return None,
+            Woke::Realm(Some(RealmRequest::Refresh)) => {
+                if !publish(events_tx, &[], true) {
+                    return None;
                 }
-                Ok(_) => None,
-            },
-        };
-        if let Some(req) = answer {
-            return req;
+            }
+            // A dial, a close, a leave or a character request has nothing to act on.
+            Woke::Realm(Some(_)) | Woke::Pick(_) | Woke::LinkCheck => {}
         }
     }
 }
@@ -458,7 +564,7 @@ fn login_park(parks: &Parks, events_tx: &Sender<SessionEvent>) -> Option<LoginRe
 /// The logon park: the realmd link is up, or closed since a world entry, and the list published.
 /// Waits for the app's realm, answering list queries on the link (`RequestRealmList`, `0x5ab840`);
 /// a new login supersedes it and a close ends it.
-fn logon_park(
+async fn logon_park(
     logon: &mut benilla_protocol::Logon,
     req: &LoginRequest,
     parks: &Parks,
@@ -468,27 +574,21 @@ fn logon_park(
         "net: parked at the realm list — {} realm(s) published",
         logon.realms.len()
     );
-    let Parks {
-        login_rx, park_rx, ..
-    } = parks;
     loop {
-        let answer = crossbeam_channel::select! {
-            recv(park_rx) -> msg => match msg {
-                Err(_) => Some(LogonAnswer::Exit),
-                Ok(ParkRequest::Realm(RealmRequest::Refresh)) => {
-                    (!query(logon, req, events_tx)).then_some(LogonAnswer::Exit)
+        match woke(parks).await {
+            Woke::Realm(None) | Woke::Login(None) => return LogonAnswer::Exit,
+            Woke::Realm(Some(RealmRequest::Refresh)) => {
+                if !query(logon, req, events_tx).await {
+                    return LogonAnswer::Exit;
                 }
-                Ok(ParkRequest::Realm(RealmRequest::Enter { realm, generation })) => {
-                    Some(LogonAnswer::Enter(realm, generation))
-                }
-                Ok(ParkRequest::Realm(RealmRequest::Close)) => Some(LogonAnswer::Close),
-                // No world session here to leave, and no character screen to ask.
-                Ok(ParkRequest::Realm(RealmRequest::Leave) | ParkRequest::Char(_)) => None,
-            },
-            recv(login_rx) -> msg => Some(msg.map_or(LogonAnswer::Exit, LogonAnswer::Login)),
-        };
-        if let Some(answer) = answer {
-            return answer;
+            }
+            Woke::Realm(Some(RealmRequest::Enter { realm, generation })) => {
+                return LogonAnswer::Enter(realm, generation)
+            }
+            Woke::Realm(Some(RealmRequest::Close)) => return LogonAnswer::Close,
+            // No world session here to leave, and no character screen to ask.
+            Woke::Realm(Some(RealmRequest::Leave)) | Woke::Pick(_) | Woke::LinkCheck => {}
+            Woke::Login(Some(next)) => return LogonAnswer::Login(next),
         }
     }
 }
@@ -498,7 +598,7 @@ fn logon_park(
 /// until the socket dies, the character logs out or the app exits. A logon failure emits
 /// [`SessionEvent::LoginFailed`] and re-parks for credentials; a world attempt's failure emits it
 /// and returns to the logon park; any retry is the app's.
-fn run(
+async fn run(
     events_tx: &Sender<SessionEvent>,
     writer_tx: &Sender<WriterSwap>,
     parks: &Parks,
@@ -506,7 +606,7 @@ fn run(
     ping_clock: &Mutex<PingClock>,
     tails_announced: &mut std::collections::HashSet<u16>,
 ) -> Result<Cycle> {
-    let Some(mut req) = login_park(parks, events_tx) else {
+    let Some(mut req) = login_park(parks, events_tx).await else {
         return Ok(Cycle::Exit);
     };
     'logon: loop {
@@ -519,7 +619,11 @@ fn run(
 
         // Logon: the dial and the SRP6 exchange against realmd.
         stage(LoginStage::Connecting);
-        let mut logon = match benilla_protocol::logon(&req.host, &req.user, &req.pass, req.locale) {
+        let mut logon = match benilla_protocol::logon_async(
+            &req.host, &req.user, &req.pass, req.locale,
+        )
+        .await
+        {
             Ok(l) => l,
             Err(e) => {
                 if canceled() {
@@ -537,9 +641,18 @@ fn run(
                         benilla_protocol::LoginRefusal::LogonProof(r.code)
                     }
                 });
+                // Said out loud as well ([`say_login_failed`]): the screen shows a mapped string.
+                let reason = format!("{e:#}");
+                match &dial {
+                    Some(dial) => say_login_failed(&format!(
+                        "net: login failed to dial {} — {reason}",
+                        dial.address
+                    )),
+                    None => say_login_failed(&format!("net: login failed — {reason}")),
+                }
                 let _ = events_tx.send(SessionEvent::LoginFailed {
                     refusal: if dial.is_some() { None } else { refusal },
-                    reason: format!("{e:#}"),
+                    reason,
                     dial,
                 });
                 return Ok(Cycle::Repark);
@@ -559,7 +672,7 @@ fn run(
         if !publish(events_tx, &logon.realms, false) {
             return Ok(Cycle::Exit);
         }
-        let mut pick = match logon_park(&mut logon, &req, parks, events_tx) {
+        let mut pick = match logon_park(&mut logon, &req, parks, events_tx).await {
             LogonAnswer::Enter(realm, generation) => (realm, generation),
             LogonAnswer::Login(next) => {
                 req = next;
@@ -579,14 +692,15 @@ fn run(
                 abandon,
                 ping_clock,
                 tails_announced,
-            )?;
+            )
+            .await?;
             match ended {
                 WorldEnd::Cycle(cycle) => return Ok(cycle),
                 WorldEnd::Login(next) => {
                     req = next;
                     continue 'logon;
                 }
-                WorldEnd::Failed => match logon_park(&mut logon, &req, parks, events_tx) {
+                WorldEnd::Failed => match logon_park(&mut logon, &req, parks, events_tx).await {
                     LogonAnswer::Enter(realm, generation) => pick = (realm, generation),
                     LogonAnswer::Login(next) => {
                         req = next;
@@ -604,7 +718,7 @@ fn run(
 /// the character park, then the world stream. Change Realm at the character park dials again from here with the same
 /// session key. A cancel is an abandon generation past the one the pick carried.
 #[allow(clippy::too_many_arguments)]
-fn world(
+async fn world(
     req: &LoginRequest,
     logon: &mut benilla_protocol::Logon,
     pick: (benilla_protocol::RealmInfo, u64),
@@ -615,11 +729,15 @@ fn world(
     ping_clock: &Mutex<PingClock>,
     tails_announced: &mut std::collections::HashSet<u16>,
 ) -> Result<WorldEnd> {
-    let Parks { login_rx, park_rx } = parks;
+    let Parks { park_rx, .. } = parks;
     let stage = |s: LoginStage| {
         let _ = events_tx.send(SessionEvent::LoginStage { stage: s });
     };
     let fail = |refusal: Option<benilla_protocol::LoginRefusal>, reason: String| {
+        // The screen shows a mapped, player-facing string; the chain that produced it went
+        // nowhere. On the web that meant a login could fail with an empty console, which is the
+        // one place a bug report has nothing to carry.
+        say_login_failed(&format!("net: login failed — {reason}"));
         let _ = events_tx.send(SessionEvent::LoginFailed {
             refusal,
             reason,
@@ -665,12 +783,14 @@ fn world(
             }
             !canceled()
         };
-        let mut session = match WorldSession::connect_queued(
+        let mut session = match WorldSession::connect_queued_async(
             &world_addr,
             &req.user,
             logon.session_key,
             &mut on_queue,
-        ) {
+        )
+        .await
+        {
             Ok(s) => s,
             Err(e) => {
                 if canceled() {
@@ -733,56 +853,65 @@ fn world(
             // The reference keeps servicing the connection here, and a drop is the disconnect
             // handler (`0x46c540`) at once, so the park looks at the socket every tick.
             bevy::log::info!("net: parked at character select");
-            let link_check = crossbeam_channel::tick(PARK_LINK_CHECK);
             let guid = loop {
                 // The realm list's requests and the character screen's share one channel, in the
-                // order they were made: `RealmList.xml` is a `frameStrata="DIALOG"` frame, so Change
-                // Realm raises it over character select and both must be served while it is open,
-                // and a roster ask made before a realm change goes out on this link before the
-                // change drops it (the reference sends at the verb, `0x46b880`, and `ConnectToRealm`
-                // only then closes the link, `0x46b22b`).
+                // order they were made: `RealmList.xml` is a `frameStrata="DIALOG"` frame, so
+                // Change Realm raises it over character select and both must be served while it is
+                // open, and a roster ask made before a realm change goes out on this link before
+                // the change drops it (the reference sends at the verb, `0x46b880`, and
+                // `ConnectToRealm` only then closes the link, `0x46b22b`).
                 //
-                // No `break` or `continue` inside the `select!` arms: the macro expands into a loop of
-                // its own, which they would bind to. The arms answer with a [`Parked`].
-                let answer = crossbeam_channel::select! {
-                    recv(park_rx) -> msg => match msg {
-                        Err(_) => Parked::Exit,
-                        // `RequestRealmList`: a query on the realmd link, dialled again once Enter
-                        // World has closed it (`0x5b2200`), then the list; also Change Realm's
-                        // first list.
-                        Ok(ParkRequest::Realm(RealmRequest::Refresh)) => {
-                            if query(logon, req, events_tx) {
-                                Parked::StayPut
-                            } else {
-                                Parked::Exit
-                            }
+                // The arms answer with a [`Parked`]; what a message asks for runs here, after
+                // [`woke`]'s race, so a second channel waking cannot drop a query or a create
+                // mid-reply.
+                // The link check races the channels as upstream's ticker does: whichever comes
+                // first, and a message waking first leaves the tick for the next wait.
+                let tick = async {
+                    benilla_protocol::transport::sleep(PARK_LINK_CHECK).await;
+                    Woke::LinkCheck
+                };
+                let answer = match futures_lite::future::race(woke(parks), tick).await {
+                    Woke::Realm(None) | Woke::Login(None) => Parked::Exit,
+                    // `RequestRealmList`: a query on the realmd link, dialled again once Enter
+                    // World has closed it (`0x5b2200`), then the list; also Change Realm's first
+                    // list.
+                    Woke::Realm(Some(RealmRequest::Refresh)) => {
+                        if query(logon, req, events_tx).await {
+                            Parked::StayPut
+                        } else {
+                            Parked::Exit
                         }
-                        // `RealmListDialogCancelled` over character select is a no-op (`0x46b810`).
-                        Ok(ParkRequest::Realm(RealmRequest::Close)) => Parked::StayPut,
-                        // `ChangeRealm(category, index)`: dial the chosen realm with the session key
-                        // we hold.
-                        Ok(ParkRequest::Realm(RealmRequest::Enter { realm, generation })) => {
-                            Parked::Realm(realm, generation)
-                        }
-                        // `ConnectToRealm` with the world up drops it first (`0x46b22b`).
-                        Ok(ParkRequest::Realm(RealmRequest::Leave)) => Parked::Leave,
-                        Ok(ParkRequest::Char(CharRequest::Enter(guid))) => Parked::Play(guid),
-                        // Select's Back: drop the parked session, return to the login park.
-                        Ok(ParkRequest::Char(CharRequest::Abandon)) => Parked::Repark,
-                        Ok(ParkRequest::Char(CharRequest::Create(create))) => {
-                            Parked::Acted(CharAction::Create, session.create_character(&create)?)
-                        }
-                        Ok(ParkRequest::Char(CharRequest::Delete(target))) => {
-                            Parked::Acted(CharAction::Delete, session.delete_character(target)?)
-                        }
-                        Ok(ParkRequest::Char(CharRequest::Rename { guid, name })) => {
-                            let (result, renamed) = session.rename_character(guid, &name)?;
-                            Parked::Renamed(result, renamed)
-                        }
-                        // `GetCharacterListUpdate` (`0x4723d0` → `0x46b880` → `0x5aabb0` → `0x5b4690`):
-                        // the reference asks the world server again whenever the glue screen wants
-                        // the list.
-                        Ok(ParkRequest::Char(CharRequest::Enumerate)) => match session.char_enum() {
+                    }
+                    // `RealmListDialogCancelled` over character select is a no-op (`0x46b810`).
+                    Woke::Realm(Some(RealmRequest::Close)) => Parked::StayPut,
+                    // `ChangeRealm(category, index)`: dial the chosen realm with the session key
+                    // we hold.
+                    Woke::Realm(Some(RealmRequest::Enter { realm, generation })) => {
+                        Parked::Realm(realm, generation)
+                    }
+                    // `ConnectToRealm` with the world up drops it first (`0x46b22b`).
+                    Woke::Realm(Some(RealmRequest::Leave)) => Parked::Leave,
+                    Woke::Pick(CharRequest::Enter(guid)) => Parked::Play(guid),
+                    // Select's Back: drop the parked session, return to the login park.
+                    Woke::Pick(CharRequest::Abandon) => Parked::Repark,
+                    Woke::Pick(CharRequest::Create(create)) => Parked::Acted(
+                        CharAction::Create,
+                        session.create_character_async(&create).await?,
+                    ),
+                    Woke::Pick(CharRequest::Delete(target)) => Parked::Acted(
+                        CharAction::Delete,
+                        session.delete_character_async(target).await?,
+                    ),
+                    Woke::Pick(CharRequest::Rename { guid, name }) => {
+                        let (result, renamed) = session.rename_character_async(guid, &name).await?;
+                        Parked::Renamed(result, renamed)
+                    }
+                    // `GetCharacterListUpdate` (`0x4723d0` → `0x46b880` → `0x5aabb0` →
+                    // `0x5b4690`): the reference asks the world server again whenever the glue
+                    // screen wants the list. A Warden refusal is the server's answer, as at the
+                    // park entry.
+                    Woke::Pick(CharRequest::Enumerate) => {
+                        match session.char_enum_async().await {
                             Ok(c) => {
                                 characters = c;
                                 Parked::Listed
@@ -793,13 +922,13 @@ fn world(
                                 let _ = events_tx.send(SessionEvent::RosterFailed { epoch });
                                 return Err(e);
                             }
-                        },
-                    },
-                    recv(login_rx) -> msg => msg.map_or(Parked::Exit, Parked::Login),
-                    recv(link_check) -> _ => match session.poll_link() {
+                        }
+                    }
+                    Woke::Login(Some(next)) => Parked::Login(next),
+                    // The server dropped the link (a kick among them): the session ends as a
+                    // stream failure does, `DISCONNECTED_FROM_SERVER` and the login screen.
+                    Woke::LinkCheck => match session.poll_link().await {
                         Ok(()) => Parked::StayPut,
-                        // The server dropped the link (a kick among them): the session ends as a
-                        // stream failure does, `DISCONNECTED_FROM_SERVER` and the login screen.
                         Err(e) => return Err(e),
                     },
                 };
@@ -872,13 +1001,14 @@ fn world(
             // again ([`query`]).
             logon.close();
             // No `CMSG_SET_ACTIVE_MOVER` here: it waits for our own player's create, as the
-            // reference's does (`super::enter_world_on_self_create`); a server may drop it before then.
-            session.player_login(refuse_once(guid))?;
+            // reference's does (`super::enter_world_on_self_create`); a server may drop it before
+            // then.
+            session.player_login_async(refuse_once(guid)).await?;
 
             let billing = session.billing();
             let tutorial_flags = session.take_tutorial_flags();
-            // `SMSG_ADDON_INFO` carries no names, so it is paired back against the block we sent. No
-            // reply means no AddOn index space at all, carried as `None`. The link's one reply
+            // `SMSG_ADDON_INFO` carries no names, so it is paired back against the block we sent.
+            // No reply means no AddOn index space at all, carried as `None`. The link's one reply
             // answers every login on it.
             let addon_info = addon_records(&session);
             match &addon_info {
@@ -898,7 +1028,7 @@ fn world(
                 fresh_link: std::mem::take(&mut fresh_link),
             };
             if writer_tx.send(install).is_err() {
-                // The writer thread ends only on app exit.
+                // The write half ends only on app exit.
                 return Ok(WorldEnd::Cycle(Cycle::Exit));
             }
             if events_tx
@@ -915,11 +1045,11 @@ fn world(
             }
             bevy::log::info!("net: connected to {world_addr}");
 
-            let reason = match stream(&mut reader, park_rx, events_tx, ping_clock, tails_announced)?
-            {
-                StreamEnd::Exit => return Ok(WorldEnd::Cycle(Cycle::Exit)),
-                StreamEnd::Back(reason) => reason,
-            };
+            let reason =
+                match stream(&mut reader, park_rx, events_tx, ping_clock, tails_announced).await? {
+                    StreamEnd::Exit => return Ok(WorldEnd::Cycle(Cycle::Exit)),
+                    StreamEnd::Back(reason) => reason,
+                };
             // The world is torn down (`0x401ee0`'s shutdown) and the link kept: the app's teardown
             // edge, then the session joined again at the character park.
             if events_tx
@@ -931,7 +1061,7 @@ fn world(
             {
                 return Ok(WorldEnd::Cycle(Cycle::Exit));
             }
-            let Some(writer) = reclaim(writer_tx)? else {
+            let Some(writer) = reclaim(writer_tx).await? else {
                 return Ok(WorldEnd::Cycle(Cycle::Exit));
             };
             session = WorldSession::rejoin(reader, writer)?;
@@ -964,9 +1094,9 @@ pub(crate) fn inbound(opcode: u16, events: Vec<SessionEvent>, body: Vec<u8>) -> 
 
 /// The world stream: every packet off the socket into [`SessionEvent`]s until a logout or a refused
 /// character login ends the world session, the socket fails or the app exits.
-fn stream(
+async fn stream(
     reader: &mut WorldReader,
-    park_rx: &Receiver<ParkRequest>,
+    park_rx: &async_channel::Receiver<ParkRequest>,
     events_tx: &Sender<SessionEvent>,
     ping_clock: &Mutex<PingClock>,
     tails_announced: &mut std::collections::HashSet<u16>,
@@ -974,7 +1104,7 @@ fn stream(
     // `poll` skips packets it cannot parse; a long run of skips means the stream desynced.
     let (mut skip_run, mut skip_logged) = (0u32, 0u32);
     loop {
-        let polled = reader.poll()?;
+        let polled = reader.poll_async().await?;
         note_inbound(); // parsed or not, the census counts liveness
         match polled {
             Poll::Events {
@@ -1083,18 +1213,20 @@ fn note_warden(session: &WorldSession, noted: &mut bool) {
     }
 }
 
-/// Takes the world writer back from the write thread, the world session over and the link kept.
-/// `None` once the write thread is gone (app exit).
-fn reclaim(writer_tx: &Sender<WriterSwap>) -> Result<Option<WorldWriter>> {
-    let (reply, returned) = crossbeam_channel::bounded(1);
+/// Takes the world writer back from the write half, the world session over and the link kept.
+/// `None` once the write half is gone (app exit). Awaited: on wasm32 the reply comes from the next
+/// frame's `web_writer_pump`, on the same event loop this task runs on.
+async fn reclaim(writer_tx: &Sender<WriterSwap>) -> Result<Option<WorldWriter>> {
+    let (reply, returned) = async_channel::bounded(1);
     if writer_tx.send(WriterSwap::Reclaim(reply)).is_err() {
         return Ok(None);
     }
     // The install went ahead of this on the same channel, so the writer is there to return.
     returned
         .recv()
+        .await
         .map(Some)
-        .map_err(|_| anyhow!("the write thread held no world writer to return"))
+        .map_err(|_| anyhow!("the write half held no world writer to return"))
 }
 
 /// `WOW_REFUSE_LOGIN=1` makes the server refuse the run's first character login, which cannot be
@@ -1106,8 +1238,9 @@ fn refuse_once(guid: u64) -> u64 {
     /// `login_refusal_probe`.
     const NOT_A_PLAYER: u64 = 0xF130_0000_0000_0001;
     static ARMED: std::sync::OnceLock<AtomicU64> = std::sync::OnceLock::new();
-    let armed = ARMED
-        .get_or_init(|| AtomicU64::new(u64::from(std::env::var_os("WOW_REFUSE_LOGIN").is_some())));
+    let armed = ARMED.get_or_init(|| {
+        AtomicU64::new(u64::from(crate::webenv::var("WOW_REFUSE_LOGIN").is_some()))
+    });
     if armed.swap(0, Ordering::SeqCst) == 1 {
         bevy::log::warn!("net: WOW_REFUSE_LOGIN — sending this pick with a non-player guid");
         NOT_A_PLAYER
@@ -1117,6 +1250,7 @@ fn refuse_once(guid: u64) -> u64 {
 }
 
 /// One [`WriterSwap`] applied to the write thread's writer, its warning count and its keepalive.
+#[cfg(not(target_arch = "wasm32"))]
 fn apply_swap(
     swap: WriterSwap,
     writer: &mut Option<WorldWriter>,
@@ -1141,7 +1275,7 @@ fn apply_swap(
         WriterSwap::Reclaim(reply) => {
             *ping_tick = crossbeam_channel::never();
             if let Some(w) = writer.take() {
-                let _ = reply.send(w);
+                let _ = reply.try_send(w);
             }
         }
     }
@@ -1149,6 +1283,9 @@ fn apply_swap(
 
 /// The write thread: app commands, writer swaps and the [`PING_INTERVAL`] keepalive. With no live
 /// writer, commands drop with a capped warning. Ends when the app drops every command sender.
+/// Native only: the page drains the same channels through the same [`dispatch`] in
+/// `crate::net`'s `web_writer_pump`.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn writer_loop(
     cmd_rx: &Receiver<ClientCommand>,
     mut writer_rx: Receiver<WriterSwap>,
@@ -1197,9 +1334,9 @@ pub(super) fn writer_loop(
             },
             recv(cmd_rx) -> cmd => {
                 let Ok(cmd) = cmd else { return }; // all app senders dropped → app exit
-                // The read thread installs a writer before it announces the entry, so a command
-                // the app sends on that announcement finds it here even when this wake-up took
-                // the command first, whether no writer is held or a lost link's dead one is.
+                // The sequencer installs a writer before it announces the entry, so a command the
+                // app sends on that announcement finds it here even when this wake-up took the
+                // command first, whether no writer is held or a lost link's dead one is.
                 while let Ok(swap) = writer_rx.try_recv() {
                     apply_swap(swap, &mut writer, &mut warned, &mut ping_tick, ping_clock);
                 }
@@ -1220,674 +1357,7 @@ pub(super) fn writer_loop(
                     }
                     continue;
                 };
-                let result = match cmd {
-                    ClientCommand::Move {
-                        kind,
-                        flags,
-                        pos,
-                        orientation,
-                        pitch,
-                        fall_time,
-                        jump,
-                        transport,
-                    } => w.send_movement(
-                        kind.opcode(),
-                        flags,
-                        pos,
-                        orientation,
-                        pitch,
-                        fall_time,
-                        jump,
-                        transport,
-                    ),
-                    ClientCommand::MoveSplineDone {
-                        flags,
-                        pos,
-                        orientation,
-                        spline_id,
-                    } => w.move_spline_done(flags, pos, orientation, spline_id),
-                    ClientCommand::MoveTimeSkipped { guid, lag_ms } => {
-                        w.move_time_skipped(guid, lag_ms)
-                    }
-                    ClientCommand::ForceSpeedAck {
-                        kind,
-                        guid,
-                        counter,
-                        speed,
-                        flags,
-                        pos,
-                        orientation,
-                        pitch,
-                        fall_time,
-                        jump,
-                        transport,
-                    } => w.force_speed_change_ack(
-                        kind,
-                        guid,
-                        counter,
-                        speed,
-                        flags,
-                        pos,
-                        orientation,
-                        pitch,
-                        fall_time,
-                        jump,
-                        transport,
-                    ),
-                    ClientCommand::SetActiveMover { guid } => w.set_active_mover(guid),
-                    ClientCommand::NotActiveMover {
-                        guid,
-                        flags,
-                        pos,
-                        orientation,
-                        fall_time,
-                    } => w.move_not_active_mover(guid, flags, pos, orientation, fall_time),
-                    ClientCommand::FarSight { engage } => w.far_sight(engage),
-                    ClientCommand::TeleportAck { guid, counter } => w.teleport_ack(guid, counter),
-                    ClientCommand::WorldportAck => w.worldport_ack(),
-                    ClientCommand::SetSelection { guid } => w.set_selection(guid),
-                    ClientCommand::CancelAutoRepeat => w.cancel_auto_repeat(),
-                    ClientCommand::CancelCast { spell_id } => w.cancel_cast(spell_id),
-                    ClientCommand::CancelChannelling { spell_id } => w.cancel_channelling(spell_id),
-                    ClientCommand::Chat {
-                        kind,
-                        target,
-                        text,
-                        language,
-                    } => w.send_message_chat(kind.chat_type(), language, target.as_deref(), &text),
-                    // The distribution is an enum, so its map to a chat type is total.
-                    ClientCommand::AddonMessage { distribution, text } => {
-                        w.send_addon_message(super::addon_wire_chat_type(distribution), &text)
-                    }
-                    ClientCommand::JoinChannel { name, password } => {
-                        w.join_channel(&name, &password)
-                    }
-                    ClientCommand::LeaveChannel { name } => w.leave_channel(&name),
-                    ClientCommand::ChannelList { name } => w.channel_list(&name),
-                    ClientCommand::RandomRoll { min, max } => w.random_roll(min, max),
-                    ClientCommand::ChannelOwner { name } => w.channel_owner(&name),
-                    ClientCommand::ChannelSetOwner { name, player } => {
-                        w.channel_set_owner(&name, &player)
-                    }
-                    ClientCommand::ChannelPassword { name, password } => {
-                        w.channel_password(&name, &password)
-                    }
-                    ClientCommand::ChannelModerator { name, player } => {
-                        w.channel_moderator(&name, &player)
-                    }
-                    ClientCommand::ChannelUnmoderator { name, player } => {
-                        w.channel_unmoderator(&name, &player)
-                    }
-                    ClientCommand::ChannelMute { name, player } => w.channel_mute(&name, &player),
-                    ClientCommand::ChannelUnmute { name, player } => {
-                        w.channel_unmute(&name, &player)
-                    }
-                    ClientCommand::ChannelInvite { name, player } => {
-                        w.channel_invite(&name, &player)
-                    }
-                    ClientCommand::ChannelKick { name, player } => w.channel_kick(&name, &player),
-                    ClientCommand::ChannelBan { name, player } => w.channel_ban(&name, &player),
-                    ClientCommand::ChannelUnban { name, player } => {
-                        w.channel_unban(&name, &player)
-                    }
-                    ClientCommand::ChannelAnnouncements { name } => w.channel_announcements(&name),
-                    ClientCommand::ChannelModerate { name } => w.channel_moderate(&name),
-                    ClientCommand::PlayedTime => w.played_time(),
-                    ClientCommand::NameQuery { guid } => w.name_query(guid),
-                    ClientCommand::CreatureQuery { entry, guid } => w.creature_query(entry, guid),
-                    ClientCommand::PetNameQuery { pet_number, guid } => {
-                        w.pet_name_query(pet_number, guid)
-                    }
-                    ClientCommand::ItemQuery { entry, guid } => w.item_query(entry, guid),
-                    ClientCommand::ItemNameQuery { entry, guid } => {
-                        w.item_name_query(entry, guid)
-                    }
-                    ClientCommand::UseItem {
-                        bag_index,
-                        slot,
-                        spell_index,
-                        target,
-                    } => w.use_item(bag_index, slot, spell_index, target),
-                    ClientCommand::OpenItem { bag_index, slot } => w.open_item(bag_index, slot),
-                    ClientCommand::WrapItem {
-                        gift_bag,
-                        gift_slot,
-                        item_bag,
-                        item_slot,
-                    } => w.wrap_item(gift_bag, gift_slot, item_bag, item_slot),
-                    ClientCommand::AutoEquipItem { bag_index, slot } => {
-                        w.auto_equip_item(bag_index, slot)
-                    }
-                    ClientCommand::SetAmmo { entry } => w.set_ammo(entry),
-                    ClientCommand::SwapInvItem { src_slot, dst_slot } => {
-                        w.swap_inv_item(src_slot, dst_slot)
-                    }
-                    ClientCommand::SwapItem {
-                        dst_bag,
-                        dst_slot,
-                        src_bag,
-                        src_slot,
-                    } => w.swap_item(dst_bag, dst_slot, src_bag, src_slot),
-                    ClientCommand::AutoStoreBagItem {
-                        src_bag,
-                        src_slot,
-                        dst_bag,
-                    } => w.auto_store_bag_item(src_bag, src_slot, dst_bag),
-                    ClientCommand::SplitItem {
-                        src_bag,
-                        src_slot,
-                        dst_bag,
-                        dst_slot,
-                        count,
-                    } => w.split_item(src_bag, src_slot, dst_bag, dst_slot, count),
-                    ClientCommand::DestroyItem {
-                        bag_index,
-                        slot,
-                        count,
-                    } => w.destroy_item(bag_index, slot, count),
-                    ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
-                    ClientCommand::CastSpellCorpse {
-                        spell_id,
-                        target,
-                        corpse_guid,
-                    } => w.cast_spell_corpse(spell_id, target, corpse_guid),
-                    ClientCommand::CastSpellAtDest { spell_id, dest } => {
-                        w.cast_spell_at_dest(spell_id, dest)
-                    }
-                    ClientCommand::CastSpellAtSource { spell_id, src } => {
-                        w.cast_spell_at_source(spell_id, src)
-                    }
-                    ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
-                    ClientCommand::SetActionButton { button, packed } => {
-                        w.set_action_button(button, packed)
-                    }
-                    ClientCommand::SetActionBarToggles { toggles } => {
-                        w.set_actionbar_toggles(toggles)
-                    }
-                    ClientCommand::PetAction {
-                        pet_guid,
-                        packed,
-                        target_guid,
-                    } => w.pet_action(pet_guid, packed, target_guid),
-                    ClientCommand::PetCastSpell {
-                        caster_guid,
-                        spell_id,
-                        target,
-                    } => w.pet_cast_spell(caster_guid, spell_id, target),
-                    ClientCommand::PetSetAction { pet_guid, entries } => {
-                        w.pet_set_action(pet_guid, &entries)
-                    }
-                    ClientCommand::PetStopAttack { pet_guid } => w.pet_stop_attack(pet_guid),
-                    ClientCommand::PetCancelAura { pet_guid, spell_id } => {
-                        w.pet_cancel_aura(pet_guid, spell_id)
-                    }
-                    ClientCommand::PetSpellAutocast {
-                        pet_guid,
-                        spell_id,
-                        enabled,
-                    } => w.pet_spell_autocast(pet_guid, spell_id, enabled),
-                    ClientCommand::PetAbandon { pet_guid } => w.pet_abandon(pet_guid),
-                    ClientCommand::RequestPetInfo => w.request_pet_info(),
-                    ClientCommand::PetRename { pet_guid, name } => w.pet_rename(pet_guid, &name),
-                    ClientCommand::AttackSwing { guid } => w.attack_swing(guid),
-                    ClientCommand::AttackStop => w.attack_stop(),
-                    ClientCommand::SetSheathed { state } => w.set_sheathed(state),
-                    ClientCommand::StandStateChange { state } => w.stand_state_change(state),
-                    ClientCommand::MountSpecial => w.mount_special(),
-                    ClientCommand::Emote { emote } => w.emote(emote),
-                    ClientCommand::TextEmote { text_id, target } => w.text_emote(text_id, target),
-                    ClientCommand::GossipHello { guid } => w.gossip_hello(guid),
-                    ClientCommand::GossipSelectOption {
-                        guid,
-                        option,
-                        code,
-                    } => w.gossip_select_option(guid, option, code.as_deref()),
-                    ClientCommand::NpcTextQuery { text_id, guid } => w.npc_text_query(text_id, guid),
-                    ClientCommand::ListInventory { guid } => w.list_inventory(guid),
-                    ClientCommand::BuyItem {
-                        vendor,
-                        entry,
-                        count,
-                    } => w.buy_item(vendor, entry, count),
-                    ClientCommand::BuyItemInSlot {
-                        vendor,
-                        entry,
-                        bag_guid,
-                        bag_slot,
-                        count,
-                    } => w.buy_item_in_slot(vendor, entry, bag_guid, bag_slot, count),
-                    ClientCommand::SellItem {
-                        vendor,
-                        item_guid,
-                        count,
-                    } => w.sell_item(vendor, item_guid, count),
-                    ClientCommand::BuybackItem { vendor, slot } => w.buyback_item(vendor, slot),
-                    ClientCommand::RepairItem { vendor, item_guid } => {
-                        w.repair_item(vendor, item_guid)
-                    }
-                    ClientCommand::GmTicketCreate {
-                        category,
-                        map,
-                        pos,
-                        text,
-                    } => w.gm_ticket_create(category, map, pos, &text),
-                    ClientCommand::GmTicketUpdate { category, text } => {
-                        w.gm_ticket_updatetext(category, &text)
-                    }
-                    ClientCommand::GmTicketGet => w.gm_ticket_get(),
-                    ClientCommand::SkillBuyStep { skill_id } => w.skill_buy_step(skill_id),
-                    ClientCommand::LotteryQuery => w.lottery_query(),
-                    ClientCommand::BuyLotteryTicket { first, second } => {
-                        w.buy_lottery_ticket(first, second)
-                    }
-                    ClientCommand::GmSurveySubmit {
-                        survey,
-                        answers,
-                        comment,
-                    } => {
-                        let answers: Vec<_> = answers
-                            .iter()
-                            .map(|(question, rating, comment)| SurveyAnswer {
-                                question: *question,
-                                rating: *rating,
-                                comment,
-                            })
-                            .collect();
-                        w.gm_survey_submit(survey, &answers, &comment)
-                    }
-                    ClientCommand::GmTicketDelete => w.gm_ticket_delete(),
-                    ClientCommand::GmTicketSystemStatus => w.gm_ticket_system_status(),
-                    ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
-                    ClientCommand::SummonResponse { summoner } => w.summon_response(summoner),
-                    ClientCommand::TalentWipeConfirm { trainer } => w.talent_wipe_confirm(trainer),
-                    ClientCommand::ForceLogout => w.player_logout(),
-                    ClientCommand::AreaSpiritHealerQueue { healer } => {
-                        w.area_spirit_healer_queue(healer)
-                    }
-                    ClientCommand::AreaSpiritHealerQuery { healer } => {
-                        w.area_spirit_healer_query(healer)
-                    }
-                    ClientCommand::BattlefieldPort { map_id, accept } => {
-                        w.battlefield_port(map_id, accept)
-                    }
-                    ClientCommand::RequestBattlefieldScoreData => {
-                        w.request_battlefield_score_data()
-                    }
-                    ClientCommand::LeaveBattlefield { map_id } => w.leave_battlefield(map_id),
-                    ClientCommand::MeetingStoneJoin { go_guid } => w.meeting_stone_join(go_guid),
-                    ClientCommand::MeetingStoneLeave => w.meeting_stone_leave(),
-                    ClientCommand::MeetingStoneStatusQuery => w.meeting_stone_status_query(),
-                    ClientCommand::TutorialFlag { id } => w.tutorial_flag(id),
-                    ClientCommand::TutorialClear => w.tutorial_clear(),
-                    ClientCommand::TutorialReset => w.tutorial_reset(),
-                    ClientCommand::BattlefieldList { map_id } => w.battlefield_list(map_id),
-                    ClientCommand::RequestBattlefieldPositions => {
-                        w.request_battlefield_positions()
-                    }
-                    ClientCommand::TabardVendorActivate { npc } => w.tabard_vendor_activate(npc),
-                    ClientCommand::SaveGuildEmblem { vendor, design } => {
-                        w.save_guild_emblem(vendor, design)
-                    }
-                    ClientCommand::BattlemasterHello { npc } => w.battlemaster_hello(npc),
-                    ClientCommand::BattlemasterJoin {
-                        battlemaster,
-                        map_id,
-                        instance_id,
-                        as_group,
-                    } => w.battlemaster_join(battlemaster, map_id, instance_id, as_group),
-                    ClientCommand::BattlefieldJoin {
-                        map_id,
-                        instance_id,
-                        as_group,
-                    } => w.battlefield_join(map_id, instance_id, as_group),
-                    ClientCommand::BattlefieldStatusRequest => w.battlefield_status(),
-                    ClientCommand::PetUnlearn { trainer } => w.pet_unlearn(trainer),
-                    ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
-                    ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),
-                    ClientCommand::AutoBankItem { bag, slot } => w.autobank_item(bag, slot),
-                    ClientCommand::AutoStoreBankItem { bag, slot } => {
-                        w.autostore_bank_item(bag, slot)
-                    }
-                    ClientCommand::TrainerList { trainer } => w.trainer_list(trainer),
-                    ClientCommand::TrainerBuySpell { trainer, spell_id } => {
-                        w.trainer_buy_spell(trainer, spell_id)
-                    }
-                    ClientCommand::ListStabledPets { npc } => w.list_stabled_pets(npc),
-                    ClientCommand::StablePet { npc } => w.stable_pet(npc),
-                    ClientCommand::UnstablePet { npc, pet_number } => {
-                        w.unstable_pet(npc, pet_number)
-                    }
-                    ClientCommand::StableSwapPet { npc, pet_number } => {
-                        w.stable_swap_pet(npc, pet_number)
-                    }
-                    ClientCommand::BuyStableSlot { npc } => w.buy_stable_slot(npc),
-                    ClientCommand::LearnTalent { talent_id, rank } => {
-                        w.learn_talent(talent_id, rank)
-                    }
-                    ClientCommand::UnlearnSkill { skill_id } => w.unlearn_skill(skill_id),
-                    ClientCommand::SetFactionAtWar {
-                        rep_list_id,
-                        at_war,
-                    } => w.set_faction_at_war(rep_list_id, at_war),
-                    ClientCommand::SetFactionInactive {
-                        rep_list_id,
-                        inactive,
-                    } => w.set_faction_inactive(rep_list_id, inactive),
-                    ClientCommand::SetWatchedFaction { rep_list_id } => {
-                        w.set_watched_faction(rep_list_id)
-                    }
-                    ClientCommand::GameObjUse { guid } => w.gameobj_use(guid),
-                    ClientCommand::AreaTrigger { trigger_id } => w.area_trigger(trigger_id),
-                    ClientCommand::GameObjectQuery { entry, guid } => w.gameobject_query(entry, guid),
-                    ClientCommand::PageTextQuery { page_id, guid } => {
-                        w.page_text_query(page_id, guid)
-                    }
-                    ClientCommand::CastSpellGameObject { spell_id, go_guid } => {
-                        w.cast_spell_gameobject(spell_id, go_guid)
-                    }
-                    ClientCommand::CastSpellItem {
-                        spell_id,
-                        item_guid,
-                    } => w.cast_spell_item(spell_id, item_guid),
-                    ClientCommand::CastSpellTradeItem { spell_id, slot } => {
-                        w.cast_spell_trade_item(spell_id, slot)
-                    }
-                    ClientCommand::LootMasterGive { guid, slot, target } => {
-                        w.loot_master_give(guid, slot, target)
-                    }
-                    ClientCommand::Loot { guid } => w.loot(guid),
-                    ClientCommand::AutostoreLootItem { slot } => w.autostore_loot_item(slot),
-                    ClientCommand::LootMoney => w.loot_money(),
-                    ClientCommand::LootRelease { guid } => w.loot_release(guid),
-                    ClientCommand::LootRoll {
-                        looted_target,
-                        item_slot,
-                        roll_type,
-                    } => w.loot_roll(looted_target, item_slot, roll_type),
-                    ClientCommand::QuestgiverQuery { npc, quest } => {
-                        w.questgiver_query_quest(npc, quest)
-                    }
-                    ClientCommand::QuestgiverAccept { npc, quest } => {
-                        w.questgiver_accept_quest(npc, quest)
-                    }
-                    ClientCommand::QuestgiverComplete { npc, quest } => {
-                        w.questgiver_complete_quest(npc, quest)
-                    }
-                    ClientCommand::QuestgiverRequestReward { npc, quest } => {
-                        w.questgiver_request_reward(npc, quest)
-                    }
-                    ClientCommand::QuestgiverChooseReward { npc, quest, choice } => {
-                        w.questgiver_choose_reward(npc, quest, choice)
-                    }
-                    ClientCommand::QuestQuery { quest } => w.quest_query(quest),
-                    ClientCommand::QuestgiverStatusQuery { npc } => w.questgiver_status_query(npc),
-                    ClientCommand::QuestgiverHello { npc } => w.questgiver_hello(npc),
-                    ClientCommand::QuestlogRemove { slot } => w.questlog_remove_quest(slot),
-                    ClientCommand::PushQuestToParty { quest } => w.push_quest_to_party(quest),
-                    ClientCommand::QuestConfirmAccept { quest } => w.quest_confirm_accept(quest),
-                    ClientCommand::QuestPushResult { sharer, msg } => {
-                        w.quest_push_result(sharer, msg)
-                    }
-                    ClientCommand::GetMailList { mailbox } => w.get_mail_list(mailbox),
-                    ClientCommand::SendMail {
-                        mailbox,
-                        receiver,
-                        subject,
-                        body,
-                        stationery,
-                        package,
-                        item_guid,
-                        money,
-                        cod,
-                    } => w.send_mail(
-                        mailbox, &receiver, &subject, &body,
-                        // vmangos stores `MAIL_STATIONERY_DEFAULT` (41) regardless of the chosen
-                        // stationery, and reads the package id (`Packets/Mail.cpp:10`) unused.
-                        stationery, package, item_guid, money, cod,
-                    ),
-                    ClientCommand::MailTakeMoney { mailbox, mail_id } => {
-                        w.mail_take_money(mailbox, mail_id)
-                    }
-                    ClientCommand::MailTakeItem { mailbox, mail_id } => {
-                        w.mail_take_item(mailbox, mail_id)
-                    }
-                    ClientCommand::MailMarkAsRead { mailbox, mail_id } => {
-                        w.mail_mark_as_read(mailbox, mail_id)
-                    }
-                    ClientCommand::MailReturnToSender { mailbox, mail_id } => {
-                        w.mail_return_to_sender(mailbox, mail_id)
-                    }
-                    ClientCommand::MailDelete { mailbox, mail_id } => {
-                        w.mail_delete(mailbox, mail_id)
-                    }
-                    ClientCommand::MailCreateTextItem {
-                        mailbox,
-                        mail_id,
-                        template_id,
-                    } => w.mail_create_text_item(mailbox, mail_id, template_id),
-                    ClientCommand::ItemTextQuery { text_id, mail_id } => {
-                        w.item_text_query(text_id, mail_id)
-                    }
-                    ClientCommand::QueryNextMailTime => w.query_next_mail_time(),
-                    // The auction house: the auctioneer guid rides on every verb.
-                    ClientCommand::AuctionHello { auctioneer } => w.auction_hello(auctioneer),
-                    ClientCommand::AuctionListItems {
-                        auctioneer,
-                        list_from,
-                        searched_name,
-                        level_min,
-                        level_max,
-                        slot_id,
-                        main_category,
-                        sub_category,
-                        quality,
-                        usable,
-                    } => w.auction_list_items(
-                        auctioneer,
-                        list_from,
-                        &searched_name,
-                        level_min,
-                        level_max,
-                        slot_id,
-                        main_category,
-                        sub_category,
-                        quality,
-                        usable,
-                    ),
-                    ClientCommand::AuctionListOwnerItems {
-                        auctioneer,
-                        list_from,
-                    } => w.auction_list_owner_items(auctioneer, list_from),
-                    ClientCommand::AuctionListBidderItems {
-                        auctioneer,
-                        list_from,
-                        auction_ids,
-                    } => w.auction_list_bidder_items(auctioneer, list_from, &auction_ids),
-                    ClientCommand::AuctionSellItem {
-                        auctioneer,
-                        item_guid,
-                        bid,
-                        buyout,
-                        etime_minutes,
-                    } => w.auction_sell_item(auctioneer, item_guid, bid, buyout, etime_minutes),
-                    ClientCommand::AuctionPlaceBid {
-                        auctioneer,
-                        auction_id,
-                        price,
-                    } => w.auction_place_bid(auctioneer, auction_id, price),
-                    ClientCommand::AuctionRemoveItem {
-                        auctioneer,
-                        auction_id,
-                    } => w.auction_remove_item(auctioneer, auction_id),
-                    ClientCommand::QueryTime => w.query_time(),
-                    // No reply is awaited.
-                    ClientCommand::Inspect { target } => w.inspect(target),
-                    // Answered on the same opcode.
-                    ClientCommand::InspectHonorStats { target } => w.inspect_honor_stats(target),
-                    ClientCommand::InitiateTrade { target } => w.initiate_trade(target),
-                    ClientCommand::BeginTrade => w.begin_trade(),
-                    ClientCommand::BusyTrade => w.busy_trade(),
-                    ClientCommand::IgnoreTrade => w.ignore_trade(),
-                    ClientCommand::AcceptTrade { flag } => w.accept_trade(flag),
-                    ClientCommand::UnacceptTrade => w.unaccept_trade(),
-                    ClientCommand::CancelTrade => w.cancel_trade(),
-                    ClientCommand::SetTradeGold { copper } => w.set_trade_gold(copper),
-                    ClientCommand::SetTradeItem {
-                        trade_slot,
-                        bag,
-                        slot,
-                    } => w.set_trade_item(trade_slot, bag, slot),
-                    ClientCommand::ClearTradeItem { trade_slot } => w.clear_trade_item(trade_slot),
-                    ClientCommand::Logout => w.logout_request(),
-                    ClientCommand::LogoutCancel => w.logout_cancel(),
-                    ClientCommand::OpeningCinematic => w.opening_cinematic(),
-                    ClientCommand::CompleteCinematic => w.complete_cinematic(),
-                    ClientCommand::NextCinematicCamera => w.next_cinematic_camera(),
-                    ClientCommand::MoveModeAck {
-                        guid,
-                        counter,
-                        mode,
-                        apply,
-                        flags,
-                        pos,
-                        orientation,
-                    } => w.move_mode_ack(guid, counter, mode, apply, flags, (pos, orientation)),
-                    ClientCommand::KnockBackAck {
-                        guid,
-                        counter,
-                        launch,
-                        flags,
-                        pos,
-                        orientation,
-                        transport,
-                    } => {
-                        w.knock_back_ack(guid, counter, launch, flags, (pos, orientation), transport)
-                    }
-                    ClientCommand::RepopRequest => w.repop_request(),
-                    ClientCommand::CorpseQuery => w.corpse_query(),
-                    ClientCommand::ReclaimCorpse { corpse } => w.reclaim_corpse(corpse),
-                    ClientCommand::SelfRes => w.self_res(),
-                    ClientCommand::SpiritHealerActivate { npc } => w.spirit_healer_activate(npc),
-                    ClientCommand::ResurrectResponse { caster, accept } => {
-                        w.resurrect_response(caster, accept)
-                    }
-                    ClientCommand::GroupInvite { name } => w.group_invite(&name),
-                    ClientCommand::GroupAccept => w.group_accept(),
-                    ClientCommand::GroupDecline => w.group_decline(),
-                    ClientCommand::GroupUninvite { name } => w.group_uninvite(&name),
-                    ClientCommand::GroupUninviteGuid { guid } => w.group_uninvite_guid(guid),
-                    ClientCommand::GroupSetLeader { guid } => w.group_set_leader(guid),
-                    ClientCommand::GroupLeave => w.group_disband(),
-                    ClientCommand::GroupRaidConvert => w.group_raid_convert(),
-                    ClientCommand::RequestPartyMemberStats { guid } => {
-                        w.request_party_member_stats(guid)
-                    }
-                    ClientCommand::LootMethod {
-                        method,
-                        master,
-                        threshold,
-                    } => w.loot_method(method, master, threshold),
-                    ClientCommand::SetRaidTarget { icon, guid } => w.raid_target_set(icon, guid),
-                    ClientCommand::RequestRaidTargets => w.raid_target_request(),
-                    ClientCommand::MinimapPing { x, y } => w.minimap_ping(x, y),
-                    ClientCommand::GroupChangeSubGroup { name, group } => {
-                        w.group_change_sub_group(&name, group)
-                    }
-                    ClientCommand::GroupSwapSubGroup { name, other } => {
-                        w.group_swap_sub_group(&name, &other)
-                    }
-                    ClientCommand::GroupAssistantLeader { guid, grant } => {
-                        w.group_assistant_leader(guid, grant)
-                    }
-                    ClientCommand::ReadyCheckStart => w.ready_check_start(),
-                    ClientCommand::ReadyCheckAnswer { status } => w.ready_check_answer(status),
-                    ClientCommand::RequestRaidInfo => w.request_raid_info(),
-                    ClientCommand::ResetInstances => w.reset_instances(),
-                    ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),
-                    ClientCommand::DuelCancelled { arbiter } => w.duel_cancelled(arbiter),
-                    ClientCommand::TogglePvp => w.toggle_pvp(),
-                    ClientCommand::ToggleHelm => w.toggle_helm(),
-                    ClientCommand::ToggleCloak => w.toggle_cloak(),
-                    ClientCommand::TeleportCheat { pos, facing } => w.teleport_cheat(pos, facing),
-                    ClientCommand::TeleportToUnit { text } => w.teleport_to_unit(&text),
-                    ClientCommand::SetRawPosition { pos, facing } => {
-                        w.set_raw_position(pos, facing)
-                    }
-                    ClientCommand::WorldTeleport {
-                        time_ms,
-                        map,
-                        pos,
-                        facing,
-                    } => w.world_teleport(time_ms, map, pos, facing),
-                    ClientCommand::Whois { text } => w.whois(&text),
-                    ClientCommand::FriendListRequest => w.friend_list(),
-                    ClientCommand::AddFriend { name } => w.add_friend(&name),
-                    ClientCommand::SetLookingForGroup { slots, comment } => {
-                        w.set_looking_for_group(slots, &comment)
-                    }
-                    ClientCommand::LfgQuery { criterion, class } => {
-                        w.looking_for_group_query(criterion, class)
-                    }
-                    ClientCommand::DelFriend { guid } => w.del_friend(guid),
-                    ClientCommand::AddIgnore { name } => w.add_ignore(&name),
-                    ClientCommand::DelIgnore { guid } => w.del_ignore(guid),
-                    ClientCommand::Who { request } => w.who(&request),
-                    ClientCommand::ChatIgnored { guid } => w.chat_ignored(guid),
-                    ClientCommand::GuildQuery { guild_id } => w.guild_query(guild_id),
-                    ClientCommand::GuildCreate { name } => w.guild_create(&name),
-                    ClientCommand::GuildInvite { name } => w.guild_invite(&name),
-                    ClientCommand::GuildAccept => w.guild_accept(),
-                    ClientCommand::GuildDecline => w.guild_decline(),
-                    ClientCommand::GuildInfoRequest => w.guild_info(),
-                    ClientCommand::GuildRosterRequest => w.guild_roster(),
-                    ClientCommand::GuildPromote { name } => w.guild_promote(&name),
-                    ClientCommand::GuildDemote { name } => w.guild_demote(&name),
-                    ClientCommand::GuildLeave => w.guild_leave(),
-                    ClientCommand::GuildRemove { name } => w.guild_remove(&name),
-                    ClientCommand::GuildDisband => w.guild_disband(),
-                    ClientCommand::GuildLeader { name } => w.guild_leader(&name),
-                    ClientCommand::GuildMotd { motd } => w.guild_motd(&motd),
-                    ClientCommand::GuildRank {
-                        rank_id,
-                        rights,
-                        name,
-                    } => w.guild_rank(rank_id, rights, &name),
-                    ClientCommand::GuildAddRank { name } => w.guild_add_rank(&name),
-                    ClientCommand::GuildDelRank => w.guild_del_rank(),
-                    ClientCommand::GuildSetPublicNote { name, note } => {
-                        w.guild_set_public_note(&name, &note)
-                    }
-                    ClientCommand::GuildSetOfficerNote { name, note } => {
-                        w.guild_set_officer_note(&name, &note)
-                    }
-                    ClientCommand::GuildInfoText { text } => w.guild_info_text(&text),
-                    // Petitions: founding a guild.
-                    ClientCommand::PetitionShowList { npc } => w.petition_show_list(npc),
-                    ClientCommand::PetitionBuy { npc, name } => w.petition_buy(npc, &name),
-                    ClientCommand::PetitionShowSignatures { item } => {
-                        w.petition_show_signatures(item)
-                    }
-                    ClientCommand::PetitionSign { item, byte } => w.petition_sign(item, byte),
-                    ClientCommand::OfferPetition { item, player } => w.offer_petition(item, player),
-                    ClientCommand::TurnInPetition { item } => w.turn_in_petition(item),
-                    ClientCommand::PetitionQuery { petition_id, item } => {
-                        w.petition_query(petition_id, item)
-                    }
-                    ClientCommand::PetitionRename { item, name } => w.petition_rename(item, &name),
-                    ClientCommand::PetitionDecline { item } => w.petition_decline(item),
-                    ClientCommand::TaxiNodeStatusQuery { guid } => w.taxi_node_status_query(guid),
-                    ClientCommand::TaxiQueryNodes { guid } => w.taxi_query_available_nodes(guid),
-                    ClientCommand::ActivateTaxi {
-                        guid,
-                        source_node,
-                        dest_node,
-                    } => w.activate_taxi(guid, source_node, dest_node),
-                    ClientCommand::ActivateTaxiExpress {
-                        guid,
-                        total_cost,
-                        nodes,
-                    } => w.activate_taxi_express(guid, total_cost, &nodes),
-                };
+                let result = dispatch(w, cmd);
                 // Send failures (tag `wire`): the controller's `snd` line records a decision, not a
                 // transmission, so a silent `wire` log beside a busy `snd` log means all went out.
                 if let Err(e) = result {
@@ -1904,12 +1374,655 @@ pub(super) fn writer_loop(
     }
 }
 
+/// Send one [`ClientCommand`] down the wire — the whole outbound verb table, one arm per thing the
+/// player can do. Lifted out of [`writer_loop`] verbatim when the web build arrived (decision: the
+/// browser has no write thread, so its per-frame pump in [`crate::net`] needs the same body without
+/// the `select!` around it). The map is TOTAL: every command has exactly one send, and a new
+/// command that forgets one fails to compile here rather than going quietly missing.
+pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
+    if crate::webdiag::armed() {
+        note_transport_bit(&cmd);
+    }
+    match cmd {
+        ClientCommand::Move {
+            kind,
+            flags,
+            pos,
+            orientation,
+            pitch,
+            fall_time,
+            jump,
+            transport,
+        } => w.send_movement(
+            kind.opcode(),
+            flags,
+            pos,
+            orientation,
+            pitch,
+            fall_time,
+            jump,
+            transport,
+        ),
+        ClientCommand::MoveSplineDone {
+            flags,
+            pos,
+            orientation,
+            spline_id,
+            transport,
+        } => w.move_spline_done(flags, pos, orientation, spline_id, transport),
+        ClientCommand::MoveTimeSkipped { guid, lag_ms } => w.move_time_skipped(guid, lag_ms),
+        ClientCommand::ForceSpeedAck {
+            kind,
+            guid,
+            counter,
+            speed,
+            flags,
+            pos,
+            orientation,
+            pitch,
+            fall_time,
+            jump,
+            transport,
+        } => w.force_speed_change_ack(
+            kind,
+            guid,
+            counter,
+            speed,
+            flags,
+            pos,
+            orientation,
+            pitch,
+            fall_time,
+            jump,
+            transport,
+        ),
+        ClientCommand::SetActiveMover { guid } => w.set_active_mover(guid),
+        ClientCommand::NotActiveMover {
+            guid,
+            flags,
+            pos,
+            orientation,
+            fall_time,
+            transport,
+        } => w.move_not_active_mover(guid, flags, pos, orientation, fall_time, transport),
+        ClientCommand::FarSight { engage } => w.far_sight(engage),
+        ClientCommand::TeleportAck { guid, counter } => w.teleport_ack(guid, counter),
+        ClientCommand::WorldportAck => w.worldport_ack(),
+        ClientCommand::SetSelection { guid } => w.set_selection(guid),
+        ClientCommand::CancelAutoRepeat => w.cancel_auto_repeat(),
+        ClientCommand::CancelCast { spell_id } => w.cancel_cast(spell_id),
+        ClientCommand::CancelChannelling { spell_id } => w.cancel_channelling(spell_id),
+        ClientCommand::SetChatLanguage { language } => {
+            w.set_chat_language(language);
+            Ok(())
+        }
+        ClientCommand::Chat {
+            kind,
+            target,
+            text,
+            language,
+        } => w.send_message_chat(kind.chat_type(), language, target.as_deref(), &text),
+        // The distribution is an enum, so its map to a chat type is total.
+        ClientCommand::AddonMessage { distribution, text } => {
+            w.send_addon_message(super::addon_wire_chat_type(distribution), &text)
+        }
+        ClientCommand::JoinChannel { name, password } => w.join_channel(&name, &password),
+        ClientCommand::LeaveChannel { name } => w.leave_channel(&name),
+        ClientCommand::ChannelList { name } => w.channel_list(&name),
+        ClientCommand::RandomRoll { min, max } => w.random_roll(min, max),
+        ClientCommand::ChannelOwner { name } => w.channel_owner(&name),
+        ClientCommand::ChannelSetOwner { name, player } => w.channel_set_owner(&name, &player),
+        ClientCommand::ChannelPassword { name, password } => w.channel_password(&name, &password),
+        ClientCommand::ChannelModerator { name, player } => w.channel_moderator(&name, &player),
+        ClientCommand::ChannelUnmoderator { name, player } => w.channel_unmoderator(&name, &player),
+        ClientCommand::ChannelMute { name, player } => w.channel_mute(&name, &player),
+        ClientCommand::ChannelUnmute { name, player } => w.channel_unmute(&name, &player),
+        ClientCommand::ChannelInvite { name, player } => w.channel_invite(&name, &player),
+        ClientCommand::ChannelKick { name, player } => w.channel_kick(&name, &player),
+        ClientCommand::ChannelBan { name, player } => w.channel_ban(&name, &player),
+        ClientCommand::ChannelUnban { name, player } => w.channel_unban(&name, &player),
+        ClientCommand::ChannelAnnouncements { name } => w.channel_announcements(&name),
+        ClientCommand::ChannelModerate { name } => w.channel_moderate(&name),
+        ClientCommand::PlayedTime => w.played_time(),
+        ClientCommand::NameQuery { guid } => w.name_query(guid),
+        ClientCommand::CreatureQuery { entry, guid } => w.creature_query(entry, guid),
+        ClientCommand::PetNameQuery { pet_number, guid } => w.pet_name_query(pet_number, guid),
+        ClientCommand::ItemQuery { entry, guid } => w.item_query(entry, guid),
+        ClientCommand::ItemNameQuery { entry, guid } => w.item_name_query(entry, guid),
+        ClientCommand::UseItem {
+            bag_index,
+            slot,
+            spell_index,
+            target,
+        } => w.use_item(bag_index, slot, spell_index, target),
+        ClientCommand::OpenItem { bag_index, slot } => w.open_item(bag_index, slot),
+        ClientCommand::WrapItem {
+            gift_bag,
+            gift_slot,
+            item_bag,
+            item_slot,
+        } => w.wrap_item(gift_bag, gift_slot, item_bag, item_slot),
+        ClientCommand::AutoEquipItem { bag_index, slot } => w.auto_equip_item(bag_index, slot),
+        ClientCommand::SetAmmo { entry } => w.set_ammo(entry),
+        ClientCommand::SwapInvItem { src_slot, dst_slot } => w.swap_inv_item(src_slot, dst_slot),
+        ClientCommand::SwapItem {
+            dst_bag,
+            dst_slot,
+            src_bag,
+            src_slot,
+        } => w.swap_item(dst_bag, dst_slot, src_bag, src_slot),
+        ClientCommand::AutoStoreBagItem {
+            src_bag,
+            src_slot,
+            dst_bag,
+        } => w.auto_store_bag_item(src_bag, src_slot, dst_bag),
+        ClientCommand::SplitItem {
+            src_bag,
+            src_slot,
+            dst_bag,
+            dst_slot,
+            count,
+        } => w.split_item(src_bag, src_slot, dst_bag, dst_slot, count),
+        ClientCommand::DestroyItem {
+            bag_index,
+            slot,
+            count,
+        } => w.destroy_item(bag_index, slot, count),
+        ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
+        ClientCommand::CastSpellCorpse {
+            spell_id,
+            target,
+            corpse_guid,
+        } => w.cast_spell_corpse(spell_id, target, corpse_guid),
+        ClientCommand::CastSpellAtDest { spell_id, dest } => w.cast_spell_at_dest(spell_id, dest),
+        ClientCommand::CastSpellAtSource { spell_id, src } => w.cast_spell_at_source(spell_id, src),
+        ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
+        ClientCommand::SetActionButton { button, packed } => w.set_action_button(button, packed),
+        ClientCommand::SetActionBarToggles { toggles } => w.set_actionbar_toggles(toggles),
+        ClientCommand::PetAction {
+            pet_guid,
+            packed,
+            target_guid,
+        } => w.pet_action(pet_guid, packed, target_guid),
+        ClientCommand::PetCastSpell {
+            caster_guid,
+            spell_id,
+            target,
+        } => w.pet_cast_spell(caster_guid, spell_id, target),
+        ClientCommand::PetSetAction { pet_guid, entries } => w.pet_set_action(pet_guid, &entries),
+        ClientCommand::PetStopAttack { pet_guid } => w.pet_stop_attack(pet_guid),
+        ClientCommand::PetCancelAura { pet_guid, spell_id } => {
+            w.pet_cancel_aura(pet_guid, spell_id)
+        }
+        ClientCommand::PetSpellAutocast {
+            pet_guid,
+            spell_id,
+            enabled,
+        } => w.pet_spell_autocast(pet_guid, spell_id, enabled),
+        ClientCommand::PetAbandon { pet_guid } => w.pet_abandon(pet_guid),
+        ClientCommand::RequestPetInfo => w.request_pet_info(),
+        ClientCommand::PetRename { pet_guid, name } => w.pet_rename(pet_guid, &name),
+        ClientCommand::AttackSwing { guid } => w.attack_swing(guid),
+        ClientCommand::AttackStop => w.attack_stop(),
+        ClientCommand::SetSheathed { state } => w.set_sheathed(state),
+        ClientCommand::StandStateChange { state } => w.stand_state_change(state),
+        ClientCommand::MountSpecial => w.mount_special(),
+        ClientCommand::Emote { emote } => w.emote(emote),
+        ClientCommand::TextEmote { text_id, target } => w.text_emote(text_id, target),
+        ClientCommand::GossipHello { guid } => w.gossip_hello(guid),
+        ClientCommand::GossipSelectOption { guid, option, code } => {
+            w.gossip_select_option(guid, option, code.as_deref())
+        }
+        ClientCommand::NpcTextQuery { text_id, guid } => w.npc_text_query(text_id, guid),
+        ClientCommand::ListInventory { guid } => w.list_inventory(guid),
+        ClientCommand::BuyItem {
+            vendor,
+            entry,
+            count,
+        } => w.buy_item(vendor, entry, count),
+        ClientCommand::BuyItemInSlot {
+            vendor,
+            entry,
+            bag_guid,
+            bag_slot,
+            count,
+        } => w.buy_item_in_slot(vendor, entry, bag_guid, bag_slot, count),
+        ClientCommand::SellItem {
+            vendor,
+            item_guid,
+            count,
+        } => w.sell_item(vendor, item_guid, count),
+        ClientCommand::BuybackItem { vendor, slot } => w.buyback_item(vendor, slot),
+        ClientCommand::RepairItem { vendor, item_guid } => w.repair_item(vendor, item_guid),
+        ClientCommand::GmTicketCreate {
+            category,
+            map,
+            pos,
+            text,
+        } => w.gm_ticket_create(category, map, pos, &text),
+        ClientCommand::GmTicketUpdate { category, text } => w.gm_ticket_updatetext(category, &text),
+        ClientCommand::GmTicketGet => w.gm_ticket_get(),
+        ClientCommand::SkillBuyStep { skill_id } => w.skill_buy_step(skill_id),
+        ClientCommand::LotteryQuery => w.lottery_query(),
+        ClientCommand::BuyLotteryTicket { first, second } => w.buy_lottery_ticket(first, second),
+        ClientCommand::GmSurveySubmit {
+            survey,
+            answers,
+            comment,
+        } => {
+            let answers: Vec<_> = answers
+                .iter()
+                .map(|(question, rating, comment)| SurveyAnswer {
+                    question: *question,
+                    rating: *rating,
+                    comment,
+                })
+                .collect();
+            w.gm_survey_submit(survey, &answers, &comment)
+        }
+        ClientCommand::GmTicketDelete => w.gm_ticket_delete(),
+        ClientCommand::GmTicketSystemStatus => w.gm_ticket_system_status(),
+        ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
+        ClientCommand::SummonResponse { summoner } => w.summon_response(summoner),
+        ClientCommand::TalentWipeConfirm { trainer } => w.talent_wipe_confirm(trainer),
+        ClientCommand::ForceLogout => w.player_logout(),
+        ClientCommand::AreaSpiritHealerQueue { healer } => w.area_spirit_healer_queue(healer),
+        ClientCommand::AreaSpiritHealerQuery { healer } => w.area_spirit_healer_query(healer),
+        ClientCommand::BattlefieldPort { map_id, accept } => w.battlefield_port(map_id, accept),
+        ClientCommand::RequestBattlefieldScoreData => w.request_battlefield_score_data(),
+        ClientCommand::LeaveBattlefield { map_id } => w.leave_battlefield(map_id),
+        ClientCommand::MeetingStoneJoin { go_guid } => w.meeting_stone_join(go_guid),
+        ClientCommand::MeetingStoneLeave => w.meeting_stone_leave(),
+        ClientCommand::MeetingStoneStatusQuery => w.meeting_stone_status_query(),
+        ClientCommand::TutorialFlag { id } => w.tutorial_flag(id),
+        ClientCommand::TutorialClear => w.tutorial_clear(),
+        ClientCommand::TutorialReset => w.tutorial_reset(),
+        ClientCommand::BattlefieldList { map_id } => w.battlefield_list(map_id),
+        ClientCommand::RequestBattlefieldPositions => w.request_battlefield_positions(),
+        ClientCommand::TabardVendorActivate { npc } => w.tabard_vendor_activate(npc),
+        ClientCommand::SaveGuildEmblem { vendor, design } => w.save_guild_emblem(vendor, design),
+        ClientCommand::BattlemasterHello { npc } => w.battlemaster_hello(npc),
+        ClientCommand::BattlemasterJoin {
+            battlemaster,
+            map_id,
+            instance_id,
+            as_group,
+        } => w.battlemaster_join(battlemaster, map_id, instance_id, as_group),
+        ClientCommand::BattlefieldJoin {
+            map_id,
+            instance_id,
+            as_group,
+        } => w.battlefield_join(map_id, instance_id, as_group),
+        ClientCommand::BattlefieldStatusRequest => w.battlefield_status(),
+        ClientCommand::PetUnlearn { trainer } => w.pet_unlearn(trainer),
+        ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
+        ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),
+        ClientCommand::AutoBankItem { bag, slot } => w.autobank_item(bag, slot),
+        ClientCommand::AutoStoreBankItem { bag, slot } => w.autostore_bank_item(bag, slot),
+        ClientCommand::TrainerList { trainer } => w.trainer_list(trainer),
+        ClientCommand::TrainerBuySpell { trainer, spell_id } => {
+            w.trainer_buy_spell(trainer, spell_id)
+        }
+        ClientCommand::ListStabledPets { npc } => w.list_stabled_pets(npc),
+        ClientCommand::StablePet { npc } => w.stable_pet(npc),
+        ClientCommand::UnstablePet { npc, pet_number } => w.unstable_pet(npc, pet_number),
+        ClientCommand::StableSwapPet { npc, pet_number } => w.stable_swap_pet(npc, pet_number),
+        ClientCommand::BuyStableSlot { npc } => w.buy_stable_slot(npc),
+        ClientCommand::LearnTalent { talent_id, rank } => w.learn_talent(talent_id, rank),
+        ClientCommand::UnlearnSkill { skill_id } => w.unlearn_skill(skill_id),
+        ClientCommand::SetFactionAtWar {
+            rep_list_id,
+            at_war,
+        } => w.set_faction_at_war(rep_list_id, at_war),
+        ClientCommand::SetFactionInactive {
+            rep_list_id,
+            inactive,
+        } => w.set_faction_inactive(rep_list_id, inactive),
+        ClientCommand::SetWatchedFaction { rep_list_id } => w.set_watched_faction(rep_list_id),
+        ClientCommand::GameObjUse { guid } => w.gameobj_use(guid),
+        ClientCommand::AreaTrigger { trigger_id } => w.area_trigger(trigger_id),
+        ClientCommand::GameObjectQuery { entry, guid } => w.gameobject_query(entry, guid),
+        ClientCommand::PageTextQuery { page_id, guid } => w.page_text_query(page_id, guid),
+        ClientCommand::CastSpellGameObject { spell_id, go_guid } => {
+            w.cast_spell_gameobject(spell_id, go_guid)
+        }
+        ClientCommand::CastSpellItem {
+            spell_id,
+            item_guid,
+        } => w.cast_spell_item(spell_id, item_guid),
+        ClientCommand::CastSpellTradeItem { spell_id, slot } => {
+            w.cast_spell_trade_item(spell_id, slot)
+        }
+        ClientCommand::LootMasterGive { guid, slot, target } => {
+            w.loot_master_give(guid, slot, target)
+        }
+        ClientCommand::Loot { guid } => w.loot(guid),
+        ClientCommand::AutostoreLootItem { slot } => w.autostore_loot_item(slot),
+        ClientCommand::LootMoney => w.loot_money(),
+        ClientCommand::LootRelease { guid } => w.loot_release(guid),
+        ClientCommand::LootRoll {
+            looted_target,
+            item_slot,
+            roll_type,
+        } => w.loot_roll(looted_target, item_slot, roll_type),
+        ClientCommand::QuestgiverQuery { npc, quest } => w.questgiver_query_quest(npc, quest),
+        ClientCommand::QuestgiverAccept { npc, quest } => w.questgiver_accept_quest(npc, quest),
+        ClientCommand::QuestgiverComplete { npc, quest } => w.questgiver_complete_quest(npc, quest),
+        ClientCommand::QuestgiverRequestReward { npc, quest } => {
+            w.questgiver_request_reward(npc, quest)
+        }
+        ClientCommand::QuestgiverChooseReward { npc, quest, choice } => {
+            w.questgiver_choose_reward(npc, quest, choice)
+        }
+        ClientCommand::QuestQuery { quest } => w.quest_query(quest),
+        ClientCommand::QuestgiverStatusQuery { npc } => w.questgiver_status_query(npc),
+        ClientCommand::QuestgiverHello { npc } => w.questgiver_hello(npc),
+        ClientCommand::QuestlogRemove { slot } => w.questlog_remove_quest(slot),
+        ClientCommand::PushQuestToParty { quest } => w.push_quest_to_party(quest),
+        ClientCommand::QuestConfirmAccept { quest } => w.quest_confirm_accept(quest),
+        ClientCommand::QuestPushResult { sharer, msg } => w.quest_push_result(sharer, msg),
+        ClientCommand::GetMailList { mailbox } => w.get_mail_list(mailbox),
+        ClientCommand::SendMail {
+            mailbox,
+            receiver,
+            subject,
+            body,
+            stationery,
+            package,
+            item_guid,
+            money,
+            cod,
+        } => w.send_mail(
+            mailbox, &receiver, &subject, &body,
+            // vmangos stores `MAIL_STATIONERY_DEFAULT` (41) regardless of the chosen
+            // stationery, and reads the package id (`Packets/Mail.cpp:10`) unused.
+            stationery, package, item_guid, money, cod,
+        ),
+        ClientCommand::MailTakeMoney { mailbox, mail_id } => w.mail_take_money(mailbox, mail_id),
+        ClientCommand::MailTakeItem { mailbox, mail_id } => w.mail_take_item(mailbox, mail_id),
+        ClientCommand::MailMarkAsRead { mailbox, mail_id } => w.mail_mark_as_read(mailbox, mail_id),
+        ClientCommand::MailReturnToSender { mailbox, mail_id } => {
+            w.mail_return_to_sender(mailbox, mail_id)
+        }
+        ClientCommand::MailDelete { mailbox, mail_id } => w.mail_delete(mailbox, mail_id),
+        ClientCommand::MailCreateTextItem {
+            mailbox,
+            mail_id,
+            template_id,
+        } => w.mail_create_text_item(mailbox, mail_id, template_id),
+        ClientCommand::ItemTextQuery { text_id, mail_id } => w.item_text_query(text_id, mail_id),
+        ClientCommand::QueryNextMailTime => w.query_next_mail_time(),
+        // The auction house: the auctioneer guid rides on every verb.
+        ClientCommand::AuctionHello { auctioneer } => w.auction_hello(auctioneer),
+        ClientCommand::AuctionListItems {
+            auctioneer,
+            list_from,
+            searched_name,
+            level_min,
+            level_max,
+            slot_id,
+            main_category,
+            sub_category,
+            quality,
+            usable,
+        } => w.auction_list_items(
+            auctioneer,
+            list_from,
+            &searched_name,
+            level_min,
+            level_max,
+            slot_id,
+            main_category,
+            sub_category,
+            quality,
+            usable,
+        ),
+        ClientCommand::AuctionListOwnerItems {
+            auctioneer,
+            list_from,
+        } => w.auction_list_owner_items(auctioneer, list_from),
+        ClientCommand::AuctionListBidderItems {
+            auctioneer,
+            list_from,
+            auction_ids,
+        } => w.auction_list_bidder_items(auctioneer, list_from, &auction_ids),
+        ClientCommand::AuctionSellItem {
+            auctioneer,
+            item_guid,
+            bid,
+            buyout,
+            etime_minutes,
+        } => w.auction_sell_item(auctioneer, item_guid, bid, buyout, etime_minutes),
+        ClientCommand::AuctionPlaceBid {
+            auctioneer,
+            auction_id,
+            price,
+        } => w.auction_place_bid(auctioneer, auction_id, price),
+        ClientCommand::AuctionRemoveItem {
+            auctioneer,
+            auction_id,
+        } => w.auction_remove_item(auctioneer, auction_id),
+        ClientCommand::QueryTime => w.query_time(),
+        // No reply is awaited.
+        ClientCommand::Inspect { target } => w.inspect(target),
+        // Answered on the same opcode.
+        ClientCommand::InspectHonorStats { target } => w.inspect_honor_stats(target),
+        ClientCommand::InitiateTrade { target } => w.initiate_trade(target),
+        ClientCommand::BeginTrade => w.begin_trade(),
+        ClientCommand::BusyTrade => w.busy_trade(),
+        ClientCommand::IgnoreTrade => w.ignore_trade(),
+        ClientCommand::AcceptTrade { flag } => w.accept_trade(flag),
+        ClientCommand::UnacceptTrade => w.unaccept_trade(),
+        ClientCommand::CancelTrade => w.cancel_trade(),
+        ClientCommand::SetTradeGold { copper } => w.set_trade_gold(copper),
+        ClientCommand::SetTradeItem {
+            trade_slot,
+            bag,
+            slot,
+        } => w.set_trade_item(trade_slot, bag, slot),
+        ClientCommand::ClearTradeItem { trade_slot } => w.clear_trade_item(trade_slot),
+        ClientCommand::Logout => w.logout_request(),
+        ClientCommand::LogoutCancel => w.logout_cancel(),
+        ClientCommand::OpeningCinematic => w.opening_cinematic(),
+        ClientCommand::CompleteCinematic => w.complete_cinematic(),
+        ClientCommand::NextCinematicCamera => w.next_cinematic_camera(),
+        ClientCommand::MoveModeAck {
+            guid,
+            counter,
+            mode,
+            apply,
+            flags,
+            pos,
+            orientation,
+            transport,
+        } => w.move_mode_ack(
+            guid,
+            counter,
+            mode,
+            apply,
+            flags,
+            (pos, orientation),
+            transport,
+        ),
+        ClientCommand::KnockBackAck {
+            guid,
+            counter,
+            launch,
+            flags,
+            pos,
+            orientation,
+            transport,
+        } => w.knock_back_ack(guid, counter, launch, flags, (pos, orientation), transport),
+        ClientCommand::RepopRequest => w.repop_request(),
+        ClientCommand::CorpseQuery => w.corpse_query(),
+        ClientCommand::ReclaimCorpse { corpse } => w.reclaim_corpse(corpse),
+        ClientCommand::SelfRes => w.self_res(),
+        ClientCommand::SpiritHealerActivate { npc } => w.spirit_healer_activate(npc),
+        ClientCommand::ResurrectResponse { caster, accept } => w.resurrect_response(caster, accept),
+        ClientCommand::GroupInvite { name } => w.group_invite(&name),
+        ClientCommand::GroupAccept => w.group_accept(),
+        ClientCommand::GroupDecline => w.group_decline(),
+        ClientCommand::GroupUninvite { name } => w.group_uninvite(&name),
+        ClientCommand::GroupUninviteGuid { guid } => w.group_uninvite_guid(guid),
+        ClientCommand::GroupSetLeader { guid } => w.group_set_leader(guid),
+        ClientCommand::GroupLeave => w.group_disband(),
+        ClientCommand::GroupRaidConvert => w.group_raid_convert(),
+        ClientCommand::RequestPartyMemberStats { guid } => w.request_party_member_stats(guid),
+        ClientCommand::LootMethod {
+            method,
+            master,
+            threshold,
+        } => w.loot_method(method, master, threshold),
+        ClientCommand::SetRaidTarget { icon, guid } => w.raid_target_set(icon, guid),
+        ClientCommand::RequestRaidTargets => w.raid_target_request(),
+        ClientCommand::MinimapPing { x, y } => w.minimap_ping(x, y),
+        ClientCommand::GroupChangeSubGroup { name, group } => {
+            w.group_change_sub_group(&name, group)
+        }
+        ClientCommand::GroupSwapSubGroup { name, other } => w.group_swap_sub_group(&name, &other),
+        ClientCommand::GroupAssistantLeader { guid, grant } => {
+            w.group_assistant_leader(guid, grant)
+        }
+        ClientCommand::ReadyCheckStart => w.ready_check_start(),
+        ClientCommand::ReadyCheckAnswer { status } => w.ready_check_answer(status),
+        ClientCommand::RequestRaidInfo => w.request_raid_info(),
+        ClientCommand::ResetInstances => w.reset_instances(),
+        ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),
+        ClientCommand::DuelCancelled { arbiter } => w.duel_cancelled(arbiter),
+        ClientCommand::TogglePvp => w.toggle_pvp(),
+        ClientCommand::ToggleHelm => w.toggle_helm(),
+        ClientCommand::ToggleCloak => w.toggle_cloak(),
+        ClientCommand::TeleportCheat { pos, facing } => w.teleport_cheat(pos, facing),
+        ClientCommand::TeleportToUnit { text } => w.teleport_to_unit(&text),
+        ClientCommand::SetRawPosition { pos, facing } => w.set_raw_position(pos, facing),
+        ClientCommand::WorldTeleport {
+            time_ms,
+            map,
+            pos,
+            facing,
+        } => w.world_teleport(time_ms, map, pos, facing),
+        ClientCommand::Whois { text } => w.whois(&text),
+        ClientCommand::FriendListRequest => w.friend_list(),
+        ClientCommand::AddFriend { name } => w.add_friend(&name),
+        ClientCommand::SetLookingForGroup { slots, comment } => {
+            w.set_looking_for_group(slots, &comment)
+        }
+        ClientCommand::LfgQuery { criterion, class } => w.looking_for_group_query(criterion, class),
+        ClientCommand::DelFriend { guid } => w.del_friend(guid),
+        ClientCommand::AddIgnore { name } => w.add_ignore(&name),
+        ClientCommand::DelIgnore { guid } => w.del_ignore(guid),
+        ClientCommand::Who { request } => w.who(&request),
+        ClientCommand::ChatIgnored { guid } => w.chat_ignored(guid),
+        ClientCommand::GuildQuery { guild_id } => w.guild_query(guild_id),
+        ClientCommand::GuildCreate { name } => w.guild_create(&name),
+        ClientCommand::GuildInvite { name } => w.guild_invite(&name),
+        ClientCommand::GuildAccept => w.guild_accept(),
+        ClientCommand::GuildDecline => w.guild_decline(),
+        ClientCommand::GuildInfoRequest => w.guild_info(),
+        ClientCommand::GuildRosterRequest => w.guild_roster(),
+        ClientCommand::GuildPromote { name } => w.guild_promote(&name),
+        ClientCommand::GuildDemote { name } => w.guild_demote(&name),
+        ClientCommand::GuildLeave => w.guild_leave(),
+        ClientCommand::GuildRemove { name } => w.guild_remove(&name),
+        ClientCommand::GuildDisband => w.guild_disband(),
+        ClientCommand::GuildLeader { name } => w.guild_leader(&name),
+        ClientCommand::GuildMotd { motd } => w.guild_motd(&motd),
+        ClientCommand::GuildRank {
+            rank_id,
+            rights,
+            name,
+        } => w.guild_rank(rank_id, rights, &name),
+        ClientCommand::GuildAddRank { name } => w.guild_add_rank(&name),
+        ClientCommand::GuildDelRank => w.guild_del_rank(),
+        ClientCommand::GuildSetPublicNote { name, note } => w.guild_set_public_note(&name, &note),
+        ClientCommand::GuildSetOfficerNote { name, note } => w.guild_set_officer_note(&name, &note),
+        ClientCommand::GuildInfoText { text } => w.guild_info_text(&text),
+        // Petitions: founding a guild.
+        ClientCommand::PetitionShowList { npc } => w.petition_show_list(npc),
+        ClientCommand::PetitionBuy { npc, name } => w.petition_buy(npc, &name),
+        ClientCommand::PetitionShowSignatures { item } => w.petition_show_signatures(item),
+        ClientCommand::PetitionSign { item, byte } => w.petition_sign(item, byte),
+        ClientCommand::OfferPetition { item, player } => w.offer_petition(item, player),
+        ClientCommand::TurnInPetition { item } => w.turn_in_petition(item),
+        ClientCommand::PetitionQuery { petition_id, item } => w.petition_query(petition_id, item),
+        ClientCommand::PetitionRename { item, name } => w.petition_rename(item, &name),
+        ClientCommand::PetitionDecline { item } => w.petition_decline(item),
+        ClientCommand::TaxiNodeStatusQuery { guid } => w.taxi_node_status_query(guid),
+        ClientCommand::TaxiQueryNodes { guid } => w.taxi_query_available_nodes(guid),
+        ClientCommand::ActivateTaxi {
+            guid,
+            source_node,
+            dest_node,
+        } => w.activate_taxi(guid, source_node, dest_node),
+        ClientCommand::ActivateTaxiExpress {
+            guid,
+            total_cost,
+            nodes,
+        } => w.activate_taxi_express(guid, total_cost, &nodes),
+    }
+}
+
 mod wire_trace;
 
-#[cfg(test)]
+// Loopback sockets and a blocked thread: native only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod cycle_tests;
 
-#[cfg(test)]
+/// The `?diag=1` wire probe for transport seats: one console line each time `ON_TRANSPORT` comes
+/// on or goes off our outbound movement, naming the packet. vmangos unseats a passenger on the
+/// first movement word without the bit (`HandleMoverRelocation` → `RemovePassenger`), so the line
+/// that turns it off is the packet that unseated us.
+fn note_transport_bit(cmd: &ClientCommand) {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 nothing sent yet, 1 the last word carried the bit, 2 it did not.
+    static LAST: AtomicU8 = AtomicU8::new(0);
+    let (name, flags, tail) = match cmd {
+        ClientCommand::Move {
+            kind,
+            flags,
+            transport,
+            ..
+        } => (format!("{kind:?}"), *flags, transport.is_some()),
+        ClientCommand::MoveSplineDone {
+            flags, transport, ..
+        } => ("SplineDone".to_string(), *flags, transport.is_some()),
+        ClientCommand::ForceSpeedAck {
+            kind,
+            flags,
+            transport,
+            ..
+        } => (format!("SpeedAck {kind:?}"), *flags, transport.is_some()),
+        ClientCommand::MoveModeAck {
+            mode,
+            apply,
+            flags,
+            transport,
+            ..
+        } => (
+            format!("ModeAck {mode:?} {apply}"),
+            *flags,
+            transport.is_some(),
+        ),
+        ClientCommand::KnockBackAck {
+            flags, transport, ..
+        } => ("KnockBackAck".to_string(), *flags, transport.is_some()),
+        ClientCommand::NotActiveMover {
+            flags, transport, ..
+        } => ("NotActiveMover".to_string(), *flags, transport.is_some()),
+        _ => return,
+    };
+    let on = flags & crate::creature_anim::move_flags::ON_TRANSPORT != 0 && tail;
+    let state = if on { 1 } else { 2 };
+    if LAST.swap(state, Ordering::Relaxed) != state {
+        crate::webdiag::out(&format!(
+            "wire: {name} flags {flags:#x} -> ON_TRANSPORT {}",
+            if on { "on" } else { "OFF" }
+        ));
+    }
+}
+
+// Loopback sockets and a blocked thread: native only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod fake;
 
 #[cfg(test)]

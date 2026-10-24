@@ -17,7 +17,6 @@ use mlua::{Lua, Value};
 
 use super::binding_abi;
 use super::char_stats::InventorySlots;
-use super::Model;
 
 /// `CheckInteractDistance`'s squared thresholds for types 1..=4, `{10², 11.1111², 10², 30²}`
 /// (`0x48ba00`, from the `.rdata` at `0x804498`, `0x804490`, `0x80448c`, `0x8044a4`).
@@ -50,7 +49,7 @@ impl super::UiScript {
     /// (`0x48babe` for `CheckInteractDistance`, `0x48a1fa` for `CanInspect`). It changes every frame, so it stays off [`super::UnitState`], whose diffs
     /// fire `UNIT_*` events.
     pub fn set_unit_reach(&mut self, reach: HashMap<u64, UnitReach>) {
-        self.model_mut().unit_reach = reach;
+        set_field!(self, unit_reach, reach);
     }
 
     /// Push one unit's reach ahead of the next whole map: a unit seated between two pushes, as
@@ -129,7 +128,9 @@ pub enum InspectCall {
 /// recognise raises `Unknown unit name` (`0x515c14`).
 fn reach(lua: &Lua, token: &str) -> mlua::Result<Option<UnitReach>> {
     super::unit::check_unit_token(&Some(token.to_string()))?;
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     let guid = model.unit_guids.resolve(token).ok().flatten();
     Ok(guid.and_then(|guid| model.unit_reach.get(&guid).copied()))
 }

@@ -562,7 +562,7 @@ impl Harness {
         });
         script.run(lua).unwrap();
         let mut app = App::new();
-        app.insert_non_send_resource(script)
+        app.insert_non_send(script)
             .init_resource::<PaneBooths>()
             .init_resource::<PaneRequests>()
             .init_resource::<PaneDisplays>()
@@ -601,6 +601,7 @@ impl Harness {
                     static_mesh: mesh,
                     skinned_mesh: None,
                     material: Handle::default(),
+                    alpha_anim: None,
                 },
             ));
             app.world_mut()
@@ -617,7 +618,7 @@ impl Harness {
     }
 
     fn script(&mut self) -> Mut<'_, UiScript> {
-        self.app.world_mut().non_send_resource_mut::<UiScript>()
+        self.app.world_mut().non_send_mut::<UiScript>()
     }
 
     fn run(&mut self, lua: &str) {
@@ -650,7 +651,7 @@ impl Harness {
             .resource_mut::<UiQuads>()
             .overlays
             .clear();
-        let script = self.app.world().non_send_resource::<UiScript>();
+        let script = self.app.world().non_send::<UiScript>();
         let (session, panes) = (script.session(), script.character_panes());
         let units = self.units;
         let mut requests = self.app.world_mut().resource_mut::<PaneRequests>();

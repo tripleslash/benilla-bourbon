@@ -30,20 +30,12 @@ pub(crate) struct TaxiCatalogs {
     continents: WorldMapContinentCatalog,
 }
 
-/// Load [`TaxiCatalogs`] once, when the patch chain is open; nothing reads them before a flight
-/// master opens the map.
-pub(super) fn load_taxi_catalogs(
-    mut done: Local<bool>,
-    world_assets: Option<Res<WorldAssets>>,
-    mut commands: Commands,
-) {
-    if *done {
-        return;
-    }
+/// Load [`TaxiCatalogs`] off the patch chain, at startup and again when its data changes (Turtle
+/// WoW adds its own nodes and paths).
+pub(super) fn load_taxi_catalogs(world_assets: Option<Res<WorldAssets>>, mut commands: Commands) {
     let Some(assets) = world_assets else {
         return;
     };
-    *done = true;
     let mut chain = assets.chain.lock_recover();
     let loaded = TaxiCatalogs::load(&mut chain);
     drop(chain);

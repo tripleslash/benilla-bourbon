@@ -176,7 +176,7 @@ pub(super) fn rig(
     for (i, &spell_id) in slots.iter().enumerate() {
         bar.spells.bar[i] = PetActionEntry::from(spell_id | (u32::from(PET_ACT_ENABLED) << 24));
     }
-    world.insert_non_send_resource(listening_vm());
+    world.insert_non_send(listening_vm());
     world.init_resource::<super::PetBarFeed>();
     // The order the plugin gives them: the feeds that push a pet cooldown, then the flush.
     let mut feed = Schedule::default();
@@ -208,7 +208,7 @@ impl Rig {
         let mut script = self
             .app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+            .non_send_mut::<benilla_ui::script::UiScript>();
         script.resolve();
         let seen = script.eval::<Vec<String>>("return SEEN").unwrap();
         script.run("SEEN = {}").unwrap();
@@ -250,7 +250,7 @@ impl Rig {
     pub(super) fn cooldown(&mut self, slot: u32) -> (f64, f64, i32) {
         self.app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .non_send_mut::<benilla_ui::script::UiScript>()
             .eval(&format!("return GetPetActionCooldown({slot})"))
             .unwrap()
     }
@@ -510,7 +510,7 @@ fn a_possessed_units_combat_spell_picks_its_target_and_orders_the_attack() {
         (FLAGS, 0x8),
     ]));
     // The call fires its refusals as it returns (`UI_ERROR_MESSAGE`).
-    let script = world.non_send_resource::<benilla_ui::script::UiScript>();
+    let script = world.non_send::<benilla_ui::script::UiScript>();
     script
         .run(
             r#"
@@ -526,7 +526,7 @@ fn a_possessed_units_combat_spell_picks_its_target_and_orders_the_attack() {
         let script = rig
             .app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>();
+            .non_send_mut::<benilla_ui::script::UiScript>();
         let seen = script.eval::<Vec<String>>("return ERRORS").unwrap();
         script.run("ERRORS = {}").unwrap();
         seen
@@ -1021,7 +1021,7 @@ fn a_wait_press_is_signalled_once() {
 
     rig.app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .run("PetWait()")
         .unwrap();
     rig.order(0x0700_0000);
@@ -1046,14 +1046,14 @@ fn a_verbs_latch_survives_a_push_of_another_slot() {
     let lit = |rig: &mut Rig| {
         rig.app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .non_send_mut::<benilla_ui::script::UiScript>()
             .eval::<bool>("local _, _, _, _, a = GetPetActionInfo(1) return a == 1")
             .unwrap()
     };
     assert!(!lit(&mut rig));
     rig.app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .run("PetWait()")
         .unwrap();
     assert!(lit(&mut rig), "the verb lit Wait");
@@ -1077,13 +1077,13 @@ fn a_packet_overwrites_a_latch_this_side_never_sent() {
     let lit = |rig: &mut Rig| {
         rig.app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .non_send_mut::<benilla_ui::script::UiScript>()
             .eval::<bool>("local _, _, _, _, a = GetPetActionInfo(1) return a == 1")
             .unwrap()
     };
     rig.app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .run("PetWait()")
         .unwrap();
     assert!(lit(&mut rig), "the verb lit Wait");

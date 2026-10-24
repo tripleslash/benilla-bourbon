@@ -194,6 +194,11 @@ fn drive_raid_marks(
                 MeshMaterial3d(material.clone()),
                 place.unwrap_or_default(),
                 RaidMarkBillboard,
+                // Out of the water's mirror, as the names it is drawn with: a billboard aimed at
+                // the world camera has no business in a second view (`crate::nameplates`).
+                bevy::camera::visibility::RenderLayers::layer(
+                    benilla_world::liquid::UNMIRRORED_RENDER_LAYER,
+                ),
             ))
             .id();
         marks.live[slot] = Some(LiveMark { marker, unit });
@@ -259,6 +264,8 @@ impl Plugin for RaidMarksPlugin {
                 PostUpdate,
                 place_raid_marks
                     .after(bevy::transform::TransformSystems::Propagate)
+                    // The horizon reads the world camera's transform, never a mark's.
+                    .ambiguous_with(benilla_world::horizon::HorizonSet)
                     .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
             );
     }

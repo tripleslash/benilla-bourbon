@@ -8,19 +8,25 @@
 //! and restarts on its next trigger; the reference mutes it past the cutoff and restarts it on
 //! re-entry itself (`0x7a5095`, `0x7a51a2`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use bevy::prelude::*;
 use kira::sound::PlaybackState;
 
-use benilla_formats::{sound_kit_flags, SoundKitCatalog};
+use benilla_formats::{sound_kit_flags, SoundKitCatalog, TryRead};
 
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::dev_state::DebugState;
 
 use super::math;
 use super::mixer::{self, StaticSoundData};
+
+/// wasm32: the decode cache's misses do not merely go silent — the play that asked is recorded
+/// against the file and replayed when it lands. Our carry; see its header.
+#[cfg(target_arch = "wasm32")]
+mod deferred;
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 /// The volume slider that scales a channel (master is global). Set by the caller, as the
@@ -60,11 +66,24 @@ pub(crate) struct SoundKits {
     catalog: SoundKitCatalog,
     /// Decoded SFX by lowercased path, cloned per play with shared frames (SoundFileDataCache).
     cache: HashMap<String, StaticSoundData>,
+    /// wasm32: the files on their way into [`Self::cache`], by the same key, with the plays
+    /// waiting on each ([`deferred`]). Native fills the cache inline and never has one.
+    #[cfg(target_arch = "wasm32")]
+    pending: HashMap<String, deferred::PendingSfx>,
     pick: HashMap<u32, PickState>,
     rng: Rng,
+    /// Kit ids already reported unplayable, under Turtle WoW only: its servers name kits its client
+    /// tables lack, and a looping object event re-fires one every cycle, so the first miss per id
+    /// is the error and later ones drop silently. A 1.12.1 realm reports every miss.
+    unplayable: HashSet<u32>,
 }
 
 impl SoundKits {
+    /// Whether this is the first report of `kit` as unplayable ([`Self::unplayable`]).
+    pub(super) fn first_unplayable(&mut self, kit: u32) -> bool {
+        self.unplayable.insert(kit)
+    }
+
     /// One 32-bit draw for [`bark_chance_pass`], off the stream the per-shot variations share.
     pub(super) fn roll(&mut self) -> u32 {
         self.rng.next()
@@ -452,10 +471,17 @@ pub(super) fn play_kit_ext(
         return Ok(false);
     }
     let kit = match kit_ref {
-        KitRef::Id(id) => kits.catalog.get(id),
-        KitRef::Name(name) => kits.catalog.interface_sound(name),
-    }
-    .ok_or_else(|| anyhow!("unknown sound kit"))?;
+        KitRef::Id(id) => match kits.catalog.get(id) {
+            Some(kit) => kit,
+            // The flavor is read on a miss only; see [`SoundKits::unplayable`].
+            None if crate::flavor::turtle() && !kits.unplayable.insert(id) => return Ok(false),
+            None => bail!("unknown sound kit"),
+        },
+        KitRef::Name(name) => kits
+            .catalog
+            .interface_sound(name)
+            .ok_or_else(|| anyhow!("unknown sound kit"))?,
+    };
 
     let (id, volume, flags, min_dist, cutoff, eax_def) = (
         kit.id,
@@ -511,8 +537,27 @@ pub(super) fn play_kit_ext(
         return Ok(false);
     }
 
-    // Decode (cached).
-    let data = kits.sfx(assets, &path)?;
+    // Decode (cached). `None` = the file is not in memory yet (web target only): the pack is now
+    // warming, so warm the kit's other variations with it and let this shot go unplayed rather than
+    // freeze the frame on a fetch. `Ok(false)` is the existing "nothing played" answer, so no caller
+    // has to learn a new one.
+    let Some(data) = kits.sfx(assets, &path)? else {
+        kits.prefetch_kit(assets, id);
+        // wasm32 only: the file is on its way ([`deferred`]). The shot — with the variation
+        // already drawn — replays when it lands, if it lands soon enough.
+        #[cfg(target_arch = "wasm32")]
+        kits.defer(
+            &path.to_ascii_lowercase(),
+            deferred::Deferred::Kit {
+                kit: id,
+                variant: pick,
+                pos,
+                category,
+                extras,
+            },
+        );
+        return Ok(false);
+    };
 
     // Per-shot variation: 0x800 volume (`0x458c60`), 0x400 pitch (`0x458da0`). No 1.12 kit sets
     // 0x800.
@@ -753,7 +798,20 @@ pub(crate) fn play_file(
     let Some(bus) = sound_file_bus(out.channels.iter().map(|c| c.bus)) else {
         return Ok(());
     };
-    let data = kits.sfx(assets, path)?;
+    // Not here yet (web target): the read started the warm, so the addon's next `PlaySoundFile`
+    // finds it. Silence beats a frozen frame — same trade as `play_kit_ext`.
+    let Some(data) = kits.sfx(assets, path)? else {
+        // wasm32 only: in flight — replayed when it lands ([`deferred`]).
+        #[cfg(target_arch = "wasm32")]
+        kits.defer(
+            &path.to_ascii_lowercase(),
+            deferred::Deferred::File {
+                path: path.to_string(),
+                category,
+            },
+        );
+        return Ok(());
+    };
     let amp = config.category_amp(category);
     let data = data.volume(mixer::amp_to_db(amp));
     if !claim_voice(out, amp) {
@@ -812,8 +870,11 @@ impl SoundKits {
         Self {
             catalog,
             cache: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            pending: HashMap::new(),
             pick: HashMap::new(),
             rng: Rng(0x9e37_79b9),
+            unplayable: HashSet::new(),
         }
     }
 
@@ -867,20 +928,69 @@ impl SoundKits {
     }
 
     /// A decoded kit file, read and decoded whole on a cache miss.
-    fn sfx(&mut self, assets: &WorldAssets, path: &str) -> Result<StaticSoundData> {
+    ///
+    /// `Ok(None)` is **"not here yet"**, and it is why this reads through [`Chain::try_read`] rather
+    /// than `read_file`. On the web target the chain is a network: a kit whose pack is not resident
+    /// costs a blocking fetch, taken from a gameplay system, on the thread that draws — a frozen tab
+    /// for a footstep. A sound is the one asset class where that trade is obviously wrong: it is
+    /// worth *hearing* for a hundredth of a second and worth nothing at all a second late, so the
+    /// miss returns silence, the read has already started warming the pack, and the next swing of
+    /// the same sword is a memcpy. (On native `try_read` is a plain read and this arm is
+    /// unreachable.)
+    fn sfx(&mut self, assets: &WorldAssets, path: &str) -> Result<Option<StaticSoundData>> {
         let key = path.to_ascii_lowercase();
         if let Some(d) = self.cache.get(&key) {
-            return Ok(d.clone());
+            return Ok(Some(d.clone()));
         }
         // An addon's loose file, then the chain ([`benilla_assets::read_loose_or_chain`]):
-        // `PlaySoundFile` is by path, and addon audio lives on disk, never in an MPQ.
-        let bytes = assets
-            .read_file_or_loose(path)
-            .with_context(|| format!("reading {path}"))?;
-        let data = mixer::sfx_from_bytes(bytes)?;
-        self.cache.insert(key, data.clone());
-        DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(data)
+        // `PlaySoundFile` is by path, and addon audio lives on disk, never in an MPQ. The chain
+        // half is the non-blocking read; the page has no addon folder.
+        let attempt = assets.try_read_loose_or_chain(path);
+        let bytes = match attempt {
+            TryRead::Ready(bytes) => bytes,
+            TryRead::Pending => {
+                // The pack is warming. Note the wait so the play that asked can record itself
+                // against it ([`deferred`]) and be replayed rather than lost.
+                #[cfg(target_arch = "wasm32")]
+                self.begin_sfx(&key, path, None);
+                return Ok(None);
+            }
+            // `TryRead` collapses "no such file" and "the read failed" into one arm, so the error
+            // claims neither. Sound misses are warned, never acted on.
+            TryRead::Missing => {
+                bail!("reading {path}: not in the AddOns folder or the patch chain")
+            }
+        };
+        // The bytes are here; the **decode** is the half still on the frame. On the page it goes
+        // to the browser ([`super::web_decode`]) and the shot replays when the PCM lands.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.begin_sfx(&key, path, Some(bytes));
+            return Ok(None);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let data = mixer::sfx_from_bytes(bytes)?;
+            self.cache.insert(key, data.clone());
+            DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Some(data))
+        }
+    }
+
+    /// Warm every file a kit could roll, without waiting for any of them.
+    ///
+    /// The pool is the point: [`Self::pick_variation`] chooses among a kit's files at play time, so
+    /// warming only the one that just missed leaves the next roll to miss as well. A kit's files sit
+    /// in the same `snd/` locality group, so this is usually one pack for the whole set. Free on
+    /// native, where `prefetch` is an empty call.
+    pub(super) fn prefetch_kit(&self, assets: &WorldAssets, id: u32) {
+        let Some(kit) = self.catalog.get(id) else {
+            return;
+        };
+        let chain = assets.chain.lock_recover();
+        for (path, _) in &kit.files {
+            chain.prefetch(path);
+        }
     }
 }
 
@@ -1059,12 +1169,16 @@ fn evict_kit_cache(
     changes.clear();
     if let Some(mut k) = kits {
         k.cache.clear();
+        // The loads in flight go with it: they are for the map being left, and a shot recorded
+        // against one is for an event on that map. wasm32 only — native has none.
+        #[cfg(target_arch = "wasm32")]
+        k.pending.clear();
     }
 }
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, load_sound_kits.after(AssetSet::Open))
+    app.add_data_loaders(load_sound_kits)
         .add_systems(
             Update,
             (
@@ -1077,6 +1191,19 @@ pub(super) fn plugin(app: &mut App) {
             OnExit(crate::client_state::ClientState::InWorld),
             stop_all_channels,
         );
+    // The web target's two: land the loads (before the pump, so a replayed shot is pumped on the
+    // frame it starts) and warm a creature's voice packs when it appears. Native has neither —
+    // nothing ever defers there.
+    #[cfg(target_arch = "wasm32")]
+    app.add_systems(
+        Update,
+        (
+            deferred::land_sfx_loads
+                .before(pump_channels)
+                .in_set(benilla_world::schedule::WorldStage::Present),
+            deferred::prewarm_creature_voices,
+        ),
+    );
 }
 
 #[cfg(test)]

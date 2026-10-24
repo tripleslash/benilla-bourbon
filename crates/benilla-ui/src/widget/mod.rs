@@ -124,6 +124,9 @@ impl<T> Arena<T> {
     }
 }
 
+mod handle_hash;
+pub use handle_hash::{HandleMap, HandleSet};
+
 // ── Widget kinds ─────────────────────────────────────────────────────────────────────────────
 
 mod kinds;
@@ -311,6 +314,9 @@ pub struct WidgetArena {
     frames: Arena<Frame>,
     regions: Arena<Region>,
     names: HashMap<String, FrameHandle>,
+    /// Names more than one frame was created under: [`Self::frames_named`] scans for these, as
+    /// [`Self::names`] holds only the first.
+    shared_names: std::collections::HashSet<String>,
     next_insertion: u32,
     /// The next [`Frame::char_stamp`] / [`Frame::key_stamp`] / [`Frame::wheel_stamp`].
     next_kb_stamp: u64,
@@ -378,6 +384,7 @@ impl WidgetArena {
             frames: Arena::new(),
             regions: Arena::new(),
             names: HashMap::new(),
+            shared_names: Default::default(),
             next_insertion: 0,
             next_kb_stamp: 0,
             level_bound: [0; Strata::ALL.len()],
@@ -523,6 +530,27 @@ impl WidgetArena {
         self.names.get(name).copied()
     }
 
+    /// Every live frame named `name`, in arena order: the index's one frame for a name created
+    /// once, a scan for a name created more than once, so the per-frame host reads by name walk
+    /// no arena.
+    pub fn frames_named<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> Box<dyn Iterator<Item = (FrameHandle, &'a Frame)> + 'a> {
+        if self.shared_names.contains(name) {
+            Box::new(
+                self.iter_frames()
+                    .filter(move |(_, f)| f.name.as_deref() == Some(name)),
+            )
+        } else {
+            Box::new(
+                self.lookup(name)
+                    .and_then(|h| self.frame(h).map(|f| (h, f)))
+                    .into_iter(),
+            )
+        }
+    }
+
     // ── Create / destroy ────────────────────────────────────────────────────────────────────────
 
     /// Create a frame as the client's ctor `0x769090` does, whatever the parent: shown, MEDIUM,
@@ -663,7 +691,14 @@ impl WidgetArena {
                 .push(handle);
         }
         if let Some(n) = name {
-            self.names.entry(n).or_insert(handle);
+            match self.names.entry(n) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(handle);
+                }
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    self.shared_names.insert(o.key().clone());
+                }
+            }
         }
         if matches!(kind, FrameKind::EditBox) {
             self.editbox_kinds.push(handle);

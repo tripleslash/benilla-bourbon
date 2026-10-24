@@ -1946,7 +1946,10 @@ mod tests {
                 return None;
             };
             let mut state = SystemState::<LootSteps>::new(self.0);
-            let tail = state.get_mut(self.0).apply(script, call);
+            let tail = state
+                .get_mut(self.0)
+                .expect("`LootSteps` validates")
+                .apply(script, call);
             state.apply(self.0);
             tail
         }
@@ -1954,12 +1957,9 @@ mod tests {
 
     /// Run `f` on the app's VM with a [`LootHost`] lent, as every entry that runs Lua lends one.
     fn hosted<R>(app: &mut App, f: impl FnOnce(&mut UiScript) -> R) -> R {
-        let mut script = app
-            .world_mut()
-            .remove_non_send_resource::<UiScript>()
-            .expect("a VM");
+        let mut script = app.world_mut().remove_non_send::<UiScript>().expect("a VM");
         let r = script.hosted(&mut LootHost(app.world_mut()), f);
-        app.world_mut().insert_non_send_resource(script);
+        app.world_mut().insert_non_send(script);
         r
     }
 
@@ -2030,7 +2030,7 @@ mod tests {
             )
             .unwrap();
         script.set_screen_size(1024.0, 768.0);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         run_hosted(&mut app, first);
         for &row in clicks {
             hosted(&mut app, |script| {
@@ -2081,11 +2081,11 @@ mod tests {
             script
                 .run(r#"CreateFrame("Frame", "LootHost"):CreateTexture("LootTex")"#)
                 .unwrap();
-            app.insert_non_send_resource(script);
+            app.insert_non_send(script);
             app.update();
             let answered = app
                 .world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<bool>("return SetLootPortrait(LootTex) == 1")
                 .unwrap();
             assert_eq!(answered, expected, "unit source: {unit}");
@@ -2120,11 +2120,11 @@ mod tests {
                      f:SetScript(\"OnEvent\", function() OPENS = OPENS + 1 end)",
                 )
                 .unwrap();
-            app.insert_non_send_resource(script);
+            app.insert_non_send(script);
 
             let opens = |app: &mut App| {
                 app.world_mut()
-                    .non_send_resource_mut::<UiScript>()
+                    .non_send_mut::<UiScript>()
                     .eval::<i64>("return OPENS")
                     .unwrap()
             };
@@ -2163,7 +2163,7 @@ mod tests {
 
     /// The rows `LOOT_BIND_CONFIRM` has named so far, in order.
     fn confirms(app: &mut App) -> Vec<i64> {
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let n = script.eval::<i64>("return getn(BIND_CONFIRMS)").unwrap();
         (1..=n)
             .map(|i| {
@@ -2404,7 +2404,7 @@ mod tests {
             )
             .unwrap();
         script.run(lua).unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 
@@ -3182,7 +3182,7 @@ mod tests {
                 })
                 .collect()
         };
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let close_loot = |app: &mut App| run_hosted(app, "CloseLoot()");
 
         // `CloseLoot`, as the close button, Escape or any other hide reaches it.
@@ -3255,7 +3255,7 @@ mod tests {
     #[test]
     fn close_loot_with_its_flag_set_shows_err_loot_no_ui() {
         let (mut app, rx) = close_app();
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let close_loot = |app: &mut App, chunk: &str| -> Vec<&'static str> {
             run_hosted(app, chunk);
             app.world_mut()
@@ -3478,7 +3478,7 @@ mod tests {
     #[test]
     fn a_refused_loot_row_is_asked_by_the_next_response_never_by_a_frame() {
         let (mut app, rx) = sweep_loot_app();
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let row = LootItem {
             slot: 0,
             item_id: 955,
@@ -3526,7 +3526,7 @@ mod tests {
                 end)"#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let world = app.world_mut();
         world
             .resource_mut::<LootState>()
@@ -3536,7 +3536,7 @@ mod tests {
         app.update();
         let seen: String = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return table.concat(SEEN, ',')")
             .unwrap();
         assert_eq!(seen, "LOOT_OPENED:1,LOOT_CLOSED:0");
@@ -3550,7 +3550,7 @@ mod tests {
     fn a_reload_releases_the_loot_and_the_new_vm_opens_nothing() {
         use crate::ui_script::sweep_test::{reload_in_place, seen, seen_in, spied_vm};
         let (mut app, rx) = sweep_loot_app();
-        app.insert_non_send_resource(spied_vm(&EVENTS));
+        app.insert_non_send(spied_vm(&EVENTS));
         app.world_mut()
             .resource_mut::<LootState>()
             .open(CORPSE, 1, 0, Vec::new());
@@ -3580,7 +3580,7 @@ mod tests {
     fn a_worldport_closes_the_loot_once() {
         use crate::ui_script::sweep_test::{seen_in, spied_vm, sweep_in_place};
         let (mut app, _rx) = sweep_loot_app();
-        app.insert_non_send_resource(spied_vm(&EVENTS));
+        app.insert_non_send(spied_vm(&EVENTS));
         app.world_mut()
             .resource_mut::<LootState>()
             .open(CORPSE, 1, 0, Vec::new());
@@ -3629,7 +3629,7 @@ mod tests {
                 end)"#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         // OBJECT_FIELD_TYPE (2): TYPEMASK_OBJECT | TYPEMASK_ITEM.
         let e = app
             .world_mut()
@@ -3656,7 +3656,7 @@ mod tests {
         sweep_in_place(&mut app);
         let seen: String = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return table.concat(SEEN, ',')")
             .unwrap();
         assert_eq!(
@@ -3695,12 +3695,12 @@ mod tests {
                 f:SetScript("OnEvent", function() SEEN = SEEN .. GetNumLootItems() end)"#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let mut loot = app.world_mut().resource_mut::<LootState>();
         loot.push_receive(&push(2589, 1, false, false), true);
         loot.open(CORPSE, loot_type::CORPSE, 0, vec![item(0, 2589, 1)]);
         app.update();
-        let s = app.world().non_send_resource::<UiScript>();
+        let s = app.world().non_send::<UiScript>();
         assert_eq!(s.eval::<String>("return SEEN").unwrap(), "0");
         assert_eq!(s.eval::<i64>("return GetNumLootItems()").unwrap(), 1);
     }
@@ -3748,7 +3748,7 @@ mod tests {
                 end)"#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app
     }
 
@@ -3757,7 +3757,7 @@ mod tests {
 
     fn seen_order(app: &App) -> String {
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<String>("return table.concat(SEEN, ',')")
             .unwrap()
     }
@@ -3807,7 +3807,7 @@ mod tests {
     #[test]
     fn close_loot_on_a_disenchant_window_with_rows_left_sweeps_it() {
         let (mut app, rx) = close_app();
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.world_mut().resource_mut::<Items>().insert_template(
             117,
             Some(crate::items::test_template("Lesser Magic Essence")),
@@ -3843,7 +3843,7 @@ mod tests {
     fn the_loot_leg_sweeps_a_disenchant_window_with_rows_left() {
         use crate::ui_script::sweep_test::{seen_in, spied_vm, sweep_in_place};
         let (mut app, rx) = sweep_loot_app();
-        app.insert_non_send_resource(spied_vm(&EVENTS));
+        app.insert_non_send(spied_vm(&EVENTS));
         app.world_mut().resource_mut::<Items>().insert_template(
             117,
             Some(crate::items::test_template("Lesser Magic Essence")),

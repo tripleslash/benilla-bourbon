@@ -23,6 +23,13 @@ fn call_args(src: &str, n: usize) -> Option<Vec<String>> {
         {
             continue;
         }
+        // The page's own row (`if cfg!(target_arch = "wasm32") { deviates(…) } else { … }`) is a
+        // `Deviates` row only in the page build; the generator lists it either way.
+        let prev_line = src[..line_start].trim_end();
+        let prev_line = prev_line[prev_line.rfind('\n').map_or(0, |l| l + 1)..].trim();
+        if !cfg!(target_arch = "wasm32") && prev_line == r#"if cfg!(target_arch = "wasm32") {"# {
+            continue;
+        }
         if seen < n {
             seen += 1;
             continue;
@@ -109,17 +116,18 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// What a constant argument (`crate::realmlist::CVAR_REALMLIST`) names: the `&str` literal of its
-/// `const NAME: &str = "…";` in this crate, as the generator greps it.
+/// `const NAME: &str = "…";` anywhere under `crates/`, as the generator greps it (a row may name
+/// another crate's constant, `benilla_ui::script::CVAR_SMALL_CULL`).
 fn const_str(path: &str) -> Option<String> {
     let name = path.rsplit("::").next()?;
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return None;
     }
     let mut files = Vec::new();
-    rs_files(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut files,
-    );
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the crate sits in crates/");
+    rs_files(crates, &mut files);
     let needle = format!("const {name}: &str = ");
     files.iter().find_map(|f| {
         let text = std::fs::read_to_string(f).ok()?;

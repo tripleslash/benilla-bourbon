@@ -200,17 +200,28 @@ fn hovering_the_indicator_shows_and_live_updates_the_game_time_tooltip() {
         s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
         "OnEnter owns the tooltip (the Scripts-walker auto-enable capturing at {x},{y})"
     );
-    // The enGB `LocalizeFrames` sets `TwentyFourHourTime = 1` (`Localization.lua:20`): 21:07.
+    // The locale's `LocalizeFrames` picks the format: enGB sets `TwentyFourHourTime = 1`
+    // (`Localization.lua:20`) and reads 21:07; enUS leaves it nil and reads 9:07 PM.
     let text = |s: &UiScript| {
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
             .unwrap()
     };
-    assert_eq!(text(&s), "21:07");
+    let twenty_four = s
+        .eval::<bool>("return TwentyFourHourTime and true or false")
+        .unwrap();
+    let clock = |m: u32| {
+        if twenty_four {
+            format!("21:{m:02}")
+        } else {
+            format!("9:{m:02} PM")
+        }
+    };
+    assert_eq!(text(&s), clock(7));
 
     // While owned, `GameTimeFrame_Update` refreshes the tooltip (`GameTime.lua:20-22`).
     s.set_game_time(21, 8);
     s.tick(0.016);
-    assert_eq!(text(&s), "21:08", "the owned tooltip follows the clock");
+    assert_eq!(text(&s), clock(8), "the owned tooltip follows the clock");
 
     // Inside the raw 50x50 rect but in the left inset: not hoverable.
     s.mouse_move(l + 2.0, y);
@@ -481,7 +492,7 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     );
 
     let mut app = App::new();
-    app.insert_non_send_resource(s);
+    app.insert_non_send(s);
     app.init_resource::<UiQuads>();
     // The pass's handover: the tick half writes it, the paint half reads it.
     app.init_resource::<crate::ui_script::UiPassState>();
@@ -607,7 +618,7 @@ fn a_shown_ping_pane_asks_for_a_tile_and_draws_its_cell() {
     );
 
     {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         // `Minimap_OnUpdate` re-seats the frame from `GetPingPosition()` (`Minimap.lua:74`).
         ping_at(&mut script, -0.125, 0.25);
     }

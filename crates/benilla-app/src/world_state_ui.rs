@@ -19,7 +19,8 @@ use bevy::prelude::*;
 use benilla_formats::{WorldStateUiCatalog, WorldStateUiRow};
 use benilla_ui::script::WorldStateUiView;
 
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 use crate::world_state::WorldStates;
 
@@ -163,7 +164,7 @@ pub(crate) struct WorldStateUiPlugin;
 
 impl Plugin for WorldStateUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_world_state_ui.after(AssetSet::Open))
+        app.add_data_loaders(load_world_state_ui)
             .add_systems(Update, feed_world_state_ui.after(crate::ui_script::UiInput));
     }
 }
@@ -441,7 +442,7 @@ mod tests {
     fn the_defense_rows_hold_through_a_rename_until_a_confirm_or_a_free() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
-        world.insert_non_send_resource(benilla_ui::script::UiScript::new().expect("a VM"));
+        world.insert_non_send(benilla_ui::script::UiScript::new().expect("a VM"));
         let mut states = WorldStates::default();
         states.init_scope(0, 139);
         world.insert_resource(states);
@@ -473,7 +474,7 @@ mod tests {
                 .run_system_once(feed_world_state_ui)
                 .expect("the feed runs");
             world
-                .non_send_resource::<benilla_ui::script::UiScript>()
+                .non_send::<benilla_ui::script::UiScript>()
                 .eval("return GetNumWorldStateUI()")
                 .expect("the count")
         };

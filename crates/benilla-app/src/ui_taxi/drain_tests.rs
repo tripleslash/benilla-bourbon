@@ -43,10 +43,8 @@ fn taxi_app(
         .insert_resource(catalogs)
         .insert_resource(factions)
         .insert_resource(reps)
-        .insert_non_send_resource(UiScript::new().unwrap());
-    app.world_mut()
-        .non_send_resource_mut::<UiScript>()
-        .keep_calls();
+        .insert_non_send(UiScript::new().unwrap());
+    app.world_mut().non_send_mut::<UiScript>().keep_calls();
     app.world_mut().spawn((
         SelfPlayer,
         crate::net::Guid(0x10),
@@ -84,7 +82,7 @@ fn taxi_app(
 
 fn eval<T: benilla_ui::mlua::FromLuaMulti>(app: &mut App, chunk: &str) -> T {
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .eval(chunk)
         .unwrap()
 }
@@ -106,10 +104,7 @@ fn take(
     slot: i64,
 ) -> (Vec<ClientCommand>, Vec<&'static str>) {
     eval::<()>(app, &format!("TakeTaxiNode({slot})"));
-    let mut calls = app
-        .world_mut()
-        .non_send_resource_mut::<UiScript>()
-        .take_taxi_calls();
+    let mut calls = app.world_mut().non_send_mut::<UiScript>().take_taxi_calls();
     app.world_mut()
         .run_system_once(move |mut steps: TaxiSteps| {
             for call in std::mem::take(&mut calls) {

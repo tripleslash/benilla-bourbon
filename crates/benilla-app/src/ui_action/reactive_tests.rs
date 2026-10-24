@@ -92,7 +92,7 @@ fn app() -> App {
         .init_resource::<super::state::EnterUsable>()
         .init_resource::<super::state::ActionStateMemory>();
     seat(&mut app);
-    app.insert_non_send_resource(listener());
+    app.insert_non_send(listener());
     app.add_systems(
         Update,
         (
@@ -162,7 +162,7 @@ fn step(app: &mut App, aura_state: u32) -> Vec<String> {
         });
     }
     app.update();
-    let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+    let mut s = app.world_mut().non_send_mut::<UiScript>();
     s.resolve();
     s.eval::<Vec<String>>("local h = HEARD; HEARD = {}; return h")
         .unwrap()
@@ -210,7 +210,7 @@ fn a_reload_keeps_the_reactive_list_and_an_arrival_empties_it() {
     );
     // The seated `/reload`: the leave-world sweep, then a new VM and its first frame.
     assert!(crate::ui_script::run_leave_world_sweep(app.world_mut()));
-    app.insert_non_send_resource(listener());
+    app.insert_non_send(listener());
     assert!(step(&mut app, 0x1).is_empty(), "the new VM's first frame");
     select(&mut app, 0x20);
     assert_eq!(
@@ -336,7 +336,7 @@ fn the_bars_usable_event_comes_before_the_reactive_word() {
         slots.dirty = true;
     }
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"local f = CreateFrame("Frame")
             f:RegisterEvent("ACTIONBAR_UPDATE_USABLE")

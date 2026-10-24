@@ -4,7 +4,6 @@ use mlua::{Lua, Table, Value, Variadic};
 
 use crate::script::binding_abi::{self, optional_string, string_arg};
 use crate::script::object::frame_handle_of;
-use crate::script::Model;
 use crate::widget::{KindState, TooltipAnchor};
 
 use super::{
@@ -55,7 +54,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     "ANCHOR_PRESERVE" => TooltipAnchor::Preserve,
                     "" => TooltipAnchor::Left,
                     other => {
-                        lua.app_data_mut::<Model>()
+                        lua.app_data_mut::<crate::script::ModelCell>()
                             .expect("model app_data")
                             .record_warning(format!(
                                 "SetOwner: unknown anchor '{other}' (mode 0, ANCHOR_LEFT)"
@@ -134,7 +133,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (this, text): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
             let extra = string_arg(lua, text, r#"Usage: AppendText("text")"#)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let lh = match model.arena.frame(h).map(|f| &f.kind_state) {
                 Some(KindState::Tooltip(t)) if t.num_lines > 0 => t.left_lines[0],
                 Some(KindState::Tooltip(_)) => return Ok(()),
@@ -234,7 +235,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (this, w): (Table, Value)| {
             let w = lua.coerce_number(w).ok().flatten().unwrap_or(0.0);
             let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let stored = model.layout_units().store(w as f32);
             super::tip_mut(&mut model, h).map(|t| t.padding = stored)
         })?,
@@ -278,7 +281,9 @@ fn font_string_arg(
             "{who}:AddFontStrings(): Couldn't find 'this' in fontstring"
         )));
     };
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     model
         .id_to_region
         .get(&id)

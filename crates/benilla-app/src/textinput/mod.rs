@@ -15,6 +15,6 @@ impl Plugin for TextInputPlugin {
     fn build(&self, app: &mut App) {
         // Held for the whole run: on X11 dropping the handle clears the clipboard. `NonSend`: no
         // backend is `Sync`, and NSPasteboard is main-thread-only.
-        app.init_non_send_resource::<HostClipboard>();
+        app.init_non_send::<HostClipboard>();
     }
 }

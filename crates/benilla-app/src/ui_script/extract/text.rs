@@ -516,7 +516,7 @@ mod caret_tests {
     /// The whole UI pass on a `w`×`h` window over `script`.
     fn app_sized(script: UiScript, w: u32, h: u32) -> App {
         let mut app = App::new();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.insert_resource(UiFontAtlas::for_test(1.0).expect("the client faces open"));
         app.init_resource::<UiQuads>();
         app.init_resource::<crate::ui_script::UiPassState>();
@@ -686,7 +686,7 @@ mod caret_tests {
         ));
         let window: String = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return (E:GetRegions()):GetText()")
             .unwrap();
         assert!(
@@ -793,7 +793,7 @@ mod link_span_tests {
             ))
             .unwrap();
         let app = app_on(script);
-        let s = app.world().non_send_resource::<UiScript>();
+        let s = app.world().non_send::<UiScript>();
         assert_eq!(
             s.eval::<i64>("return CF:GetNumChildren()").unwrap(),
             1,

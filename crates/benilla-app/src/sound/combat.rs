@@ -23,7 +23,8 @@ use benilla_formats::{impact_slot, WeaponImpactCatalog};
 
 use crate::creature_anim::{AnimSoundEvent, SwingImpact, SwingMessage, Wielded};
 use crate::net::{Embodied, NetEntity};
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_protocol::EntityKind;
 use benilla_world::schedule::WorldStage;
 
@@ -642,11 +643,8 @@ fn combat_sounds(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(
-        Startup,
-        (load_weapon_impacts, load_weapon_swings).after(AssetSet::Open),
-    )
-    .add_systems(Update, combat_sounds.in_set(WorldStage::Present));
+    app.add_data_loaders((load_weapon_impacts, load_weapon_swings))
+        .add_systems(Update, combat_sounds.in_set(WorldStage::Present));
 }
 
 #[cfg(test)]

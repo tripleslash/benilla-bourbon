@@ -81,7 +81,7 @@ pub(crate) struct Probe {
     tx: crossbeam_channel::Sender<String>,
     /// The pre-tap's frame clock, the shared time axis.
     audio_pos: Option<Arc<AtomicU64>>,
-    started: std::time::Instant,
+    started: bevy::platform::time::Instant,
     marks: u32,
     since_tick: std::time::Duration,
     since_speak: std::time::Duration,
@@ -114,23 +114,29 @@ struct Window {
 impl Probe {
     /// Begins recording. With no pre-tap (`audio_pos` `None`) the timeline has the game clock only.
     pub(super) fn start(dir: PathBuf, rate: u32, audio_pos: Option<Arc<AtomicU64>>) -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded::<String>();
-        let path = dir.join("timeline.jsonl");
-        match std::fs::File::create(&path) {
-            Ok(file) => {
-                std::thread::Builder::new()
-                    .name("sound-probe".into())
-                    .spawn(move || writer(file, rx))
-                    .expect("spawn sound-probe writer");
+        let (tx, _rx) = crossbeam_channel::unbounded::<String>();
+        // No writer thread on wasm32 (single-threaded there without COOP/COEP + SharedArrayBuffer)
+        // — `_rx` is simply never drained, so `send`'s ordinary `$WOW_SOUND_PROBE`-off case (a
+        // full queue nobody reads) is exactly what a web run looks like too. Native only, below.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = dir.join("timeline.jsonl");
+            match std::fs::File::create(&path) {
+                Ok(file) => {
+                    std::thread::Builder::new()
+                        .name("sound-probe".into())
+                        .spawn(move || writer(file, _rx))
+                        .expect("spawn sound-probe writer");
+                }
+                Err(e) => warn!("sound probe: cannot create {}: {e}", path.display()),
             }
-            Err(e) => warn!("sound probe: cannot create {}: {e}", path.display()),
         }
         let probe = Self {
             dir,
             rate,
             tx,
             audio_pos,
-            started: std::time::Instant::now(),
+            started: bevy::platform::time::Instant::now(),
             marks: 0,
             since_tick: std::time::Duration::ZERO,
             since_speak: std::time::Duration::ZERO,

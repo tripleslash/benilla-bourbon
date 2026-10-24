@@ -51,7 +51,7 @@ fn app() -> Option<(App, u32)> {
         .init_resource::<crate::ui_chat::ChatLog>()
         .insert_resource(crate::target::Factions::from_catalog(catalog))
         .insert_resource(crate::net::NetCommands(crossbeam_channel::unbounded().0))
-        .insert_non_send_resource(script);
+        .insert_non_send(script);
     let me = app
         .world_mut()
         .spawn((

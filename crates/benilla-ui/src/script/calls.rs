@@ -76,10 +76,12 @@ pub enum ScriptCall {
     SpellStopCasting,
     /// `CastSpell(id, "spell", onSelf)` and `CastSpellByName(name, onSelf)` on a player-book name,
     /// through `0x4b3300`'s player leg; `onSelf` swaps the target guid for the active player's
-    /// (`0x4b4afa`, `0x4b4345`).
+    /// (`0x4b4afa`, `0x4b4345`). `unit` is the guid a macro option's `@unit` resolved to (this
+    /// fork, [`super::macro_options`]), cast at in the selection's place; `None` in 1.12.
     CastSpell {
         spell_id: u32,
         on_self: bool,
+        unit: Option<u64>,
         /// The gate's tag 2 allowed the cast (`0x6e4bc1`). The book leg's cancels (an active aura
         /// `0x4b3466`, a form `0x4b35da`) come before it, so a refusal stops only the cast.
         may_cast: bool,
@@ -398,7 +400,9 @@ impl super::Model {
 /// Hold `held` for the host, with the input events running now: an engine step fired it while it
 /// could not lend the host ([`super::host::holding`]).
 pub(crate) fn hold(lua: &Lua, held: Held) {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let input = model.protected.events();
     let muted = model.sound_suppression;
     model.push_waiting(Waiting::Lua { held, input, muted });
@@ -408,7 +412,7 @@ pub(crate) fn hold(lua: &Lua, held: Held) {
 
 /// Whether a handler an engine step held waits for the host ([`Waiting::Lua`]).
 pub(crate) fn signal_waiting(lua: &Lua) -> bool {
-    lua.app_data_ref::<Model>()
+    lua.app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .script_calls
         .iter()
@@ -420,8 +424,10 @@ pub(crate) fn signal_waiting(lua: &Lua) -> bool {
 /// write is made again in its place ([`Waiting::Lock`], [`Waiting::Cursor`], a held segment's
 /// own).
 fn take_waiting(lua: &Lua) -> VecDeque<Waiting> {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let model = &mut *model;
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
+    let model: &mut crate::script::Model = &mut model;
     let batch = std::mem::take(&mut model.script_calls);
     rewind_waiting(model, &batch);
     batch.into()
@@ -446,7 +452,7 @@ fn rewind_waiting(model: &mut Model, batch: &[Waiting]) {
 
 /// Make a lock write that waited, in its place.
 fn relock(lua: &Lua, guid: u64, locked: bool) {
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .set_item_lock(guid, locked);
 }
@@ -455,7 +461,9 @@ fn relock(lua: &Lua, guid: u64, locked: bool) {
 /// engine half made it, outside any segment, or with `shown` silently, its events having fired
 /// as it was first made.
 fn rewrite(lua: &Lua, write: Box<super::cursor::CursorWrite>, shown: bool) {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     if shown {
         let outer = model.verb_events.replace(Vec::new());
         super::cursor::write(&mut model, write.op);
@@ -469,13 +477,13 @@ fn rewrite(lua: &Lua, write: Box<super::cursor::CursorWrite>, shown: bool) {
 fn replay(lua: &Lua, script: &mut UiScript, held: Held, input: super::InputEvents, muted: u32) {
     let outer = std::mem::replace(
         &mut lua
-            .app_data_mut::<Model>()
+            .app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .sound_suppression,
         muted,
     );
     script.with_input_events(input, |_| run_held(lua, held));
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .sound_suppression = outer;
 }
@@ -487,7 +495,7 @@ fn run_held(lua: &Lua, held: Held) {
         Held::Segment(raised) => super::tick::fan_out(lua, raised, super::tick::Fan::Again),
         Held::Handler { id, script, extra } => {
             if let Err(e) = super::event::fire_widget_handler(lua, id, &script, extra) {
-                lua.app_data_mut::<Model>()
+                lua.app_data_mut::<crate::script::ModelCell>()
                     .expect("model app_data")
                     .record_lua_error(&e);
             }
@@ -517,7 +525,9 @@ pub(crate) const TOO_DEEP: &str = "script calls nested too deep";
 /// What the host raises in the call ([`UiScript::raise_in_call`]) is the verb's error. The caller
 /// holds no borrow of the model.
 pub(crate) fn submit(lua: &Lua, call: ScriptCall) -> mlua::Result<()> {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     if !super::host::open(lua) {
         // A VM with no host open queues a refusal's line for the app instead
         // ([`super::Model::push_ui_error`]).
@@ -543,7 +553,7 @@ pub(crate) fn submit(lua: &Lua, call: ScriptCall) -> mlua::Result<()> {
     struct Awaited<'a>(&'a Lua, u64);
     impl Drop for Awaited<'_> {
         fn drop(&mut self) {
-            if let Some(mut model) = self.0.app_data_mut::<Model>() {
+            if let Some(mut model) = self.0.app_data_mut::<crate::script::ModelCell>() {
                 model.call_raises.awaited.retain(|&s| s != self.1);
             }
         }
@@ -551,7 +561,9 @@ pub(crate) fn submit(lua: &Lua, call: ScriptCall) -> mlua::Result<()> {
     let awaited = Awaited(lua, seq);
     drain(lua);
     drop(awaited);
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let raised = &mut model.call_raises.raised;
     match raised.iter().position(|&(s, _)| s == seq) {
         Some(at) => Err(mlua::Error::runtime(raised.remove(at).1)),
@@ -570,7 +582,9 @@ pub(crate) fn display_error(lua: &Lua, key: &'static str) -> mlua::Result<()> {
 /// verb having returned while the call waited for the host, as its script's error, which the
 /// error handler hears as it would the verb's raise.
 fn file_raise(lua: &Lua, seq: u64, message: String) {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     if model.call_raises.awaited.contains(&seq) {
         model.call_raises.raised.push((seq, message));
     } else {
@@ -584,7 +598,9 @@ fn file_raise(lua: &Lua, seq: u64, message: String) {
 
 /// Swap the applying call's raise for `raise`, returning what was there.
 fn swap_raising(lua: &Lua, raise: Option<String>) -> Option<String> {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     std::mem::replace(&mut model.call_raises.raising, raise)
 }
 
@@ -598,7 +614,9 @@ pub(crate) fn drain(lua: &Lua) {
         return;
     }
     {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         if model.script_calls.is_empty() {
             return;
         }
@@ -608,7 +626,7 @@ pub(crate) fn drain(lua: &Lua) {
     struct Depth<'a>(&'a Lua);
     impl Drop for Depth<'_> {
         fn drop(&mut self) {
-            if let Some(mut model) = self.0.app_data_mut::<Model>() {
+            if let Some(mut model) = self.0.app_data_mut::<crate::script::ModelCell>() {
                 model.call_depth = model.call_depth.saturating_sub(1);
             }
         }
@@ -679,7 +697,9 @@ pub(super) fn settle(lua: &Lua, script: &mut UiScript) {
 
 /// Put `calls` back at the front of the queue, ahead of any queued since.
 fn requeue(lua: &Lua, calls: impl IntoIterator<Item = Waiting>) {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let later = std::mem::replace(&mut model.script_calls, calls.into_iter().collect());
     model.script_calls.extend(later);
 }
@@ -731,7 +751,7 @@ impl UiScript {
     /// when nothing waited.
     pub fn park_since(&mut self, mark: usize) -> Option<u64> {
         let mut model = self.model_mut();
-        let model = &mut *model;
+        let model: &mut crate::script::Model = &mut model;
         if model.script_calls.len() <= mark {
             return None;
         }
@@ -758,7 +778,7 @@ impl UiScript {
     /// before, which stands. A verb that returned while its call waited for the host reports it as
     /// its script's error. For [`super::CallHost::apply`] and the tail it leaves.
     pub fn raise_in_call(&mut self, message: &str) {
-        self.model_mut().call_raises.raising = Some(message.to_string());
+        set_field!(self, call_raises.raising, Some(message.to_string()));
     }
 
     /// Make this VM a harness's: a call its verbs make with no host lent is kept, for the
@@ -1302,7 +1322,7 @@ mod tests {
         let locked = lua
             .create_function(|lua, guid: u64| {
                 Ok(lua
-                    .app_data_ref::<Model>()
+                    .app_data_ref::<crate::script::ModelCell>()
                     .expect("model app_data")
                     .item_locks
                     .contains(&guid))
@@ -1405,7 +1425,9 @@ mod tests {
         });
         let watched = lua
             .create_function(|lua, ()| {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let on = match &model.cursor {
                     Some(CursorPayload::Item(item)) => item.guid,
                     _ => 0,

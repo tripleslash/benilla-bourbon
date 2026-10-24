@@ -6,6 +6,7 @@ pub trait ByteExt {
     fn u8_at(&self, o: usize) -> Option<u8>;
     fn u16_at(&self, o: usize) -> Option<u16>;
     fn u32_at(&self, o: usize) -> Option<u32>;
+    fn u64_at(&self, o: usize) -> Option<u64>;
     fn i32_at(&self, o: usize) -> Option<i32>;
     fn f32_at(&self, o: usize) -> Option<f32>;
     /// A length-checked sub-slice: `n` bytes starting at `o`.
@@ -27,6 +28,12 @@ impl ByteExt for [u8] {
     fn u32_at(&self, o: usize) -> Option<u32> {
         Some(u32::from_le_bytes(
             self.get(o..o.checked_add(4)?)?.try_into().ok()?,
+        ))
+    }
+    #[inline]
+    fn u64_at(&self, o: usize) -> Option<u64> {
+        Some(u64::from_le_bytes(
+            self.get(o..o.checked_add(8)?)?.try_into().ok()?,
         ))
     }
     #[inline]

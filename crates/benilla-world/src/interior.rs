@@ -346,7 +346,7 @@ pub fn classify_entity_interior(
     // (`FadeMaterials::material_for`), so the two writers never fight.
     mut parts: PartWrite,
 ) {
-    let _t0 = std::time::Instant::now();
+    let _t0 = bevy::platform::time::Instant::now();
     let (mut n_anchors, mut n_resolved, mut n_written) = (0usize, 0usize, 0usize);
     // Anchors with no part to ask, the tripwire for a fade lockout creeping back.
     let mut n_fade_blocked = 0usize;
@@ -430,7 +430,7 @@ pub fn classify_entity_interior(
         };
         let seated = seats.get(anchor).ok().map(|s| s.0);
         n_resolved += 1;
-        let _r = std::time::Instant::now();
+        let _r = bevy::platform::time::Instant::now();
         let (attach, attach_at) = attach_anchor(containment, bake_center, anchor_t);
         let (law, room) = resolve_anchor_law(
             &mut commands,
@@ -975,6 +975,7 @@ mod tests {
                 world_from_local: bevy::math::Affine3A::IDENTITY,
                 name_set: 0,
                 visible: vec![true],
+                lit: vec![true],
                 interior_fog: vec![gate],
                 liquid_visited: vec![false],
                 flooded: vec![None],

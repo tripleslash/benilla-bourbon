@@ -8,7 +8,7 @@ use crate::script::binding_abi::{self, bool_or_default};
 use crate::script::region_map::{set_shared, Side};
 
 use crate::order::{DrawLayer, Strata};
-use crate::script::{visibility, Backdrop, Insets, Model};
+use crate::script::{visibility, Backdrop, Insets};
 use crate::widget::FrameKind;
 
 use super::{decode_id, draw_layer_from_str, frame_handle_of, frame_wrapper, strata_from_str};
@@ -28,7 +28,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "IsShown",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(crate::script::binding_abi::flag(
                 model.arena.frame(h).map(|f| f.shown).unwrap_or(false),
             ))
@@ -38,7 +40,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "IsVisible",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(crate::script::binding_abi::flag(
                 model
                     .arena
@@ -52,7 +56,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     set_shared(lua, m, Side::Frame, "GetName", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
         let name = {
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             model.arena.frame(h).and_then(|f| f.name.clone())
         };
         match name {
@@ -67,7 +73,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetID",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(model.arena.frame(h).map(|f| f.wow_id).unwrap_or(0))
         })?,
     )?;
@@ -81,7 +89,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 id,
                 "SetID(ID)",
             )?));
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             if let Some(f) = model.arena.frame_mut(h) {
                 f.wow_id = id;
             }
@@ -120,7 +130,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     }
     fn chain_of(lua: &Lua, this: &Table) -> mlua::Result<&'static [&'static str]> {
         let h = frame_handle_of(lua, this)?;
-        let model = lua.app_data_ref::<Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         Ok(model
             .arena
             .frame(h)
@@ -183,7 +195,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     set_shared(lua, m, Side::Frame, "GetParent", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
         let parent_id = {
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             model
                 .arena
                 .frame(h)
@@ -248,7 +262,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 _ => return Err(mlua::Error::runtime("expected a frame")),
             };
             let h = frame_handle_of(lua, &this)?;
-            let who = binding_abi::frame_name(&lua.app_data_ref::<Model>().expect("model"), h);
+            let who = binding_abi::frame_name(
+                &lua.app_data_ref::<crate::script::ModelCell>()
+                    .expect("model"),
+                h,
+            );
             let parent_arg = it.next();
             // `_G[name]` is read with no guard alive and no `$parent` expansion: `0x7a1550` calls
             // `0x76c760` directly, and only the layout path's `0x76c700` expands the token.
@@ -260,7 +278,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 _ => None,
             };
             let new_parent = {
-                let model = lua.app_data_ref::<Model>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 match &parent_arg {
                     // An explicit nil reparents to the screen root, resetting strata and level.
                     Some(Value::Nil) => None,
@@ -297,7 +317,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             // The cycle guard raises (`0x7a177f`'s ancestor walk, the frame itself included).
             if let Some(np) = new_parent {
-                let model = lua.app_data_ref::<Model>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 if np == h || model.arena.is_ancestor(h, np) {
                     let pname = binding_abi::frame_name(&model, np);
                     return Err(mlua::Error::runtime(format!(
@@ -306,7 +328,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 }
             }
             let was_visible = {
-                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model");
                 model.arena.reparent_begin(h, new_parent)
             };
             // None: the same parent, a total no-op (`0x76ab20`), not even a layout touch.
@@ -317,7 +341,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 visibility::hide(lua, h);
             }
             {
-                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model");
                 model.arena.reparent_finish(h, new_parent);
                 // A reparent moves the subtree's effective scale, a layout input and part of every
                 // descendant FontString's measure key.
@@ -343,7 +369,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     "{name}:SetFrameStrata(): Unknown frame strata: {strata}"
                 )));
             };
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model")
                 .arena
                 .set_frame_strata(h, s);
@@ -354,7 +380,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetFrameStrata",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let s = model.arena.frame(h).map(|f| f.strata).unwrap_or_default();
             Ok(strata_name(s).to_string())
         })?,
@@ -382,7 +410,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let lvl = level.min(i64::from(u16::MAX)) as u16;
             // A script level change moves no children: `0x774560` calls `set_frame_level 0x76a4f0`
             // with `propagate = 0`, which stock `BonusActionButtonTemplate` relies on.
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model")
                 .arena
                 .set_frame_level(h, lvl, false);
@@ -393,7 +421,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetFrameLevel",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(i64::from(
                 model.arena.frame(h).map(|f| f.level).unwrap_or(0),
             ))
@@ -415,7 +445,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     binding_abi::name_of(lua, &this)
                 )));
             }
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model")
                 .set_frame_scale(h, scale as f32, false);
             Ok(())
@@ -425,7 +455,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetScale",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(model.arena.frame(h).map(|f| f.scale).unwrap_or(1.0))
         })?,
     )?;
@@ -438,7 +470,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let Some(alpha) = lua.coerce_number(alpha)? else {
                 return Err(binding_abi::usage(lua, &this, "SetAlpha(alpha 0 to 1)"));
             };
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model")
                 .arena
                 .set_alpha(h, crate::color::frame_alpha_byte(alpha));
@@ -449,7 +481,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetAlpha",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(model
                 .arena
                 .frame(h)
@@ -474,7 +508,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     )))
                 }
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             crate::script::backdrop::install(&mut model, h, bd);
             Ok(())
         })?,
@@ -493,7 +529,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // Copied out before any Lua write: filling a caller's table can run a `__newindex` that
             // re-enters and would panic on the app-data borrow.
             let (bd, u) = {
-                let model = lua.app_data_ref::<Model>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 let u = model.layout_units();
                 (model.backdrops.get(&h).map(|i| i.spec.clone()), u)
             };
@@ -536,7 +574,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
             let color = backdrop_color(lua, args);
             let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             crate::script::backdrop::set_color(&mut model, h, false, color);
             Ok(())
         })?,
@@ -546,7 +586,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, args): (Table, mlua::MultiValue)| {
             let color = backdrop_color(lua, args);
             let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             crate::script::backdrop::set_color(&mut model, h, true, color);
             Ok(())
         })?,
@@ -555,7 +597,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetBackdropColor",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             // No backdrop pushes nothing (`0x777c68`/`0x778008`: `+0x1ac` null returns 0).
             // With one, each byte times the float at `0x81c6b4` (`0x777c98`).
             Ok(match model.backdrops.get(&h).map(|i| &i.spec) {
@@ -568,7 +612,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetBackdropBorderColor",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             // No backdrop pushes nothing (`0x777c68`/`0x778008`: `+0x1ac` null returns 0).
             Ok(match model.backdrops.get(&h).map(|i| &i.spec) {
                 Some(bd) => crate::script::object::colour_values(bd.border_color),
@@ -590,7 +636,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "IsMouseEnabled",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(crate::script::binding_abi::flag(
                 model.arena.is_mouse_enabled(h),
             ))
@@ -603,7 +651,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, args): (Table, MultiValue)| {
             let enable = bool_or_default(args.front(), true); // `0x776f4e`
             let h = frame_handle_of(lua, &this)?;
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model")
                 .arena
                 .set_keyboard_enabled(h, enable);
@@ -614,7 +662,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "IsKeyboardEnabled",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(crate::script::binding_abi::flag(
                 model.arena.is_keyboard_enabled(h),
             ))
@@ -633,7 +683,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     .and_then(|s| s.to_str().ok().and_then(|s| draw_layer_from_str(&s)))
                     .unwrap_or(DrawLayer::Artwork);
                 let h = frame_handle_of(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model");
                 if let Some(frame) = model.arena.frame_mut(h) {
                     let bit = 1u8 << l.index();
                     if disable {
@@ -653,7 +705,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, args): (Table, MultiValue)| {
             let enable = bool_or_default(args.front(), true); // `0x77727e`
             let h = frame_handle_of(lua, &this)?;
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model")
                 .arena
                 .set_mouse_wheel_enabled(h, enable);
@@ -664,7 +716,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "IsMouseWheelEnabled",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(crate::script::binding_abi::flag(
                 model.arena.is_mouse_wheel_enabled(h),
             ))
@@ -677,7 +731,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, args): (Table, MultiValue)| {
             let clamp = bool_or_default(args.front(), true); // `0x776c8e`
             let h = frame_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let changed = model.arena.is_clamped_to_screen(h) != clamp;
             model.arena.set_clamped_to_screen(h, clamp);
             // `0x768cc0` invalidates whether or not the flag moved.
@@ -689,7 +745,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "IsClampedToScreen",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(crate::script::binding_abi::flag(
                 model.arena.is_clamped_to_screen(h),
             ))
@@ -712,7 +770,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     *slot = binding_abi::method_number(lua, &this, v, line)? as f32;
                 }
                 let [left, right, top, bottom] = insets;
-                lua.app_data_mut::<Model>()
+                lua.app_data_mut::<crate::script::ModelCell>()
                     .expect("model")
                     .arena
                     .set_hit_rect_insets(h, [left, right, top, bottom].map(Len::Script));
@@ -724,7 +782,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetHitRectInsets",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let i = model.arena.hit_rect_insets(h);
             let u = model.layout_units();
             Ok((i[0].get(u), i[1].get(u), i[2].get(u), i[3].get(u)))
@@ -797,7 +857,9 @@ fn set_shown(lua: &Lua, this: &Table, shown: bool) -> mlua::Result<()> {
 /// The frame's child ids in link order, the one walk `GetChildren` and `GetNumChildren` share.
 fn children_of(lua: &Lua, this: &Table) -> mlua::Result<Vec<u32>> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     let Some(children) = model.arena.frame(h).map(|f| f.children.clone()) else {
         return Ok(Vec::new());
     };
@@ -810,7 +872,9 @@ fn children_of(lua: &Lua, this: &Table) -> mlua::Result<Vec<u32>> {
 /// and state textures are in.
 fn regions_of(lua: &Lua, this: &Table) -> mlua::Result<Vec<u32>> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     let Some((regions, title)) = model
         .arena
         .frame(h)

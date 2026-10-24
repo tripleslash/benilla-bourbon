@@ -165,7 +165,9 @@ fn nth_aura(
     // The token resolves before the index is read (`0x519542`, then `0x51957a`), so a bad token
     // raises at any index.
     let hit = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         match token {
             Some(t) => auras_of(&model, t)?
                 .filter(|_| index >= 1)
@@ -189,7 +191,7 @@ impl super::UiScript {
     /// family's list. The player's slots, which `UnitBuff("player")` reads, are its
     /// [`Self::set_unit_auras`] list.
     pub fn set_player_auras(&mut self, auras: Vec<AuraState>) {
-        self.model_mut().player_auras = auras;
+        set_field!(self, player_auras, auras);
     }
 
     /// Push or clear a unit's aura list by guid, in ascending aura slot, the player's too; any token
@@ -237,7 +239,7 @@ impl super::UiScript {
 
     /// Push or clear the player's active [`TrackingState`].
     pub fn set_tracking(&mut self, tracking: Option<TrackingState>) {
-        self.model_mut().tracking = tracking;
+        set_field!(self, tracking, tracking);
     }
 
     /// The spell ids of the buffs (`helpful`) or debuffs of the unit `token` names, in the order
@@ -321,7 +323,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetTrackingTexture",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.tracking.as_ref().and_then(|t| t.icon.clone()))
         })?,
     )?;
@@ -332,7 +336,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "CancelTrackingBuff",
         lua.create_function(|lua, ()| {
             let tracked = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .tracking
                     .as_ref()

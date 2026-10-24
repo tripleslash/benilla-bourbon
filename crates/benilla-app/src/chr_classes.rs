@@ -7,7 +7,8 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_formats::{ChrClasses, ChrRaces};
 
 /// The parsed table; [`benilla_formats::ChrClasses`] documents the columns.
@@ -63,10 +64,7 @@ pub(crate) struct ChrClassesPlugin;
 
 impl Plugin for ChrClassesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Startup,
-            (load_chr_classes, load_chr_races).after(AssetSet::Open),
-        );
+        app.add_data_loaders((load_chr_classes, load_chr_races));
     }
 }
 
@@ -78,12 +76,16 @@ fn load_chr_classes(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     };
     match loaded {
         Ok(table) => commands.insert_resource(ChrClassTable(table)),
-        Err(e) => warn!(
+        // A rerun on a data change that fails drops the other client's table.
+        Err(e) => {
+            commands.remove_resource::<ChrClassTable>();
+            warn!(
             "chr_classes: ChrClasses.dbc failed to load — every pet book tab reads the client's \
              own \"PET\" fallback, so a warlock's says Pet rather than Demon, no class reads \
              as having a relic slot, and no talent spell modifier can apply (the gate has no \
              class family to match): {e:#}"
-        ),
+            )
+        }
     }
 }
 
@@ -98,17 +100,24 @@ fn load_chr_races(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     };
     match loaded {
         Ok(table) => commands.insert_resource(ChrRaceTable(table)),
-        Err(e) => warn!(
-            "chr_races: ChrRaces.dbc failed to load — no unit has a race name or token, so \
+        Err(e) => {
+            commands.remove_resource::<ChrRaceTable>();
+            warn!(
+                "chr_races: ChrRaces.dbc failed to load — no unit has a race name or token, so \
              `UnitRace` answers nil and the social lists print no race: {e:#}"
-        ),
+            )
+        }
     }
     match teams {
         Ok(teams) => commands.insert_resource(RacePvpTeams(teams)),
-        Err(e) => warn!(
+        // A rerun on a data change that fails drops the other client's sides.
+        Err(e) => {
+            commands.remove_resource::<RacePvpTeams>();
+            warn!(
             "chr_races: the races' PvP sides failed to load (ChrRaces.dbc to FactionTemplate.dbc) \
              — no race has a side, so every rank title and the roster seat's faction group read \
              none: {e:#}"
-        ),
+            )
+        }
     }
 }

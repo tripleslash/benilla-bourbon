@@ -12,7 +12,6 @@ use mlua::{Lua, Value};
 
 use super::binding_abi::{number_arg, string_arg};
 use super::lottery::{queue, UnservedSend};
-use super::Model;
 
 /// The survey tables as the client joins them, pushed by the app; empty without the DBCs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -55,7 +54,7 @@ impl SurveyState {
 impl super::UiScript {
     /// Push the survey tables, once the app has read them.
     pub fn set_gm_survey_tables(&mut self, tables: GmSurveyTables) {
-        self.model_mut().gm_survey.tables = tables;
+        set_field!(self, gm_survey.tables, tables);
     }
 }
 
@@ -75,7 +74,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GMSurveyQuestion",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GMSurveyGetQuestion(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let tables = &model.gm_survey.tables;
             let text = usize::try_from(index - 1)
                 .ok()
@@ -105,7 +106,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if (rank as u8) > 5 {
                 return Err(mlua::Error::runtime("Ranks limited from 0 to 5"));
             }
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let slot = (question - 1) as usize;
             model.gm_survey.ratings[slot] = rank as u8;
             model.gm_survey.comments[slot] = kept(comment);
@@ -119,7 +122,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GMSurveyCommentSubmit",
         lua.create_function(|lua, comment: Value| {
             let comment = string_arg(lua, comment, "Usage: GMSurveyCommentSubmit(comment)")?;
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .gm_survey
                 .comment = kept(comment);
@@ -134,7 +137,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GMSurveySubmit",
         lua.create_function(|lua, ()| {
             let send = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let s = &mut model.gm_survey;
                 let answers = s
                     .tables

@@ -6,7 +6,9 @@
 //! (`0x4aa090`), which fires `BATTLEFIELDS_CLOSED`, the window's only engine-side close, once the
 //! player is more than 5.5556 yd from the anchor.
 
-use std::time::Instant;
+// The platform clock, not std's: `std::time::Instant::now()` panics on wasm32, and this
+// module's deadlines run in the browser build like every other.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
@@ -475,7 +477,7 @@ mod tests {
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()
             .add_systems(Update, feed_battlefield);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let joined = |app: &mut App| {
             app.world_mut()
                 .resource_mut::<Battlefield>()

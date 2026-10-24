@@ -155,7 +155,7 @@ pub struct TradeState {
 impl super::UiScript {
     /// Push (or clear, with `None`) the trade's two offers.
     pub fn set_trade(&mut self, state: Option<TradeState>) {
-        self.model_mut().trade = state;
+        set_field!(self, trade, state);
     }
 
     /// The open of the window (`0x4bf4e0` with a partner): the partner cell is set (`0x4bf549`) and
@@ -175,7 +175,7 @@ impl super::UiScript {
     /// partner, before the latch's release re-enters the core with 0: `CloseTrade` signals
     /// `PLAYER_TRADE_MONEY` only while it is 0 (`0x4bfdc7`).
     pub fn set_trade_done(&mut self, done: bool) {
-        self.model_mut().trade_done = done;
+        set_field!(self, trade_done, done);
     }
 
     /// The rest of the placement `place` once its send has answered `sent`, run in the host's
@@ -364,7 +364,7 @@ impl super::UiScript {
     /// table stay (`0x4bfcf0` only unlocks), so the getters still answer the last offer, in
     /// `TRADE_CLOSED`'s handlers too (`0x4bf522`).
     pub fn close_trade_window(&mut self) {
-        self.model_mut().trade_window = false;
+        set_field!(self, trade_window, false);
     }
 
     /// Our column as the VM holds it, `ClickTradeButton`'s writes included: what the slots'
@@ -503,7 +503,7 @@ impl super::UiScript {
     /// that found a filled slot with no template: the host registers the callback `0x4c0340` on
     /// each that is still unanswered.
     pub fn take_trade_record_asks(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().trade_record_asks)
+        drain_field!(self, trade_record_asks)
     }
 }
 
@@ -569,7 +569,9 @@ fn click_trade_button(lua: &Lua, id: i32) -> mlua::Result<()> {
     // zero or negative id is checked too.
     if i64::from(id) - 1 < 6 {
         let refusal = {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             match &model.cursor {
                 Some(CursorPayload::Item(item)) => trade_refusal(&model, item),
                 _ => None,
@@ -584,7 +586,9 @@ fn click_trade_button(lua: &Lua, id: i32) -> mlua::Result<()> {
         .ok()
         .filter(|&i| i < TRADE_SLOTS);
     let (held, old) = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let held = match &model.cursor {
             Some(CursorPayload::Item(item)) => Some(item.clone()),
             _ => None,
@@ -635,7 +639,9 @@ fn place(
 ) -> mlua::Result<()> {
     let kept = !super::host::open(lua);
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.trade_place_seq += 1;
         let id = model.trade_place_seq;
         model.trade_placing.insert(
@@ -662,7 +668,7 @@ fn place(
         },
     };
     if let Err(e) = submit(lua, call) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .trade_placing
             .remove(&id);
@@ -677,7 +683,7 @@ fn place(
 /// [`UiScript::finish_trade_placement`].
 fn finish_placement(lua: &Lua, place: u64, sent: bool) {
     let placing = lua
-        .app_data_mut::<Model>()
+        .app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .trade_placing
         .remove(&place);
@@ -856,7 +862,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: GetTradePlayerItemInfo(index)` (`0x847c44`, `0x4c047e`).
             let id = binding_abi::index_arg(lua, id, "Usage: GetTradePlayerItemInfo(index)")?;
             let slot = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let slot = slot_at(&model, id, |t| &t.player);
                 ask_record(&mut model, slot.as_ref());
                 slot
@@ -916,7 +924,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             lua.create_function(move |lua, id: Value| {
                 let id = binding_abi::index_arg(lua, id, usage)?;
                 let link = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     let slot = if side {
                         slot_at(&model, id, |t| &t.player)
                     } else {
@@ -949,7 +959,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: GetTradeTargetItemInfo(index)` (`0x847bf4`, `0x4c011e`).
             let id = binding_abi::index_arg(lua, id, "Usage: GetTradeTargetItemInfo(index)")?;
             let (slot, usable) = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let slot = slot_at(&model, id, |t| &t.target);
                 ask_record(&mut model, slot.as_ref());
                 let usable = slot
@@ -997,7 +1009,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetPlayerTradeMoney",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             // Gated on the partner cell (`0x4c0706`-`0x4c0714`); the target's is not (`0x4c0759`).
             Ok(if model.trade_window {
                 i64::from(gold(&model, |t| &t.player))
@@ -1009,7 +1023,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetTargetTradeMoney",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(gold(&model, |t| &t.target)))
         })?,
     )?;
@@ -1023,7 +1039,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let token = binding_abi::string_arg(lua, unit, "Usage: InitiateTrade(\"unit\")")?;
             super::unit::check_unit_token(&Some(token.clone()))?;
             let guid = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .unit_guids
                 .resolve(&token)
@@ -1084,12 +1100,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 copper,
                 "Usage: SetTradeMoney(amount)",
             )? as u32;
-            if u64::from(n) > lua.app_data_ref::<Model>().expect("model app_data").money {
+            if u64::from(n)
+                > lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data")
+                    .money
+            {
                 return Ok(());
             }
             submit(lua, TradeCall::Gold(n))?;
             cursor::money::set_own_offer(
-                &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                &mut lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data"),
                 n,
             );
             Ok(())

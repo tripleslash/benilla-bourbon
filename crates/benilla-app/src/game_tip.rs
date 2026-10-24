@@ -41,6 +41,7 @@
 //! The face is the locale's (`0x406663`-`0x406678`, table `0x82f018` by `[0xc0e080]`): koKR's
 //! `2002.TTF`, zhCN's and zhTW's `FZLBJW.TTF`, `FRIZQT__.TTF` for the other five ([`tip_font_path`]).
 
+use benilla_assets::DataLoadAppExt;
 use benilla_ui::script::{JustifyH, JustifyV, Outline};
 use bevy::prelude::*;
 
@@ -382,10 +383,7 @@ impl Plugin for GameTipPlugin {
             // Initialised here, not by the CVar host: [`on_cvar`] takes it as a plain `ResMut` and
             // panics without it.
             .init_resource::<GameTipSetting>()
-            .add_systems(
-                Startup,
-                load_game_tips.after(benilla_assets::AssetSet::Open),
-            )
+            .add_data_loaders(load_game_tips)
             // After the loading screen's drive, which sets the edge this reads.
             .add_systems(
                 Update,

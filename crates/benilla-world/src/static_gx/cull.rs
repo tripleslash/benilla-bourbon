@@ -150,6 +150,8 @@ pub(super) fn cull_cells(
     windows: Res<crate::wmo_portal::ExteriorWindows>,
     claim: Res<crate::wmo_portal::CameraInteriorClaim>,
     instances: Query<&crate::wmo_portal::WmoPortalInstance>,
+    horizon: Option<Res<crate::horizon::Horizon>>,
+    census: Option<ResMut<crate::horizon::HorizonCensus>>,
 ) {
     let _t = super::gx_perf_guard(1);
     for e in gx.pending_despawn.drain(..) {
@@ -316,6 +318,19 @@ pub(super) fn cull_cells(
 
     // The building the camera is in is not exterior to itself, for WMO groups and prop sets.
     let own = claim.0.map(|c| c.room.instance);
+    let no_horizon = crate::horizon::Horizon::default();
+    let horizon = horizon.as_deref().unwrap_or(&no_horizon);
+    let (mut h_cells, mut h_groups) = (0usize, 0usize);
+    // A region's world box below the horizon: counted, and skipped when enforced.
+    let behind = |origin: Vec3, aabb: &bevy::camera::primitives::Aabb, flags, n: &mut usize| {
+        let (c, h) = (
+            origin + Vec3::from(aabb.center),
+            Vec3::from(aabb.half_extents),
+        );
+        let hidden = horizon.hides_box(c - h, c + h, flags);
+        *n += usize::from(hidden);
+        hidden && horizon.enforced()
+    };
     // The dev doodad kind toggle hides every cell at once; the blend-layer toggles do not reach
     // this lane. Cells and prop regions, both the M2 scene, sort near-first as one list: the 1.12
     // client's front-to-back band walk (32 bands of 33⅓ yd, `0xc7bd40`) at cell grain.
@@ -339,6 +354,12 @@ pub(super) fn cull_cells(
                 &GlobalTransform::from_translation(draw.origin),
                 Some(&draw.aabb),
             ) {
+                continue;
+            }
+            // Deviation: the reference tests each doodad's sphere against the horizon (`0x683700` →
+            // `0x686000`); a retained cell is one batched draw of its 4×4 chunks' doodads, so the
+            // test takes the cell's box, which only ever hides less.
+            if behind(draw.origin, &draw.aabb, 0, &mut h_cells) {
                 continue;
             }
             // Distance² is non-negative, so its IEEE bits sort exactly like the value.
@@ -390,6 +411,10 @@ pub(super) fn cull_cells(
                     && Some(entity) != own
                     && !gate.admits(&GlobalTransform::from_translation(draw.origin), Some(aabb))
                 {
+                    continue;
+                }
+                // Group doodads take the horizon too (`0x6838f0`).
+                if Some(entity) != own && behind(draw.origin, aabb, 0, &mut h_groups) {
                     continue;
                 }
                 sel.drawn[usize::from(*set)] = true;
@@ -454,6 +479,10 @@ pub(super) fn cull_cells(
                 {
                     continue;
                 }
+                // Per group, where the reference tests the placement's box (`0x6856c0`, flags 1).
+                if Some(entity) != own && behind(draw.origin, aabb, 1, &mut h_groups) {
+                    continue;
+                }
                 sel.drawn[usize::from(*group)] = true;
                 any = true;
             }
@@ -466,6 +495,10 @@ pub(super) fn cull_cells(
         world
             .visible_wmos
             .extend(admitted.into_iter().map(|(_, v)| v));
+    }
+    if let Some(mut census) = census {
+        census.gx_cells = h_cells;
+        census.gx_groups = h_groups;
     }
     // `WOW_GX_CENSUS=1`: a selected item is one would-be entity-path submesh, so the counts read
     // against the entity path's `VIS_CENSUS`; at or above it is coarser grain, far above a leak.
@@ -546,13 +579,16 @@ pub(super) fn cull_cells(
             .collect();
         println!(
             "GX_PERF ms/frame flush={:.3} cull={:.3} publish={:.3} prepare={:.3} node={:.3} \
-             arrays_mb={}",
+             arrays_mb={} draws/frame gx={} shadow={} gi={}",
             ms[0],
             ms[1],
             ms[2],
             ms[3],
             ms[4],
-            super::GX_VRAM.load(Relaxed) / (1024 * 1024)
+            super::GX_VRAM.load(Relaxed) / (1024 * 1024),
+            super::GX_DRAWS[0].swap(0, Relaxed) / 64,
+            super::GX_DRAWS[1].swap(0, Relaxed) / 64,
+            super::GX_DRAWS[2].swap(0, Relaxed) / 64,
         );
     }
 }

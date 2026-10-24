@@ -59,13 +59,14 @@ pub struct MatKey {
     /// The batch samples the generated sphere-map coordinate, not its vertex UVs.
     env_map: bool,
     /// The second texture stage's texture and combine preset ([`benilla_assets::Stage1`]).
-    stage1: Option<(AssetId<Image>, u8)>,
+    stage1: Option<(AssetId<Image>, u8, bool)>,
     /// Stage 0's combine preset (`ModelSubmesh::combine`), which sets a fade twin's alpha.
     combine: Option<u8>,
     /// The static terrain-shade selector, fixed per placement.
     shade: ShadeSel,
-    /// Authored batch index + 1 (0 = unordered): the transparent sort bias of every batch, and for
-    /// WMO the clip-z nudge too (MOBA batches draw in strict file order, `0x6b4f10`/`0x6b5190`).
+    /// Authored batch index + 1 (0 = unordered): the transparent sort bias of a blending batch, and
+    /// for WMO the clip-z nudge too (MOBA batches draw in strict file order, `0x6b4f10`/`0x6b5190`).
+    /// 0 for a batch whose material reads neither ([`order_is_read`]).
     batch_order: u16,
     /// The `Arc<UvAnim>` pointer, stable while its model is loaded: one material per UV loop.
     uv_anim: Option<usize>,
@@ -79,6 +80,9 @@ pub struct MatKey {
     window: bool,
     /// A depth-prime twin ([`zfill_material`], the reference's `M2UseZFill` clone at `0x707f7d`).
     zfill: bool,
+    /// fork: a classified tree or bush leaf batch's exile copy, marker bit 14
+    /// ([`FOLIAGE_WIND_MARKER`]); `wow_model.wgsl` sways only these.
+    foliage_wind: bool,
     /// A WMO skybox batch ([`crate::skybox`]), with its own pipeline and sort rung.
     sky_depth: bool,
     /// The placement owning this material when its animated loop follows the instance's sequence
@@ -159,9 +163,10 @@ pub fn model_material(
     light: &Buffer,
     instance: Option<Entity>,
 ) -> Handle<WowModelMaterial> {
-    let key = MatKey {
-        light: light.id(),
-        texture: texture.as_ref().map(Handle::id),
+    model_material_impl(
+        cache,
+        materials,
+        texture,
         blend,
         two_sided,
         is_wmo,
@@ -173,22 +178,113 @@ pub fn model_material(
         no_depth_test,
         fog_policy,
         env_map,
-        stage1: stage1.map(|s| (s.texture.id(), s.combine)),
+        stage1,
         combine,
         shade,
         batch_order,
-        uv_anim: uv_anim.map(|a| std::sync::Arc::as_ptr(a) as usize),
-        rgb_anim: rgb_anim.map(|a| std::sync::Arc::as_ptr(a) as usize),
+        uv_anim,
+        rgb_anim,
         wmo_class,
         sidn,
         window,
-        zfill: false,
         sky_depth,
+        light,
         instance,
-    };
-    if let Some(h) = cache.fetch(&key) {
-        return h;
-    }
+        false,
+    )
+}
+
+/// fork: [`model_material`] for a classified tree or bush leaf batch's exile copy: the same
+/// material plus [`FOLIAGE_WIND_MARKER`], so the entity draw sways like the retained batch. A leaf
+/// card is one stage at the stock opaque preset, so no second stage and no combine.
+#[allow(clippy::too_many_arguments)]
+pub fn foliage_model_material(
+    cache: &mut MaterialCache,
+    materials: &mut Assets<WowModelMaterial>,
+    texture: Option<Handle<Image>>,
+    blend: ModelBlend,
+    two_sided: bool,
+    is_wmo: bool,
+    is_interior: bool,
+    is_emissive: bool,
+    is_additive: bool,
+    fade_variant: bool,
+    no_depth_write: bool,
+    no_depth_test: bool,
+    fog_policy: benilla_formats::FogPolicy,
+    env_map: bool,
+    shade: ShadeSel,
+    batch_order: u16,
+    uv_anim: Option<&std::sync::Arc<benilla_formats::UvAnim>>,
+    rgb_anim: Option<&std::sync::Arc<benilla_formats::RgbAnim>>,
+    wmo_class: Option<WmoBatchClass>,
+    sidn: Option<[u8; 3]>,
+    window: bool,
+    sky_depth: bool,
+    light: &Buffer,
+    instance: Option<Entity>,
+) -> Handle<WowModelMaterial> {
+    model_material_impl(
+        cache,
+        materials,
+        texture,
+        blend,
+        two_sided,
+        is_wmo,
+        is_interior,
+        is_emissive,
+        is_additive,
+        fade_variant,
+        no_depth_write,
+        no_depth_test,
+        fog_policy,
+        env_map,
+        None,
+        None,
+        shade,
+        batch_order,
+        uv_anim,
+        rgb_anim,
+        wmo_class,
+        sidn,
+        window,
+        sky_depth,
+        light,
+        instance,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn model_material_impl(
+    cache: &mut MaterialCache,
+    materials: &mut Assets<WowModelMaterial>,
+    texture: Option<Handle<Image>>,
+    blend: ModelBlend,
+    two_sided: bool,
+    is_wmo: bool,
+    is_interior: bool,
+    is_emissive: bool,
+    is_additive: bool,
+    fade_variant: bool,
+    no_depth_write: bool,
+    no_depth_test: bool,
+    fog_policy: benilla_formats::FogPolicy,
+    env_map: bool,
+    stage1: Option<&benilla_assets::Stage1>,
+    combine: Option<u8>,
+    shade: ShadeSel,
+    batch_order: u16,
+    uv_anim: Option<&std::sync::Arc<benilla_formats::UvAnim>>,
+    rgb_anim: Option<&std::sync::Arc<benilla_formats::RgbAnim>>,
+    wmo_class: Option<WmoBatchClass>,
+    sidn: Option<[u8; 3]>,
+    window: bool,
+    sky_depth: bool,
+    light: &Buffer,
+    instance: Option<Entity>,
+    foliage_wind: bool,
+) -> Handle<WowModelMaterial> {
     // An additive batch is a (ONE, ONE) add of gamma-space premultiplied colour: the shader and
     // `specialize` must key on the same `clutter_fade.z` bit 2.
     let source_cutout = blend == ModelBlend::AlphaTest && !alphatest_disabled();
@@ -205,6 +301,45 @@ pub fn model_material(
             ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x => AlphaMode::Blend,
         }
     };
+    // The authored index keys a material only where the material reads it: the transparent sort
+    // bias of a blending batch and a WMO batch's clip-z nudge, both below. An opaque or cutout
+    // M2 batch reads neither, so every index of it shares one material and one bind group.
+    let batch_order = if order_is_read(matches!(alpha_mode, AlphaMode::Blend), is_wmo) {
+        batch_order
+    } else {
+        0
+    };
+    let key = MatKey {
+        light: light.id(),
+        texture: texture.as_ref().map(Handle::id),
+        blend,
+        two_sided,
+        is_wmo,
+        is_interior,
+        is_emissive,
+        is_additive,
+        fade_variant,
+        no_depth_write,
+        no_depth_test,
+        fog_policy,
+        env_map,
+        stage1: stage1.map(|s| (s.texture.id(), s.combine, s.uv_set)),
+        combine,
+        shade,
+        batch_order,
+        uv_anim: uv_anim.map(|a| std::sync::Arc::as_ptr(a) as usize),
+        rgb_anim: rgb_anim.map(|a| std::sync::Arc::as_ptr(a) as usize),
+        wmo_class,
+        sidn,
+        window,
+        zfill: false,
+        foliage_wind,
+        sky_depth,
+        instance,
+    };
+    if let Some(h) = cache.fetch(&key) {
+        return h;
+    }
     // Single-sided unless the M2's 0x04 flag is set.
     let cull_mode = if two_sided { None } else { Some(Face::Back) };
     // Transparent batches only: opaque passes never sort by it. Tying past index 899 is safe:
@@ -244,6 +379,9 @@ pub fn model_material(
         ExtendedMaterial {
             base,
             extension: WowModelExt {
+                modern_shadow: benilla_assets::materials::MODERN_SHADOW_MAP, // fork: modern lighting (FORK.md, P2)
+                modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES,
+                modern_fog: benilla_assets::materials::MODERN_FOG_VOLUME, // fork: modern lighting (FORK.md, P4)
                 // x, y, w are the clutter fade (0 here); z packs the markers `specialize` keys on.
                 clutter_fade: Vec4::new(
                     0.0,
@@ -254,7 +392,7 @@ pub fn model_material(
                     // (`0x70baf0`), 7 Mod (DST_COLOR, ZERO) and 8 Mod2x (DST_COLOR, SRC_COLOR),
                     // exact because the framebuffer holds gamma as in the reference, 10 twin
                     // cutout (the source alpha-tests: 224/255 on the unfaded alpha; an Opaque
-                    // source has no test, `0x70c237`), 12 env map, 13 sky depth.
+                    // source has no test, `0x70c237`), 12 env map, 13 sky depth, 14 foliage wind.
                     f32::from(
                         u16::from(no_depth_write)
                             | (u16::from(no_depth_test) << 1)
@@ -269,7 +407,8 @@ pub fn model_material(
                             | (u16::from(blend == ModelBlend::Mod2x) << 8)
                             | (u16::from(fade_variant && source_cutout) * TWIN_CUTOUT_MARKER)
                             | (u16::from(env_map) * ENV_MAP_MARKER)
-                            | (u16::from(sky_depth) * SKY_DEPTH_MARKER),
+                            | (u16::from(sky_depth) * SKY_DEPTH_MARKER)
+                            | (u16::from(foliage_wind) * FOLIAGE_WIND_MARKER),
                     ),
                     0.0,
                 ),
@@ -342,6 +481,12 @@ pub fn model_material(
 /// `clutter_fade.z` marker bit 9: this material is a depth-prime twin ([`zfill_material`]).
 pub(crate) const ZFILL_MARKER: u16 = 1 << 9;
 
+/// Whether a batch's material reads its authored index: a blending batch sorts by it, and a WMO
+/// batch nudges its clip z by it unless the nudge is off.
+fn order_is_read(blends: bool, is_wmo: bool) -> bool {
+    blends || (is_wmo && !wmo_bias_off())
+}
+
 /// `clutter_fade.z` marker bit 10: the twin's source alpha-tests, so the shader keeps the 224/255
 /// cutout while blending. Never on an Opaque source: mode 0 has no alpha test (`0x70c237`).
 pub(crate) const TWIN_CUTOUT_MARKER: u16 = 1 << 10;
@@ -353,6 +498,11 @@ pub(crate) const ENV_MAP_MARKER: u16 = 1 << 12;
 /// `clutter_fade.z` marker bit 13: a WMO skybox batch, whose pipeline pins the far depth at the
 /// vertex with no raster bias; a `WowModelKey` axis, so every other draw keeps its real depth.
 pub(crate) const SKY_DEPTH_MARKER: u16 = 1 << 13;
+
+/// fork: `clutter_fade.z` marker bit 14: a classified tree or bush leaf batch's exile copy, the
+/// only entity draw `wow_model.wgsl` applies `tree_offset` to. Vertex-only uniform data, not a
+/// `WowModelKey` axis; a `MeshTag` bit would alias the lane weight and the interior probe slot.
+pub(crate) const FOLIAGE_WIND_MARKER: u16 = 1 << 14;
 
 /// [`BATCH_ORDER_SORT_EPS`] for the WMO skybox lane: at the −6e4 rung the f32 ulp is 0.0039, so
 /// 1e-3 would round away; this step is 4 ulps. Every skybox batch pair ties, being eye-anchored.
@@ -414,7 +564,7 @@ pub fn zfill_material(
         no_depth_test: false,
         fog_policy: benilla_formats::FogPolicy::Scene,
         env_map,
-        stage1: stage1.map(|s| (s.texture.id(), s.combine)),
+        stage1: stage1.map(|s| (s.texture.id(), s.combine, s.uv_set)),
         combine: None,
         shade: ShadeSel::Lit,
         batch_order: 0,
@@ -424,6 +574,7 @@ pub fn zfill_material(
         sidn: None,
         window: false,
         zfill: true,
+        foliage_wind: false,
         // No skybox batch has a twin: the sky writes no depth.
         sky_depth: false,
         instance: None,
@@ -446,6 +597,9 @@ pub fn zfill_material(
         ExtendedMaterial {
             base,
             extension: WowModelExt {
+                modern_shadow: benilla_assets::materials::MODERN_SHADOW_MAP, // fork: modern lighting (FORK.md, P2)
+                modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES,
+                modern_fog: benilla_assets::materials::MODERN_FOG_VOLUME, // fork: modern lighting (FORK.md, P4)
                 clutter_fade: Vec4::new(
                     0.0,
                     0.0,
@@ -479,7 +633,8 @@ fn stage1_params(stage1: Option<&benilla_assets::Stage1>, combine: Option<u8>) -
         f32::from(u8::from(stage1.is_some())),
         stage1.map_or(0.0, |s| f32::from(s.combine)),
         combine.map_or(0.0, |p| f32::from(p) + 1.0),
-        0.0,
+        // tortoise: a stage on a UV set reads the mesh's UV set B (`wow_model.wgsl`).
+        f32::from(u8::from(stage1.is_some_and(|s| s.uv_set))),
     )
 }
 
@@ -747,21 +902,34 @@ fn classify_part(
         return;
     }
     let cur = mat.0.id();
+    // The reactive walk's dry fast path: a near-side part that does not straddle, under a dry eye
+    // and over no loaded surface, stays near whatever its material (no surface counts as above,
+    // `0x707a10`), so none of the verdict below can move. The full walk still marks the twin GC.
+    if used.is_none()
+        && !interleave.eye_submerged()
+        && !marked
+        && !straddling
+        && !tag.is_some_and(|t| clips.straddles(crate::mesh_tag::rig_of(t.0)))
+        && !twins.to_near.contains_key(&cur)
+        && interleave.dry_at(gt.translation())
+    {
+        return;
+    }
     let (near, swapped) = match twins.to_near.get(&cur) {
         Some(n) => (n.clone(), true),
         None => (mat.0.clone(), false),
     };
     // The current verdict: the marker, or the handle for the batches this system swaps itself.
     let far_now = marked || swapped;
-    let qualifies = match materials.get(near.id()) {
-        Some(m) => {
-            matches!(m.base.alpha_mode, AlphaMode::Blend)
-                && m.extension.model_flags.x <= 0.5
-                // A WMO skybox sits at the eye and the far depth, on no side of the water plane.
-                && (m.extension.clutter_fade.z as u16) & SKY_DEPTH_MARKER == 0
-        }
-        None => false,
-    };
+    // Read wherever it lives: a batch first classifies as it binds, while its material is still
+    // parked (`lazy`), and a still one is not asked again.
+    let qualifies = lazy::with_material(materials, near.id(), |m| {
+        matches!(m.base.alpha_mode, AlphaMode::Blend)
+            && m.extension.model_flags.x <= 0.5
+            // A WMO skybox sits at the eye and the far depth, on no side of the water plane.
+            && (m.extension.clutter_fade.z as u16) & SKY_DEPTH_MARKER == 0
+    })
+    .unwrap_or(false);
     if !qualifies {
         // A part back on its opaque cutout has no side until it blends again.
         if marked {
@@ -803,6 +971,15 @@ fn classify_part(
     let far = !straddles
         && crate::particles::far_side_of_water(interleave, Some(entity), gt.translation());
     if far == far_now {
+        // The marker outlives the handle it was set for: a writer that binds another blend
+        // material before that one's twin exists leaves the near handle under a far marker, and
+        // only the twin's existence lets it resolve.
+        if far && !swapped {
+            let far_h = far_twin(twins, materials, &near);
+            if !authority_owned {
+                mat.0 = far_h;
+            }
+        }
         return;
     }
     trace_side(if far { "far-side" } else { "near-side" }, entity, gt);
@@ -830,7 +1007,7 @@ fn far_twin(
     if let Some(h) = twins.to_far.get(&near.id()) {
         return h.clone();
     }
-    let twin = far_twin_of(materials.get(near.id()).unwrap());
+    let twin = lazy::with_material(materials, near.id(), far_twin_of).unwrap();
     let h = materials.add(twin);
     twins.to_far.insert(near.id(), h.clone());
     twins.to_near.insert(h.id(), near.clone());
@@ -952,14 +1129,34 @@ pub enum ModelKind {
 
 /// A spawned model submesh's subsystem and blend layer, which the panel toggles on.
 #[derive(Component, Clone, Copy)]
+#[require(ShadowOccluder)]
 pub struct ModelPart {
     pub kind: ModelKind,
     pub blend: ModelBlend,
 }
 
+/// The camera-INDEPENDENT half of [`visibility::apply_model_visibility`]'s verdict: does this
+/// submesh exist as world content this frame (toggles, far clip, distance fade, material alpha)?
+///
+/// `Visibility` cannot answer that for a shadow caster: it also folds the exterior window gate,
+/// the portal PVS and the exterior-scene cull — all functions of where the camera LOOKS — and a
+/// wall behind the camera still blocks the sun. Gating the caster proxy on `InheritedVisibility`
+/// made every entity-lane shadow swing with view direction. Defaults to occluding so a part casts
+/// correctly from its spawn frame; the walk corrects a toggled-off part one frame later.
+#[derive(Component, Clone, Copy)]
+pub struct ShadowOccluder(pub bool);
+
+impl Default for ShadowOccluder {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 /// Why the streamer left this submesh on the entity path, one static label per batch for the
 /// census (`VIS_CENSUS … why …`); absent on units, GameObjects and everything the app spawns.
 #[derive(Component, Clone, Copy)]
+// Sparse: only the census reads it, and a column would split the parts' tables by spawn path.
+#[component(storage = "SparseSet")]
 pub struct EntityPathWhy(pub &'static str);
 
 /// The model-`Visibility` authority's set; the first-person self hide runs after it and wins.
@@ -968,6 +1165,33 @@ pub struct ModelVisSet;
 
 #[cfg(test)]
 mod tests {
+    /// The markers toggled at runtime, or read only by the census, live outside the tables: as
+    /// table columns each would split its family's tables, and every query pays per table.
+    #[test]
+    fn toggled_markers_are_sparse_sets() {
+        use bevy::ecs::component::{Component, StorageType};
+        for (name, storage) in [
+            (
+                "AnimParked",
+                <crate::rig_anim::AnimParked as Component>::STORAGE_TYPE,
+            ),
+            (
+                "RigStarved",
+                <crate::rig_palette::RigStarved as Component>::STORAGE_TYPE,
+            ),
+            (
+                "ParkedMesh",
+                <super::park::ParkedMesh as Component>::STORAGE_TYPE,
+            ),
+            (
+                "EntityPathWhy",
+                <super::EntityPathWhy as Component>::STORAGE_TYPE,
+            ),
+        ] {
+            assert_eq!(storage, StorageType::SparseSet, "{name}");
+        }
+    }
+
     use super::replace_fog_policy;
     use benilla_formats::FogPolicy;
 
@@ -997,6 +1221,7 @@ mod tests {
         let stage = benilla_assets::Stage1 {
             texture: Default::default(),
             combine: 3,
+            uv_set: false,
         };
         let p = super::stage1_params(Some(&stage), Some(0));
         assert_eq!((p.x, p.y, p.z), (1.0, 3.0, 1.0));

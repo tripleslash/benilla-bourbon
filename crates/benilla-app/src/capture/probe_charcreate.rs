@@ -52,6 +52,7 @@ fn parse_req(spec: &str) -> Option<CharCreateReq> {
         hair_style: next_u8(0),
         hair_color: next_u8(0),
         facial_hair: next_u8(0),
+        challenge_mask: None,
     })
 }
 

@@ -40,7 +40,8 @@ use benilla_protocol::EntityKind;
 use crate::net::{ActiveMover, Guid, GuidIndex, NetEntity, ObjectStore, SelfPlayer};
 use crate::target::{RelUnit, RelationWorld, Relations};
 use crate::ui_session::LatchVocal;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
 
@@ -348,7 +349,7 @@ fn stop_on_despawn(mut removed: RemovedComponents<NetEntity>, mut out: NonSendMu
 pub(super) fn plugin(app: &mut App) {
     app.add_message::<NpcGreetingRequest>()
         .init_resource::<GreetSeq>()
-        .add_systems(Startup, load_npc_greetings.after(AssetSet::Open))
+        .add_data_loaders(load_npc_greetings)
         .add_systems(
             Update,
             (

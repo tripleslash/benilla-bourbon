@@ -547,7 +547,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>();
@@ -567,6 +567,9 @@ mod tests {
             Collider::trimesh(verts, tris),
             Transform::default(),
         ));
+        // avian 0.7 registers its spatial-query diagnostics in `finish`, which `run` would call.
+        app.finish();
+        app.cleanup();
         // One frame builds Position/Rotation and the spatial-query trees.
         app.update();
         app
@@ -582,7 +585,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>();

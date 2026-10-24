@@ -233,6 +233,11 @@ pub struct Billboard {
     /// The joint the card rides on an animated host (a swinging lamp).
     pub bone: u16,
     pub kind: BillboardKind,
+    /// The billboard bones above this one, outermost first, as `(pivot, kind)`. A child multiplies
+    /// onto its parent's replaced matrix (`0x7151ba`), so each swings the pivot below it about its
+    /// own: `Misc_1H_Lantern_B_01.m2`'s glow bone sits 0.06 yd down its parent's −X, behind the
+    /// lantern from every side.
+    pub carriers: Vec<([f32; 3], BillboardKind)>,
     pub scale_anim: Option<BoneScaleAnim>,
     /// Translation loops `(anim id, band keys)`: anim 0 the questgiver bob, 190 its raised form
     /// under an overhead name (`0x6076c0`). Only the marker spawn site arms them.
@@ -369,12 +374,18 @@ pub struct TextureStage {
     pub wrap_y: bool,
     /// Generated coordinates: the lookup `texture_unit_lookup[texCoordSet + k]` is above 2
     /// (`0x70b8bd`), the same view-space sphere map as [`RenderSubmesh::env_map`]. Otherwise the
-    /// stage reads the vertex's UV set `k` (`Model2.bls` binds `texcoord[k]`), which no stock
-    /// two-texture batch does.
+    /// stage reads a vertex UV set (`Model2.bls` binds `texcoord[k]`), as `Stars.m2`'s does.
     pub env_map: bool,
     /// The combine preset (`benilla_m2::M2Model::stage_combine`): 0 and 1 modulate the colour
     /// with alpha passed or modulated, 3 adds, 4 modulates ×2, 2 and 5 interpolate.
     pub combine: u8,
+    /// A stage that is not env-mapped: its coordinates, the vertex UV set
+    /// `texture_unit_lookup[texCoordSet + k]` names (0 or 1), parallel to
+    /// [`RenderSubmesh::positions`]; empty for an env-mapped stage.
+    pub uvs: Vec<[f32; 2]>,
+    /// The stage's own translation loop, `textureTransform[combo + 1]` (`0x70b740`); `None` when
+    /// it does not move or the combo is the `0xffff` no-transform sentinel.
+    pub uv_anim: Option<UvAnim>,
 }
 
 /// A flat ground-plane quad: four vertices on one horizontal plane at or just above z = 0 (hover

@@ -56,9 +56,13 @@ impl WorldWriter {
         pos: [f32; 3],
         orientation: f32,
         fall_time: u32,
+        transport: Option<TransportPose>,
     ) -> Result<()> {
         let mut info = movement_info(pos, orientation, flags);
         info.fall_time = fall_time;
+        // The server relocates the body we let go from this (`HandleMoveNotActiveMoverOpcode`):
+        // a rider's keeps `ON_TRANSPORT` and its tail, or it is removed from the deck.
+        info.transport = transport;
         let mut body = messages::full_guid(guid);
         body.extend_from_slice(&messages::movement(&info));
         self.send(opcode::CMSG_MOVE_NOT_ACTIVE_MOVER, &body)
@@ -74,15 +78,18 @@ impl WorldWriter {
     }
 
     /// `CMSG_MOVE_SPLINE_DONE`: owed, at rest, when an `SMSG_MONSTER_MOVE` on our own guid ends.
-    /// The server checks `spline_id` against its newest, then relocates us and tells observers.
+    /// The server checks `spline_id` against its newest, then relocates us and tells observers. A
+    /// rider's carries `ON_TRANSPORT` and `transport`, or the relocation removes it from the deck.
     pub fn move_spline_done(
         &mut self,
         flags: u32,
         pos: [f32; 3],
         orientation: f32,
         spline_id: u32,
+        transport: Option<TransportPose>,
     ) -> Result<()> {
-        let info = movement_info(pos, orientation, flags);
+        let mut info = movement_info(pos, orientation, flags);
+        info.transport = transport;
         self.send(
             opcode::CMSG_MOVE_SPLINE_DONE,
             &messages::move_spline_done(&info, spline_id),
@@ -134,6 +141,9 @@ impl WorldWriter {
     /// pose, plus a trailing `u32 apply` for all but root. Unacked, the server never applies it.
     /// `flags` must carry the mode's bit (a root apply-ack without it is a kick, vmangos
     /// `MovementHandler.cpp:715-722`) and no moving bit beside `MOVEFLAG_ROOT`; turn bits are fine.
+    /// A rider's ack carries `ON_TRANSPORT` and `transport`: the server relocates us from it
+    /// (`HandleMoverRelocation`), and an ack without the bit removes us from the transport.
+    #[allow(clippy::too_many_arguments)] // one wire record, field for field
     pub fn move_mode_ack(
         &mut self,
         guid: u64,
@@ -142,8 +152,10 @@ impl WorldWriter {
         apply: bool,
         flags: u32,
         pose: ([f32; 3], f32),
+        transport: Option<TransportPose>,
     ) -> Result<()> {
-        let info = movement_info(pose.0, pose.1, flags);
+        let mut info = movement_info(pose.0, pose.1, flags);
+        info.transport = transport;
         let trailing = mode.ack_carries_apply().then_some(apply);
         self.send(
             mode.ack_opcode(apply),

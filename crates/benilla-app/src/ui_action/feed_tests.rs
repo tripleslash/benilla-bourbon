@@ -62,7 +62,7 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
             ItemDisplayCatalog::from_displays(displays),
         ))
         .insert_resource(NetCommands(tx));
-    app.insert_non_send_resource(UiScript::new().unwrap());
+    app.insert_non_send(UiScript::new().unwrap());
     app.add_systems(Update, feed_actions);
     (app, rx)
 }
@@ -71,7 +71,7 @@ fn app_with_food_on_the_bar() -> (App, crossbeam_channel::Receiver<ClientCommand
 /// (`ActionButton.lua:157`); a nil hides the icon.
 fn fed_texture(app: &mut App) -> Option<String> {
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<Option<String>>(&format!("return GetActionTexture({JERKY_ACTION})"))
         .unwrap()
 }
@@ -80,7 +80,7 @@ fn fed_texture(app: &mut App) -> Option<String> {
 /// (`ActionButton.lua:287`): 1 or nil.
 fn fed_consumable(app: &mut App) -> Option<i64> {
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<Option<i64>>(&format!("return IsConsumableAction({JERKY_ACTION})"))
         .unwrap()
 }
@@ -165,9 +165,7 @@ fn a_landed_item_template_also_lands_the_consumable_gate() {
 #[test]
 fn a_bar_drag_fires_its_slots_in_place_and_the_feed_adds_nothing() {
     let (mut app, _rx) = app_with_food_on_the_bar();
-    app.world_mut()
-        .non_send_resource_mut::<UiScript>()
-        .keep_calls();
+    app.world_mut().non_send_mut::<UiScript>().keep_calls();
     let mut info = test_template("Tough Jerky");
     info.display_info_id = JERKY_DISPLAY;
     info.spells = vec![ItemSpellEntry {
@@ -186,7 +184,7 @@ fn a_bar_drag_fires_its_slots_in_place_and_the_feed_adds_nothing() {
     app.update();
 
     fn script(app: &mut App) -> Mut<'_, UiScript> {
-        app.world_mut().non_send_resource_mut::<UiScript>()
+        app.world_mut().non_send_mut::<UiScript>()
     }
     script(&mut app)
         .run(
@@ -218,7 +216,7 @@ fn a_bar_drag_fires_its_slots_in_place_and_the_feed_adds_nothing() {
     let sets = script(&mut app).take_action_sets();
     let mut bar = bevy::ecs::system::SystemState::<super::ActionBarSteps>::new(app.world_mut());
     for (id, packed) in sets {
-        bar.get_mut(app.world_mut()).set(id, packed);
+        bar.get_mut(app.world_mut()).unwrap().set(id, packed);
     }
 
     app.update();
@@ -244,7 +242,7 @@ fn a_verbs_bar_write_survives_a_resolve_of_the_stale_store() {
     app.update();
 
     fn script(app: &mut App) -> Mut<'_, UiScript> {
-        app.world_mut().non_send_resource_mut::<UiScript>()
+        app.world_mut().non_send_mut::<UiScript>()
     }
     script(&mut app)
         .run(&format!(
@@ -411,13 +409,13 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
         }],
         Vec::new(),
     ));
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.add_systems(Update, feed_actions);
 
     app.update();
     let icon = |app: &mut App| {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Option<String>>(&format!("return GetActionTexture({ACTION})"))
             .unwrap()
     };
@@ -428,7 +426,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     );
 
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run("EditMacro(1, nil, 1)")
         .unwrap();
     assert!(
@@ -447,12 +445,12 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     // its call (`0x4f1329`), and the feed adds nothing.
     let events = |app: &mut App| {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<i64>("return BENILLA_TEST_SLOT_EVENTS or 0")
             .unwrap()
     };
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"
             local f = CreateFrame("Frame")
@@ -472,7 +470,7 @@ fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
     );
     assert_eq!(
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Option<String>>(&format!("return GetActionText({ACTION})"))
             .unwrap()
             .as_deref(),
@@ -491,7 +489,7 @@ fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
     benilla_formats::wow_data_or_skip!();
     let (mut app, _rx) = app_with_food_on_the_bar();
     {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.set_screen_size(1024.0, 768.0);
         // Stock files, read from the install.
         for file in [
@@ -513,7 +511,7 @@ fn pre_resolved_lines_land_on_the_errors_frame_in_the_arms_colour() {
         "the feed drains the queue"
     );
 
-    let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+    let mut script = app.world_mut().non_send_mut::<UiScript>();
     assert!(
         script.errors().is_empty(),
         "VM errors: {:?}",
@@ -558,7 +556,7 @@ fn a_notice_under_the_loading_cover_fires_at_the_reveal() {
     let (mut app, _rx) = app_with_food_on_the_bar();
     app.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"
             BENILLA_TEST_ERRORS = {}
@@ -570,7 +568,7 @@ fn a_notice_under_the_loading_cover_fires_at_the_reveal() {
         .unwrap();
     let fired = |app: &mut App| {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<String>>("return BENILLA_TEST_ERRORS")
             .unwrap()
     };
@@ -618,7 +616,7 @@ fn report_feed(spells: crate::ui_action::Spells, reports: crate::ui_cast::CastRe
         .init_resource::<crate::creature_anim::UnitEdits>()
         .add_message::<crate::player::StandStateRequest>()
         .insert_resource(NetCommands(tx));
-    app.insert_non_send_resource(UiScript::new().unwrap());
+    app.insert_non_send(UiScript::new().unwrap());
     app.add_systems(Update, crate::ui_cast::signal_reports);
     app
 }
@@ -640,7 +638,7 @@ fn a_validator_line_shows_as_its_message_does() {
     });
     let mut app = report_feed(Spells::empty_for_tests(), reports);
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run(
             r#"ERR_SPELL_ALREADY_KNOWN_S = "You already know %s.";
                ERR_TAME_FAILED = "%s.";
@@ -654,7 +652,7 @@ fn a_validator_line_shows_as_its_message_does() {
     app.update();
     let seen = app
         .world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<Vec<String>>("return SEEN")
         .unwrap();
     assert_eq!(
@@ -696,7 +694,7 @@ fn a_pets_refused_cast_writes_no_combat_log_line() {
     // Only what the log line needs, its template and its reason; the red line's text has its own
     // tests.
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run(
             r#"SPELLFAILCASTSELF = "You fail to cast %s: %s."
                SPELL_FAILED_ROOTED = "You are unable to move";"#,
@@ -738,7 +736,7 @@ fn a_refused_spell_flagged_not_to_log_writes_no_combat_log_line() {
             reports,
         );
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run(
                 r#"SPELLFAILCASTSELF = "You fail to cast %s: %s."
                    SPELL_FAILED_ROOTED = "You are unable to move";"#,
@@ -779,7 +777,7 @@ fn an_empty_default_format_shows_nothing_and_still_logs() {
             reports,
         );
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run(&format!(
                 r#"SPELLFAILCASTSELF = "You fail to cast %s: %s."
                 SPELL_FAILED_ROOTED = "You are unable to move"
@@ -793,7 +791,7 @@ fn an_empty_default_format_shows_nothing_and_still_logs() {
         app.update();
         let seen = app
             .world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<String>>("return SEEN")
             .unwrap();
         let logged = app
@@ -816,7 +814,7 @@ fn an_empty_default_format_shows_nothing_and_still_logs() {
 fn a_tame_failure_composes_the_reason_string_into_err_tame_failed() {
     let (mut app, _rx) = app_with_food_on_the_bar();
     {
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         // The strings verbatim from 1.12's `GlobalStrings.lua`, and a recorder for the event.
         script
             .run(
@@ -836,7 +834,7 @@ fn a_tame_failure_composes_the_reason_string_into_err_tame_failed() {
     }
     let line = |app: &mut App, i: usize| {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Option<String>>(&format!("return BENILLA_TEST_LINES[{i}]"))
             .unwrap()
     };
@@ -883,7 +881,7 @@ fn a_refusal_of_the_armed_craft_disarms_the_batch() {
         crate::ui_cast::CastReports::default(),
     );
     {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.set_trade_skill(Some(benilla_ui::script::TradeSkillState {
             line: 197,
             line_name: "Tailoring".into(),
@@ -911,11 +909,7 @@ fn a_refusal_of_the_armed_craft_disarms_the_batch() {
         script.keep_calls();
         script.run("DoTradeSkill(2, 3)").unwrap();
     }
-    let repeat = |app: &App| {
-        app.world()
-            .non_send_resource::<UiScript>()
-            .trade_skill_repeat()
-    };
+    let repeat = |app: &App| app.world().non_send::<UiScript>().trade_skill_repeat();
     app.world_mut()
         .resource_mut::<crate::ui_cast::CastReports>()
         .refused(CastFail::local(133, 0x0c));
@@ -961,13 +955,13 @@ fn a_bag_count_moving_between_resolves_is_not_polled_into_the_bar() {
     app.update();
     let count = |app: &mut App| {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<i64>(&format!("return GetActionCount({JERKY_ACTION})"))
             .unwrap()
     };
     assert_eq!(count(&mut app), 4, "the resolve counts the bag");
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"
             SLOT_EVENTS = 0
@@ -986,7 +980,7 @@ fn a_bag_count_moving_between_resolves_is_not_polled_into_the_bar() {
     app.update();
     let events: i64 = app
         .world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval("return SLOT_EVENTS")
         .unwrap();
     assert_eq!(events, 0, "the feed polled the count into the bar");
@@ -1023,7 +1017,7 @@ fn hold(world: &mut World, items: &[(u16, u64, u32, u32, u32)]) {
 
 fn jerky_count(app: &mut App) -> i64 {
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<i64>(&format!("return GetActionCount({JERKY_ACTION})"))
         .unwrap()
 }
@@ -1118,11 +1112,11 @@ fn the_feed_signals_no_macro_slot_of_its_own() {
         vec![view("a", "Ability_Ambush"), view("b", "Ability_BackStab")],
         Vec::new(),
     ));
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.add_systems(Update, feed_actions);
     app.update();
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run(
             r#"
             SLOT_EVENTS = {}
@@ -1134,14 +1128,14 @@ fn the_feed_signals_no_macro_slot_of_its_own() {
         .unwrap();
     let events = |app: &mut App| {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<i64>>("local t = SLOT_EVENTS SLOT_EVENTS = {} return t")
             .unwrap()
     };
 
     // A load with new icons for both macros.
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_macros(MacroState::from_scopes(
             vec![view("a", "Spell_Holy_Heal"), view("b", "Spell_Holy_Renew")],
             Vec::new(),
@@ -1154,7 +1148,7 @@ fn the_feed_signals_no_macro_slot_of_its_own() {
     );
     assert_eq!(
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<String>("return GetActionTexture(3)")
             .unwrap(),
         "Interface\\Icons\\Spell_Holy_Heal",
@@ -1162,7 +1156,7 @@ fn the_feed_signals_no_macro_slot_of_its_own() {
     );
 
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run(r#"CreateMacro("c", 1, "")"#)
         .unwrap();
     app.update();
@@ -1173,7 +1167,7 @@ fn the_feed_signals_no_macro_slot_of_its_own() {
     );
 
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .run("EditMacro(GetMacroIndexByName('a'), nil, 1)")
         .unwrap();
     app.update();

@@ -52,6 +52,11 @@ impl crate::query_cache::AskOnce for PageTexts {
 }
 
 impl PageTexts {
+    /// A flavor switch: the pages are the other client's.
+    pub(crate) fn forget(&mut self) {
+        self.pages.clear();
+    }
+
     pub(crate) fn insert(&mut self, page_id: u32, text: String, next: u32) {
         self.pages.insert(page_id, PageText { text, next });
     }
@@ -263,8 +268,8 @@ fn sweep_item_text(world: &mut World) {
 fn item_text_reads(world: &mut World) -> bevy::ecs::query::FilteredAccessSet {
     let mut access = crate::lanes::system_access(world, begin_item_text);
     for t in crate::ui_session::latch_reads(world) {
-        if let Some(id) = world.components().get_resource_id(t) {
-            access.add_unfiltered_resource_read(id);
+        if let Some(id) = world.components().get_id(t) {
+            access.add_resource_read(id);
         }
     }
     access
@@ -475,10 +480,9 @@ fn begin_core(world: &mut World, object: u64, begun: ItemTextState) {
         script.fire_event("ITEM_TEXT_BEGIN", vec![]);
     });
     world.resource_scope(|world, mut open: Mut<ItemTextOpen>| {
-        if let (Some(sess), Some(script)) = (
-            open.pending.as_mut(),
-            world.get_non_send_resource::<UiScript>(),
-        ) {
+        if let (Some(sess), Some(script)) =
+            (open.pending.as_mut(), world.get_non_send::<UiScript>())
+        {
             sess.told.get(script).begun = true;
         }
     });
@@ -867,7 +871,7 @@ mod tests {
                 Update,
                 (apply_reads, begin_item_text, feed_item_text).chain(),
             );
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.world_mut()
             .resource_mut::<Items>()
             .insert_template(5_000, Some(crate::items::test_template("Letter")));
@@ -939,7 +943,7 @@ mod tests {
                 (apply_reads, begin_item_text, feed_item_text).chain(),
             );
         net::register(&mut app);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let mut data = [0i32; 24];
         data[7] = 358;
         data[9] = 2;

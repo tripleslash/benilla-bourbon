@@ -130,7 +130,7 @@ fn client(alive: bool, pet_number: u32) -> Feed {
         },
     );
     script.set_container(0, Some(bag));
-    app.world_mut().insert_non_send_resource(script);
+    app.world_mut().insert_non_send(script);
     let drop = app
         .world_mut()
         .register_system(super::drop_item::drop_item_on_unit);
@@ -157,10 +157,7 @@ fn casts(f: &Feed) -> Vec<String> {
 }
 
 fn held(f: &Feed) -> Option<CursorPayload> {
-    f.app
-        .world()
-        .non_send_resource::<UiScript>()
-        .cursor_payload()
+    f.app.world().non_send::<UiScript>().cursor_payload()
 }
 
 /// Food dropped on the target frame with our pet targeted feeds it: `"target"` resolves to the

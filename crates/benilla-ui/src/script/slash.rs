@@ -45,7 +45,7 @@ impl super::UiScript {
         let first = first.to_string();
         let handler = self.lua.create_function(move |lua, msg: Option<String>| {
             let line = format!("{first} {}", msg.unwrap_or_default());
-            lua.app_data_mut::<super::Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .chat_input
                 .push(line);

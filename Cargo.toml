@@ -6,21 +6,22 @@ members = ["crates/*"]
 version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-authors = ["sam <samuv.eth@gmail.com>"]
 
 # A version two crates share is pinned in `[workspace.dependencies]`; feature additions stay per
 # crate. `image` stays per-crate: its consumers differ on default features, and a member cannot
 # turn off default features that a workspace entry enables.
 # `too_many_arguments` is off: a Bevy system's parameter list is its dependency declaration.
+# `missing_const_for_thread_local` is off: clippy 1.98.1 flags initializers already `const { … }`.
 [workspace.lints.clippy]
 too_many_arguments = "allow"
+missing_const_for_thread_local = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.102"
 # bevy's default features spelled out without `audio`: `2d`, `3d` and `ui` each pull `bevy_audio`
 # and `vorbis`, and the client mixes through kira. Add a feature by name, never `2d`/`3d`/`ui`; a
 # plugin that takes bevy with its default features brings the audio stack back too.
-bevy = { version = "0.18.1", default-features = false, features = [
+bevy = { version = "0.19.1", default-features = false, features = [
     "default_app",
     "default_platform",
     "2d_bevy_render",
@@ -30,8 +31,9 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "scene",
     "picking",
 ] }
-# For the `WOW_GPU_MS` meter's query set, which bevy 0.18 does not wrap; must match bevy's wgpu.
-wgpu = "27"
+# For the `WOW_GPU_MS` meter's query set, which bevy does not wrap; must match bevy's wgpu, which
+# resolves to the vendored copy (`third_party/wgpu`, below).
+wgpu = "29"
 clap = { version = "4.6.1", features = ["derive"] }
 sha1 = "0.10.6"
 
@@ -39,6 +41,71 @@ sha1 = "0.10.6"
 # kira 0.12.4, patched to compute spatial gains and the volume tween per output chunk and
 # interpolate them, not per sample frame (`third_party/kira/BENILLA.md`).
 kira = { path = "third_party/kira" }
+# bevy_tasks 0.19.1, forked so the browser build can have threads at all. Upstream gates its
+# `multi_threaded` alias on `target_arch` rather than `target_feature`, which makes "wasm" and "has
+# no threads" the same statement — they stopped being the same statement when the browser got shared
+# memory. The fork also supplies the threads themselves (`std::thread::spawn` is the `unsupported`
+# stub on wasm32 even with atomics) and keeps the main thread out of `Atomics.wait`, which traps
+# there rather than erroring. One patch entry covers the graph: every bevy crate depends on this one.
+# `third_party/bevy_tasks/BENILLA.md` has the hunk list and the verifying diff.
+bevy_tasks = { path = "third_party/bevy_tasks" }
+# bevy_platform 0.19.1, forked for one thing: on `wasm32 + atomics` its `Mutex` and `RwLock` spin
+# (its own no-std implementation) instead of parking, because a parked page traps and the render
+# worker shares bevy's locks with the page. `third_party/bevy_platform/BENILLA.md`.
+bevy_platform = { path = "third_party/bevy_platform" }
+# bevy_ecs 0.19.1, forked for the same reason and in the same shape: 13 threading gates in
+# `query/par_iter.rs` and `query/state.rs` that ask `target_arch == "wasm32"` when they mean
+# "has no threads", plus one logic change: a query's archetype update tests only the new archetypes
+# when they are fewer than its rarest component's set. Left alone: `ExecutorKind`'s wasm default, which stays SingleThreaded on
+# purpose — decisions 1366/1437 measured the multi-threaded executor as a LOSS on this app
+# (~60% of Update systems are non-Send), and `benilla_app::run` sets the kinds explicitly
+# anyway. `third_party/bevy_ecs/BENILLA.md` has the list and the verifying diff.
+bevy_ecs = { path = "third_party/bevy_ecs" }
+# async-executor 1.14.0, forked for ONE `use` line. It guards its state with `std::sync::Mutex` and
+# `RwLock`, which on wasm32+atomics are futex-based — and the browser main thread may not execute
+# `memory.atomic.wait32`: it throws rather than waiting. This executor is shared between that thread
+# and the Web Worker pool, so the locks are contended across the boundary on every frame that runs a
+# `par_iter_mut`. The fork swaps them for spin equivalents on that target alone.
+# `third_party/async-executor/BENILLA.md` has the argument and the verifying diff.
+async-executor = { path = "third_party/async-executor" }
+# bevy_render 0.19.1, forked for TWO `ComputeTaskPool::scope` call sites. `WgpuWrapper` is a
+# `SendWrapper` under wasm+atomics and panics if dereferenced off its creating thread; upstream
+# guards `renderer/mod.rs` for exactly that and misses `batching::gpu_preprocessing`, which hands
+# `&RenderDevice`/`&RenderQueue` into `scope.spawn`. The fork reroutes those two through a serial
+# scope on that target alone. `third_party/bevy_render/BENILLA.md` has the diff.
+bevy_render = { path = "third_party/bevy_render" }
+# bevy_winit 0.19.1, forked for three pieces of per-frame state its runner rebuilt on every call: a
+# `world.query` on each window event (`RedrawRequested` is one a frame), the focus `SystemState` in
+# `redraw_requested`, and the monitor `SystemState` in `about_to_wait`. A fresh query state scans every
+# archetype in the world, and this world has thousands: measured at ~4% of the browser's frame
+# thread. `third_party/bevy_winit/BENILLA.md` has the diff.
+bevy_winit = { path = "third_party/bevy_winit" }
+# wgpu 29.0.4, forked for two WebGPU feature mappings the browser backend lacks: `"subgroups"` and
+# `"texture-formats-tier1"`, the second so the FSR 3.1.5 upscaler gets FidelityFX's one- and
+# two-channel storage formats in the browser. Two table rows and the two binding names they need;
+# `third_party/wgpu/PATCH.md` has the diff and the removal condition.
+wgpu = { path = "third_party/wgpu" }
+# event-listener 5.4.1, forked for ONE `use` line, and the least obvious of the four. `Event` is
+# what `async-channel` parks on, so its mutex is taken on every send/recv that registers or notifies
+# a listener -- and in the threaded browser build the main thread and a worker per core are on
+# opposite ends of those channels. With `std` on, the crate takes `intrusive.rs` and a real
+# `std::sync::Mutex` on EVERY target including wasm (its own spinning mutex in `slab.rs` is the
+# no_std path only), so a contended send on the page thread threw `Atomics.wait cannot be called in
+# this context`. `third_party/event-listener/BENILLA.md` has the diff.
+event-listener = { path = "third_party/event-listener" }
+# parking 2.2.1, forked for ONE function. `futures_lite::block_on` parks worker threads on it, and
+# `Unparker::unpark` -- which the main thread calls whenever spawning work wakes a sleeping worker --
+# takes a `std::sync::Mutex` to close a race with the parker. That lock is the last blocking call an
+# unparking thread makes, and on the page thread it threw. `try_lock` in a spin instead, same
+# semantics; `park` is untouched because a worker may block.
+# `third_party/parking/BENILLA.md` has the diff.
+parking = { path = "third_party/parking" }
+# web-task 1.1.3, forked for one leak in its `+atomics` runtime. A `spawn_local` task that finished
+# while its `Task` was still held left an `Atomics.waitAsync` waiter on its state word, and freeing
+# the task dropped the closure that waiter calls. The next notify at that address woke the stale
+# waiter instead of its owner: "closure invoked recursively or after being dropped", and the real
+# task never ran again. `third_party/web-task/BENILLA.md` has the diff.
+web-task = { path = "third_party/web-task" }
 # A lock-only stand-in: bevy_audio's unbuilt cpal 0.15 would otherwise hold `alsa-sys` 0.3 against
 # cpal 0.17's 0.4, and a lock holds one `links = "alsa"` (`third_party/alsa-0.9/BENILLA.md`).
 alsa = { path = "third_party/alsa-0.9" }

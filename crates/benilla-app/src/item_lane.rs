@@ -407,7 +407,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.insert_resource(crate::net::NetCommands(tx));
-        app.insert_non_send_resource(rx);
+        app.insert_non_send(rx);
         app.world_mut()
             .spawn((SelfPlayer, ObjectStore(Default::default())));
         let mut script = UiScript::new().unwrap();
@@ -471,7 +471,7 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(HEARD, event) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         seat_item_lane(app.world_mut());
         app
     }
@@ -485,7 +485,7 @@ mod tests {
         });
         fire_item_lane(app.world_mut());
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
             .unwrap()
     }
@@ -544,7 +544,7 @@ mod tests {
             ["BAG_UPDATE"]
         );
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run("CloseTradeSkill() CloseCraft() HEARD = {}")
             .unwrap();
         assert_eq!(

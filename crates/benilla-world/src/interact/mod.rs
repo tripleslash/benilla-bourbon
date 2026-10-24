@@ -12,10 +12,14 @@ use bevy::prelude::*;
 use crate::model_render::ModelKind;
 
 mod pick;
+mod posed_once;
+
+pub use posed_once::PosedPickScratch;
 
 pub use pick::{
-    cast_object_ray, cast_pick_ray, cast_pick_ray_inflated, pick_at_cursor, pick_object_at_cursor,
-    ObjectHit, PickBlob, PickBox, PickMember, PickMesh, PickParts, PickSource,
+    cast_nearest_accepted, cast_object_ray, cast_pick_ray, cast_pick_ray_inflated, pick_at_cursor,
+    pick_object_at_cursor, ObjectHit, PickAccept, PickBlob, PickBox, PickMember, PickMesh,
+    PickParts, PickSource,
 };
 
 pub use pick::{ray_member, ray_mesh_bounds, ray_posed_mesh, RayHit};
@@ -60,6 +64,9 @@ pub struct WorldRightClick;
 #[derive(Message, Clone, Copy)]
 pub struct WorldRightPress;
 
+/// An entity that carries pick geometry, on itself or as a blob's members.
+type CarriesPickGeometry = Or<(With<PickMesh>, With<PickBlob>)>;
+
 /// The world's pick sources as one `SystemParam`: the entity pick geometry ([`PickParts`]) and
 /// every lane that draws without entities ([`PickSource`]). Use this, not [`PickParts`] alone,
 /// which still returns hits but misses most of the static world.
@@ -68,6 +75,8 @@ pub struct WorldPick<'w, 's> {
     parts: PickParts<'w, 's>,
     /// The identity every entity hit resolves through.
     objects: Query<'w, 's, &'static WorldObject>,
+    /// Every entity that carries pick geometry, for the casts that walk the whole drawn world.
+    geometry: Query<'w, 's, Entity, CarriesPickGeometry>,
     /// The retained static pass; `None` when `WOW_STATIC_GX=0` keeps every placement on the entity
     /// path. The static merge's blobs are entities and answer through [`PickBlob`].
     gx: Option<Res<'w, crate::static_gx::StaticGx>>,
@@ -92,6 +101,27 @@ impl WorldPick<'_, '_> {
             &self.objects,
             &self.sources(),
             all_hits,
+        )
+    }
+
+    /// The doodad leg of the mouse pick's world trace, nearest-first: a static doodad occludes the
+    /// pick by its drawn opaque batches, never by its collision hull. The reference's `0x69cdb0`
+    /// registers every doodad for the trace with hit-test mode `1 + (flags & 0x1000000 != 0)`, 2
+    /// for the mouse's mask `0x1000114` (`0x69ce4a`-`0x69ce5c`); the M2 hit test (`0x7089c0`) sends
+    /// only mode 3 to the collision triangles (`0x708ff2` → `0x70967c`) and, in mode 2, skips any
+    /// render batch whose material blend is not 0 (`0x70903b`-`0x709054`). Deviation: admission is
+    /// drawn-this-frame where the reference walks loaded defs, and the texunit-`0x08`, textureless
+    /// and zero-alpha skips (`0x70902f`, `0x709071`, `0x7090c2`) are not modelled; neither can stop
+    /// the trace sooner than the reference.
+    pub fn doodad_occluder(&self, ray: Ray3d) -> Option<RayHit> {
+        cast_nearest_accepted(
+            ray,
+            self.geometry.iter(),
+            &self.parts,
+            &self.sources(),
+            &|kind, blend| {
+                kind == ModelKind::Doodad && blend == benilla_formats::ModelBlend::Opaque
+            },
         )
     }
 

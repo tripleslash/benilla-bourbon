@@ -19,7 +19,13 @@
 //! [`crate::field_watch::FieldNotice::Tutorial`], fired in the watcher's place
 //! ([`TutorialState::fire_now`]).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// The platform clock, not std's: `std::time::Instant::now()` PANICS on wasm32 ("time not
+// implemented on this platform"), and the tutorial cascade reads it on ordinary gameplay events —
+// a loot, a first cast, opening the chat box. On native this is a re-export of std's, so nothing
+// about the native build changes.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
@@ -993,7 +999,7 @@ mod tests {
 
     fn enabled(app: &mut App) -> bool {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<bool>("return TutorialsEnabled() ~= nil")
             .unwrap()
     }
@@ -1013,7 +1019,7 @@ mod tests {
             .lock()
             .apply_flags(&bank);
 
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         app.update();
         assert!(
             enabled(&mut app),
@@ -1021,7 +1027,7 @@ mod tests {
         );
 
         // `ReloadUI()`: a fresh VM, and nothing touches the app's banks.
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         assert!(
             !enabled(&mut app),
             "a fresh VM starts knowing no bank — this is the state the row used to load in"
@@ -1038,11 +1044,11 @@ mod tests {
             .resource::<Tutorials>()
             .lock()
             .apply_flags(&[0u8; 32]);
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         app.update();
         // Cleared behind the feed's back, a bank the VM was told stays cleared.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_tutorial_bank(None);
         app.update();
         assert!(!enabled(&mut app), "unchanged ⇒ nothing pushed");
@@ -1114,13 +1120,13 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut()
             .resource::<Tutorials>()
             .lock()
             .apply_flags(&[0u8; 32]);
         app.update();
-        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut s = app.world_mut().non_send_mut::<UiScript>();
         s.resolve();
         assert_eq!(
             s.eval::<Vec<i64>>("return SEEN").unwrap(),
@@ -1150,8 +1156,8 @@ mod tests {
         // The deferral window: in the world on the wire, the entry load still owed, and a live
         // VM with no frames.
         app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
-        app.insert_resource(crate::ui_script::PendingEntryUiLoad);
-        app.insert_non_send_resource(UiScript::new().expect("a frameless VM"));
+        app.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
+        app.insert_non_send(UiScript::new().expect("a frameless VM"));
 
         {
             let t = app.world().resource::<Tutorials>();
@@ -1208,7 +1214,7 @@ mod tests {
                      f:SetScript('OnEvent', function() table.insert(SEEN, arg1) end)",
                 )
                 .unwrap();
-            app.insert_non_send_resource(script);
+            app.insert_non_send(script);
             app.world_mut().write_message(EnteredWorldMessage {
                 tutorial_flags: Some(vec![0u8; 32]),
             });
@@ -1223,7 +1229,7 @@ mod tests {
             app.world_mut()
                 .write_message(crate::net::WorldEnterCascadeMessage);
             app.update();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             assert_eq!(
                 s.eval::<Vec<i64>>("return SEEN").unwrap(),
@@ -1261,7 +1267,7 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(SEEN, arg1) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut().spawn((
             SelfPlayer,
             ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[])),
@@ -1273,7 +1279,7 @@ mod tests {
             .apply_flags(&[0u8; 32]);
         app.update();
         let seen = |app: &mut App| {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             s.eval::<Vec<i64>>("return SEEN").unwrap()
         };
@@ -1354,7 +1360,7 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(SEEN, arg1) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world()
             .resource::<Tutorials>()
             .lock()
@@ -1363,7 +1369,7 @@ mod tests {
     }
 
     fn seen(app: &mut App) -> Vec<i64> {
-        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut s = app.world_mut().non_send_mut::<UiScript>();
         s.resolve();
         s.eval::<Vec<i64>>("return SEEN").unwrap()
     }

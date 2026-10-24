@@ -958,7 +958,11 @@ fn build(sources: Vec<Src>) -> Scan {
     // relay file must show its origin as a tuple, or it hides a forwarder the scan does not read.
     let unaccounted = relay_files
         .iter()
-        .filter(|f| !DRAINS.contains(&f.as_str()) && !tuples.iter().any(|t| &t.path == *f))
+        .filter(|f| {
+            // A Windows checkout spells the path with backslashes.
+            !DRAINS.contains(&f.replace('\\', "/").as_str())
+                && !tuples.iter().any(|t| &t.path == *f)
+        })
         .cloned()
         .collect();
     sites.extend(tuples);

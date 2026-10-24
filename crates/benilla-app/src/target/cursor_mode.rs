@@ -369,6 +369,26 @@ const GO_TYPE_AUCTIONHOUSE: i32 = 20;
 /// `GAMEOBJECT_TYPE_CAPTURE_POINT` (29): never a cursor (`0x5f6d40`), but a tooltip and brighten
 /// when its highlight column `data[19]` is set (`0x5f6d80`), GENERIC's rule. No 1.12 data uses it.
 const GO_TYPE_CAPTURE_POINT: i32 = 29;
+/// The local player's map and the `Map.dbc` catalog, resolved once per system: whether the player
+/// stands inside a battleground (`InstanceType` 3). One [`SystemParam`](bevy::ecs::system::SystemParam)
+/// so a caller that is already at the parameter ceiling can still read it.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct BattlegroundMap<'w> {
+    map: Option<Res<'w, benilla_world::world_map::CurrentMap>>,
+    maps: Option<Res<'w, benilla_assets::MapCatalogRes>>,
+}
+
+impl BattlegroundMap<'_> {
+    /// `true` while the current map's `Map.dbc` `InstanceType` is 3. `false` when either the map or
+    /// the catalog is unknown, so an off-world frame keeps the reference's ordinary faction gate.
+    pub(crate) fn active(&self) -> bool {
+        match (self.map.as_deref(), self.maps.as_deref()) {
+            (Some(map), Some(catalog)) => catalog.0.instance_type(map.0) == Some(3),
+            _ => false,
+        }
+    }
+}
+
 /// Inputs of the two types whose `+0x14` is a predicate of its own rather than `0x5f2f80` or a
 /// constant; the caller resolves them, and each is ignored for every other type.
 #[derive(Clone, Copy, Default)]
@@ -377,6 +397,12 @@ pub(crate) struct GoOverrides {
     pub(crate) channel_owned: bool,
     /// MEETINGSTONE: this stone's area is the one we are queued at.
     pub(crate) meeting_stone_queued: bool,
+    /// The local player is inside a battleground: skip the faction term. A battleground objective's
+    /// `GAMEOBJECT_FACTION` encodes a team (the neutral node banners are faction 35, the occupied
+    /// ones a team template), and on a cross-faction realm the player's race faction need not match
+    /// the team they fight for, which would otherwise hide the very flag they must assault. The
+    /// server's `CanUseBattleGroundObject` validates every use, so the client offer is safe.
+    pub(crate) battleground: bool,
 }
 
 /// `GAMEOBJECT_TYPE_MEETINGSTONE` (23): its `+0x14` (`0x5f6990`) is only
@@ -404,17 +430,29 @@ fn highlightable_flags(
     if type_id == GO_TYPE_MEETINGSTONE {
         return !overrides.meeting_stone_queued;
     }
-    // The faction term (`0x5f3026`): the GameObject's reaction toward us must beat hostile. An
-    // unresolved reaction passes, so a data gap never blanks the world.
-    let ordinary_faction_ok = |r: Option<u8>| r.is_none_or(|r| r > 1);
+    // The TRAP faction term (`0x5f2fc6`) inverts the ordinary one: a trap is highlightable only to
+    // whoever it is hostile to. It is not a team marker, so it must keep gating inside a
+    // battleground: Arathi Basin's visual-only aura GameObjects (180100-180102, type 6) are
+    // friendly-or-neutral traps, and letting them through wins them the pick over the node banner
+    // and swallows the capture as a no-op use.
     if type_id == GO_TYPE_TRAP {
-        // TRAP inverts it (`0x5f2fc6`): highlightable only to whoever it is hostile to.
-        if !reaction.is_none_or(|r| r == 1) {
-            return false;
-        }
-    } else if !ordinary_faction_ok(reaction) {
+        return reaction.is_none_or(|r| r == 1);
+    }
+    // The faction term (`0x5f2f80`): the GameObject's reaction toward us must beat hostile. An
+    // unresolved reaction passes, so a data gap never blanks the world. Skipped inside a
+    // battleground only, and only for this term: an objective's `GAMEOBJECT_FACTION` is a team
+    // marker the client cannot resolve against the player's race faction on a cross-faction realm,
+    // so this is the one term the reference cannot gate on there.
+    if !overrides.battleground && !reaction.is_none_or(|r| r > 1) {
         return false;
     }
+    // `0x5f2f80`'s remaining terms apply in every battleground — its gate has no battleground
+    // branch, so it evaluates them whether or not the map is a BG. An in-use or not-selectable
+    // object stays out (`+0xc & 0x11`), and an INTERACT_COND object stays out until the server sets
+    // the per-player activate bit (`+0x34 & 1`). Arathi Basin's flag is marked in-use and left
+    // un-activated while its node is owned or mid-capture, so skipping these let the click land on
+    // a flag the reference never offers; the server can only answer such a use by cancelling the
+    // capture, which is what leaves the node uncapturable for either side.
     if flags & GO_FLAG_IN_USE_OR_NO_INTERACT != 0 {
         return false;
     }
@@ -460,7 +498,12 @@ pub(crate) fn mouseover_eligible(
     overrides: GoOverrides,
 ) -> bool {
     match type_id {
-        GO_TYPE_TRANSPORT | GO_TYPE_MAP_OBJECT | GO_TYPE_MO_TRANSPORT => false,
+        // TRAP's `+0xc` is constant false, like the transports': a trap is proximity-triggered and
+        // never clicked, so it never becomes the mouseover. Arathi Basin's visual-only aura
+        // GameObjects (180100-180102, type 6, faction 114 hostile-to-all) would otherwise stay
+        // eligible through the inverted TRAP term and take the pick from the node banner behind
+        // them — the banner is what the capture needs, the aura is decoration.
+        GO_TYPE_TRAP | GO_TYPE_TRANSPORT | GO_TYPE_MAP_OBJECT | GO_TYPE_MO_TRANSPORT => false,
         GO_TYPE_SPELL_FOCUS
         | GO_TYPE_DUEL_ARBITER
         | GO_TYPE_FISHINGHOLE
@@ -739,6 +782,7 @@ pub(super) fn classify(
                 tmpl.and_then(|t| t.meeting_stone).map(|m| m.area),
                 stone.as_deref().map_or(0, |s| s.area),
             ),
+            battleground: go_inputs.battleground.active(),
         };
         if !go_highlightable(store, reaction, overrides) {
             return None;
@@ -1113,7 +1157,10 @@ mod tests {
             Some(4),
             GoOverrides::default()
         ));
-        assert!(mouseover_eligible(
+        // A TRAP never becomes the mouseover, hostile or not: it is proximity-triggered and never
+        // clicked, so its `+0xc` slot is constant false. This is what keeps a battleground's
+        // visual-only aura GO (type 6, hostile-to-all) off the pick over the node banner.
+        assert!(!mouseover_eligible(
             GO_TYPE_TRAP,
             0,
             0,
@@ -1153,6 +1200,48 @@ mod tests {
             None,
             GoOverrides::default()
         )); // mailbox
+    }
+
+    /// A battleground's visual-only aura GameObjects are `TRAP` (Arathi Basin 180100-180102). Their
+    /// inverted faction term must keep gating there, or they win the pick over the node banner and
+    /// the `CMSG_GAMEOBJ_USE` lands on a no-op trap instead of the capture.
+    #[test]
+    fn a_battleground_aura_trap_keeps_its_inverted_faction_term() {
+        let bg = GoOverrides {
+            battleground: true,
+            ..Default::default()
+        };
+        assert!(
+            !highlightable_flags(GO_TYPE_TRAP, 0, 0, Some(3), bg),
+            "a neutral aura trap stays out of the pick"
+        );
+        assert!(highlightable_flags(GO_TYPE_TRAP, 0, 0, Some(1), bg));
+        assert!(highlightable_flags(GO_TYPE_TRAP, 0, 0, None, bg));
+        // The objective types are offered in a battleground whatever the faction marker says.
+        for t in [1, 3, 10, 24] {
+            assert!(
+                highlightable_flags(t, 0, 0, Some(1), bg),
+                "objective type {t} is offered in a battleground"
+            );
+        }
+        // `0x5f2f80` has no battleground branch, so its two flag terms still gate inside one: an
+        // in-use or not-selectable objective stays out, and so does an un-activated INTERACT_COND
+        // one. This is what stops the click landing on a flag the reference never offers, which
+        // the server can only answer by cancelling the capture.
+        for t in [1, 3, 10, 24] {
+            assert!(
+                !highlightable_flags(t, 0x11, 0, Some(1), bg),
+                "objective type {t} is not offered while in use"
+            );
+            assert!(
+                !highlightable_flags(t, GO_FLAG_INTERACT_COND, 0, Some(1), bg),
+                "objective type {t} gates its activate bit"
+            );
+            assert!(
+                highlightable_flags(t, GO_FLAG_INTERACT_COND, GO_DYNFLAG_ACTIVATE, Some(1), bg),
+                "objective type {t} opens once the activate bit is set"
+            );
+        }
     }
 
     #[test]

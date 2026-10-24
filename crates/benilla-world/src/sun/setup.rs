@@ -190,14 +190,7 @@ pub(super) fn setup_sun(
             .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
             .fold(0.0_f32, f32::max)
             .max(1e-3);
-        // One material per patch, not per texture: each patch has its own transparency weight.
-        let tex_white = world_assets
-            .as_mut()
-            .and_then(|a| a.texture("Environments\\Stars\\Stars.blp", (true, true), &mut images));
-        let tex_blue = world_assets
-            .as_mut()
-            .and_then(|a| a.texture("Environments\\Stars\\Stars2.blp", (true, true), &mut images));
-        for sub in &subs {
+        for (i, sub) in subs.iter().enumerate() {
             let positions: Vec<[f32; 3]> = sub
                 .positions
                 .iter()
@@ -210,13 +203,29 @@ pub(super) fn setup_sun(
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sub.uvs.clone());
             mesh.insert_indices(Indices::U32(sub.indices.clone()));
-            let is_blue = sub
+            // Each batch's own texture and address mode: patch-Y's nebulae clamp, its star
+            // fields wrap.
+            let mut texture = |path: &str, wrap: (bool, bool)| {
+                world_assets
+                    .as_mut()
+                    .and_then(|a| a.texture(path, wrap, &mut images))
+            };
+            let tex = sub
                 .texture
                 .as_deref()
-                .is_some_and(|t| t.to_lowercase().contains("stars2"));
-            let tex = if is_blue { &tex_blue } else { &tex_white };
-            // The batch's static transparency weight, baked as a loop; sampled at 0, as `Stars.m2`
-            // is static.
+                .and_then(|t| texture(t, (sub.wrap_x, sub.wrap_y)));
+            // The second stage by its own UV set; `Stars.m2` has no env-mapped stage.
+            let stage2 = sub
+                .stage1
+                .as_ref()
+                .filter(|st| !st.uvs.is_empty())
+                .and_then(|st| {
+                    let tex = texture(st.texture.as_deref()?, (st.wrap_x, st.wrap_y))?;
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, st.uvs.clone());
+                    Some(tex)
+                });
+            // The batch's static transparency weight, baked as a loop; sampled at 0, as
+            // `Stars.m2` plays one static sequence.
             let weight = sub
                 .alpha_anim
                 .as_ref()
@@ -225,21 +234,34 @@ pub(super) fn setup_sun(
             let mat = star_mats.add(StarMaterial {
                 base: StandardMaterial {
                     base_color: Color::srgba(1.0, 1.0, 1.0, 0.0), // alpha driven per-frame
-                    base_color_texture: tex.clone(),
+                    base_color_texture: tex,
                     unlit: true,
                     cull_mode: None,
                     alpha_mode: AlphaMode::Premultiplied,
                     // The first sky draw: everything else paints over the stars.
-                    depth_bias: sky_order::STARS_BIAS,
+                    depth_bias: sky_order::star_batch_bias(i),
                     ..default()
                 },
-                extension: StarExt {},
+                extension: StarExt {
+                    params: Vec4::new(
+                        if sub.additive { 1.0 } else { 0.0 },
+                        if stage2.is_some() { 1.0 } else { 0.0 },
+                        0.0,
+                        0.0,
+                    ),
+                    stage2,
+                    horizon: Vec4::ZERO,
+                    tint: Vec4::ZERO,
+                },
             });
             commands.spawn((
                 Mesh3d(meshes.add(mesh)),
                 MeshMaterial3d(mat),
                 Transform::default(),
-                StarDome { weight },
+                StarDome {
+                    weight,
+                    scroll: sub.uv_anim.clone().filter(|a| a.period > 0.0),
+                },
             ));
         }
     } else {
@@ -255,13 +277,16 @@ pub(super) fn setup_sun(
                 depth_bias: sky_order::STARS_BIAS, // first sky draw, as above
                 ..default()
             },
-            extension: StarExt {},
+            extension: StarExt::default(),
         });
         commands.spawn((
             Mesh3d(meshes.add(star_field_mesh(350))),
             MeshMaterial3d(star_mat),
             Transform::default(),
-            StarDome { weight: 1.0 },
+            StarDome {
+                weight: 1.0,
+                scroll: None,
+            },
         ));
     }
 }

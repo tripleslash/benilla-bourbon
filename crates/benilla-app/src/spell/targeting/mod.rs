@@ -835,7 +835,7 @@ mod tests {
         let mut script = UiScript::new().expect("a VM");
         script.keep_calls();
         script.set_spell_targeting(true);
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         (world, rx, ally)
     }
 
@@ -869,15 +869,13 @@ mod tests {
             guids.target = guid;
             guids.held.insert(guid, 0);
         }
-        world
-            .non_send_resource_mut::<UiScript>()
-            .set_unit_guids(&guids);
+        world.non_send_mut::<UiScript>().set_unit_guids(&guids);
     }
 
     /// Queue `SpellTargetUnit(token)` in the VM, then apply it.
     fn spell_target_unit(world: &mut World, token: &str) {
         world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(&format!("SpellTargetUnit({token:?})"))
             .expect("a known token");
         world
@@ -1108,20 +1106,20 @@ mod tests {
             // The index of us and the ally, then the aura feed's inputs with the chain's units:
             // each held unit and the target it names.
             publish_guids(&mut world);
-            world.non_send_resource_mut::<UiScript>().set_unit_guids(
-                &benilla_ui::script::UnitGuids {
+            world
+                .non_send_mut::<UiScript>()
+                .set_unit_guids(&benilla_ui::script::UnitGuids {
                     player: ME,
                     pet: PET,
                     target: ALLY,
                     held: HashMap::from([(ME, ALLY), (PET, ALLY), (ALLY, 0)]),
                     ..Default::default()
-                },
-            );
+                });
             world
                 .run_system_cached(feed_targeting_to_vm)
                 .expect("the feed runs");
             world
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                 .expect("a boolean")
         };
@@ -1310,7 +1308,7 @@ mod tests {
                 .run_system_cached(feed_targeting_to_vm)
                 .expect("the feed runs");
             let hover = world
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                 .expect("a boolean");
             assert_eq!(hover, binds, "{label}: the hover verdict");
@@ -1565,7 +1563,7 @@ mod tests {
                     .run_system_cached(feed_targeting_to_vm)
                     .expect("the feed runs");
                 let hover = world
-                    .non_send_resource::<UiScript>()
+                    .non_send::<UiScript>()
                     .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                     .expect("a boolean");
                 assert_eq!(hover, binds, "{label}: the hover verdict");
@@ -1622,7 +1620,7 @@ mod tests {
                 .run_system_cached(feed_targeting_to_vm)
                 .expect("the feed runs");
             world
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<bool>(&format!("return SpellCanTargetUnit({token:?}) == 1"))
                 .expect("a boolean")
         };

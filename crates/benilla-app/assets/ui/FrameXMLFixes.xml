@@ -48,6 +48,63 @@
         end
         RegisterForSave("FRIENDNAMEPLATES_ON")
 
+        -- Deviation (this fork): on a Turtle WoW realm the dungeon finder's eye offers the way
+        -- out of the finder's dungeon and back in. Turtle's menu (LFT.lua:1773-1816) has no such
+        -- row; the server of this fork ports a finder group in, says so with S2C_DUNGEON_RUN,
+        -- and answers C2S_DUNGEON_TELEPORT. The row leads the eye's own menu, which the stock
+        -- function builds after it, unchanged. No LFT.lua loads on a 1.12.1 realm, so nothing
+        -- here runs there.
+        if LFTActionsDropDown_Init then
+            local refInit = LFTActionsDropDown_Init
+            local inRun
+
+            local function Teleport(direction)
+                SendAddonMessage(LFT_ADDON_PREFIX,
+                    "C2S_DUNGEON_TELEPORT" .. LFT_ADDON_FIELD_DELIMITER .. direction, LFT_ADDON_CHANNEL)
+            end
+
+            function LFTActionsDropDown_Init()
+                local ours
+                if inRun and LFTActionsDropDown.owner == LFTMinimapButton
+                    and GetNumPartyMembers() + GetNumRaidMembers() > 0 then
+                    local info = {}
+                    info.notCheckable = 1
+                    info.func = Teleport
+                    if IsInInstance() then
+                        info.text = "Teleport out of dungeon"
+                        info.arg1 = "out"
+                    else
+                        info.text = "Teleport to dungeon"
+                        info.arg1 = "in"
+                    end
+                    UIDropDownMenu_AddButton(info)
+                    ours = DropDownList1.numButtons
+                end
+                refInit()
+                -- The stock menu closes with its own Cancel row when it has any row at all.
+                if ours and DropDownList1.numButtons == ours then
+                    local info = {}
+                    info.notCheckable = 1
+                    info.text = CANCEL
+                    info.func = HideDropDownMenu
+                    info.arg1 = 1
+                    UIDropDownMenu_AddButton(info)
+                end
+            end
+
+            local watch = CreateFrame("Frame")
+            watch:RegisterEvent("CHAT_MSG_ADDON")
+            watch:SetScript("OnEvent", function()
+                if arg1 == LFT_ADDON_PREFIX then
+                    local _, _, state =
+                        strfind(arg2, "^S2C_DUNGEON_RUN" .. LFT_ADDON_FIELD_DELIMITER .. "(%d)")
+                    if state then
+                        inRun = state == "1"
+                    end
+                end
+            end)
+        end
+
         -- Deviation: a button whose key moved away keeps the old key's label while it holds an
         -- action with no range (a stance, a self buff). The stock ActionButton_UpdateHotkeys
         -- (ActionButton.lua:129-140) writes no text in that one unbound case; this clears it. The
@@ -62,5 +119,58 @@
                 getglobal(this:GetName().."HotKey"):SetText("")
             end
         end
+
+        -- wenilla carry: TurtleWoW's arena leftovers, defined only where that chain names them, so
+        -- stock 1.12 gains no names (ported from benilla-octo 031acdd8, d729fc11, 3247bc76).
+        --
+        -- Its `CharacterFrame.lua` appends "ArenaFrame" to `CHARACTERFRAME_SUBFRAMES`, six names
+        -- where the reference has five, and no file on the chain defines the frame, so the tab
+        -- loop's Hide indexes nil. An empty hidden page, id 6, continuing PaperDoll 1 .. Honor 5.
+        if ( CHARACTERFRAME_SUBFRAMES and CHARACTERFRAME_SUBFRAMES[6] == "ArenaFrame"
+                and not ArenaFrame and CharacterFrame ) then
+            local page = CreateFrame("Frame", "ArenaFrame", CharacterFrame)
+            page:SetAllPoints(CharacterFrame)
+            page:SetID(6)
+            page:Hide()
+        end
+        -- Its `WorldStateFrame.lua:217` calls `RequestArenaScoreInfo()` on the battleground score
+        -- events; the function is native to its client and 1.12 has no arena scoreboard, so the
+        -- request is a no-op. `RequestCustomScoreInfo`, its battleground twin, marks that chain.
+        if ( RequestCustomScoreInfo and not RequestArenaScoreInfo ) then
+            RequestArenaScoreInfo = function() end
+        end
     ]]></Script>
+
+    <!--
+        wenilla carry: TurtleWoW's `Blizzard_InspectUI\InspectArenaFrame.xml` has its three team
+        buttons inherit `ArenaTeamTemplate`, which no file on that chain defines, so each OnLoad
+        raises on the missing fields. Only the names its scripts index, drawing nothing. A virtual
+        template creates no global, so stock 1.12 is unchanged (from benilla-octo d729fc11).
+    -->
+    <Button name="ArenaTeamTemplate" virtual="true">
+        <Layers>
+            <Layer level="OVERLAY">
+                <FontString name="$parentText" inherits="GameFontNormal"/>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Frame name="$parentDetails" hidden="true">
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <FontString name="$parentName" inherits="GameFontNormal"/>
+                        <FontString name="$parentRating" inherits="GameFontNormal"/>
+                        <FontString name="$parentWeekRank" inherits="GameFontNormal"/>
+                        <FontString name="$parentWeekGames" inherits="GameFontNormal"/>
+                        <FontString name="$parentWeekWins" inherits="GameFontNormal"/>
+                        <FontString name="$parentWeekLoss" inherits="GameFontNormal"/>
+                        <FontString name="$parentSeasonRank" inherits="GameFontNormal"/>
+                        <FontString name="$parentSeasonGames" inherits="GameFontNormal"/>
+                        <FontString name="$parentSeasonWins" inherits="GameFontNormal"/>
+                        <FontString name="$parentSeasonLoss" inherits="GameFontNormal"/>
+                    </Layer>
+                </Layers>
+            </Frame>
+            <Button name="$parentDetailsDisbandButton"/>
+        </Frames>
+    </Button>
 </Ui>

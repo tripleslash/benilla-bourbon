@@ -465,7 +465,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let me = app
             .world_mut()
             .spawn((
@@ -478,7 +478,7 @@ mod tests {
             .id();
         let seen = |app: &mut App| {
             app.update();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let out = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
@@ -841,7 +841,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Reputations>()
             .add_systems(Update, feed_reputation);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.world_mut()
             .spawn((SelfPlayer, ObjectStore(Default::default())));
         let queued = |app: &App| app.world().resource::<Reputations>().list_ops.len();

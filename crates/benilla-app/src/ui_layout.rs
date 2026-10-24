@@ -43,7 +43,7 @@ pub(crate) struct LayoutFile {
     /// Whether this VM has unsaved drags. Keyed on the VM, as a flag that outlived its VM would
     /// write a fresh tree, with nothing placed, over the player's file.
     dirty: VmMemo<bool>,
-    last_change: Option<std::time::Instant>,
+    last_change: Option<bevy::platform::time::Instant>,
 }
 
 /// Render the cache as [`parse`] reads it, frames in the order the engine hands them; a field
@@ -226,7 +226,7 @@ pub(crate) fn load_layout(
         let Some(path) = file.path.clone() else {
             return; // hermetic capture or no state folder: session-only
         };
-        let text = match std::fs::read_to_string(&path) {
+        let text = match crate::local_state::read_to_string(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
@@ -257,7 +257,7 @@ pub(crate) fn load_layout(
             // The anchor form is read once: the autosave rewrites it in the rect form once the
             // restored windows have settled.
             *file.dirty.get(script) = true;
-            file.last_change = Some(std::time::Instant::now());
+            file.last_change = Some(bevy::platform::time::Instant::now());
         }
     })
 }
@@ -270,7 +270,7 @@ fn watch_layout(mut hosted_vm: crate::script_calls::HostedVm, mut file: ResMut<L
             return;
         }
         *file.dirty.get(script) = true;
-        file.last_change = Some(std::time::Instant::now());
+        file.last_change = Some(bevy::platform::time::Instant::now());
     })
 }
 

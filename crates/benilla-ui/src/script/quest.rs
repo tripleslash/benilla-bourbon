@@ -6,7 +6,6 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{self, flag};
-use super::Model;
 
 /// Which questgiver panel a [`QuestState`] is for, set from the wire packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,7 +166,7 @@ impl super::UiScript {
     /// callbacks `0x5018c0` the item cache keeps (dedupe flag 0, `0x5017ca`), each of which fires
     /// `QUEST_ITEM_UPDATE` when its record lands (`0x5018fe`-`0x501903`).
     pub fn take_quest_item_waits(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().quest_item_waits)
+        drain_field!(self, quest_item_waits)
     }
 
     /// Push (or clear, with `None`) the open questgiver panel snapshot.
@@ -251,7 +250,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, ()| {
                 let text = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     model.quest.as_ref().map(pick).unwrap_or_default()
                 };
                 Ok(Value::String(lua.create_string(&text)?))
@@ -270,7 +271,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.globals().set(
             name,
             lua.create_function(move |lua, ()| {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 Ok(model.quest.as_ref().map(pick).unwrap_or(0))
             })?,
         )
@@ -288,7 +291,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsQuestCompletable",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.quest.as_ref().is_some_and(|q| q.completable)))
         })?,
     )?;
@@ -299,7 +304,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             lua.create_function(move |lua, i: Value| {
                 let i = binding_abi::index_arg(lua, i, usage)?;
                 let title = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     model.quest.as_ref().and_then(|q| {
                         let v = if active {
                             &q.active_titles
@@ -335,7 +342,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, index: Value| {
                 let row = binding_abi::number_arg(lua, index, usage)?.wrapping_sub(1) as u32;
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let pool = &model.quest_pool_levels;
                 let levels = if active {
                     &pool.active
@@ -386,7 +395,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Err(invalid());
             }
             let item = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let empty = Vec::new();
                 let list = match model.quest.as_ref() {
                     Some(q) => item_vec(q, &kind),
@@ -405,7 +416,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .as_ref()
                 .filter(|it| it.name.is_none() && it.item_id != 0)
             {
-                lua.app_data_mut::<Model>()
+                lua.app_data_mut::<crate::script::ModelCell>()
                     .expect("model app_data")
                     .quest_item_waits
                     .push(it.item_id);
@@ -416,7 +427,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     // a cached template it refuses (`0x501882`-`0x501899`); the stock frame tints
                     // the row red by it (`QuestFrame.lua:393`).
                     let usable = it.name.is_none() || {
-                        let model = lua.app_data_ref::<Model>().expect("model app_data");
+                        let model = lua
+                            .app_data_ref::<crate::script::ModelCell>()
+                            .expect("model app_data");
                         super::item_stats::item_usable_by_id(&model, it.item_id)
                     };
                     (
@@ -454,7 +467,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: GetQuestItemLink(\"type\", index)",
             )?;
             let link = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.quest.as_ref().and_then(|q| {
                     item_vec(q, &kind)
                         .and_then(|v| index.checked_sub(1).and_then(|n| v.get(n)))
@@ -473,7 +488,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetRewardSpell",
         lua.create_function(|lua, ()| {
             let spell = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.quest.as_ref().and_then(|q| q.reward_spell.clone())
             };
             reward_spell_returns(lua, spell)
@@ -532,7 +549,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetQuestBackgroundMaterial",
         lua.create_function(|lua, ()| {
             let material = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .quest
                     .as_ref()
@@ -552,7 +571,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "QuestChooseRewardError",
         lua.create_function(|lua, ()| {
             {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .sound_queue
                     .push(super::SoundRequest::KitName("igQuestFailed".to_string()));

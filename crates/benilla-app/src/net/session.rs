@@ -887,8 +887,8 @@ fn worldport(
 /// timed-quest timer) are dated in; its skew against ours is logged once per session.
 fn server_unix_time(unix_time: u32, clock: &mut ServerWallClock) {
     // `time(NULL)` at the sync (`0x4deef3`), whose difference is the reference's offset.
-    let local = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let local = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     if clock.0.is_none() {

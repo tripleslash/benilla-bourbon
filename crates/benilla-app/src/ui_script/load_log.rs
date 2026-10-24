@@ -4,6 +4,7 @@
 //! build writes its own `Logs\GlueXML.log` (`0x837024`, opened at `0x46a8ce`) the same way.
 //! Deviation: the files are under `benilla-config/Logs/`, since the install is read-only.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Write as _;
 
 use bevy::prelude::*;
@@ -32,10 +33,19 @@ fn write_named(file: &str, writes: Vec<LogWrite>) {
     if writes.iter().all(|w| lines(w).is_empty()) {
         return;
     }
-    let Some(dir) = crate::local_state::logs_dir() else {
-        return; // hermetic capture, or no state folder
-    };
-    write_under(&dir, file, writes);
+    // fork: web build — the page has no filesystem (its state folder is `localStorage`, for small
+    // player files), so the drain goes to the console instead of failing a write every load.
+    #[cfg(target_arch = "wasm32")]
+    for line in writes.iter().flat_map(|w| lines(w).iter()) {
+        info!("{file}: {line}");
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let Some(dir) = crate::local_state::logs_dir() else {
+            return; // hermetic capture, or no state folder
+        };
+        write_under(&dir, file, writes);
+    }
 }
 
 fn lines(write: &LogWrite) -> &[String] {
@@ -45,6 +55,7 @@ fn lines(write: &LogWrite) -> &[String] {
 }
 
 /// [`write_named`] into `dir`.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_under(dir: &std::path::Path, file: &str, writes: Vec<LogWrite>) {
     let path = dir.join(file);
     for w in writes {

@@ -400,12 +400,12 @@ mod tests {
              :SetModel('Interface/Glues/Models/UI_MainMenu/UI_MainMenu.mdx')",
         )
         .unwrap();
-        app.insert_non_send_resource(s)
-            .insert_non_send_resource(SharedGlueMgr::default())
+        app.insert_non_send(s)
+            .insert_non_send(SharedGlueMgr::default())
             .init_resource::<GluePreview>()
             .add_systems(Update, feed_stock_glue_preview);
         let run = |app: &mut App, chunk: &str| {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.run(chunk).unwrap();
             s.resolve();
             app.update();
@@ -449,12 +449,12 @@ mod tests {
              :SetModel('Interface/Glues/Models/UI_Orc/UI_Orc.mdx') Select:Hide()",
         )
         .unwrap();
-        app.insert_non_send_resource(s)
-            .insert_non_send_resource(SharedGlueMgr::default())
+        app.insert_non_send(s)
+            .insert_non_send(SharedGlueMgr::default())
             .init_resource::<GluePreview>()
             .add_systems(Update, feed_stock_glue_preview);
         let run = |app: &mut App, chunk: &str| {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.run(chunk).unwrap();
             s.resolve();
             app.update();
@@ -504,12 +504,12 @@ mod tests {
             .unwrap();
             s
         };
-        app.insert_non_send_resource(vm())
-            .insert_non_send_resource(SharedGlueMgr::default())
+        app.insert_non_send(vm())
+            .insert_non_send(SharedGlueMgr::default())
             .init_resource::<GluePreview>()
             .add_systems(Update, feed_stock_glue_preview);
         let run = |app: &mut App, chunk: &str| {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.run(chunk).unwrap();
             s.resolve();
             app.update();
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(run(&mut app, "Select:Hide() Login:Show()"), login);
 
         // A new VM: its login scene takes a number past every one given out.
-        app.insert_non_send_resource(vm());
+        app.insert_non_send(vm());
         let fresh = run(&mut app, "");
         assert!(fresh > select.max(login), "{fresh} after {login}, {select}");
     }

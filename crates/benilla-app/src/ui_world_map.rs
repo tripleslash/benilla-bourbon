@@ -279,10 +279,17 @@ pub(crate) fn build_catalog(
     ))
 }
 
-/// The built continent catalog, kept for the process: the walk cannot change, so a later login
-/// re-seeds its VM from here. The instance maps ride [`WorldMapUiData`].
+/// The built continent catalog, kept while the chain's data holds: a later login re-seeds its VM
+/// from here. The instance maps ride [`WorldMapUiData`].
 #[derive(Resource)]
 pub(crate) struct WorldMapCatalog(pub(crate) Vec<WorldMapContinentView>);
+
+/// A change of the data the chain answers from changes the walk (Turtle WoW adds its own
+/// `WorldMapArea` rows), so the catalog goes and the next world entry builds it again.
+fn forget_world_map_catalog(_: On<benilla_assets::ChainDataChanged>, mut commands: Commands) {
+    commands.remove_resource::<WorldMapCatalog>();
+    commands.remove_resource::<WorldMapUiData>();
+}
 
 /// Push the map catalog into the VM before any interface file runs, from
 /// [`crate::ui_script::load_ingame_ui_on_world_entry`]: addons read `GetMapContinents` and
@@ -802,7 +809,8 @@ impl Plugin for WorldMapUiPlugin {
                 // After the script tick, so the jump hit-tests this tick's frame rects.
                 dev_map_jump.after(crate::ui_script::UiInput),
             ),
-        );
+        )
+        .add_observer(forget_world_map_catalog);
     }
 }
 

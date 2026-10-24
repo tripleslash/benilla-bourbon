@@ -222,10 +222,10 @@ mod tests {
                 "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.update();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .fire_world_enter();
         app.update();
         app
@@ -241,7 +241,7 @@ mod tests {
         };
         crate::net::handlers::dispatch(app.world_mut(), vec![ev]);
         app.update();
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let seen = script.eval::<String>("return SEEN").unwrap();
         script.run("SEEN = ''").unwrap();
         seen

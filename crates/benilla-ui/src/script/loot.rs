@@ -11,7 +11,7 @@
 use mlua::{Lua, MultiValue, Table, Value};
 
 use super::binding_abi::{self, bool_or_default, flag};
-use super::{Model, ScriptCall};
+use super::ScriptCall;
 
 /// A loot verb the host applies inside its call ([`ScriptCall::Loot`]), its rows 1-based.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,13 +126,13 @@ impl LootState {
 impl super::UiScript {
     /// Push (or clear, with `None`) the open loot.
     pub fn set_loot(&mut self, state: Option<LootState>) {
-        self.model_mut().loot = state;
+        set_field!(self, loot, state);
     }
 
     /// The loot type cell (`0xb71bbc`), which the copier stores (`0x4c1dd6`) and no close clears:
     /// `IsFishingLoot` reads it, window or not.
     pub fn set_loot_type(&mut self, loot_type: u8) {
-        self.model_mut().loot_type = loot_type;
+        set_field!(self, loot_type, loot_type);
     }
 
     /// `SetAutoLoot` (`0x5df460`) as a call, the interaction's: the byte stored, and with a loot
@@ -205,7 +205,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetLootPortrait",
         lua.create_function(|lua, texture: Value| {
             let rh = super::region::this_texture(lua, &texture)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             if !model.loot.as_ref().is_some_and(|l| l.source_unit) {
                 super::region::clear_texture(&mut model, rh);
                 return Ok(Value::Nil);
@@ -223,7 +225,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumLootItems",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.loot.as_ref().map_or(0, LootState::count) as i64)
         })?,
     )?;
@@ -239,7 +243,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let slot = binding_abi::index_arg(lua, slot, "Usage: GetLootSlotInfo(slot)")?;
             // `Some(Some(row))` live, `Some(None)` cleared, `None` no such slot.
             let slot_state = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .loot
                     .as_ref()
@@ -285,7 +291,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: GetLootSlotLink(slot)` (`0x848024`, `0x4c2d3a`).
             let slot = binding_abi::index_arg(lua, slot, "Usage: GetLootSlotLink(slot)")?;
             let link = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .loot
                     .as_ref()
@@ -304,7 +312,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, slot: Value| {
             // `is-number` else `Usage: LootSlotIsItem(slot)` (`0x848044`, `0x4c2da1`).
             let slot = binding_abi::index_arg(lua, slot, "Usage: LootSlotIsItem(slot)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(
                 slot.checked_sub(1)
                     .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
@@ -318,7 +328,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, slot: Value| {
             // `is-number` else `Usage: LootSlotIsCoin(slot)` (`0x848060`, `0x4c2e11`).
             let slot = binding_abi::index_arg(lua, slot, "Usage: LootSlotIsCoin(slot)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(
                 slot.checked_sub(1)
                     .and_then(|n| model.loot.as_ref()?.rows.get(n)?.as_ref())
@@ -331,7 +343,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsFishingLoot",
         lua.create_function(|lua, ()| {
             // `0x4c2740` reads the type cell unguarded: a close leaves it.
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.loot_type == FISHING))
         })?,
     )?;
@@ -399,7 +413,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: GetMasterLootCandidate(index)` (`0x848094`, `0x4c2f27`).
             let index =
                 binding_abi::index_arg32(lua, index, "Usage: GetMasterLootCandidate(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let name = index.checked_sub(1).and_then(|i| {
                 model
                     .loot

@@ -40,6 +40,7 @@ pub(super) fn drive(
         cam_pivot_target = pivot_target(
             pivot,
             net_entity,
+            player.mount_seat_lift,
             move_flags_now & crate::creature_anim::move_flags::SWIMMING != 0,
         );
         if let Some(mut motion) = motion {
@@ -69,12 +70,41 @@ pub(super) fn drive(
 /// [`super::camera::PivotGlide`] glides between presets. `None` until the model attaches: the
 /// reference skips the camera update while the model is unresolved (`0x50e907`), so a display
 /// swap holds, then glides once.
+///
+/// `mount_seat_lift` is [`Player::mount_seat_lift`], and its two halves arrive together
+/// (`0x50ca90`, and see [`CameraPivot::mounted_delta_local`]): while mounted the preset is measured
+/// in the **Mount** pose rather than the bind pose, and the origin it is measured from is the
+/// saddle rather than the feet. Applying either alone is worse than applying neither — the
+/// correction is negative on every character, so the Mount pose without the seat drops the camera
+/// to a sitting height at ground level, and the seat without the correction floats a standing neck
+/// above the saddle. The clamp stays on the model-relative half, which is the half the reference
+/// clamps.
 pub(super) fn pivot_target(
     pivot: Option<&CameraPivot>,
     net: Option<&crate::net::NetEntity>,
+    mount_seat_lift: Option<f32>,
     swimming: bool,
 ) -> Option<f32> {
-    pivot.map(|p| model_pivot_height(p, net.map_or(1.0, |n| n.scale), swimming))
+    let scale = net.map_or(1.0, |n| n.scale);
+    pivot.map(|p| match mount_seat_lift {
+        None => model_pivot_height(p, scale, swimming),
+        // **The clamp is on the TOTAL, not on the model-relative half.** `0x50ca90` adds the
+        // saddle into all three presets at `0x50cf77`-`0x50cf9e` and only then runs its per-preset
+        // `[5/6, 15]` clamp at `0x50cfa4`. Clamping the halves separately floors the rider's own
+        // Mount-pose height — which is BELOW 5/6 on a gnome (0.67) — and then adds the saddle on
+        // top of the floored value, riding ~0.17 yd high on exactly the race where the correction
+        // matters most.
+        //
+        // **`swimming` does not reach this arm**, and that is the reference's shape rather than a
+        // simplification: `0x50cba8` forces animation 91 on any unit whose
+        // `UNIT_FIELD_MOUNTDISPLAYID` is set, *overriding* the posture the swim preset belongs to,
+        // and [`CameraPivot::swim_drop_local`] is a `Stand`-vs-`Swim` delta that says nothing about
+        // a Mount-pose box. A mounted swimmer is unreachable in 1.12 anyway — deep water dismounts
+        // you — so subtracting a Stand-relative drop here would only mis-measure the impossible.
+        Some(seat) => super::camera::clamp_pivot_height(
+            (p.height_local + p.mounted_delta_local) * scale + seat,
+        ),
+    })
 }
 
 /// `WOW_TWIST_GAP=<radians>` pins the counter-twist's yaw gap; the env is read once.

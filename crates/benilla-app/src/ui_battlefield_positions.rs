@@ -7,7 +7,11 @@
 //! slot's map, answering `(0, 0)` off it. The app resolves the list that way each frame. A name
 //! landing fires `WORLD_MAP_NAME_UPDATE`, as in the reference.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// The platform clock, not std's — `std::time::Instant::now()` panics on wasm32. See
+// `crate::tutorial` for the same note; the request throttle below reads it per frame.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
@@ -286,7 +290,7 @@ mod tests {
             .init_resource::<GuidIndex>()
             .init_resource::<NameCache>()
             .add_systems(Update, feed_battlefield_positions);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let packet = |app: &mut App| {
             app.world_mut()
                 .resource_mut::<BattlefieldPositions>()
@@ -302,7 +306,7 @@ mod tests {
         };
         let call = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .run("GetBattlefieldPosition(1)")
                 .unwrap();
             app.update();
@@ -352,7 +356,7 @@ mod tests {
             .init_resource::<GuidIndex>()
             .init_resource::<NameCache>()
             .add_systems(Update, feed_battlefield_positions);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let at = |guid| BattlefieldPosition {
             guid,
             x: 0.0,
@@ -367,7 +371,7 @@ mod tests {
         app.update();
         let counts: (i64, i64) = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return GetNumBattlefieldPositions(), GetNumBattlefieldFlagPositions()")
             .unwrap();
         assert_eq!(counts, (1, 1));

@@ -21,15 +21,20 @@ const LANGUAGE_WORDS: &str = "DBFilesClient\\LanguageWords.dbc";
 /// Locale columns in a 5875 `Name_lang` block.
 const LOCALES: usize = 8;
 
-/// Race id to its base language's name, in the locale's column.
+/// Race id to its base language: the `Languages` id and its name in the locale's column.
 #[derive(Debug, Default, Clone)]
-pub struct DefaultLanguages(HashMap<u32, Option<String>>);
+pub struct DefaultLanguages(HashMap<u32, (u32, Option<String>)>);
 
 impl DefaultLanguages {
     /// The race's default language name. `None` is the reference's answer at three of its four
     /// failure edges, which push no Lua value at all, not `nil`.
     pub fn name(&self, race: u32) -> Option<&str> {
-        self.0.get(&race)?.as_deref()
+        self.0.get(&race)?.1.as_deref()
+    }
+
+    /// The race's `ChrRaces.BaseLanguage`, the language id its chat goes out in.
+    pub fn id(&self, race: u32) -> Option<u32> {
+        self.0.get(&race).map(|(id, _)| *id)
     }
 
     pub fn len(&self) -> usize {
@@ -126,7 +131,7 @@ pub fn load_default_languages(chain: &mut Chain) -> Result<DefaultLanguages> {
             continue;
         };
         if let Some(name) = by_id.get(&lang) {
-            out.insert(race, name.clone());
+            out.insert(race, (lang, name.clone()));
         }
     }
     Ok(DefaultLanguages(out))

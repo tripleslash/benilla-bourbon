@@ -180,7 +180,9 @@ pub(in crate::script) use relayout::reseat_resized;
 /// focused nothing processes, since an `autoFocus` box takes the focus only where the walk
 /// reaches it.
 fn route(lua: &Lua) -> Option<FrameHandle> {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let h = model.focused_editbox?;
     match model.arena.frame(h) {
         Some(f) if f.effective_visible && f.kind == FrameKind::EditBox => Some(h),
@@ -198,7 +200,9 @@ fn route(lua: &Lua) -> Option<FrameHandle> {
 /// `SetFocus` at its own walk position and the event with it; any other box declines.
 pub(super) fn takes_event(lua: &Lua, h: FrameHandle) -> bool {
     {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         if let Some(f) = model.focused_editbox {
             if model.arena.frame(f).is_some() {
                 return f == h;
@@ -214,7 +218,7 @@ pub(super) fn takes_event(lua: &Lua, h: FrameHandle) -> bool {
         }
     }
     set_focus_handle(lua, h);
-    lua.app_data_ref::<Model>()
+    lua.app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .focused_editbox
         == Some(h)
@@ -225,7 +229,9 @@ pub(super) fn takes_event(lua: &Lua, h: FrameHandle) -> bool {
 /// client's only focus grant and writes no selection, so no focus gain changes the selection.
 fn set_focus_handle(lua: &Lua, h: FrameHandle) {
     let (old_id, new_id) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let focusable = matches!(
             model.arena.frame(h),
             Some(f) if f.effective_visible && f.kind == FrameKind::EditBox
@@ -270,7 +276,9 @@ pub(super) fn visibility_focus(lua: &Lua, h: FrameHandle, visible: bool) {
         return;
     }
     let wants = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.focused_editbox.is_none()
             && matches!(
                 model.arena.frame(h).map(|f| &f.kind_state),
@@ -287,7 +295,9 @@ pub(super) fn visibility_focus(lua: &Lua, h: FrameHandle, visible: bool) {
 /// `OnEditFocusLost`.
 fn clear_focus_handle(lua: &Lua, h: FrameHandle) {
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         if model.focused_editbox != Some(h) {
             return;
         }
@@ -324,7 +334,7 @@ fn insert(lua: &Lua, h: FrameHandle, ins: &str, fire_space: bool) {
         .create_string(ins)
         .and_then(|s| event::fire_widget_handler(lua, id, "OnChar", vec![mlua::Value::String(s)]));
     if let Err(e) = on_char {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }
@@ -401,7 +411,9 @@ fn sync_text_region(lua: &Lua, h: FrameHandle) {
         return;
     };
     if let Some(text) = with_eb(lua, h, |eb| eb.window_text(true)) {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         write_region_text(&mut model, rh, text);
     }
 }
@@ -433,7 +445,9 @@ pub(super) fn reseat_text_region(lua: &Lua, h: FrameHandle) {
     if ensure_text_region(lua, h).is_none() {
         return;
     }
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     relayout::seat_text_region(&mut model, h);
 }
 
@@ -444,7 +458,9 @@ pub(crate) fn editbox_text_region_wrapper(lua: &Lua, frame: &Table) -> Option<Ta
     let h = frame_handle_of(lua, frame).ok()?;
     let rh = ensure_text_region(lua, h)?;
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.region_id(rh)
     };
     super::region::region_wrapper(lua, id).ok()
@@ -461,7 +477,9 @@ pub(crate) fn adopt_text_region(lua: &Lua, frame: &Table, region: &Table) -> mlu
     }) else {
         return Ok(()); // not an EditBox
     };
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     relayout::seat_text_region(&mut model, h);
     // Always `Some` text: an empty box still emits its Text quad for the host's caret.
     let data = model.region_data.entry(rh).or_default();
@@ -511,7 +529,9 @@ pub(crate) fn set_selection_color(
 
 /// Get or create the box's text FontString; an XML-declared one is wired by [`adopt_text_region`].
 pub(super) fn ensure_text_region(lua: &Lua, h: FrameHandle) -> Option<RegionHandle> {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     ensure_text_region_in(&mut model, h)
 }
 
@@ -551,7 +571,9 @@ pub(super) fn ensure_text_region_in(model: &mut Model, h: FrameHandle) -> Option
 /// it applies the box's flags.
 pub(super) fn refresh_text_region(lua: &Lua, this: &Table) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let Some(KindState::EditBox(eb)) = model.arena.frame(h).map(|f| &f.kind_state) else {
         return Ok(());
     };
@@ -578,7 +600,9 @@ fn apply_text_region_justify(data: &mut RegionData, multi_line: bool) {
 
 /// Run `f` over a frame's EditBox state under one short write borrow; `None` if not a live EditBox.
 fn with_eb<T>(lua: &Lua, h: FrameHandle, f: impl FnOnce(&mut EditBoxState) -> T) -> Option<T> {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     match model.arena.frame_mut(h).map(|fr| &mut fr.kind_state) {
         Some(KindState::EditBox(eb)) => Some(f(eb)),
         _ => None,
@@ -586,7 +610,7 @@ fn with_eb<T>(lua: &Lua, h: FrameHandle, f: impl FnOnce(&mut EditBoxState) -> T)
 }
 
 fn frame_id_of(lua: &Lua, h: FrameHandle) -> u32 {
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .frame_id(h)
 }
@@ -594,7 +618,7 @@ fn frame_id_of(lua: &Lua, h: FrameHandle) -> u32 {
 /// Fire one specialized EditBox script (no args beyond `self`); errors go to [`Model::errors`].
 fn fire_script(lua: &Lua, id: u32, name: &str) {
     if let Err(e) = event::fire_widget_handler(lua, id, name, Vec::new()) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }

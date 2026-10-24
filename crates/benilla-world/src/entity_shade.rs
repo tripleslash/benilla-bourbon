@@ -215,7 +215,9 @@ impl Plugin for EntityShadePlugin {
                 census_shade_marks,
             )
                 .chain()
-                .after(classify_entity_interior),
+                .after(classify_entity_interior)
+                // fork: modern lighting (FORK.md, P3) — the baked MCSH ground shade retires; real shadows darken units.
+                .run_if(|| !crate::modern::frame_is_modern()),
         );
     }
 }
@@ -420,7 +422,7 @@ mod tests {
     /// Run the card resolve against a world's live `ChildOf` topology.
     fn resolve(world: &mut World, map: &EntityHashMap<u8>, follows: Option<Entity>) -> Option<u8> {
         let mut state: SystemState<Query<&ChildOf>> = SystemState::new(world);
-        card_root_shade(map, &state.get(world), follows)
+        card_root_shade(map, &state.get(world).unwrap(), follows)
     }
 
     #[test]

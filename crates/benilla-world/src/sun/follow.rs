@@ -6,6 +6,7 @@
 
 use bevy::camera::Projection;
 use bevy::ecs::system::SystemParam;
+use bevy::math::Affine2;
 use bevy::prelude::*;
 
 use crate::clouds::{occ1_moon, occ1_sun, CloudCoverage};
@@ -75,7 +76,13 @@ fn flare_slew(current: f32, target: f32, rise: f32, fall: f32, dt: f32) -> f32 {
 pub(super) fn disc_span(dir_y: f32, size: f32) -> Vec4 {
     let elev = dir_y.clamp(-1.0, 1.0).asin();
     let half = (0.5 * size).atan();
-    Vec4::new((elev - half).sin(), (elev + half).sin(), 0.0, 0.0)
+    // fork: modern lighting (FORK.md) — `.z` = the frame is linear (celestial.wgsl).
+    let modern = if crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled() {
+        1.0
+    } else {
+        0.0
+    };
+    Vec4::new((elev - half).sin(), (elev + half).sin(), modern, 0.0)
 }
 
 /// A [`disc_span`] in 1/4096 sin-elevation steps, so its drift does not defeat the write gate.
@@ -493,12 +500,61 @@ pub(super) fn follow_moons(
     }
 }
 
+/// fork: **the modern night sky**, in every zone: the star dome (patch-Y's nebulae) at this share
+/// of its authored strength, so the sky band shows through it rather than a lit band over the
+/// haze.
+const MODERN_STAR_SHARE: f32 = 0.65;
+/// fork: the view elevation (sine) above which the modern star dome is whole; below it the dome
+/// fades out to the horizon (`StarExt::horizon`). It draws after the fog composite, so without
+/// the fade its nebulae ran unhazed down to a hard line on the horizon band (~20 degrees).
+const MODERN_STAR_HORIZON: f32 = 0.35;
+
+/// Dev tuning (`$WOW_MODERN_STARS`, browser `?modern_stars=`): the modern star dome's share in
+/// place of [`MODERN_STAR_SHARE`].
+fn modern_star_share() -> f32 {
+    crate::launch_env::live_var("WOW_MODERN_STARS")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .map_or(MODERN_STAR_SHARE, |v| v.clamp(0.0, 1.0))
+}
+
+/// fork: the share of the modern star dome's own colour that gives way to the sky's hue
+/// (`StarExt::tint`): patch-Y's teal nebulae read as a band laid over a zone's mauve or green night.
+const MODERN_STAR_TINT: f32 = 0.8;
+
+/// Dev tuning (`$WOW_MODERN_STAR_TINT`, browser `?modern_star_tint=`): the share in place of
+/// [`MODERN_STAR_TINT`].
+fn modern_star_tint() -> f32 {
+    crate::launch_env::live_var("WOW_MODERN_STAR_TINT")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .map_or(MODERN_STAR_TINT, |v| v.clamp(0.0, 1.0))
+}
+
+/// The hue (at luma 1) of the sky the star dome draws over: the mean of the dome's upper three
+/// stops as `sky::dome_stops` tints them, in gamma, quantized to 1/256 for the write gate. Grey where
+/// the sky is black.
+fn star_tint(light: &WowLighting, share: f32) -> Vec4 {
+    let sky_tint = crate::modern::look::sky_tint();
+    let mean = (0..3).fold(Vec3::ZERO, |acc, i| {
+        acc + Vec3::from(light.sky[i]) * Vec3::from(sky_tint)
+    }) / 3.0;
+    let luma = mean.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+    let hue = if luma > 1e-3 {
+        (mean / luma).min(Vec3::splat(4.0))
+    } else {
+        Vec3::ONE
+    };
+    hue.map(|c| benilla_assets::quantize(c, 256.0))
+        .extend(share)
+}
+
 /// Anchor the star dome and fade it by the model-global byte `trunc(curve·254 + 1)`, the draw
-/// skipped below 2 (`0x6d1b50`/`0x7e6120`), times each patch's [`StarDome::weight`].
+/// skipped below 2 (`0x6d1b50`/`0x7e6120`), times each patch's [`StarDome::weight`]; drift a
+/// scrolling batch's stage 0 on its global-sequence clock.
 pub(super) fn follow_stars(
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
     light: Res<WowLighting>,
     debug: Res<DebugState>,
+    time: Res<Time>,
     mut star_mats: ResMut<Assets<StarMaterial>>,
     mut stars: Query<
         (
@@ -518,10 +574,50 @@ pub(super) fn follow_stars(
         _ => 3000.0,
     };
     let byte = (light.star_alpha * 254.0 + 1.0).trunc();
+    // fork: modern lighting (FORK.md) — `.z` = the frame is linear (star.wgsl).
+    let linear = if crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled() {
+        1.0
+    } else {
+        0.0
+    };
+    // fork: a modern frame's dome at [`MODERN_STAR_SHARE`] of its strength; a classic one's whole.
+    let share = if linear > 0.5 {
+        modern_star_share()
+    } else {
+        1.0
+    };
     let global = if debug.lighting.disable_sky_dome || byte < 2.0 {
         0.0
     } else {
-        byte / 255.0
+        byte / 255.0 * share
+    };
+    // fork: `.w` = the reciprocal of the modern post's exposure (the zone look's times the night
+    // auto-exposure lift), so the night sky reaches the screen at its classic brightness: the
+    // lift exists to make a dark lit world readable, and on the star dome it blew the nebulae out
+    // to white (up to 2.25× at night). The tonemap is the identity below its knee, where the night
+    // sky sits. 1 on a classic frame, in 1/1024 steps for the write gate.
+    let unexpose = if linear > 0.5 {
+        benilla_assets::quantize(1.0 / crate::modern::look::exposure().max(1e-3), 1024.0)
+    } else {
+        1.0
+    };
+    // fork: the horizon fade on a linear frame (`StarExt::horizon`).
+    let horizon = if linear > 0.5 {
+        Vec4::new(0.0, MODERN_STAR_HORIZON, 0.0, 0.0)
+    } else {
+        Vec4::ZERO
+    };
+    // fork: the sky's hue on a linear frame (`StarExt::tint`).
+    let tint = if linear > 0.5 {
+        star_tint(&light, modern_star_tint())
+    } else {
+        Vec4::ZERO
+    };
+    // A capture holds the drift at its seed, as the shared-clock material lanes do.
+    let gseq_now = if crate::dev_state::deterministic_run() {
+        0.0
+    } else {
+        time.elapsed_secs_f64()
     };
     for (mut tf, mut gt, mat, dome) in &mut stars {
         tf.translation = cam_gt.translation();
@@ -535,11 +631,38 @@ pub(super) fn follow_stars(
             1.0,
             benilla_assets::quantize(global * dome.weight, 255.0),
         );
+        // `uv + t` (`uv_transform` with no rotation or scale), in 1/4096 steps for the write gate.
+        let uv = dome.scroll.as_ref().map_or(Affine2::IDENTITY, |a| {
+            let [x, y] = a.sample(a.clock(0.0, gseq_now));
+            Affine2::from_translation(Vec2::new(
+                benilla_assets::quantize(x, 4096.0),
+                benilla_assets::quantize(y, 4096.0),
+            ))
+        });
+        // A batch at alpha 0 draws nothing, so only its colour is kept current: the exposure moves
+        // on most modern frames (the auto-exposure follows the camera between lit and dark rooms),
+        // and every write re-prepares the material, a new uniform buffer and bind group each.
+        let shown = color.alpha() > 0.0;
         benilla_assets::write_gated(
             &mut star_mats,
             &mat.0,
-            |m| m.base.base_color != color,
-            |m| m.base.base_color = color,
+            |m| {
+                m.base.base_color != color
+                    || (shown
+                        && (m.base.uv_transform != uv
+                            || m.extension.params.z != linear
+                            || m.extension.params.w != unexpose
+                            || m.extension.horizon != horizon
+                            || m.extension.tint != tint))
+            },
+            |m| {
+                m.base.base_color = color;
+                m.base.uv_transform = uv;
+                m.extension.params.z = linear;
+                m.extension.params.w = unexpose;
+                m.extension.horizon = horizon;
+                m.extension.tint = tint;
+            },
         );
     }
 }

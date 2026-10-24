@@ -279,8 +279,18 @@ pub(crate) fn seed_bindings_for_vm(world: &mut World, script: &mut UiScript) {
 /// Read and parse one diff file; `None` (the defaults) when absent or unreadable.
 fn read_diff(path: &Option<std::path::PathBuf>) -> Option<Vec<(String, Vec<String>)>> {
     let path = path.as_ref()?;
-    match std::fs::read_to_string(path) {
-        Ok(text) => Some(store::from_diff(&text)),
+    // Through `local_state` (not `std::fs`): on the web the state folder is `localStorage`, and
+    // a direct read there is a silent "not found" — bindings were saved and never read back.
+    match crate::local_state::read_to_string(path) {
+        Ok(text) => {
+            let diff = store::from_diff(&text);
+            info!(
+                "bindings: {} overrides read from {}",
+                diff.len(),
+                path.display()
+            );
+            Some(diff)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             warn!("bindings: reading {}: {e}", path.display());
@@ -309,7 +319,7 @@ fn drain_binding_requests(mut hosted_vm: crate::script_calls::HostedVm, files: R
             }
             if which == 1 {
                 if let Some(chr) = &files.character {
-                    match std::fs::remove_file(chr) {
+                    match crate::local_state::remove_file(chr) {
                         Ok(()) => info!("bindings: character-specific set deleted"),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                         Err(e) => warn!("bindings: deleting {}: {e}", chr.display()),
@@ -872,14 +882,14 @@ mod tests {
             .init_resource::<BindingDispatch>()
             .init_resource::<LayoutNames>()
             .add_systems(Update, (sync_dispatch, latch_and_dispatch).chain());
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app
     }
 
     /// A counter a binding body left in the VM; `0` when the body never ran.
     fn lua_count(app: &App, global: &str) -> i64 {
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<i64>(&format!("return {global} or 0"))
             .expect("eval")
     }
@@ -887,7 +897,7 @@ mod tests {
     /// A string a binding body left in the VM; `""` when it never ran.
     fn lua_str(app: &App, global: &str) -> String {
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<String>(&format!(r#"return {global} or """#))
             .expect("eval")
     }
@@ -909,7 +919,7 @@ mod tests {
         let mut app = vm_harness(script);
         app.update();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(
                 "UPDATES = 0 local f = CreateFrame('Frame') f:RegisterEvent('UPDATE_BINDINGS') \
                  f:SetScript('OnEvent', function() UPDATES = UPDATES + 1 end) \
@@ -954,7 +964,7 @@ mod tests {
         assert_eq!(lua_count(&app, "UPDATES"), 1, "once");
 
         {
-            let script = app.world().non_send_resource::<UiScript>();
+            let script = app.world().non_send::<UiScript>();
             // The verb signals in place and owes nothing; only then does the registration run.
             script
                 .run(r#"SetBinding("J", "PROBEHOLD") UPDATES = 0"#)
@@ -980,7 +990,7 @@ mod tests {
         );
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .load_binding_set(1);
         app.update();
         assert_eq!(lua_count(&app, "UPDATES"), 1, "a load does");
@@ -1128,7 +1138,7 @@ mod tests {
             .expect("bind");
         let mut app = vm_harness(script);
         {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             assert!(s.key_input("G"), "the frame takes G first");
             s.run("stale:Hide()").unwrap();
         }
@@ -1139,7 +1149,7 @@ mod tests {
             1,
             "the binding took the press"
         );
-        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut s = app.world_mut().non_send_mut::<UiScript>();
         s.run("stale:Show()").unwrap();
         assert!(s.key_up("G").taken());
         assert_eq!(s.eval::<i64>("return ups").unwrap(), 0);
@@ -1450,7 +1460,7 @@ mod tests {
             .run(r#"CreateFrame("WorldFrame", "WorldFrame")"#)
             .expect("world frame");
         let mut app = vm_harness(script);
-        app.insert_non_send_resource(crate::textinput::HostClipboard::holding(""))
+        app.insert_non_send(crate::textinput::HostClipboard::holding(""))
             .add_systems(Update, feed.before(latch_and_dispatch));
         app
     }
@@ -1502,7 +1512,7 @@ mod tests {
     fn a_press_and_a_release_in_one_batch_go_to_the_world_frame_not_a_stale_consumer() {
         let mut app = feed_and_dispatch_harness();
         {
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.run(
                 r#"
                 ups = 0
@@ -1519,7 +1529,7 @@ mod tests {
         press_key(&mut app, KeyCode::KeyW);
         release_key(&mut app, KeyCode::KeyW);
         app.update();
-        let s = app.world().non_send_resource::<UiScript>();
+        let s = app.world().non_send::<UiScript>();
         assert_eq!(s.eval::<i64>("return ups").unwrap(), 0);
     }
 
@@ -1542,7 +1552,7 @@ mod tests {
 
         // A frame that takes the key-down walk keeps it from the binding.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(
                 r#"
                 got = 0
@@ -1564,7 +1574,7 @@ mod tests {
         // A platform that sends both halves: the press ran it and made the world frame the
         // consumer, so the up is delivered, not walked again.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("cover:Hide()")
             .unwrap();
         press_key(&mut app, KeyCode::PrintScreen);
@@ -1638,7 +1648,7 @@ mod tests {
 
         // Outside a binding body (a macro, `RunScript`, an addon's own code) nothing moves.
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run("MoveForwardStart() Jump() ToggleAutoRun() RunBinding('MOVEFORWARD')")
             .expect("the calls answer");
         app.update();
@@ -1654,7 +1664,7 @@ mod tests {
         let mut app = harness();
         let run = |app: &mut App, lua: &str| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .run(lua)
                 .expect("the call answers");
             app.update();
@@ -2079,11 +2089,11 @@ mod tests {
         app.add_message::<bevy::input::keyboard::KeyboardFocusLost>();
         let script_starts = |app: &mut App| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .execute_binding("MOVEANDSTEER", true)
                 .expect("runs");
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .execute_binding("MOVEFORWARD", true)
                 .expect("runs");
             app.update();
@@ -2147,7 +2157,7 @@ mod tests {
         // `IsBagOpen(id)` scans `ContainerFrame1..12`: which window a bag lands in varies.
         let open = |app: &App, id: i64| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<bool>(&format!("return IsBagOpen({id}) ~= nil"))
                 .expect("eval")
         };

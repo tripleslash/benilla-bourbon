@@ -20,6 +20,45 @@ const FXVIEW_UNIT_GUID: u64 = (0xF130u64 << 48) | 0xFC0FEE;
 /// a GO's identity from.
 const FXVIEW_GO_GUID: u64 = (0xF110u64 << 48) | 0xFC0FEE;
 
+/// `WOW_FX_SCENE`'s guids: the lanes' high words, a low counter clear of the subject's.
+const SCENE_GUID_BASE: u64 = 0xFD0000;
+
+/// Stand the `WOW_FX_SCENE` rows up at their own coordinates, each with the component set its
+/// lane gives the subject: a unit as a streamed creature, a GameObject in READY with its row's
+/// type, facing by the wire's yaw (`net::motion::wire_yaw`).
+fn spawn_scene(commands: &mut Commands, scene: &[super::SceneSpawn]) {
+    for (i, s) in scene.iter().enumerate() {
+        let (high, kind, fields) = if s.go {
+            (
+                0xF110u64,
+                benilla_protocol::EntityKind::GameObject,
+                vec![(14, 1), (21, s.go_type)], // GAMEOBJECT_STATE READY, GAMEOBJECT_TYPE_ID
+            )
+        } else {
+            (
+                0xF130u64,
+                benilla_protocol::EntityKind::Unit,
+                // The unit lane's fields: alive, level 60, friendly.
+                vec![(22, 100), (28, 100), (34, 60), (35, 35)],
+            )
+        };
+        commands.spawn((
+            crate::net::Guid((high << 48) | (SCENE_GUID_BASE + i as u64)),
+            crate::net::NetEntity {
+                kind,
+                display_id: Some(s.display),
+                scale: 1.0,
+            },
+            crate::net::ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(
+                &fields,
+            )),
+            Transform::from_translation(benilla_assets::coords::wow_to_bevy(s.at))
+                .with_rotation(Quat::from_rotation_y(s.orientation)),
+            Visibility::default(),
+        ));
+    }
+}
+
 /// Drives the `fxview` fixture once armed: spawns a root, attaches the model through the game's
 /// own [`attach_effect_visuals`], and flies a missile along its facing so trails extend.
 pub(crate) fn drive_fx_view(
@@ -141,6 +180,10 @@ pub(crate) fn drive_fx_view(
             ))
             .id()
     });
+    if !state.scene_spawned {
+        state.scene_spawned = true;
+        spawn_scene(&mut commands, &req.scene);
+    }
     // A missile only trails in motion: fly along model-forward (local -Z); `WOW_FX_TURN` spins it.
     if req.fly > 0.0 || req.turn != 0.0 {
         if let Ok(mut t) = transforms.get_mut(root) {
@@ -205,5 +248,41 @@ pub(crate) fn drive_fx_view(
         ) {
             state.attached_at = Some(time.elapsed_secs());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{parse_scene, SceneSpawn};
+
+    /// A table export's rows parse by kind; a header or a short row is skipped and counted.
+    #[test]
+    fn a_scene_file_parses_its_rows_and_counts_the_rest() {
+        let (rows, bad) = parse_scene(
+            "kind\tdisplay\n\
+             go\t6417\t5\t6310.5\t512.0\t15.2\t1.5\n\
+             unit 4845 0 6300 500 8 2.5\n\
+             go 6417 5 1 2\n",
+        );
+        assert_eq!(bad, 2);
+        assert_eq!(
+            rows,
+            vec![
+                SceneSpawn {
+                    go: true,
+                    display: 6417,
+                    go_type: 5,
+                    at: [6310.5, 512.0, 15.2],
+                    orientation: 1.5,
+                },
+                SceneSpawn {
+                    go: false,
+                    display: 4845,
+                    go_type: 0,
+                    at: [6300.0, 500.0, 8.0],
+                    orientation: 2.5,
+                },
+            ]
+        );
     }
 }

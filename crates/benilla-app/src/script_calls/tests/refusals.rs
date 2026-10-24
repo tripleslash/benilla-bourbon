@@ -18,17 +18,14 @@ fn shown_in_call(f: &mut Frame, lua: &str) -> String {
 
 /// The VM knows the player by name, as a chat line needs.
 fn in_world(f: &mut Frame) {
-    f.app
-        .world_mut()
-        .non_send_resource_mut::<UiScript>()
-        .set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                exists: true,
-                name: Some("Probe".into()),
-                ..Default::default()
-            }),
-        );
+    f.app.world_mut().non_send_mut::<UiScript>().set_unit(
+        "player",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Probe".into()),
+            ..Default::default()
+        }),
+    );
 }
 
 /// `SendChatMessage`'s group gate (`0x49f351` → `0x496720`, message `0x48`) and its dead check
@@ -127,7 +124,7 @@ fn a_probe_emote_lines_refusal_runs_its_listener_with_the_host_lent() {
     f.rx.try_iter().for_each(drop);
     let world = f.app.world_mut();
     world
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .push_chat_input("/wave".into());
     crate::ui_chat::drain_chat_input_once(world);
     assert_eq!(errors(&f), ["ERR_NOEMOTEWHILERUNNING"]);
@@ -151,7 +148,7 @@ fn a_raid_mark_refused_shows_inside_its_call() {
     with_factions(&mut f, FOE, &[(2, 0x19)]);
     f.app
         .world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .seat_selection(Some(benilla_ui::script::SeatedSelection {
             guid: OLD,
             held: true,
@@ -251,7 +248,7 @@ fn a_raid_lines_refusal_shows_inside_its_call() {
     };
     f.app
         .world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_party(benilla_ui::script::PartyState {
             leader_guid: NEW,
             own_guid: ME,
@@ -272,7 +269,7 @@ fn a_party_verbs_own_refusal_shows_inside_its_call() {
     let mut f = frame(true);
     {
         let world = f.app.world_mut();
-        let mut script = world.non_send_resource_mut::<UiScript>();
+        let mut script = world.non_send_mut::<UiScript>();
         // The player's object is held (`0x48a460`), so the invite compares names.
         script.set_unit_guids(&benilla_ui::script::UnitGuids {
             player: ME,

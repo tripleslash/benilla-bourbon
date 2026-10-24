@@ -214,6 +214,9 @@ pub(crate) fn simulate_ribbons(
         // Keeps the camera's `&GlobalTransform` read disjoint from these writes.
         Without<WorldCamera>,
     >,
+    // fork: fsr (FORK.md) — each drawn head's world point at the last world frame, and this one's.
+    mut last_heads: Local<bevy::ecs::entity::EntityHashMap<Vec3>>,
+    mut heads_now: Local<bevy::ecs::entity::EntityHashMap<Vec3>>,
 ) {
     *verdict = RibbonVerdict::default();
     let Ok((cam, cam_tf, frustum, projection)) = world_cam.single() else {
@@ -225,6 +228,12 @@ pub(crate) fn simulate_ribbons(
     let (farclip, exterior_gate, camera_instance) = gates.scene(Some((cam_tf, projection)));
     let dt = time.delta_secs().min(0.1);
     let now = time.elapsed_secs();
+    heads_now.clear();
+    // fork: fsr (FORK.md) — the motion stream and the head history only while a camera runs FSR.
+    let track_motion = quads.tracks_motion();
+    if !track_motion {
+        last_heads.clear();
+    }
     for (entity, mut trail, mut entity_tf, mut entity_global) in &mut trails {
         let RibbonTrail {
             def,
@@ -443,21 +452,40 @@ pub(crate) fn simulate_ribbons(
             ));
         }
         verdict.drawn += 1;
+        // fork: fsr (FORK.md) — the head moved since the last world frame; the edges behind it
+        // stay where they were laid.
+        let head_delta = head.filter(|_| track_motion).and_then(|(node, _)| {
+            heads_now.insert(entity, node);
+            last_heads
+                .get(&entity)
+                .map(|last| (node - *last).to_array())
+        });
         let start = quads.begin();
-        for w in pairs.windows(2) {
+        for (i, w) in pairs.windows(2).enumerate() {
             let ((t0, b0, a0), (t1, b1, a1)) = (w[0], w[1]);
             let (ua0, ua1) = (u0 + (u1 - u0) * a0, u0 + (u1 - u0) * a1);
-            for (pos, uv) in [
+            for (j, (pos, uv)) in [
                 (b0, [ua0, v1]),
                 (b1, [ua1, v1]),
                 (t1, [ua1, v0]),
                 (t0, [ua0, v0]),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 quads.verts.push(EffectVertex {
                     pos: pos.to_array(),
                     uv,
                     color: rgba,
                 });
+                // The head pair is the first quad's `b₀` and `t₀`.
+                if track_motion {
+                    let moved = i == 0 && (j == 0 || j == 3);
+                    quads.motion.push(match head_delta {
+                        Some(d) if moved => d,
+                        _ => [0.0; 3],
+                    });
+                }
             }
         }
         quads.commit_quads(
@@ -495,9 +523,11 @@ pub(crate) fn simulate_ribbons(
                 main_entity: entity,
                 light: None, // trails never carry a light override (world lane only)
                 clip: None,  // …and never ride a UI model pane's atlas cell
+                motion: crate::particles::buffer::EffectMotion::PerVertex,
             },
         );
     }
+    std::mem::swap(&mut *last_heads, &mut *heads_now);
 }
 
 /// Registers the per-frame ribbon simulation; the model spawn sites call [`spawn_ribbon`].

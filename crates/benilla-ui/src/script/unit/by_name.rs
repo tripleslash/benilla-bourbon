@@ -288,7 +288,7 @@ impl super::super::UiScript {
     /// Whether a selection call moved the `"target"` view since the last ask; the app's unit feed
     /// then re-pushes `"target"` from the committed selection, which its memo no longer matches.
     pub fn take_target_view_moved(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().target_view_moved)
+        drain_field!(self, target_view_moved)
     }
 
     /// Seat the selection a script call just committed as `"target"` for the rest of its chunk,
@@ -337,12 +337,12 @@ impl super::super::UiScript {
     /// itself, as `SetSelection` does (`0x49389c`, `0x493a73`): the unit feed takes the change as
     /// heard ([`Self::take_announced_selection`]) and signals only a change no call made.
     pub fn announce_selection(&mut self, guid: Option<u64>) {
-        self.model_mut().announced_selection = Some(guid);
+        set_field!(self, announced_selection, Some(guid));
     }
 
     /// The selection the last call announced since the last asking, spent by the asking.
     pub fn take_announced_selection(&mut self) -> Option<Option<u64>> {
-        self.model_mut().announced_selection.take()
+        drain_field!(self, announced_selection)
     }
 }
 

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{UiFlavor, UiScript};
 use benilla_ui::status::{self, Status};
 use benilla_ui::toc::Toc;
 
@@ -31,6 +31,10 @@ pub(super) enum Source {
     Dir(PathBuf),
     /// The player's patch chain ([`super::reference_ui`]), by full chain path, `/` and `\` alike.
     Chain,
+    /// An addon benilla ships ([`benilla_formats::bundled_addons`]): a folder's paths
+    /// (`Interface/AddOns/<Folder>/…`), read through the chain, which answers them after its
+    /// archives.
+    Bundled,
 }
 
 /// One loadable interface: a name, its parsed manifest, and where its files come from.
@@ -84,7 +88,7 @@ impl Addon {
                     .map(String::into_bytes)
             }
             Source::Dir(root) => read_addon_file(root, req),
-            Source::Chain => super::reference_ui::read(req),
+            Source::Chain | Source::Bundled => super::reference_ui::read(req),
         }
     }
 
@@ -98,7 +102,7 @@ impl Addon {
     fn prefix(&self) -> String {
         match &self.source {
             Source::Builtin | Source::Chain => String::new(),
-            Source::Dir(_) => format!("{ADDONS_PREFIX}{}", self.name),
+            Source::Dir(_) | Source::Bundled => format!("{ADDONS_PREFIX}{}", self.name),
         }
     }
 
@@ -109,7 +113,9 @@ impl Addon {
     fn chunk_name(&self, file: &str, path: &str) -> String {
         match &self.source {
             Source::Builtin => benilla_ui::script::addon_chunk_name(&self.name, file),
-            Source::Dir(_) | Source::Chain => format!("@{}", path.replace('/', "\\")),
+            Source::Dir(_) | Source::Chain | Source::Bundled => {
+                format!("@{}", path.replace('/', "\\"))
+            }
         }
     }
 
@@ -151,7 +157,7 @@ impl Addon {
                 // `smoke.sh`.
                 match self.source {
                     Source::Builtin | Source::Chain => error!("ui_script: {e}"),
-                    Source::Dir(_) => warn!("ui_script: {e}"),
+                    Source::Dir(_) | Source::Bundled => warn!("ui_script: {e}"),
                 }
                 // Retained for the player: the commonest way an addon fails with nothing on screen.
                 script.report_load_failure(&e);
@@ -210,7 +216,7 @@ impl Addon {
                 let e = format!("{}/{file}: {m}", self.name);
                 match self.source {
                     Source::Builtin | Source::Chain => error!("ui_script: {e}"),
-                    Source::Dir(_) => warn!("ui_script: {e}"),
+                    Source::Dir(_) | Source::Bundled => warn!("ui_script: {e}"),
                 }
                 script.report_load_failure(&e);
                 failures.push(e);
@@ -290,20 +296,38 @@ const BLIZZARD_ADDONS: [&str; 12] = [
     "Blizzard_TrainerUI",
 ];
 
-/// The Blizzard addons the chain carries as LoadOnDemand registry rows, for `UIParentLoadAddOn`;
-/// a toc that is not LoadOnDemand is skipped, as the startup walk does not read the chain.
-fn chain_addons() -> Vec<Addon> {
+/// Turtle WoW 1.18.1's own addons, in its archives beside the Blizzard ones (each with its folder
+/// on the install's disk, as theirs have): `## Secure: 1` and not LoadOnDemand, so its client's
+/// archive pass registers them and its startup walk loads them. `Turtle_General` restores the
+/// saved tables Turtle's FrameXML rows read (`TransmogOutfits`, `LFTPresets`, `ChronoboonBuffs`,
+/// `Turtle_ChallengesCache`); `Turtle_GroupUI` is its group frames.
+const TURTLE_ADDONS: [&str; 2] = ["Turtle_General", "Turtle_GroupUI"];
+
+/// The addons the chain carries as registry rows: the Blizzard ones that are LoadOnDemand, for
+/// `UIParentLoadAddOn` (a Blizzard toc that is not is skipped), then, in a Turtle WoW VM, Turtle's
+/// own, which the startup walk loads.
+fn chain_addons(flavor: UiFlavor) -> Vec<Addon> {
+    chain_addons_in(flavor, super::reference_ui::read)
+}
+
+/// [`chain_addons`] over a given chain reader.
+fn chain_addons_in(flavor: UiFlavor, chain: impl Fn(&str) -> Option<Vec<u8>>) -> Vec<Addon> {
+    let read = |name: &str| {
+        let bytes = chain(&format!("Interface/AddOns/{name}/{name}.toc"))?;
+        Some(Addon {
+            name: name.to_string(),
+            toc: Toc::parse(&benilla_ui::source::decode(&bytes)),
+            source: Source::Chain,
+        })
+    };
+    let turtle: &[&str] = match flavor {
+        UiFlavor::Vanilla => &[],
+        UiFlavor::Turtle => &TURTLE_ADDONS,
+    };
     BLIZZARD_ADDONS
         .iter()
-        .filter_map(|name| {
-            let bytes = super::reference_ui::read(&format!("Interface/AddOns/{name}/{name}.toc"))?;
-            let toc = Toc::parse(&benilla_ui::source::decode(&bytes));
-            toc.load_on_demand().then(|| Addon {
-                name: (*name).to_string(),
-                toc,
-                source: Source::Chain,
-            })
-        })
+        .filter_map(|name| read(name).filter(|a| a.toc.load_on_demand()))
+        .chain(turtle.iter().filter_map(|name| read(name)))
         .collect()
 }
 
@@ -313,9 +337,9 @@ fn chain_addons() -> Vec<Addon> {
 /// (`0x42ad10`), and `0x51c9b0` returns on a name-hash hit (`0x51ca10`) and tail-inserts
 /// (`0x521ad0`). That order is the Lua index space, and in the one shared Lua state (`0x7040d0`)
 /// it decides whose copy of a global wins.
-fn discover() -> Vec<Addon> {
+fn discover(flavor: UiFlavor) -> Vec<Addon> {
     // The archive pass, in `BLIZZARD_ADDONS` order: the shipped `patch.MPQ` listfile's too.
-    let mut found = chain_addons();
+    let mut found = chain_addons(flavor);
     // The loose pass, minus the names the archive registered.
     let seen: HashSet<String> = found.iter().map(|a| a.name.to_ascii_lowercase()).collect();
     found.extend(
@@ -323,7 +347,60 @@ fn discover() -> Vec<Addon> {
             .into_iter()
             .filter(|a| !seen.contains(&a.name.to_ascii_lowercase())),
     );
+    // The bundled ones last, so a copy of the same name in the player's folder is the one used.
+    let seen: HashSet<String> = found.iter().map(|a| a.name.to_ascii_lowercase()).collect();
+    found.extend(
+        bundled_addons(flavor)
+            .into_iter()
+            .filter(|a| !seen.contains(&a.name.to_ascii_lowercase())),
+    );
     found
+}
+
+/// The addons benilla bundles and the flavor each is offered in, `None` for both: pfQuest's
+/// Turtle WoW database names Turtle's own quests, zones and NPCs and means nothing on a 1.12 realm.
+const BUNDLED_ADDONS: [(&str, Option<UiFlavor>); 2] = [
+    ("pfQuest", None),
+    ("pfQuest-turtle", Some(UiFlavor::Turtle)),
+];
+
+/// The bundled addons `flavor` offers, from what the bundle actually holds. Deviation: each is off
+/// (`## DefaultState: disabled`) until the player ticks it on the AddOns screen, where a folder
+/// addon defaults on; the reference ships none, and a player never asked for these.
+fn bundled_addons(flavor: UiFlavor) -> Vec<Addon> {
+    if cfg!(test) {
+        return Vec::new(); // a unit test's addon list is the folder it built, as for `local_state`
+    }
+    bundled_addons_in(flavor, benilla_formats::bundled_addons::folders(), |path| {
+        super::reference_ui::read(path)
+    })
+}
+
+/// [`bundled_addons`] over a given folder list and reader.
+fn bundled_addons_in(
+    flavor: UiFlavor,
+    folders: &[String],
+    read: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Vec<Addon> {
+    BUNDLED_ADDONS
+        .iter()
+        .filter(|(_, only)| only.is_none_or(|f| f == flavor))
+        .filter_map(|(name, _)| {
+            let folder = folders.iter().find(|f| f.eq_ignore_ascii_case(name))?;
+            let bytes = read(&format!("{ADDONS_PREFIX}{folder}/{folder}.toc"))?;
+            // Opt-in: a last `## DefaultState` line, which the reader lets win over the file's
+            // own (`Toc::default_state`).
+            let toc = Toc::parse(&format!(
+                "{}\n## DefaultState: disabled\n",
+                benilla_ui::source::decode(&bytes)
+            ));
+            Some(Addon {
+                name: folder.clone(),
+                toc,
+                source: Source::Bundled,
+            })
+        })
+        .collect()
 }
 
 /// Sort folder names into NTFS directory order. The reference's loose pass (`0x42ad10`,
@@ -452,7 +529,22 @@ fn manifest_in(dir: &Path, name: &str) -> Option<String> {
 
 /// The AddOn API's registry row for one discovered addon.
 fn info_for(addon: &Addon) -> benilla_ui::script::AddOnInfo {
-    info_from_toc(&addon.name, &addon.toc, addon.is_chain())
+    let mut info = info_from_toc(&addon.name, &addon.toc, addon.is_chain());
+    // A bundled addon's `LoadAddOn` reads through the chain too, which answers its folder's paths;
+    // it stays INSECURE, since only the player's own chain carries Blizzard's `.sig` files.
+    info.chain = matches!(addon.source, Source::Chain | Source::Bundled);
+    // fork: Turtle WoW's own two are its interface, not an option: always on, never listed.
+    info.pinned = is_pinned(addon);
+    info
+}
+
+/// fork: whether a row is one of [`TURTLE_ADDONS`] off the player's chain, which the registry
+/// pins on and keeps out of every AddOns list ([`benilla_ui::script::AddOnInfo::pinned`]).
+fn is_pinned(addon: &Addon) -> bool {
+    matches!(addon.source, Source::Chain)
+        && TURTLE_ADDONS
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&addon.name))
 }
 
 /// What the signature check `0x6f10f0` answers for an addon, modelled: 3 (the addon is SECURE,
@@ -525,6 +617,7 @@ pub(crate) fn info_from_toc(name: &str, toc: &Toc, chain: bool) -> benilla_ui::s
         // Visible to `GetAddOnInfo(index)` until `SMSG_ADDON_INFO` hides it: the server's verdict
         // on a `## Secure:` record, not a directive.
         hidden: false,
+        pinned: false,       // `info_for` pins a flavor's own
         enabled: true,       // until the enable state says otherwise
         saved_enabled: true, // re-stamped from `enabled` at registration
         loaded: false,
@@ -582,7 +675,9 @@ pub(crate) struct AppAddonFiles;
 impl benilla_ui::script::AddonStateFiles for AppAddonFiles {
     fn read(&self, realm: &str, character: &str) -> Option<Vec<(String, bool)>> {
         let id = (realm.to_string(), character.to_string());
-        let bytes = std::fs::read(enable_state_path(Some(&id))?).ok()?;
+        // Through `local_state`, not `std::fs`: on the page the state folder is localStorage, and
+        // these files are settings that must survive a reload there.
+        let bytes = crate::local_state::read(&enable_state_path(Some(&id))?).ok()?;
         Some(parse_enable_state(&benilla_ui::source::decode(&bytes)))
     }
 
@@ -600,7 +695,7 @@ pub(crate) fn seat_glue_addons(
     script: &mut UiScript,
     reply: Option<&[benilla_protocol::messages::AddonRecord]>,
 ) {
-    let infos = discover().iter().map(info_for).collect();
+    let infos = discover(script.flavor()).iter().map(info_for).collect();
     script.register_addons(infos, None, None, None);
     if let Some(records) = reply {
         script.note_addon_info_records(addon_replies(records));
@@ -668,7 +763,7 @@ pub(super) fn save_addon_variables(script: &mut UiScript, identity: Option<&(Str
                 // Only a file this session read cleanly: never a held one, never one it did not read.
                 if script.saved_file_loaded(&path) {
                     let bak = dir.join(format!("{name}.lua.bak"));
-                    match std::fs::rename(&path, &bak) {
+                    match crate::local_state::rename(&path, &bak) {
                         Ok(()) => {
                             info!(
                                 "ui_script: {name} declares no saved variables for {} — moved to {}",
@@ -728,11 +823,48 @@ pub(super) fn load_third_party(
     roster: &[String],
     version_check: bool,
 ) -> Vec<String> {
-    let addons = discover();
+    let mut walk = open_third_party(script, identity, roster, version_check);
+    for i in 0..walk.len() {
+        load_one_addon(&mut walk, script, i);
+    }
+    walk.failures()
+}
+
+/// [`load_third_party`] held open, so the sliced entry load can step its addons one per frame:
+/// the rows, and what a [`Walk`] carries from one step to the next.
+pub(super) struct ThirdParty {
+    addons: Vec<Addon>,
+    failures: Vec<String>,
+    reported: HashSet<usize>,
+    version_check: bool,
+}
+
+impl ThirdParty {
+    /// How many addons the walk steps through, LoadOnDemand ones included.
+    pub(super) fn len(&self) -> usize {
+        self.addons.len()
+    }
+
+    /// The walk's failures, once every addon has had its step.
+    pub(super) fn failures(self) -> Vec<String> {
+        self.failures
+    }
+}
+
+/// [`load_third_party`] up to its per-addon loop: discover, register, read the enable bits.
+pub(super) fn open_third_party(
+    script: &mut UiScript,
+    identity: Option<&(String, String)>,
+    roster: &[String],
+    version_check: bool,
+) -> ThirdParty {
+    let addons = discover(script.flavor());
     // Registered even when empty: `GetNumAddOns()` must answer 0, not a previous session's list.
     let mut infos: Vec<_> = addons.iter().map(info_for).collect();
     // Chain rows read their files off the player's patch chain.
     script.set_addon_chain_reader(Box::new(super::reference_ui::read));
+    // Saved variables read through `local_state` too: on the page `std::fs` is unsupported.
+    script.set_addon_saved_reader(Box::new(crate::local_state::read));
     // Each enable bit through the reference's query: the character's explicit row, else what the
     // realm's other characters agree on, else the manifest's `## DefaultState`.
     let store = load_store(
@@ -743,7 +875,8 @@ pub(super) fn load_third_party(
     );
     let character = identity.map(|(_, c)| c.as_str());
     for (info, addon) in infos.iter_mut().zip(addons.iter()) {
-        info.enabled = store.enabled_for(&info.name, addon.toc.default_state(), character);
+        info.enabled =
+            info.pinned || store.enabled_for(&info.name, addon.toc.default_state(), character);
     }
     script.register_addons(
         infos,
@@ -758,43 +891,65 @@ pub(super) fn load_third_party(
             .cloned()
             .unwrap_or_default(),
     );
-    if addons.is_empty() {
-        return Vec::new();
+    if !addons.is_empty() {
+        info!(
+            "ui_script: {} addon(s) found: {}",
+            addons.len(),
+            addons
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
-    info!(
-        "ui_script: {} addon(s) found: {}",
-        addons.len(),
-        addons
-            .iter()
-            .map(|a| a.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let mut state = Walk::new(script, &addons, version_check);
-    for (i, addon) in addons.iter().enumerate() {
-        // `## LoadOnDemand: 1` waits for `LoadAddOn`: `0x51f600` loads only records whose
-        // LoadOnDemand byte is 0.
-        if addon.toc.load_on_demand() {
-            info!(
-                "ui_script: {} is LoadOnDemand — not loaded (no LoadAddOn() yet)",
-                addon.name
-            );
-            continue;
-        }
-        // Re-armed per addon, so one runaway cannot fail every addon after it; a dependency
-        // chain loads under its dependent's arming, as in the harness's survey.
-        script.set_instruction_budget(LOAD_INSTRUCTION_BUDGET);
-        state.load(i);
-        let spent = script.instructions_used();
-        if spent > 1_000_000 {
-            // A heavy load gets a line: this counter is what the budget was chosen from.
-            info!(
-                "ui_script: {} spent {spent} VM instructions loading",
-                addon.name
-            );
-        }
+    ThirdParty {
+        addons,
+        failures: Vec::new(),
+        reported: HashSet::new(),
+        version_check,
     }
-    state.failures
+}
+
+/// The `i`th addon of the walk, through [`Walk::load`]; one the shared loader already loaded as a
+/// dependency or a `## LoadWith` answers at once.
+pub(super) fn load_one_addon(state: &mut ThirdParty, script: &mut UiScript, i: usize) {
+    let Some(addon) = state.addons.get(i) else {
+        return;
+    };
+    // `## LoadOnDemand: 1` waits for `LoadAddOn`: `0x51f600` loads only records whose
+    // LoadOnDemand byte is 0.
+    if addon.toc.load_on_demand() {
+        info!(
+            "ui_script: {} is LoadOnDemand — not loaded (no LoadAddOn() yet)",
+            addon.name
+        );
+        return;
+    }
+    // Re-armed per addon, so one runaway cannot fail every addon after it; a dependency
+    // chain loads under its dependent's arming, as in the harness's survey.
+    script.set_instruction_budget(LOAD_INSTRUCTION_BUDGET);
+    // The walk borrows the VM and the rows for this step and hands back what it carries to the
+    // next; which rows are loaded is the registry's own memory.
+    let mut walk = Walk {
+        script,
+        all: &state.addons,
+        failures: std::mem::take(&mut state.failures),
+        reported: std::mem::take(&mut state.reported),
+        version_check: state.version_check,
+    };
+    walk.load(i);
+    let Walk {
+        failures, reported, ..
+    } = walk;
+    (state.failures, state.reported) = (failures, reported);
+    let spent = script.instructions_used();
+    if spent > 1_000_000 {
+        // A heavy load gets a line: this counter is what the budget was chosen from.
+        info!(
+            "ui_script: {} spent {spent} VM instructions loading",
+            addon.name
+        );
+    }
 }
 
 /// The startup walk's side of `AddOn_Load` (`0x51f240`): the shared loader
@@ -813,6 +968,9 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
+    /// A walk with nothing carried in, for the tests; the entry load builds one per step
+    /// ([`load_one_addon`]).
+    #[cfg(test)]
     fn new(script: &'a UiScript, all: &'a [Addon], version_check: bool) -> Self {
         Walk {
             script,
@@ -984,7 +1142,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
         let (home, _h) = hermetic_root("scanorder");
-        let chain = chain_addons();
+        let chain = chain_addons(UiFlavor::Vanilla);
         if chain.is_empty() {
             eprintln!("skipping: the chain carries no Blizzard addon rows");
             return;
@@ -998,7 +1156,7 @@ mod tests {
         );
         write_addon(&home, "Loose", "## Interface: 11200\n", &[]);
 
-        let found = discover();
+        let found = discover(UiFlavor::Vanilla);
         let names: Vec<&str> = found.iter().map(|a| a.name.as_str()).collect();
 
         let first_loose = names.iter().position(|n| *n == "Loose").expect("Loose");
@@ -1026,12 +1184,108 @@ mod tests {
         );
     }
 
+    /// pfQuest is offered on both flavors and its Turtle database on Turtle alone, each off until
+    /// ticked, from the folders the bundle holds.
+    #[test]
+    fn the_bundled_pfquest_is_offered_off_and_its_turtle_database_on_turtle_alone() {
+        let folders = ["pfQuest".to_string(), "pfQuest-turtle".to_string()];
+        let read = |path: &str| -> Option<Vec<u8>> {
+            let toc = match path {
+                "Interface/AddOns/pfQuest/pfQuest.toc" => "## Interface: 11200\npfQuest.lua\n",
+                "Interface/AddOns/pfQuest-turtle/pfQuest-turtle.toc" => {
+                    "## Interface: 11200\n## DefaultState: enabled\n## Dependencies: pfQuest\nx.lua\n"
+                }
+                _ => return None,
+            };
+            Some(toc.as_bytes().to_vec())
+        };
+        let names = |flavor| {
+            bundled_addons_in(flavor, &folders, read)
+                .into_iter()
+                .map(|a| {
+                    assert!(matches!(a.source, Source::Bundled));
+                    assert!(!a.toc.default_state(), "{} is off until ticked", a.name);
+                    assert_eq!(a.prefix(), format!("Interface/AddOns/{}", a.name));
+                    a.name
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(UiFlavor::Vanilla), ["pfQuest"]);
+        assert_eq!(names(UiFlavor::Turtle), ["pfQuest", "pfQuest-turtle"]);
+        // A folder the bundle lacks is not offered.
+        assert!(bundled_addons_in(UiFlavor::Turtle, &folders[..1], read)
+            .iter()
+            .all(|a| a.name == "pfQuest"));
+    }
+
+    /// A Turtle WoW VM registers Turtle's own two archive addons after the Blizzard rows, as they
+    /// are, not LoadOnDemand, for the startup walk; a 1.12.1 VM never probes for them, and a
+    /// Blizzard toc that is not LoadOnDemand stays out either way.
+    #[test]
+    fn a_turtle_vm_registers_turtles_own_addons_for_the_startup_walk() {
+        let chain = |path: &str| -> Option<Vec<u8>> {
+            let toc = match path {
+                "Interface/AddOns/Blizzard_TrainerUI/Blizzard_TrainerUI.toc" => {
+                    "## Interface: 11200\n## LoadOnDemand: 1\nBlizzard_TrainerUI.xml\n"
+                }
+                "Interface/AddOns/Blizzard_RaidUI/Blizzard_RaidUI.toc" => {
+                    "## Interface: 11200\nBlizzard_RaidUI.xml\n"
+                }
+                "Interface/AddOns/Turtle_General/Turtle_General.toc" => {
+                    "## Interface: 11200\n## Secure: 1\nTurtle_General.lua\n"
+                }
+                _ => return None,
+            };
+            Some(toc.as_bytes().to_vec())
+        };
+        let names = |flavor| {
+            chain_addons_in(flavor, chain)
+                .into_iter()
+                .map(|a| (a.name, a.toc.load_on_demand()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(UiFlavor::Vanilla),
+            vec![("Blizzard_TrainerUI".to_string(), true)]
+        );
+        assert_eq!(
+            names(UiFlavor::Turtle),
+            vec![
+                ("Blizzard_TrainerUI".to_string(), true),
+                ("Turtle_General".to_string(), false),
+            ]
+        );
+    }
+
+    /// fork: Turtle WoW's own two, off the chain, are pinned: always on and never listed. The same
+    /// name in the player's folder is an ordinary addon.
+    #[test]
+    fn turtles_own_addons_are_pinned_and_a_folder_namesake_is_not() {
+        let chain = |path: &str| -> Option<Vec<u8>> {
+            matches!(
+                path,
+                "Interface/AddOns/Turtle_General/Turtle_General.toc"
+                    | "Interface/AddOns/Turtle_GroupUI/Turtle_GroupUI.toc"
+            )
+            .then(|| b"## Interface: 11200\n## Secure: 1\nx.lua\n".to_vec())
+        };
+        let rows = chain_addons_in(UiFlavor::Turtle, chain);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|a| info_for(a).pinned));
+        let folder = Addon::new(
+            "Turtle_General".into(),
+            Toc::parse("## Interface: 11200\nx.lua\n"),
+            Source::Dir(PathBuf::from("AddOns")),
+        );
+        assert!(!info_for(&folder).pinned);
+    }
+
     /// Every chain row is LoadOnDemand and chain-sourced, the eight windows the interface opens
     /// through them are rows, and the core, the chain's `FrameXML.toc`, lists none.
     #[test]
     fn the_chain_carries_blizzards_load_on_demand_addons_as_registry_rows() {
         let _data = benilla_formats::wow_data_or_skip!();
-        let rows = chain_addons();
+        let rows = chain_addons(UiFlavor::Vanilla);
         assert!(
             rows.iter().any(|a| a.name == "Blizzard_TrainerUI"),
             "the trainer addon is a row: {:?}",

@@ -53,7 +53,9 @@ pub(crate) use manifest::load_default_ui;
 pub(crate) use manifest::load_ingame_ui;
 #[cfg(test)]
 pub(crate) use manifest::{load_stock_bindings, stock_bindings_file};
-pub(crate) use reference_ui::{boot_client_locale, client_locale, client_region};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use reference_ui::boot_client_locale;
+pub(crate) use reference_ui::{client_locale, client_region};
 
 /// Whether the pointer is over any UI (the egui dev overlay or a player-UI frame), combined by
 /// [`arbitrate_pointer_over_ui`]; gameplay reads it, so it is not the dev plugin's.
@@ -199,10 +201,11 @@ pub(crate) struct UiInput;
 /// `Cooldown.lua:3` gates on `start > 0`, so a reset would hide every running cooldown's sweep.
 #[derive(Resource)]
 pub(crate) struct UiClock {
-    /// [`FrameStep::at`] at the tick that produced [`Self::ui_now`].
+    /// [`FrameStep::at`] at the tick that produced [`Self::ui_now`]: Bevy's platform `Instant`,
+    /// which is `web_time::Instant` on wasm32, where `std::time::Instant` panics.
     ///
     /// [`FrameStep::at`]: benilla_world::frame_pace::FrameStep::at
-    pub(crate) anchor: std::time::Instant,
+    pub(crate) anchor: bevy::platform::time::Instant,
     /// The VM clock after that tick, in seconds since this process started.
     pub(crate) ui_now: f64,
 }
@@ -211,7 +214,7 @@ pub(crate) struct UiClock {
 impl Default for UiClock {
     fn default() -> Self {
         Self {
-            anchor: std::time::Instant::now(),
+            anchor: bevy::platform::time::Instant::now(),
             ui_now: 0.0,
         }
     }
@@ -326,7 +329,7 @@ impl Plugin for UiScriptPlugin {
         // The quit root runs in `Last`: the close button's `AppExit` is written in `PostUpdate`.
         crate::shutdown::on_app_exit(app, shutdown_on_exit.into_configs());
         app.insert_resource(UiScaleCvar(default_ui_scale()))
-            .init_non_send_resource::<glue_mgr::SharedGlueMgr>()
+            .init_non_send::<glue_mgr::SharedGlueMgr>()
             .init_resource::<UiAutoScaleCache>()
             .init_resource::<UiFrameCost>()
             .init_resource::<crate::bindings::WheelNotches>()
@@ -354,10 +357,10 @@ impl Plugin for UiScriptPlugin {
                 Startup,
                 // After the CVars load: the glue screens read the agreements as they come up. After
                 // the glyph cache, which measures the text their first show sizes frames by. After
-                // the word lists, which every VM is seated with as it is made.
+                // the word lists, which every VM is seated with as it is made: a data loader.
                 setup_script
                     .after(benilla_assets::AssetSet::Open)
-                    .after(crate::text_filter::TextFilterLoad)
+                    .after(benilla_assets::AssetSet::Catalogs)
                     .after(crate::cvars::CvarLoad)
                     .after(crate::ui_text::FontAtlasInit),
             )
@@ -440,10 +443,12 @@ impl Plugin for UiScriptPlugin {
                 (
                     extract::tick_script,
                     input::feed_ui_input.run_if(
-                        in_state(crate::client_state::ClientState::InWorld).or(glue::glue_ui_up),
+                        in_state(crate::client_state::ClientState::InWorld)
+                            .or_else(glue::glue_ui_up),
                     ),
                     input::feed_ui_wheel.run_if(
-                        in_state(crate::client_state::ClientState::InWorld).or(glue::glue_ui_up),
+                        in_state(crate::client_state::ClientState::InWorld)
+                            .or_else(glue::glue_ui_up),
                     ),
                     // Off the walk that just ran, for the pick and the arbiter after the pass.
                     crate::vplates::seed_plate_hover,
@@ -539,8 +544,8 @@ fn arbitrate_pointer_over_ui(
 /// The session lifecycle: the VM's birth, identity, death and reload.
 mod lifecycle;
 pub(crate) use lifecycle::{
-    ingame_ui_up, run_pending_reload, setup_script, strings_vm, AddOnIdentity, PendingEntryUiLoad,
-    ReloadUiPending, SessionEnd,
+    ingame_ui_up, rebuild_stale_glue_vm, reinstall_boot_vm, run_pending_reload, setup_script,
+    strings_vm, AddOnIdentity, PendingEntryUiLoad, ReloadUiPending, SessionEnd,
 };
 /// The leave-world sweep `0x490a80`: its latch, its schedule and its legs' order.
 mod sweep;
@@ -579,9 +584,16 @@ fn feed_framerate(mut hosted_vm: crate::script_calls::HostedVm, times: Res<World
 /// [`feed_framerate`] hands the VM the rate before the next tick reads it.
 fn record_world_frame_time(
     step: Res<benilla_world::frame_pace::FrameStep>,
+    cadence: Option<Res<benilla_world::fsr::cadence::FgCadence>>,
     mut times: ResMut<WorldFrameTimes>,
 ) {
-    times.0.push(step.delta.as_secs_f32());
+    // fork: fsr (FORK.md) — the ring counts frames presented: frame generation shows two
+    // per update, each half the step.
+    let presents = cadence.map_or(1, |c| c.presents_per_update()).max(1);
+    let each = step.delta.as_secs_f32() / presents as f32;
+    for _ in 0..presents {
+        times.0.push(each);
+    }
 }
 
 /// Synthetic player and target snapshots for a server-less UI capture, and its first events once.
@@ -882,6 +894,9 @@ mod chat_resize_tests;
 mod dropdown_tests;
 
 #[cfg(test)]
+mod lft_teleport_tests;
+
+#[cfg(test)]
 mod ui_scale_tests;
 
 #[cfg(test)]
@@ -1011,8 +1026,6 @@ mod tooltip_template_tests;
 #[cfg(test)]
 mod escape_tests;
 
-#[cfg(test)]
-mod game_menu_addon_tests;
 #[cfg(test)]
 mod game_menu_tests;
 

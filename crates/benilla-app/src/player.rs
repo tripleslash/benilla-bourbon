@@ -240,9 +240,9 @@ pub(super) type BodyQuery<'w, 's> = Query<
 >;
 
 /// The armed transports, for the deck carry ([`ride`]) and its hold aboard (`TransportVolume`,
-/// `0x6173b0`). `ColliderAabb` is for the ride trace:
-/// avian refreshes it in `FixedPostUpdate`, before `tick_transports` moves the deck in `Update`, so
-/// the broad-phase box lags its deck by a frame.
+/// `0x6173b0`). `ColliderAabb` is for the ride trace: avian refreshes it in `PostUpdate`, after
+/// `tick_transports` moved the deck in `Update`, so the next frame's move leaves the broad-phase box
+/// a frame behind its deck.
 pub(super) type TransportQuery<'w, 's> = Query<
     'w,
     's,
@@ -281,17 +281,21 @@ impl Plugin for PlayerPlugin {
         camera_saved::plugin(app);
         camera_view::plugin(app);
         // The stream focus is published after `control`'s teleport snap and before the stream
-        // stage, and the post-snap hold released after it. Both edges are needed: without
-        // `.after(Input)` the focus can precede the snap, the world streams around the departure,
-        // and the hold releases at once. Both run among the VM pass's hosts, which read the
-        // player's settle state, so a host after them reads this frame's.
+        // stage, and the settle hold armed mid-run and released after it. Both edges are needed:
+        // without `.after(Input)` the focus can precede the snap, the world streams around the
+        // departure, and the hold releases at once. All run among the VM pass's hosts, which read
+        // the player's settle state, so a host after them reads this frame's.
         app.add_systems(
             Update,
             (
                 (world_focus::publish_viewer, world_focus::publish_view_focus)
                     .after(benilla_world::schedule::WorldStage::Input)
                     .before(benilla_world::schedule::WorldStage::Stream),
-                world_focus::release_post_snap_hold
+                (
+                    world_focus::hold_unsupported_body,
+                    world_focus::release_post_snap_hold,
+                )
+                    .chain()
                     .after(benilla_world::schedule::WorldStage::Stream),
             )
                 .in_set(WorldFocusSet)
@@ -384,6 +388,11 @@ impl Plugin for PlayerPlugin {
             Update,
             wire_in::release_on_session_end.in_set(WorldStage::Input),
         )
+        // The same edge hands a held mouse-look cursor back to the glue screens.
+        .add_systems(
+            OnExit(crate::client_state::ClientState::InWorld),
+            camera::end_look_on_session_end,
+        )
         // Embodiment, before every reader of the marker.
         .add_systems(
             Update,
@@ -392,10 +401,29 @@ impl Plugin for PlayerPlugin {
                 .before(control)
                 .before(mirror_mover_collision_height),
         )
+        // A worldport carrying us aboard a transport boards it once it is armed, before
+        // `control` carries us.
+        .add_systems(
+            Update,
+            ride::board_pending
+                .in_set(WorldStage::Input)
+                .after(embody::maintain_embodiment)
+                .before(control)
+                .in_set(crate::client_state::InWorldGated),
+        )
         // Before `control`, which evaluates the swim depth lines.
         .add_systems(
             Update,
             mirror_mover_collision_height
+                .in_set(WorldStage::Input)
+                .before(control),
+        )
+        // …and the mounted camera's other half beside it, for the same reasons: the seat is a
+        // property of the body we drive, it changes when a mount is summoned or dismissed or when
+        // a worldport re-streams the entity, and the camera seat reads it off the resource.
+        .add_systems(
+            Update,
+            mirror_mount_seat_lift
                 .in_set(WorldStage::Input)
                 .before(control),
         )
@@ -468,5 +496,51 @@ fn mirror_mover_collision_height(
         if player.collision_height != h {
             player.collision_height = h;
         }
+    }
+}
+
+/// Mirror the driven body's **seat lift** onto [`Player`] — how far the saddle sits above its feet
+/// ([`Player::mount_seat_lift`]), `None` unless it is mounted on a model we can measure.
+///
+/// **The saddle is the mount model's authored attachment 0, scaled — never the posed joint.**
+/// `0x50ce1c`-`0x50ce56` reads it with `getAttachment(mountModel, &out, 0)`, the same `0x712cf0`
+/// that answers the rider's own pivot, and there is no bone matrix anywhere in that call tree; the
+/// preset it feeds is computed on the model event and constant until the next one.
+///
+/// This function read `RigPose::joints_root`'s live `GlobalTransform` until 2026-09-09, which is
+/// the seated position *after* the mount's skeleton has posed it — one mistake with three reported
+/// faces. The camera crept upward over seconds instead of rising once (a target that moves every
+/// frame re-arms [`camera::PivotGlide`] every frame, and a glide whose duration is `|Δ| / 1.2` s
+/// restarted from its own midpoint never arrives); it then wobbled with the mount's idle; and a
+/// MountSpecial flourish lifted it further. All three are the same read.
+///
+/// `None` while the mount model has not attached yet — no `MountChild`, or a child that has not
+/// been built — rather than `Some(0.0)`. The rider really is standing at its own feet in those
+/// frames, so the standing pivot is where the camera already is: answering `0.0` would glide it
+/// down to the Mount-pose height at ground level and then back up when the model landed, two
+/// glides for one mount. It is also the reference's own shape — it skips the camera update
+/// entirely while a model is unresolved (`0x50e907`).
+fn mirror_mount_seat_lift(
+    mut player: ResMut<Player>,
+    mover: Query<
+        (
+            Option<&crate::net::ObjectStore>,
+            Option<&crate::entities::mount::MountChild>,
+        ),
+        With<Embodied>,
+    >,
+    mounts: Query<(&CameraPivot, &crate::net::NetEntity)>,
+) {
+    let lift = mover.single().ok().and_then(|(store, child)| {
+        // The FIELD is what says mounted, and the CHILD is what says measurable.
+        store.filter(|s| s.0.unit_mount_display_id() != 0)?;
+        let child = child?.0;
+        let (pivot, net) = mounts.get(child).ok()?;
+        // A mount whose model authors no attachment 0 seats the rider at the unit matrix
+        // (`entities::mount` warns and does exactly that), so a zero here is the right lift.
+        Some((pivot.seat_z_local * net.scale).max(0.0))
+    });
+    if player.mount_seat_lift != lift {
+        player.mount_seat_lift = lift;
     }
 }

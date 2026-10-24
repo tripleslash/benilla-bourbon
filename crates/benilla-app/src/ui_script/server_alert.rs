@@ -25,6 +25,8 @@
 //! the buffer is full, since no later byte can change it.
 //! Deviation: the connection is direct. The reference opens its session with access type 0
 //! (`InternetOpenA`, `0x7a6d97`), the system's proxy settings, which benilla does not read.
+//! Deviation (this fork): the browser build fetches nothing, a page having no socket and no thread
+//! to dial one from, and `LaunchURL` opens a tab there.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -478,8 +480,12 @@ pub(super) fn fetch_alert(url: &str, timeouts: Timeouts) -> Option<Vec<u8>> {
 }
 
 /// The fetch on a thread of its own: the channel holds the alert once, or closes without one.
+/// The browser build starts none, and the channel closes.
 pub(super) fn spawn_fetch(url: String) -> crossbeam_channel::Receiver<Option<Vec<u8>>> {
     let (tx, rx) = crossbeam_channel::bounded(1);
+    if cfg!(target_arch = "wasm32") {
+        return rx;
+    }
     let started = std::thread::Builder::new()
         .name("server-alert".into())
         .spawn(move || {
@@ -502,9 +508,13 @@ pub(super) fn allowed() -> bool {
 static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The fetch for the glue manager's init (`0x46a564`): started once per process, and only for a
-/// URL that is not empty, when the run [`allowed`] it.
+/// URL that is not empty, when the run [`allowed`] it; never in the browser build.
 pub(super) fn begin_once(url: &str) -> Option<crossbeam_channel::Receiver<Option<Vec<u8>>>> {
-    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) || !allowed() || url.is_empty() {
+    if cfg!(target_arch = "wasm32")
+        || STARTED.swap(true, std::sync::atomic::Ordering::SeqCst)
+        || !allowed()
+        || url.is_empty()
+    {
         return None;
     }
     Some(spawn_fetch(url.to_string()))
@@ -556,6 +566,7 @@ pub(crate) fn open_launched(mut urls: MessageReader<LaunchUrl>) {
 /// ([`benilla_ui::script::GlueRequest::LaunchUrl`]), or a web address of URL characters and
 /// `%XY` escapes ([`benilla_ui::script::launch_addon_url_allowed`]), and goes as one argument to
 /// an opener that is no shell.
+#[cfg(not(target_arch = "wasm32"))]
 fn open_in_browser(url: &str) {
     let mut command = if cfg!(target_os = "macos") {
         std::process::Command::new("/usr/bin/open")
@@ -585,6 +596,15 @@ fn open_in_browser(url: &str) {
             });
         }
         Err(e) => warn!("LaunchURL: no browser opener: {e}"),
+    }
+}
+
+/// The page's opener: a new tab, which the browser may refuse outside a click.
+#[cfg(target_arch = "wasm32")]
+fn open_in_browser(url: &str) {
+    let opened = web_sys::window().map(|w| w.open_with_url_and_target(url, "_blank"));
+    if !matches!(opened, Some(Ok(Some(_)))) {
+        warn!("LaunchURL: the page opened no tab for {url}");
     }
 }
 

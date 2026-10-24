@@ -98,9 +98,108 @@ struct GlueMusic {
     /// The credits playlist (`[0xb06098]`), a stream of its own beside the theme's.
     credits: CreditsPlaylist,
     credits_handle: Option<GlueStream>,
+    /// The theme's and the playlist track's loads: on the page a stream's bytes and decode arrive
+    /// some frames after the ask ([`StreamLoad`]), so a file still loading is held here and
+    /// [`open_pending_streams`] opens it the frame it lands.
+    theme_load: StreamLoad,
+    theme_pending: Option<String>,
+    credits_load: StreamLoad,
+    credits_pending: Option<&'static str>,
 }
 
 type GlueStream = mixer::StreamingSoundHandle<kira::sound::FromFileError>;
+
+/// A glue stream's data as far as it has come.
+enum StreamData {
+    Ready(Box<mixer::StreamingSoundData<kira::sound::FromFileError>>),
+    /// wasm32: the bytes or the decode are in flight; ask again next frame.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Waiting,
+    Failed,
+}
+
+/// One glue stream's load. Native reads inline. **wasm32:** no whole-file blocking read on the
+/// frame: `Chain::try_read` for the bytes, [`super::web_decode`] for the PCM, the same two-step
+/// wait the zone soundscape takes; a failed load waits [`GLUE_MUSIC_RETRY`] before the next
+/// attempt, on the wasm-safe `bevy::platform::time::Instant`.
+#[derive(Default)]
+struct StreamLoad {
+    #[cfg(target_arch = "wasm32")]
+    decode: Option<super::web_decode::Pending>,
+    #[cfg(target_arch = "wasm32")]
+    retry_at: Option<bevy::platform::time::Instant>,
+}
+
+/// wasm32: how long a failed load waits before the next attempt. The failure this guards is a
+/// *permanent* one (a file the container does not hold, a decode nothing accepts), where a
+/// per-frame start would otherwise mean one request per frame.
+#[cfg(target_arch = "wasm32")]
+const GLUE_MUSIC_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl StreamLoad {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll(&mut self, assets: &WorldAssets, file: &str) -> StreamData {
+        // Every file FMOD opens is a loose-flagged open (`0x7a8860`).
+        let bytes = match assets.try_read_loose_or_chain(file) {
+            benilla_formats::TryRead::Ready(bytes) => Ok(bytes),
+            _ => Err(anyhow::anyhow!("not in the loose files or the patch chain")),
+        };
+        match bytes.and_then(mixer::stream_from_bytes) {
+            Ok(d) => StreamData::Ready(Box::new(d)),
+            Err(e) => {
+                debug!("glue music: {file} — {e:#}");
+                StreamData::Failed
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn poll(&mut self, assets: &WorldAssets, file: &str) -> StreamData {
+        use benilla_formats::TryRead;
+        use bevy::platform::time::Instant;
+
+        if let Some(pending) = self.decode.as_mut() {
+            return match pending.take() {
+                None => StreamData::Waiting,
+                Some(Ok(data)) => {
+                    self.decode = None;
+                    StreamData::Ready(Box::new(mixer::stream_from_decoded(data)))
+                }
+                Some(Err(e)) => {
+                    debug!("glue music: {file} — {e}");
+                    self.decode = None;
+                    self.retry_at = Some(Instant::now() + GLUE_MUSIC_RETRY);
+                    StreamData::Failed
+                }
+            };
+        }
+        if self.retry_at.is_some_and(|t| Instant::now() < t) {
+            return StreamData::Failed;
+        }
+        // Every file FMOD opens is a loose-flagged open (`0x7a8860`).
+        match assets.try_read_loose_or_chain(file) {
+            TryRead::Ready(bytes) => {
+                self.decode = Some(super::web_decode::begin(bytes, false));
+                StreamData::Waiting
+            }
+            // The pack is warming; that ask started it. Progress, not failure.
+            TryRead::Pending => StreamData::Waiting,
+            TryRead::Missing => {
+                debug!("glue music: {file} — not in the loose files or the patch chain");
+                self.retry_at = Some(Instant::now() + GLUE_MUSIC_RETRY);
+                StreamData::Failed
+            }
+        }
+    }
+
+    /// Drop a load in flight, for a stream no longer wanted.
+    fn cancel(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.decode = None;
+        }
+    }
+}
 
 impl Default for GlueMusic {
     fn default() -> Self {
@@ -111,6 +210,10 @@ impl Default for GlueMusic {
             fading: false,
             credits: CreditsPlaylist::default(),
             credits_handle: None,
+            theme_load: StreamLoad::default(),
+            theme_pending: None,
+            credits_load: StreamLoad::default(),
+            credits_pending: None,
         }
     }
 }
@@ -120,33 +223,35 @@ impl Default for GlueMusic {
 fn open_stream(
     out: &mut SoundOutput,
     assets: Option<&WorldAssets>,
+    load: &mut StreamLoad,
     file: &str,
     amp: f32,
-) -> Option<GlueStream> {
+) -> Opened {
     let (Some(assets), Some(mixer_ref)) = (assets, out.mixer.as_mut()) else {
-        return None;
+        return Opened::Failed;
     };
-    // Every file FMOD opens is a loose-flagged open (`0x7a8860`).
-    let bytes = assets
-        .read_file_or_loose(file)
-        .ok_or_else(|| anyhow::anyhow!("not in the loose files or the patch chain"));
-    let data = match bytes.and_then(mixer::stream_from_bytes) {
-        Ok(d) => d,
-        Err(e) => {
-            debug!("glue music: {file} — {e:#}");
-            return None;
-        }
+    let data = match load.poll(assets, file) {
+        StreamData::Ready(d) => *d,
+        StreamData::Waiting => return Opened::Waiting,
+        StreamData::Failed => return Opened::Failed,
     };
     match mixer_ref.play_stream(data.volume(mixer::amp_to_db(amp))) {
         Ok(h) => {
             info!("glue music: {file}");
-            Some(h)
+            Opened::Playing(h)
         }
         Err(e) => {
             debug!("glue music: {e:#}");
-            None
+            Opened::Failed
         }
     }
+}
+
+/// What [`open_stream`] came to.
+enum Opened {
+    Playing(GlueStream),
+    Waiting,
+    Failed,
 }
 
 /// Open `file` off the chain as the held theme at the Music slider times 0.8.
@@ -158,10 +263,15 @@ fn open_glue_music(
     file: &str,
 ) {
     let amp = config.category_amp(SoundCategory::Music) * GLUE_MUSIC_VOLUME;
-    if let Some(h) = open_stream(out, assets, file, amp) {
-        music.handle = Some(h);
-        music.fading = false;
-        music.watch.reset();
+    music.theme_pending = None;
+    match open_stream(out, assets, &mut music.theme_load, file, amp) {
+        Opened::Playing(h) => {
+            music.handle = Some(h);
+            music.fading = false;
+            music.watch.reset();
+        }
+        Opened::Waiting => music.theme_pending = Some(file.to_string()),
+        Opened::Failed => {}
     }
 }
 
@@ -171,6 +281,8 @@ fn stop_credits(music: &mut GlueMusic) {
     if let Some(mut h) = music.credits_handle.take() {
         h.stop(mixer::fade(CREDITS_FADE_OUT_MS));
     }
+    music.credits_pending = None;
+    music.credits_load.cancel();
     music.credits.stop();
 }
 
@@ -181,17 +293,36 @@ fn open_credits_track(
     out: &mut SoundOutput,
     assets: Option<&WorldAssets>,
     config: &SoundConfig,
-    file: &str,
+    file: &'static str,
 ) {
     let amp = config.category_amp(SoundCategory::Music) * CREDITS_VOLUME;
-    match open_stream(out, assets, file, amp) {
-        Some(h) => music.credits_handle = Some(h),
-        None => music.credits.stop(),
+    music.credits_pending = None;
+    match open_stream(out, assets, &mut music.credits_load, file, amp) {
+        Opened::Playing(h) => music.credits_handle = Some(h),
+        Opened::Waiting => music.credits_pending = Some(file),
+        Opened::Failed => music.credits.stop(),
+    }
+}
+
+/// Open the theme or the playlist track whose load was still in flight, the frame it lands.
+fn open_pending_streams(
+    mut music: NonSendMut<GlueMusic>,
+    mut out: NonSendMut<SoundOutput>,
+    assets: Option<Res<WorldAssets>>,
+    config: Res<SoundConfig>,
+) {
+    if let Some(file) = music.theme_pending.clone() {
+        open_glue_music(&mut music, &mut out, assets.as_deref(), &config, &file);
+    }
+    if let Some(file) = music.credits_pending {
+        open_credits_track(&mut music, &mut out, assets.as_deref(), &config, file);
     }
 }
 
 /// Stop the held theme over `fade_ms`; the handle drops once the watch sees it stopped.
 fn fade_glue_music(music: &mut GlueMusic, fade_ms: u64) {
+    music.theme_pending = None;
+    music.theme_load.cancel();
     if let Some(h) = music.handle.as_mut() {
         h.stop(mixer::fade(fade_ms));
         music.fading = true;
@@ -363,13 +494,17 @@ fn report_stream_voices(music: NonSend<GlueMusic>, mut out: NonSendMut<super::So
 
 pub(super) fn plugin(app: &mut App) {
     app.add_message::<GlueMusicRequest>()
-        .insert_non_send_resource(GlueMusic::default())
+        .insert_non_send(GlueMusic::default())
         .add_systems(
             Update,
             (
                 // The stock screens' `PlayGlueMusic`/`StopGlueMusic` drive it.
                 drive_glue_music_requests
                     .after(crate::ui_script::glue_mgr::drive_glue_mgr)
+                    .before(watch_glue_music),
+                // A load still in flight opens the frame it lands (the page's async read).
+                open_pending_streams
+                    .after(drive_glue_music_requests)
                     .before(watch_glue_music),
                 // No run condition: the theme plays into `InWorld`, and the entry load burst is
                 // the window the watch exists for.

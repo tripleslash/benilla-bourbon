@@ -74,23 +74,24 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
 
     let (events_tx, events) = crossbeam_channel::unbounded();
     let (writer_tx, _writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
-    let (login_tx, login_rx) = crossbeam_channel::unbounded();
-    let (park_tx, park_rx) = crossbeam_channel::unbounded();
+    let (login_tx, login_rx) = async_channel::unbounded();
+    let (park_tx, park_rx) = async_channel::unbounded();
     let cycle = thread::spawn(move || {
         let parks = Parks { login_rx, park_rx };
-        let ended = run(
+        // Natively every await in the cycle is a blocking socket read, as on the `wow-net` thread.
+        let ended = futures_lite::future::block_on(run(
             &events_tx,
             &writer_tx,
             &parks,
             &AtomicU64::new(0),
             &Mutex::new(PingClock::default()),
             &mut Default::default(),
-        );
+        ));
         matches!(ended, Ok(Cycle::Repark))
     });
 
     login_tx
-        .send(LoginRequest {
+        .send_blocking(LoginRequest {
             user: fake::USER.into(),
             pass: fake::PASS.into(),
             host: realmd.addr.clone(),
@@ -102,14 +103,14 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
     assert!(!failed);
     assert_eq!(realms[0].name, REALM);
     park_tx
-        .send(ParkRequest::Realm(enter(realms[0].clone())))
+        .send_blocking(ParkRequest::Realm(enter(realms[0].clone())))
         .unwrap();
     assert!(
         matches!(next_event(&events), SessionEvent::WorldAuthenticated { .. }),
         "the world connect completes with the authentication"
     );
     park_tx
-        .send(ParkRequest::Char(CharRequest::Enumerate))
+        .send_blocking(ParkRequest::Char(CharRequest::Enumerate))
         .unwrap();
     match next_event(&events) {
         SessionEvent::CharacterList { characters, .. } => assert!(
@@ -120,7 +121,7 @@ fn an_empty_account_parks_at_select_without_creating_a_character() {
     }
     // Select's Back ends the cycle, so the socket is done and its log complete.
     park_tx
-        .send(ParkRequest::Char(CharRequest::Abandon))
+        .send_blocking(ParkRequest::Char(CharRequest::Abandon))
         .unwrap();
     assert!(cycle.join().unwrap(), "Back returns to the login park");
     let sent = world.sent.lock().unwrap().clone();
@@ -540,6 +541,7 @@ fn a_create_sends_its_result_alone() {
         hair_style: 0,
         hair_color: 0,
         facial_hair: 0,
+        challenge_mask: None,
     };
     let (realmd, world) = fake::servers(|world| vec![FakeRealm::new(REALM, world)]);
     let cycles = fake::spawn_cycles();

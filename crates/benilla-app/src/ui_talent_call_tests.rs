@@ -55,7 +55,7 @@ fn client(money: u32) -> (App, Receiver<ClientCommand>) {
         ]],
         points: (1, 0),
     });
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     (app, rx)
 }
 
@@ -130,7 +130,7 @@ fn confirm_talent_wipe_answers_inside_its_call() {
     assert_eq!(sent(&rx), [roll(1, 2)]);
     let in_call = app
         .world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .eval::<String>("return InCall")
         .expect("the refusal was heard inside the call");
     assert_eq!(in_call, "You don't have enough money.");

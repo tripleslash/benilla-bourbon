@@ -442,7 +442,7 @@ fn feed_app() -> (App, crossbeam_channel::Receiver<ClientCommand>) {
     // The calls are kept, not applied: this app has no host, and its tests read the VM.
     let mut script = UiScript::new().unwrap();
     script.keep_calls();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.add_latched_window::<TradeSession>()
         .add_systems(Update, feed_trade);
     net::register(&mut app);
@@ -468,7 +468,7 @@ fn open_with(app: &mut App, partner: u64) {
 /// The number of `TRADE_REQUEST_CANCEL`s a spy frame has seen.
 fn cancels_seen(app: &mut App) -> i64 {
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<i64>("return BENILLA_TEST_TRADE_CANCELS or 0")
         .unwrap()
 }
@@ -477,7 +477,7 @@ fn cancels_seen(app: &mut App) -> i64 {
 fn canceled_fires_trade_request_cancel_and_the_siblings_do_not() {
     let (mut app, _rx) = feed_app();
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"
             local f = CreateFrame("Frame")
@@ -550,7 +550,7 @@ fn a_trade_slot_click_is_not_announced_again_by_the_feed() {
         durability: 0,
     };
     {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         let slot = benilla_ui::script::ContainerSlot {
             item_id: 2589,
             count: 3,
@@ -579,7 +579,7 @@ fn a_trade_slot_click_is_not_announced_again_by_the_feed() {
     }
     let seen = |app: &mut App| {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<i64>("return SLOT_EVENTS")
             .unwrap()
     };
@@ -591,7 +591,7 @@ fn a_trade_slot_click_is_not_announced_again_by_the_feed() {
     assert_eq!(seen(&mut app), 1, "the feed re-announced the placement");
 
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run("ClearCursor() ClickTradeButton(1)")
         .unwrap();
     assert_eq!(seen(&mut app), 2, "the clear's own signal, in place");
@@ -616,7 +616,7 @@ fn a_trade_slot_click_survives_a_push_of_the_stale_store() {
     app.update();
     app.update();
     {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         let slot = benilla_ui::script::ContainerSlot {
             item_id: 2589,
             count: 3,
@@ -650,7 +650,7 @@ fn a_trade_slot_click_survives_a_push_of_the_stale_store() {
     app.update();
     let (events, name): (i64, Option<String>) = app
         .world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval("return SLOT_EVENTS, (GetTradePlayerItemInfo(1))")
         .unwrap();
     assert_eq!(events, 1, "the stale slot was announced");
@@ -1069,7 +1069,7 @@ fn offered_app() -> App {
     let (mut app, _rx) = feed_app();
     open_with(&mut app, 0x7);
     app.update();
-    let mut vm = app.world_mut().non_send_resource_mut::<UiScript>();
+    let mut vm = app.world_mut().non_send_mut::<UiScript>();
     let mut bag = benilla_ui::script::ContainerState::default();
     bag.slots.insert(
         1,
@@ -1097,14 +1097,14 @@ fn offered_app() -> App {
 
 fn seen(app: &mut App) -> Vec<String> {
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval("local s = SEEN SEEN = {} return s")
         .unwrap()
 }
 
 fn bag_locked(app: &mut App) -> bool {
     app.world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval("local _, _, l = GetContainerItemInfo(0, 1) return l == 1")
         .unwrap()
 }
@@ -1201,7 +1201,7 @@ fn both_offers_answer_inside_trade_closed_and_until_the_next_open() {
                      tostring((GetTradeTargetItemInfo(1))) .. '/' .. GetPlayerTradeMoney() \
                      .. '/' .. GetTargetTradeMoney()";
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(&format!(
                 "CLOSED = {{}} local f = CreateFrame('Frame') f:RegisterEvent('TRADE_CLOSED') \
                  f:SetScript('OnEvent', function() table.insert(CLOSED, (function() {reads} end)()) end)"
@@ -1210,7 +1210,7 @@ fn both_offers_answer_inside_trade_closed_and_until_the_next_open() {
         app.update();
         let read = |app: &App| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<String>(reads)
                 .unwrap()
         };
@@ -1220,7 +1220,7 @@ fn both_offers_answer_inside_trade_closed_and_until_the_next_open() {
         app.update();
         let closed: Vec<String> = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return CLOSED")
             .unwrap();
         assert!(!closed.is_empty(), "TRADE_CLOSED fired after {closing:?}");
@@ -1231,18 +1231,14 @@ fn both_offers_answer_inside_trade_closed_and_until_the_next_open() {
         assert_eq!(read(&app), "Linen Cloth/Iron Sword/0/0", "after the close");
         // `PickupTradeMoney` finds no offer to lift (`0x4c07ca`-`0x4c07d1`), so no coins
         // reach the cursor and nothing is queued.
-        let mut vm = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut vm = app.world_mut().non_send_mut::<UiScript>();
         vm.run("PickupTradeMoney(100)").unwrap();
         assert!(!vm
             .take_trade_calls()
             .iter()
             .any(|c| matches!(c, benilla_ui::script::TradeCall::Gold(_))));
         assert_eq!(vm.eval::<i64>("return GetCursorMoney()").unwrap(), 0);
-        let holding = |app: &App| {
-            app.world()
-                .non_send_resource::<UiScript>()
-                .trade_slot_holding(LINEN)
-        };
+        let holding = |app: &App| app.world().non_send::<UiScript>().trade_slot_holding(LINEN);
         assert_eq!(holding(&app), Some((0, 0, 1)), "our item table outlives it");
 
         open_with(&mut app, 0x7);
@@ -1264,7 +1260,7 @@ fn trade_update_comes_only_from_a_landed_record_a_getter_asked_for() {
         .init_resource::<Selection>()
         .init_resource::<GroupState>();
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"
             UPDATES, SLOTS, SEEN = 0, 0, {}
@@ -1286,7 +1282,7 @@ fn trade_update_comes_only_from_a_landed_record_a_getter_asked_for() {
     app.update();
     let counts = |app: &App| -> (i64, i64) {
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return UPDATES, SLOTS")
             .unwrap()
     };
@@ -1315,7 +1311,7 @@ fn trade_update_comes_only_from_a_landed_record_a_getter_asked_for() {
 
     // Two getter calls on the unanswered slot register two callbacks (`0x55bbb3`).
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run("GetTradeTargetItemInfo(1) GetTradeTargetItemInfo(1)")
         .unwrap();
     app.update();
@@ -1352,7 +1348,7 @@ fn trade_update_comes_only_from_a_landed_record_a_getter_asked_for() {
     );
     let seen: Vec<String> = app
         .world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval("return SEEN")
         .unwrap();
     assert_eq!(
@@ -1363,7 +1359,7 @@ fn trade_update_comes_only_from_a_landed_record_a_getter_asked_for() {
 
     // Answered now, a getter asks nothing and nothing signals.
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run("GetTradeTargetItemInfo(1)")
         .unwrap();
     app.update();
@@ -1407,7 +1403,7 @@ fn a_refused_slot_record_is_asked_by_the_next_getter_never_by_a_frame() {
     );
     let getter = |app: &mut App| {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("GetTradeTargetItemInfo(1)")
             .unwrap();
         app.update();
@@ -1489,7 +1485,7 @@ fn a_bounced_offer_unlocks_its_item_and_signals_the_slot_once() {
 
     // An own-side extended status that empties a filled slot does the same (`0x5d4b33`).
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run("ClearCursor() PickupContainerItem(0, 1) ClickTradeButton(1)")
         .unwrap();
     app.world_mut()
@@ -1539,7 +1535,7 @@ const EVENTS: [&str; 3] = ["TRADE_SHOW", "TRADE_CLOSED", "PLAYER_LEAVING_WORLD"]
 fn a_reload_cancels_the_trade_closes_it_and_the_new_vm_opens_nothing() {
     use crate::ui_script::sweep_test::{reload_in_place, seen, seen_in, spied_vm};
     let (mut app, rx) = sweep_trade_app();
-    app.insert_non_send_resource(spied_vm(&EVENTS));
+    app.insert_non_send(spied_vm(&EVENTS));
     open_with(&mut app, 0x7);
     app.update();
     assert_eq!(seen_in(&app), ["TRADE_SHOW"]);
@@ -1563,7 +1559,7 @@ fn a_reload_cancels_the_trade_closes_it_and_the_new_vm_opens_nothing() {
 fn the_trade_leg_cancels_with_no_trade_and_a_worldport_closes_once() {
     use crate::ui_script::sweep_test::{seen_in, spied_vm, sweep_in_place};
     let (mut app, rx) = sweep_trade_app();
-    app.insert_non_send_resource(spied_vm(&EVENTS));
+    app.insert_non_send(spied_vm(&EVENTS));
     sweep_in_place(&mut app);
     assert_eq!(
         cancels(&rx),
@@ -1656,7 +1652,7 @@ fn a_destroyed_offer_clears_its_slot_and_tells_the_server() {
     );
     let name: Option<String> = app
         .world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval("return (GetTradePlayerItemInfo(1))")
         .unwrap();
     assert_eq!(name, None, "the slot is empty");
@@ -1681,7 +1677,7 @@ fn a_destroyed_offer_clears_its_slot_and_tells_the_server() {
 fn a_traded_away_item_clears_its_slot_before_trade_closed() {
     let (mut app, rx) = resignal_app();
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             "READS = {} local f = CreateFrame('Frame') f:RegisterEvent('TRADE_CLOSED') \
              f:SetScript('OnEvent', function() \
@@ -1704,7 +1700,7 @@ fn a_traded_away_item_clears_its_slot_before_trade_closed() {
     );
     let reads: Vec<String> = app
         .world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval("return READS")
         .unwrap();
     assert_eq!(
@@ -1756,7 +1752,7 @@ fn a_wrapped_offer_placed_again_carries_its_giver() {
     );
     let slots = app
         .world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .trade_player_slots()
         .expect("open trade");
     let row = slots[0].as_ref().expect("the slot is filled");
@@ -1802,7 +1798,7 @@ fn a_restacked_offer_is_placed_again_with_its_live_count() {
     assert_eq!(seen(&mut app), ["TRADE_PLAYER_ITEM_CHANGED"]);
     let count: i64 = app
         .world_mut()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval("local _, _, n = GetTradePlayerItemInfo(1) return n")
         .unwrap();
     assert_eq!(count, 7, "the slot reads the live stack");
@@ -1841,7 +1837,7 @@ fn a_restacked_offer_is_placed_again_with_its_live_count() {
 fn the_trade_re_signal_follows_the_bar_recount_in_the_watchers_run() {
     let (mut app, _rx) = resignal_app();
     let world = app.world_mut();
-    let mut vm = world.non_send_resource_mut::<UiScript>();
+    let mut vm = world.non_send_mut::<UiScript>();
     vm.set_action(
         4,
         Some(benilla_ui::script::ActionSlot {
@@ -1876,7 +1872,7 @@ fn the_destroy_run_recounts_scans_asks_then_signals() {
     use benilla_ui::script::{QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS};
     let (mut app, _rx) = resignal_app();
     let world = app.world_mut();
-    let mut vm = world.non_send_resource_mut::<UiScript>();
+    let mut vm = world.non_send_mut::<UiScript>();
     vm.set_action(
         4,
         Some(benilla_ui::script::ActionSlot {
@@ -1972,7 +1968,7 @@ fn the_enchant_slots_spell_signals_its_side_and_names_the_enchantment() {
     }
     app.update();
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run(
             r#"SEEN = {}
                local f = CreateFrame("Frame")
@@ -1983,7 +1979,7 @@ fn the_enchant_slots_spell_signals_its_side_and_names_the_enchantment() {
         .unwrap();
     let enchantments = |app: &mut App| -> (Option<String>, Option<String>) {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval(
                 "local _, _, _, _, p = GetTradePlayerItemInfo(7) \
                  local _, _, _, _, _, t = GetTradeTargetItemInfo(7) return p, t",

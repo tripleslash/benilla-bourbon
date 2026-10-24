@@ -28,6 +28,7 @@ fn fixture() -> Vec<RealmInfo> {
             flags: 0,
             category,
             id: 0,
+            version: None,
         };
     vec![
         realm("Amberfield", 1, 0, 0.5, 2),

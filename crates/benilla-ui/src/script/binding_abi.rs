@@ -194,7 +194,11 @@ pub(crate) fn region_name(model: &Model, rh: RegionHandle) -> String {
 
 /// [`object_name`], borrowing the model; a caller holding a borrow uses that instead.
 pub(crate) fn name_of(lua: &Lua, this: &Table) -> String {
-    object_name(&lua.app_data_ref::<Model>().expect("model"), this)
+    object_name(
+        &lua.app_data_ref::<crate::script::ModelCell>()
+            .expect("model"),
+        this,
+    )
 }
 
 /// `Usage: <name>:<line>`, the raise of a method whose format string is `Usage: %s:<line>`.

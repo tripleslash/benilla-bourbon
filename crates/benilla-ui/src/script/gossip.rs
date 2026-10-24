@@ -15,7 +15,6 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi;
-use super::Model;
 
 /// One gossip option; its 1-based index is its place in [`GossipMenu::options`].
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -71,7 +70,7 @@ fn submit(lua: &Lua, call: GossipCall) -> mlua::Result<()> {
 impl super::UiScript {
     /// Push (or clear, with `None`) the open gossip menu.
     pub fn set_gossip(&mut self, menu: Option<GossipMenu>) {
-        self.model_mut().gossip = menu;
+        set_field!(self, gossip, menu);
     }
 
     /// The menu the VM holds, as last pushed.
@@ -116,7 +115,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetGossipText",
         lua.create_function(|lua, ()| {
             let text = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.gossip.as_ref().map(|m| m.greeting.clone())
             };
             match text {
@@ -131,7 +132,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             // Copy out under one short borrow; build the Lua values with none held.
             let pairs: Vec<(String, String)> = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.gossip.as_ref().map_or_else(Vec::new, |m| {
                     m.options
                         .iter()
@@ -181,7 +184,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // behind two vararg verbs (`0x4e2430`, `0x4e2580`); the app splits them at parse time.
     fn quest_rows(lua: &Lua, active: bool) -> mlua::Result<MultiValue> {
         let rows: Vec<(String, u32)> = {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.gossip.as_ref().map_or_else(Vec::new, |m| {
                 m.quests
                     .iter()

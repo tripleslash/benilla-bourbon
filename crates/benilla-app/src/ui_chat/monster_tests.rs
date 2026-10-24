@@ -57,7 +57,7 @@ fn client() -> App {
     "#,
     )
     .unwrap();
-    world.insert_non_send_resource(s);
+    world.insert_non_send(s);
     app
 }
 
@@ -81,7 +81,7 @@ fn heard(app: &mut App, line: ChatMessage) -> Vec<String> {
     crate::lanes::fire_in_order(app.world_mut());
     let s = app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        .non_send_mut::<benilla_ui::script::UiScript>();
     let out = s.eval::<Vec<String>>("return Heard").unwrap();
     s.run("Heard = {}").unwrap();
     out
@@ -179,7 +179,7 @@ fn idle(app: &mut App) -> Vec<String> {
     crate::lanes::fire_in_order(app.world_mut());
     let s = app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        .non_send_mut::<benilla_ui::script::UiScript>();
     let out = s.eval::<Vec<String>>("return Heard").unwrap();
     s.run("Heard = {}").unwrap();
     out

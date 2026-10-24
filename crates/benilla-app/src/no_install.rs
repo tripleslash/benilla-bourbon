@@ -73,6 +73,8 @@ fn message(looked_in: &[PathBuf]) -> String {
 /// is `unattended`, so an instrumented run never waits on a click.
 pub(crate) fn fail(err: &NoInstall, unattended: bool) -> AppExit {
     eprintln!("benilla: {}", err.message());
+    // Native only: the page has no native dialog, and its console carries the stderr line.
+    #[cfg(not(target_arch = "wasm32"))]
     if !unattended {
         // Linux shows it through `zenity` and logs nothing when that is missing, which stderr covers.
         rfd::MessageDialog::new()
@@ -82,6 +84,8 @@ pub(crate) fn fail(err: &NoInstall, unattended: bool) -> AppExit {
             .set_buttons(rfd::MessageButtons::Ok)
             .show();
     }
+    #[cfg(target_arch = "wasm32")]
+    let _ = unattended;
     AppExit::error()
 }
 

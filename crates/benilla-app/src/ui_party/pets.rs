@@ -282,7 +282,7 @@ pub(in crate::ui_party) mod tests {
                 "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         // The feed, then the party lane, as the lanes' drain follows the feeds.
         app.init_resource::<crate::ui_party::PartyLane>()
             .add_systems(
@@ -384,7 +384,7 @@ pub(in crate::ui_party) mod tests {
     /// Run a frame and take the pet events it fired; `UNIT_PET`, or a unit event naming a pet.
     pub(in crate::ui_party) fn frame(app: &mut App) -> Vec<String> {
         app.update();
-        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut s = app.world_mut().non_send_mut::<UiScript>();
         s.resolve();
         let seen: Vec<String> = s.eval("return SEEN").unwrap();
         s.run("SEEN = {}").unwrap();
@@ -396,7 +396,7 @@ pub(in crate::ui_party) mod tests {
     /// A number the VM answers, for the getters.
     fn num(app: &mut App, code: &str) -> f64 {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval(&format!("return {code}"))
             .unwrap()
     }
@@ -404,7 +404,7 @@ pub(in crate::ui_party) mod tests {
     /// A string or nil the VM answers.
     fn text(app: &mut App, code: &str) -> Option<String> {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval(&format!("return {code}"))
             .unwrap()
     }
@@ -412,7 +412,7 @@ pub(in crate::ui_party) mod tests {
     /// A predicate answers the number 1 or nil, never a boolean.
     pub(in crate::ui_party) fn flag(app: &mut App, code: &str) -> Option<f64> {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval(&format!("return {code}"))
             .unwrap()
     }
@@ -560,7 +560,7 @@ pub(in crate::ui_party) mod tests {
     fn a_member_leaving_view_with_an_unnamed_new_pet_names_it_unknownobject() {
         let mut app = app();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(r#"UNKNOWNOBJECT = "Unknown""#)
             .unwrap();
         party(&mut app, 1, true);
@@ -587,7 +587,7 @@ pub(in crate::ui_party) mod tests {
                     Some(&store),
                     |g| (g == pet(2)).then_some(&pet_store),
                     world.resource::<NameCache>(),
-                    world.get_non_send_resource::<UiScript>(),
+                    world.get_non_send::<UiScript>(),
                     world.resource::<NetCommands>(),
                 );
             });
@@ -829,7 +829,7 @@ pub(in crate::ui_party) mod tests {
             "and no other slot's"
         );
         // The frame's portrait binds the token the portrait booths bake for it.
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.resolve();
         let bound: Vec<String> = script
             .extract()
@@ -868,7 +868,7 @@ pub(in crate::ui_party) mod tests {
             "the push alone"
         );
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.set_unit_guids(&benilla_ui::script::UnitGuids {
                 player: ME,
                 party: [member(1), 0, 0, 0],
@@ -879,7 +879,7 @@ pub(in crate::ui_party) mod tests {
             }
         }
         assert_eq!(flag(&mut app, "PartyMemberFrame1PetFrame:IsShown()"), None);
-        let errors = app.world().non_send_resource::<UiScript>().errors();
+        let errors = app.world().non_send::<UiScript>().errors();
         assert!(errors.is_empty(), "script errors: {errors:?}");
     }
 

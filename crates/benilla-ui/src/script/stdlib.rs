@@ -80,7 +80,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 fn install_profile(lua: &Lua) -> mlua::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     // The latch as nanoseconds past this VM's origin; 0 until a start, as `[0xceeb58]` is.
-    let origin = std::time::Instant::now();
+    let origin = web_time::Instant::now();
     let start = std::sync::Arc::new(AtomicU64::new(0));
     let g = lua.globals();
     let latch = start.clone();

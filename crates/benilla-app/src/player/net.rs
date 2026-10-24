@@ -89,7 +89,7 @@ mod tests {
                  f:SetScript(\"OnEvent\", function() tinsert(SKINNED, arg1) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
 
         crate::net::handlers::dispatch(
             app.world_mut(),
@@ -100,7 +100,7 @@ mod tests {
         );
         let skinned = |app: &App| -> Vec<i64> {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval("return SKINNED")
                 .unwrap()
         };
@@ -130,7 +130,7 @@ mod tests {
                  f:SetScript(\"OnEvent\", function() SKINNED = SKINNED + 1 end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
 
         crate::net::handlers::dispatch(
             app.world_mut(),
@@ -143,7 +143,7 @@ mod tests {
         app.update();
         let fired: i64 = app
             .world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval("return SKINNED")
             .unwrap();
         assert_eq!(fired, 0);

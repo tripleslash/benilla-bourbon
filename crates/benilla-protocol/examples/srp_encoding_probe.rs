@@ -12,11 +12,13 @@
 //! realmd's lockout: `WrongPass.MaxAttempts` (default 10) failures within 60 s lock the IP out
 //! for 60 s, answered with `0x08 WOW_FAIL_DB_BUSY`.
 
-use std::net::TcpStream;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use benilla_protocol::auth::{self, AuthReject};
+// The login readers are awaited (the transport seam, so the same code runs in a browser); this
+// probe stays a straight-line CLI and drives each of them to completion where it stands.
+use benilla_protocol::transport::Conn;
 use num_bigint::BigUint;
 use rand::{thread_rng, RngCore};
 use sha1::{Digest, Sha1};
@@ -260,12 +262,12 @@ fn handshake(
     want: Want,
     tries: u32,
 ) -> Result<(Attempt, Outcome)> {
-    let mut s = TcpStream::connect((host, AUTH_PORT))
+    let mut s = futures_lite::future::block_on(Conn::connect(host, AUTH_PORT))
         .with_context(|| format!("connecting to {host}:{AUTH_PORT}"))?;
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
     auth::write_logon_challenge(&mut s, user, BUILD, auth::LOCALE_TAG_EN_US)
         .context("sending logon challenge")?;
-    let reply = auth::read_challenge_reply(&mut s)
+    let reply = futures_lite::future::block_on(auth::read_challenge_reply(&mut s))
         .context("reading logon challenge reply")?
         .ok_or_else(|| anyhow!("SUCCESS_SURVEY on the challenge: no SRP inputs"))?;
 
@@ -279,7 +281,7 @@ fn handshake(
 
     auth::write_logon_proof(&mut s, &attempt.a_pub, &attempt.m1, &reply.crc_salt)
         .context("sending logon proof")?;
-    let outcome = match auth::read_proof_reply(&mut s) {
+    let outcome = match futures_lite::future::block_on(auth::read_proof_reply(&mut s)) {
         Ok(None) => Outcome::Error("SUCCESS_SURVEY: accepted with no M2".into()),
         Ok(Some(m2)) => Outcome::Accepted {
             m2_fixed: m2 == attempt.expected_m2(Enc::Fixed),

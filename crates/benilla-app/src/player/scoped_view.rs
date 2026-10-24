@@ -7,7 +7,8 @@
 //! `π/2` and unlocks. The Ornate Spyglass (item 5507, spell 12883) passes 15, a 6× zoom.
 //!
 //! The ratio is applied, not the degrees: `[camera+0x40]` defaults to 90°, while our [`CAM_FOVY`]
-//! is the effective vertical field of view, 45° against the reference's measured 44.1°.
+//! is the effective vertical field of view, 58.7° (90° horizontal at 16:9) against the reference's
+//! measured 44.1°.
 
 use bevy::camera::{PerspectiveProjection, Projection};
 use bevy::prelude::*;
@@ -68,10 +69,15 @@ pub(super) fn apply_scoped_view(
         return;
     };
     let want = CAM_FOVY * scoped.zoom.unwrap_or(1.0);
+    // `&mut` marks the projection changed even when the value is equal, so compare first.
+    let Projection::Perspective(PerspectiveProjection { fov, .. }) = projection.as_ref() else {
+        return;
+    };
+    if (*fov - want).abs() <= f32::EPSILON {
+        return;
+    }
     if let Projection::Perspective(PerspectiveProjection { fov, .. }) = &mut *projection {
-        if (*fov - want).abs() > f32::EPSILON {
-            *fov = want;
-        }
+        *fov = want;
     }
 }
 
@@ -90,8 +96,8 @@ mod tests {
             "the spyglass is a 6x zoom off whatever our normal FOV is, not a literal 15 degrees"
         );
         assert!(
-            (fov.to_degrees() - 7.5).abs() < 1e-4,
-            "…which lands at 7.5 degrees vertical for our 45 degree default, not 15"
+            (fov.to_degrees() - 58.7155 / 6.0).abs() < 1e-3,
+            "…which lands at 9.79 degrees vertical for our 58.7 degree default, not 15"
         );
         assert!(scoped.active());
 
@@ -102,5 +108,33 @@ mod tests {
             "unscoped restores OUR default, never the reference's stored 90"
         );
         assert!(!none.active());
+    }
+
+    /// An unscoped frame over an unchanged field of view leaves the projection unmarked: the
+    /// particle gate's and model visibility's still-camera skips read its change tick.
+    #[test]
+    fn an_equal_field_of_view_leaves_the_projection_unmarked() {
+        #[derive(Resource, Default)]
+        struct Marks(u32);
+        fn probe(cams: Query<Ref<Projection>, With<WorldCamera>>, mut marks: ResMut<Marks>) {
+            marks.0 += cams.iter().filter(|p| p.is_changed()).count() as u32;
+        }
+        let mut app = App::new();
+        app.init_resource::<ScopedView>();
+        app.init_resource::<Marks>();
+        app.add_systems(Update, (apply_scoped_view, probe).chain());
+        app.world_mut().spawn((
+            WorldCamera,
+            Projection::Perspective(PerspectiveProjection {
+                fov: CAM_FOVY,
+                ..default()
+            }),
+        ));
+        app.update();
+        app.world_mut().resource_mut::<Marks>().0 = 0;
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<Marks>().0, 0, "no write, no mark");
     }
 }

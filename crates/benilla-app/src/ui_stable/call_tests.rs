@@ -75,7 +75,7 @@ fn client(summon: u64) -> Stable {
         ],
         has_live_pet: false,
     }));
-    app.world_mut().insert_non_send_resource(script);
+    app.world_mut().insert_non_send(script);
     Stable { app, rx }
 }
 

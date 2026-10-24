@@ -128,7 +128,7 @@ impl LoginRefusal {
 pub struct TransportClock {
     pub progress_ms: u32,
     /// Stamped by [`crate::WorldReader::poll`] as it reads the packet; `None` from a bare decode.
-    pub arrived: Option<std::time::Instant>,
+    pub arrived: Option<web_time::Instant>,
 }
 
 /// The block an [`SessionEvent::ObjectNotify`] stands for in the notify pass.

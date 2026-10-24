@@ -17,6 +17,43 @@ use super::{
 };
 
 /// The materials one item batch fades through.
+/// Whether a model's loader idle poses a bone away from bind pose ([`ModelAnimations::first_seq`]),
+/// so an attached instance needs its own pose to draw where the reference draws it.
+///
+/// [`ModelAnimations::first_seq`]: benilla_assets::ModelAnimations::first_seq
+fn idle_poses_bones(dm: &super::super::DisplayModel) -> bool {
+    dm.animations
+        .as_ref()
+        .is_some_and(|a| a.first_seq.is_some())
+}
+
+/// The loader idle's pose of a parentless bone 0 at the sequence start, as the one rigid
+/// transform a static mesh can take: `T(pivot + d) · R · S · T(−pivot)`, the joint's local pose
+/// over its inverse bind pose. The identity when the idle is the bind pose or bone 0 has a parent.
+fn idle_root_pose(dm: &super::super::DisplayModel) -> Transform {
+    let Some(anims) = dm.animations.as_ref().filter(|a| a.first_seq.is_some()) else {
+        return Transform::IDENTITY;
+    };
+    let Some(joint) = dm.skeleton.joints.first().filter(|j| j.parent < 0) else {
+        return Transform::IDENTITY;
+    };
+    let Some(bone) = anims
+        .idle_clip()
+        .and_then(|clip| anims.pose.node(clip.node))
+        .and_then(|node| anims.pose.clips.get(node.clip as usize))
+        .and_then(|clip| clip.bones.iter().find(|b| b.bone == 0))
+    else {
+        return Transform::IDENTITY;
+    };
+    let pivot = joint.local_translation;
+    let posed = Mat4::from_scale_rotation_translation(
+        bone.scale.sample(0.0).unwrap_or(Vec3::ONE),
+        bone.rotation.sample(0.0).unwrap_or(Quat::IDENTITY),
+        bone.translation.sample(0.0).unwrap_or(pivot),
+    ) * Mat4::from_translation(-pivot);
+    Transform::from_matrix(posed)
+}
+
 fn item_fade_set(part: &super::super::EntityPart) -> FadeSet<'_> {
     FadeSet {
         steady: &part.material,
@@ -140,6 +177,10 @@ pub(in crate::entities) fn attach_held_items(
             body_center: body_center.map(|c| c.0),
             scale: unit_tf.map_or(1.0, |t| t.scale.max_element()),
         };
+        // Settled: every slot is applied, and readiness only moves when a model builds.
+        if !held.is_changed() && attached.as_ref().is_some_and(|a| a.applied == *items) {
+            continue;
+        }
         // A slot whose model has not built stays unapplied, and attaches once it has.
         let mut next = items.clone();
         for slot in next.slots.iter_mut() {
@@ -296,7 +337,7 @@ fn spawn_slot(
         if let Some([top, bottom]) = dm.string_anchors {
             commands
                 .entity(root)
-                .insert(crate::weapon_trail::WeaponTrail::new(top.1, bottom.1));
+                .insert(crate::weapon_trail::WeaponTrail::new(top.rest, bottom.rest));
         }
     }
     // The fishing line's near anchor (`0x61f780`). The reference gates on class 2 subclass 20 and
@@ -316,6 +357,10 @@ fn spawn_slot(
         && dm.animations.as_ref().is_some_and(|a| {
             a.owns(crate::ranged_flex::BOW_PULL) || a.owns(crate::ranged_flex::BOW_RELEASE)
         });
+    // Every attached M2 is armed with its loader idle like any other (`0x71019b`), so an item whose
+    // idle holds a pose away from bind pose is posed too: reforged's Stormwind guard helm keys its
+    // bone 0.19 yd down in Stand, and at bind pose it floats above the head.
+    let posed = flexes || (!dm.skeleton.joints.is_empty() && idle_poses_bones(dm));
     // The item rig, for geometry welded to a billboard bone (an R14 pauldron's spikes): the
     // reference billboards an attached model like a standalone one (`0x718657`..`0x71876f`),
     // blending the bone's camera-replaced row per vertex (`0x71a460`). All seven such models are
@@ -357,9 +402,9 @@ fn spawn_slot(
             benilla_world::rig_palette::RigSkin::allocate_bones(
                 palettes,
                 dm.skeleton.joints.len() as u32,
-                // A resting rider's rows are the placement alone; a flexing prop's are
+                // A resting rider's rows are the placement alone; a posed prop's are
                 // `F × model[b] × ibp[b]`.
-                if flexes {
+                if posed {
                     dm.inverse_bindposes.clone().unwrap_or_default()
                 } else {
                     Handle::default()
@@ -385,9 +430,9 @@ fn spawn_slot(
     // idle too. A pose without a skin re-seats anchors only, so the item's mesh is unchanged.
     let poses_emitters = dm.poses_emitters();
     // The prop's pose and clock, armed as the reference arms every M2 at load (animation 0 through
-    // its `playableAnimationLookup`). A flexing prop's palette rows stay the rider's, composed in
+    // its `playableAnimationLookup`). A posed prop's palette rows stay the rider's, composed in
     // the wearer's frame, not from its own `GlobalTransform`.
-    let mut prop_pose = ((flexes && rider.is_some()) || poses_emitters).then(|| {
+    let mut prop_pose = ((posed && rider.is_some()) || poses_emitters).then(|| {
         let anims = dm.animations.as_ref().expect("a posed prop has animations");
         let mut player = AnimationPlayer::default();
         if let Some(idle) = anims.idle_clip() {
@@ -412,6 +457,8 @@ fn spawn_slot(
     // indexes the palette by it and the tint arrives up the `ParentModel` chain (`0x714000`),
     // else the wearer's, which carries the body's tint.
     let rig_slot = item_rig.or(rider).unwrap_or(ctx.rig_slot);
+    // The booth draws the static mesh, so it takes the idle's root-bone pose as one transform.
+    let portrait_idle = idle_root_pose(dm);
     // Billboard batches spawn as world-root cards below; as children they would sit at the grip.
     let mut billboard_parts = Vec::new();
     commands.entity(root).with_children(|parent| {
@@ -436,13 +483,14 @@ fn spawn_slot(
                 },
                 // The picker's triangles; the render meshes are `RENDER_WORLD`-only.
                 benilla_world::interact::PickMesh(part.geometry.clone()),
-                // The booth's mirror: the static mesh and steady material at the bone's bind pose.
+                // The booth's mirror: the static mesh and steady material, posed as the item idles.
                 crate::portrait::PortraitRider {
                     static_mesh: part.mesh.clone(),
                     material: part.material.clone(),
                     bone,
                     offset,
                     attach: Some(hs.attach),
+                    idle: portrait_idle,
                 },
             ));
             if skinned.is_some() {
@@ -619,7 +667,7 @@ fn spawn_slot(
         );
     }
     // The item's own M2 point lights (a held torch's glow), riding `root` like the emitters.
-    spawn_carried_lights(commands, &dm.lights, root, |_| None);
+    spawn_carried_lights(commands, &dm.lights, root, false, |_| None);
     // The ribbons ride the item root in Stand, where a thrown weapon's flight trail is keyed dark.
     for rb in &dm.ribbons {
         benilla_world::ribbons::spawn_ribbon(
@@ -1135,6 +1183,108 @@ mod tests {
         );
     }
 
+    /// A helm whose loader idle holds a bone away from bind pose (reforged's Stormwind guard helm,
+    /// Stand keying its bone 0.19 yd down) is posed like any armed M2; a rest-pose helm stays on
+    /// the one rigid frame, and neither is the ranged prop.
+    #[test]
+    fn an_item_whose_idle_poses_a_bone_gets_its_own_pose() {
+        fn attach(first_seq: Option<usize>) -> App {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins);
+            app.init_resource::<benilla_world::rig_palette::RigPalettes>();
+            app.init_resource::<Assets<bevy::image::Image>>();
+            let mut displays = ItemDisplays::icons_for_tests(
+                benilla_formats::ItemDisplayCatalog::from_displays(HashMap::new()),
+            );
+            let mut dm = empty_display();
+            let mut p = part(false);
+            p.skinned_mesh = Some(skinned_handle());
+            dm.parts = Some(vec![p]);
+            dm.skeleton = benilla_assets::ModelSkeleton {
+                joints: vec![benilla_assets::ModelJoint {
+                    parent: -1,
+                    local_translation: Vec3::ZERO,
+                    billboard: None,
+                    parent_arm: None,
+                }],
+                spine_bone: None,
+                head_bone: None,
+            };
+            dm.inverse_bindposes = Some(Handle::default());
+            dm.animations = Some(benilla_assets::ModelAnimations {
+                graph: Handle::default(),
+                clips: Vec::new(),
+                hand_close: [None, None],
+                playable_animation_lookup: Vec::new(),
+                animation_lookup: vec![0],
+                global_bones: Vec::new(),
+                first_seq,
+                pose: Default::default(),
+            });
+            let kind = ItemModelKind::Helm { race: 1, sex: 0 };
+            displays.models.insert((7, kind), dm);
+            app.insert_resource(displays);
+            let bones = BoneAttach {
+                points: HashMap::from([(attach_id::HELM, (3u16, Vec3::ZERO))]),
+                markers: HashMap::new(),
+            };
+            let mut items = HeldItems::default();
+            items.slots[0] = Some(HeldSlot {
+                display: 7,
+                kind,
+                attach: attach_id::HELM,
+                visual: NO_GLOW,
+            });
+            let wearer = app
+                .world_mut()
+                .spawn((items, bones, Transform::default()))
+                .id();
+            let pose = benilla_world::testing::test_rig_pose(wearer, &[Vec3::ZERO; 4]);
+            app.world_mut().entity_mut(wearer).insert(pose);
+            app.add_systems(Update, attach_held_items);
+            app.update();
+            app
+        }
+        fn posed_riders(app: &mut App) -> (usize, usize) {
+            let riders: Vec<Entity> = app
+                .world_mut()
+                .query_filtered::<Entity, With<benilla_world::rig_rider::RigRider>>()
+                .iter(app.world())
+                .collect();
+            let posed = riders
+                .iter()
+                .filter(|&&e| {
+                    let e = app.world().entity(e);
+                    e.contains::<AnimationPlayer>()
+                        && e.contains::<benilla_world::rig_anim::RigPose>()
+                })
+                .count();
+            (riders.len(), posed)
+        }
+
+        let mut app = attach(Some(0));
+        assert_eq!(
+            posed_riders(&mut app),
+            (1, 1),
+            "a helm whose idle moves a bone carries a player and a pose of its own"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&crate::ranged_flex::RangedProp>()
+                .iter(app.world())
+                .count(),
+            0,
+            "…but it is not the ranged prop"
+        );
+
+        let mut app = attach(None);
+        assert_eq!(
+            posed_riders(&mut app),
+            (1, 0),
+            "a rest-pose helm keeps the one rigid frame"
+        );
+    }
+
     /// A card's booth mirror seats at the attach point plus its pivot, the emitters' at the attach
     /// point; both nonzero, so either term missing fails.
     #[test]
@@ -1156,6 +1306,7 @@ mod tests {
             bone: 1,
             kind: benilla_formats::BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: Vec::new(),
         });
         dm.parts = Some(vec![part(false), card]);
@@ -1258,6 +1409,7 @@ mod tests {
             bone: 1,
             kind: benilla_formats::BillboardKind::Spherical,
             scale_anim: None,
+            carriers: Vec::new(),
             seq_translations: Vec::new(),
         });
         dm.parts = Some(vec![card]);

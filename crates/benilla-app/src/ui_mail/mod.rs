@@ -1165,14 +1165,14 @@ mod tests {
         }));
         script.run("CheckInbox()").unwrap();
         assert_eq!(script.take_mail_calls(), [MailCall::CheckInbox]);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         {
             let mut mail = app.world_mut().resource_mut::<MailOpen>();
             mail.click(0x20);
             mail.mails.push(entry(1, Some(0xA), 0, 30.0));
         }
         let check = |app: &mut App| {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.run("CheckInbox()").unwrap();
             script.take_mail_calls() == [MailCall::CheckInbox]
         };
@@ -1816,7 +1816,7 @@ mod tests {
     fn a_reload_forgets_the_mailbox_silently_and_the_new_vm_shows_nothing() {
         use crate::ui_script::sweep_test::{reload_in_place, seen, seen_in, spied_vm};
         let mut app = sweep_mail_app();
-        app.insert_non_send_resource(spied_vm(&EVENTS));
+        app.insert_non_send(spied_vm(&EVENTS));
         app.world_mut().resource_mut::<MailOpen>().click(MAILBOX);
         app.update();
         assert_eq!(seen_in(&app), ["MAIL_SHOW"]);
@@ -1841,7 +1841,7 @@ mod tests {
     fn a_worldport_forgets_the_mailbox_without_mail_closed() {
         use crate::ui_script::sweep_test::{seen_in, spied_vm, sweep_in_place};
         let mut app = sweep_mail_app();
-        app.insert_non_send_resource(spied_vm(&EVENTS));
+        app.insert_non_send(spied_vm(&EVENTS));
         app.world_mut().resource_mut::<MailOpen>().click(MAILBOX);
         app.update();
         sweep_in_place(&mut app);
@@ -1876,13 +1876,13 @@ mod tests {
                 f:SetScript("OnEvent", function() table.insert(LOG, event) end)"#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 
     fn logged(app: &mut App) -> i64 {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<i64>("return getn(LOG)")
             .unwrap()
     }
@@ -1972,11 +1972,9 @@ mod tests {
             mail.mails = vec![template, notice];
             mail.bodies.insert(9, "Outbid.".into());
         }
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .keep_calls();
+        app.world_mut().non_send_mut::<UiScript>().keep_calls();
         app.update();
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let (body, takeable): (Option<String>, bool) = script
             .eval("local b, _, t = GetInboxText(1) return b, t == 1")
             .unwrap();
@@ -2292,7 +2290,7 @@ mod tests {
         }
         app.update();
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script
                 .run(
                     r#"DELETES = 0
@@ -2313,7 +2311,7 @@ mod tests {
             });
         }
         app.update();
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         assert!(row_verbs(&mut script).is_empty(), "refused under the lock");
         // The lock came back by the end of the feed.
         script.run("DeleteInboxItem(1)").unwrap();

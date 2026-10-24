@@ -1163,7 +1163,7 @@ mod tests {
                  end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 
@@ -1201,7 +1201,7 @@ mod tests {
 
     /// `rollID:rollTime:name` for each `START_LOOT_ROLL` seen so far, in order.
     fn starts(app: &mut App) -> Vec<String> {
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let n = script.eval::<i64>("return getn(STARTS)").unwrap();
         (1..=n)
             .map(|i| {
@@ -1214,7 +1214,7 @@ mod tests {
 
     /// Every roll event seen so far, in firing order: `S<id>` a start, `C<id>` a cancel.
     fn events(app: &mut App) -> Vec<String> {
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let n = script.eval::<i64>("return getn(EVENTS)").unwrap();
         (1..=n)
             .map(|i| {

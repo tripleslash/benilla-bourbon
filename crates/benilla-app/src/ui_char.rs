@@ -7,6 +7,7 @@
 
 use bevy::prelude::*;
 
+use benilla_assets::DataLoadAppExt;
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
 use benilla_ui::script::{
     weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, SkillEntry, SkillsState,
@@ -57,10 +58,7 @@ pub(crate) struct UiCharPlugin;
 impl Plugin for UiCharPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CharFeedState>()
-            .add_systems(
-                Startup,
-                load_skill_tiers.after(benilla_assets::AssetSet::Open),
-            )
+            .add_data_loaders(load_skill_tiers)
             .add_systems(
                 Update,
                 (
@@ -1006,12 +1004,12 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app
     }
 
     fn seen(app: &mut App) -> Vec<String> {
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let out = script.eval::<Vec<String>>("return SEEN").unwrap();
         script.run("SEEN = {}").unwrap();
         out
@@ -1073,7 +1071,7 @@ mod tests {
             .insert_template(HELM_ID, Some(crate::items::test_template("Helm")));
         let broken = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<bool>(r#"return GetInventoryItemBroken("player", 1) ~= nil"#)
                 .unwrap()
         };
@@ -1118,7 +1116,7 @@ mod tests {
         app.world_mut().run_system_once(feed_char).unwrap();
         let link = app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<String>(r#"return GetInventoryItemLink("player", 1)"#)
             .unwrap();
         assert_eq!(link, "|cffffffff|Hitem:7366:1900:862:7|h[Helm]|h|r");
@@ -1149,7 +1147,7 @@ mod tests {
         app.world_mut().run_system_once(feed_char).unwrap();
         let link = app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<Option<String>>(r#"return GetInventoryItemLink("player", 1)"#)
             .unwrap();
         assert_eq!(
@@ -1238,7 +1236,7 @@ mod tests {
         app.world_mut().run_system_once(feed_char).unwrap();
         assert_eq!(asked(&rx), 0, "the view reads");
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(r#"GetInventoryItemQuality("player", 0)"#)
             .unwrap();
         app.world_mut().run_system_once(feed_char).unwrap();
@@ -1259,7 +1257,7 @@ mod tests {
         app.world_mut().run_system_once(feed_char).unwrap();
         let ask = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .run(r#"GetInventoryItemQuality("player", 0)"#)
                 .unwrap();
         };
@@ -1307,24 +1305,20 @@ mod tests {
         app.world_mut().run_system_once(feed_char).unwrap();
         let _ = seen(&mut app);
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_bank(Some(benilla_ui::script::BankState::default()));
         let locked = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<bool>(r#"return IsInventoryItemLocked(64) and true or false"#)
                 .unwrap()
         };
         assert!(!locked(&mut app));
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .lock_item(BAG);
+        app.world_mut().non_send_mut::<UiScript>().lock_item(BAG);
         app.world_mut().run_system_once(feed_char).unwrap();
         assert!(seen(&mut app).is_empty(), "a lock is no inventory change");
         assert!(locked(&mut app), "a send's lock on the bag");
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .unlock_item(BAG);
+        app.world_mut().non_send_mut::<UiScript>().unlock_item(BAG);
         assert!(!locked(&mut app), "the server's answer");
     }
 
@@ -1478,7 +1472,7 @@ mod tests {
         let quality = |app: &mut App| {
             app.world_mut().run_system_once(feed_char).unwrap();
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<Option<i64>>(r#"return GetInventoryItemQuality("player", 1)"#)
                 .unwrap()
         };

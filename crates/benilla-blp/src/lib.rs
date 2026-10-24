@@ -172,6 +172,11 @@ struct Header<'a> {
     chain: usize,
 }
 
+/// A BLP2's level-0 `(width, height)`, off the header alone: no level is decoded.
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    parse_header(bytes).map(|h| (h.width, h.height))
+}
+
 /// Parse and bounds-check the BLP2 header, palette and level table.
 fn parse_header(bytes: &[u8]) -> Result<Header<'_>> {
     if bytes.len() < HEADER_SIZE || &bytes[0..4] != b"BLP2" {
@@ -217,16 +222,21 @@ fn parse_header(bytes: &[u8]) -> Result<Header<'_>> {
 
 impl Header<'_> {
     /// Level `level`'s stored bytes, or `None` where the chain ends before the formula's count.
+    ///
+    /// Deviation: a deeper level whose span runs past the file also ends the chain, where the
+    /// reference reads past its buffer. patch-A's `Character\Troll\SCALPUPPERHAIR00_01.blp` ships
+    /// level 6 at the file's end with size `0xFFFFD0C4`, over six intact levels.
     fn level_data<'b>(&self, bytes: &'b [u8], level: usize) -> Result<Option<&'b [u8]>> {
         let off = self.offsets[level] as usize;
         let sz = self.sizes[level] as usize;
         if level > 0 && (sz == 0 || off == 0) {
             return Ok(None);
         }
-        bytes
-            .get(off..off + sz)
-            .map(Some)
-            .ok_or(Error::OutOfBounds { level })
+        match off.checked_add(sz).and_then(|end| bytes.get(off..end)) {
+            Some(data) => Ok(Some(data)),
+            None if level > 0 => Ok(None),
+            None => Err(Error::OutOfBounds { level }),
+        }
     }
 
     /// DXTC level `level` as the reference reads it: `bpp·max(4,w)·max(4,h)/8` bytes from the
@@ -482,6 +492,30 @@ mod tests {
         assert!(matches!(decode(&b), Err(Error::DimensionsTooLarge { .. })));
         let b = header(3, 0, 0, 0, 4, MAX_DIM + 1, [0; 16], [0; 16]);
         assert!(matches!(decode(&b), Err(Error::DimensionsTooLarge { .. })));
+    }
+
+    /// patch-A's `Character\Troll\SCALPUPPERHAIR00_01.blp`: a deeper level at the file's end with a
+    /// wrapped size ends the chain on the intact levels; the same fault on level 0 still errors.
+    #[test]
+    fn a_deeper_level_past_the_file_ends_the_chain() {
+        // Raw1 4x4 without alpha: levels 4x4, 2x2, 1x1, one index byte per texel.
+        let base = (HEADER_SIZE + PALETTE_SIZE) as u32;
+        let mut offsets = [0u32; 16];
+        let mut sizes = [0u32; 16];
+        (offsets[0], sizes[0]) = (base, 16);
+        (offsets[1], sizes[1]) = (base + 16, 4);
+        (offsets[2], sizes[2]) = (base + 20, 0xFFFF_D0C4);
+        let mut b = header(1, 0, 8, 1, 4, 4, offsets, sizes);
+        b.resize((base + 20) as usize, 0);
+
+        let d = decode(&b).expect("the intact levels decode");
+        assert_eq!(d.mips.len(), 2, "the chain ends before the broken level");
+        assert_eq!(decode_native(&b).expect("native too").mips.len(), 2);
+
+        sizes[0] = 0xFFFF_D0C4;
+        let mut b = header(1, 0, 8, 1, 4, 4, offsets, sizes);
+        b.resize((base + 20) as usize, 0);
+        assert!(matches!(decode(&b), Err(Error::OutOfBounds { level: 0 })));
     }
 
     #[test]

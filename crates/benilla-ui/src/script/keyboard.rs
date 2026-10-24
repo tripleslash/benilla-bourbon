@@ -82,7 +82,9 @@ fn has_script(lua: &Lua, id: u32, name: &str) -> bool {
 /// replaces the input slots without chaining to the base. So an unfocused box's `OnChar` (`+0x180`)
 /// never runs and never eats a neighbour's keys.
 fn is_editbox(lua: &Lua, h: FrameHandle) -> bool {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     model
         .arena
         .frame(h)
@@ -99,7 +101,9 @@ fn box_declines(lua: &Lua, h: FrameHandle, key: &str) -> bool {
     let arrow = ["LEFT", "UP", "RIGHT", "DOWN"]
         .iter()
         .any(|a| key.eq_ignore_ascii_case(a));
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     arrow
         && !model.alt_down
         && model.arena.frame(h).is_some_and(|f| {
@@ -112,7 +116,9 @@ fn box_declines(lua: &Lua, h: FrameHandle, key: &str) -> bool {
 /// `0x76b760` (`OnChar` alone) and `0x76b7d0` (either key slot, `OnKeyDown` fired).
 fn frame_takes(lua: &Lua, h: FrameHandle, channel: Channel, arg: &str) -> bool {
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.frame_id(h)
     };
     match channel {
@@ -139,7 +145,9 @@ fn frame_takes(lua: &Lua, h: FrameHandle, channel: Channel, arg: &str) -> bool {
 /// The char walk (`0x765df0`): whether a frame or a box took the character.
 fn walk_char(lua: &Lua, text: &str) -> bool {
     let order = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         walk_order(&model, Channel::Char)
     };
     for h in order {
@@ -157,7 +165,9 @@ fn walk_char(lua: &Lua, text: &str) -> bool {
 /// The key-down walk (`0x765f10`). A handler's own return is discarded (`0x7026f0`).
 fn walk_key(lua: &Lua, key: &str) -> KeyWalk {
     let order = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         walk_order(&model, Channel::KeyDown)
     };
     for h in order {
@@ -187,7 +197,9 @@ pub(crate) fn enable_for_script(lua: &Lua, this: &mlua::Table, script: &str) -> 
         return Ok(());
     }
     let h = super::object::frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     if char_bit {
         model.arena.set_char_enabled(h, true);
     } else {
@@ -198,7 +210,7 @@ pub(crate) fn enable_for_script(lua: &Lua, this: &mlua::Table, script: &str) -> 
 
 /// The consumer of a key-down, which that key's up and repeats go to (`0x765fa2`).
 fn remember(lua: &Lua, key: &str, h: FrameHandle) {
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .key_consumers
         .insert(key.to_string(), h);
@@ -209,7 +221,9 @@ fn remember(lua: &Lua, key: &str, h: FrameHandle) {
 /// (`0x483bd0`), not to whichever frame took the key before.
 pub(super) fn note_world_key(lua: &Lua, key: &str) {
     let world = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let found = model
             .arena
             .iter_frames()
@@ -224,7 +238,9 @@ pub(super) fn note_world_key(lua: &Lua, key: &str) {
 
 /// Whether `h` is linked, the base handlers' first test (`[+0xd4]`, `0x76bba7`, `0x77b7c0`).
 fn linked(lua: &Lua, h: FrameHandle) -> bool {
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     model.arena.frame(h).is_some_and(|f| f.effective_visible)
 }
 
@@ -256,7 +272,7 @@ impl KeyUp {
 /// (`0x76603c`-`0x76605b`).
 pub(super) fn key_up(lua: &Lua, key: &str) -> KeyUp {
     let Some(h) = lua
-        .app_data_ref::<Model>()
+        .app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .key_consumers
         .get(key)
@@ -266,7 +282,7 @@ pub(super) fn key_up(lua: &Lua, key: &str) -> KeyUp {
             return KeyUp::Unclaimed;
         }
         let walked = walk_key(lua, key);
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .key_consumers
             .remove(key);
@@ -280,7 +296,9 @@ pub(super) fn key_up(lua: &Lua, key: &str) -> KeyUp {
         return KeyUp::Delivered;
     }
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.frame_id(h)
     };
     if has_script(lua, id, "OnKeyUp") {
@@ -297,7 +315,7 @@ pub(super) fn key_up(lua: &Lua, key: &str) -> KeyUp {
 /// consumer on record: `Declined`, and nothing happens.
 pub(super) fn key_repeat(lua: &Lua, key: &str) -> KeyWalk {
     let Some(h) = lua
-        .app_data_ref::<Model>()
+        .app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .key_consumers
         .get(key)
@@ -322,14 +340,14 @@ fn fire(lua: &Lua, id: u32, script: &str, arg: &str) {
     let val = mlua::Value::String(match lua.create_string(arg) {
         Ok(s) => s,
         Err(e) => {
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .record_lua_error(&e);
             return;
         }
     });
     if let Err(e) = event::fire_widget_handler(lua, id, script, vec![val]) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }

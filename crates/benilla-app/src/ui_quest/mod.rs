@@ -713,7 +713,7 @@ mod tests {
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()
             .add_systems(Update, feed_quest);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         // A player source, so the giver's name is no creature read: its own query is the name's.
         const SOURCE: u64 = 0x42;
         let publish = |app: &mut App| {
@@ -1047,7 +1047,7 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         open_panel(
             app.world_mut(),
             GIVER,
@@ -1063,7 +1063,7 @@ mod tests {
         let feed = app.world_mut().register_system(feed_quest);
         let tick = |app: &mut App| -> Vec<String> {
             app.world_mut().run_system(feed).unwrap();
-            let s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let s = app.world_mut().non_send_mut::<UiScript>();
             let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
             seen
@@ -1088,14 +1088,14 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let feed = app.world_mut().register_system(feed_quest);
         (app, feed)
     }
 
     fn quest_tick(app: &mut App, feed: bevy::ecs::system::SystemId) -> Vec<String> {
         app.world_mut().run_system(feed).unwrap();
-        let s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let s = app.world_mut().non_send_mut::<UiScript>();
         let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
         s.run("SEEN = {}").unwrap();
         seen
@@ -1152,7 +1152,7 @@ mod tests {
         publish(&mut app, offer(102, "Westbrook Garrison", 903));
         assert_eq!(quest_tick(&mut app, feed), ["QUEST_DETAIL"]);
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("GetQuestItemInfo('choice', 1) GetQuestItemInfo('choice', 1)")
             .unwrap();
         assert!(

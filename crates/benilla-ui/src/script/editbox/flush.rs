@@ -3,14 +3,20 @@
 
 use mlua::{Lua, Value};
 
-use super::{event, fire_script, frame_id_of, relayout, with_eb, Model, CARET_WIDTH};
+use super::{event, fire_script, frame_id_of, relayout, with_eb, CARET_WIDTH};
 use crate::widget::{EditBoxState, FrameHandle};
 
 /// The box's update after its Lua `OnUpdate` (`0x77a79a`): the flush (`0x77a7a1`), then the caret
 /// blink (`0x77a7a6`). The walk runs it for every shown box, with an `OnUpdate` or without.
 pub(in crate::script) fn update(lua: &Lua, h: FrameHandle, dt: f32) {
-    flush(lua, h);
+    // A flush with nothing dirty only read, and the blink is the host's text-UI seam, no extract
+    // input: the mutation count stands ([`crate::script::ModelCell`]).
+    let quiet = crate::script::epoch_of(lua);
+    let worked = flush(lua, h);
     blink(lua, h, dt);
+    if !worked {
+        crate::script::restore_epoch_of(lua, quiet);
+    }
 }
 
 /// The flush `0x77d3e0`. It samples bit 0 at entry (`0x77d3f2`); on bit 0 the relayout runs
@@ -27,11 +33,12 @@ pub(in crate::script) fn update(lua: &Lua, h: FrameHandle, dt: f32) {
 ///
 /// Deviation: the promotion's IME legs (`0x77d417`–`0x77d431`) and the IME writer's `or 6`
 /// (`0x77acde`, in `0x77ac60`) are not modelled: benilla has no IME composition.
-pub(super) fn flush(lua: &Lua, h: FrameHandle) {
+/// Whether it did anything: a relayout, the caret leg or `OnTextChanged`.
+pub(super) fn flush(lua: &Lua, h: FrameHandle) -> bool {
     let Some((entry, owed, left)) = with_eb(lua, h, |eb| {
         (eb.dirty, eb.relayout_owed, !eb.caret_in_window())
     }) else {
-        return;
+        return false;
     };
     let text_changed = entry & EditBoxState::DIRTY_TEXT != 0;
     let promoted = entry & EditBoxState::DIRTY_CURSOR != 0 && left;
@@ -48,6 +55,7 @@ pub(super) fn flush(lua: &Lua, h: FrameHandle) {
     if text_changed {
         fire_script(lua, frame_id_of(lua, h), "OnTextChanged");
     }
+    text_changed || owed || promoted || entry & EditBoxState::DIRTY_CURSOR != 0
 }
 
 /// The caret leg `0x77da80`: a caret outside the window is only hidden (`0x77da97` →
@@ -64,7 +72,7 @@ fn caret(lua: &Lua, h: FrameHandle) -> bool {
     with_eb(lua, h, |eb| eb.blink_accum = 0.0);
     let placed = cursor_changed(lua, h);
     let focused = lua
-        .app_data_ref::<Model>()
+        .app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .focused_editbox
         == Some(h);
@@ -143,7 +151,9 @@ fn cursor_changed(lua: &Lua, h: FrameHandle) -> bool {
     // alone); the handler gets the box's own, the reference dividing by its effective scale
     // (`0x77db23 fdiv [esi+0x7c]`).
     let k = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         crate::script::object::eff_scale(&model, h)
     };
     let (x, y) = (x / k, y / k);
@@ -158,7 +168,7 @@ fn cursor_changed(lua: &Lua, h: FrameHandle) -> bool {
             Value::Number(f64::from(line_h)),
         ],
     ) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }
@@ -170,7 +180,7 @@ fn cursor_changed(lua: &Lua, h: FrameHandle) -> bool {
 /// the accumulator resets; only a period of exactly 0.0 keeps the caret solid (`0x77a7b4`).
 fn blink(lua: &Lua, h: FrameHandle, dt: f32) {
     let focused = lua
-        .app_data_ref::<Model>()
+        .app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .focused_editbox
         == Some(h);

@@ -115,7 +115,8 @@ impl PluginGroup for GamePlugins {
             .add(crate::combat_log::CombatLogPlugin)
             .add(CreatureAnimPlugin)
             // The blob shadow (`0x6d7920`), sized from the Stand box (`playableAnimationLookup[0]`,
-            // fixed per model), never the playing sequence.
+            // fixed per model), never the playing sequence. With `worldShadows 1` the realtime
+            // shadow map owns unit shadows and this lane hides (the gate in `update_shadows`).
             .add(BlobShadowPlugin)
             .add(CameraShakePlugin)
             .add(FootprintsPlugin)
@@ -132,6 +133,8 @@ impl PluginGroup for GamePlugins {
             .add(crate::death::DeathPlugin)
             .add(crate::client_state::ClientStatePlugin { start: self.start })
             .add(crate::glue_session::GlueSessionPlugin)
+            .add(crate::flavor::FlavorPlugin)
+            .add(crate::hd_models::HdModelsPlugin)
             .add(SoundPlugin)
             .add(TargetPlugin)
             .add(TransportPlugin)
@@ -156,6 +159,7 @@ impl PluginGroup for GamePlugins {
             .add(UiScriptPlugin)
             // Before CvarPlugin, so the resource exists when `load_config` applies the saved value.
             .add(crate::video::VideoPlugin)
+            .add(crate::player_shadow::WorldShadowPlugin)
             // A CVar knob too, so before CvarPlugin for the same reason.
             .add(crate::realmlist::RealmlistPlugin)
             .add(crate::cvars::CvarPlugin)
@@ -440,7 +444,7 @@ pub(crate) mod schedule_tests {
             &mut self,
             _: &mut World,
             _: &mut bevy::ecs::schedule::ScheduleGraph,
-            flat: &mut bevy::ecs::schedule::graph::Dag<SystemKey>,
+            flat: bevy::ecs::schedule::FlattenedDependencies<'_>,
         ) -> Result<(), bevy::ecs::schedule::ScheduleBuildError> {
             *self
                 .0
@@ -477,9 +481,22 @@ pub(crate) mod schedule_tests {
             // `initialize` fills the systems' access (the build would run it anyway); done
             // first so pass 1 can read it while the graph still holds the systems.
             schedule.graph_mut().systems.initialize(world);
+            // Each system's access, read back by initializing it again: 0.19 keeps the stored
+            // access private, and a function system's `initialize` keeps its state and only
+            // recomputes the access.
+            let accesses: HashMap<_, _> = {
+                let systems = &mut schedule.graph_mut().systems;
+                let keys: Vec<_> = systems.iter().map(|(key, _, _)| key).collect();
+                keys.into_iter()
+                    .filter_map(|key| {
+                        let system = systems.get_mut(key)?;
+                        Some((key, bevy::ecs::system::System::initialize(system, world)))
+                    })
+                    .collect()
+            };
             let vm = world
                 .components()
-                .get_resource_id(TypeId::of::<benilla_ui::script::UiScript>());
+                .get_id(TypeId::of::<benilla_ui::script::UiScript>());
             let host = {
                 use bevy::ecs::system::{IntoSystem, System};
                 let mut host = IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {});
@@ -508,22 +525,20 @@ pub(crate) mod schedule_tests {
             let mut hosted = HashSet::new();
             let mut uses_self = HashSet::new();
             for (key, system, conds) in graph.systems.iter() {
-                if let (Some(id), Some(with_access)) = (self_player, graph.systems.get(key)) {
-                    let names_it = with_access.access.filtered_accesses().iter().any(|fa| {
-                        fa.contains(id)
-                            || (!fa.access().has_read_all_components()
-                                && fa.access().has_component_read(id))
+                if let (Some(id), Some(access)) = (self_player, accesses.get(&key)) {
+                    let names_it = access.filtered_accesses().iter().any(|fa| {
+                        fa.contains(id) || (!fa.access().has_read_all() && fa.access().has_read(id))
                     });
                     if names_it {
                         uses_self.insert(key);
                     }
                 }
-                if let (Some(vm), Some(with_access)) = (vm, graph.systems.get(key)) {
-                    let access = with_access.access.combined_access();
-                    if access.has_resource_read(vm) || access.has_resource_write(vm) {
+                if let (Some(vm), Some(set)) = (vm, accesses.get(&key)) {
+                    let access = set.combined_access();
+                    if access.has_read(vm) || access.has_write(vm) {
                         holds_vm.insert(key);
                     }
-                    let mut with_host = with_access.access.clone();
+                    let mut with_host = set.clone();
                     with_host.extend(host.clone());
                     if with_host.combined_access() == access {
                         hosted.insert(key);
@@ -692,16 +707,31 @@ pub(crate) mod schedule_tests {
         app.world_mut()
             .schedule_scope(label.intern(), |world, schedule| {
                 schedule.graph_mut().systems.initialize(world);
-                let Some(id) = world.components().get_resource_id(TypeId::of::<T>()) else {
+                // 0.19 keeps the stored access private: read it back by initializing again, as
+                // [`census`] does.
+                let accesses: HashMap<_, _> = {
+                    let systems = &mut schedule.graph_mut().systems;
+                    let keys: Vec<_> = systems.iter().map(|(key, _, _)| key).collect();
+                    keys.into_iter()
+                        .filter_map(|key| {
+                            let system = systems.get_mut(key)?;
+                            Some((key, bevy::ecs::system::System::initialize(system, world)))
+                        })
+                        .collect()
+                };
+                let Some(id) = world.components().get_id(TypeId::of::<T>()) else {
                     return Vec::new();
                 };
                 let graph = schedule.graph();
                 let mut out = Vec::new();
                 for (key, system, conds) in graph.systems.iter() {
-                    let writes = graph
-                        .systems
-                        .get(key)
-                        .is_some_and(|s| s.access.combined_access().has_resource_write(id));
+                    // A write by name, not one of 0.19's inverted ones (bevy's `animate_targets`
+                    // writes every component but a few, an `EntityMutExcept`), which names no
+                    // resource in particular: `try_writes` refuses an inverted set.
+                    let writes = accesses.get(&key).is_some_and(|a| {
+                        let c = a.combined_access();
+                        c.has_write(id) && c.try_writes().is_ok()
+                    });
                     if !writes {
                         continue;
                     }
@@ -838,14 +868,14 @@ pub(crate) mod schedule_tests {
             let resolve = |rows: &[ClassRow]| -> HashSet<ComponentId> {
                 rows.iter()
                     .map(|(name, type_id)| {
-                        comps.get_resource_id(type_id()).unwrap_or_else(|| {
+                        comps.get_id(type_id()).unwrap_or_else(|| {
                             panic!("`{name}` is in the class table but is not a resource of this world")
                         })
                     })
                     .collect()
             };
             Self {
-                vm: comps.get_resource_id(TypeId::of::<benilla_ui::script::UiScript>()),
+                vm: comps.get_id(TypeId::of::<benilla_ui::script::UiScript>()),
                 non_send: comps
                     .iter_registered()
                     .filter(|info| !info.is_send_and_sync())
@@ -932,7 +962,34 @@ pub(crate) mod schedule_tests {
 
     /// `PostUpdate`'s undeclared-order pairs on the declared graph; `GlobalTransform` and the
     /// particle `EffectQuads` are most of it.
-    const POST_UPDATE_CEILING: usize = 371;
+    ///
+    /// **375 (fork: benilla-bourbon, merge of upstream dd196298)** — upstream's 371 was measured on a
+    /// tree without this fork's systems; the merged tree measures four more. Not yet read pair by
+    /// pair — a fork-side follow-up, like the `Update` ceiling below.
+    ///
+    /// **462 (fork: the Bevy 0.19 port and FSR, FORK.md)** — measured on the 0.19 tree with
+    /// session 3's runtime fixes and the FSR wiring in; the census passed at 375 on the port before
+    /// them. Not yet attributed pair by pair: `WOW_AMBIGUITY_DUMP=1` now prints PostUpdate's pairs
+    /// too (`post …`), mostly `GlobalTransform` between the camera followers and the effect lanes.
+    ///
+    /// **478 (merge of upstream 1efd9a71)** — sixteen more, read pair by pair. Six are upstream's:
+    /// `glue::hide_native_glue`'s `Visibility` against the world's and the fade cover's writers,
+    /// populations it never shares an entity with (the native glue roots alone). Ten are
+    /// `fishing_line::size_engine_lines` over `GizmoConfigStore` against the two engine-line
+    /// painters and bevy's own eight gizmo painters: it writes one group's line width, which is
+    /// read at extraction, after every painter, so the write commutes with each of them.
+    ///
+    /// **479 (merge of upstream c49c2011)** — one more, upstream's:
+    /// `glue::backdrop::fit_tiled_backgrounds`'s `ImageNode` rect against bevy's private
+    /// accessibility `image_changed`, which reads only the change tick for a label: either order
+    /// labels the same node.
+    ///
+    /// **485 (fork: placed-light grouping, af708800b; measured at the merge of upstream
+    /// f52df3a11)** — `lighting::global_light::group_placed_lights` reads the `GlobalTransform` of
+    /// `PlacedLight` lamps against the nine transform writers `build_light_data` already pairs
+    /// with (nameplates, raid marks, billboards, the cloud dome, the camera followers), populations
+    /// it never shares an entity with: fourteen pairs in the dump; the census measures 485.
+    const POST_UPDATE_CEILING: usize = 485;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
@@ -986,7 +1043,77 @@ pub(crate) mod schedule_tests {
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
     /// that commutes by construction belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 1_756;
+    ///
+    /// This fork's own systems add their pairs on top of upstream's count: the modern lighting
+    /// model, the liquid reflection camera and ripple clock, SSILVB, the character shadow map, and
+    /// the web build's writer pump and stutter probe. Declaring those orders is fork-side work.
+    ///
+    /// fork: fsr (FORK.md) — +16 with the FSR wiring: `world_backdrop::sync_fsr_view` takes
+    /// ten (the world camera and window it shares with the video, portrait, minimap, controller and
+    /// net systems `claim_backdrop`, chained before it, already pairs with), and the effect lane's
+    /// motion writers six. Declaring them is fork-side work, with the rest.
+    ///
+    /// Upstream's own ceiling moved 4,860 -> 4,980 (+120) by 98217654; the fork's +258 sits on it.
+    ///
+    /// fork: transports and wet surfaces — +52 net (5,238 -> 5,290), read off the dump:
+    /// `player::ride::board_from_create` takes 30 (a `ResMut<Player>` writer and `Commands`, at the
+    /// login edge before `control`, against the other `Player` writers and the portrait and drain
+    /// systems' commands), `loading_screen::ship::paint_ship_route` 24 (`Visibility` on the ship
+    /// layer and its dots alone, the disjoint-lane kind), `transport::drive_ship_props` 2, the wet
+    /// surfaces' `wetness_tick` and `wet_ssr::publish` 2, and upstream's
+    /// `ui_honor::feed_pvp_name_strings` 1, all of the new ones against the exclusive
+    /// `terrain_stream::collider::finish_colliders` among them; 7 fewer elsewhere. Declaring them
+    /// is fork-side work, with the rest.
+    ///
+    /// Upstream's ceiling then moved 4,980 -> 4,689 (-291) with the cursor and glue-booth work
+    /// (2af917044); the fork's +310 sits on it.
+    ///
+    /// Upstream's AddOns screen and character rename (71d65a488) bring +6: the `LaunchAddOnURL`
+    /// opener and the addon reply's news against the glue systems.
+    ///
+    /// Upstream's ceiling then moved 4,689 -> 4,642 (-47) with the glue verbs and the world-leave
+    /// sweep (dd3983a47); the fork's count follows it, plus the stock glue's pending music opener
+    /// and its glue-VM rebuild after a flavor switch, against the glue and sound systems.
+    ///
+    /// Upstream's chunk-visible targeting (benilla#1244, superseding #1225) moved its ceiling
+    /// 4,642 -> 4,603 (-39); the fork's count follows it.
+    ///
+    /// The merge of upstream c49c2011 (2e5cc4e4) measures six more and did not move the ceiling;
+    /// the terrain horizon added none here (the dump names no horizon system or resource in
+    /// `Update`). Read pair by pair: fork-side work, with the rest.
+    ///
+    /// The merge of upstream e3eade8e (the NPC interaction latch, the in-flight cast slot, the
+    /// Lua and chat gates) measures 4,804, 142 fewer: upstream's own ceiling fell 4,603 -> 4,463.
+    ///
+    /// Upstream's character-pane `SetUnit` subjects (b727e30f3, #1352) moved its ceiling 4,463 ->
+    /// 3,964 (-499); the merge of 7b608671a (the locale, the item watchers) measures 4,284.
+    ///
+    /// The merges of upstream 560d7ff6 and f55bb79b (benilla-lua, the stock glue alone, the glue
+    /// session, field-watch unit events) measure 3,644: the native glue screens' systems left.
+    ///
+    /// Upstream's inner-window wait (8731395bd, #1824) moved its ceiling 3,346 -> 3,367 (+21):
+    /// the stream's request and spawn halves split around the wait; the merge of cff056c3
+    /// measures 3,667 (+23).
+    ///
+    /// Upstream's lent call host (c0e301eae, #1992) moved its ceiling 3,355 -> 3,133 (-222); the
+    /// fork's ceiling stays at 3,667 through the merge of abcdced19.
+    ///
+    /// Upstream's ceiling moved 3,133 -> 3,092 (-41) through 9950c469a (the roster, unit
+    /// relations, the cast reports, the combat log and tooltips); with the render worker and the
+    /// terrain LOD the merge of 9950c469a measures 3,396 (-271).
+    ///
+    /// Upstream's ceiling then moved 3,092 -> 3,090 through 33067c38a; the fork's holds at its
+    /// measured count.
+    ///
+    /// Upstream's ceiling moved 3,090 -> 3,079 (-11) through 848ede6a4 (the click and attack
+    /// gates, the macro ids and the font objects); the fork's holds at its measured count.
+    ///
+    /// Upstream's VM pass (fcb42ab40, #2143) moved its ceiling 3,079 -> 1,708 through 3387c8225;
+    /// the merge of 3387c8225 measures 2,043 (-1,353).
+    ///
+    /// Upstream's ceiling moved 1,708 -> 1,780 (+72) through 601438a77 (the lanes' drain and the
+    /// minimap's quest statuses, listed above), then 1,780 -> 1,756 (-24) through 965fda84f.
+    const UPDATE_ACTIONABLE_CEILING: usize = 2_043;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1063,6 +1190,31 @@ pub(crate) mod schedule_tests {
             for r in rows {
                 eprintln!("{r}");
             }
+            // PostUpdate's pairs, every one (it has no classes), under their own header.
+            let mut rows: Vec<String> = post
+                .conflicts
+                .iter()
+                .map(|(a, b, what)| {
+                    let (x, y) = if post.name(*a) <= post.name(*b) {
+                        (*a, *b)
+                    } else {
+                        (*b, *a)
+                    };
+                    format!(
+                        "  post {}  <->  {}\n      on {}",
+                        post.name(x),
+                        post.name(y),
+                        what.iter()
+                            .map(|id| post.component(*id))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect();
+            rows.sort();
+            for r in rows {
+                eprintln!("{r}");
+            }
         }
         ratchet(
             "Update (actionable)",
@@ -1090,7 +1242,11 @@ pub(crate) mod schedule_tests {
     /// ([`crate::vm_pass::order_the_pass`]), so a link's commands wait for the first barrier past
     /// the chain. The count may not rise past the ceiling, and the ceiling follows it down. Read
     /// on the dev build, whose schedule holds every system the player build does.
-    const UPDATE_SYNC_POINT_CEILING: usize = 54;
+    ///
+    /// Upstream's count is 54 at 3387c8225; this fork's own systems with commands (the lighting,
+    /// liquid, SSILVB, FSR and web-build lanes) place three more, 57 at its merge. Declaring them
+    /// away is fork-side work.
+    const UPDATE_SYNC_POINT_CEILING: usize = 57;
     const UPDATE_SYNC_POINT_SLACK: usize = 4;
 
     #[test]
@@ -1577,7 +1733,8 @@ pub(crate) mod schedule_tests {
 
     /// The `Startup` VM, the stock glue's, is built after the glyph cache:
     /// its first screen sizes frames by measured text in the show (`TOSFrameHeader` off
-    /// `TOSFrameTitle:GetWidth()`, `AccountLogin.lua`), which with no cache measures 0.
+    /// `TOSFrameTitle:GetWidth()`, `AccountLogin.lua`), which with no cache measures 0; so do the
+    /// glue buttons that size to their text in `<OnLoad>` (`SetWidth(this:GetTextWidth() + 50)`).
     #[test]
     fn the_startup_vm_is_built_after_the_glyph_cache() {
         let mut app = headless_client();

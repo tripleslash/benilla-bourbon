@@ -278,7 +278,13 @@ fn anchor_for(prev_block: Option<u32>, frame_id: u32, point: Point, next_y: f32)
 /// (`0x78a17a`-`0x78a18f`) and each font child loads into one (`0x78a26e`).
 pub(crate) fn element_fonts_lua(lua: &Lua, frame: &Table) -> mlua::Result<[FontId; 4]> {
     let h = html_handle(lua, frame)?;
-    Ok(state_mut(&mut lua.app_data_mut::<Model>().expect("model"), h).fonts)
+    Ok(state_mut(
+        &mut lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model"),
+        h,
+    )
+    .fonts)
 }
 
 /// The element index an XML child tag names: `<FontString>` is `P`, `<FontStringHeader1|2|3>`
@@ -303,7 +309,9 @@ pub(crate) fn element_of_xml_tag(tag: &str) -> Option<usize> {
 /// Resolve `this` to a live `SimpleHTML` frame; only a misapplied method table fails.
 fn html_handle(lua: &Lua, this: &Table) -> mlua::Result<FrameHandle> {
     let h = frame_handle_of(lua, this)?;
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     match model.arena.frame(h).map(|f| f.kind) {
         Some(FrameKind::SimpleHtml) => Ok(h),
         _ => Err(mlua::Error::runtime("not a SimpleHTML")),
@@ -336,7 +344,13 @@ fn take_element(args: &mut MultiValue) -> usize {
 fn element_font(lua: &Lua, this: &Table, args: &mut MultiValue) -> mlua::Result<FontId> {
     let h = html_handle(lua, this)?;
     let elem = take_element(args);
-    Ok(state_mut(&mut lua.app_data_mut::<Model>().expect("model"), h).fonts[elem])
+    Ok(state_mut(
+        &mut lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model"),
+        h,
+    )
+    .fonts[elem])
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -355,7 +369,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `lua_tostring(2)` (`0x796b1e`): bytes, lossily, a number as Lua's `%.14g` text.
             let raw = binding_abi::optional_string(lua, &text).unwrap_or_default();
             let h = html_handle(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             set_text(&mut model, h, &raw);
             Ok(())
         })?,
@@ -374,7 +390,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     "SetHyperlinkFormat(\"format\")",
                 ));
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             state_mut(&mut model, h).hyperlink_format = fmt;
             Ok(())
         })?,
@@ -383,7 +401,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetHyperlinkFormat",
         lua.create_function(|lua, this: Table| {
             let h = html_handle(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(model
                 .simple_html
                 .get(&h)

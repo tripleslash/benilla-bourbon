@@ -27,13 +27,17 @@
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 
-use benilla_assets::materials::LiquidMaterial;
+use benilla_assets::materials::{LiquidCataMaterial, LiquidMaterial};
 use benilla_assets::AssetSet;
 
+mod art;
 mod drift;
 mod query;
 #[cfg(test)]
 mod real_data;
+mod reflect;
+mod ripple;
+mod screen;
 mod spatial;
 mod surface;
 
@@ -43,10 +47,94 @@ pub use query::{
     EyeLiquid, FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, SubmergedEye,
     Underwater, WaterChunkInfo, WmoPool,
 };
+pub use reflect::UNMIRRORED_RENDER_LAYER;
+// fork: modern lighting (FORK.md, P4) — the fog composite runs on the mirror and orders before the scene copy.
+pub(crate) use reflect::{LiquidReflectionCamera, ReflectionPlane};
+pub(crate) use screen::{liquid_screen_pass, LiquidScreenTargets, LiquidScreenView};
 pub(crate) use spatial::{maintain_water_index, WaterIndex};
 pub(crate) use surface::{
     spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, LiquidSurface,
 };
+
+/// **Which liquid renderer the client is running** — the `waterDetail` CVar, in the reference's own
+/// value space.
+///
+/// `0` is the 1.12.1 path (`liquid.wgsl`, a port of `Water.bls` and the fixed-function combine
+/// around it) and `2` is the Cataclysm path (`liquid_cata.wgsl`, `ProcWater` + `ProcWaterAbove`).
+/// Those are the reference's numbers, not ours: `Liquid::CMaterialWater::InitResources` switches on
+/// exactly this cvar, and its `1` is the *medium* tier (`MediumWater`), which benilla does not
+/// implement. Leaving the gap rather than renumbering means a medium tier can land later without
+/// re-teaching the options page, the config files players already have, or this type.
+///
+/// fork: `1` is taken since by the SSR-only cata tier ([`WATER_DETAIL_SSR`]) and `3` by the
+/// experimental modern combine ([`WATER_DETAIL_EXPERIMENTAL`]).
+///
+/// fork: Modern (Experimental) is the default. `$WOW_WATER_DETAIL` overrides for a session.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WaterDetail(pub u8);
+
+/// The 1.12.1 renderer.
+pub const WATER_DETAIL_LEGACY: u8 = 0;
+/// fork: the Cataclysm renderer WITHOUT its planar mirror — the screen-space trace alone over the
+/// horizon colour (what perm 4 runs). Skips the second, mirrored scene render (and every modern
+/// lighting pass that render drags along) for about half the water's cost. It sits in the
+/// reference's medium-tier slot, which benilla never implemented.
+pub const WATER_DETAIL_SSR: u8 = 1;
+/// The Cataclysm renderer — `ProcWaterAbove` perm 4 / `ProcWaterBelow` perm 0.
+pub const WATER_DETAIL_CATA: u8 = 2;
+/// fork: modern lighting — the Cataclysm renderer, mirror and all, whose above-water combine is
+/// the fork's stylised clear water (`liquid_cata.wgsl`'s `modern_water`, tuned against WoW Forever's
+/// rivers) instead of the reference's: the bed seen through the water and filtered toward its hue,
+/// Beer–Lambert toward the zone's deep colour, a calm surface whose refraction scales with the
+/// water crossed, and a soft, capped reflection. "Modern (Experimental)" on the options page, under
+/// either lighting model; a modern frame adds its wind sea, cascades and glitter. It takes the slot
+/// after the reference's highest tier rather than one of its numbers, so `2` keeps meaning the
+/// reference's water.
+pub const WATER_DETAIL_EXPERIMENTAL: u8 = 3;
+
+impl WaterDetail {
+    /// Is this the Cataclysm renderer? Written as "not legacy" rather than "== 2" so that a medium
+    /// tier landing at `1` joins the cata lane by default instead of silently falling back.
+    pub fn is_cata(self) -> bool {
+        self.0 != WATER_DETAIL_LEGACY
+    }
+
+    /// Clamp an arbitrary cvar value onto a tier this build actually has. Anything that is not a
+    /// known tier reads as cata, which is the default and the better-looking answer; a player who
+    /// hand-edits `waterDetail 7` into their config gets water, not a black lake — and not the
+    /// experimental tier, which only a `3` asks for.
+    pub fn from_cvar(v: f32) -> Self {
+        if v <= 0.0 {
+            WaterDetail(WATER_DETAIL_LEGACY)
+        } else if v < 1.5 {
+            WaterDetail(WATER_DETAIL_SSR)
+        } else if (2.5..3.5).contains(&v) {
+            WaterDetail(WATER_DETAIL_EXPERIMENTAL)
+        } else {
+            WaterDetail(WATER_DETAIL_CATA)
+        }
+    }
+
+    /// Does the water run the Modern (Experimental) combine ([`WATER_DETAIL_EXPERIMENTAL`])?
+    pub fn is_experimental(self) -> bool {
+        self.0 == WATER_DETAIL_EXPERIMENTAL
+    }
+
+    /// Does the cata water get its planar mirror render? Only the full tiers do (cata and the
+    /// experimental tier above it); the SSR tier reflects through the screen-space trace alone.
+    pub fn has_planar_reflection(self) -> bool {
+        self.0 >= WATER_DETAIL_CATA
+    }
+}
+
+impl Default for WaterDetail {
+    fn default() -> Self {
+        match crate::launch_env::var("WOW_WATER_DETAIL").and_then(|v| v.parse::<f32>().ok()) {
+            Some(v) => Self::from_cvar(v),
+            None => WaterDetail(WATER_DETAIL_EXPERIMENTAL),
+        }
+    }
+}
 
 /// `WOW_FORCE_SUB=<frames>`: hold the camera-eye verdict submerged for the first `<frames>` frames,
 /// then release it, so the wet-to-dry crossing lands on a known frame with no water or server.
@@ -84,12 +172,30 @@ pub(crate) struct LiquidPlugin;
 impl Plugin for LiquidPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<LiquidMaterial>::default())
+            .add_plugins(MaterialPlugin::<LiquidCataMaterial>::default())
+            .init_resource::<WaterDetail>()
             .init_resource::<Underwater>()
             .init_resource::<SubmergedEye>()
             .init_resource::<WaterIndex>()
             // PreUpdate: a surface streamed by last frame's commands is indexed before anyone asks.
             .add_systems(PreUpdate, maintain_water_index)
             .add_systems(Startup, surface::setup_liquid.after(AssetSet::Open))
+            // The renderer swap and the above/below flip. Both are value-watched (see their
+            // headers) so the steady state is one compare, and both run in `Update` because their
+            // effect is a material the NEXT frame draws with — there is no ordering to get right
+            // beyond being before the extract.
+            .add_systems(
+                Update,
+                (
+                    surface::sync_below_water.after(SubmersionVerdict),
+                    surface::sync_water_tier,
+                    screen::resize_targets,
+                ),
+            )
+            // `PostUpdate`, so the tiles the streamer spawned this tick have already had their
+            // commands applied and show up in its `Added` query — a surface is never drawn
+            // material-less, and never dressed twice.
+            .add_systems(PostUpdate, surface::apply_water_detail)
             .add_systems(
                 Update,
                 (
@@ -118,6 +224,25 @@ impl Plugin for LiquidPlugin {
                     .in_set(SubmersionVerdict),
             );
         }
+        // fork: modern lighting — the water look's live override (see [`surface::sync_water_look`])
+        // likewise exists only in a session launched with it: a production run carries neither the
+        // system nor its per-frame read of the knob.
+        if crate::launch_env::var("WOW_WATER_LOOK").is_some() {
+            app.add_systems(Update, surface::sync_water_look);
+        }
         drift::register(app);
+        // The three pictures of the frame the cata renderer reads, and the graph node that fills
+        // them. Registered unconditionally: the node stands itself down when the targets are
+        // absent, and the materials that read them exist either way. Multisampling is NOT a
+        // stand-down — the node compiles a per-sample-count variant and resolves in the copy it was
+        // already making.
+        screen::register(app);
+        // The dynamic ripple displacement map: the wave a wading body pushes into the water.
+        ripple::register(app);
+        // The planar mirror `ProcWaterAbove` perm 0 reads on `samp1` — the one input of the cata
+        // water that is a scene render rather than a blit, and therefore a camera rather than a
+        // node. Registered unconditionally: its camera stands itself down off `waterDetail` and
+        // the submersion verdict, and the material binds the target either way.
+        reflect::register(app);
     }
 }

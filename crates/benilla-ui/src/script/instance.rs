@@ -4,8 +4,6 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::Model;
-
 /// `IsInInstance()`'s type word for a `Map.dbc` `InstanceType`: the reference's table at
 /// `0x83de58`, and `"none"` from 4 up.
 pub fn instance_type_name(instance_type: u32) -> &'static str {
@@ -59,7 +57,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsInInstance",
         lua.create_function(|lua, ()| {
             let ty = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.instance_type
             };
             let name = instance_type_name(ty.unwrap_or(0));
@@ -78,7 +78,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CanShowResetInstances",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(if model.can_reset_instances {
                 Value::Number(1.0)
             } else {

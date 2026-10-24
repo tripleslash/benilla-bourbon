@@ -8,7 +8,6 @@
 use mlua::{Lua, Value};
 
 use super::binding_abi::{flag, number_arg};
-use super::Model;
 
 /// `FlagTutorial`'s bound, `0 ≤ n − 1 < 0x32`: the fifty tutorials `GlobalStrings.lua` names.
 const TUTORIAL_IDS: i32 = 0x32;
@@ -28,7 +27,7 @@ pub enum TutorialCall {
 impl super::UiScript {
     /// The acknowledged bank's bytes, `None` before `SMSG_TUTORIAL_FLAGS`.
     pub fn set_tutorial_bank(&mut self, bank: Option<Vec<u8>>) {
-        self.model_mut().tutorial_bank = bank;
+        set_field!(self, tutorial_bank, bank);
     }
 
     /// The tutorial calls a harness VM kept ([`Self::keep_calls`]), in call order.
@@ -48,7 +47,7 @@ impl super::UiScript {
     /// `TriggerTutorial(id, 0)` asks the engine made since the last drain, as 0-based ids, for the
     /// app's fire-once bank.
     pub fn take_tutorial_triggers(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().tutorial_triggers)
+        drain_field!(self, tutorial_triggers)
     }
 }
 
@@ -65,7 +64,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "TutorialsEnabled",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let enabled = model
                 .tutorial_bank
                 .as_ref()

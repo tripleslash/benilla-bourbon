@@ -1,0 +1,27 @@
+[package]
+name = "benilla-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The BENPACK container — a range-optional, streaming-friendly repackaging of the 1.12.1 MPQ chain for static hosting"
+
+[lints]
+workspace = true
+
+[features]
+# The writer half. Native only (it pulls the C zstd encoder); the browser reader needs none of it,
+# and keeping it off by default is what lets this crate compile to wasm32 unchanged.
+write = ["dep:zstd", "dep:crc32fast"]
+
+[dependencies]
+benilla-bytes = { path = "../benilla-bytes" }
+# The container's key is the MPQ hash pair, so name normalization is inherited, never restated.
+benilla-mpq = { path = "../benilla-mpq" }
+# Pure-Rust zstd decoder. Already in the workspace lock (bevy_image pulls it), so the wasm client
+# pays almost nothing in bytes for the container's main codec.
+ruzstd = "0.8"
+# The alternate frame codec, and already in-tree as benilla-mpq's MPQ sector codec.
+miniz_oxide = "0.8"
+
+zstd = { version = "0.13", optional = true }
+crc32fast = { version = "1", optional = true }

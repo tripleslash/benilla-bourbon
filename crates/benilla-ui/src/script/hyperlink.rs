@@ -48,7 +48,11 @@ pub(super) fn owner_link(model: &Model, h: FrameHandle) -> Option<(FrameHandle, 
 /// Fire the text frame's `OnHyperlinkEnter` or `OnHyperlinkLeave` for the button `h`, with the link
 /// alone; false when `h` is not a hyperlink button, whose own enter or leave then runs.
 pub(super) fn hover(lua: &Lua, h: FrameHandle, enter: bool) -> bool {
-    let Some((owner, link, _)) = owner_link(&lua.app_data_ref::<Model>().expect("model"), h) else {
+    let Some((owner, link, _)) = owner_link(
+        &lua.app_data_ref::<crate::script::ModelCell>()
+            .expect("model"),
+        h,
+    ) else {
         return false;
     };
     let script = if enter {
@@ -63,8 +67,11 @@ pub(super) fn hover(lua: &Lua, h: FrameHandle, enter: bool) -> bool {
 /// Fire the text frame's `OnHyperlinkClick(link, text, button)` for the button `h`; false when `h`
 /// is not a hyperlink button, whose own `OnClick` then runs.
 pub(super) fn click(lua: &Lua, h: FrameHandle, button: &str) -> bool {
-    let Some((owner, link, text)) = owner_link(&lua.app_data_ref::<Model>().expect("model"), h)
-    else {
+    let Some((owner, link, text)) = owner_link(
+        &lua.app_data_ref::<crate::script::ModelCell>()
+            .expect("model"),
+        h,
+    ) else {
         return false;
     };
     fire(lua, owner, "OnHyperlinkClick", &[&link, &text, button]);
@@ -73,7 +80,9 @@ pub(super) fn click(lua: &Lua, h: FrameHandle, button: &str) -> bool {
 
 fn fire(lua: &Lua, owner: FrameHandle, script: &str, args: &[&str]) {
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         if model.arena.frame(owner).is_none() {
             return;
         }
@@ -85,7 +94,7 @@ fn fire(lua: &Lua, owner: FrameHandle, script: &str, args: &[&str]) {
         .collect();
     let result = args.and_then(|args| event::fire_widget_handler(lua, id, script, args));
     if let Err(e) = result {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model")
             .record_lua_error(&e);
     }
@@ -119,8 +128,10 @@ pub(super) fn set_spans(lua: &Lua, spans: Vec<(FrameHandle, Rect, String, String
         }
     }
     {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
-        let model = &mut *model;
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
+        let model: &mut crate::script::Model = &mut model;
         model
             .link_buttons
             .retain(|owner, _| model.arena.frame(*owner).is_some());
@@ -155,7 +166,11 @@ pub(super) fn set_spans(lua: &Lua, spans: Vec<(FrameHandle, Rect, String, String
     }
     // The pointer hit-tests resolved rects, so a moved button is solved before the next input.
     if moved {
-        UiScript::resolve_layout(&mut lua.app_data_mut::<Model>().expect("model"));
+        UiScript::resolve_layout(
+            &mut lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model"),
+        );
     }
 }
 
@@ -166,8 +181,10 @@ pub(super) fn set_spans(lua: &Lua, spans: Vec<(FrameHandle, Rect, String, String
 /// model does not flag (a ring wiped by `SetMaxLines`, a hidden frame, a frame not yet laid out,
 /// which the reference's rebuild skips at `0x78af7b`) leaves no stale button.
 fn due(lua: &Lua, owner: FrameHandle, list: &[Span]) -> bool {
-    let mut model = lua.app_data_mut::<Model>().expect("model");
-    let model = &mut *model;
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
+    let model: &mut crate::script::Model = &mut model;
     // A message frame's lines' box, which `0x788384`-`0x7883b2` compares.
     let size = super::messageframe::message_rect(model, owner)
         .map(|r| (r.right - r.left, r.top - r.bottom));
@@ -189,8 +206,10 @@ fn due(lua: &Lua, owner: FrameHandle, list: &[Span]) -> bool {
 /// Re-seat `owner`'s live buttons on `list`, one each, with no hide and no show. True when a
 /// button's anchors or size changed.
 fn follow(lua: &Lua, owner: FrameHandle, list: &[Span]) -> bool {
-    let mut model = lua.app_data_mut::<Model>().expect("model");
-    let model = &mut *model;
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
+    let model: &mut crate::script::Model = &mut model;
     let live = model
         .link_buttons
         .get(&owner)
@@ -207,7 +226,9 @@ fn follow(lua: &Lua, owner: FrameHandle, list: &[Span]) -> bool {
 /// changed.
 fn rebuild(lua: &Lua, owner: FrameHandle, list: &[Span]) -> bool {
     let released = {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         let pool = model.link_buttons.entry(owner).or_default();
         let released = std::mem::take(&mut pool.live);
         pool.free.extend(released.iter().copied());
@@ -220,8 +241,10 @@ fn rebuild(lua: &Lua, owner: FrameHandle, list: &[Span]) -> bool {
     let mut moved = false;
     let mut shows = Vec::with_capacity(list.len());
     {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
-        let model = &mut *model;
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
+        let model: &mut crate::script::Model = &mut model;
         // A leave handler may have destroyed the text frame.
         if model.arena.frame(owner).is_none() {
             model.link_buttons.remove(&owner);

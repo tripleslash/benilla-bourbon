@@ -27,6 +27,7 @@ pub(crate) fn session_edges(
         back_on_login_refused,
         apply_roster_policy,
         back_on_disconnect,
+        back_on_entry_failed,
     )
         .chain()
         .into_configs()
@@ -68,6 +69,24 @@ fn back_on_disconnect(
     // With no reconnect coming, a kept pick would auto-answer the next roster.
     roster.pending_pick = None;
     next.set(ClientState::Login);
+}
+
+/// Change Realm whose world dial failed: `ConnectToRealm` (`0x46b210`) dropped the old realm's
+/// session before dialling and the IO thread re-parks pre-logon, so select has nothing left to
+/// stand on and returns to the login screen, where the failure's dialog shows.
+fn back_on_entry_failed(
+    mut msgs: MessageReader<crate::net::LoginFailedMessage>,
+    state: Res<State<ClientState>>,
+    mut roster: ResMut<Roster>,
+    mut next: ResMut<NextState<ClientState>>,
+) {
+    if msgs.read().last().is_none() {
+        return;
+    }
+    if *state.get() == ClientState::CharSelect {
+        roster.pending_pick = None;
+        next.set(ClientState::Login);
+    }
 }
 
 /// `SMSG_CHARACTER_LOGIN_FAILED`: back to select. The IO thread announces the entry with the pick,
@@ -168,7 +187,7 @@ mod tests {
     /// database, so the refusal lands in the same drain and must be the last word.
     #[test]
     fn a_refused_login_beats_the_entry_it_revokes() {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = async_channel::unbounded();
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
             .insert_state(ClientState::CharSelect)
@@ -184,6 +203,8 @@ mod tests {
             .add_message::<CharacterLoginFailedMessage>()
             .add_message::<crate::net::DisconnectedMessage>()
             // The production chain, in its own order.
+            // fork: `back_on_entry_failed` is one of the edges.
+            .add_message::<crate::net::LoginFailedMessage>()
             .add_systems(Update, session_edges());
 
         app.world_mut().write_message(EnteredWorldMessage {
@@ -215,7 +236,7 @@ mod tests {
     #[test]
     fn a_return_and_its_roster_in_one_drain_show_the_roster() {
         for refused in [false, true] {
-            let (tx, rx) = crossbeam_channel::unbounded();
+            let (tx, rx) = async_channel::unbounded();
             let mut app = App::new();
             app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
                 .insert_state(ClientState::InWorld)
@@ -230,6 +251,8 @@ mod tests {
                 .add_message::<LoggedOutMessage>()
                 .add_message::<CharacterLoginFailedMessage>()
                 .add_message::<crate::net::DisconnectedMessage>()
+                // fork: `back_on_entry_failed` is one of the edges.
+                .add_message::<crate::net::LoginFailedMessage>()
                 .add_systems(Update, session_edges());
             if refused {
                 app.world_mut()

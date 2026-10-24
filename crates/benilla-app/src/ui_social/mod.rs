@@ -9,6 +9,7 @@
 //! prints to the chat frame: `HandleResult` (`0x5acab0`) shows catalog ids `0x104..0x114` through
 //! `DisplayError` (`0x496720`), all of kind 0 (`0xb4b498`), the chat composer (`0x49a870`).
 
+use benilla_assets::DataLoadAppExt;
 use benilla_protocol::messages::{friend_result, friend_status, FriendEntry, FriendStatusUpdate};
 use bevy::prelude::*;
 
@@ -857,10 +858,7 @@ impl Plugin for UiSocialPlugin {
             whois::whois,
         );
         app.init_resource::<SocialState>()
-            .add_systems(
-                Startup,
-                load_lfg_dungeons.after(benilla_assets::AssetSet::Open),
-            )
+            .add_data_loaders(load_lfg_dungeons)
             .add_systems(Update, feed::feed_social.in_set(UiFeed));
     }
 }

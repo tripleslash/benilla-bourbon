@@ -264,7 +264,7 @@ mod tests {
             f:SetScript("OnEvent", function()
                 table.insert(SEEN, event .. " " .. tostring(arg1))
             end)"#);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let me = app
             .world_mut()
             .spawn((
@@ -278,7 +278,7 @@ mod tests {
         // The session's honorable kills as the pane reads them, and what the VM heard.
         let step = |app: &mut App| {
             app.world_mut().run_system_once(feed_honor).unwrap();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let kills = s.eval::<i64>("return (GetPVPSessionStats())").unwrap();
             let heard = s.eval::<Vec<String>>("return SEEN").unwrap();
@@ -357,7 +357,7 @@ mod tests {
                        PVP_RANK_7_1 = "Sergeant""#;
         let boot = vm(stock);
         let boot_session = boot.session();
-        world.insert_non_send_resource(boot);
+        world.insert_non_send(boot);
         world.run_system_once(feed_name_line_strings).unwrap();
         let held = world.resource::<crate::nameplates::NameLineStrings>();
         assert_eq!(held.session(), Some(boot_session));
@@ -366,7 +366,7 @@ mod tests {
         // A global the same VM sets later waits for a rebuild, then reaches the held strings, a
         // flag tag's included.
         world
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run(r#"PVP_RANK_7_1 = "Later" CHAT_FLAG_AFK = "<Away>""#)
             .expect("global set");
         world.run_system_once(feed_name_line_strings).unwrap();
@@ -380,7 +380,7 @@ mod tests {
 
         let world_vm = vm(&format!("{stock}\nPVP_RANK_7_1 = \"Feldwebel\""));
         let world_session = world_vm.session();
-        world.insert_non_send_resource(world_vm);
+        world.insert_non_send(world_vm);
         world.run_system_once(feed_name_line_strings).unwrap();
         let held = world.resource::<crate::nameplates::NameLineStrings>();
         assert_eq!(held.session(), Some(world_session));
@@ -395,13 +395,13 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.init_resource::<crate::nameplates::NameLineStrings>();
-        world.insert_non_send_resource(vm(r#"INDEXED = 0
+        world.insert_non_send(vm(r#"INDEXED = 0
             setmetatable(getfenv(0), { __index = function(t, k)
                 rawset(t, "INDEXED", rawget(t, "INDEXED") + 1)
             end })"#));
         let indexed = |world: &World| -> i64 {
             world
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval("return rawget(getfenv(0), 'INDEXED')")
                 .unwrap()
         };

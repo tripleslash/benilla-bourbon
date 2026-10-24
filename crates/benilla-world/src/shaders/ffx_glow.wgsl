@@ -5,6 +5,8 @@
 // count source texels from texel-centre UVs, with no half-texel shift. The math runs on gamma
 // bytes, and every scene read clamps to 1.0 because the float target does not saturate.
 
+// fork: modern lighting (FORK.md)
+#import benilla_modern::colorspace
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 
 @group(0) @binding(0) var in_tex: texture_2d<f32>;
@@ -15,8 +17,13 @@ struct FfxCombine {
     // x = zone glow weight `w` (both combines), y = FFXDeath gate (1 while a ghost, no ramp),
     // z = haze mix, w = deband dither on.
     lane: vec4<f32>,
-    // xy = the GlowWave phases `(t mod 3174)/3174` and `(t mod 2805)/2805`, t in ms; zw unused.
+    // xy = the GlowWave phases `(t mod 3174)/3174` and `(t mod 2805)/2805`; z = the fork's modern-lighting
+    // flag (FORK.md); w = its exposure. Written on
+    // every frame, read only by `fs_combine_wave`.
     wave: vec4<f32>,
+    // fork: modern lighting — the zone look's cinematic grade: x = contrast, y = saturation,
+    // z = vignette, w = toe (gamma on the encoded picture; > 1 deepens the shadows). All 0 = off.
+    grade: vec4<f32>,
 }
 @group(0) @binding(3) var<uniform> ffx: FfxCombine;
 // The 128×128 wave LUT and its repeat sampler: bound on every combine, sampled only underwater.
@@ -38,7 +45,23 @@ fn fs_downsample(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         * 0.25;
 }
 
-// Gauss4: taps at ±0.5 and ±2.5 source texels (0x6cad10), weights from FFXGauss4.bls.
+// fork: modern lighting (FORK.md) — the HDR twin of `fs_downsample`. A modern
+// frame is linear radiance, so the taps keep their energy above 1 (capped only against inf); the
+// modern combine turns that surplus into bloom.
+@fragment
+fn fs_downsample_hdr(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let texel = 1.0 / vec2<f32>(textureDimensions(in_tex));
+    let cap = vec4<f32>(64.0);
+    return (min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(-1.5, -1.5) * texel), cap)
+        + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(0.5, -1.5) * texel), cap)
+        + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(0.5, 0.5) * texel), cap)
+        + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(-1.5, 0.5) * texel), cap))
+        * 0.25;
+}
+
+// Gauss4: taps at ±0.5 (weight 0.375) and ±2.5 (weight 0.125) source texels — byte-pinned
+// (0x6cad10 tap arrays; corrects the earlier INFERRED ±1.5 outer tap). Weights are the shipped
+// FFXGauss4.bls constants.
 fn gauss4(uv: vec2<f32>, axis: vec2<f32>) -> vec4<f32> {
     let texel = axis / vec2<f32>(textureDimensions(in_tex));
     return textureSample(in_tex, in_samp, uv - 2.5 * texel) * 0.125
@@ -72,8 +95,36 @@ fn screen_space_dither(frag_coord: vec2<f32>) -> vec3<f32> {
     return (dither - vec3<f32>(0.5)) / 255.0;
 }
 
-// The combine's exit: dither in gamma space, where the present-encode rounds, then the frame's
-// one decode, which the sRGB present-encode reverses byte-exactly; none under `GAMMA_OUT`.
+// fork: modern lighting — the P1b tonemap: identity below the knee (so ordinary pixels keep their
+// classic value), an exponential shoulder above it that approaches white without clipping.
+const MODERN_BLOOM: f32 = 0.35;
+const MODERN_KNEE: f32 = 0.8;
+fn modern_tonemap(x: vec3<f32>) -> vec3<f32> {
+    let k = MODERN_KNEE;
+    let over = max(x - vec3<f32>(k), vec3<f32>(0.0));
+    let rolled = vec3<f32>(k) + (1.0 - k) * (vec3<f32>(1.0) - exp(-over / (1.0 - k)));
+    return select(x, rolled, x > vec3<f32>(k));
+}
+
+// fork: modern lighting — the cinematic grade on the encoded, tonemapped picture: saturation about
+// the luma, contrast about mid grey, a toe that deepens the shadows, and a soft vignette.
+fn cinematic_grade(g: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+    let luma = dot(g, vec3<f32>(0.2126, 0.7152, 0.0722));
+    // Saturation above 1 extrapolates away from the luma and can drive a vivid channel negative;
+    // floored at 0, or the toe's `pow` below turns it into NaN (flat red and blue patches on screen).
+    var c = max(mix(vec3<f32>(luma), g, ffx.grade.y), vec3<f32>(0.0));
+    // Contrast as an S-curve, NOT a scale about mid grey: the latter maps everything below 0.5 toward
+    // zero, so a night exterior (whose pixels all sit near 0.08) went black on screen while a daylit
+    // one only gained a little snap. The curve fixes 0 and 1 and shapes the midtones between them.
+    let s = clamp(c * c * (vec3<f32>(3.0) - 2.0 * c), vec3<f32>(0.0), vec3<f32>(1.0));
+    c = mix(c, s, clamp((ffx.grade.x - 1.0) * 2.0, 0.0, 1.0));
+    c = pow(c, vec3<f32>(max(ffx.grade.w, 0.01)));
+    let edge = length((uv - vec2<f32>(0.5)) * vec2<f32>(1.25, 1.0)) * 1.3;
+    return c * (1.0 - ffx.grade.z * smoothstep(0.35, 1.0, edge));
+}
+
+// The combine's one exit: dither (when armed) in GAMMA space — the space the present-encode
+// rounds in — then the frame's single decode, or, under `GAMMA_OUT`, no decode at all.
 fn combine_out(outg: vec3<f32>, alpha: f32, frag_coord: vec2<f32>) -> vec4<f32> {
     let dithered = clamp(
         outg + screen_space_dither(frag_coord) * step(0.5, ffx.lane.w),
@@ -91,10 +142,29 @@ fn combine_out(outg: vec3<f32>, alpha: f32, frag_coord: vec2<f32>) -> vec4<f32> 
 // Both combines, at the plain or the warped UV; `frag_coord` stays unwarped for the dither.
 fn combine_body(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
     let scene = textureSample(in_tex, in_samp, uv);
-    // Clamped like the downsample taps: the screen term must saturate before the glow add.
-    let sg = clamp(scene.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-    let bg = max(textureSample(blur_tex, in_samp, uv).rgb, vec3<f32>(0.0));
-    // Scene alpha passes through; only the transparent-clear create booth reads it.
+    // Clamped to [0, 1] like the downsample's taps: the byte framebuffer this term stands for
+    // could never exceed 255, and an unclamped super-white here keeps the whole additive stack
+    // hard-white after the min() below — the screen term must saturate BEFORE the glow add.
+    // fork: modern lighting (FORK.md) — in a modern frame (`wave.z`) the scene
+    // and its blur are linear HDR radiance: expose (`wave.w`), add the energy above white as bloom,
+    // roll the shoulder into [0, 1], then run the combine's byte math on the gamma encode — the
+    // glow, haze and death programs keep their classic behaviour on a tonemapped image.
+    let blur_raw = max(textureSample(blur_tex, in_samp, uv).rgb, vec3<f32>(0.0));
+    var sg = clamp(scene.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    var bg = blur_raw;
+    if (ffx.wave.z > 0.5) {
+        let exposure = ffx.wave.w;
+        let blur_hdr = blur_raw * exposure;
+        let bloom = max(blur_hdr - vec3<f32>(1.0), vec3<f32>(0.0)) * MODERN_BLOOM;
+        sg = colorspace::linear_to_srgb(modern_tonemap(max(scene.rgb, vec3<f32>(0.0)) * exposure + bloom));
+        if (ffx.grade.x > 0.0) {
+            sg = cinematic_grade(sg, uv);
+        }
+        bg = colorspace::linear_to_srgb(modern_tonemap(blur_hdr));
+    }
+    // The scene alpha rides through untouched: the window surface ignores it and the opaque-clear
+    // booths hold 1 everywhere — only the transparent-clear create booth reads it, to composite
+    // its baked model straight over the UI page.
     if ffx.lane.y > 0.0 {
         // FFXDeath replaces the glow while a ghost, unhazed (one pass slot, `[0xce8bb4]`). The
         // 0.144 blue weight is as shipped; the tint is packed at `0x6cb930`.

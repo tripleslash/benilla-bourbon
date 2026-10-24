@@ -105,6 +105,7 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
             bone: 0,
             pivot: [0.0; 3],
             kind: BillboardKind::LockZ,
+            carriers: vec![],
             scale_anim: None,
             seq_translations: vec![],
         }),

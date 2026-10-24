@@ -12,7 +12,8 @@ use crate::entities::{AttachPoints, Creatures};
 use crate::net::{EmoteKind, EmoteMessage, ObjectStore, SelfGuid};
 use crate::spell::group_relation::GroupRoster;
 use crate::ui_social::SocialState;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::kit::{
@@ -225,7 +226,7 @@ fn emote_sounds(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, load_emote_sounds.after(AssetSet::Open))
+    app.add_data_loaders(load_emote_sounds)
         .add_systems(Update, emote_sounds.in_set(WorldStage::Present));
 }
 

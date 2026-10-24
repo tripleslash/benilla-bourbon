@@ -279,6 +279,19 @@ fn drain_view_requests(
                         );
                     }
                 }
+                CameraViewRequest::Zoom(yards) => {
+                    // `0x50fc60`/`0x50fcd0`: a glide the other way stops where it is (`0x50fd90`), one
+                    // the same way runs on, and the zoom moves `yards` at the rig's speed from there.
+                    // The max re-clamps every frame (`camera_zoom::apply_zoom_scroll`).
+                    let rig = &mut targets.rig;
+                    let against = (rig.target_distance - rig.distance) * yards > 0.0;
+                    let from = if against {
+                        rig.distance
+                    } else {
+                        rig.target_distance
+                    };
+                    rig.target_distance = (from - yards).max(CAM_DIST_MIN);
+                }
                 CameraViewRequest::FlipYaw(degrees) => {
                     // `cam[+0x100] += arg * pi/180` (`0x50b6a0`). The reference keeps the flip in
                     // its own yaw field, added outside the follow channel (`0x50f7de`), so it

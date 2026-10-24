@@ -127,7 +127,7 @@ fn do_trade_skill_casts_inside_its_call() {
         ..crate::ui_action::Spells::empty_for_tests()
     });
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .set_trade_skill(Some(benilla_ui::script::TradeSkillState {
             line: 197,
             line_name: "Tailoring".into(),

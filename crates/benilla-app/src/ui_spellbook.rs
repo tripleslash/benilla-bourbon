@@ -25,7 +25,8 @@ use crate::items::Items;
 use crate::ui_action::{melee_auto_attack_icon, ranged_weapon_icon, PlayerActions, Spells};
 use crate::ui_script::gate;
 use crate::ui_unit::UnitFeed;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 /// `SkillLine.dbc` × `SkillLineAbility.dbc`; absent when the data failed to load.
 #[derive(Resource)]
@@ -56,7 +57,7 @@ pub(crate) struct UiSpellbookPlugin;
 impl Plugin for UiSpellbookPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LearnedInTab>()
-            .add_systems(Startup, load_skill_lines.after(AssetSet::Open))
+            .add_data_loaders(load_skill_lines)
             .add_systems(
                 Update,
                 // The feed precedes `CooldownEvents`, whose `SPELL_UPDATE_COOLDOWN` makes the book
@@ -467,7 +468,12 @@ fn leading_number(s: &str) -> u32 {
 /// `CastSpell(id, "spell", onSelf)` and `CastSpellByName(name, onSelf)` (`0x4b3300`'s player leg),
 /// through the cast tail the action bar uses, at the selection as the calls before it left it, or
 /// with `onSelf` at the caster.
-pub(crate) fn cast_spell(cast: &mut crate::spell::ScriptCast, spell_id: u32, on_self: bool) {
+pub(crate) fn cast_spell(
+    cast: &mut crate::spell::ScriptCast,
+    spell_id: u32,
+    on_self: bool,
+    unit: Option<u64>,
+) {
     let crate::spell::ScriptCast { targeting, ladder } = cast;
     // `CastSpell`'s three forks ahead of the cast (`0x4b3300`), in order, all ahead of the gate:
     // the active-action toggle (`0x4b36f0`), the stop of the targeting cursor this spell armed
@@ -514,12 +520,18 @@ pub(crate) fn cast_spell(cast: &mut crate::spell::ScriptCast, spell_id: u32, on_
             None => {}
         }
     }
+    // A macro option's `@unit` (this fork) binds that unit in the selection's place; `onSelf`
+    // still wins, as `@player` resolves to it.
+    let ctx = match unit.filter(|_| !on_self) {
+        Some(guid) => targeting.context_at_guid(guid),
+        None => targeting.context().self_bound(on_self),
+    };
     debug!(
         "ui_spellbook: cast {spell_id} (target {:?}{})",
-        targeting.selection.guid,
+        ctx.selection_guid,
         if on_self { ", on self" } else { "" }
     );
-    ladder.send_spell(spell_id, &targeting.context().self_bound(on_self), on_self);
+    ladder.send_spell(spell_id, &ctx, on_self);
 }
 
 #[cfg(test)]
@@ -683,7 +695,7 @@ mod tests {
                 ..spell("Last Stand", None, 0x10000)
             }
         }
-        let now = std::time::Instant::now();
+        let now = bevy::platform::time::Instant::now();
         let mut app = App::new();
         app.insert_resource(Spells {
             catalog: SpellCatalog::from_displays(HashMap::from([(LAST_STAND, last_stand())])),
@@ -705,11 +717,11 @@ mod tests {
             .insert(LAST_STAND);
         let mut script = UiScript::new().unwrap();
         script.set_now(1000.0);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.update();
         let duration = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<f64>("local _, d = GetSpellCooldown(1, 'spell') return d")
                 .unwrap()
         };

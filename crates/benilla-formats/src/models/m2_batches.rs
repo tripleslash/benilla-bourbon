@@ -27,7 +27,7 @@ fn parent_dir(path: &str) -> &str {
     }
 }
 
-/// A batch's `.blp`: `Monster1/2/3` come from the creature's skin variations
+/// A batch's `.blp`: `Monster1/2/3` come from the creature's skin variations alone
 /// (`<model-dir>\<name>.blp`), else the embedded filename.
 fn resolve_texture(
     tex: &benilla_m2::M2Texture,
@@ -55,11 +55,14 @@ fn resolve_texture(
         M2TextureType::Other(8) => Some(CharSkinSlot::SkinExtra),
         _ => None,
     };
-    // The skin slot is reported so a skin-less load can fill it at spawn.
+    // The skin slot is reported so a skin-less load can fill it at spawn. A creature-skin record's
+    // own name is never a file: the stock models leave it empty, and Turtle WoW's `Stag.m2` carries
+    // one junk byte there, which read as a path left the slot looking filled, so the display's
+    // skin never went on and the stag drew nothing.
     match tex.texture_type {
-        M2TextureType::Monster1 => (variation(0).or(embedded), Some(0), None, false),
-        M2TextureType::Monster2 => (variation(1).or(embedded), Some(1), None, false),
-        M2TextureType::Monster3 => (variation(2).or(embedded), Some(2), None, false),
+        M2TextureType::Monster1 => (variation(0), Some(0), None, false),
+        M2TextureType::Monster2 => (variation(1), Some(1), None, false),
+        M2TextureType::Monster3 => (variation(2), Some(2), None, false),
         _ => (embedded, None, char_slot, icon_slot),
     }
 }
@@ -185,6 +188,12 @@ fn parse_bone_seq_translation(
 /// Load an M2 from the chain as render submeshes; creatures use [`load_m2_mesh_skinned`].
 pub fn load_m2_mesh(chain: &mut Chain, raw_path: &str) -> Result<Vec<RenderSubmesh>> {
     load_m2_mesh_skinned(chain, raw_path, &[])
+}
+
+/// Would [`load_m2_mesh`] read `raw_path` without blocking? Starts the pack warm if not. Always
+/// true on native; in the browser a `false` read would be a synchronous XHR on the frame thread.
+pub fn m2_ready(chain: &Chain, raw_path: &str) -> bool {
+    chain.ready(&model_path(raw_path))
 }
 
 /// [`load_m2_mesh`] with `Monster1/2/3` filled from `skins` (`CreatureDisplayInfo` variations).
@@ -416,8 +425,21 @@ pub fn parse_m2_render_submeshes(
                 wrap_y,
                 env_map: model.stage_is_env_mapped(batch, 1),
                 combine: model.stage_combine(batch, 1),
+                uvs: Vec::new(),
+                uv_anim: batch
+                    .texture_transform_combo_index
+                    .checked_add(1)
+                    .and_then(|combo| tex_anim::bake_uv_anim(model, combo, seq0_slot)),
             }
         });
+        // The vertex UV set a stage that is not env-mapped reads (`texture_unit_lookup` at
+        // `texCoordSet + 1`, read on past the table as `0x70b8bd` does, set 0 or 1): `Stars.m2`'s
+        // second stage reads set 1.
+        let stage1_set = stage1
+            .as_ref()
+            .filter(|st| !st.env_map)
+            .and_then(|_| model.stage_coord(batch, 1))
+            .filter(|&set| set <= 1);
         // Render flag 0x01, unlit: full texture brightness (lamp glass, glow cards).
         let emissive = material.is_some_and(|m| m.flags.bits() & 0x01 != 0);
         // Render flags 0x10 (no depth write) and 0x08 (no depth test): the reference keys depth
@@ -505,10 +527,28 @@ pub fn parse_m2_render_submeshes(
         // can hold cards on several bones (a candelabra's glows): one submesh per billboard bone.
         let make_billboard = |bone_idx: usize| -> Option<Billboard> {
             let bone = model.bones.get(bone_idx)?;
+            // The billboard bones above, walked up from the parent; the bone count bounds a
+            // malformed parent cycle.
+            let mut carriers = Vec::new();
+            let mut parent = bone.parent;
+            for _ in 0..model.bones.len() {
+                let Some(p) = usize::try_from(parent)
+                    .ok()
+                    .and_then(|p| model.bones.get(p))
+                else {
+                    break;
+                };
+                if let Some(kind) = BillboardKind::from_bone_flags(p.flags.bits()) {
+                    carriers.push(([p.pivot.x, p.pivot.y, p.pivot.z], kind));
+                }
+                parent = p.parent;
+            }
+            carriers.reverse();
             Some(Billboard {
                 pivot: [bone.pivot.x, bone.pivot.y, bone.pivot.z],
                 bone: bone_idx as u16,
                 kind: BillboardKind::from_bone_flags(bone.flags.bits())?,
+                carriers,
                 // The glow-card pulse: the bone's global-sequence scale track.
                 scale_anim: parse_bone_scale_anim(bytes, bone_idx),
                 // Per-sequence translation loops (the questgiver bob: anim 0 low, 190 raised).
@@ -573,7 +613,23 @@ pub fn parse_m2_render_submeshes(
                 })
             });
             sub.env_map = env_map;
-            sub.stage1 = stage1.clone();
+            sub.stage1 = stage1.clone().map(|mut st| {
+                if let Some(set) = stage1_set {
+                    st.uvs = globals
+                        .iter()
+                        .map(|&g| {
+                            let v = &model.vertices[g as usize];
+                            let uv = if set == 1 {
+                                v.tex_coords2
+                            } else {
+                                v.tex_coords
+                            };
+                            [uv.x, uv.y]
+                        })
+                        .collect();
+                }
+                st
+            });
             sub.combine = combine;
             sub.additive = additive;
             sub.no_depth_write = no_depth_write;
@@ -875,6 +931,8 @@ mod tests {
                 wrap_y: false,
                 env_map: true,
                 combine: 1,
+                uvs: Vec::new(),
+                uv_anim: None,
             })
         );
         // One texture binds one stage, whatever the lookups past it hold.

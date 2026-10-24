@@ -420,6 +420,8 @@ pub(crate) fn simulate_chain_beams(
             ..
         } = &mut *beam;
 
+        // fork: fsr (FORK.md) — `EffectMotion::Static`, the batch default: every strand is
+        // re-rolled each frame, so no vertex has a previous position; the reactive mask takes it.
         let mut batch = draw.batch(cam, texture);
         let (mut anchor_sum, mut anchor_n) = (Vec3::ZERO, 0.0f32);
         for (i, bolt) in bolts.iter_mut().enumerate() {

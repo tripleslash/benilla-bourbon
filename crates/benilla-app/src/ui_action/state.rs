@@ -16,7 +16,9 @@
 
 use crate::ui_items::stack_counts;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::time::Instant;
+// `bevy::platform::time::Instant`, not `std::time::Instant`: this flows into `crate::cooldowns`/
+// `crate::ui_script::UiClock`, and `std`'s panics on wasm32.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 

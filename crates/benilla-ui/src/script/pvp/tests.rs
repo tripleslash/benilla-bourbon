@@ -827,6 +827,29 @@ fn unit_pvp_name_decorates_a_ranked_player_and_falls_back_three_ways() {
         .eval::<bool>(r#"return UnitPVPName("party1") == nil"#)
         .unwrap());
 
+    // A title on an unranked player is Turtle's: vanilla keeps the plain name (the reference
+    // reaches the medal from the ranked leg only).
+    s.lua().globals().set("PVP_MEDAL18", "Still Alive").unwrap();
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            pvp_medal: 18,
+            pvp_rank: 0,
+            ..player()
+        }),
+    );
+    assert_eq!(
+        s.eval::<String>(r#"return UnitPVPName("player")"#).unwrap(),
+        "Benilla"
+    );
+    s.set_flavor(crate::script::UiFlavor::Turtle);
+    assert_eq!(
+        s.eval::<String>(r#"return UnitPVPName("player")"#).unwrap(),
+        "Benilla
+Still Alive"
+    );
+    s.set_flavor(crate::script::UiFlavor::Vanilla);
+
     // Leg B: the civilian prefix, on the tooltip's `0x612550` gate: PvP-flagged, hostile and grey
     // to the player.
     s.set_player_req_state(crate::script::PlayerReqState {

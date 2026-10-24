@@ -57,12 +57,36 @@ impl MaterialExtension for CelestialExt {
 /// `clamp(30·dir.y, 0, 1)`, a soft edge over the bottom ~1.9° of elevation; at or below 0 it clips.
 pub(super) const DISC_HORIZON_FADE: f32 = 30.0;
 
-/// The star patches, blended premultiplied in gamma space by `star.wgsl`, like the reference.
+/// The `Stars.m2` batches, blended premultiplied in gamma space by `star.wgsl`, like the reference.
 pub type StarMaterial = ExtendedMaterial<StandardMaterial, StarExt>;
 
-/// No uniforms: the star fragment reads the base colour's alpha, the star-curve fade.
+/// A star batch's second stage and blend. The base colour carries stage 0 and the vertex alpha,
+/// the star-curve fade times the batch weight.
 #[derive(Asset, AsBindGroup, Clone, TypePath, Default)]
-pub struct StarExt {}
+pub struct StarExt {
+    /// `.x` 1 for an additive batch (M2 blend 3/4), 0 for alpha blend; `.y` 1 when
+    /// [`Self::stage2`] is bound; `.z` 1 when the frame is linear (modern lighting) and `.w` the
+    /// reciprocal of the modern post's exposure, both written per frame.
+    #[uniform(100)]
+    pub(super) params: Vec4,
+    /// The batch's second texture, on `UV_1`, modulated over stage 0: blend modes 1-4 set every
+    /// stage's op to `GL_COMBINE` MODULATE on RGB and alpha (`0x70b7d7`, table `0x811f8c`, the GL
+    /// rows at `0x85c254`).
+    #[texture(101)]
+    #[sampler(102)]
+    pub(super) stage2: Option<Handle<Image>>,
+    /// fork: the modern horizon fade (`follow::MODERN_STAR_HORIZON`), modern frames only: the dome is
+    /// gone below the view elevation (sine) `.x` and whole above `.y`; `.y` 0 = no fade. The dome
+    /// draws after the fog composite, so without it the nebulae ran unhazed down to the horizon.
+    #[uniform(103)]
+    pub(super) horizon: Vec4,
+    /// fork: the modern sky's hue (`follow::star_tint`), modern frames only: `.rgb` the hue of the
+    /// sky the dome draws over, at luma 1, and `.w` the share of the dome's own colour that gives way
+    /// to it at the same luma; `.w` 0 = the authored colour. patch-Y's teal nebulae otherwise
+    /// clashed with a zone's mauve or green night sky.
+    #[uniform(104)]
+    pub(super) tint: Vec4,
+}
 
 impl MaterialExtension for StarExt {
     /// The shared sky vertex stage, the far-depth pin ([`crate::sky_order`]).

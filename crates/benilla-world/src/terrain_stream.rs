@@ -2,8 +2,9 @@
 //! the `AssetServer`, spawns its cells, collider, placements, MCLQ water and ground clutter, and
 //! publishes the residency the loading screen reads.
 
+use bevy::platform::time::Instant;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use benilla_assets::coords::{bevy_to_wow, placement_rotation, wow_to_bevy};
 use benilla_assets::{AdtTile, M2Model, WdtIndex, WmoModel};
@@ -29,7 +30,10 @@ use benilla_assets::{m2_url, wmo_url};
 
 mod collider;
 mod furnish;
+mod lod;
+pub(crate) use lod::TerrainLodEpoch;
 pub mod merge;
+mod provisional;
 mod queries;
 mod residency;
 mod spawn;
@@ -50,6 +54,9 @@ pub use window::StreamWindow;
 pub use spawn::prop_light::{fold_interior_probe, hex_word, interior_light_up, PropLobeLight};
 // The placed-model assembler and off-thread collider build, shared with WMO gameobject props.
 pub use collider::{build_collider_task, placement_collider_data, PendingCollider};
+// The stand-in collision lane (`provisional`): its marker is public so an instrument can tell a
+// stand-in floor from real ground; everything else about it is the streamer's own business.
+pub use provisional::ProvisionalCollider;
 pub use spawn::{m2_anim_bound, m2_fade, point_light, spawn_model_entities, SpawnedModel};
 // The position queries and the area authority.
 use queries::update_current_area;
@@ -94,6 +101,8 @@ pub struct TerrainStreamer {
     settled: bool,
     /// The off-grid focus tile last warned about, so the warning fires once per tile.
     off_grid_reported: Option<(i32, i32)>,
+    /// The map id last warned about for having no `Map.dbc` directory, so it warns once per map.
+    unknown_map: Option<u32>,
     /// The tiles held resident: the WDT-authored tiles of the inner window while the focus holds
     /// it (a live paced body or a cinematic's camera, [`ViewFocus::holds_inner`]), else none. The tile pass waits for these
     /// and builds them with no limit (`0x698644`–`0x6986a5`).
@@ -134,6 +143,21 @@ impl TerrainStreamer {
         let spawned = self.tiles.values().filter(|t| t.furnished).count();
         (spawned, self.tiles.len())
     }
+
+    /// The spawned tiles' keys and assets, for the horizon's chunk walk.
+    pub(crate) fn spawned_tiles(&self) -> impl Iterator<Item = ((i32, i32), &Handle<AdtTile>)> {
+        self.tiles
+            .iter()
+            .filter(|(_, t)| t.entity.is_some())
+            .map(|(k, t)| (*k, &t.handle))
+    }
+}
+
+/// A furnished terrain cell: its tile and its index, row·4 + column, among the tile's 4×4 cells.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TerrainCell {
+    pub tile: (i32, i32),
+    pub cell: u8,
 }
 
 /// One loaded tile and everything it owns.
@@ -159,7 +183,9 @@ struct TileState {
     /// Those placements' merged static-render blobs, per cell and material (`WOW_STATIC_MERGE`).
     merged: Vec<Entity>,
     /// The inner wait gave up on this request's read ([`INNER_WAIT_CAP`]); it streams on
-    /// unwaited, and a fresh request after a drop is waited on again.
+    /// unwaited, and a fresh request after a drop is waited on again. Native only: the page waits
+    /// for nothing.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     gave_up: bool,
 }
 
@@ -186,8 +212,15 @@ impl TileState {
 /// Doodad and WMO placements, spawned once and refcounted across the tiles that list them.
 #[derive(Resource, Default)]
 pub(crate) struct Placements {
-    /// By MDDF/MODF uniqueId.
+    /// By registry key: the MDDF/MODF uniqueId, or [`Placements::key_for`]'s own key for a
+    /// placement whose uniqueId another placement already holds.
     by_id: HashMap<u32, Placement>,
+    /// Those own keys by the uniqueId they share, so every tile listing such a placement finds
+    /// the same one; each leaves with its placement.
+    aliases: HashMap<u32, Vec<u32>>,
+    /// Every registered placement's key by [`PlacementIdent::spot`], so an exact double listed
+    /// under another uniqueId joins it rather than stacking on it.
+    spots: HashMap<PlacementSpot, u32>,
     /// The material dedup, so submeshes sharing a look share one handle and batch.
     materials: MaterialCache,
     /// Placements awaiting their model plus WMO props awaiting their M2s; at zero the spawner skips
@@ -196,6 +229,75 @@ pub(crate) struct Placements {
 }
 
 impl Placements {
+    /// The registry key for an authored placement, and whether it is already registered.
+    ///
+    /// A uniqueId names one placement across every tile that lists it, so it is the key — unless a
+    /// different placement holds it ([`PlacementIdent::same_placement`]). Stock 1.12.1 data never
+    /// reuses an id (none on either continent), but a custom map does (Turtle WoW's Azeroth: 20k M2
+    /// ids), and a residency window wider than the reference's load radius holds both users at
+    /// once: the first to register would hide the other for the session. That one takes a key of
+    /// its own, counted down from below [`GLOBAL_WMO_UID`] past any key in use.
+    ///
+    /// Deviates: an exact double under another uniqueId (the same model, spot, turn, scale and
+    /// sets) joins the placement already there, where the reference draws both. Stock data has
+    /// eight such pairs, all small props; Turtle WoW's two continents 1,075 (trees stacked up to
+    /// seven deep). A double is the same pixels twice, darker where it blends and out of step
+    /// where it animates.
+    fn key_for(&mut self, uid: u32, ident: &PlacementIdent) -> (u32, bool) {
+        let holds = |key: &u32| {
+            self.by_id
+                .get(key)
+                .is_some_and(|p| p.ident.same_placement(ident))
+        };
+        if holds(&uid) {
+            return (uid, true);
+        }
+        if let Some(&key) = self
+            .aliases
+            .get(&uid)
+            .and_then(|keys| keys.iter().find(|k| holds(k)))
+        {
+            return (key, true);
+        }
+        if let Some(&key) = self.spots.get(&ident.spot()) {
+            if self.by_id.contains_key(&key) {
+                return (key, true);
+            }
+        }
+        if !self.by_id.contains_key(&uid) {
+            return (uid, false);
+        }
+        let mut key = GLOBAL_WMO_UID - 1;
+        while self.by_id.contains_key(&key) {
+            key -= 1;
+        }
+        self.aliases.entry(uid).or_default().push(key);
+        (key, false)
+    }
+
+    /// File a new placement under `key`, as [`Self::key_for`] handed it out.
+    fn insert(&mut self, key: u32, placement: Placement) {
+        self.spots.entry(placement.ident.spot()).or_insert(key);
+        self.by_id.insert(key, placement);
+        self.pending_spawns += 1;
+    }
+
+    /// Take the placement filed under `key` out of the registry and its indexes.
+    fn remove(&mut self, key: u32) -> Option<Placement> {
+        let p = self.by_id.remove(&key)?;
+        if let Some(keys) = self.aliases.get_mut(&p.uid) {
+            keys.retain(|&k| k != key);
+            if keys.is_empty() {
+                self.aliases.remove(&p.uid);
+            }
+        }
+        let spot = p.ident.spot();
+        if self.spots.get(&spot) == Some(&key) {
+            self.spots.remove(&spot);
+        }
+        Some(p)
+    }
+
     /// Every entity a registered placement owns; a placed part outside it is a doubled prop.
     pub(crate) fn owned(&self) -> std::collections::HashSet<Entity> {
         self.by_id
@@ -207,6 +309,11 @@ impl Placements {
 
 /// A shared placement: its model, transform and spawned entities.
 struct Placement {
+    /// The authored MDDF/MODF uniqueId, which is also the key unless [`Placements::key_for`]
+    /// gave the placement its own.
+    uid: u32,
+    /// What tells two placements sharing a uniqueId apart, and an exact double from a neighbour.
+    ident: PlacementIdent,
     model: ModelHandle,
     transform: Transform,
     /// Spawned submesh entities, WMO prop submeshes included so they despawn together.
@@ -226,6 +333,14 @@ struct Placement {
     /// The tile owning an M2 doodad's hull weld and merged blobs, first the registering tile;
     /// WMOs never read it.
     owner: (i32, i32),
+    /// The building's authored **world-space bounding box** in WoW coords (MODF), `None` for an M2
+    /// doodad and for a MODF entry whose box is degenerate.
+    ///
+    /// Carried because it is known one fetch EARLIER than anything else about this placement: the
+    /// box is authored in the tile, so it exists while the `.wmo` is still on the wire. That is the
+    /// whole basis of the stand-in hull (`provisional`) — a body can be stopped by a building's
+    /// mass before the building's geometry has arrived.
+    bounds: Option<[[f32; 3]; 2]>,
 }
 
 /// How much of the world wanted around the view focus is there, read by the loading bar and by
@@ -244,6 +359,48 @@ pub struct WorldLoadProgress {
     pub scene_ready: bool,
     /// Outstanding collider attaches, from `finish_colliders`.
     pub colliders_pending: usize,
+    /// **Is there collision geometry under the focus tile?** Published by the stand-in lane
+    /// (`provisional`), which is the only system that both knows the focus tile and can see whether
+    /// its collider has attached.
+    ///
+    /// The scene term plus a quiet collider queue *imply* this on every ordinary frame, and saying
+    /// it out loud anyway is the point: the implication runs through four other terms, and the
+    /// thing a body must never be released onto is exactly this one fact.
+    ///
+    /// **A stand-in floor satisfies it.** It did not at first — the term was "the *real* collider
+    /// has attached" — and that made it a hard wait on a network: the body sat frozen while a tile's
+    /// heightfield was fetched, decoded, built and attached. Waiting is the same mistake as falling,
+    /// arrived at from the other side; both come from treating "not here yet" as something to sit
+    /// still for. What the consumers need is that the body is not released over *nothing*, and a
+    /// stand-in is not nothing.
+    ///
+    /// Vacuously true where the map authors no tile under the focus (open ocean, a map edge, a
+    /// WMO-only map), for the same reason `focus_resident` is: waiting there would hang forever on
+    /// terrain that cannot exist.
+    ///
+    /// False while the body stands inside the MODF box of a WMO whose real collision has not
+    /// attached: no stand-in boxes in a body already inside one, so nothing else holds it up.
+    pub focus_collidable: bool,
+    /// **The ground that should hold the body may still be arriving**: the body is inside the MODF
+    /// box of a WMO whose collision has not attached, its own tile has no real collider yet, or it
+    /// is under its tile's terrain while a neighbouring tile, whose WMOs are not registered until
+    /// it lands, is still loading. Published every frame by the stand-in lane, never latched.
+    ///
+    /// The game reads it with the body's own state: airborne with no floor below and this set, the
+    /// body is held rather than falling through ground that has not landed.
+    pub support_pending: bool,
+    /// Streamed assets the AssetServer says are **still arriving** — desired tiles and unspawned
+    /// placements whose fetch/decode has not finished. Published by the stand-in lane beside
+    /// [`Self::focus_collidable`].
+    ///
+    /// It exists for the settle hold's stall backstop (`SETTLE_TIMEOUT`), which pushes its deadline
+    /// while the destination is "visibly still arriving" and reads that off the residency counters.
+    /// Those counters move when something *lands*; on the web target a single large object can be
+    /// on the wire for longer than the whole budget without any of them moving, and the backstop
+    /// then fires against a stream that is working perfectly — gravity back on in a city whose
+    /// colliders are still coming. A non-zero count here is the direct statement the counters can
+    /// only imply: this stream is slow, not dead.
+    pub loads_in_flight: usize,
     /// Unflushed static-merge accumulators (`WOW_STATIC_MERGE`), holes the reveal must not show.
     pub merge_pending: usize,
     /// Focus-neighbourhood placements not yet spawned.
@@ -277,6 +434,7 @@ impl WorldLoadProgress {
     /// the settle release key on.
     pub fn presentable(&self) -> bool {
         self.scene_ready
+            && self.focus_collidable
             && self.colliders_pending == 0
             && self.merge_pending == 0
             && self.gx_pending == 0
@@ -410,6 +568,21 @@ enum ModelHandle {
     Wmo(Handle<WmoModel>),
 }
 
+impl ModelHandle {
+    /// Is this model's asset still being fetched or decoded?
+    ///
+    /// Read by the stand-in lane to publish `WorldLoadProgress::loads_in_flight` — the difference
+    /// between a stream that is *stalled* and one that is merely *slow*, which on the web target is
+    /// the difference between a dead origin and a large object still coming down a wire.
+    fn is_loading(&self, server: &AssetServer) -> bool {
+        let state = match self {
+            ModelHandle::M2(h) => server.load_state(h),
+            ModelHandle::Wmo(h) => server.load_state(h),
+        };
+        state.is_loading()
+    }
+}
+
 /// What the streamer did this frame, bumped by the `WorldStage::Stream` chain and zeroed by its
 /// reader, so a frame spike can be read against what was dropped, requested and spawned.
 #[derive(Resource, Default)]
@@ -429,6 +602,10 @@ pub struct StreamActivity {
     /// Placements (or WMO props) whose model landed and spawned.
     pub placements_spawned: u32,
     pub colliders_attached: u32,
+    /// Stand-in colliders up right now (`provisional`) — WDL ground floors plus MODF hull boxes.
+    /// A level, not a per-frame count: it is zero in a settled world, and a trace row where it is
+    /// not names a frame where something was holding a body up that was not the real world.
+    pub provisional_live: u32,
     /// Self-times in ms, in order: `stream_terrain`, `furnish_tile_cells`, `furnish_model_forms`,
     /// `spawn_loaded_placements`, `finish_colliders`.
     pub stream_ms: f32,
@@ -436,6 +613,8 @@ pub struct StreamActivity {
     pub mfurnish_ms: f32,
     pub spawn_ms: f32,
     pub collider_ms: f32,
+    /// Self-time of `provisional::maintain_provisional_collision` (ms).
+    pub provisional_ms: f32,
     /// The inner-window hold's self-time: the wait for the reads and the inner collider attach.
     pub wait_ms: f32,
 }
@@ -469,6 +648,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<HullWelds>()
             .init_resource::<StaticMerge>()
             .init_resource::<crate::model_forms::ModelForms>()
+            .init_resource::<provisional::ProvisionalCollision>()
             .init_resource::<CurrentArea>()
             .init_resource::<queries::AreaMap>()
             // In `WorldStage::Stream`, between the teleport snap (Input) and the loading cover
@@ -484,10 +664,18 @@ impl Plugin for TerrainPlugin {
                     spawn_streamed_tiles,
                     attach_inner_colliders,
                     furnish_tile_cells,
+                    // A cell furnished this frame is keyed at once.
+                    lod::update_terrain_lod,
                     spawn_loaded_placements,
                     flush_hull_welds,
                     flush_static_merge,
                     sync_interior_volumes,
+                    // The stand-in collision lane, at the TAIL: `finish_colliders` runs in
+                    // `await_reads_and_attach` above, so a collider that attached this frame is visible here
+                    // and its stand-in is retired in the same frame rather than one late. It also
+                    // publishes `focus_collidable` / `loads_in_flight`, which the settle release
+                    // (a stage later) reads for this frame.
+                    provisional::maintain_provisional_collision,
                     publish_terrain_residency,
                 )
                     .chain()
@@ -590,6 +778,41 @@ fn stream_terrain(
     let placements = placements.into_inner();
     let map_id = focus.map(current_map.map(|m| m.0));
     let Some(dir) = map_catalog.0.directory(map_id).map(str::to_string) else {
+        // Under Turtle WoW only, a map its tables do not name has no world to stream, and the
+        // loading cover must not wait on one: the last map is dropped and the focus published
+        // resident, the map-edge law (ground that is not there counts as there). A 1.12.1 realm
+        // idles here as before. The flavor is read on this path only.
+        if benilla_formats::layers::turtle_mounted() {
+            if state.unknown_map != Some(map_id) {
+                warn!("terrain: map {map_id} has no Map.dbc directory — nothing to stream");
+                state.unknown_map = Some(map_id);
+            }
+            if state.map_dir.is_some() || !state.tiles.is_empty() {
+                drop_streamed_world(
+                    &mut commands,
+                    &mut state,
+                    placements,
+                    &mut welds,
+                    &mut static_merge,
+                    staticgx.as_deref_mut(),
+                    &mut activity,
+                );
+                state.map_dir = None;
+            }
+            // This map's own focus tile, as the publish below computes it: the settle release
+            // keys on it.
+            let center = focus.resolve(camera.single().ok().map(|c| c.translation));
+            let tile = StreamWindow::at(view.farclip, center[0], center[1]).focus_tile();
+            if let Some(p) = load_progress.as_mut() {
+                p.focus_tile = Some(tile);
+                p.total = 1;
+                p.ready = 1;
+                p.focus_resident = true;
+                p.scene_ready = true;
+                p.placements_pending = 0;
+                p.complete = true;
+            }
+        }
         return;
     };
 
@@ -650,6 +873,13 @@ fn stream_terrain(
                     unique_id: GLOBAL_WMO_UID,
                     doodad_set: g.doodad_set,
                     name_set: g.name_set,
+                    // No stand-in box for the building that IS the map. Its MODF box is authored in
+                    // the WDT's own raw frame, not the ADT's corner-origin one, so it would need a
+                    // second remap to be trustworthy — and it would buy nothing: there is no
+                    // neighbouring ground to fall between, and the only way onto a WMO-only map is
+                    // an arrival, which the settle hold already refuses to release until the
+                    // building has spawned (`focus_resident` folds it, decision 0688).
+                    bounds: None,
                 },
             );
             state.global_wmo = true;
@@ -660,6 +890,17 @@ fn stream_terrain(
     let center = focus.resolve(camera.single().ok().map(|c| c.translation));
     let window = StreamWindow::at(view.farclip, center[0], center[1]);
     let (cx, cy) = window.focus_tile();
+    // **Tell the warm queue where terrain is being streamed from** — the web target's fetch order
+    // (`benilla_formats::web::warm_priority`). The queue sees names and nothing else, so without
+    // this the tile a body is about to walk onto shares one lane with every doodad and building of
+    // the zone it is standing in; six connections drained in arrival order then land it after the
+    // art, which is the ADT that only turns up once you have stepped onto it. Naming the focus tile
+    // and the neighbour it is nearest to is the whole of what the queue needs to order the eight.
+    //
+    // Published BEFORE the settled skip below, and cheap enough to mean it: a lock read and a
+    // compare, with a write only when the answer moved. Nothing reads it on native: there the
+    // chain is a filesystem and there is no queue to put in an order.
+    benilla_formats::web::set_terrain_focus(&dir, (cx, cy), window.lean_tile());
     let same_window = state.streamed(&window);
     // Skip an unchanged frame only in a paced, complete, presentable world, since the tail it
     // bypasses releases a load; even then the undrawn count stays fresh, so a rebake un-skips it.
@@ -812,9 +1053,11 @@ fn stream_terrain(
 }
 
 /// How long the inner wait may block before it gives up and lets the frame go on.
+#[cfg(not(target_arch = "wasm32"))]
 const INNER_WAIT_CAP: Duration = Duration::from_secs(10);
 
 /// A test's override of [`INNER_WAIT_CAP`].
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource)]
 struct InnerWaitCap(Duration);
 
@@ -825,6 +1068,7 @@ struct InnerWaitCap(Duration);
 /// Deviation: a read still loading after [`INNER_WAIT_CAP`] is given up on with a warning, once
 /// per request, and its tile then streams on unwaited like the outer ring, where the reference
 /// waits for ever: a hung read costs one capped stall, not one every frame.
+#[cfg(not(target_arch = "wasm32"))]
 fn await_inner_tiles(world: &mut World) {
     let pending: Vec<((i32, i32), Handle<AdtTile>)> = {
         let state = world.resource::<TerrainStreamer>();
@@ -889,6 +1133,13 @@ fn await_inner_tiles(world: &mut World) {
         activity.wait_ms += t0.elapsed().as_secs_f32() * 1000.0;
     }
 }
+
+/// Deviation: the page waits for nothing. Its one thread cannot block on a fetch, which lands
+/// only once the frame yields to the browser; the held inner tiles are still requested first and
+/// built unbudgeted, and the stand-in lane (`provisional`) and the loading cover's backstop
+/// stand in for the wait.
+#[cfg(target_arch = "wasm32")]
+fn await_inner_tiles(_world: &mut World) {}
 
 /// The chain's one exclusive stop: the wait for the held inner tiles' reads, then the budgeted
 /// collider attach. One barrier, not two, since an exclusive system stalls everything the
@@ -967,6 +1218,8 @@ fn spawn_streamed_tiles(
         let material = materials.add(ExtendedMaterial {
             base: terrain_base_material(),
             extension: TerrainExtension {
+                modern_shadow: benilla_assets::materials::MODERN_SHADOW_MAP, // fork: modern lighting (FORK.md, P2)
+                modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES,
                 layer_array: adt.layer_array.clone(),
                 alpha_array: adt.alpha_array.clone(),
                 shadow_array: adt.shadow_array.clone(),
@@ -1008,18 +1261,21 @@ fn spawn_streamed_tiles(
         // Placements register by uniqueId; their ground shade resolves at spawn by a global lookup,
         // since a doodad's origin may lie on another tile.
         for d in &adt.doodads {
-            register_doodad(placements, &asset_server, d, (tx, ty));
-            tile.placements.push(d.unique_id);
+            let key = register_doodad(placements, &asset_server, d, (tx, ty));
+            tile.placements.push(key);
         }
         for w in &adt.wmos {
-            register_wmo(placements, &asset_server, w);
-            tile.placements.push(w.unique_id);
+            let key = register_wmo(placements, &asset_server, w);
+            tile.placements.push(key);
         }
 
         let mut liquid_ents = Vec::new();
         spawn_liquids(
             &mut commands,
-            adt.chunks.iter().flat_map(|c| c.liquids.iter()),
+            adt.chunks
+                .iter()
+                .enumerate()
+                .flat_map(|(i, c)| c.liquids.iter().map(move |lq| (i, lq))),
             liquid_assets.as_deref(),
             &mut meshes,
             &mut liquid_ents,
@@ -1151,21 +1407,90 @@ fn tile_drop_disabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_NO_TILE_DROP").is_some())
 }
 
-/// Register one M2 doodad placement, or bump its refcount if already known.
+/// How far apart (yd) two tiles' copies of one uniqueId may stand and still be one placement. A
+/// placement's copies agree, save a custom map's drifted edit (Turtle WoW: Orgrimmar's WMO at
+/// 0.23 yd, a Redridge rowboat at 3 yd); a reused id lands far off (none within 200 yd).
+const SAME_PLACEMENT_YD: f32 = 32.0;
+
+/// A placement's identity beside its uniqueId: its model, where it stands, how it is turned and
+/// scaled and, for a WMO, which doodad and name sets it shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PlacementIdent {
+    /// The model path, case- and separator-folded, hashed.
+    model: u64,
+    /// The authored position (WoW yards).
+    at: [f32; 3],
+    /// The authored rotation in 1/100 degree.
+    turn: [i32; 3],
+    /// The scale in 1/1024 (MDDF's own unit).
+    scale: i32,
+    /// A WMO's doodad set and name set, `(set << 16) | name_set`; 0 for an M2.
+    sets: u32,
+}
+
+/// [`PlacementIdent::spot`]: model, position to 1/8 yd, turn, scale and sets.
+type PlacementSpot = (u64, [i32; 3], [i32; 3], i32, u32);
+
+impl PlacementIdent {
+    fn new(model: &str, at: [f32; 3], rotation: [f32; 3], scale: f32, sets: u32) -> Self {
+        use std::hash::Hasher;
+        let mut h = std::hash::DefaultHasher::new();
+        for b in model.bytes() {
+            h.write_u8(if b == b'\\' {
+                b'/'
+            } else {
+                b.to_ascii_lowercase()
+            });
+        }
+        Self {
+            model: h.finish(),
+            at,
+            turn: rotation.map(|r| (r * 100.0).round() as i32),
+            scale: (scale * 1024.0).round() as i32,
+            sets,
+        }
+    }
+
+    /// Two tiles' copies of one uniqueId: the same model within [`SAME_PLACEMENT_YD`].
+    fn same_placement(&self, other: &Self) -> bool {
+        self.model == other.model
+            && Vec3::from(self.at).distance(Vec3::from(other.at)) <= SAME_PLACEMENT_YD
+    }
+
+    /// The exact-double key: everything that decides the pixels.
+    fn spot(&self) -> PlacementSpot {
+        (
+            self.model,
+            self.at.map(|v| (v * 8.0).round() as i32),
+            self.turn,
+            self.scale,
+            self.sets,
+        )
+    }
+}
+
+/// Register one M2 doodad placement, or bump its refcount if already known; the registry key,
+/// which the tile lists and releases.
 fn register_doodad(
     placements: &mut Placements,
     asset_server: &AssetServer,
     d: &Doodad,
     tile: (i32, i32),
-) {
-    if let Some(p) = placements.by_id.get_mut(&d.unique_id) {
-        p.refs += 1;
-        return;
+) -> u32 {
+    let ident = PlacementIdent::new(&d.model, d.position, d.rotation, d.scale, 0);
+    let (key, known) = placements.key_for(d.unique_id, &ident);
+    if known {
+        if let Some(p) = placements.by_id.get_mut(&key) {
+            p.refs += 1;
+        }
+        return key;
     }
     let handle: Handle<M2Model> = asset_server.load(m2_url(&d.model));
-    placements.by_id.insert(
-        d.unique_id,
+    placements.insert(
+        key,
         Placement {
+            uid: d.unique_id,
+            ident,
             model: ModelHandle::M2(handle),
             transform: Transform {
                 translation: wow_to_bevy(d.position),
@@ -1180,21 +1505,33 @@ fn register_doodad(
             portal_instance: None,
             refs: 1,
             owner: tile,
+            // MDDF authors no bounding box — an M2 doodad's extents live in the model header, which
+            // is the thing that has not arrived. A tree with no stand-in hull is the right answer
+            // anyway: doodads are what you walk *past*, not what holds you up.
+            bounds: None,
         },
     );
-    placements.pending_spawns += 1;
+    key
 }
 
-/// Register one WMO placement, or bump its refcount; a 1.12 WMO placement has no scale.
-fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &WmoInstance) {
-    if let Some(p) = placements.by_id.get_mut(&w.unique_id) {
-        p.refs += 1;
-        return;
+/// Register one WMO placement, or bump its refcount; a 1.12 WMO placement has no scale. The
+/// registry key, as [`register_doodad`].
+fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &WmoInstance) -> u32 {
+    let sets = (u32::from(w.doodad_set) << 16) | u32::from(w.name_set);
+    let ident = PlacementIdent::new(&w.model, w.position, w.rotation, 1.0, sets);
+    let (key, known) = placements.key_for(w.unique_id, &ident);
+    if known {
+        if let Some(p) = placements.by_id.get_mut(&key) {
+            p.refs += 1;
+        }
+        return key;
     }
     let handle: Handle<WmoModel> = asset_server.load(wmo_url(&w.model));
-    placements.by_id.insert(
-        w.unique_id,
+    placements.insert(
+        key,
         Placement {
+            uid: w.unique_id,
+            ident,
             model: ModelHandle::Wmo(handle),
             transform: Transform {
                 translation: wow_to_bevy(w.position),
@@ -1209,9 +1546,10 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
             portal_instance: None,
             refs: 1,
             owner: (0, 0), // unread for WMOs: their prop hulls weld per placement
+            bounds: w.bounds,
         },
     );
-    placements.pending_spawns += 1;
+    key
 }
 
 /// Drop every streamed tile and the placements they reference, on a cross-map teleport or on
@@ -1269,6 +1607,7 @@ fn release_world(
     mut forms: ResMut<crate::model_forms::ModelForms>,
     mut progress: Option<ResMut<WorldLoadProgress>>,
     mut activity: ResMut<StreamActivity>,
+    mut prov: ResMut<provisional::ProvisionalCollision>,
     // The stream-batch accumulators the drop must clear, bundled under clippy's argument count.
     batchers: (
         ResMut<HullWelds>,
@@ -1286,6 +1625,11 @@ fn release_world(
     );
     // Drop the whole model-form cache, or an entry another holder keeps would pin its meshes.
     forms.clear();
+    // The stand-ins go with the world they stood in for. They cannot wait for their own lane to
+    // notice: that lane is inside the `world_is_live` chain, so out of world it does not run at
+    // all — which is exactly what makes an abandoned collider immortal (the same reasoning this
+    // whole system exists for one paragraph up).
+    prov.release(&mut commands);
     drop_streamed_world(
         &mut commands,
         &mut state,
@@ -1298,6 +1642,9 @@ fn release_world(
     state.map_dir = None;
     state.wdt = None;
     state.wdt_ungated = false;
+    // Nothing left to be near to: the warm queue's terrain tiers go back to naming no tile in
+    // particular (`benilla_formats::web::set_terrain_focus`, published by `stream_terrain`).
+    benilla_formats::web::clear_terrain_focus();
     // Reset residency, or the next entry could clear its cover on this world's counts.
     if let Some(p) = progress.as_mut() {
         **p = WorldLoadProgress::default();
@@ -1322,19 +1669,23 @@ fn despawn_tile_owned(commands: &mut Commands, t: &TileState) {
 /// Re-scatter the loaded tiles when `WorldDetail` changes, as the reference's setter tail-calls
 /// the chunk rebuild (`0x6725a0` → `0x6b1d20`). It watches the density value, since
 /// `ClutterConfig` also holds the detail-doodad cutout; the first sight only arms.
+///
+/// fork: a lighting-model flip re-scatters too — a modern tuft drops the baked MCSH tint
+/// (`clutter::scatter_tile_clutter`), and the model is live in the world.
 fn rescatter_clutter(
     mut commands: Commands,
     mut streamer: ResMut<TerrainStreamer>,
     adts: Res<Assets<AdtTile>>,
     clutter: Option<Res<GroundClutter>>,
     cfg: Res<ClutterConfig>,
-    mut last: Local<Option<f32>>,
+    mut last: Local<Option<(f32, bool)>>,
 ) {
-    let prev = last.replace(cfg.density);
+    let now = (cfg.density, crate::modern::frame_is_modern());
+    let prev = last.replace(now);
     let (Some(prev), Some(clutter)) = (prev, clutter) else {
         return;
     };
-    if prev == cfg.density {
+    if prev == now {
         return;
     }
     let mut n = 0;
@@ -1484,7 +1835,7 @@ fn release_placement(
         None => false,
     };
     if drop_it {
-        if let Some(p) = placements.by_id.remove(&uid) {
+        if let Some(p) = placements.remove(uid) {
             // Its unspawned model and props leave the pending count with it.
             placements.pending_spawns -=
                 usize::from(!p.spawned) + p.doodads.iter().filter(|d| !d.spawned).count();
@@ -1589,6 +1940,8 @@ mod straddler_tests {
 
     fn straddler(owner: (i32, i32), entities: Vec<Entity>) -> Placement {
         Placement {
+            uid: 0,
+            ident: PlacementIdent::default(),
             model: ModelHandle::M2(Default::default()),
             transform: Transform::IDENTITY,
             entities,
@@ -1599,7 +1952,71 @@ mod straddler_tests {
             portal_instance: None,
             refs: 1,
             owner,
+            bounds: None,
         }
+    }
+
+    /// A reused uniqueId splits into two placements, every copy of one placement shares its key
+    /// (a drifted copy included, and after the id's first holder is released), and an exact double
+    /// under another uniqueId joins the placement it would stack on.
+    #[test]
+    fn placements_key_by_what_they_are_not_only_by_unique_id() {
+        let mut placements = Placements::default();
+        let m2 = |model: &str, at: [f32; 3], turn: f32| {
+            PlacementIdent::new(model, at, [0.0, turn, 0.0], 1.0, 0)
+        };
+        let fence = m2("world/elwynn/fence.m2", [-8937.0, -107.0, 83.0], 90.0);
+        let file = |placements: &mut Placements, uid: u32, ident: PlacementIdent| {
+            let (key, known) = placements.key_for(uid, &ident);
+            if !known {
+                let mut p = straddler((0, 0), Vec::new());
+                (p.uid, p.ident) = (uid, ident);
+                placements.insert(key, p);
+            }
+            (key, known)
+        };
+        assert_eq!(file(&mut placements, 7, fence), (7, false));
+        assert_eq!(
+            file(&mut placements, 7, fence),
+            (7, true),
+            "a straddler's copy"
+        );
+        let drifted = m2(r"WORLD\ELWYNN\FENCE.M2", [-8937.0, -107.0, 83.23], 90.0);
+        assert_eq!(
+            file(&mut placements, 7, drifted),
+            (7, true),
+            "a copy whose height drifted, in another case and separator, is the same placement"
+        );
+        let far = m2("world/elwynn/fence.m2", [-9548.0, -1412.0, 56.0], 90.0);
+        let (other, known) = file(&mut placements, 7, far);
+        assert!(
+            !known && other != 7,
+            "a different placement under the same id"
+        );
+        assert_eq!(file(&mut placements, 7, far), (other, true));
+        assert_eq!(
+            file(&mut placements, 9, fence),
+            (7, true),
+            "an exact double under another id joins the first"
+        );
+        let turned = m2("world/elwynn/fence.m2", [-8937.0, -107.0, 83.0], 0.0);
+        assert_eq!(
+            file(&mut placements, 10, turned),
+            (10, false),
+            "a second fence on the same spot, turned, is its own placement"
+        );
+        placements.remove(7);
+        assert_eq!(
+            file(&mut placements, 7, far),
+            (other, true),
+            "the alias outlives the id's first holder"
+        );
+        placements.remove(other);
+        assert!(
+            placements.aliases.is_empty(),
+            "each alias leaves with its placement"
+        );
+        assert!(!placements.spots.values().any(|&k| k == 7 || k == other));
     }
 
     fn run_handoff(world: &mut World, dead: (i32, i32), uids: Vec<u32>, merge_on: bool) {

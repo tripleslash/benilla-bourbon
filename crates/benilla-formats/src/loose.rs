@@ -419,12 +419,15 @@ impl LooseIndexCell {
 }
 
 /// The player's install as a [`LooseIndexCell`], over [`wow_data`] and its parent folder; empty
-/// without an install.
+/// without an install, and always on the web build, whose `wow_data` is a URL root with no
+/// folder to walk (the page's loose top-level files are `ui_script::reference_ui`'s fetch).
 pub fn install_index() -> Arc<LooseIndexCell> {
     static CELL: LazyLock<Arc<LooseIndexCell>> = LazyLock::new(|| {
         Arc::new(LooseIndexCell::new(|| match wow_data() {
-            Some(data) => LooseIndex::build(data.parent(), &data),
-            None => LooseIndex::default(),
+            Some(data) if cfg!(not(target_arch = "wasm32")) => {
+                LooseIndex::build(data.parent(), &data)
+            }
+            _ => LooseIndex::default(),
         }))
     });
     CELL.clone()

@@ -82,7 +82,7 @@ fn world(over_ui: bool) -> World {
     let mut window = Window::default();
     window.set_physical_cursor_position(Some(DVec2::new(100.0, 100.0)));
     world.spawn((window, CursorOptions::default(), PrimaryWindow));
-    world.insert_non_send_resource(UiScript::new().unwrap());
+    world.insert_non_send(UiScript::new().unwrap());
     world
 }
 
@@ -114,15 +114,12 @@ fn pointer(world: &mut World) -> Option<Vec2> {
 }
 
 fn lua(world: &mut World, chunk: &str) {
-    world.non_send_resource::<UiScript>().run(chunk).unwrap();
+    world.non_send::<UiScript>().run(chunk).unwrap();
 }
 
 /// A binding body, as `ExecuteBinding` runs one: the movement gate passes.
 fn binding(world: &mut World, chunk: &str) {
-    world
-        .non_send_resource::<UiScript>()
-        .run_binding(chunk)
-        .unwrap();
+    world.non_send::<UiScript>().run_binding(chunk).unwrap();
 }
 
 fn looking(world: &World) -> bool {
@@ -131,7 +128,7 @@ fn looking(world: &World) -> bool {
 
 fn is_mouselooking(world: &World) -> bool {
     world
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<Option<i64>>("return IsMouselooking()")
         .unwrap()
         == Some(1)
@@ -437,6 +434,30 @@ fn mouselook_start_under_a_left_drag_is_the_both_button_run() {
     frame(&mut w, 0.0);
     assert_eq!(w.resource::<CameraControl>().look, Some(LookButton::Right));
     assert!(w.resource::<Messages<WorldClick>>().is_empty());
+}
+
+/// A disconnect mid-drag: `control` stops at the session's end with the button still down and
+/// never sees its release, so the exit edge hands the cursor back to the glue screens, shown and
+/// free, and leaves nothing held for the next world enter.
+#[test]
+fn a_session_end_mid_drag_hands_the_cursor_back() {
+    let mut w = world(false);
+    press(&mut w, MouseButton::Right);
+    frame(&mut w, 40.0);
+    assert_eq!(cursor(&mut w).grab_mode, CursorGrabMode::Locked);
+
+    w.run_system_once(end_look_on_session_end).unwrap();
+    let rig = w.resource::<CameraControl>();
+    assert_eq!(rig.look, None);
+    assert!(!rig.freelook);
+    assert!(!rig.world_mouse.held(LookButton::Right));
+    let c = cursor(&mut w);
+    assert_eq!(
+        c.grab_mode,
+        CursorGrabMode::None,
+        "the login screen's pointer is free"
+    );
+    assert!(c.visible, "and shown");
 }
 
 /// `ToggleMouseMove` with no button enters mouselook (`0x50f910` → `0x50f930`): the cursor locks,

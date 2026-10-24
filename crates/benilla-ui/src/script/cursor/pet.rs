@@ -111,7 +111,9 @@ fn assign(slots: &mut [u32], target: usize, source: u32, passive: bool) -> Optio
 /// was. Returns whether to repaint.
 pub(super) fn pickup_pet_action(lua: &Lua, slot: u32) -> mlua::Result<bool> {
     {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         if !model.pet_bar.pickup_allowed {
             return Ok(false);
         }
@@ -120,7 +122,9 @@ pub(super) fn pickup_pet_action(lua: &Lua, slot: u32) -> mlua::Result<bool> {
         Some(wrote) => wrote,
         None => {
             let picked = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 pick_pet_action(&model, slot)
             };
             let Some((payload, blank)) = picked else {
@@ -163,7 +167,9 @@ fn send_write(lua: &Lua, entries: Vec<(u32, u32)>) -> mlua::Result<()> {
 /// core. `Some(wrote)` is a payload dropped, `None` is none held, the cursor cleared all the same.
 pub(in crate::script) fn clear_and_drop(lua: &Lua, slot: u32) -> mlua::Result<Option<bool>> {
     let held = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         match &model.cursor {
             Some(CursorPayload::PetAction(held)) => Some(held.clone()),
             _ => None,
@@ -433,7 +439,9 @@ mod tests {
         let word = s
             .lua
             .create_function(|lua, ()| {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 Ok(model.pet_bar.slots[4].view.packed == CLAW)
             })
             .unwrap();

@@ -48,7 +48,8 @@ pub struct ChunkShading {
     /// Up to 4 layer-array indices (vertex `COLOR`); an unused slot repeats slot 0 and never shows,
     /// as its alpha weight is 0.
     pub layers: [u32; 4],
-    /// The alpha-array index (vertex `UV1.x`); 0 when the chunk has no map.
+    /// The alpha-array index (vertex `UV1.x`, whose fraction is `pack_water_depth`); 0 when the
+    /// chunk has no map.
     pub alpha: u32,
     /// The shadow-array index (vertex `UV1.y`); `-1.0` when there is no MCSH map.
     pub shadow: f32,
@@ -64,6 +65,27 @@ impl Default for ChunkShading {
     }
 }
 
+/// fork: the depths [`pack_water_depth`] tells apart, in yards either side of the water line. Past
+/// it only the sign matters, and a bank that steep holds no puddle.
+const WATER_DEPTH_RANGE: f32 = 16.0;
+/// The share of the index's rounding margin (±0.5) the packed depth uses.
+const WATER_DEPTH_SPAN: f32 = 0.4;
+
+/// fork: a vertex's depth under its chunk's water (`ChunkMesh::water_depths`, positive submerged)
+/// as the fraction added to the alpha-array index in `UV1.x`. The index is uniform over a chunk, so
+/// the fraction interpolates on its own and `round` still recovers the index; the terrain shader
+/// reads it back to keep the rain's wet look off ground that lies under water
+/// (`wet_hook::above_water`). Dry ground, with no water over it, packs as far above the line.
+fn pack_water_depth(depth: f32) -> f32 {
+    depth.clamp(-WATER_DEPTH_RANGE, WATER_DEPTH_RANGE) * (WATER_DEPTH_SPAN / WATER_DEPTH_RANGE)
+}
+
+/// The inverse of [`pack_water_depth`] over a whole `UV1.x`, as `terrain.wgsl` decodes it.
+#[cfg(test)]
+fn unpack_water_depth(uv1_x: f32) -> f32 {
+    (uv1_x - uv1_x.round()) * (WATER_DEPTH_RANGE / WATER_DEPTH_SPAN)
+}
+
 /// One drawn MCNK chunk's mesh in Bevy space and absolute world coords; `None` for a chunk the
 /// hole mask emptied. The reference's exterior cull tests one AABB per 33.333 yd chunk
 /// (`0x683bf0`). The mesh is `RENDER_WORLD` only, so the caller takes its `Aabb` first
@@ -76,19 +98,32 @@ pub fn chunk_to_mesh(chunk: &ChunkMesh, shading: &ChunkShading) -> Option<Mesh> 
 /// the shader reads are per vertex and the tile shares one material, so the merge draws the same
 /// pixels in one draw. `None` when every chunk is a hole.
 pub fn chunks_to_mesh(parts: &[(&ChunkMesh, &ChunkShading)]) -> Option<Mesh> {
-    let live: Vec<&(&ChunkMesh, &ChunkShading)> =
-        parts.iter().filter(|(c, _)| c.indices.len() >= 3).collect();
+    let full: Vec<(&ChunkMesh, &ChunkShading, &[u32])> = parts
+        .iter()
+        .map(|(c, s)| (*c, *s, c.indices.as_slice()))
+        .collect();
+    chunks_to_mesh_lod(&full)
+}
+
+/// [`chunks_to_mesh`] with each chunk drawn by the triangle list beside it, over its own 145
+/// vertices: its terrain level's (`benilla_formats::chunk_lod_indices`). The vertices and the
+/// chunks a cell holds are the full fan's, so a level change rewrites only which triangles draw.
+pub fn chunks_to_mesh_lod(parts: &[(&ChunkMesh, &ChunkShading, &[u32])]) -> Option<Mesh> {
+    let live: Vec<&(&ChunkMesh, &ChunkShading, &[u32])> = parts
+        .iter()
+        .filter(|(c, _, _)| c.indices.len() >= 3)
+        .collect();
     if live.is_empty() {
         return None;
     }
-    let total: usize = live.iter().map(|(c, _)| c.positions.len()).sum();
+    let total: usize = live.iter().map(|(c, _, _)| c.positions.len()).sum();
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(total);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(total);
     let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(total);
     let mut uv1: Vec<[f32; 2]> = Vec::with_capacity(total);
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(total);
-    let mut indices: Vec<u32> = Vec::with_capacity(live.iter().map(|(c, _)| c.indices.len()).sum());
-    for (chunk, shading) in live {
+    let mut indices: Vec<u32> = Vec::with_capacity(live.iter().map(|(_, _, i)| i.len()).sum());
+    for (chunk, shading, drawn) in live {
         let base = u32::try_from(positions.len()).expect("a cell's vertex count fits u32");
         let chunk_positions: Vec<[f32; 3]> = chunk
             .positions
@@ -103,13 +138,16 @@ pub fn chunks_to_mesh(parts: &[(&ChunkMesh, &ChunkShading)]) -> Option<Mesh> {
         let li = shading.layers;
         let col = [li[0] as f32, li[1] as f32, li[2] as f32, li[3] as f32];
         let n = chunk_positions.len();
-        uv1.extend(std::iter::repeat_n(
-            [shading.alpha as f32, shading.shadow],
-            n,
-        ));
+        // fork: the depth under the chunk's own water rides the alpha index's fraction.
+        uv1.extend(chunk.water_depths().into_iter().map(|depth| {
+            [
+                shading.alpha as f32 + pack_water_depth(depth),
+                shading.shadow,
+            ]
+        }));
         colors.extend(std::iter::repeat_n(col, n));
         uvs.extend_from_slice(&chunk.uvs);
-        indices.extend(chunk.indices.iter().map(|i| i + base));
+        indices.extend(drawn.iter().map(|i| i + base));
         positions.extend(chunk_positions);
     }
     let mut mesh = Mesh::new(
@@ -143,7 +181,19 @@ impl AssetLoader for AdtLoader {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
-        let tile = adt_to_tile_mesh(&bytes).map_err(to_io)?;
+        // Metered, like every CPU-bound stretch in a loader: on the web target this runs on the
+        // thread that draws (`crate::frame_budget`). Scoped rather than held to the end of `load`,
+        // because the chunk loop below awaits layer reads and a slot must never span I/O.
+        //
+        // The **geometry** lane: this decode is where the tile's MCNK heightfield comes from, and
+        // that heightfield IS the terrain collider (`terrain_stream::collider`). It must not queue
+        // behind the several hundred layer/doodad textures the same zone boundary asks for — that
+        // race is the one that leaves a body standing on ground with no collider under it.
+        let tile = crate::frame_budget::offload(crate::frame_budget::Lane::Geometry, move || {
+            adt_to_tile_mesh(&bytes)
+        })
+        .await
+        .map_err(to_io)?;
 
         // Layer array: a solid-green fallback at index 0, then each unique layer texture, packed
         // once the whole tile is read.
@@ -216,17 +266,27 @@ impl AssetLoader for AdtLoader {
         }
 
         let layer_count = layers.len() as u32 + 1;
-        let packed = pack_layers([107, 133, 82, 0], layers);
+        // The layer pack and the three array uploads run off the frame on the art lane: one
+        // uninterrupted stretch of CPU over buffers this loader owns, with nothing awaited after
+        // it. The `debug!` reads `ctx`, so the two facts it wants come back out of the closure.
+        let (layer_array, alpha_array, shadow_array, format, kib) =
+            crate::frame_budget::offload(crate::frame_budget::Lane::Art, move || {
+                let packed = pack_layers([107, 133, 82, 0], layers);
+                let (format, kib) = (packed.format, packed.data.len() >> 10);
+                (
+                    layer_array_image(LAYER_TEX_SIZE, layer_count, packed),
+                    alpha_array_image(ALPHA_MAP_SIZE, alpha_count, alpha_buf),
+                    shadow_array_image(SHADOW_MAP_SIZE, shadow_count, shadow_buf),
+                    format,
+                    kib,
+                )
+            })
+            .await;
         // Per tile, so a log shows which tiles fell back to the decoded format.
         debug!(
-            "adt {}: layer array {layer_count} x {:?}, {} KiB",
-            ctx.path(),
-            packed.format,
-            packed.data.len() >> 10
+            "adt {}: layer array {layer_count} x {format:?}, {kib} KiB",
+            ctx.path()
         );
-        let layer_array = layer_array_image(LAYER_TEX_SIZE, layer_count, packed);
-        let alpha_array = alpha_array_image(ALPHA_MAP_SIZE, alpha_count, alpha_buf);
-        let shadow_array = shadow_array_image(SHADOW_MAP_SIZE, shadow_count, shadow_buf);
 
         Ok(AdtTile {
             shading,
@@ -249,7 +309,11 @@ impl AssetLoader for AdtLoader {
 async fn read_layer(ctx: &mut LoadContext<'_>, key: &str) -> Option<RawLayer> {
     if let Some(spec) = key.strip_suffix(".blp").map(|stem| format!("{stem}_s.blp")) {
         if let Ok(bytes) = ctx.read_asset_bytes(mpq_url(&spec)).await {
-            if let Ok(chain) = blp_bytes_to_native_chain(&bytes) {
+            let decoded = crate::frame_budget::offload(crate::frame_budget::Lane::Art, move || {
+                blp_bytes_to_native_chain(&bytes)
+            })
+            .await;
+            if let Ok(chain) = decoded {
                 return Some(RawLayer {
                     chain,
                     matte: false,
@@ -258,7 +322,11 @@ async fn read_layer(ctx: &mut LoadContext<'_>, key: &str) -> Option<RawLayer> {
         }
     }
     let bytes = ctx.read_asset_bytes(mpq_url(key)).await.ok()?;
-    let chain = blp_bytes_to_native_chain(&bytes).ok()?;
+    let chain = crate::frame_budget::offload(crate::frame_budget::Lane::Art, move || {
+        blp_bytes_to_native_chain(&bytes)
+    })
+    .await
+    .ok()?;
     Some(RawLayer { chain, matte: true })
 }
 
@@ -290,4 +358,30 @@ fn computed_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     acc.into_iter()
         .map(|n| n.normalize_or_zero().to_array())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The packed depth never moves the index it rides on, at the largest index a tile can hold,
+    /// and comes back to a hundredth of a yard; past the range only the sign survives.
+    #[test]
+    fn the_water_depth_rides_the_alpha_index_without_moving_it() {
+        for alpha in [0u32, 1, 97, 255] {
+            for depth in [-3.0f32, -0.05, 0.0, 0.1, 1.5, 12.0] {
+                let x = alpha as f32 + pack_water_depth(depth);
+                assert_eq!(x.round(), alpha as f32);
+                assert!((unpack_water_depth(x) - depth).abs() < 0.01, "{depth}");
+            }
+            // The shader's constant is the same scale.
+            assert!((WATER_DEPTH_RANGE / WATER_DEPTH_SPAN - 40.0).abs() < 1e-4);
+            let dry = alpha as f32 + pack_water_depth(f32::NEG_INFINITY);
+            assert_eq!(dry.round(), alpha as f32);
+            assert!(unpack_water_depth(dry) < -WATER_DEPTH_RANGE + 0.01);
+            let deep = alpha as f32 + pack_water_depth(400.0);
+            assert_eq!(deep.round(), alpha as f32);
+            assert!(unpack_water_depth(deep) > WATER_DEPTH_RANGE - 0.01);
+        }
+    }
 }

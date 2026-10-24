@@ -57,7 +57,7 @@ fn sent(rx: &Receiver<ClientCommand>) -> Vec<String> {
 }
 
 fn vm(app: &mut App) -> Mut<'_, UiScript> {
-    app.world_mut().non_send_resource_mut::<UiScript>()
+    app.world_mut().non_send_mut::<UiScript>()
 }
 
 /// Our player seated with `fields`, in the guid index, and named to the VM as `"player"`.

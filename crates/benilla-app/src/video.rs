@@ -23,12 +23,13 @@
 //! keeps the synced look without the crash. `$WOW_PRESENT=fifo` restores plain `Fifo`.
 
 use benilla_ui::script::ScreenResolution;
+#[cfg(any(test, not(target_arch = "wasm32")))]
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::renderer::RenderAdapterInfo;
-use bevy::window::{
-    Monitor, MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution,
-};
-use std::time::{Duration, Instant};
+use bevy::window::Monitor;
+use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution};
+use std::time::Duration;
 
 /// `$WOW_NOVSYNC=1`: uncap for this session only; it never reaches `config.toml` (the
 /// `session_owned` set in [`crate::cvars`]).
@@ -121,12 +122,13 @@ pub(crate) fn window_mode(
 /// answer before the window exists (`bevy_winit::select_monitor`).
 pub(crate) fn boot_window_mode() -> WindowMode {
     // Quiet and lazy: the log plugin does not exist yet, and a config holding both rows needs no
-    // locale at all.
-    boot_window_mode_for(
-        || crate::ui_script::boot_client_locale().index(),
-        crate::cvars::boot_cvar,
-        windowed_env(),
-    )
+    // locale at all. The page asks none: its canvas has no display mode for the rows to pick, and
+    // the chain is not opened before the app exists.
+    #[cfg(not(target_arch = "wasm32"))]
+    let locale = || crate::ui_script::boot_client_locale().index();
+    #[cfg(target_arch = "wasm32")]
+    let locale = || 0;
+    boot_window_mode_for(locale, crate::cvars::boot_cvar, windowed_env())
 }
 
 /// [`boot_window_mode`] on a client whose locale index `locale` answers, asked only when a row is
@@ -171,6 +173,8 @@ pub(crate) fn boot_windowed_size() -> UVec2 {
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct VideoConfig {
     pub(crate) vsync: bool,
+    /// Whether characters use the isolated real shadow-map path.
+    pub(crate) world_shadows: bool,
     pub(crate) display: DisplayMode,
     /// `gxMaximize`: a windowed window fills the monitor, borderless ([`window_mode`]).
     pub(crate) maximize: bool,
@@ -183,6 +187,13 @@ impl Default for VideoConfig {
     fn default() -> Self {
         Self {
             vsync: !novsync_env(),
+            // ON since 2026-09-08 (the director's call). It shipped off because off was the value
+            // at which no frame moved — the honest default for a path that was new — and the
+            // argument for that has expired: the shadow map has been the thing this client looks
+            // like for long enough that the blob decal now reads as the fallback rather than the
+            // baseline. `worldShadows` registers "1" to match, and the two are welded by
+            // `cvars::tests`.
+            world_shadows: true,
             display: if windowed_env() {
                 DisplayMode::Windowed
             } else {
@@ -263,6 +274,7 @@ pub(crate) fn refresh_period(
 }
 
 /// How much longer the frame that began at `last` must wait to last a whole `period`.
+#[cfg(any(test, not(target_arch = "wasm32")))]
 fn pace_wait(last: Option<Instant>, now: Instant, period: Duration) -> Duration {
     last.map_or(Duration::ZERO, |last| {
         period.saturating_sub(now.saturating_duration_since(last))
@@ -274,7 +286,9 @@ fn pace_wait(last: Option<Instant>, now: Instant, period: Duration) -> Duration 
 pub(crate) struct RefreshPacing(pub(crate) bool);
 
 /// Sleep out the rest of the frame so a non-waiting present mode runs at the monitor's rate. A
-/// frame that overran starts the next period from now: no catch-up burst.
+/// frame that overran starts the next period from now: no catch-up burst. Native only: the page
+/// never sleeps, and its present is paced by the browser's frame callback.
+#[cfg(not(target_arch = "wasm32"))]
 fn pace_to_refresh(
     pacing: Res<RefreshPacing>,
     monitors: Query<&Monitor>,
@@ -314,6 +328,7 @@ impl Default for Widescreen {
 
 /// The change callbacks of the reference's video-options registration block (`0x688470`); each
 /// arm writes only its own resource.
+#[allow(clippy::type_complexity)]
 pub(crate) fn on_cvar(
     ev: On<crate::cvars::CvarChanged>,
     mut cfg: ResMut<VideoConfig>,
@@ -328,6 +343,23 @@ pub(crate) fn on_cvar(
     mut ffx: ResMut<benilla_world::ffx_glow::FfxSwitches>,
     mut widescreen: ResMut<Widescreen>,
     mut cvars: ResMut<crate::cvars::Cvars>,
+    // fork: the Graphics page's own rows — screen-space indirect lighting, the modern lighting
+    // model and the liquid renderer. Optional because each is the engine plugin's resource and a
+    // stripped app (a headless test, the glue-only scenarios) may not carry the plugin.
+    mut fork: (
+        Option<ResMut<benilla_world::ssilvb::IndirectLighting>>,
+        Option<ResMut<benilla_world::modern::LightingSettings>>,
+        Option<ResMut<benilla_world::liquid::WaterDetail>>,
+        // fork: the Everwood port (FORK.md) — the foliage wind tier and gain.
+        Option<ResMut<benilla_world::wind::FoliageWind>>,
+        Option<ResMut<benilla_world::wind::FoliageWindStrength>>,
+        Option<ResMut<benilla_world::weather::wetness::RainSurfaces>>,
+        Option<ResMut<benilla_world::lighting::LavaLightGain>>,
+        // fork: the modern model's light auto-exposure.
+        Option<ResMut<benilla_world::modern::look::AutoExposure>>,
+        // fork: the terrain horizon (FORK.md) — `lod` and `lodDist`.
+        Option<ResMut<benilla_world::horizon::HorizonCulling>>,
+    ),
 ) {
     use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
     let v = ev.num();
@@ -357,6 +389,23 @@ pub(crate) fn on_cvar(
         // The registry refuses a value outside the callback's range (`0x688d40`); the clamp only
         // keeps the knob in it.
         "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
+        // World flag 4 (`0x688920`): the chunk level the horizon rows are taken at.
+        "lod" => {
+            if let Some(horizon) = fork.8.as_deref_mut() {
+                horizon.lod = ev.flag();
+            }
+        }
+        // `0x688ab0` takes 50 to 250 and stores 77 for anything else (`0x688af4`).
+        "loddist" => {
+            use benilla_world::horizon::{LOD_DIST_FALLBACK, LOD_DIST_RANGE};
+            if let Some(horizon) = fork.8.as_deref_mut() {
+                horizon.lod_dist = if LOD_DIST_RANGE.contains(&v) {
+                    v
+                } else {
+                    LOD_DIST_FALLBACK
+                };
+            }
+        }
         // Clamped, where the reference refuses an out-of-range write and keeps the value
         // (`0x688d90` echoes "NearClip must be in range 0.01 - 0.33" and returns 0).
         "nearclip" => view.set_nearclip(v),
@@ -410,6 +459,79 @@ pub(crate) fn on_cvar(
         // quality cells {0.1, 0.33, 0.66, 1.0} at `[0x8680ec]`. Its off-grid handling is
         // untraced; this clamps.
         "weatherdensity" => weather.weather_density = v.trunc().clamp(0.0, 3.0) as u8,
+        // Benilla's character shadow-map switch. `blob_shadow`'s gate reads the knob each frame,
+        // so the decal and the realtime silhouette hand over on the click.
+        "worldshadows" => cfg.world_shadows = ev.flag(),
+        // Screen-space indirect lighting. Clamped at the knob's edge like every other numeric
+        // row; the render node reads the resource each frame, so a drag tick previews live and
+        // nothing is reallocated by the move.
+        "ssaostrength" => {
+            if let Some(indirect) = fork.0.as_deref_mut() {
+                use benilla_world::ssilvb::SSILVB_RANGE;
+                indirect.ao = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
+            }
+        }
+        "ssgistrength" => {
+            if let Some(indirect) = fork.0.as_deref_mut() {
+                use benilla_world::ssilvb::SSILVB_RANGE;
+                indirect.gi = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
+            }
+        }
+        // The fork's modern lighting (FORK.md). The MODEL and the TIER are both
+        // live in the world (`benilla_world::modern::ActiveLighting`): the frame after this write
+        // is already rendered with them.
+        "lightingmodel" => {
+            if let Some(lighting) = fork.1.as_deref_mut() {
+                lighting.model = benilla_world::modern::LightingModel::from_cvar(v);
+            }
+        }
+        "lightingquality" => {
+            if let Some(lighting) = fork.1.as_deref_mut() {
+                lighting.quality = benilla_world::modern::LightingQuality::from_cvar(v);
+            }
+        }
+        // The liquid renderer. Not clamped into a range — the value space is a set of TIERS, so
+        // `WaterDetail::from_cvar` maps rather than clamps, and anything unrecognised reads as
+        // cata (the default, and the one that cannot look broken).
+        "waterdetail" => {
+            if let Some(water) = fork.2.as_deref_mut() {
+                *water = benilla_world::liquid::WaterDetail::from_cvar(v);
+            }
+        }
+        // fork: the foliage wind (FORK.md): 0 off, 1 grass, 2 grass and trees. A
+        // dev build's capture pin (`$WOW_FOLIAGE_WIND` under `$WOW_CAPTURE`) holds its tier.
+        "foliagewind" => {
+            if let Some(wind) = fork.3.as_deref_mut() {
+                let pinned = crate::run_mode::dev_affordances()
+                    && benilla_world::wind::FoliageWind::capture_override().is_some();
+                if !pinned {
+                    wind.0 = v.clamp(0.0, 2.0) as u8;
+                }
+            }
+        }
+        // fork: the light auto-exposure; the look reads the knob each frame.
+        "autoexposure" => {
+            if let Some(auto) = fork.7.as_deref_mut() {
+                auto.0 = ev.flag();
+            }
+        }
+        // fork: rain on surfaces; the wetness tick reads the knob each frame.
+        "rainsurfaces" => {
+            if let Some(rain) = fork.5.as_deref_mut() {
+                rain.0 = ev.flag();
+            }
+        }
+        // fork: lava light, on or off; the reconcile spawns and retires the lights on the edge.
+        "lavalight" => {
+            if let Some(lava) = fork.6.as_deref_mut() {
+                lava.0 = if ev.flag() { 1.0 } else { 0.0 };
+            }
+        }
+        "foliagewindstrength" => {
+            if let Some(strength) = fork.4.as_deref_mut() {
+                *strength = benilla_world::wind::FoliageWindStrength::from_cvar(v);
+            }
+        }
         // Spell Detail (`0x689510`): `SStrToInt`, clamped to [0, 2] in the handler's own copy,
         // echoed, then the emission scalar 0.33, 0.66 or 1.0 through `0x7adfb0`, shared with
         // `particleDensity`. The reference runs it on every write, an unchanged one included; an
@@ -455,10 +577,11 @@ impl Plugin for VideoPlugin {
         app.init_resource::<SpellEffectLevel>()
             .init_resource::<Widescreen>();
         app.add_observer(on_cvar);
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(Last, pace_to_refresh);
         app.init_resource::<VideoConfig>()
             .init_resource::<GxRestarts>()
             .init_resource::<RefreshPacing>()
-            .add_systems(Last, pace_to_refresh)
             // Ahead of the glue's size callback (`ui_script::glue::watch_glue_aspect`) and of
             // every `GetCVar`, so both read the screen the window has this frame.
             .add_systems(PreUpdate, show_screen_size)
@@ -591,7 +714,7 @@ type PublishedModes = Option<(Vec<ScreenResolution>, Option<ScreenResolution>)>;
 fn publish_display_modes(
     mut hosted_vm: crate::script_calls::HostedVm,
     windows: Query<&Window, With<PrimaryWindow>>,
-    monitors: Query<&bevy::window::Monitor>,
+    monitors: Query<&Monitor>,
     widescreen: Option<Res<Widescreen>>,
     mut last: Local<crate::ui_script::VmMemo<PublishedModes>>,
 ) {
@@ -1100,6 +1223,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(VideoConfig {
             vsync: true,
+            world_shadows: false,
             display: DisplayMode::Fullscreen,
             maximize: false,
             windowed: UVec2::new(1024, 768),
@@ -1164,6 +1288,7 @@ mod tests {
             display: DisplayMode::Fullscreen,
             maximize: false,
             windowed: UVec2::new(1600, 900),
+            world_shadows: false,
         })
         .insert_resource(crate::cvars::Cvars::with_value("gxResolution", "1600x900"))
         .add_systems(Update, show_screen_size);
@@ -1219,6 +1344,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(VideoConfig {
             vsync: true,
+            world_shadows: false,
             display: DisplayMode::Windowed,
             maximize: false,
             windowed: UVec2::new(1024, 768),

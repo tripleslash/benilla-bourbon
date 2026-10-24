@@ -26,7 +26,7 @@ mod room_vis;
 mod seed;
 
 use fog::select_wmo_fog;
-pub use fog::{CameraWmoFog, WmoFogTarget};
+pub use fog::{CameraRoomExtent, CameraWmoFog, WmoFogTarget};
 pub use interior::{
     indoor_verdict_at, indoors_at, terrain_z_local, IndoorVerdict, LightAttach,
     INTERIOR_PROBE_HEIGHT,
@@ -46,6 +46,7 @@ pub use seed::{down_ray_seeds, floor_z_at, DownRaySeeds};
 use crate::terrain_stream::{terrain_height_under, TerrainStreamer};
 use crate::view::WorldCamera;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::{AdtTile, WmoGroupNav, WmoModel, WmoPortalInfo};
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::camera::Projection;
@@ -116,6 +117,13 @@ pub enum ExteriorWindows {
     Windows(Vec<Rect>),
 }
 
+/// Each exterior window's portal reach (`0x6b4680`), the fifth float of its record: the farthest
+/// view depth of the portal's vertices, never below 0. The scene driver feeds the horizon from it
+/// plus 33.333332 (`0x6811a9`), so terrain short of the doorway never occludes through it. Parallel
+/// to [`ExteriorWindows::Windows`], empty outdoors.
+#[derive(Resource, Default, Clone, PartialEq, Debug)]
+pub struct ExteriorWindowReach(pub Vec<f32>);
+
 /// Tag on every portal-culled WMO piece (a group submesh, a group's MLIQ surface, a MODD prop): its
 /// placement instance and the absolute groups that can draw it. Geometry and liquid belong to one
 /// group; a prop can be named by many, as the reference admits a prop from any visited group whose
@@ -138,6 +146,15 @@ impl WmoGroupVis {
     /// Takes the building's MFOG triple iff any naming group does (the client's `[0xca7f00]`,
     /// [`WmoPortalInstance::interior_fog`]). A miss reads false, unlike `drawn_by`: a missing bit
     /// must not paint a room's fog onto the open world.
+    /// The LIGHTING verdict: lit iff any referencing group is reachable through portals from the
+    /// camera's room ([`WmoPortalInstance::lit`]). The twin of [`Self::drawn_by`], on the same
+    /// fail-open, and deliberately NOT the same set — see that field.
+    pub fn lit_by(&self, inst: &WmoPortalInstance) -> bool {
+        self.groups
+            .iter()
+            .any(|&g| inst.lit.get(g as usize).copied().unwrap_or(true))
+    }
+
     pub fn interior_fogged_by(&self, inst: &WmoPortalInstance) -> bool {
         self.groups.iter().any(|&g| inst.fogs_group(g))
     }
@@ -162,6 +179,42 @@ pub fn room_admits(room: Option<&WmoGroupVis>, instance: Option<&WmoPortalInstan
     }
 }
 
+/// [`room_admits`] for a LIGHT. Same shape, different set: a light is admitted by portal
+/// reachability ([`WmoPortalInstance::lit`]) rather than by this frame's frustum-clipped cull, so
+/// tilting the camera cannot switch a lamp on and off.
+pub fn room_admits_light(room: Option<&WmoGroupVis>, instance: Option<&WmoPortalInstance>) -> bool {
+    match (room, instance) {
+        (None, _) => true,
+        (Some(r), Some(inst)) => r.lit_by(inst),
+        (Some(_), None) => false,
+    }
+}
+
+/// **Is a room-bound light genuinely INDOORS?** — the light's own half of the surface lanes'
+/// indoor/outdoor class test, answered from the groups that name it.
+///
+/// Not the same question as "does it name rooms". A sconce bolted to the outside of Northshire
+/// Abbey names rooms too: it belongs to the building's `0x8` shell. Packing `w` from
+/// `rooms.is_some()` therefore read "is a WMO light", and a class test built on that would put
+/// every porch lamp and courtyard brazier in the game out the moment it tried to reject indoor
+/// light on outdoor ground.
+///
+/// The discriminator is the one the render path already uses for the receiver
+/// (`RenderSubmesh::interior`, the client's `groupFlags & 0x48` branch at `0x6b3f90`): a group is a
+/// true interior with neither `0x8` nor `0x40` set. ALL naming groups must be interior for the
+/// light to count as indoor — a fixture a courtyard also names can legitimately light that
+/// courtyard, and the error directions are lopsided (1276): wrongly "outdoor" leaves a light doing
+/// what it does today, wrongly "indoor" switches a working lamp off.
+pub fn rooms_are_indoor(vis: &WmoGroupVis, model: &WmoModel) -> bool {
+    !vis.groups.is_empty()
+        && vis.groups.iter().all(|&g| {
+            model
+                .group_nav
+                .get(g as usize)
+                .is_some_and(|n| n.flags & (EXTERIOR | EXTERIOR_LIT) == 0)
+        })
+}
+
 /// One placed WMO's portal-cull state, spawned with its geometry and despawned with the placement.
 #[derive(Component)]
 pub struct WmoPortalInstance {
@@ -176,6 +229,18 @@ pub struct WmoPortalInstance {
     /// Per-group PVS bit this frame, by absolute group index; seeded all-true, which a portal-less
     /// prop keeps.
     pub visible: Vec<bool>,
+    /// **Per-group LIGHTING reachability** — which rooms this frame's camera can be lit from.
+    ///
+    /// Not [`Self::visible`], and the difference is the whole point. `visible` is the reference's
+    /// portal cull, and that cull clips the frustum to each doorway: a room drops out of it the
+    /// moment the doorway leaves the screen. Gating LIGHTS on it made a lamp's light blink as the
+    /// player tilted the camera or stepped back — Northshire Abbey's entrance lamp, which sits
+    /// right beside the portal that decides it.
+    ///
+    /// This is the same graph walked without the frustum: which groups are reachable through
+    /// portals from the room the camera stands in, whatever is on screen. Turning the camera cannot
+    /// change it, which is exactly the property a light needs. Seeded all-`true`, like `visible`.
+    pub lit: Vec<bool>,
     /// Per-group interior-fog gate this frame (the client's `[0xca7f00]`, see [`GroupPvs`]): `true`
     /// draws the group and its doodads with the building's MFOG triple, `false` with the scene fog.
     /// Seeded all-false, which a portal-less prop keeps.
@@ -240,30 +305,29 @@ pub struct WmoPortalPlugin;
 
 impl Plugin for WmoPortalPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Startup,
-            interior::load_wmo_areas.after(benilla_assets::AssetSet::Open),
-        )
-        .init_resource::<CurrentWmoInterior>()
-        .init_resource::<PlayerWmoRoom>()
-        .init_resource::<CurrentAreaInterior>()
-        .init_resource::<CameraWmoFog>()
-        .init_resource::<CameraInteriorClaim>()
-        .init_resource::<ExteriorWindows>()
-        .init_resource::<WmoCullProbe>()
-        .add_systems(
-            Update,
-            (
-                compute_wmo_pvs,
-                track_current_interior,
-                track_area_interior,
-                track_unit_interiors,
-            )
-                .in_set(WmoPvsSet)
-                // On this frame's camera pose: the flood, the claim and the windows key on the eye
-                // and decide what the frame may draw.
-                .after(crate::view::CameraPoseSet),
-        );
+        app.add_data_loaders(interior::load_wmo_areas)
+            .init_resource::<CurrentWmoInterior>()
+            .init_resource::<PlayerWmoRoom>()
+            .init_resource::<CurrentAreaInterior>()
+            .init_resource::<CameraWmoFog>()
+            .init_resource::<CameraRoomExtent>()
+            .init_resource::<CameraInteriorClaim>()
+            .init_resource::<ExteriorWindows>()
+            .init_resource::<ExteriorWindowReach>()
+            .init_resource::<WmoCullProbe>()
+            .add_systems(
+                Update,
+                (
+                    compute_wmo_pvs,
+                    track_current_interior,
+                    track_area_interior,
+                    track_unit_interiors,
+                )
+                    .in_set(WmoPvsSet)
+                    // On this frame's camera pose: the flood, the claim and the windows key on the eye
+                    // and decide what the frame may draw.
+                    .after(crate::view::CameraPoseSet),
+            );
     }
 }
 
@@ -281,8 +345,10 @@ fn compute_wmo_pvs(
     adt_tiles: Res<Assets<AdtTile>>,
     mut probe: ResMut<WmoCullProbe>,
     mut camera_fog: ResMut<CameraWmoFog>,
+    mut camera_room: ResMut<CameraRoomExtent>,
     mut camera_claim: ResMut<CameraInteriorClaim>,
     mut camera_windows: ResMut<ExteriorWindows>,
+    mut camera_reach: ResMut<ExteriorWindowReach>,
 ) {
     // No world camera yet: keep last frame's sets, all visible.
     let Some((cam_t, proj)) = cam.iter().next() else {
@@ -314,9 +380,12 @@ fn compute_wmo_pvs(
     // The fog target and the claim come from the flood's own seed; the first placement whose seed
     // claims a non-exterior group wins both.
     let mut fog_target: Option<WmoFogTarget> = None;
+    // fork: modern lighting — the claiming room's world sphere, beside its fog (see
+    // [`CameraRoomExtent`]).
+    let mut room_extent: Option<(Vec3, f32)> = None;
     let mut claim: Option<InteriorClaim> = None;
     // `None` is the driver's outside leg: no containing map object, one full-screen walk.
-    let mut windows: Option<Vec<Rect>> = None;
+    let mut windows: Option<(Vec<Rect>, Vec<f32>)> = None;
     for (entity, mut inst) in &mut instances {
         let Some(model) = wmos.get(&inst.handle) else {
             continue;
@@ -330,6 +399,10 @@ fn compute_wmo_pvs(
             let mut changed = false;
             if held.visible.len() != groups || held.visible.iter().any(|v| !*v) {
                 held.visible = vec![true; groups];
+                changed = true;
+            }
+            if held.lit.len() != groups || held.lit.iter().any(|v| !*v) {
+                held.lit = vec![true; groups];
                 changed = true;
             }
             if held.interior_fog.len() != groups || held.interior_fog.iter().any(|v| *v) {
@@ -361,6 +434,11 @@ fn compute_wmo_pvs(
             &world_from_local,
             &mut (&mut tap, &mut log),
         );
+        let lit = lighting_reach(model, eye_local, terrain_local);
+        if inst.bypass_change_detection().lit != lit {
+            inst.bypass_change_detection().lit = lit;
+            inst.set_changed();
+        }
         if inst.bypass_change_detection().visible != fresh.visible {
             inst.bypass_change_detection().visible = fresh.visible;
             inst.set_changed();
@@ -407,6 +485,24 @@ fn compute_wmo_pvs(
                                 .filter(|n| n.flags & (EXTERIOR | EXTERIOR_LIT) == 0)
                         })
                         .and_then(|n| select_wmo_fog(&model.fogs, n.fog_indices, eye_local));
+                    // fork: modern lighting — how far the room's own air reaches, for the
+                    // medium ([`CameraRoomExtent`]): the MOGI box of the group whose fog just
+                    // engaged, as a world sphere, and nothing when none did. Never the in-group
+                    // as such: an exterior-lit courtyard claims the camera without carrying a
+                    // fog, and Orgrimmar's entry canyon (g133, `0x0a841`) is a 170 yd sphere —
+                    // stepping out of the gate tunnel spread the tunnel's teal over the whole
+                    // city for the 4 s fade-out. A placement is a rotation and a translation,
+                    // so the box's half-diagonal is its radius unchanged.
+                    room_extent = fog_target
+                        .and(fog_room(&model.group_nav, [Some(gi), tap.across]))
+                        .and_then(|g| model.group_nav.get(g))
+                        .map(|n| {
+                            let box_local = group_aabb(n);
+                            (
+                                world_from_local.transform_point3(Vec3::from(box_local.center)),
+                                Vec3::from(box_local.half_extents).length(),
+                            )
+                        });
                     claim = Some(InteriorClaim {
                         room: WmoRoom {
                             instance: entity,
@@ -422,7 +518,10 @@ fn compute_wmo_pvs(
                     // the containing map object (`[0xc7b748]`) and defers that flood's windows,
                     // the list Pass 2 already used. Its push test is `0x8` alone
                     // (`opens_a_window`), not the `0x148` of `exterior_visible` above.
-                    windows = Some(std::mem::take(&mut fresh.windows));
+                    windows = Some((
+                        std::mem::take(&mut fresh.windows),
+                        std::mem::take(&mut fresh.reaches),
+                    ));
                 }
             }
         }
@@ -447,15 +546,21 @@ fn compute_wmo_pvs(
     if camera_fog.0 != fog_target {
         camera_fog.0 = fog_target;
     }
+    if camera_room.0 != room_extent {
+        camera_room.0 = room_extent;
+    }
     if camera_claim.0 != claim {
         camera_claim.0 = claim;
     }
-    let want_windows = match windows {
-        Some(rects) => ExteriorWindows::Windows(rects),
-        None => ExteriorWindows::Unrestricted,
+    let (want_windows, want_reach) = match windows {
+        Some((rects, reaches)) => (ExteriorWindows::Windows(rects), reaches),
+        None => (ExteriorWindows::Unrestricted, Vec::new()),
     };
     if *camera_windows != want_windows {
         *camera_windows = want_windows;
+    }
+    if camera_reach.0 != want_reach {
+        camera_reach.0 = want_reach;
     }
     if let Some((mut text, path)) = dump_text.zip(dump_to) {
         // The frame's published verdict, after every placement: the claim and the windows.
@@ -594,6 +699,65 @@ impl<T: FloodTrace> FloodTrace for Option<T> {
     }
 }
 
+/// **Which rooms the camera can be LIT from** — the portal graph walked with no frustum at all.
+///
+/// Deliberately not [`compute_pvs_traced`], and deliberately much simpler. That function is a
+/// faithful carve of the reference's cull, down to clipping the frustum to each doorway and
+/// dropping a branch whose window closes; several decisions rest on it and it must not be bent to
+/// serve lighting. But that same frustum clipping is what made a lamp's light blink when the player
+/// tilted the camera — the room the lamp stands in left the *screen*, so the cull dropped it, so its
+/// light left the table.
+///
+/// A light's reach is a property of the building, not of where the player is looking. So this walks
+/// the same graph on connectivity alone: from the group the camera stands in, out through every
+/// portal, as far as the graph goes. No frustum, no windows, no front-side test — a lamp behind you
+/// lights the wall in front of you, and a lamp through a doorway you are not looking at still lights
+/// its own room.
+///
+/// With no containing group (the camera outside the building) every group is lit: the building's
+/// own lights are then gated by range alone, which is what the open world already does.
+fn lighting_reach(model: &WmoModel, eye_local: [f32; 3], terrain_z: Option<f32>) -> Vec<bool> {
+    let nav = &model.group_nav;
+    let mut lit = vec![false; nav.len()];
+    let seeds = down_ray_seeds(model, eye_local, terrain_z);
+    let mut stack: Vec<usize> = Vec::new();
+    match seeds.in_group {
+        Some(c) => {
+            stack.push(c);
+            if let Some(a) = seeds.across {
+                stack.push(a);
+            }
+        }
+        // **Outside the building: no room gate at all**, and the narrower answers tried here do
+        // not work. `lit` is ONE set for the whole frame, so anything tight enough to stop an
+        // interior torch washing the road outside is also tight enough to darken that torch when
+        // the player looks straight at it through the doorway — a hop cap did exactly that, and
+        // the room you could plainly see through the abbey door went black.
+        //
+        // The two cases differ by the RECEIVER, not by the light, so they cannot be separated
+        // here at all: that belongs to the indoor/outdoor class test the surface lanes already
+        // carry (`static_gx.wgsl`'s `modern_local_lights`, which rejects an outdoor light on an
+        // interior surface and wants the mirror-image rejection for the bleed).
+        None => return vec![true; nav.len()],
+    }
+    while let Some(gi) = stack.pop() {
+        if lit.get(gi).copied().unwrap_or(true) {
+            continue;
+        }
+        lit[gi] = true;
+        let Some(g) = nav.get(gi) else { continue };
+        let lo = g.ref_start as usize;
+        let hi = lo + g.ref_count as usize;
+        for r in model.portal_refs.get(lo..hi).unwrap_or(&[]) {
+            let to = r.group as usize;
+            if to < lit.len() && !lit[to] {
+                stack.push(to);
+            }
+        }
+    }
+    lit
+}
+
 /// The portal flood's per-group visible set, for the audit harness. `eye_local` is the camera in
 /// WMO model space (WoW axes), the seed and the front-side test point; a portal vertex reaches clip
 /// space as `clip_from_world * world_from_local * wow_to_bevy(v)`.
@@ -631,6 +795,8 @@ pub(crate) struct GroupPvs {
     /// one clipped NDC rect per doorway reached onto an `0x8` group. Pass 2 and [`ExteriorWindows`]
     /// both read it, as the reference feeds both from one list (`0x681070` copies it).
     pub(crate) windows: Vec<Rect>,
+    /// Each window's portal reach ([`ExteriorWindowReach`]), parallel to `windows`.
+    pub(crate) reaches: Vec<f32>,
     /// Stack steps across every run of the walk this frame, Pass 1 and each Pass-2 replay; the dump
     /// prints it.
     pub(crate) iters: u32,
@@ -655,6 +821,8 @@ struct Flood<'a> {
     /// The deferred exterior-window worklist Pass 1 leaves: the client's `[0xcbe324]` records,
     /// reset at `0x6b3b51` and filled at `0x6b4541`.
     windows: Vec<Rect>,
+    /// Each window's portal reach, stored beside its rect (`0x6b45ab`).
+    reaches: Vec<f32>,
     /// The client's per-frame stamp on the portal record (`0x6b4505`, `[esi+0x18]` vs
     /// `[0xca8014]`): a portal adds at most one window per frame, however many paths reach it. It
     /// guards the store only, never the recursion; the first push wins.
@@ -746,6 +914,12 @@ impl Flood<'_> {
                         if !*stamp {
                             *stamp = true;
                             self.windows.push(inter);
+                            self.reaches.push(portal_reach(
+                                model,
+                                info,
+                                self.clip_from_world,
+                                self.world_from_local,
+                            ));
                         }
                     }
                 }
@@ -773,6 +947,7 @@ fn compute_pvs_traced<T: FloodTrace>(
         visible: vec![false; nav.len()],
         interior_fog: vec![false; nav.len()],
         windows: Vec::new(),
+        reaches: Vec::new(),
         portal_pushed: vec![false; model.portal_infos.len()],
         iters: 0,
     };
@@ -849,7 +1024,9 @@ fn compute_pvs_traced<T: FloodTrace>(
     // the flood's per-group callback without the recursion). Both legs run it: the camera-outside
     // seed `0x6b3dd0` forks on the same bit. Every arm frustum-tests the MOGI AABB first
     // (`0x6b3d9d`, `0x6b3f2d`, `call 0x682f60`).
-    let base = Frustum::from_clip_from_world(clip_from_world);
+    let base = Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world(
+        clip_from_world,
+    ));
     for (gi, g) in nav.iter().enumerate() {
         if flood.visible[gi] || g.flags & CALLBACK_PASS == 0 {
             continue;
@@ -863,8 +1040,27 @@ fn compute_pvs_traced<T: FloodTrace>(
         visible: flood.visible,
         interior_fog: flood.interior_fog,
         windows: flood.windows,
+        reaches: flood.reaches,
         iters: flood.iters,
     }
+}
+
+/// `0x6b4680`: the largest view depth of the portal's vertices, from 0 and replaced only by a
+/// strictly larger one (`0x6b46cf`). A perspective clip `w` is the depth along the camera's forward.
+fn portal_reach(
+    model: &WmoModel,
+    info: &WmoPortalInfo,
+    clip_from_world: &Mat4,
+    world_from_local: &Affine3A,
+) -> f32 {
+    portal_poly(&model.portal_vertices, info)
+        .into_iter()
+        .flatten()
+        .map(|v| {
+            let world = world_from_local.transform_point3(wow_to_bevy(*v));
+            (*clip_from_world * world.extend(1.0)).w
+        })
+        .fold(0.0, |m, w| if w > m { w } else { m })
 }
 
 /// A group's MOGI bounding box as a Bevy-space [`Aabb`] in the placement's local frame, the bound
@@ -874,6 +1070,16 @@ fn group_aabb(nav: &WmoGroupNav) -> Aabb {
     let a = wow_to_bevy(nav.bbox_min);
     let b = wow_to_bevy(nav.bbox_max);
     Aabb::from_min_max(a.min(b), a.max(b))
+}
+
+/// fork: modern lighting — the group of the camera's containing set (the down-ray's in-group,
+/// then its across-portal partner) whose MFOG the interior fog engages: the first TRUE interior,
+/// `flags & (EXTERIOR | EXTERIOR_LIT) == 0` — the conjunct the fog target is selected under.
+fn fog_room(nav: &[WmoGroupNav], seeds: [Option<usize>; 2]) -> Option<usize> {
+    seeds.into_iter().flatten().find(|&g| {
+        nav.get(g)
+            .is_some_and(|n| n.flags & (EXTERIOR | EXTERIOR_LIT) == 0)
+    })
 }
 
 /// The portal's polygon (WoW model space), or `None` if the span is out of range or under 3.
@@ -1016,6 +1222,7 @@ mod tests {
             world_from_local: Affine3A::IDENTITY,
             name_set: 0,
             visible: vec![false, true, false],
+            lit: vec![false, true, false],
             interior_fog: vec![false; 3],
             liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
@@ -1046,6 +1253,7 @@ mod tests {
             world_from_local: Affine3A::IDENTITY,
             name_set: 0,
             visible: vec![true; 3],
+            lit: vec![true; 3],
             interior_fog: vec![false, true, false],
             liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
@@ -1111,6 +1319,45 @@ mod tests {
         assert!(
             !opens_a_window(&nav, 99),
             "an out-of-range group is no window"
+        );
+    }
+
+    /// **A room's air is the room whose fog engaged, never an exterior-lit courtyard's.** The flag
+    /// values are Orgrimmar's own (`ogrimmar.wmo`): g006, the gate tunnel's last segment
+    /// (`0x0a805`, a true interior carrying the building's teal MFOG), opens through a doorway
+    /// portal onto g133, the entry canyon (`0x0a841`, exterior-lit, a 170 yd box reaching the
+    /// Valley of Strength). The modern medium took the courtyard's sphere for the tunnel's fog, and
+    /// the whole city fogged over for the 4 s fade-out whenever the camera stepped out.
+    #[test]
+    fn only_a_true_interior_carries_the_rooms_air() {
+        let g = |flags: u32| WmoGroupNav {
+            flags,
+            bbox_min: [0.0; 3],
+            bbox_max: [0.0; 3],
+            ref_start: 0,
+            ref_count: 0,
+            area_table_id: 0,
+            fog_indices: [0; 4],
+            group_liquid: 0xf,
+        };
+        let (tunnel, canyon, outside) = (0, 1, 2);
+        let nav = [g(0x0a805), g(0x0a841), g(0x08009)];
+        assert_eq!(fog_room(&nav, [Some(tunnel), None]), Some(tunnel));
+        assert_eq!(
+            fog_room(&nav, [Some(canyon), None]),
+            None,
+            "the canyon claims the camera but carries no room"
+        );
+        assert_eq!(
+            fog_room(&nav, [Some(canyon), Some(tunnel)]),
+            Some(tunnel),
+            "on a crossing into the tunnel the room is the tunnel, not the courtyard"
+        );
+        assert_eq!(fog_room(&nav, [Some(outside), None]), None);
+        assert_eq!(
+            fog_room(&nav, [Some(99), None]),
+            None,
+            "an unknown group is no room"
         );
     }
 
@@ -1446,6 +1693,154 @@ mod tests {
     }
 
     /// A bare model with one vertical doorway portal in the WoW x=0 plane, y and z in [-1,1].
+    /// A three-room chain: 0 —portal— 1 —portal— 2, with group 2 nowhere near the camera's view.
+    fn chain_model() -> WmoModel {
+        let mut m = portal_model();
+        // An interior room spanning the origin, so the down-ray's seed lands in group 0.
+        let room = |ref_start: u16, ref_count: u16| WmoGroupNav {
+            flags: 0,
+            bbox_min: [-8.0, -8.0, -8.0],
+            bbox_max: [8.0, 8.0, 8.0],
+            ref_start,
+            ref_count,
+            area_table_id: 0,
+            fog_indices: [0; 4],
+            group_liquid: benilla_formats::NO_GROUP_LIQUID,
+        };
+        m.group_nav = vec![room(0, 1), room(1, 2), room(3, 1)];
+        m.portal_refs = vec![
+            WmoPortalRef {
+                portal: 0,
+                group: 1,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 0,
+                side: -1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 2,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 1,
+                side: -1,
+            },
+        ];
+        m
+    }
+
+    /// Two triangles of walkable floor spanning `x0..x1 × y0..y1` at height `z` (WoW model space).
+    fn floor_quad(x0: f32, x1: f32, y0: f32, y1: f32, z: f32) -> Vec<[[f32; 3]; 3]> {
+        vec![
+            [[x0, y0, z], [x1, y0, z], [x1, y1, z]],
+            [[x0, y0, z], [x1, y1, z], [x0, y1, z]],
+        ]
+    }
+
+    /// [`chain_model`] with the three rooms laid out side by side in X and **given floors**, so the
+    /// down-ray actually resolves a containing group.
+    ///
+    /// `chain_model` alone carries no collision triangles at all, so `down_ray_seeds` answers
+    /// `in_group: None` for every eye — which meant the golden below was, until this model existed,
+    /// silently measuring the OUTSIDE leg's old fail-open ("return every group lit") and never once
+    /// walking the portal chain it claims to pin.
+    fn floored_chain_model() -> WmoModel {
+        let mut m = chain_model();
+        let span = [(-9.0f32, -3.0f32), (-3.0, 3.0), (3.0, 9.0)];
+        for (gi, (x0, x1)) in span.iter().enumerate() {
+            m.group_nav[gi].bbox_min = [*x0, -3.0, -1.0];
+            m.group_nav[gi].bbox_max = [*x1, 3.0, 5.0];
+        }
+        m.group_collision_tris = span
+            .iter()
+            .map(|(x0, x1)| floor_quad(*x0, *x1, -3.0, 3.0, -1.0))
+            .collect();
+        m.group_collision_grids = vec![None; 3];
+        m.group_camera_only_tris = vec![Vec::new(); 3];
+        m
+    }
+
+    /// GOLDEN — **a light's room gate is reachability, and reachability cannot see the camera.**
+    ///
+    /// The lamp at Northshire Abbey's entrance blinked as the player tilted the camera or backed
+    /// away. Lights were gated on [`WmoPortalInstance::visible`] — the reference's portal cull,
+    /// which clips the frustum to each doorway — so looking away from the doorway dropped the room
+    /// and the lamp's light left the table. A lamp beside a portal re-rolls that verdict on every
+    /// small camera move.
+    ///
+    /// [`lighting_reach`] takes no orientation and no projection **at all**: its signature is the
+    /// guarantee, and this pins the behaviour behind it — every room on the portal chain is lit
+    /// from the camera's own room, however far down the chain and whatever is on screen.
+    #[test]
+    fn lighting_reach_floods_the_whole_portal_chain_and_ignores_the_view() {
+        let m = floored_chain_model();
+        // Standing in room 0. Room 2 is two doorways away and cannot be on screen through both.
+        let lit = lighting_reach(&m, [-6.0, 0.0, 1.0], None);
+        assert_eq!(lit.len(), 3, "one verdict per group");
+        assert!(
+            lit.iter().all(|v| *v),
+            "every room on the chain is lit: {lit:?}"
+        );
+    }
+
+    /// GOLDEN — **"names rooms" is not "is indoors", and the porch lamp is the difference.**
+    ///
+    /// The surface lanes' class test runs both ways off the packed `w`: an interior surface takes
+    /// only indoor lights, an exterior one only outdoor lights. That is only safe if `w` means
+    /// what it says. Packed from `rooms.is_some()` it meant "is a WMO light", and a sconce bolted
+    /// to the outside of the abbey names rooms too — so the two-way test would have switched off
+    /// every porch lamp and courtyard brazier in the game.
+    #[test]
+    fn a_lamp_on_a_buildings_outside_is_not_an_indoor_light() {
+        let mut m = floored_chain_model();
+        m.group_nav[0].flags |= EXTERIOR; // group 0 is the outdoor shell
+        let e = Entity::from_raw_u32(1).expect("a valid test entity id");
+        let vis = |groups: &[u16]| WmoGroupVis {
+            instance: e,
+            groups: groups.into(),
+        };
+        // A candle in the nave: only interior groups name it.
+        assert!(rooms_are_indoor(&vis(&[1, 2]), &m));
+        // A sconce on the shell — it lights the open world, and must survive the test.
+        assert!(!rooms_are_indoor(&vis(&[0]), &m));
+        // A fixture a courtyard ALSO names keeps its outdoor half: all naming groups must be
+        // interior, because the error directions are lopsided (1276).
+        assert!(!rooms_are_indoor(&vis(&[0, 1]), &m));
+        // `0x40`-only is an interior GRAPH group lit as outdoors — Stormwind's streets (decision
+        // 0475). A street lamp there is not an indoor light.
+        let mut streets = floored_chain_model();
+        streets.group_nav[1].flags |= EXTERIOR_LIT;
+        assert!(!rooms_are_indoor(&vis(&[1]), &streets));
+        // Naming nothing at all is the empty claim, not an indoor one.
+        assert!(!rooms_are_indoor(&vis(&[]), &m));
+        // A group index past the model answers the same way — a lookup miss is not "indoors".
+        assert!(!rooms_are_indoor(&vis(&[99]), &m));
+    }
+
+    /// Outside the building there is no room gate at all — the building's lights are then bounded
+    /// by range alone, which is what the open world already does.
+    ///
+    /// **A narrower answer was tried here and reverted.** Seeding the outdoor shell and flooding a
+    /// single portal hop inward stopped an interior torch washing the road, but it also darkened
+    /// the room you can see through the abbey's open door, because that room is more than one
+    /// portal from the shell. `lit` is one set for the whole frame and the two cases differ by the
+    /// receiver, so no verdict here can tell them apart — the bleed belongs to the surface lanes'
+    /// indoor/outdoor class test, not to this function. Keep that in mind before narrowing it
+    /// again.
+    #[test]
+    fn lighting_reach_outside_a_building_gates_nothing() {
+        let m = floored_chain_model();
+        // Standing on the road beside the building — outside every group's own column, which is
+        // what actually makes the down-ray answer "no containing group" (being merely high above
+        // it does not: the ray still lands on a floor).
+        let lit = lighting_reach(&m, [100.0, 0.0, 1.0], None);
+        assert!(lit.iter().all(|v| *v), "{lit:?}");
+    }
+
     fn portal_model() -> WmoModel {
         WmoModel {
             wmo_id: 0,
@@ -1464,6 +1859,7 @@ mod tests {
             }],
             portal_refs: Vec::new(),
             group_nav: Vec::new(),
+            ambient: [0.0; 3],
             fogs: Vec::new(),
             skybox: None,
             group_collision_tris: Vec::new(),

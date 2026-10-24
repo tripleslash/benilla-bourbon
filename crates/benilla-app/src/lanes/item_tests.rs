@@ -123,7 +123,7 @@ fn client() -> App {
             "#,
         )
         .unwrap();
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     frame(&mut app, vec![item(HELM, HELM_ID), item(POTIONS, POTION)]);
     app
 }
@@ -133,7 +133,7 @@ fn frame(app: &mut App, packets: Vec<SessionEvent>) -> Vec<String> {
     let world = app.world_mut();
     crate::net::handlers::dispatch(world, wire(packets));
     crate::lanes::fire_in_order(world);
-    let s = world.non_send_resource_mut::<UiScript>();
+    let s = world.non_send_mut::<UiScript>();
     let out = s.eval::<Vec<String>>("return Heard").unwrap();
     s.run("Heard = {}").unwrap();
     out
@@ -406,7 +406,7 @@ fn a_held_copier_ends_inside_its_packet_before_a_later_close() {
 fn linen_on_the_bar() -> App {
     let mut app = client();
     let world = app.world_mut();
-    let mut script = world.non_send_resource_mut::<UiScript>();
+    let mut script = world.non_send_mut::<UiScript>();
     script.set_unit_guids(&benilla_ui::script::UnitGuids {
         player: ME,
         ..Default::default()

@@ -1,5 +1,4 @@
-//! Tests for the frame ESC opens: the stock `GameMenuFrame.xml` as the layer's
-//! `GameMenuAdapters.xml` reshapes it. The bags in its way are the stock
+//! Tests for our `GameMenuFrame.xml`, the frame ESC opens. The bags in its way are the stock
 //! `ContainerFrame1..12`, recycled, so tests ask [`bag_open`] rather than naming a frame.
 
 use benilla_ui::script::{
@@ -8,8 +7,8 @@ use benilla_ui::script::{
 
 use super::test_ui::{bag_open, load_ui as load_xml, BAG_UI};
 
-/// The stock menu over what it needs (`GameMenuButtonTemplate` is `UIPanelTemplates.xml:403`),
-/// with `extra` in its way and the layer's reshaping, each file once, in the production order.
+/// The menu over what it needs (`GameMenuButtonTemplate` is `UIPanelTemplates.xml:403`), with
+/// `extra` in its way, each file once, in the production order.
 fn harness_with(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.keep_calls();
@@ -25,9 +24,8 @@ fn harness_with(extra: &[&str]) -> UiScript {
         r"Interface\FrameXML\MoneyFrame.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        r"Interface\FrameXML\GameMenuFrame.xml",
         "Interface\\FrameXML\\StaticPopup.xml",
-        "GameMenuAdapters.xml",
+        "GameMenuFrame.xml",
     ];
     for file in super::test_ui::production_order(&[MENU, extra]) {
         load_xml(&s, file);
@@ -47,19 +45,19 @@ fn bag_harness_with(extra: &[&str]) -> UiScript {
 }
 
 /// Top to bottom. Deviation: the 1.15 era client's ESC ladder, because its settings screens
-/// replace 1.12's; without the AddOns rung, as the character-select screen is the only addon UI.
-const LADDER: [&str; 7] = [
+/// replace 1.12's; without the AddOns rung, as the character-select screen is the only addon UI,
+/// and (this fork) without Exit Game, as a browser tab has no process for it to end.
+const LADDER: [&str; 6] = [
     "GameMenuButtonOptions",
     "BenillaGameMenuButtonEditMode",
     "BenillaGameMenuButtonSupport",
     "GameMenuButtonMacros",
     "GameMenuButtonLogout",
-    "GameMenuButtonQuit",
     "GameMenuButtonContinue",
 ];
 
 /// The era layout (MainMenuFrameTemplates: padding 32 top and 28 elsewhere, 20-unit section
-/// gaps) over seven 144x21 rungs: 200x267, gaps after Options, after Macros and before Return.
+/// gaps) over six 144x21 rungs: 200x246, gaps after Options, after Macros and before Return.
 #[test]
 fn the_menu_has_the_era_frame_and_button_ladder() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -70,11 +68,11 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
     let (w, h) = s
         .eval::<(f64, f64)>("return GameMenuFrame:GetWidth(), GameMenuFrame:GetHeight()")
         .unwrap();
-    benilla_ui::assert_near!((w, h), (200.0, 267.0), "the era frame size");
+    benilla_ui::assert_near!((w, h), (200.0, 246.0), "the era frame size");
 
     let top = s.eval::<f64>("return GameMenuFrame:GetTop()").unwrap();
     let left = s.eval::<f64>("return GameMenuFrame:GetLeft()").unwrap();
-    const TOPS: [f64; 7] = [32.0, 73.0, 94.0, 115.0, 156.0, 177.0, 218.0];
+    const TOPS: [f64; 6] = [32.0, 73.0, 94.0, 115.0, 156.0, 197.0];
     for (name, down) in LADDER.iter().zip(TOPS) {
         let (bw, bh, btop, bleft) = s
             .eval::<(f64, f64, f64, f64)>(&format!(
@@ -133,7 +131,6 @@ fn the_unbacked_entry_is_disabled_and_the_rest_are_live() {
         "BenillaGameMenuButtonSupport",
         "GameMenuButtonMacros",
         "GameMenuButtonLogout",
-        "GameMenuButtonQuit",
         "GameMenuButtonContinue",
     ] {
         assert!(
@@ -142,8 +139,8 @@ fn the_unbacked_entry_is_disabled_and_the_rest_are_live() {
             "{name} is live"
         );
     }
-    // Edit Mode is the era's label and Continue 1.12's `RETURN_TO_GAME`; Options is a literal, as
-    // 1.12's `OPTIONS_MENU` is "Options Menu".
+    // Edit Mode is the era's literal and Continue 1.12's `RETURN_TO_GAME`; Options
+    // is a literal, as 1.12's `OPTIONS_MENU` is "Options Menu".
     assert_eq!(
         s.eval::<String>("return BenillaGameMenuButtonEditMode:GetText()")
             .unwrap(),
@@ -301,7 +298,8 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Logout and Exit Game queue alike here: whether a finished logout ends the process is app-side.
+/// Logout and `Quit()` queue alike here: whether a finished logout ends the process is app-side.
+/// `Quit()` has no rung on this fork, but `/quit` still calls it.
 #[test]
 fn the_live_buttons_queue_their_intents_and_play_their_kits() {
     let _data = benilla_formats::wow_data_or_skip!();
@@ -325,13 +323,10 @@ fn the_live_buttons_queue_their_intents_and_play_their_kits() {
         .contains(&SoundRequest::KitName("igMainMenuLogout".into())));
     assert!(!s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap());
 
-    s.run("ToggleGameMenu()").unwrap();
-    let _ = s.take_sounds();
-    s.run("GameMenuButtonQuit:Click()").unwrap();
+    // Quit — no button any more, but the API behind the retired rung is what `/quit` calls, and
+    // it queues the same shape Logout does.
+    s.run("Quit()").unwrap();
     assert_eq!(s.take_session_requests(), vec![SessionRequest::Quit]);
-    assert!(s
-        .take_sounds()
-        .contains(&SoundRequest::KitName("igMainMenuQuit".into())));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -443,10 +438,11 @@ fn player_quiting_offers_exit_now_and_logout_cancel_closes_it() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The stock OnShow guard (`GameMenuFrame.xml:134-140`) disables both while CAMP or QUIT counts.
+/// The stock OnShow guard (`GameMenuFrame.xml:134-140`) disables Logout while CAMP or QUIT counts;
+/// QUIT is still reachable through `/quit`.
 /// Opened with the micro button, because ESC during a countdown dismisses the dialog instead.
 #[test]
-fn logout_and_exit_read_disabled_while_a_countdown_runs() {
+fn logout_reads_disabled_while_a_countdown_runs() {
     let _data = benilla_formats::wow_data_or_skip!();
     let mut s = harness();
     s.fire_event("PLAYER_CAMPING", vec![]);
@@ -456,10 +452,19 @@ fn logout_and_exit_read_disabled_while_a_countdown_runs() {
             .unwrap(),
         "Logout is dead while the camp timer runs"
     );
-    assert!(!s
-        .eval::<bool>("return GameMenuButtonQuit:IsEnabled() ~= 0")
-        .unwrap());
 
+    // The QUIT countdown arms the same guard — `/quit` is still a way to raise one.
+    s.run("HideUIPanel(GameMenuFrame)").unwrap();
+    s.fire_event("LOGOUT_CANCEL", vec![]);
+    s.fire_event("PLAYER_QUITING", vec![]);
+    s.run("ToggleGameMenu(1)").unwrap();
+    assert!(
+        !s.eval::<bool>("return GameMenuButtonLogout:IsEnabled() ~= 0")
+            .unwrap(),
+        "…and dead under the quit timer too"
+    );
+
+    // With the countdown gone, a re-opened menu has it back.
     s.run("HideUIPanel(GameMenuFrame)").unwrap();
     s.fire_event("LOGOUT_CANCEL", vec![]);
     s.run("ToggleGameMenu(1)").unwrap();

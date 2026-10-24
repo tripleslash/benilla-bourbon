@@ -42,10 +42,10 @@ fn grouped() -> Fix {
 fn run(f: &mut Fix, lua: &str) {
     let world = f.app.world_mut();
     if world
-        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .get_non_send::<benilla_ui::script::UiScript>()
         .is_none()
     {
-        world.insert_non_send_resource(benilla_ui::script::UiScript::new().expect("a VM"));
+        world.insert_non_send(benilla_ui::script::UiScript::new().expect("a VM"));
     }
     crate::script_calls::with_hosted_vm(world, |s| s.expect("a VM").run(lua))
         .expect("the script runs");
@@ -202,7 +202,7 @@ fn the_chunk_that_selects_a_party_member_out_of_range_reads_them() {
     };
     script.set_unit("target", Some(unit(OLD, "Old", true)));
     script.set_unit("party1", Some(unit(MEMBER, MEMBER_NAME, false)));
-    f.app.world_mut().insert_non_send_resource(script);
+    f.app.world_mut().insert_non_send(script);
     run(&mut f, r#"TargetUnit("party1") SEEN = UnitName("target")"#);
     let seen = crate::script_calls::with_hosted_vm(f.app.world_mut(), |s| {
         s.expect("a VM").eval::<Option<String>>("return SEEN")

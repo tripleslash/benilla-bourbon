@@ -177,7 +177,16 @@ fn report_gate_miss(
     generation_eq: bool,
     text_ui_eq: bool,
     portraits_eq: bool,
+    art_deferred: bool,
 ) {
+    if art_deferred {
+        // First, because it is the one miss whose cause is not in the comparison at all: the last
+        // conversion drew a placeholder for art that had not arrived, so this frame converts again
+        // to pick it up. Expected on the web target and only there; a run that reports it every
+        // frame is a sprite that never resolves, not a gate that is working.
+        eprintln!("[ui-gate] miss: art deferred by the last conversion has not arrived yet");
+        return;
+    }
     if !dims_eq {
         eprintln!("[ui-gate] miss: window size / seam scale / DPI changed");
         return;
@@ -236,8 +245,28 @@ pub(super) struct GateInputs {
     /// Per-entry prefix ends: entry `i`'s quads are `spans[i-1]..spans[i]` of `UiQuads::quads`
     /// (from 0 for `i = 0`), which lets the splice re-convert one entry alone.
     spans: Vec<u32>,
+    /// **Did the last conversion draw art that had not arrived yet?** (web target only — on native
+    /// a sprite either resolves or is missing, and this is permanently `false`.)
+    ///
+    /// The gate below skips a frame on the argument that equal inputs prove last frame's quads are
+    /// this frame's too. A deferred sprite breaks that argument from outside the inputs: the quads
+    /// are a transparent placeholder, the real art lands a few frames later, and nothing in
+    /// `extracted`/`dims`/`generation` moves to say so — which is a window that stays blank until
+    /// you close and reopen it. So a conversion that deferred anything refuses the next skip, and
+    /// keeps refusing until one completes with everything it asked for in hand.
+    art_deferred: bool,
     /// The stitch's ping-pong buffer: last frame's emptied allocation.
     held: Vec<UiQuad>,
+    /// The model's mutation count when [`Self::extracted`] was walked (`UiScript::visual_epoch`):
+    /// equal next frame, with the other inputs, the walk is skipped.
+    epoch: Option<u64>,
+}
+
+/// `WOW_UI_VERIFY=1`: walk every frame, and report a frame the mutation-count skip would have
+/// drawn stale. Read once.
+fn ui_verify_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_UI_VERIFY").is_some())
 }
 
 /// How this frame's entry list lines up with last frame's.
@@ -503,14 +532,14 @@ pub(super) fn tick_script(
         // Per frame: both halves' measure passes add to these, and only this zeroes them.
         ui_cost.measured = 0;
         ui_cost.measured_texts.clear();
-        let mut t_mark = cost_on.then(std::time::Instant::now);
+        let mut t_mark = cost_on.then(bevy::platform::time::Instant::now);
         // μs since the previous mark, re-armed; nothing with the meter off.
         let mut lap = move || -> u128 {
             if !cost_on {
                 return 0;
             }
             t_mark
-                .replace(std::time::Instant::now())
+                .replace(bevy::platform::time::Instant::now())
                 .map_or(0, |t| t.elapsed().as_micros())
         };
         {
@@ -684,13 +713,15 @@ pub(super) fn paint_script(
         let (solves_before, derives_before) = (Some(pass.solves_before), Some(pass.derives_before));
         let printing = ui_cost_enabled();
         let cost_on = printing || ui_cost_wanted.0;
-        let mut t_mark = cost_on.then(std::time::Instant::now);
+        // `bevy::platform::time::Instant`: the UI cost meter is a RUNTIME flag, not a `cfg`, so this
+        // line is reachable on the page — and `std::time::Instant::now()` panics on wasm32.
+        let mut t_mark = cost_on.then(bevy::platform::time::Instant::now);
         let mut lap = move || -> u128 {
             if !cost_on {
                 return 0;
             }
             t_mark
-                .replace(std::time::Instant::now())
+                .replace(bevy::platform::time::Instant::now())
                 .map_or(0, |t| t.elapsed().as_micros())
         };
         // ── The second measure and resolve ───────────────────────────────────────────────────────
@@ -739,20 +770,41 @@ pub(super) fn paint_script(
         // and the blink phase (0.5 s, `0x77a790`).
         let text_ui = script.focused_editbox_text_ui();
         let _ = lap(); // re-arm: the editbox seam above is not the walk's cost
-        let extracted = script.extract();
-        let us_exm = lap();
-        let n_extracted = extracted.len();
-        // ── The extract gate ──────────────────────────────────────────────────────
-        // Equal inputs skip the conversion; the quads, minimap slot and link spans stay as they
-        // are.
+                       // ── The extract gate ──────────────────────────────────────────────────────
+                       // Equal inputs skip the conversion; the quads, minimap slot and link spans stay as they
+                       // are. The walk itself is skipped when, beside them, the model's mutation count stands
+                       // where the last walk left it: nothing it reads can have moved (`benilla_ui`'s
+                       // `ModelCell`). `WOW_UI_VERIFY=1` walks anyway and reports a skip that would have missed.
         let dims = (w.to_bits(), h.to_bits(), s.to_bits(), dpi.to_bits());
-        let settled = capture.is_none()
+        let inputs_still = capture.is_none()
+            && !prev.art_deferred
             && prev.dims == Some(dims)
             && prev.generation == generation
             && text_ui == prev.text_ui
-            && booths.images.0 == prev.portraits
-            && extracted == prev.extracted;
+            && booths.images.0 == prev.portraits;
+        let epoch_still = inputs_still && prev.epoch == Some(script.visual_epoch());
+        let walked = (!epoch_still || ui_verify_enabled()).then(|| script.extract());
+        // Read after the walk, whose texture stamps may move it.
+        let epoch_now = script.visual_epoch();
+        let us_exm = lap();
+        let n_extracted = walked.as_ref().map_or(prev.extracted.len(), Vec::len);
+        let settled = inputs_still
+            && match &walked {
+                Some(w) => *w == prev.extracted,
+                None => epoch_still,
+            };
+        if let (true, Some(w)) = (epoch_still, walked.as_ref()) {
+            if *w != prev.extracted {
+                eprintln!(
+                    "[ui-verify] MISS: the mutation count stood at {epoch_now} but the walk \
+                     moved ({} -> {} entries)",
+                    prev.extracted.len(),
+                    w.len()
+                );
+            }
+        }
         if settled {
+            prev.epoch = Some(epoch_now);
             drop(extract_span);
             let us_cmp = lap();
             if cost_on {
@@ -778,13 +830,19 @@ pub(super) fn paint_script(
                 let solves = script.layout_solves() - solves_before.unwrap_or(0);
                 eprintln!(
                     "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
-                     exm={us_exm} exa={us_cmp} diff=0 eq={n_extracted} quads={} \
-                     solves={solves} changed=0 skip=1",
+                 exm={us_exm} exa={us_cmp} diff=0 eq={n_extracted} quads={} \
+                 solves={solves} changed=0 skip=1",
                     quads.quads.len()
                 );
             }
             return;
         }
+        let extracted = walked.expect("an unsettled frame walked");
+        // Brackets the conversion below — either path — so `prev.art_deferred` records whether THIS
+        // frame's drawing is complete rather than whether anything anywhere is still loading. Taken
+        // past the skip because a skipped frame converts nothing and has nothing to record.
+        let deferrals_before = benilla_assets::sprite_deferrals();
+
         if gate_log_enabled() {
             report_gate_miss(
                 script,
@@ -794,6 +852,7 @@ pub(super) fn paint_script(
                 prev.generation == generation,
                 text_ui == prev.text_ui,
                 booths.images.0 == prev.portraits,
+                prev.art_deferred,
             );
         }
         // ── The per-entry splice ─────────────────────────────────────────────────────────────────
@@ -801,13 +860,13 @@ pub(super) fn paint_script(
         // alone and stitch into last frame's `UiQuads` at the ranges `prev.spans` holds.
         'splice: {
             macro_rules! no_splice {
-                ($($arg:tt)*) => {{
-                    if gate_log_enabled() {
-                        eprintln!("[ui-splice] miss: {}", format_args!($($arg)*));
-                    }
-                    break 'splice;
-                }};
-            }
+            ($($arg:tt)*) => {{
+                if gate_log_enabled() {
+                    eprintln!("[ui-splice] miss: {}", format_args!($($arg)*));
+                }
+                break 'splice;
+            }};
+        }
             if capture.is_some() {
                 no_splice!("capture mode");
             }
@@ -826,6 +885,15 @@ pub(super) fn paint_script(
             }
             if booths.images.0 != prev.portraits {
                 no_splice!("portrait sources moved");
+            }
+            // The splice re-converts only the entries that DIFFER, and art that has not arrived is not a
+            // difference — the entry is identical, its quad is a placeholder. So one animating entry (a
+            // cooldown sweep, the resting blink) would splice itself, clear the flag, and let the gate
+            // settle with every other entry's placeholder still on screen. That is the reopened-window
+            // bug again, one layer down. While anything is outstanding the full conversion is the only
+            // pass that re-resolves everything, so take it.
+            if prev.art_deferred {
+                no_splice!("art deferred by the last conversion has not arrived yet");
             }
             // The spans describe last conversion's list; if anything replaced it, convert in full.
             if prev.spans.len() != prev.extracted.len()
@@ -959,6 +1027,7 @@ pub(super) fn paint_script(
                 quads.dirty = true;
             }
             prev.extracted = extracted;
+            prev.epoch = Some(epoch_now);
             if splice_verify_enabled() {
                 verify_splice(
                     prev,
@@ -1001,14 +1070,15 @@ pub(super) fn paint_script(
                 let solves = script.layout_solves() - solves_before.unwrap_or(0);
                 eprintln!(
                     "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
-                     exm={us_exm} exa={us_spl} diff=0 eq={n_extracted} quads={} \
-                     solves={solves} changed={} skip=0 spliced={} dropped={}",
+                 exm={us_exm} exa={us_spl} diff=0 eq={n_extracted} quads={} \
+                 solves={solves} changed={} skip=0 spliced={} dropped={}",
                     quads.quads.len(),
                     u8::from(dirtied),
                     changed.len(),
                     align.dropped.len()
                 );
             }
+            prev.art_deferred = benilla_assets::sprite_deferrals() != deferrals_before;
             return;
         }
         prev.dims = Some(dims);
@@ -1016,6 +1086,7 @@ pub(super) fn paint_script(
         prev.text_ui = text_ui.clone();
         prev.portraits = booths.images.0.clone();
         prev.extracted = extracted.clone();
+        prev.epoch = Some(epoch_now);
         // Cleared only on the full-conversion path: a settled frame's maps are still true, and
         // clearing them would put the character panes' cameras to sleep.
         booths.panes.0.clear();
@@ -1126,12 +1197,15 @@ pub(super) fn paint_script(
             if printing {
                 eprintln!(
                     "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
-                     exm={us_exm} exa={us_exa} diff={us_diff} eq={n_extracted} quads={n_quads} \
-                     solves={solves} changed={} skip=0",
+                 exm={us_exm} exa={us_exa} diff={us_diff} eq={n_extracted} quads={n_quads} \
+                 solves={solves} changed={} skip=0",
                     u8::from(changed)
                 );
             }
         }
+        // Past the whole conversion, which is the point: anything it drew as a placeholder makes the
+        // next frame convert again rather than keep these quads.
+        prev.art_deferred = benilla_assets::sprite_deferrals() != deferrals_before;
     })
 }
 
@@ -1718,7 +1792,7 @@ mod clip_plumb_tests {
             .unwrap();
 
         let mut app = App::new();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.init_resource::<UiQuads>();
         app.init_resource::<crate::ui_script::UiPassState>();
         app.init_resource::<Assets<Image>>();
@@ -1810,7 +1884,7 @@ mod clip_plumb_tests {
             .unwrap();
 
         let mut app = App::new();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.init_resource::<UiQuads>();
         app.init_resource::<crate::ui_script::UiPassState>();
         app.init_resource::<Assets<Image>>();
@@ -2043,7 +2117,7 @@ mod extract_gate_tests {
     /// [`app_from_script`] over a VM of the caller's.
     fn app_over(script: UiScript) -> App {
         let mut app = App::new();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.init_resource::<UiQuads>();
         app.init_resource::<crate::ui_script::UiPassState>();
         app.init_resource::<Assets<Image>>();
@@ -2087,7 +2161,7 @@ mod extract_gate_tests {
         // A paint-only write, invisible to the layout gate: only the extracted-list compare can
         // reopen extraction.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("marker:SetTexture(0, 0, 1)")
             .unwrap();
         app.update();
@@ -2110,7 +2184,7 @@ mod extract_gate_tests {
         app.world_mut().resource_mut::<UiQuads>().dirty = false;
 
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("getglobal('Plain'):SetPoint('TOPLEFT', 40, -40)")
             .unwrap();
         app.update();
@@ -2237,7 +2311,7 @@ mod extract_gate_tests {
         );
         app.update();
 
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         let handle = |name: &str| script.frame_handle(name).expect(name);
         let (doll, stray, bare) = (
             handle("CharacterModelFrame"),
@@ -2275,7 +2349,7 @@ mod extract_gate_tests {
     fn a_booth_bake_quad_is_flagged_premultiplied_and_a_plain_one_is_not() {
         let mut app = app_with_marker();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("SetPortraitTexture(marker, 'target')")
             .unwrap();
         // The booth publishes a live bake for that unit; without an entry the region draws nothing.
@@ -2317,7 +2391,7 @@ mod extract_gate_tests {
         app.update();
         app.world_mut().resource_mut::<UiQuads>().dirty = false;
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("marker:SetTexture(0, 0, 1)")
             .unwrap();
         app.update();
@@ -2360,7 +2434,7 @@ mod extract_gate_tests {
         let before = app.world().resource::<UiQuads>().quads.len();
         app.world_mut().resource_mut::<UiQuads>().dirty = false;
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("marker:SetTexture(nil)")
             .unwrap();
         app.update();
@@ -2381,7 +2455,7 @@ mod extract_gate_tests {
         // The follow-up (0 → 1 quads) splices against the re-derived spans.
         app.world_mut().resource_mut::<UiQuads>().dirty = false;
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("marker:SetTexture(0, 1, 0)")
             .unwrap();
         app.update();
@@ -2439,7 +2513,7 @@ mod extract_gate_tests {
 
         // ── Insertion ────────────────────────────────────────────────────────────────────────
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("hidden:Show()")
             .unwrap();
         app.update();
@@ -2473,7 +2547,7 @@ mod extract_gate_tests {
         // Nothing converts, so `dropped` is what shows the splice ran.
         app.world_mut().resource_mut::<UiQuads>().dirty = false;
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("hidden:Hide()")
             .unwrap();
         app.update();
@@ -2516,7 +2590,7 @@ mod extract_gate_tests {
             .unwrap();
         app.world_mut().get_mut::<Window>(win).unwrap().resolution = UVec2::new(800, 600).into();
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("marker:SetTexture(0, 0, 1)")
             .unwrap();
         app.update();

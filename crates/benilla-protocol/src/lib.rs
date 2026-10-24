@@ -5,9 +5,10 @@ pub mod auth;
 pub mod events;
 pub mod guid;
 pub mod messages;
+pub mod transport;
 pub mod wire;
 pub mod world;
-pub use auth::{AuthReject, LogonReply};
+pub use auth::{AuthReject, LogonReply, RealmVersion};
 pub use events::{
     decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, NotifyBlock, Poll,
     RosterCause, SessionEnd, SessionEvent, SessionEventKind, TransportClock,
@@ -24,10 +25,10 @@ pub use world::{
     WorldReader, WorldSession, WorldWriter, WORLD_PORT,
 };
 
-use std::net::{SocketAddr, TcpStream};
-
 use anyhow::{anyhow, Context, Result};
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge, SESSION_KEY_LENGTH};
+
+use crate::transport::Conn;
 
 /// The port a stock vmangos `realmd` listens on.
 pub const AUTH_PORT: u16 = 3724;
@@ -73,32 +74,41 @@ impl std::error::Error for DialFailure {}
 /// The port a realm's world address dials when it names none (`0x2382`, `0x53785a`).
 const WORLD_DEFAULT_PORT: u16 = 9090;
 
-/// Resolves, then dials the first IPv4 address ([`first_ipv4`]).
-fn dial(host: &str, port: u16) -> Result<TcpStream> {
-    use std::net::ToSocketAddrs;
+/// Resolves, then connects, reporting the two failures apart ([`DialFailure`]); natively it dials
+/// the first IPv4 address alone ([`first_ipv4`]). On the web the page never resolves anything —
+/// the host proxies the dial — so a failure there can only be "nothing answered".
+pub(crate) async fn dial(host: &str, port: u16) -> Result<Conn> {
     let address = format!("{host}:{port}");
-    let addrs: Vec<SocketAddr> = match (host, port).to_socket_addrs() {
-        Ok(addrs) => addrs.collect(),
-        Err(e) => {
+    #[cfg(not(target_arch = "wasm32"))]
+    let target = {
+        use std::net::ToSocketAddrs;
+        let addrs: Vec<std::net::SocketAddr> = match (host, port).to_socket_addrs() {
+            Ok(addrs) => addrs.collect(),
+            Err(e) => {
+                return Err(anyhow::Error::new(DialFailure {
+                    address,
+                    unresolved: true,
+                })
+                .context(format!("resolving {host}: {e}")))
+            }
+        };
+        let Some(target) = first_ipv4(&addrs) else {
             return Err(anyhow::Error::new(DialFailure {
                 address,
                 unresolved: true,
-            })
-            .context(format!("resolving {host}: {e}")))
-        }
+            }));
+        };
+        target.ip().to_string()
     };
-    let Some(target) = first_ipv4(&addrs) else {
-        return Err(anyhow::Error::new(DialFailure {
-            address,
-            unresolved: true,
-        }));
-    };
-    connect(target, &address)
+    #[cfg(target_arch = "wasm32")]
+    let target = host.to_string();
+    connect(&target, port, &address).await
 }
 
-/// Open a socket to `target`; a refusal is a [`DialFailure`] naming `address`.
-fn connect(target: SocketAddr, address: &str) -> Result<TcpStream> {
-    TcpStream::connect(target).map_err(|e| {
+/// Open a connection to `target` (an address natively, the host the page proxies on the web); a
+/// refusal is a [`DialFailure`] naming `address`.
+async fn connect(target: &str, port: u16, address: &str) -> Result<Conn> {
+    Conn::connect(target, port).await.map_err(|e| {
         anyhow::Error::new(DialFailure {
             address: address.to_string(),
             unresolved: false,
@@ -111,20 +121,15 @@ fn connect(target: SocketAddr, address: &str) -> Result<TcpStream> {
 /// (`WowConnection::ConnectToHost` `0x5b6e40`: `inet_addr`, else `gethostbyname`'s first entry).
 /// `localhost` resolves to `::1` first, which a server bound to IPv4 refuses only after about 2 s
 /// on Windows.
-fn first_ipv4(addrs: &[SocketAddr]) -> Option<SocketAddr> {
-    addrs.iter().copied().find(SocketAddr::is_ipv4)
-}
-
-/// Dial a realm's world server at its realm-list address ([`world_host_port`]).
-pub(crate) fn dial_world(address: &str) -> Result<TcpStream> {
-    let (host, port) = world_host_port(address);
-    dial(host, port)
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn first_ipv4(addrs: &[std::net::SocketAddr]) -> Option<std::net::SocketAddr> {
+    addrs.iter().copied().find(std::net::SocketAddr::is_ipv4)
 }
 
 /// A realm's world address as `NetClient::Connect` (`0x537820`) splits it: the host up to the
 /// first `:` (`SStrChr2` `0x64a3f0`, `0x53786c`) and the low 16 bits (`0x5b6e94`) of `_atoi` of
 /// the rest (`0x53787a`), or the whole text and [`WORLD_DEFAULT_PORT`] with no `:`.
-fn world_host_port(address: &str) -> (&str, u16) {
+pub(crate) fn world_host_port(address: &str) -> (&str, u16) {
     match address.split_once(':') {
         Some((host, port)) => (host, atoi(port) as u16),
         None => (address, WORLD_DEFAULT_PORT),
@@ -180,9 +185,9 @@ fn logon_pieces(realmlist: &str) -> Vec<(&str, u16)> {
 
 /// `ConnectToRandomAddress` (`0x5bc2b0`): entry `draw mod count` (`0x5bc392`) of the list, or none
 /// of an empty one, which the reference reports as a failed dial (`0x5bc3cb`).
-fn pick(addrs: &[SocketAddr], draw: u32) -> Option<SocketAddr> {
+fn pick<T: Clone>(addrs: &[T], draw: u32) -> Option<T> {
     let count = u32::try_from(addrs.len()).ok().filter(|&n| n > 0)?;
-    Some(addrs[(draw % count) as usize])
+    Some(addrs[(draw % count) as usize].clone())
 }
 
 /// The address a logon dials, and the realmlist's hosts for a failure to name. The list is every
@@ -190,24 +195,43 @@ fn pick(addrs: &[SocketAddr], draw: u32) -> Option<SocketAddr> {
 /// address, every `AF_INET` address `gethostbyname` gives for a name (`0x43ba07`-`0x43baf6`), none
 /// for a name that resolves to none (`0x43ba18`). One is drawn at random ([`pick`]), as
 /// `ClientLink::Connect` (`0x5bc3e0`) hands the list to `ConnectToRandomAddress`.
-fn logon_target(realmlist: &str) -> Result<(SocketAddr, String)> {
-    use std::net::ToSocketAddrs;
+///
+/// Deviation: on the web the page resolves nothing (the host proxies the dial), so the draw is
+/// among the pieces themselves, each counting once whatever its name resolves to.
+fn logon_target(realmlist: &str) -> Result<(String, u16, String)> {
     let pieces = logon_pieces(realmlist);
     let address = pieces
         .iter()
         .map(|(host, port)| format!("{host}:{port}"))
         .collect::<Vec<_>>()
         .join(";");
-    let mut addrs = Vec::new();
-    let mut unresolved = Vec::new();
-    for &(host, port) in &pieces {
-        match (host, port).to_socket_addrs() {
-            Ok(found) => addrs.extend(found.filter(SocketAddr::is_ipv4)),
-            Err(e) => unresolved.push(format!("resolving {host}: {e}")),
+    #[cfg(not(target_arch = "wasm32"))]
+    let (targets, unresolved) = {
+        use std::net::ToSocketAddrs;
+        let mut targets = Vec::new();
+        let mut unresolved = Vec::new();
+        for &(host, port) in &pieces {
+            match (host, port).to_socket_addrs() {
+                Ok(found) => targets.extend(
+                    found
+                        .filter(std::net::SocketAddr::is_ipv4)
+                        .map(|a| (a.ip().to_string(), a.port())),
+                ),
+                Err(e) => unresolved.push(format!("resolving {host}: {e}")),
+            }
         }
-    }
-    match pick(&addrs, rand::random()) {
-        Some(target) => Ok((target, address)),
+        (targets, unresolved)
+    };
+    #[cfg(target_arch = "wasm32")]
+    let (targets, unresolved): (Vec<(String, u16)>, Vec<String>) = (
+        pieces
+            .iter()
+            .map(|&(host, port)| (host.to_string(), port))
+            .collect(),
+        Vec::new(),
+    );
+    match pick(&targets, rand::random()) {
+        Some((host, port)) => Ok((host, port, address)),
         None => {
             let failure = anyhow::Error::new(DialFailure {
                 address,
@@ -244,29 +268,43 @@ pub struct RealmInfo {
     pub category: u8,
     /// The wire's realm id.
     pub id: u8,
+    /// The client version the realm advertises, when its realmd tags it: flag `0x04`
+    /// (SPECIFYBUILD) with the version appended to the name, which is how a mangos-family realmd
+    /// says it to a 1.x client ([`auth::realm_version_tag`]). `None` for an untagged realm.
+    pub version: Option<RealmVersion>,
 }
 
-/// A successful logon: the SRP6 session key, the realms, and the realmd socket, kept open because
-/// the reference's `RealmList.lua` re-requests the list every `REALM_LIST_REFRESH_TIME` (5 s).
+/// A successful logon: the SRP6 session key, the realms, and the realmd connection, kept open
+/// because the reference's `RealmList.lua` re-requests the list every `REALM_LIST_REFRESH_TIME` (5 s).
 pub struct Logon {
     pub session_key: [u8; SESSION_KEY_LENGTH],
     pub realms: Vec<RealmInfo>,
     /// `None` once a refresh has failed; the held list is then final.
-    stream: Option<TcpStream>,
+    ///
+    /// [`transport::Conn`], not a `TcpStream`: the browser build has no sockets at all, and this
+    /// connection is a `WebSocket` there (see [`transport`]).
+    stream: Option<Conn>,
 }
 
 impl Logon {
     /// The reference's `RequestRealmList`: re-reads the list, keeping the old one and dropping
-    /// the socket on failure (realmd closes idle sockets); `timeout` bounds a silent server.
-    pub fn refresh_realms(&mut self, timeout: std::time::Duration) -> bool {
+    /// the connection on failure (realmd closes idle sockets); `timeout` bounds a silent server.
+    ///
+    /// `async` because the read is: a browser cannot block for a reply that arrives on the very
+    /// event loop it would be blocking (see [`transport`]). The request write stays synchronous on
+    /// both targets, so only the reply is awaited.
+    pub async fn refresh_realms_async(&mut self, timeout: std::time::Duration) -> bool {
         let Some(stream) = self.stream.as_mut() else {
             return false;
         };
-        let refreshed = (|| -> Result<Vec<RealmInfo>> {
+        let refreshed = async {
             stream.set_read_timeout(Some(timeout))?;
             auth::write_realm_list_request(stream).context("requesting realm list")?;
-            auth::read_realm_list(stream).context("reading realm list")
-        })();
+            auth::read_realm_list(stream)
+                .await
+                .context("reading realm list")
+        }
+        .await;
         match refreshed {
             Ok(realms) => {
                 self.realms = realms;
@@ -279,7 +317,7 @@ impl Logon {
         }
     }
 
-    /// Whether the realmd socket is still up, so [`Self::refresh_realms`] can do anything.
+    /// Whether the realmd connection is still up, so [`Self::refresh_realms_async`] can do anything.
     pub fn realmd_live(&self) -> bool {
         self.stream.is_some()
     }
@@ -291,16 +329,28 @@ impl Logon {
     }
 }
 
+/// The full SRP6 logon against a vanilla `realmd`, then the realm list — the blocking twin of
+/// [`logon_async`], for the CLIs/probes and the native net thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn logon(realmlist: &str, username: &str, password: &str, locale: u32) -> Result<Logon> {
+    futures_lite::future::block_on(logon_async(realmlist, username, password, locale))
+}
+
 /// The full SRP6 logon against a vanilla `realmd`, then the realm list. `realmlist` is one or more
 /// `host[:port]` separated by `;`, the server dialled one of their addresses (`logon_target`).
 /// `locale` is the client's locale tag the challenge carries ([`auth::write_logon_challenge`]).
-pub fn logon(realmlist: &str, username: &str, password: &str, locale: u32) -> Result<Logon> {
+pub async fn logon_async(
+    realmlist: &str,
+    username: &str,
+    password: &str,
+    locale: u32,
+) -> Result<Logon> {
     let username_n =
         NormalizedString::new(username).map_err(|e| anyhow!("invalid username: {e}"))?;
     let password_n =
         NormalizedString::new(password).map_err(|e| anyhow!("invalid password: {e}"))?;
     // One draw per login, as the reference dials once: the redials below go to the same address.
-    let (target, address) = logon_target(realmlist)?;
+    let (target, port, address) = logon_target(realmlist)?;
 
     // The account name goes uppercased, as SRP6 hashes it. About one `B` in 137 serializes
     // differently in the client and mangos (a right password gets 0x04), so redial for a fresh
@@ -308,7 +358,7 @@ pub fn logon(realmlist: &str, username: &str, password: &str, locale: u32) -> Re
     let (mut stream, reply, server_public_key) = {
         let mut dialed = None;
         for _ in 0..MAX_CHALLENGE_DIALS {
-            let mut stream = connect(target, &address)?;
+            let mut stream = connect(&target, port, &address).await?;
             auth::write_logon_challenge(
                 &mut stream,
                 &username.to_uppercase(),
@@ -316,12 +366,13 @@ pub fn logon(realmlist: &str, username: &str, password: &str, locale: u32) -> Re
                 locale,
             )
             .context("sending logon challenge")?;
-            let Some(reply) =
-                auth::read_challenge_reply(&mut stream).context("reading logon challenge reply")?
+            let Some(reply) = auth::read_challenge_reply(&mut stream)
+                .await
+                .context("reading logon challenge reply")?
             else {
                 // `SUCCESS_SURVEY` on the challenge authenticates with no SRP exchange; the
                 // reference's success arm copies no key (length 0 at `0x5b2e16`).
-                return finish_logon(stream, [0u8; SESSION_KEY_LENGTH]);
+                return finish_logon(stream, [0u8; SESSION_KEY_LENGTH]).await;
             };
             let server_public_key = PublicKey::from_le_bytes(reply.server_public_key)
                 .map_err(|e| anyhow!("invalid server public key: {e}"))?;
@@ -352,23 +403,27 @@ pub fn logon(realmlist: &str, username: &str, password: &str, locale: u32) -> Re
     )
     .context("sending logon proof")?;
 
-    let session_key =
-        match auth::read_proof_reply(&mut stream).context("reading logon proof reply")? {
-            Some(server_proof) => *challenge
-                .verify_server_proof(server_proof)
-                .map_err(|e| anyhow!("server proof mismatch (wrong password?): {e}"))?
-                .session_key(),
-            // `SUCCESS_SURVEY` on the proof authenticates with no `M2` to check; the key is the one
-            // this exchange derived.
-            None => challenge.into_unverified_session_key(),
-        };
-    finish_logon(stream, session_key)
+    let session_key = match auth::read_proof_reply(&mut stream)
+        .await
+        .context("reading logon proof reply")?
+    {
+        Some(server_proof) => *challenge
+            .verify_server_proof(server_proof)
+            .map_err(|e| anyhow!("server proof mismatch (wrong password?): {e}"))?
+            .session_key(),
+        // `SUCCESS_SURVEY` on the proof authenticates with no `M2` to check; the key is the one
+        // this exchange derived.
+        None => challenge.into_unverified_session_key(),
+    };
+    finish_logon(stream, session_key).await
 }
 
 /// An authenticated logon's tail: the realm list over the same socket.
-fn finish_logon(mut stream: TcpStream, session_key: [u8; SESSION_KEY_LENGTH]) -> Result<Logon> {
+async fn finish_logon(mut stream: Conn, session_key: [u8; SESSION_KEY_LENGTH]) -> Result<Logon> {
     auth::write_realm_list_request(&mut stream).context("requesting realm list")?;
-    let realms = auth::read_realm_list(&mut stream).context("reading realm list")?;
+    let realms = auth::read_realm_list(&mut stream)
+        .await
+        .context("reading realm list")?;
 
     Ok(Logon {
         session_key,
@@ -487,6 +542,6 @@ mod dial_tests {
         assert_eq!(pick(&list, 0), Some(list[0]));
         assert_eq!(pick(&list, 5), Some(list[2]));
         assert_eq!(pick(&list, u32::MAX), Some(list[0]));
-        assert_eq!(pick(&[], 1), None);
+        assert_eq!(pick::<SocketAddr>(&[], 1), None);
     }
 }

@@ -1469,7 +1469,7 @@ pub(super) fn mouseover_app() -> (App, Entity, Entity) {
             }),
         );
     }
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     (app, wolf, boar)
 }
 
@@ -1492,7 +1492,7 @@ pub(super) fn hover_unit(app: &mut App, entity: Entity, guid: u64) {
 
 pub(super) fn eval(app: &mut App, lua: &str) -> Option<i64> {
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .eval::<Option<i64>>(lua)
         .unwrap()
 }
@@ -1527,6 +1527,46 @@ fn the_mouseover_token_carries_the_hovered_guid() {
     );
 }
 
+/// `UnitCanAssist` (`0x516bb0` → `CanAssist` `0x6066f0`) answers for `"mouseover"` as for any held
+/// unit, so a macro option's `[@mouseover,help]` holds over a friend: hovering ourselves (friendly
+/// by the self rung, `0x606200`) answers 1, and leaving the hover nil.
+#[test]
+fn the_mouseover_token_answers_can_assist() {
+    let (mut app, _, _) = mouseover_app();
+    let me = app
+        .world_mut()
+        .query_filtered::<Entity, With<SelfPlayer>>()
+        .single(app.world())
+        .unwrap();
+    // A player's `UNIT_FIELD_FLAGS` carries PLAYER_CONTROLLED (`0x8`), `CanAssist`'s passing arm.
+    app.world_mut()
+        .entity_mut(me)
+        .get_mut::<ObjectStore>()
+        .unwrap()
+        .0
+        .merge(benilla_protocol::ObjectFields::from_pairs(&[(
+            benilla_protocol::field::FIELD_UNIT_FLAGS,
+            0x8,
+        )]));
+    // The relation functions the verb asks, pushed as the client's unit feed pushes them, over a
+    // self entity that carries its guid.
+    app.world_mut().entity_mut(me).insert(crate::net::Guid(ME));
+    app.add_systems(
+        Update,
+        crate::ui_unit::relations::feed_unit_relations.after(drive_mouseover_tooltip),
+    );
+    let can_assist = r#"return UnitCanAssist("player", "mouseover")"#;
+
+    hover_unit(&mut app, me, ME);
+    assert_eq!(
+        eval(&mut app, can_assist),
+        Some(1),
+        "we can assist ourselves"
+    );
+    hover(&mut app, Hovered::default(), HoveredObject::default());
+    assert_eq!(eval(&mut app, can_assist), None, "no mouseover");
+}
+
 /// `GetGuildInfo("mouseover")` (`0x4c9330`) reads the hovered player's guild from the cache
 /// (`0x4c93d2`), as any token does, from the frame the record lands.
 #[test]
@@ -1541,7 +1581,7 @@ fn the_mouseover_answers_get_guild_info_from_the_cache() {
         .merge(ObjectFields::from_pairs(&[(2, 0x19), (191, 7), (192, 2)]));
     let info = |app: &mut App| -> (Option<String>, i64) {
         app.world_mut()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<(Option<String>, Option<String>, i64)>(r#"return GetGuildInfo("mouseover")"#)
             .map(|(name, _, rank)| (name, rank))
             .unwrap()
@@ -1607,7 +1647,7 @@ fn a_fresh_hovers_reach_and_slots_answer_inside_its_mouseover_event() {
         .0
         .insert(OTHER, other);
     {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.set_unit_guids(&benilla_ui::script::UnitGuids {
             player: ME,
             held: [(ME, 0)].into_iter().collect(),
@@ -1637,7 +1677,7 @@ fn a_fresh_hovers_reach_and_slots_answer_inside_its_mouseover_event() {
         script.resolve();
     }
     hover_unit(&mut app, other, OTHER);
-    let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+    let mut s = app.world_mut().non_send_mut::<UiScript>();
     s.resolve();
     let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
     assert!(
@@ -1680,7 +1720,7 @@ fn the_mouseover_token_names_the_hovered_units_creature_type() {
         .id();
     let creature_type = |app: &mut App| {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<Option<String>>(r#"return UnitCreatureType("mouseover")"#)
             .unwrap()
     };
@@ -1860,10 +1900,10 @@ fn the_feed_pushes_the_spells_the_vm_holds_before_a_hover() {
             .into(),
         ),
     );
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.update();
 
-    let script = app.world().non_send_resource::<UiScript>();
+    let script = app.world().non_send::<UiScript>();
     script
         .run(
             r#"
@@ -1978,11 +2018,11 @@ fn the_feed_builds_the_pet_views_against_the_pet_and_rebuilds_them_on_its_level(
             "#,
         )
         .unwrap();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     // The feed runs over the pet bar and book; the player's book's view is an ask on its hover.
     app.update();
     let descs = |app: &mut App| {
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         let d = script
             .eval::<(String, String, Option<String>)>(
                 r#"return DESC(function() TT:SetPetAction(1) end),

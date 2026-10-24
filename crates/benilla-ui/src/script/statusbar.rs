@@ -24,7 +24,9 @@ fn with_bar<T>(
     f: impl FnOnce(&mut StatusBarState) -> T,
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let frame = model
         .arena
         .frame_mut(h)
@@ -84,7 +86,9 @@ fn install_bar(
     layer: DrawLayer,
 ) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     install_bar_model(&mut model, h, incoming, layer)
 }
 
@@ -104,7 +108,9 @@ pub(super) fn install_loaded(
 /// `layer` (`0x7831cb`).
 fn set_bar_path(lua: &Lua, this: &Table, path: &str, layer: DrawLayer) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     set_bar_path_model(&mut model, h, path, layer)
 }
 
@@ -136,14 +142,16 @@ pub(super) fn set_bar_path_model(
 /// The kind's update after the frame's `OnUpdate` (`0x7833c0`): a marked fill writes the bar
 /// texture's coordinates ([`StatusBarState::take_fill`]), replacing any the texture held, so an
 /// addon's `SetTexCoord` on the bar lasts until the next range, value, orientation or texture.
-pub(super) fn update(model: &mut Model, h: crate::widget::FrameHandle) {
+/// Whether a fill was written.
+pub(super) fn update(model: &mut Model, h: crate::widget::FrameHandle) -> bool {
     let Some(KindState::StatusBar(sb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) else {
-        return;
+        return false;
     };
     let (Some(bar), Some(edges)) = (sb.bar, sb.take_fill()) else {
-        return;
+        return false;
     };
     model.region_data.entry(bar).or_default().tex_coords = Some(super::TexCoords::Rect(edges));
+    true
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -233,7 +241,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let bar = with_bar(lua, &this, |sb| sb.bar)?;
             let id = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 bar.map(|rh| model.region_id(rh))
             };
             match id {
@@ -256,7 +266,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let Some(rh) = with_bar(lua, &this, |sb| sb.bar)? else {
                     return Ok(());
                 };
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .region_data
                     .entry(rh)
@@ -270,7 +282,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetStatusBarColor",
         lua.create_function(|lua, this: Table| {
             let bar = with_bar(lua, &this, |sb| sb.bar)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             // Each byte times the float at `0x81c6b4` (`0x78fab0`).
             let c = bar
                 .and_then(|rh| model.region_data.get(&rh))
@@ -313,7 +327,9 @@ pub(super) fn set_health(
 /// model borrow.
 pub(super) fn fire_engine_value_changed(lua: &Lua, bar: crate::widget::FrameHandle, value: f32) {
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.frame_id(bar)
     };
     if let Err(e) = event::fire_widget_handler(
@@ -322,7 +338,7 @@ pub(super) fn fire_engine_value_changed(lua: &Lua, bar: crate::widget::FrameHand
         "OnValueChanged",
         vec![Value::Number(f64::from(value))],
     ) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }

@@ -4,7 +4,6 @@
 use mlua::{Lua, Value};
 
 use super::binding_abi::{bool_or_default, coerced_number, flag};
-use super::Model;
 
 /// The meeting stone's verb the host applies inside its call ([`super::ScriptCall::MeetingStone`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,12 +21,12 @@ impl super::UiScript {
 
     /// What `CheckPetUntrainerDist()` answers: a pending question whose trainer is in reach.
     pub fn set_pet_untrainer_pending(&mut self, pending: bool) {
-        self.model_mut().pet_untrainer_pending = pending;
+        set_field!(self, pet_untrainer_pending, pending);
     }
 
     /// `GetInstanceBootTimeRemaining()`'s answer, whole seconds (0 idle).
     pub fn set_instance_boot_secs(&mut self, secs: u32) {
-        self.model_mut().instance_boot_secs = secs;
+        set_field!(self, instance_boot_secs, secs);
     }
 
     /// The seconds to the area spirit healer's next wave (`[0xb4e338]`).
@@ -69,7 +68,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetInstanceBootTimeRemaining",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.instance_boot_secs))
         })?,
     )?;
@@ -98,7 +99,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetAreaSpiritHealerTime",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.area_spirit_secs))
         })?,
     )?;
@@ -152,7 +155,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsInMeetingStoneQueue",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.meeting_stone_area != 0))
         })?,
     )?;
@@ -161,7 +166,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetMeetingStoneStatusText",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(match &model.meeting_stone_status_text {
                 Some(text) => Value::String(lua.create_string(text)?),
                 None => Value::Nil,
@@ -173,7 +180,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CheckPetUntrainerDist",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.pet_untrainer_pending))
         })?,
     )?;

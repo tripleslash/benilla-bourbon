@@ -7,11 +7,12 @@ pub(crate) mod prop_light;
 pub use assemble::{spawn_model_entities, SpawnedModel};
 pub use fx::point_light;
 use fx::{
-    emitter_fade, spawn_emitters_for, spawn_lights_for, spawn_ribbons_for, spawn_wmo_lights_for,
+    emitter_fade, spawn_emissive_light_for, spawn_emitters_for, spawn_lights_for,
+    spawn_ribbons_for, spawn_window_lights_for, spawn_wmo_lights_for,
 };
 
+use bevy::platform::time::Instant;
 use std::sync::Arc;
-use std::time::Instant;
 
 use benilla_assets::coords::{wmo_doodad_local, wow_to_bevy};
 use benilla_assets::{AdtTile, DoodadBase, M2Model, WmoModel};
@@ -37,6 +38,7 @@ use super::collider::{
     PendingCollider,
 };
 use super::merge::{MergeSite, StaticMerge};
+use super::provisional::{wmo_box_within, URGENT_REACH};
 use super::weld::{hull_weld_disabled, HullWelds};
 use super::{
     doodad_ground_shade, ModelHandle, Placements, ShadeResolve, TerrainStreamer, SPAWN_BUDGET,
@@ -143,13 +145,40 @@ pub(super) fn spawn_loaded_placements(
         by_id,
         materials: mat_cache,
         pending_spawns,
+        ..
     } = placements;
 
     // At most `SPAWN_BUDGET` per frame, resumed next frame through the `spawned` flags; the check
     // follows the work, so every frame spawns at least one.
     let deadline = Instant::now() + SPAWN_BUDGET;
 
-    'placements: for (&unique_id, p) in by_id.iter_mut() {
+    // The buildings the body is in or about to be in go first, their forms ahead of the focus
+    // tile's: their collider is built at spawn, and until it attaches the body has no floor there.
+    let body = focus.body.map(wow_to_bevy);
+    let (mut urgent, mut rest) = (Vec::new(), Vec::with_capacity(by_id.len()));
+    for (&key, p) in by_id.iter() {
+        if p.spawned && p.doodads.iter().all(|d| d.spawned) {
+            continue;
+        }
+        if body.is_some_and(|b| wmo_box_within(p, b, URGENT_REACH)) {
+            // The web warm queue fetches the root's group files at the server entities' rank.
+            if !p.spawned && p.model.is_loading(&asset_server) {
+                if let ModelHandle::Wmo(h) = &p.model {
+                    benilla_formats::web::mark_urgent_model(&handle_label(h));
+                }
+            }
+            urgent.push(key);
+        } else {
+            rest.push(key);
+        }
+    }
+    let urgent_n = urgent.len();
+
+    'placements: for (order, unique_id) in urgent.into_iter().chain(rest).enumerate() {
+        let Some(p) = by_id.get_mut(&unique_id) else {
+            continue;
+        };
+        let urgent = order < urgent_n;
         // 1. The model's own geometry, once; a WMO also resolves its doodad props for step 2.
         if !p.spawned {
             let entities = match &p.model {
@@ -161,6 +190,7 @@ pub(super) fn spawn_loaded_placements(
                     let kinds = WANT_STATIC | if wants_rig(m) { WANT_SKINNED } else { 0 };
                     if !forms.require(
                         key,
+                        &m.submeshes,
                         kinds,
                         placement_priority(&streamer, p.transform.translation),
                     ) {
@@ -204,6 +234,7 @@ pub(super) fn spawn_loaded_placements(
                         FormSlices {
                             stat: forms.static_meshes(key).unwrap_or(&[]),
                             skin: forms.skinned_meshes(key),
+                            billboard: forms.palette_billboards(key),
                         },
                         p.transform,
                         &object,
@@ -235,9 +266,9 @@ pub(super) fn spawn_loaded_placements(
                             .entity(*e)
                             .insert(crate::exterior_cull::ExteriorScene);
                     }
-                    // The collision hull, welded into the owner tile's batch, which carries the
-                    // `PickOccluder` clamp. A hull-less model (a tree canopy) stays pick-through,
-                    // as the reference's world trace tests only collision-flagged doodads.
+                    // The collision hull, welded into the owner tile's batch. It never clamps the
+                    // mouse pick: the reference traces a doodad's opaque drawn batches for that
+                    // (`interact::WorldPick::doodad_occluder`), never its collision triangles.
                     if let Some((verts, tris)) = (!doodad_bodies_disabled())
                         .then(|| placement_collider_data(m.collision.as_ref(), &p.transform))
                         .flatten()
@@ -245,13 +276,10 @@ pub(super) fn spawn_loaded_placements(
                         if hull_weld_disabled() {
                             ents.push(
                                 commands
-                                    .spawn((
-                                        PendingCollider::new(
-                                            build_collider_task(verts, tris),
-                                            None,
-                                            !doodad_hulls_bare(),
-                                        ),
-                                        PickOccluder,
+                                    .spawn(PendingCollider::new(
+                                        build_collider_task(verts, tris),
+                                        None,
+                                        !doodad_hulls_bare(),
                                     ))
                                     .id(),
                             );
@@ -276,6 +304,22 @@ pub(super) fn spawn_loaded_placements(
                         &fade,
                     );
                     spawn_lights_for(&mut commands, &m.lights, p.transform, None, &mut ents);
+                    // fork: modern lighting (P8) — and, on Cinematic, the lamps that ship with no
+                    // light block at all. No-op on every other tier.
+                    spawn_emissive_light_for(
+                        &mut commands,
+                        &object.label,
+                        &m.lights,
+                        &m.emitters,
+                        &m.submeshes,
+                        p.transform,
+                        None,
+                        m.animations
+                            .as_ref()
+                            .and_then(benilla_assets::ModelAnimations::idle_seq)
+                            .unwrap_or(0),
+                        &mut ents,
+                    );
                     tag_world_object(&mut commands, &ents, &object);
                     if let Some((target, r)) = fade_near_target() {
                         let pos = p.transform.translation;
@@ -300,8 +344,12 @@ pub(super) fn spawn_loaded_placements(
                     };
                     // Static forms only: WMO group geometry never skins.
                     let key = ModelKey::from(h);
-                    let prio = placement_priority(&streamer, p.transform.translation);
-                    if !forms.require(key, WANT_STATIC, prio) {
+                    let prio = if urgent {
+                        URGENT_PRIORITY
+                    } else {
+                        placement_priority(&streamer, p.transform.translation)
+                    };
+                    if !forms.require(key, &m.submeshes, WANT_STATIC, prio) {
                         continue;
                     }
                     let has_portals = !m.portal_refs.is_empty() && !m.portal_infos.is_empty();
@@ -322,6 +370,8 @@ pub(super) fn spawn_loaded_placements(
                                 world_from_local: p.transform.compute_affine(),
                                 name_set: p.name_set,
                                 visible: vec![true; m.group_nav.len()],
+                                // Lit until a flood narrows it, on the same fail-open as `visible`.
+                                lit: vec![true; m.group_nav.len()],
                                 // Fogged only once a flood puts the group on the chain.
                                 interior_fog: vec![false; m.group_nav.len()],
                                 liquid_visited: vec![false; m.group_nav.len()],
@@ -355,6 +405,7 @@ pub(super) fn spawn_loaded_placements(
                         FormSlices {
                             stat: forms.static_meshes(key).unwrap_or(&[]),
                             skin: None,
+                            billboard: None,
                         },
                         p.transform,
                         &object,
@@ -499,8 +550,10 @@ pub(super) fn spawn_loaded_placements(
                                     ),
                                     // The walk faces take the selection ring (floors, steps).
                                     GroundDecalSurface,
-                                    // Clamps the mouse pick. The reference's occluder faces are
-                                    // MOPY reject-mask 0x84; the walk bake (0x04) is the nearest.
+                                    // Clamps the mouse pick: the reference's WMO leg tests every
+                                    // face outside MOPY mask 0x84 (`0x6a37b0`, leaf `0x6bc716`),
+                                    // where 0x80 is its runtime visited bit, so the walk bake's
+                                    // non-DETAIL set is exactly it.
                                     PickOccluder,
                                 ))
                                 .id(),
@@ -528,6 +581,8 @@ pub(super) fn spawn_loaded_placements(
                         p.transform,
                         &mut ents,
                     );
+                    // fork: modern lighting (P8) — and, on Cinematic, its lit windows at night.
+                    spawn_window_lights_for(&mut commands, &m.submeshes, p.transform, &mut ents);
                     tag_world_object(&mut commands, &ents, &object);
                     p.doodads = resolve_wmo_doodads(m, p.doodad_set, p.transform, &asset_server);
                     ents
@@ -559,6 +614,7 @@ pub(super) fn spawn_loaded_placements(
             let kinds = WANT_STATIC | if wants_rig(m) { WANT_SKINNED } else { 0 };
             if !forms.require(
                 key,
+                &m.submeshes,
                 kinds,
                 placement_priority(&streamer, d.transform.translation),
             ) {
@@ -634,6 +690,7 @@ pub(super) fn spawn_loaded_placements(
                 FormSlices {
                     stat: forms.static_meshes(key).unwrap_or(&[]),
                     skin: forms.skinned_meshes(key),
+                    billboard: forms.palette_billboards(key),
                 },
                 d.transform,
                 &object,
@@ -707,7 +764,7 @@ pub(super) fn spawn_loaded_placements(
                 }
             }
             // Solid to body and camera iff it has a collision hull, like a map doodad; welded per
-            // placement, as every prop despawns with its building.
+            // placement, as every prop despawns with its building. Not a pick clamp, as above.
             if let Some((verts, tris)) = (!doodad_bodies_disabled())
                 .then(|| placement_collider_data(m.collision.as_ref(), &d.transform))
                 .flatten()
@@ -715,13 +772,10 @@ pub(super) fn spawn_loaded_placements(
                 if hull_weld_disabled() {
                     ents.push(
                         commands
-                            .spawn((
-                                PendingCollider::new(
-                                    build_collider_task(verts, tris),
-                                    None,
-                                    !doodad_hulls_bare(),
-                                ),
-                                PickOccluder,
+                            .spawn(PendingCollider::new(
+                                build_collider_task(verts, tris),
+                                None,
+                                !doodad_hulls_bare(),
                             ))
                             .id(),
                     );
@@ -750,6 +804,23 @@ pub(super) fn spawn_loaded_placements(
                 &m.lights,
                 d.transform,
                 fade.room.as_ref(), // the prop's glow rides its rooms like its mesh
+                &mut ents,
+            );
+            // fork: modern lighting (P8) — the WMO doodad lamps: an inn's hearth, a keep's wall
+            // sconces, a chapel's candles, most of which author a flame card and nothing else. Same
+            // room gate as the light above, so one of them in a culled room still lights nothing.
+            spawn_emissive_light_for(
+                &mut commands,
+                &object.label,
+                &m.lights,
+                &m.emitters,
+                &m.submeshes,
+                d.transform,
+                fade.room.as_ref(),
+                m.animations
+                    .as_ref()
+                    .and_then(benilla_assets::ModelAnimations::idle_seq)
+                    .unwrap_or(0),
                 &mut ents,
             );
             tag_world_object(&mut commands, &ents, &object);
@@ -864,6 +935,10 @@ fn log_fade_near(
     );
 }
 
+/// The render-forms priority of a building the body is in or near: behind the entity lane's 0,
+/// ahead of every scenery placement's 16 and up.
+const URGENT_PRIORITY: i32 = 8;
+
 /// A placement's render-forms priority, lower sooner: its Chebyshev tile distance to the focus,
 /// above the entity lane's band so a unit coming into view never queues behind scenery.
 /// `translation` is Bevy space; `world_to_tile` takes WoW ground coordinates.
@@ -942,6 +1017,9 @@ mod retire_tests {
 
     fn placement(model: ModelHandle, doodads: Vec<WmoDoodadInst>) -> Placement {
         Placement {
+            uid: 0,
+            ident: super::super::PlacementIdent::new("", [0.0; 3], [0.0; 3], 1.0, 0),
+            bounds: None,
             model,
             transform: Transform::IDENTITY,
             entities: Vec::new(),

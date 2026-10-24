@@ -12,6 +12,7 @@ pub(crate) fn plugin(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/ui_gamma.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/ui_node_gamma.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/ui_slice_gamma.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/shadow_caster.wgsl");
 }
 
 #[cfg(test)]
@@ -46,7 +47,7 @@ mod tests {
                  `shaders::plugin`, or was registered from a file that is not directly under src/"
             );
         }
-        assert_eq!(found, 5, "the game's shader set changed size");
+        assert_eq!(found, 6, "the game's shader set changed size");
     }
 
     /// Every `.wgsl` file under `dir` of the embedded source, as the asset server would serve it.
@@ -92,10 +93,6 @@ mod tests {
     /// gives each of the two vertex layouts it draws (the batch mesh and the minimap's tile quad).
     /// The module must validate and translate for the backend this platform renders with.
     #[test]
-    #[expect(
-        clippy::result_large_err,
-        reason = "bevy's `ShaderCache` fixes the module loader's `PipelineCacheError` return"
-    )]
     fn the_ui_quad_shader_composes_and_translates() {
         use bevy::shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
         let app = crate::game_plugins::schedule_tests::headless_client_unrun();
@@ -104,7 +101,9 @@ mod tests {
         let mut files = Vec::new();
         embedded_shaders(source, std::path::Path::new(""), &mut files);
 
+        // Bevy 0.19's cache owns the device it loads through; the test loads into naga alone.
         let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new(
+            (),
             bevy::render::render_resource::WgpuFeatures::empty(),
             bevy::render::render_resource::DownlevelFlags::all(),
             |_, source, _| match source {
@@ -137,7 +136,7 @@ mod tests {
                 storage,
             ));
             let module = cache
-                .get(&(), 0, ui_quad, &defs)
+                .get(0, ui_quad, &defs)
                 .unwrap_or_else(|e| panic!("{layout:?}: ui_quad.wgsl does not compose: {e:?}"));
             let info = naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),

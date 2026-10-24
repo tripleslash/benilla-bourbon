@@ -24,6 +24,22 @@ pub(crate) struct ViewSubject {
     pub(crate) remote: Option<RemoteView>,
 }
 
+impl ViewSubject {
+    /// The subject for a rig seating on `body` at `feet` this frame. Possession names the body we
+    /// drive (`Unit::ModPossess` sets the field Mind Control does, through `SetView`), and its
+    /// published pose is that body's transform from before this frame's move: seated there, the
+    /// eye trails the body by a frame's travel, which shows as the body jerking in the picture
+    /// with every uneven frame. So a subject that is the body takes the body's pose.
+    pub(super) fn seated_on(&self, body: Option<Entity>, feet: Vec3) -> Self {
+        Self {
+            remote: self.remote.map(|v| RemoteView {
+                feet: if Some(v.entity) == body { feet } else { v.feet },
+                ..v
+            }),
+        }
+    }
+}
+
 /// A far-sight subject's pose, in the two forms the camera rig asks for.
 #[derive(Clone, Copy)]
 pub(crate) struct RemoteView {
@@ -198,6 +214,47 @@ pub(super) fn publish_view_subject(
 mod tests {
     use super::*;
 
+    /// The published pose is read before the controller moves the body, so for a body we drive it
+    /// is a frame old; any other subject is moved by someone else and keeps what was published.
+    #[test]
+    fn a_subject_we_drive_is_seated_at_this_frames_pose() {
+        let mut world = World::new();
+        let (tonk, eye) = (world.spawn_empty().id(), world.spawn_empty().id());
+        let published = Vec3::new(10.0, 0.0, 0.0);
+        let moved = Vec3::new(10.2, 0.0, 0.0);
+        let watching = |entity| ViewSubject {
+            remote: Some(RemoteView {
+                entity,
+                feet: published,
+                pivot_height: 1.5,
+            }),
+        };
+        let seated = watching(tonk).seated_on(Some(tonk), moved).remote.unwrap();
+        assert_eq!(
+            seated.feet, moved,
+            "possession: the rig rides this frame's body"
+        );
+        assert_eq!(seated.sweep_origin(), moved + Vec3::Y * 1.5);
+        assert_eq!(
+            watching(eye)
+                .seated_on(Some(tonk), moved)
+                .remote
+                .unwrap()
+                .feet,
+            published,
+            "far sight on anything else keeps the pose its own mover gave it"
+        );
+        assert_eq!(
+            watching(tonk).seated_on(None, moved).remote.unwrap().feet,
+            published,
+            "no body in hand: nothing to take a pose from"
+        );
+        assert!(ViewSubject::default()
+            .seated_on(Some(tonk), moved)
+            .remote
+            .is_none());
+    }
+
     #[test]
     fn an_unset_or_unstreamed_far_sight_both_resolve_to_the_body() {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -224,7 +281,7 @@ mod tests {
                 Transform::from_xyz(100.0, 0.0, 0.0),
                 CameraPivot {
                     height_local: 2.0,
-                    swim_drop_local: 0.0,
+                    ..CameraPivot::default()
                 },
                 crate::net::NetEntity {
                     kind: benilla_protocol::EntityKind::Unit,

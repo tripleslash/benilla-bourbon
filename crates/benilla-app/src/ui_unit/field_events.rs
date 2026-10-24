@@ -716,7 +716,7 @@ mod tests {
             )
             .unwrap();
         script.set_unit_guids(&guids);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app
     }
 
@@ -725,7 +725,7 @@ mod tests {
             .resource_mut::<crate::field_watch::NoticeLane>()
             .write_batch(notices.iter().copied());
         app.world_mut().run_system_once(fire_field_notices).unwrap();
-        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut s = app.world_mut().non_send_mut::<UiScript>();
         s.resolve();
         let out = s.eval::<Vec<String>>("return SEEN").unwrap();
         s.run("SEEN = {}").unwrap();
@@ -863,7 +863,7 @@ mod tests {
     fn a_global_notice_fires_bare_and_the_pvp_preference_speaks() {
         let mut app = world(seated());
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(
                 r#"
                 ERR_PVP_TOGGLE_ON = "on"
@@ -966,7 +966,7 @@ mod tests {
             .resource_mut::<crate::names::NameCache>()
             .insert_player(OTHER, "Bob".into(), None);
         {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.set_unit_relations(Some(std::rc::Rc::new(Attackable)));
             script
                 .run(
@@ -999,7 +999,7 @@ mod tests {
         );
         // A target the player cannot attack: the lines alone.
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .set_unit_guids(&seated());
         assert_eq!(
             fired(&mut app, &[drunk(ME, 60, 40)]),
@@ -1062,7 +1062,7 @@ mod tests {
             crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(36, 0x0101)])),
         ));
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(
                 r#"ERR_SKILL_GAINED_S = "You have gained the %s skill."
                 ERR_SKILL_UP_SI = "Your skill in %s has increased to %d.""#,
@@ -1141,7 +1141,7 @@ mod tests {
             "the interface is up: the drain fires it"
         );
         // An entry load pending is the interface not up yet.
-        app.insert_resource(crate::ui_script::PendingEntryUiLoad);
+        app.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
         assert!(heard(&mut app, FieldNotice::Player { id: 406 }).is_empty());
     }
 
@@ -1171,7 +1171,7 @@ mod tests {
             player: ME,
             ..Default::default()
         });
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let me = app
             .world_mut()
             .spawn((
@@ -1187,7 +1187,7 @@ mod tests {
     }
 
     fn seen(app: &mut App) -> Vec<String> {
-        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut s = app.world_mut().non_send_mut::<UiScript>();
         s.resolve();
         let out = s.eval::<Vec<String>>("return SEEN").unwrap();
         s.run("SEEN = {}").unwrap();
@@ -1300,7 +1300,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
 
         // We at the origin; a Human 3 yards off wearing the helm, whom no token names yet.
         let mut spawn = |guid: u64, pairs: &[(u16, u32)], yards: f32| {
@@ -1336,7 +1336,7 @@ mod tests {
             if target_changed {
                 app.world_mut().resource_scope(
                     |world, mut feed: Mut<super::super::UnitFeedState>| {
-                        let script = world.non_send_resource::<UiScript>();
+                        let script = world.non_send::<UiScript>();
                         feed.vm.get(script).pending.target_changed = true;
                     },
                 );
@@ -1374,7 +1374,7 @@ mod tests {
         });
         feeds(&mut app, true);
 
-        let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut s = app.world_mut().non_send_mut::<UiScript>();
         s.resolve();
         let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
         assert!(
@@ -1511,7 +1511,7 @@ mod tests {
                 player: ME,
                 ..Default::default()
             });
-            app.insert_non_send_resource(reloaded);
+            app.insert_non_send(reloaded);
             app.update();
             assert_eq!(
                 seen(&mut app),
@@ -1561,7 +1561,7 @@ mod tests {
             assert_eq!(seen(&mut app), heard, "form {form}: the login");
             let reloaded = UiScript::new().unwrap();
             reloaded.run(spy).unwrap();
-            app.insert_non_send_resource(reloaded);
+            app.insert_non_send(reloaded);
             app.update();
             assert_eq!(seen(&mut app), heard, "form {form}: the reload");
         }
@@ -1635,7 +1635,7 @@ mod tests {
                 benilla_formats::FactionCatalog::from_rows(Default::default(), Default::default()),
             ));
             {
-                let s = app.world().non_send_resource::<UiScript>();
+                let s = app.world().non_send::<UiScript>();
                 for file in [
                     r"Interface\FrameXML\GlobalStrings.lua",
                     r"Interface\FrameXML\Fonts.xml",
@@ -1669,7 +1669,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(super::super::feed_units)
                 .unwrap();
-            let s = app.world().non_send_resource::<UiScript>();
+            let s = app.world().non_send::<UiScript>();
             let shown = |frame: &str| {
                 s.eval::<bool>(&format!("return {frame}:IsShown() ~= nil"))
                     .unwrap()

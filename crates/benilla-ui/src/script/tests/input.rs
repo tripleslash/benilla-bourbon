@@ -604,6 +604,27 @@ fn a_2_0_script_kind_raises_and_the_input_language_slot_is_kept() {
     .unwrap();
 }
 
+/// A Turtle WoW VM takes `OnInputLanguageChanged` as the reference does, stored and never fired;
+/// a 1.12.1 VM still raises on it (above).
+#[test]
+fn a_turtle_vm_takes_the_input_language_slot() {
+    let mut s = script();
+    s.set_flavor(crate::script::UiFlavor::Turtle);
+    s.run(
+        r#"
+        Box = CreateFrame("EditBox", "LangBox")
+        Box:SetScript("oninputlanguagechanged", function() end)
+        "#,
+    )
+    .unwrap();
+    assert!(s
+        .eval::<bool>(
+            r#"return Box:GetScript("OnInputLanguageChanged") ~= nil
+                and Box:HasScript("OnInputLanguageChanged") == 1"#
+        )
+        .unwrap());
+}
+
 /// Hiding the hovered frame fires its `OnLeave` inside the hide, before its `OnHide` (`0x764ba0`'s
 /// removal tail, the leave at `0x764cce`), and an ancestor's `Hide()` reaches it by the cascade.
 #[test]

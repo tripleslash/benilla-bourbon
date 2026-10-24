@@ -75,7 +75,7 @@ pub(super) struct ChatWindowFile {
     identity: VmMemo<Option<(String, String)>>,
     /// Whether this VM has unsaved Lua writes, per VM: a replaced VM's stock table must not save.
     dirty: VmMemo<bool>,
-    last_change: Option<std::time::Instant>,
+    last_change: Option<bevy::platform::time::Instant>,
 }
 
 /// A parsed file: its windows (0-based), its `COLORS` rows in file order, its custom channels.
@@ -428,7 +428,11 @@ pub(crate) fn restore_chat_looks(world: &mut World, script: &mut UiScript) {
         let text = file
             .path
             .as_ref()
-            .and_then(|path| match std::fs::read_to_string(path) {
+            // `local_state`, not `std::fs`: on the page the state folder is localStorage, so a
+            // browser session's chat layout survives a reload through the same reader every
+            // other saved setting uses. `None` is the hermetic-capture / no-state-folder case,
+            // and reads as no file — exactly the branch below that stands the stock window up.
+            .and_then(|path| match crate::local_state::read_to_string(path) {
                 Ok(t) => Some(t),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                 Err(e) => {
@@ -536,7 +540,7 @@ fn watch_chat_looks(
             return;
         }
         *file.dirty.get(script) = true;
-        file.last_change = Some(std::time::Instant::now());
+        file.last_change = Some(bevy::platform::time::Instant::now());
     })
 }
 
@@ -623,7 +627,7 @@ pub(crate) fn fold_dying_vm_chat_cache(world: &mut World) {
     // Lift the file out, leaving the VM and the roster as shared borrows of the world.
     world.resource_scope(|world, mut file: Mut<ChatWindowFile>| {
         let (Some(script), Some(channels)) = (
-            world.get_non_send_resource::<UiScript>(),
+            world.get_non_send::<UiScript>(),
             world.get_resource::<super::edit::ChannelState>(),
         ) else {
             return;
@@ -1086,7 +1090,7 @@ mod tests {
 
         // A Lua rename of window 1, which arms the debounce.
         world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run(r#"SetChatWindowName(1, "Reloaded")"#)
             .expect("rename");
         world
@@ -1111,7 +1115,7 @@ mod tests {
 
         // The rebuilt VM reads it back.
         let name = world
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<String>("GetChatWindowInfo(1)")
             .unwrap_or_default();
         assert_eq!(
@@ -1237,7 +1241,7 @@ mod tests {
         // through the real feed arm.
         world.resource_scope(
             |world, mut channels: Mut<super::super::edit::ChannelState>| {
-                let mut script = world.non_send_resource_mut::<UiScript>();
+                let mut script = world.non_send_mut::<UiScript>();
                 let (tx, _rx) = crossbeam_channel::unbounded();
                 let errors = crate::ui_action::UiErrorKeys::default();
                 super::super::channels::walk_zone(

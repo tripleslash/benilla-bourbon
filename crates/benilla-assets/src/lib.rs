@@ -15,6 +15,7 @@ use bevy::prelude::*;
 
 pub mod column_grid;
 pub mod coords;
+pub mod frame_budget;
 pub mod materials;
 pub mod minimap_grid;
 mod spatial_cache;
@@ -28,16 +29,19 @@ pub use world_assets::*;
 
 mod model;
 pub use model::{
-    bone_target_id, merged_static_mesh_faded, submesh_to_skinned_mesh, submesh_to_static_mesh,
-    AnimClip, BillboardInfo, ClipEvent, GlobalBone, GlobalSeqChannel, ModelAnimations,
-    ModelAttachment, ModelJoint, ModelMarker, ModelSkeleton, ModelSubmesh, PoseBone, PoseClip,
-    PoseNode, PoseSource, PoseTrack, Stage1, ATTRIBUTE_WOW_FADE_SPHERE, ATTRIBUTE_WOW_JOINT_INDEX,
-    ATTRIBUTE_WOW_JOINT_WEIGHT, ATTRIBUTE_WOW_MERGED_SLOT,
+    bone_target_id, merged_static_mesh_faded, submesh_to_palette_billboard,
+    submesh_to_skinned_mesh, submesh_to_static_mesh, AnimClip, BillboardInfo, ClipEvent,
+    GlobalBone, GlobalSeqChannel, ModelAnimations, ModelAttachment, ModelJoint, ModelMarker,
+    ModelSkeleton, ModelSubmesh, PoseBone, PoseClip, PoseNode, PoseSource, PoseTrack, Stage1,
+    StringTip, ATTRIBUTE_WOW_FADE_SPHERE, ATTRIBUTE_WOW_JOINT_INDEX, ATTRIBUTE_WOW_JOINT_WEIGHT,
+    ATTRIBUTE_WOW_MERGED_SLOT,
 };
 mod adt;
 mod terrain;
 mod wdt;
-pub use adt::{chunk_to_mesh, chunks_to_mesh, AdtLoader, AdtTile, ChunkShading};
+pub use adt::{
+    chunk_to_mesh, chunks_to_mesh, chunks_to_mesh_lod, AdtLoader, AdtTile, ChunkShading,
+};
 pub use wdt::{WdtIndex, WdtIndexLoader};
 mod blp;
 pub use blp::{BlpImageLoader, BlpLoaderSettings, BlpVariant};
@@ -87,20 +91,55 @@ fn internal_path(path: &Path) -> Result<String, AssetReaderError> {
 
 impl MpqAssetReader {
     /// The bytes of the archive file `path` names.
-    fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, AssetReaderError> {
+    ///
+    /// On the web `read` is awaited instead of blocked on: `Chain` there reads a BENPACK container
+    /// (`benilla_formats::webpack`), and `read_async` is the lane that exists for exactly this
+    /// caller: `AssetReader` is async everywhere Bevy calls it, so it has no business paying for
+    /// `Chain::read`'s synchronous XHR (that one is for the call sites that read the chain from a
+    /// Bevy system and cannot await). The `contains` pre-check runs on both targets: against the
+    /// container it is a binary search over the in-memory index, so Bevy's meta fallback costs no
+    /// fetch.
+    async fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, AssetReaderError> {
         let internal = internal_path(path)?;
         if !self.chain.contains(&internal) {
             return Err(AssetReaderError::NotFound(path.to_path_buf()));
         }
-        self.chain
-            .read(&internal)
-            .map_err(|e| AssetReaderError::Io(Arc::new(std::io::Error::other(format!("{e:#}")))))
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = self.chain.read(&internal);
+        #[cfg(target_arch = "wasm32")]
+        let bytes = match self.chain.read_async_stored(&internal).await {
+            // A compressed frame decompresses on a worker: a character model or a terrain tile is
+            // megabytes of zstd, which on this thread is a frame the loader's own offload never
+            // got to shorten.
+            Ok(blob) if blob.is_encoded() => {
+                crate::frame_budget::offload(read_lane(&internal), move || blob.into_bytes())
+                    .await
+                    .map_err(|e| e.context(internal.clone()))
+            }
+            other => other.and_then(benilla_formats::StoredBlob::into_bytes),
+        };
+        bytes.map_err(|e| AssetReaderError::Io(Arc::new(std::io::Error::other(format!("{e:#}")))))
+    }
+}
+
+/// The [`frame_budget::Lane`] a read's decompression takes when no worker runs it: the lane its
+/// loader's own decode takes, geometry for models and terrain, art for the rest.
+#[cfg(target_arch = "wasm32")]
+fn read_lane(internal: &str) -> frame_budget::Lane {
+    let lower = internal.to_ascii_lowercase();
+    if [".m2", ".wmo", ".adt"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+    {
+        frame_budget::Lane::Geometry
+    } else {
+        frame_budget::Lane::Art
     }
 }
 
 impl AssetReader for MpqAssetReader {
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
-        Ok(VecReader::new(self.read_bytes(path)?))
+        Ok(VecReader::new(self.read_bytes(path).await?))
     }
 
     async fn read_meta<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
@@ -145,7 +184,7 @@ impl AssetReader for LooseAssetReader {
             Some(file) => file
                 .read()
                 .ok_or_else(|| AssetReaderError::NotFound(path.to_path_buf()))?,
-            None => self.mpq.read_bytes(path)?,
+            None => self.mpq.read_bytes(path).await?,
         };
         Ok(VecReader::new(bytes))
     }
@@ -171,7 +210,8 @@ const SAMPLER_MARKER: char = '@';
 
 /// The `mpq://` URL of a model texture at a sampler address mode. Bevy keys the sampler to the
 /// `Image` and the `Image` to its path, so a mode other than repeat/repeat marks the path before
-/// the extension (`…/leaves01@cc.blp`), which must stay `.blp` to pick the loader.
+/// the extension (`…/leaves01@cc.blp`), which must stay `.blp` to pick the loader. A name with no
+/// extension (an HD model may store one so) asks for its `.blp`, as [`m2_url`] normalises models.
 pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
     texture_url_on(MPQ_SOURCE, internal, wrap)
 }
@@ -179,7 +219,10 @@ pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
 /// [`texture_url`] on the asset source `source`: a model's textures are read from the source its
 /// `.m2` was, as they open with the model's flag (`0x71da64`).
 pub fn texture_url_on(source: &str, internal: &str, wrap: (bool, bool)) -> String {
-    let path = internal.replace('\\', "/").to_ascii_lowercase();
+    let mut path = internal.replace('\\', "/").to_ascii_lowercase();
+    if !path.rsplit('/').next().unwrap_or(&path).contains('.') {
+        path.push_str(".blp");
+    }
     if wrap == (true, true) {
         return format!("{source}://{path}");
     }
@@ -188,10 +231,8 @@ pub fn texture_url_on(source: &str, internal: &str, wrap: (bool, bool)) -> Strin
         (false, true) => "cr",
         _ => "cc",
     };
-    match path.rsplit_once('.') {
-        Some((stem, ext)) => format!("{source}://{stem}{SAMPLER_MARKER}{tag}.{ext}"),
-        None => format!("{source}://{path}{SAMPLER_MARKER}{tag}"),
-    }
+    let (stem, ext) = path.rsplit_once('.').unwrap_or((path.as_str(), "blp"));
+    format!("{source}://{stem}{SAMPLER_MARKER}{tag}.{ext}")
 }
 
 /// The `Map.dbc` [`MapCatalog`] (`mapId` to directory and `LoadingScreenID`) as a Bevy resource; a
@@ -254,6 +295,66 @@ fn strip_sampler_marker(path: &str) -> Option<String> {
     matches!(tag, "rc" | "cr" | "cc").then(|| format!("{base}.{ext}"))
 }
 
+/// Reload every `mpq://` and `mpq-loose://` asset loaded so far — BLP images, M2 and WMO models,
+/// ADT tiles, WDT indices — whose archive name `in_layer` holds, for a layer just mounted or
+/// unmounted: the server keys an asset by path, so without this a live handle keeps answering with
+/// the bytes it was first loaded from. Returns the assets reloading, each of which sends its
+/// `AssetEvent::Modified` when the new bytes land (or fails to load). An edge, never per frame.
+pub fn reload_chain_assets(
+    world: &World,
+    in_layer: impl Fn(&str) -> bool,
+) -> Vec<bevy::asset::UntypedAssetId> {
+    use bevy::asset::io::AssetSourceId;
+    use bevy::asset::AssetPath;
+
+    fn collect<A: Asset>(
+        world: &World,
+        server: &AssetServer,
+        in_layer: &dyn Fn(&str) -> bool,
+        out: &mut std::collections::HashSet<AssetPath<'static>>,
+        ids: &mut Vec<bevy::asset::UntypedAssetId>,
+    ) {
+        let Some(assets) = world.get_resource::<Assets<A>>() else {
+            return;
+        };
+        for id in assets.ids() {
+            let Some(path) = server.get_path(id) else {
+                continue; // made in code, not loaded
+            };
+            // Both chain-backed sources: a loose-flagged open falls through to the same chain.
+            if !matches!(path.source(), AssetSourceId::Name(n)
+                if n.as_ref() == MPQ_SOURCE || n.as_ref() == MPQ_LOOSE_SOURCE)
+            {
+                continue;
+            }
+            let Some(raw) = path.path().to_str() else {
+                continue;
+            };
+            let archive = strip_sampler_marker(raw).unwrap_or_else(|| raw.to_string());
+            if in_layer(&archive.replace('/', "\\")) {
+                // A labelled sub-asset and its file are one reload.
+                out.insert(path.without_label().into_owned());
+                ids.push(id.untyped());
+            }
+        }
+    }
+
+    let Some(server) = world.get_resource::<AssetServer>() else {
+        return Vec::new();
+    };
+    let mut paths = std::collections::HashSet::new();
+    let mut ids = Vec::new();
+    collect::<Image>(world, server, &in_layer, &mut paths, &mut ids);
+    collect::<M2Model>(world, server, &in_layer, &mut paths, &mut ids);
+    collect::<WmoModel>(world, server, &in_layer, &mut paths, &mut ids);
+    collect::<AdtTile>(world, server, &in_layer, &mut paths, &mut ids);
+    collect::<WdtIndex>(world, server, &in_layer, &mut paths, &mut ids);
+    for path in &paths {
+        server.reload(path.clone());
+    }
+    ids
+}
+
 /// Register the `mpq://` source on `app`, backed by the patch chain at `data_dir`, and the
 /// `mpq-loose://` source over the install's loose files and the same chain. Call it before
 /// `AssetPlugin` builds (before `DefaultPlugins`), which reads the sources.
@@ -287,6 +388,10 @@ pub fn register_asset_loaders(app: &mut App) {
     app.register_asset_loader(WmoModelLoader);
     app.register_asset_loader(AdtLoader);
     app.register_asset_loader(WdtIndexLoader);
+    // The per-frame decode budget the heavy loaders above take their slots from. On the web a
+    // loader is main-thread work, and without the `First` reset every slot after the first
+    // frame's would wait forever; on native it costs a no-op system.
+    app.add_plugins(frame_budget::plugin);
     // The materials' WGSL, compiled in; it too needs `AssetPlugin` first.
     materials::register_shaders(app);
 }
@@ -296,6 +401,25 @@ mod tests {
     use super::*;
     use bevy::camera::primitives::MeshAabb;
     use bevy::tasks::block_on;
+
+    /// A model texture stored without an extension asks for its `.blp`; a dotted folder is not an
+    /// extension, and a named extension is kept.
+    #[test]
+    fn a_texture_name_without_an_extension_asks_for_its_blp() {
+        let raw = r"world\azeroth\redridge\passivedoodads\trees\redtreecanopy_base02";
+        assert_eq!(
+            texture_url(raw, (true, true)),
+            "mpq://world/azeroth/redridge/passivedoodads/trees/redtreecanopy_base02.blp"
+        );
+        assert_eq!(
+            texture_url(r"Foo.d\Bar", (false, false)),
+            "mpq://foo.d/bar@cc.blp"
+        );
+        assert_eq!(
+            texture_url(r"Foo\Bar.blp", (true, false)),
+            "mpq://foo/bar@rc.blp"
+        );
+    }
 
     /// `0x706a50`'s extension rule: the last dot's `.mdx`/`.mdl` in any case is `.m2`, `.m2`
     /// stands, and anything else stands the error cube from the archives (`0x70737f`).
@@ -475,10 +599,12 @@ mod tests {
         // In isolation: a bare `load()` of the same path would share the handle and its settings.
         let tile = "mpq://textures/Minimap/ea283abc0bf9637c3fad5e840a65b38b.blp";
         let server = app.world().resource::<AssetServer>().clone();
-        let sprite_h: Handle<Image> =
-            server.load_with_settings(tile, |s: &mut BlpLoaderSettings| {
+        let sprite_h: Handle<Image> = server
+            .load_builder()
+            .with_settings(|s: &mut BlpLoaderSettings| {
                 s.variant = BlpVariant::Sprite;
-            });
+            })
+            .load(tile);
 
         let mut sprite_fmt = None;
         // A generous ceiling: a parallel gate run starves the IO pool.
@@ -494,7 +620,7 @@ mod tests {
         assert_eq!(
             sprite_fmt,
             Some(TextureFormat::Rgba8UnormSrgb),
-            "load_with_settings(Sprite) must produce an sRGB tile on the async mpq:// path"
+            "load_builder().with_settings(Sprite) must produce an sRGB tile on the async mpq:// path"
         );
     }
 
@@ -714,7 +840,8 @@ mod tests {
         let images = app.world().resource::<Assets<Image>>();
         let layer = images.get(&layer_h).expect("layer array present");
         assert_eq!(
-            layer.texture_descriptor.size.width, 256,
+            layer.texture_descriptor.size.width,
+            crate::terrain::LAYER_TEX_SIZE,
             "layer array packed at LAYER_TEX_SIZE"
         );
         assert!(

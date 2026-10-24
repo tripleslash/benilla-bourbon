@@ -1,6 +1,7 @@
-//! Leaving: the game menu's Logout and Exit Game, from the request to the countdown dialog and the
-//! process exit. The server owns the clock: vmangos answers `CMSG_LOGOUT_REQUEST` with
-//! `SMSG_LOGOUT_RESPONSE { u32 reason, u8 instant }` (`MiscHandler.cpp:284`):
+//! Leaving: the game menu's Logout and `Quit()` (`/quit`; this fork has no Exit Game rung), from
+//! the request to the countdown dialog and the process exit. The server owns the clock: vmangos
+//! answers `CMSG_LOGOUT_REQUEST` with `SMSG_LOGOUT_RESPONSE { u32 reason, u8 instant }`
+//! (`MiscHandler.cpp:284`):
 //!
 //! - `reason != 0`: refused (1 in combat, 3 jumping or falling, 2 GM-frozen).
 //! - `instant == 1`: out at once (resting, on a taxi, or a GM-level account), with no dialog.
@@ -265,7 +266,7 @@ impl SessionSteps<'_> {
     }
 }
 
-/// `SMSG_LOGOUT_COMPLETE` returns to character select, or ends the process for Exit Game; a
+/// `SMSG_LOGOUT_COMPLETE` returns to character select, or ends the process for a `Quit()`; a
 /// posted exit ([`SessionPosts`]) ends it too.
 fn exit_on_logout_complete(
     mut logged_out: MessageReader<LoggedOutMessage>,
@@ -413,7 +414,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<LogoutState>()
             .seat_world_handle_for_test();
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         (app, rx)
     }
 
@@ -659,14 +660,14 @@ mod tests {
         use std::rc::Rc;
 
         let (mut app, rx) = client();
-        app.insert_resource(bevy::ecs::error::DefaultErrorHandler(
+        app.insert_resource(bevy::ecs::error::FallbackErrorHandler(
             bevy::ecs::error::ignore,
         ));
         let (events, inbound) = crossbeam_channel::unbounded();
         app.insert_resource(crate::net::NetEvents::for_test(inbound));
         // The start-up frame first, which seats a VM of its own.
         app.update();
-        app.insert_non_send_resource(UiScript::new().expect("a VM"));
+        app.insert_non_send(UiScript::new().expect("a VM"));
         app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
         app.world_mut()
             .resource_mut::<crate::ui_script::LeavingWorldArmed>()
@@ -674,7 +675,7 @@ mod tests {
         let notes: Rc<RefCell<Vec<String>>> = Rc::default();
         {
             let sink = notes.clone();
-            let script = app.world().non_send_resource::<UiScript>();
+            let script = app.world().non_send::<UiScript>();
             let note = script
                 .lua()
                 .create_function(move |_, text: String| {

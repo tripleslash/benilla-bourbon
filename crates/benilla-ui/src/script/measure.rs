@@ -66,7 +66,9 @@ impl TextMeasure for SharedMeasurer {
 /// Measure region `rh` now if a measurer is installed and its stored measure is stale; a current
 /// one is left alone, so a per-frame poll does not re-measure.
 pub(super) fn ensure_measured(lua: &Lua, rh: RegionHandle) {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     ensure_measured_in(&mut model, rh);
 }
 
@@ -123,7 +125,7 @@ impl super::UiScript {
 
     /// Whether a [`TextMeasure`] is installed; the host then skips its batch measure pass.
     pub fn has_text_measurer(&self) -> bool {
-        self.model_mut().measurer.is_some()
+        self.model_ref().measurer.is_some()
     }
 
     /// Answer every pending FontString measure inline, so a box is right in the frame its text

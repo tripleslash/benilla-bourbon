@@ -126,6 +126,46 @@ impl ChunkMesh {
         ((0.0..=1.0).contains(&south) && (0.0..=1.0).contains(&east)).then_some(self.impassable)
     }
 
+    /// fork: per vertex, how far the ground lies under the chunk's own MCLQ surface, in yards:
+    /// positive under water, negative above it, `f32::NEG_INFINITY` where no wet cell touches the
+    /// vertex. An outer vertex reads the liquid vertex it shares the lattice with; an inner one the
+    /// mean of its cell's four. Linear over a fan triangle, as the ground and the surface both are,
+    /// so the interpolated value is the depth at every point of a wet cell.
+    pub fn water_depths(&self) -> Vec<f32> {
+        let mut depths = vec![f32::NEG_INFINITY; self.positions.len()];
+        if self.positions.len() != 145 {
+            return depths;
+        }
+        for liquid in &self.liquids {
+            if liquid.grid != [9, 9] || liquid.positions.len() != 81 || liquid.wet.len() != 64 {
+                continue;
+            }
+            let wet = |r: usize, c: usize| r < 8 && c < 8 && liquid.wet[r * 8 + c];
+            let surface = |r: usize, c: usize| liquid.positions[r * 9 + c][2];
+            for r in 0..9usize {
+                for c in 0..9usize {
+                    // The (up to) four cells meeting at this corner; `wrapping_sub` sends the
+                    // row or column before the first out of range.
+                    let (rn, cw) = (r.wrapping_sub(1), c.wrapping_sub(1));
+                    if wet(rn, cw) || wet(rn, c) || wet(r, cw) || wet(r, c) {
+                        let i = r * 17 + c;
+                        depths[i] = depths[i].max(surface(r, c) - self.positions[i][2]);
+                    }
+                    if wet(r, c) {
+                        let i = r * 17 + 9 + c;
+                        let mean = 0.25
+                            * (surface(r, c)
+                                + surface(r, c + 1)
+                                + surface(r + 1, c)
+                                + surface(r + 1, c + 1));
+                        depths[i] = depths[i].max(mean - self.positions[i][2]);
+                    }
+                }
+            }
+        }
+        depths
+    }
+
     /// The terrain height under a raw WoW column, interpolated on the covering fan triangle. `None`
     /// off the footprint or in a hole: a cave mouth's column goes to the WMO below it, where the
     /// reference's terrain probe misses too.
@@ -165,6 +205,72 @@ impl ChunkMesh {
             triangle_z_at(&tri, wow[0], wow[1])
         })
     }
+}
+
+/// A chunk's near level (`[0x867964]`, `maxLOD`): the full 145-vertex fan, 256 triangles.
+pub const CHUNK_LEVEL_NEAR: u8 = 3;
+/// A chunk's far level (`[0x867968]`): 41 of the 145 vertices, 64 triangles.
+pub const CHUNK_LEVEL_FAR: u8 = 2;
+
+/// A chunk's triangle list at `level` over its own 145 vertices (stride-17 order), the index
+/// builder `0x6c51b0`. A leaf is a cell of four triangles around its centre, (centre, from, to) on
+/// the west, south, east and north edges, the winding of the full fan. At level 3 a leaf is one
+/// quad around its inner vertex; at level 2 it is a 2×2 block around the outer vertex at its
+/// middle, its corners the centre ± 17 ± 1, and a set hole bit (`(row>>1)·4 + (col>>1)`, a 2×2
+/// block) drops it at either level. `caps` is the four neighbours' levels where finer, else 0, in
+/// the order row − 1, column + 1, row + 1, column − 1 (`+0xc4` to `+0xd0`): a border leaf whose
+/// neighbour on that side is finer splits the edge at its middle (`0x6c5304` and its three
+/// siblings), so the finer chunk's edge vertices are all met and no crack opens. A level 3 chunk has
+/// no finer neighbour and never splits. Leaves are emitted row by row rather than in the
+/// quadtree's order, which draws the same triangles.
+pub fn chunk_lod_indices(level: u8, caps: [u8; 4], holes: u16) -> Vec<u32> {
+    let (cells, step) = if level >= CHUNK_LEVEL_NEAR {
+        (8u32, 1u32)
+    } else {
+        (4u32, 2u32)
+    };
+    let finer = |side: usize| caps[side] > level;
+    let mut out = Vec::with_capacity((cells * cells * 12) as usize + 4 * cells as usize * 3);
+    for row in 0..cells {
+        for col in 0..cells {
+            let hole_bit = if step == 1 {
+                (row >> 1) * 4 + (col >> 1)
+            } else {
+                row * 4 + col
+            };
+            if holes & (1u16 << hole_bit) != 0 {
+                continue;
+            }
+            // The leaf's corners and centre: level 3 around the inner vertex 9 past the corner,
+            // level 2 around the outer vertex at the block's middle.
+            let (tl, ctr) = if step == 1 {
+                let tl = row * 17 + col;
+                (tl, tl + 9)
+            } else {
+                let ctr = (2 * row + 1) * 17 + 2 * col + 1;
+                (ctr - 18, ctr)
+            };
+            let tr = tl + step;
+            let bl = tl + 17 * step;
+            let br = bl + step;
+            // The four edges and the caps side each faces when the leaf is on the border.
+            let edges = [
+                (tl, bl, col == 0 && finer(3)),
+                (bl, br, row == cells - 1 && finer(2)),
+                (br, tr, col == cells - 1 && finer(1)),
+                (tr, tl, row == 0 && finer(0)),
+            ];
+            for (from, to, split) in edges {
+                if split {
+                    let mid = (from + to) / 2;
+                    out.extend_from_slice(&[ctr, from, mid, ctr, mid, to]);
+                } else {
+                    out.extend_from_slice(&[ctr, from, to]);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The `z` of `tri` at column `(x, y)`, `None` outside its XY projection or for a vertical face.
@@ -267,6 +373,14 @@ pub struct WmoInstance {
     pub doodad_set: u16,
     /// MODF name-set index, the placement's `WMOAreaTable.NameSetID`.
     pub name_set: u16,
+    /// The placement's authored **world-space bounding box** in WoW coords — `[min, max]`, mapped
+    /// through the same MODF→world transform as [`Self::position`]. `None` where the entry authors
+    /// a degenerate box (nothing to bound).
+    ///
+    /// Known from the *tile*, so it exists before the `.wmo` has been fetched — which is what makes
+    /// it useful: a building's mass can be stood on while its real hull is still on the wire
+    /// (`benilla_world::terrain_stream::provisional`).
+    pub bounds: Option<[[f32; 3]; 2]>,
 }
 
 /// One ADT tile: its chunk meshes, placed doodads and buildings.
@@ -354,25 +468,7 @@ pub fn adt_to_tile_mesh(adt_bytes: &[u8]) -> Result<TileMesh> {
         // Four fan triangles per cell, CCW from above (front face up in Bevy under the det +1
         // transform); a set hole bit drops its 2×2 block, and 1.12 has no high-res holes.
         let holes = mcnk.header.holes_low_res;
-        let mut indices = Vec::with_capacity(8 * 8 * 12);
-        for row in 0..8u32 {
-            for col in 0..8u32 {
-                if holes & (1u16 << ((row >> 1) * 4 + (col >> 1))) != 0 {
-                    continue;
-                }
-                let tl = row * 17 + col;
-                let tr = tl + 1;
-                let bl = tl + 17;
-                let br = bl + 1;
-                let ctr = row * 17 + 9 + col;
-                indices.extend_from_slice(&[
-                    ctr, tl, bl, // west fan
-                    ctr, bl, br, // south fan
-                    ctr, br, tr, // east fan
-                    ctr, tr, tl, // north fan
-                ]);
-            }
-        }
+        let indices = chunk_lod_indices(CHUNK_LEVEL_NEAR, [0; 4], holes);
 
         // Name and effect id together, so the two vecs stay aligned when a layer is dropped.
         let layers: Vec<(String, u32)> = mcnk
@@ -499,6 +595,7 @@ pub fn adt_to_tile_mesh(adt_bytes: &[u8]) -> Result<TileMesh> {
                 unique_id: w.unique_id,
                 doodad_set: w.doodad_set,
                 name_set: w.name_set,
+                bounds: modf_bounds_to_world(&w.bounds),
             })
         })
         .collect();
@@ -508,6 +605,27 @@ pub fn adt_to_tile_mesh(adt_bytes: &[u8]) -> Result<TileMesh> {
         doodads,
         wmos,
     })
+}
+
+/// A MODF bounding box (raw placement frame, `[min, max]`) as a **WoW world-space** AABB.
+///
+/// The corner remap is [`parse_tile_mesh`]'s own — `(x, y, z) -> (MAP_CENTER - z, MAP_CENTER - y', y)`
+/// with the axes it uses for a position — and it flips two axes, so a mapped "min" corner is not
+/// the mapped box's min. Both corners go through the transform and the extremes are taken
+/// afterwards, which is the only form of this that stays correct if the remap ever changes.
+///
+/// `None` for a degenerate box: several MODF entries in the shipped corpus author `0,0,0 .. 0,0,0`,
+/// and a zero-volume hull is worse than no hull — it is an invisible point the mover can hit.
+fn modf_bounds_to_world(bounds: &[[f32; 3]; 2]) -> Option<[[f32; 3]; 2]> {
+    // The same corner origin `parse_tile_mesh` uses for a placement position.
+    const MAP_CENTER: f32 = 32.0 * TILE_SIZE;
+    let corner = |p: &[f32; 3]| [MAP_CENTER - p[2], MAP_CENTER - p[0], p[1]];
+    let (a, b) = (corner(&bounds[0]), corner(&bounds[1]));
+    let min = [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])];
+    let max = [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])];
+    let solid =
+        (0..3).all(|i| max[i] - min[i] > 0.01) && min.iter().chain(&max).all(|v| v.is_finite());
+    solid.then_some([min, max])
 }
 
 /// Read a map's WDT from the chain and parse it (vanilla/Classic layout).
@@ -732,6 +850,53 @@ mod tests {
         assert_eq!(c.height_at([quarter_x, far_y - 5.0, 0.0]), None);
     }
 
+    /// A chunk sloping from z 2 at its north edge to z −6 at its south, under a pond at z 0 whose
+    /// westmost column of cells is dry: the depth is the water line less the ground wherever a wet
+    /// cell touches the vertex, and nothing where none does.
+    #[test]
+    fn water_depths_follow_the_surface_over_wet_cells_only() {
+        let ground = |row: f32| 2.0 - row;
+        let mut positions = Vec::with_capacity(145);
+        for row in 0..9 {
+            for col in 0..9 {
+                positions.push([-(row as f32), -(col as f32), ground(row as f32)]);
+            }
+            if row < 8 {
+                for col in 0..8 {
+                    let r = row as f32 + 0.5;
+                    positions.push([-r, -(col as f32 + 0.5), ground(r)]);
+                }
+            }
+        }
+        let mut c = chunk(positions, Vec::new());
+        assert!(c.water_depths().iter().all(|d| *d == f32::NEG_INFINITY));
+        c.liquids.push(crate::liquid::LiquidMesh {
+            grid: [9, 9],
+            wet: (0..64).map(|cell| cell % 8 != 0).collect(),
+            shared: vec![false; 64],
+            positions: (0..81)
+                .map(|n| [-((n / 9) as f32), -((n % 9) as f32), 0.0])
+                .collect(),
+            uvs: Vec::new(),
+            depths: Vec::new(),
+            indices: Vec::new(),
+            sound_nibble: 0,
+            material_id: None,
+            kind: crate::liquid::LiquidKind::Still,
+        });
+        let d = c.water_depths();
+        // Outer row 5, column 4: ground −3 under the line. Row 1: a yard above it.
+        assert_eq!(d[5 * 17 + 4], 3.0);
+        assert_eq!(d[17 + 4], -1.0);
+        // The inner vertex of wet cell (5, 4) sits half a row further down.
+        assert_eq!(d[5 * 17 + 9 + 4], 3.5);
+        // Column 0 touches only dry cells, and so does the dry column's inner vertex; column 1
+        // borders a wet cell and carries its depth.
+        assert_eq!(d[5 * 17], f32::NEG_INFINITY);
+        assert_eq!(d[5 * 17 + 9], f32::NEG_INFINITY);
+        assert_eq!(d[5 * 17 + 1], 3.0);
+    }
+
     /// 20 of the 43 shipped WDTs author no ADT tiles: their global WMO is the whole map.
     #[test]
     fn real_wdts_split_into_adt_maps_and_wmo_only_maps() {
@@ -858,5 +1023,100 @@ mod tests {
             hits > 12000,
             "the sample grid should land on terrain almost everywhere: {hits}"
         );
+    }
+
+    /// A vertex's place on the chunk's flat grid, (column, row) in quads: outer on the corners,
+    /// inner at the quad centres.
+    fn grid_of(i: u32) -> (f32, f32) {
+        let (r, c) = (i / 17, i % 17);
+        if c < 9 {
+            (c as f32, r as f32)
+        } else {
+            ((c - 9) as f32 + 0.5, r as f32 + 0.5)
+        }
+    }
+
+    /// Twice the signed area of each triangle on the flat grid.
+    fn windings(indices: &[u32]) -> Vec<f32> {
+        indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|t| {
+                let (a, b, c) = (grid_of(t[0]), grid_of(t[1]), grid_of(t[2]));
+                (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+            })
+            .collect()
+    }
+
+    /// Level 3 is the full fan, 256 triangles; level 2 takes 41 of the 145 vertices, 192 indices,
+    /// 64 triangles (`0x86b820`, `0x86b8c8`), all wound as the full fan is.
+    #[test]
+    fn the_level_meshes_have_the_reference_counts_and_winding() {
+        let near = chunk_lod_indices(CHUNK_LEVEL_NEAR, [0; 4], 0);
+        assert_eq!(near.len(), 768);
+        let far = chunk_lod_indices(CHUNK_LEVEL_FAR, [0; 4], 0);
+        assert_eq!(far.len(), 192);
+        let distinct: std::collections::BTreeSet<u32> = far.iter().copied().collect();
+        assert_eq!(distinct.len(), 41);
+        // Only outer vertices: the 5×5 corners and the 4×4 block centres.
+        assert!(distinct.iter().all(|&i| i % 17 < 9));
+        let sign = windings(&near)[0].signum();
+        assert!(windings(&near)
+            .iter()
+            .all(|w| w.signum() == sign && *w != 0.0));
+        assert!(windings(&far)
+            .iter()
+            .all(|w| w.signum() == sign && *w != 0.0));
+    }
+
+    /// A level 2 chunk beside a finer one splits its shared edge at every level 3 vertex on it,
+    /// and the finer chunk's own list does not change.
+    #[test]
+    fn a_coarse_chunk_meets_every_vertex_of_a_finer_neighbours_edge() {
+        // Each side: the caps byte and the outer vertices on that edge.
+        let sides: [(usize, Vec<u32>); 4] = [
+            (0, (0..9).collect()),
+            (1, (0..9).map(|r| r * 17 + 8).collect()),
+            (2, (0..9).map(|c| 8 * 17 + c).collect()),
+            (3, (0..9).map(|r| r * 17).collect()),
+        ];
+        for (side, edge) in sides {
+            let mut caps = [0; 4];
+            caps[side] = CHUNK_LEVEL_NEAR;
+            let stitched = chunk_lod_indices(CHUNK_LEVEL_FAR, caps, 0);
+            assert_eq!(
+                stitched.len(),
+                192 + 4 * 3,
+                "one triangle more per border cell"
+            );
+            assert!(
+                edge.iter().all(|v| stitched.contains(v)),
+                "side {side} misses an edge vertex"
+            );
+            let sign = windings(&stitched)[0].signum();
+            assert!(windings(&stitched).iter().all(|w| w.signum() == sign));
+        }
+        let plain = chunk_lod_indices(CHUNK_LEVEL_NEAR, [0; 4], 0);
+        assert_eq!(
+            chunk_lod_indices(CHUNK_LEVEL_NEAR, [CHUNK_LEVEL_NEAR; 4], 0),
+            plain
+        );
+    }
+
+    /// A hole bit is one 2×2 block: one level 2 leaf, four level 3 leaves.
+    #[test]
+    fn a_hole_drops_one_block_at_either_level() {
+        assert_eq!(
+            chunk_lod_indices(CHUNK_LEVEL_FAR, [0; 4], 1).len(),
+            192 - 12
+        );
+        assert_eq!(
+            chunk_lod_indices(CHUNK_LEVEL_NEAR, [0; 4], 1).len(),
+            768 - 48
+        );
+        assert!(chunk_lod_indices(CHUNK_LEVEL_FAR, [0; 4], 0xffff).is_empty());
+        // The dropped level 2 leaf is the one around outer vertex (1, 1).
+        assert!(!chunk_lod_indices(CHUNK_LEVEL_FAR, [0; 4], 1).contains(&18));
     }
 }

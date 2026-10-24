@@ -3,6 +3,7 @@
 //! routes (built in [`routing`]) and fires the map events, and [`TaxiSteps`] applies the verbs
 //! inside their calls.
 
+use benilla_assets::DataLoadAppExt;
 use benilla_protocol::messages::TaxiMask;
 use bevy::prelude::*;
 
@@ -110,7 +111,7 @@ fn leave_world(world: &mut World) {
     if let Some(mut cache) = world.get_resource_mut::<TaxiRouteCache>() {
         cache.slots.clear();
     }
-    if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
+    if let Some(mut script) = world.get_non_send_mut::<UiScript>() {
         script.set_taxi(None);
     }
     close_core(world);
@@ -129,7 +130,7 @@ pub(crate) fn open_map(world: &mut World, flightmaster: u64, nearest_node: u32, 
     if let Some(mut cache) = world.get_resource_mut::<TaxiRouteCache>() {
         cache.slots.clear();
     }
-    if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
+    if let Some(mut script) = world.get_non_send_mut::<UiScript>() {
         script.reset_taxi_slots();
     }
     crate::ui_session::register(world, flightmaster);
@@ -325,12 +326,12 @@ impl Plugin for UiTaxiPlugin {
         net::register(app);
         app.init_resource::<TaxiState>()
             .init_resource::<TaxiRouteCache>()
+            .add_data_loaders(load_taxi_catalogs)
             .add_latched_window::<TaxiState>()
             .add_sweep_leg(SweepLeg::Taxi, leave_world)
             .add_systems(
                 Update,
                 (
-                    load_taxi_catalogs,
                     // After the roster publish, whose party slots the master's reaction reads.
                     feed_taxi
                         .in_set(UiFeed)
@@ -359,7 +360,7 @@ mod tests {
     fn unit_on_taxi_reads_the_taxi_flight_flag() {
         let mut app = App::new();
         app.add_systems(Update, feed_on_taxi);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let me = app
             .world_mut()
             .spawn((
@@ -369,7 +370,7 @@ mod tests {
             .id();
         let on_taxi = |app: &mut App| -> bool {
             app.update();
-            let s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let s = app.world_mut().non_send_mut::<UiScript>();
             s.eval::<Option<i64>>(r#"return UnitOnTaxi("player")"#)
                 .unwrap()
                 .is_some()
@@ -426,7 +427,7 @@ mod tests {
             .insert_resource(catalogs)
             .insert_resource(factions)
             .insert_resource(reps)
-            .insert_non_send_resource(UiScript::new().unwrap());
+            .insert_non_send(UiScript::new().unwrap());
         // A human warrior player: the master's standing leg needs the player's type, flag `0x8`
         // and template (`0x606576`-`0x6065b6`).
         app.world_mut().spawn((
@@ -463,7 +464,7 @@ mod tests {
 
         let node = |app: &mut App, name: &str| -> (i64, i64) {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval(&format!(
                     "for i = 1, NumTaxiNodes() do \
                        if TaxiNodeName(i) == {name:?} then return i, TaxiNodeCost(i) end \
@@ -478,7 +479,7 @@ mod tests {
         assert_eq!(shown, 136);
 
         let mut calls = {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.keep_calls();
             script.run(&format!("TakeTaxiNode({thelsamar})")).unwrap();
             script.take_taxi_calls()
@@ -538,7 +539,7 @@ mod tests {
             .init_resource::<crate::sound::MessageSounds>()
             .insert_resource(NetCommands(tx))
             .insert_resource(catalogs)
-            .insert_non_send_resource(UiScript::new().unwrap())
+            .insert_non_send(UiScript::new().unwrap())
             .add_systems(Update, feed_taxi);
         let open = |app: &mut App| {
             app.world_mut().resource_mut::<TaxiState>().open(
@@ -591,10 +592,10 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let tick = |app: &mut App| -> Vec<String> {
             app.update();
-            let s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let s = app.world_mut().non_send_mut::<UiScript>();
             let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
             seen
@@ -636,7 +637,7 @@ mod tests {
                 "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut()
             .resource_mut::<crate::ui_gossip::GossipState>()
             .npc = Some(MASTER);
@@ -650,7 +651,7 @@ mod tests {
                 }],
             );
             app.world_mut().flush();
-            let script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let script = app.world_mut().non_send_mut::<UiScript>();
             let heard = script.eval::<String>("return HEARD").unwrap();
             script.run("HEARD = ''").unwrap();
             heard

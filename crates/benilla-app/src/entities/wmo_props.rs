@@ -180,9 +180,9 @@ pub(super) fn spawn_wmo_gameobject_props(
             };
             // Priority 0, the entity lane's, like any creature walking into view.
             let ready = if benilla_world::doodad_anim::wants_rig(m) {
-                forms.require_rigged(&prop.handle, 0)
+                forms.require_rigged(&prop.handle, &m.submeshes, 0)
             } else {
-                forms.require_static(&prop.handle, 0)
+                forms.require_static(&prop.handle, &m.submeshes, 0)
             };
             if !ready {
                 return true; // forms still building
@@ -400,6 +400,16 @@ pub(super) fn spawn_wmo_gameobject_props(
                             Visibility::default(),
                         ))
                         .id();
+                    // fork: a lantern on a deck flickers like one on a quay.
+                    if let Some(flicker) = benilla_world::lighting::flame_flicker(
+                        None,
+                        false,
+                        l.diffuse_color,
+                        l.diffuse_intensity,
+                        Vec3::from(l.position) + Vec3::splat((entity.to_bits() % 4096) as f32),
+                    ) {
+                        commands.entity(glow).insert(flicker);
+                    }
                     commands.entity(entity).add_child(glow);
                     lights += 1;
                 }

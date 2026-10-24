@@ -7,7 +7,7 @@ use bevy::prelude::*;
 
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_script::InspectMode;
-use benilla_assets::AssetSet;
+use benilla_assets::DataLoadAppExt;
 use benilla_world::interact::{WorldClick, WorldRightClick};
 use benilla_world::schedule::WorldStage;
 
@@ -325,14 +325,8 @@ impl Plugin for TargetPlugin {
             .add_message::<click::DeselectGuid>()
             .add_message::<click::PlateRightClick>()
             .add_message::<Interact>()
-            .add_systems(
-                Startup,
-                (
-                    ring::setup_ring,
-                    reticle::setup_reticle,
-                    (ring::load_factions, scan::load_creature_types).after(AssetSet::Open),
-                ),
-            )
+            .add_systems(Startup, (ring::setup_ring, reticle::setup_reticle))
+            .add_data_loaders((ring::load_factions, scan::load_creature_types))
             // After input, so this frame's `WorldClick` is here, in order: the picks, the cursor,
             // the clicks, the non-mouse selection writers, then the flash and the ring off the
             // frame's final selection. Nested tuples keep the chain within Bevy's 20-tuple limit.

@@ -3,6 +3,11 @@
 **/*.rs.bk
 # Cargo.lock IS committed (this workspace produces binaries).
 
+# The wasm-bindgen build output (`scripts/web-build.sh`) — regenerated
+# from `crates/wenilla` + `web/index.html`/`web/wasi_stubs.js` on every build, and the .wasm
+# alone can run tens of MB.
+/web/dist/
+
 # --- Blizzard-owned content: NEVER commit ---
 # The user's legally-installed 1.12.1 client. Read at runtime; not redistributed.
 /WoW
@@ -33,8 +38,33 @@ trace-*.json
 .DS_Store
 *.swp
 /.idea/
-# Claude Code: settings and skills under .claude/ are each person's own.
-/.claude/
+
+# The C sysroot for the wasm Lua build — fetched by scripts/web-setup.sh, ~300 MB
+/tools/wasi-sdk/
+/tools/binaryen/
+
+# The BENPACK container (`benilla-pack build`) — ~3 GiB of repackaged Blizzard data,
+# regenerated from the install, and what the static tree serves under `/data`. `packs-hd` is the same thing
+# for the optional updated-character-model layer, built from `patch-A.MPQ` alone and hosted
+# beside the corpus at `/data-hd` — a separate tree so a player with the option off downloads none
+# of it.
+#
+# The glob is deliberate and the trailing slash is what makes it safe: a container rebuild is
+# routinely done beside the live one (`web/packs-hd.premultiplied/` is the pre-2026-09-08 layer,
+# kept while the un-premultiplied one was verified), and each of those is another 1-3 GiB that an
+# ordinary `git add -A` would try to commit. Matching directories only leaves `web/packs.js` —
+# a real, tracked source file — alone.
+/web/packs*/
+/web/site/
+
+
+# Claude Code: share the project hooks + settings + slash commands + skills, ignore per-machine state.
+/.claude/*
+!/.claude/settings.json
+!/.claude/hooks/
+!/.claude/commands/
+!/.claude/skills/
+/.claude/settings.local.json
 
 # Python bytecode from the `scripts/` tooling.
 __pycache__/

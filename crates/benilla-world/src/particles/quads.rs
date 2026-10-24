@@ -6,7 +6,7 @@ use benilla_assets::coords::wow_to_bevy;
 use benilla_formats::ParticleEmitterDef;
 use bevy::prelude::*;
 
-use super::buffer::EffectVertex;
+use super::buffer::{EffectVertex, GpuParticle, ParticlePool};
 use super::{rand01, Particle};
 
 /// The 128-entry twinkle noise table, uniform in [0, 1) like the reference's `0xcf58f0` (filled at
@@ -19,6 +19,12 @@ static TWINKLE_LUT: std::sync::LazyLock<[f32; 128]> = std::sync::LazyLock::new(|
     }
     t
 });
+
+/// Fill the twinkle table on the calling thread: the expansion reads it from the compute pool,
+/// and a worker filling a lazy static while the browser's page thread asks traps the page.
+pub(super) fn warm_tables() {
+    let _ = TWINKLE_LUT[0];
+}
 
 /// Index `(floor(clamp(twinkleSpeed · age, 0, 255)) + phase) & 0x7f` (`0x7b2a86`); the reference's
 /// phase is a pointer hash, ours a spawn-time random ([`Particle::phase`]).
@@ -67,6 +73,35 @@ pub(super) fn particle_center(frame: &DrawFrame, placement: &Transform, p: &Part
     } else {
         // Model mode (`0x10` set): the live emitter matrix, re-applied every frame (`0x7b3efb`).
         placement.transform_point(wow_to_bevy([p.pos.x, p.pos.y, p.pos.z]))
+    }
+}
+
+/// fork: fsr (FORK.md) — each quad vertex's world displacement since the last world frame, in
+/// [`expand_quads`]'s vertex order: every quad a particle draws moves with its centre. A world-mode
+/// particle moved by its world velocity over `dt`; a model-mode one also rides the emitter from
+/// `prev_placement` to `placement`.
+pub(super) fn push_particle_motion(
+    def: &ParticleEmitterDef,
+    particles: &[Particle],
+    frame: &DrawFrame,
+    placement: &Transform,
+    prev_placement: &Transform,
+    dt: f32,
+    out: &mut Vec<[f32; 3]>,
+) {
+    let per = 4 * (usize::from(def.head_tail != 1) + usize::from(def.head_tail >= 1));
+    for p in particles {
+        if draw_gated(def, p) {
+            continue;
+        }
+        let delta = if frame.anchored {
+            frame.ride.dir_to_world(p.vel) * dt
+        } else {
+            let prev = p.pos - p.vel * dt;
+            placement.transform_point(wow_to_bevy(p.pos.to_array()))
+                - prev_placement.transform_point(wow_to_bevy(prev.to_array()))
+        };
+        out.extend(std::iter::repeat_n(delta.to_array(), per));
     }
 }
 
@@ -232,6 +267,125 @@ pub(super) fn expand_quads(
                 );
             }
         }
+    }
+}
+
+/// fork: perf — the quads one particle of `def` draws on the GPU: a head, a tail, or both.
+pub(super) fn quads_per_particle(def: &ParticleEmitterDef) -> u32 {
+    u32::from(def.head_tail != 1) + u32::from(def.head_tail >= 1)
+}
+
+/// fork: perf — one pool's [`ParticlePool`] record, the inputs [`expand_quads`] reads of the pool
+/// and its frame; `None` for a pool the vertex stage cannot draw (an atlas whose columns are not a
+/// power of two, which the CPU writer's cell arithmetic also assumes).
+pub(super) fn pool_record(
+    def: &ParticleEmitterDef,
+    frame: &DrawFrame,
+    placement: &Transform,
+    cam: &CamBasis,
+    committed: Option<[f32; 3]>,
+) -> Option<ParticlePool> {
+    if def.tile_cols == 0 || !def.tile_cols.is_power_of_two() || def.tile_rows == 0 {
+        return None;
+    }
+    // The stored frame to the world: [`particle_center`]'s two arms as one affine, whose linear
+    // part also turns a velocity as the tail's `vel_world` does.
+    let center = if frame.anchored {
+        frame
+            .ride
+            .matrix()
+            .unwrap_or(bevy::math::Affine3A::IDENTITY)
+    } else {
+        let w = bevy::math::Mat3A::from_cols(
+            wow_to_bevy([1.0, 0.0, 0.0]).into(),
+            wow_to_bevy([0.0, 1.0, 0.0]).into(),
+            wow_to_bevy([0.0, 0.0, 1.0]).into(),
+        );
+        let m = bevy::math::Affine3A::from_scale_rotation_translation(
+            placement.scale,
+            placement.rotation,
+            placement.translation,
+        );
+        bevy::math::Affine3A {
+            matrix3: m.matrix3 * w,
+            translation: m.translation,
+        }
+    };
+    let row = |i: usize| {
+        let m = center.matrix3;
+        Vec4::new(m.x_axis[i], m.y_axis[i], m.z_axis[i], center.translation[i])
+    };
+    let scale = if def.scale_size_by_instance() {
+        placement.scale.x.max(1e-4)
+    } else {
+        frame.size_scale
+    };
+    let (plane_r, plane_u) = if def.xy_quad() {
+        let s = placement.scale.x.max(1e-4);
+        (
+            placement.rotation * (wow_to_bevy([0.0, 1.0, 0.0]) * s),
+            placement.rotation * (wow_to_bevy([-1.0, 0.0, 0.0]) * s),
+        )
+    } else {
+        (Vec3::ZERO, Vec3::ZERO)
+    };
+    let ol = &def.over_life;
+    let ramp = |r: &[benilla_formats::CellRamp; 2]| {
+        let (b0, s0) = r[0].base_span();
+        let (b1, s1) = r[1].base_span();
+        Vec4::new(b0 as f32, s0 as f32, b1 as f32, s1 as f32)
+    };
+    let bits = u32::from(def.head_tail.min(3))
+        | u32::from(def.xy_quad()) << 2
+        | u32::from(def.tail_clamps_to_age()) << 3
+        | u32::from(committed.is_some()) << 4;
+    let light = Vec3::from(committed.unwrap_or([1.0; 3]));
+    Some(ParticlePool {
+        center_x: row(0),
+        center_y: row(1),
+        center_z: row(2),
+        cam_right: cam.right.extend(scale),
+        cam_up: cam.up.extend(frame.alpha),
+        plane_r: plane_r.extend(def.spin),
+        plane_u: plane_u.extend(def.tail_time),
+        color0: Vec4::from_array(ol.color[0]),
+        color1: Vec4::from_array(ol.color[1]),
+        color2: Vec4::from_array(ol.color[2]),
+        scale: Vec4::new(ol.scale[0], ol.scale[1], ol.scale[2], ol.mid),
+        head: ramp(&ol.head_cells),
+        tail: ramp(&ol.tail_cells),
+        atlas: Vec4::new(
+            ol.repeat[0],
+            ol.repeat[1],
+            f32::from(def.tile_cols),
+            f32::from(def.tile_rows),
+        ),
+        mode: Vec4::new(bits as f32, light.x, light.y, light.z),
+        spare: Vec4::ZERO,
+    })
+}
+
+/// fork: perf — pack `particles` for the GPU expansion: the twinkle gate drops a particle here
+/// ([`draw_gated`]), and its size multiplier rides the instance, so the vertex stage needs no
+/// table.
+pub(super) fn pack_gpu_particles(
+    def: &ParticleEmitterDef,
+    particles: &[Particle],
+    out: &mut Vec<GpuParticle>,
+) {
+    for p in particles {
+        let noise = twinkle_noise(def.twinkle_speed, p.age, p.phase);
+        if def.twinkle_percent < 1.0 && noise > def.twinkle_percent {
+            continue;
+        }
+        out.push(GpuParticle {
+            pos: p.pos.to_array(),
+            age: p.age,
+            vel: p.vel.to_array(),
+            u_age: (p.age / p.life).clamp(0.0, 1.0),
+            twinkle: def.twinkle(noise),
+            phase: p.phase,
+        });
     }
 }
 

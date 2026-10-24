@@ -73,8 +73,13 @@ const INSTRUMENT_ROOTS: &[&str] = &["art_scope", "debug_panel", "perf", "pipe_wa
 const INSTRUMENT_CONSUMERS: &[&str] = &["capture", "crash", "debug_panel", "perf", "pipe_warm"];
 
 /// Is this file one of the app-side instruments?
+///
+/// The separator set carries the BACKSLASH too: `rel` comes off `Path::display`, so on
+/// Windows every instrument file reads `perf\trace.rs` and matched nothing — which
+/// silently moved the whole instrument bucket into the gated count and made the number this
+/// test prints platform-dependent.
 fn is_instrument_consumer(rel: &str) -> bool {
-    let root = rel.split(['/', '.']).next().unwrap_or("");
+    let root = rel.split(['/', '\\', '.']).next().unwrap_or("");
     INSTRUMENT_CONSUMERS.contains(&root)
 }
 
@@ -99,6 +104,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("doodad_anim::MatAnimTick", "record"),
     ("doodad_anim::TintLoop", "record"),
     ("doodad_anim::UvLoops", "record"),
+    ("doodad_anim::is_ship_prop", "wall"),
     ("doodad_anim::clocked_twin", "record"),
     ("doodad_anim::register_entity_uv", "record"),
     ("doodad_anim::register_fx_uv", "record"),
@@ -109,18 +115,43 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("ffx_glow::FfxGlow", "record"),
     ("ffx_glow::FfxSwitches", "record"),
     ("ffx_glow::GlueFfx", "record"),
+    ("ffx_glow::ffx_transparent_pass_2d", "wall"),
     ("final_pass::FinalPassTarget", "record"),
     ("frame_pace::FrameStep", "record"),
+    ("fsr::FgBlocked", "wall"),
+    ("fsr::FrameGeneration", "wall"),
+    ("fsr::FsrView", "wall"),
+    ("fsr::PresentsHeldFrames", "wall"),
+    ("fsr::RCAS_SHARPNESS_DEFAULT", "wall"),
+    ("fsr::RcasSharpness", "wall"),
+    ("fsr::cadence::FgCadence", "wall"),
+    ("horizon::Horizon", "wall"),
+    ("horizon::HorizonCulling", "wall"),
+    ("horizon::HorizonSet", "wall"),
+    ("horizon::LOD_DIST_FALLBACK", "wall"),
+    ("horizon::LOD_DIST_RANGE", "wall"),
+    ("horizon::world_box", "wall"),
     ("instance_tint::InstanceTintMirrors", "record"),
     ("instance_tint::InstanceTints", "record"),
     ("interact::PickMesh", "record"),
+    ("interact::PosedPickScratch", "wall"),
     ("interact::WorldObject", "record"),
     ("interact::WorldPick", "record"),
     ("interact::cast_pick_ray", "record"),
     ("interior::NodeAmbient", "record"),
+    ("launch_env::seed", "wall"),
+    ("launch_env::set_live_reader", "wall"),
+    ("lighting::LavaLightGain", "wall"),
     ("lighting::LightBlob", "record"),
+    ("lighting::LightOwner", "wall"),
+    ("lighting::PlacedLight", "wall"),
+    ("lighting::SpellFxLight", "wall"),
+    ("lighting::WorldPointLight", "wall"),
     ("lighting::WorldTime", "record"),
     ("lighting::WowLighting", "record"),
+    ("lighting::flame_flicker", "wall"),
+    ("liquid::UNMIRRORED_RENDER_LAYER", "wall"),
+    ("liquid::WaterDetail", "wall"),
     ("mac_quit::MacQuitPlugin", "record"),
     ("mat_anim_table::MatAnimMirrors", "record"),
     ("mat_anim_table::MatAnimTable", "record"),
@@ -136,15 +167,27 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("model_render::M2BatchMaterials", "record"),
     ("model_render::ModelKind", "record"),
     ("model_render::ModelPart", "record"),
+    ("model_render::ShadowOccluder", "wall"),
     ("model_render::lazy::realize", "record"),
+    ("modern::LightingModel", "wall"),
+    ("modern::LightingQuality", "wall"),
+    ("modern::LightingSettings", "wall"),
+    ("modern::frame_is_modern", "wall"),
+    ("modern::lights::FixtureRadius", "wall"),
+    ("modern::lights::SynthesizedLight", "wall"),
+    ("modern::lights::emissive::combine", "wall"),
+    ("modern::lights::emissive::glow_of_geometry", "wall"),
+    ("modern::look::AutoExposure", "wall"),
     ("modkeys::SyntheticHold", "wall"),
     ("particles::ParticleTuning", "record"),
     ("particles::ViewThrottled", "record"),
+    ("particles::buffer::EffectMotion", "wall"),
     ("particles::render::EFFECT_DRAW_STATS", "record"),
     ("particles::spawn_emitter", "record"),
     ("ride_frame::RideFrame", "record"),
     ("rig_anim::AnimParked", "wall"),
     ("rig_anim::GlobalSeqDrive", "wall"),
+    ("rig_anim::PoseEveryFrame", "wall"),
     ("rig_anim::PosePost", "wall"),
     ("rig_anim::RigAnchor", "wall"),
     ("rig_anim::RigFrame", "wall"),
@@ -156,8 +199,14 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("schedule::WorldLive", "record"),
     ("schedule::WorldStage", "record"),
     ("sky_order::Rung", "wall"),
+    ("ssilvb::IndirectLighting", "wall"),
+    ("ssilvb::SSILVB_RANGE", "wall"),
     ("sun::SunGlare", "record"),
+    ("system_profile::install", "wall"),
+    ("system_profile::plugin", "wall"),
+    ("system_profile::set_web_hooks", "wall"),
     ("terrain_stream::SPAWN_XY", "wall"),
+    ("terrain_stream::StreamActivity", "wall"),
     ("terrain_stream::ViewFocus", "record"),
     ("terrain_stream::WorldLoadProgress", "wall"),
     ("thread_qos::QosClass", "record"),
@@ -172,6 +221,9 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("water_fx::WaterRipples", "record"),
     ("weather::WeatherMessage", "record"),
     ("weather::WeatherState", "record"),
+    ("weather::wetness::RainSurfaces", "wall"),
+    ("wind::FoliageWind", "wall"),
+    ("wind::FoliageWindStrength", "wall"),
     ("wmo_portal::EntityOutdoors", "record"),
     ("wmo_portal::room_pvs_visible", "record"),
     ("world_census::CensusReport", "record"),
@@ -297,6 +349,20 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
 ];
 
 /// The gate on the leak count. Lower it when a leak closes.
+///
+/// This fork's engine work publishes its own doors as `wall` rows in [`PUBLISHED`]: the water and
+/// lighting tier knobs (`liquid::WaterDetail`, `modern::Lighting*`), the indirect-lighting pass
+/// (`ssilvb::*`), the shadow-caster marker, the mirror's render layer, the entity lane's light
+/// derivation (`modern::lights::*`) and the page's launch keys (`launch_env::*`); and FSR's frame
+/// generation (`fsr::*`, `ffx_glow::ffx_transparent_pass_2d`), the light lanes it drives
+/// (`lighting::WorldPointLight`, `SpellFxLight`, `LavaLightGain`, `flame_flicker`), the foliage
+/// wind and wet surfaces' settings, the transport's prop test, the posed pick's scratch and the
+/// effect lane's motion; frame generation's cadence (`fsr::cadence::FgCadence`), the terrain
+/// horizon's culling knob and set (`horizon::*`), and the portrait's every-frame pose
+/// (`rig_anim::PoseEveryFrame`), the placed-light marker the app's lamps carry so the modern
+/// frame can merge near lights (`lighting::PlacedLight`), and the per-system CPU profile
+/// (`system_profile::plugin`, with its subscriber's `install` and the page's `set_web_hooks`). They
+/// gate nothing; only the leaks do. Upstream's own count is 111.
 const LEAK_CEILING: usize = 111;
 
 /// How far under [`LEAK_CEILING`] the count may sit before the test asks for the ceiling to be

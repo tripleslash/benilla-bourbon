@@ -1,4 +1,73 @@
 <div align="center">
+  <h1>benilla-bourbon</h1>
+  <p><b>A fork of <a href="https://github.com/samwhosung/benilla">benilla</a>, the from-scratch World of Warcraft 1.12.1 client in Rust and Bevy, with a modern renderer, Turtle WoW support and a browser build</b></p>
+</div>
+
+## What this fork changes
+
+benilla-bourbon follows upstream benilla's `main` by merge, so everything in upstream's README
+below still holds. On top of it, the fork adds the following. [`FORK.md`](FORK.md) describes each
+change in full, why each vendored library is vendored, and where the fork deviates from 1.12.1.
+
+- **Modern lighting** (optional; Classic stays the reference client): linear HDR, sun shadow
+  cascades, probe GI, froxel volumetrics, SSILVB ambient occlusion, auto-exposure, per-zone
+  looks, point lights and lamps, a night sky with a moon, stars and clouds.
+- **Water and weather:** a port of the Cataclysm client's water and lava with reflections,
+  ripples and shoreline foam; rain, storms, lightning, mist and wet surfaces.
+- **Culling and LOD:** the client's terrain horizon occlusion and chunk LOD, animation LOD, and a
+  90° Hor+ field of view.
+- **Engine:** Bevy 0.19.1 on a vendored wgpu 29.0.4, FSR 3.1.5 upscaling with frame generation
+  and RCAS sharpening, GPU particle pools, and measured CPU and GPU performance work.
+- **Asset loading:** BLP, ADT, M2 and WMO decode off the main thread, streaming ahead of the
+  player under an upload budget, optional updated (HD) and reforged model layers, and a
+  content-addressed container for the game data.
+- **Turtle WoW 1.18.1:** its patch archives and data, realm detection with a live data switch,
+  its races, its GlueXML and its options window.
+- **Browser build (wenilla):** the whole client compiled to WebAssembly with worker threads and a
+  render worker, streaming game data from a static host and reaching the realm through a
+  WebSocket gateway.
+- **Gameplay and UI:** transport riding fixes, retail macro options (`[@mouseover]`,
+  `#showtooltip`), an AddOns options page, a server time offset, fidelity fixes, and an opt-in
+  bundled pfQuest.
+- **Settings:** a Graphics Preset ladder and the fork's own rows in both options windows; every
+  default that differs from 1.12.1 is listed in [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md).
+- **Vendored libraries:** patched copies of wgpu, five Bevy crates and a few support crates under
+  `third_party/`, each with a note saying why.
+
+### Running it in a browser
+
+The browser build needs nothing installed on the player's machine: raw TCP becomes a WebSocket
+through a small host (`wenilla-host`), the MPQ chain becomes a content-addressed container the
+browser streams from any static file host, and the C Lua 5.1 VM is compiled for wasm with the
+wasi-sdk sysroot. WebGPU is required for the world.
+
+```bash
+scripts/web-setup.sh                                   # once: wasm target, Trunk, wasi-sdk (no sudo)
+WASI_SDK=$PWD/tools/wasi-sdk trunk build --release      # → web/dist/
+scripts/stage-packs.sh                                 # → web/site/ (.ps1 and .py twins too)
+scripts/web-build-threads.sh                           # …or the same build WITH worker threads, staged
+
+# once per install: 6.3 GiB of MPQ → a 3.3 GiB container of ~4,700 static objects
+cargo run --release -p benilla-packer --bin benilla-pack --     build --data /path/to/WoW/Data --out web/packs
+# optional, if the install has patch-A.MPQ: the updated character models, own container
+#   (extract -> scripts/upscale-hd-textures.py -> build --replace-from; see web/README.md)
+cargo run --release -p benilla-packer --bin benilla-pack --     build --data /path/to/WoW/Data/patch-A.mpq --out web/packs-hd --replace-from /tmp/hd-char
+cargo run --release -p wenilla-host -- --www web/dist --packs web/packs --packs-hd web/packs-hd
+# open http://127.0.0.1:8090/
+```
+
+That command is the *local* shape: page, game data and net proxy from one process. A run that
+serves files has no login, so keep it on loopback or a private network. Hosted for others it
+splits in two: the static tree (`web/site/`) goes to any static file host, and the same binary
+runs on the realm's machine as a **gateway and nothing else** (`wenilla-host --bind …`, no
+`--www`/`--packs`), relaying `/ws/3724` and `/ws/8085` to realmd and mangosd on loopback.
+[`web/README.md`](web/README.md) has the how and the porting notes.
+
+---
+
+*Everything below is upstream benilla's README.*
+
+<div align="center">
   <h1>benilla</h1>
   <p><b>A complete World of Warcraft 1.12.1 client, written from scratch in Rust and <a href="https://bevy.org">Bevy</a></b></p>
   <p>
@@ -92,9 +161,9 @@ Each release is a tag on the [Releases page](https://github.com/samwhosung/benil
 does the same (`ln -s /path/to/WoW WoW`, or on Windows a junction, which needs no admin rights:
 `New-Item -ItemType Junction -Path WoW -Target C:\path\to\WoW`). The server defaults to
 `localhost:3724`, the stock auth port. Point `WOW_HOST` at another (`WOW_HOST=play.example.com`, or
-`play.example.com:5000` for a remapped port), or set it from the Realmlist button on the login
-screen, which remembers it. Credentials go in at the login screen, or set `WOW_USER` and `WOW_PASS`
-to skip it.
+`play.example.com:5000` for a remapped port), or set the `realmList` CVar in `config.toml`; this
+fork has no Realmlist button, and the browser build takes the address from the site's
+`/config.json`. Credentials go in at the login screen, or set `WOW_USER` and `WOW_PASS` to skip it.
 
 Settings, screenshots and addons live in `benilla-config/` at the repo root: a 1.12 addon goes in
 `benilla-config/AddOns/`. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) has the rest, from the
@@ -103,8 +172,8 @@ player build to the tests.
 ## Contributing
 
 Issues and pull requests are open. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) says where to
-start, what gets in, how a change is judged and what happens to a pull request once it is open.
-Bugs, questions and ideas are welcome on the [Discord](https://discord.gg/wJSJx467G4) too.
+start, what gets in and how a change is judged. Bugs, questions and ideas are welcome on the
+[Discord](https://discord.gg/wJSJx467G4) too.
 
 ---
 

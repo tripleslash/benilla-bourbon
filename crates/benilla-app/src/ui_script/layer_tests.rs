@@ -130,11 +130,13 @@ fn the_layer_loads_after_every_stock_file_and_before_the_addons() {
     let log: Vec<String> = s.eval("return DEFINE_LOG").unwrap();
 
     // The core's last row that defines a global (RaidWarning.xml; ClassTrainerFrameTemplates.xml
-    // declares templates alone), the layer's first file (ScrollTemplates.xml) and last
-    // (FrameXMLFixes.xml is all redefinitions, so ScriptLogFrame.xml), then the addon.
+    // declares templates alone), the layer's first file (ScrollTemplates.xml), our menu
+    // (GameMenuFrame.xml) and the last (FrameXMLFixes.xml is all redefinitions, so
+    // ScriptLogFrame.xml), then the addon.
     let order = [
         "RaidWarningFrame_OnLoad",
         "BenillaScrollBar_Step",
+        "BenillaGameMenuButton_Pending",
         "BenillaScriptLog_Toggle",
         "ZZORDER_SAW_LAYER",
     ];
@@ -158,9 +160,12 @@ fn the_layer_loads_after_every_stock_file_and_before_the_addons() {
             || n.strip_prefix("arg")
                 .is_some_and(|d| d.len() == 1 && d.as_bytes()[0].is_ascii_digit())
     };
-    let late: Vec<&String> = log[at[1]..]
+    // Deviation (this fork): the layer's own ESC menu declares the stock menu's frame names in
+    // place of the stock `GameMenuFrame.xml`, which the core does not load.
+    let fork_menu = |n: &str| n.starts_with("GameMenu");
+    let late: Vec<&String> = log[at[2]..]
         .iter()
-        .filter(|n| stock.contains(n.as_str()) && !dispatch(n))
+        .filter(|n| stock.contains(n.as_str()) && !dispatch(n) && !fork_menu(n))
         .collect();
     assert!(
         late.is_empty(),
@@ -259,6 +264,8 @@ fn the_stock_ui_switch_boots_the_core_without_the_layer() {
     }
     assert!(!s.eval::<bool>("return BenillaOptionsFrame ~= nil").unwrap());
     assert!(!s.eval::<bool>("return ZZORDER_SAW_LAYER").unwrap());
+    // The stock game menu's Options rung, which a stock boot loads in place of the layer's menu.
+    s.run("GameMenuButtonOptions:Click()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -457,7 +464,9 @@ fn the_error_log_collects_off_the_error_handler() {
 
 /// Every global the layer defines takes the `Benilla` prefix (a slash alias its `SLASH_BENILLA_`
 /// form, as `ChatEdit_ParseText` reads it), so no layer name meets a stock or an addon one; a stock
-/// global the layer redefines keeps its name and is not a new definition here.
+/// global the layer redefines keeps its name and is not a new definition here, nor is a 1.12
+/// global the layer builds in place of a stock file the core leaves out (`GameMenuFrame`, whose
+/// `GameMenuFrame.xml` the layer replaces: `manifest::fork_rows`).
 #[test]
 fn every_global_the_layer_defines_takes_the_benilla_prefix() {
     benilla_formats::wow_data_or_skip!();
@@ -475,6 +484,7 @@ fn every_global_the_layer_defines_takes_the_benilla_prefix() {
             || n.strip_prefix("arg")
                 .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
     };
+    let stock = super::surface_gate::reference_globals();
     let unprefixed: Vec<&String> = log[start..end]
         .iter()
         .filter(|n| {
@@ -482,6 +492,7 @@ fn every_global_the_layer_defines_takes_the_benilla_prefix() {
                 || n.starts_with("BENILLA_")
                 || n.starts_with("SLASH_BENILLA_"))
                 && !dispatch(n)
+                && !stock.contains(n.as_str())
         })
         .collect();
     assert!(
@@ -510,17 +521,14 @@ fn log_in(
     let mut app = App::new();
     app.add_systems(Update, crate::vplates::apply_plate_verbs)
         .insert_resource(before)
-        .insert_non_send_resource(s);
-    crate::ui_saved::load_saved_variables(
-        &mut app.world_mut().non_send_resource_mut::<UiScript>(),
-        |_| {},
-    );
+        .insert_non_send(s);
+    crate::ui_saved::load_saved_variables(&mut app.world_mut().non_send_mut::<UiScript>(), |_| {});
     app.update();
     if entry {
         crate::vplates::clear_at_world_entry(app.world_mut());
     }
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .fire_event("PLAYER_ENTERING_WORLD", vec![]);
     app.update();
     app
@@ -533,7 +541,7 @@ fn plates(app: &bevy::app::App) -> (bool, bool) {
 
 fn plate_globals(app: &bevy::app::App) -> (Option<i64>, Option<i64>) {
     app.world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval("return NAMEPLATES_ON, FRIENDNAMEPLATES_ON")
         .unwrap()
 }
@@ -593,7 +601,7 @@ fn with_the_layer_plates_turned_on_stay_on_after_entry_and_reload() {
     assert_eq!(plates(&app), (true, true), "both on after the entry");
 
     // The session's end writes the file, the friendly global included.
-    crate::ui_saved::save(&mut app.world_mut().non_send_resource_mut::<UiScript>());
+    crate::ui_saved::save(&mut app.world_mut().non_send_mut::<UiScript>());
     let file = std::fs::read_to_string(home.join("saved-variables.lua")).unwrap();
     for line in ["NAMEPLATES_ON = 1", "FRIENDNAMEPLATES_ON = 1"] {
         assert!(file.contains(line), "{line} saved: {file}");

@@ -92,18 +92,70 @@ fn quoted_call_argument(line: &str) -> Option<String> {
     Some(rest.split('"').next().unwrap_or_default().to_string())
 }
 
+/// The name a macro binds: a `#show` argument in the cast line's place (this fork), else
+/// [`cast_name`]'s.
+fn bound_name(aliases: &[String], body: &str) -> Option<(CastArm, String)> {
+    let shown = crate::script::show_directive(body)
+        .and_then(|s| s.arg.filter(|_| !s.is_none()))
+        .map(|arg| (CastArm::Slash, arg.to_string()));
+    shown.or_else(|| cast_name(aliases, body))
+}
+
+/// Whether a body reads retail macro options, whose choice moves with the world (this fork), so
+/// its binding is derived again at every pass.
+pub fn reads_options(body: &str) -> bool {
+    body.contains('[') || body.contains(';')
+}
+
+/// fork: what [`derive`] asks of a name with retail macro options: the value the clause that
+/// holds selects, `None` with none holding.
+pub(crate) type Options<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// fork: the options [`derive`] reads for one body, evaluated now, before a verb borrows the
+/// model the evaluator's unit verbs read: the value the clause that holds selects, `None` with
+/// none holding.
+pub(crate) fn options_now(
+    lua: &mlua::Lua,
+    aliases: &[String],
+    body: &str,
+) -> impl Fn(&str) -> Option<String> {
+    let answer = bound_name(aliases, body)
+        .filter(|(_, name)| crate::script::macro_has_options(name))
+        .and_then(|(_, name)| {
+            super::super::macro_options::evaluate(lua, &name)
+                .ok()
+                .flatten()
+        })
+        .map(|(value, _)| value);
+    move |_| answer.clone()
+}
+
 /// The macro's cast, derived again (`0x4efe00`) from `was`: [`cast_name`] resolved as
 /// `CastSpellByName` resolves a name ([`resolve_spell_in_books`]), so the cooldown swirl and the
 /// press agree on the rank. A match writes the book it came from; a miss leaves the selector.
+///
+/// Deviation (this fork): a `#show` argument names the spell in the cast line's place, and a name
+/// with retail macro options binds the value `options` selects as the world stands (the VM's
+/// evaluator), nothing when no clause holds. A plain name binds as in 1.12.
 pub(crate) fn derive(
     aliases: &[String],
     body: &str,
     player: &SpellBookState,
     pet: &PetBookState,
     was: MacroBinding,
+    options: Options<'_>,
 ) -> MacroBinding {
-    let Some((arm, name)) = cast_name(aliases, body) else {
-        return MacroBinding { spell: 0, ..was };
+    let none = MacroBinding { spell: 0, ..was };
+    let Some((arm, name)) = bound_name(aliases, body) else {
+        return none;
+    };
+    let name = if crate::script::macro_has_options(&name) {
+        match options(&name) {
+            Some(value) => value.strip_prefix('!').unwrap_or(&value).trim().to_string(),
+            None => return none,
+        }
+    } else {
+        name
     };
     match (resolve_spell_in_books(player, pet, &name), arm) {
         (Some(s), _) => MacroBinding {
@@ -246,6 +298,7 @@ mod tests {
             book,
             &PetBookState::default(),
             MacroBinding::default(),
+            &|_| None,
         )
         .spell
     }
@@ -308,6 +361,53 @@ mod tests {
         assert_eq!(bound(&t, "/cast Fireball (Rank 1)", &book), -1);
     }
 
+    /// This fork: `#show` names the bound spell, `#show none` leaves the cast line's, and a cast
+    /// with retail options binds what the evaluator selects, nothing when no clause holds.
+    #[test]
+    fn show_lines_and_options_choose_the_bound_spell() {
+        let book = SpellBookState {
+            tabs: Vec::new(),
+            slots: vec![named(133, "Fireball"), named(116, "Frostbolt")],
+        };
+        let t = aliases();
+        let with = |body: &str, options: &dyn Fn(&str) -> Option<String>| {
+            derive(
+                &t,
+                body,
+                &book,
+                &PetBookState::default(),
+                MacroBinding::default(),
+                options,
+            )
+            .spell
+        };
+        let none = |_: &str| None;
+        let last = |s: &str| s.rsplit(']').next().map(|v| v.trim().to_string());
+        let hop = "#showtooltip
+/cast [@mouseover,help,nodead][] Frostbolt";
+        assert_eq!(with(hop, &last), 116);
+        assert_eq!(with(hop, &none), 0);
+        assert_eq!(
+            with(
+                "#show Fireball
+/cast Frostbolt",
+                &none
+            ),
+            133
+        );
+        assert_eq!(
+            with(
+                "#show none
+/cast Frostbolt",
+                &none
+            ),
+            116
+        );
+        assert_eq!(with("/cast [] !Fireball", &last), 133);
+        assert!(reads_options(hop));
+        assert!(!reads_options("/cast Fireball"));
+    }
+
     /// An unknown `/cast` is -1 (`0x4eff48`), which the bar greys; no cast line, or an unknown
     /// `CastSpellByName(`, is 0 (`0x4eff81`).
     #[test]
@@ -346,7 +446,8 @@ mod tests {
             slots: vec![named(6358, "Seduction"), named(19647, "Spell Lock")],
         };
         let at = |spell, pet_book| MacroBinding { spell, pet_book };
-        let derived = |body: &str| derive(&t, body, &player, &pet, MacroBinding::default());
+        let derived =
+            |body: &str| derive(&t, body, &player, &pet, MacroBinding::default(), &|_| None);
         assert_eq!(derived("/cast Spell Lock"), at(19647, true));
         assert_eq!(
             derived(r#"/script CastSpellByName("Spell Lock")"#),
@@ -367,6 +468,7 @@ mod tests {
                 &player,
                 &PetBookState::default(),
                 was,
+                &|_| None,
             )
         };
         assert_eq!(gone(MacroBinding::default()).spell, -1);
@@ -375,7 +477,7 @@ mod tests {
         assert!(gone(at(19647, true)).pet_book);
         assert!(!gone(MacroBinding::default()).pet_book);
         assert_eq!(
-            derive(&t, "/say hi", &player, &pet, at(19647, true)),
+            derive(&t, "/say hi", &player, &pet, at(19647, true), &|_| None),
             at(0, true)
         );
     }

@@ -12,8 +12,9 @@ use bevy::prelude::*;
 use crate::view::WorldCamera;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::materials::WowModelMaterial;
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::LockRecover;
-use benilla_assets::{AssetSet, WorldAssets};
+use benilla_assets::WorldAssets;
 use benilla_formats::{
     load_ground_effect_catalog, load_m2_mesh, scatter_ground_doodads, ChunkMesh,
     GroundDoodadPlacement, GroundEffectCatalog, ModelBlend, RenderSubmesh, SHADOW_MAP_SIZE,
@@ -27,7 +28,7 @@ impl Plugin for ClutterPlugin {
         // Inserted at build, not in `setup_clutter`: `benilla-app`'s Startup CVar loader applies a
         // saved `WorldDetail` onto it.
         app.init_resource::<ClutterConfig>()
-            .add_systems(Startup, setup_clutter.after(AssetSet::Open))
+            .add_data_loaders(setup_clutter)
             .add_systems(
                 Update,
                 (
@@ -110,6 +111,11 @@ fn setup_clutter(mut commands: Commands, world_assets: Option<ResMut<WorldAssets
     }
 }
 
+/// fork (perf): one built clutter mesh, so the water mirror can leave the tufts out
+/// (`liquid::reflect::thin_mirror_view`).
+#[derive(Component)]
+pub(crate) struct ClutterMesh;
+
 /// The `effectId → (models, density)` catalog; absent, and no clutter, when the DBCs fail to load.
 #[derive(Resource)]
 pub(crate) struct GroundClutter {
@@ -121,7 +127,10 @@ pub(crate) const DETAIL_DOODAD_ALPHA_REF: f32 = 128.0 / 255.0;
 
 /// The reference's hardcoded detail-doodad draw distance, 70 yd (`[0x867958]`); clutter fades out
 /// over its last quarter.
-pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 70.0;
+///
+/// fork: modern lighting — doubled to 140 yd (the director's call, 2026-09-17): with the long-range
+/// fog the ground past 70 yd reads bare.
+pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 140.0;
 
 /// Ground-clutter tunables. `density` scales the reference's 16 cells per chunk (`frillDensity`),
 /// and a change re-scatters loaded tiles, as the 1.12 setter rebuilds its chunks. Seeded from
@@ -155,7 +164,13 @@ impl Default for ClutterConfig {
             // Deviation: ×2, `frillDensity` 32 (the panel's Medium), because a fresh install's
             // `hwDetect` value (24 from `VideoHardware.dbc`, 8 on the weakest parts) is on no panel
             // stop, and Medium is the nearest stop no sparser.
-            density: env("WOW_CLUTTER_DENSITY").unwrap_or(2.0).max(0.0),
+            //
+            // **Back to x3/High on 2026-09-08, the director's call.** The paragraph above is
+            // the 1649 reasoning and it still stands as *analysis*; what it does not settle is
+            // which stop a fresh client should start on, and that is a look call. It is taken here
+            // rather than left to the row because this literal and the CVar's registered default
+            // are the same fact spelled twice, welded by `cvars::tests`.
+            density: env("WOW_CLUTTER_DENSITY").unwrap_or(3.0).max(0.0),
             alpha_ref: env("WOW_CLUTTER_ALPHA")
                 .unwrap_or(DETAIL_DOODAD_ALPHA_REF)
                 .clamp(0.0, 1.0),
@@ -263,7 +278,12 @@ pub(crate) fn scatter_tile_clutter(
     for chunk in chunks {
         let mut by_model: HashMap<String, Vec<ShadedPlacement>> = HashMap::new();
         for placement in scatter_ground_doodads(chunk, catalog, tile_x, tile_y, density) {
-            let tint = mcsh_tint_at(chunk, placement.position);
+            // fork: modern lighting (FORK.md, P3) — clutter drops the baked MCSH tint.
+            let tint = if crate::modern::frame_is_modern() {
+                MCSH_LIT
+            } else {
+                mcsh_tint_at(chunk, placement.position)
+            };
             let ground_normal =
                 wow_to_bevy(terrain_normal_at(chunk, placement.position)).to_array();
             by_model
@@ -320,10 +340,24 @@ fn build_chunk_clutter(
         if subs.is_empty() {
             continue;
         }
+        // fork: foliage wind. Source M2 Z is up. The bend weight is the tuft's own height,
+        // normalised over ALL of the model's submeshes (so a stem and its head bend as one body),
+        // never texture V. UV_1 is free on clutter and carries height + per-tuft phase.
+        let (min_z, max_z) = subs
+            .iter()
+            .flat_map(|sub| sub.positions.iter())
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| {
+                (lo.min(p[2]), hi.max(p[2]))
+            });
+        let height_span = (max_z - min_z).max(1.0e-4);
+        // A rock, bones or a shell carries no bend weight: the wind and the parting field both
+        // scale by it.
+        let bends = !rigid_detail(model_path);
         for sub in subs.iter() {
             let vcount = sub.positions.len() * placements.len();
             let mut positions = Vec::with_capacity(vcount);
             let mut uvs = Vec::with_capacity(vcount);
+            let mut wind = Vec::with_capacity(vcount);
             // The ground normal under each tuft, never the blade's own M2 normal.
             let mut normals = Vec::with_capacity(vcount);
             let mut colors = Vec::with_capacity(vcount);
@@ -335,6 +369,7 @@ fn build_chunk_clutter(
                 let rot = Quat::from_rotation_y(d.yaw);
                 // The reference's random per-tuft scale, in [0.9, 1.1].
                 let inst_scale = d.scale;
+                let phase = tuft_phase(origin);
                 // One tint per tuft. The reference makes the grey the lit material (colour material
                 // on ambient and diffuse, `0x59cfec`), `clamp(grey × light) × texture`; the shader
                 // multiplies it outside the clamp, `texture × grey × clamp(light)`, so under light
@@ -343,6 +378,12 @@ fn build_chunk_clutter(
                 for (i, p) in sub.positions.iter().enumerate() {
                     positions.push((rot * (wow_to_bevy(*p) * inst_scale) + origin).to_array());
                     uvs.push(sub.uvs[i]);
+                    let bend = if bends {
+                        ((p[2] - min_z) / height_span).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    wind.push([bend, phase]);
                     normals.push(sp.ground_normal);
                     colors.push(tint);
                 }
@@ -354,6 +395,8 @@ fn build_chunk_clutter(
             );
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+            // fork: the wind attributes; a second UV set turns `VERTEX_UVS_B` on for clutter only.
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, wind);
             mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
             // The MCSH tint, under the `VERTEX_COLORS` def the shader's clutter path reads.
             mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
@@ -376,7 +419,12 @@ fn build_chunk_clutter(
             );
             out.push(
                 commands
-                    .spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::IDENTITY))
+                    .spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        Transform::IDENTITY,
+                        ClutterMesh,
+                    ))
                     .id(),
             );
         }
@@ -401,6 +449,25 @@ fn build_chunk_clutter(
         );
     }
     out
+}
+
+/// fork: whether a detail doodad is rigid, by the kind its file name ends in ahead of the number:
+/// rocks (`ElwRoc01`, `DurIRo01`, `ElwynnRock1`), bones (`DslBon03`) and shells (`TifShl02`,
+/// `AzhShel01`). Grass, bushes, flowers and every other kind bend.
+fn rigid_detail(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+    let kind = stem.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_');
+    ["roc", "rock", "iro", "bon", "shl", "shel"]
+        .iter()
+        .any(|k| kind.ends_with(k))
+}
+
+/// fork: a tuft's wind phase from its world-space origin: an identity hash, so rebuild order and
+/// frame timing cannot change a blade's motion.
+fn tuft_phase(origin: Vec3) -> f32 {
+    let h = (origin.x * 0.737 + origin.z * 1.311).sin() * 43_758.547;
+    h.fract().abs() * std::f32::consts::TAU
 }
 
 /// Squared distance from a point to an axis-aligned box, zero inside.
@@ -501,6 +568,20 @@ pub(crate) fn stream_chunk_clutter(
         let Ok((_, mut cc)) = chunks.get_mut(ent) else {
             continue;
         };
+        // A model not yet resident would be read with a synchronous fetch on the browser's frame
+        // thread; `m2_ready` starts its pack's warm and the chunk builds on a later frame.
+        let ready = {
+            let chain = assets.chain.lock_recover();
+            cc.models
+                .iter()
+                .filter(|(path, _)| !geometry.0.contains(path))
+                .fold(true, |all, (path, _)| {
+                    benilla_formats::m2_ready(&chain, path) && all
+                })
+        };
+        if !ready {
+            continue;
+        }
         if d2 < visible_d2 {
             late += 1;
             late_nearest = late_nearest.min(d2.sqrt());
@@ -543,6 +624,31 @@ pub(crate) fn stream_chunk_clutter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rocks_bones_and_shells_are_rigid_detail_and_plants_are_not() {
+        for path in [
+            "World\\NoDXT\\Detail\\ElwRoc01.m2",
+            "World\\NoDXT\\Detail\\DurIRo02.m2",
+            "World\\NoDXT\\Detail\\PlaguelandsRoc01.m2",
+            "World/NoDXT/Detail/DslBon03.mdx",
+            "World\\NoDXT\\Detail\\TifShl02.m2",
+            "World\\NoDXT\\Detail\\AzhShel01.m2",
+            "World\\Azeroth\\Elwynn\\PassiveDoodads\\Detail\\ElwynnRock1\\ElwynnRock1.m2",
+        ] {
+            assert!(rigid_detail(path), "{path}");
+        }
+        for path in [
+            "World\\NoDXT\\Detail\\ElwGra01.m2",
+            "World\\NoDXT\\Detail\\ElwBus02.m2",
+            "World\\NoDXT\\Detail\\DskFlo01.m2",
+            "World\\NoDXT\\Detail\\DurIGr03.m2",
+            "World\\NoDXT\\Detail\\UnwCor04.m2",
+            "World\\NoDXT\\Detail\\WesShe01.m2",
+        ] {
+            assert!(!rigid_detail(path), "{path}");
+        }
+    }
 
     /// The fade ramp `wow_model.wgsl` evaluates, mirrored as a pin on its constants.
     fn ramp(z: f32, far: f32) -> f32 {

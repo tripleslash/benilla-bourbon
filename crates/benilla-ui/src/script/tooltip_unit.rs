@@ -226,7 +226,9 @@ fn render_unit(lua: &Lua, this: &Table, token: &str) -> mlua::Result<bool> {
     let h = frame_handle_of(lua, this)?;
     // A unit is its object, found by guid (`0x52a021`); guid 0 finds none.
     let (unit, viewer, player_level, skinning, me) = {
-        let model = lua.app_data_mut::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let unit = model
             .unit(token)
             .cloned()
@@ -389,7 +391,9 @@ fn keyed_line(lua: &Lua, this: &Table, key: &str, color: [f32; 4]) -> mlua::Resu
 
 /// Remember (or drop) the guid of the unit the tooltip shows, the health watcher's key.
 fn set_subject(lua: &Lua, h: FrameHandle, guid: Option<u64>) {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     if let Some(f) = model.arena.frame_mut(h) {
         if let KindState::Tooltip(t) = &mut f.kind_state {
             t.unit_guid = guid;
@@ -403,7 +407,9 @@ fn set_subject(lua: &Lua, h: FrameHandle, guid: Option<u64>) {
 /// `HealthBar_OnValueChanged` colours the fill. Neither shows it. Returns the bar.
 fn seed_bar(lua: &Lua, h: FrameHandle, u: &UnitState) -> Option<FrameHandle> {
     let (bar, fires) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let bar = super::tooltip::status_bar(&model, h)?;
         if let Some(KindState::Tooltip(t)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
             t.unit_health = u.health;
@@ -425,7 +431,9 @@ fn seed_bar(lua: &Lua, h: FrameHandle, u: &UnitState) -> Option<FrameHandle> {
 /// when the health differs from the bytes it last saw (`0x4655bb`), not for a maximum alone.
 pub(super) fn on_unit_push(lua: &Lua, token: &str) {
     let (unit, hits): (UnitState, Vec<FrameHandle>) = {
-        let model = lua.app_data_mut::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let Some(unit) = model.pushed_unit(token).filter(|u| u.exists && u.guid != 0) else {
             return;
         };
@@ -508,7 +516,9 @@ impl super::UiScript {
             // `0x529010` writes (`0x52aa92`-`0x52aaaa`); `GameTooltip_OnHide` restores the
             // default.
             {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 super::backdrop::set_color(&mut model, h, false, OBJECT_BACKDROP);
             }
             append_line(lua, this, (name.to_string(), GOLD), None, false)?;
@@ -612,7 +622,7 @@ impl super::UiScript {
             self.push_error(e);
             return false;
         }
-        self.model_mut().minimap_blip = Some(text.to_string());
+        set_field!(self, minimap_blip, Some(text.to_string()));
         show_or_hide_empty(&self.lua, h);
         true
     }

@@ -114,7 +114,9 @@ impl UiScript {
         // lookup honours an `_G` `__index` (`lua_gettable` at `0x704373`), which may call any verb.
         let mut fonts: VecDeque<Option<String>> = {
             let built = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // No WorldFrame, no bubbles, and no lookups for them.
                 if model.arena.lookup("WorldFrame").is_none() {
                     return;
@@ -126,7 +128,9 @@ impl UiScript {
                 .collect()
         };
         let visibility = {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             // No WorldFrame (no interface loaded), no bubbles: no addon walks an invented root.
             let Some(world) = model.arena.lookup("WorldFrame") else {
                 return;
@@ -142,7 +146,9 @@ impl UiScript {
     /// How many bubble widgets the pool holds.
     pub fn chat_bubble_pool_len(&self) -> usize {
         let lua = self.lua();
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.chat_bubbles.bubbles.len()
     }
 }

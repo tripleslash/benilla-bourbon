@@ -161,6 +161,44 @@ fn zero_width_fontstring_autosizes_to_its_line() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
+/// A button's label is measured in the font it is drawn in: `Button:SetFont`'s, on each axis the
+/// label did not set itself. Measured in its own font, the label's box and its text disagreed by
+/// a pixel and the draw cut the text short.
+#[test]
+fn a_button_label_is_measured_in_the_buttons_font() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local b = CreateFrame("Button", "FontedButton")
+        b:SetPoint("CENTER", 0, 0); b:SetWidth(120); b:SetHeight(22)
+        local label = b:CreateFontString("FontedButtonText", "ARTWORK")
+        label:SetPoint("CENTER", 0, 0)
+        b:SetFontString(label)
+        b:SetText("Cancel")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    // With no font on the label or the button, the label measures 0 and asks the font engine
+    // nothing (`0x772bd0`).
+    let before = s.fontstrings_needing_measure();
+    assert!(before.iter().all(|r| r.text != "Cancel"), "no font, no ask");
+    s.run(r#"FontedButton:SetFont("Fonts\\ARIALN.TTF", 10, "OUTLINE")"#)
+        .unwrap();
+    s.resolve();
+    let after = s.fontstrings_needing_measure();
+    let r = after
+        .iter()
+        .find(|r| r.text == "Cancel")
+        .expect("measured under the drawn font");
+    // The label set no font of its own, so every axis is the button's.
+    assert_eq!(r.height, Some(10.0));
+    assert_eq!(r.font.as_deref(), Some("Fonts\\ARIALN.TTF"));
+    assert_eq!(r.outline, crate::script::Outline::Normal);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 /// A scaled frame's quads carry its effective scale for the glyph raster (layout already scaled
 /// the rect), and the measure request and its cache key carry it too.
 #[test]

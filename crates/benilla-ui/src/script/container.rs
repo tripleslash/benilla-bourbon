@@ -8,7 +8,7 @@ use mlua::{Lua, MultiValue, Value};
 use super::binding_abi::{self, flag, number_arg};
 use super::cursor::{self, CursorItem, CursorPayload};
 use super::protected::{self, Tag};
-use super::{ItemCall, Model};
+use super::ItemCall;
 
 /// The petition lines an item tooltip prints under the name (`0x854d7c..0x854dd0`): the title and
 /// the creator, keyed `GUILD_CHARTER_*` for a charter, else `PETITION_*`, then the signature
@@ -363,24 +363,28 @@ impl super::UiScript {
         &mut self,
         cooldowns: std::collections::HashMap<usize, (i64, u32, bool)>,
     ) {
-        self.model_mut().worn_cooldowns = cooldowns
-            .into_iter()
-            .map(|(slot, (start_ms, duration_ms, enabled))| {
-                (
-                    slot,
+        set_field!(
+            self,
+            worn_cooldowns,
+            cooldowns
+                .into_iter()
+                .map(|(slot, (start_ms, duration_ms, enabled))| {
                     (
-                        start_ms as f64 / 1000.0,
-                        f64::from(duration_ms) / 1000.0,
-                        enabled,
-                    ),
-                )
-            })
-            .collect();
+                        slot,
+                        (
+                            start_ms as f64 / 1000.0,
+                            f64::from(duration_ms) / 1000.0,
+                            enabled,
+                        ),
+                    )
+                })
+                .collect()
+        );
     }
 
     /// Push `HasKey()`'s answer: whether the player owns a `BagFamily` key item anywhere.
     pub fn set_has_key(&mut self, has_key: bool) {
-        self.model_mut().has_key = has_key;
+        set_field!(self, has_key, has_key);
     }
 
     /// Take the `UseContainerItem` calls out of the call stream, as `(bag, slot)`.
@@ -394,7 +398,7 @@ impl super::UiScript {
     /// Drain the item entries whose record a cooldown query found missing since the last call, each
     /// asked with the callback `0x6e2f70`.
     pub fn take_cooldown_record_asks(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().cooldown_record_asks)
+        drain_field!(self, cooldown_record_asks)
     }
 
     /// Arm a gift wrap with the paper at `(bag, slot)`, as `0x5edea0` does: the paper locks, the
@@ -908,7 +912,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 t.wrapping_add(60)
             };
             let path = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // A shut bank bag is no bag (`0x4fa5d8` into `0x4f93e0`): the portrait stays clear.
                 usize::try_from(inv)
                     .ok()
@@ -916,7 +922,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .and_then(|slot| model.inv_slot("player", slot))
                     .and_then(|v| v.icon.clone())
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             // An empty slot's `None` is the answer: the reference clears first, then sets.
             let set = path.map_or(super::texel::TexSet::None, super::texel::TexSet::Portrait);
             model.set_texel(rh, set);
@@ -942,7 +950,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if !(-1..=10).contains(&bag) {
                 return Ok(0);
             }
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.bag(bag).map_or(0, |c| c.num_slots))
         })?,
     )?;
@@ -960,7 +970,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // (`0x4fa6f0`), the bag item's name for 1-10, nil for the bank, the keyring and the
             // rest (`0x4fa712`, `0x4fa717`).
             let name = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 match model.bag(bag) {
                     Some(_) if bag == 0 => {
                         Some(super::glue_core::global_text(lua, "BACKPACK_TOOLTIP"))
@@ -991,7 +1003,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 slot,
                 "Usage: GetContainerItemCooldown(index, slot)",
             )?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let slot = key.and_then(|k| model.bag_slot(k.0, k.1));
             let held = slot.is_some();
             // The query asks a missing record with the callback `0x6e2f70` (`0x6e2efb`).
@@ -1014,7 +1028,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (bag, slot): (Value, Value)| {
             let key = container_key(lua, bag, slot, "Usage: GetContainerItemLink(index, slot)")?;
             let link = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 key.and_then(|(bag, slot)| {
                     let s = model.bag_slot(bag, slot)?;
                     s.link.clone().or_else(|| s.uncached_link.clone())
@@ -1046,7 +1062,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(mlua::MultiValue::new());
             };
             let (info, locked) = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let info = model.bag_slot(bag, slot).cloned();
                 let locked = info
                     .as_ref()
@@ -1099,7 +1117,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let on_self = super::binding_abi::bool_or_default(rest.front(), false);
             // An unresolved bag ends the verb before its clear (`0x4fa156`, `0x4fa15d`).
             if !lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .bag_resolves(bag)
             {
@@ -1146,7 +1164,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // An unresolved bag ends the verb before anything is read (`0x4f9bb6`), and so does
             // a vault slot with no banker open (`0x4f9bc6`-`0x4f9bf0`), a held item included.
             {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 if !model.bag_resolves(bag) || model.vault_shut(bag) {
                     return Ok(());
                 }
@@ -1184,7 +1204,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let slot =
                 binding_abi::index_arg32(lua, slot, "Usage: ShowContainerSellCursor(index, slot)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let occupied = model
                 .bag_slot(bag, slot)
                 .is_some_and(|s| !cursor::item_locked(&model, s.guid));
@@ -1201,7 +1223,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "ShowInspectCursor",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.ui_cursor = Some(UiCursorMode::Inspect);
             model.ui_cursor_dirty = true;
             Ok(())
@@ -1212,7 +1236,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "HasKey",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(if model.has_key {
                 Value::Integer(1)
             } else {
@@ -1232,7 +1258,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, args: MultiValue| {
             let first = args.into_iter().next();
             if matches!(first, Some(Value::Nil)) {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.ui_cursor = None;
                 model.ui_cursor_dirty = true;
                 return Ok(MultiValue::new());
@@ -1252,7 +1280,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 ("ATTACK_ERROR_CURSOR", UiCursorMode::UnableAttack),
             ];
             let Some(&(_, mode)) = NAMED.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name)) else {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let loaded = custom_cursor(&mut model, &name);
                 return Ok(MultiValue::from_vec(vec![if loaded {
                     Value::Integer(1)
@@ -1260,7 +1290,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     Value::Nil
                 }]));
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.ui_cursor = Some(mode);
             model.ui_cursor_dirty = true;
             Ok(MultiValue::from_vec(vec![Value::Integer(1)]))
@@ -1270,7 +1302,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "ResetCursor",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.ui_cursor = None;
             model.ui_cursor_dirty = true;
             Ok(())

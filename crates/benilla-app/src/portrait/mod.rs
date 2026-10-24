@@ -155,6 +155,8 @@ pub(crate) struct PortraitPart {
     /// `None` for a WMO-display part, which never skins; the booth draws the static twin.
     pub(crate) skinned_mesh: Option<Handle<Mesh>>,
     pub(crate) material: Handle<WowModelMaterial>,
+    /// The batch's per-sequence material alpha, which the booth reads at Stand.
+    pub(crate) alpha_anim: Option<std::sync::Arc<benilla_formats::AlphaAnim>>,
 }
 
 /// Stamped on every bone-rider mesh child (helm, shoulder, held item). A booth seats it under its
@@ -170,6 +172,10 @@ pub(crate) struct PortraitRider {
     /// The M2 attachment id the rider hangs from, for [`attach_reset`]; `None` for the host
     /// model's own geometry, which sits in no attachment node.
     pub(crate) attach: Option<u16>,
+    /// The item's own loader-idle pose of its root bone, composed under the attach seat; the
+    /// identity for an item whose idle is its bind pose. Reforged's Stormwind guard helm holds its
+    /// root 0.19 yd down in Stand, and the booth draws the static mesh.
+    pub(crate) idle: Transform,
 }
 
 /// Stamped on an anchor child for each camera-facing batch a unit wears (the eye-glow, an item's
@@ -483,7 +489,9 @@ const BOOTH_SETTLE_FRAMES: u32 = 4;
 
 /// A rig on a booth stage: its `AnimParked` marker belongs to [`gate_booth_cameras`] alone, and
 /// the world-view parker skips it, since a stage is outside every world frustum.
+/// A stage rig is posed every frame: the world's distance LOD measures from no camera of its own.
 #[derive(bevy::prelude::Component)]
+#[require(benilla_world::rig_anim::PoseEveryFrame)]
 pub(crate) struct StageRig;
 
 /// How long a [`Booth::pending`] hold may keep the camera awake (wall secs).
@@ -874,11 +882,12 @@ pub(crate) fn new_target_image_sized(width: u32, height: u32) -> Image {
 pub(crate) fn booth_view_shape() -> impl Bundle {
     (
         Camera3d::default(),
-        bevy::render::view::Hdr,
+        bevy::camera::Hdr,
         Tonemapping::None,
         Msaa::Off,
-        // No Bevy light reaches a booth, so skip the per-view cluster rebuild.
-        bevy::light::cluster::ClusterConfig::None,
+        // No Bevy light reaches a booth, so one cluster: `Single`, not `None`, whose zero grid
+        // sizes Bevy 0.19's GPU-clustering dummy target at 0×0, which WebGPU rejects.
+        bevy::light::cluster::ClusterConfig::Single,
     )
 }
 
@@ -1396,8 +1405,7 @@ fn sync_portraits(
                     skinned: p.skinned_mesh.clone(),
                     static_mesh: p.static_mesh.clone(),
                     material: booth_light.studio.variant(&p.material, &mut wow_mats),
-                    // `None`: a mirrored part does not carry the batch's alpha loops.
-                    alpha_anim: None,
+                    alpha_anim: p.alpha_anim.clone(),
                     twins: BoothTwins::default(),
                     mat_anim: false,
                 })
@@ -1409,6 +1417,7 @@ fn sync_portraits(
                     material: booth_light.studio.variant(&r.material, &mut wow_mats),
                     bone: r.bone,
                     offset: r.offset,
+                    idle: r.idle,
                     twins: BoothTwins::default(),
                     mat_anim: false,
                 })
@@ -2240,6 +2249,7 @@ mod tests {
             static_mesh: Handle::default(),
             skinned_mesh: None,
             material: Handle::default(),
+            alpha_anim: None,
         }
     }
 
@@ -2272,6 +2282,7 @@ mod tests {
             bone: 4,
             offset: Vec3::new(0.21, 1.42, 0.06),
             attach: Some(attach),
+            idle: Transform::IDENTITY,
         }
     }
 
@@ -2407,6 +2418,7 @@ mod tests {
             bone: 4,
             offset: Vec3::ZERO,
             attach: Some(attach),
+            idle: Transform::IDENTITY,
         }
     }
 

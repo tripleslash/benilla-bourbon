@@ -107,7 +107,7 @@ fn client(handlers: impl FnOnce(&mut App)) -> App {
     "#,
     )
     .unwrap();
-    world.insert_non_send_resource(s);
+    world.insert_non_send(s);
     app
 }
 
@@ -115,7 +115,7 @@ fn client(handlers: impl FnOnce(&mut App)) -> App {
 fn heard(app: &mut App) -> Vec<String> {
     let s = app
         .world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>();
+        .non_send_mut::<benilla_ui::script::UiScript>();
     let out = s.eval::<Vec<String>>("return Heard").unwrap();
     s.run("Heard = {}").unwrap();
     out
@@ -343,7 +343,7 @@ fn a_line_whose_item_answers_later_in_the_frame_fires_at_the_answer() {
     });
     app.world_mut().resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
     app.world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .run(r#"TRADESKILL_LOG_FIRSTPERSON = "You create %s.""#)
         .unwrap();
     assert_eq!(
@@ -572,7 +572,7 @@ fn an_auction_line_fires_at_its_packet() {
             .net_handler(SessionEventKind::LoggedOut, enter);
     });
     app.world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .run(r#"ERR_AUCTION_HIGHER_BID = "You have been outbid.""#)
         .unwrap();
     assert_eq!(
@@ -622,7 +622,7 @@ fn the_roster_events_fire_at_their_packet() {
     app.world_mut()
         .init_resource::<crate::ui_guild::GuildState>();
     app.world_mut()
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .run(
             r#"
             ERR_JOINED_GROUP_S = "%s joins the party."
@@ -669,7 +669,7 @@ fn the_session_end_drops_the_cast_and_house_lanes() {
         .insert_state(crate::client_state::ClientState::InWorld);
     let world = app.world_mut();
     world
-        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .non_send_mut::<benilla_ui::script::UiScript>()
         .run(r#"ERR_AUCTION_HIGHER_BID = "You have been outbid.""#)
         .unwrap();
     world

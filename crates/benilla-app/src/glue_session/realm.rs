@@ -4,6 +4,7 @@
 //!
 //! Not [`crate::realmlist`], which is the logon server's address (the `realmList` CVar).
 
+use benilla_assets::DataLoadAppExt;
 use bevy::prelude::*;
 
 use benilla_formats::{RealmCategory, RealmConfigs};
@@ -21,7 +22,13 @@ pub(crate) fn is_down(realm: &RealmInfo) -> bool {
     realm.flags & 0x02 != 0
 }
 
-/// The client's realm tables, read once at startup, which the realm list's tabs and type column
+/// Whether the run's own pick may take `realm`: up, and for a client this build can play
+/// ([`crate::flavor::playable`]); a hand-picked unplayable one is refused with a reason at entry.
+fn answerable(realm: &RealmInfo) -> bool {
+    !is_down(realm) && crate::flavor::playable(realm)
+}
+
+/// The client's realm tables, read at every data load, which the realm list's tabs and type column
 /// and the world entry's PvP latch read.
 #[derive(Resource, Default)]
 pub(crate) struct RealmTables {
@@ -95,7 +102,7 @@ impl RealmTables {
     }
 }
 
-/// Read the client Region's category set once, after the archive chain opens.
+/// Read the client Region's category set at a data load.
 fn load_categories(
     mut tables: ResMut<RealmTables>,
     assets: Option<Res<benilla_assets::WorldAssets>>,
@@ -131,7 +138,7 @@ fn load_categories(
     }
 }
 
-/// Read `Cfg_Configs.dbc` once, after the archive chain opens.
+/// Read `Cfg_Configs.dbc` at a data load.
 fn load_realm_types(
     mut tables: ResMut<RealmTables>,
     assets: Option<Res<benilla_assets::WorldAssets>>,
@@ -172,7 +179,8 @@ impl RunModeRealm {
     /// The choice as this process's environment makes it.
     pub(crate) fn from_env() -> Self {
         Self {
-            named: std::env::var("WOW_REALM").ok().filter(|s| !s.is_empty()),
+            // Through `webenv`, so `?realm=` is the page's same fast path (a tab has no environment).
+            named: crate::webenv::var("WOW_REALM").filter(|s| !s.is_empty()),
             unattended: crate::run_mode::unattended(),
         }
     }
@@ -198,15 +206,15 @@ impl RunModeRealm {
         if !self.unattended {
             return None;
         }
-        let mut up: Vec<&RealmInfo> = realms.iter().filter(|r| !is_down(r)).collect();
+        let mut up: Vec<&RealmInfo> = realms.iter().filter(|r| answerable(r)).collect();
         // Stable: ties keep the server's order.
         up.sort_by_key(|r| std::cmp::Reverse(r.characters));
         up.first().copied()
     }
 }
 
-/// The first of `names` that names a realm on `realms` that is up, case folded, since vmangos does
-/// not normalise realm names.
+/// The first of `names` that names a realm on `realms` that is up and playable ([`answerable`],
+/// this fork), case folded, since vmangos does not normalise realm names.
 pub(crate) fn first_named_up<'a, 'n>(
     realms: &'a [RealmInfo],
     names: impl IntoIterator<Item = &'n str>,
@@ -214,17 +222,15 @@ pub(crate) fn first_named_up<'a, 'n>(
     names.into_iter().find_map(|want| {
         realms
             .iter()
-            .find(|r| r.name.eq_ignore_ascii_case(want) && !is_down(r))
+            .find(|r| r.name.eq_ignore_ascii_case(want) && answerable(r))
     })
 }
 
 pub(super) fn build(app: &mut App) {
     app.init_resource::<RealmTables>()
         .insert_resource(RunModeRealm::from_env())
-        .add_systems(
-            Startup,
-            (load_categories, load_realm_types).after(benilla_assets::AssetSet::Open),
-        );
+        // At every data load, so a realm switch reads the mounted layer's tables.
+        .add_data_loaders((load_categories, load_realm_types));
 }
 
 #[cfg(test)]
@@ -241,6 +247,7 @@ mod tests {
             flags,
             category: 1,
             id: 0,
+            version: None,
         }
     }
 

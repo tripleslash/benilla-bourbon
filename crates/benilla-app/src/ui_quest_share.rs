@@ -251,7 +251,7 @@ mod tests {
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()
             .add_systems(Update, feed_quest_share);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let packets = |app: &mut App| {
             let mut share = app.world_mut().resource_mut::<QuestShare>();
             share.push_verdict(0x9, QuestShareMsg::SHARING_QUEST);

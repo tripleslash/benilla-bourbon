@@ -1,6 +1,7 @@
 //! Sound: the 1.12 client's own selection and scheduling ([`kit`], the triggers) over kira behind
 //! an FMOD-shaped seam ([`mixer`]). This module holds the output, the listener and the config.
 
+use benilla_assets::DataLoadAppExt;
 use bevy::prelude::*;
 
 use crate::net::Embodied;
@@ -34,6 +35,13 @@ mod money;
 mod mount;
 mod net;
 // Crate-visible for the dev stall watchdog, which asks `output::device_open`.
+//
+// The device layer is the mix's own on every target that has threads (1920), and on wasm32 it is
+// not the device at all — `mixer::PlatformBackend` runs kira's own cpal backend there, because
+// this layer's shape is a render thread the page cannot give it. It still *compiles* on wasm32 so
+// that `Window` and the `report_output` that reads its dozen fields need no `#[cfg]` of their
+// own; the allow is what that costs.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) mod output;
 mod probe;
 mod reverb;
@@ -43,6 +51,14 @@ mod ui;
 mod vocal;
 mod water;
 mod weather;
+// The browser's decode lane — `decodeAudioData` instead of a whole-file wasm decode on the frame.
+// Every audio path on this target reads through it; native decodes inline as it always has.
+#[cfg(target_arch = "wasm32")]
+mod web_decode;
+// The browser's output — an `AudioWorklet` drain and a Web Worker fill, so neither half of the mix
+// sits on the thread that draws. What the comment above `output` used to say was impossible.
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod web_output;
 mod zone;
 pub(crate) use emote::EmoteSounds;
 /// First-play kit decodes so far, for the probe's tail line.
@@ -378,7 +394,7 @@ impl Plugin for SoundPlugin {
             };
             Some(probe::Probe::start(dir, rate, m.audio_pos()))
         });
-        app.insert_non_send_resource(SoundOutput {
+        app.insert_non_send(SoundOutput {
             mixer,
             channels: Vec::new(),
             probe,
@@ -391,10 +407,7 @@ impl Plugin for SoundPlugin {
         })
         .init_resource::<SoundConfig>()
         .init_resource::<AudioListener>()
-        .add_systems(
-            Startup,
-            load_materials.after(benilla_assets::AssetSet::Open),
-        )
+        .add_data_loaders(load_materials)
         .add_systems(PreUpdate, feed_world_hold)
         .add_systems(
             Update,

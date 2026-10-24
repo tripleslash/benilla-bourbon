@@ -26,7 +26,8 @@
 
 use std::time::Duration;
 
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_formats::{CinematicCatalog, CinematicPath};
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
@@ -130,10 +131,8 @@ pub(crate) struct CinematicPlugin;
 impl Plugin for CinematicPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Cinematic>()
-            .add_systems(
-                Startup,
-                (load_catalog.after(AssetSet::Open), spawn_letterbox),
-            )
+            .add_systems(Startup, spawn_letterbox)
+            .add_data_loaders(load_catalog)
             .add_systems(
                 Update,
                 // One chain in one frame, after the net drain and after `control` seats the
@@ -823,7 +822,7 @@ mod ack_ledger {
                 abandon_cinematic_on_leave_world,
             )
             .add_systems(Update, feed_ui);
-        app.insert_non_send_resource(spied_vm(&EVENTS));
+        app.insert_non_send(spied_vm(&EVENTS));
         app.update();
         assert_eq!(seen_in(&app), ["CINEMATIC_START"]);
 
@@ -857,6 +856,10 @@ mod settling_under_black {
             total: 1,
             focus_resident: home,
             scene_ready: home,
+            // The third residency term the reveal reads through `presentable`: there is real
+            // collision under the focus tile. It rides `home` with the other two — this fixture's
+            // whole vocabulary is "the world is, or is not, here".
+            focus_collidable: home,
             ..Default::default()
         }
     }
@@ -942,10 +945,10 @@ mod opening_cinematic {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.insert_resource(NetCommands(tx));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, send_opening_cinematic);
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run("OpeningCinematic() OpeningCinematic()")
             .unwrap();
         app.update();

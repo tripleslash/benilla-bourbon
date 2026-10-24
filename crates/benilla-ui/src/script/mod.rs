@@ -13,6 +13,119 @@
 //! state lives in the registry under named keys, fetched per call; [`Model`] is plain data in
 //! `lua.app_data`, borrowed briefly and released before re-entering Lua.
 
+// ── Host-side drains and writes that keep the mutation count where it stood ──
+//
+// The app polls dozens of these every frame. Each reads first through `model_ref`, which never
+// counts as a mutation ([`ModelCell`]), and takes the mutable borrow only with something to do.
+
+/// Drain a [`Drainable`] field (a queue, a map, an `Option`, a counter, a flag): read empty,
+/// nothing is taken and the count stands.
+macro_rules! drain_field {
+    ($self:expr, $($field:ident).+) => {{
+        if crate::script::Drainable::is_drained(&$self.model_ref().$($field).+) {
+            Default::default()
+        } else {
+            std::mem::take(&mut $self.model_mut().$($field).+)
+        }
+    }};
+}
+
+/// A field [`drain_field!`] takes: empty is its default, and reads as such without a compare.
+pub(crate) trait Drainable: Default {
+    fn is_drained(&self) -> bool;
+}
+
+impl<T> Drainable for Vec<T> {
+    fn is_drained(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<T> Drainable for std::collections::VecDeque<T> {
+    fn is_drained(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<K, V, S: Default> Drainable for std::collections::HashMap<K, V, S> {
+    fn is_drained(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<T, S: Default> Drainable for std::collections::HashSet<T, S> {
+    fn is_drained(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<K, V> Drainable for std::collections::BTreeMap<K, V> {
+    fn is_drained(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<T> Drainable for std::collections::BTreeSet<T> {
+    fn is_drained(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<T> Drainable for Option<T> {
+    fn is_drained(&self) -> bool {
+        self.is_none()
+    }
+}
+
+impl Drainable for String {
+    fn is_drained(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl Drainable for bool {
+    fn is_drained(&self) -> bool {
+        !*self
+    }
+}
+
+macro_rules! drainable_counter {
+    ($($t:ty),*) => {$(
+        impl Drainable for $t {
+            fn is_drained(&self) -> bool {
+                *self == 0
+            }
+        }
+    )*};
+}
+drainable_counter!(u8, u16, u32, u64, usize, i32, i64);
+
+/// The model's mutation count, for a caller holding `&Lua` ([`ModelCell::epoch`]).
+pub(crate) fn epoch_of(lua: &mlua::Lua) -> u64 {
+    lua.app_data_ref::<ModelCell>()
+        .expect("model app_data set")
+        .epoch()
+}
+
+/// Put the mutation count back to `epoch`, for a caller holding `&Lua` that took a mutable borrow
+/// since and changed nothing the extract reads ([`ModelCell::set_epoch`]).
+pub(crate) fn restore_epoch_of(lua: &mlua::Lua, epoch: u64) {
+    lua.app_data_mut::<ModelCell>()
+        .expect("model app_data set")
+        .set_epoch(epoch);
+}
+
+/// Write a `PartialEq` field: an equal value is not written.
+#[allow(unused_macros)]
+macro_rules! set_field {
+    ($self:expr, $($field:ident).+, $value:expr) => {{
+        let value = $value;
+        if $self.model_ref().$($field).+ != value {
+            $self.model_mut().$($field).+ = value;
+        }
+    }};
+}
+
 mod action;
 mod action_bar_toggles;
 mod addon_message;
@@ -138,6 +251,7 @@ mod layout_cache;
 mod loot;
 mod loot_roll;
 mod lua50;
+mod macro_options;
 mod macros;
 mod mail;
 mod measure;
@@ -249,6 +363,7 @@ pub use chat_send::{
 };
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
+pub use client::UiFlavor;
 pub use console_exec::s_str_tokenize;
 pub use console_exec::{console_word, cvar_name_arg, no_such_cvar, set_args};
 pub use container::{
@@ -325,9 +440,10 @@ pub use layout_cache::{AnchorLayout, FrameLayout, LayoutPoint};
 pub use lock_check::{check_lock, LockCheck, LockOpener, LockOpeners, LockSlotView};
 pub use loot::{LootCall, LootRow, LootState, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollCall, LootRollEntry, LootRollsState};
+pub use macro_options::{has_options as macro_has_options, show_directive, ShowDirective};
 pub use macros::{
-    macro_lines, MacroBinding, MacroDerives, MacroState, MacroView, CHARACTER_ID_BASE, MAX_MACROS,
-    MAX_MACRO_BODY, MAX_MACRO_NAME,
+    macro_lines, reads_options as macro_reads_options, MacroBinding, MacroDerives, MacroState,
+    MacroView, CHARACTER_ID_BASE, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME,
 };
 pub use mail::{
     MailCall, MailInboxRow, MailInvoice, MailRowVerb, MailSendRequest, MailState, PackageView,
@@ -341,17 +457,18 @@ pub use minimap::{
     GROUP_ARROW as MINIMAP_GROUP_ARROW, GUIDE_ARROW as MINIMAP_GUIDE_ARROW,
     LANDMARK_ARROW as MINIMAP_LANDMARK_ARROW,
 };
-pub(crate) use model::Model;
 pub use model::{
     FontProbe, MacroIconSource, TextureProbe, TextureSizeFn, TextureSizeProbe, WorldLocFn,
     WorldLocProjector,
 };
+pub(crate) use model::{Model, ModelCell};
 pub use party::{
     PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, ReadyCheckState, SavedInstanceInfo,
 };
 pub use pet::{PetActionView, PetCall, PetStats, PET_DISMISS_WORD};
 pub use pvp::{
-    decorated_name, pvp_name_global_keys, HonorState, InspectHonorData, PvpCall, RankTitle,
+    decorated_name, medal_line, pvp_name_global_keys, HonorState, InspectHonorData, PvpCall,
+    RankTitle,
 };
 pub use quest::{QuestCall, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState};
 pub use quest_log::{
@@ -624,6 +741,26 @@ const SCRIPT_KINDS: [&str; 46] = [
     "OnKeyUp",
 ];
 
+/// What a Turtle WoW VM takes beyond [`SCRIPT_KINDS`]. `OnInputLanguageChanged` is a real slot the
+/// reference accepts on every client and fires only when an input method changes the language;
+/// with no input method here nothing fires it, so a 1.12.1 VM refuses it (a documented deviation,
+/// `SCRIPT_KINDS`' rule), and a Turtle VM takes the reference's behaviour: stored, never fired.
+const TURTLE_SCRIPT_KINDS: [&str; 1] = ["OnInputLanguageChanged"];
+
+/// The kind `name` names in a VM of `flavor`, in its canonical spelling, matched
+/// case-insensitively.
+pub(crate) fn script_kind(flavor: UiFlavor, name: &str) -> Option<&'static str> {
+    let extra: &[&'static str] = match flavor {
+        UiFlavor::Vanilla => &[],
+        UiFlavor::Turtle => &TURTLE_SCRIPT_KINDS,
+    };
+    SCRIPT_KINDS
+        .iter()
+        .chain(extra)
+        .copied()
+        .find(|k| k.eq_ignore_ascii_case(name))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // UiScript: the public host
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -658,7 +795,7 @@ fn open_state(vm: VmKind) -> mlua::Result<Lua> {
     let lua = Lua::new();
     let mut model = Model::new();
     model.vm = vm;
-    lua.set_app_data(model);
+    lua.set_app_data(ModelCell::new(model));
     // Before anything can fire a handler: every VM carries the profiler's slot and the call
     // host's.
     handler_prof::install(&lua);
@@ -759,6 +896,7 @@ fn install_in_game(lua: &Lua) -> mlua::Result<()> {
     cursor::install(lua)?;
     spellbook::install(lua)?;
     macros::install(lua)?;
+    macro_options::install(lua)?;
     talent::install(lua)?;
     dialog_verbs::install(lua)?;
     battlefield_score::install(lua)?;
@@ -825,7 +963,7 @@ impl UiScript {
 
     fn host(lua: Lua) -> UiScript {
         let session = NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Some(mut model) = lua.app_data_mut::<Model>() {
+        if let Some(mut model) = lua.app_data_mut::<crate::script::ModelCell>() {
             model.session = session;
         }
         UiScript {
@@ -839,7 +977,10 @@ impl UiScript {
     /// ran the script holds the VM ([`host::CallHost::apply`]). It is the same session; an
     /// instruction budget is the entry's own.
     pub(crate) fn reentrant(lua: &Lua) -> UiScript {
-        let session = lua.app_data_ref::<Model>().expect("model app_data").session;
+        let session = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data")
+            .session;
         UiScript {
             lua: lua.clone(),
             instructions: Default::default(),
@@ -875,11 +1016,11 @@ impl UiScript {
         let lua = self.lua.fork();
         lua.remove_hook();
         let session = NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut model = self.model_ref().clone();
+        let mut model: Model = (**self.model_ref()).clone();
         model.session = session;
         // What waits is the original's host's, and its handlers' values its VM's.
         model.script_calls.clear();
-        lua.set_app_data(model);
+        lua.set_app_data(ModelCell::new(model));
         // A fork is a VM of its own, so it carries the profiler's slot and the call host's.
         handler_prof::install(&lua);
         host::install(&lua);
@@ -1018,7 +1159,7 @@ impl UiScript {
     /// index `GetZoom`/`SetZoom` act on. Call it before the script tick, on each inside/outside
     /// edge and for each new VM.
     pub fn set_minimap_inside(&mut self, inside: bool) {
-        self.model_mut().minimap.inside = inside;
+        set_field!(self, minimap.inside, inside);
     }
 
     /// The Minimap's per-frame update (`0x4eb040`) on every Minimap's player arrow: once its model
@@ -1069,13 +1210,13 @@ impl UiScript {
     /// Push the active player's WoW world `(x, y)`, `None` with no player object, before the
     /// script tick: the ping methods read it at the call (`0x4eecdf`, `0x4ef021`).
     pub fn set_minimap_player(&mut self, pos: Option<(f32, f32)>) {
-        self.model_mut().minimap.player = pos;
+        set_field!(self, minimap.player, pos);
     }
 
     /// Seat the stored ping a new VM inherits, the reference's statics living across the reload
     /// (`0xbc787c`, `0xbc7880`); no event.
     pub fn set_minimap_ping_point(&mut self, world: (f32, f32)) {
-        self.model_mut().minimap.ping = world;
+        set_field!(self, minimap.ping, world);
     }
 
     /// A group member's ping (`0x5e41bd` → `0x4ee330`): stored at once and `MINIMAP_PING` signalled
@@ -1220,7 +1361,7 @@ impl UiScript {
     /// Drain the chat lines queued since the last call (a probe's, a host `SlashCmdList` row's), for
     /// the app to parse.
     pub fn take_chat_input(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().chat_input)
+        drain_field!(self, chat_input)
     }
 
     /// Queue a line as if typed into the chat EditBox and submitted, for probes (`WOW_PROBE_CHAT`).
@@ -1238,8 +1379,8 @@ impl UiScript {
     pub fn frame_visible(&self, name: &str) -> bool {
         self.model_ref()
             .arena
-            .iter_frames()
-            .any(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
+            .frames_named(name)
+            .any(|(_, f)| f.effective_visible)
     }
 
     /// The named frame's alpha byte as a fraction (`+0xc8`, which the walk `0x76a690` hands down
@@ -1248,8 +1389,8 @@ impl UiScript {
     pub fn frame_alpha(&self, name: &str) -> Option<f32> {
         self.model_ref()
             .arena
-            .iter_frames()
-            .find(|(_, f)| f.name.as_deref() == Some(name) && f.effective_visible)
+            .frames_named(name)
+            .find(|(_, f)| f.effective_visible)
             .map(|(_, f)| crate::color::alpha_f32(f.alpha))
     }
 
@@ -1258,6 +1399,10 @@ impl UiScript {
     /// `OnSizeChanged` for frames whose size moved ([`event::fire_size_changes`]) and re-seat the
     /// text of every resized EditBox.
     pub fn resolve(&mut self) {
+        // A resolve that solved nothing moved no rect and fired no size or range handler (both
+        // read the rects a solve wrote): the mutation count stands ([`ModelCell`]).
+        let quiet = self.visual_epoch();
+        let solves = self.model_ref().layout_solves;
         self.resolve_and_measure();
         event::fire_size_changes(&self.lua);
         // The EditBox's own `OnSizeChanged` (`0x77a8d0`) runs after the script fire and re-seats a
@@ -1265,6 +1410,9 @@ impl UiScript {
         let reseated = editbox::reseat_resized(&mut self.model_mut());
         if reseated {
             self.resolve_and_measure();
+        }
+        if self.model_ref().layout_solves == solves {
+            self.restore_epoch(quiet);
         }
     }
 
@@ -1472,7 +1620,7 @@ impl UiScript {
 
     /// Whether ALT is held, which an alt-arrow EditBox reads for the arrows (`0x77b1b3`).
     pub fn set_alt_down(&mut self, alt: bool) {
-        self.model_mut().alt_down = alt;
+        set_field!(self, alt_down, alt);
     }
 
     /// Whether the key-down walk takes `key`, a frame or a box.
@@ -1610,7 +1758,7 @@ impl UiScript {
 
     /// Drain the collected script errors.
     pub fn take_errors(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().errors)
+        drain_field!(self, errors)
     }
 
     /// A snapshot of non-fatal host warnings (e.g. ignored `CreateFrame` templates).
@@ -1620,7 +1768,7 @@ impl UiScript {
 
     /// Drain the non-fatal host warnings, for the host to log.
     pub fn take_warnings(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().warnings)
+        drain_field!(self, warnings)
     }
 
     /// Report a script error the host caught outside the VM's dispatch (an addon file that failed
@@ -1644,7 +1792,7 @@ impl UiScript {
     /// [`UiScript::errors`], alone; a handler that raises is recorded there only and stops the
     /// batch, so the path cannot recurse.
     pub fn dispatch_script_errors_to_handler(&mut self) {
-        let pending = std::mem::take(&mut self.model_mut().pending_error_dispatch);
+        let pending = drain_field!(self, pending_error_dispatch);
         if pending.is_empty() {
             return;
         }
@@ -1684,16 +1832,29 @@ impl UiScript {
 
     // ── internals ────────────────────────────────────────────────────────────────────────────
 
-    fn model_ref(&self) -> mlua::AppDataRef<'_, Model> {
+    fn model_ref(&self) -> mlua::AppDataRef<'_, ModelCell> {
         self.lua
-            .app_data_ref::<Model>()
+            .app_data_ref::<ModelCell>()
             .expect("model app_data set")
     }
 
-    fn model_mut(&self) -> mlua::AppDataRefMut<'_, Model> {
+    /// A mutable borrow, which counts as a visual mutation ([`ModelCell`]).
+    fn model_mut(&self) -> mlua::AppDataRefMut<'_, ModelCell> {
         self.lua
-            .app_data_mut::<Model>()
+            .app_data_mut::<ModelCell>()
             .expect("model app_data set")
+    }
+
+    /// The model's mutation count ([`ModelCell::epoch`]): a frame on which it stands where the
+    /// last [`UiScript::extract`] left it has nothing new to extract.
+    pub fn visual_epoch(&self) -> u64 {
+        self.model_ref().epoch()
+    }
+
+    /// Put the mutation count back to `epoch` ([`ModelCell::set_epoch`]): the caller took a
+    /// mutable borrow since and changed nothing the extract reads.
+    fn restore_epoch(&self, epoch: u64) {
+        self.model_mut().set_epoch(epoch);
     }
 
     fn push_error(&self, e: mlua::Error) {

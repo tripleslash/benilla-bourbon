@@ -107,6 +107,9 @@ const COMPOSITE_SLOTS: [(u8, usize); 8] = [
     (18, 7),
 ];
 
+/// The tabard's `Equipment::bodyslots` index: equipment slot 18 in [`COMPOSITE_SLOTS`].
+const TABARD_BODYSLOT: usize = 7;
+
 /// The item models a unit shows this frame, in [`ATTACH_SLOT_NAMES`] order.
 #[derive(Component, Default, Clone, PartialEq, Eq)]
 pub(super) struct HeldItems {
@@ -223,6 +226,20 @@ pub(crate) const ATTACH_SLOT_NAMES: [&str; ATTACH_SLOTS] = [
 /// (`0x47a200`) and the ranged and ammo builder pass the display's visual.
 const NO_GLOW: i32 = 0;
 
+/// [`ensure_item_model`] through the resource's change-detected handle: a model already present is
+/// found by a plain read, so `ItemDisplays` reads as changed only when a model is added.
+pub(in crate::entities) fn ensure_item_model_mut(
+    held: &mut ResMut<ItemDisplays>,
+    display: u32,
+    kind: ItemModelKind,
+    asset_server: &AssetServer,
+) {
+    if held.models.contains_key(&(display, kind)) {
+        return;
+    }
+    ensure_item_model(held, display, kind, asset_server);
+}
+
 /// Ensure `display` has a [`DisplayModel`] for `kind`; its texture is the BLP the display row
 /// names, never derived from the model name.
 pub(in crate::entities) fn ensure_item_model(
@@ -258,9 +275,7 @@ pub(in crate::entities) fn ensure_item_model(
         Some(d) if d.model[col].is_some() => {
             let mut model = d.model[col].clone().unwrap();
             if let ItemModelKind::Helm { race, sex } = kind {
-                // Race 1-8 is Hu Or Dw Ni Sc Ta Gn Tr, sex M or F.
-                const RACE_PREFIX: [&str; 8] = ["Hu", "Or", "Dw", "Ni", "Sc", "Ta", "Gn", "Tr"];
-                let prefix = RACE_PREFIX[(race.clamp(1, 8) - 1) as usize];
+                let prefix = helm_race_prefix(race, crate::flavor::turtle());
                 let letter = if sex == 1 { 'F' } else { 'M' };
                 let stem = model.strip_suffix(".m2").unwrap_or(&model).to_string();
                 model = format!("{stem}_{prefix}{letter}.m2");
@@ -281,4 +296,59 @@ pub(in crate::entities) fn ensure_item_model(
         _ => super::empty_display(),
     };
     held.models.insert((display, kind), dm);
+}
+
+/// A helm model's race infix, ChrRaces' clientPrefix: race 1-8 is Hu Or Dw Ni Sc Ta Gn Tr, and
+/// Turtle WoW adds Go (9, Goblin) and Be (10, High Elf). An unknown race wears the nearest row's.
+pub(crate) fn helm_race_prefix(race: u8, turtle: bool) -> &'static str {
+    const RACE_PREFIX: [&str; 10] = ["Hu", "Or", "Dw", "Ni", "Sc", "Ta", "Gn", "Tr", "Go", "Be"];
+    let last = if turtle { 10 } else { 8 };
+    RACE_PREFIX[(race.clamp(1, last) - 1) as usize]
+}
+
+#[cfg(test)]
+mod item_display_tests {
+    use bevy::prelude::*;
+
+    use super::super::display::empty_display;
+    use super::{ensure_item_model_mut, ItemDisplays, ItemModelKind};
+
+    /// What each frame's resolver saw of the resource's change flag.
+    #[derive(Resource, Default)]
+    struct Seen(Vec<bool>);
+
+    fn resolve_present(
+        mut held: ResMut<ItemDisplays>,
+        assets: Res<AssetServer>,
+        mut seen: ResMut<Seen>,
+    ) {
+        ensure_item_model_mut(&mut held, 900, ItemModelKind::Weapon, &assets);
+        seen.0.push(held.is_changed());
+    }
+
+    /// A resolver asking for a model already present reads it, so `ItemDisplays` reads as changed
+    /// only when a model is added: the settled-wearer skip in `attach_held_items` keys on it.
+    #[test]
+    fn a_present_item_model_leaves_item_displays_unchanged() {
+        let mut displays = ItemDisplays::icons_for_tests(
+            benilla_formats::ItemDisplayCatalog::from_displays(std::collections::HashMap::new()),
+        );
+        displays
+            .models
+            .insert((900, ItemModelKind::Weapon), empty_display());
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.insert_resource(displays);
+        app.init_resource::<Seen>();
+        app.add_systems(Update, resolve_present);
+        for _ in 0..3 {
+            app.update();
+        }
+        let seen = &app.world().resource::<Seen>().0;
+        assert_eq!(seen.len(), 3);
+        assert!(
+            !seen[1] && !seen[2],
+            "a present model marks nothing after the insert frame: {seen:?}"
+        );
+    }
 }

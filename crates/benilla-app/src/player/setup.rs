@@ -1,10 +1,10 @@
 //! Startup: spawns the world camera and seeds the avatar resources [`super::control`] drives.
 
 use avian3d::prelude::*;
+use bevy::camera::Hdr;
 use bevy::camera::{CameraOutputMode, PerspectiveProjection, Projection};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
 
 use benilla_assets::coords::wow_to_bevy;
 
@@ -128,8 +128,11 @@ pub(super) fn setup_player(
     // No clustered light assignment here: world shaders take point lights from our own buffer
     // (`lighting::global_light`). `Clusters` stays so the view bind group builds; other cameras
     // keep bevy's default, and `WOW_CLUSTERS=1` restores it on this one.
+    // Bevy 0.19: `Single`, not `None` — GPU clustering sizes a dummy render target from the
+    // grid, and `None`'s zero grid is a 0×0 texture WebGPU rejects (every clustering pass after
+    // it invalid). One cluster is the cheapest grid that stays valid.
     if std::env::var_os("WOW_CLUSTERS").is_none() {
-        world_cam.insert(bevy::light::cluster::ClusterConfig::None);
+        world_cam.insert(bevy::light::cluster::ClusterConfig::Single);
     }
 }
 

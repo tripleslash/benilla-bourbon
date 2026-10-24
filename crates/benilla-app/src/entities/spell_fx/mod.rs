@@ -12,6 +12,15 @@
 //! for the client's completion callback.
 
 mod lifecycle;
+// fork: an effect on a parked host stops writing its joints.
+mod park;
+pub(crate) use park::park_effect_rigs;
+// fork: the light a luminous effect throws (fire / holy / fel) and its envelope — ported from
+// pkuzic's benilla-lighting.
+mod light;
+pub(crate) use light::{
+    advance_spell_lights, budget_spell_lights, spawn_spell_light, SpellLightMode, SPELL_BURST_SPAN,
+};
 
 use std::collections::HashMap;
 
@@ -81,7 +90,7 @@ pub(crate) fn tick_fx_tint(
     }
     let now = time.elapsed_secs();
     reg.0.retain(|id, (anim, origin)| {
-        let Some(mat) = materials.get_mut(*id) else {
+        let Some(mut mat) = materials.get_mut(*id) else {
             return false; // the instance despawned, and its clone with it
         };
         let rgb = anim.sample(now - *origin);
@@ -144,6 +153,11 @@ fn fx_part_material(
     }
     handle
 }
+
+/// fork: an effect instance's root whose player [`arm_effect_rig`] armed, the population
+/// [`park_effect_rigs`] holds while its host is parked.
+#[derive(Component)]
+pub(crate) struct EffectPlayer;
 
 /// Where an effect-model instance sits in the client's model graph.
 #[derive(Clone, Copy, Default)]
@@ -423,9 +437,11 @@ pub(super) fn arm_effect_rig(
             let mut player = AnimationPlayer::default();
             // The stage owns the repeat policy (`0x60ed00` repeats a clamping precast).
             let life = FxAnimLife::arm(&mut player, clip, stage.unwrap_or(FxStage::OneShot));
-            commands
-                .entity(root)
-                .insert((player, AnimationGraphHandle(anims.graph.clone())));
+            commands.entity(root).insert((
+                player,
+                AnimationGraphHandle(anims.graph.clone()),
+                EffectPlayer,
+            ));
             // The lifecycle watcher, on a `CEffect` only.
             if stage.is_some() {
                 commands.entity(root).insert((life, anims.clone()));
@@ -646,6 +662,18 @@ fn drain_instance_emitters(
     }
 }
 
+/// The whole teardown `0x6203e0`: the drain, then the root. The root hangs under the unit's
+/// visual, so a display swap or rig heal (`despawn_related::<Children>`) may already have taken
+/// it while the instance still names it; a plain despawn of that id is a command error.
+fn end_instance_root(
+    commands: &mut Commands,
+    emitters: &mut Query<&mut benilla_world::particles::ParticleEmitter>,
+    root: Entity,
+) {
+    drain_instance_emitters(emitters, root);
+    commands.entity(root).try_despawn();
+}
+
 /// The same-slot replace (`0x6208e0`): destroy each live node with the same `SpellVisualEffectName`
 /// record at the same tag, without a decay, which keeps the effect count flat in the number of
 /// attackers. The world-plant tag (-1) is exempt (`0x620913`); a decaying instance is out of reach.
@@ -665,8 +693,7 @@ fn replace_same_slot(
         }
         if let Some(root) = i.root {
             // Through the shared teardown `0x6203e0`, so its particles finish.
-            drain_instance_emitters(emitters, root);
-            commands.entity(root).despawn();
+            end_instance_root(commands, emitters, root);
         }
         false
     });
@@ -701,8 +728,7 @@ fn reap_matching(
         let (Some(root), Some(span)) = (i.root, span) else {
             if let Some(root) = i.root {
                 // Destroyed at once, through `0x6203e0` like any other, so its particles drain.
-                drain_instance_emitters(emitters, root);
-                commands.entity(root).despawn();
+                end_instance_root(commands, emitters, root);
             }
             return false;
         };
@@ -750,8 +776,7 @@ pub(super) fn attach_spell_fx(
                 if now >= expires {
                     if let Some(root) = inst.root {
                         // The `0x6203e0` teardown: the particles outlive the flash.
-                        drain_instance_emitters(&mut emitters, root);
-                        commands.entity(root).despawn();
+                        end_instance_root(&mut commands, &mut emitters, root);
                     }
                     if benilla_assets::trace::enabled() {
                         benilla_assets::trace::line(
@@ -869,6 +894,16 @@ pub(super) fn attach_spell_fx(
                 &ibps,
                 &mut palettes,
                 None, // an attach-point kit effect opens on its model's own `Stand`
+            );
+            // fork: and the light it throws, if its school is a luminous one — up on the ramp,
+            // held for the aura's life, out when `FxDecay` lands. The unit's room gates it.
+            spawn_spell_light(
+                &mut commands,
+                &inst.path,
+                dm,
+                root,
+                Some(unit),
+                SpellLightMode::Kit,
             );
             inst.root = Some(root);
             if !inst.persistent {
@@ -1073,6 +1108,22 @@ mod tests {
             .unwrap()
             .instances[0]
             .decaying = true;
+        app.world_mut().entity_mut(roots[0]).despawn();
+        app.update();
+        assert_eq!(instances_of(&app, unit), vec![]);
+    }
+
+    /// A cast flash whose span ends after a display swap took its root: nothing is left to
+    /// despawn, and a despawn of the dead id is a command error (a battleground shapeshift).
+    #[test]
+    fn an_expiring_instance_whose_root_died_as_collateral_is_dropped_quietly() {
+        let (mut app, unit, roots) = standing(&[false]);
+        app.world_mut()
+            .entity_mut(unit)
+            .get_mut::<FxAttached>()
+            .unwrap()
+            .instances[0]
+            .expires = Some(0.0);
         app.world_mut().entity_mut(roots[0]).despawn();
         app.update();
         assert_eq!(instances_of(&app, unit), vec![]);

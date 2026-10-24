@@ -25,6 +25,24 @@ use benilla_formats::WdlFile;
 /// (2112 yd, about 4 tiles) still rise above the horizon as silhouettes.
 const WDL_RADIUS: u32 = 5;
 
+/// fork: modern lighting (FORK.md) — the ring a modern frame streams. Its height fog
+/// lets the far ranges rise above the haze kilometres out (Hyjal behind Orgrimmar), so the band reaches
+/// ~6.4 km, on coarser meshes the further out a tile lies ([`modern_lod`]).
+const WDL_RADIUS_MODERN: u32 = 12;
+
+/// The mesh a modern ring tile `ring` tiles (Chebyshev) from the view's own takes: 0 = the full centre
+/// fan, otherwise the outer lattice every `n` corners (`WdlFile::tile_mesh_coarse`).
+fn modern_lod(ring: u32) -> usize {
+    match ring {
+        0..=2 => 0,
+        3..=5 => 1,
+        _ => 2,
+    }
+}
+
+/// The curtain (yd) a coarse ring tile hangs from its border over the T-junctions against a finer one.
+const WDL_SKIRT: f32 = 60.0;
+
 /// New WDL tiles built per frame (545 vertices each), so a whole ring does not hitch a zone load.
 const WDL_LOADS_PER_FRAME: usize = 8;
 
@@ -35,6 +53,7 @@ impl Plugin for WdlPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<WdlMaterial>::default())
             .add_systems(Startup, setup_wdl.after(AssetSet::Open))
+            .add_observer(forget_wdl)
             // The ring follows the world's lifecycle: it spawns only while a world is live.
             .add_systems(Update, stream_wdl.run_if(crate::schedule::world_is_live))
             .add_systems(
@@ -55,7 +74,8 @@ pub(crate) struct WdlStreamer {
     /// The `mapId` of the loaded `wdl`; a cross-map teleport reloads it.
     map_id: u32,
     material: Handle<WdlMaterial>,
-    loaded: HashMap<(u32, u32), Entity>,
+    /// Spawned ring tiles and the LOD each was built at (always 0 in a classic frame).
+    loaded: HashMap<(u32, u32), (Entity, usize)>,
 }
 
 impl WdlStreamer {
@@ -66,11 +86,59 @@ impl WdlStreamer {
         let wow = bevy_to_wow(bevy_pos);
         self.wdl.height_at(wow[0], wow[1])
     }
+
+    /// One tile's coarse surface as **parry heightfield inputs in Bevy space**: the 17×17 height
+    /// lattice, where to put it, and how far it spans. `None` where this map authors no such tile.
+    ///
+    /// The horizon data, borrowed for a second job: it is the only description of a tile's ground
+    /// that exists *before* the tile's own `.adt` has been fetched, because the whole map's copy of
+    /// it arrived in one 770 KB file at startup. `terrain_stream::provisional` stands a body on it
+    /// while the real heightfield is still on the wire.
+    ///
+    /// **A lattice, not a mesh, and that is the whole point.** The obvious form is
+    /// `WdlFile::tile_mesh` fed to a trimesh, and it is what this returned first — 3,072 triangles
+    /// per tile, and a parry trimesh means a QBVH build. Nine of those at a tile-boundary crossing
+    /// is a visible hitch on a target whose "async compute pool" is `spawn_local` on the thread that
+    /// draws. A heightfield stores the grid and builds no acceleration structure at all, because a
+    /// regular lattice already is one: 289 floats copied, and the cost stops being worth pacing.
+    ///
+    /// The index order passes through untouched, which is worth stating because it looks like it
+    /// should not. `WdlTileGrid` is `[row][col]` with row along −X and column along −Y (WoW), and
+    /// parry's heightfield is `[row][col]` with row along +Z and column along +X (its own space).
+    /// `wow_to_bevy` maps +X to −Z and +Y to −X, so both flips cancel and each index keeps its axis
+    /// and its direction.
+    pub(crate) fn coarse_floor(&self, tile_x: u32, tile_y: u32) -> Option<CoarseFloor> {
+        self.wdl.tile_height_grid(tile_x, tile_y).map(coarse_floor)
+    }
+}
+
+/// One WDL tile's height lattice as parry heightfield inputs — [`WdlStreamer::coarse_floor`]'s
+/// whole body, split out because it is the part with an axis convention in it and therefore the
+/// part worth testing on its own.
+fn coarse_floor(grid: benilla_formats::WdlTileGrid) -> CoarseFloor {
+    CoarseFloor {
+        // `centre` carries no z: the heights are absolute WoW z and parry adds them to the
+        // collider's own origin, so the collider sits at y = 0 and the lattice supplies the height.
+        // (`scale.y` is 1 for the same reason.)
+        at: wow_to_bevy([grid.centre[0], grid.centre[1], 0.0]),
+        scale: Vec3::new(grid.extent, 1.0, grid.extent),
+        heights: grid.heights,
+    }
+}
+
+/// What [`WdlStreamer::coarse_floor`] hands back — a parry heightfield, unbuilt.
+pub(crate) struct CoarseFloor {
+    /// 17×17 absolute heights, `[row][col]`; row indexes Bevy **Z**, column indexes Bevy **X**.
+    pub(crate) heights: Vec<Vec<f32>>,
+    /// Where the lattice's centre sits in Bevy space (`y = 0` — see [`WdlStreamer::coarse_floor`]).
+    pub(crate) at: Vec3,
+    /// Per-axis scale: the tile's edge on X and Z, and `1.0` on Y since the heights are absolute.
+    pub(crate) scale: Vec3,
 }
 
 /// Marks a spawned WDL tile.
 #[derive(Component)]
-struct WdlTile;
+pub(crate) struct WdlTile;
 
 fn setup_wdl(
     mut commands: Commands,
@@ -142,7 +210,7 @@ fn stream_wdl(
         if let Some(dir) = map_catalog.0.directory(map_id) {
             match WdlFile::load(&mut assets.chain.lock_recover(), dir) {
                 Ok(wdl) => {
-                    for (_, e) in streamer.loaded.drain() {
+                    for (_, (e, _)) in streamer.loaded.drain() {
                         commands.entity(e).despawn();
                     }
                     streamer.wdl = wdl;
@@ -150,7 +218,7 @@ fn stream_wdl(
                 }
                 // No `.wdl` for this map (instances often lack one): clear the ring.
                 Err(_) => {
-                    for (_, e) in streamer.loaded.drain() {
+                    for (_, (e, _)) in streamer.loaded.drain() {
                         commands.entity(e).despawn();
                     }
                     streamer.map_id = map_id;
@@ -163,27 +231,60 @@ fn stream_wdl(
     let center = focus.resolve(camera.single().ok().map(|c| c.translation));
     // The full window, the camera's own tile included (at a low view distance it is the near
     // horizon); the shader's near plane bounds the band, never the streamed set.
-    let desired = streamer.wdl.tiles_in_ring(center[0], center[1], WDL_RADIUS);
+    let modern = crate::modern::frame_is_modern();
+    let radius = if modern {
+        WDL_RADIUS_MODERN
+    } else {
+        WDL_RADIUS
+    };
+    let (ctx, cty) = benilla_formats::world_to_tile(center[0], center[1]);
+    let lod_of = |c: (u32, u32)| {
+        if modern {
+            modern_lod(
+                (c.0 as i32 - ctx as i32)
+                    .unsigned_abs()
+                    .max((c.1 as i32 - cty as i32).unsigned_abs()),
+            )
+        } else {
+            0
+        }
+    };
+    let desired = streamer.wdl.tiles_in_ring(center[0], center[1], radius);
 
+    // Unload ring tiles no longer wanted, or wanted at another LOD.
     let stale: Vec<(u32, u32)> = streamer
         .loaded
-        .keys()
-        .filter(|c| !desired.contains(c))
-        .copied()
+        .iter()
+        .filter(|(c, (_, lod))| !desired.contains(c) || *lod != lod_of(**c))
+        .map(|(c, _)| *c)
         .collect();
     for coords in stale {
-        if let Some(e) = streamer.loaded.remove(&coords) {
+        if let Some((e, _)) = streamer.loaded.remove(&coords) {
             commands.entity(e).despawn();
         }
     }
 
-    let missing: Vec<(u32, u32)> = desired
+    // Load a few missing tiles this frame, nearest first.
+    let mut missing: Vec<(u32, u32)> = desired
         .into_iter()
         .filter(|c| !streamer.loaded.contains_key(c))
-        .take(WDL_LOADS_PER_FRAME)
         .collect();
+    missing.sort_by_key(|c| {
+        (c.0 as i32 - ctx as i32)
+            .abs()
+            .max((c.1 as i32 - cty as i32).abs())
+    });
+    missing.truncate(WDL_LOADS_PER_FRAME);
     for coords in missing {
-        let Some(tile) = streamer.wdl.tile_mesh(coords.0, coords.1) else {
+        let lod = lod_of(coords);
+        let tile = if lod == 0 {
+            streamer.wdl.tile_mesh(coords.0, coords.1)
+        } else {
+            streamer
+                .wdl
+                .tile_mesh_coarse(coords.0, coords.1, lod, WDL_SKIRT)
+        };
+        let Some(tile) = tile else {
             continue;
         };
         let positions: Vec<[f32; 3]> = tile
@@ -214,14 +315,30 @@ fn stream_wdl(
                 crate::exterior_cull::ExteriorScene,
             ))
             .id();
-        streamer.loaded.insert(coords, e);
+        streamer.loaded.insert(coords, (e, lod));
     }
+}
+
+/// A change of the data the chain answers from changes the `.wdl` under the same map id (Turtle
+/// WoW's `Azeroth.wdl` carries its added coasts), so the next stream reloads it and rebuilds the
+/// ring.
+fn forget_wdl(
+    _: On<benilla_assets::ChainDataChanged>,
+    mut commands: Commands,
+    streamer: Option<ResMut<WdlStreamer>>,
+) {
+    let Some(mut streamer) = streamer else { return };
+    for (_, (e, _)) in streamer.loaded.drain() {
+        commands.entity(e).despawn();
+    }
+    // No map has this id, so `stream_wdl` reloads on its next run.
+    streamer.map_id = u32::MAX;
 }
 
 /// Leaving the world drops the ring; the parsed `.wdl` stays for `height_under`.
 fn release_wdl_ring(mut commands: Commands, streamer: Option<ResMut<WdlStreamer>>) {
     let Some(mut streamer) = streamer else { return };
-    for (_, e) in streamer.loaded.drain() {
+    for (_, (e, _)) in streamer.loaded.drain() {
         commands.entity(e).despawn();
     }
 }
@@ -259,4 +376,60 @@ fn the_far_band_is_a_fog_hull_not_a_fogged_surface() {
         "wdl.wgsl: the hull reads the SCENE fog distances again — the 33 yd overlap goes partly \
          white at low view distances"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The heights matrix passes through untransposed, and that is a claim worth proving.**
+    ///
+    /// `WdlTileGrid` is `[row][col]` with row along −X and column along −Y in WoW; parry's
+    /// heightfield is `[row][col]` with row along +Z and column along +X in its own space.
+    /// `wow_to_bevy` maps +X to −Z and +Y to −X, so both flips cancel — which is exactly the kind of
+    /// reasoning that is right until it is not, and silently puts a tile's floor sideways when it is
+    /// not.
+    ///
+    /// So: for each corner, where the WDL says that sample is (mapped into Bevy space) against
+    /// where parry will place `heights[i][j]` (its own documented `x_at(j)` / `z_at(i)`). Two
+    /// derivations, one answer.
+    #[test]
+    fn the_height_lattice_lands_where_the_wdl_says_it_does() {
+        const EDGE: usize = 17;
+        let extent = 533.333_3_f32;
+        // A lattice whose rows and columns cannot be confused for one another.
+        let heights: Vec<Vec<f32>> = (0..EDGE)
+            .map(|r| (0..EDGE).map(|c| (r * 100 + c) as f32).collect())
+            .collect();
+        let centre = [1234.5_f32, -678.25_f32];
+        let floor = coarse_floor(benilla_formats::WdlTileGrid {
+            heights: heights.clone(),
+            centre,
+            extent,
+        });
+
+        for (r, row) in heights.iter().enumerate() {
+            for (c, height) in row.iter().enumerate() {
+                // Where the WDL puts this sample: row along −X, column along −Y, then into Bevy.
+                let wow = [
+                    centre[0] + (0.5 - r as f32 / 16.0) * extent,
+                    centre[1] + (0.5 - c as f32 / 16.0) * extent,
+                    *height,
+                ];
+                let want = wow_to_bevy(wow);
+                // Where parry puts `heights[i][j]`: `x_at(j) = (-0.5 + j/16) * scale.x`,
+                // `z_at(i) = (-0.5 + i/16) * scale.z`, plus the collider's own origin.
+                let got = floor.at
+                    + Vec3::new(
+                        (-0.5 + c as f32 / 16.0) * floor.scale.x,
+                        floor.heights[r][c] * floor.scale.y,
+                        (-0.5 + r as f32 / 16.0) * floor.scale.z,
+                    );
+                assert!(
+                    want.distance(got) < 0.01,
+                    "sample [{r}][{c}]: the WDL says {want:?}, parry would place it at {got:?}"
+                );
+            }
+        }
+    }
 }

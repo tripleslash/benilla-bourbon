@@ -85,7 +85,10 @@ struct Frame {
     boundary: bool,
 }
 
-// A call writes one cache line of frame.
+// A call writes one cache line of frame, on 64-bit targets: the browser's wasm32 has pointers half
+// as wide, so its frame is smaller and the cache line a 64-bit layout fact (as in
+// Adrinalin4ik/manila's browser carry).
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Frame>() == 64);
 
 impl Frame {
@@ -328,13 +331,20 @@ pub struct Hook {
     counted: u64,
 }
 
+/// The profile's clock: `std::time::Instant` panics on wasm32 ("time not implemented on this
+/// platform"), where `web-time` reads `performance.now()` behind the same API.
+#[cfg(not(target_arch = "wasm32"))]
+type ProfileClock = std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+type ProfileClock = web_time::Instant;
+
 /// Wall time charged to each chunk (`Heap::sources`, by id). A switch between chunks (a call, a
 /// return) and every loop back-edge closes the running segment and charges it to the chunk that
 /// ran it; time in a host function goes to the chunk that called it; time outside Lua to none.
 #[derive(Clone, Debug, Default)]
 pub struct Profile {
     pub ns: Vec<u64>,
-    last: Option<(std::time::Instant, u32)>,
+    last: Option<(ProfileClock, u32)>,
 }
 
 impl Profile {
@@ -344,10 +354,10 @@ impl Profile {
         if self.last.is_some_and(|(_, s)| s == source) {
             return;
         }
-        self.charge(std::time::Instant::now(), Some(source));
+        self.charge(ProfileClock::now(), Some(source));
     }
 
-    fn charge(&mut self, now: std::time::Instant, next: Option<u32>) {
+    fn charge(&mut self, now: ProfileClock, next: Option<u32>) {
         if let Some((t, s)) = self.last {
             let s = s as usize;
             if self.ns.len() <= s {
@@ -360,7 +370,7 @@ impl Profile {
 
     /// Close the running segment: execution left Lua.
     fn close(&mut self) {
-        self.charge(std::time::Instant::now(), None);
+        self.charge(ProfileClock::now(), None);
     }
 }
 

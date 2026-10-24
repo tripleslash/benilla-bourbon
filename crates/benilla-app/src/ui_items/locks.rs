@@ -40,13 +40,10 @@ pub(crate) struct HeldItemLocks {
 /// of `[0xb4d900]` and `[0xb4e248]`), so a held item stays held, with its lock, and an armed wrap
 /// stays armed.
 pub(crate) fn fold_dying_vm_item_locks(world: &mut World) {
-    let Some(held) = world
-        .get_non_send_resource::<UiScript>()
-        .map(|s| HeldItemLocks {
-            locks: s.item_locks(),
-            cursor: s.held_cursor(),
-        })
-    else {
+    let Some(held) = world.get_non_send::<UiScript>().map(|s| HeldItemLocks {
+        locks: s.item_locks(),
+        cursor: s.held_cursor(),
+    }) else {
         return;
     };
     world.insert_resource(held);
@@ -159,13 +156,13 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.update();
         app
     }
 
     fn heard(app: &mut App) -> usize {
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let n = script.eval::<usize>("return table.getn(SEEN)").unwrap();
         script.run("SEEN = {}").unwrap();
         n
@@ -177,9 +174,7 @@ mod tests {
     fn a_window_sources_unlock_needs_a_live_item() {
         const GONE: u64 = 0x4000_0000_0000_0dea;
         let mut app = arrow_world();
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .lock_item(A);
+        app.world_mut().non_send_mut::<UiScript>().lock_item(A);
         let _ = heard(&mut app);
         let mut loot = crate::ui_loot::LootState::default();
         loot.unlock_item_source(GONE);
@@ -187,7 +182,7 @@ mod tests {
         app.insert_resource(loot);
         app.update();
         assert_eq!(heard(&mut app), 1, "A's alone");
-        assert!(!app.world().non_send_resource::<UiScript>().item_locked(A));
+        assert!(!app.world().non_send::<UiScript>().item_locked(A));
     }
 
     /// The lock is the item object's: one rebuilt under the same guid (a cross-map worldport)
@@ -196,21 +191,17 @@ mod tests {
     #[test]
     fn a_rebuilt_or_despawned_item_loses_its_lock_silently() {
         let mut app = arrow_world();
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .lock_item(A);
+        app.world_mut().non_send_mut::<UiScript>().lock_item(A);
         app.update();
         let _ = heard(&mut app);
         let old = app.world().resource::<crate::net::GuidIndex>().0[&A];
         app.world_mut().despawn(old);
         crate::items::test_spawn_item(app.world_mut(), A, arrows(200), false);
         app.update();
-        assert!(!app.world().non_send_resource::<UiScript>().item_locked(A));
+        assert!(!app.world().non_send::<UiScript>().item_locked(A));
         assert_eq!(heard(&mut app), 0, "no event for the rebuild");
 
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .lock_item(A);
+        app.world_mut().non_send_mut::<UiScript>().lock_item(A);
         app.update();
         let _ = heard(&mut app);
         let e = app.world().resource::<crate::net::GuidIndex>().0[&A];
@@ -220,7 +211,7 @@ mod tests {
             .0
             .remove(&A);
         app.update();
-        assert!(!app.world().non_send_resource::<UiScript>().item_locked(A));
+        assert!(!app.world().non_send::<UiScript>().item_locked(A));
         assert_eq!(heard(&mut app), 0, "no event for the drop itself");
     }
 
@@ -228,15 +219,13 @@ mod tests {
     #[test]
     fn the_loot_windows_owed_unlocks_run() {
         let mut app = arrow_world();
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .lock_item(A);
+        app.world_mut().non_send_mut::<UiScript>().lock_item(A);
         let _ = heard(&mut app);
         let mut loot = crate::ui_loot::LootState::default();
         loot.unlock_item_source(A);
         app.insert_resource(loot);
         app.update();
         assert_eq!(heard(&mut app), 1);
-        assert!(!app.world().non_send_resource::<UiScript>().item_locked(A));
+        assert!(!app.world().non_send::<UiScript>().item_locked(A));
     }
 }

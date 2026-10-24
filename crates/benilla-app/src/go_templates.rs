@@ -154,6 +154,11 @@ impl crate::query_cache::AskOnce for GameObjectTemplates {
 }
 
 impl GameObjectTemplates {
+    /// A flavor switch: the templates are the other client's.
+    pub(crate) fn forget(&mut self) {
+        self.templates.clear();
+    }
+
     /// The key an object's template is cached under: its descriptor's `OBJECT_FIELD_ENTRY`
     /// (`[descriptor+0xc]`, `0x5f7d77`), never the guid, whose bits carry the entry only on some
     /// cores. `None` for a descriptor that has not received the field.

@@ -416,7 +416,7 @@ mod tests {
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()
             .add_systems(Update, feed_stable);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let list = |app: &mut App| {
             app.world_mut().resource_mut::<StableOpen>().open(
                 0xF130_0000_4500_0001,
@@ -470,7 +470,7 @@ mod tests {
                  f:SetScript('OnEvent', function() SEEN = SEEN .. GetNumStableSlots() end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut()
             .resource_mut::<StableOpen>()
             .open(MASTER, 0, Vec::new());
@@ -501,7 +501,7 @@ mod tests {
         };
         crate::net::handlers::dispatch(app.world_mut(), events);
         app.update();
-        let s = app.world().non_send_resource::<UiScript>();
+        let s = app.world().non_send::<UiScript>();
         (
             s.eval::<String>("return SEEN").unwrap(),
             s.eval::<i64>("return GetNumStableSlots()").unwrap(),

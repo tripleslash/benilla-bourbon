@@ -109,7 +109,7 @@ fn check_blend_states(
     let mut table = live.0.lock().unwrap();
     if let Some(phases) = transparent {
         for phase in phases.0.values() {
-            for item in &phase.items {
+            for item in phase.items.values() {
                 let Some(inst) = instances.instances.get(&item.entity.1) else {
                     continue;
                 };

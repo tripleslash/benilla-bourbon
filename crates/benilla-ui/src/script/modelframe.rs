@@ -180,7 +180,7 @@ impl Model {
 fn facts_of_pane(lua: &Lua, this: &Table) -> mlua::Result<Option<Arc<ModelFileFacts>>> {
     let path = with_model(lua, this, |m| m.path.clone())?;
     Ok(path.and_then(|p| {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .model_facts_for(&p)
     }))
@@ -201,7 +201,9 @@ pub(super) fn with_model<T>(
     f: impl FnOnce(&mut ModelState) -> T,
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let frame = model
         .arena
         .frame_mut(h)
@@ -348,7 +350,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // A pane of this kind, or the error.
             with_model(lua, &this, |_| ())?;
             let h = frame_handle_of(lua, &this)?;
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .set_pane_model(h, path);
             Ok(())
@@ -426,7 +428,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let c = int(&c);
             with_model(lua, &this, |_| ())?;
             let h = frame_handle_of(lua, &this)?;
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .set_pane_camera(h, c);
             Ok(())
@@ -596,10 +598,12 @@ pub(super) fn install_player_model(lua: &Lua) -> mlua::Result<()> {
                 optional_string(lua, &unit).ok_or_else(|| mlua::Error::runtime(SET_UNIT_USAGE))?;
             let h = frame_handle_of(lua, &this)?;
             let guid = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.unit_guids.guid_of(&token)?.unwrap_or(0)
             };
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .set_pane_unit(h, guid);
             // A dress-up pane rebuilds from the unit's live model, dropping try-ons (`0x5059a0`).
@@ -614,7 +618,7 @@ pub(super) fn install_player_model(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let guid = with_model(lua, &this, |m| m.character.as_ref().map_or(0, |c| c.guid))?;
             let h = frame_handle_of(lua, &this)?;
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .set_pane_unit(h, guid);
             super::dressup::redress_if_dressup(lua, &this)
@@ -629,7 +633,7 @@ pub(super) fn install_player_model(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (this, rad): (Table, Value)| {
             let rad = num(&rad);
             let now_ms = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .now_ms();
             let facts = facts_of_pane(lua, &this)?;
@@ -780,9 +784,9 @@ impl crate::script::UiScript {
     pub fn model_pane(&self, name: &str) -> Option<ModelState> {
         self.model_ref()
             .arena
-            .iter_frames()
-            .find_map(|(_, f)| match (&f.name, &f.kind_state) {
-                (Some(n), KindState::Model(m)) if n == name => Some(m.clone()),
+            .frames_named(name)
+            .find_map(|(_, f)| match &f.kind_state {
+                KindState::Model(m) => Some(m.clone()),
                 _ => None,
             })
     }
@@ -843,7 +847,7 @@ impl crate::script::UiScript {
     /// Drain the model files panes named with no facts yet; the host loads each once and answers
     /// through [`Self::set_model_facts`].
     pub fn model_facts_wanted(&mut self) -> Vec<ModelWanted> {
-        std::mem::take(&mut self.model_mut().model_facts_wanted)
+        drain_field!(self, model_facts_wanted)
     }
 
     /// Whether the engine holds facts for `path`'s file.

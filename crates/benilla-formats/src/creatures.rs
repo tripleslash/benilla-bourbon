@@ -795,7 +795,9 @@ mod tests {
                 "an extended-display NPC wears a Character\\ body, got {}",
                 m.model_path
             );
-            let path = format!("Textures\\BakedNpcTextures\\{bake}");
+            // A Turtle row may name its bake bare; the texture loader asks for the `.blp`.
+            let ext = if bake.contains('.') { "" } else { ".blp" };
+            let path = format!("Textures\\BakedNpcTextures\\{bake}{ext}");
             assert!(
                 chain.read_file(&path).is_ok(),
                 "the baked body atlas ships: {path}"

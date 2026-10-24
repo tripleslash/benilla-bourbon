@@ -23,13 +23,11 @@ pub(crate) fn harness() -> UiScript {
         "Interface\\FrameXML\\UIDropDownMenu.xml",
         r"Interface\FrameXML\UIPanelTemplates.lua",
         r"Interface\FrameXML\UIPanelTemplates.xml",
-        // Before our files, as the core loads before the layer: it sources UIParent.lua again.
-        r"Interface\FrameXML\GameMenuFrame.xml",
         "Interface\\FrameXML\\StaticPopup.xml",
         "ScrollTemplates.xml",
         "KeyBindingsPage.xml",
         "OptionsFrame.xml",
-        "GameMenuAdapters.xml",
+        "GameMenuFrame.xml",
     ] {
         // Strict for ours: an unknown template only warns, so a skinless window would pass.
         if file == "KeyBindingsPage.xml" || file == "OptionsFrame.xml" {

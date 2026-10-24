@@ -10,7 +10,7 @@
 //! player's history whatever the caster (`0x60952e`, `0x609569`: `0x6e2ea0(spell, 0)`), and its
 //! reputation rung the player's standing (`0x609f29` → `0x4d6370`).
 
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use benilla_protocol::messages::{OwnerFallback, UseItemTarget};
 use bevy::prelude::*;

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::layout::{self, Anchor, LayoutInput, Rect};
 use crate::widget::{FrameHandle, RegionHandle};
 
@@ -29,8 +27,8 @@ fn hold_clear(hold: &mut [u8], id: u32, bits: u8) {
 
 /// Node `id`'s anchors: a frame's layout input's, a region's own.
 fn node_anchors(
-    layout_inputs: &HashMap<FrameHandle, LayoutInput>,
-    region_data: &HashMap<RegionHandle, RegionData>,
+    layout_inputs: &crate::widget::HandleMap<FrameHandle, LayoutInput>,
+    region_data: &crate::widget::HandleMap<RegionHandle, RegionData>,
     id_to_frame: &IdMap<FrameHandle>,
     id_to_region: &IdMap<RegionHandle>,
     id: u32,
@@ -161,7 +159,8 @@ pub(super) fn effective_measure(data: &RegionData) -> Option<super::MeasuredText
 /// A region's per-node input hash: its anchors, explicit size, owner, whose effective scale the
 /// sweep reads (`None` for an owner with no layout id), and, where an axis authored 0 takes its
 /// span from it, its effective measure. Not a Texture's art, which only a resolve that reaches the
-/// node reads, so art set since moves no node, as `SetTexture` invalidates none (`0x770200`).
+/// node reads, so art set since moves no node, as `SetTexture` invalidates none (`0x770200`); art
+/// whose size lands after the sweep is forced through instead ([`UiScript::name_landed_art`]).
 #[inline]
 pub(super) fn region_node_hash(data: &RegionData, owner: Option<u32>) -> u64 {
     let mut node = InputFingerprint::default();
@@ -183,6 +182,11 @@ pub(super) fn region_node_hash(data: &RegionData, owner: Option<u32>) -> u64 {
         None => node.feed(u64::MAX),
     }
     node.finish()
+}
+
+/// Whether an axis of `data` authored 0 takes its span from the art (`content_span`).
+fn spans_from_art(data: &RegionData) -> bool {
+    !data.anchors.is_empty() && data.size.is_none_or(|(w, h)| w.is_zero() || h.is_zero())
 }
 
 /// A texture's content-derived span in FrameXML units. `CSimpleTexture::GetWidth` (`0x770720`,
@@ -696,8 +700,8 @@ fn deferral_state(model: &Model) -> (Vec<FrameHandle>, Vec<RegionHandle>) {
 /// and `regions`, in id order.
 fn first_rect_diff(
     model: &Model,
-    frames: &HashMap<FrameHandle, Rect>,
-    regions: &HashMap<RegionHandle, Rect>,
+    frames: &crate::widget::HandleMap<FrameHandle, Rect>,
+    regions: &crate::widget::HandleMap<RegionHandle, Rect>,
 ) -> Option<u32> {
     let mut ids: Vec<u32> = Vec::new();
     for (h, r) in &model.frame_rects {
@@ -855,8 +859,8 @@ impl PreambleProf {
 /// loses its rect had no `ApplyRect` and fires nothing.
 fn queue_size_changes(
     watched: &[(FrameHandle, Option<Rect>)],
-    resolved: &HashMap<FrameHandle, Rect>,
-    frame_to_id: &HashMap<FrameHandle, u32>,
+    resolved: &crate::widget::HandleMap<FrameHandle, Rect>,
+    frame_to_id: &crate::widget::HandleMap<FrameHandle, u32>,
     eps: f64,
     out: &mut Vec<(u32, f32, f32)>,
 ) {
@@ -879,6 +883,7 @@ impl UiScript {
     /// [`UiScript::resolve`]'s body on a bare `Model`, so a Lua binding can force a fresh resolve,
     /// as a scroll frame's range recompute must reflect a same-tick `SetHeight`.
     pub(super) fn resolve_layout(model: &mut Model) {
+        Self::name_landed_art(model);
         // A tooltip sized before its lines were measured, in a VM with no font engine.
         super::tooltip::size_owed(model);
         let solves = model.layout_solves;
@@ -941,14 +946,15 @@ impl UiScript {
         let report = |id: u32| format!("id {id}, inputs now: {}", node_inputs(model, id));
         let graph = graph.map(|(id, why)| format!("{why} ({})", report(id)));
         if let Some(id) = first_rect_diff(model, &before.0, &before.1) {
-            let rect = |frames: &HashMap<FrameHandle, Rect>,
-                        regions: &HashMap<RegionHandle, Rect>| {
-                match (model.id_to_frame.get(&id), model.id_to_region.get(&id)) {
-                    (Some(h), _) => frames.get(h).copied(),
-                    (_, Some(rh)) => regions.get(rh).copied(),
-                    _ => None,
-                }
-            };
+            let rect =
+                |frames: &crate::widget::HandleMap<FrameHandle, Rect>,
+                 regions: &crate::widget::HandleMap<RegionHandle, Rect>| {
+                    match (model.id_to_frame.get(&id), model.id_to_region.get(&id)) {
+                        (Some(h), _) => frames.get(h).copied(),
+                        (_, Some(rh)) => regions.get(rh).copied(),
+                        _ => None,
+                    }
+                };
             return Some(format!(
                 "an INCREMENTAL layout pass disagreed with a full derivation of the same frame — \
                  a write site named the wrong node or moved layout inputs without naming any. \
@@ -981,6 +987,37 @@ impl UiScript {
                  the re-derive mis-applied one. {why}"
             )
         })
+    }
+
+    /// Names every region whose art had no size at its last sweep and has one now, so its hash
+    /// moves and the resolve re-sweeps it; the rest wait on. Nothing else would: the art landing
+    /// (in flight on the web) is no layout write.
+    fn name_landed_art(model: &mut Model) {
+        if model.layout_art_waiting.is_empty() {
+            return;
+        }
+        let mut landed = Vec::new();
+        let Model {
+            layout_art_waiting,
+            region_data,
+            texture_size_probe,
+            ..
+        } = &mut *model;
+        layout_art_waiting.retain(|&rh| match region_data.get(&rh) {
+            Some(data) if spans_from_art(data) => {
+                if content_span(data, texture_size_probe.as_ref()).is_some() {
+                    landed.push(rh);
+                    false
+                } else {
+                    true
+                }
+            }
+            // Gone, or sized since: a later sweep re-enrols it if it needs the art again.
+            _ => false,
+        });
+        for rh in landed {
+            model.clear_region_valid(rh);
+        }
     }
 
     fn resolve_layout_inner(model: &mut Model) {
@@ -1057,6 +1094,7 @@ impl UiScript {
             layout_last_scope,
             layout_rounds,
             pending_size_changed,
+            layout_art_waiting,
             texture_size_probe,
             layout_force,
             layout_screen,
@@ -1155,20 +1193,21 @@ impl UiScript {
         // An invalidated region with no anchors is no node, and its resolve can only fail
         // (`0x768d55`): its valid bit clears, a Texture keeps its last quad. So does one whose
         // owner's scale moved, which the cascade invalidates (`0x76ad06`).
-        let fail_loose = |rh: RegionHandle,
-                          arena: &crate::widget::WidgetArena,
-                          region_resolved: &mut HashMap<RegionHandle, Rect>,
-                          region_kept: &mut HashMap<RegionHandle, Rect>| {
-            let Some(r) = arena.region(rh) else { return };
-            if region_data.get(&rh).is_some_and(|d| !d.anchors.is_empty()) {
-                return;
-            }
-            if let Some(rect) = region_resolved.remove(&rh) {
-                if !matches!(r.kind, crate::widget::RegionKind::FontString) {
-                    region_kept.insert(rh, rect);
+        let fail_loose =
+            |rh: RegionHandle,
+             arena: &crate::widget::WidgetArena,
+             region_resolved: &mut crate::widget::HandleMap<RegionHandle, Rect>,
+             region_kept: &mut crate::widget::HandleMap<RegionHandle, Rect>| {
+                let Some(r) = arena.region(rh) else { return };
+                if region_data.get(&rh).is_some_and(|d| !d.anchors.is_empty()) {
+                    return;
                 }
-            }
-        };
+                if let Some(rect) = region_resolved.remove(&rh) {
+                    if !matches!(r.kind, crate::widget::RegionKind::FontString) {
+                        region_kept.insert(rh, rect);
+                    }
+                }
+            };
         for &id in &pending {
             if let Some(&rh) = id_to_region.get(&id) {
                 fail_loose(rh, arena, region_resolved, region_kept);
@@ -1539,6 +1578,10 @@ impl UiScript {
                     let content = (sw == 0.0 || sh == 0.0)
                         .then(|| content_span(data, texture_size_probe.as_ref()))
                         .flatten();
+                    if (sw == 0.0 || sh == 0.0) && content.is_none() && data.tex.path().is_some() {
+                        // Art with no size yet waits for `name_landed_art`.
+                        layout_art_waiting.insert(rh);
+                    }
                     (
                         texture_slot(units, sw, content.map(|c| c.0)),
                         texture_slot(units, sh, content.map(|c| c.1)),
@@ -2034,6 +2077,8 @@ impl UiScript {
     /// [`UiScript::resolve`], answer with [`UiScript::set_measured_text`], and resolve again.
     pub fn fontstrings_needing_measure(&mut self) -> Vec<MeasureRequest> {
         let mut model = self.model_mut();
+        // An empty ask re-arms the ledger and nothing else: the mutation count stands.
+        let quiet = model.epoch();
         // Every FontString with text, sized or not: `GetStringWidth` answers the natural width.
         // The ledger (`Model::touch_measure`) re-arms empty, so a second ask this frame sees only
         // the writes since the first; `None` walks every region.
@@ -2088,6 +2133,9 @@ impl UiScript {
             if let Some(req) = measure_request_for(&mut model, rh) {
                 out.push(req);
             }
+        }
+        if out.is_empty() {
+            model.set_epoch(quiet);
         }
         out
     }

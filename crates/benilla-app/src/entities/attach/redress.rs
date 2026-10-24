@@ -17,12 +17,13 @@ use benilla_world::model_fade::{
 };
 
 use super::super::equipment::AppliedEquipment;
+use super::super::skin_composite::BodyAtlas;
 use super::super::{
     Characters, Creatures, EntityPart, Equipment, ItemDisplays, SkinComposites, SkinSections,
     VisualAttached,
 };
 use super::char_skin::{
-    build_char_skin_materials, equip_geosets, forced_body_atlas, resolve_char_look,
+    build_char_skin_materials, equip_geosets, redress_body_atlas, resolve_char_look,
     resolve_worn_equip, skin_key, CharSkinMaterials,
 };
 use super::dress::{part_materials, spawn_group, DressedPart, PartDress};
@@ -107,6 +108,9 @@ pub(in crate::entities) fn redress_player_looks(
             continue;
         }
         // Stamp first: a model-less player has nothing to re-dress and must not retry every frame.
+        // fork: web — kept, so the one case that DOES want to come back, a composite whose blobs
+        // are still in flight (below), can put it back.
+        let was_applied = applied.0;
         applied.0 = *live;
         let Some(dm) = net
             .display_id
@@ -124,8 +128,9 @@ pub(in crate::entities) fn redress_player_looks(
         // geosets apply at once and the atlas composites that frame when its sections are
         // resident, never gated or withheld. So it composites here, in the frame, taking over a
         // running composite of the same look; only an arriving body waits for its atlas.
-        let body_tex = look.as_ref().and_then(|l| {
-            forced_body_atlas(
+        // fork: web — the composite takes the arrival's lane instead (`redress_body_atlas`).
+        let atlas = look.as_ref().map(|l| {
+            redress_body_atlas(
                 l,
                 skin_key(l, worn.bodyslots, worn.emblem, worn.tabard_preview),
                 displays.as_deref(),
@@ -135,6 +140,17 @@ pub(in crate::entities) fn redress_player_looks(
                 &mut images,
             )
         });
+        // fork: web — still coming, its blobs or its blend: undo the stamp so this arm re-enters
+        // next frame, and leave the player in the gear they are wearing rather than re-point
+        // every part at an undressed body.
+        let body_tex = match atlas {
+            Some(BodyAtlas::Pending) => {
+                applied.0 = was_applied;
+                continue;
+            }
+            Some(BodyAtlas::Ready(tex)) => tex,
+            None => None,
+        };
         let eg = equip_geosets(
             displays.as_deref(),
             &worn.bodyslots,
@@ -146,7 +162,6 @@ pub(in crate::entities) fn redress_player_looks(
             let cg = characters.as_deref()?;
             Some(cg.0.visible_geosets(l.race, l.sex, l.hair_style, l.facial_hair, &eg))
         });
-        // Cached per (appearance, worn set), so a swap back costs a lookup.
         let char_mats: CharSkinMaterials = match look.as_ref() {
             Some(l) => build_char_skin_materials(
                 l,
@@ -196,10 +211,10 @@ pub(in crate::entities) fn redress_player_looks(
                 // A billboard card is a world root, so it is reaped by name.
                 if let Some(card) = dp.card {
                     if let Ok(mut ec) = commands.get_entity(card) {
-                        ec.despawn();
+                        ec.try_despawn();
                     }
                 }
-                commands.entity(child).despawn();
+                commands.entity(child).try_despawn();
                 hidden += 1;
                 continue;
             }

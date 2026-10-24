@@ -5,8 +5,14 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::sync::OnceLock;
+
+// The platform lock, not std's: any thread logs here, and on the browser a std lock the page finds
+// held parks, which traps there; this one spins on the page.
+use bevy::platform::sync::Mutex;
+// The platform clock, not std's: `std::time::Instant::now()` panics on wasm32, and this layer
+// runs under the page's log subscriber in a debug web build.
+use bevy::platform::time::Instant;
 
 use bevy::log::tracing::field::{Field, Visit};
 use bevy::log::tracing::{Event, Subscriber};

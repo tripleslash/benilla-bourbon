@@ -9,7 +9,6 @@ use mlua::{Lua, Value};
 
 use super::binding_abi::{self, bool_or_default, string_arg};
 use super::who_sort::WhoSortChain;
-use super::Model;
 
 /// One friend slot as `GetFriendInfo` (`0x5ad060`) reads it, its ids resolved; the default is an
 /// empty slot, as the list's constructor leaves one (`0x5aca10`).
@@ -122,7 +121,7 @@ pub enum SocialCall {
 impl super::UiScript {
     /// Replace the social snapshot; firing `FRIENDLIST_UPDATE` and kin is the app's job.
     pub fn set_social(&mut self, state: SocialState) {
-        self.model_mut().social = state;
+        set_field!(self, social, state);
     }
 
     /// `SetWhoToUI`'s flag (`0xc2a12c`): whether the next `/who` answer goes to the Who frame.
@@ -161,7 +160,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumFriends",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let slots = model.social.friends.iter().take(FRIEND_SLOTS);
             Ok(slots.take_while(|f| f.listed).count() as i64)
         })?,
@@ -178,7 +179,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let text = |key: &str| super::glue_core::global_text(lua, key);
             let unknown = text("UNKNOWN");
             let string = |s: &str| lua.create_string(s).map(Value::String);
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(friend) = friend_at(&model.social.friends, index) else {
                 // `0x5ad1c8`-`0x5ad1fd`.
                 return Ok(mlua::MultiValue::from_vec(vec![
@@ -213,7 +216,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSelectedFriend",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.social.selected_friend))
         })?,
     )?;
@@ -235,7 +240,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetLookingForGroup",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(mlua::MultiValue::from_vec(vec![
                 Value::Nil,
                 Value::Nil,
@@ -279,7 +286,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
                 _ => None,
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let mut changed = false;
             if model.lfg_slots != slots {
                 model.lfg_slots = slots;
@@ -346,7 +355,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumIgnores",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let slots = model.social.ignores.iter().take(IGNORE_SLOTS);
             Ok(slots.take_while(|i| i.listed).count() as i64)
         })?,
@@ -362,7 +373,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let index = binding_abi::index_arg32(lua, index, "Usage: GetIgnoreName(index)")?;
             let slot = index.wrapping_sub(1) as usize;
             let name = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 (slot <= IGNORE_SLOTS)
                     .then(|| model.social.ignores.get(slot).and_then(|i| i.name.clone()))
                     .flatten()
@@ -376,7 +389,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSelectedIgnore",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.social.selected_ignore))
         })?,
     )?;
@@ -421,7 +436,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumWhoResults",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok((
                 model.social.who.len() as i64,
                 i64::from(model.social.who_total),
@@ -441,7 +458,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: GetWhoInfo(index)",
             )?);
             let unknown = super::glue_core::global_text(lua, "UNKNOWN");
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             // `index - 1` against the kept count, unsigned, with `ja` (`0x5ad71a`-`0x5ad71f`): the
             // count's own slot passes.
             let slot = (index as u32).wrapping_sub(1) as usize;
@@ -503,8 +522,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, sort_type: Value| {
             let sort_type = string_arg(lua, sort_type, "Usgae: SortWho(\"type\")")?;
             {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                let model = &mut *model;
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
+                let model: &mut crate::script::Model = &mut model;
                 model.social.who_sort.promote(&sort_type);
                 model.social.who_sort.sort(&mut model.social.who);
             }
@@ -522,7 +543,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetWhoToUI",
         lua.create_function(|lua, flag: Option<Value>| {
             let on = bool_or_default(flag.as_ref(), false);
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .who_to_ui = on;
             Ok(())
@@ -561,6 +582,22 @@ mod tests {
             class: Some("Warrior".to_string()),
             zone: Some(zone.to_string()),
         }
+    }
+
+    /// A miss still answers six values with a NUMBER level (`1.12-shapes.tsv`:
+    /// `(nil,nil,number,nil,nil,nil)`), so an unguarded `GetDifficultyColor(level)` over the empty
+    /// slots of the who list does not raise.
+    #[test]
+    fn a_who_miss_answers_six_values_with_a_number_level() {
+        let mut s = UiScript::new().unwrap();
+        s.set_social(SocialState::default());
+        let got = s
+            .eval::<(bool, bool, i64, bool, bool, bool)>(
+                "local a,b,c,d,e,f = GetWhoInfo(1) \
+                 return a == nil, b == nil, c, d == nil, e == nil, f == nil",
+            )
+            .unwrap();
+        assert_eq!(got, (true, true, 0, true, true, true));
     }
 
     /// Two `/who` hits and a `WHO_LIST_UPDATE` handler that records the order it sees.

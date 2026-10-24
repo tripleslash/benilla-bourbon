@@ -85,13 +85,22 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("CustomCursorImage", Plumbing),
     ("InputPlugin", Plumbing),
     ("WinitPlugin", Plumbing),
+    // The event loop's pacing, set once for a background run; neither reads the player.
+    ("WinitSettings", Plumbing),
+    ("UpdateMode", Plumbing),
+    // The runner's hook behind a held frame's present (`fsr::cadence`): a frame step, no input.
+    ("AfterUpdate", Plumbing),
     ("InputSystems", Plumbing),
     ("Key", Plumbing),
     ("KeyCode", Plumbing),
     ("MouseButton", Plumbing),
     ("MouseScrollUnit", Plumbing),
+    // Bevy 0.19's `MouseWheel::phase`: a field of a swallowed event, named where one is built.
+    ("TouchPhase", Plumbing),
     ("NativeKey", Plumbing),
     ("ExitCondition", Plumbing),
+    // Bevy 0.19's window-exit set, which `shutdown.rs` orders `OnAppExit` after: a set name.
+    ("ExitSystems", Plumbing),
     ("Monitor", Plumbing),
     ("MonitorSelection", Plumbing),
     ("PresentMode", Plumbing),

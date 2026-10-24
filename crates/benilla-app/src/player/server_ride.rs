@@ -80,7 +80,34 @@ pub(super) fn drive_self_ride(
         ),
         With<Embodied>,
     >,
+    // The deck we ride, whose frame the forced move is kept in ([`super::ride::follow_body`]).
+    decks: Query<&Transform, (With<crate::transport::Transport>, Without<Embodied>)>,
 ) {
+    let deck = player
+        .ride
+        .as_ref()
+        .and_then(|r| decks.get(r.entity).ok())
+        .copied();
+    // The rider's tail for an ack at `world`: deck-local, as the server relocates a rider from it.
+    let tail = |player: &Player, world: Vec3| {
+        let (Some(r), Some(d)) = (player.ride.as_ref(), deck) else {
+            return (0, None);
+        };
+        let local = bevy_to_wow(d.rotation.inverse() * (world - d.translation));
+        let deck_yaw = yaw_of(d.rotation);
+        (
+            move_flags::ON_TRANSPORT,
+            Some(benilla_protocol::TransportPose {
+                guid: r.guid,
+                pos: benilla_protocol::wire::Vector3d {
+                    x: local[0],
+                    y: local[1],
+                    z: local[2],
+                },
+                orientation: (player.face_yaw - deck_yaw).rem_euclid(std::f32::consts::TAU),
+            }),
+        )
+    };
     // Only while we hold control; a free-fly detach abandons the ride (the server still ends it).
     if !player.active || player.detached {
         player.server_riding = false;
@@ -153,6 +180,9 @@ pub(super) fn drive_self_ride(
             player.pos = transform.translation;
             player.face_yaw = yaw;
             player.model_yaw = yaw;
+            if let Some(d) = deck.as_ref() {
+                super::ride::follow_body(&mut player, d);
+            }
             player.server_riding = true;
             player.ride_spline_id = spline.id;
             player.ride_grounded = spline.grounded;
@@ -189,6 +219,9 @@ pub(super) fn drive_self_ride(
             player.pos = transform.translation;
             player.face_yaw = yaw_of(transform.rotation);
             player.model_yaw = player.face_yaw;
+            if let Some(d) = deck.as_ref() {
+                super::ride::follow_body(&mut player, d);
+            }
             player.server_riding = false;
             player.move_flags = 0;
             player.airborne_since = None;
@@ -202,11 +235,13 @@ pub(super) fn drive_self_ride(
             if stopped.is_some() {
                 commands.entity(entity).remove::<SplineStopped>();
             }
+            let (flags, transport) = tail(&player, player.pos);
             let _ = net.0.send(ClientCommand::MoveSplineDone {
-                flags: 0,
+                flags,
                 pos: bevy_to_wow(player.pos),
                 orientation: player.face_yaw,
                 spline_id,
+                transport,
             });
         }
         // A stop with no ride behind it (a fear ending between flee paths, a possession's opening
@@ -214,11 +249,13 @@ pub(super) fn drive_self_ride(
         None if stopped.is_some() => {
             let id = stopped.expect("checked above").0;
             commands.entity(entity).remove::<SplineStopped>();
+            let (flags, transport) = tail(&player, transform.translation);
             let _ = net.0.send(ClientCommand::MoveSplineDone {
-                flags: 0,
+                flags,
                 pos: bevy_to_wow(transform.translation),
                 orientation: yaw_of(transform.rotation),
                 spline_id: id,
+                transport,
             });
         }
         None => {}
@@ -227,8 +264,9 @@ pub(super) fn drive_self_ride(
 
 #[cfg(test)]
 mod tests {
+    use bevy::platform::time::Instant;
     use std::f32::consts::FRAC_PI_2;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::*;
 
@@ -248,7 +286,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
             avian3d::prelude::PhysicsPlugins::new(bevy::app::PostUpdate),
         ));
         app.init_asset::<Mesh>();

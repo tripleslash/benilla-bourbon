@@ -60,37 +60,28 @@ if [ -z "$dirlist" ]; then
     exit 0
 fi
 
-# ── Changed crates → reverse-dependency closure, off cargo metadata ──────────────────────────────
-pkgs="$(python3 - "$root" $dirlist <<'PY'
-import json, subprocess, sys, os
-root, dirs = sys.argv[1], set(sys.argv[2:])
-meta = json.loads(subprocess.run(
-    ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-    capture_output=True, text=True, cwd=root, check=True).stdout)
-by_dir, deps = {}, {}
-names = {p["name"] for p in meta["packages"]}
-for p in meta["packages"]:
-    by_dir[os.path.relpath(os.path.dirname(p["manifest_path"]), root)] = p["name"]
-    deps[p["name"]] = {d["name"] for d in p["dependencies"] if d["name"] in names}
-changed = {by_dir[d] for d in dirs if d in by_dir}
-missing = [d for d in dirs if d not in by_dir]
-if missing:  # a changed dir cargo doesn't know: not our map's to scope
-    print("FULL " + " ".join(missing)); sys.exit(0)
-scope = set(changed)
-grew = True
-while grew:
-    grew = False
-    for name, ds in deps.items():
-        if name not in scope and ds & scope:
-            scope.add(name); grew = True
-print(" ".join(sorted(scope)))
-PY
-)" || { echo "check: cargo metadata failed — falling back to the full chain"; exec "$root/scripts/gates.sh"; }
-
-case "$pkgs" in FULL*)
-    echo "check: changed path(s) not in the workspace map (${pkgs#FULL }) — full chain"
-    exec "$root/scripts/gates.sh" ;;
-esac
+# ── Changed crates → reverse-dependency closure, off cargo tree ──────────────────────────────────
+# A changed dir with no package manifest is not our map's to scope.
+names=""
+missing=""
+for d in $dirlist; do
+    name="$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$d/Cargo.toml" 2>/dev/null | head -1)"
+    if [ -n "$name" ]; then names="$names $name"; else missing="$missing $d"; fi
+done
+if [ -n "$missing" ]; then
+    echo "check: changed path(s) not in the workspace map (${missing# }) — full chain"
+    exec "$root/scripts/gates.sh"
+fi
+# `--invert` lists every workspace package that reaches the changed one, over every dependency
+# kind and target, the package included.
+pkgs=""
+for name in $names; do
+    dependents="$(cargo tree -q --workspace --invert "$name" --edges normal,build,dev --target all \
+        --prefix none 2>/dev/null)" ||
+        { echo "check: cargo tree failed — falling back to the full chain"; exec "$root/scripts/gates.sh"; }
+    pkgs="$pkgs $(printf '%s\n' "$dependents" | sed -n 's/^\([A-Za-z0-9_-]*\) v[0-9].*/\1/p')"
+done
+pkgs="$(printf '%s\n' $pkgs | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
 
 pflags=""
 for p in $pkgs; do pflags="$pflags -p $p"; done

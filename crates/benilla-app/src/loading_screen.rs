@@ -1,7 +1,8 @@
 //! The loading screen: the full-screen splash and progress bar over world entry and cross-map
 //! teleports. The art resolves `Map.dbc` → `LoadingScreens.dbc` → BLP for every map kind; the bar
 //! is two layers, `Loading-BarBorder` and `Loading-BarFill` (Background, Glow and Glass are never
-//! drawn in 1.12).
+//! drawn in 1.12). A transfer aboard a transport with a drawn route shows the world map and that
+//! route instead ([`ship`]).
 //!
 //! Event-raised and readiness-cleared, as in the reference: it rises at the character pick's
 //! `Connected` edge and at `SMSG_TRANSFER_PENDING` (`0x406640`, and `0x4072c0` for a transport,
@@ -21,12 +22,16 @@ use benilla_formats::{load_loading_screens, LoadingScreenCatalog};
 
 use benilla_assets::LockRecover;
 use benilla_assets::MapCatalogRes;
-use benilla_assets::{AssetSet, LooseOpen, WorldAssets};
+use benilla_assets::{AssetSet, DataLoadAppExt, LooseOpen, WorldAssets};
 use benilla_world::schedule::WorldStage;
 use benilla_world::terrain_stream::WorldLoadProgress;
+use benilla_world::world_map::CurrentMap;
 
 /// The cover's input half: while it is up the client takes no input (a source cut in `PreUpdate`).
 mod input;
+// The capture probes order after it, so a build without the instruments leaves it unused.
+// Not a `cfg`: seam knowledge lives in three fixed places, and this file is not one of them.
+#[allow(unused_imports)]
 pub(crate) use input::CoverInput;
 /// A transport transfer's route screen.
 mod route;
@@ -113,6 +118,10 @@ const CLEAR_AFTER_READY_FRAMES: u32 = 3;
 /// [`WAIT_LOG_EVERY`] seconds.
 const WAIT_LOG_AFTER: f32 = 3.0;
 const WAIT_LOG_EVERY: f32 = 2.0;
+/// How far (yd) a same-map snap must move the body to count as a load. It clears every combat
+/// relocation (charge and intercept 25 yd, blink 20, knockbacks under 30), which also ends in a
+/// server teleport and must never black out the screen.
+const SNAP_LOAD_MIN_YD: f32 = 100.0;
 
 /// Consecutive covered, in-world frames before the cover is on the glass: renders are serial, so
 /// at 3 the two frames before have presented.
@@ -223,6 +232,8 @@ pub(crate) struct LoadingScreen {
     /// `Time::elapsed_secs` at the last raise and at the last wait log line.
     active_since: f32,
     last_wait_log: f32,
+    /// The avatar's position last frame, to measure a snap (applied in `Input`, a stage earlier).
+    last_pos: Option<Vec3>,
 }
 
 impl LoadingScreen {
@@ -342,10 +353,13 @@ impl Plugin for LoadingScreenPlugin {
             .init_resource::<EntryCover>()
             // In `First`, ahead of every consumer in `PreUpdate` and `Update`.
             .add_systems(First, count_entry_cover)
-            .add_systems(
-                Startup,
-                (setup_loading_screen, route::setup_transfer_routes).after(AssetSet::Open),
-            )
+            // `First` alongside it, and for the same reason it is not `Update`: the budget it sets
+            // governs asset work that lands at the tail of THIS frame.
+            .add_systems(First, pace_asset_budget)
+            .add_systems(Startup, setup_loading_screen.after(AssetSet::Open))
+            // The route's tables are catalogs: read at start-up and again when the chain changes.
+            .add_data_loaders(route::setup_transfer_routes)
+            .add_observer(forget_chain_art)
             // In `WorldStage::Present`, after Input and Stream: a worldport snaps in Input and the
             // streamer refocuses in Stream, so the cover lands on the same frame, never a flash.
             .add_systems(Update, drive_loading_screen.in_set(WorldStage::Present))
@@ -368,6 +382,47 @@ impl Plugin for LoadingScreenPlugin {
         // The cover's input rule, registered here so the two cannot be registered apart.
         input::build(app);
     }
+}
+
+/// A change of the data the chain answers from (a realm of the other flavor, a content layer)
+/// changes the bytes behind a backdrop's path and may change the table: the decoded art goes and
+/// the catalog is read again. Without it a 1.12.1 realm entered after a Turtle WoW one raised
+/// Turtle's picture for the same map, out of [`LoadingScreen::art_cache`].
+fn forget_chain_art(
+    _: On<benilla_assets::ChainDataChanged>,
+    mut screen: ResMut<LoadingScreen>,
+    world_assets: Option<ResMut<WorldAssets>>,
+    mut commands: Commands,
+) {
+    screen.art_cache.clear();
+    let Some(assets) = world_assets else {
+        return;
+    };
+    // Bound first: the lock guard must drop before `assets` does.
+    let catalog = load_loading_screens(&mut assets.chain.lock_recover());
+    match catalog {
+        Ok(c) => commands.insert_resource(LoadingScreenCatalogRes(c)),
+        Err(e) => warn!("LoadingScreens.dbc unreadable after a chain change — {e:#}"),
+    }
+}
+
+/// Tell the asset decode budget which of its two regimes this frame is in
+/// (`benilla_assets::frame_budget`).
+///
+/// The budget exists to stop asset decoding from eating a frame the player is looking at — but that
+/// is only a cost worth paying when there *is* a frame worth protecting. Behind the loading screen
+/// nothing animates but the bar, the player is waiting on exactly this work, and metering it would
+/// make the load longer for no one's benefit. So the cover raises it to effectively no limit and
+/// clearing the cover puts it back.
+///
+/// Free on native, where the whole module is a no-op: decoding runs on the pool's own threads there
+/// and never touches the frame.
+fn pace_asset_budget(screen: Res<LoadingScreen>) {
+    benilla_assets::frame_budget::set_budget_ms(if screen.covering() {
+        benilla_assets::frame_budget::LOADING_BUDGET_MS
+    } else {
+        benilla_assets::frame_budget::PLAY_BUDGET_MS
+    });
 }
 
 /// Startup: load the LoadingScreens catalog and the bar textures, and spawn the hidden UI tree.
@@ -413,8 +468,11 @@ fn setup_loading_screen(
     }
 
     // The two layers 1.12 draws, as sRGB clamp sprites, from the archives alone: the loading
-    // screen's `TextureCreate` calls (`0x406891`) pass file flag 0.
-    let mut tex = |path: &str| assets.sprite_texture_opened(path, LooseOpen::Archives, &mut images);
+    // screen's `TextureCreate` calls (`0x406891`) pass file flag 0. Blocking: the `ImageNode`s
+    // spawned below own these handles for the session and this system runs once. See
+    // `WorldAssets::sprite_texture_blocking`.
+    let mut tex =
+        |path: &str| assets.sprite_texture_opened_blocking(path, LooseOpen::Archives, &mut images);
     let Some(border) = tex("Interface\\Glues\\LoadingBar\\Loading-BarBorder.blp") else {
         error!("loading bar textures missing — plain black cover, no art");
         return;
@@ -516,7 +574,12 @@ pub(crate) fn fit_loading_area(
 #[allow(clippy::type_complexity)]
 fn drive_loading_screen(
     mut screen: ResMut<LoadingScreen>,
-    progress: Res<WorldLoadProgress>,
+    // Bundled to stay under Bevy's 16-parameter ceiling.
+    stream: (
+        Res<WorldLoadProgress>,
+        Res<benilla_world::terrain_stream::ViewFocus>,
+    ),
+    current_map: Option<Res<CurrentMap>>,
     maps: Option<Res<MapCatalogRes>>,
     screens: Option<Res<LoadingScreenCatalogRes>>,
     mut assets: Option<ResMut<WorldAssets>>,
@@ -535,10 +598,12 @@ fn drive_loading_screen(
     player: Option<Res<crate::player::Player>>,
     // Real time: `Time<Virtual>` clamps frames over 250 ms, and a load is made of those.
     time: Res<Time<Real>>,
-    // The cover holds until the warm pass has compiled its pipelines.
-    warm: Res<crate::pipe_warm::WarmPass>,
-    // The world-entry UI load runs behind this cover; the reference's reveal always has the UI up.
-    entry_ui_pending: Option<Res<crate::ui_script::PendingEntryUiLoad>>,
+    // The cover holds until the warm pass has compiled its pipelines, and while the world-entry UI
+    // load runs behind it: the reference's reveal always has the UI up.
+    (warm, entry_ui_pending): (
+        Res<crate::pipe_warm::WarmPass>,
+        Option<Res<crate::ui_script::PendingEntryUiLoad>>,
+    ),
     route_source: route::RouteSource,
     edges: (
         Res<State<crate::client_state::ClientState>>,
@@ -565,7 +630,12 @@ fn drive_loading_screen(
         roster,
         mut legs_left,
     ) = edges;
+    let (progress, focus) = (&stream.0, &stream.1);
+    // The focus is read by the page's backstop alone.
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = focus;
     let now = time.elapsed_secs();
+    let map_id = current_map.as_ref().map(|m| m.0);
     // The physics hold releases on the same residency signal, so the body's world is live first.
     let player_settling = player.as_ref().is_some_and(|p| p.settling);
 
@@ -625,15 +695,17 @@ fn drive_loading_screen(
         screen.raise("transport leg", false, map, now);
         screen.set_route(route);
     }
-    // A snap never re-raises a live screen ([`LoadingScreen::far_snap`]).
+    // A snap never re-raises a live screen ([`LoadingScreen::far_snap`]). vmangos sends the
+    // transfer and its worldport back to back, so the two usually land in one frame and the
+    // transfer's raise is made here.
     for w in worldports.read() {
         if screen.far_snap(w.map_id) {
             screen.raise("worldport", false, Some(w.map_id), now);
         }
     }
-    // A same-map teleport ends any awaited snap and raises nothing: the reference's
-    // `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of the screen's raises.
-    if teleports.read().next().is_some() {
+    // A same-map teleport ends any awaited snap; whether it needs a screen is decided below.
+    let teleported = teleports.read().next().is_some();
+    if teleported {
         screen.snap_landed(None);
     }
     // Logout, a lost session or a refused login: `CharSelect` applies next frame, so cover the torn
@@ -659,6 +731,50 @@ fn drive_loading_screen(
     if screen.blackout && *state.get() != crate::client_state::ClientState::InWorld {
         // The glue is up (it renders above this root); the cover's job is done.
         screen.dismiss();
+    }
+
+    // --- Backstop, on the page alone: the ground under the focus is not resident and nothing
+    // raised us. Native waits for the inner window's reads in the frame and raises no screen
+    // (`0x6985d0`). Deviation: the page cannot block its one thread on a fetch, so there the
+    // stream cannot wait and the cover stands in. In world only, since behind the glue nothing
+    // loads; only while the focus is the body, since in a cinematic or free-fly residency
+    // describes the camera's tile; and never while a same-map teleport's settle hold is up. ---
+    #[cfg(target_arch = "wasm32")]
+    if !screen.active
+        && !progress.focus_resident
+        && focus.follows_body()
+        && !player_settling
+        && *state.get() == crate::client_state::ClientState::InWorld
+    {
+        // Same map by construction: the ground under the body.
+        screen.raise("focus not resident", false, map_id, now);
+    }
+    // The body walked off onto a building's ground that is still arriving and is held there: the
+    // same cover, cleared by the same rule, once the hold has ended.
+    if !screen.active
+        && player.as_ref().is_some_and(|p| p.ground_hold)
+        && *state.get() == crate::client_state::ClientState::InWorld
+    {
+        screen.raise("ground under the body still arriving", false, map_id, now);
+    }
+
+    // --- Deviation: a long same-map snap is covered until the destination is presentable. The
+    // reference's `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of the screen's
+    // raises; benilla covers it so the destination is not seen streaming in. ---
+    let body = player.as_ref().map(|p| p.pos);
+    let relocated = match (teleported, screen.last_pos, body) {
+        (true, Some(was), Some(now_pos)) => was.distance(now_pos) >= SNAP_LOAD_MIN_YD,
+        // No previous position (the entry frame): treat it as a relocation.
+        (true, _, _) => true,
+        _ => false,
+    };
+    screen.last_pos = body;
+    if relocated
+        && !screen.active
+        && *state.get() == crate::client_state::ClientState::InWorld
+        && !(progress.is_ready() && progress.presentable())
+    {
+        screen.raise("teleport, destination not presentable", false, map_id, now);
     }
 
     // --- Clear, sustained a few frames. ---
@@ -739,8 +855,9 @@ fn drive_loading_screen(
     }
 
     // --- Backdrop art, `0x406cf0`'s gate: the map id is read once per screen to resolve the
-    // texture, so a raise onto a live screen repaints nothing. ---
-    if !screen.art_resolved {
+    // texture, so a raise onto a live screen repaints nothing. Under a route the plain draw does
+    // not run at all (`0x406cd0`). ---
+    if !screen.art_resolved && screen.route.is_none() {
         // Black, never the last screen's texture (the reference holds a null handle, no quad).
         if let Ok((mut img, _)) = backdrop.single_mut() {
             if img.color != Color::BLACK {
@@ -758,8 +875,11 @@ fn drive_loading_screen(
             let handle = path.and_then(|path| match screen.art_cache.get(&path) {
                 Some(h) => Some(h.clone()),
                 // `ResolveLoadingArt` opens the art with file flag 0 (`0x406eba`, `0x406ef1`).
+                // Blocking: the handle goes straight into `art_cache` and is never re-resolved, so
+                // a deferred read would leave this continent's backdrop black for the session. The
+                // frame it stalls is a loading frame, which is the one place that is free.
                 None => assets
-                    .sprite_texture_opened(&path, LooseOpen::Archives, &mut images)
+                    .sprite_texture_opened_blocking(&path, LooseOpen::Archives, &mut images)
                     .inspect(|h| {
                         screen.art_cache.insert(path.clone(), h.clone());
                     }),
@@ -782,7 +902,15 @@ fn drive_loading_screen(
 
     // --- Progress bar: zero until the snap lands (residency is still the old place's). ---
     if !screen.awaiting_snap {
-        screen.displayed = screen.displayed.max(progress.fraction());
+        // The sliced in-game UI load is part of what the screen waits for (its clear condition
+        // above), so it is part of what the bar shows: while it is pending, residency fills the
+        // first 80 % and the load's own steps the last 20 %; once it is gone, residency alone —
+        // and the monotonic max below keeps that hand-over from ever moving the bar backwards.
+        let fraction = match entry_ui_pending.as_deref() {
+            Some(ui) => 0.8 * progress.fraction() + 0.2 * ui.fraction(),
+            None => progress.fraction(),
+        };
+        screen.displayed = screen.displayed.max(fraction);
     }
     let frac = screen.displayed;
     if let Ok(mut node) = fill.single_mut() {
@@ -793,7 +921,24 @@ fn drive_loading_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use benilla_world::world_map::CurrentMap;
+
+    /// A backdrop decoded under one flavor's chain is not the other's: the chain change drops it.
+    #[test]
+    fn a_chain_change_forgets_the_decoded_backdrops() {
+        let mut app = App::new();
+        app.init_resource::<LoadingScreen>()
+            .add_observer(forget_chain_art);
+        app.world_mut()
+            .resource_mut::<LoadingScreen>()
+            .art_cache
+            .insert(
+                "Interface\\Glues\\LoadingScreens\\LoadScreenEasternKingdom.blp".into(),
+                Handle::default(),
+            );
+        app.world_mut().trigger(benilla_assets::ChainDataChanged);
+        app.update();
+        assert!(app.world().resource::<LoadingScreen>().art_cache.is_empty());
+    }
 
     fn fit(w: f32, h: f32) -> [f32; 4] {
         let r = fit_rect(Vec2::new(w, h), true);
@@ -1036,6 +1181,8 @@ mod tests {
             .init_resource::<LoadingScreen>()
             .init_resource::<crate::pipe_warm::WarmPass>()
             .init_resource::<Assets<Image>>()
+            // The transfer's route lookup (`route::RouteSource`) reads the templates.
+            .init_resource::<crate::go_templates::GameObjectTemplates>()
             .insert_resource(CurrentMap(1))
             .insert_resource(benilla_world::terrain_stream::ViewFocus::body(at, true))
             .insert_resource(WorldLoadProgress {
@@ -1075,7 +1222,7 @@ mod tests {
 
     /// GM Island to the South Seas, both on Kalimdor.
     #[test]
-    fn a_same_map_teleport_across_the_continent_shows_no_loading_screen() {
+    fn a_same_map_teleport_across_the_continent_covers_its_load() {
         let mut app = in_world(GM_ISLAND);
         assert!(!covering(&app), "standing on resident ground");
 
@@ -1087,14 +1234,24 @@ mod tests {
             orientation: 0.0,
         });
         app.update();
-        assert!(!covering(&app), "the snap frame raises no screen");
+        assert!(covering(&app), "the deviation covers a long same-map snap");
+    }
 
+    /// A charge-length snap (25 yd) onto ground still arriving is never covered.
+    #[test]
+    fn a_short_same_map_snap_shows_no_loading_screen() {
+        let mut app = in_world(GM_ISLAND);
+        let near = [GM_ISLAND[0] + 25.0, GM_ISLAND[1], GM_ISLAND[2]];
+        land_unloaded(&mut app, near);
+        app.world_mut().write_message(crate::net::TeleportMessage {
+            guid: 1,
+            counter: 0,
+            position: near,
+            orientation: 0.0,
+        });
         for _ in 0..30 {
             app.update();
-            assert!(
-                !covering(&app),
-                "nor does the destination streaming in under the held body"
-            );
+            assert!(!covering(&app));
         }
     }
 

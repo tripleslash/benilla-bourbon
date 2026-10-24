@@ -10,10 +10,7 @@
 use bevy::prelude::*;
 
 use super::roster::Roster;
-use crate::net::{
-    CharPick, CharRequest, LoginAbandon, RealmChoice, RealmListMessage, RealmRequest,
-    WorldAuthMessage,
-};
+use crate::net::{CharPick, CharRequest, LoginAbandon, RealmListMessage, WorldAuthMessage};
 
 /// Answer the realm list and the character park of a reconnect while a pick is kept: the realm the
 /// session was on, as the list now holds it, then the roster ask.
@@ -21,8 +18,8 @@ pub(super) fn answer_reconnect(
     roster: Res<Roster>,
     mut lists: MessageReader<RealmListMessage>,
     mut auths: MessageReader<WorldAuthMessage>,
-    choice: Res<RealmChoice>,
     pick: Res<CharPick>,
+    mut commands: Commands,
     abandon: Option<Res<LoginAbandon>>,
 ) {
     let kept = roster.pending_pick.is_some();
@@ -36,10 +33,12 @@ pub(super) fn answer_reconnect(
         match list.realms.iter().find(|r| r.name == name) {
             Some(realm) => {
                 info!("reconnect: dialing {name} again for the kept pick");
-                let _ = choice.0.send(RealmRequest::Enter {
-                    realm: realm.clone(),
-                    generation: LoginAbandon::now(abandon.as_deref()),
-                });
+                // Through the flavor switch, as every realm entry (this fork).
+                crate::flavor::enter_realm(
+                    &mut commands,
+                    realm.clone(),
+                    LoginAbandon::now(abandon.as_deref()),
+                );
             }
             None => warn!("reconnect: {name} is not on the realm list — the pick is not re-made"),
         }
@@ -54,6 +53,7 @@ mod tests {
     use super::*;
 
     use crate::glue_session::roster::test_character;
+    use crate::net::{RealmChoice, RealmRequest};
 
     fn realm(name: &str) -> benilla_protocol::RealmInfo {
         benilla_protocol::RealmInfo {
@@ -65,14 +65,15 @@ mod tests {
             flags: 0,
             category: 1,
             id: 0,
+            version: None,
         }
     }
 
-    type Rx<T> = crossbeam_channel::Receiver<T>;
+    type Rx<T> = async_channel::Receiver<T>;
 
     fn reconnect_app(pending: bool) -> (App, Rx<RealmRequest>, Rx<CharRequest>) {
-        let (realm_tx, realm_rx) = crossbeam_channel::unbounded();
-        let (pick_tx, pick_rx) = crossbeam_channel::unbounded();
+        let (realm_tx, realm_rx) = async_channel::unbounded();
+        let (pick_tx, pick_rx) = async_channel::unbounded();
         let mut roster = if pending {
             Roster::with_pending_pick(vec![test_character(7, "Seven")], 7)
         } else {

@@ -465,7 +465,7 @@ mod tests {
             }),
         );
         script.set_item_pick_armed(true);
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         (app, rx)
     }
 
@@ -518,7 +518,7 @@ mod tests {
         for template in [false, true] {
             let (mut app, rx) = item_targeting(template);
             app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .non_send_mut::<benilla_ui::script::UiScript>()
                 .set_spell_targeting(true);
             let after = crate::script_calls::with_hosted_vm(app.world_mut(), |s| {
                 s.expect("a VM")
@@ -572,7 +572,7 @@ mod tests {
                 [(ENCHANT, 1)].into(),
             ),
         ));
-        let mut script = world.non_send_resource_mut::<benilla_ui::script::UiScript>();
+        let mut script = world.non_send_mut::<benilla_ui::script::UiScript>();
         script.set_spell_targeting(true);
         script
             .run(
@@ -719,7 +719,7 @@ mod tests {
                 ),
             ));
             world
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .non_send_mut::<benilla_ui::script::UiScript>()
                 .run(
                     r#"local f = CreateFrame("Frame")
                     f:RegisterEvent("BIND_ENCHANT")
@@ -734,7 +734,7 @@ mod tests {
             );
             let heard = app
                 .world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .non_send_mut::<benilla_ui::script::UiScript>()
                 .eval::<Option<i64>>("return Heard")
                 .unwrap();
             assert_eq!(heard, None, "gated {gated}: no popup, no refusal");

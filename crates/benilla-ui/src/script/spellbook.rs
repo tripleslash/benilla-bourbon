@@ -126,7 +126,7 @@ pub struct SpellBookState {
 impl super::UiScript {
     /// Replace the book; the app fires `SPELLS_CHANGED` on its own diff.
     pub fn set_spellbook(&mut self, state: SpellBookState) {
-        self.model_mut().spellbook = state;
+        set_field!(self, spellbook, state);
     }
 
     /// Replace the pet's book; its `SPELLS_CHANGED` is the pet spell message's own sort
@@ -137,7 +137,7 @@ impl super::UiScript {
 
     /// The pet's book as it stands, for the app's name lookups (a macro's bound spell).
     pub fn pet_spellbook(&self) -> PetBookState {
-        self.model_mut().pet_book.clone()
+        self.model_ref().pet_book.clone()
     }
 
     /// Take the `CastSpell(id, "pet")` calls out of the call stream as `(spell id, onSelf)`: each
@@ -162,7 +162,7 @@ impl super::UiScript {
     /// The pushed book, for resolving a macro's spell by the rule `CastSpellByName` uses, so the
     /// bar and the cast agree on which rank a bare `/cast` means.
     pub fn spellbook(&self) -> SpellBookState {
-        self.model_mut().spellbook.clone()
+        self.model_ref().spellbook.clone()
     }
 
     /// Take the `CastSpell` and `CastSpellByName` calls out of the call stream as
@@ -281,7 +281,9 @@ pub(super) fn book_slot<'a>(
 /// on.
 fn pickup_spell(lua: &Lua, id: u32, book_type: &str) -> bool {
     let (payload, target, held) = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let held = match &model.cursor {
             Some(CursorPayload::Spell(s)) => s.spell_id,
             _ => 0,
@@ -346,7 +348,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumSpellTabs",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.spellbook.tabs.len() as i64)
         })?,
     )?;
@@ -365,7 +369,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let i = super::binding_abi::number_arg(lua, i, "Usage: GetSpellTabInfo(index)")?;
             // Zero or a negative fails `usize::try_from`, as the unsigned compare fails it.
             let tab = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 usize::try_from(i64::from(i) - 1)
                     .ok()
                     .and_then(|n| model.spellbook.tabs.get(n))
@@ -411,7 +417,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let (id, book_type) = spell_slot_args(id, book_type, "GetSpellName")?;
             // Out of `[0, 0x400)` already raised in `spell_slot_args`; the binding's own bound
             // check (`0x4b4018`) is never taken.
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(slot) = book_slot(&model, id, &book_type) else {
                 // An empty slot inside the range answers two nils (`0x4b4086`).
                 return Ok(MultiValue::from_vec(vec![Value::Nil, Value::Nil]));
@@ -427,7 +435,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetSpellTexture",
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "GetSpellTexture")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let tex = book_slot(&model, id, &book_type).and_then(|s| s.texture.clone());
             match tex {
                 Some(t) => Ok(Value::String(lua.create_string(&t)?)),
@@ -442,7 +452,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsCurrentCast",
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "IsCurrentCast")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let current = book_slot(&model, id, &book_type).is_some_and(|s| s.current);
             // 1 or nil, never false, as the reference's bindings answer.
             match current {
@@ -460,7 +472,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "GetSpellCooldown")?;
             let now = crate::script::clock::now(lua);
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let cooldown = book_slot(&model, id, &book_type).and_then(|s| s.cooldown);
             Ok(match cooldown {
                 Some((start_ms, duration_ms, enabled)) => {
@@ -485,7 +499,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsSpellPassive",
         lua.create_function(|lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "IsSpellPassive")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(
                 book_slot(&model, id, &book_type).is_some_and(|s| s.passive),
             ))
@@ -513,7 +529,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let pet = is_pet_book(&book_type);
                 let may_cast = pet || protected::gate(lua, Tag::CAST);
                 let spell_id = book_slot(
-                    &lua.app_data_ref::<Model>().expect("model app_data"),
+                    &lua.app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data"),
                     id,
                     &book_type,
                 )
@@ -528,6 +545,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                             ScriptCall::CastSpell {
                                 spell_id,
                                 on_self,
+                                unit: None,
                                 may_cast,
                             }
                         },
@@ -543,7 +561,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "HasPetSpells",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let n = model.pet_book.slots.len();
             if n == 0 {
                 return Ok(MultiValue::from_vec(vec![Value::Nil, Value::Nil]));
@@ -563,7 +583,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetSpellAutocast",
         lua.create_function(move |lua, (id, book_type): (Value, Value)| {
             let (id, book_type) = spell_slot_args(id, book_type, "GetSpellAutocast")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let (allowed, enabled) = book_slot(&model, id, &book_type)
                 .filter(|_| is_pet_book(&book_type))
                 .and_then(|s| s.autocast)
@@ -625,16 +647,49 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // to the dispatcher `CastSpell` shares (`0x4b3300`, called at `0x4b4b24`): a pet match is the
     // `CMSG_PET_ACTION` fork (`0x4b34ce`), which tests no passive, and a player match the cast,
     // whose `TryCastSpell` refuses a passive silently (`0x6e4bb2`) ahead of its gate.
+    //
+    // Deviation (this fork): the name may carry retail macro options (`[@mouseover,help][] Heal`,
+    // [`super::macro_options`]), read before the name resolves: no clause holding casts nothing,
+    // `@player` is `onSelf`, and another unit is cast at in the selection's place, or at the
+    // selection when it names nobody; a pet match ignores the unit. A retail `!` before the name
+    // (do not toggle off) is dropped.
     g.set(
         "CastSpellByName",
         lua.create_function(|lua, (name, on_self): (Value, Option<Value>)| {
             let name = lua
                 .coerce_string(name)?
                 .ok_or_else(|| mlua::Error::runtime(USAGE_CAST_SPELL_BY_NAME))?;
-            let on_self = bool_or_default(on_self.as_ref(), false);
-            let found = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                by_name::resolve_named(&model.spellbook, &model.pet_book, &name.as_bytes())
+            let mut on_self = bool_or_default(on_self.as_ref(), false);
+            // A name without option syntax resolves exactly as 1.12's does.
+            let options = name
+                .to_str()
+                .ok()
+                .filter(|text| super::macro_options::has_options(text))
+                .map(|text| text.to_string());
+            let (name, unit) = match options {
+                Some(text) => match super::macro_options::evaluate(lua, &text)? {
+                    Some((value, unit)) => {
+                        let value = value.strip_prefix('!').unwrap_or(&value).trim();
+                        (value.as_bytes().to_vec(), unit)
+                    }
+                    None => return Ok(()),
+                },
+                None => (name.as_bytes().to_vec(), None),
+            };
+            let (unit, found) = {
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
+                let unit = match unit {
+                    Some(token) if token.eq_ignore_ascii_case("player") => {
+                        on_self = true;
+                        None
+                    }
+                    Some(token) => model.unit_guids.guid_of(&token).ok().flatten(),
+                    None => None,
+                };
+                let found = by_name::resolve_named(&model.spellbook, &model.pet_book, &name);
+                (unit, found)
             };
             let call = match found {
                 Some(found) if found.pet => ScriptCall::CastPetSpell {
@@ -646,6 +701,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(found) if !found.passive => ScriptCall::CastSpell {
                     spell_id: found.spell_id,
                     on_self,
+                    unit,
                     may_cast: protected::gate(lua, Tag::CAST),
                 },
                 _ => return Ok(()),
@@ -677,7 +733,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `0x6e6e80` reads only the auto-repeat key `0xceac30` and the in-flight id
             // `0xceca88`, which is 0 mid-channel, as the call that cast last left them.
             let stoppable = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .cast_view
                 .stoppable();
@@ -694,7 +750,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "SpellIsTargeting",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.spell_targeting))
         })?,
     )?;
@@ -711,7 +769,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 unit,
                 r#"Usage: SpellCanTargetUnit("unit")"#,
             )?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let can = model
                 .unit_guids
                 .guid_of(&token)?
@@ -729,7 +789,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // The gate's tag 2 opens the function (`0x6e6e38`); a refusal answers nil (`0x6e6e69`).
             let may_stop = protected::gate(lua, Tag::CAST);
             let targeting = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .spell_targeting;
             if may_stop && targeting {
@@ -1176,6 +1236,38 @@ mod tests {
                 vec![(133, on_self)],
                 "CastSpellByName(\"Fireball\"{arg})"
             );
+        }
+    }
+
+    /// This fork's retail macro options: a plain name resolves as before; `[]` always
+    /// holds, `@player` is `onSelf`, a clause that fails casts nothing and `!` is dropped.
+    #[test]
+    fn cast_spell_by_name_reads_retail_options_and_leaves_a_plain_name_alone() {
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        s.set_spellbook(book());
+        for (line, want) in [
+            (r#"CastSpellByName("Fireball")"#, vec![(133, false)]),
+            (r#"CastSpellByName("Fireball", 1)"#, vec![(133, true)]),
+            // A plain name reaches the resolver untouched, which trims nothing (`0x4b3950`).
+            (r#"CastSpellByName(" Fireball")"#, vec![]),
+            (r#"CastSpellByName("[] Fireball")"#, vec![(133, false)]),
+            (
+                r#"CastSpellByName("[@mouseover,help,nodead][] !Fireball")"#,
+                vec![(133, false)],
+            ),
+            (
+                r#"CastSpellByName("[@player] Fireball")"#,
+                vec![(133, true)],
+            ),
+            (r#"CastSpellByName("[help] Fireball")"#, vec![]),
+            (
+                r#"CastSpellByName("[help] Nothing; Fireball")"#,
+                vec![(133, false)],
+            ),
+        ] {
+            s.run(line).unwrap();
+            assert_eq!(s.take_spell_casts(), want, "{line}");
         }
     }
 
@@ -1679,6 +1771,7 @@ mod tests {
         let cast = |spell_id| ScriptCall::CastSpell {
             spell_id,
             on_self: false,
+            unit: None,
             may_cast: true,
         };
         assert_eq!(

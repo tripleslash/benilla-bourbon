@@ -10,6 +10,10 @@ workspace = true
 
 [dependencies]
 
+# The profile's clock on the page (`vm.rs`, `ProfileClock`): `std::time::Instant` panics there.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
 [dev-dependencies]
 benilla-formats = { path = "../benilla-formats" }
 roxmltree = "0.20"

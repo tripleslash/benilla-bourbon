@@ -39,13 +39,6 @@ pub(crate) const OVERLAY_TEXT: egui::Color32 = egui::Color32::from_gray(235);
 /// De-emphasised overlay text: ids, distances, hints.
 pub(crate) const OVERLAY_TEXT_DIM: egui::Color32 = egui::Color32::from_gray(180);
 
-/// Other dev overlays that need the egui lane open while the panel and inspector are shut.
-#[derive(Resource, Default)]
-pub(crate) struct EguiDemand {
-    pub(crate) profiler: bool,
-    pub(crate) inspector: bool,
-}
-
 /// Overlay text for the compact fixed-size surfaces: [`OVERLAY_TEXT`], no wrapping, which also
 /// stops a fresh auto-sized container breaking a label across lines on its first frame.
 pub(crate) fn overlay_text(ui: &mut egui::Ui) {
@@ -76,8 +69,8 @@ fn track_pointer_over_ui(
     mut keyboard: ResMut<crate::ui_script::EguiKeyboard>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
-    over.0 = ctx.is_pointer_over_area() || ctx.wants_pointer_input();
-    keyboard.0 = ctx.wants_keyboard_input();
+    over.0 = ctx.is_pointer_over_egui() || ctx.egui_wants_pointer_input();
+    keyboard.0 = ctx.egui_wants_keyboard_input();
     Ok(())
 }
 
@@ -139,7 +132,6 @@ impl Plugin for DebugPanelPlugin {
         // The inspector, its mouseover pick and the cast journal. `DebugState`, `InspectMode` and
         // `EguiPointerOver` are inited by their owners.
         app.init_resource::<MouseoverTarget>()
-            .init_resource::<EguiDemand>()
             .init_resource::<journal::CastJournal>()
             // After `UiInput`: `update_mouseover` reads `PointerOverUi`, whose player-UI half it
             // writes, and must see this frame's hover.
@@ -197,9 +189,11 @@ fn feed_gated_egui_output(
                 None => {
                     // `get_mut`: `get` needs bevy_egui's `immutable_ctx` feature. The font
                     // texture delta must reach the GPU exactly once, so the cache drops it.
-                    let out = ctx.get_mut().run(egui::RawInput::default(), |_| {});
+                    let out = ctx.get_mut().run_ui(egui::RawInput::default(), |_| {});
                     let mut keep = out.clone();
-                    keep.textures_delta = Default::default();
+                    // `clear`, not an assignment: epaint 0.36 debug-asserts in `Drop` that a
+                    // delta was applied, and the assignment dropped the clone's unapplied one.
+                    keep.textures_delta.clear();
                     keep.shapes.clear();
                     *cached = Some(keep);
                     out
@@ -222,6 +216,8 @@ fn spawn_egui_camera(mut commands: Commands) {
         // pass fails validation. egui feathers its own edges anyway.
         bevy::render::view::Msaa::Off,
         RenderLayers::none(),
+        // fork: fsr (FORK.md) — the overlay presents on a held frame of frame generation too.
+        benilla_world::fsr::PresentsHeldFrames,
         Camera {
             order: 2,
             // An overlay composites only its own pixels: egui paints a cleared transparent canvas
@@ -246,12 +242,11 @@ fn spawn_egui_camera(mut commands: Commands) {
 fn gate_egui_lane(
     debug: Res<DebugState>,
     inspect: Res<crate::ui_script::InspectMode>,
-    demand: Res<EguiDemand>,
     mut cams: Query<(&mut Camera, &mut EguiContextSettings), With<PrimaryEguiContext>>,
     mut over: ResMut<EguiPointerOver>,
     mut keyboard: ResMut<crate::ui_script::EguiKeyboard>,
 ) {
-    let open = debug.open || inspect.enabled || demand.profiler || demand.inspector;
+    let open = debug.open || inspect.enabled;
     if !open && keyboard.0 {
         keyboard.0 = false;
     }
@@ -624,7 +619,7 @@ fn debug_panel_ui(
             ui.separator();
             ui.label(
                 egui::RichText::new(format!(
-                    "{DEV_CHORD}:  D panel · P perf · I inspect · L addons · E Lua · M mute · F free-fly"
+                    "{DEV_CHORD}:  D panel · P perf · I inspect · M mute · F free-fly"
                 ))
                 .small()
                 .color(OVERLAY_TEXT_DIM),

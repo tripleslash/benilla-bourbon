@@ -18,7 +18,7 @@ const RECALL: u32 = 8690;
 /// `0x6e2ed0`).
 #[test]
 fn an_initial_item_cooldown_alone_reaches_the_bags() {
-    let now = std::time::Instant::now();
+    let now = bevy::platform::time::Instant::now();
     let mut app = App::new();
     app.init_resource::<Items>()
         .init_resource::<Cooldowns>()
@@ -69,11 +69,11 @@ fn an_initial_item_cooldown_alone_reaches_the_bags() {
     ));
     let mut script = UiScript::new().unwrap();
     script.set_now(1000.0);
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.update();
     let duration = |app: &mut App| {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<f64>("local _, d = GetContainerItemCooldown(0, 1) return d")
             .unwrap()
     };

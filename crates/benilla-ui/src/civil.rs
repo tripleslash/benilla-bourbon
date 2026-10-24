@@ -223,19 +223,112 @@ mod zone {
     }
 }
 
+/// The platform's half in a browser, which has no C runtime: the page's own zone through JS
+/// `Date`, whose `getTimezoneOffset` is minutes west of UTC for the date it holds.
+#[cfg(target_arch = "wasm32")]
+mod zone {
+    use js_sys::Date;
+    use wasm_bindgen::JsValue;
+
+    /// `libc::tm`'s fields that [`super::local`] reads; the browser target's `libc` has none.
+    pub(super) struct Tm {
+        pub tm_year: i32,
+        pub tm_mon: i32,
+        pub tm_mday: i32,
+        pub tm_hour: i32,
+        pub tm_min: i32,
+        pub tm_sec: i32,
+        pub tm_wday: i32,
+        pub tm_yday: i32,
+        pub tm_isdst: i32,
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn reread() {}
+
+    fn date(secs: i64) -> Option<Date> {
+        let d = Date::new(&JsValue::from_f64(secs as f64 * 1000.0));
+        (!d.get_time().is_nan()).then_some(d)
+    }
+
+    /// Minutes west of UTC on the year's 1 January and 1 July: the larger is standard time.
+    fn offsets(year: i64) -> (f64, f64) {
+        let at = |month| {
+            date(super::days_from_civil(year, month, 1) * 86_400)
+                .map_or(0.0, |d| d.get_timezone_offset())
+        };
+        let (jan, jul) = (at(1), at(7));
+        (jan.max(jul), jan.min(jul))
+    }
+
+    pub(super) fn localtime(secs: i64) -> Option<Tm> {
+        let d = date(secs)?;
+        let (year, month, day) = (d.get_full_year(), d.get_month() + 1, d.get_date());
+        let yday = super::days_from_civil(i64::from(year), month, day)
+            - super::days_from_civil(i64::from(year), 1, 1);
+        let (standard, _) = offsets(i64::from(year));
+        Some(Tm {
+            tm_year: year as i32 - 1900,
+            tm_mon: month as i32 - 1,
+            tm_mday: day as i32,
+            tm_hour: d.get_hours() as i32,
+            tm_min: d.get_minutes() as i32,
+            tm_sec: d.get_seconds() as i32,
+            tm_wday: d.get_day() as i32,
+            tm_yday: yday as i32,
+            tm_isdst: i32::from(d.get_timezone_offset() < standard),
+        })
+    }
+
+    /// `_timezone` and `_dstbias` in seconds, as the Windows runtime derives them for now.
+    pub(super) fn biases() -> (i32, i32) {
+        let (standard, daylight) = offsets(super::from_unix(super::unix_seconds()).year);
+        (
+            (standard * 60.0) as i32,
+            ((daylight - standard) * 60.0) as i32,
+        )
+    }
+
+    /// Deviation: a browser names no zone abbreviation, so `%Z` writes nothing, as the runtime
+    /// does for a zone it cannot name.
+    pub(super) fn name(_isdst: bool) -> Vec<u8> {
+        Vec::new()
+    }
+}
+
 /// Wall-clock seconds since the Unix epoch; a clock set before 1970 reads 0 rather than raising.
 pub fn unix_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Sets `TZ` (`None` removes it) where both the process and the C runtime read it, and rereads
+/// the zone: the Windows runtime keeps its own copy of the environment, taken at its first read,
+/// which `std::env::set_var` never reaches, so `_putenv_s` writes that copy too. For tests that fix
+/// the zone.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_tz(tz: Option<&str>) {
+    match tz {
+        Some(v) => std::env::set_var("TZ", v),
+        None => std::env::remove_var("TZ"),
+    }
+    #[cfg(windows)]
+    {
+        let value = std::ffi::CString::new(tz.unwrap_or("")).expect("a zone has no NUL");
+        // SAFETY: both arguments are NUL-terminated and outlive the call, which copies them; an
+        // empty value removes the variable.
+        unsafe { libc::putenv_s(c"TZ".as_ptr(), value.as_ptr()) };
+    }
+    zone::reread();
 }
 
 /// Holds the process's time zone at a `TZ` value for a test, so a local-time answer is the same on
 /// every machine: the lock keeps two zone tests apart, and the drop puts the old `TZ` back.
 #[cfg(test)]
 pub(crate) struct ZoneGuard {
-    old: Option<std::ffi::OsString>,
+    old: Option<String>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -244,9 +337,8 @@ impl ZoneGuard {
     pub(crate) fn set(tz: &str) -> Self {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var_os("TZ");
-        std::env::set_var("TZ", tz);
-        reread_zone();
+        let old = std::env::var("TZ").ok();
+        set_tz(Some(tz));
         Self { old, _lock: lock }
     }
 }
@@ -254,17 +346,8 @@ impl ZoneGuard {
 #[cfg(test)]
 impl Drop for ZoneGuard {
     fn drop(&mut self) {
-        match self.old.take() {
-            Some(v) => std::env::set_var("TZ", v),
-            None => std::env::remove_var("TZ"),
-        }
-        reread_zone();
+        set_tz(self.old.as_deref());
     }
-}
-
-#[cfg(test)]
-fn reread_zone() {
-    zone::reread();
 }
 
 #[cfg(test)]

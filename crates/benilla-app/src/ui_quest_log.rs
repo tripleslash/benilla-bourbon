@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ui_items::{count_of, InventoryScope};
+use benilla_assets::DataLoadAppExt;
 
 use bevy::prelude::*;
 
@@ -246,7 +247,7 @@ fn kill_line(
 /// outlive a `/reload`. Called with the CVar fold, before the VM is replaced.
 pub(crate) fn fold_dying_vm_quest_folds(world: &mut World) {
     let Some(folds) = world
-        .get_non_send_resource::<UiScript>()
+        .get_non_send::<UiScript>()
         .map(UiScript::quest_log_carry)
     else {
         return;
@@ -528,11 +529,7 @@ impl Plugin for UiQuestLogPlugin {
         app.init_resource::<QuestLog>()
             .init_resource::<crate::item_lane::ItemLane>()
             .init_resource::<crate::field_watch::NoticeLane>()
-            .add_systems(
-                Startup,
-                (load_quest_header_names, load_quest_tag_names)
-                    .after(benilla_assets::AssetSet::Open),
-            )
+            .add_data_loaders((load_quest_header_names, load_quest_tag_names))
             .add_systems(
                 Update,
                 (
@@ -574,8 +571,8 @@ fn feed_server_clock(
         let synced = seen.map_or(0, |was| samples.saturating_sub(was));
         *seen = Some(samples);
         let Some(now) = clock.now_unix() else {
-            let local = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let local = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map_or(0.0, |d| d.as_secs_f64());
             script.set_local_unix_time(local);
             return;
@@ -1269,7 +1266,7 @@ mod tests {
                 .world_mut()
                 .spawn((ObjectStore(ObjectFields::default()), Guid(0x2A), SelfPlayer))
                 .id();
-            app.insert_non_send_resource(Self::vm());
+            app.insert_non_send(Self::vm());
             app.add_systems(
                 Update,
                 (
@@ -1316,11 +1313,11 @@ mod tests {
 
         /// A `/reload`: a new VM over the same caches and descriptor.
         fn reload(&mut self) {
-            self.app.insert_non_send_resource(Self::vm());
+            self.app.insert_non_send(Self::vm());
         }
 
         fn script(&mut self) -> Mut<'_, UiScript> {
-            self.app.world_mut().non_send_resource_mut::<UiScript>()
+            self.app.world_mut().non_send_mut::<UiScript>()
         }
 
         fn write_store(&mut self) {
@@ -1948,10 +1945,10 @@ mod tests {
     fn each_time_response_signals_the_log_once() {
         let mut app = App::new();
         app.init_resource::<crate::net::ServerWallClock>()
-            .insert_non_send_resource(Rig::vm())
+            .insert_non_send(Rig::vm())
             .add_systems(Update, feed_server_clock);
         let seen = |app: &mut App| {
-            let s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let s = app.world_mut().non_send_mut::<UiScript>();
             let out = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
             out
@@ -1968,7 +1965,7 @@ mod tests {
         assert_eq!(seen(&mut app), [QLU]);
         app.update();
         assert_eq!(seen(&mut app), Vec::<String>::new());
-        app.insert_non_send_resource(Rig::vm());
+        app.insert_non_send(Rig::vm());
         app.update();
         assert_eq!(seen(&mut app), Vec::<String>::new(), "the old response");
         sample(&mut app, 1_003_600);
@@ -1983,9 +1980,9 @@ mod tests {
     fn a_zero_offset_sync_reaches_the_vm() {
         let mut app = App::new();
         app.init_resource::<crate::net::ServerWallClock>()
-            .insert_non_send_resource(Rig::vm())
+            .insert_non_send(Rig::vm())
             .add_systems(Update, feed_server_clock);
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         let mut q = fixture::quest(7, "Deliver the Message", 1);
         q.record.objectives[0] = fixture::kill(40, 3);
         q.slot.timer = 4_000_000_000;
@@ -1995,7 +1992,7 @@ mod tests {
                 .resource_mut::<crate::net::ServerWallClock>()
                 .sample(server, local);
             app.update();
-            let s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let s = app.world_mut().non_send_mut::<UiScript>();
             s.eval::<i64>("return GetQuestTimers()").unwrap()
         };
         let skewed = left(&mut app, 1_000_000, 1_000_005);

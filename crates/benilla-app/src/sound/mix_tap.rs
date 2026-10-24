@@ -39,6 +39,20 @@ pub(super) fn install(
 /// Install a tap writing `path`, and return its frame clock: the count of frames processed, which
 /// is the write position in the file. A game system reads it to place an event on the waveform,
 /// since the game and device clocks drift. `None` when the file cannot be created.
+#[cfg(target_arch = "wasm32")]
+pub(super) fn install_at(
+    _builder: &mut kira::track::MainTrackBuilder,
+    _path: &std::path::Path,
+    _sample_rate: u32,
+) -> Option<Arc<AtomicU64>> {
+    // No background writer thread on wasm32 (single-threaded there without COOP/COEP +
+    // SharedArrayBuffer, and `web_sys`'s File System Access API isn't `std::fs::File` anyway) —
+    // this is a native-only diagnostic; `$WOW_MIX_TAP` simply does nothing on web (`install`'s
+    // caller already treats `None` as "not recording", same as a native path it couldn't create).
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn install_at(
     builder: &mut kira::track::MainTrackBuilder,
     path: &std::path::Path,

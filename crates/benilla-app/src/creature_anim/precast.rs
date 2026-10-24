@@ -30,7 +30,7 @@ use super::{UnitEdit, UnitEdits};
 /// the spell (`0x5ed4cc`, `0x5eb52b`), the emote gate the bit (`0x5fcd8b`). Its hooks mirror it
 /// into the queue, which answers it for the VM pass ([`UnitEdits::precast`]).
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-#[component(on_insert = mirror_insert, on_replace = mirror_replace)]
+#[component(on_insert = mirror_insert, on_discard = mirror_replace)]
 pub(crate) struct Precast {
     /// `+0xc8c`, never 0.
     pub(crate) spell_id: u32,

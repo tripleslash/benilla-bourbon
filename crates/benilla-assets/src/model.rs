@@ -27,6 +27,9 @@ pub struct BillboardInfo {
     /// The billboard bone, the joint the card rides on an animated host.
     pub bone: u16,
     pub kind: BillboardKind,
+    /// The billboard bones above this one, outermost first, as `(pivot, kind)`: each swings the
+    /// pivot below it about its own, as its children multiply onto its replaced matrix.
+    pub carriers: Vec<(Vec3, BillboardKind)>,
     /// The bone's global-sequence scale loop (a glow card's pulse), folded into the card's scale.
     pub scale_anim: Option<BoneScaleAnim>,
     /// The bone's per-sequence translation loops `(anim id, loop)`, keys in Bevy axes: the quest
@@ -107,23 +110,58 @@ pub struct Stage1 {
     pub texture: Handle<Image>,
     /// The combine preset 0-5.
     pub combine: u8,
+    /// tortoise: the stage reads the mesh's UV set B (its own UV set 0 or 1, `TextureStage::uvs`)
+    /// instead of the generated coordinate.
+    pub uv_set: bool,
+}
+
+/// Where a billboard batch's vertices are baked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BillboardBake {
+    /// Centred on the bone pivot, for a card the billboard system turns in place.
+    Card,
+    /// In model space, for a part the rig palette turns through the billboard bone's row.
+    Model,
+    /// Every vertex on the pivot: the palette part's unrigged twin, which draws nothing.
+    Collapsed,
 }
 
 /// Bake a [`RenderSubmesh`] to a Bevy-space [`Mesh`]: authored normals, else flat ones.
 fn build_submesh_mesh(sub: &RenderSubmesh, usages: RenderAssetUsages) -> Mesh {
-    // A billboard batch is centred on its bone pivot, so the spawn site turns it in place.
-    let center = sub
-        .billboard
-        .as_ref()
-        .map_or(Vec3::ZERO, |b| wow_to_bevy(b.pivot));
+    build_submesh_mesh_as(sub, usages, BillboardBake::Card)
+}
+
+fn build_submesh_mesh_as(
+    sub: &RenderSubmesh,
+    usages: RenderAssetUsages,
+    bake: BillboardBake,
+) -> Mesh {
+    let pivot = sub.billboard.as_ref().map(|b| wow_to_bevy(b.pivot));
     let positions: Vec<[f32; 3]> = sub
         .positions
         .iter()
-        .map(|p| (wow_to_bevy(*p) - center).to_array())
+        .map(|p| {
+            let v = wow_to_bevy(*p);
+            match (bake, pivot) {
+                (BillboardBake::Card, Some(c)) => v - c,
+                (BillboardBake::Collapsed, Some(c)) => c,
+                _ => v,
+            }
+            .to_array()
+        })
         .collect();
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, usages);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sub.uvs.clone());
+    // MONKEY (skybox): a second stage on its own UV set reads it as UV set B, for a lane that
+    // binds that stage (the sky's, the glue scenes').
+    if let Some(st) = sub
+        .stage1
+        .as_ref()
+        .filter(|s| !s.env_map && s.uvs.len() == sub.positions.len())
+    {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, st.uvs.clone());
+    }
     mesh.insert_indices(Indices::U32(sub.indices.clone()));
     if sub.vertex_colors.len() == sub.positions.len() {
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, sub.vertex_colors.clone());
@@ -192,7 +230,25 @@ pub fn submesh_to_static_mesh(sub: &RenderSubmesh) -> Mesh {
 /// The skinned mesh: the static one plus the joint attributes. It keeps its main-world copy,
 /// which the mouseover picker (`target::hover`) skins on the CPU.
 pub fn submesh_to_skinned_mesh(sub: &RenderSubmesh) -> Mesh {
-    let mut mesh = build_submesh_mesh(sub, RenderAssetUsages::default());
+    skinned_mesh_as(sub, BillboardBake::Card)
+}
+
+/// A billboard batch drawn through the rig palette, as the reference skins it: the skinned form
+/// in model space, which the billboard bone's camera-faced row turns about its pivot, and its
+/// unrigged twin, collapsed onto the pivot so an unrigged frame draws nothing.
+pub fn submesh_to_palette_billboard(sub: &RenderSubmesh) -> (Mesh, Mesh) {
+    (
+        skinned_mesh_as(sub, BillboardBake::Model),
+        build_submesh_mesh_as(
+            sub,
+            RenderAssetUsages::RENDER_WORLD,
+            BillboardBake::Collapsed,
+        ),
+    )
+}
+
+fn skinned_mesh_as(sub: &RenderSubmesh, bake: BillboardBake) -> Mesh {
+    let mut mesh = build_submesh_mesh_as(sub, RenderAssetUsages::default(), bake);
     if sub.joints.len() == sub.positions.len() && !sub.joints.is_empty() {
         mesh.insert_attribute(
             ATTRIBUTE_WOW_JOINT_INDEX,
@@ -378,6 +434,31 @@ pub struct ModelMarker {
     pub offset: Vec3,
 }
 
+/// One bow limb tip (`$WTT`/`$WTB`, `0x611ff0`) in both frames its readers need: `offset` is
+/// bone-local from the bind pivot (the [`ModelMarker`] bake, what `RigPose::posed_point` composes
+/// through a flexing prop's live bone), `rest` is the same point model-local (the rigid prop-root
+/// frame a resting prop and the weapon trail read).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StringTip {
+    pub bone: u16,
+    pub offset: Vec3,
+    pub rest: Vec3,
+}
+
+/// Bake one raw `(bone, WoW model-space position)` anchor into a [`StringTip`]: the
+/// [`build_markers`] bake plus the un-rebased point. `None` for an out-of-range bone.
+pub(crate) fn build_string_tip(
+    (bone, position): (u16, [f32; 3]),
+    pivots: &[Vec3],
+) -> Option<StringTip> {
+    let rest = wow_to_bevy(position);
+    Some(StringTip {
+        bone,
+        offset: rest - *pivots.get(bone as usize)?,
+        rest,
+    })
+}
+
 /// Bake the event markers like [`build_attachments`], in file order: queries take the first match.
 pub(crate) fn build_markers(
     markers: &[benilla_formats::EventMarker],
@@ -532,6 +613,11 @@ pub(crate) fn billboard_info(sub: &RenderSubmesh) -> Option<BillboardInfo> {
         pivot: wow_to_bevy(bb.pivot),
         bone: bb.bone,
         kind: bb.kind,
+        carriers: bb
+            .carriers
+            .iter()
+            .map(|&(pivot, kind)| (wow_to_bevy(pivot), kind))
+            .collect(),
         scale_anim: bb.scale_anim.clone(),
         // Translation keys are vectors and take Bevy axes; the scale keys stay per-axis factors.
         seq_translations: bb
@@ -760,6 +846,50 @@ fn merged_static_mesh_impl(
 mod tests {
     use super::*;
 
+    /// A palette billboard keeps its quad in model space, for the billboard bone's camera-faced
+    /// palette row to turn about the pivot, and its unrigged twin puts every vertex on the pivot,
+    /// so a placement whose rig has not woken draws nothing rather than an unfaced quad.
+    #[test]
+    fn a_palette_billboard_bakes_in_model_space_and_its_twin_on_the_pivot() {
+        let pivot = [1.0, 2.0, 3.0];
+        let quad = [
+            [0.5, 2.0, 2.5],
+            [1.5, 2.0, 2.5],
+            [1.5, 2.0, 3.5],
+            [0.5, 2.0, 3.5],
+        ];
+        let sub = RenderSubmesh {
+            positions: quad.to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+            billboard: Some(benilla_formats::Billboard {
+                pivot,
+                bone: 0,
+                kind: benilla_formats::BillboardKind::Spherical,
+                carriers: Vec::new(),
+                scale_anim: None,
+                seq_translations: Vec::new(),
+            }),
+            ..RenderSubmesh::default()
+        };
+        let positions = |mesh: &Mesh| match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) => v.clone(),
+            other => panic!("positions: {other:?}"),
+        };
+        let (skinned, collapsed) = submesh_to_palette_billboard(&sub);
+        let model: Vec<[f32; 3]> = quad.iter().map(|p| wow_to_bevy(*p).to_array()).collect();
+        assert_eq!(
+            positions(&skinned),
+            model,
+            "the skinned form, in model space"
+        );
+        assert!(
+            positions(&collapsed)
+                .iter()
+                .all(|p| *p == wow_to_bevy(pivot).to_array()),
+            "the twin, every vertex on the pivot"
+        );
+    }
+
     /// One sequence record with the given bones, the rest neutral.
     fn sequence(duration: f32, bones: Vec<benilla_formats::BoneKeys>) -> ModelAnimation {
         ModelAnimation {
@@ -945,5 +1075,38 @@ mod tests {
             built.joints[23].parent_arm.is_none() && built.joints[25].parent_arm.is_none(),
             "the swinging spine bones are ordinary"
         );
+    }
+
+    /// A bow's limb tip, composed through its bone at bind pose, lands on the authored point. The
+    /// flexing prop's string reads `posed_point(bone, offset)` = bone frame × offset, so an offset
+    /// left in model space puts each tip one pivot off the limb — the string floated beside the
+    /// bow. The tip bone's pivot is nonzero so dropping the rebase fails here.
+    #[test]
+    fn a_string_tip_composed_through_its_bone_lands_on_the_marker() {
+        let bone = |parent, pivot| benilla_formats::SkeletonBone {
+            parent,
+            pivot,
+            key_bone: -1,
+            billboard: None,
+            parent_arm: None,
+        };
+        let raw = benilla_formats::Skeleton {
+            bones: vec![bone(-1, [0.0, 0.0, 0.1]), bone(0, [0.05, 0.0, 0.9])],
+        };
+        let (skeleton, _) = build_skeleton(&raw);
+        let tip = build_string_tip((1, [0.06, 0.01, 0.95]), &skeleton_pivots(&raw)).unwrap();
+        // The bind-pose bone frame is the local-translation chain, the fold `RigPose` composes.
+        let frame: Vec3 = [0usize, 1]
+            .iter()
+            .map(|&i| skeleton.joints[i].local_translation)
+            .sum();
+        assert!(
+            (frame + tip.offset - tip.rest).length() < 1e-6,
+            "posed tip {:?} ≠ marker {:?}",
+            frame + tip.offset,
+            tip.rest
+        );
+        assert_eq!(tip.rest, wow_to_bevy([0.06, 0.01, 0.95]));
+        assert!(build_string_tip((2, [0.0; 3]), &skeleton_pivots(&raw)).is_none());
     }
 }

@@ -5,7 +5,6 @@
 use mlua::Lua;
 
 use super::binding_abi::flag;
-use super::Model;
 
 /// The binder's verb the host applies inside its call ([`super::ScriptCall::Binder`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,7 +45,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CheckBinderDist",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.binder_pending))
         })?,
     )?;

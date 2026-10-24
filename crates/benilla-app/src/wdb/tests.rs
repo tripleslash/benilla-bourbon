@@ -177,6 +177,7 @@ fn roster(realm: &str) -> Roster {
         flags: 0,
         category: 1,
         id: 1,
+        version: None,
     });
     roster
 }

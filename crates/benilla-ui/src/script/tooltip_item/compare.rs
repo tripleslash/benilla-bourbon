@@ -6,7 +6,7 @@ use mlua::{Lua, Table, Value};
 use super::build;
 use super::view_of;
 use crate::script::object::frame_handle_of;
-use crate::script::{ItemTemplateView, Model};
+use crate::script::ItemTemplateView;
 
 /// The body both compare bindings run (`0x536080`, `0x535d70`): walk `0x809200[InventoryType]`'s
 /// slots, skipping empty ones uncounted and ones whose worn item's class differs (`0x5d9f30`),
@@ -21,7 +21,9 @@ fn compare_against_worn(
     mut left: f64,
 ) -> mlua::Result<Value> {
     let found = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let mut hit = None;
         for &slot in equip_slots_for(offered.inventory_type) {
             let Some(worn) = model
@@ -49,7 +51,9 @@ fn compare_against_worn(
         return Ok(Value::Nil);
     };
     {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         if let Ok(t) = crate::script::tooltip::tip_mut(&mut model, h) {
             t.equipped_header_armed = true;
         }
@@ -66,13 +70,15 @@ fn offered_view(
     h: crate::widget::FrameHandle,
     item_id: u32,
 ) -> Option<ItemTemplateView> {
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .item_cache_misses
         .clear();
     let v = view_of(lua, item_id);
     build::keep_misses(
-        &mut lua.app_data_mut::<Model>().expect("model app_data"),
+        &mut lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data"),
         h,
         false,
     );
@@ -155,7 +161,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let row = row as usize;
                 let Some(item_id) = ({
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     model
                         .merchant
                         .as_ref()
@@ -217,7 +225,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let row = row as usize;
                 let Some(item_id) = ({
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     let list = crate::script::auction::list_index_of(&kind);
                     model
                         .auction

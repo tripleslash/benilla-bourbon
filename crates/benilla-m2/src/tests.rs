@@ -170,6 +170,41 @@ fn transparency_lookup_reads_0xa4_not_the_texture_unit_lookup_at_0x9c() {
     assert_eq!(m.texture_transform_lookup, vec![0xffff]);
 }
 
+/// A stage past the texture-unit table reads the file's next u16 (`0x70b8bd` indexes it
+/// unchecked): the OctoWoW HD pack's `UI_MainMenu.m2` has `[0]` then a 0, so its two-texture
+/// batches' stage 1 reads UV set 0, not the sphere map; a table ending the file has nothing past
+/// it.
+#[test]
+fn a_stage_past_the_texture_unit_table_reads_the_files_next_entry() {
+    let mut b = header();
+    let unit_ofs = b.len() as u32;
+    for v in [0u16, 0, 0xffff] {
+        b.extend(v.to_le_bytes());
+    }
+    set_arr(&mut b, OFS_TEX_UNIT_LOOKUP, 1, unit_ofs);
+    let fmt = parse(&b).expect("a one-entry texture-unit table parses");
+    let m = fmt.model();
+    assert_eq!(m.texture_unit_lookup, vec![0]);
+    // tortoise: past the table a stage reads its own UV set, as the Turtle client draws it.
+    assert_eq!(
+        m.texture_unit_lookup_past,
+        vec![0, 0xffff],
+        "the file's next u16s are kept"
+    );
+    assert_eq!(m.stage_coord(&combine_batch(), 0), Some(0));
+    assert_eq!(m.stage_coord(&combine_batch(), 1), Some(1));
+    assert!(
+        !m.stage_is_env_mapped(&combine_batch(), 1),
+        "UV set 1, not the sphere map"
+    );
+
+    // The table is the file's last bytes: the same rule, nothing read past it.
+    b.truncate(unit_ofs as usize + 2);
+    let fmt = parse(&b).expect("a table at the end of the file parses");
+    assert_eq!(fmt.model().stage_coord(&combine_batch(), 1), Some(1));
+    assert!(!fmt.model().stage_is_env_mapped(&combine_batch(), 1));
+}
+
 /// A batch on material 0 for [`M2Model::stage_combine`]; only `material_index` is read.
 fn combine_batch() -> SkinBatch {
     SkinBatch {

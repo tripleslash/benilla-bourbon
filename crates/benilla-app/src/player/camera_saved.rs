@@ -116,7 +116,7 @@ fn load_camera_pose(
     let Some(path) = file.path.clone() else {
         return; // a hermetic capture or no install: the defaults stand
     };
-    let text = match std::fs::read_to_string(&path) {
+    let text = match crate::local_state::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => {

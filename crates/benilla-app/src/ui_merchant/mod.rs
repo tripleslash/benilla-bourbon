@@ -1051,10 +1051,10 @@ mod tests {
             can_repair: true,
             ..Default::default()
         }));
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
 
         app.world_mut().run_system_once(feed_repair_costs).unwrap();
-        let script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let script = app.world_mut().non_send_mut::<UiScript>();
         let got = script.eval::<i64>("return (GetRepairAllCost())").unwrap();
         assert_eq!(got, i64::from(want), "the undiscounted total is {full}");
     }
@@ -1124,11 +1124,11 @@ mod tests {
         let mut script = UiScript::new().unwrap();
         script.keep_calls();
         record_errors(&script);
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut().run_system_once(feed_merchant).unwrap();
         while rx.try_recv().is_ok() {} // the feed's name query for the vendor
         let mut calls = {
-            let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut script = app.world_mut().non_send_mut::<UiScript>();
             script.run("RepairAllItems()").unwrap();
             script.take_merchant_calls()
         };
@@ -1142,7 +1142,7 @@ mod tests {
             )
             .unwrap();
         let sent = rx.try_iter().collect();
-        let lines = shown(app.world().non_send_resource::<UiScript>());
+        let lines = shown(app.world().non_send::<UiScript>());
         (sent, lines, sounded(app.world()))
     }
 
@@ -1208,12 +1208,12 @@ mod tests {
                 f:SetScript("OnEvent", function() table.insert(SEEN, event) end)"#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         // One system across the frames, so its memory of the last push lasts.
         let feed_id = app.world_mut().register_system(feed_merchant);
         let feed = |app: &mut App| {
             app.world_mut().run_system(feed_id).unwrap();
-            let script = app.world_mut().non_send_resource_mut::<UiScript>();
+            let script = app.world_mut().non_send_mut::<UiScript>();
             let seen = script.eval::<Vec<String>>("return SEEN").unwrap();
             script.run("SEEN = {}").unwrap();
             let can = script
@@ -1281,10 +1281,10 @@ mod tests {
         let (full, discounted) = sword_prices();
         let priced = |slot_field: u16, read: &str| {
             let (mut app, _) = repair_app(slot_field);
-            app.insert_non_send_resource(sword_vm());
+            app.insert_non_send(sword_vm());
             let read_cost = |app: &mut App| {
                 app.world_mut().run_system_once(feed_repair_costs).unwrap();
-                let script = app.world().non_send_resource::<UiScript>();
+                let script = app.world().non_send::<UiScript>();
                 script.eval::<i64>(read).unwrap()
             };
             let at_vendor = read_cost(&mut app);
@@ -1321,10 +1321,10 @@ mod tests {
         const ITEM_FLAGS: u16 = 21;
         const WRAPPED: u32 = 0x8;
         let (mut app, _) = repair_app(FIELD_PLAYER_INV_SLOT_HEAD + 2 * 15);
-        app.insert_non_send_resource(sword_vm());
+        app.insert_non_send(sword_vm());
         let cost = |app: &mut App| {
             app.world_mut().run_system_once(feed_repair_costs).unwrap();
-            let script = app.world().non_send_resource::<UiScript>();
+            let script = app.world().non_send::<UiScript>();
             script
                 .eval::<i64>(r#"local _, _, c = TT:SetInventoryItem("player", 16) return c"#)
                 .unwrap()
@@ -1367,7 +1367,7 @@ mod tests {
         // A banker open too: the vault's slots read empty to the tooltip without one
         // (`0x6228a0`).
         script.set_bank(Some(benilla_ui::script::BankState::default()));
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
 
         let entity =
             |app: &App, guid: u64| app.world().resource::<crate::net::GuidIndex>().0[&guid];
@@ -1379,7 +1379,7 @@ mod tests {
         let frame = |app: &mut App| {
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<(i64, i64, i64, i64)>(
                     r#"local _, _, worn = TT:SetInventoryItem("player", 16)
                        local _, carried = TT:SetBagItem(0, 1)
@@ -1691,7 +1691,7 @@ mod tests {
             .init_resource::<crate::sound::MessageSounds>()
             .insert_resource(NetCommands(tx))
             .add_systems(Update, feed_merchant);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let item_asks = |rx: &crossbeam_channel::Receiver<ClientCommand>| {
             crate::query_cache::queries(rx)
                 .into_iter()
@@ -1747,10 +1747,10 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let tick = |app: &mut App| -> Vec<String> {
             app.update();
-            let s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let s = app.world_mut().non_send_mut::<UiScript>();
             let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
             seen

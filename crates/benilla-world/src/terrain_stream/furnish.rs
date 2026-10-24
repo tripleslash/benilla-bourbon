@@ -4,7 +4,7 @@
 //! the cap is off: the loading screen absorbs the burst and waits on furnished tiles. The held
 //! inner tiles are never capped: the reference builds an inner chunk with no limit (`0x6986a5`).
 
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use benilla_assets::{chunks_to_mesh, AdtTile};
 use bevy::camera::primitives::MeshAabb;
@@ -19,7 +19,7 @@ const CELL_SPAWN_CAP: usize = 64;
 /// A tile's 16×16 chunks furnish as 4×4 cells of 4×4 chunks, one mesh and one draw each: every
 /// per-chunk fact is baked per vertex and the material is the tile's. The 133⅓-yd cell matches
 /// `static_gx` and the merge lanes.
-const CELL_SPAN: usize = 4;
+pub(super) const CELL_SPAN: usize = 4;
 const CELLS_PER_TILE: usize = (16 / CELL_SPAN) * (16 / CELL_SPAN);
 const CHUNKS_PER_CELL: usize = CELL_SPAN * CELL_SPAN;
 
@@ -109,6 +109,10 @@ pub(super) fn furnish_tile_cells(
                     // Exterior scene: from inside a WMO a cell draws only through a portal window
                     // (`0x683bf0`, fed only by the per-window walk `0x682fa0`).
                     crate::exterior_cull::ExteriorScene,
+                    super::TerrainCell {
+                        tile: key,
+                        cell: cell as u8,
+                    },
                 ));
                 if let Some(aabb) = aabb {
                     cell.insert(aabb);

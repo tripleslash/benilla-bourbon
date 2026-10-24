@@ -31,23 +31,25 @@ pub(super) use scrolling::REG_SCROLLINGMESSAGEFRAME_METHODS;
 /// for, then fades (`0x7862b0`); the scrolling class (`0x788460`) only fades.
 ///
 /// [`MessageFrameState::trim_to_viewport`]: crate::widget::MessageFrameState::trim_to_viewport
-pub(super) fn update(model: &mut Model, h: FrameHandle, elapsed: f32) {
+/// Whether anything drawn moved: a line trimmed, freed, hidden or faded, or a relayout.
+pub(super) fn update(model: &mut Model, h: FrameHandle, elapsed: f32) -> bool {
     let rows = UiScript::message_viewport_rows(model, h);
     let viewport = UiScript::message_viewport(model, h);
     let font_key = UiScript::message_font_key(model, h);
     match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
         Some(KindState::Message(mf)) => {
-            mf.trim_to_viewport(rows);
-            mf.tick(elapsed);
+            let trimmed = mf.trim_to_viewport(rows);
+            mf.tick(elapsed) | trimmed
         }
         Some(KindState::ScrollingMessage(smf)) => {
             // A font change relayouts at the anchor (`0x788086`); the resize is the resolve's.
-            if smf.laid_font.replace(font_key) != Some(font_key) {
+            let relaid = smf.laid_font.replace(font_key) != Some(font_key);
+            if relaid {
                 smf.relayout(viewport);
             }
-            smf.tick(elapsed)
+            smf.tick(elapsed) | relaid
         }
-        _ => {}
+        _ => false,
     }
 }
 
@@ -99,7 +101,9 @@ pub(super) fn on_visibility(lua: &mlua::Lua, h: FrameHandle, visible: bool) {
     if !visible {
         return;
     }
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     if !matches!(
         model.arena.frame(h).map(|f| &f.kind_state),
         Some(KindState::ScrollingMessage(_))
@@ -125,7 +129,9 @@ pub(super) fn on_visibility(lua: &mlua::Lua, h: FrameHandle, visible: bool) {
 /// recorded.
 pub(super) fn fire_scroll_changes(lua: &mlua::Lua, h: FrameHandle) {
     let (n, id) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let n = match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
             Some(KindState::ScrollingMessage(smf)) => std::mem::take(&mut smf.scroll_changes),
             _ => return,
@@ -139,7 +145,7 @@ pub(super) fn fire_scroll_changes(lua: &mlua::Lua, h: FrameHandle) {
         if let Err(e) =
             super::event::fire_widget_handler(lua, id, "OnMessageScrollChanged", Vec::new())
         {
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .record_lua_error(&e);
         }
@@ -223,7 +229,9 @@ pub(super) fn install_justify(lua: &mlua::Lua, m: &mlua::Table) -> mlua::Result<
                             justify::usage_v(&name)
                         }
                     })?;
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let frame = model
                     .arena
                     .frame_mut(h)
@@ -243,7 +251,9 @@ pub(super) fn install_justify(lua: &mlua::Lua, m: &mlua::Table) -> mlua::Result<
         "GetJustifyH",
         lua.create_function(move |lua, this: mlua::Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let bits = match model.arena.frame(h).and_then(|f| own(&f.kind_state)) {
                 Some(j) => j.0,
                 None => {
@@ -258,7 +268,9 @@ pub(super) fn install_justify(lua: &mlua::Lua, m: &mlua::Table) -> mlua::Result<
         "GetJustifyV",
         lua.create_function(move |lua, this: mlua::Table| {
             let h = frame_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let j = model
                 .arena
                 .frame(h)
@@ -349,7 +361,9 @@ pub(super) fn ensure_font_region(
     lua: &mlua::Lua,
     fh: FrameHandle,
 ) -> Option<crate::widget::RegionHandle> {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     ensure_font_region_in(&mut model, fh)
 }
 
@@ -427,7 +441,9 @@ pub(crate) fn set_xml_insets(
     insets: [crate::layout::Len; 4],
 ) -> mlua::Result<()> {
     let h = frame_handle_of(lua, frame)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     if let Some(slot) = model
         .arena
         .frame_mut(h)
@@ -520,21 +536,28 @@ impl UiScript {
     /// [`UiScript::resolve`]; answer with [`UiScript::set_message_line_rows`] before extract.
     pub fn message_lines_needing_measure(&mut self) -> Vec<LineMeasureRequest> {
         use std::hash::{Hash, Hasher};
-        let mut model = self.model_mut();
+        // The sweep tokens are the ask's own bookkeeping, no extract input: the mutation count
+        // stands; the answers move it ([`UiScript::set_message_line_rows`]).
+        let quiet = self.visual_epoch();
+        let mut guard = self.model_mut();
         // A plain reborrow, so the arena reads and the sweep-token writes borrow disjoint fields.
-        let model = &mut *model;
+        let model: &mut crate::script::Model = &mut guard;
         let mut out = Vec::new();
         let european = model.european_numbers;
+        // The message kinds take a kind update, so they are on the walked list from creation:
+        // that list, not every resolved rect, is where to find them.
         let frames: Vec<(FrameHandle, Rect)> = model
-            .frame_rects
+            .arena
+            .walked_kinds()
             .iter()
-            .filter(|(&fh, _)| {
-                model
-                    .arena
-                    .frame(fh)
-                    .is_some_and(|f| f.kind_state.message_lines().is_some() && f.effective_visible)
+            .copied()
+            .filter(|&fh| {
+                model.frame_rects.contains_key(&fh)
+                    && model.arena.frame(fh).is_some_and(|f| {
+                        f.kind_state.message_lines().is_some() && f.effective_visible
+                    })
             })
-            .filter_map(|(&fh, _)| Some((fh, message_rect(model, fh)?)))
+            .filter_map(|fh| Some((fh, message_rect(model, fh)?)))
             .collect();
         for (fh, fr) in frames {
             let wrap_width = fr.right - fr.left;
@@ -610,6 +633,7 @@ impl UiScript {
                 model.msg_swept.remove(&fh);
             }
         }
+        guard.set_epoch(quiet);
         out
     }
 

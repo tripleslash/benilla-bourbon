@@ -57,6 +57,7 @@ pub(super) fn seed_create_stage(
                 hair_style: 0,
                 hair_color: 0,
                 facial_hair: 0,
+                challenge_mask: None,
             };
             if let Err(why) = glue_press::press_body(vm, &req) {
                 error!("capture: the create screen refused the pick ({why})");

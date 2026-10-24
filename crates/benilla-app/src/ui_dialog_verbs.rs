@@ -4,7 +4,9 @@
 //! A meeting stone's click runs the stone's own use slot, which refuses a join client-side or
 //! sends `CMSG_MEETINGSTONE_JOIN`, never the shared `CMSG_GAMEOBJ_USE`.
 
-use std::time::Instant;
+// The platform clock, not std's: `std::time::Instant::now()` panics on wasm32, and this
+// module's deadlines run in the browser build like every other.
+use bevy::platform::time::Instant;
 
 use benilla_protocol::messages::{BattlefieldStatus, MeetingStoneNotice};
 use benilla_ui::script::{ScriptValue, UiScript};
@@ -199,6 +201,10 @@ pub(crate) struct BattlefieldQueue {
     instance_expiration: Option<Instant>,
     /// Status 3 fires `UPDATE_BATTLEFIELD_SCORE` before `_STATUS` (`0x4aaa5a`, then `0x4aab05`).
     score_dirty: bool,
+    /// The player left the battleground: the active slot lost its instance, or the same slot's map
+    /// went to zero. The handler already zeroes the run-time clocks on both, so the scoreboard's
+    /// winner goes with them — [`crate::ui_battlefield_score::feed_battlefield_score`] takes this.
+    board_cleared: bool,
     /// Tutorials the handler triggers (`0x2f` on queued, `0x30` on confirm), owed to the next feed.
     tutorials: Vec<u32>,
 }
@@ -219,6 +225,7 @@ impl BattlefieldQueue {
             if self.active.is_some_and(|(i, _)| i == index) {
                 self.run_started = None;
                 self.instance_expiration = None;
+                self.board_cleared = true;
             }
             *slot = None;
             self.changed = true;
@@ -245,6 +252,7 @@ impl BattlefieldQueue {
                 self.instance_expiration = None;
                 if self.active.is_some_and(|(i, _)| i == index) {
                     self.active = None;
+                    self.board_cleared = true;
                 }
             }
         }
@@ -281,6 +289,11 @@ impl BattlefieldQueue {
 
     pub(crate) fn take_score_dirty(&mut self) -> bool {
         std::mem::take(&mut self.score_dirty)
+    }
+
+    /// Take the "the player left the battleground" mark. One packet, one board to zero.
+    pub(crate) fn take_board_cleared(&mut self) -> bool {
+        std::mem::take(&mut self.board_cleared)
     }
 
     /// The map id `AcceptBattlefieldPort` sends for a 1-based slot, if the slot holds a queue.
@@ -955,6 +968,9 @@ fn poll_area_spirit_healer(
 /// The dialog verbs' packet handlers: each parks a question or a countdown for the feed.
 mod net {
     use benilla_protocol::{SessionEvent, SessionEventKind};
+    // The platform clock, for the reason the parent module's import gives: `std`'s panics on
+    // wasm32, and both deadlines below are stamped in the browser build like every other.
+    use bevy::platform::time::Instant;
     use bevy::prelude::*;
 
     use super::{AreaSpiritHealer, BattlefieldQueue, InstanceBoot, MeetingStone, PetUnlearnState};
@@ -996,7 +1012,7 @@ mod net {
 
     fn on_raid_group_only(In(ev): In<SessionEvent>, mut boot: ResMut<InstanceBoot>) {
         if let SessionEvent::RaidGroupOnly { delay_ms, reason } = ev {
-            boot.apply(delay_ms, reason, std::time::Instant::now());
+            boot.apply(delay_ms, reason, Instant::now());
         }
     }
 
@@ -1024,7 +1040,7 @@ mod net {
                 }
                 super::send_healer_query(&change, &net);
             }
-            if spirit.on_time(healer, ms, std::time::Instant::now()) {
+            if spirit.on_time(healer, ms, Instant::now()) {
                 lane.write(FieldNotice::Global {
                     id: id::AREA_SPIRIT_HEALER_IN_RANGE,
                 });
@@ -1130,7 +1146,7 @@ mod tests {
             .init_resource::<crate::sound::MessageSounds>()
             .add_message::<SpellKitFx>()
             .add_systems(Update, feed_meeting_stone);
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         let added = |app: &mut App| {
             app.world_mut()
                 .resource_mut::<MeetingStone>()
@@ -1563,7 +1579,7 @@ mod tests {
             STONE,
             crate::go_templates::test_fields(STONE_ENTRY),
         );
-        app.insert_non_send_resource(UiScript::new().expect("VM"));
+        app.insert_non_send(UiScript::new().expect("VM"));
         app.world_mut().spawn((
             SelfPlayer,
             ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(

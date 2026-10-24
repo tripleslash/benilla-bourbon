@@ -19,7 +19,11 @@ impl PluginGroup for WorldPlugins {
             .add(MaterialPlugin::<TerrainMaterial>::default())
             .add(MaterialPlugin::<WowModelMaterial>::default())
             // Physics (avian3d): colliders, their BVH and the shape-casts of controller and picker.
-            .add_group(PhysicsPlugins::default())
+            // Once a frame in `PostUpdate` on the frame's own delta, not avian's fixed-step
+            // `FixedPostUpdate`: with no dynamics (below) a step's length changes nothing, and
+            // the fixed loop ran every step a long frame owed, up to sixteen after a stall, so the
+            // next frame ran long too and stalls chained.
+            .add_group(PhysicsPlugins::new(bevy::app::PostUpdate))
             // No contact pipeline: nothing reads a contact (the player is a shape-cast controller,
             // units carry no colliders), and trimesh pairs against terrain tiles cost whole ticks.
             // The collider BVH the shape-casts ride is `ColliderTreePlugin`'s, kept.
@@ -87,6 +91,8 @@ impl PluginGroup for WorldPlugins {
             .add(crate::clouds::CloudsPlugin)
             // Weather (`SMSG_WEATHER`): the storm light blend and precipitation.
             .add(crate::weather::WeatherPlugin)
+            // fork: the shared wind field and the foliage benders, after the weather it reads.
+            .add(crate::wind::WindPlugin)
             // The sun disc and glow halo (`CSky::Render`).
             .add(crate::sun::SunPlugin)
             // The interior classifier: M2 entities in a WMO room lit off its baked floor colour.
@@ -98,6 +104,8 @@ impl PluginGroup for WorldPlugins {
             .add(crate::wmo_portal::WmoPortalPlugin)
             // From inside a building, the exterior draws only through the flood's portal windows.
             .add(crate::exterior_cull::ExteriorCullPlugin)
+            // The terrain horizon: what nearer chunks hide, read by every exterior visibility owner.
+            .add(crate::horizon::HorizonPlugin)
             // Doodad animation: placed M2s loop their first and global sequences while drawn.
             .add(crate::doodad_anim::DoodadAnimPlugin)
             // Ground clutter: the catalog and per-chunk build; the active streamer scatters.
@@ -110,6 +118,19 @@ impl PluginGroup for WorldPlugins {
             // Water foam decals (`CWater0Ripple`): wake, ring and step-in splash.
             .add(crate::water_fx::WaterFxPlugin)
             .add(crate::ffx_glow::FfxGlowPlugin)
+            // Screen-space indirect lighting (AO + one bounce of colour bleed) — the frame's other
+            // full-screen pass, and the one before FFXGlow in the graph. Its two strengths are
+            // player sliders and both halves are exact no-ops at zero.
+            .add(crate::ssilvb::SsilvbPlugin)
+            // The fork's parallel lighting model (FORK.md). Classic by default,
+            // and a classic session never reads anything it registers.
+            .add(crate::modern::ModernLightingPlugin)
+            // fork: fsr (FORK.md) — FSR 3.1.5 upscaling and frame generation, inert until the app
+            // puts an `FsrView` on the world camera.
+            .add(crate::fsr::FsrPlugin)
+            // fork: the perf rig. Registers nothing unless `WOW_PERF`/`?perf=` names a frame
+            // count, so a shipped session carries the module and not one system.
+            .add(crate::perf_probe::PerfProbePlugin)
             .add(crate::ribbons::RibbonPlugin)
             // Stuck-modifier reconciliation: macOS system shortcuts (⇧⌘5) swallow modifier
             // releases without a focus loss, wedging every bare-key binding.
@@ -122,11 +143,27 @@ impl PluginGroup for WorldPlugins {
     }
 }
 
+/// Any of Bevy's own lights.
+type BevyLight = Or<(With<DirectionalLight>, With<PointLight>, With<SpotLight>)>;
+
+/// Whether any Bevy light exists, the gate on Bevy's light-visibility pass.
+fn bevy_light_exists(lights: Query<(), BevyLight>) -> bool {
+    !lights.is_empty()
+}
+
 /// The engine's bare settings, after `PhysicsPlugins`: [`SubstepCount`] overwrites its default.
 struct WorldFoundation;
 
 impl Plugin for WorldFoundation {
     fn build(&self, app: &mut App) {
+        // Bevy's light visibility serves its shadow maps, and the world's lights are
+        // `WorldPointLight`s on the reference's model; only the player shadow's sun is a Bevy
+        // light. With none, the pass still queues a fresh `ViewVisibility` query state every
+        // frame (~0.1 ms matching this world's archetypes), so it waits for a light.
+        app.configure_sets(
+            PostUpdate,
+            bevy::light::SimulationLightSystems::CheckLightVisibility.run_if(bevy_light_exists),
+        );
         // One solver substep, not avian's 6: with no dynamic bodies, kinematic motion is exact at
         // any count. Revisit when a dynamic body enters the world.
         app.insert_resource(SubstepCount(1))
@@ -150,28 +187,26 @@ impl Plugin for WorldFoundation {
             // The collider-set stamp cached collision answers are dated by; a removal is stamped in
             // `First`, before any consumer.
             .init_resource::<crate::collision::ColliderEpoch>()
+            // fork: where it changed, for the rain's ground columns.
+            .init_resource::<crate::collision::ColliderChanges>()
+            .add_observer(crate::collision::note_collider_removal)
             .init_resource::<crate::collision::MoverTraceExclusions>()
             .add_systems(First, crate::collision::track_collider_removals);
         // No pre-step transform propagation: movers write `Position`/`Rotation` directly, so a
         // second whole-world sweep buys nothing; an opening door's hull reaches physics a frame
         // late. `WOW_PHYS_PREPROP=1` restores avian's default.
-        if std::env::var_os("WOW_PHYS_PREPROP").is_none() {
-            app.insert_resource(avian3d::physics_transform::PhysicsTransformConfig {
-                propagate_before_physics: false,
-                ..Default::default()
-            });
-        }
-        // `WOW_PHYS_HZ=<hz>`: the fixed loop's rate, a measurement lever and never a setting (at
-        // 8 Hz streamed colliders reach the spatial trees up to 125 ms late).
-        if let Some(hz) = std::env::var("WOW_PHYS_HZ")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-        {
-            app.insert_resource(bevy::time::Time::<bevy::time::Fixed>::from_hz(hz));
-        }
+        //
+        // avian's transform-to-position sync walks every collider each step; ours walks the moved
+        // ones (`collision::sync_moved_positions`).
+        app.insert_resource(avian3d::physics_transform::PhysicsTransformConfig {
+            propagate_before_physics: std::env::var_os("WOW_PHYS_PREPROP").is_some(),
+            transform_to_position: false,
+            ..Default::default()
+        });
+        crate::collision::add_moved_position_sync(app, PostUpdate);
         // Static transform tracking always on: movers are 1–3% of the world, so the adaptive
         // check's two full scans a frame could only ever conclude "track".
-        app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::enabled());
+        app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::Enabled);
         // The retained static-world pass; `WOW_STATIC_GX=0` opts out, registering nothing.
         app.add_plugins(crate::static_gx::StaticGxPlugin);
         // `WOW_MERGE_CENSUS=1`: the merge census printer.
@@ -180,10 +215,17 @@ impl Plugin for WorldFoundation {
         }
         // `WOW_UPLOAD_BUDGET=<MB>`: cap the per-frame GPU upload of meshes and images (bevy's
         // `RenderAssetBytesPerFrame`, unlimited by default), a measurement lever.
-        if let Some(mb) = std::env::var("WOW_UPLOAD_BUDGET")
+        // In the browser the render world prepares on the thread that draws, so a zone line whose
+        // textures and meshes all land together would upload them inside one frame; there the
+        // default is `WEB_UPLOAD_BUDGET_MB`. A single asset over the cap still uploads whole.
+        // fork: web — only an image ever waits. A mesh counts against the frame and is prepared
+        // in it (`third_party/bevy_render/BENILLA.md`, the seventh delta): held back, a rewritten
+        // mesh draws nothing, which blanked the player UI's batches under a streaming backlog.
+        let upload_mb = std::env::var("WOW_UPLOAD_BUDGET")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-        {
+            .or(WEB_UPLOAD_BUDGET_MB);
+        if let Some(mb) = upload_mb {
             app.insert_resource(bevy::render::render_asset::RenderAssetBytesPerFrame::new(
                 mb * 1024 * 1024,
             ));
@@ -195,5 +237,121 @@ impl Plugin for WorldFoundation {
         if std::env::var_os("WOW_INDIRECT").is_none() {
             app.register_required_components::<bevy::camera::Camera, bevy::render::view::NoIndirectDrawing>();
         }
+    }
+
+    fn finish(&self, app: &mut App) {
+        // Bevy's prepass copies every mesh's `GlobalTransform` into `PreviousGlobalTransform` each
+        // frame for motion vectors; no view here asks for them (no `MotionVectorPrepass`, no TAA:
+        // the FSR velocity pass keeps its own last-world-frame poses, `fsr::velocity`), and a mesh
+        // without the component extracts its current transform as its previous one.
+        let _ = app.remove_systems_in_set(
+            PreUpdate,
+            bevy::pbr::update_mesh_previous_global_transforms,
+            bevy::ecs::schedule::ScheduleCleanupPolicy::RemoveSetAndSystems,
+        );
+    }
+}
+
+/// The browser's default per-frame GPU upload cap in MB (native stays unlimited unless
+/// `WOW_UPLOAD_BUDGET` asks). At 60 fps it is ~1 GB/s: a zone's art arrives over a few frames
+/// instead of one.
+#[cfg(target_arch = "wasm32")]
+const WEB_UPLOAD_BUDGET_MB: Option<usize> = Some(16);
+#[cfg(not(target_arch = "wasm32"))]
+const WEB_UPLOAD_BUDGET_MB: Option<usize> = None;
+
+#[cfg(test)]
+mod upload_budget_tests {
+    use bevy::asset::{Asset, AssetId};
+    use bevy::ecs::system::{RunSystemOnce, SystemParamItem};
+    use bevy::prelude::*;
+    use bevy::render::mesh::RenderMesh;
+    use bevy::render::render_asset::{
+        prepare_assets, ExtractedAssets, PrepareAssetError, PrepareNextFrameAssets, RenderAsset,
+        RenderAssetBytesPerFrameLimiter, RenderAssets,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Asset, TypePath, Clone)]
+    struct Source(u32);
+
+    /// A budgeted asset the way upstream prepares one.
+    struct Waits;
+    /// A budgeted asset that says what [`RenderMesh`] says.
+    struct Never(u32);
+
+    impl RenderAsset for Waits {
+        type SourceAsset = Source;
+        type Param = ();
+        fn byte_len(_: &Source) -> Option<usize> {
+            Some(1)
+        }
+        fn prepare_asset(
+            _: Source,
+            _: AssetId<Source>,
+            (): &mut SystemParamItem<()>,
+            _: Option<&Self>,
+        ) -> Result<Self, PrepareAssetError<Source>> {
+            Ok(Self)
+        }
+    }
+
+    impl RenderAsset for Never {
+        type SourceAsset = Source;
+        type Param = ();
+        const DEFERRABLE: bool = false;
+        fn byte_len(_: &Source) -> Option<usize> {
+            Some(1)
+        }
+        fn prepare_asset(
+            source: Source,
+            _: AssetId<Source>,
+            (): &mut SystemParamItem<()>,
+            _: Option<&Self>,
+        ) -> Result<Self, PrepareAssetError<Source>> {
+            Ok(Self(source.0))
+        }
+    }
+
+    /// A render world one frame into a spent budget: asset `id` prepared as 1, rewritten as 2.
+    fn rewritten_under_a_spent_budget<A: RenderAsset<SourceAsset = Source>>(
+        prepared: A,
+    ) -> (World, AssetId<Source>) {
+        let id = AssetId::<Source>::Uuid {
+            uuid: bevy::asset::uuid::Uuid::from_u128(7),
+        };
+        let mut world = World::new();
+        world.insert_resource(RenderAssetBytesPerFrameLimiter {
+            max_bytes: Some(1),
+            bytes_written: AtomicUsize::new(1),
+        });
+        let mut assets = RenderAssets::<A>::default();
+        assets.insert(id, prepared);
+        world.insert_resource(assets);
+        world.init_resource::<PrepareNextFrameAssets<A>>();
+        let mut extracted = ExtractedAssets::<A>::default();
+        extracted.extracted.push((id, Source(2)));
+        extracted.modified.insert(id);
+        world.insert_resource(extracted);
+        world.run_system_once(prepare_assets::<A>).unwrap();
+        (world, id)
+    }
+
+    /// The player UI rewrites its pooled batch meshes in place. Upstream's budget takes the
+    /// prepared one away and makes the new one wait, so the batch draws nothing meanwhile.
+    #[test]
+    fn a_rewritten_mesh_is_prepared_on_a_frame_whose_budget_is_spent() {
+        let (world, id) = rewritten_under_a_spent_budget(Waits);
+        assert!(
+            world.resource::<RenderAssets<Waits>>().get(id).is_none(),
+            "a deferrable asset is gone while it waits: the blank this test is about"
+        );
+        let (world, id) = rewritten_under_a_spent_budget(Never(1));
+        assert_eq!(
+            world.resource::<RenderAssets<Never>>().get(id).map(|a| a.0),
+            Some(2),
+            "an asset that is not deferrable is prepared in the frame that rewrote it"
+        );
+        const { assert!(!<RenderMesh as RenderAsset>::DEFERRABLE) };
     }
 }

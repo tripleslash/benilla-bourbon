@@ -72,7 +72,7 @@ impl<A: Asset> Parked<A> {
     ) -> Option<&'a mut A> {
         // Store first: once realized it is the truth, and a parked value for it would be stale.
         if store.contains(id) {
-            return store.get_mut(id);
+            return store.get_mut(id).map(bevy::asset::AssetMut::into_inner);
         }
         self.0.get_mut(&id)
     }

@@ -2,7 +2,8 @@
 //! ([`build_collider_task`]) and [`finish_colliders`] attaches the results under a per-frame
 //! budget, since a streamed burst finishes together and each attach is main-thread work.
 
-use std::time::{Duration, Instant};
+use bevy::platform::time::Instant;
+use std::time::Duration;
 
 use avian3d::prelude::{Collider, CollisionLayers, RigidBody};
 use benilla_assets::coords::wow_to_bevy;
@@ -77,7 +78,11 @@ pub(super) fn finish_colliders(world: &mut World, state: &mut PendingColliders) 
     let t0 = Instant::now();
     let mut ready: Vec<Entity> = Vec::new();
     let mut pending = 0usize;
-    for (entity, mut pc) in state.get_mut(world).iter_mut() {
+    // A plain query always validates.
+    let Ok(mut pending_colliders) = state.get_mut(world) else {
+        return;
+    };
+    for (entity, mut pc) in pending_colliders.iter_mut() {
         pending += 1;
         if let Some(task) = pc.task.as_mut() {
             if let Some(collider) = block_on(future::poll_once(task)) {
@@ -110,10 +115,16 @@ pub(super) fn finish_colliders(world: &mut World, state: &mut PendingColliders) 
 
     // Pass 2: attach. The deadline is checked after each attach, so an oversized one still lands.
     let mut attached = 0u32;
-    let budget = world
-        .get_resource::<AttachBudget>()
-        .map_or(ATTACH_BUDGET, |b| b.0);
-    let deadline = Instant::now() + budget;
+    // fork: where each one lands, for `crate::collision::ColliderChanges`.
+    let mut changes = world.remove_resource::<crate::collision::ColliderChanges>();
+    let budget = world.get_resource::<AttachBudget>().map(|b| b.0);
+    let deadline = Instant::now() + budget.unwrap_or(ATTACH_BUDGET);
+    /// Attaches between deadline checks — see the check below.
+    const DEADLINE_STRIDE: u32 = 16;
+    // fork: an explicit [`AttachBudget`] is checked after EVERY attach — its own contract (a zero
+    // budget attaches exactly one per call, the tests' deterministic setting). Only the client's
+    // wall-clock budget takes the stride.
+    let stride = if budget.is_some() { 1 } else { DEADLINE_STRIDE };
     for entity in ready {
         // The entity may have streamed out while its collider was building.
         let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
@@ -125,6 +136,9 @@ pub(super) fn finish_colliders(world: &mut World, state: &mut PendingColliders) 
         let Some(collider) = pc.built.take() else {
             continue;
         };
+        if let Some(changes) = changes.as_mut() {
+            changes.note_attached(&collider, entity_mut.get::<GlobalTransform>());
+        }
         entity_mut.insert(collider);
         if pc.static_body {
             entity_mut.insert(RigidBody::Static);
@@ -133,9 +147,19 @@ pub(super) fn finish_colliders(world: &mut World, state: &mut PendingColliders) 
             entity_mut.insert(layers);
         }
         attached += 1;
-        if Instant::now() >= deadline {
+        // **The clock is read every [`DEADLINE_STRIDE`] attaches, not every one.** On the web
+        // `Instant::now()` is `performance.now()` across the wasm→JS boundary, and this loop can
+        // run several hundred times in a frame during a stream-in — so a per-iteration check
+        // spends a bridge call to save a fraction of an attach. The budget still bites: the
+        // overshoot it buys back is at most a stride of the *cheapest* attaches, which is what
+        // this loop is made of once the expensive part (the build) has already happened
+        // off-thread.
+        if attached.is_multiple_of(stride) && Instant::now() >= deadline {
             break;
         }
+    }
+    if let Some(changes) = changes {
+        world.insert_resource(changes);
     }
     if let Some(mut activity) = world.get_resource_mut::<crate::terrain_stream::StreamActivity>() {
         activity.colliders_attached += attached;
@@ -178,7 +202,13 @@ pub(super) fn attach_inner_colliders(
         };
         let collider = match (pc.built.take(), pc.task.take()) {
             (Some(collider), _) => collider,
-            (None, Some(task)) => block_on(task),
+            (None, Some(task)) => match finish_now(task) {
+                Ok(collider) => collider,
+                Err(task) => {
+                    pc.task = Some(task);
+                    continue;
+                }
+            },
             (None, None) => continue,
         };
         // In `finish_colliders`' order, so avian's observers see what they see there.
@@ -202,6 +232,20 @@ pub(super) fn attach_inner_colliders(
     if let Some(epoch) = epoch.as_mut() {
         epoch.bump();
     }
+}
+
+/// The inner attach's build, waited on natively.
+#[cfg(not(target_arch = "wasm32"))]
+fn finish_now(task: Task<Collider>) -> Result<Collider, Task<Collider>> {
+    Ok(block_on(task))
+}
+
+/// Deviation: the page cannot block its one thread on a build (a worker's result needs
+/// `Atomics.wait`, a local one the frame to yield), so an unfinished one is handed back to
+/// [`finish_colliders`] and the stand-in lane (`super::provisional`) holds the body meanwhile.
+#[cfg(target_arch = "wasm32")]
+fn finish_now(mut task: Task<Collider>) -> Result<Collider, Task<Collider>> {
+    block_on(future::poll_once(&mut task)).ok_or(task)
 }
 
 /// `WOW_NO_DOODAD_BODIES=1` spawns no doodad or prop hulls: a measurement lever that drops their
@@ -324,7 +368,55 @@ pub(super) fn impassable_wall_data(
 
 /// Builds a static trimesh [`Collider`] on the async compute pool, for [`finish_colliders`].
 pub fn build_collider_task(verts: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Task<Collider> {
-    AsyncComputeTaskPool::get().spawn(async move { Collider::trimesh(verts, tris) })
+    // **Real threads: `spawn_pooled`, and no budget.** Native has always had them; the browser has
+    // them whenever the module was built with shared memory (`scripts/web-build-threads.sh`) AND
+    // the page actually started the workers. The `Send` bound on `spawn_pooled` is what says this
+    // is safe to move — the payload is two plain `Vec`s in linear memory and parry's output,
+    // nothing that belongs to a JS agent — and once the work is genuinely off the frame thread
+    // there is nothing left for a per-frame budget to meter. Taking a `frame_budget` slot here
+    // would be worse than pointless: its `Slot` is `!Send`, so it would not cross to a worker, and
+    // waiting for frame budget on a thread that is not drawing would just delay the collider for
+    // no one's benefit.
+    //
+    // **The question is asked at run time, not by `cfg`, and that is the fix for a real stall.**
+    // A `+atomics` module whose workers never started (`?nothreads=1`, an origin that is not
+    // cross-origin isolated, a browser that refused a `Worker`) has a pool with zero threads, and
+    // on the web nothing ever ticks an idle pool — `bevy_app` does not add its
+    // `tick_global_task_pools` system there and no caller in this tree drives one. The old `cfg`
+    // arm read `+atomics` as "there are threads" and handed every collider to that pool, where it
+    // sat forever: not a slow load, a permanent one, with `super::provisional`'s stand-ins never
+    // retiring and the settle release never presentable. `pooled_work_runs` is the honest
+    // question, and its `false` lands on the metered path below — which is precisely the shape
+    // that page needs.
+    // The `cfg` that remains is not the old "are there threads" question — it is that
+    // `spawn_pooled` does not EXIST on a wasm build without atomics (`bevy_tasks` swaps in
+    // `single_threaded_task_pool.rs` there, which defines no such method), so the call has to be
+    // compiled away rather than merely skipped. `pooled_work_runs` answers `false` on that target
+    // too, so the two agree; this attribute is what keeps the agreement from having to compile.
+    #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
+    if benilla_assets::frame_budget::pooled_work_runs() {
+        return AsyncComputeTaskPool::get()
+            .spawn_pooled(async move { Collider::trimesh(verts, tris) });
+    }
+
+    // **One thread: metered, because this "pool" is the thread that draws.**
+    // With no worker to take it, `AsyncComputeTaskPool::spawn` is `spawn_local` on `wasm32`, so a
+    // burst of builds that become ready together drains as one uninterrupted run of microtasks —
+    // and a burst is the normal case: crossing a tile boundary at a run readies a tile's terrain
+    // hull, its buildings and their props at once. The budget spreads them over frames instead
+    // (`benilla_assets::frame_budget`, the geometry lane), which is the same deferral every other
+    // CPU-bound stretch of a load already takes.
+    //
+    // Deferring the *real* collider is only safe because something else is holding the body up
+    // while it waits — `super::provisional`'s stand-ins, which cost nothing to build and are
+    // retired the frame this one attaches. The two halves are one design: nothing waits, and
+    // nothing is unsupported.
+    AsyncComputeTaskPool::get().spawn(async move {
+        let _slot =
+            benilla_assets::frame_budget::slot_in(benilla_assets::frame_budget::Lane::Geometry)
+                .await;
+        Collider::trimesh(verts, tris)
+    })
 }
 
 #[cfg(test)]
@@ -499,7 +591,7 @@ mod tests {
                 MinimalPlugins,
                 bevy::transform::TransformPlugin,
                 bevy::asset::AssetPlugin::default(),
-                bevy::scene::ScenePlugin,
+                bevy::world_serialization::WorldSerializationPlugin,
                 avian3d::prelude::PhysicsPlugins::new(bevy::app::PostUpdate),
             ));
             app.init_asset::<Mesh>();
@@ -520,6 +612,9 @@ mod tests {
                     ));
                 }
             }
+            // avian 0.7 registers its spatial-query diagnostics in `finish`, which `run` would call.
+            app.finish();
+            app.cleanup();
             app.update(); // builds Position/Rotation and the spatial-query trees
             app.world_mut()
                 .run_system_once(move |world: crate::collision::WorldCollision| {

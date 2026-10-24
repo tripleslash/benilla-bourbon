@@ -8,7 +8,6 @@ use mlua::{Lua, Value};
 
 use super::by_name::Filter;
 use super::protected::{self, Tag};
-use super::Model;
 
 /// The duel verbs the host applies inside their calls ([`super::ScriptCall::Duel`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +55,9 @@ impl super::UiScript {
 /// spell at the guid (`0x4d4810`); a zero guid does nothing (`0x4d4c76`).
 fn start_duel_by_name(lua: &Lua, name: &str) -> mlua::Result<()> {
     let guid = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.closest_player(name, Filter::AcceptAll)
     };
     match guid {
@@ -95,7 +96,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             };
             let guid = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.closest_player(&name, Filter::AcceptAll)
             };
             match guid.filter(|_| protected::gate(lua, Tag::CAST)) {
@@ -115,7 +118,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let token =
                 super::binding_abi::string_arg(lua, unit, r#"Usage: StartDuelUnit("unit")"#)?;
             let guid = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.unit_guids.guid_of(&token)?.unwrap_or(0)
             };
             if guid != 0 && protected::gate(lua, Tag::CAST) {

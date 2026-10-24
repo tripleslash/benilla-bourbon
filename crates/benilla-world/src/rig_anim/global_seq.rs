@@ -25,6 +25,27 @@ pub struct GlobalSeqDrive {
     /// Skip the writes: the doodad lane pauses culled instances, as the reference evaluates a
     /// model only when drawn (`0x707680`). The cursor is absolute, so a resume needs no seek.
     paused: bool,
+    /// This frame's sampled channels for each joint target, filled by the parallel pass and
+    /// written by the serial one.
+    joint_samples: Vec<(Entity, SampledChannels)>,
+}
+
+/// The channels a bone carries, sampled; a channel it does not carry keeps the current value.
+#[derive(Clone, Copy)]
+struct SampledChannels {
+    translation: Option<Vec3>,
+    rotation: Option<Quat>,
+    scale: Option<Vec3>,
+}
+
+impl SampledChannels {
+    fn over(self, cur: &Transform) -> Transform {
+        Transform {
+            translation: self.translation.unwrap_or(cur.translation),
+            rotation: self.rotation.unwrap_or(cur.rotation),
+            scale: self.scale.unwrap_or(cur.scale),
+        }
+    }
 }
 
 impl GlobalSeqDrive {
@@ -42,6 +63,7 @@ impl GlobalSeqDrive {
             bones,
             anchor: None,
             paused: false,
+            joint_samples: Vec::new(),
         })
     }
 
@@ -56,6 +78,7 @@ impl GlobalSeqDrive {
             bones,
             anchor: None,
             paused: false,
+            joint_samples: Vec::new(),
         })
     }
 
@@ -67,52 +90,71 @@ impl GlobalSeqDrive {
 
 /// Sample each drive at `sceneNow − anchor`, wrapped in f64 for a long uptime, and write only the
 /// driven components, so the eyelid blinks over any gait.
+///
+/// The sampling runs in parallel, one drive per item: a rig's bones are its own host's
+/// [`super::RigPose`] and are written there, while a joint target is another entity, so its sample
+/// is kept on the drive and written by the serial pass after.
+/// A drive, whether its host is parked, the host's collapsed rig and its scene's clock.
+type DriveItem = (
+    &'static mut GlobalSeqDrive,
+    Has<super::AnimParked>,
+    Option<&'static mut super::RigPose>,
+    Option<&'static super::SceneClock>,
+);
+
 fn apply_global_sequences(
     time: Res<Time>,
-    mut drives: Query<(
-        Entity,
-        &mut GlobalSeqDrive,
-        Has<super::AnimParked>,
-        Option<&super::SceneClock>,
-    )>,
+    mut drives: Query<DriveItem>,
     mut joints: Query<&mut Transform>,
-    mut rigs: Query<&mut super::RigPose>,
 ) {
     let now = time.elapsed_secs_f64();
-    for (host, mut drive, parked, clock) in &mut drives {
-        let scene_now = clock.map_or(now, |c| c.0);
-        // Stamped even while parked: the reference stamps `+0x68` at attach, not at first draw.
-        let t = scene_now - *drive.anchor.get_or_insert(scene_now);
-        if drive.paused || parked {
-            continue;
-        }
-        let mut rig = rigs.get_mut(host).ok();
-        for (target, bone) in &drive.bones {
-            let tf: &mut Transform = match target {
-                SeqTarget::Joint(joint) => {
-                    let Ok(tf) = joints.get_mut(*joint) else {
-                        continue;
-                    };
-                    tf.into_inner()
-                }
-                SeqTarget::Bone(b) => {
-                    let Some(rig) = rig.as_mut() else { continue };
-                    rig.pose_dirty = true;
-                    let Some(tf) = rig.locals.get_mut(*b as usize) else {
-                        continue;
-                    };
-                    tf
-                }
-            };
-            let at = |period: f32| (t % f64::from(period.max(1e-3))) as f32;
-            if let Some(c) = &bone.translation {
-                tf.translation = c.sample(at(c.period));
+    drives
+        .par_iter_mut()
+        .for_each(|(drive, parked, mut rig, clock)| {
+            let GlobalSeqDrive {
+                bones,
+                anchor,
+                paused,
+                joint_samples,
+            } = drive.into_inner();
+            joint_samples.clear();
+            let scene_now = clock.map_or(now, |c| c.0);
+            // Stamped even while parked: the reference stamps `+0x68` at attach, not at first draw.
+            let t = scene_now - *anchor.get_or_insert(scene_now);
+            if *paused || parked {
+                return;
             }
-            if let Some(c) = &bone.rotation {
-                tf.rotation = c.sample(at(c.period));
+            for (target, bone) in bones.iter() {
+                let at = |period: f32| (t % f64::from(period.max(1e-3))) as f32;
+                let sampled = SampledChannels {
+                    translation: bone.translation.as_ref().map(|c| c.sample(at(c.period))),
+                    rotation: bone.rotation.as_ref().map(|c| c.sample(at(c.period))),
+                    scale: bone.scale.as_ref().map(|c| c.sample(at(c.period))),
+                };
+                match target {
+                    SeqTarget::Joint(joint) => joint_samples.push((*joint, sampled)),
+                    // A rig's `pose_dirty` costs a re-fold and anchor re-seat, so only a moved value is
+                    // stored.
+                    SeqTarget::Bone(b) => {
+                        let Some(rig) = rig.as_mut() else { continue };
+                        let Some(cur) = rig.locals.get(*b as usize).copied() else {
+                            continue;
+                        };
+                        let posed = sampled.over(&cur);
+                        if cur != posed {
+                            rig.locals[*b as usize] = posed;
+                            rig.pose_dirty = true;
+                        }
+                    }
+                }
             }
-            if let Some(c) = &bone.scale {
-                tf.scale = c.sample(at(c.period));
+        });
+    // A joint's `Changed` costs a propagation walk, so only a moved value is stored.
+    for (drive, ..) in &drives {
+        for (joint, sampled) in &drive.joint_samples {
+            if let Ok(mut tf) = joints.get_mut(*joint) {
+                let posed = sampled.over(&tf);
+                tf.set_if_neq(posed);
             }
         }
     }

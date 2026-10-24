@@ -366,6 +366,9 @@ pub(crate) struct Player {
     /// destination's colliders stream in. Released by the terrain streamer on residency or at
     /// [`SETTLE_TIMEOUT`], never by ground contact, which a flyer or a swimmer never makes.
     pub(crate) settling: bool,
+    /// This hold caught a body walking off onto ground whose collision is still arriving
+    /// ([`super::world_focus::hold_unsupported_body`]), not a snap: it raises the loading cover.
+    pub(crate) ground_hold: bool,
     /// When to give up settling (`Time::elapsed_secs`), pushed on while the world is stale or
     /// still loading.
     pub(crate) settle_deadline: f32,
@@ -384,8 +387,13 @@ pub(crate) struct Player {
     pub(super) ride_abort: bool,
     /// A `MSG_MOVE_WORLDPORT_ACK` owed at the settle release: the reference sends it only after its
     /// blocking load returns (`0x401cae`, after `0x66fbe0`), and vmangos has no load timeout. A
-    /// riding crossing never settles and acks at once.
+    /// riding crossing acks at once and settles on the deck.
     pub(crate) owes_worldport_ack: bool,
+    /// After a far teleport's ack, the hold also waits for our own create block, as the reference
+    /// keeps its load screen until the active player object arrives: vmangos seats a passenger at
+    /// the ack (`Player::LoadFromDB`'s seating, run on arrival) and only that create block carries
+    /// the seat, so releasing before it drops the body where the deck was when the teleport began.
+    pub(crate) awaiting_arrival: bool,
     /// `Time::elapsed_secs` when we last sent a heartbeat.
     pub(super) last_heartbeat: f32,
     /// Milliseconds of movement the settle hold skipped, sent as `CMSG_MOVE_TIME_SKIPPED` on the
@@ -452,6 +460,22 @@ pub(crate) struct Player {
     /// own type, so `Player::default()` gives [`DEFAULT_COLLISION_HEIGHT`] rather than 0, which
     /// would swim on dry land.
     pub(crate) collision_height: crate::entities::CollisionHeight,
+    /// **How far our body's model frame rides above its feet** — the mount's attachment-0 saddle,
+    /// in world yards, or `None` while we are not mounted.
+    ///
+    /// The camera's framing pivot is a height above the **model's own origin**, not above the
+    /// ground: the reference's preset (`0x50ca90`) measures attachment 17 and the posture
+    /// correction in model space, and the camera then adds the finished preset to the model's live
+    /// world matrix. Standing, that origin is the feet and the two are the same point. Mounted, the
+    /// character model is parented to the mount's attachment-0 joint, so the origin is the saddle —
+    /// which is the whole of why the camera rises when you mount, and why it rises *with the
+    /// gallop* rather than by a constant.
+    ///
+    /// Mirrored onto this resource by [`super::mirror_mount_seat_lift`] for the same reason
+    /// [`Self::collision_height`] is: the camera seat runs off the resource. `None` and `Some(0.0)`
+    /// are different answers — `None` means "not mounted", which is what selects the plain
+    /// bind-pose pivot over the Mount-pose one.
+    pub(crate) mount_seat_lift: Option<f32>,
     /// The liquid surface over our feet as the last movement tick stored it (Bevy Y). The camera's
     /// water corridor reads this a frame late, as the reference's camera reads the tick's cache
     /// through the field accessor `0x670630`; the lag keeps its depth off a band edge.
@@ -498,6 +522,23 @@ pub(crate) struct Player {
     /// [`crate::transport::Transport`] support, kept through deck jumps, detached on world ground,
     /// in water or when the transport despawns.
     pub(super) ride: Option<PlayerRide>,
+    /// A ride the server named before its transport could carry us, held until that transport is
+    /// armed ([`super::ride::board_pending`]): a worldport carrying us with a transport we had not
+    /// boarded yet. The post-snap hold waits on it, so the body is not released into the air the
+    /// deck has left.
+    pub(super) pending_board: Option<PendingBoard>,
+}
+
+/// A transport to board once it is armed, by guid when the create block named it, else by the
+/// template entry a worldport names (`SMSG_TRANSFER_PENDING`'s transport tail).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PendingBoard {
+    pub(super) guid: Option<u64>,
+    pub(super) entry: Option<u32>,
+    /// Feet in the transport's frame (Bevy axes).
+    pub(super) local_pos: Vec3,
+    /// Facing in the transport's frame (WoW radians), the server's own.
+    pub(super) local_yaw: f32,
 }
 
 /// The player's attachment to a transport's frame ([`Player::ride`]).
@@ -597,6 +638,7 @@ impl Player {
     /// [`SETTLE_TIMEOUT`] fired first, which the `sett` trace records.
     pub(crate) fn end_settle(&mut self, resident: bool, now: f32) {
         self.settling = false;
+        self.ground_hold = false;
         let waited = now - self.settle_since;
         super::move_trace::settle(resident, waited, self.pos);
     }

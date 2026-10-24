@@ -1674,7 +1674,7 @@ mod re_derive {
         assert_eq!(super::lua_count(&mut app, every_filter), 0);
         let kinds = app
             .world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<Vec<String>>(
             "local out = {} local i = 1 while true do local _, _, t = GetTrainerServiceInfo(i) \
              if t == nil then break end table.insert(out, t) i = i + 1 end return out",
@@ -1690,7 +1690,7 @@ mod re_derive {
     fn a_row_keyed_known_keeps_the_key_until_the_next_list() {
         let mut app = super::feed_app(catalog(), skill_lines());
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .run("KNOWN_TALENTS_HEADER = 'My Talents'")
             .unwrap();
         let mut known = service(RANK1_WRAPPER);
@@ -1702,7 +1702,7 @@ mod re_derive {
         };
         let header = |app: &mut App| -> String {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .eval::<String>(
                     "SetTrainerServiceTypeFilter('all') SEEN = {} \
                      return (GetTrainerServiceInfo(1))",
@@ -1772,7 +1772,7 @@ fn a_refused_product_is_asked_at_the_next_list_never_by_a_frame() {
             catalog: benilla_formats::SkillLineCatalog::from_spell_lines([]),
         })
         .add_systems(Update, feed_trainer);
-    app.insert_non_send_resource(UiScript::new().unwrap());
+    app.insert_non_send(UiScript::new().unwrap());
     let list = |app: &mut App| {
         app.world_mut().resource_mut::<TrainerOpen>().open(
             0xF130_0000_4500_0001,
@@ -1949,7 +1949,7 @@ fn the_trainer_rows_sort_only_at_a_list_and_a_re_derive() {
             catalog: benilla_formats::SkillLineCatalog::from_spell_lines([]),
         })
         .add_systems(Update, feed_trainer);
-    app.insert_non_send_resource(UiScript::new().unwrap());
+    app.insert_non_send(UiScript::new().unwrap());
     let list = |app: &mut App| {
         app.world_mut().resource_mut::<TrainerOpen>().open(
             TRAINER,
@@ -1963,7 +1963,7 @@ fn the_trainer_rows_sort_only_at_a_list_and_a_re_derive() {
     // Each row by its cost, a header as 0.
     let rows = |app: &mut App| -> Vec<i64> {
         app.world_mut()
-            .non_send_resource_mut::<UiScript>()
+            .non_send_mut::<UiScript>()
             .eval::<Vec<i64>>(
                 "local out = {} for i = 1, 5 do out[i] = (GetTrainerServiceCost(i)) end return out",
             )
@@ -2025,14 +2025,14 @@ fn feed_app(spells: SpellCatalog, lines: SkillLineCatalog) -> App {
              f:SetScript('OnEvent', function() table.insert(SEEN, event) end)",
         )
         .unwrap();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app
 }
 
 /// One frame, then the trainer events the VM saw.
 fn tick(app: &mut App) -> Vec<String> {
     app.update();
-    let s = app.world_mut().non_send_resource_mut::<UiScript>();
+    let s = app.world_mut().non_send_mut::<UiScript>();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
     s.run("SEEN = {}").unwrap();
@@ -2041,13 +2041,13 @@ fn tick(app: &mut App) -> Vec<String> {
 
 /// `chunk`'s number.
 fn lua_count(app: &mut App, chunk: &str) -> i64 {
-    let s = app.world_mut().non_send_resource_mut::<UiScript>();
+    let s = app.world_mut().non_send_mut::<UiScript>();
     s.eval::<i64>(chunk).unwrap()
 }
 
 /// `chunk`'s list of numbers.
 fn lua_numbers(app: &mut App, chunk: &str) -> Vec<i64> {
-    let s = app.world_mut().non_send_resource_mut::<UiScript>();
+    let s = app.world_mut().non_send_mut::<UiScript>();
     s.eval::<Vec<i64>>(chunk).unwrap()
 }
 
@@ -2142,7 +2142,7 @@ fn an_item_record_a_getter_missed_runs_the_state_pass() {
     assert_eq!(tick(&mut app), ["TRAINER_SHOW"]);
     assert_eq!(costs(&mut app, 6), listed);
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run("for i = 1, 6 do GetTrainerServiceIcon(i) end")
         .unwrap();
     assert!(tick(&mut app).is_empty(), "the record is still out");
@@ -2181,7 +2181,7 @@ fn the_state_pass_runs_once_per_trigger_and_per_callback() {
     assert!(tick(&mut app).is_empty());
 
     app.world_mut()
-        .non_send_resource_mut::<UiScript>()
+        .non_send_mut::<UiScript>()
         .run("for i = 1, 2 do GetTrainerServiceIcon(i) end GetTrainerServiceIcon(2)")
         .unwrap();
     assert!(tick(&mut app).is_empty(), "the record is still out");

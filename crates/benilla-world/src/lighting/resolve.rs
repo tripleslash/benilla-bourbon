@@ -14,6 +14,17 @@ use benilla_formats::{Atmosphere, LightCatalog};
 
 use super::{daynight, quantize_glow, ClockSource, GameClock, LightSampler, WowLighting};
 
+/// The storm `LightParams` over the clear one by `bcc`.
+/// fork: modern weather — a modern frame's storm only darkens and greys the clear colours
+/// (`modern::weather::storm_atmosphere`).
+fn storm_lerp(clear: &Atmosphere, stormy: &Atmosphere, storm: f32) -> Atmosphere {
+    if crate::modern::frame_is_modern() {
+        crate::modern::weather::storm_atmosphere(clear, stormy, storm)
+    } else {
+        clear.lerp(stormy, storm)
+    }
+}
+
 /// The scene-fog stage (`0x6cee30`): the pushed pair `end = min(zone end, farclip)` and
 /// `start = frac × end`, unclamped. The storm's negative fraction (Elwynn −0.5) floors the near
 /// field at `1 − 1/(1−frac)`, about 33% fog at the eye: the constant storm veil.
@@ -131,6 +142,7 @@ pub(super) fn setup_lighting(
         fog_color: atmo.fog_color,
         fog_start,
         fog_end,
+        zone_fog_end: atmo.fog_end, // fork: modern lighting (FORK.md)
         // The camera starts outdoors, so the interior fog equals the scene's.
         wmo_fog_color: atmo.fog_color,
         wmo_fog_start: fog_start,
@@ -155,6 +167,10 @@ pub(super) fn setup_lighting(
         cloud_density: atmo.cloud_density,
         cloud_colors: atmo.cloud_colors,
         storm_bcc: 0.0,
+        clear_fog: [fog_start, fog_end, atmo.fog_end],
+        // fork: modern lighting — no moon at noon; the per-frame resolve samples the night rows.
+        night_key: atmo.sun_diffuse,
+        night_tint: atmo.sun_color,
         cloud_glow_dir: daynight::celestial_sun_direction(720.0), // noon: the sun
         cloud_glow_track: daynight::cloud_glow_track(720.0),
     });
@@ -231,22 +247,51 @@ pub(super) fn update_time_lighting(
     let storm = weather
         .as_ref()
         .map_or(0.0, |w| crate::weather::storm_blend(w.sky_density));
-    let atmo = sampler
+    // fork: modern lighting — the clear atmosphere's fog pair is kept beside the blend.
+    let (atmo, clear_fog_raw) = sampler
         .as_ref()
         .map(|s| {
             let clear =
                 s.0.sample_blended(map, wow_pos, minute * 2, false, submerged, ghost);
-            if storm > 0.0 {
+            let clear_fog = (clear.fog_end, clear.fog_start_frac);
+            let atmo = if storm > 0.0 {
                 let stormy =
                     s.0.sample_blended(map, wow_pos, minute * 2, true, submerged, ghost);
-                clear.lerp(&stormy, storm)
+                storm_lerp(&clear, &stormy, storm)
+            } else {
+                clear
+            };
+            (atmo, clear_fog)
+        })
+        .unwrap_or((
+            Atmosphere::DEFAULT,
+            (
+                Atmosphere::DEFAULT.fog_end,
+                Atmosphere::DEFAULT.fog_start_frac,
+            ),
+        ));
+    let clear_fog = {
+        let (start, end) = scene_fog(clear_fog_raw.0, clear_fog_raw.1, view.farclip);
+        [start, end, clear_fog_raw.0]
+    };
+    let sun_dir = daynight::sun_direction(minute_f);
+    let celestial_dir = daynight::celestial_sun_direction(minute_f);
+    // fork: modern lighting — the same blend at midnight (half-minute 0), sampled only while the
+    // modern moon is up: the colours it lights with (`modern::sun_arc`).
+    let night_atmo = sampler
+        .as_ref()
+        .filter(|_| {
+            crate::modern::frame_is_modern() && crate::modern::sun_arc::moon_is_up(minute_f)
+        })
+        .map(|s| {
+            let clear = s.0.sample_blended(map, wow_pos, 0, false, submerged, ghost);
+            if storm > 0.0 {
+                let stormy = s.0.sample_blended(map, wow_pos, 0, true, submerged, ghost);
+                storm_lerp(&clear, &stormy, storm)
             } else {
                 clear
             }
-        })
-        .unwrap_or(Atmosphere::DEFAULT);
-    let sun_dir = daynight::sun_direction(minute_f);
-    let celestial_dir = daynight::celestial_sun_direction(minute_f);
+        });
 
     // Elwynn commits 125/500 clear and −139/278 at full storm (`0x6cee30`): the negative start is
     // the near veil, and the short storm end whites out the middle distance.
@@ -283,6 +328,7 @@ pub(super) fn update_time_lighting(
         fog_color: atmo.fog_color,
         fog_start,
         fog_end,
+        zone_fog_end: atmo.fog_end, // fork: modern lighting (FORK.md)
         wmo_fog_color,
         wmo_fog_start,
         wmo_fog_end,
@@ -309,6 +355,15 @@ pub(super) fn update_time_lighting(
         cloud_colors: atmo.cloud_colors,
         // The one `bcc` that also weighted the storm blend above (`0x6d4500`).
         storm_bcc: storm,
+        clear_fog,
+        // fork: modern lighting — the diffuse row takes the same ocean ramp as `diffuse`.
+        night_key: hsv_value_scale(
+            night_atmo
+                .as_ref()
+                .map_or(atmo.sun_diffuse, |n| n.sun_diffuse),
+            fac2,
+        ),
+        night_tint: night_atmo.as_ref().map_or(atmo.sun_color, |n| n.sun_color),
         // The sun by day, the white moon by night (`0x6cfb00`).
         cloud_glow_dir: if daynight::cloud_glow_is_sun(minute_f) {
             celestial_dir
@@ -378,18 +433,25 @@ pub(super) fn update_time_lighting(
 pub(super) fn apply_sky_backdrop(
     lighting: Option<Res<WowLighting>>,
     mut clear: ResMut<ClearColor>,
-    mut last: Local<Option<[f32; 3]>>,
+    active: Option<Res<crate::modern::ActiveLighting>>,
+    mut last: Local<Option<([f32; 3], bool)>>,
 ) {
     let Some(l) = lighting else {
         return;
     };
-    if *last == Some(l.fog_color) {
+    let modern = active.is_some_and(|a| a.is_modern());
+    if *last == Some((l.fog_color, modern)) {
         return;
     }
-    *last = Some(l.fog_color);
+    *last = Some((l.fog_color, modern));
     // The buffer holds gamma bytes, so the clear writes the DBC value raw (`linear_rgb` converts
     // nothing); the frame's one decode is the FFXGlow combine.
-    clear.0 = Color::linear_rgb(l.fog_color[0], l.fog_color[1], l.fog_color[2]);
+    // fork: modern lighting — a modern frame is linear, so the clear takes the decoded colour.
+    clear.0 = if modern {
+        Color::srgb(l.fog_color[0], l.fog_color[1], l.fog_color[2])
+    } else {
+        Color::linear_rgb(l.fog_color[0], l.fog_color[1], l.fog_color[2])
+    };
 }
 
 #[cfg(test)]

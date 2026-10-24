@@ -5,13 +5,13 @@
 //! and on the SpineLow torso-masked overlay while moving, seated or airborne in combat
 //! (`0x5fe2f0`). Death overrides everything.
 
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::{AnimClip, ModelAnimations};
 use benilla_formats::AnimDataCatalog;
 use bevy::prelude::*;
 
-use benilla_assets::AssetSet;
 use benilla_world::schedule::WorldStage;
 
 /// The pure selection logic: the `0x5fd100` tables, the gait, swing and ready picks, the rate math.
@@ -102,7 +102,7 @@ impl Wielded {
 /// it, not on sheath (`0x5fd360`); `0x6e3480` reads its reach. Its hooks mirror it into the
 /// queue, which answers it for the VM pass ([`UnitEdits::attack_target`]).
 #[derive(Component)]
-#[component(on_insert = edits::engaged_inserted, on_replace = edits::engaged_replaced)]
+#[component(on_insert = edits::engaged_inserted, on_discard = edits::engaged_replaced)]
 pub(crate) struct Engaged(pub(crate) u64);
 
 /// The stop in flight, the reference's `[+0xc54]`, kept for the one unit that sets it: only
@@ -962,6 +962,9 @@ pub(crate) struct AnimDriver {
     /// short kick, its mechanism open: the reference's blend source keeps running, so it stays
     /// scoped to the airborne cut.
     frozen: Option<bevy::animation::graph::AnimationNodeIndex>,
+    /// The main node's clip index, so the per-frame rate sync skips the clip search; checked
+    /// against the clip's own node before use, as each node belongs to one clip.
+    rate_clip: Option<(bevy::animation::graph::AnimationNodeIndex, usize)>,
 }
 
 impl AnimDriver {
@@ -1039,6 +1042,7 @@ impl Default for AnimDriver {
             mount_display: 0,
             last_special: None,
             frozen: None,
+            rate_clip: None,
         }
     }
 }
@@ -1126,16 +1130,12 @@ impl Plugin for CreatureAnimPlugin {
             .add_message::<HardLanding>()
             // The pending-morph latch, the reference's per-unit `[+0xd54]`.
             .init_resource::<MorphLatch>()
-            .add_systems(
-                Startup,
-                (
-                    load_anim_data,
-                    load_spell_visuals,
-                    load_blood_tables,
-                    load_env_damage_table,
-                )
-                    .after(AssetSet::Open),
-            )
+            .add_data_loaders((
+                load_anim_data,
+                load_spell_visuals,
+                load_blood_tables,
+                load_env_damage_table,
+            ))
             .add_systems(
                 Update,
                 (

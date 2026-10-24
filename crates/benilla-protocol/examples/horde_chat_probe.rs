@@ -58,6 +58,7 @@ fn main() -> Result<()> {
             hair_style: 0,
             hair_color: 0,
             facial_hair: 0,
+            challenge_mask: None,
         };
         match session.create_character(&req)? {
             CHAR_CREATE_SUCCESS | CHAR_CREATE_NAME_IN_USE => {}

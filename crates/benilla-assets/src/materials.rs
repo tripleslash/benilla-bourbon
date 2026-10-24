@@ -17,13 +17,51 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
-/// Compile the four WGSL files into the binary under `embedded://benilla_assets/shaders/…`. Call
+// fork: modern lighting (FORK.md, P2) — the modern sun's cascade shadow map
+// (`benilla_world::modern::shadow`) and its cascade block, as constant handles so every material can
+// name them at construction whatever order the assets are created in.
+pub const MODERN_SHADOW_MAP: Handle<Image> =
+    bevy::asset::uuid_handle!("6d2f1e4a-3b7c-4e0a-9a51-0c7e8f2d9b31");
+pub const MODERN_SHADOW_CASCADES: Handle<bevy::render::storage::ShaderBuffer> =
+    bevy::asset::uuid_handle!("b3c94a7e-52d1-4f6b-8e2a-7d10c4e5f9a2");
+
+/// fork: perf — `$WOW_MODERN_VERTEXWALKS=1` (an A/B lever, read once; the browser has no
+/// environment and keeps the default): the modern pipelines of `wow_model.wgsl`, `terrain.wgsl`
+/// and `static_gx.wgsl` are built with `MODERN_VERTEX_WALKS`, and every vertex walks the light
+/// table for the Gouraud sum and the three-nearest selection whether its fragments read them or
+/// not, as before.
+pub fn modern_vertex_walks() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WOW_MODERN_VERTEXWALKS").as_deref() == Ok("1"))
+}
+// fork: modern lighting (FORK.md, P4) — the integrated froxel fog volume
+// (`benilla_world::modern::volumetrics`), sampled by the transparent lanes.
+pub const MODERN_FOG_VOLUME: Handle<Image> =
+    bevy::asset::uuid_handle!("e8a1c6d2-4f37-4b9e-a0c5-93d17b2f6e48");
+
+/// Compile the five WGSL files into the binary under `embedded://benilla_assets/shaders/…`. Call
 /// after Bevy's `AssetPlugin`, whose registry this fills; [`crate::register_asset_loaders`] does.
 pub fn register_shaders(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/terrain.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/wow_model.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/wdl.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/liquid.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/liquid_cata.wgsl");
+    // fork: the importable libraries the world shaders call into, held loaded so the `#import`
+    // resolves. A headless app with no `Shader` asset type (the loader tests) has nothing to
+    // compile them for.
+    if app
+        .world()
+        .contains_resource::<Assets<bevy::shader::Shader>>()
+    {
+        // `benilla::env_frame`, the block the world `WowLight` mirrors declare after the point
+        // table (`benilla-world`'s `lighting/env_frame.rs`).
+        bevy::shader::load_shader_library!(app, "shaders/env_frame.wgsl");
+        // `benilla::wind_hook`, the shared vertex displacement for grass and foliage.
+        bevy::shader::load_shader_library!(app, "shaders/wind_hook.wgsl");
+        // `benilla::wet_hook`, the rain-on-surfaces look terrain, model and static_gx call.
+        bevy::shader::load_shader_library!(app, "shaders/wet_hook.wgsl");
+    }
 }
 
 /// The WDL far-band shader's source, for the tests that live beside the renderer (`wdl.rs`).
@@ -64,6 +102,10 @@ pub struct WowModelKey {
     /// The WMO-skybox lane (`clutter_fade.z` bit 13, `model_render::SKY_DEPTH_MARKER`), a key axis
     /// because only this model's depth is pinned.
     sky_depth: bool,
+    /// fork: modern lighting — the latched lighting model ([`MODERN_MODEL_PIPELINES`]). A classic
+    /// pipeline does not compile the modern code at all (`WOW_MODERN`): carrying it dead behind the
+    /// runtime flag turned Chrome/Metal's leaf-card holes black in classic frames.
+    modern: bool,
     // The WMO batch order is deliberately not a key axis (a pipeline per batch index stalls a
     // city's first sight): the file-order layering (`0x6b4f10`/`0x6b5190`) rides `sun_scale.y`.
 }
@@ -82,9 +124,16 @@ impl From<&WowModelExt> for WowModelKey {
             zfill: markers & 0x200 != 0,
             far_side: markers & 0x800 != 0,
             sky_depth: markers & 0x2000 != 0,
+            modern: MODERN_MODEL_PIPELINES.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
+
+/// fork: modern lighting — whether model pipelines compile the modern lighting code
+/// (`wow_model.wgsl`'s `WOW_MODERN`). Set by `benilla_world::modern` at the lighting latch, which
+/// then re-prepares every model material so the new key reaches the pipelines.
+pub static MODERN_MODEL_PIPELINES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// The model material's extension. Every `Vec4` uniform packs into binding 100, one buffer entry,
 /// to stay under Metal's 16-buffer vertex-stage cap (Bevy 0.18 ignores `visibility` on uniforms);
@@ -117,7 +166,9 @@ pub struct WowModelExt {
     pub anim_slots: Vec4,
     /// The second texture stage: `x` = bound (1) or not (0), `y` = its combine preset 0-5
     /// (`benilla_formats::TextureStage::combine`); `z` = the stage-0 combine preset plus one
-    /// (`benilla_formats::RenderSubmesh::combine`), 0 for a batch that has none; `w` unused.
+    /// (`benilla_formats::RenderSubmesh::combine`), 0 for a batch that has none; `w` = 1 for a stage
+    /// on UV set B instead of the generated coordinate, `1 + slot` with a scroll row in the
+    /// `matanim` table (tortoise).
     #[uniform(100)]
     pub stage1: Vec4,
     /// Stage 1's texture, sampled at the generated environment coordinate when `stage1.x` is set;
@@ -129,6 +180,21 @@ pub struct WowModelExt {
     /// vertex stage reads its point-light table, since Bevy's clusterable lights are fragment-only.
     #[storage(90, read_only, buffer, visibility(vertex, fragment))]
     pub light_buf: Buffer,
+    // fork: modern lighting (FORK.md, P2) — sampled only when the light buffer's modern flag is set.
+    #[texture(
+        121,
+        dimension = "2d_array",
+        sample_type = "depth",
+        visibility(fragment)
+    )]
+    #[sampler(122, sampler_type = "comparison", visibility(fragment))]
+    pub modern_shadow: Handle<Image>,
+    #[storage(123, read_only, visibility(fragment))]
+    pub modern_cascades: Handle<bevy::render::storage::ShaderBuffer>,
+    // fork: modern lighting (FORK.md, P4) — blended batches fog themselves from the froxel volume.
+    #[texture(124, dimension = "3d", visibility(fragment))]
+    #[sampler(125, visibility(fragment))]
+    pub modern_fog: Handle<Image>,
 }
 
 impl MaterialExtension for WowModelExt {
@@ -153,6 +219,12 @@ impl MaterialExtension for WowModelExt {
         // attributes: rebuild it with Bevy's conditionals (mesh.rs, locations 0-5) plus 10/11.
         if layout.0.contains(crate::ATTRIBUTE_WOW_JOINT_INDEX) {
             descriptor.vertex.shader_defs.push("WOW_RIG_SKIN".into());
+            // The FRAGMENT stage keys on the same def: a skinned unit takes the whole-unit
+            // ground-point shadow sample (one fetch at its rig origin) instead of the
+            // per-fragment fetch, which would read the unit's own caster copy as an occluder.
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("WOW_RIG_SKIN".into());
+            }
             let mut attrs = Vec::with_capacity(7);
             for (attr, loc) in [
                 (Mesh::ATTRIBUTE_POSITION, 0),
@@ -202,9 +274,9 @@ impl MaterialExtension for WowModelExt {
             descriptor.vertex.buffers = vec![layout.0.get_layout(&attrs)?];
         }
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
-            ds.depth_write_enabled = !key.bind_group_data.no_depth_write;
+            ds.depth_write_enabled = Some(!key.bind_group_data.no_depth_write);
             if key.bind_group_data.no_depth_test {
-                ds.depth_compare = CompareFunction::Always;
+                ds.depth_compare = Some(CompareFunction::Always);
             }
         }
         // A sort bias is not a raster bias: the base `StandardMaterial::specialize` also packs it
@@ -212,6 +284,21 @@ impl MaterialExtension for WowModelExt {
         if key.bind_group_data.far_side {
             if let Some(ds) = descriptor.depth_stencil.as_mut() {
                 ds.bias.constant = 0;
+            }
+        }
+        if key.bind_group_data.modern {
+            descriptor.vertex.shader_defs.push("WOW_MODERN".into());
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("WOW_MODERN".into());
+            }
+            if modern_vertex_walks() {
+                descriptor
+                    .vertex
+                    .shader_defs
+                    .push("MODERN_VERTEX_WALKS".into());
+                if let Some(fragment) = descriptor.fragment.as_mut() {
+                    fragment.shader_defs.push("MODERN_VERTEX_WALKS".into());
+                }
             }
         }
         // The skybox pins clip z to 0, reverse-Z far, in the vertex stage; its bias is sort-only.
@@ -227,7 +314,7 @@ impl MaterialExtension for WowModelExt {
         if key.bind_group_data.fade && !key.bind_group_data.sky_depth {
             // A fading model's near cards occlude its far ones; the sky never writes depth.
             if let Some(ds) = descriptor.depth_stencil.as_mut() {
-                ds.depth_write_enabled = true;
+                ds.depth_write_enabled = Some(true);
             }
         }
         if key.bind_group_data.clutter {
@@ -266,6 +353,9 @@ impl MaterialExtension for WowModelExt {
             }
         }
         if key.bind_group_data.zfill {
+            if let Some(frag) = descriptor.fragment.as_mut() {
+                frag.shader_defs.push("WOW_ZFILL".into());
+            }
             // The reference's `M2UseZFill` pre-pass (`0x707f7d`-`0x708072`): depth only, so a
             // translucent model shows one blended layer. The colour is computed and masked, not
             // skipped by an early return, which naga's MSL backend miscompiles.
@@ -276,7 +366,7 @@ impl MaterialExtension for WowModelExt {
                 }
             }
             if let Some(ds) = descriptor.depth_stencil.as_mut() {
-                ds.depth_write_enabled = true;
+                ds.depth_write_enabled = Some(true);
             }
         }
         // The waterline clip (`benilla_world::straddle`) keys on the blend pass: no new pipelines.
@@ -373,6 +463,257 @@ pub struct LiquidExt {
     /// The shared global light, read in both stages (the vertex stage evaluates the sun sheen).
     #[storage(90, read_only, buffer, visibility(vertex, fragment))]
     pub light_buf: Buffer,
+    // fork: modern lighting (FORK.md, P4) — water draws after the fog composite and fogs
+    // itself from the froxel volume (the block carries its parameters).
+    #[storage(123, read_only, visibility(fragment))]
+    pub modern_cascades: Handle<bevy::render::storage::ShaderBuffer>,
+    #[texture(124, dimension = "3d", visibility(fragment))]
+    #[sampler(125, visibility(fragment))]
+    pub modern_fog: Handle<Image>,
+}
+
+/// **The Cataclysm liquid renderer** (`waterDetail 2`) — the second of benilla's two liquid paths.
+///
+/// A separate material type rather than a shader-def branch on [`LiquidExt`], and deliberately so:
+///
+/// * The two do not share a bind group. This one carries a bump map and three pictures of the frame
+///   ([`benilla_world`'s `liquid::screen`]); the 1.12.1 one carries an animated sheet and nothing
+///   else, and paying its cost on every machine that never turns cata water on would be a tax on
+///   the default-off path for no reason.
+/// * `MaterialExtension::vertex_shader` is an associated function with no key, so a *single*
+///   extension type cannot answer with two different WGSL files. The alternative is one file
+///   forked end to end by `#ifdef`, which would dilute `liquid.wgsl`'s header — 86 lines of
+///   byte-level reverse engineering about a *different* renderer, five previously-wrong readings
+///   and why each was reverted. That record earns its own file.
+///
+/// Swapping is therefore a component swap (`MeshMaterial3d<LiquidMaterial>` ↔
+/// `MeshMaterial3d<LiquidCataMaterial>`), which `benilla_world`'s `liquid::surface` owns.
+pub type LiquidCataMaterial = ExtendedMaterial<StandardMaterial, LiquidCataExt>;
+
+/// Inputs for `liquid_cata.wgsl` — the ported `ProcWater` + `ProcWaterAbove`/`ProcWaterBelow`
+/// (perm 4) program family.
+///
+/// The reference binds ten texture stages for this program; six of them belong to permutations this
+/// client does not port (the dynamic displacement maps, the third material texture, the noise
+/// volume, and the real reflection buffer). What is left is the four below plus the depth ramp,
+/// which is evaluated from the shared light rather than sampled — see `liquid_cata.wgsl`.
+#[derive(Asset, AsBindGroup, Clone, TypePath)]
+pub struct LiquidCataExt {
+    /// The kind's animated frames, exactly as [`LiquidExt::frames`] carries them.
+    ///
+    /// **Water does not read this** — the cata water program has no animated-sheet stage at all,
+    /// its surface detail coming from the bump map and its body from the depth ramp. It stays bound
+    /// because magma and slime still take their sheet as the body colour, and one material type
+    /// covering all five kinds is worth more than a binding the water lane ignores.
+    #[texture(100, dimension = "2d_array", visibility(fragment))]
+    #[sampler(101, visibility(fragment))]
+    pub frames: Handle<Image>,
+
+    /// Stage 5: the tiling wave normal map, sampled four times per fragment at two scales and two
+    /// scroll phases. Synthesised at build time — `benilla_world`'s `liquid::art` is the whole
+    /// account of why, and of why it is a full RGB normal rather than a two-channel derivative.
+    #[texture(103, visibility(fragment))]
+    #[sampler(104, visibility(fragment))]
+    pub bump: Handle<Image>,
+
+    /// Stage 0: the opaque frame, for refraction.
+    #[texture(105, visibility(fragment))]
+    #[sampler(106, visibility(fragment))]
+    pub scene_color: Handle<Image>,
+    /// Stage 3: a blurred quarter-size copy of the same, for the screen-space reflection. Shares
+    /// sampler 106 — both are linear-clamp reads of the same picture at different scales, and
+    /// Metal's per-stage sampler ceiling is close enough here to be worth not spending twice.
+    #[texture(107, visibility(fragment))]
+    pub scene_blur: Handle<Image>,
+    /// Stage 1: the **planar reflection buffer** — a mirrored render of the world about the
+    /// world plane `z = 0`, which `ProcWaterAbove` perm 0 samples as the BASE of its reflection
+    /// and lays the screen-space trace over.
+    ///
+    /// `SetupRender` binds this on stage 1 as `a7 == 1 ? GetRealReflectionBuffer() :
+    /// GetFakeReflectionBuffer()`, and the "fake" one is not a fake: `HasFakeReflection()` is
+    /// `waterDetail != 0` outright, and it drives a real second scene render —
+    /// `CWorldScene::RenderReflection(s_defaultReflectionView2, FakeReflectionFB, 0, 0.0)`,
+    /// mirroring the camera with `C4Plane::Mirror` about `(0, 0, 1, −0)`. `benilla_world`'s
+    /// `liquid::reflect` owns the camera that fills it.
+    ///
+    /// **No sampler of its own** — it takes 106 (`scene_samp`), the linear-clamp one the other two
+    /// screen reads use. It is addressed by a projected screen coordinate exactly as they are, and
+    /// the WebGPU 16-sampler cap is close enough here to be worth not spending a fourth on.
+    #[texture(115, visibility(fragment))]
+    pub reflect_map: Handle<Image>,
+
+    /// Stage 7: the shoreline foam sheet, sampled twice at two scroll phases and ADDED.
+    ///
+    /// `ProcWaterAbove`'s `samp7` — `GetTexture(mat, 3, 0)`, the third of the reference's per-liquid
+    /// material textures. Synthesised, like the bump map, and for the same reason: the column that
+    /// names it does not exist in 1.12.1's `LiquidType.dbc`. See `benilla_world`'s `liquid::art`.
+    ///
+    /// **No sampler of its own** — it takes 104 (`art_samp`), which `liquid_cata.wgsl` explains at
+    /// the declaration: this sheet, the bump map and the noise volume are built with identical
+    /// descriptors, and WebGPU's 16-sampler-per-fragment-stage cap counts every one in the layout.
+    #[texture(109, visibility(fragment))]
+    pub foam: Handle<Image>,
+
+    /// `ProcMagma`'s stage 0: the animated noise VOLUME whose three channels are three independent
+    /// masks for three composited lava layers.
+    ///
+    /// The reference loads it from `XTextures\FX\noise.blob` as a 128 x 128 x 16 volume; this one
+    /// is synthesised at half the face (`benilla_world`'s `liquid::art`). The third axis is a
+    /// clock, not a third space dimension — the shader walks it — which is why the sampler repeats
+    /// on `w` too.
+    /// on `w` too — and 104, the shared `art_samp` it now takes instead of one of its own, repeats
+    /// on all three axes for exactly that reason. A sampler carries no dimensionality, so the same
+    /// binding serves this 3D volume and the two 2D sheets alike.
+    #[texture(111, dimension = "3d", visibility(fragment))]
+    pub noise_vol: Handle<Image>,
+
+    /// `ProcWaterAbove`'s stage 4: the dynamic ripple displacement map — `.x` the current wave
+    /// height, `.y` the previous one, packed so the water can interpolate between two fixed steps.
+    /// `benilla_world`'s `liquid::ripple` owns the simulation.
+    #[texture(113, visibility(fragment))]
+    #[sampler(114, visibility(fragment))]
+    pub ripple_map: Handle<Image>,
+
+    /// Stage 6: linear view depth in yards, `R32Float`.
+    ///
+    /// `filterable = false` and **no sampler**: `R32Float` cannot take a filtering sampler without
+    /// a device feature, and the shader reads it with `textureLoad`. That is not a concession —
+    /// a depth used for an in-front-of/behind comparison wants a point fetch, and interpolating
+    /// across a silhouette would invent a surface that is in neither place.
+    #[texture(108, sample_type = "float", filterable = false, visibility(fragment))]
+    pub scene_depth: Handle<Image>,
+
+    // -------------------------------------------------------------------------------------------
+    // Packed uniform buffer at binding 102 — the WGSL `LiquidParams` struct lists these fields in
+    // the SAME order (each `Vec4` is 16 bytes, no padding). Reordering is a breaking change.
+    // -------------------------------------------------------------------------------------------
+    /// As [`LiquidExt::kind`]: `x` fullbright, `y` ocean swatch, `z` interior fog, `w` sheen
+    /// shininess.
+    #[uniform(102)]
+    pub kind: Vec4,
+    /// As [`LiquidExt::path`]: `x` = which of the reference's three liquid renderers owns this
+    /// surface. `y` = **the below-water flag** — 1 when the camera eye is under this surface, which
+    /// is what selects `ProcWaterBelow` over `ProcWaterAbove`. The reference makes the same choice
+    /// per draw (`CMaterialWater::RenderAbove` / `RenderBelow`), not per fragment. `z` = **is
+    /// [`Self::reflect_map`] live this frame** — the reference's own `HasFakeReflection()`, which
+    /// stands the mirror down while the camera is submerged (`Liquid::CameraSubmerged`) and
+    /// whenever `waterDetail` is 0; with it clear the shader falls back to the flat horizon colour
+    /// perm 4 uses, rather than reading a frame-old mirror.
+    #[uniform(102)]
+    pub path: Vec4,
+    /// As [`LiquidExt::anim`]: `x` reserved, `y` frame count, `z` scroll flag, `w` clock enable.
+    #[uniform(102)]
+    pub anim: Vec4,
+    /// The bump lane, from the reference's `LiquidType.dbc` `Float[18]` block:
+    /// `x`/`y` = the two tiling scales (`GetFloat(mat, 3)` / `GetFloat(mat, 4)`, each times
+    /// `Liquid::WorldCoordScale`), `z` = the scroll rate, `w` = **bump strength** (`c23.w`,
+    /// `GetFloat(mat, 7) × 0.35`).
+    #[uniform(102)]
+    pub bump_params: Vec4,
+    /// The shading lane: `x` = the view-perturb amount (`c23.y`), `y` = specular power (`c4.w`),
+    /// `z` = specular scale (`c27.w`), `w` = sun-glare scale (`c27.z`).
+    #[uniform(102)]
+    pub shade_params: Vec4,
+    /// The shoreline foam lane: `x` = the sheet's tiling scale in repeats per yard, `y` = the
+    /// **depth scale** in yards — how deep the water has to get before the surf fades out —
+    /// `z` = strength (the reference's `c28.y`), `w` = how far the wave normal drags the second
+    /// tap, so the foam churns with the swell instead of sliding over it.
+    #[uniform(102)]
+    pub foam_params: Vec4,
+    /// `ProcMagma`'s tiling lane: `x`/`y` = the two noise-volume sample scales, `z`/`w` = the first
+    /// two lava layer scales. All in repeats per yard.
+    #[uniform(102)]
+    pub magma_scales: Vec4,
+    /// `ProcMagma`'s motion lane: `x` = the third layer's scale, `y` = the wobble frequency,
+    /// `z` = how fast the clock walks the volume's third axis, `w` = how fast the two volume taps
+    /// drift apart.
+    #[uniform(102)]
+    pub magma_params: Vec4,
+    /// `ProcMagma`'s base colour — the reference's `c17.rgb`, what the surface is where every mask
+    /// reads zero. The cold crust under the layers, not a tint over them.
+    #[uniform(102)]
+    pub magma_color: Vec4,
+    /// fork: modern lighting — the water's optics on the modern lane: `xyz` = absorption per yard of
+    /// water crossed (r, g, b), `w` = **the Modern (Experimental) water tier** (`waterDetail 3`),
+    /// which alone runs the shader's `modern_water` combine; `liquid`'s `sync_water_tier` flips it
+    /// with the setting. The classic lanes never read it.
+    #[uniform(102)]
+    pub optics: Vec4,
+    /// fork: modern lighting — the Modern (Experimental) tier's stylised clear water, in the shader's
+    /// `modern_water`: `x` = how far the bed is filtered toward the water's hue (the DEEP row), `y` =
+    /// the depth in yards that filter takes to come in, `z` = the head-on reflectance Schlick starts
+    /// from, `w` = how much of the reflection is pulled to the body. Per kind from `liquid`'s
+    /// `cata_water_look`, overridable live through `$WOW_WATER_LOOK`. The classic lanes never read it.
+    #[uniform(102)]
+    pub look_a: Vec4,
+    /// fork: modern lighting — the same tier's calm: `x` = the wind swell a river or lake keeps (the
+    /// sea always keeps all of it), `y` = the swell left over water with no depth under it, `z` = the
+    /// refraction's bend per yard of water crossed, `w` = the sun glitter spike's gain.
+    #[uniform(102)]
+    pub look_b: Vec4,
+    /// fork: modern lighting — the same tier's Fresnel: `x` = the reflectance at grazing (the curve's
+    /// cap; `look_a.z` is its head-on floor), `y` = the power of its climb along `1 − cos`, `z` = the
+    /// share of the reference combine blended over the clear surface, `w` = the wind ripples' RMS
+    /// slope, a multi-octave layer under the swell.
+    #[uniform(102)]
+    pub look_c: Vec4,
+
+    /// **The shared global light**, as [`LiquidExt::light_buf`] — same buffer, same rows. The cata
+    /// path reads the two water swatches for its depth ramp, the sun/ambient/diffuse for its
+    /// lighting, and both fog blocks; it needs no light input the 1.12.1 path did not already have.
+    #[storage(90, read_only, buffer, visibility(vertex, fragment))]
+    pub light_buf: Buffer,
+
+    /// **The ripple field's placement**, on its own shared buffer for the same reason the light is
+    /// on one: it changes every frame, and a per-frame `#[uniform]` rewrite would re-prepare every
+    /// liquid bind group every frame. Written in place by `liquid::ripple`'s render-world upload.
+    ///
+    /// A second buffer rather than more rows on the light one because the light buffer's tail is a
+    /// variable-length point-light table — there is no free row to take, only spare lanes scattered
+    /// through rows that mean something else.
+    #[storage(91, read_only, buffer, visibility(fragment))]
+    pub ripple_buf: Buffer,
+    // fork: modern lighting (FORK.md, P4) — as `LiquidExt::modern_fog`, but with no
+    // sampler of its own: this layout already sits at the 16-sampler stage limit, so the volume is read
+    // through `scene_samp` (106, linear clamp).
+    #[storage(123, read_only, visibility(fragment))]
+    pub modern_cascades: Handle<bevy::render::storage::ShaderBuffer>,
+    #[texture(124, dimension = "3d", visibility(fragment))]
+    pub modern_fog: Handle<Image>,
+    // fork: modern lighting — the sun cascades, so water in shade loses its sun glare and highlight.
+    // Texture only, compared by hand with `textureLoad` (`sunshadow::sun_visibility_load`): the
+    // layout has no sampler slot left.
+    #[texture(
+        121,
+        dimension = "2d_array",
+        sample_type = "depth",
+        visibility(fragment)
+    )]
+    pub modern_shadow: Handle<Image>,
+}
+
+impl MaterialExtension for LiquidCataExt {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://benilla_assets/shaders/liquid_cata.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "embedded://benilla_assets/shaders/liquid_cata.wgsl".into()
+    }
+
+    /// As [`LiquidExt`]'s: `sky_order::WATER_BIAS` is a sort rung, kept out of the rasterizer. As a
+    /// depth-bias constant it sinks the surface in reversed-Z, and whatever stands just under the
+    /// water wins the depth test and draws unshaded by it.
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(ds) = descriptor.depth_stencil.as_mut() {
+            ds.bias.constant = 0;
+        }
+        Ok(())
+    }
 }
 
 impl MaterialExtension for LiquidExt {
@@ -402,9 +743,30 @@ impl MaterialExtension for LiquidExt {
 /// Per-tile terrain splat, one material per ADT tile: each merged-mesh vertex carries its chunk's
 /// four layer indices (`COLOR`) and alpha layer (`UV1.x`), so a tile is one draw.
 ///
+/// fork: modern lighting — the terrain lane's only pipeline key: the latched lighting model
+/// ([`MODERN_MODEL_PIPELINES`]), exactly as [`WowModelKey::modern`] carries it for the model lane.
+/// Without it both lighting models compile into every terrain pipeline, which is the fragment size
+/// that turned Chrome/Metal's leaf-card holes black on the model lane, and the modern path pays a
+/// discarded `shadow_array` sample on the lane already at the 16-texture cap. One value is live per
+/// session (the latch is per world entry), so this mints no new variants at runtime.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TerrainKey {
+    modern: bool,
+}
+
+impl From<&TerrainExtension> for TerrainKey {
+    fn from(_: &TerrainExtension) -> Self {
+        Self {
+            modern: MODERN_MODEL_PIPELINES.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
 /// One repeating sampler (105) serves every array, to stay under Metal's 16 fragment samplers;
-/// `terrain.wgsl` insets the alpha UVs by half a texel so they do not wrap at a chunk edge.
+/// `terrain.wgsl` insets the alpha UVs by half a texel so they do not wrap at a chunk edge. Every
+/// `Vec4` uniform packs into binding 106, whose `TerrainParams` field order must match.
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
+#[bind_group_data(TerrainKey)]
 pub struct TerrainExtension {
     #[texture(100, dimension = "2d_array", visibility(fragment))]
     #[sampler(105, visibility(fragment))]
@@ -423,6 +785,17 @@ pub struct TerrainExtension {
     /// The shared global light, rows 0-5 (light, fog, farclip).
     #[storage(90, read_only, buffer)]
     pub light_buf: Buffer,
+    // fork: modern lighting (FORK.md, P2) — sampled only when the light buffer's modern flag is set.
+    #[texture(
+        121,
+        dimension = "2d_array",
+        sample_type = "depth",
+        visibility(fragment)
+    )]
+    #[sampler(122, sampler_type = "comparison", visibility(fragment))]
+    pub modern_shadow: Handle<Image>,
+    #[storage(123, read_only, visibility(fragment))]
+    pub modern_cascades: Handle<bevy::render::storage::ShaderBuffer>,
 }
 
 impl MaterialExtension for TerrainExtension {
@@ -432,6 +805,32 @@ impl MaterialExtension for TerrainExtension {
     }
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/terrain.wgsl".into()
+    }
+
+    /// fork: modern lighting — compile one lighting model, not both ([`TerrainKey`]). The def
+    /// reaches the vertex stage too: it decides which walk of the light table a vertex makes.
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if key.bind_group_data.modern {
+            descriptor.vertex.shader_defs.push("WOW_MODERN".into());
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("WOW_MODERN".into());
+            }
+            if modern_vertex_walks() {
+                descriptor
+                    .vertex
+                    .shader_defs
+                    .push("MODERN_VERTEX_WALKS".into());
+                if let Some(fragment) = descriptor.fragment.as_mut() {
+                    fragment.shader_defs.push("MODERN_VERTEX_WALKS".into());
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -477,9 +876,10 @@ mod tests {
             "stage 1 no longer generates its coordinate in view space"
         );
         assert!(
-            src.contains(
-                "tex1 = textureSampleBias(stage1_texture, stage1_sampler, in.env_uv, view.mip_bias);"
-            ),
+            src.contains("var st1_uv = in.env_uv;")
+                && src.contains(
+                    "tex1 = textureSampleBias(stage1_texture, stage1_sampler, st1_uv, view.mip_bias);"
+                ),
             "stage 1 no longer samples its texture at the generated coordinate"
         );
 
@@ -575,7 +975,8 @@ mod tests {
     /// preset 1 by texel × fade.
     #[test]
     fn a_fade_twin_blends_by_the_stage_zero_alpha_op() {
-        let src = include_str!("shaders/wow_model.wgsl");
+        // As checked out: a Windows checkout under `core.autocrlf` ends its lines in CRLF.
+        let src = include_str!("shaders/wow_model.wgsl").replace("\r\n", "\n");
         for (line, why) in [
             (
                 "faded_alpha = stage_alpha(u32(m.stage1.z) - 1u, obj_fade, tex0_alpha);",

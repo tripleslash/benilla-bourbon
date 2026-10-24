@@ -22,7 +22,8 @@ use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_script::gate;
 use crate::ui_unit::UnitFeed;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 /// The talent catalog (`Talent.dbc`, `TalentTab.dbc`), absent when the client data failed to load.
 #[derive(Resource)]
@@ -34,14 +35,9 @@ pub(crate) struct UiTalentPlugin;
 
 impl Plugin for UiTalentPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_talents.after(AssetSet::Open))
-            .add_systems(
-                Update,
-                (
-                    // Feed before the input pass, so an open this frame sees a populated window.
-                    feed_talents.in_set(UnitFeed),
-                ),
-            );
+        // Feed before the input pass, so an open this frame sees a populated window.
+        app.add_data_loaders(load_talents)
+            .add_systems(Update, feed_talents.in_set(UnitFeed));
     }
 }
 

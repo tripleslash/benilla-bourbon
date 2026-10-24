@@ -17,7 +17,9 @@ use crate::widget::{RegionHandle, RegionKind};
 /// fails the type test ([`super::object::ERR_WRONG_TYPE`]).
 pub(crate) fn region_handle_of(lua: &Lua, this: &Table) -> mlua::Result<RegionHandle> {
     let id = decode_id(this)?;
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     model
         .id_to_region
         .get(&id)
@@ -42,7 +44,9 @@ pub(super) fn texture_object_arg(
             "{who}:{method}(): Couldn't find 'this' in texture"
         )));
     }
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     let rh = decode_id(arg)
         .ok()
         .and_then(|id| model.id_to_region.get(&id).copied())
@@ -234,7 +238,9 @@ pub(crate) fn install_loaded_texture(
     let h = super::object::frame_handle_of(lua, this)?;
     let rh = texture_object_arg(lua, this, texture, "SetStatusBarTexture")?;
     let layer = layer.and_then(super::object::draw_layer_from_str);
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     match tag {
         "BarTexture" => super::statusbar::install_loaded(&mut model, h, rh, layer),
         "ThumbTexture" => super::slider::install_loaded(&mut model, h, rh, layer),
@@ -269,7 +275,9 @@ pub(super) fn this_texture(lua: &Lua, this: &Value) -> mlua::Result<RegionHandle
     }
     let wrong = || mlua::Error::runtime(ERR_WRONG_TYPE);
     let rh = region_handle_of(lua, t).map_err(|_| wrong())?;
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     if model.arena.region(rh).map(|r| r.kind) != Some(RegionKind::Texture) {
         return Err(wrong());
     }
@@ -298,7 +306,9 @@ pub(crate) fn load_xml_font_file(
     (outline, monochrome): (super::Outline, bool),
 ) -> mlua::Result<bool> {
     let rh = region_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     let u = model.layout_units();
     let held = model.region_data.get(&rh).is_some_and(|d| {
         d.font_path
@@ -332,7 +342,9 @@ pub(crate) fn apply_wrap_attrs(
     max_lines: Option<u32>,
 ) -> mlua::Result<()> {
     let rh = region_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     let d = model.region_data.entry(rh).or_default();
     if let Some(on) = non_space_wrap {
         d.non_space_wrap = on;
@@ -355,7 +367,9 @@ pub(super) fn region_wrapper(lua: &Lua, id: u32) -> mlua::Result<Table> {
     // The metatable is chosen once, here, not per call: a title region
     // (`CreateTitleRegion 0x773910`) answers only the 19 Region methods.
     let kind = {
-        let model = lua.app_data_ref::<Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         model
             .id_to_region
             .get(&id)
@@ -402,7 +416,9 @@ fn portrait_target(lua: &Lua, target: &Value) -> mlua::Result<RegionHandle> {
     };
     if let Some(name) = super::binding_abi::optional_string(lua, target) {
         let found = super::object::prefetch_named_target(lua, &name, None);
-        let model = lua.app_data_ref::<Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         return super::object::resolve_named_target(&model, &found)
             .and_then(|id| is_texture(&model, id))
             .ok_or_else(|| {
@@ -419,7 +435,9 @@ fn portrait_target(lua: &Lua, target: &Value) -> mlua::Result<RegionHandle> {
     let id = decode_id(t).map_err(|_| {
         mlua::Error::runtime("SetPortraitToTexture(): Couldn't find 'this' in texture object")
     })?;
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     is_texture(&model, id).ok_or_else(|| {
         mlua::Error::runtime("SetPortraitToTexture(): Wrong object type, expected texture")
     })
@@ -444,7 +462,9 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
                 unit,
                 r#"Usage: SetPortraitTexture(texture, "unit")"#,
             )?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             model.set_texel(rh, super::texel::TexSet::Own(None));
             let data = model.region_data.entry(rh).or_default();
             // Lowercased: the reference resolves the token case-insensitively (`0x519ef0` →
@@ -473,7 +493,9 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
             let Some(path) = super::binding_abi::optional_string(lua, &path) else {
                 return Ok(());
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             model.set_texel(rh, super::texel::TexSet::Portrait(path));
             let data = model.region_data.entry(rh).or_default();
             data.circular = true;
@@ -501,7 +523,9 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     // GetName(): the global name, or nil for an anonymous region.
     set_shared(lua, &m, Side::Region, "GetName", |lua, this: Table| {
         let id = decode_id(&this)?;
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         match region_name_of(&model, id) {
             Some(n) => Ok(Value::String(lua.create_string(&n)?)),
             None => Ok(Value::Nil),
@@ -519,7 +543,9 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         "GetObjectType",
         |lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(region_type_name(&model, rh))
         },
     )?;
@@ -535,7 +561,9 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         "IsObjectType",
         |lua, (this, want): (Table, Value)| {
             let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let Some(want) = super::binding_abi::optional_string(lua, &want) else {
                 let who = super::binding_abi::region_name(&model, rh);
                 return Err(mlua::Error::runtime(format!(
@@ -578,7 +606,9 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 }),
                 _ => None,
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let new_owner = match &parent {
                 Value::Nil => None,
                 // A region or font-object wrapper is no frame: the same "expected frame" raise.
@@ -620,7 +650,19 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         "Show",
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            // Already so: nothing to write, and the mutation count stands.
+            if lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model")
+                .region_data
+                .get(&rh)
+                .is_some_and(|d| !d.hidden)
+            {
+                return Ok(());
+            }
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             model.set_region_hidden(rh, false);
             Ok(())
         })?,
@@ -630,7 +672,19 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         "Hide",
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            // Already so: nothing to write, and the mutation count stands.
+            if lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model")
+                .region_data
+                .get(&rh)
+                .is_some_and(|d| d.hidden)
+            {
+                return Ok(());
+            }
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             model.set_region_hidden(rh, true);
             Ok(())
         })?,
@@ -640,7 +694,9 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         "IsShown",
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let shown = region_shown(&model, rh);
             Ok(if shown { Value::Integer(1) } else { Value::Nil })
         })?,
@@ -650,7 +706,9 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         "IsVisible",
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let shown = region_shown(&model, rh);
             let owner_visible = model
                 .arena
@@ -742,7 +800,9 @@ pub(crate) fn publish_region_name(lua: &Lua, name: &str, region: &Table) {
     let Ok(rh) = region_handle_of(lua, region) else {
         return;
     };
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let id = model.region_id(rh);
     set_region_name(&mut model, rh, id, name);
 }
@@ -946,7 +1006,9 @@ pub(crate) fn anchor_unanchored_at(
 /// [`implicit_creation_anchor`] for the loader, which holds region wrappers.
 pub(crate) fn implicit_creation_anchor_lua(lua: &Lua, wrapper: &Table) -> mlua::Result<()> {
     let rh = region_handle_of(lua, wrapper)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     implicit_creation_anchor(&mut model, rh);
     Ok(())
 }
@@ -954,7 +1016,9 @@ pub(crate) fn implicit_creation_anchor_lua(lua: &Lua, wrapper: &Table) -> mlua::
 /// The receiver's name for error strings and what a leading `$parent` expands to, the owner frame
 /// (`+0x9c`), read under a borrow dropped before the ladder reads `_G`.
 pub(super) fn region_ladder_context(lua: &Lua, rh: RegionHandle) -> (String, String) {
-    let model = lua.app_data_mut::<Model>().expect("model");
+    let model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     let who = model
         .arena
         .region(rh)
@@ -982,7 +1046,10 @@ pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> ml
     // No model borrow is alive across the ladder's `_G` read.
     let p = parse_set_point(lua, args, &who, &base)?;
 
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
+    let quiet = model.epoch();
     let me = model.region_id(rh);
     let owner = region_owner_id(&mut model, rh);
     let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, owner)?;
@@ -996,6 +1063,9 @@ pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> ml
         .set(Anchor::new(point, rel_to_id, rel_point, x, y), units)
     {
         model.invalidate_region(rh, true);
+    } else {
+        // The per-frame caller setting what is there: the mutation count stands.
+        model.set_epoch(quiet);
     }
     Ok(())
 }

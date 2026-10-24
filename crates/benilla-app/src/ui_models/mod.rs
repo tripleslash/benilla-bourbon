@@ -592,7 +592,7 @@ pub(crate) struct UiModelsPlugin;
 impl Plugin for UiModelsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiModelTiles>()
-            .init_non_send_resource::<TileState>()
+            .init_non_send::<TileState>()
             .add_systems(Startup, setup_tiles)
             // Ahead of the extract, which publishes the tile requests (`paint_script`).
             .add_systems(
@@ -1037,7 +1037,7 @@ fn sync_tiles(
                         // than the linger rebuilds at combat rate.
                         debug!(
                             "ui_models: tile built for {} on pane {} — {} parts, {} emitters, \
-                             {} animated alphas",
+                         {} animated alphas",
                             req.path,
                             script.frame_name(*handle).unwrap_or_default(),
                             model.submeshes.len(),
@@ -2303,6 +2303,20 @@ mod tests {
         .expect("build the pane");
         s.resolve();
         s
+    }
+
+    /// A pane's want loads the file its path names, through the name rule (`0x706a50`), so every
+    /// action button's cooldown sweep draws the sweep and not the error cube.
+    #[test]
+    fn a_cooldown_pane_loads_the_cooldown_model_not_the_error_cube() {
+        let mut state = TileState::default();
+        let mut s = vm_with_a_cooldown_pane();
+        let wants = state.answer_facts(&mut s);
+        let urls: Vec<String> = wants.iter().map(facts_url).collect();
+        assert_eq!(
+            urls,
+            ["mpq-loose://interface/cooldown/ui-cooldown-indicator.m2"]
+        );
     }
 
     /// `model_facts_wanted` drains and only `SetModel` re-pushes, so a want skipped because the

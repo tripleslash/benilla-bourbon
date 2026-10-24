@@ -1,12 +1,13 @@
 //! World-map state: the `Map.dbc` catalog and the current map id, for every subsystem that keys
 //! off the map (the terrain and WDL streamers, the loading screen, time-of-day lighting).
 
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::MapCatalogRes;
 use benilla_formats::load_map_catalog;
 use bevy::prelude::*;
 
 use benilla_assets::LockRecover;
-use benilla_assets::{AssetSet, WorldAssets};
+use benilla_assets::WorldAssets;
 
 /// The map before the server names one: Eastern Kingdoms (`Map.dbc` id 0).
 pub(crate) const DEFAULT_MAP_ID: u32 = 0;
@@ -14,9 +15,10 @@ pub(crate) const DEFAULT_MAP_ID: u32 = 0;
 /// `$WOW_MAP`: the `Map.dbc` id a server-less run starts on (`0` Azeroth, `1` Kalimdor), unset
 /// giving [`DEFAULT_MAP_ID`]. A value that does not parse panics rather than falling back.
 fn map_id_from_env() -> u32 {
-    match std::env::var("WOW_MAP") {
-        Err(_) => DEFAULT_MAP_ID,
-        Ok(v) => v.trim().parse().unwrap_or_else(|_| {
+    // fork: modern lighting (FORK.md, P4) — through `launch_env`, so the browser worldview can pick Kalimdor (`?map=1`).
+    match crate::launch_env::var("WOW_MAP") {
+        None => DEFAULT_MAP_ID,
+        Some(v) => v.trim().parse().unwrap_or_else(|_| {
             panic!("WOW_MAP={v:?} is not a Map.dbc id — it takes a NUMBER (0 = Azeroth, 1 = Kalimdor), not a name")
         }),
     }
@@ -41,10 +43,8 @@ pub(crate) struct WorldMapPlugin;
 
 impl Plugin for WorldMapPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<MapChange>().add_systems(
-            Startup,
-            load_world_map.after(AssetSet::Open).in_set(WorldMapLoad),
-        );
+        app.add_message::<MapChange>()
+            .add_data_loaders(load_world_map.in_set(WorldMapLoad));
         app.add_systems(Update, announce_map_change);
     }
 }
@@ -69,7 +69,11 @@ pub(crate) fn announce_map_change(
 }
 
 /// Read `Map.dbc` off the patch chain into [`MapCatalogRes`] and seed [`CurrentMap`].
-fn load_world_map(mut commands: Commands, world_assets: Option<Res<WorldAssets>>) {
+fn load_world_map(
+    mut commands: Commands,
+    world_assets: Option<Res<WorldAssets>>,
+    current: Option<Res<CurrentMap>>,
+) {
     let Some(world_assets) = world_assets else {
         return;
     };
@@ -80,8 +84,10 @@ fn load_world_map(mut commands: Commands, world_assets: Option<Res<WorldAssets>>
             commands.insert_resource(MapCatalogRes(c));
             // `$WOW_MAP` picks a server-less run's map (a named capture scenario sets it before
             // `Startup`); a live session's `player::wire_in` overwrites it from the server.
-            let map = map_id_from_env();
-            commands.insert_resource(CurrentMap(map));
+            // Seeded once: a rerun on a data change must not move a player off the map they are on.
+            if current.is_none() {
+                commands.insert_resource(CurrentMap(map_id_from_env()));
+            }
         }
         Err(e) => error!("failed to load Map.dbc, cross-map teleport disabled: {e:#}"),
     }

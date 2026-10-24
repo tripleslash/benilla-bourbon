@@ -452,12 +452,52 @@ fn format_time(time: &WowTime) -> String {
 #[derive(Resource, Default)]
 pub(crate) struct ServerTime(pub(crate) GameTime);
 
+/// fork: the `serverTimeOffset` CVar, whole hours added to the server's time of day where the
+/// player sees it: the sky and light ([`publish_world_time`]) and `GetGameTime`. The clock itself
+/// keeps the server's time, as does the daytime gate a spell's cast checks against the server.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TimeOffset(pub(crate) i32);
+
+/// The offset's range in hours, either way.
+pub(crate) const TIME_OFFSET_MAX: i32 = 12;
+
+impl TimeOffset {
+    /// `hour:minute` moved by the offset, wrapped to the day; an unset field stays -1.
+    pub(crate) fn shown(self, hour: i32, minute: i32) -> (i32, i32) {
+        if hour < 0 || minute < 0 {
+            return (hour, minute);
+        }
+        ((hour + self.0).rem_euclid(24), minute)
+    }
+
+    fn minutes(self) -> f32 {
+        (self.0 * 60) as f32
+    }
+}
+
+/// The CVar's change callback: rounded to the hour and held to [`TIME_OFFSET_MAX`] either way.
+pub(crate) fn time_offset_on_cvar(
+    ev: On<crate::cvars::CvarChanged>,
+    mut offset: ResMut<TimeOffset>,
+) {
+    if ev.is("serverTimeOffset") {
+        let v = ev.num();
+        offset.0 = if v.is_finite() {
+            (v.round() as i32).clamp(-TIME_OFFSET_MAX, TIME_OFFSET_MAX)
+        } else {
+            0
+        };
+    }
+}
+
 /// The clock's per-frame systems. In the net stage, after the drain that may have set the clock:
 /// the lighting resolve runs after it and reads this frame's clock. The frame advance runs only
 /// in the world: the reference registers it with `ClientInitializeGame` at world entry
 /// (`0x401684`) and `ClientDestroyGame` removes it (`0x401f04`), while the clock, built once at
 /// start-up, outlives both, so it stands where the world left it.
 pub(super) fn register(app: &mut App) {
+    app.init_resource::<TimeOffset>()
+        .add_observer(time_offset_on_cvar);
     app.add_systems(
         Update,
         (
@@ -485,19 +525,22 @@ pub(crate) fn tick_game_time(step: Res<FrameStep>, mut server: ResMut<ServerTime
 
 /// Publish the session clock into [`WorldTime`] each frame, as `StampLightState` (`0x482bcc`) stamps
 /// the light state: the minute of day, the day phase and the day count. With no server time yet,
-/// its default (noon).
+/// its default (noon). fork: moved by the [`TimeOffset`].
 pub(crate) fn publish_world_time(
     server: Res<ServerTime>,
     step: Res<FrameStep>,
+    offset: Option<Res<TimeOffset>>,
     mut world_time: ResMut<WorldTime>,
 ) {
     let clock = &server.0;
+    let shift = offset.map_or(0.0, |o| o.minutes());
     *world_time = if clock.live() {
         let phase = clock.phase(clock_tick(&step));
+        let minute_f = (phase * 1440.0 + shift).rem_euclid(1440.0);
         WorldTime {
-            minute: clock.minute_of_day(),
-            minute_f: phase * 1440.0,
-            day: clock.day_count() as f64 + f64::from(phase),
+            minute: (clock.minute_of_day() as f32 + shift).rem_euclid(1440.0) as u32,
+            minute_f,
+            day: clock.day_count() as f64 + f64::from(phase) + f64::from(shift) / 1440.0,
             live: true,
         }
     } else {
@@ -1104,6 +1147,50 @@ mod tests {
         assert!((t.minute_f - 870.0).abs() < 1e-3);
         let serial = (26 * 372 + 9 * 31 + 17) as f64;
         assert!((t.day - (serial + 870.0 / 1440.0)).abs() < 1e-6);
+    }
+
+    /// fork: the `serverTimeOffset` hours move the sky's minute, phase and day count, wrapped
+    /// across midnight either way, and leave an idle clock at noon.
+    #[test]
+    fn the_time_offset_moves_the_sky_across_midnight() {
+        let shifted = |hours: i32, h: i32, m: i32| {
+            let mut clock = GameTime::new(0);
+            clock.set(sunday(h, m), 0);
+            let mut app = App::new();
+            app.insert_resource(ServerTime(clock))
+                .insert_resource(TimeOffset(hours))
+                .init_resource::<FrameStep>()
+                .init_resource::<WorldTime>()
+                .add_systems(Update, publish_world_time);
+            app.update();
+            *app.world().resource::<WorldTime>()
+        };
+        let base = shifted(0, 22, 30);
+        let late = shifted(3, 22, 30);
+        assert_eq!(late.minute, 90);
+        assert!((late.minute_f - 90.0).abs() < 1e-3);
+        assert!((late.day - (base.day + 3.0 / 24.0)).abs() < 1e-6);
+        let early = shifted(-12, 2, 0);
+        assert_eq!(early.minute, 840);
+        assert!((early.minute_f - 840.0).abs() < 1e-3);
+
+        let mut app = App::new();
+        app.insert_resource(ServerTime(GameTime::new(0)))
+            .insert_resource(TimeOffset(5))
+            .init_resource::<FrameStep>()
+            .init_resource::<WorldTime>()
+            .add_systems(Update, publish_world_time);
+        app.update();
+        assert_eq!(app.world().resource::<WorldTime>().minute, 720);
+    }
+
+    /// fork: `GetGameTime` reads the offset hour, wrapped to the day; an unset clock stays -1, -1.
+    #[test]
+    fn the_time_offset_moves_the_shown_hour() {
+        assert_eq!(TimeOffset(3).shown(22, 15), (1, 15));
+        assert_eq!(TimeOffset(-12).shown(5, 0), (17, 0));
+        assert_eq!(TimeOffset(0).shown(14, 30), (14, 30));
+        assert_eq!(TimeOffset(4).shown(-1, -1), (-1, -1));
     }
 
     /// The clock and its two systems under the real lifecycle gate, the screen set by `start`.

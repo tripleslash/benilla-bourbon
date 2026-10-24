@@ -571,15 +571,21 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
     let visible = ctx.characters.map(|c| {
         c.0.visible_geosets(race, sex, char_look.hair_style, char_look.facial_hair, &eg)
     });
-    let body_tex = super::char_skin::forced_body_atlas(
-        &char_look,
-        super::char_skin::skin_key(&char_look, bodyslots, spec.emblem, false),
-        ctx.displays.as_deref(),
-        ctx.sections,
-        ctx.skin_composites,
-        ctx.asset_server,
-        ctx.images,
-    );
+    // fork: web — a forced composite whose blobs have not arrived is Pending, and the booth waits:
+    // the same "retry next frame" this function already does for a held-item model still loading.
+    let super::super::skin_composite::BodyAtlas::Ready(body_tex) =
+        super::char_skin::forced_body_atlas(
+            &char_look,
+            super::char_skin::skin_key(&char_look, bodyslots, spec.emblem, false),
+            ctx.displays.as_deref(),
+            ctx.sections,
+            ctx.skin_composites,
+            ctx.asset_server,
+            ctx.images,
+        )
+    else {
+        return None;
+    };
     let char_mats = super::char_skin::build_char_skin_materials(
         &char_look,
         body_tex,
@@ -604,8 +610,8 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assemble
             skinned_mesh: p.skinned_mesh.clone(),
             material: steady_material(p, &char_mats).unwrap_or_else(|| p.material.clone()),
             twins: part_twins(p, &char_mats),
-            // Not carried yet: a character batch's authored dimming constant previews at 1.0.
-            alpha_anim: None,
+            // Turtle WoW's Goblin culls a spare eye piece and a rag through Stand this way.
+            alpha_anim: p.alpha_anim.clone(),
         })
         .collect();
 

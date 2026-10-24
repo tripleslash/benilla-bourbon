@@ -94,11 +94,12 @@ pub(super) fn resolve_char_look(
     None
 }
 
-/// The `mpq://` URL of a baked NPC atlas under `Textures\BakedNpcTextures\`.
+/// The `mpq://` URL of a baked NPC atlas under `Textures\BakedNpcTextures\`. A bake name with no
+/// extension (some Turtle rows) asks for its `.blp`, as every texture name does.
 fn baked_npc_url(bake_name: &str) -> String {
-    format!(
-        "mpq://textures/bakednpctextures/{}",
-        bake_name.replace('\\', "/").to_ascii_lowercase()
+    benilla_assets::texture_url(
+        &format!("Textures\\BakedNpcTextures\\{bake_name}"),
+        (true, true),
     )
 }
 
@@ -307,7 +308,8 @@ pub(super) fn body_atlas(
 }
 
 /// [`body_atlas`] composited on this thread on a miss ([`SkinComposites::force`]): the previews, whose
-/// composite the reference forces, a re-dress of a standing body and a rig-heal rebuild.
+/// composite the reference forces, a native re-dress of a standing body and a rig-heal rebuild.
+/// Always [`BodyAtlas::Ready`] on native; fork: web — [`BodyAtlas::Pending`] while its blobs arrive.
 pub(super) fn forced_body_atlas(
     look: &CharLook,
     key: Option<SkinKey>,
@@ -316,17 +318,47 @@ pub(super) fn forced_body_atlas(
     composites: &mut SkinComposites,
     asset_server: &AssetServer,
     images: &mut Assets<Image>,
-) -> Option<Handle<Image>> {
+) -> BodyAtlas {
     if let BodySkin::Baked(name) = &look.body {
-        return Some(asset_server.load::<Image>(baked_npc_url(name)));
+        return BodyAtlas::Ready(Some(asset_server.load::<Image>(baked_npc_url(name))));
     }
-    let (key, sections) = (key?, sections?);
+    let (Some(key), Some(sections)) = (key, sections) else {
+        return BodyAtlas::Ready(None);
+    };
     composites.force(
         key,
         sections,
         || composite_plan(&key, sections, displays),
         images,
     )
+}
+
+/// A standing body's atlas for a re-dress: composited on this thread ([`forced_body_atlas`]), as
+/// the reference's incremental composite is. fork: web — the arrival's lane ([`body_atlas`]), so
+/// the blend runs on a worker and never on the page's thread; [`BodyAtlas::Pending`] until it
+/// lands, the body keeping its standing look.
+#[cfg_attr(target_arch = "wasm32", allow(unused_variables))] // `images` is the forced lane's
+pub(super) fn redress_body_atlas(
+    look: &CharLook,
+    key: Option<SkinKey>,
+    displays: Option<&super::super::ItemDisplays>,
+    sections: Option<&SkinSections>,
+    composites: &mut SkinComposites,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
+) -> BodyAtlas {
+    #[cfg(not(target_arch = "wasm32"))]
+    return forced_body_atlas(
+        look,
+        key,
+        displays,
+        sections,
+        composites,
+        asset_server,
+        images,
+    );
+    #[cfg(target_arch = "wasm32")]
+    return body_atlas(look, key, displays, sections, composites, asset_server);
 }
 
 /// Build a character body's per-appearance materials: the body atlas ([`body_atlas`]), the hair,
@@ -428,4 +460,23 @@ pub(super) fn build_char_skin_materials(
         });
 
     (body, hair, object, skin_extra)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::baked_npc_url;
+
+    /// Vanilla's bake names carry `.blp`; Turtle's display 4729 (extra row 12488) names its
+    /// atlas bare, and a URL with no extension picks no loader, which left the body untextured.
+    #[test]
+    fn a_bake_name_with_or_without_its_extension_asks_for_the_blp() {
+        assert_eq!(
+            baked_npc_url("fa1833128da792145a62c21976584c9"),
+            "mpq://textures/bakednpctextures/fa1833128da792145a62c21976584c9.blp"
+        );
+        assert_eq!(
+            baked_npc_url("973E54E79012EEA3F2658F2897E681D9.blp"),
+            "mpq://textures/bakednpctextures/973e54e79012eea3f2658f2897e681d9.blp"
+        );
+    }
 }

@@ -13,7 +13,8 @@
 //! form's aura holds a slot, warrior stances included) and `SPELL_UPDATE_COOLDOWN`, so the feed
 //! runs before all three; a cooldown's expiry fires nothing.
 
-use std::time::Instant;
+// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
@@ -476,14 +477,14 @@ mod tests {
                 (47, FEAR_AURA),
             ])),
         ));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, feed_shapeshift_bar);
         app
     }
 
     fn castable(app: &App, index: u32) -> bool {
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<bool>(&format!(
                 "local _, _, _, c = GetShapeshiftFormInfo({index}) return c == 1"
             ))
@@ -530,7 +531,7 @@ mod tests {
             None,
         );
         let read = |app: &App| {
-            let script = app.world().non_send_resource::<UiScript>();
+            let script = app.world().non_send::<UiScript>();
             let (start, duration, enable) = script
                 .eval::<(f64, f64, i64)>("return GetShapeshiftFormCooldown(1)")
                 .unwrap();
@@ -540,9 +541,7 @@ mod tests {
         let first = read(&app);
         assert_eq!((first.1, first.2), (0.001, 0), "(now, 0.001, 0)");
         assert_eq!(first.0, first.3);
-        app.world_mut()
-            .non_send_resource_mut::<UiScript>()
-            .tick(0.02);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.02);
         app.update();
         let second = read(&app);
         assert_eq!(second.0, second.3, "the poll answers its own now");

@@ -37,7 +37,7 @@ use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
 use benilla_formats::TrailProc;
-use benilla_world::particles::buffer::{EffectVertex, WorldEffectDraw};
+use benilla_world::particles::buffer::{EffectMotion, EffectVertex, WorldEffectDraw};
 use benilla_world::view::WorldCamera;
 
 use crate::entities::HeldAttached;
@@ -290,6 +290,8 @@ fn draw_weapon_trails(
         &InheritedVisibility,
         &benilla_world::model_fade::ParentModel,
     )>,
+    // fork: fsr (FORK.md) — each swinging blade's edge at the last world frame it drew.
+    mut last_blade: Local<EntityHashMap<(Vec3, Vec3)>>,
 ) {
     let Ok(cam) = world_cam.single() else {
         return;
@@ -298,9 +300,15 @@ fn draw_weapon_trails(
     // resolve, the authored colour.
     let scene = lighting.as_deref().map_or([1.0; 3], |l| l.ambient);
     let now_ms = time.elapsed().as_millis() as u32;
+    // fork: fsr (FORK.md) — the blade's motion and its history only while a camera runs FSR.
+    let track_motion = draw.tracks_motion();
+    if !track_motion {
+        last_blade.clear();
+    }
     for (entity, mut trail, prop, vis, wearer) in &mut trails {
         // Checked through `&` first, so an idle weapon is not marked changed.
         if trail.swing.is_none() {
+            last_blade.remove(&entity);
             continue;
         }
         // Indoors, the node's own ramped ambient toward `cap96(MOCV)`: the room's light, not the
@@ -337,14 +345,32 @@ fn draw_weapon_trails(
             .alpha()
             .over_everything()
             .anchored(anchor)
-            .owner(entity);
-        let verts = batch.verts_mut();
-        for w in strip.windows(2) {
+            .owner(entity)
+            .moving(EffectMotion::PerVertex);
+        // fork: fsr (FORK.md) — the blade's edge moved since the last world frame; the strip
+        // laid behind it stays where it was laid.
+        let blade = track_motion
+            .then(|| last_blade.insert(entity, (bottom, top)))
+            .flatten()
+            .map(|(b, t)| ((bottom - b).to_array(), (top - t).to_array()));
+        let last_window = strip.len() - 2;
+        for (i, w) in strip.windows(2).enumerate() {
             let ((b0, t0, a0), (b1, t1, a1)) = (w[0], w[1]);
             // The lane indexes a quad `[0,1,2, 0,2,3]`, so `[b0, b1, t1, t0]` reproduces the
             // reference's strip (`primType 4`).
-            for (pos, a) in [(b0, a0), (b1, a1), (t1, a1), (t0, a0)] {
-                verts.push(EffectVertex {
+            for (j, (pos, a)) in [(b0, a0), (b1, a1), (t1, a1), (t0, a0)]
+                .into_iter()
+                .enumerate()
+            {
+                if track_motion {
+                    let motion = match blade {
+                        Some((db, _)) if i == last_window && j == 1 => db,
+                        Some((_, dt)) if i == last_window && j == 2 => dt,
+                        _ => [0.0; 3],
+                    };
+                    batch.motion_mut().push(motion);
+                }
+                batch.verts_mut().push(EffectVertex {
                     pos: pos.to_array(),
                     uv: [0.0, 0.0],
                     color: [

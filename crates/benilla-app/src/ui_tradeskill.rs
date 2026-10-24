@@ -10,7 +10,9 @@
 //! as the client holds no focus id or radius, and the server's refusal is the only feedback.
 
 use std::collections::VecDeque;
-use std::time::Instant;
+
+// `bevy::platform::time::Instant`, not `bevy::platform::time::Instant`: this flows into `crate::cooldowns`/`crate::ui_script::UiClock`, which on wasm32 (the default `web` Bevy feature) is a genuinely different type from `bevy::platform::time::Instant` — a plain alias for it everywhere else.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
@@ -32,7 +34,8 @@ use crate::ui_items::{count_of, item_icon, InventoryScope};
 use crate::ui_script::{SweepApp, SweepLeg};
 use crate::ui_spellbook::SkillLines;
 use crate::ui_unit::UnitFeed;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 
 /// Opener spell ids (effect 47) that `send_spell_cast` intercepted, opened by
 /// [`open_trade_skill`] the same frame.
@@ -55,7 +58,7 @@ pub(crate) struct TradeSkillRepeatCarry(pub(crate) u32);
 /// Fold the repeat count out of the dying VM, with the CVar fold.
 pub(crate) fn fold_dying_vm_repeat(world: &mut World) {
     let Some((_, count)) = world
-        .get_non_send_resource::<UiScript>()
+        .get_non_send::<UiScript>()
         .map(UiScript::trade_skill_repeat)
     else {
         return;
@@ -116,7 +119,7 @@ impl Plugin for UiTradeSkillPlugin {
         app.init_resource::<TradeSkillOpens>()
             .init_resource::<TradeSkillOpen>()
             .init_resource::<TradeSkillRepeatCarry>()
-            .add_systems(Startup, load_spell_focus.after(AssetSet::Open))
+            .add_data_loaders(load_spell_focus)
             .add_systems(
                 Update,
                 (
@@ -1207,11 +1210,11 @@ mod tests {
                  f:SetScript('OnEvent', function() CLOSES = CLOSES + 1 end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.add_systems(Update, feed_trade_skill);
         let closes = |app: &App| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<i64>("return CLOSES")
                 .unwrap()
         };
@@ -1287,12 +1290,12 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(HEARD, event) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.add_systems(Update, feed_trade_skill);
         let heard = |app: &mut App| {
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
                 .unwrap()
         };
@@ -1305,7 +1308,7 @@ mod tests {
         assert!(heard(&mut app).is_empty());
         assert!(
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<bool>("return GetTradeSkillCooldown(2) ~= nil")
                 .unwrap(),
             "pushed, silently"
@@ -1361,11 +1364,11 @@ mod tests {
             });
         app.world_mut()
             .spawn((ObjectStore(Default::default()), SelfPlayer));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.add_systems(Update, feed_trade_skill);
         app.world_mut().resource_mut::<TradeSkillOpen>().line = Some(197);
         app.update();
-        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut script = app.world_mut().non_send_mut::<UiScript>();
         script.run("CollapseTradeSkillSubClass(0)").unwrap();
         script.rebuild_trade_skill(&mut |_| {});
         let tail = script
@@ -1432,12 +1435,12 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(HEARD, event) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.add_systems(Update, feed_trade_skill);
         let heard = |app: &mut App| {
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
                 .unwrap()
         };
@@ -1522,14 +1525,14 @@ mod tests {
                  f:SetScript('OnEvent', function() table.insert(HEARD, event) end)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.add_systems(Update, feed_trade_skill.in_set(crate::ui_script::UiFeed))
             .insert_resource(State::new(crate::client_state::ClientState::InWorld));
         register_rebuild_triggers(&mut app);
         let heard = |app: &mut App| {
             app.update();
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
                 .unwrap()
         };
@@ -1564,7 +1567,7 @@ mod tests {
         );
         assert!(heard(&mut app).is_empty());
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .run("GetTradeSkillReagentInfo(2, 1) GetTradeSkillReagentInfo(2, 1)")
             .unwrap();
         assert!(heard(&mut app).is_empty());
@@ -1617,7 +1620,7 @@ mod tests {
             max_rank: 75,
             recipes: Vec::new(),
         }));
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         let mut fired = |notice: FieldNotice| {
             app.world_mut()
                 .resource_mut::<crate::field_watch::NoticeLane>()
@@ -1625,7 +1628,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(crate::ui_unit::field_events::fire_field_notices)
                 .unwrap();
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             s.eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
                 .unwrap()
@@ -1791,7 +1794,7 @@ mod tests {
                 tools_pending: Vec::new(),
             }],
         }));
-        world.insert_non_send_resource(script);
+        world.insert_non_send(script);
         (app, rx)
     }
 
@@ -1851,7 +1854,7 @@ mod tests {
             });
         }
         drain(&mut app);
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert_eq!(script.trade_skill_repeat(), (2963, 1));
         assert_eq!(script.eval::<String>("return SEEN").unwrap(), "3 2 1 ");
     }
@@ -1868,11 +1871,7 @@ mod tests {
         })
         .unwrap();
         drain(&mut app);
-        let repeat = |app: &App| {
-            app.world()
-                .non_send_resource::<UiScript>()
-                .trade_skill_repeat()
-        };
+        let repeat = |app: &App| app.world().non_send::<UiScript>().trade_skill_repeat();
         assert_eq!(repeat(&app), (2963, 3));
         let stop = |app: &mut App| {
             let up = app
@@ -1934,11 +1933,11 @@ mod tests {
                  DoTradeSkill(2, 3)",
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.update();
         let count = |app: &App| {
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<i64>("return GetNumTradeSkills()")
                 .unwrap()
         };
@@ -1946,7 +1945,7 @@ mod tests {
         app.world_mut()
             .write_message(crate::net::WorldEnterCascadeMessage);
         app.update();
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert_eq!(count(&app), 0);
         assert_eq!(script.eval::<i64>("return GetNumCrafts()").unwrap(), 0);
         assert_eq!(script.trade_skill_repeat(), (0, 3));
@@ -2028,7 +2027,7 @@ mod tests {
             });
         app.world_mut()
             .spawn((ObjectStore(Default::default()), SelfPlayer));
-        app.insert_non_send_resource(listening());
+        app.insert_non_send(listening());
         app.add_systems(Update, (open_trade_skill, feed_trade_skill).chain());
         app
     }
@@ -2050,7 +2049,7 @@ mod tests {
     fn heard(app: &mut App) -> Vec<String> {
         app.update();
         app.world()
-            .non_send_resource::<UiScript>()
+            .non_send::<UiScript>()
             .eval::<Vec<String>>("local h = HEARD HEARD = {} return h")
             .unwrap()
     }
@@ -2058,11 +2057,11 @@ mod tests {
     /// A `/reload` (`0x490bd0`): the leave sweep zeroes the pending count (`0x4fc8cb`), a new VM
     /// replaces the old, and the world-enter init zeroes the list (`0x4fc750` at `0x4909bf`).
     fn reload(app: &mut App) {
-        let mut old = app.world_mut().non_send_resource_mut::<UiScript>();
+        let mut old = app.world_mut().non_send_mut::<UiScript>();
         old.trade_skill_cancel_waits();
         let mut script = listening();
         script.reset_crafts_on_world_enter();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
     }
 
     /// A `/reload` with the book open keeps its line (`[0xbde040]`) and signals nothing, so the
@@ -2079,7 +2078,7 @@ mod tests {
         assert_eq!(heard(&mut app), ["TRADE_SKILL_SHOW"]);
         reload(&mut app);
         assert!(heard(&mut app).is_empty(), "no update, no show");
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert_eq!(
             script
                 .eval::<(i64, String)>("return GetNumTradeSkills(), (GetTradeSkillLine())")
@@ -2093,7 +2092,7 @@ mod tests {
         assert_eq!(heard(&mut app), ["TRADE_SKILL_UPDATE"]);
         assert!(
             app.world()
-                .non_send_resource::<UiScript>()
+                .non_send::<UiScript>()
                 .eval::<i64>("return GetNumTradeSkills()")
                 .unwrap()
                 > 0
@@ -2144,9 +2143,6 @@ mod tests {
         app.world_mut()
             .spawn((ObjectStore(Default::default()), SelfPlayer));
         assert!(heard(&mut app).is_empty(), "no second open");
-        assert!(app
-            .world()
-            .non_send_resource::<UiScript>()
-            .trade_skill_open());
+        assert!(app.world().non_send::<UiScript>().trade_skill_open());
     }
 }

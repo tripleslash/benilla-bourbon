@@ -696,7 +696,9 @@ pub(crate) fn split_container_item(
     count: i64,
 ) -> mlua::Result<bool> {
     let item = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         // The slot resolver (`0x4fa00a`), through the bag lookup `0x4f93e0`.
         let Some(s) = model.bag_slot(bag, slot) else {
             return Ok(false);
@@ -768,7 +770,9 @@ pub(crate) fn click_attach_slot(
     slot: impl Fn(&mut Model) -> &mut Option<CursorItem>,
 ) -> bool {
     let (held, old) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let held = match &model.cursor {
             Some(CursorPayload::Item(item)) => Some(item.clone()),
             _ => None,
@@ -819,7 +823,7 @@ impl super::UiScript {
     pub fn unlock_entry_items(&mut self, guids: &[u64]) {
         {
             let mut model = self.model_mut();
-            let model = &mut *model;
+            let model: &mut crate::script::Model = &mut model;
             let attached = |guid: u64| {
                 let held =
                     |item: &Option<CursorItem>| item.as_ref().is_some_and(|i| i.guid == guid);
@@ -867,7 +871,11 @@ impl super::UiScript {
 
     /// Seat a fresh VM's locks before anything runs on it, with no event.
     pub fn seed_item_locks(&mut self, guids: impl IntoIterator<Item = u64>) {
-        self.model_mut().item_locks = guids.into_iter().filter(|&g| g != 0).collect();
+        set_field!(
+            self,
+            item_locks,
+            guids.into_iter().filter(|&g| g != 0).collect()
+        );
     }
 
     /// The cursor's state as the engine holds it: the payload (`[0xb4d900]` and its data), the
@@ -933,7 +941,7 @@ impl super::UiScript {
 
     /// Feed the world pick under the cursor this frame ([`WorldPick`]).
     pub fn set_world_pick(&mut self, pick: WorldPick) {
-        self.model_mut().world_pick = pick;
+        set_field!(self, world_pick, pick);
     }
 
     /// Whether a left press on the world, over the pick fed this frame, is the payload's: the
@@ -971,7 +979,7 @@ impl super::UiScript {
     /// Test-only: set the payload directly, bypassing the Lua bindings.
     #[cfg(test)]
     pub(crate) fn set_cursor_for_test(&mut self, payload: CursorPayload) {
-        self.model_mut().cursor = Some(payload);
+        set_field!(self, cursor, Some(payload));
     }
 }
 
@@ -984,7 +992,7 @@ impl super::UiScript {
     /// picking up, as the reference's two pickups do (`0x4f9b30` at `0x4f9c54`, `0x4c7300` at
     /// `0x4c76df`).
     pub fn set_item_pick_armed(&mut self, armed: bool) {
-        self.model_mut().item_pick_armed = armed;
+        set_field!(self, item_pick_armed, armed);
     }
 
     /// Arm or disarm the targeting cursor's location half (`SpellTargetWantsLocation`,
@@ -998,7 +1006,7 @@ impl super::UiScript {
     /// `SpellCanTargetUnit` resolves its token to a guid, as `0x515970` does, and asks this set,
     /// so a chain such as `"party1target"` reads the unit it ends on.
     pub fn set_spell_targetable_units(&mut self, guids: impl IntoIterator<Item = u64>) {
-        self.model_mut().spell_targetable_units = guids.into_iter().collect();
+        set_field!(self, spell_targetable_units, guids.into_iter().collect());
     }
 }
 
@@ -1063,14 +1071,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CursorHasItem",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(matches!(model.cursor, Some(CursorPayload::Item(_)))))
         })?,
     )?;
     g.set(
         "CursorHasSpell",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(matches!(model.cursor, Some(CursorPayload::Spell(_)))))
         })?,
     )?;
@@ -1134,7 +1146,9 @@ pub(crate) fn install_kind_probe(s: &super::UiScript) {
     let kind = s
         .lua
         .create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(match &model.cursor {
                 None => "none",
                 Some(CursorPayload::Item(_)) => "item",

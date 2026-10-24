@@ -15,6 +15,9 @@ default = ["dev"]
 dev = ["benilla-formats/dev"]
 
 [dependencies]
+# Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
+# `Date.now()` in a browser, where std's panics on first use (`anim_rng`'s session seed).
+web-time = "1"
 anyhow.workspace = true
 bevy.workspace = true
 benilla-formats = { path = "../benilla-formats", default-features = false }
@@ -22,3 +25,7 @@ benilla-formats = { path = "../benilla-formats", default-features = false }
 # bytes, with no averaging to darken mid-tones.
 image = { version = "0.25", default-features = false }
 serde = { version = "1", features = ["derive"] }
+
+# No wasm-specific dependencies. `MpqAssetReader::read` used to hand-roll a `fetch` here; it now
+# awaits `Chain::read_async`, so every browser API this crate touched moved behind
+# `benilla_formats::webpack` where the pack store already needed them.

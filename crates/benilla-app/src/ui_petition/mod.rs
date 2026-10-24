@@ -877,7 +877,7 @@ mod tests {
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>()
             .add_systems(Update, feed::feed_petition);
-        app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+        app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
         let show = |app: &mut App| {
             let commands = NetCommands(app.world().resource::<NetCommands>().0.clone());
             app.world_mut()
@@ -941,7 +941,7 @@ mod tests {
                 feed::free_petition_signers_on_leave_world,
             )
             .add_systems(Update, feed::feed_petition);
-        app.insert_non_send_resource(spied_vm(&EVENTS));
+        app.insert_non_send(spied_vm(&EVENTS));
         app.update();
         assert_eq!(seen_in(&app), ["PETITION_SHOW"]);
 
@@ -952,7 +952,7 @@ mod tests {
         assert!(seen_in(&app).is_empty(), "no replay into the new VM");
         assert_eq!(
             app.world()
-                .non_send_resource::<benilla_ui::script::UiScript>()
+                .non_send::<benilla_ui::script::UiScript>()
                 .eval::<i64>("return GetNumPetitionNames()")
                 .unwrap(),
             0

@@ -151,6 +151,11 @@ impl NamePlates {
         self.pending_paint.clear();
     }
 
+    /// Whether a paint waits for [`Self::begin_update`] to clear it.
+    pub(super) fn paint_pending(&self) -> bool {
+        !self.pending_paint.is_empty()
+    }
+
     /// Whether `frame` is a plate, whose leave publishes the empty mouseover (`0x7cb8b0`).
     pub(crate) fn is_plate(&self, frame: FrameHandle) -> bool {
         self.by_frame.contains_key(&frame)
@@ -237,7 +242,9 @@ pub(super) fn install_verbs(lua: &Lua) -> mlua::Result<()> {
             name,
             // The empty `MultiValue` returns zero values, which is not nil.
             lua.create_function(move |lua, _: mlua::MultiValue| {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.nameplates.bit_writes.write(bit, on);
                 Ok(mlua::MultiValue::new())
             })?,
@@ -250,7 +257,9 @@ impl UiScript {
     /// Drain the plate verbs' writes for the engine's `[0xc4da34]`, which the app owns.
     pub fn take_nameplate_bit_writes(&mut self) -> PlateBitWrites {
         let lua = self.lua();
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         std::mem::take(&mut model.nameplates.bit_writes)
     }
 
@@ -263,7 +272,9 @@ impl UiScript {
         // `__index` (`lua_gettable` at `0x704373`), which may call any verb.
         let mut fonts: VecDeque<Option<String>> = {
             let built = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // No WorldFrame, no plates, and no lookups for them.
                 if model.arena.lookup("WorldFrame").is_none() {
                     return;
@@ -275,7 +286,9 @@ impl UiScript {
                 .collect()
         };
         let effects = {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             // No WorldFrame (no interface loaded), no plates: no addon walks an invented root.
             let Some(world) = model.arena.lookup("WorldFrame") else {
                 return;
@@ -292,7 +305,9 @@ impl UiScript {
     /// → `0x492890`, `[0xb4e2c8]`); an addon frame on a plate takes the hover from it.
     pub fn hovered_nameplate(&self) -> Option<u64> {
         let lua = self.lua();
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let frame = model.mouseover?;
         let slot = *model.nameplates.by_frame.get(&frame)?;
         model.nameplates.plates.get(slot)?.key()
@@ -301,7 +316,9 @@ impl UiScript {
     /// Drain the completed plate clicks, physical or `plate:Click()`, for the app to select from.
     pub fn take_nameplate_clicks(&mut self) -> Vec<NamePlateClick> {
         let lua = self.lua();
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         std::mem::take(&mut model.nameplates.clicks)
     }
 
@@ -312,7 +329,9 @@ impl UiScript {
     pub fn set_nameplate_mouse(&mut self, enabled: bool) {
         let lua = self.lua();
         let frames: Vec<FrameHandle> = {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.nameplates.plates.iter().map(|p| p.frame).collect()
         };
         for frame in frames {
@@ -326,7 +345,9 @@ impl UiScript {
     /// word against `0x878e` whose meaning is unsettled, is not applied.
     pub fn set_nameplate_hit_test_veto(&mut self, vetoed: bool) {
         let lua = self.lua();
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.nameplates.hit_test_vetoed = vetoed;
     }
 
@@ -335,7 +356,9 @@ impl UiScript {
     pub fn retire_nameplates(&mut self) {
         let lua = self.lua();
         let effects = {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let mut effects = SyncEffects::default();
             model.nameplates.assigned.clear();
             for i in 0..model.nameplates.plates.len() {
@@ -349,7 +372,9 @@ impl UiScript {
     /// How many plate widgets the pool holds.
     pub fn nameplate_pool_len(&self) -> usize {
         let lua = self.lua();
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.nameplates.plates.len()
     }
 }
@@ -363,7 +388,9 @@ fn apply_visibility(lua: &mlua::Lua, verbs: Vec<(FrameHandle, bool)>) {
 
 /// Record a click on `id` if it is a live plate; every button click comes here.
 pub(super) fn note_click(lua: &mlua::Lua, id: u32, button: &str) {
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let Some(frame) = model.id_to_frame.get(&id).copied() else {
         return;
     };

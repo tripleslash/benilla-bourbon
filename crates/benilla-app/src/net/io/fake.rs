@@ -241,7 +241,8 @@ fn serve_realmd(
         list.extend_from_slice(&records);
         // vmangos's trailer (`AuthSocket.cpp:1088`).
         list.extend_from_slice(&0x0002u16.to_le_bytes());
-        // Counted before the write, so the count never reads behind a list the client has.
+        // Counted before the write, so the count never reads behind a list the client has: the
+        // client may act on the list, and a test read the count, before this thread runs again.
         lists.fetch_add(1, Ordering::SeqCst);
         if s.write_all(&list).is_err() {
             return;
@@ -787,12 +788,13 @@ pub(crate) fn dead_address() -> String {
     l.local_addr().unwrap().to_string()
 }
 
-/// The app's ends of the IO thread's channels.
+/// The app's ends of the IO thread's channels; the credentials and park channels are
+/// `async_channel`, as [`super::NetHandles`]' are.
 pub(crate) struct Cycles {
     pub(crate) events: Receiver<SessionEvent>,
     /// The app's commands, to the write thread and on to the world socket while in the world.
     pub(crate) commands: Sender<ClientCommand>,
-    pub(crate) login: Sender<LoginRequest>,
+    pub(crate) login: async_channel::Sender<LoginRequest>,
     pub(crate) realm: ParkSender<RealmRequest>,
     pub(crate) pick: ParkSender<CharRequest>,
     pub(crate) abandon: Arc<AtomicU64>,
@@ -804,8 +806,8 @@ pub(crate) fn spawn_cycles() -> Cycles {
     let (commands, cmd_rx) = crossbeam_channel::unbounded::<ClientCommand>();
     let (writer_tx, writer_rx) = crossbeam_channel::unbounded::<WriterSwap>();
     thread::spawn(move || writer_loop(&cmd_rx, writer_rx, &Mutex::new(PingClock::default())));
-    let (login, login_rx) = crossbeam_channel::unbounded();
-    let (park_tx, park_rx) = crossbeam_channel::unbounded::<ParkRequest>();
+    let (login, login_rx) = async_channel::unbounded();
+    let (park_tx, park_rx) = async_channel::unbounded::<ParkRequest>();
     let abandon = Arc::new(AtomicU64::new(0));
     let thread_abandon = Arc::clone(&abandon);
     thread::spawn(move || {
@@ -813,14 +815,16 @@ pub(crate) fn spawn_cycles() -> Cycles {
         let clock = Mutex::new(PingClock::default());
         let mut tails = Default::default();
         loop {
-            match run(
+            // Natively every await in the cycle is a blocking socket read, as on the `wow-net`
+            // thread.
+            match futures_lite::future::block_on(run(
                 &events_tx,
                 &writer_tx,
                 &parks,
                 &thread_abandon,
                 &clock,
                 &mut tails,
-            ) {
+            )) {
                 Ok(Cycle::Exit) => return,
                 Ok(Cycle::Repark) => {}
                 Err(e) => {
@@ -851,7 +855,7 @@ pub(crate) fn spawn_cycles() -> Cycles {
 pub(crate) fn login(cycles: &Cycles, host: &str) {
     cycles
         .login
-        .send(LoginRequest {
+        .send_blocking(LoginRequest {
             user: USER.into(),
             pass: PASS.into(),
             host: host.into(),

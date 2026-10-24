@@ -19,7 +19,8 @@ use benilla_protocol::EntityKind;
 
 use crate::go_anim::GoStateDispatch;
 use crate::net::NetEntity;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::DataLoadAppExt;
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
 use super::emitter_pool::AmbientEmitterPool;
@@ -141,7 +142,7 @@ pub(super) fn go_display_sounds(
 
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, load_go_sounds.after(AssetSet::Open))
+    app.add_data_loaders(load_go_sounds)
         // In `Present`, with the GO scanner that feeds it and the state machine that dispatches.
         .add_systems(Update, go_display_sounds.in_set(WorldStage::Present));
 }

@@ -375,9 +375,9 @@ impl Loader<'_> {
             .exec()
     }
 
-    fn model(&self) -> mlua::AppDataRefMut<'_, crate::script::Model> {
+    fn model(&self) -> mlua::AppDataRefMut<'_, crate::script::ModelCell> {
         self.lua
-            .app_data_mut::<crate::script::Model>()
+            .app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
     }
 

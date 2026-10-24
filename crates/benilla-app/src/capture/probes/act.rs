@@ -156,8 +156,6 @@ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
         "Shift" => KeyCode::ShiftLeft,
         // The cost pill's toggle, dev chord + `P` (`perf::hud::toggle_hud`); it starts hidden.
         "P" => KeyCode::KeyP,
-        // The addon profiler's toggle, dev chord + `L` (`devtools::profiler::toggle`).
-        "L" => KeyCode::KeyL,
         // Text editing: `EditBox` has no Lua deletion API, so caret and deletion need real keys.
         "Backspace" => KeyCode::Backspace,
         "Delete" => KeyCode::Delete,

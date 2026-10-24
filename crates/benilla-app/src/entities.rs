@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use benilla_assets::DataLoadAppExt;
 use benilla_assets::{M2Model, WmoModel};
 use benilla_formats::{
     load_creature_catalog, load_gameobject_catalog, load_item_display_catalog, CharCreateCatalog,
@@ -13,7 +14,7 @@ use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
 use crate::net::NetEntity;
-use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 use benilla_world::model_fade::apply_render_fade;
 use benilla_world::schedule::WorldStage;
 
@@ -53,7 +54,7 @@ use mount::reseat_mounts;
 pub(crate) mod corpse;
 
 mod live_display;
-pub(crate) use live_display::DisplaySwapped;
+pub(crate) use live_display::{rebuild_character_bodies, DisplaySwapped};
 use live_display::{refresh_live_display, tick_scale_ease};
 
 /// Terrain conform: a model flagged `GlobalModelFlags & 3 ∈ {1,3}` tilts to the ground.
@@ -236,6 +237,17 @@ pub(crate) struct Creatures {
 }
 
 impl Creatures {
+    /// Whether a display is a character body — a character model (`Character\`), or a humanoid
+    /// NPC's `CreatureDisplayInfoExtra` appearance — the art the updated character models replace.
+    pub(crate) fn is_character_body(&self, display_id: u32) -> bool {
+        self.catalog.model(display_id).is_some_and(|m| {
+            m.npc_appearance.is_some()
+                || m.model_path
+                    .get(..10)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("character\\"))
+        })
+    }
+
     /// The display row a unit's records come from (`0x60afb0`).
     pub(crate) fn records_row(&self, display_id: u32) -> Option<u32> {
         self.catalog.records_row(display_id)
@@ -391,6 +403,7 @@ impl Creatures {
                     static_mesh: part.mesh.clone(),
                     skinned_mesh: part.skinned_mesh.clone(),
                     material: part.material.clone(),
+                    alpha_anim: part.alpha_anim.clone(),
                 }),
             }
         }
@@ -490,22 +503,51 @@ pub(crate) struct EntityVisualsSet;
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DisplayBuildSet;
 
+/// Every display and skin cache, dropped together.
+#[derive(bevy::ecs::system::SystemParam)]
+struct DisplayCaches<'w> {
+    composites: ResMut<'w, SkinComposites>,
+    fx: ResMut<'w, spell_fx::SpellFx>,
+    creatures: Option<ResMut<'w, Creatures>>,
+    gos: Option<ResMut<'w, GameObjects>>,
+    items: Option<ResMut<'w, equipment::ItemDisplays>>,
+    glows: Option<ResMut<'w, ItemGlows>>,
+    bones: ResMut<'w, corpse::BonesModels>,
+    /// Keyed by the address of a model's geometry, which a rebuilt model may reuse.
+    merged: ResMut<'w, attach::MergedFormsCache>,
+}
+
 /// Drop every display and skin cache on a map change; an entry rebuilds on its next use.
 fn evict_display_caches(
     mut changes: MessageReader<benilla_world::world_map::MapChange>,
-    mut composites: ResMut<SkinComposites>,
-    mut fx: ResMut<spell_fx::SpellFx>,
-    creatures: Option<ResMut<Creatures>>,
-    gos: Option<ResMut<GameObjects>>,
-    items: Option<ResMut<equipment::ItemDisplays>>,
-    glows: Option<ResMut<ItemGlows>>,
-    mut bones: ResMut<corpse::BonesModels>,
+    caches: DisplayCaches,
 ) {
     if changes.is_empty() {
         return;
     }
     changes.clear();
-    info!(
+    caches.clear();
+}
+
+/// The same on a change of the data the chain answers from: every cached model and skin was
+/// built from the other flavor's files.
+fn forget_display_caches(_: On<benilla_assets::ChainDataChanged>, caches: DisplayCaches) {
+    caches.clear();
+}
+
+impl DisplayCaches<'_> {
+    fn clear(self) {
+        let DisplayCaches {
+            mut composites,
+            mut fx,
+            creatures,
+            gos,
+            items,
+            glows,
+            mut bones,
+            mut merged,
+        } = self;
+        info!(
         "display caches evicted: {} creature / {} go / {} item / {} fx / {} glow models, {} skins",
         creatures.as_ref().map_or(0, |c| c.models.len()),
         gos.as_ref().map_or(0, |g| g.models.len()),
@@ -514,21 +556,23 @@ fn evict_display_caches(
         glows.as_ref().map_or(0, |g| g.models.len()),
         composites.done.len(),
     );
-    composites.clear();
-    fx.models.clear();
-    if let Some(mut c) = creatures {
-        c.models.clear();
+        composites.clear();
+        fx.models.clear();
+        if let Some(mut c) = creatures {
+            c.models.clear();
+        }
+        if let Some(mut g) = gos {
+            g.models.clear();
+        }
+        if let Some(mut i) = items {
+            i.models.clear();
+        }
+        if let Some(mut g) = glows {
+            g.models.clear();
+        }
+        bones.0.clear();
+        merged.clear();
     }
-    if let Some(mut g) = gos {
-        g.models.clear();
-    }
-    if let Some(mut i) = items {
-        i.models.clear();
-    }
-    if let Some(mut g) = glows {
-        g.models.clear();
-    }
-    bones.0.clear();
 }
 
 /// Expire composited skins by distance within a map. The display-id model caches are not swept:
@@ -667,7 +711,7 @@ impl Plugin for EntitiesPlugin {
         // A display swap's rebuild edge, for the impact-kit replay the reference runs at the end
         // of `0x60abe0`.
         .add_message::<live_display::DisplaySwapped>()
-        .add_systems(Startup, setup_entities.after(AssetSet::Open))
+        .add_data_loaders(setup_entities)
         // The eviction ahead of the VM pass, whose sends read the item displays for a ranged
         // spell's precast visual (`0x60d450`).
         .add_systems(
@@ -677,6 +721,7 @@ impl Plugin for EntitiesPlugin {
                 scope_entity_art,
             ),
         )
+        .add_observer(forget_display_caches)
         // An arrival is stamped the frame it streams in, before its visual is asked for.
         .add_systems(
             Update,
@@ -734,7 +779,17 @@ impl Plugin for EntitiesPlugin {
                 spell_fx::tick_fx_tint,
                 // Event keyframes and completion callbacks, after attach so a just-spawned
                 // instance's first window `[0, cur]` fires this frame.
-                (spell_fx::fire_fx_anim_events, spell_fx::advance_fx_anim),
+                // fork: and the spell lights' envelopes + budget (`spell_fx::light`), after the
+                // reap has marked its instances so a kit light starts its fade the same frame.
+                (
+                    spell_fx::fire_fx_anim_events,
+                    spell_fx::advance_fx_anim,
+                    (
+                        spell_fx::advance_spell_lights,
+                        spell_fx::budget_spell_lights,
+                    )
+                        .chain(),
+                ),
                 // A gear change re-dresses the standing visual in place, every attachment left
                 // alone as in the reference; a new corpse arms its Dead or Drowned pose.
                 (attach::redress_player_looks, corpse::pose_corpses),
@@ -817,6 +872,7 @@ fn setup_entities(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     world_assets: Option<ResMut<WorldAssets>>,
+    flavor: Option<Res<crate::flavor::ClientFlavor>>,
 ) {
     // A person-sized box; its origin is centred, so it is lifted by half its height.
     let mesh = meshes.add(Cuboid::new(2.0, 4.0, 2.0));
@@ -946,14 +1002,24 @@ fn setup_entities(
         }
         Err(e) => warn!("char sections unavailable, player bodies stay untextured: {e:#}"),
     }
-    match CharCreateCatalog::load(&mut chain) {
+    // Turtle WoW's races and race/class table are its own; the 1.12.1 load refuses them.
+    let catalog = if flavor.is_some_and(|f| f.is_turtle()) {
+        CharCreateCatalog::load_turtle(&mut chain)
+    } else {
+        CharCreateCatalog::load(&mut chain)
+    };
+    match catalog {
         Ok(catalog) => {
             if let Some(e) = catalog.name_gen_error() {
                 warn!("NameGen.dbc unavailable, the create screen's random name is empty: {e}");
             }
             commands.insert_resource(CharCreate(catalog));
         }
-        Err(e) => warn!("char-create catalog unavailable, the create screen is disabled: {e:#}"),
+        Err(e) => {
+            // A rerun must not leave the other flavor's catalog answering.
+            commands.remove_resource::<CharCreate>();
+            warn!("char-create catalog unavailable, the create screen is disabled: {e:#}");
+        }
     }
     match load_item_display_catalog(&mut chain) {
         Ok(catalog) => {
@@ -1424,6 +1490,7 @@ mod display_mirror_tests {
                 bone,
                 kind: benilla_formats::BillboardKind::Spherical,
                 scale_anim: None,
+                carriers: Vec::new(),
                 seq_translations: Vec::new(),
             }),
             alpha_anim: None,

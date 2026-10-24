@@ -62,8 +62,9 @@ impl Viewer {
 }
 
 /// View distance in yards. `farclip`, the `farclip` CVar, is the one view distance: the detailed
-/// world's far wall and the reach of terrain residency; its default, 350, is the reference's
-/// registered one.
+/// world's far wall and the reach of terrain residency. Deviation (this fork): its default is 1000
+/// where the reference registers 350, because the modern look's long-range fog shows the world
+/// past it.
 /// `nearclip` shares the resource because `0x511bc0` stamps both onto the camera every frame, the
 /// `nearclip` record's float to `[cam+0x38]` (`0x511bd4`) and the `farclip` one's to `[cam+0x3c]`.
 #[derive(Resource, Clone, Copy)]
@@ -76,7 +77,9 @@ pub struct ViewDistance {
 /// The settable range of [`ViewDistance::farclip`]: the range the reference's `farclip` callback
 /// `0x688d40` accepts, `[0x81021c]` = 177 to `[0x80fed8]` = 777, refusing anything else; shared by
 /// the CVar apply, the options row and `$WOW_FARCLIP`, which clamps to it.
-pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=777.0;
+/// fork: modern lighting — the top raised to 1500 (the vanilla clamp is 777): the long-range fog
+/// shows the world past it. `benilla_ui::script::check_farclip` refuses on the same bounds.
+pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=1500.0;
 
 /// The settable range of [`ViewDistance::nearclip`]: the bounds in the reference's `nearclip`
 /// change callback `0x688d90`, `[0x8029d0]` = 0.01 and `[0x808300]` = 0.33.
@@ -105,7 +108,10 @@ pub const MSAA_RANGE: std::ops::RangeInclusive<u32> = 1..=16;
 impl Default for MsaaSetting {
     /// `$WOW_MSAA` overrides the default for the session; `off`, `0` and `1` all mean none.
     fn default() -> Self {
-        let samples = match std::env::var("WOW_MSAA").ok().as_deref() {
+        // fork: `launch_env`, not `std::env` — a browser tab has no process environment, so `?msaa=`
+        // is the only way this A/B lever reaches the web build. Native is unchanged (nothing seeded
+        // ⇒ `launch_env::var` is `std::env::var`).
+        let samples = match crate::launch_env::var("WOW_MSAA").as_deref() {
             Some("off") => Some(1),
             Some(v) => v.parse::<u32>().ok(),
             None => None,
@@ -134,13 +140,12 @@ impl MsaaSetting {
 /// `Rgba16Float` target, `Depth32Float` depth, the swapchain), each a separate wgpu capability;
 /// Bevy passes a count on unchecked, and wgpu fails validation on one the device lacks.
 fn supported_sample_counts(adapter: &bevy::render::renderer::RenderAdapter) -> Vec<u32> {
-    use bevy::image::BevyDefault as _;
     use bevy::render::render_resource::TextureFormat;
 
     let formats = [
         TextureFormat::Rgba16Float,
         TextureFormat::Depth32Float,
-        TextureFormat::bevy_default(),
+        TextureFormat::Rgba8UnormSrgb,
     ];
     MSAA_RANGE
         .clone()
@@ -188,12 +193,11 @@ impl MsaaFormats {
 /// Colour and depth bits for the dropdown's `MULTISAMPLING_FORMAT_STRING`, from the formats we
 /// render into; colour is the swapchain's, the mode the window presents in.
 fn dropdown_bit_depths() -> (u32, u32) {
-    use bevy::image::BevyDefault as _;
     use bevy::render::render_resource::TextureFormat;
 
     let bits = |f: TextureFormat| f.block_copy_size(None).unwrap_or(4) * 8;
     (
-        bits(TextureFormat::bevy_default()),
+        bits(TextureFormat::Rgba8UnormSrgb),
         bits(TextureFormat::Depth32Float),
     )
 }
@@ -243,7 +247,7 @@ impl Plugin for MsaaSupportPlugin {
 /// detailed world to `farclip` and the horizon to `horizonfarclip` (default 2112, floored at
 /// `farclip + 528`); ours has one far plane well beyond `farclip`, because the WDL ring draws in
 /// the same projection, and the detailed world ends at `farclip` by the wall.
-pub const CAM_FAR: f32 = 3000.0;
+pub const CAM_FAR: f32 = 10_000.0;
 
 impl ViewDistance {
     /// Set the near plane from a `nearclip` write, clamped to [`NEARCLIP_RANGE`].
@@ -253,13 +257,13 @@ impl ViewDistance {
 }
 
 impl Default for ViewDistance {
-    /// `$WOW_FARCLIP` (yd, clamped to [`FARCLIP_RANGE`]) overrides the 350 default, read once at
+    /// `$WOW_FARCLIP` (yd, clamped to [`FARCLIP_RANGE`]) overrides the 1000 default, read once at
     /// startup, so a headless capture can reproduce a player's view distance.
     fn default() -> Self {
-        let farclip = std::env::var("WOW_FARCLIP")
-            .ok()
+        // fork: modern lighting — `launch_env`, so the browser world view reaches it (`?farclip=`).
+        let farclip = crate::launch_env::var("WOW_FARCLIP")
             .and_then(|v| v.parse::<f32>().ok())
-            .map_or(350.0, |v| {
+            .map_or(1000.0, |v| {
                 v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end())
             });
         Self {
@@ -335,9 +339,13 @@ pub fn stamp_near_clip(
     }
 }
 /// The vertical field of view in radians, shared by the projection and every consumer of the near
-/// rectangle: 45°, Bevy's `PerspectiveProjection` default; the reference's follows the aspect,
-/// 44.1° at 16:9.
-pub const CAM_FOVY: f32 = std::f32::consts::FRAC_PI_4;
+/// rectangle: `2·atan(9/16)`, 58.72°, which is 90° horizontal at 16:9 and widens Hor+ with the
+/// aspect (about 106° at 21:9, 74° at 4:3).
+///
+/// Deviation: the reference's camera fov is π/2 (`0x7ac620`), but its projection divides it by
+/// the diagonal, `θ = fov / (2·√(aspect² + 1))` (`0x5c3cc0`), a vertical field of 44.1° at 16:9
+/// and 54° at 4:3; the maintainer chose a modern 90° horizontal field.
+pub const CAM_FOVY: f32 = 1.024_779;
 
 /// The world camera's pose made current within `Update`, for every viewer authority there: Bevy
 /// propagates `GlobalTransform` in `PostUpdate`, a whole jump late after a teleport snap.
@@ -379,12 +387,39 @@ pub(crate) fn plugin(app: &mut App) {
             // After the controller writes this frame's `Transform`.
             .after(crate::schedule::WorldStage::Input),
     );
+    app.add_systems(Startup, cpu_light_clusters);
+}
+
+/// Bevy's light clustering runs on the CPU, over the one cluster each world view asks for. No
+/// world shader reads Bevy's clusters (point lights ride `lighting::global_light`), and the GPU
+/// path allocates fresh cluster buffers per view every frame: a browser frees those only on its own
+/// garbage collection, and Firefox collected them too late, out of GPU memory within minutes.
+/// `WOW_CLUSTERS=1` keeps Bevy's choice, as it keeps the default grid on the world camera.
+fn cpu_light_clusters(settings: Option<ResMut<bevy::light::cluster::GlobalClusterSettings>>) {
+    if std::env::var_os("WOW_CLUSTERS").is_some() {
+        return;
+    }
+    if let Some(mut settings) = settings {
+        settings.gpu_clustering = None;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// The vertical field is the one whose horizontal span is 90° at 16:9.
+    #[test]
+    fn the_field_of_view_is_90_degrees_across_at_16_9() {
+        assert!((CAM_FOVY - 2.0 * (9.0_f32 / 16.0).atan()).abs() < 1e-6);
+        let across = 2.0 * ((CAM_FOVY * 0.5).tan() * 16.0 / 9.0).atan();
+        assert!(
+            (across.to_degrees() - 90.0).abs() < 1e-3,
+            "{}",
+            across.to_degrees()
+        );
+    }
 
     /// `0x511bc0`'s near stamp reaches the projection, and an unchanged one stays unmarked.
     #[test]

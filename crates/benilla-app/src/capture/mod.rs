@@ -30,8 +30,9 @@
 //! fixture ([`scenarios::ui_opted_in`]); `WOW_CAPTURE_UI=1` paints the UI over a world scenario,
 //! whose baselines are UI-free by default. `WOW_CAPTURE=list` prints the scenario names.
 
+use bevy::platform::time::Instant;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Capturing, Screenshot, ScreenshotCaptured};
@@ -172,7 +173,7 @@ fn glue_capture() -> bool {
 /// orbit degrees (0/10), `WOW_FX_DIST` yd (5), `WOW_FX_FLY` yd/s along the facing (0),
 /// `WOW_FX_YAW` degrees (0), `WOW_FX_TURN` deg/s after spawn (0), `WOW_FX_GROUND=1` seats it on
 /// the terrain for ground decals, `WOW_FX_HOLD=1` keeps it past one sequence pass,
-/// `WOW_FX_MINUTE` the clock (720).
+/// `WOW_FX_MINUTE` the clock (720), `WOW_FX_SCENE=<tsv>` the spawns around it ([`SceneSpawn`]).
 #[derive(Resource)]
 pub(crate) struct FxViewRequest {
     pub(crate) model_path: String,
@@ -205,6 +206,50 @@ pub(crate) struct FxViewRequest {
     /// `WOW_FX_UP`: yards above the resolved seat, for a model authored below its anchor (Arcane
     /// Intellect's star cluster starts 1.6 yd under it) whose opening the terrain would swallow.
     pub(crate) up: f32,
+    /// `WOW_FX_SCENE=<tsv>`: a server's spawns around the subject, stood up beside it through the
+    /// same unit and GameObject component sets ([`SceneSpawn`]), so a populated spot can be
+    /// measured with no server.
+    pub(crate) scene: Vec<SceneSpawn>,
+}
+
+/// One `WOW_FX_SCENE` row: `go|unit <display> <GAMEOBJECT_TYPE_ID> <x> <y> <z> <orientation>`,
+/// tab- or space-separated, WoW coordinates, the columns a `gameobject`/`creature` table holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SceneSpawn {
+    pub(crate) go: bool,
+    pub(crate) display: u32,
+    pub(crate) go_type: u32,
+    pub(crate) at: [f32; 3],
+    pub(crate) orientation: f32,
+}
+
+/// Parse a `WOW_FX_SCENE` file; a malformed row is skipped and counted, not fatal.
+pub(crate) fn parse_scene(text: &str) -> (Vec<SceneSpawn>, usize) {
+    let mut rows = Vec::new();
+    let mut bad = 0;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let num = |i: usize| f.get(i).and_then(|v| v.parse::<f32>().ok());
+        let go = match f.first() {
+            Some(&"go") => true,
+            Some(&"unit") => false,
+            _ => {
+                bad += 1;
+                continue;
+            }
+        };
+        match (num(1), num(2), num(3), num(4), num(5), num(6)) {
+            (Some(d), Some(t), Some(x), Some(y), Some(z), Some(o)) => rows.push(SceneSpawn {
+                go,
+                display: d as u32,
+                go_type: t as u32,
+                at: [x, y, z],
+                orientation: o,
+            }),
+            _ => bad += 1,
+        }
+    }
+    (rows, bad)
 }
 
 /// The fixture's live state, written by `fxview::drive_fx_view` and `drive_capture`.
@@ -213,6 +258,8 @@ pub(crate) struct FxViewState {
     /// Set once the scene has settled; the fixture spawns only then, so its age is the one asked.
     pub(crate) armed: bool,
     pub(crate) root: Option<Entity>,
+    /// The `WOW_FX_SCENE` spawns are up.
+    pub(crate) scene_spawned: bool,
     /// `time.elapsed_secs()` when the visuals attached: the age clock's zero.
     pub(crate) attached_at: Option<f32>,
     /// The root was reaped after one sequence pass, as the game reaps a discrete kit;
@@ -473,6 +520,24 @@ impl Plugin for CapturePlugin {
                     hold: knob("WOW_FX_HOLD", 0.0) > 0.5,
                     up: knob("WOW_FX_UP", 0.0),
                     at,
+                    scene: std::env::var("WOW_FX_SCENE").map_or_else(
+                        |_| Vec::new(),
+                        |path| match std::fs::read_to_string(&path) {
+                            Ok(text) => {
+                                let (rows, bad) = parse_scene(&text);
+                                info!(
+                                    "fxview: WOW_FX_SCENE {path} — {} spawn(s), {bad} row(s) \
+                                     skipped",
+                                    rows.len()
+                                );
+                                rows
+                            }
+                            Err(e) => {
+                                eprintln!("WOW_FX_SCENE={path}: {e}");
+                                std::process::exit(2);
+                            }
+                        },
+                    ),
                 })
                 .init_resource::<FxViewState>();
                 Scenario {
@@ -733,13 +798,14 @@ fn pin_scene(
 
     let (eye, look) = match (&fx_req, &fx_state) {
         // fxview: orbit the fixture's live root (a missile moves), aimed one yard up, where the
-        // effect models author their bodies.
+        // effect models author their bodies. Before it spawns, orbit the point it will spawn at,
+        // so that ground streams in first: the image settles on it, and the seat ray hits it.
         (Some(req), Some(state)) => {
             let root_pos = state
                 .root
                 .and_then(|r| roots.get(r).ok())
                 .map(|t| t.translation)
-                .unwrap_or_else(|| wow_to_bevy(FXVIEW_POS));
+                .unwrap_or_else(|| wow_to_bevy(req.at.unwrap_or(FXVIEW_POS)));
             let look = root_pos + Vec3::Y;
             let orbit = Quat::from_rotation_y(req.az_deg.to_radians())
                 * Quat::from_rotation_x(-req.el_deg.to_radians());

@@ -15,9 +15,25 @@ default = ["dev"]
 # `bevy/debug` names systems and parameters in ECS diagnostics (else "Enable the debug feature to
 # see the name"); set here so `benilla-worldview`, which reports those names, gets it too.
 dev = ["benilla-formats/dev", "benilla-assets/dev", "bevy/debug"]
+# The browser render backend, chosen by the launcher (`wenilla`): WebGL2 runs everywhere but has
+# no storage buffers (the shared light blob and the skin palettes are storage — decision 0278), so
+# the world needs WebGPU; WebGL2 stays selectable for the glue screens and as the census baseline.
+# Mutually exclusive — bevy asserts if both are on.
+webgl2 = ["bevy/webgl2"]
+# fork: perf — Bevy's per-system spans, summed and printed by `system_profile` whenever built in. Off
+# in every shipped build; `cargo build -p benilla-worldview --features trace_systems` for a profile.
+# `bevy/debug` keeps the system names the spans carry; without it every system is one unnamed row.
+trace_systems = ["bevy/trace", "bevy/debug"]
+# Tuning only: every embedded shader (`embedded_asset!`, `load_shader_library!`) is re-read from the
+# source tree when its file is saved, and the pipelines that use it recompile in the running app.
+# Native dev builds only, in no default set; `cargo build -p benilla-worldview --features shader_reload`.
+# The watcher resolves each shader's `file!()` path against Bevy's asset root, which for a binary
+# launched by hand is the binary's own folder: run with `BEVY_ASSET_ROOT=<the repo root>`.
+shader_reload = ["bevy/embedded_watcher"]
+webgpu = ["bevy/webgpu"]
 
 [dependencies]
-avian3d = "0.6"
+avian3d = "0.7"
 benilla-assets = { path = "../benilla-assets", default-features = false }
 benilla-formats = { path = "../benilla-formats", default-features = false }
 # No `benilla-protocol`: the engine renders a world and does not speak the protocol.
@@ -25,6 +41,8 @@ benilla-formats = { path = "../benilla-formats", default-features = false }
 benilla-wmo = { path = "../benilla-wmo" }
 bevy.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
+# fork: fsr (FORK.md) — `fsr::caps` claims WebGPU's tier-1 bit on wgpu's own flag type.
+wgpu.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # macOS AppKit calls, at `benilla-app`'s pins so the graph has one objc2.
@@ -44,3 +62,12 @@ objc2-app-kit = { version = "0.2", features = [
 objc2-foundation = "0.2"
 # `sel!`, for the two selectors `mac_quit` swaps; the objc2 that objc2-app-kit 0.2 builds against.
 objc2 = "0.5"
+
+# WebGL2 is bevy's wasm32 render backend (no WebGPU fallback here). `bevy.workspace = true` above
+# already carries it transitively (`default_platform` bundles it for every target), but named
+# explicitly on the wasm32 target table per the plan's feature-unification note — this crate and
+# `benilla-app` must resolve `bevy` to the SAME feature set or cargo builds two copies.
+
+[dev-dependencies]
+# fork: fsr (FORK.md) — validates every FSR shader permutation.
+naga = { version = "29", features = ["wgsl-in"] }

@@ -860,11 +860,17 @@ fn feed_auction(
 
         // The class tree needs no session: the stock `AuctionFrameBrowse_OnLoad` reads
         // `GetAuctionItemClasses()` when the addon loads (`Blizzard_AuctionUI.lua:174`).
-        let classes_now = categories(catalogs.0.as_deref(), catalogs.1.as_deref());
+        // The tree is a function of the two catalogs alone: rebuilt when either lands or changes,
+        // or for a VM that has none yet.
         let last_classes = last_classes.get(script);
-        if *last_classes != classes_now {
-            *last_classes = classes_now.clone();
-            script.set_auction_item_classes(classes_now);
+        let catalogs_moved = catalogs.0.as_ref().is_some_and(|c| c.is_changed())
+            || catalogs.1.as_ref().is_some_and(|c| c.is_changed());
+        if catalogs_moved || last_classes.is_empty() {
+            let classes_now = categories(catalogs.0.as_deref(), catalogs.1.as_deref());
+            if *last_classes != classes_now {
+                *last_classes = classes_now.clone();
+                script.set_auction_item_classes(classes_now);
+            }
         }
 
         // A `_S` line whose item was not cached when its handler ran, shown once the record lands,
@@ -1291,7 +1297,7 @@ mod tests {
             "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.world_mut().spawn((SelfPlayer, crate::net::Guid(ME)));
         // The row's item template is cached: an uncached row answers the miss shape, whose
         // eleventh value is nil whatever the bidder.
@@ -1310,7 +1316,7 @@ mod tests {
             app.world_mut().run_system(feed).unwrap();
             // The lanes' drain, after the feed.
             net::fire_house_lane(app.world_mut());
-            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
             s.resolve();
             let seen = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();
@@ -1364,7 +1370,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<Items>()
             .insert_template(2589, Some(crate::items::test_template("Linen Cloth")));
-        app.insert_non_send_resource(UiScript::new().unwrap());
+        app.insert_non_send(UiScript::new().unwrap());
         app.world_mut().spawn((SelfPlayer, crate::net::Guid(ME)));
         {
             let mut open = app.world_mut().resource_mut::<AuctionOpen>();
@@ -1373,7 +1379,7 @@ mod tests {
         }
         let read = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .run(r#"GetAuctionItemInfo("owner", 1)"#)
                 .unwrap();
             app.update();
@@ -1422,7 +1428,7 @@ mod tests {
     fn a_reload_closes_the_auction_house_and_the_new_vm_shows_nothing() {
         use crate::ui_script::sweep_test::{reload_in_place, seen, seen_in, spied_vm};
         let mut app = sweep_auction_app();
-        app.insert_non_send_resource(spied_vm(&EVENTS));
+        app.insert_non_send(spied_vm(&EVENTS));
         open_auction(app.world_mut(), AUCTIONEER, 1);
         app.update();
         assert_eq!(seen_in(&app), ["AUCTION_HOUSE_SHOW"]);
@@ -1450,7 +1456,7 @@ mod tests {
     fn a_worldport_closes_the_auction_house_once() {
         use crate::ui_script::sweep_test::{seen_in, spied_vm, sweep_in_place};
         let mut app = sweep_auction_app();
-        app.insert_non_send_resource(spied_vm(&EVENTS));
+        app.insert_non_send(spied_vm(&EVENTS));
         open_auction(app.world_mut(), AUCTIONEER, 1);
         app.update();
         sweep_in_place(&mut app);

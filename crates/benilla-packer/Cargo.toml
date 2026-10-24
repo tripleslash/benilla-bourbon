@@ -1,0 +1,36 @@
+[package]
+name = "benilla-packer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "benilla-pack — the one-time repackaging of a WoW 1.12.1 install into a BENPACK container for static hosting"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "benilla-pack"
+path = "src/main.rs"
+
+[features]
+# Forwarded dev/player seam (0026 · 1173/1174 · 1175). `benilla-formats` is taken with
+# `default-features = false` and its `dev` re-exported here, or feature unification puts the build
+# machine's source-tree path back into a `--no-default-features` build. This is a developer tool and
+# is never shipped to a player, but the seam is uniform across the workspace on purpose: an
+# exception is a thing to remember, and the next crate copies whatever this one did.
+default = ["dev"]
+dev = ["benilla-formats/dev"]
+
+[dependencies]
+benilla-pack = { path = "../benilla-pack", features = ["write"] }
+benilla-mpq = { path = "../benilla-mpq" }
+# For `Chain::open`'s mount law and its listfile union — the archive-order rules live there and are
+# reused, never restated.
+benilla-formats = { path = "../benilla-formats", default-features = false }
+# `inspect`'s reader scan: the point of that command is to answer "can THIS client read this art",
+# so it must use the same two readers the client does rather than a second opinion.
+benilla-m2 = { path = "../benilla-m2" }
+benilla-blp = { path = "../benilla-blp" }
+anyhow.workspace = true
+clap.workspace = true
+rayon = "1"

@@ -154,7 +154,7 @@ fn client() -> App {
             "#,
         )
         .unwrap();
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     frame(
         &mut app,
         vec![
@@ -173,7 +173,7 @@ fn frame(app: &mut App, packets: Vec<SessionEvent>) -> Vec<String> {
     let world = app.world_mut();
     crate::net::handlers::dispatch(world, wire(packets));
     crate::lanes::fire_in_order(world);
-    let s = world.non_send_resource_mut::<UiScript>();
+    let s = world.non_send_mut::<UiScript>();
     let out = s.eval::<Vec<String>>("return Heard").unwrap();
     s.run("Heard = {}").unwrap();
     out

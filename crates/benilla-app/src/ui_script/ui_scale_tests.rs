@@ -36,7 +36,7 @@ fn app(w: u32, h: u32, ui_scale: f32) -> App {
     let script = UiScript::new().unwrap();
     script.run(TREE).unwrap();
     let mut app = App::new();
-    app.insert_non_send_resource(script);
+    app.insert_non_send(script);
     app.init_resource::<UiQuads>();
     app.init_resource::<super::UiPassState>();
     app.init_resource::<Assets<Image>>();
@@ -66,7 +66,7 @@ fn app(w: u32, h: u32, ui_scale: f32) -> App {
 
 fn eval(app: &App, chunk: &str) -> f64 {
     app.world()
-        .non_send_resource::<UiScript>()
+        .non_send::<UiScript>()
         .eval::<f64>(chunk)
         .unwrap()
 }

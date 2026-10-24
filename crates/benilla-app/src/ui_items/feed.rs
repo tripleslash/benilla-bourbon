@@ -890,7 +890,9 @@ fn resolve_slot(
     names: &crate::names::NameCache,
     // Mutable: reading a charter's record is what queries it.
     petitions: &crate::ui_petition::PetitionRecords,
-    now: std::time::Instant,
+    // `bevy::platform::time::Instant`: this is `clock.anchor` (`crate::ui_script::UiClock`), which
+    // on wasm32 is a different type from `std::time::Instant` (that field's own doc has the reason).
+    now: bevy::platform::time::Instant,
     ui_now: f64,
     // The class's `ChrClasses.dbc` relic flag, which decides slot 17 for every fit-rule read.
     has_relic_slot: bool,
@@ -1065,7 +1067,7 @@ fn use_cooldown(
     charges_left: i32,
     cooldowns: &crate::spell::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
-    now: std::time::Instant,
+    now: bevy::platform::time::Instant,
     ui_now: f64,
 ) -> Option<(i64, u32, bool)> {
     if t.charges_depleted(charges_left) {
@@ -1091,7 +1093,7 @@ fn worn_cooldowns(
     items: &Items,
     cooldowns: &crate::spell::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
-    now: std::time::Instant,
+    now: bevy::platform::time::Instant,
     ui_now: f64,
 ) -> HashMap<usize, (i64, u32, bool)> {
     (0..WORN_SLOTS)
@@ -1245,7 +1247,7 @@ pub(crate) fn feed_containers(
         // `WOW_FEED_COST=1` prints the body's mean cost every 60 runs.
         let cost_t0 = std::env::var_os("WOW_FEED_COST")
             .is_some()
-            .then(std::time::Instant::now);
+            .then(bevy::platform::time::Instant::now);
         // One clock pair for every slot, so a running cooldown's pushed start is frame-stable.
         let (now, ui_now) = (clock.anchor, clock.ui_now);
         let spell_catalog = spells.as_deref().map(|s| &s.catalog);
@@ -2103,7 +2105,7 @@ mod tests {
                 None,
                 &names,
                 &petitions,
-                std::time::Instant::now(),
+                bevy::platform::time::Instant::now(),
                 0.0,
                 false,
             )
@@ -2163,7 +2165,7 @@ mod tests {
             None,
             &NameCache::default(),
             &petitions,
-            std::time::Instant::now(),
+            bevy::platform::time::Instant::now(),
             0.0,
             false,
         )
@@ -2219,7 +2221,7 @@ mod tests {
                 None,
                 &names,
                 &petitions,
-                std::time::Instant::now(),
+                bevy::platform::time::Instant::now(),
                 0.0,
                 false,
             )
@@ -2275,7 +2277,7 @@ mod tests {
                 None,
                 &names,
                 &petitions,
-                std::time::Instant::now(),
+                bevy::platform::time::Instant::now(),
                 0.0,
                 false,
             )
@@ -2336,7 +2338,7 @@ mod tests {
                 None,
                 &names,
                 &petitions,
-                std::time::Instant::now(),
+                bevy::platform::time::Instant::now(),
                 0.0,
                 false,
             )
@@ -2384,7 +2386,7 @@ mod tests {
             t.use_spell = spell;
             items.insert_template(entry, Some(t));
         }
-        let now = std::time::Instant::now();
+        let now = bevy::platform::time::Instant::now();
         let mut cooldowns = crate::spell::Cooldowns::default();
         // Only 2000 was used; 2001 has a use spell and no cooldown, 2002 has no use spell.
         cooldowns.start_item(2000, &use_spell(9000), None, now);
@@ -2441,7 +2443,7 @@ mod tests {
         ];
         let mut objs = TestObjects::new();
         let mut items = Items::default();
-        let now = std::time::Instant::now();
+        let now = bevy::platform::time::Instant::now();
         let mut cooldowns = crate::spell::Cooldowns::default();
         for &(guid, entry, template_charges, copy_charges) in &cases {
             objs.spawn(
@@ -2718,14 +2720,14 @@ mod ask_tests {
             .insert_template(25, Some(crate::items::test_template("Linen Cloth")));
         let name = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .non_send_mut::<benilla_ui::script::UiScript>()
                 .eval::<Option<String>>("return (GetItemInfo(25))")
                 .unwrap()
         };
-        app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+        app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
         app.update();
         assert_eq!(name(&mut app).as_deref(), Some("Linen Cloth"));
-        app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+        app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
         app.update();
         assert_eq!(
             name(&mut app).as_deref(),
@@ -2748,10 +2750,10 @@ mod ask_tests {
         app.world_mut()
             .resource_mut::<Items>()
             .insert_template(25, Some(crate::items::test_template("Linen Cloth")));
-        app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+        app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
         let name = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .non_send_mut::<benilla_ui::script::UiScript>()
                 .eval::<Option<String>>("return (GetItemInfo(25))")
                 .unwrap()
         };
@@ -2775,10 +2777,10 @@ mod ask_tests {
             .init_resource::<Items>()
             .init_resource::<crate::spell::SpellModifiers>()
             .add_systems(Update, super::feed_item_stats);
-        app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+        app.insert_non_send(benilla_ui::script::UiScript::new().unwrap());
         let run = |app: &mut App, lua: &str| {
             app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .non_send_mut::<benilla_ui::script::UiScript>()
                 .run(lua)
                 .unwrap();
             app.update();
@@ -2790,7 +2792,7 @@ mod ask_tests {
         );
         let ask = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .non_send_mut::<benilla_ui::script::UiScript>()
                 .ask_item_templates([25]);
             app.update();
         };
@@ -2838,11 +2840,11 @@ mod ask_tests {
                 ..Default::default()
             },
         );
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.update();
         let line: String = app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .non_send_mut::<benilla_ui::script::UiScript>()
             .eval(
                 r#"
                 local tt = CreateFrame("GameTooltip", "TT", nil, "TestTooltipTemplate")
@@ -2873,7 +2875,7 @@ mod ask_tests {
         .add_systems(Update, super::feed_random_properties);
         let script = benilla_ui::script::UiScript::new().unwrap();
         script.run(r#"ITEM_SUFFIX_TEMPLATE = "%s -- %s""#).unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.update();
         let name = |app: &App| {
             let props = app.world().resource::<crate::items::RandomProperties>();
@@ -2881,7 +2883,7 @@ mod ask_tests {
         };
         assert_eq!(name(&app), "Robe -- of the Bear");
         app.world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .non_send_mut::<benilla_ui::script::UiScript>()
             .run(r#"ITEM_SUFFIX_TEMPLATE = nil"#)
             .unwrap();
         app.update();
@@ -2926,11 +2928,11 @@ mod ask_tests {
                 ..Default::default()
             },
         );
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         app.update();
         let (known, medal, r, g, b): (String, String, f32, f32, f32) = app
             .world_mut()
-            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .non_send_mut::<benilla_ui::script::UiScript>()
             .eval(
                 r#"
                 ITEM_SPELL_KNOWN = "Already known"

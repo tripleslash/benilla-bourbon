@@ -124,6 +124,9 @@ pub(super) struct InspectStores<'w, 's> {
     /// The meeting-stone queue (`[0xb72038]`), part of MEETINGSTONE(23)'s highlightable term, so
     /// the card's `interact` verdict reads the same predicate as the cursor.
     stone: Option<Res<'w, crate::ui_dialog_verbs::MeetingStone>>,
+    /// Whether the player is in a battleground, whose objective faction term the card's `interact`
+    /// verdict must skip to match the cursor.
+    battleground: crate::target::cursor_mode::BattlegroundMap<'w>,
     /// The published GameObject mouseover the tooltip reads; the card's own dev pick bypasses the
     /// publish, so this shows when the two differ.
     hovered_go: Res<'w, crate::target::HoveredObject>,
@@ -214,6 +217,7 @@ pub(super) fn inspect_ui(
     );
     let go_templates = &*stores.go_templates;
     let queued_area = stores.stone.as_deref().map_or(0, |s| s.area);
+    let battleground = stores.battleground.active();
     let hovered_go = &*stores.hovered_go;
     // The picked submesh's shading payload, off the hit entity itself.
     let tag_line = mouseover
@@ -356,6 +360,7 @@ pub(super) fn inspect_ui(
                     go_templates.of(&s.0).and_then(|t| Some(t.meeting_stone?.area)),
                     queued_area,
                 ),
+                battleground,
             };
             let interact = if crate::target::cursor_mode::go_highlightable(s, reaction, overrides) {
                 "interact ✓"

@@ -269,8 +269,9 @@ pub(crate) fn assistable_alive(
 }
 
 /// One unit query's candidates, positioned by [`GlobalTransform`] as the VM's candidate feed
-/// (`ui_unit::held::feed_name_candidates`) does: nothing writes it during `Update`, so both walks
-/// read one value in a frame, and it adds no undeclared order against the systems that move units.
+/// (`ui_unit::held::feed_name_candidates`) does: a passenger's `Transform` is local to its
+/// transport, nothing writes `GlobalTransform` during `Update`, so both walks read one value in a
+/// frame, and it adds no undeclared order against the systems that move units.
 type UnitQuery<'w, 's> = Query<
     'w,
     's,

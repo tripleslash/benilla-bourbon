@@ -18,6 +18,7 @@ mod quads;
 pub mod render;
 pub(crate) mod sim; // `SceneGates` is the ribbon sim's draw-set input too
 
+pub use emit::birth_world;
 use emit::{emit_local, next_u32, rand01, rand_s11};
 use sim::simulate_particles;
 // The water-plane classification, shared with the ribbon sim.
@@ -910,6 +911,7 @@ pub(crate) mod tests {
             liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
             visible: vec![true, false, false],
+            lit: vec![true, false, false],
             interior_fog: vec![false; 3],
         };
         let fade = |groups: Option<&[u16]>| EmitterFade {

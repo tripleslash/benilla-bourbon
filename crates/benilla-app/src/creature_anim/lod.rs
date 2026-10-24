@@ -10,6 +10,12 @@
 //! The room leg parks a rig whose WMO room ([`UnitWmoRoom`]) and every room one portal hop away
 //! are outside the PVS: a body pokes out of its room only through a portal. The PVS is built in
 //! `Update`, before this gate, so a reveal wakes the same frame; every lookup seam fails open.
+//!
+//! The horizon leg parks a body the terrain horizon hides (`0x686000`, the same sphere the body
+//! election tests, [`benilla_world::exterior_cull`]): a unit behind a ridge goes to pass 2
+//! (`0x683340` → `0x680390`), neither animated (`0x714260`) nor event-ticked (`0x718960`). The
+//! horizon is built after transform propagation, which pose evaluation precedes, so the gate reads
+//! the previous frame's, as it reads a one-frame-old frustum.
 
 use bevy::app::AnimationSystems;
 use bevy::camera::primitives::{Frustum, Sphere as CullSphere};
@@ -24,7 +30,9 @@ use crate::target::SelectionRadius;
 use benilla_world::view::WorldCamera;
 use benilla_world::wmo_portal::{room_pvs_visible, UnitWmoRoom, WmoPortalInstance};
 
+use benilla_world::horizon::{world_box, Horizon};
 use benilla_world::rig_anim::{AnimParked, RigPose};
+use benilla_world::world_unit::WorldUnit;
 
 use crate::portrait::StageRig;
 
@@ -41,7 +49,7 @@ const FALLBACK_RADIUS: f32 = 6.0;
 /// Park or wake each rig by its padded frustum sphere and its room, before [`AnimationSystems`] so
 /// a wake samples the same frame. The body we drive and its mount never park: the camera rides its
 /// attachment 17 and it animates faded out in first person. `WOW_NO_ANIM_LOD=1` never parks and
-/// `WOW_NO_ROOM_LOD=1` drops the room leg.
+/// `WOW_NO_ROOM_LOD=1` drops the room leg; `WOW_HORIZON=0` or `count` leaves the horizon leg off.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn gate_rig_animation(
     time: Res<Time>,
@@ -55,6 +63,7 @@ pub(super) fn gate_rig_animation(
             Has<Embodied>,
             Option<&MountBody>,
             Option<&UnitWmoRoom>,
+            Option<&WorldUnit>,
         ),
         // Every rig, driver or not: a GameObject rig's looping player is its whole animation.
         // Doodads and booth stages are left out: their own gates own their `AnimParked`, and two
@@ -68,6 +77,7 @@ pub(super) fn gate_rig_animation(
     self_hosts: Query<Has<Embodied>>,
     instances: Query<&WmoPortalInstance>,
     wmos: Res<Assets<WmoModel>>,
+    horizon: Option<Res<Horizon>>,
     mut out_since: Local<EntityHashMap<f32>>,
     mut disabled: Local<Option<bool>>,
     mut park_all: Local<Option<bool>>,
@@ -82,12 +92,13 @@ pub(super) fn gate_rig_animation(
     // The `[rig-gate]` counters (`WOW_RIG_COST`): `room_out` counts the rigs the frustum keeps and
     // the PVS rejects, even under `WOW_NO_ROOM_LOD`.
     let cost_on = benilla_world::rig_palette::rig_cost_enabled();
-    let (mut n_rigs, mut n_parked, mut room_out) = (0u32, 0u32, 0u32);
+    let (mut n_rigs, mut n_parked, mut room_out, mut horizon_out) = (0u32, 0u32, 0u32, 0u32);
+    let horizon = horizon.as_deref().filter(|h| h.enforced());
     let Ok(frustum) = cam.single() else {
         return;
     };
     let now = time.elapsed_secs();
-    for (entity, tf, radius, parked, is_self, mount, room) in &rigs {
+    for (entity, tf, radius, parked, is_self, mount, room, unit) in &rigs {
         let exempt =
             disabled || is_self || mount.is_some_and(|m| self_hosts.get(m.host).unwrap_or(false));
         let visible = exempt
@@ -103,13 +114,25 @@ pub(super) fn gate_rig_animation(
                 );
                 // The room leg: only a rig the frustum leg kept can be room-parked.
                 let room_in = !sphere_in || (no_room && !cost_on) || {
-                    let ok = room_pvs_visible(room, &instances, &wmos);
+                    let ok = room_pvs_visible(room, Some((tf.translation(), r)), &instances, &wmos);
                     if !ok {
                         room_out += 1;
                     }
                     ok || no_room
                 };
-                sphere_in && room_in
+                // The horizon leg: the election's own sphere, so the draw and the pose agree.
+                let above = !(sphere_in && room_in)
+                    || match (horizon, unit.and_then(|u| u.bound.as_ref())) {
+                        (Some(h), Some(bound)) => {
+                            let (min, max) = world_box(tf, bound);
+                            let hidden =
+                                h.hides_sphere((min + max) * 0.5, (max - min).length() * 0.5);
+                            horizon_out += u32::from(hidden);
+                            !hidden
+                        }
+                        _ => true,
+                    };
+                sphere_in && room_in && above
             };
         if cost_on {
             n_rigs += 1;
@@ -129,15 +152,27 @@ pub(super) fn gate_rig_animation(
         }
     }
     if cost_on {
-        eprintln!("[rig-gate] rigs={n_rigs} parked={n_parked} room_out={room_out}");
+        eprintln!(
+            "[rig-gate] rigs={n_rigs} parked={n_parked} room_out={room_out} \
+             horizon_out={horizon_out}"
+        );
     }
     // Drop entries for rigs that despawned (or lost their model) before parking.
     out_since.retain(|e, _| rigs.contains(*e));
 }
 
-/// Register [`gate_rig_animation`] before the frame's pose evaluation.
+/// Register [`gate_rig_animation`] before the frame's pose evaluation, and behind it the hold on
+/// the effect models its parked rigs host, so a wake restores both in the same frame.
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(PostUpdate, gate_rig_animation.before(AnimationSystems));
+    app.add_systems(
+        PostUpdate,
+        (
+            gate_rig_animation,
+            crate::entities::spell_fx::park_effect_rigs,
+        )
+            .chain()
+            .before(AnimationSystems),
+    );
 }
 
 #[cfg(test)]
@@ -269,8 +304,12 @@ mod tests {
     /// at +Z are behind it.
     fn spawn_camera(app: &mut App) {
         let clip_from_world = Mat4::perspective_rh(1.2, 1.0, 0.1, 1000.0);
-        app.world_mut()
-            .spawn((WorldCamera, Frustum::from_clip_from_world(&clip_from_world)));
+        app.world_mut().spawn((
+            WorldCamera,
+            Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &clip_from_world,
+            )),
+        ));
     }
 
     fn app() -> App {
@@ -513,6 +552,11 @@ mod tests {
                 world_from_local: bevy::math::Affine3A::IDENTITY,
                 name_set: 0,
                 visible: vec![false, false],
+                // This rig is room-DARK in the PVS sense, which is the `visible` row above and
+                // the whole subject of this test. Lighting reachability is a different question
+                // and not one this leg reads, so it takes the ungated default the portal pass
+                // itself falls back to (`lit = all true` for an instance nothing has gated).
+                lit: vec![true, true],
                 interior_fog: vec![false, false],
                 liquid_visited: vec![false, false],
                 flooded: vec![None, None],
@@ -563,6 +607,37 @@ mod tests {
         let frozen = bone(&app, joint);
         advance(&mut app, DUR * 0.35, 2);
         assert_eq!(frozen, bone(&app, joint), "the parked GO rig's bones hold");
+    }
+
+    /// A body the horizon hides parks; one standing above the ridge's line stays live.
+    #[test]
+    fn a_rig_behind_the_horizon_parks_and_one_above_it_does_not() {
+        let mut app = app();
+        spawn_camera(&mut app);
+        // A wall at slope 0.1 from the camera's eye along −Z.
+        app.insert_resource(Horizon::level_wall(Vec3::ZERO, Vec3::NEG_Z, 0.1));
+        let unit = WorldUnit {
+            wades: true,
+            scale: 1.0,
+            height: 2.0,
+            bound: Some(bevy::camera::primitives::Aabb::from_min_max(
+                Vec3::splat(-0.5),
+                Vec3::splat(0.5),
+            )),
+        };
+        let (behind, _) = spawn_rig(&mut app, Vec3::new(0.0, 0.0, -100.0));
+        let (above, _) = spawn_rig(&mut app, Vec3::new(0.0, 40.0, -100.0));
+        app.world_mut().entity_mut(behind).insert(unit);
+        app.world_mut().entity_mut(above).insert(unit);
+        advance(&mut app, PARK_AFTER_SECS + 0.2, 4);
+        assert!(
+            app.world().entity(behind).contains::<AnimParked>(),
+            "in the frustum but under the horizon ⇒ parked"
+        );
+        assert!(
+            !app.world().entity(above).contains::<AnimParked>(),
+            "above the ridge's line ⇒ live"
+        );
     }
 
     #[test]

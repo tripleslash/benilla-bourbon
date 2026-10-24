@@ -8,18 +8,21 @@
 //! The geometry (`0x61f780`): 65 vertices lerped near to far with a fixed sag of
 //! `0.5 * sin(pi * t)` world units, not scaled by length. Near is the pole's `$CCH` marker (the
 //! bobber's own `$CCH` is never read); far is the bobber's position plus half its scaled bbox
-//! height. One flat color, the pole's light-collector ambient, opaque and unlit.
+//! height. One flat color, the pole's light-collector ambient, opaque and unlit. It is a D3D
+//! line strip, so it rasterizes one display pixel wide at any distance.
 //!
 //! Here the anchor rides the unposed prop frame, the color is the scene ambient rather than the
 //! pole's light collector, and the line is unfogged. The sheathe trigger (`0x60d2f0`) and the
 //! FishingCast to FishingLoop handoff (`0x5fc3f0` case 0x85) belong to the channel animations.
 
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 
 use benilla_protocol::EntityKind;
 
 use crate::entities::OverheadFallback;
 use crate::net::{GuidIndex, NetEntity, ObjectStore};
+use crate::world_backdrop::WorldBackdrop;
 
 /// Marks a mainhand prop whose model authors `$CCH`, which only the fishing pole does, standing
 /// in for the reference's `{class 2, subclass 20}` item check. Despawned with the prop.
@@ -36,6 +39,33 @@ const SEGMENTS: usize = 64;
 /// The half-sine sag amplitude (const `0x80c9a8` = -0.5, applied to `sin(pi * t)`).
 const SAG: f32 = 0.5;
 
+/// The engine-drawn lines' gizmo group, this line's and the bowstring's: one display pixel wide,
+/// not Bevy's default two.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub(crate) struct EngineLineGizmos;
+
+/// One display pixel in the world target's pixels, the unit a gizmo width is measured in. Below
+/// 1.0 the gizmo shader draws one pixel at that coverage, which the upscale spreads back to one.
+fn display_pixel(render_width: u32, window_width: u32) -> f32 {
+    render_width.max(1) as f32 / window_width.max(1) as f32
+}
+
+/// Holds the engine lines at one display pixel as the render scale or the window moves.
+fn size_engine_lines(
+    backdrop: Option<Res<WorldBackdrop>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut store: ResMut<GizmoConfigStore>,
+) {
+    let (Some(backdrop), Ok(window)) = (backdrop, windows.single()) else {
+        return;
+    };
+    let width = display_pixel(backdrop.render_size().x, window.physical_width());
+    let (config, _) = store.config_mut::<EngineLineGizmos>();
+    if config.line.width != width {
+        config.line.width = width;
+    }
+}
+
 /// Draws every visible fisher's line from this frame's prop frame.
 fn draw_fishing_lines(
     poles: Query<(&FishingPoleTip, &GlobalTransform, &InheritedVisibility)>,
@@ -48,7 +78,7 @@ fn draw_fishing_lines(
         Option<&OverheadFallback>,
     )>,
     lighting: Option<Res<benilla_world::lighting::WowLighting>>,
-    mut gizmos: Gizmos,
+    mut gizmos: Gizmos<EngineLineGizmos>,
 ) {
     for (pole, prop, vis) in &poles {
         if !vis.get() {
@@ -102,9 +132,12 @@ pub(crate) struct FishingLinePlugin;
 
 impl Plugin for FishingLinePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_gizmo_group::<EngineLineGizmos>().add_systems(
             PostUpdate,
-            draw_fishing_lines.in_set(benilla_world::billboard::BillboardPlace),
+            (
+                size_engine_lines,
+                draw_fishing_lines.in_set(benilla_world::billboard::BillboardPlace),
+            ),
         );
     }
 }
@@ -135,5 +168,14 @@ mod tests {
         let dip = SAG * (std::f32::consts::PI * 0.5).sin();
         assert!((dip - SAG).abs() < 1e-6);
         assert!(long.y - dip < long.y);
+    }
+
+    /// One display pixel in world-target pixels: 1 at render scale 1, the scale otherwise.
+    #[test]
+    fn the_line_is_one_display_pixel_wide() {
+        assert_eq!(display_pixel(2560, 2560), 1.0);
+        assert_eq!(display_pixel(1280, 2560), 0.5);
+        assert_eq!(display_pixel(5120, 2560), 2.0);
+        assert_eq!(display_pixel(0, 0), 1.0);
     }
 }

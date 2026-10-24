@@ -112,7 +112,7 @@ fn client() -> (App, Receiver<ClientCommand>) {
         },
     );
     script.set_container(0, Some(bag));
-    world.insert_non_send_resource(script);
+    world.insert_non_send(script);
     (app, rx)
 }
 
@@ -244,7 +244,7 @@ fn a_held_rows_drop_on_a_bank_bag_slot_buys_into_that_bag() {
             (BANK_BAG_SLOT_1, BANK_BAG as u32),
             (BANK_BAG_SLOT_1 + 1, (BANK_BAG >> 32) as u32),
         ]));
-        let mut script = world.non_send_resource_mut::<UiScript>();
+        let mut script = world.non_send_mut::<UiScript>();
         script.set_bank(Some(benilla_ui::script::BankState::default()));
         script.set_container(
             5,

@@ -164,15 +164,30 @@ type Result<T> = std::result::Result<T, Error>;
 pub fn parse_wmo(cursor: &mut Cursor<&[u8]>) -> Result<ParsedWmo> {
     let b: &[u8] = cursor.get_ref();
     // A group file carries a MOGP super-chunk; a root carries MOHD.
-    for (magic, payload) in chunks(b) {
-        if &magic == b"PGOM" {
-            return Ok(ParsedWmo::Group(parse_group(payload)?));
-        }
-        if &magic == b"DHOM" {
-            return Ok(ParsedWmo::Root(parse_root(b)?));
-        }
+    if let Some(payload) = mogp_payload(b) {
+        return Ok(ParsedWmo::Group(parse_group(payload)?));
+    }
+    if chunks(b).any(|(magic, _)| &magic == b"DHOM") {
+        return Ok(ParsedWmo::Root(parse_root(b)?));
     }
     Err(Error::NotWmo)
+}
+
+/// The MOGP (`PGOM` as stored) payload of a group file: from its data start to **EOF**, whatever
+/// size it declares. MOGP is always a group file's last top-level chunk, and the six Turtle
+/// `Shadowmoon_Slagpit01_00{0..5}.wmo` declare 0x40 — short of the 0x44 header — leaving MOPY/MOVI/
+/// MOVT/... as top-level siblings after it, so trusting the declared size drops the whole group.
+pub fn mogp_payload(b: &[u8]) -> Option<&[u8]> {
+    let mut pos = 0usize;
+    while pos.checked_add(8)? <= b.len() {
+        let size = b.u32_at(pos + 4)? as usize;
+        let start = pos + 8;
+        if &b[pos..pos + 4] == b"PGOM" {
+            return Some(&b[start..]);
+        }
+        pos = start.saturating_add(size).min(b.len());
+    }
+    None
 }
 
 fn parse_root(b: &[u8]) -> Result<WmoRoot> {
@@ -483,6 +498,31 @@ mod tests {
             panic!("expected a group");
         };
         assert!(g.liquid.is_none());
+    }
+
+    #[test]
+    fn mogp_declaring_less_than_its_header_still_owns_the_sibling_chunks() {
+        // Shadowmoon_Slagpit01_00x: MOGP declares 0x40 (< the 0x44 header) and MOVT/MOVI/MOPY
+        // follow as top-level siblings up to EOF.
+        let mut hdr = vec![0u8; 68];
+        hdr[8..12].copy_from_slice(&0x48u32.to_le_bytes()); // flags
+        let mut b = chunk(b"REVM", &17u32.to_le_bytes());
+        b.extend_from_slice(b"PGOM");
+        b.extend_from_slice(&64u32.to_le_bytes());
+        b.extend_from_slice(&hdr);
+        let mut vert = Vec::new();
+        for f in [0f32, 0., 0., 1., 0., 0., 0., 1., 0.] {
+            vert.extend_from_slice(&f.to_le_bytes());
+        }
+        b.extend(chunk(b"TVOM", &vert));
+        b.extend(chunk(b"IVOM", &[0u8, 0, 1, 0, 2, 0]));
+        b.extend(chunk(b"YPOM", &[0u8, 0]));
+        let Ok(ParsedWmo::Group(g)) = parse(&b) else {
+            panic!("expected a group");
+        };
+        assert_eq!(g.flags, 0x48);
+        assert_eq!(g.vertex_positions.len(), 3);
+        assert_eq!(g.vertex_indices.len(), 3);
     }
 
     #[test]

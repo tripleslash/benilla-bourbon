@@ -122,20 +122,113 @@ impl Pool {
 
 /// A lazy cache of the weather ground oracle (`0x67c760` → `0x6b7070`), the max of terrain and
 /// the chunk's WMO and doodad hits (`CMapObj::IntersectSegment` `0x6a37b0`, `0x6b7237`), so drops
-/// land on roofs. Here one downward ray per cell from the spawn plane; cleared when that plane
-/// moves a story (the ray start decides which roofs it sees) or the cache outgrows its bound.
+/// land on roofs: the first surface below the spawn plane, or 200 below it on a miss.
+///
+/// fork: perf — cached as each cell's COLUMN of surfaces, cast once from above any spawn plane
+/// the camera is near, so every plane reads its answer from the column. The cache used to hold one
+/// answer per cell for one plane and was dropped whole whenever the plane moved 8 yd: a flying
+/// camera re-cast every cell of the spawn area several times a second, thousands of rays a frame
+/// (`PRECIP_PROFILE`, Duskwood in rain). Its bound covers the band of cells a flight leaves drops
+/// in (packets replay up to [`RETIRE_DIST`] behind the camera), and past it the cells far from the
+/// camera go, once a frame ([`HeightCache::evict_far`]).
+///
+/// fork: a column answers for the colliders it was cast against. A zone streams them in over
+/// seconds, and until a tile's or a building's own lands the rays meet its stand-in (the far
+/// band's coarse ground, a bounding box: `terrain_stream::provisional`) or nothing at all; a
+/// column kept past that had the rain landing on a plane yards off the floor, or falling through
+/// it, for as long as the camera stayed. So the cache holds only the cells round the camera
+/// ([`Self::evict_far`]), and when a collider comes or goes within [`NEAR_REACH`] of it
+/// (`crate::collision::ColliderChanges`) every column is stale: re-cast when next asked for,
+/// [`STALE_RECASTS`] a frame, and answering as it is until its turn.
 #[derive(Resource, Default)]
 pub(super) struct HeightCache {
-    cells: HashMap<(i32, i32), f32>,
-    cast_y: f32,
+    cells: HashMap<(i32, i32), Column>,
+    /// How many times the colliders near the camera have changed ([`Self::begin_frame`]).
+    epoch: u64,
+    /// Frames since the cells far from the camera last went.
+    since_trim: u32,
+    /// Stale columns this frame may still re-cast.
+    recasts_left: u32,
+    /// fork: perf — rays cast, evictions and stale columns re-cast since the profile last read
+    /// them (`WOW_PRECIP_PROFILE`).
+    pub(super) rays: u32,
+    pub(super) clears: u32,
+    pub(super) recasts: u32,
+}
+
+/// One cell's surfaces, highest first, from `top` down to `bottom` (the known span).
+struct Column {
+    top: f32,
+    bottom: f32,
+    hits: [f32; COLUMN_HITS],
+    len: u8,
+    /// The cache's stamp when it was cast.
+    epoch: u64,
 }
 
 /// The reference's cell stride (`0x80ff98` = 1.0416666).
 pub(super) const CELL: f32 = 1.041_666_6;
 /// A probe that hits nothing reports ground 200 below the query (`0x67c812`: `refZ − 200`).
 const MISS_DEPTH: f32 = 200.0;
+/// How far below the plane a probe reaches before it counts as a miss.
+const PROBE_REACH: f32 = MISS_DEPTH + 50.0;
+/// A column is cast from this far above the plane that asked for it, so a climbing camera reuses
+/// it until it has risen this far.
+const COLUMN_HEADROOM: f32 = 64.0;
+/// Surfaces kept per column: a roof or a canopy over the ground, a bridge over both.
+const COLUMN_HITS: usize = 4;
+/// The cache's bound (about 8 MB), and the square half-width (yd) kept around the camera past it.
+const CACHE_CELLS: usize = 1 << 17;
+const KEEP_HALF: f32 = 160.0;
+/// Stale columns re-cast per frame: the rain's ~16 000 cells follow a change in about two
+/// seconds, at a few hundred rays a frame while they do.
+const STALE_RECASTS: u32 = 128;
+/// Frames between trims to [`KEEP_HALF`], and how far from the camera (yd, XZ) a collider change
+/// still dates the columns: the kept square's half-width plus what a flight covers between trims.
+const TRIM_FRAMES: u32 = 120;
+pub(super) const NEAR_REACH: f32 = KEEP_HALF + 100.0;
+
+impl Column {
+    /// The oracle's answer for a probe from `plane`: the first surface at or below it within
+    /// [`PROBE_REACH`], or the miss depth; `None` when this column does not cover that span.
+    fn ground(&self, plane: f32) -> Option<f32> {
+        if plane > self.top {
+            return None;
+        }
+        let floor = plane - PROBE_REACH;
+        match self.hits[..usize::from(self.len)]
+            .iter()
+            .find(|&&y| y <= plane)
+        {
+            Some(&y) if y >= floor => Some(y),
+            // The first surface under the plane is past the reach: a miss.
+            Some(_) => Some(plane - MISS_DEPTH),
+            None if self.bottom <= floor => Some(plane - MISS_DEPTH),
+            None => None,
+        }
+    }
+}
 
 impl HeightCache {
+    /// Opens a frame's lookups; `changed` when a collider came or went within [`NEAR_REACH`].
+    pub(super) fn begin_frame(&mut self, changed: bool) {
+        if changed {
+            self.epoch += 1;
+        }
+        self.recasts_left = STALE_RECASTS;
+    }
+
+    /// Does a column cast at stamp `cast_epoch` answer this lookup as it is? One from before the
+    /// last nearby change is re-cast instead while the frame's budget lasts.
+    fn serves(&mut self, cast_epoch: u64) -> bool {
+        if cast_epoch == self.epoch || self.recasts_left == 0 {
+            return true;
+        }
+        self.recasts_left -= 1;
+        self.recasts += 1;
+        false
+    }
+
     pub(super) fn ground_y(
         &mut self,
         x: f32,
@@ -144,32 +237,142 @@ impl HeightCache {
         spatial: &SpatialQuery,
         filter: &SpatialQueryFilter,
     ) -> f32 {
-        if (self.cast_y - cast_from_y).abs() > 8.0 || self.cells.len() > 20_000 {
-            self.cells.clear();
-            self.cast_y = cast_from_y;
-        }
         let key = Self::key(x, z);
-        if let Some(&y) = self.cells.get(&key) {
-            return y;
+        let cached = self
+            .cells
+            .get(&key)
+            .and_then(|c| Some((c.ground(cast_from_y)?, c.epoch)));
+        if let Some((y, cast_epoch)) = cached {
+            if self.serves(cast_epoch) {
+                return y;
+            }
         }
         let cx = (key.0 as f32 + 0.5) * CELL;
         let cz = (key.1 as f32 + 0.5) * CELL;
-        let y = spatial
-            .cast_ray(
-                Vec3::new(cx, cast_from_y, cz),
-                Dir3::NEG_Y,
-                MISS_DEPTH + 50.0,
-                true,
-                filter,
-            )
-            .map_or(cast_from_y - MISS_DEPTH, |hit| cast_from_y - hit.distance);
-        self.cells.insert(key, y);
+        let column = self.cast_column(cx, cz, cast_from_y, spatial, filter);
+        let y = column
+            .ground(cast_from_y)
+            .unwrap_or(cast_from_y - MISS_DEPTH);
+        self.cells.insert(key, column);
         y
+    }
+
+    /// Keep only the cells within [`KEEP_HALF`] of the camera: past the bound, and every
+    /// [`TRIM_FRAMES`], so no column outlives the reach its staleness is judged over.
+    pub(super) fn evict_far(&mut self, cam: Vec3) {
+        self.since_trim += 1;
+        if self.cells.len() < CACHE_CELLS && self.since_trim < TRIM_FRAMES {
+            return;
+        }
+        self.since_trim = 0;
+        let (kx, kz) = Self::key(cam.x, cam.z);
+        let keep = (KEEP_HALF / CELL).ceil() as i32;
+        self.cells
+            .retain(|&(cx, cz), _| (cx - kx).abs() <= keep && (cz - kz).abs() <= keep);
+        self.clears += 1;
+    }
+
+    /// Walk down from [`COLUMN_HEADROOM`] above `plane` to [`PROBE_REACH`] below it, one ray per
+    /// surface. Not solid: a ray starting inside a doodad's hull reports where it leaves it, so the
+    /// walk goes on below.
+    fn cast_column(
+        &mut self,
+        x: f32,
+        z: f32,
+        plane: f32,
+        spatial: &SpatialQuery,
+        filter: &SpatialQueryFilter,
+    ) -> Column {
+        let top = plane + COLUMN_HEADROOM;
+        let mut column = Column {
+            top,
+            bottom: plane - PROBE_REACH,
+            hits: [0.0; COLUMN_HITS],
+            len: 0,
+            epoch: self.epoch,
+        };
+        let mut from = top;
+        while usize::from(column.len) < COLUMN_HITS {
+            let reach = from - column.bottom;
+            if reach <= 0.0 {
+                break;
+            }
+            self.rays += 1;
+            let Some(hit) =
+                spatial.cast_ray(Vec3::new(x, from, z), Dir3::NEG_Y, reach, false, filter)
+            else {
+                break;
+            };
+            let y = from - hit.distance;
+            column.hits[usize::from(column.len)] = y;
+            column.len += 1;
+            from = y - 0.05;
+        }
+        // Full: the span below the last surface is unknown.
+        if usize::from(column.len) == COLUMN_HITS {
+            column.bottom = column.bottom.max(from);
+        }
+        column
+    }
+
+    /// [`Self::ground_y`] without the ray: the cached answer, or `None` where `ground_y` would
+    /// cast or re-cast (no column, one that does not cover `cast_from_y`, or one from before the
+    /// last nearby collider change). Read-only, so the drift asks it from every worker at once.
+    fn peek(&self, key: (i32, i32), cast_from_y: f32) -> Option<f32> {
+        let column = self.cells.get(&key)?;
+        if column.epoch != self.epoch {
+            return None;
+        }
+        column.ground(cast_from_y)
     }
 
     /// The grid cell owning an XZ position.
     pub(super) fn key(x: f32, z: f32) -> (i32, i32) {
         ((x / CELL).floor() as i32, (z / CELL).floor() as i32)
+    }
+}
+
+/// Drops per parallel task in the drift: a step is a few nanoseconds, so a chunk this size keeps
+/// the dispatch cost small against the work (heavy rain holds ~17 k drops).
+const DRIFT_CHUNK: usize = 2048;
+
+/// Move every drop by `dt` and give each that changed cell its new cell's ground from the cache.
+/// Returns the drops whose new cell [`HeightCache::peek`] could not answer, in pool order: each
+/// moves alone and only reads the cache, so the chunks run in parallel on the compute pool, and
+/// the misses take their rays after, serially, as rays fill the shared cache and spend the
+/// frame's recast budget, in the order the serial walk spent it.
+fn drift_drops(drops: &mut [Drop], heights: &HeightCache, cast_plane: f32, dt: f32) -> Vec<usize> {
+    let step = |base: usize, chunk: &mut [Drop]| {
+        let mut miss = Vec::new();
+        for (i, d) in chunk.iter_mut().enumerate() {
+            d.pos += d.vel * dt;
+            d.age += dt;
+            let cell = HeightCache::key(d.pos.x, d.pos.z);
+            if cell != d.cell {
+                d.cell = cell;
+                match heights.peek(cell, cast_plane) {
+                    Some(y) => d.land_y = y,
+                    None => miss.push(base + i),
+                }
+            }
+        }
+        miss
+    };
+    // Below a chunk, or with no compute pool (a unit test), the walk stays on this thread.
+    let pool = bevy::tasks::ComputeTaskPool::try_get().filter(|p| p.thread_num() > 1);
+    match pool {
+        Some(pool) if drops.len() > DRIFT_CHUNK => {
+            let step = &step;
+            pool.scope(|s| {
+                for (c, chunk) in drops.chunks_mut(DRIFT_CHUNK).enumerate() {
+                    s.spawn(async move { step(c * DRIFT_CHUNK, chunk) });
+                }
+            })
+            .into_iter()
+            .flatten()
+            .collect()
+        }
+        _ => step(0, drops),
     }
 }
 
@@ -343,16 +546,13 @@ pub(super) fn run_kind(
     // ===== integrate + land =====
     // Landing tests the current cell's ground, a max from above: a drop drifting under cover
     // lands on the roof and splashes there, never on the floor below.
+    for i in drift_drops(&mut pool.drops, heights, cast_plane, dt) {
+        let d = &mut pool.drops[i];
+        d.land_y = heights.ground_y(d.pos.x, d.pos.z, cast_plane, spatial, filter);
+    }
     let mut landed: Vec<Patter> = Vec::new();
     {
         pool.drops.retain_mut(|d| {
-            d.pos += d.vel * dt;
-            d.age += dt;
-            let cell = HeightCache::key(d.pos.x, d.pos.z);
-            if cell != d.cell {
-                d.cell = cell;
-                d.land_y = heights.ground_y(d.pos.x, d.pos.z, cast_plane, spatial, filter);
-            }
             if d.pos.y > d.land_y {
                 return true;
             }
@@ -380,6 +580,142 @@ pub(super) fn run_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A column answers any plane under its top as one ray from that plane would: the first
+    /// surface at or below it within reach, the miss depth past it, and nothing it did not cover.
+    #[test]
+    fn a_column_answers_every_plane_under_its_top() {
+        // A roof at 30 over ground at 10, cast for a plane at 40.
+        let mut hits = [0.0; COLUMN_HITS];
+        hits[..2].copy_from_slice(&[30.0, 10.0]);
+        let column = Column {
+            top: 40.0 + COLUMN_HEADROOM,
+            bottom: 40.0 - PROBE_REACH,
+            hits,
+            len: 2,
+            epoch: 0,
+        };
+        assert_eq!(column.ground(40.0), Some(30.0));
+        assert_eq!(column.ground(100.0), Some(30.0));
+        // Under the roof, the ground.
+        assert_eq!(column.ground(20.0), Some(10.0));
+        // Above the column's top: re-cast.
+        assert_eq!(column.ground(40.0 + COLUMN_HEADROOM + 1.0), None);
+        // A plane whose first surface lies past the reach: a miss.
+        let low = Column {
+            top: 400.0,
+            bottom: 400.0 - COLUMN_HEADROOM - PROBE_REACH,
+            hits,
+            len: 2,
+            epoch: 0,
+        };
+        assert_eq!(low.ground(300.0), Some(300.0 - MISS_DEPTH));
+        // Below every surface and past what the column covers: re-cast.
+        assert_eq!(column.ground(5.0), None);
+    }
+
+    /// A column cast before the last nearby collider change is re-cast when asked for, a bounded
+    /// number a frame; past the budget it answers as it is, and the next frame takes up where
+    /// this one stopped. A frame with no nearby change dates nothing.
+    #[test]
+    fn a_stale_column_is_recast_within_the_frames_budget() {
+        let mut heights = HeightCache::default();
+        heights.begin_frame(false);
+        assert!(heights.serves(0), "nothing changed: a column answers");
+        heights.begin_frame(true);
+        for _ in 0..STALE_RECASTS {
+            assert!(!heights.serves(0), "cast before the change: re-cast");
+        }
+        assert!(
+            heights.serves(0),
+            "the budget is spent: it answers as it is"
+        );
+        assert!(heights.serves(1), "cast since the change");
+        assert_eq!(heights.recasts, STALE_RECASTS);
+        heights.begin_frame(false);
+        assert!(!heights.serves(0), "a new frame, a new budget");
+        assert!(heights.serves(1));
+    }
+
+    /// The drift's read-only lookup answers only what `ground_y` would answer without a ray: a
+    /// current column over the plane. A missing cell, an uncovered plane or a column from before
+    /// the last nearby collider change is a miss, left to the serial pass and its recast budget.
+    #[test]
+    fn the_drift_peeks_only_a_current_column() {
+        let mut heights = HeightCache::default();
+        let mut hits = [0.0; COLUMN_HITS];
+        hits[0] = 5.0;
+        heights.cells.insert(
+            (0, 0),
+            Column {
+                top: 40.0,
+                bottom: -300.0,
+                hits,
+                len: 1,
+                epoch: 0,
+            },
+        );
+        assert_eq!(
+            heights.peek((0, 0), 20.0),
+            Some(5.0),
+            "a current column answers"
+        );
+        assert_eq!(
+            heights.peek((0, 0), 60.0),
+            None,
+            "a plane over its top casts"
+        );
+        assert_eq!(heights.peek((1, 0), 20.0), None, "no column casts");
+        heights.begin_frame(true);
+        assert_eq!(heights.peek((0, 0), 20.0), None, "a stale column re-casts");
+    }
+
+    /// Drifting in chunks moves every drop and lists the misses in pool order, as the serial walk
+    /// met them.
+    #[test]
+    fn the_drift_moves_every_drop_and_lists_misses_in_order() {
+        let heights = HeightCache::default();
+        let mut drops: Vec<Drop> = (0..DRIFT_CHUNK * 2 + 7)
+            .map(|i| Drop {
+                pos: Vec3::new(i as f32 * 0.01, 30.0, 0.0),
+                vel: Vec3::new(2.0, -10.0, 0.0),
+                land_y: 0.0,
+                cell: (i32::MIN, 0),
+                age: 0.0,
+            })
+            .collect();
+        let misses = drift_drops(&mut drops, &heights, 40.0, 0.1);
+        assert_eq!(misses, (0..drops.len()).collect::<Vec<_>>());
+        assert!(drops
+            .iter()
+            .all(|d| (d.pos.y - 29.0).abs() < 1e-5 && d.age > 0.0));
+    }
+
+    /// The cells far from the camera go on a clock as well as at the bound, so every column the
+    /// cache holds lies inside the reach a collider change is judged over.
+    #[test]
+    fn the_cache_keeps_only_the_cells_round_the_camera() {
+        let mut heights = HeightCache::default();
+        let column = |epoch| Column {
+            top: 0.0,
+            bottom: 0.0,
+            hits: [0.0; COLUMN_HITS],
+            len: 0,
+            epoch,
+        };
+        heights.cells.insert(HeightCache::key(0.0, 0.0), column(0));
+        heights
+            .cells
+            .insert(HeightCache::key(KEEP_HALF + 20.0, 0.0), column(0));
+        for _ in 0..TRIM_FRAMES - 1 {
+            heights.evict_far(Vec3::ZERO);
+        }
+        assert_eq!(heights.cells.len(), 2, "not yet due");
+        heights.evict_far(Vec3::ZERO);
+        assert_eq!(heights.cells.len(), 1, "the far cell went with the trim");
+        assert!(heights.cells.contains_key(&HeightCache::key(0.0, 0.0)));
+        const { assert!(NEAR_REACH > KEEP_HALF) };
+    }
 
     /// A converged [`WeatherWind`] for a run along Bevy +X at `speed`, through the real window.
     fn wind_at(speed: f32) -> WeatherWind {

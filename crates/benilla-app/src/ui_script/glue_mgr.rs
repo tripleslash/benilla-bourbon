@@ -623,6 +623,22 @@ pub(crate) struct GlueMgr {
 impl GlueMgr {
     /// The record the last character list reply carried for `guid`: what the scene drive builds
     /// the selected character from (`0x472950` reads the select record's own copy).
+    /// The screen up while no operation runs, `login` or `charselect` (`screen`, as the VM's
+    /// `SetCurrentScreen` last set it): where the glue VM may be rebuilt without losing anything
+    /// ([`super::lifecycle::rebuild_stale_glue_vm`]).
+    pub(crate) fn idle_screen(&self, screen: &str) -> Option<super::glue::GlueScreen> {
+        if self.state != ScreenState::Idle || !self.outbox.is_empty() {
+            return None;
+        }
+        if screen.eq_ignore_ascii_case("charselect") {
+            Some(super::glue::GlueScreen::CharSelect)
+        } else if screen.eq_ignore_ascii_case("login") {
+            Some(super::glue::GlueScreen::Login)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn roster_character(&self, guid: u64) -> Option<&Character> {
         self.roster.iter().find(|c| c.guid == guid)
     }
@@ -877,6 +893,8 @@ impl GlueMgr {
                     hair_style: r.hair_style,
                     hair_color: r.hair_color,
                     facial_hair: r.facial_hair,
+                    // Kept on Turtle WoW alone where the ask is sent ([`send_asks`]).
+                    challenge_mask: Some(r.challenge_modes),
                 }),
             ),
             Step::Delete(guid) => char_op(
@@ -1761,7 +1779,7 @@ pub(crate) struct LoginNews<'w, 's> {
 
 /// What the manager asks of the rest of the app.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct GlueAsks<'w> {
+pub(crate) struct GlueAsks<'w, 's> {
     login: MessageWriter<'w, GlueLogin>,
     music: MessageWriter<'w, crate::sound::GlueMusicRequest>,
     launch: MessageWriter<'w, super::server_alert::LaunchUrl>,
@@ -1774,6 +1792,10 @@ pub(crate) struct GlueAsks<'w> {
     pick: Option<Res<'w, crate::net::CharPick>>,
     /// The engine-side CVar table `EnterWorld` writes and saves.
     cvars: Option<ResMut<'w, crate::cvars::Cvars>>,
+    /// Turtle WoW's `CMSG_CHAR_CREATE` carries a challenge mask the 1.12.1 one has no room for.
+    flavor: Option<Res<'w, crate::flavor::ClientFlavor>>,
+    /// A realm entry is queued through the flavor switch ([`crate::flavor::enter_realm`]).
+    commands: Commands<'w, 's>,
     /// What a new character's entry reads for its intro eye.
     eyes: crate::glue_session::roster::IntroEyes<'w>,
 }
@@ -1787,6 +1809,14 @@ pub(crate) fn read_agreements(cvars: &crate::cvars::Cvars) -> [NoticeState; 4] {
         if let Some(value) = cvars.get(notice.cvar()) {
             n[notice as usize] = NoticeState::from_cvar(value);
         }
+    }
+    // Deviation (this fork): every agreement stands accepted, as the native login has no
+    // agreements step. Their texts are loose `eula.html`/`tos.html` beside the install, which the
+    // browser build's packs do not carry, and an empty agreement cannot be scrolled to its end to
+    // enable Accept. The enUS glue also shows the scanning agreement (`AccountLogin.lua`'s
+    // `SHOW_SCANNING_AGREEMENT` leg), and the contest one shows wherever its flag is set.
+    for notice in GlueNotice::ALL {
+        n[notice as usize].accepted = true;
     }
     n
 }
@@ -1805,7 +1835,7 @@ pub(crate) fn drive_glue_mgr(
     mut asks: GlueAsks,
     tables: Option<Res<crate::glue_session::realm::RealmTables>>,
     run: Option<Res<RunModeRealm>>,
-    mut realmlist: Option<ResMut<crate::realmlist::Realmlist>>,
+    realmlist: Option<ResMut<crate::realmlist::Realmlist>>,
     areas: Option<Res<crate::area::AreaTableRes>>,
     sources: super::glue_create::CreateSources,
     state: Option<Res<State<crate::client_state::ClientState>>>,
@@ -2036,18 +2066,6 @@ pub(crate) fn drive_glue_mgr(
         {
             let mut mgr = shared.get_mut();
             mgr.tick();
-            // The realmlist control's typed value that was not an address reopens its dialog.
-            if script.is_some() {
-                if let Some(typed) = realmlist.as_deref_mut().and_then(|r| r.take_refused()) {
-                    mgr.outbox.push(Outgoing::Open {
-                        which: "BENILLA_REALMLIST",
-                        text: Some(Text::Raw(
-                            crate::glue_session::login::REALMLIST_BAD.to_string(),
-                        )),
-                        data: Some(typed),
-                    });
-                }
-            }
         }
         pump(
             &shared,
@@ -2121,7 +2139,7 @@ fn seat_glue(
 /// `CharacterSelect_OnShow` asks for its list only on a link `IsConnectedToServer` reports, and
 /// names the realm `GetServerName` does).
 pub(crate) fn seat_glue_build(world: &mut World, script: &mut UiScript) {
-    let Some(shared) = world.get_non_send_resource::<SharedGlueMgr>().cloned() else {
+    let Some(shared) = world.get_non_send::<SharedGlueMgr>().cloned() else {
         return;
     };
     script.set_glue_create_catalog(std::rc::Rc::new(super::glue_create::world_catalog(world)));
@@ -2137,8 +2155,10 @@ pub(crate) fn seat_glue_build(world: &mut World, script: &mut UiScript) {
 }
 
 /// Send the asks the manager holds: the login engine's, and the park requests in the order they
-/// were made, the realm requests stamped with the abandon generation as they go and the world
-/// entry's pick through the session's ([`crate::glue_session::roster::send_pick`]).
+/// were made. A realm dial goes through the flavor switch ([`crate::flavor::enter_realm`]), which
+/// mounts the realm's client data first and sends the ask itself, stamped with the abandon
+/// generation held now; it runs at this frame's command flush. The world entry's pick goes through
+/// the session's ([`crate::glue_session::roster::send_pick`]).
 fn send_asks(mgr: &mut GlueMgr, asks: &mut GlueAsks) {
     let (logins, park_asks) = mgr.take_asks();
     for ask in logins {
@@ -2148,7 +2168,10 @@ fn send_asks(mgr: &mut GlueMgr, asks: &mut GlueAsks) {
     if let Some(choice) = asks.realm.as_deref() {
         for mut ask in park_asks {
             match &mut ask {
-                ParkRequest::Realm(RealmRequest::Enter { generation, .. }) => *generation = now,
+                ParkRequest::Realm(RealmRequest::Enter { realm, .. }) => {
+                    crate::flavor::enter_realm(&mut asks.commands, realm.clone(), now);
+                    continue;
+                }
                 ParkRequest::Char(CharRequest::Enter(guid)) => {
                     if let (Some(roster), Some(pick)) =
                         (asks.roster.as_deref_mut(), asks.pick.as_deref())
@@ -2156,6 +2179,11 @@ fn send_asks(mgr: &mut GlueMgr, asks: &mut GlueAsks) {
                         crate::glue_session::roster::send_pick(roster, pick, *guid, &asks.eyes);
                     }
                     continue;
+                }
+                ParkRequest::Char(CharRequest::Create(req))
+                    if !asks.flavor.as_deref().is_some_and(|f| f.is_turtle()) =>
+                {
+                    req.challenge_mask = None;
                 }
                 _ => {}
             }

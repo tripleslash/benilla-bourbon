@@ -185,12 +185,12 @@ mod tests {
                    f:SetScript("OnEvent", function() table.insert(seen, arg1) end)"#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 
     fn script(app: &mut App) -> Mut<'_, UiScript> {
-        app.world_mut().non_send_resource_mut::<UiScript>()
+        app.world_mut().non_send_mut::<UiScript>()
     }
 
     /// A member's ping applies to the VM with its token at the next drive, and an unknown
@@ -266,7 +266,7 @@ mod tests {
             let pings = script(&mut app).take_minimap_pings_sent();
             let mut steps = bevy::ecs::system::SystemState::<MinimapSteps>::new(app.world_mut());
             for (x, y) in pings {
-                steps.get_mut(app.world_mut()).ping(x, y);
+                steps.get_mut(app.world_mut()).unwrap().ping(x, y);
             }
             let sent: Vec<_> = rx.try_iter().collect();
             assert_eq!(sent.len(), usize::from(grouped), "grouped: {grouped}");
@@ -281,7 +281,7 @@ mod tests {
             fresh
                 .run(r#"m = CreateFrame("Minimap", "Minimap")"#)
                 .unwrap();
-            app.insert_non_send_resource(fresh);
+            app.insert_non_send(fresh);
             app.update();
             let (x, _) = script(&mut app)
                 .eval::<(f64, f64)>("return m:GetPingPosition()")
@@ -309,6 +309,7 @@ mod tests {
             bevy::ecs::system::SystemState::<crate::spell::ScriptCursor>::new(app.world_mut());
         cursor
             .get_mut(app.world_mut())
+            .unwrap()
             .bind_location(ground_cast_point(100.0, 200.0, 30.5));
         cursor.apply(app.world_mut());
         let sent: Vec<_> = rx

@@ -564,7 +564,9 @@ fn desaturation_rides_the_extract_for_art_and_never_for_a_solid() {
 /// quad to read it from.
 fn desaturated(s: &UiScript, name: &str) -> bool {
     let lua = s.lua();
-    let model = lua.app_data_ref::<crate::script::Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let id = *model.region_by_name.get(name).expect("region name");
     let h = *model.id_to_region.get(&id).expect("region handle");
     model.region_data.get(&h).is_some_and(|d| d.desaturated)
@@ -1270,6 +1272,54 @@ fn a_textures_getters_report_its_texel_span_on_an_unsized_axis() {
     assert!(s.take_errors().is_empty());
 }
 
+/// A texture whose height comes from its art resolves once the art's size lands, with no layout
+/// write in between: on the web the size is in flight at the first sweep, and Turtle WoW's options
+/// frame stretches its `Top` and `Bot` pieces between two corners with no authored height.
+#[test]
+fn an_unsized_texture_resolves_when_its_arts_size_lands_after_the_first_sweep() {
+    use std::rc::Rc;
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let landed = Rc::new(std::cell::Cell::new(false));
+    let probe_landed = landed.clone();
+    s.set_texture_size_probe(Box::new(move |p| {
+        (p == "Interface\\Top" && probe_landed.get()).then_some((256, 256))
+    }));
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Box")
+        f:SetPoint("BOTTOMLEFT", 0, 0); f:SetWidth(648); f:SetHeight(520)
+        Top = f:CreateTexture("Top", "BACKGROUND")
+        Top:SetTexture("Interface\\Top")
+        Top:SetPoint("TOPLEFT", f, "TOPLEFT", 256, 0)
+        Top:SetPoint("TOPRIGHT", f, "TOPRIGHT", -128, 0)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(
+        s.eval::<bool>("return Top:GetBottom() == nil").unwrap(),
+        "no size yet: the height axis has no span, so the region does not resolve"
+    );
+
+    landed.set(true);
+    s.resolve();
+    // The getters answer `G` of the stored layout value (the screen-unit law), which at 800x600
+    // is the edge to within a float's rounding, not to the bit.
+    assert_eq!(
+        s.eval::<Vec<f64>>(
+            "return { Top:GetLeft(), Top:GetRight(), Top:GetTop(), Top:GetBottom() }"
+        )
+        .unwrap()
+        .into_iter()
+        .map(|v| (v * 1000.0).round() / 1000.0)
+        .collect::<Vec<_>>(),
+        vec![256.0, 520.0, 520.0, 264.0],
+        "the art's 256 texels are the height, the anchors the width"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
 /// The constructors' string arguments take four shapes, by whether the binding tests its parser's
 /// return: a region constructor's `name` and `layer` (`0x6f3510` → `0x6f3690`, untested) and
 /// `CreateFrame`'s `name` and `inherits` (`0x6f3690`, unguarded) read a table as absent and
@@ -1328,7 +1378,9 @@ fn the_constructors_string_arguments_are_four_shapes_not_one() {
         .unwrap_or_else(|e| panic!("an unrecognised layer must not raise: {e}"));
     let layer_of = |s: &UiScript, name: &str| {
         let lua = s.lua();
-        let model = lua.app_data_ref::<crate::script::Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let id = *model.region_by_name.get(name).expect("published region");
         let rh = *model.id_to_region.get(&id).expect("live region");
         model.arena.region(rh).expect("region").draw_layer

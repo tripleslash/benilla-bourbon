@@ -273,7 +273,7 @@ mod tests {
                 "#,
             )
             .unwrap();
-        app.insert_non_send_resource(script);
+        app.insert_non_send(script);
         (app, rx)
     }
 
@@ -441,7 +441,7 @@ mod tests {
         app.update();
         let triggers = |app: &mut App| {
             app.world_mut()
-                .non_send_resource_mut::<UiScript>()
+                .non_send_mut::<UiScript>()
                 .take_tutorial_triggers()
         };
         assert_eq!(triggers(&mut app), [0x28]);

@@ -1729,6 +1729,7 @@ fn a_two_token_predicate_raises_on_either_nil_argument() {
         "UnitIsFriend",
         "UnitCanCooperate",
         "UnitCanAttack",
+        "UnitCanAssist",
         "UnitReaction",
     ] {
         assert!(

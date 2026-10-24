@@ -124,8 +124,8 @@ pub(crate) fn runs_before_in<MA, MB>(
     use std::any::TypeId;
     use std::collections::HashSet;
 
-    let a = System::type_id(&IntoSystem::into_system(a));
-    let b = System::type_id(&IntoSystem::into_system(b));
+    let a = System::system_type(&IntoSystem::into_system(a));
+    let b = System::system_type(&IntoSystem::into_system(b));
     // `schedule_scope`, not `resource_scope::<Schedules>`: initializing the schedule inserts
     // `Schedules`, which a resource scope refuses.
     app.world_mut().schedule_scope(label, |world, schedule| {
@@ -134,7 +134,7 @@ pub(crate) fn runs_before_in<MA, MB>(
             schedule
                 .systems()
                 .expect("initialized")
-                .find(|&(_, s)| System::type_id(&**s) == id)
+                .find(|&(_, s)| System::system_type(&**s) == id)
                 .map(|(k, _)| NodeId::System(k))
                 .expect("the system is in the schedule")
         };

@@ -3,7 +3,11 @@
 //! An item is `Guid` + [`ObjectStore`] + [`ItemObject`] in the guid index; item fields are private,
 //! so only our own arrive. Templates are keyed by entry, asked once, and survive disconnect.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// fork: the platform clock, not `std::time::Instant` — the browser build panics on std's (the page
+// has no monotonic `Instant`), and every deadline in this file is parked on it.
+use bevy::platform::time::Instant;
 
 use benilla_assets::LockRecover;
 use bevy::prelude::*;
@@ -675,8 +679,10 @@ impl Items {
     }
 
     /// Drops every template, which the interface's copy drops too: another realm's file replaces
-    /// them.
+    /// them, and on a flavor switch they are the other client's. The asks in flight and the
+    /// session's callbacks go with them.
     pub(crate) fn forget_templates(&mut self) {
+        self.clear_session();
         self.dropped
             .extend(self.templates.iter().map(|(&entry, _)| entry));
         self.fresh.clear();
@@ -769,7 +775,7 @@ impl TestDeps {
     ) -> R {
         let (world, items, commands) = (&mut self.world, &self.items, &self.commands);
         let mut state = bevy::ecs::system::SystemState::<Objects>::new(world);
-        let objects = state.get(world);
+        let objects = state.get(world).expect("`Objects` validates");
         f(&objects, items, commands)
     }
 

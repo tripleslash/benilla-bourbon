@@ -28,7 +28,9 @@ fn player_record_arm<T>(
     {
         return None;
     }
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     Some(f(&model.player_record))
 }
 
@@ -104,7 +106,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "UnitIsPartyLeader",
         lua.create_function(|lua, token: Option<String>| {
             check_unit_token(&token)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let by_flag = token
                 .as_ref()
                 .and_then(|t| model.unit(t))
@@ -151,7 +155,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     // A unit with no object reads the name cache by guid with a callback
                     // (`0x5171eb`), which asks on the miss: the host sends it.
                     if !held && guid != 0 {
-                        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                        let mut model = lua
+                            .app_data_mut::<crate::script::ModelCell>()
+                            .expect("model app_data");
                         model.unit_name_asks.insert(guid);
                     }
                     Value::String(unknownobject(lua)?)
@@ -198,7 +204,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 r#"Usage: UnitLevel("unit")"#,
             )?);
             check_unit_token(&token)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(u) = token.as_ref().and_then(|t| model.unit(t)) else {
                 return Ok(0i64);
             };
@@ -252,7 +260,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 r#"Usage: UnitIsTrivial("unit")"#,
             )?);
             let player_level = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .player_req
                 .level;
@@ -268,7 +276,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetQuestGreenRange",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(grey_band(model.player_req.level)))
         })?,
     )?;
@@ -321,7 +331,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 unit,
                 r#"Usage: UnitIsCivilian("unit")"#,
             )?);
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let player_level = model.player_req.level;
             Ok(flag(
                 unit.and_then(|u| model.unit(&u))
@@ -335,7 +347,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitPlayerControlled",
         lua.create_function(|lua, unit: Option<String>| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(
                 unit.and_then(|u| model.unit(&u))
                     .is_some_and(|u| u.player_controlled),
@@ -384,7 +398,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             // Both go through the resolver, so either one unrecognised raises.
             check_unit_token(&a)?;
             check_unit_token(&b)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let guid = |t: &Option<String>| {
                 t.as_deref()
                     .and_then(|t| model.unit(t))
@@ -418,7 +434,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "HasFullControl",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.player_control))
         })?,
     )?;
@@ -434,7 +452,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, token: Option<String>| {
                 check_unit_token(&token)?;
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let Some(u) = token.as_ref().and_then(|t| model.unit(t)) else {
                     return Ok(Value::Nil);
                 };
@@ -468,7 +488,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "UnitInRaid",
         lua.create_function(|lua, token: Option<String>| {
             check_unit_token(&token)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let hit = token
                 .as_ref()
                 .and_then(|t| model.unit(t))
@@ -492,7 +514,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitInParty",
         lua.create_function(|lua, token: Option<String>| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let guids = &model.unit_guids;
             let guid = match token.as_deref() {
                 Some(t) => guids.guid_of(t)?.unwrap_or(0),
@@ -788,7 +812,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let token =
                 crate::script::binding_abi::string_arg(lua, token, r#"Usage: UnitXP("unit")"#)?;
             check_unit_token(&Some(token.clone()))?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(if names_self(&model, &token) {
                 i64::from(model.player_xp)
             } else {
@@ -802,7 +828,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let token =
                 crate::script::binding_abi::string_arg(lua, token, r#"Usage: UnitXPMax("unit")"#)?;
             check_unit_token(&Some(token.clone()))?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(if names_self(&model, &token) {
                 i64::from(model.player_next_level_xp)
             } else {
@@ -823,7 +851,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetMoney",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.money as i64)
         })?,
     )?;
@@ -835,7 +865,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetComboPoints",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let class = model.player_req.class_id;
             if class != CLASS_ROGUE && class != CLASS_DRUID {
                 return Ok(0_i64);
@@ -853,7 +885,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetRestState",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(match model.exhaustion.get(&model.rest_state) {
                 Some((name, factor)) => (
                     Value::Number(f64::from(model.rest_state)),
@@ -870,7 +904,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetXPExhaustion",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(if model.rest_state != 1 {
                 Value::Nil
             } else {
@@ -883,7 +919,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsResting",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.resting))
         })?,
     )?;
@@ -892,14 +930,18 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "PartialPlayTime",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.partial_play_time))
         })?,
     )?;
     g.set(
         "NoPlayTime",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.no_play_time))
         })?,
     )?;
@@ -908,7 +950,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetBillingTimeRested",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(Value::Number(f64::from(model.billing_time_rested)))
         })?,
     )?;
@@ -1023,7 +1067,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 token != "pet"
                     || crate::script::protected::gate(lua, crate::script::protected::Tag::CAST)
             }) {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.drop_item_on_unit.push(token);
             }
             Ok(())
@@ -1049,7 +1095,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             }
             if !lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .spell_targeting
             {
@@ -1070,7 +1116,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "ClearTarget",
         lua.create_function(|lua, ()| {
             let had = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.unit("target").is_some_and(|u| u.exists)
             };
             submit(lua, ScriptCall::ClearTarget)?;

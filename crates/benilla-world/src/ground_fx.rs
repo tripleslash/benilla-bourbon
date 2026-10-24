@@ -13,7 +13,9 @@ use bevy::prelude::*;
 
 use crate::collision::GroundDecalSurface;
 use crate::decal::{project_decal, DecalFrame};
-use crate::particles::buffer::{EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
+use crate::particles::buffer::{
+    EffectBlend, EffectDrawSpec, EffectFog, EffectMotion, EffectQuads, EffectVertex,
+};
 use crate::view::WorldCamera;
 
 /// One ground-quad decal: the joint it rides, the authored quad, its draw identity and its cache.
@@ -138,10 +140,16 @@ pub(crate) fn update_ground_fx_decals(
         &mut GroundFxDecal,
         Option<&crate::doodad_anim::MatAnim>,
     )>,
+    // fork: fsr (FORK.md) — each decal's centre at the last world frame.
+    mut last_centres: Local<bevy::ecs::entity::EntityHashMap<Vec3>>,
 ) {
     let Ok(cam) = cam.single() else { return };
     let now = time.elapsed_secs();
     let mut surface_count = usize::MAX;
+    // fork: fsr (FORK.md) — this frame's decal centres, kept only while a camera runs FSR;
+    // `last_centres` holds the last world frame's.
+    let track_motion = quads.tracks_motion();
+    let mut centres = bevy::ecs::entity::EntityHashMap::<Vec3>::default();
     for (entity, mut decal, mat_anim) in &mut decals {
         let Ok(joint) = joints.get(decal.joint) else {
             commands.entity(entity).despawn();
@@ -186,6 +194,16 @@ pub(crate) fn update_ground_fx_decals(
             .map_or([1.0, 1.0, 1.0], |(anim, origin)| anim.sample(now - origin));
         let tint: [f32; 3] = std::array::from_fn(|i| decal.tint[i] * loop_tint[i]);
         let alpha = mat_anim.map_or(1.0, |m| m.current);
+        let motion = if track_motion {
+            centres.insert(entity, decal.center);
+            last_centres
+                .get(&entity)
+                .map_or(EffectMotion::Static, |last| {
+                    EffectMotion::Rigid(decal.center - *last)
+                })
+        } else {
+            EffectMotion::Static
+        };
         let start = quads.begin();
         quads.verts.extend(decal.cache.iter().map(|v| EffectVertex {
             pos: v.pos,
@@ -211,9 +229,12 @@ pub(crate) fn update_ground_fx_decals(
                 main_entity: entity,
                 light: None,
                 clip: None,
+                // The decal follows its joint: re-projected where the unit now stands.
+                motion,
             },
         );
     }
+    *last_centres = centres;
 }
 
 /// Runs the placement pass in `BillboardPlace`, after transform propagation so joints carry this

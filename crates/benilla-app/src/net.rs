@@ -1,13 +1,16 @@
-//! The network-to-ECS bridge. A read thread owns the blocking [`WorldSession`] and streams
-//! [`SessionEvent`]s; a write thread drains [`ClientCommand`]s. [`apply_net_updates`] turns the
-//! events into real entities keyed by [`Guid`] through [`GuidIndex`]; movement paths become
-//! [`Spline`]s, the server clock [`ServerTime`], one-shot directives Bevy [`Message`]s.
+//! The network-to-ECS bridge. Natively a read thread owns the [`WorldSession`] and streams
+//! [`SessionEvent`]s and a write thread drains [`ClientCommand`]s; on wasm32 the session is one
+//! `spawn_local` task and `web_writer_pump` drains the commands each frame. [`apply_net_updates`]
+//! turns the events into real entities keyed by [`Guid`] through [`GuidIndex`]; movement paths
+//! become [`Spline`]s, the server clock [`ServerTime`], one-shot directives Bevy [`Message`]s.
 //!
 //! It runs in [`WorldStage::Net`], before `Input`, so a server teleport snaps, streams and covers
 //! in one frame. Coordinates cross from WoW into Bevy space here (`wow_to_bevy`).
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use bevy::platform::time::Instant;
 
 use benilla_protocol::{
     messages::WhoRequest, EntityKind, JumpInfo, MoveMode, MoveSpeeds, ObjectFields, SessionEvent,
@@ -38,9 +41,12 @@ pub(crate) use reputations::Reputations;
 pub(crate) use apply::apply_net_updates;
 pub(crate) use apply::enter_world_on_self_create;
 use apply::tag_self_player;
+/// For the CVar tests' list of every observer; the plugin adds it itself.
+#[cfg(test)]
+pub(crate) use game_time::time_offset_on_cvar;
 #[cfg(test)]
 pub(crate) use game_time::GameTime;
-pub(crate) use game_time::{clock_tick, ServerTime};
+pub(crate) use game_time::{clock_tick, ServerTime, TimeOffset};
 pub(crate) use handlers::NetHandlerApp;
 
 pub(crate) use io::LoginRequest;
@@ -77,6 +83,22 @@ impl Plugin for NetPlugin {
         if !self.connect {
             app.insert_resource(NetOffline);
         }
+        // The web's write half. It runs *before* the event drain so a command the app issued last
+        // frame is on the wire by the time this frame's inbound state lands on it.
+        #[cfg(target_arch = "wasm32")]
+        app.insert_resource(WebWriter {
+            writer: None,
+            writer_rx: handles.writer_rx,
+            cmd_rx: handles.commands_rx,
+            last_ping: 0.0,
+            warned: 0,
+        })
+        .add_systems(
+            Update,
+            web_writer_pump
+                .in_set(WorldStage::Net)
+                .before(apply_net_updates),
+        );
         game_time::register(app);
         world::register(app);
         session::register(app);
@@ -178,6 +200,96 @@ impl Plugin for NetPlugin {
                     .after(enter_world_on_self_create),
             )
             .add_systems(Update, population_pulse.in_set(WorldStage::Net));
+    }
+}
+
+/// The web build's write half.
+///
+/// A page has no write thread — it has no threads at all — so what `io::writer_loop` owns natively
+/// lives here instead: the current [`WorldWriter`], the swap channel each world entry hands one over
+/// on and a logout takes it back on ([`io::WriterSwap`]), and the command queue. [`web_writer_pump`] drains both once a frame through the same
+/// `io::dispatch` the native thread calls, so the two targets send byte-identical packets.
+///
+/// A `Resource` (not a non-`Send` one — Bevy 0.18 has none) because `WorldWriter` **is** `Send` on
+/// wasm: its `ConnWriter` wraps the page's WebSocket in a `SendWrapper`, whose contract — touch it
+/// only on the thread that made it — is exactly the truth of a single-threaded page.
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource)]
+pub(crate) struct WebWriter {
+    writer: Option<benilla_protocol::WorldWriter>,
+    writer_rx: Receiver<io::WriterSwap>,
+    cmd_rx: Receiver<ClientCommand>,
+    /// `Time`'s elapsed seconds at the last keepalive — the tick the write thread gets from
+    /// `crossbeam_channel::tick`, kept off the frame count so it holds at any frame rate.
+    last_ping: f64,
+    /// Consecutive dropped/failed sends warned about, capped per connection like the native path's
+    /// `SEND_WARN_CAP` so an outage cannot flood the browser console with a movement stream.
+    warned: u32,
+}
+
+/// Apply the sequencer's writer swaps, drain the frame's commands through the writer, and keep the
+/// 30 s keepalive going — the web's `writer_loop`, once per frame instead of once per `select!`.
+#[cfg(target_arch = "wasm32")]
+fn web_writer_pump(mut web: ResMut<WebWriter>, time: Res<Time>, ping: Res<PingShared>) {
+    let web = &mut *web;
+    while let Ok(swap) = web.writer_rx.try_recv() {
+        match swap {
+            io::WriterSwap::Install { writer, fresh_link } => {
+                web.writer = Some(writer);
+                web.warned = 0;
+                web.last_ping = time.elapsed_secs_f64();
+                // A fresh connection restarts the keepalive from scratch, like the real client:
+                // sequence 1 is the new socket's first ping, and a stale pong from the old one can
+                // no longer match. A later entry on the same link keeps the block.
+                if fresh_link {
+                    *ping.0.lock().expect("ping clock") = io::PingClock::default();
+                }
+            }
+            // The world session is over and the link kept: the writer goes back to the sequencer,
+            // which awaits it to rejoin the session at character select.
+            io::WriterSwap::Reclaim(reply) => {
+                if let Some(writer) = web.writer.take() {
+                    let _ = reply.try_send(writer);
+                }
+            }
+        }
+    }
+    let Some(writer) = web.writer.as_mut() else {
+        // No live writer: the session is gone and these commands evaporate — the same answer the
+        // native write thread gives, and for the same reason (the reconnect handshake re-syncs us).
+        let mut dropped = 0u32;
+        while web.cmd_rx.try_recv().is_ok() {
+            dropped += 1;
+        }
+        if dropped > 0 && web.warned < io::SEND_WARN_CAP {
+            warn!("net: dropping {dropped} command(s) — not connected");
+            web.warned += 1;
+        }
+        return;
+    };
+    for cmd in web.cmd_rx.try_iter() {
+        if let Err(e) = io::dispatch(writer, cmd) {
+            if web.warned < io::SEND_WARN_CAP {
+                warn!("net: send failed: {e:#}");
+                web.warned += 1;
+            }
+        }
+    }
+    let now = time.elapsed_secs_f64();
+    if now - web.last_ping >= io::PING_INTERVAL.as_secs_f64() {
+        web.last_ping = now;
+        let (sequence, last_rtt) = {
+            let mut clock = ping.0.lock().expect("ping clock");
+            clock.sequence += 1;
+            clock.sent_at = Some(bevy::platform::time::Instant::now());
+            (clock.sequence, clock.last_rtt_ms.unwrap_or(0))
+        };
+        if let Err(e) = writer.ping(sequence, last_rtt) {
+            if web.warned < io::SEND_WARN_CAP {
+                warn!("net: ping send failed: {e:#}");
+                web.warned += 1;
+            }
+        }
     }
 }
 
@@ -488,13 +600,18 @@ impl From<RealmRequest> for ParkRequest {
 #[derive(Debug)]
 pub(crate) struct ParkGone;
 
-/// The app's end of the park channel for one kind of request.
+/// The app's end of the park channel for one kind of request. `async_channel`, as the sequencer
+/// awaits the park (a page's task cannot block); the ECS only ever `try_send`s into the unbounded
+/// queue, so a send never waits.
 pub(crate) enum ParkSender<T> {
     /// The shared, ordered channel the IO thread reads.
-    Park(Sender<ParkRequest>, std::marker::PhantomData<fn(T)>),
+    Park(
+        async_channel::Sender<ParkRequest>,
+        std::marker::PhantomData<fn(T)>,
+    ),
     /// A channel of that kind alone, for a test that reads the requests itself.
     #[cfg(test)]
-    Direct(Sender<T>),
+    Direct(async_channel::Sender<T>),
 }
 
 impl<T> Clone for ParkSender<T> {
@@ -509,7 +626,7 @@ impl<T> Clone for ParkSender<T> {
 
 impl<T> ParkSender<T> {
     /// The app's end of the IO thread's park channel.
-    pub(super) fn park(tx: Sender<ParkRequest>) -> Self {
+    pub(super) fn park(tx: async_channel::Sender<ParkRequest>) -> Self {
         ParkSender::Park(tx, std::marker::PhantomData)
     }
 }
@@ -518,7 +635,7 @@ impl<T> ParkSender<T> {
     /// Send a request of either kind, in the order it is made against the rest.
     pub(crate) fn send_request(&self, request: ParkRequest) -> Result<(), ParkGone> {
         match self {
-            ParkSender::Park(tx, _) => tx.send(request).map_err(|_| ParkGone),
+            ParkSender::Park(tx, _) => tx.try_send(request).map_err(|_| ParkGone),
             #[cfg(test)]
             ParkSender::Direct(_) => Err(ParkGone),
         }
@@ -526,18 +643,19 @@ impl<T> ParkSender<T> {
 }
 
 impl<T: Into<ParkRequest>> ParkSender<T> {
+    /// Send a request without waiting: the queue is unbounded, so only a gone IO thread fails it.
     pub(crate) fn send(&self, request: T) -> Result<(), ParkGone> {
         match self {
-            ParkSender::Park(tx, _) => tx.send(request.into()).map_err(|_| ParkGone),
+            ParkSender::Park(tx, _) => tx.try_send(request.into()).map_err(|_| ParkGone),
             #[cfg(test)]
-            ParkSender::Direct(tx) => tx.send(request).map_err(|_| ParkGone),
+            ParkSender::Direct(tx) => tx.try_send(request).map_err(|_| ParkGone),
         }
     }
 }
 
 #[cfg(test)]
-impl<T> From<Sender<T>> for ParkSender<T> {
-    fn from(tx: Sender<T>) -> Self {
+impl<T> From<async_channel::Sender<T>> for ParkSender<T> {
+    fn from(tx: async_channel::Sender<T>) -> Self {
         ParkSender::Direct(tx)
     }
 }
@@ -593,7 +711,7 @@ pub(crate) enum RealmRequest {
 
 /// The credentials channel to the IO thread's pre-logon park, sent by [`crate::glue_session::login`].
 #[derive(Resource)]
-pub(crate) struct LoginSubmit(pub(crate) Sender<io::LoginRequest>);
+pub(crate) struct LoginSubmit(pub(crate) async_channel::Sender<io::LoginRequest>);
 
 /// The login abandon generation: Cancel bumps it, and the IO thread drops an
 /// [`io::LoginRequest`] or a [`RealmRequest::Enter`] asked under an older value.
@@ -953,6 +1071,8 @@ pub(crate) enum ClientCommand {
         pos: [f32; 3],
         orientation: f32,
         spline_id: u32,
+        /// The rider's deck-local tail, sent with `ON_TRANSPORT` in `flags`.
+        transport: Option<benilla_protocol::TransportPose>,
     },
     /// `CMSG_FORCE_*_SPEED_CHANGE_ACK`: echoes guid, counter and exact speed with a live movement
     /// payload. Unacked, the server force-resolves after ~4 s and flags the session.
@@ -988,6 +1108,8 @@ pub(crate) enum ClientCommand {
         pos: [f32; 3],
         orientation: f32,
         fall_time: u32,
+        /// The rider's deck-local tail, sent with `ON_TRANSPORT` in `flags`.
+        transport: Option<benilla_protocol::TransportPose>,
     },
     /// `CMSG_FAR_SIGHT`: `true` on attach, `false` on release; neither names an object.
     FarSight {
@@ -1005,6 +1127,10 @@ pub(crate) enum ClientCommand {
         guid: u64,
     },
     /// `CMSG_MESSAGECHAT`. A plain line, `.` GM commands included, goes as `Say`.
+    /// The language every later chat line goes out in: the self race's `ChrRaces.BaseLanguage`.
+    SetChatLanguage {
+        language: u32,
+    },
     Chat {
         kind: ChatKind,
         target: Option<String>,
@@ -1882,6 +2008,8 @@ pub(crate) enum ClientCommand {
         flags: u32,
         pos: [f32; 3],
         orientation: f32,
+        /// The rider's deck-local tail, sent with `ON_TRANSPORT` in `flags`.
+        transport: Option<benilla_protocol::TransportPose>,
     },
     /// `CMSG_MOVE_KNOCK_BACK_ACK`, `launch` echoed as the jump tail. Sent on the frame the mover
     /// takes off, never on receipt: the reference applies (`0x61624d call 0x6179c0`) then sends

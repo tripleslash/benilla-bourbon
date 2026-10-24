@@ -99,6 +99,22 @@ fn local_now() -> [u32; 6] {
     .map(u32::from)
 }
 
+/// `[month, day, hour, minute, second, millisecond]` of now, the page's local time from the
+/// browser's `Date` (std's wall clock panics on wasm32). The log files never open there (the page
+/// has no filesystem), but `crate::ui_script::load_log` stamps its lines all the same.
+#[cfg(target_arch = "wasm32")]
+fn local_now() -> [u32; 6] {
+    let d = js_sys::Date::new_0();
+    [
+        d.get_month() + 1,
+        d.get_date(),
+        d.get_hours(),
+        d.get_minutes(),
+        d.get_seconds(),
+        d.get_milliseconds(),
+    ]
+}
+
 /// `[month, day, hour, minute, second, millisecond]` of now, in the process's time zone.
 #[cfg(unix)]
 fn local_now() -> [u32; 6] {
