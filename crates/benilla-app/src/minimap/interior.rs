@@ -232,6 +232,7 @@ mod tests {
             doodad_base: Default::default(),
             doodad_owner: Default::default(),
             doodad_groups: Default::default(),
+            convex_volume: Vec::new(),
         };
 
         let drawable = interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0);
@@ -321,6 +322,7 @@ mod tests {
             doodad_base: Default::default(),
             doodad_owner: Default::default(),
             doodad_groups: Default::default(),
+            convex_volume: Vec::new(),
         };
 
         let drawable = interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0);

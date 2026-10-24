@@ -79,9 +79,6 @@ pub(super) enum UiFixture {
     /// The world-entry loading screen held up with its `GameTips.dbc` tip: it is otherwise up for a
     /// second on a path nothing can pause.
     LoadingTip,
-    /// The transport loading screen held up: the world map with the Menethil Harbor to Theramore
-    /// route, which a crossing shows for a second and nothing can pause.
-    LoadingShip,
     /// The shared StaticPopup plate as the group-invite dialog (`PARTY_INVITE`), the one that
     /// floats over the world rather than another window's art.
     PartyInvite,
@@ -858,14 +855,6 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::LoadingTip),
-    },
-    Scenario {
-        name: "loading-ship",
-        map: Some(MAP_AZEROTH),
-        eye: GROUND_EYE,
-        look: GROUND_LOOK,
-        minute: 720,
-        ui: Some(UiFixture::LoadingShip),
     },
     Scenario {
         name: "ui-options",

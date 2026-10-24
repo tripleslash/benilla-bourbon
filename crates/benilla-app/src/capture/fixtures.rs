@@ -116,10 +116,6 @@ pub(super) fn seed_ui_fixture(
     mut quest_log: ResMut<crate::ui_quest_log::QuestLog>,
     mut trainer: ResMut<crate::ui_trainer::TrainerOpen>,
     icons: Option<Res<crate::entities::ItemDisplays>>,
-    // The fork's ship-route and art reads, outside the VM's parts.
-    ship_routes: Option<Res<crate::loading_screen::ShipRoutes>>,
-    mut assets: Option<ResMut<benilla_assets::WorldAssets>>,
-    mut images: ResMut<Assets<Image>>,
 ) {
     let icons = icons.as_deref();
     // The seed's Lua (its pushes, chunks and hovers) runs once the turn's world writes are in,
@@ -225,13 +221,6 @@ pub(super) fn seed_ui_fixture(
             UiFixture::Bare => {}
             // Holds the world-entry loading screen, tip and all, over the settled scene.
             UiFixture::LoadingTip => loading.hold_for_capture(scenario.map),
-            // Path 292 is the Menethil Harbor to Theramore boat; leaving map 0 is its outbound leg.
-            UiFixture::LoadingShip => loading.hold_ship_for_capture(
-                ship_routes.as_deref(),
-                (292, 0),
-                assets.as_deref_mut(),
-                &mut images,
-            ),
             UiFixture::Merchant => {
                 names.insert_creature(
                     NPC_ENTRY,

@@ -33,7 +33,7 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 
 Each entry is the first sentence of a `Deviation:` comment, linking to where it lives.
 
-- [benilla-app](#benilla-app): 258
+- [benilla-app](#benilla-app): 257
 - [benilla-assets](#benilla-assets): 6
 - [benilla-blp](#benilla-blp): 2
 - [benilla-formats](#benilla-formats): 24
@@ -161,8 +161,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### loading_screen
 
 - The live window's aspect stands in for `gxResolution`'s, as in `portrait`'s `GxAspect`, because the window here takes any shape a drag gives it, where the reference's keeps `gxResolution`'s (`0x5989d7`). ([`src/loading_screen.rs:69`](../crates/benilla-app/src/loading_screen.rs#L69))
-- The page cannot block its one thread on a fetch, so there the stream cannot wait and the cover stands in. ([`src/loading_screen.rs:733`](../crates/benilla-app/src/loading_screen.rs#L733))
-- A long same-map snap is covered until the destination is presentable. The reference's `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of the screen's raises; benilla covers it so the destination is not seen streaming in. ---. ([`src/loading_screen.rs:756`](../crates/benilla-app/src/loading_screen.rs#L756))
+- The page cannot block its one thread on a fetch, so there the stream cannot wait and the cover stands in. ([`src/loading_screen.rs:738`](../crates/benilla-app/src/loading_screen.rs#L738))
+- A long same-map snap is covered until the destination is presentable. The reference's `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of the screen's raises; benilla covers it so the destination is not seen streaming in. ---. ([`src/loading_screen.rs:761`](../crates/benilla-app/src/loading_screen.rs#L761))
 - The wheel is swallowed, where the reference still zooms the hidden camera, because nothing should act through the screen. ([`src/loading_screen/input.rs:12`](../crates/benilla-app/src/loading_screen/input.rs#L12))
 - The world pick is cleared, where the reference's `0x481790` keeps picking at the frozen point, because ours is quieter and looks the same: the reference's pointer cannot move, so its pick changes nothing visible. ([`src/loading_screen/input.rs:14`](../crates/benilla-app/src/loading_screen/input.rs#L14))
 
@@ -203,8 +203,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference paces a self move through the same replay chain as a remote's, which would only delay a correction to our own pose. ([`src/net/motion/remote.rs:84`](../crates/benilla-app/src/net/motion/remote.rs#L84))
 - \*\*a body nobody can see is stepped every `HIDDEN_STRIDE`th frame\*\*, with the time it is owed, where the reference steps every mover every frame. ([`src/net/motion/remote.rs:355`](../crates/benilla-app/src/net/motion/remote.rs#L355))
 - Its rate-limited hover climb (`0x636fa1`, 7 yd/s) is not reproduced, because the cache gate needs a pure function; it converges to this answer. ([`src/net/motion/spline.rs:749`](../crates/benilla-app/src/net/motion/spline.rs#L749))
-- A first-pass values block the clear header byte left unwritten re-fires, for a live object, its last write's edges against the watch copy (`0x465570`, `0x466686`); benilla compares against this packet's copies, which hold none for it, so a stale edge never fires twice. ([`src/net/objects/update.rs:887`](../crates/benilla-app/src/net/objects/update.rs#L887))
-- The create notify uses its lookup's result untested (`0x465c97`, `0x465d79`). ([`src/net/objects/update.rs:899`](../crates/benilla-app/src/net/objects/update.rs#L899))
+- A first-pass values block the clear header byte left unwritten re-fires, for a live object, its last write's edges against the watch copy (`0x465570`, `0x466686`); benilla compares against this packet's copies, which hold none for it, so a stale edge never fires twice. ([`src/net/objects/update.rs:905`](../crates/benilla-app/src/net/objects/update.rs#L905))
+- The create notify uses its lookup's result untested (`0x465c97`, `0x465d79`). ([`src/net/objects/update.rs:917`](../crates/benilla-app/src/net/objects/update.rs#L917))
 
 #### no_install
 
@@ -227,8 +227,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - A settle hold is summed and sent once on release, without the push, because it stands in for the reference's blocking load (`0x694920`), not a refused substep, and lasts seconds. ([`src/player/movement_net.rs:358`](../crates/benilla-app/src/player/movement_net.rs#L358))
 - The reference's blocking load (`0x694920`) waits out its reads before the frame goes on and has no such release; without one, a model that never loads would freeze our body for good. ([`src/player/state.rs:120`](../crates/benilla-app/src/player/state.rs#L120))
 - Root is not merged, because a bare pose unrooting us while the server still roots us streams motion into `CHEAT_TYPE_ROOT_MOVE`; vmangos keeps a rooted mover's root bit (`MovementHandler.cpp:1064`), so the reference's merge of it is a no-op anyway. ([`src/player/state.rs:202`](../crates/benilla-app/src/player/state.rs#L202))
-- The reference acks after its blocking load (`0x401cae`); a rider acks now, so the server re-adds us to the boat at once. ([`src/player/wire_in.rs:273`](../crates/benilla-app/src/player/wire_in.rs#L273))
-- Applied at arrival, because our own avatar has no motion to de-jitter; the reference routes it through the replay chain remotes use, which paces to the sender's cadence and can hold an early packet (up to 1000 ms in `net::motion`). ([`src/player/wire_in.rs:514`](../crates/benilla-app/src/player/wire_in.rs#L514))
+- The reference acks after its blocking load (`0x401cae`); a rider acks now, so the server re-adds us to the boat at once. ([`src/player/wire_in.rs:283`](../crates/benilla-app/src/player/wire_in.rs#L283))
+- Applied at arrival, because our own avatar has no motion to de-jitter; the reference routes it through the replay chain remotes use, which paces to the sender's cadence and can hold an early packet (up to 1000 ms in `net::motion`). ([`src/player/wire_in.rs:543`](../crates/benilla-app/src/player/wire_in.rs#L543))
 
 #### portrait
 
@@ -236,10 +236,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - A fixed neutral front-lit studio (`studio_light`) replaces the portrait bake's hard-coded rig (`0x525b10`: ambient 0.45 grey, white directional), because the studio is the look chosen for them. ([`src/portrait/light.rs:65`](../crates/benilla-app/src/portrait/light.rs#L65))
 - The round portraits bake at 256², not 64², because the 64² still is a resolution limit, not a look; and under a fixed studio light, not the ambient state, because that neutral light is the chosen portrait look (`light::BoothLight`). ([`src/portrait/mod.rs:17`](../crates/benilla-app/src/portrait/mod.rs#L17))
 - Only the four party slots hand over, capped at `Self::CAP`, instead of every portrait until `ClientDestroyGame` (`0x401ee0`), because a general cache would pay a texture per unit ever seen. ([`src/portrait/mod.rs:261`](../crates/benilla-app/src/portrait/mod.rs#L261))
-- This reads the window's aspect, not `gxResolution`'s, because the window here takes any shape a drag gives it, where the reference's keeps `gxResolution`'s (`0x5989d7`). ([`src/portrait/mod.rs:578`](../crates/benilla-app/src/portrait/mod.rs#L578))
-- `boothHalfRate` is benilla's own CVar, because the reference draws its doll in the main pass and has no second view; a full-rate pass costs up to 7.6 ms a frame at 4K. ([`src/portrait/mod.rs:617`](../crates/benilla-app/src/portrait/mod.rs#L617))
-- The reference widget draws only its model; a body pane clears to near-black, the chosen look where nothing sits behind the pane. ([`src/portrait/mod.rs:859`](../crates/benilla-app/src/portrait/mod.rs#L859))
-- The reference probes a bake cache keyed by the record's display id (`0x525cb0`, `0xc0cea4`) before the stand-in, so a pet out of view keeps its face. benilla holds no such cache, and `PortraitBakes` is keyed by guid for the party slots alone: the stand-in shows. ([`src/portrait/mod.rs:1604`](../crates/benilla-app/src/portrait/mod.rs#L1604))
+- This reads the window's aspect, not `gxResolution`'s, because the window here takes any shape a drag gives it, where the reference's keeps `gxResolution`'s (`0x5989d7`). ([`src/portrait/mod.rs:682`](../crates/benilla-app/src/portrait/mod.rs#L682))
+- `boothHalfRate` is benilla's own CVar, because the reference draws its doll in the main pass and has no second view; a full-rate pass costs up to 7.6 ms a frame at 4K. ([`src/portrait/mod.rs:721`](../crates/benilla-app/src/portrait/mod.rs#L721))
+- The reference widget draws only its model; a body pane clears to near-black, the chosen look where nothing sits behind the pane. ([`src/portrait/mod.rs:966`](../crates/benilla-app/src/portrait/mod.rs#L966))
 
 #### quest_markers
 
@@ -300,8 +299,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### target
 
-- The reference's arm reads the last object's stop (`0x611336` before `0x610383` stores this one's), so its first walk has no stop. ([`src/target/click.rs:716`](../crates/benilla-app/src/target/click.rs#L716))
-- It runs on the first frame with none, so an arrival that sends no stop (mid-air, rooted, under a held turn key) acts at once or on landing or release, where the reference waits for the next ground stop and can act long after, wherever the player then is. ([`src/target/click.rs:1547`](../crates/benilla-app/src/target/click.rs#L1547))
+- The reference's arm reads the last object's stop (`0x611336` before `0x610383` stores this one's), so its first walk has no stop. ([`src/target/click.rs:717`](../crates/benilla-app/src/target/click.rs#L717))
+- It runs on the first frame with none, so an arrival that sends no stop (mid-air, rooted, under a held turn key) acts at once or on landing or release, where the reference waits for the next ground stop and can act long after, wherever the player then is. ([`src/target/click.rs:1555`](../crates/benilla-app/src/target/click.rs#L1555))
 - The rank is held to 7, the top of the ring scale's eight entries (`0..=7`), where the reference keeps any value; a server rank past 7 would index outside our palette. ([`src/target/relations.rs:487`](../crates/benilla-app/src/target/relations.rs#L487))
 - TAB uses Classic Era's screen-space priority, not 1.12's ±30° facing cone and snapshot cursor (`0x493f60`), because the cone skips a close mob in front of the camera, which sits behind the character. ([`src/target/scan.rs:3`](../crates/benilla-app/src/target/scan.rs#L3))
 - Our own body is never a candidate. The reference's friendly scan picks the player at some facings (`CanAssist(P, P)` is true, `0x6061e0`; the cone test `0x47f220`), but our scoring always puts the player dead centre at distance 0, so CTRL-TAB would pick us on every press. ([`src/target/scan.rs:194`](../crates/benilla-app/src/target/scan.rs#L194))
@@ -433,7 +432,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### ui_pet_stats
 
-- Fired when the bucket or its two tooltip figures change, not on every change of the happiness field as in the reference, because no stock consumer reads the raw value. ([`src/ui_pet_stats.rs:180`](../crates/benilla-app/src/ui_pet_stats.rs#L180))
+- Fired when the bucket or its two tooltip figures change, not on every change of the happiness field as in the reference, because no stock consumer reads the raw value. ([`src/ui_pet_stats.rs:204`](../crates/benilla-app/src/ui_pet_stats.rs#L204))
 
 #### ui_quest
 
@@ -667,7 +666,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### events
 
-- `benilla::spell_mods` refuses an out-of-range pair, because the reference would overrun it. ([`src/events.rs:713`](../crates/benilla-protocol/src/events.rs#L713))
+- `benilla::spell_mods` refuses an out-of-range pair, because the reference would overrun it. ([`src/events.rs:725`](../crates/benilla-protocol/src/events.rs#L725))
 - An out-of-range list past the first block reads no body in the write passes (`0x466076`), which misread every block behind it, while the notify pass reads past it (`0x465fd0`) and stays in step; benilla reads the list and drops it, keeping the blocks behind it whole. ([`src/events/decode.rs:1130`](../crates/benilla-protocol/src/events/decode.rs#L1130))
 - The flagged pass reads a movement block's guid as 8 raw bytes (`0x467140`, `0x46714d`) where the wire packs it, so unless the packed guid happens to be 8 bytes the reference misreads the rest of that pass; benilla reads the block once, packed, as pass 0 does (`0x467080`). ([`src/events/decode.rs:1147`](../crates/benilla-protocol/src/events/decode.rs#L1147))
 

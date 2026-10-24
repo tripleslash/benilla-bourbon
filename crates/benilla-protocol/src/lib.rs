@@ -11,7 +11,7 @@ pub mod world;
 pub use auth::{AuthReject, LogonReply, RealmVersion};
 pub use events::{
     decode, CharAction, EntityKind, LoginRefusal, LoginStage, MoveSpeeds, NotifyBlock, Poll,
-    RosterCause, SessionEnd, SessionEvent, SessionEventKind,
+    RosterCause, SessionEnd, SessionEvent, SessionEventKind, TransportClock,
 };
 pub use messages::field;
 pub use messages::{

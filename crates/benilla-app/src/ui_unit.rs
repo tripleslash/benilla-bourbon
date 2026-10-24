@@ -1412,6 +1412,8 @@ fn feed_units(
     // cascade lacks. The feed runs only with an interface up, so an arrival before one waits.
     arrivals: Query<(), Added<SelfPlayer>>,
     pet_bar_feed: Option<ResMut<crate::ui_pet::PetBarFeed>>,
+    pet_stats_feed: Option<ResMut<crate::ui_pet_stats::PetStatsFeed>>,
+    mut enter_usable: Option<ResMut<crate::ui_action::EnterUsable>>,
 ) {
     let arrived = !arrivals.is_empty();
     // The pushes are an engine turn, as they read the relation inputs a call can write; the
@@ -1766,13 +1768,18 @@ fn feed_units(
         }
         owed
     });
+    // The entry's usable refresh, which the action feed ran ahead of the cascade.
+    let usable_changed = owed.world_enter.is_some()
+        && enter_usable
+            .as_deref_mut()
+            .is_some_and(|u| std::mem::take(&mut u.0));
     let world_enter = vm.run(|script| {
         let script = script?;
         if owed.unghost {
             script.fire_event("PLAYER_UNGHOST", vec![]);
         }
         let enter = owed.world_enter?;
-        script.fire_world_enter_head(enter.bonus_bar_offset);
+        script.fire_world_enter_head(enter.bonus_bar_offset, usable_changed);
         Some(enter)
     });
     let Some(enter) = world_enter else {
@@ -1782,13 +1789,17 @@ fn feed_units(
     // signals, then `CMSG_REQUEST_PET_INFO` (`0x4bc738`), then the cascade's rest. Its trainer
     // refresh (`0x4bc872`) never runs here: the cascade zeroes the trainer cell before it
     // (`0x4909ab` → `0x4d73e0`).
-    let mut pet_bar_feed = pet_bar_feed;
+    let (mut pet_bar_feed, mut pet_stats_feed) = (pet_bar_feed, pet_stats_feed);
     let dropped = vm.turn(|script, (_, _, bar, latch)| {
         let script = script?;
         Some(match (bar, latch) {
-            (Some(mut bar), Some(mut latch)) => {
-                crate::ui_pet::drop_bar(script, &mut bar, &mut latch, pet_bar_feed.as_deref_mut())
-            }
+            (Some(mut bar), Some(mut latch)) => crate::ui_pet::drop_bar(
+                script,
+                &mut bar,
+                &mut latch,
+                pet_bar_feed.as_deref_mut(),
+                pet_stats_feed.as_deref_mut(),
+            ),
             _ => script.drop_pet_bar(),
         })
     });
@@ -4180,7 +4191,6 @@ mod tests {
             orientation: 0.0,
             needs_ack,
             transport_entry: None,
-            transport_map: None,
         };
 
         let arm = |app: &mut App| {

@@ -111,8 +111,8 @@ pub(super) fn release_post_snap_hold(
     mut last_counters: Local<Option<[usize; 6]>>,
     net_cmds: Option<Res<crate::net::NetCommands>>,
     decks: Query<(), With<avian3d::prelude::Collider>>,
-    // Our own body as the create path left it: still tagged with a seat `board_from_create` has
-    // not taken up yet, or carried by a server spline on a deck, which keeps the tag.
+    // Our own body as the create path left it: still tagged with a seat control has not taken up
+    // yet (`wire_in::SelfSeat`), or carried by a server spline on a deck, which keeps the tag.
     arrived: Query<
         (
             Has<crate::transport::TransportRider>,
@@ -123,11 +123,12 @@ pub(super) fn release_post_snap_hold(
     self_guid: Option<Res<crate::net::SelfGuid>>,
 ) {
     let Some(p) = progress else { return };
-    // Our create block has landed and any seat in it is a pending board or a ride by now.
+    // Our create block has landed and any seat in it is a ride by now: the seat takes the tag's
+    // transport as control seats us (`wire_in::SelfSeat`), and leaves the tag on the body.
     if player.awaiting_arrival
         && arrived
             .iter()
-            .any(|(seat_pending, spline)| !seat_pending || spline)
+            .any(|(seat_pending, spline)| !seat_pending || spline || player.ride.is_some())
     {
         player.awaiting_arrival = false;
     }
@@ -782,6 +783,7 @@ mod tests {
                 guid: 0x1F1_0000_0000_0001,
                 local_pos: Vec3::ZERO,
                 boat_yaw: 0.0,
+                placed: true,
             });
         }
         let resident = |p: &mut WorldLoadProgress| {
@@ -859,6 +861,7 @@ mod tests {
             guid: 0x1F1_0000_0000_0001,
             local_pos: Vec3::ZERO,
             boat_yaw: 0.0,
+            placed: true,
         });
         step(&mut app, 0.1, resident);
         assert!(settling(&mut app), "the deck does not collide yet");

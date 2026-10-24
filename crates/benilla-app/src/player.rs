@@ -239,9 +239,10 @@ pub(super) type BodyQuery<'w, 's> = Query<
     (With<Embodied>, Without<FlyCam>),
 >;
 
-/// The armed transports, for the deck carry ([`ride`]). `ColliderAabb` is for the ride trace:
-/// avian refreshes it in `PostUpdate`, after `tick_transports` moved the deck in `Update`, so the
-/// next frame's move leaves the broad-phase box a frame behind its deck.
+/// The armed transports, for the deck carry ([`ride`]) and its hold aboard (`TransportVolume`,
+/// `0x6173b0`). `ColliderAabb` is for the ride trace: avian refreshes it in `PostUpdate`, after
+/// `tick_transports` moved the deck in `Update`, so the next frame's move leaves the broad-phase box
+/// a frame behind its deck.
 pub(super) type TransportQuery<'w, 's> = Query<
     'w,
     's,
@@ -249,6 +250,7 @@ pub(super) type TransportQuery<'w, 's> = Query<
         &'static Transform,
         &'static crate::net::Guid,
         Option<&'static avian3d::prelude::ColliderAabb>,
+        Option<&'static crate::transport::TransportVolume>,
     ),
     (
         With<crate::transport::Transport>,
@@ -398,10 +400,11 @@ impl Plugin for PlayerPlugin {
                 .before(control)
                 .before(mirror_mover_collision_height),
         )
-        // A login aboard a transport boards it once it is armed, before `control` carries us.
+        // A worldport carrying us aboard a transport boards it once it is armed, before
+        // `control` carries us.
         .add_systems(
             Update,
-            ride::board_from_create
+            ride::board_pending
                 .in_set(WorldStage::Input)
                 .after(embody::maintain_embodiment)
                 .before(control)

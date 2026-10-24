@@ -5,8 +5,9 @@
 //! route instead ([`ship`]).
 //!
 //! Event-raised and readiness-cleared, as in the reference: it rises at the character pick's
-//! `Connected` edge and at `SMSG_TRANSFER_PENDING` (the reference's two entries into `0x406640`'s
-//! tail) and clears on a per-frame readiness poll. The reference's one blocking stretch
+//! `Connected` edge and at `SMSG_TRANSFER_PENDING` (`0x406640`, and `0x4072c0` for a transport,
+//! whose screen is the leg's route over the world map, [`route`]) and clears on a per-frame
+//! readiness poll. The reference's one blocking stretch
 //! (`SMSG_NEW_WORLD`'s `0x401b00` defers `0x401bc0` onto the deadline heap, drained at `0x420d0c`)
 //! also suppresses input, which this client builds explicitly ([`input`]).
 //!
@@ -21,7 +22,7 @@ use benilla_formats::{load_loading_screens, LoadingScreenCatalog};
 
 use benilla_assets::LockRecover;
 use benilla_assets::MapCatalogRes;
-use benilla_assets::{AssetSet, LooseOpen, WorldAssets};
+use benilla_assets::{AssetSet, DataLoadAppExt, LooseOpen, WorldAssets};
 use benilla_world::schedule::WorldStage;
 use benilla_world::terrain_stream::WorldLoadProgress;
 use benilla_world::world_map::CurrentMap;
@@ -32,9 +33,8 @@ mod input;
 // Not a `cfg`: seam knowledge lives in three fixed places, and this file is not one of them.
 #[allow(unused_imports)]
 pub(crate) use input::CoverInput;
-/// The transport route screen, drawn in place of the art, the tip and the bar.
-mod ship;
-pub(crate) use ship::ShipRoutes;
+/// A transport transfer's route screen.
+mod route;
 
 // The bar, from the `LoadingScreen.cpp` descriptor table at `0x7ffd34` (read by `0x407150`):
 // entry {cx, cy, halfW, halfH}, rect [cx ± halfW·0.5] × [cy ± halfH·0.5], fill right edge
@@ -224,12 +224,10 @@ pub(crate) struct LoadingScreen {
     pub(crate) tip_edge: Option<TipEdge>,
     /// Capture only: the clear is skipped while set ([`Self::hold_for_capture`]).
     held: bool,
-    /// The transport route this screen draws in place of its art, the reference's vertex array at
-    /// `[0x8828e4]`: `0x4072c0` fills it, only the dismiss empties it (`0x407f1e`), and while it
-    /// holds the plain draw never runs (`0x406cd0`).
-    ship: Option<ship::ShipScreen>,
-    /// The last [`ship::ShipScreen`]'s serial.
-    ship_serial: u32,
+    /// The transfer's route (`0x8828e0`), which draws in place of the art, the bar and the tip.
+    route: Option<route::ActiveRoute>,
+    /// Bumped whenever [`Self::route`] changes, for [`route::draw_route`].
+    route_built: u32,
 
     /// `Time::elapsed_secs` at the last raise and at the last wait log line.
     active_since: f32,
@@ -317,8 +315,16 @@ impl LoadingScreen {
         self.tip_edge = Some(TipEdge::Clear);
         // `0x407ed7` clears `[0x882e04]`: the next screen resolves its own art.
         self.art_resolved = false;
-        // `0x407f1e` frees the route with it.
-        self.ship = None;
+        // `0x407f1e`: the route goes with the screen.
+        self.set_route(None);
+    }
+
+    /// Take a route, or drop the one held: a build that fails clears it (`0x407405`).
+    fn set_route(&mut self, route: Option<route::ActiveRoute>) {
+        if self.route.is_some() || route.is_some() {
+            self.route = route;
+            self.route_built = self.route_built.wrapping_add(1);
+        }
     }
 }
 
@@ -351,14 +357,17 @@ impl Plugin for LoadingScreenPlugin {
             // governs asset work that lands at the tail of THIS frame.
             .add_systems(First, pace_asset_budget)
             .add_systems(Startup, setup_loading_screen.after(AssetSet::Open))
+            // The route's tables are catalogs: read at start-up and again when the chain changes.
+            .add_data_loaders(route::setup_transfer_routes)
             .add_observer(forget_chain_art)
             // In `WorldStage::Present`, after Input and Stream: a worldport snaps in Input and the
             // streamer refocuses in Stream, so the cover lands on the same frame, never a flash.
+            .add_systems(Update, drive_loading_screen.in_set(WorldStage::Present))
             .add_systems(
                 Update,
-                (drive_loading_screen, ship::paint_ship_route)
-                    .chain()
-                    .in_set(WorldStage::Present),
+                route::draw_route
+                    .in_set(WorldStage::Present)
+                    .after(drive_loading_screen),
             )
             // After the drive, which sets the visibility the same nodes carry, and after the
             // window's mode is applied, so the size it reads is this frame's.
@@ -535,8 +544,6 @@ fn setup_loading_screen(
                     ..default()
                 },
             ));
-            // The transport route, over all of the above.
-            area.spawn(ship::layer_bundle());
         });
     });
 }
@@ -591,10 +598,13 @@ fn drive_loading_screen(
     player: Option<Res<crate::player::Player>>,
     // Real time: `Time<Virtual>` clamps frames over 250 ms, and a load is made of those.
     time: Res<Time<Real>>,
-    // The cover holds until the warm pass has compiled its pipelines.
-    warm: Res<crate::pipe_warm::WarmPass>,
-    // The world-entry UI load runs behind this cover; the reference's reveal always has the UI up.
-    entry_ui_pending: Option<Res<crate::ui_script::PendingEntryUiLoad>>,
+    // The cover holds until the warm pass has compiled its pipelines, and while the world-entry UI
+    // load runs behind it: the reference's reveal always has the UI up.
+    (warm, entry_ui_pending): (
+        Res<crate::pipe_warm::WarmPass>,
+        Option<Res<crate::ui_script::PendingEntryUiLoad>>,
+    ),
+    route_source: route::RouteSource,
     edges: (
         Res<State<crate::client_state::ClientState>>,
         MessageReader<crate::net::EnteredWorldMessage>,
@@ -605,8 +615,7 @@ fn drive_loading_screen(
         MessageReader<crate::net::CharacterLoginFailedMessage>,
         Option<Res<crate::net::PendingTransfer>>,
         Option<Res<crate::glue_session::roster::Roster>>,
-        ship::ShipLookup,
-        MessageReader<crate::transport::TransportLegMessage>,
+        MessageReader<crate::transport::TransportLegLeft>,
     ),
 ) {
     let (
@@ -619,8 +628,7 @@ fn drive_loading_screen(
         mut refusals,
         transfer,
         roster,
-        ship_lookup,
-        mut transport_legs,
+        mut legs_left,
     ) = edges;
     let (progress, focus) = (&stream.0, &stream.1);
     // The focus is read by the page's backstop alone.
@@ -642,61 +650,58 @@ fn drive_loading_screen(
         // `CGlueMgr::EnterWorld`, which neither `SMSG_TRANSFER_PENDING` arm reaches.
         screen.tip_edge = Some(TipEdge::Pick);
     }
-    // `SMSG_TRANSFER_PENDING`: cover now, before the server unloads us, as the reference does
-    // (`0x401900`). Aboard a transport with a drawn route the cover is that route and no art
-    // (`0x4072c0` stores `-1` at `0x4073d4`); any other transfer shows the destination's art.
-    let deck = player.as_ref().and_then(|p| p.ride_entity());
-    let mut raise_transfer = |screen: &mut LoadingScreen,
-                              reason: &str,
-                              awaiting_snap: bool,
-                              map: u32,
-                              transport: Option<(u32, u32)>| {
-        ship_lookup.board(screen, deck, transport, assets.as_deref_mut(), &mut images);
-        let art = screen.ship.is_none().then_some(map);
-        screen.raise(reason, awaiting_snap, art, now);
-    };
+    // `SMSG_TRANSFER_PENDING` covers now, before the server unloads us, on both arms of
+    // `0x401900`: with a transport entry and a map left other than −1, `0x4072c0` draws that leg's
+    // route over the world map, which sets the map id to −1 (`0x4073d4`), so no art; else
+    // `0x406640`, the destination's art.
     if let Some(t) = transfer.as_ref().filter(|t| t.is_changed()) {
         match &t.0 {
-            Some(info) => raise_transfer(
-                &mut screen,
-                "transfer pending",
-                true,
-                info.map_id,
-                info.transport_entry.zip(info.transport_map),
-            ),
+            Some(info) => {
+                let route_arm = info
+                    .transport_entry
+                    .zip(info.from_map)
+                    .filter(|&(entry, from)| entry != 0 && from != u32::MAX);
+                let route = route_arm.and_then(|(entry, from)| {
+                    route_source.build(
+                        entry,
+                        route::RouteLeg::Leaving(from),
+                        assets.as_deref_mut(),
+                        &mut images,
+                    )
+                });
+                let map = route.is_none().then_some(info.map_id);
+                screen.raise("transfer pending", true, map, now);
+                if route_arm.is_some() {
+                    screen.set_route(route);
+                }
+            }
             // Cleared with no snap in flight is `SMSG_TRANSFER_ABORTED` (a worldport lands below
             // this frame): stop waiting, and the resident old world clears the screen.
             None => screen.awaiting_snap = false,
         }
+    }
+    // `0x407de0`, from the ship tick: the route of the leg we left, which stores −1 for the map on
+    // success (`0x407e59`) and leaves the last raise's map otherwise. The reference loads around
+    // the camera and dismisses inside that tick (`0x615020`, `0x407e80`); here the readiness poll
+    // below dismisses it.
+    for left in legs_left.read() {
+        let route = route_source.build(
+            left.entry,
+            route::RouteLeg::Index(left.leg),
+            assets.as_deref_mut(),
+            &mut images,
+        );
+        let map = if route.is_some() { None } else { screen.map };
+        screen.raise("transport leg", false, map, now);
+        screen.set_route(route);
     }
     // A snap never re-raises a live screen ([`LoadingScreen::far_snap`]). vmangos sends the
     // transfer and its worldport back to back, so the two usually land in one frame and the
     // transfer's raise is made here.
     for w in worldports.read() {
         if screen.far_snap(w.map_id) {
-            raise_transfer(
-                &mut screen,
-                "worldport",
-                false,
-                w.map_id,
-                w.transport_entry.zip(w.transport_map),
-            );
+            screen.raise("worldport", false, Some(w.map_id), now);
         }
-    }
-    // The transport under us moved onto its next leg on this map (`0x5f5461` → `0x407de0`): the
-    // route of the leg it left, or on a miss the plain screen with whatever art the last raise
-    // named, since `0x407de0` leaves `[0x82f00c]` alone. The reference loads the new place inside
-    // this call and dismisses; here the readiness poll clears it.
-    for leg in transport_legs.read() {
-        ship_lookup.board_leg(
-            &mut screen,
-            leg.deck,
-            leg.left,
-            assets.as_deref_mut(),
-            &mut images,
-        );
-        let art = screen.map.filter(|_| screen.ship.is_none());
-        screen.raise("transport leg", false, art, now);
     }
     // A same-map teleport ends any awaited snap; whether it needs a screen is decided below.
     let teleported = teleports.read().next().is_some();
@@ -829,14 +834,20 @@ fn drive_loading_screen(
     } else {
         Visibility::Inherited
     };
+    // `0x406cd0`: the route screen draws instead of the art and the bar.
+    let plain_vis = if screen.route.is_some() {
+        Visibility::Hidden
+    } else {
+        content_vis
+    };
     if let Ok((_, mut vis)) = backdrop.single_mut() {
-        if *vis != content_vis {
-            *vis = content_vis;
+        if *vis != plain_vis {
+            *vis = plain_vis;
         }
     }
     for mut vis in &mut bar_vis {
-        if *vis != content_vis {
-            *vis = content_vis;
+        if *vis != plain_vis {
+            *vis = plain_vis;
         }
     }
     if !screen.active || screen.blackout {
@@ -846,7 +857,7 @@ fn drive_loading_screen(
     // --- Backdrop art, `0x406cf0`'s gate: the map id is read once per screen to resolve the
     // texture, so a raise onto a live screen repaints nothing. Under a route the plain draw does
     // not run at all (`0x406cd0`). ---
-    if !screen.art_resolved && screen.ship.is_none() {
+    if !screen.art_resolved && screen.route.is_none() {
         // Black, never the last screen's texture (the reference holds a null handle, no quad).
         if let Ok((mut img, _)) = backdrop.single_mut() {
             if img.color != Color::BLACK {
@@ -1166,12 +1177,11 @@ mod tests {
             .add_message::<crate::net::LoggedOutMessage>()
             .add_message::<crate::net::DisconnectedMessage>()
             .add_message::<crate::net::CharacterLoginFailedMessage>()
-            // fork: a transport changing leg raises the cover too.
-            .add_message::<crate::transport::TransportLegMessage>()
+            .add_message::<crate::transport::TransportLegLeft>()
             .init_resource::<LoadingScreen>()
             .init_resource::<crate::pipe_warm::WarmPass>()
             .init_resource::<Assets<Image>>()
-            // fork: the transfer's route lookup (`ship::ShipLookup`) reads the templates.
+            // The transfer's route lookup (`route::RouteSource`) reads the templates.
             .init_resource::<crate::go_templates::GameObjectTemplates>()
             .insert_resource(CurrentMap(1))
             .insert_resource(benilla_world::terrain_stream::ViewFocus::body(at, true))
@@ -1277,9 +1287,86 @@ mod tests {
             orientation: 0.0,
             needs_ack: true,
             transport_entry: None,
-            transport_map: None,
         });
         app.update();
         assert!(covering(&app));
+    }
+
+    /// `0x407de0`, from the ship tick's leg change: it raises the screen, and with no route to
+    /// draw it keeps the map the last raise stored, as it stores none but −1 (`0x407e59`).
+    #[test]
+    fn a_ridden_ships_leg_change_raises_the_screen() {
+        let mut app = in_world(GM_ISLAND);
+        {
+            let mut screen = app.world_mut().resource_mut::<LoadingScreen>();
+            screen.raise("earlier", false, Some(0), 0.0);
+            screen.dismiss();
+        }
+        app.world_mut()
+            .write_message(crate::transport::TransportLegLeft {
+                entry: 176495,
+                leg: 0,
+            });
+        app.update();
+        assert!(covering(&app));
+        let screen = app.world().resource::<LoadingScreen>();
+        assert!(screen.route.is_none(), "no route tables here");
+        assert_eq!(screen.map, Some(0));
+    }
+
+    /// `0x401900` raises on both arms: a transport crossing covers at `SMSG_TRANSFER_PENDING`,
+    /// and with no route to draw it shows the destination's art (`0x4072d3`).
+    #[test]
+    fn a_transport_crossing_covers_at_transfer_pending() {
+        let mut app = in_world(GM_ISLAND);
+        app.insert_resource(crate::net::PendingTransfer(Some(
+            crate::net::PendingTransferInfo {
+                map_id: 0,
+                transport_entry: Some(20808),
+                from_map: Some(1),
+            },
+        )));
+        app.update();
+        assert!(covering(&app), "the screen is up before the worldport");
+        let screen = app.world().resource::<LoadingScreen>();
+        assert!(screen.route.is_none(), "no transport is ridden here");
+        assert_eq!(screen.map, Some(0));
+    }
+
+    /// `0x406cd0`: with a route the taxi screen draws and the plain art and its bar do not; the
+    /// dismiss takes the route with it (`0x407f1e`).
+    #[test]
+    fn a_route_screen_draws_no_art_and_no_bar() {
+        let mut app = in_world(GM_ISLAND);
+        let backdrop = app
+            .world_mut()
+            .spawn((LoadingBackdrop, ImageNode::default(), Visibility::Inherited))
+            .id();
+        let bar = app
+            .world_mut()
+            .spawn((LoadingBarBorder, Visibility::Inherited))
+            .id();
+        let quad = [benilla_formats::RouteVertex {
+            pos: [0.5; 2],
+            uv: [0.0; 2],
+        }; 4];
+        {
+            let mut screen = app.world_mut().resource_mut::<LoadingScreen>();
+            screen.raise("transfer pending", true, None, 0.0);
+            screen.set_route(Some(route::ActiveRoute::test(benilla_formats::Route {
+                markers: [quad; 2],
+                ribbon: vec![quad; 3],
+            })));
+        }
+        app.update();
+        for e in [backdrop, bar] {
+            assert_eq!(
+                app.world().get::<Visibility>(e),
+                Some(&Visibility::Hidden),
+                "the route screen hides the plain screen's parts"
+            );
+        }
+        app.world_mut().resource_mut::<LoadingScreen>().dismiss();
+        assert!(app.world().resource::<LoadingScreen>().route.is_none());
     }
 }
