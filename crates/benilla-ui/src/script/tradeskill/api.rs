@@ -86,7 +86,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetTradeSkillLine",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let (name, rank, max_rank) = match &model.trade_skill {
                 Some(t) => (t.line_name.clone(), t.rank, t.max_rank),
                 None => ("UNKNOWN".to_string(), 0, 0),
@@ -103,7 +105,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumTradeSkills",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(num_rows(&model) as i64)
         })?,
     )?;
@@ -114,7 +118,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetTradeSkillItemLink",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetTradeSkillItemLink(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let link = usize::try_from(index)
                 .ok()
                 .and_then(|i| i.checked_sub(1))
@@ -146,7 +152,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetTradeSkillItemStats",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetTradeSkillItemStats(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let product = usize::try_from(index)
                 .ok()
                 .and_then(|i| i.checked_sub(1))
@@ -204,7 +212,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let usage = "Usage: GetTradeReagentSkillItemLink(index, reagentIndex)";
             let index = number_arg(lua, index, usage)?;
             let reagent = number_arg(lua, reagent, usage)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let link = usize::try_from(index)
                 .ok()
                 .and_then(|i| i.checked_sub(1))
@@ -235,7 +245,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetTradeSkillInfo(index)` (`0x84e2a4`, `0x4fd839`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetTradeSkillInfo(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let miss = || binding_abi::tuple(&[None, None, Some(0), None]);
             let Some(n) = index.checked_sub(1) else {
                 return Ok(miss());
@@ -274,7 +286,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetFirstTradeSkill",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(first_recipe_index(&model)))
         })?,
     )?;
@@ -283,7 +297,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetTradeSkillSubClasses",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let mut out = Vec::new();
             if model.trade_skill.is_some() {
                 for grp in &model.trade_skill_headers {
@@ -320,7 +336,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetTradeSkillIcon(index)` (`0x84d3d0`, `0x4fdb11`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetTradeSkillIcon(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(r) = recipe_at(&model, index) else {
                 return Ok(Value::Nil);
             };
@@ -337,7 +355,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetTradeSkillNumMade(index)` (`0x84e308`, `0x4fdc6a`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetTradeSkillNumMade(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let (min_made, max_made) =
                 recipe_at(&model, index).map_or((1, 1), |r| (r.min_made, r.max_made));
             Ok(MultiValue::from_vec(vec![
@@ -356,7 +376,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetTradeSkillCooldown(index)` (`0x84e2e4`, `0x4fda37`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetTradeSkillCooldown(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let left = recipe_at(&model, index)
                 .and_then(|r| r.cooldown)
                 .map(|(start_ms, duration_ms, enabled)| {
@@ -378,7 +400,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: GetTradeSkillNumReagents(index)` (`0x84e5cc`, `0x4ff525`).
             let index =
                 binding_abi::index_arg(lua, index, "Usage: GetTradeSkillNumReagents(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(recipe_at(&model, index).map_or(0, |r| r.reagents.len()) as i64)
         })?,
     )?;
@@ -400,7 +424,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 reagent_index,
                 "Usage: GetTradeSkillReagentInfo(index, reagentIndex)",
             )?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(reagent) = recipe_at(&model, index)
                 .and_then(|r| reagent_index.checked_sub(1).and_then(|n| r.reagents.get(n)))
                 .cloned()
@@ -427,7 +453,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetTradeSkillTools(index)` (`0x84e668`, `0x4ff9ab`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetTradeSkillTools(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(r) = recipe_at(&model, index) else {
                 return Ok(MultiValue::new());
             };
@@ -449,7 +477,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetTradeskillRepeatCount",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let armed = model.trade_skill_repeat_spell;
             let count = model.trade_skill_repeat_count;
             let latched = armed != 0 && armed == model.trade_skill_selected_spell && count > 1;
@@ -464,7 +494,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: SelectTradeSkill(index)` (`0x84e2c4`, `0x4fd9c1`).
             let index = binding_abi::index_arg32(lua, index, "Usage: SelectTradeSkill(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             select(&mut model, index);
             Ok(())
         })?,
@@ -472,7 +504,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetTradeSkillSelectionIndex",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(selected_index(&model)))
         })?,
     )?;
@@ -546,7 +580,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number`, then `trunc(n) - 1` as a signed index (`0x4ffdcd`): anything at or below
             // 0 asks about the whole list, one past the end raises (`0x4ffe0e`, `0x84e738`).
             let n = filter_index(lua, index, "Usage: GetTradeSkillSubClassFilter(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let groups = if model.trade_skill.is_some() {
                 model.trade_skill_headers.clone()
             } else {
@@ -570,7 +606,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetTradeSkillSubClassFilter",
         lua.create_function(|lua, args: (Option<Value>, Option<Value>, Option<Value>)| {
             let count = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 if model.trade_skill.is_some() {
                     model.trade_skill_headers.len()
                 } else {
@@ -592,7 +630,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetTradeSkillInvSlots",
         lua.create_function(|lua, ()| {
             let bits = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 present_inv_slots(&model)
             };
             let mut out = Vec::new();
@@ -616,7 +656,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             // The same shape over the present inventory-type bits (`0x500018`): at or below 0
             // asks about all of them, past the last present one raises (`0x50006e`, `0x84e838`).
             let n = filter_index(lua, index, "Usage: GetTradeSkillInvSlotFilter(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let bits = if model.trade_skill.is_some() {
                 present_inv_slots(&model)
             } else {
@@ -639,7 +681,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetTradeSkillInvSlotFilter",
         lua.create_function(|lua, args: (Option<Value>, Option<Value>, Option<Value>)| {
             let count = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 if model.trade_skill.is_some() {
                     present_inv_slots(&model).len()
                 } else {

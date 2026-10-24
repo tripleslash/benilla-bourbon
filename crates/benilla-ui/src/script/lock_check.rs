@@ -156,20 +156,20 @@ impl UiScript {
     /// answer. The reference reads its loaded store (`0xc0dae4`), and a lock id without a row is no
     /// lock to the item builder (`0x52bd74`).
     pub fn set_lock_rows(&mut self, rows: std::collections::HashMap<u32, Vec<LockSlotView>>) {
-        self.model_mut().lock_rows = rows;
+        set_field!(self, lock_rows, rows);
     }
 
     /// Pushes `LockType.dbc`'s names, by index, once at load: the `LOCKED_WITH_SPELL_KNOWN` line
     /// names the lock kind off the store `0xc0dad0` (`0x52bef4`); an index without a row reads
     /// `UNKNOWN` (`0x52bf00`).
     pub fn set_lock_type_names(&mut self, names: std::collections::HashMap<u32, String>) {
-        self.model_mut().lock_type_names = names;
+        set_field!(self, lock_type_names, names);
     }
 
     /// Pushes what the active player opens locks with, on change. Never pushed, there is no active
     /// player and every lock reads as open.
     pub fn set_lock_openers(&mut self, openers: LockOpeners) {
-        self.model_mut().lock_openers = Some(openers);
+        set_field!(self, lock_openers, Some(openers));
     }
 }
 

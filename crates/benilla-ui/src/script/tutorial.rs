@@ -6,7 +6,6 @@
 use mlua::{Lua, Value};
 
 use super::binding_abi::{flag, number_arg};
-use super::Model;
 
 /// `FlagTutorial`'s bound, `0 ≤ n − 1 < 0x32`: the fifty tutorials `GlobalStrings.lua` names.
 const TUTORIAL_IDS: i32 = 0x32;
@@ -14,12 +13,12 @@ const TUTORIAL_IDS: i32 = 0x32;
 impl super::UiScript {
     /// The acknowledged bank's bytes, `None` before `SMSG_TUTORIAL_FLAGS`.
     pub fn set_tutorial_bank(&mut self, bank: Option<Vec<u8>>) {
-        self.model_mut().tutorial_bank = bank;
+        set_field!(self, tutorial_bank, bank);
     }
 
     /// `FlagTutorial(n)` calls since the last drain, as 0-based ids (`n − 1`).
     pub fn take_tutorial_flag_requests(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().tutorial_flag_requests)
+        drain_field!(self, tutorial_flag_requests)
     }
 
     /// An acknowledge the engine made inside a script call (`AcknowledgeTutorial 0x4b54c0`), as a
@@ -37,17 +36,17 @@ impl super::UiScript {
     /// `TriggerTutorial(id, 0)` asks the engine made since the last drain, as 0-based ids, for the
     /// app's fire-once bank.
     pub fn take_tutorial_triggers(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().tutorial_triggers)
+        drain_field!(self, tutorial_triggers)
     }
 
     /// `ClearTutorials()` calls since the last drain.
     pub fn take_tutorial_clears(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().tutorial_clears)
+        drain_field!(self, tutorial_clears)
     }
 
     /// `ResetTutorials()` calls since the last drain.
     pub fn take_tutorial_resets(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().tutorial_resets)
+        drain_field!(self, tutorial_resets)
     }
 }
 
@@ -59,7 +58,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "TutorialsEnabled",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let enabled = model
                 .tutorial_bank
                 .as_ref()
@@ -78,7 +79,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if !(0..TUTORIAL_IDS).contains(&id) {
                 return Ok(());
             }
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.tutorial_flag_requests.push(id as u32);
             Ok(())
         })?,
@@ -87,7 +90,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ClearTutorials",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.tutorial_clears += 1;
             Ok(())
         })?,
@@ -96,7 +101,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ResetTutorials",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.tutorial_resets += 1;
             Ok(())
         })?,

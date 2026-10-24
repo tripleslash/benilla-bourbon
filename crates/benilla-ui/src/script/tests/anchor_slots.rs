@@ -3,12 +3,12 @@
 //! (`0x7a2340`).
 
 use super::common::script;
-use crate::script::{Model, UiScript};
+use crate::script::UiScript;
 
 /// The mutation epoch, bumped by every write into the layout read set.
 fn epoch(s: &UiScript) -> u64 {
     s.lua()
-        .app_data_ref::<Model>()
+        .app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .layout_epoch
 }

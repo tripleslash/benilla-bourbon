@@ -25,7 +25,9 @@ fn with_scroll<T>(
     f: impl FnOnce(&mut ScrollFrameState) -> T,
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let frame = model
         .arena
         .frame_mut(h)
@@ -132,7 +134,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 _ => None,
             };
             let new_child: Option<FrameHandle> = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 match &target {
                     Value::Table(t) => decode_id(t)
                         .ok()
@@ -148,7 +152,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             with_scroll(lua, &this, |s| s.range_dirty = true)?;
             {
                 let h = frame_handle_of(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.arena.set_scroll_child(h, new_child);
             }
             // The old child keeps its point and is not invalidated (`0x786ce6`–`0x786cf4` only
@@ -162,7 +168,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let child = with_scroll(lua, &this, |s| s.child)?;
             let id = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 child
                     .filter(|&h| model.arena.frame(h).is_some())
                     .map(|h| model.frame_id(h))
@@ -288,7 +296,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 /// The screen-scale cells the range getters convert through (`0x7916f0`, `0x7917d0`).
 fn script_units(lua: &Lua) -> crate::layout::LayoutUnits {
-    lua.app_data_ref::<Model>()
+    lua.app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .layout_units()
 }
@@ -306,11 +314,13 @@ fn moved(old: f32, new: f32, eps: f64) -> bool {
 fn fire_scroll(lua: &Lua, this: &Table, script: &str, value: f64) -> mlua::Result<()> {
     let id = {
         let h = frame_handle_of(lua, this)?;
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.frame_id(h)
     };
     if let Err(e) = event::fire_widget_handler(lua, id, script, vec![Value::Number(value)]) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }
@@ -329,8 +339,13 @@ fn fire_scroll(lua: &Lua, this: &Table, script: &str, value: f64) -> mlua::Resul
 /// recompute reads them through `0x768320`, which never resolves, so a resize made earlier in the
 /// walk counts from the next tick, and the size it notes is the one that drain applied.
 pub(super) fn update(lua: &Lua, h: FrameHandle) {
+    // The size cache and the range are no extract input: the count stands, and a range change's
+    // handler moves it through what it writes.
+    let quiet = crate::script::epoch_of(lua);
     let notify = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let rect = model.frame_rects.get(&h).copied();
         let eps = SIZE_EPS;
         let units = model.layout_units();
@@ -356,6 +371,7 @@ pub(super) fn update(lua: &Lua, h: FrameHandle) {
         }
         moved.map(|range| (model.frame_id(h), range.map(|r| units.load(r))))
     };
+    crate::script::restore_epoch_of(lua, quiet);
     let Some((id, [x_range, y_range])) = notify else {
         return;
     };
@@ -367,12 +383,17 @@ pub(super) fn update(lua: &Lua, h: FrameHandle) {
         "OnScrollRangeChanged",
         vec![Value::Number(x_range), Value::Number(y_range)],
     ) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }
     // The mark clears after the notify, so one the handler set is dropped.
-    if let Some(s) = scroll_state(&mut lua.app_data_mut::<Model>().expect("model app_data"), h) {
+    if let Some(s) = scroll_state(
+        &mut lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data"),
+        h,
+    ) {
         s.range_dirty = false;
     }
 }
@@ -408,7 +429,9 @@ fn reanchor_child(lua: &Lua, this: &Table) -> mlua::Result<()> {
         return Ok(());
     };
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     if model.arena.frame(child).is_none() {
         return Ok(());
     }

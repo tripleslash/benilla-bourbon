@@ -564,7 +564,9 @@ fn desaturation_rides_the_extract_for_art_and_never_for_a_solid() {
 /// quad to read it from.
 fn desaturated(s: &UiScript, name: &str) -> bool {
     let lua = s.lua();
-    let model = lua.app_data_ref::<crate::script::Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let id = *model.region_by_name.get(name).expect("region name");
     let h = *model.id_to_region.get(&id).expect("region handle");
     model.region_data.get(&h).is_some_and(|d| d.desaturated)
@@ -1376,7 +1378,9 @@ fn the_constructors_string_arguments_are_four_shapes_not_one() {
         .unwrap_or_else(|e| panic!("an unrecognised layer must not raise: {e}"));
     let layer_of = |s: &UiScript, name: &str| {
         let lua = s.lua();
-        let model = lua.app_data_ref::<crate::script::Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let id = *model.region_by_name.get(name).expect("published region");
         let rh = *model.id_to_region.get(&id).expect("live region");
         model.arena.region(rh).expect("region").draw_layer

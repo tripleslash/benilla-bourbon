@@ -51,7 +51,9 @@ fn install_money(lua: &Lua, copper: u32) {
 /// `PickupPlayerMoney` after the argument gate; each refusal is silent.
 pub(crate) fn pickup_player_money(lua: &Lua, copper: u32) -> bool {
     let allowed = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         copper != 0 && model.player_control && u64::from(copper) <= model.money
     };
     if allowed {
@@ -96,7 +98,9 @@ pub(crate) fn set_own_offer(model: &mut Model, copper: u32) {
 /// ends both clicks whatever the purse answered.
 pub(crate) fn add_trade_money(lua: &Lua) -> mlua::Result<bool> {
     let (held, total) = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         (cursor_money(&model) != 0, trade_money_total(&model))
     };
     let Some(total) = total else {
@@ -115,7 +119,9 @@ pub(crate) fn add_trade_money(lua: &Lua) -> mlua::Result<bool> {
 /// cursor.
 pub(crate) fn pickup_trade_money(lua: &Lua, amount: i32) -> mlua::Result<bool> {
     let left = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let offer = model.trade.as_ref().map_or(0, |t| t.player.gold) as i32;
         (amount > 0 && amount <= offer).then(|| (offer - amount) as u32)
     };
@@ -124,7 +130,9 @@ pub(crate) fn pickup_trade_money(lua: &Lua, amount: i32) -> mlua::Result<bool> {
     };
     crate::script::trade::submit(lua, crate::script::trade::TradeCall::Gold(left))?;
     set_own_offer(
-        &mut lua.app_data_mut::<Model>().expect("model app_data"),
+        &mut lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data"),
         left,
     );
     install_money(lua, amount as u32);
@@ -136,14 +144,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetCursorMoney",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(cursor_money(&model)))
         })?,
     )?;
     g.set(
         "CursorHasMoney",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(matches!(model.cursor, Some(CursorPayload::Money(_)))))
         })?,
     )?;

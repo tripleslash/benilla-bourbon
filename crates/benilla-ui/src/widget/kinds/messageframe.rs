@@ -629,14 +629,16 @@ impl ScrollingMessageState {
     /// counts down, hiding below 0 (`0x788521`, so exactly 0 stays shown at alpha 0), else stored
     /// with the alpha byte `ftol(left / fadeDuration · 255)`, unclamped (`0x788544`-`0x788558`), from
     /// the unrounded x87 value.
-    pub fn tick(&mut self, dt: f32) {
+    /// Whether a line hid or its alpha moved, the drawn part of the fade.
+    pub fn tick(&mut self, dt: f32) -> bool {
         if !self.fading_enabled || !self.at_bottom || self.lines_shown == 0 {
-            return;
+            return false;
         }
         let dt = f64::from(dt);
         let duration = f64::from(self.fade_duration);
         let range = self.shown_range();
         let mut hid = false;
+        let mut faded = false;
         for line in self.lines.range_mut(range) {
             if !line.shown {
                 continue;
@@ -671,9 +673,12 @@ impl ScrollingMessageState {
             }
             line.fade_left = left as f32;
             let byte = crate::script::binding_abi::ftol(left / duration * 255.0) as u8;
-            line.alpha = f32::from(byte) / 255.0;
+            let alpha = f32::from(byte) / 255.0;
+            faded |= line.alpha != alpha;
+            line.alpha = alpha;
         }
         self.links_dirty |= hid;
+        hid || faded
     }
 }
 
@@ -794,11 +799,14 @@ impl MessageFrameState {
     /// duration (`0x78635b`-`0x786379`); a line with no fade left stays (`0x78633a`). The reference
     /// also gates on `numLinesDisplayed > 0`, which this does not check. The arithmetic is `f32`:
     /// whether `0x786200` keeps the unrounded x87 value like the scrolling tick is untraced.
-    pub fn tick(&mut self, dt: f32) {
+    /// Whether a line was freed or its alpha moved, the drawn part of the fade.
+    pub fn tick(&mut self, dt: f32) -> bool {
         if !self.fading_enabled {
-            return;
+            return false;
         }
         let duration = self.fade_duration;
+        let before = self.lines.len();
+        let mut faded = false;
         self.lines.retain_mut(|line| {
             if line.time_left != 0.0 {
                 line.time_left -= dt;
@@ -818,20 +826,24 @@ impl MessageFrameState {
             let fade = line.fade_left - dt;
             if fade > 0.0 || fade.is_nan() {
                 line.fade_left = fade;
-                line.alpha = f32::from(quantize_fade(fade / duration)) / 255.0;
+                let alpha = f32::from(quantize_fade(fade / duration)) / 255.0;
+                faded |= line.alpha != alpha;
+                line.alpha = alpha;
                 true
             } else {
                 false
             }
         });
+        faded || self.lines.len() != before
     }
 
     /// Evict the oldest lines until the rest fit `viewport_rows`, each costing its wrapped rows.
     /// Zero rows means no rect yet and evicts nothing, so a message posted from `OnLoad` before
     /// the first layout survives; until then only the fade bounds the list.
-    pub fn trim_to_viewport(&mut self, viewport_rows: usize) {
+    /// Whether a line was evicted.
+    pub fn trim_to_viewport(&mut self, viewport_rows: usize) -> bool {
         if viewport_rows == 0 {
-            return;
+            return false;
         }
         let mut used = 0usize;
         let mut keep = 0usize;
@@ -842,8 +854,10 @@ impl MessageFrameState {
             used += usize::from(line.rows.max(1));
             keep += 1;
         }
+        let before = self.lines.len();
         while self.lines.len() > keep.max(1) {
             self.lines.pop_front();
         }
+        self.lines.len() != before
     }
 }

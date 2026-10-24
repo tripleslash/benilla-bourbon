@@ -6,7 +6,6 @@
 use mlua::{Lua, Value};
 
 use super::binding_abi::flag;
-use super::Model;
 
 /// The death snapshot the app pushes each frame.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -59,12 +58,12 @@ pub enum DeathAction {
 impl super::UiScript {
     /// Push this frame's death snapshot, before the event dispatch.
     pub fn set_death(&mut self, state: DeathUiState) {
-        self.model_mut().death = state;
+        set_field!(self, death, state);
     }
 
     /// Drain the queued death intents.
     pub fn take_death_actions(&mut self) -> Vec<DeathAction> {
-        std::mem::take(&mut self.model_mut().death_actions)
+        drain_field!(self, death_actions)
     }
 }
 
@@ -75,7 +74,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.globals().set(
             name,
             lua.create_function(move |lua, ()| {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.death_actions.push(action);
                 Ok(())
             })?,
@@ -90,7 +91,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "UseSoulstone",
         lua.create_function(|lua, ()| {
             let may_cast = super::protected::gate(lua, super::protected::Tag::CAST);
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model
                 .death_actions
                 .push(DeathAction::UseSoulstone { may_cast });
@@ -103,7 +106,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetReleaseTimeRemaining",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model
                 .death
                 .release_remaining
@@ -116,7 +121,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetCorpseRecoveryDelay",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(f64::from(model.death.recovery_delay.max(0.0).floor()))
         })?,
     )?;
@@ -124,21 +131,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ResurrectHasSickness",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.death.resurrect_sickness))
         })?,
     )?;
     g.set(
         "ResurrectHasTimer",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.death.resurrect_has_timer))
         })?,
     )?;
     g.set(
         "CheckSpiritHealerDist",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.death.spirit_healer_in_range))
         })?,
     )?;
@@ -146,7 +159,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetResSicknessDuration",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(match &model.death.sickness_duration {
                 Some(s) => Value::String(lua.create_string(s)?),
                 None => Value::Nil,
@@ -159,7 +174,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "HasSoulstone",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(match &model.death.self_res_label {
                 Some(s) => Value::String(lua.create_string(s)?),
                 None => Value::Nil,

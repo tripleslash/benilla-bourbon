@@ -17,6 +17,19 @@ use crate::widget::{ButtonState, ChildWalk, FrameHandle, FrameKind};
 /// then dispatch the transition (`0x7757fb`/`0x7758bb`), which gates itself, so `Show()` on a
 /// frame already shown but not visible still runs.
 pub(super) fn set_shown(lua: &Lua, h: FrameHandle, shown: bool) {
+    // Already so, bit and visibility both: the transition below would gate out at once, so it is
+    // not run and the mutation count stands. A tooltip's show re-sizes itself and always runs.
+    let settled = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data set")
+        .arena
+        .frame(h)
+        .is_some_and(|f| {
+            f.kind != FrameKind::GameTooltip && f.shown == shown && f.effective_visible == shown
+        });
+    if settled {
+        return;
+    }
     match model_mut(lua).arena.frame_mut(h) {
         Some(f) => f.shown = shown,
         None => return,
@@ -50,7 +63,7 @@ pub(super) fn hide(lua: &Lua, h: FrameHandle) {
 }
 
 fn kind(lua: &Lua, h: FrameHandle) -> Option<FrameKind> {
-    lua.app_data_ref::<Model>()
+    lua.app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .arena
         .frame(h)
@@ -171,7 +184,7 @@ fn walk_children(lua: &Lua, parent: FrameHandle, step: fn(&Lua, FrameHandle)) {
     let mut walk = ChildWalk::default();
     loop {
         let next = lua
-            .app_data_ref::<Model>()
+            .app_data_ref::<crate::script::ModelCell>()
             .expect("model app_data")
             .arena
             .next_child(parent, &mut walk);
@@ -327,8 +340,9 @@ pub(crate) fn post_load_show(lua: &Lua, wrapper: &Table) {
     record(lua, fired);
 }
 
-fn model_mut(lua: &Lua) -> mlua::AppDataRefMut<'_, Model> {
-    lua.app_data_mut::<Model>().expect("model app_data")
+fn model_mut(lua: &Lua) -> mlua::AppDataRefMut<'_, crate::script::ModelCell> {
+    lua.app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data")
 }
 
 /// A handler error is recorded in [`Model::errors`], never propagated to the verb.

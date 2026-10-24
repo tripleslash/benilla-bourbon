@@ -4,7 +4,7 @@
 //! fades (`0x788460`, `0x786200`). `OnUpdateModel` fires later, from the draw pass (`0x7657d0`),
 //! in draw order.
 
-use crate::script::{Model, UiScript};
+use crate::script::UiScript;
 use crate::widget::{ModelFileFacts, SequenceFacts};
 
 use super::common::script;
@@ -250,7 +250,10 @@ fn on_update_model_fires_in_draw_order() {
 
 /// Each line of message frame `name` as `(time_left, alpha)`, oldest first.
 fn lines(s: &UiScript, name: &str) -> Vec<(f32, f32)> {
-    let model = s.lua().app_data_ref::<Model>().expect("model");
+    let model = s
+        .lua()
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let fh = model.arena.lookup(name).expect("message frame");
     model
         .arena

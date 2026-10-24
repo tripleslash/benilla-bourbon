@@ -309,12 +309,12 @@ impl super::UiScript {
 
     /// The live table, for the app's save.
     pub fn macros(&self) -> MacroState {
-        self.model_mut().macros.clone()
+        self.model_ref().macros.clone()
     }
 
     /// Push every macro's cached cast by id, replacing the last push.
     pub fn set_macro_bindings(&mut self, bindings: std::collections::HashMap<u32, MacroBinding>) {
-        self.model_mut().macro_bindings = bindings;
+        set_field!(self, macro_bindings, bindings);
     }
 
     /// Each macro's cached cast by id; a record with none is bound to nothing.
@@ -349,7 +349,7 @@ impl super::UiScript {
             })
             .collect();
         let mut model = self.model_mut();
-        let model = &mut *model;
+        let model: &mut crate::script::Model = &mut model;
         for (id, body, was, options) in picked {
             let next = bind::derive(
                 &aliases,
@@ -366,13 +366,13 @@ impl super::UiScript {
     /// Whether a script changed the table since the last call; the app then saves it. The verbs
     /// signal `UPDATE_MACROS` (`0x852460`) themselves, from the order's rebuild (`0x4f0d30`).
     pub fn take_macros_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().macros_dirty)
+        drain_field!(self, macros_dirty)
     }
 
     /// Push the icon chooser's texture paths in grid order: the files under `Interface\Icons\`
     /// that `0x4f0090` lists (`benilla_formats::load_macro_icons`), not `SpellIcon.dbc`.
     pub fn set_macro_icons(&mut self, icons: Vec<String>) {
-        self.model_mut().macro_icons = icons;
+        set_field!(self, macro_icons, icons);
     }
 
     /// Install what builds the icon list. `GetNumMacroIcons`, `CreateMacro` and `EditMacro` run it
@@ -392,13 +392,13 @@ impl super::UiScript {
     /// a `u64` instead of diffing the table. Not [`Self::take_macros_dirty`]: that drain has one
     /// owner, the save, and a second reader would steal its edge.
     pub fn macros_generation(&self) -> u64 {
-        self.model_mut().macros_generation
+        self.model_ref().macros_generation
     }
 
     /// How many `EditMacro` calls have edited a macro: each one's worker `EditMacroRecord 0x4f1280`
     /// ends in the action bar's usable refresh `0x4e5c00` (`0x4f132e`), which the app runs.
     pub fn macro_edits(&self) -> u64 {
-        self.model_mut().macro_edits
+        self.model_ref().macro_edits
     }
 }
 
@@ -544,7 +544,9 @@ fn delete_macro(model: &mut Model, index: usize) -> bool {
 /// macro went on.
 fn pickup_macro(lua: &Lua, index: usize) -> bool {
     let payload = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let Some(entry) = model.macros.get(index) else {
             return false;
         };
@@ -562,7 +564,9 @@ fn pickup_macro(lua: &Lua, index: usize) -> bool {
 /// dedup then reads below its null list (`0x4f0134`-`0x4f0145`) and faults.
 fn ensure_macro_icons(lua: &Lua) {
     let source = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         if !model.macro_icons.is_empty() {
             return;
         }
@@ -570,7 +574,7 @@ fn ensure_macro_icons(lua: &Lua) {
     };
     if let Some(source) = source {
         let icons = source();
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .macro_icons = icons;
     }
@@ -590,7 +594,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumMacros",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok((
                 model.macros.count(false) as i64,
                 model.macros.count(true) as i64,
@@ -603,7 +609,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetMacroInfo(index)` (`0x84cc0c`, `0x4f177b`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetMacroInfo(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(m) = model.macros.get(index) else {
                 // `0x4f1829`: four nils.
                 return Ok(super::binding_abi::tuple(&[None; 4]));
@@ -636,7 +644,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetMacroIndexByName",
         lua.create_function(|lua, name: Value| {
             let name = binding_abi::string_arg(lua, name, "Usage: GetMacroIndexByName(name)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.macros.index_by_name(&name) as i64)
         })?,
     )?;
@@ -646,7 +656,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetNumMacroIcons",
         lua.create_function(|lua, ()| {
             ensure_macro_icons(lua);
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.macro_icons.len() as i64)
         })?,
     )?;
@@ -660,7 +672,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, v: Value| {
             let index = super::binding_abi::index_arg(lua, v, "Usage: GetMacroIconInfo(index)")?;
             let path = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .macro_icons
                     .get((index as u32).wrapping_sub(1) as usize)
@@ -752,7 +766,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 None => turtle_named_icon(lua, &icon_arg),
             };
             let names_macro = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .macros
                 .get(index)
@@ -766,7 +780,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let aliases = bind::cast_aliases(lua);
             // The body the edit leaves, for the options evaluated before the verb's borrow.
             let after = body.clone().or_else(|| {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let id = model.macros.id_at(index);
                 model.macros.by_id(id).map(|m| m.body.clone())
             });
@@ -817,8 +833,11 @@ const TURTLE_NO_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
 /// a number: its path in the icons folder, as the macro file's icon token reads, and a name with
 /// a path separator taken whole. `None` on a 1.12.1 VM or for any other value.
 fn turtle_named_icon(lua: &Lua, v: &Value) -> Option<String> {
-    let turtle =
-        lua.app_data_ref::<Model>().expect("model app_data").flavor == super::UiFlavor::Turtle;
+    let turtle = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data")
+        .flavor
+        == super::UiFlavor::Turtle;
     let Value::String(s) = v else {
         return None;
     };

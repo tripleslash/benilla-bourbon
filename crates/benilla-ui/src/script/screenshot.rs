@@ -10,13 +10,13 @@
 
 use mlua::Lua;
 
-use super::{Model, VmKind};
+use super::VmKind;
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "Screenshot",
         lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .screenshot_asks += 1;
             Ok(())
@@ -28,7 +28,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 impl super::UiScript {
     /// `Screenshot()` calls since the last drain, each one capture.
     pub fn take_screenshot_asks(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().screenshot_asks)
+        drain_field!(self, screenshot_asks)
     }
 
     /// The event that answers a capture in this state: the glue's callback `0x46c520` signals id

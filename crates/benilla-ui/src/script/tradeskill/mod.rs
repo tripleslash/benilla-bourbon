@@ -272,17 +272,17 @@ impl super::UiScript {
     /// The cancel `0x4fc890` on leaving the world (`0x490ae9` → `0x4fc780`): the pending count
     /// zeroed (`0x4fc8cb`); the callbacks stay, as the cancel's keys miss them.
     pub fn trade_skill_cancel_waits(&mut self) {
-        self.model_mut().trade_skill_pending = 0;
+        set_field!(self, trade_skill_pending, 0);
     }
 
     /// The records the builds waited on since the last take, one per miss.
     pub fn take_trade_skill_build_waits(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().trade_skill_build_waits)
+        drain_field!(self, trade_skill_build_waits)
     }
 
     /// The item records the getters' calls missed since the last take, one per call.
     pub fn take_trade_skill_item_waits(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().trade_skill_item_waits)
+        drain_field!(self, trade_skill_item_waits)
     }
 
     /// The rows the list holds, headers included: the full count (`0xbde04c`) that
@@ -294,12 +294,12 @@ impl super::UiScript {
     /// Drains the `(spell id, count)` crafts `DoTradeSkill` queued; the app's repeat loop
     /// (`0x4fd7b0`) sends one cast per item.
     pub fn take_trade_skill_dos(&mut self) -> Vec<(u32, u32)> {
-        std::mem::take(&mut self.model_mut().trade_skill_dos)
+        drain_field!(self, trade_skill_dos)
     }
 
     /// Whether `CloseTradeSkill` ran since the last drain; the close sends no packet.
     pub fn take_trade_skill_close(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().trade_skill_close)
+        drain_field!(self, trade_skill_close)
     }
 
     /// Whether the VM holds the window open: `CloseTradeSkill` closes it in the verb, so a feed
@@ -375,7 +375,7 @@ impl super::UiScript {
     /// Seat the repeat count a previous VM left (`[0xbde060]`), which the world-enter init keeps
     /// while it disarms the spell (`0x4fc76b`).
     pub fn seed_trade_skill_repeat_count(&mut self, count: u32) {
-        self.model_mut().trade_skill_repeat_count = count;
+        set_field!(self, trade_skill_repeat_count, count);
     }
 
     /// The armed repeat as `(spell, count)`, the reference's `0xbde05c` and `0xbde060`.

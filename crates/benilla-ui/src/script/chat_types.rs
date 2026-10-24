@@ -5,7 +5,6 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi;
-use super::Model;
 
 /// The fixed segment: 94 entries, in the reference's order (index = position + 1).
 pub const FIXED_CHAT_TYPES: usize = 94;
@@ -185,12 +184,12 @@ impl super::UiScript {
 
     /// The live registry, fixed segment first, then the extras.
     pub fn chat_colors(&self) -> Vec<ChatTypeColor> {
-        self.model_mut().chat_colors.clone()
+        self.model_ref().chat_colors.clone()
     }
 
     /// Whether Lua changed a colour since the last drain, the app's cue to persist.
     pub fn take_chat_color_changes(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().chat_colors_changed)
+        drain_field!(self, chat_colors_changed)
     }
 }
 
@@ -203,7 +202,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(name) = name else {
                 return Ok(0);
             };
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(position(&model.chat_colors, &name).map_or(0, |i| i as i64 + 1))
         })?,
     )?;
@@ -219,7 +220,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let g = binding_abi::float_arg(lua, g, USAGE)?;
             let b = binding_abi::float_arg(lua, b, USAGE)?;
             let written = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let Some(i) = position(&model.chat_colors, &name) else {
                     return Ok(());
                 };
@@ -246,7 +249,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ResetChatColors",
         lua.create_function(|lua, _ignored: MultiValue| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             reset(&mut model.chat_colors);
             model.chat_colors_changed = true;
             // `0x4a09e0` ends `xor eax,eax; ret`: no value.

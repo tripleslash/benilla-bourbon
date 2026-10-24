@@ -95,7 +95,7 @@ impl UiScript {
         display: (u32, u32),
         auto_cache: &mut Option<(u32, u32)>,
     ) -> bool {
-        self.model_mut().ui_scale_request = Some(ui_scale);
+        set_field!(self, ui_scale_request, Some(ui_scale));
         self.apply_ui_scale(display, auto_cache)
     }
 

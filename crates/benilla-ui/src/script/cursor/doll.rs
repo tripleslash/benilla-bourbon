@@ -382,7 +382,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // The slot reader (`0x4c9003`) else `Invalid inventory slot in CursorCanGoInSlot`
             // (`0x848bd0`).
             let id = inventory_slot(lua, id, "Invalid inventory slot in CursorCanGoInSlot")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(cursor_can_go_in_slot(&model, id)))
         })?,
     )?;
@@ -417,7 +419,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             if slot0 < 0 {
                 return Ok(Value::Nil);
             }
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(is_inventory_item_locked(&model, slot0 as u32 + 1)))
         })?,
     )?;

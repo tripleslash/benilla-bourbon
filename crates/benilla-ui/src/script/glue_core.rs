@@ -9,7 +9,7 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{flag, s_str_to_int, string_arg};
-use super::{Model, ScriptValue};
+use super::ScriptValue;
 
 /// One of the four user agreements the login screen walks before it shows the login boxes
 /// (`AccountLogin_ShowUserAgreements`), each a CVar the glue manager reads once at startup
@@ -575,7 +575,7 @@ const SCREEN_NAME_MAX: usize = 0x3f;
 impl super::UiScript {
     /// Drain the glue verbs' requests since the last call.
     pub fn take_glue_requests(&mut self) -> Vec<GlueRequest> {
-        std::mem::take(&mut self.model_mut().glue.requests)
+        drain_field!(self, glue.requests)
     }
 
     /// Seat the glue manager the verbs call in place ([`GlueHost`]).
@@ -585,7 +585,7 @@ impl super::UiScript {
 
     /// Drain the manager calls made while no host was seated, for the host to run now.
     pub fn take_glue_calls(&mut self) -> Vec<GlueCall> {
-        std::mem::take(&mut self.model_mut().glue.calls)
+        drain_field!(self, glue.calls)
     }
 
     /// Fire one of the glue manager's signals into this VM, as the manager's frame raises it.
@@ -631,7 +631,7 @@ impl super::UiScript {
     /// Seed the current glue screen's name. The buffer is the client's (`[0xb41478]`), which a
     /// glue rebuild (`0x46a7b0`) leaves as it was, so the host carries it into the new VM.
     pub fn set_glue_screen_name(&mut self, name: &str) {
-        self.model_mut().glue.screen = name.to_string();
+        set_field!(self, glue.screen, name.to_string());
     }
 
     /// A string global's text, `GetGlobalString`'s answer (`0x703bf0` with no gender and no
@@ -643,7 +643,7 @@ impl super::UiScript {
 }
 
 pub(super) fn queue(lua: &Lua, request: GlueRequest) {
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .glue
         .requests
@@ -657,7 +657,9 @@ pub(super) fn queue(lua: &Lua, request: GlueRequest) {
 /// waits for the one that seats this VM.
 pub(super) fn call(lua: &Lua, call: GlueCall) {
     let host = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         match model.glue.host.clone() {
             Some(host) => host,
             None => {
@@ -706,7 +708,7 @@ fn fire_signal(lua: &Lua, signal: GlueSignal) {
         }
         GlueSignal::ScreenFrom { current, name } => {
             let here = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .glue
                 .screen
@@ -727,12 +729,14 @@ fn fire_signal(lua: &Lua, signal: GlueSignal) {
             );
         }
         GlueSignal::Cvar { name, value } => {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             super::cvars::set_from_engine(&mut model, name, value);
         }
         GlueSignal::Resume(step) => {
             let host = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .glue
                 .host
@@ -779,7 +783,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let account = string_arg(lua, account, USAGE)?;
             let password = string_arg(lua, password, USAGE)?;
             let agreed = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let n = &model.glue.notices;
                 n.get(GlueNotice::Tos).accepted && n.get(GlueNotice::Eula).accepted
             };
@@ -803,7 +809,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSavedAccountName",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let value = model
                 .cvars
                 .get(CVAR_ACCOUNT_NAME_KEY)
@@ -818,7 +826,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetSavedAccountName",
         lua.create_function(|lua, name: Value| {
             let name = string_arg(lua, name, "Usage: SetSavedAccountName(\"accountName\")")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             super::cvars::write_cvar(&mut model, "accountName", name);
             Ok(())
         })?,
@@ -853,21 +863,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         g.set(
             show,
             lua.create_function(move |lua, _: MultiValue| {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 Ok(flag(model.glue.notices.get(notice).show_notice))
             })?,
         )?;
         g.set(
             accepted,
             lua.create_function(move |lua, _: MultiValue| {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 Ok(flag(model.glue.notices.get(notice).accepted))
             })?,
         )?;
         g.set(
             accept,
             lua.create_function(move |lua, _: MultiValue| {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.glue.notices.set(
                     notice,
                     NoticeState {
@@ -919,7 +935,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
                 name.truncate(end);
             }
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .glue
                 .screen = name;
@@ -935,7 +951,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetServerName",
         lua.create_function(|lua, _: MultiValue| {
             let (name, host) = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 (
                     super::glue_realm::realm_name(&model),
                     model.glue.host.clone(),
@@ -943,7 +961,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let selected = host.and_then(|h| h.selected_realm_type());
             let (pvp, rp) = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 selected.map_or((false, false), |t| model.glue.realms.type_of(t))
             };
             Ok(MultiValue::from_vec(vec![
@@ -959,7 +979,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsConnectedToServer",
         lua.create_function(|lua, _: MultiValue| {
             let host = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .glue
                 .host
@@ -1027,7 +1047,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetMovieSubtitles",
         lua.create_function(|lua, _: MultiValue| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let on = model
                 .cvars
                 .get("moviesubtitle")
@@ -1041,7 +1063,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetMovieResolution",
         lua.create_function(|lua, _: MultiValue| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let width = model
                 .cvars
                 .get("gxresolution")
@@ -1054,7 +1078,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         g.set(
             name,
             lua.create_function(move |lua, _: MultiValue| {
-                lua.app_data_mut::<Model>()
+                lua.app_data_mut::<crate::script::ModelCell>()
                     .expect("model app_data")
                     .glue
                     .cursor_hidden = hidden;

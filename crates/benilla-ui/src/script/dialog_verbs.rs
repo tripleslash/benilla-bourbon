@@ -4,7 +4,6 @@
 use mlua::{Lua, Value};
 
 use super::binding_abi::{bool_or_default, coerced_number, flag};
-use super::Model;
 
 /// The area spirit healer's aura (`0xA18`), the only cancel-aura spell that also fires
 /// `AREA_SPIRIT_HEALER_OUT_OF_RANGE` (`0x6e70b6`).
@@ -13,17 +12,17 @@ pub const AREA_SPIRIT_HEALER_SPELL: u32 = 2584;
 impl super::UiScript {
     /// `ConfirmPetUnlearn()` calls since the last drain.
     pub fn take_pet_unlearn_confirms(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().pet_unlearn_confirms)
+        drain_field!(self, pet_unlearn_confirms)
     }
 
     /// What `CheckPetUntrainerDist()` answers: a pending question whose trainer is in reach.
     pub fn set_pet_untrainer_pending(&mut self, pending: bool) {
-        self.model_mut().pet_untrainer_pending = pending;
+        set_field!(self, pet_untrainer_pending, pending);
     }
 
     /// `GetInstanceBootTimeRemaining()`'s answer, whole seconds (0 idle).
     pub fn set_instance_boot_secs(&mut self, secs: u32) {
-        self.model_mut().instance_boot_secs = secs;
+        set_field!(self, instance_boot_secs, secs);
     }
 
     /// The area spirit healer: whether one is cached, and the seconds to its next wave.
@@ -35,17 +34,17 @@ impl super::UiScript {
 
     /// `AcceptAreaSpiritHeal()` calls since the last drain, each a `0x2E3` to send.
     pub fn take_area_spirit_accepts(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().area_spirit_accepts)
+        drain_field!(self, area_spirit_accepts)
     }
 
     /// `AcceptBattlefieldPort` calls since the last drain: `(slot 1..=3, accept)`.
     pub fn take_battlefield_port_requests(&mut self) -> Vec<(u8, bool)> {
-        std::mem::take(&mut self.model_mut().battlefield_port_requests)
+        drain_field!(self, battlefield_port_requests)
     }
 
     /// `CancelMeetingStoneRequest()` calls since the last drain.
     pub fn take_meeting_stone_cancels(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().meeting_stone_cancels)
+        drain_field!(self, meeting_stone_cancels)
     }
 
     /// The meeting stone's two globals: the queued area id (`0xb72038`, 0 for none) and the
@@ -64,7 +63,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetInstanceBootTimeRemaining",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.instance_boot_secs))
         })?,
     )?;
@@ -73,7 +74,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "AcceptAreaSpiritHeal",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             if model.area_spirit_healer_cached {
                 model.area_spirit_accepts += 1;
             }
@@ -98,7 +101,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetAreaSpiritHealerTime",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.area_spirit_secs))
         })?,
     )?;
@@ -126,7 +131,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             }
             let accept = bool_or_default(Some(&accept), false);
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.battlefield_port_requests.push((slot as u8, accept));
             Ok(())
         })?,
@@ -136,7 +143,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CancelMeetingStoneRequest",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.meeting_stone_cancels += 1;
             Ok(())
         })?,
@@ -146,7 +155,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "IsInMeetingStoneQueue",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.meeting_stone_area != 0))
         })?,
     )?;
@@ -155,7 +166,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetMeetingStoneStatusText",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(match &model.meeting_stone_status_text {
                 Some(text) => Value::String(lua.create_string(text)?),
                 None => Value::Nil,
@@ -167,7 +180,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CheckPetUntrainerDist",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.pet_untrainer_pending))
         })?,
     )?;
@@ -175,7 +190,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ConfirmPetUnlearn",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.pet_unlearn_confirms += 1;
             Ok(())
         })?,

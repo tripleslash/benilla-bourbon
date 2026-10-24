@@ -178,7 +178,7 @@ pub(crate) struct Model {
     pub(crate) load_log: crate::status::LoadLog,
     pub(crate) arena: WidgetArena,
     /// Per-frame anchors, size and scale; every live frame has one from creation on.
-    pub(crate) layout_inputs: HashMap<FrameHandle, LayoutInput>,
+    pub(crate) layout_inputs: crate::widget::HandleMap<FrameHandle, LayoutInput>,
     /// Per dragged frame, its anchors and size as the scripts last set them: as they stood before
     /// its first drag pin (`0x768430`), then each script `SetPoint`, `SetAllPoints`,
     /// `ClearAllPoints`, `SetWidth` and `SetHeight` applied to it too, the engine's own writes
@@ -195,7 +195,7 @@ pub(crate) struct Model {
     /// Each resolvable frame's rect from the last resolve, in layout units: the resolver's own,
     /// which its keep test, its getters and its anchors read; everything else reads
     /// [`Self::frame_rect`].
-    pub(crate) frame_rects: HashMap<FrameHandle, Rect>,
+    pub(crate) frame_rects: crate::widget::HandleMap<FrameHandle, Rect>,
     /// The anchor solver, kept across resolves so a steady round allocates nothing; scratch only.
     pub(crate) solver: LayoutSolver,
     /// Tier 2 of the resolve gate, the last converged inputs' fingerprint; `None` forces a resolve.
@@ -280,17 +280,17 @@ pub(crate) struct Model {
     /// Fixpoint rounds run across all solves.
     pub(crate) layout_rounds: u64,
     /// Per text frame, its hyperlink buttons, live and free ([`super::hyperlink::LinkPool`]).
-    pub(crate) link_buttons: HashMap<FrameHandle, super::hyperlink::LinkPool>,
+    pub(crate) link_buttons: crate::widget::HandleMap<FrameHandle, super::hyperlink::LinkPool>,
     /// Region visuals (texture, colour, text) and layout (anchors, size, justify).
-    pub(crate) region_data: HashMap<RegionHandle, RegionData>,
+    pub(crate) region_data: crate::widget::HandleMap<RegionHandle, RegionData>,
     /// The textures the regions' slots hold, with their creation stamps ([`super::texel`]).
     pub(crate) texels: super::texel::Texels,
     /// Each frame's backdrop plate (`<Backdrop>` or `SetBackdrop`, the client's `frame+0x1ac`):
     /// its spec and the nine Texture regions it built.
-    pub(crate) backdrops: HashMap<FrameHandle, backdrop::Installed>,
+    pub(crate) backdrops: crate::widget::HandleMap<FrameHandle, backdrop::Installed>,
     /// The own font of each EditBox, MessageFrame and ScrollingMessageFrame whose XML made one
     /// (`+0x300`, `+0x320`, `+0x338`; [`super::font_block::own_font`]).
-    pub(crate) own_fonts: HashMap<FrameHandle, super::font::FontId>,
+    pub(crate) own_fonts: crate::widget::HandleMap<FrameHandle, super::font::FontId>,
     /// `CSimpleHTML`'s state: element fonts `+0x350`, link format `+0x360`, content nodes `+0x340`.
     pub(crate) simple_html: simplehtml::SimpleHtmlStates,
     /// Every font object, named or a widget's own, with its links ([`super::font::Fonts`]).
@@ -299,25 +299,25 @@ pub(crate) struct Model {
     /// read (`GetRect 0x768320`, `0x7730b7`). A cleared region keeps its rect until its own next
     /// invalidate, as `ClearAllPoints` queues no resolve (`0x767620`). In layout units, as
     /// [`Self::frame_rects`]; [`Self::region_rect`] reads it in the root's.
-    pub(crate) region_rects: HashMap<RegionHandle, Rect>,
+    pub(crate) region_rects: crate::widget::HandleMap<RegionHandle, Rect>,
     /// A Texture whose resolve failed: the rect its last good resolve placed it at, which it keeps
     /// drawing, as the failed resolve (`0x768d55`) leaves the quad `0x770670` wrote and its emit
     /// checks only its texture (`0x7706e0`). Dropped when it resolves again. In layout units.
-    pub(crate) region_kept_rects: HashMap<RegionHandle, Rect>,
+    pub(crate) region_kept_rects: crate::widget::HandleMap<RegionHandle, Rect>,
 
     /// The next object id to mint; ids start at 1, since 0 is `SCREEN`.
     pub(crate) next_id: u32,
     pub(crate) id_to_frame: IdMap<FrameHandle>,
-    pub(crate) frame_to_id: HashMap<FrameHandle, u32>,
+    pub(crate) frame_to_id: crate::widget::HandleMap<FrameHandle, u32>,
     pub(crate) id_to_region: IdMap<RegionHandle>,
-    pub(crate) region_to_id: HashMap<RegionHandle, u32>,
+    pub(crate) region_to_id: crate::widget::HandleMap<RegionHandle, u32>,
     /// Region name to the first region that took it, for name lookups only (`SetPoint` anchoring
     /// to a sibling by name, after frames): first come, as the `_G` entry is (`0x701bd0`). A
     /// region's own name, for `GetName` and error strings, is [`crate::widget::Region::name`].
     pub(crate) region_by_name: HashMap<String, u32>,
 
     /// Which handlers each frame has; the closures themselves live in Lua's `REG_SCRIPTS` table.
-    pub(crate) scripts: HashMap<FrameHandle, HashSet<&'static str>>,
+    pub(crate) scripts: crate::widget::HandleMap<FrameHandle, HashSet<&'static str>>,
     /// Frames with an `OnUpdate` script, kept by `SetScript`, from which the update walk starts.
     pub(crate) on_update_frames: Vec<FrameHandle>,
     /// Bumped each time a frame joins [`Self::on_update_frames`], so the walk notices a frame that
@@ -1462,7 +1462,7 @@ impl Model {
             flavor: Default::default(),
             load_log: Default::default(),
             arena: WidgetArena::new(),
-            layout_inputs: HashMap::new(),
+            layout_inputs: Default::default(),
             drag_authored: HashMap::new(),
             solver: LayoutSolver::new(),
             layout_fingerprint: None,
@@ -1480,23 +1480,23 @@ impl Model {
             layout_solves: 0,
             layout_gate_walks: 0,
             layout_rounds: 0,
-            frame_rects: HashMap::new(),
-            link_buttons: HashMap::new(),
-            region_data: HashMap::new(),
+            frame_rects: Default::default(),
+            link_buttons: Default::default(),
+            region_data: Default::default(),
             texels: super::texel::Texels::default(),
-            backdrops: HashMap::new(),
-            own_fonts: HashMap::new(),
+            backdrops: Default::default(),
+            own_fonts: Default::default(),
             simple_html: simplehtml::SimpleHtmlStates::new(),
             fonts: super::font::Fonts::default(),
-            region_rects: HashMap::new(),
-            region_kept_rects: HashMap::new(),
+            region_rects: Default::default(),
+            region_kept_rects: Default::default(),
             next_id: 1,
             id_to_frame: IdMap::default(),
-            frame_to_id: HashMap::new(),
+            frame_to_id: Default::default(),
             id_to_region: IdMap::default(),
-            region_to_id: HashMap::new(),
+            region_to_id: Default::default(),
             region_by_name: HashMap::new(),
-            scripts: HashMap::new(),
+            scripts: Default::default(),
             on_update_frames: Vec::new(),
             on_update_joins: 0,
             on_size_changed_frames: Vec::new(),
@@ -2816,4 +2816,51 @@ fn derive_trace_armed() -> bool {
         && left
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1))
             .is_ok()
+}
+
+// ── The mutation counter ──
+
+/// [`Model`] behind a mutation counter. Every `&mut Model` taken through the VM's app data (a
+/// binding's `app_data_mut`, the host's `UiScript::model_mut`) comes through [`DerefMut`] and
+/// bumps `epoch`; a `&Model` never does. So a frame whose count stands where the last extract
+/// left it has nothing new to draw, and the app skips `UiScript::extract` outright
+/// (`UiScript::visual_epoch`). Host bookkeeping that proves it changed nothing drawn puts the
+/// count back ([`ModelCell::set_epoch`]); a write that is not provably invisible keeps its bump,
+/// so a miss costs one walk, never a stale frame.
+///
+/// [`DerefMut`]: std::ops::DerefMut
+pub(crate) struct ModelCell {
+    inner: Model,
+    epoch: u64,
+}
+
+impl ModelCell {
+    pub(crate) fn new(inner: Model) -> ModelCell {
+        ModelCell { inner, epoch: 1 }
+    }
+
+    /// The count as of now; equal counts mean no mutable borrow in between.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Put the count back to `epoch`, by a caller that took a mutable borrow since and changed
+    /// nothing the extract reads.
+    pub(crate) fn set_epoch(&mut self, epoch: u64) {
+        self.epoch = epoch;
+    }
+}
+
+impl std::ops::Deref for ModelCell {
+    type Target = Model;
+    fn deref(&self) -> &Model {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for ModelCell {
+    fn deref_mut(&mut self) -> &mut Model {
+        self.epoch = self.epoch.wrapping_add(1);
+        &mut self.inner
+    }
 }

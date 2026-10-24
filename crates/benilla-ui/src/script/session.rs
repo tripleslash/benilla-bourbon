@@ -6,8 +6,6 @@
 
 use mlua::Lua;
 
-use super::Model;
-
 /// A session intent queued by a Lua call, drained by the app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionRequest {
@@ -35,7 +33,7 @@ pub enum SessionRequest {
 impl super::UiScript {
     /// Drain the session intents queued since the last call.
     pub fn take_session_requests(&mut self) -> Vec<SessionRequest> {
-        std::mem::take(&mut self.model_mut().session_requests)
+        drain_field!(self, session_requests)
     }
 
     /// Queue an intent from the app: `/logout`, `/camp`, `/quit` and `/reload`, which benilla
@@ -48,7 +46,7 @@ impl super::UiScript {
     /// `0x49011d`, unconditionally, and [`Self::fire_world_enter`] spends it. The flag lives in
     /// this VM, so each load arms its own and a worldport, which loads nothing, re-arms nothing.
     pub fn arm_player_login(&mut self) {
-        self.model_mut().player_login_armed = true;
+        set_field!(self, player_login_armed, true);
     }
 
     /// The bag watchers' set-up in the world-enter cascade (`0x4f8cc0`): the bag cache zeroed,
@@ -102,7 +100,7 @@ impl super::UiScript {
     /// `PLAYER_LOGIN` if armed, `PLAYER_ENTERING_WORLD` and the calls after it through the quest
     /// log's (`0x4909a1`). [`Self::fire_world_enter_tail`] closes it.
     pub fn fire_world_enter_head(&mut self, bonus_bar_offset: u8) {
-        let armed = std::mem::take(&mut self.model_mut().player_login_armed);
+        let armed = drain_field!(self, player_login_armed);
         self.push_sound_suppression();
         // `0x703bc0` with 1: the threshold set to 0 (`0x703bd6`), so the collection runs now.
         self.lua.set_gc_threshold_kb(0);
@@ -153,7 +151,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 {
                     return Ok(());
                 }
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.session_requests.push(request);
                 Ok(())
             })?,
@@ -164,7 +164,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "InCinematic",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(if model.in_cinematic {
                 mlua::Value::Integer(1)
             } else {

@@ -167,7 +167,7 @@ pub enum ChannelCommand {
 impl super::UiScript {
     /// Feed the zone-channel catalog, whenever the zone, and so every resolved name, changes.
     pub fn set_zone_channel_catalog(&mut self, rows: Vec<ZoneChannelRow>) {
-        self.model_mut().zone_channel_catalog = rows;
+        set_field!(self, zone_channel_catalog, rows);
     }
 
     /// The channel verbs a harness's VM kept ([`Self::keep_calls`]), in call order.
@@ -193,18 +193,18 @@ impl super::UiScript {
 
     /// Whether Lua moved the latch since the last drain: the chat cache's dirty signal.
     pub fn take_guild_recruitment_change(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().guild_recruitment_changed)
+        drain_field!(self, guild_recruitment_changed)
     }
 
     /// Whether a `SetGuildRecruitmentMode(1)` since the last drain left its cascade owed
     /// (`0x49ea70` → `0x49ea90`, the plan [`RecruitmentPlan::Retry`]).
     pub fn take_guild_recruitment_cascade(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().guild_recruitment_cascade)
+        drain_field!(self, guild_recruitment_cascade)
     }
 
     /// What the cascade would do now; the verb runs it in place.
     pub fn set_guild_recruitment_plan(&mut self, plan: RecruitmentPlan) {
-        self.model_mut().guild_recruitment_plan = plan;
+        set_field!(self, guild_recruitment_plan, plan);
     }
 
     /// The host's own run of the cascade (the retry, the guild-id watcher): as the verb's, its
@@ -280,7 +280,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetGuildRecruitmentMode",
         // Always a number, never nil: `UIOptionsFrame_Load` tests it `== 1`.
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(f64::from(model.guild_recruitment_mode))
         })?,
     )?;
@@ -313,7 +315,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             let mode = n as u8;
             {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 if model.guild_recruitment_mode != mode {
                     model.guild_recruitment_mode = mode;
                     model.guild_recruitment_changed = true;
@@ -321,7 +325,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             // `0x49ea79 jne` / `0x49ea7b jmp 0x49ea90`: the cascade, on the new value alone.
             if mode == 1 && !run_recruitment_cascade(lua)? {
-                lua.app_data_mut::<Model>()
+                lua.app_data_mut::<crate::script::ModelCell>()
                     .expect("model app_data")
                     .guild_recruitment_cascade = true;
             }
@@ -340,7 +344,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetChannelName",
         lua.create_function(|lua, key: Value| {
             let number = super::binding_abi::is_number(lua, key.clone());
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let found = match (number, &key) {
                 (Some(n), _) => {
                     let n = i64::from(super::binding_abi::ftol(n));
@@ -378,7 +384,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetChannelList",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let mut out = Vec::with_capacity(model.joined_channels.len() * 2);
             for (i, slot) in model.joined_channels.iter().enumerate() {
                 let Some(slot) = slot.as_ref().filter(|c| c.confirmed) else {
@@ -423,7 +431,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     return Ok(MultiValue::new());
                 }
                 let row = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     model
                         .zone_channel_catalog
                         .iter()
@@ -450,7 +460,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .and_then(|i| usize::try_from(i).ok())
                 .filter(|i| *i < 10);
                 {
-                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     if let Some(i) = window {
                         let entry = shortcut.clone().unwrap_or_else(|| name.clone());
                         model.register_window_channel(i, entry, id);
@@ -486,7 +498,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "EnumerateServerChannels",
         lua.create_function(|lua, _ignored: MultiValue| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let mut out = Vec::new();
             for row in model.zone_channel_catalog.iter().filter(|r| r.listed) {
                 out.push(Value::String(lua.create_string(&row.shortcut)?));
@@ -520,7 +534,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let number = super::binding_abi::s_str_to_int(&key);
             {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // A number naming no confirmed slot names nothing (`0x49e880`), and the app ends
                 // the leave there (`0x49ee8a`).
                 let named = match number {
@@ -543,7 +559,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return submit(lua, ChannelCommand::Leave { name: key });
             }
             let wire = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let row = model
                     .zone_channel_catalog
                     .iter()
@@ -681,7 +699,7 @@ impl super::UiScript {
     /// Mirror the app's joined channels in join order, `None` for a freed slot; the app pushes it
     /// after every step that writes a slot's name or state.
     pub fn set_joined_channels(&mut self, joined: Vec<Option<JoinedChannel>>) {
-        self.model_mut().joined_channels = joined;
+        set_field!(self, joined_channels, joined);
     }
 
     /// `SendChatMessage`'s channel target (`0x49f4d9`-`0x49f4ea`): `SStrToInt` (`0x64ac60`)

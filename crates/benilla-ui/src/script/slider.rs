@@ -29,7 +29,9 @@ fn with_slider<T>(
     f: impl FnOnce(&mut SliderState) -> T,
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let frame = model
         .arena
         .frame_mut(h)
@@ -91,7 +93,9 @@ pub(super) fn install_loaded(
 /// (`0x790431`'s layer).
 fn set_thumb_path(lua: &Lua, this: &Table, path: &str) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let existing = match &model
         .arena
         .frame(h)
@@ -195,12 +199,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             )? {
                 SlotArg::Object(rh) => {
                     let h = frame_handle_of(lua, &this)?;
-                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     install_thumb_model(&mut model, h, Some(rh), DrawLayer::Overlay)
                 }
                 SlotArg::Clear => {
                     let h = frame_handle_of(lua, &this)?;
-                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     install_thumb_model(&mut model, h, None, DrawLayer::Overlay)
                 }
                 SlotArg::Path(path) => set_thumb_path(lua, &this, &path),
@@ -212,7 +220,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let thumb = with_slider(lua, &this, |s| s.thumb)?;
             let id = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 thumb.map(|rh| model.region_id(rh))
             };
             match id {
@@ -232,7 +242,9 @@ fn fire_value_changed(lua: &Lua, this: &Table, changed: Option<f32>) -> mlua::Re
     let Some(value) = changed else { return Ok(()) };
     let id = {
         let h = frame_handle_of(lua, this)?;
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.frame_id(h)
     };
     if let Err(e) = event::fire_widget_handler(
@@ -241,7 +253,7 @@ fn fire_value_changed(lua: &Lua, this: &Table, changed: Option<f32>) -> mlua::Re
         "OnValueChanged",
         vec![Value::Number(f64::from(value))],
     ) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }

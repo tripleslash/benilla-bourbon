@@ -6,7 +6,6 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::bool_or_default;
-use super::Model;
 
 /// `DoEmote(token [, target])`: the `EmotesText.dbc` name token (`"WAVE"`, not `/wave`) and an
 /// optional target string (`0x49fd30` reads arg 2 with `lua_tostring`): a player name, or a `%`
@@ -45,18 +44,18 @@ impl super::UiScript {
     /// `ConsoleExec` lines its own CVar commands did not run ([`super::console_exec`]): the app's
     /// console commands (`reloadui`, …), a bare CVar name, an unknown word.
     pub fn take_console_lines(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().console_lines)
+        drain_field!(self, console_lines)
     }
 
     /// `(chat, combat)`, as `LoggingChat` and `LoggingCombat` last set them.
     pub fn logging_flags(&self) -> (bool, bool) {
-        let model = self.model_mut();
+        let model = self.model_ref();
         (model.logging_chat, model.logging_combat)
     }
 
     /// Whether a logging flag moved since the last drain: the app's cue to open or close its logs.
     pub fn take_logging_changes(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().logging_changed)
+        drain_field!(self, logging_changed)
     }
 }
 
@@ -146,7 +145,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         g.set(
             name,
             lua.create_function(move |lua, args: MultiValue| {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // With an argument (`lua_gettop > 0`, `0x49fe57`) the flag is set from
                 // `GetBoolOrDefault` (`0x49fe69`, default 1), so an explicit nil clears it. Both
                 // paths then answer the flag as it stands, 1 or nil, one value (`0x49feb2`-`0x49fee1`):

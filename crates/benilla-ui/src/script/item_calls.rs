@@ -7,7 +7,7 @@
 
 use mlua::Lua;
 
-use super::{BagAutoStore, ContainerMove, Model, PendingEquipAnswer, ScriptCall};
+use super::{BagAutoStore, ContainerMove, PendingEquipAnswer, ScriptCall};
 
 /// One item verb's send or answer past its binding's checks.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,7 +62,7 @@ pub enum ItemCall {
 pub(super) fn submit_item_calls(lua: &Lua) -> mlua::Result<()> {
     let calls = std::mem::take(
         &mut lua
-            .app_data_mut::<Model>()
+            .app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .item_calls,
     );

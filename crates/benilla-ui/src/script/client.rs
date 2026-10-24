@@ -4,7 +4,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
-use super::{Model, UiScript};
+use super::UiScript;
 
 /// The 1.12.1 client's build identity, as the strings in its binary spell it.
 pub(super) const VERSION: &str = "1.12.1";
@@ -84,7 +84,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "OpeningCinematic",
         lua.create_function(|lua, _: MultiValue| {
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .opening_cinematic_asks += 1;
             Ok(())
@@ -99,7 +99,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetLayoutMode",
         lua.create_function(|lua, v: Value| {
             let mode = lua.coerce_number(v)?.map_or(1, super::binding_abi::ftol);
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .layout_mode = mode;
             Ok(())
@@ -122,7 +122,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetEuropeanNumbers",
         lua.create_function(|lua, args: MultiValue| {
             let on = super::binding_abi::bool_or_default(args.front(), true);
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .european_numbers = on;
             Ok(())
@@ -137,7 +137,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "FrameXML_Debug",
         lua.create_function(|lua, v: Value| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             if let Some(n) = lua.coerce_number(v)? {
                 model.framexml_debug.set(super::binding_abi::ftol(n));
             }
@@ -150,7 +152,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetBuildInfo",
         lua.create_function(|lua, ()| {
-            let flavor = lua.app_data_ref::<Model>().expect("model app_data").flavor;
+            let flavor = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data")
+                .flavor;
             let (version, build, date) = match flavor {
                 UiFlavor::Vanilla => (VERSION, BUILD, BUILD_DATE),
                 UiFlavor::Turtle => (TURTLE_VERSION, TURTLE_BUILD, TURTLE_BUILD_DATE),
@@ -201,7 +206,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 });
             if let Err(e) = ran {
                 let bare = super::stdlib::lua_message(&e);
-                lua.app_data_mut::<crate::script::Model>()
+                lua.app_data_mut::<crate::script::ModelCell>()
                     .expect("model")
                     .record_error(bare, super::model::HandlerArg::Error(e));
             }
@@ -214,7 +219,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetRealmName",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             lua.create_string(&model.realm_name)
         })?,
     )?;
@@ -235,7 +242,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetBindLocation",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             lua.create_string(&model.bind_location)
         })?,
     )?;
@@ -245,7 +254,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetFramerate",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.framerate)
         })?,
     )?;
@@ -265,7 +276,7 @@ impl super::UiScript {
 
     /// Drain the `OpeningCinematic()` calls, each an empty `CMSG_OPENING_CINEMATIC`.
     pub fn take_opening_cinematic_asks(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().opening_cinematic_asks)
+        drain_field!(self, opening_cinematic_asks)
     }
 
     /// Push the bind location's name, resolved from `SMSG_BINDPOINTUPDATE`'s AreaTable id through
@@ -307,13 +318,13 @@ impl super::UiScript {
 
     /// Push the current framerate, [`FrameTimeRing::rate`]; this crate has no clock.
     pub fn set_framerate(&mut self, fps: f64) {
-        self.model_mut().framerate = fps;
+        set_field!(self, framerate, fps);
     }
 
     /// Set which client's interface this VM runs, before anything loads into it; a Turtle WoW VM
     /// gets the engine verbs Turtle's interface calls that a 1.12.1 one does not.
     pub fn set_flavor(&mut self, flavor: UiFlavor) {
-        self.model_mut().flavor = flavor;
+        set_field!(self, flavor, flavor);
         if flavor == UiFlavor::Turtle {
             let installed = if self.vm_kind() == super::VmKind::Glue {
                 super::glue_create::install_turtle(&self.lua)
@@ -380,7 +391,7 @@ impl UiScript {
 
     /// Seat the switch a dying VM held in the VM that replaces it.
     pub fn set_european_numbers(&mut self, on: bool) {
-        self.model_mut().european_numbers = on;
+        set_field!(self, european_numbers, on);
     }
 
     /// The client's locale index, `[0xc0e080]`.
@@ -391,11 +402,15 @@ impl UiScript {
     /// Seat the install's locale index, which start-up reads from `Wow.ini` once (`0x402562`); an
     /// index past the table's eight names reads as 0.
     pub fn set_locale(&mut self, index: usize) {
-        self.model_mut().locale = if index < crate::toc::LOCALES.len() {
-            index
-        } else {
-            0
-        };
+        set_field!(
+            self,
+            locale,
+            if index < crate::toc::LOCALES.len() {
+                index
+            } else {
+                0
+            }
+        );
     }
 
     /// `Wow.ini`'s `Region` as seated, 0 until the host seats the install's.
@@ -406,13 +421,15 @@ impl UiScript {
     /// Seat `Wow.ini`'s `Region`, which start-up hands the name check once (`0x402b7f`); a signed
     /// word there, and only 1 to 5 picks a charset pair of its own.
     pub fn set_client_region(&mut self, region: i32) {
-        self.model_mut().client_region = region;
+        set_field!(self, client_region, region);
     }
 }
 
 /// The locale name table `0x8558a4` at the VM's locale index, `GetLocale`'s answer in either state.
 pub(super) fn locale_name(lua: &Lua) -> &'static str {
-    let index = lua.app_data_ref::<Model>().map_or(0, |m| m.locale);
+    let index = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .map_or(0, |m| m.locale);
     crate::toc::LOCALES[index]
 }
 

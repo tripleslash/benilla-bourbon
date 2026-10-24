@@ -10,7 +10,7 @@ use std::borrow::Cow;
 
 use mlua::{Function, Lua, Table, Value};
 
-use super::{Model, ScriptValue, REG_SCRIPTS};
+use super::{ScriptValue, REG_SCRIPTS};
 use crate::script::object::frame_wrapper;
 
 /// `UiScript::fire_event` for engine code that holds only the Lua context.
@@ -50,7 +50,7 @@ pub(super) fn fire_widget_handler(
 pub(super) fn fire_size_changes(lua: &Lua) {
     let pending = std::mem::take(
         &mut lua
-            .app_data_mut::<Model>()
+            .app_data_mut::<crate::script::ModelCell>()
             .expect("model")
             .pending_size_changed,
     );
@@ -67,7 +67,7 @@ pub(super) fn fire_size_changed(lua: &Lua, id: u32, w: f32, h: f32) {
         "OnSizeChanged",
         vec![Value::Number(f64::from(w)), Value::Number(f64::from(h))],
     ) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model")
             .record_lua_error(&e);
     }

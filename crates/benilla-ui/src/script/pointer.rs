@@ -40,7 +40,9 @@ pub(super) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetCursorPosition",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<super::Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(cursor_position(&model))
         })?,
     )?;
@@ -51,7 +53,9 @@ pub(super) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
         "GetMouseFocus",
         lua.create_function(|lua, ()| {
             let id = {
-                let mut model = lua.app_data_mut::<super::Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // A frame destroyed since the hover answers nil.
                 model
                     .mouseover
@@ -391,7 +395,7 @@ impl UiScript {
         if hooked {
             // `ClearCursor(1, 1)` at `0x492bb5`; the handler returns without a capture, a raise or
             // a press slot, so no frame sees this press and its release finds none to go to.
-            self.model_mut().cursor_pos = (x, y);
+            set_field!(self, cursor_pos, (x, y));
             verb(&self.lua, cursor::clear_cursor);
             return true;
         }
@@ -415,7 +419,7 @@ impl UiScript {
         // `OnClick` or double-click stamp, and the event is consumed.
         if let Some(h) = press_target {
             if self.title_region_hit(h, x, y) {
-                self.model_mut().cursor_pos = (x, y);
+                set_field!(self, cursor_pos, (x, y));
                 crate::script::object::movable::start_title_move(&mut self.model_mut(), h);
                 return true;
             }
@@ -449,7 +453,7 @@ impl UiScript {
         };
         // The `GetTime()` clock for the double-click detector, read before the borrow.
         let now = self.now();
-        self.model_mut().cursor_pos = (x, y);
+        set_field!(self, cursor_pos, (x, y));
         let btn = match self.lua.create_string(button) {
             Ok(s) => Value::String(s),
             Err(e) => {

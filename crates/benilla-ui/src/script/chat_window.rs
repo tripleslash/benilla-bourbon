@@ -22,7 +22,6 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi;
 use super::channel::ZoneChannelRow;
-use super::Model;
 
 /// The reference's record slots (`0xb4fe50`); FrameXML builds only [`NUM_CHAT_WINDOWS`] frames.
 pub(super) const ENGINE_CHAT_WINDOW_SLOTS: usize = 10;
@@ -297,12 +296,12 @@ impl super::UiScript {
 
     /// Every window's record, index 0 being `ChatFrame1`, for the saver.
     pub fn chat_window_looks(&self) -> Vec<ChatWindowLook> {
-        self.model_mut().chat_window_looks.to_vec()
+        self.model_ref().chat_window_looks.to_vec()
     }
 
     /// Drains the 0-based windows Lua changed since the last call, deduplicated and ascending.
     pub fn take_chat_window_changes(&mut self) -> Vec<usize> {
-        let mut v: Vec<usize> = std::mem::take(&mut self.model_mut().chat_window_changes)
+        let mut v: Vec<usize> = drain_field!(self, chat_window_changes)
             .into_iter()
             .collect();
         v.sort_unstable();
@@ -323,7 +322,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let i = window_index(id)?;
             let look = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .chat_window_looks[i]
                 .clone();
@@ -368,7 +367,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let g = binding_abi::float_arg(lua, g, "Usage: SetChatWindowColor(index, r, g, b)")?;
             let b = binding_abi::float_arg(lua, b, "Usage: SetChatWindowColor(index, r, g, b)")?;
             let i = window_index(id)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let look = &mut model.chat_window_looks[i];
             let next = ChatWindowLook {
                 r: to_byte(r),
@@ -398,7 +399,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let alpha =
                 binding_abi::float_arg(lua, alpha, "Usage: SetChatWindowAlpha(index, alpha)")?;
             let i = window_index(id)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let look = &mut model.chat_window_looks[i];
             let a = to_byte(alpha);
             if a != look.a {
@@ -425,7 +428,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let locked = crate::script::binding_abi::bool_or_default(locked.as_ref(), false);
             let i = window_index(id)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let look = &mut model.chat_window_looks[i];
             if locked != look.locked {
                 look.locked = locked;
@@ -454,7 +459,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .map(binding_abi::ftol)
                 .filter(|p| *p > 0)
                 .and_then(|p| u8::try_from(p).ok());
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let look = &mut model.chat_window_looks[i];
             if position != look.docked {
                 look.docked = position;
@@ -476,7 +483,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             )?);
             let size = binding_abi::float_arg(lua, size, "Usage: SetChatWindowSize(index, size)")?;
             let i = window_index(id)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let look = &mut model.chat_window_looks[i];
             // A size `<= 0` after truncation is dropped (`0x4a14bc jle`). Deviation: one past
             // `i32::MAX` clamps where the reference keeps the low 32 bits, for the colours' reason.
@@ -505,7 +514,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         f: impl FnOnce(&mut ChatWindowLook) -> T,
     ) -> mlua::Result<T> {
         let i = window_index(id)?;
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let before = model.chat_window_looks[i].clone();
         let out = f(&mut model.chat_window_looks[i]);
         if model.chat_window_looks[i] != before {
@@ -609,7 +620,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: GetChatWindowMessages(index)",
             )?);
             let i = window_index(id)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let mut out = Vec::new();
             for name in &model.chat_window_looks[i].messages {
                 out.push(Value::String(lua.create_string(name)?));
@@ -642,7 +655,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(MultiValue::new());
             }
             let matched = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .zone_channel_catalog
                     .iter()
@@ -688,7 +703,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 r#"Usage: RemoveChatWindowChannel(index, "channel")"#,
             )?;
             let key = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let n = crate::script::binding_abi::s_str_to_int(&key);
                 // `0x49e880` (`0x4a12bf`): a non-zero `SStrToInt` names a confirmed slot, and
                 // `0x49be50` answers NULL below slot 1 or for a slot not in state 0, so `"-1"` or
@@ -729,7 +746,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 "Usage: GetChatWindowChannels(index)",
             )?);
             let i = window_index(id)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let mut out = Vec::new();
             for (name, zone_id) in &model.chat_window_looks[i].channels {
                 out.push(Value::String(lua.create_string(name)?));

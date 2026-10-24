@@ -177,7 +177,9 @@ pub(crate) fn wrapper(lua: &Lua, id: FontId) -> mlua::Result<Table> {
         return Ok(t);
     }
     let handle = {
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         let handle = model.next_id;
         model.next_id += 1;
         model.fonts.by_handle.insert(handle, id);
@@ -210,7 +212,9 @@ pub(super) fn id_of_table(model: &Model, t: &Table) -> Option<FontId> {
 /// at `[0]`, or one that is no Font (`0x79fda0`..`0x7a0e70`).
 fn id_of(lua: &Lua, this: &Table) -> mlua::Result<FontId> {
     let id = super::object::decode_id(this)?;
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     model
         .fonts
         .of_handle(id)
@@ -241,7 +245,9 @@ pub(super) fn font_arg(
         Verb::SetFontObject => "SetFontObject",
         Verb::CopyFontObject => "CopyFontObject",
     };
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     match arg {
         Some(Value::Table(t)) => match t.raw_get::<Value>(0)? {
             Value::LightUserData(l) if !l.0.is_null() => {
@@ -601,13 +607,17 @@ pub(crate) fn replace_block(model: &mut Model, id: FontId, block: FontObject) {
 
 /// Run `f` on font `id`'s block as [`set`] does: every setter's one write path.
 fn edit<R>(lua: &Lua, id: FontId, group: FontMask, f: impl FnOnce(&mut FontObject) -> R) -> R {
-    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     set(&mut model, id, group, f)
 }
 
 /// A copy of font `id`'s block.
 fn read(lua: &Lua, id: FontId) -> FontObject {
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     model.fonts.get(id).block.clone()
 }
 
@@ -652,7 +662,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetName",
         lua.create_function(|lua, this: Table| {
             let id = id_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(model.fonts.get(id).name.clone())
         })?,
     )?;
@@ -666,7 +678,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let who = super::binding_abi::name_of(lua, &this);
             let src = font_arg(lua, &who, Verb::CopyFontObject, args.front())?
                 .expect("CopyFontObject refuses nil");
-            copy_font(&mut lua.app_data_mut::<Model>().expect("model"), id, src);
+            copy_font(
+                &mut lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model"),
+                id,
+                src,
+            );
             Ok(())
         })?,
     )?;
@@ -730,7 +748,9 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
             let id = resolve(lua, &this, &mut args)?;
             let who = super::binding_abi::name_of(lua, &this);
             let to = font_arg(lua, &who, Verb::SetFontObject, args.front())?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             if to.is_some_and(|to| would_loop(&model, id, to)) {
                 return Err(mlua::Error::runtime(format!(
                     "{who}:SetFontObject(): Can't create a font object loop"
@@ -746,7 +766,7 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
         lua.create_function(move |lua, (this, mut args): (Table, MultiValue)| {
             let id = resolve(lua, &this, &mut args)?;
             let parent = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model")
                 .fonts
                 .get(id)
@@ -802,7 +822,10 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
                 None => Value::Nil,
             };
             // `G` of the stored height (`0x79f3e3`), stored by `S` (`0x79f276`).
-            let u = lua.app_data_ref::<Model>().expect("model").layout_units();
+            let u = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model")
+                .layout_units();
             Ok((
                 path,
                 fo.height.map_or(0.0, |h| h.get(u)),
@@ -902,7 +925,10 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
             let o = read(lua, resolve(lua, &this, &mut args)?)
                 .shadow
                 .map_or([crate::layout::Len::Layout(0.0); 2], |s| s.offset);
-            let u = lua.app_data_ref::<Model>().expect("model").layout_units();
+            let u = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model")
+                .layout_units();
             Ok((o[0].get(u), o[1].get(u)))
         })?,
     )?;
@@ -926,7 +952,10 @@ pub(super) fn install_shared(lua: &Lua, m: &Table, resolve: ResolveFont) -> mlua
             let sp = read(lua, resolve(lua, &this, &mut args)?)
                 .spacing
                 .unwrap_or(0.0);
-            let u = lua.app_data_ref::<Model>().expect("model").layout_units();
+            let u = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model")
+                .layout_units();
             Ok(u.round_trip(sp))
         })?,
     )?;
@@ -1021,7 +1050,7 @@ fn create_font(lua: &Lua, name: Option<Value>) -> mlua::Result<Table> {
         .and_then(|v| binding_abi::optional_string(lua, &v))
         .ok_or_else(|| mlua::Error::runtime(r#"Usage: CreateFont("name")"#))?;
     let id = lua
-        .app_data_mut::<Model>()
+        .app_data_mut::<crate::script::ModelCell>()
         .expect("model")
         .fonts
         .named(&name);

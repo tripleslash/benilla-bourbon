@@ -650,8 +650,9 @@ pub(super) fn create_frame_handle(model: &Model) -> Option<crate::widget::FrameH
     .then_some(h)
 }
 
-fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, Model> {
-    lua.app_data_mut::<Model>().expect("model app_data")
+fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, crate::script::ModelCell> {
+    lua.app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data")
 }
 
 fn arg(args: &MultiValue, i: usize) -> Value {

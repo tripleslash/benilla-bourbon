@@ -27,7 +27,7 @@ pub enum DuelRequest {
 impl super::UiScript {
     /// Drain the duel intents queued since the last call.
     pub fn take_duel_requests(&mut self) -> Vec<DuelRequest> {
-        std::mem::take(&mut self.model_mut().duel_requests)
+        drain_field!(self, duel_requests)
     }
 
     /// `StartDuel(name)` for the app's Rust slash parser: the binding's own resolve and queue.
@@ -57,7 +57,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "AcceptDuel",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.duel_requests.push(DuelRequest::Accept);
             Ok(())
         })?,
@@ -67,7 +69,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "CancelDuel",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.duel_requests.push(DuelRequest::Cancel);
             Ok(())
         })?,
@@ -83,11 +87,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             };
             let guid = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.closest_player(&name, Filter::AcceptAll)
             };
             if let Some(guid) = guid.filter(|_| protected::gate(lua, Tag::CAST)) {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.duel_requests.push(DuelRequest::StartByGuid(guid));
             }
             Ok(())
@@ -104,11 +112,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let token =
                 super::binding_abi::string_arg(lua, unit, r#"Usage: StartDuelUnit("unit")"#)?;
             let guid = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.unit_guids.guid_of(&token)?.unwrap_or(0)
             };
             if guid != 0 && protected::gate(lua, Tag::CAST) {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.duel_requests.push(DuelRequest::StartByGuid(guid));
             }
             Ok(())

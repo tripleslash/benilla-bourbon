@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::layout::{self, Anchor, LayoutInput, Rect};
 use crate::widget::{FrameHandle, RegionHandle};
 
@@ -29,8 +27,8 @@ fn hold_clear(hold: &mut [u8], id: u32, bits: u8) {
 
 /// Node `id`'s anchors: a frame's layout input's, a region's own.
 fn node_anchors(
-    layout_inputs: &HashMap<FrameHandle, LayoutInput>,
-    region_data: &HashMap<RegionHandle, RegionData>,
+    layout_inputs: &crate::widget::HandleMap<FrameHandle, LayoutInput>,
+    region_data: &crate::widget::HandleMap<RegionHandle, RegionData>,
     id_to_frame: &IdMap<FrameHandle>,
     id_to_region: &IdMap<RegionHandle>,
     id: u32,
@@ -702,8 +700,8 @@ fn deferral_state(model: &Model) -> (Vec<FrameHandle>, Vec<RegionHandle>) {
 /// and `regions`, in id order.
 fn first_rect_diff(
     model: &Model,
-    frames: &HashMap<FrameHandle, Rect>,
-    regions: &HashMap<RegionHandle, Rect>,
+    frames: &crate::widget::HandleMap<FrameHandle, Rect>,
+    regions: &crate::widget::HandleMap<RegionHandle, Rect>,
 ) -> Option<u32> {
     let mut ids: Vec<u32> = Vec::new();
     for (h, r) in &model.frame_rects {
@@ -861,8 +859,8 @@ impl PreambleProf {
 /// loses its rect had no `ApplyRect` and fires nothing.
 fn queue_size_changes(
     watched: &[(FrameHandle, Option<Rect>)],
-    resolved: &HashMap<FrameHandle, Rect>,
-    frame_to_id: &HashMap<FrameHandle, u32>,
+    resolved: &crate::widget::HandleMap<FrameHandle, Rect>,
+    frame_to_id: &crate::widget::HandleMap<FrameHandle, u32>,
     eps: f64,
     out: &mut Vec<(u32, f32, f32)>,
 ) {
@@ -948,14 +946,15 @@ impl UiScript {
         let report = |id: u32| format!("id {id}, inputs now: {}", node_inputs(model, id));
         let graph = graph.map(|(id, why)| format!("{why} ({})", report(id)));
         if let Some(id) = first_rect_diff(model, &before.0, &before.1) {
-            let rect = |frames: &HashMap<FrameHandle, Rect>,
-                        regions: &HashMap<RegionHandle, Rect>| {
-                match (model.id_to_frame.get(&id), model.id_to_region.get(&id)) {
-                    (Some(h), _) => frames.get(h).copied(),
-                    (_, Some(rh)) => regions.get(rh).copied(),
-                    _ => None,
-                }
-            };
+            let rect =
+                |frames: &crate::widget::HandleMap<FrameHandle, Rect>,
+                 regions: &crate::widget::HandleMap<RegionHandle, Rect>| {
+                    match (model.id_to_frame.get(&id), model.id_to_region.get(&id)) {
+                        (Some(h), _) => frames.get(h).copied(),
+                        (_, Some(rh)) => regions.get(rh).copied(),
+                        _ => None,
+                    }
+                };
             return Some(format!(
                 "an INCREMENTAL layout pass disagreed with a full derivation of the same frame — \
                  a write site named the wrong node or moved layout inputs without naming any. \
@@ -1194,20 +1193,21 @@ impl UiScript {
         // An invalidated region with no anchors is no node, and its resolve can only fail
         // (`0x768d55`): its valid bit clears, a Texture keeps its last quad. So does one whose
         // owner's scale moved, which the cascade invalidates (`0x76ad06`).
-        let fail_loose = |rh: RegionHandle,
-                          arena: &crate::widget::WidgetArena,
-                          region_resolved: &mut HashMap<RegionHandle, Rect>,
-                          region_kept: &mut HashMap<RegionHandle, Rect>| {
-            let Some(r) = arena.region(rh) else { return };
-            if region_data.get(&rh).is_some_and(|d| !d.anchors.is_empty()) {
-                return;
-            }
-            if let Some(rect) = region_resolved.remove(&rh) {
-                if !matches!(r.kind, crate::widget::RegionKind::FontString) {
-                    region_kept.insert(rh, rect);
+        let fail_loose =
+            |rh: RegionHandle,
+             arena: &crate::widget::WidgetArena,
+             region_resolved: &mut crate::widget::HandleMap<RegionHandle, Rect>,
+             region_kept: &mut crate::widget::HandleMap<RegionHandle, Rect>| {
+                let Some(r) = arena.region(rh) else { return };
+                if region_data.get(&rh).is_some_and(|d| !d.anchors.is_empty()) {
+                    return;
                 }
-            }
-        };
+                if let Some(rect) = region_resolved.remove(&rh) {
+                    if !matches!(r.kind, crate::widget::RegionKind::FontString) {
+                        region_kept.insert(rh, rect);
+                    }
+                }
+            };
         for &id in &pending {
             if let Some(&rh) = id_to_region.get(&id) {
                 fail_loose(rh, arena, region_resolved, region_kept);
@@ -2077,6 +2077,8 @@ impl UiScript {
     /// [`UiScript::resolve`], answer with [`UiScript::set_measured_text`], and resolve again.
     pub fn fontstrings_needing_measure(&mut self) -> Vec<MeasureRequest> {
         let mut model = self.model_mut();
+        // An empty ask re-arms the ledger and nothing else: the mutation count stands.
+        let quiet = model.epoch();
         // Every FontString with text, sized or not: `GetStringWidth` answers the natural width.
         // The ledger (`Model::touch_measure`) re-arms empty, so a second ask this frame sees only
         // the writes since the first; `None` walks every region.
@@ -2131,6 +2133,9 @@ impl UiScript {
             if let Some(req) = measure_request_for(&mut model, rh) {
                 out.push(req);
             }
+        }
+        if out.is_empty() {
+            model.set_epoch(quiet);
         }
         out
     }

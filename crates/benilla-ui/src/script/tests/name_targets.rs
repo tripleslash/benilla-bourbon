@@ -361,7 +361,9 @@ fn freeing_a_region_leaves_a_same_named_siblings_name() {
     .unwrap();
     {
         let lua = s.lua();
-        let mut model = lua.app_data_mut::<crate::script::Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         let id = *model.region_by_name.get("FreedRegionName").expect("held");
         let rh = *model.id_to_region.get(&id).expect("first region");
         crate::script::region::free_region(&mut model, rh);

@@ -3,7 +3,7 @@
 
 use super::common::script;
 use crate::layout::Point;
-use crate::script::{Model, UiScript};
+use crate::script::UiScript;
 use crate::widget::RegionKind;
 
 /// One block as a reader would describe it.
@@ -32,7 +32,9 @@ enum Rel {
 /// Read every block of the named SimpleHTML off the model, in emission order.
 fn blocks(s: &UiScript, name: &str) -> Vec<Blk> {
     let lua = s.lua();
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let fh = model.arena.lookup(name).expect("SimpleHTML frame");
     let frame_id = model.frame_to_id.get(&fh).copied();
     let st = model.simple_html.get(&fh).expect("SimpleHTML state");
@@ -92,7 +94,9 @@ fn texts(s: &UiScript, name: &str) -> Vec<String> {
 /// The frame's region count, which still counts a block orphaned rather than freed.
 fn region_count(s: &UiScript, name: &str) -> usize {
     let lua = s.lua();
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let fh = model.arena.lookup(name).expect("frame");
     model.arena.frame(fh).expect("live frame").regions.len()
 }
@@ -839,7 +843,9 @@ fn a_built_block_follows_later_sets_on_its_element_font() {
     );
     let mono = {
         let lua = s.lua();
-        let model = lua.app_data_ref::<Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let fh = model.arena.lookup("Page").expect("frame");
         let st = model.simple_html.get(&fh).expect("state");
         model.region_data[&st.blocks[0]].monochrome
@@ -923,7 +929,9 @@ fn a_new_face_or_spacing_on_an_element_font_rebuilds_the_links() {
         .unwrap();
     let spend = |s: &UiScript| {
         let lua = s.lua();
-        let mut model = lua.app_data_mut::<Model>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         let fh = model.arena.lookup("Page").expect("frame");
         let st = model.simple_html.get_mut(&fh).expect("state");
         std::mem::take(&mut st.links_dirty)
@@ -965,7 +973,9 @@ fn the_element_colour_setters_read_a_non_number_as_zero() {
 /// Block `i`'s `vertex_color`, which for a FontString is the colour it draws.
 fn block_color(s: &UiScript, name: &str, i: usize) -> Option<[f32; 4]> {
     let lua = s.lua();
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let fh = model.arena.lookup(name).expect("frame");
     let st = model.simple_html.get(&fh).expect("state");
     model
@@ -1045,7 +1055,9 @@ fn set_justify_h_is_stored_and_answered_but_never_drawn() {
 /// Every block's resolved `(top, bottom)`, in block order.
 fn resolved_tops(s: &UiScript, name: &str) -> Vec<(f32, f32)> {
     let lua = s.lua();
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let fh = model.arena.lookup(name).expect("frame");
     let st = model.simple_html.get(&fh).expect("state");
     st.blocks
@@ -1059,7 +1071,9 @@ fn resolved_tops(s: &UiScript, name: &str) -> Vec<(f32, f32)> {
 
 fn maybe_resolved_rect(s: &UiScript, name: &str, block: usize) -> Option<crate::layout::Rect> {
     let lua = s.lua();
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let fh = model.arena.lookup(name).expect("frame");
     let st = model.simple_html.get(&fh).expect("state");
     model.region_rect(st.blocks[block])
@@ -1067,7 +1081,9 @@ fn maybe_resolved_rect(s: &UiScript, name: &str, block: usize) -> Option<crate::
 
 fn resolved_rect(s: &UiScript, name: &str, block: usize) -> crate::layout::Rect {
     let lua = s.lua();
-    let model = lua.app_data_ref::<Model>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let fh = model.arena.lookup(name).expect("frame");
     let st = model.simple_html.get(&fh).expect("state");
     model.region_rect(st.blocks[block]).expect("block rect")

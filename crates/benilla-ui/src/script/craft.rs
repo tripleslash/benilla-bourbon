@@ -403,17 +403,17 @@ impl super::UiScript {
 
     /// The item records the getters' calls missed since the last take, one per call.
     pub fn take_craft_item_waits(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().craft_item_waits)
+        drain_field!(self, craft_item_waits)
     }
 
     /// Drain the spell ids `DoCraft` queued, one per call, with no count.
     pub fn take_craft_dos(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.model_mut().craft_dos)
+        drain_field!(self, craft_dos)
     }
 
     /// Whether `CloseCraft` was called since the last drain; the close sends no packet.
     pub fn take_craft_close(&mut self) -> bool {
-        std::mem::take(&mut self.model_mut().craft_close)
+        drain_field!(self, craft_close)
     }
 
     /// Whether the VM holds the window open: `CloseCraft` closes it in the verb, so a feed that
@@ -461,7 +461,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetCraftName",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let name = model
                 .craft
                 .as_ref()
@@ -478,7 +480,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             let row = binding_abi::number_arg(lua, index, "Usage: GetCraftSkillLine(index)")?
                 .wrapping_sub(1) as u32;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             opt_str(lua, row_line(&model, row as usize))
         })?,
     )?;
@@ -490,7 +494,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetCraftDisplaySkillLine",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let enchanting = model.open_professions().craft == Some(CRAFT_TYPE_ENCHANTING);
             let (name, rank, max_rank) = match &model.craft {
                 Some(c) if enchanting && c.display_line.is_some() => {
@@ -510,7 +516,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumCrafts",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.craft_visible as i64)
         })?,
     )?;
@@ -524,7 +532,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetCraftItemLink",
         lua.create_function(|lua, index: Value| {
             let index = number_arg(lua, index, "Usage: GetCraftItemLink(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let link = usize::try_from(index)
                 .ok()
                 .and_then(|i| recipe(&model, i))
@@ -545,7 +555,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let usage = "Usage: GetCraftReagentItemLink(index, reagentIndex)";
             let index = number_arg(lua, index, usage)?;
             let reagent = number_arg(lua, reagent, usage)?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let link = usize::try_from(index)
                 .ok()
                 .and_then(|i| recipe(&model, i))
@@ -576,7 +588,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetCraftInfo(index)` (`0x84d398`, `0x4f6ea9`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetCraftInfo(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let header = index.checked_sub(1).and_then(|row| {
                 header_position(&model, row).and_then(|p| {
                     let collapsed = model.craft_fold_mask & (1u32 << (p & 31)) == 0;
@@ -630,7 +644,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: GetTradeSkillIcon(index)` (`0x84d3d0`, `0x4f7171`), the
             // client's own text naming `GetTradeSkillIcon`.
             let index = binding_abi::index_arg(lua, index, "Usage: GetTradeSkillIcon(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             opt_str(lua, recipe(&model, index).and_then(|r| r.icon.as_ref()))
         })?,
     )?;
@@ -642,7 +658,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetCraftDescription(index)` (`0x84d500`, `0x4f7aac`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetCraftDescription(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             opt_str(
                 lua,
                 recipe(&model, index).and_then(|r| r.description.as_ref()),
@@ -656,7 +674,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetCraftNumReagents(index)` (`0x84d454`, `0x4f7435`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetCraftNumReagents(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(recipe(&model, index).map_or(0, |r| r.reagents.len()) as i64)
         })?,
     )?;
@@ -678,7 +698,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 reagent_index,
                 "Usage: GetCraftReagentInfo(index, reagentIndex)",
             )?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(reagent) = recipe(&model, index)
                 .and_then(|r| reagent_index.checked_sub(1).and_then(|n| r.reagents.get(n)))
                 .cloned()
@@ -705,7 +727,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetCraftSpellFocus(index)` (`0x84d4dc`, `0x4f78db`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetCraftSpellFocus(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(r) = recipe(&model, index) else {
                 return Ok(MultiValue::new());
             };
@@ -732,7 +756,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetCraftButtonToken",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let token = match model.open_professions().craft.unwrap_or(0) {
                 0 => "USE",
                 1 => "TRAIN",
@@ -752,7 +778,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: SelectCraft(index)` (`0x84d3b4`, `0x4f7101`).
             let index = binding_abi::index_arg32(lua, index, "Usage: SelectCraft(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.craft_selection = recipe(&model, index as usize).map_or(0, |r| r.spell_id);
             Ok(())
         })?,
@@ -760,7 +788,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetCraftSelectionIndex",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let sel = model.craft_selection;
             let at = (sel != 0)
                 .then(|| {
@@ -781,7 +811,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // The recipe's cast is `TryCastSpell` (`0x4f7d64` → `0x6e5a90`), behind the gate's
             // tag 2 (`0x6e4bc1`).
             let may_cast = super::protected::gate(lua, super::protected::Tag::CAST);
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             if let Some(spell_id) = recipe(&model, index)
                 .map(|r| r.spell_id)
                 .filter(|_| may_cast)

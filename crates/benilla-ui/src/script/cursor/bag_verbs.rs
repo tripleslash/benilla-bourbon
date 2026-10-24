@@ -222,7 +222,9 @@ pub(super) fn pickup_bag_from_slot(lua: &Lua, live: u32) -> mlua::Result<()> {
         return Ok(());
     }
     let (gated, occupied) = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         let gated =
             !model.player_control || (BANK_BAG_INV_SLOTS.contains(&live) && model.bank.is_none());
         let occupied = usize::try_from(live)
@@ -244,7 +246,9 @@ pub(super) fn pickup_bag_from_slot(lua: &Lua, live: u32) -> mlua::Result<()> {
         return Ok(());
     }
     let picked = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         grab_bag(&model, live)
     };
     if let Some(item) = picked {

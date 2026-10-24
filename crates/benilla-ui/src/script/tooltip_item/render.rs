@@ -8,7 +8,7 @@
 use mlua::{Lua, Table};
 
 use crate::script::tooltip::{append_line, duration_text, plural_template};
-use crate::script::{ItemTemplateView, Model};
+use crate::script::ItemTemplateView;
 use crate::strings::{fill, Arg};
 
 use super::build::{note_miss, CacheWait};
@@ -216,7 +216,9 @@ pub(super) fn render_view_flagged(
 ) -> mlua::Result<Option<bool>> {
     let mut live = false;
     let (req, known_spell, taught_known, set_view, equipped, rank_title) = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let known =
             v.required_spell != 0 && v.knows_required_spell(|id| model.known_spells.contains(&id));
         // The first slot's taught spell, or a higher rank of it, known to the player, or to the
@@ -318,7 +320,9 @@ pub(super) fn render_view_flagged(
         };
         if let Some(wait) = wait {
             let ends = matches!(wait, CacheWait::Petition(_));
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             model.petition_asks.insert(i.guid);
             note_miss(&mut model, wait);
             if ends {
@@ -893,7 +897,9 @@ pub(super) fn render_view_flagged(
         false => (&inst.creator, inst.creator_guid),
     };
     if asked.is_none() && guid != 0 {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         model.item_name_asks.insert(guid);
         note_miss(&mut model, CacheWait::Name(guid));
     }
@@ -958,7 +964,9 @@ struct LockSubLine {
 fn lock_lines(lua: &Lua, v: &ItemTemplateView, inst: Option<&ItemInstance>) -> Option<LockLines> {
     use crate::script::lock_check::walk_lock;
     use crate::script::{check_lock, LockCheck};
-    let mut guard = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut guard = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let model = &mut *guard;
     let block_lock = inst.map_or(0, |i| i.block_lock_id);
     let row = if model.lock_rows.contains_key(&v.lock_id) {

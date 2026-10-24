@@ -30,6 +30,10 @@ impl UiScript {
     /// its turn comes), then its kind's own update ([`Self::kind_update`]).
     pub(super) fn update_walk(&mut self, elapsed: f32) {
         let mut ahead: BTreeMap<Place, FrameHandle> = BTreeMap::new();
+        // The walk's own bookkeeping (the roster, the link log, each turn's place) is no extract
+        // input: each borrow for it puts the mutation count back ([`super::ModelCell`]); the
+        // handlers and kind updates move it through what they write.
+        let quiet = self.visual_epoch();
         let (renumbers, mut joins, mut seen) = {
             let mut model = self.model_mut();
             // `SetScript` keeps the OnUpdate list; a destroyed frame's handle compacts out here.
@@ -63,10 +67,12 @@ impl UiScript {
             model.arena.open_link_log();
             (model.arena.renumbers(), model.on_update_joins, seen)
         };
+        self.restore_epoch(quiet);
         // Each frame linked during the walk, by the number of its latest link.
         let mut relinked: HashMap<FrameHandle, u64> = HashMap::new();
         let mut links = 0u64;
         while let Some((place, h)) = ahead.pop_first() {
+            let quiet = self.visual_epoch();
             let (on_update, kind_update) = {
                 let mut model = self.model_mut();
                 let Some(f) = model.arena.frame(h) else {
@@ -88,6 +94,7 @@ impl UiScript {
                         .is_some_and(|s| s.contains("OnUpdate"));
                 (on_update.then(|| model.frame_id(h)), kind_update)
             };
+            self.restore_epoch(quiet);
             if let Some(id) = on_update {
                 if let Err(e) = event::fire_update_handler(&self.lua, id, elapsed) {
                     self.push_error(e);
@@ -96,6 +103,7 @@ impl UiScript {
             if let Some(k) = kind_update {
                 self.kind_update(k, h, elapsed);
             }
+            let quiet = self.visual_epoch();
             let mut model = self.model_mut();
             for linked in model.arena.take_linked() {
                 links += 1;
@@ -130,8 +138,12 @@ impl UiScript {
                     }
                 }
             }
+            drop(model);
+            self.restore_epoch(quiet);
         }
+        let quiet = self.visual_epoch();
         self.model_mut().arena.close_link_log();
+        self.restore_epoch(quiet);
     }
 
     /// A kind's engine work after its `OnUpdate`, in its place in the walk.
@@ -145,14 +157,24 @@ impl UiScript {
             // The scene clock (`0x76d843`), whose completions fire `OnAnimFinished` here.
             KindUpdate::Model => self.advance_pane(h, elapsed),
             // The line fades (`0x7862b0`, `0x788476`), counted only while the frame is shown.
+            // A tick that moved no line's alpha, freed or hid no line and relaid nothing changed
+            // nothing drawn: the countdowns are no extract input.
             KindUpdate::MessageFrame | KindUpdate::ScrollingMessageFrame => {
-                messageframe::update(&mut self.model_mut(), h, elapsed);
+                let quiet = self.visual_epoch();
+                if !messageframe::update(&mut self.model_mut(), h, elapsed) {
+                    self.restore_epoch(quiet);
+                }
                 messageframe::fire_scroll_changes(&self.lua, h);
             }
             // A marked range's recompute (`0x787152`), whose change fires `OnScrollRangeChanged`.
             KindUpdate::ScrollFrame => scrollframe::update(&self.lua, h),
             // The fill (`0x783449`), the bar texture's coordinates written in the frame's place.
-            KindUpdate::StatusBar => statusbar::update(&mut self.model_mut(), h),
+            KindUpdate::StatusBar => {
+                let quiet = self.visual_epoch();
+                if !statusbar::update(&mut self.model_mut(), h) {
+                    self.restore_epoch(quiet);
+                }
+            }
         }
     }
 }

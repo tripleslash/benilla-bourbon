@@ -9,7 +9,6 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{self, bool_or_default, flag};
 use super::protected::{self, Tag};
-use super::Model;
 
 /// The kind byte, bits 24-31 of the packed slot word (vmangos `Player.h:133`). Must match
 /// `benilla_protocol`'s `ACTION_KIND_*`; this crate has no protocol dependency.
@@ -263,12 +262,12 @@ impl super::UiScript {
     /// Push the player's cast state ([`CastView`]), which the checked tests and `SpellStopCasting`
     /// read.
     pub fn set_cast_view(&mut self, view: CastView) {
-        self.model_mut().cast_view = view;
+        set_field!(self, cast_view, view);
     }
 
     /// Push the current bonus-bar page offset (0 = the plain main bar; warrior stances 1..3).
     pub fn set_bonus_bar_offset(&mut self, offset: u8) {
-        self.model_mut().bonus_bar_offset = offset;
+        set_field!(self, bonus_bar_offset, offset);
     }
 
     /// Take the `UseAction` presses out of the call stream.
@@ -282,7 +281,7 @@ impl super::UiScript {
     /// Drain the `(lua action id, packed)` pairs `PickupAction`/`PlaceAction` queued; the app
     /// sends each as `CMSG_SET_ACTION_BUTTON` (`packed == 0` clears) and updates its own store.
     pub fn take_action_sets(&mut self) -> Vec<(u32, u32)> {
-        std::mem::take(&mut self.model_mut().action_sets)
+        drain_field!(self, action_sets)
     }
 
     /// Queue `(lua action id, packed)` writes behind the ones a placement queued, for the app's
@@ -304,7 +303,7 @@ impl super::UiScript {
     /// `UI_ERROR_MESSAGE` inside the failing press, and the app signals it a frame later, under
     /// these raised again.
     pub fn take_ui_errors_with_input(&mut self) -> Vec<(&'static str, super::InputEvents)> {
-        std::mem::take(&mut self.model_mut().ui_errors)
+        drain_field!(self, ui_errors)
     }
 }
 
@@ -317,7 +316,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, action: Value| {
             // `is-number` else `Usage: HasAction(slot)` (`0x84c010`, `0x4e711f`).
             let action = binding_abi::index_arg32(lua, action, "Usage: HasAction(slot)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(flag(model.actions.contains_key(&action)))
         })?,
     )?;
@@ -332,7 +333,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetActionAutocast",
         lua.create_function(|lua, slot: Value| {
             let slot = super::binding_abi::number_arg(lua, slot, "Usage: GetActionAutocast(slot)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             // `(spell, pet_book)` as the resolver leaves them.
             let resolved = u32::try_from(slot)
                 .ok()
@@ -370,7 +373,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // and the basename (`0x4f0ffa`) and the binding pushes the buffer (`0x4e6e42`), so a
             // macro with no icon gives the directory alone.
             let tex = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // Deviation (this fork): a `#show` macro shows its spell's icon, as retail does.
                 let shown = model
                     .actions
@@ -420,7 +425,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, slot: Value| {
             let slot = super::binding_abi::number_arg(lua, slot, "Usage: GetActionText(slot)")?;
             let name = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 u32::try_from(slot)
                     .ok()
                     .and_then(|s| model.actions.get(&s))
@@ -453,7 +460,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let check_cursor = bool_or_default(rest.front(), false);
             let on_self = bool_or_default(rest.get(1), false);
             let may_cast = protected::gate(lua, Tag::CAST);
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             if check_cursor && model.cursor.is_some() {
                 drop(model);
                 super::cursor::place_action(lua, action)?;
@@ -479,7 +488,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, action: Value| {
             // `is-number` else `Usage: GetActionCount(slot)` (`0x84bf98`, `0x4e6ebb`).
             let action = binding_abi::index_arg32(lua, action, "Usage: GetActionCount(slot)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model
                 .actions
                 .get(&action)
@@ -491,7 +502,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetBonusBarOffset",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.bonus_bar_offset))
         })?,
     )?;
@@ -510,7 +523,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // 1/nil booleans and `IsActionInRange`'s nil/0/1, which FrameXML tests with a plain `if`.
 
     fn state_flag(lua: &Lua, action: u32, pick: impl Fn(&ActionState) -> bool) -> Value {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         match model.action_states.get(&action) {
             Some(s) if pick(&s.state) => Value::Integer(1),
             _ => Value::Nil,
@@ -519,7 +534,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     /// 1 or nil for a slot's test against the live cast state.
     fn live_flag(lua: &Lua, action: u32, pick: impl Fn(&ActionState, &CastView) -> bool) -> Value {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         match model.action_states.get(&action) {
             Some(s) if pick(&s.state, &model.cast_view) => Value::Integer(1),
             _ => Value::Nil,
@@ -545,7 +562,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(action) = binding_abi::index_or(lua, action)? else {
                 return Ok(Value::Nil);
             };
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(
                 match model
                     .action_states
@@ -577,7 +596,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, action: Value| {
             // `is-number` else `Usage: IsCurrentAction(slot)` (`0x84c0b0`, `0x4e733f`).
             let action = binding_abi::index_arg32(lua, action, "Usage: IsCurrentAction(slot)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let open = model.open_professions();
             Ok(match model.action_states.get(&action) {
                 Some(s) if s.state.is_current(&model.cast_view, open) => Value::Integer(1),
@@ -608,7 +629,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, action: Value| {
             // `is-number` else `Usage: IsConsumableAction(slot)` (`0x84c10c`, `0x4e74bf`).
             let action = binding_abi::index_arg32(lua, action, "Usage: IsConsumableAction(slot)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             match model.actions.get(&action) {
                 Some(s) if s.consumable => Ok(Value::Integer(1)),
                 _ => Ok(Value::Nil),
@@ -635,7 +658,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: GetActionCooldown(slot)` (`0x84bfb4`, `0x4e6f77`).
             let action = binding_abi::index_arg32(lua, action, "Usage: GetActionCooldown(slot)")?;
             let now = crate::script::clock::now(lua);
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(state) = model
                 .action_states
                 .get(&action)

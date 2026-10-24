@@ -101,7 +101,7 @@ impl super::UiScript {
     /// The first push into a VM builds the list, silently.
     pub fn set_skills(&mut self, state: SkillsState) {
         let mut model = self.model_mut();
-        let model = &mut *model;
+        let model: &mut crate::script::Model = &mut model;
         for row in &mut model.skills.entries {
             if let Some(fresh) = state.entries.iter().find(|e| e.skill_id == row.skill_id) {
                 *row = fresh.clone();
@@ -132,7 +132,7 @@ impl super::UiScript {
 
     /// Push `SkillTiers.dbc` as `(tier id, step costs)`.
     pub fn set_skill_tiers(&mut self, tiers: impl IntoIterator<Item = (u32, [u32; 16])>) {
-        self.model_mut().skill_tiers = tiers.into_iter().collect();
+        set_field!(self, skill_tiers, tiers.into_iter().collect());
     }
 }
 
@@ -348,7 +348,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetNumSkillLines",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(num_rows(&model) as i64)
         })?,
     )?;
@@ -361,7 +363,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: GetSkillLineInfo(index)` (`0x849eb4`, `0x4d3629`).
             let index = binding_abi::index_arg(lua, index, "Usage: GetSkillLineInfo(index)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(n) = index.checked_sub(1) else {
                 return out_of_range_tuple(lua);
             };
@@ -453,7 +457,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             // `is-number` else `Usage: SetSelectedSkill(index)` (`0x849f88`, `0x4d4031`).
             let index = binding_abi::index_arg32(lua, index, "Usage: SetSelectedSkill(index)")?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             set_selected(&mut model, index);
             Ok(())
         })?,
@@ -461,7 +467,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSelectedSkill",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(selected_index(&model)))
         })?,
     )?;
@@ -472,7 +480,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetAdjustedSkillPoints",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(i64::from(model.talents.points.1 as i32))
         })?,
     )?;
@@ -487,7 +497,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: AbandonSkill(index)` (`0x849ed4`, `0x4d3ac7`).
             let index = binding_abi::index_arg(lua, index, "Usage: AbandonSkill(index)")?;
             let skill_id = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let row = index
                     .checked_sub(1)
                     .and_then(|n| rows(&model).get(n).copied());
@@ -587,7 +599,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, index: Value| {
             let index = binding_abi::index_arg(lua, index, "Usage: BuySkillTier(index)")?;
             let send = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 entry_at(&model, index).and_then(|e| {
                     let admitted = e.flags & 0x8 != 0 || (e.step == 0 && e.flags & 0x4 != 0);
                     let cost = model

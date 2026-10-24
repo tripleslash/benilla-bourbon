@@ -15,7 +15,6 @@ use mlua::{Lua, MultiValue, Value, Variadic};
 
 use super::binding_abi::{coerced_number, ftol, number_arg};
 use super::item_stats::MISSING_ITEM_ICON;
-use super::Model;
 
 /// A send made by a verb of a system no 1.12 server runs, drained by the app in call order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,13 +38,13 @@ pub enum UnservedSend {
 impl super::UiScript {
     /// Drain the sends queued since the last call.
     pub fn take_unserved_sends(&mut self) -> Vec<UnservedSend> {
-        std::mem::take(&mut self.model_mut().unserved_sends)
+        drain_field!(self, unserved_sends)
     }
 }
 
 /// Queue a send from a binding.
 pub(super) fn queue(lua: &Lua, send: UnservedSend) {
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .unserved_sends
         .push(send);

@@ -254,7 +254,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let ins = with_editbox(lua, &this, |eb| eb.text_insets)?;
             reseat_text_region(lua, frame_handle_of(lua, &this)?);
             let u = lua
-                .app_data_ref::<crate::script::model::Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model")
                 .layout_units();
             Ok((ins[0].get(u), ins[1].get(u), ins[2].get(u), ins[3].get(u)))

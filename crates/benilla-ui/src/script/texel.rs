@@ -184,6 +184,11 @@ impl Texels {
         }
     }
 
+    /// Whether a file set since the last extract waits for its stamp ([`Self::flush`]).
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// Stamp the files set since the last extract, in the order set: their first draw forces them.
     pub(crate) fn flush(&mut self) {
         for i in std::mem::take(&mut self.pending) {

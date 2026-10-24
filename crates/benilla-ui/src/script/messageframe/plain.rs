@@ -9,7 +9,6 @@ use mlua::{Lua, MultiValue, Table, Value};
 
 use super::{channel, is_number};
 use crate::script::object::frame_handle_of;
-use crate::script::Model;
 use crate::widget::{InsertMode, KindState, MessageFrameState};
 
 /// Registry key of the MessageFrame method table (the MAXCSTACK discipline).
@@ -23,7 +22,9 @@ fn with_mf<T>(
     f: impl FnOnce(&mut MessageFrameState) -> T,
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let frame = model
         .arena
         .frame_mut(h)
@@ -54,7 +55,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 };
                 // The line goes through `SetText` with its expand flag as it is added (`0x7863fe`).
                 let text = lua
-                    .app_data_ref::<crate::script::Model>()
+                    .app_data_ref::<crate::script::ModelCell>()
                     .expect("model app_data")
                     .localized_text(text);
                 // Each of r, g and b is `lua_isnumber`-gated (`0x79565f`-`0x795687`) and the trio is

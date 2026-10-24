@@ -295,13 +295,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `[mounted]`: the player unit's mount display, which no 1.12 verb answers.
     let mounted = lua.create_function(|lua, ()| {
         Ok(lua
-            .app_data_ref::<super::Model>()
+            .app_data_ref::<crate::script::ModelCell>()
             .is_some_and(|m| m.units_by_lower.get("player").is_some_and(|u| u.mounted)))
     })?;
     // `[known:…]`: 1.12 names no spell id to Lua, so the books answer.
     let known = lua.create_function(|lua, arg: String| {
         Ok(lua
-            .app_data_ref::<super::Model>()
+            .app_data_ref::<crate::script::ModelCell>()
             .is_some_and(|m| spell_known(&m, &arg)))
     })?;
     let evaluator: Function = lua
@@ -583,7 +583,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        lua.set_app_data(model);
+        lua.set_app_data(crate::script::ModelCell::new(model));
         lua.load(
             r#"
             FORM = 0

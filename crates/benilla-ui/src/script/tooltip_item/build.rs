@@ -255,7 +255,7 @@ pub(in crate::script) fn build_item(
 ) -> mlua::Result<bool> {
     clear(lua, h);
     // What an earlier render outside a build noted is no miss of this one.
-    lua.app_data_mut::<Model>()
+    lua.app_data_mut::<crate::script::ModelCell>()
         .expect("model app_data")
         .item_cache_misses
         .clear();
@@ -267,7 +267,9 @@ pub(in crate::script) fn build_item(
                 // A petition miss returns before the sell price and the show (`0x52b94e`); the
                 // build is kept for the answer's rebuild.
                 None => {
-                    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     keep_misses(&mut model, h, true);
                     model.item_builds.insert(h, build);
                     return Ok(false);
@@ -294,7 +296,9 @@ pub(in crate::script) fn build_item(
         }
     };
     let sell = build.sell_count.zip(view.as_ref()).map(|(count, v)| {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         // An item object's charges and repair cost (`0x52e426` tests the object).
         let object = build.inst.as_ref().filter(|i| i.object);
         let charges = object.map(|i| i.object_charges[0]);
@@ -306,7 +310,9 @@ pub(in crate::script) fn build_item(
         (v.sell_price, amount)
     });
     {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         keep_misses(&mut model, h, true);
         model.item_builds.insert(h, build);
     }
@@ -314,7 +320,9 @@ pub(in crate::script) fn build_item(
     // ITEM_UNSELLABLE at price 0 (`0x854a74`, pushed at `0x52e4a3`).
     if let Some((price, amount)) = sell {
         let (merchant_open, repairing) = {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             (model.merchant.is_some(), model.repair_mode)
         };
         if merchant_open && !repairing {
@@ -365,7 +373,9 @@ pub(super) fn sell_amount(
 /// answers are two rebuilds. A tooltip that keeps none takes the answer and stays as it is.
 pub(in crate::script) fn answer_item_caches(lua: &Lua) -> Vec<mlua::Error> {
     let due: Vec<(u32, FrameHandle, usize)> = {
-        let mut guard = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut guard = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let model = &mut *guard;
         if model.item_cache_waits.is_empty() {
             return Vec::new();
@@ -392,7 +402,9 @@ pub(in crate::script) fn answer_item_caches(lua: &Lua) -> Vec<mlua::Error> {
     for (id, h, answers) in due {
         for _ in 0..answers {
             let build = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model
                     .item_builds
                     .get(&h)
@@ -407,7 +419,9 @@ pub(in crate::script) fn answer_item_caches(lua: &Lua) -> Vec<mlua::Error> {
             }
             // The callback sizes the plate after its builder's show (`0x52e5ae`), so lines an
             // `OnShow` added count.
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             crate::script::tooltip::size_tooltip(&mut model, h);
         }
     }

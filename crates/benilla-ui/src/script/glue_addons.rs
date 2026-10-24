@@ -101,8 +101,9 @@ fn gate_rows<'a>(model: &'a Model, store: &EnableStore) -> Vec<GateRow<'a>> {
         .collect()
 }
 
-fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, Model> {
-    lua.app_data_mut::<Model>().expect("model app_data")
+fn model(lua: &Lua) -> mlua::AppDataRefMut<'_, crate::script::ModelCell> {
+    lua.app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data")
 }
 
 fn lua_str(lua: &Lua, s: &str) -> mlua::Result<Value> {

@@ -11,8 +11,6 @@
 
 use mlua::{Lua, Value};
 
-use super::Model;
-
 /// The four distributions the binding sends on (whitelist `0x49fa3f`-`0x49fa4e`); the receiving
 /// side's jump table (`0x49afe0`) names the same four. vmangos also accepts `LANG_ADDON` on the
 /// officer, raid-leader, raid-warning, battleground-leader and channel lanes
@@ -139,7 +137,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     None => AddonDistribution::Party,
                 };
                 let in_raid = {
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     !model.party.raid.is_empty()
                 };
                 super::calls::submit(

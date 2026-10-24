@@ -131,10 +131,14 @@ impl super::UiScript {
     /// starts at its saved value. Without it a knobless or addon-declared CVar would revert to its
     /// default in every new VM, and the saver would then drop the player's setting from the file.
     pub fn set_cvar_saved_base(&mut self, entries: impl IntoIterator<Item = (String, String)>) {
-        self.model_mut().cvars_saved_base = entries
-            .into_iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v))
-            .collect();
+        set_field!(
+            self,
+            cvars_saved_base,
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v))
+                .collect()
+        );
     }
 
     /// Register the host-backed CVars as `(name, default)`, idempotently: a re-register refreshes
@@ -214,7 +218,7 @@ impl super::UiScript {
 
     /// Read one CVar's live value (host side).
     pub fn cvar(&self, name: &str) -> Option<String> {
-        self.model_mut()
+        self.model_ref()
             .cvars
             .get(&name.to_ascii_lowercase())
             .map(|s| s.value.clone())
@@ -223,7 +227,7 @@ impl super::UiScript {
     /// One CVar's integer, the record's `+0x28`: Storm's `SStrToInt` of its text, as the set
     /// stores it (`0x63e127`). `None` with no such record.
     pub fn cvar_int(&self, name: &str) -> Option<i32> {
-        self.model_mut()
+        self.model_ref()
             .cvars
             .get(&name.to_ascii_lowercase())
             .map(|s| super::binding_abi::s_str_to_int(&s.value))
@@ -232,7 +236,7 @@ impl super::UiScript {
     /// Snapshot the table as `(name, value, default)`; the saver writes only rows off their
     /// default, so the config file stays a diff.
     pub fn cvars_snapshot(&self) -> Vec<(String, String, String)> {
-        self.model_mut()
+        self.model_ref()
             .cvars
             .values()
             .map(|s| (s.name.clone(), s.value.clone(), s.default.clone()))
@@ -241,13 +245,13 @@ impl super::UiScript {
 
     /// Drain the lines CVar change callbacks printed since the last call, for the console.
     pub fn take_cvar_console_lines(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.model_mut().cvar_console)
+        drain_field!(self, cvar_console)
     }
 
     /// Whether a Lua write, registration or callback line waits for [`Self::take_cvar_changes`],
     /// [`Self::take_cvar_registrations`] or [`Self::take_cvar_console_lines`].
     pub fn has_cvar_traffic(&self) -> bool {
-        let model = self.model_mut();
+        let model = self.model_ref();
         !model.cvar_changes.is_empty()
             || !model.cvar_registrations.is_empty()
             || !model.cvar_console.is_empty()
@@ -256,7 +260,7 @@ impl super::UiScript {
     /// Drain the writes queued since the last call, in order, under the registered spelling: the
     /// host's cue to sync its resources and mark the config dirty.
     pub fn take_cvar_writes(&mut self) -> Vec<CvarWrite> {
-        std::mem::take(&mut self.model_mut().cvar_changes)
+        drain_field!(self, cvar_changes)
     }
 
     /// [`Self::take_cvar_writes`] as `(name, value)` per value written, a stage or a restore; a
@@ -276,19 +280,19 @@ impl super::UiScript {
     /// Drain the `(name, default)` rows an addon's `RegisterCVar` created since the last call; the
     /// host's registry keeps them beside its own, as the reference's one table does.
     pub fn take_cvar_registrations(&mut self) -> Vec<(String, String)> {
-        std::mem::take(&mut self.model_mut().cvar_registrations)
+        drain_field!(self, cvar_registrations)
     }
 
     /// The process's count of CVars Lua has created ([`LUA_CVAR_LIMIT`]), which outlives the VM
     /// as the reference's `[0xb4e3c8]` outlives every `ReloadUI`: the host seeds each new VM with
     /// it and reads it back.
     pub fn set_cvar_lua_created(&mut self, count: u32) {
-        self.model_mut().cvar_lua_created = count;
+        set_field!(self, cvar_lua_created, count);
     }
 
     /// See [`Self::set_cvar_lua_created`].
     pub fn cvar_lua_created(&self) -> u32 {
-        self.model_mut().cvar_lua_created
+        self.model_ref().cvar_lua_created
     }
 
     /// Flag a CVar read-only, or clear it: `CVar::SetReadOnly` (`0x63e030`). A flagged name makes
@@ -316,7 +320,7 @@ impl super::UiScript {
     /// reference's `0x48c3e0` sweeps its candidate table `0x85a83c` (D3D) or every pixel format
     /// (GL); here the host asks wgpu.
     pub fn set_multisample_formats(&mut self, formats: Vec<MultisampleFormat>) {
-        self.model_mut().multisample_formats = formats;
+        set_field!(self, multisample_formats, formats);
     }
 
     /// Publish the dropdown's resolutions and the client's current one, sorted by
@@ -344,13 +348,13 @@ impl super::UiScript {
 
     /// Publish what this run's device and presentation path offer, behind `GetVideoCaps`.
     pub fn set_video_caps(&mut self, caps: VideoCaps) {
-        self.model_mut().video_caps = caps;
+        set_field!(self, video_caps, caps);
     }
 
     /// Drain the `RestartGx()` calls queued since the last call; the host answers each by
     /// re-asserting the staged video settings against the window.
     pub fn take_restart_gx_asks(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().restart_gx_asks)
+        drain_field!(self, restart_gx_asks)
     }
 }
 
@@ -558,7 +562,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(name) = cvar_arg(args.front()) else {
                 return Err(mlua::Error::runtime(USAGE_REGISTER_CVAR));
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             // The limit is tested before the name is looked up (`0x488b25`), so at the limit a
             // re-declaration raises too.
             if model.cvar_lua_created >= LUA_CVAR_LIMIT {
@@ -608,7 +614,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(name) = cvar_arg(args.front()) else {
                 return Err(mlua::Error::runtime(USAGE_GET_CVAR));
             };
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             match model.cvars.get(&name.to_ascii_lowercase()) {
                 Some(slot) => Ok(Value::String(lua.create_string(&slot.value)?)),
                 None => Err(unknown_cvar(&name)),
@@ -623,7 +631,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(name) = cvar_arg(args.front()) else {
                 return Err(mlua::Error::runtime(USAGE_GET_CVAR_DEFAULT));
             };
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             match model.cvars.get(&name.to_ascii_lowercase()) {
                 Some(slot) => Ok(Value::String(lua.create_string(&slot.default)?)),
                 None => Err(unknown_cvar(&name)),
@@ -638,7 +648,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetMultisampleFormats",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             // Flat, three per entry (`0x48c360`); no formats is no values and an empty menu.
             let mut out = mlua::MultiValue::new();
             for f in &model.multisample_formats {
@@ -652,7 +664,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetCurrentMultisampleFormat",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let cvar = |n: &str| model.cvars.get(n).and_then(|s| s.value.parse::<u32>().ok());
             let (Some(color), Some(depth), Some(samples)) = (
                 cvar("gxcolorbits"),
@@ -679,7 +693,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `lua_isnumber` (`0x48c659`): a non-number is a missing id, which the deviation below
             // ignores.
             let id = crate::script::binding_abi::is_number(lua, id);
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             // 1-based from `UIDropDownMenu_GetSelectedID`. Deviation: an id out of range is
             // ignored, because the reference reads one entry past the last (`0x48c67c`) and a
             // clamp would apply a format the player did not pick. A missing id is ignored too,
@@ -716,7 +732,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // it as is.
             let value = cvar_arg(args.get(1)).unwrap_or_else(|| NO_STRING_FORM.to_string());
             {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 // The lookup comes first (`0x488c47`-`0x488c59`): an unknown name raises before
                 // the read-only flag is read.
                 let key = name.to_ascii_lowercase();
@@ -793,7 +811,9 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetScreenResolutions",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let mut out = mlua::MultiValue::new();
             for r in &model.screen_resolutions {
                 out.push_back(Value::String(lua.create_string(r.to_string())?));
@@ -813,7 +833,9 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetCurrentResolution",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(model.current_resolution.map_or(1.0, |i| (i + 1) as f64))
         })?,
     )?;
@@ -836,7 +858,9 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
                 Some(v) => lua.coerce_number(v)?.map_or(0, super::binding_abi::ftol),
                 None => 0,
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             if model.screen_resolutions.is_empty() {
                 return Ok(());
             }
@@ -877,7 +901,7 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
         "GetVideoCaps",
         lua.create_function(|lua, ()| {
             let caps = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .video_caps;
             let flag = |b: bool| if b { Value::Number(1.0) } else { Value::Nil };
@@ -908,7 +932,7 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "RestartGx",
         lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .restart_gx_asks += 1;
             Ok(())
@@ -921,7 +945,9 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "RestoreVideoDefaults",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             for name in VIDEO_DEFAULT_CVARS {
                 let Some(default) = model
                     .cvars
@@ -947,7 +973,9 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
         "GetGamma",
         // Any argument is ignored (the getter never calls `lua_gettop`); one number comes back.
         lua.create_function(|lua, _: mlua::MultiValue| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let gamma = model
                 .cvars
                 .get(&CVAR_GAMMA.to_ascii_lowercase())
@@ -974,7 +1002,9 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
                 }
                 _ => return Err(mlua::Error::runtime(USAGE_SET_GAMMA)),
             };
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             write_cvar(&mut model, CVAR_GAMMA, format_f(1.0 - v));
             // Zero return values, not nil (`eax = 0` at every `ret`).
             Ok(mlua::MultiValue::new())
@@ -1050,7 +1080,9 @@ fn install_world_detail_verbs(lua: &Lua) -> mlua::Result<()> {
                 return Err(mlua::Error::runtime(RANGE_SET_WORLD_DETAIL));
             }
             let stop = stop as usize;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             // The reference's two writes, `frillDensity` as "%d" (`0x488e26`) and `smallCull` as
             // "%f" of the f32 (`0x488e63`), then ours, the stop: writing it here keeps
             // `GetWorldDetail` current before the host drains the queue.
@@ -1070,7 +1102,9 @@ fn install_world_detail_verbs(lua: &Lua) -> mlua::Result<()> {
         // `MultiValue`: an argument is accepted and ignored, as the getter never calls
         // `lua_gettop`.
         lua.create_function(|lua, _: mlua::MultiValue| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let stop = model
                 .cvars
                 .get(&CVAR_WORLD_DETAIL.to_ascii_lowercase())

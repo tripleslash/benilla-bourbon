@@ -133,7 +133,9 @@ pub(super) fn fonts(model: &mut Model, h: FrameHandle) -> Option<ButtonFonts> {
 /// [`fonts`] for a Lua receiver.
 fn fonts_of(lua: &Lua, this: &Table) -> mlua::Result<(FrameHandle, ButtonFonts)> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let f = fonts(&mut model, h).ok_or_else(|| mlua::Error::runtime("not a Button"))?;
     Ok((h, f))
 }
@@ -144,7 +146,12 @@ fn fonts_of(lua: &Lua, this: &Table) -> mlua::Result<(FrameHandle, ButtonFonts)>
 /// over whatever font the string's own XML linked.
 pub(crate) fn refresh_label_lua(lua: &Lua, wrapper: &Table) -> mlua::Result<()> {
     let h = frame_handle_of(lua, wrapper)?;
-    refresh_label(&mut lua.app_data_mut::<Model>().expect("model app_data"), h);
+    refresh_label(
+        &mut lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data"),
+        h,
+    );
     Ok(())
 }
 
@@ -231,7 +238,9 @@ fn link_state_font(
     let to = super::font::font_arg(lua, &who, super::font::Verb::SetFontObject, args.front())?;
     let (_, f) = fonts_of(lua, this)?;
     let id = which.of(f);
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     if to.is_some_and(|to| super::font::would_loop(&model, id, to)) {
         return Err(mlua::Error::runtime(format!(
             "{who}:SetFontObject(): Can't create a font object loop"
@@ -246,7 +255,7 @@ fn link_state_font(
 fn state_font_object(lua: &Lua, this: &Table, which: LabelFont) -> mlua::Result<Value> {
     let (_, f) = fonts_of(lua, this)?;
     let parent = lua
-        .app_data_ref::<Model>()
+        .app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .fonts
         .get(which.of(f))
@@ -269,7 +278,9 @@ fn set_state_color(
     // every colour setter packs.
     let c = super::object::colour_args(lua, &r, &g, &b, &a);
     let (_, f) = fonts_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     super::font::set(&mut model, which.of(f), super::FontMask::COLOR, |fo| {
         fo.color = Some(c);
     });
@@ -281,7 +292,9 @@ fn set_state_color(
 /// white; each byte times the float at `0x81c6b4`.
 fn state_color(lua: &Lua, this: &Table, which: LabelFont) -> mlua::Result<mlua::MultiValue> {
     let (_, f) = fonts_of(lua, this)?;
-    let model = lua.app_data_ref::<Model>().expect("model app_data");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data");
     let c = model
         .fonts
         .get(which.of(f))
@@ -299,7 +312,9 @@ fn with_button<T>(
     f: impl FnOnce(&mut ButtonState) -> T,
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let frame = model
         .arena
         .frame_mut(h)
@@ -319,7 +334,9 @@ fn with_button_shown(
 ) -> mlua::Result<()> {
     let writes = with_button(lua, this, f)?;
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     super::region::apply_shown_writes(&mut model, writes);
     relink_after_change(&mut model, h);
     Ok(())
@@ -332,7 +349,9 @@ fn with_button_shown(
 /// (`0x779183`), and never while `LockHighlight` holds (`[frame+0xf8]`).
 fn set_enabled(lua: &Lua, this: &Table, on: bool) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let frame = model
         .arena
         .frame_mut(h)
@@ -389,7 +408,9 @@ pub(super) fn is_enabled(model: &Model, h: FrameHandle) -> bool {
 /// `LootButton:SetSlot`: writes [`ButtonState::loot_slot`].
 pub(super) fn set_loot_slot(lua: &Lua, this: &Table, slot: Option<u32>) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let frame = model
         .arena
         .frame_mut(h)
@@ -409,7 +430,9 @@ pub(super) fn set_loot_slot(lua: &Lua, this: &Table, slot: Option<u32>) -> mlua:
 /// Get-or-create the region behind `slot`; returns its id.
 fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let existing = match &model
         .arena
         .frame(h)
@@ -465,7 +488,9 @@ fn install_slot(
     incoming: Option<RegionHandle>,
 ) -> mlua::Result<bool> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     install_slot_model(&mut model, h, slot, incoming)
 }
 
@@ -562,7 +587,7 @@ fn set_slot_texture(
         super::region::SlotArg::Object(rh) => {
             if install_slot(lua, this, slot, Some(rh))? {
                 if let Some(blend) = blend {
-                    lua.app_data_mut::<Model>()
+                    lua.app_data_mut::<crate::script::ModelCell>()
                         .expect("model app_data")
                         .region_data
                         .entry(rh)
@@ -588,14 +613,18 @@ fn set_slot_texture(
     let verdict = if existing {
         None
     } else {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data");
         match crate::script::texture_name_verdict(&model, &path) {
             crate::script::FileLoad::Failed => return Ok(()),
             v => Some(v),
         }
     };
     let id = ensure_slot(lua, this, slot)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let rh = *model.id_to_region.get(&id).expect("slot region id");
     // `""` clears the texture, which `QuestLogFrame.lua:165` relies on; a file that loads clears
     // the desaturation, and one that fails keeps the image and the grey (`0x778f3a` → `0x770200`).
@@ -623,7 +652,9 @@ fn set_slot_texture(
 fn get_slot_texture(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<Value> {
     let rh = with_button(lua, this, |bs| slot.get(bs))?;
     let id = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         rh.map(|rh| model.region_id(rh))
     };
     match id {
@@ -672,7 +703,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // button's own; `FontString:SetText(nil)` clears (`0x771d80`).
             let Some(text) = text else { return Ok(()) };
             let id = ensure_slot(lua, &this, Slot::Text)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let rh = *model.id_to_region.get(&id).expect("text region id");
             // The label's `SetText` (`0x778e10` into `0x771d80`) runs the separator pass.
             let text = model.localized_text(text);
@@ -690,7 +723,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let rh = with_button(lua, &this, |bs| bs.text)?;
             let text = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 rh.and_then(|rh| model.region_data.get(&rh))
                     .and_then(|d| d.text.clone())
                     .filter(|t| !t.is_empty())
@@ -720,7 +755,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             let who = {
                 let h = frame_handle_of(lua, &this)?;
-                super::binding_abi::frame_name(&lua.app_data_ref::<Model>().expect("model"), h)
+                super::binding_abi::frame_name(
+                    &lua.app_data_ref::<crate::script::ModelCell>()
+                        .expect("model"),
+                    h,
+                )
             };
             let Some(Value::Table(fs)) = it.next() else {
                 return Err(mlua::Error::runtime(format!(
@@ -736,7 +775,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     ))
                 };
                 let id = super::object::decode_id(&fs).map_err(|_| not_an_object())?;
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 let known_object = model.id_to_frame.contains_key(&id)
                     || model.id_to_region.contains_key(&id)
                     || model.fonts.of_handle(id).is_some();
@@ -763,7 +804,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             let owner = frame_handle_of(lua, &this)?;
             with_button(lua, &this, |bs| bs.text = Some(rh))?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             if let Some(dead) = old {
                 // Destroyed, not orphaned (`0x778d3c`).
                 super::region::free_region(&mut model, dead);
@@ -863,7 +906,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     return Ok(());
                 }
                 let (_, f) = fonts_of(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 for id in [f.normal, f.disabled, f.highlight] {
                     super::font::set(&mut model, id, super::FontMask::FONT, |fo| {
                         fo.font = Some(path.clone());
@@ -883,7 +928,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let (_, f) = fonts_of(lua, &this)?;
             let (block, u) = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 (
                     model.fonts.get(f.normal).block.clone(),
                     model.layout_units(),
@@ -910,7 +957,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             lua.create_function(move |lua, this: Table| {
                 let h = frame_handle_of(lua, &this)?;
                 with_button(lua, &this, |bs| bs.locked_highlight = on)?;
-                refresh_label(&mut lua.app_data_mut::<Model>().expect("model app_data"), h);
+                refresh_label(
+                    &mut lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model app_data"),
+                    h,
+                );
                 Ok(())
             })?,
         )?;
@@ -943,7 +995,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let [x, y] = with_button(lua, &this, |bs| bs.pushed_text_offset)?;
             let units = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .layout_units();
             Ok((x.get(units), y.get(units)))
@@ -1027,7 +1079,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (this, button): (Table, Value)| {
             let h = frame_handle_of(lua, &this)?;
             let id = {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 model.frame_id(h)
             };
             // A released click, flagged as scripted, which only a LootButton reads.
@@ -1135,7 +1189,7 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
     // A hyperlink button's click slot (`+0x94`, `0x7a3510`) is its text frame's
     // `OnHyperlinkClick`, in place of the Button's `OnClick` firer.
     let target = lua
-        .app_data_ref::<Model>()
+        .app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .id_to_frame
         .get(&id)
@@ -1145,7 +1199,9 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
     }
     let mut take_loot = None;
     let fire = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let Some(&h) = model.id_to_frame.get(&id) else {
             return;
         };
@@ -1199,7 +1255,7 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
         Err(_) => return,
     };
     if let Err(e) = event::fire_widget_handler(lua, id, "OnClick", vec![btn]) {
-        lua.app_data_mut::<Model>()
+        lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model app_data")
             .record_lua_error(&e);
     }
@@ -1215,7 +1271,7 @@ pub(super) fn click_button(lua: &Lua, id: u32, button: &str, down: bool, scripte
         // The slot is 0-based; the call speaks the 1-based row.
         let take = super::ScriptCall::Loot(super::loot::LootCall::Take(slot + 1));
         if let Err(e) = super::calls::submit(lua, take) {
-            lua.app_data_mut::<Model>()
+            lua.app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .record_lua_error(&e);
         }

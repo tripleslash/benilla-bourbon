@@ -5,7 +5,6 @@ use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::justify;
 use crate::script::binding_abi;
-use crate::script::Model;
 
 use super::region_handle_of;
 
@@ -19,9 +18,23 @@ pub(crate) fn store_text_of(lua: &Lua, this: &Table, text: Option<String>) -> ml
 
 /// [`store_text_of`] by handle, the tail Lua's `SetText` shares.
 fn store_text(lua: &Lua, rh: crate::widget::RegionHandle, text: Option<String>) {
-    let mut model = lua.app_data_mut::<Model>().expect("model");
-    // The separator pass runs before the same-text test (`0x771d9f`, `0x771dea`).
-    let text = text.map(|t| model.localized_text(t));
+    // The separator pass runs before the same-text test (`0x771d9f`, `0x771dea`). The text held
+    // returns there, and empty over empty at `0x771dba`, before anything is touched: read first,
+    // so the per-frame caller re-setting a label leaves the mutation count standing.
+    let text = {
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
+        let text = text.map(|t| model.localized_text(t));
+        let held = model.region_data.get(&rh).and_then(|d| d.text.as_deref());
+        if held.unwrap_or("") == text.as_deref().unwrap_or("") {
+            return;
+        }
+        text
+    };
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model");
     let data = model.region_data.entry(rh).or_default();
     let was_shown = data.text.as_deref().is_some_and(|t| !t.is_empty());
     let same = data.text == text;
@@ -48,7 +61,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // A string with no font raises before its argument is read and sets nothing
             // (`0x79d7e5`, `0x79d810`), naming the receiver or `<unnamed>`.
             let fonted = {
-                let model = lua.app_data_ref::<Model>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 crate::script::font_block::has_font(&model, rh)
             };
             if !fonted {
@@ -75,7 +90,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             let text = {
-                let model = lua.app_data_ref::<Model>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 model
                     .region_data
                     .get(&rh)
@@ -100,7 +117,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         // `SetText` then `GetStringWidth` works in one tick; without one it is 0 until the host
         // answers.
         crate::script::measure::ensure_measured(lua, rh);
-        let model = lua.app_data_ref::<Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let Some(d) = model.region_data.get(&rh) else {
             return Ok(0.0);
         };
@@ -136,7 +155,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             if parsed == justify::Set::NoMatch {
                 return Err(justify::usage_h(&binding_abi::name_of(lua, &this)));
             }
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let d = model.region_data.entry(rh).or_default();
             match parsed {
                 justify::Set::To(jh) => d.justify.set_h(jh),
@@ -164,7 +185,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             if parsed == justify::Set::NoMatch {
                 return Err(justify::usage_v(&binding_abi::name_of(lua, &this)));
             }
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let d = model.region_data.entry(rh).or_default();
             match parsed {
                 justify::Set::To(jv) => d.justify.set_v(jv),
@@ -182,7 +205,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // untouched, the ctor's `0x212` read through each axis mask.
     fn justify_of(lua: &Lua, this: &Table) -> mlua::Result<justify::Justify> {
         let rh = region_handle_of(lua, this)?;
-        let model = lua.app_data_ref::<Model>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         Ok(model
             .region_data
             .get(&rh)
@@ -207,7 +232,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, args): (Table, MultiValue)| {
             let on = crate::script::binding_abi::bool_or_default(args.front(), true);
             let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             model.region_data.entry(rh).or_default().non_space_wrap = on;
             // The flag moves the wrap, so the measure.
             model.touch_measure(rh);
@@ -219,7 +246,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "CanNonSpaceWrap",
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let on = model.region_data.get(&rh).is_some_and(|d| d.non_space_wrap);
             Ok(if on { Some(1i64) } else { None })
         })?,
@@ -249,7 +278,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     binding_abi::lua_number_text(f64::from(height))
                 )));
             }
-            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             let model_units = model.layout_units();
             let d = model.region_data.entry(rh).or_default();
             let held = d.font_height.map_or(0.0, |h| h.script(model_units));

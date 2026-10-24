@@ -868,11 +868,17 @@ fn feed_auction(
 
         // The class tree needs no session: the stock `AuctionFrameBrowse_OnLoad` reads
         // `GetAuctionItemClasses()` when the addon loads (`Blizzard_AuctionUI.lua:174`).
-        let classes_now = categories(catalogs.0.as_deref(), catalogs.1.as_deref());
+        // The tree is a function of the two catalogs alone: rebuilt when either lands or changes,
+        // or for a VM that has none yet.
         let last_classes = last_classes.get(script);
-        if *last_classes != classes_now {
-            *last_classes = classes_now.clone();
-            script.set_auction_item_classes(classes_now);
+        let catalogs_moved = catalogs.0.as_ref().is_some_and(|c| c.is_changed())
+            || catalogs.1.as_ref().is_some_and(|c| c.is_changed());
+        if catalogs_moved || last_classes.is_empty() {
+            let classes_now = categories(catalogs.0.as_deref(), catalogs.1.as_deref());
+            if *last_classes != classes_now {
+                *last_classes = classes_now.clone();
+                script.set_auction_item_classes(classes_now);
+            }
         }
 
         // A `_S` line whose item was not cached when its handler ran, shown once the record lands,

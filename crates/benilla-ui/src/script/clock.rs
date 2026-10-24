@@ -6,8 +6,6 @@
 
 use mlua::Lua;
 
-use super::Model;
-
 impl super::UiScript {
     /// The current `GetTime()` value in seconds; the app stamps absolute expiries with it, such as
     /// an aura's `expirationTime`.
@@ -21,14 +19,14 @@ impl super::UiScript {
     /// `Cooldown.lua` relies on (`start > 0`). Set once, at construction; after that only
     /// [`Self::tick`] moves it.
     pub fn set_now(&mut self, secs: f64) {
-        self.model_mut().now = secs;
+        set_field!(self, now, secs);
     }
 
     /// Push the game clock `GetGameTime()` answers, `(hour, minute)`; -1, -1 until the first push.
     /// The clock holds either as the server sent it, so a field is -1 when unset and may run past
     /// a day's end (an hour to 30, a minute to 62).
     pub fn set_game_time(&mut self, hour: i32, minute: i32) {
-        self.model_mut().game_time = Some((hour, minute));
+        set_field!(self, game_time, Some((hour, minute)));
     }
 }
 
@@ -45,7 +43,9 @@ pub(crate) fn held_start(start: f64, enabled: bool, now: f64) -> f64 {
 
 /// `GetTime()`'s clock, for a caller holding no model borrow; one that holds it reads `model.now`.
 pub(crate) fn now(lua: &Lua) -> f64 {
-    lua.app_data_ref::<Model>().expect("model app_data").now
+    lua.app_data_ref::<crate::script::ModelCell>()
+        .expect("model app_data")
+        .now
 }
 
 /// Register `GetTime` and `GetGameTime`.
@@ -64,7 +64,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetGameTime",
         lua.create_function(|lua, ()| {
             let clock = lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")
                 .game_time;
             Ok(clock.map_or((-1.0, -1.0), |(hour, minute)| {

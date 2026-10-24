@@ -56,6 +56,6 @@ impl super::UiScript {
     /// The on-use spells that pass the control gate right now (`0x5d8ec0`-`0x5d8f6a`), computed by
     /// the app off the caster's flags and auras; empty with control.
     pub fn set_control_bypass(&mut self, spells: std::collections::HashSet<u32>) {
-        self.model_mut().control_bypass = spells;
+        set_field!(self, control_bypass, spells);
     }
 }

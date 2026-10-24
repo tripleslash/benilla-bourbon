@@ -257,6 +257,16 @@ pub(super) struct GateInputs {
     art_deferred: bool,
     /// The stitch's ping-pong buffer: last frame's emptied allocation.
     held: Vec<UiQuad>,
+    /// The model's mutation count when [`Self::extracted`] was walked (`UiScript::visual_epoch`):
+    /// equal next frame, with the other inputs, the walk is skipped.
+    epoch: Option<u64>,
+}
+
+/// `WOW_UI_VERIFY=1`: walk every frame, and report a frame the mutation-count skip would have
+/// drawn stale. Read once.
+fn ui_verify_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_UI_VERIFY").is_some())
 }
 
 /// How this frame's entry list lines up with last frame's.
@@ -760,21 +770,41 @@ pub(super) fn paint_script(
         // and the blink phase (0.5 s, `0x77a790`).
         let text_ui = script.focused_editbox_text_ui();
         let _ = lap(); // re-arm: the editbox seam above is not the walk's cost
-        let extracted = script.extract();
-        let us_exm = lap();
-        let n_extracted = extracted.len();
-        // ── The extract gate ──────────────────────────────────────────────────────
-        // Equal inputs skip the conversion; the quads, minimap slot and link spans stay as they
-        // are.
+                       // ── The extract gate ──────────────────────────────────────────────────────
+                       // Equal inputs skip the conversion; the quads, minimap slot and link spans stay as they
+                       // are. The walk itself is skipped when, beside them, the model's mutation count stands
+                       // where the last walk left it: nothing it reads can have moved (`benilla_ui`'s
+                       // `ModelCell`). `WOW_UI_VERIFY=1` walks anyway and reports a skip that would have missed.
         let dims = (w.to_bits(), h.to_bits(), s.to_bits(), dpi.to_bits());
-        let settled = capture.is_none()
+        let inputs_still = capture.is_none()
             && !prev.art_deferred
             && prev.dims == Some(dims)
             && prev.generation == generation
             && text_ui == prev.text_ui
-            && booths.images.0 == prev.portraits
-            && extracted == prev.extracted;
+            && booths.images.0 == prev.portraits;
+        let epoch_still = inputs_still && prev.epoch == Some(script.visual_epoch());
+        let walked = (!epoch_still || ui_verify_enabled()).then(|| script.extract());
+        // Read after the walk, whose texture stamps may move it.
+        let epoch_now = script.visual_epoch();
+        let us_exm = lap();
+        let n_extracted = walked.as_ref().map_or(prev.extracted.len(), Vec::len);
+        let settled = inputs_still
+            && match &walked {
+                Some(w) => *w == prev.extracted,
+                None => epoch_still,
+            };
+        if let (true, Some(w)) = (epoch_still, walked.as_ref()) {
+            if *w != prev.extracted {
+                eprintln!(
+                    "[ui-verify] MISS: the mutation count stood at {epoch_now} but the walk \
+                     moved ({} -> {} entries)",
+                    prev.extracted.len(),
+                    w.len()
+                );
+            }
+        }
         if settled {
+            prev.epoch = Some(epoch_now);
             drop(extract_span);
             let us_cmp = lap();
             if cost_on {
@@ -807,6 +837,7 @@ pub(super) fn paint_script(
             }
             return;
         }
+        let extracted = walked.expect("an unsettled frame walked");
         // Brackets the conversion below — either path — so `prev.art_deferred` records whether THIS
         // frame's drawing is complete rather than whether anything anywhere is still loading. Taken
         // past the skip because a skipped frame converts nothing and has nothing to record.
@@ -996,6 +1027,7 @@ pub(super) fn paint_script(
                 quads.dirty = true;
             }
             prev.extracted = extracted;
+            prev.epoch = Some(epoch_now);
             if splice_verify_enabled() {
                 verify_splice(
                     prev,
@@ -1054,6 +1086,7 @@ pub(super) fn paint_script(
         prev.text_ui = text_ui.clone();
         prev.portraits = booths.images.0.clone();
         prev.extracted = extracted.clone();
+        prev.epoch = Some(epoch_now);
         // Cleared only on the full-conversion path: a settled frame's maps are still true, and
         // clearing them would put the character panes' cameras to sleep.
         booths.panes.0.clear();

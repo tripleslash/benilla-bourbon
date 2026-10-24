@@ -215,14 +215,17 @@ pub(crate) fn auto_equip_from(
     // An item offered in the trade window shows `ERR_EQUIP_TRADE_ITEM` inside the verb and ends
     // it before the set (`0x5e1897`-`0x5e18b3`, `0x4bfd20`).
     let in_trade = lua
-        .app_data_ref::<Model>()
+        .app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data")
         .trade_holds(item.guid);
     if in_trade {
         crate::script::calls::display_error(lua, "ERR_EQUIP_TRADE_ITEM")?;
         return Ok(AutoEquip::None);
     }
-    let control = has_cursor_control(&lua.app_data_ref::<Model>().expect("model app_data"));
+    let control = has_cursor_control(
+        &lua.app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data"),
+    );
     if control {
         set_cursor(lua, true, |_| Some(CursorPayload::Item(item)));
     }

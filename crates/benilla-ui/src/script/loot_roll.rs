@@ -54,13 +54,13 @@ pub struct LootRollsState {
 impl super::UiScript {
     /// Push the open-rolls snapshot (an empty list means no roll is open).
     pub fn set_loot_rolls(&mut self, state: LootRollsState) {
-        self.model_mut().loot_rolls = state;
+        set_field!(self, loot_rolls, state);
     }
 
     /// Drain the `(roll_id, roll_type)` votes queued by `RollOnLoot` since the last call. The app
     /// maps each roll id back to its `(lootedTarget, itemSlot)` for `CMSG_LOOT_ROLL`.
     pub fn take_loot_roll_votes(&mut self) -> Vec<(u32, u8)> {
-        std::mem::take(&mut self.model_mut().loot_roll_votes)
+        drain_field!(self, loot_roll_votes)
     }
 }
 
@@ -112,7 +112,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, roll_id: Value| {
             // `is-number` else `Usage: GetLootRollItemInfo(id)` (`0x8480e0`, `0x4c307e`).
             let roll_id = binding_abi::index_arg32(lua, roll_id, "Usage: GetLootRollItemInfo(id)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some(r) = find(&model, roll_id) else {
                 return lua.pack_multi((
                     mlua::Value::Nil,
@@ -140,7 +142,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // `is-number` else `Usage: GetLootRollItemLink(id)` (`0x848100`, `0x4c321e`).
             let roll_id = binding_abi::index_arg32(lua, roll_id, "Usage: GetLootRollItemLink(id)")?;
             let link = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 find(&model, roll_id).and_then(|r| r.link.clone())
             };
             match link {
@@ -157,7 +161,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, roll_id: Value| {
             // `is-number` else `Usage: GetLootRollTimeLeft(id)` (`0x848120`, `0x4c32e8`).
             let roll_id = binding_abi::index_arg32(lua, roll_id, "Usage: GetLootRollTimeLeft(id)")?;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             Ok(find(&model, roll_id).map_or(0, |r| r.time_left_ms))
         })?,
     )?;

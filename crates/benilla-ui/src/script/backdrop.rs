@@ -5,8 +5,6 @@
 //! path paints them, and every Texture verb works on them. The spec drives them: the colour
 //! setters tint them and a resize re-runs their texcoords (`0x77f0c0`).
 
-use std::collections::HashMap;
-
 use crate::layout::Len;
 use crate::layout::{self, Anchor, Anchors, Point, Rect};
 use crate::order::DrawLayer;
@@ -532,7 +530,11 @@ fn run_texcoords(model: &mut Model, fh: FrameHandle, rect: Rect) {
 
 /// `0x77f0c0`: the tiled background's and the edge strips' texcoords for a frame at `rect`, the
 /// corners' left as created, then both colours re-applied (`0x77f410`, `0x77f440`).
-fn rerun(inst: &mut Installed, region_data: &mut HashMap<RegionHandle, RegionData>, rect: Rect) {
+fn rerun(
+    inst: &mut Installed,
+    region_data: &mut crate::widget::HandleMap<RegionHandle, RegionData>,
+    rect: Rect,
+) {
     inst.ran_for = Some(rect);
     let (bg, edges) = run_uvs(&inst.spec, inst.edge, inst.tile, rect);
     if let (Some(rh), Some(uvs)) = (inst.bg(), bg) {
@@ -550,7 +552,7 @@ fn rerun(inst: &mut Installed, region_data: &mut HashMap<RegionHandle, RegionDat
 
 /// Each piece's single vertex colour (`0x77f750`): the backdrop colour on the background only
 /// (`0x77f410`), the border colour on the eight edges only (`0x77f440`).
-fn paint(inst: &Installed, region_data: &mut HashMap<RegionHandle, RegionData>) {
+fn paint(inst: &Installed, region_data: &mut crate::widget::HandleMap<RegionHandle, RegionData>) {
     if let Some(d) = inst.bg().and_then(|rh| region_data.get_mut(&rh)) {
         d.set_vertex_color(Some(inst.spec.bg_color));
     }

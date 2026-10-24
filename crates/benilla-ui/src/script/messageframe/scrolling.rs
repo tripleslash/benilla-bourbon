@@ -8,7 +8,7 @@ use mlua::{Lua, MultiValue, Table, Value};
 
 use super::{channel, is_number};
 use crate::script::object::frame_handle_of;
-use crate::script::{Model, UiScript};
+use crate::script::UiScript;
 use crate::widget::{KindState, ScrollingMessageState, Viewport};
 
 /// Registry key of the ScrollingMessageFrame method table (the MAXCSTACK discipline).
@@ -23,7 +23,9 @@ fn with_smf<T>(
     f: impl FnOnce(&mut ScrollingMessageState) -> T,
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
     let frame = model
         .arena
         .frame_mut(h)
@@ -43,7 +45,9 @@ fn with_viewport<T>(
 ) -> mlua::Result<T> {
     let h = frame_handle_of(lua, this)?;
     let out = {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
         let viewport_rows = UiScript::message_viewport(&model, h);
         let frame = model
             .arena
@@ -121,7 +125,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 }
                 let color = {
                     let h = frame_handle_of(lua, &this)?;
-                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model app_data");
                     UiScript::message_frame_color(&model, h)
                 };
                 with_viewport(lua, &this, |smf, rows| {

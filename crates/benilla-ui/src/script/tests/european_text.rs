@@ -5,7 +5,7 @@
 
 use super::common::script;
 use crate::script::{
-    BubbleGeometry, BubbleState, MeasureRequest, Model, PlateGeometry, PlateState, QuadContent,
+    BubbleGeometry, BubbleState, MeasureRequest, PlateGeometry, PlateState, QuadContent,
     TextMeasure, UiScript,
 };
 
@@ -111,7 +111,10 @@ fn simple_html_blocks_swap_their_separators() {
     "#,
     )
     .unwrap();
-    let model = s.lua().app_data_ref::<Model>().expect("model");
+    let model = s
+        .lua()
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let fh = model.arena.lookup("H").expect("SimpleHTML frame");
     let texts: Vec<String> = model.simple_html[&fh]
         .blocks

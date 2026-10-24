@@ -34,7 +34,7 @@ pub struct LfgDungeon {
 impl super::UiScript {
     /// Push the dungeon table; without it every list is empty.
     pub fn set_lfg_dungeons(&mut self, rows: Vec<LfgDungeon>) {
-        self.model_mut().lfg_dungeons = rows;
+        set_field!(self, lfg_dungeons, rows);
     }
 }
 
@@ -122,7 +122,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 None => 0,
             };
             let inside = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data");
                 kind < 6 && (entry as usize) < type_list(&model, kind as usize).0
             };
             if !inside {
@@ -170,7 +172,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetLFGTypeEntries",
         lua.create_function(|lua, kind: Value| {
             let kind = number_arg(lua, kind, "Usage: GetLFGTypeEntries(type)")? as u32;
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model app_data");
             if kind >= 6 {
                 return Ok(MultiValue::new());
             }
