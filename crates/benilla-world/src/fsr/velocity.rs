@@ -988,6 +988,11 @@ pub(super) fn prepare_effect_velocity(
         if matches!(merged.blend, EffectBlend::Multiply | EffectBlend::Mod2x) {
             continue;
         }
+        // fork: perf — a GPU-expanded pool has no vertices here; it exists only while no camera
+        // runs FSR, so this pass never meets one in its own frame.
+        if merged.particles.is_some() {
+            continue;
+        }
         let Some(gpu) = images.get(merged.texture) else {
             continue;
         };

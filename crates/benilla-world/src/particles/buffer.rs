@@ -88,6 +88,60 @@ pub struct EffectPoint {
     pub b: f32,
 }
 
+/// fork: perf — one live particle of a GPU-expanded pool, an instance of its draw: the stored-frame
+/// position and velocity, the age, and what the packing reads off the twinkle table, which the
+/// vertex stage then never needs. A particle the twinkle gate drops is never packed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuParticle {
+    pub pos: [f32; 3],
+    pub age: f32,
+    pub vel: [f32; 3],
+    /// The normalized age `clamp(age / life, 0, 1)` the over-life ramps read.
+    pub u_age: f32,
+    /// The gated twinkle's size multiplier ([`benilla_formats::ParticleEmitterDef::twinkle`]).
+    pub twinkle: f32,
+    /// The particle's phase, whose bit 5 counter-rotates a negative spin (`quads::spin_angle`).
+    pub phase: u32,
+}
+
+/// fork: perf — one GPU-expanded pool's record, one dynamic-offset uniform row the vertex stage
+/// builds its particles' quads from: the CPU writer's per-pool inputs (`quads::expand_quads`).
+/// Sixteen rows, one 256-byte uniform slot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, bevy::render::render_resource::ShaderType)]
+pub struct ParticlePool {
+    /// The stored frame to the world, row-major (`xyz` the linear part, `w` the translation):
+    /// the ride frame in world mode, the placement times `wow_to_bevy` in model mode.
+    pub center_x: Vec4,
+    pub center_y: Vec4,
+    pub center_z: Vec4,
+    /// The camera basis the quads face; `w`: the size unit (instance scale or the lane's).
+    pub cam_right: Vec4,
+    /// `w`: the model's render alpha.
+    pub cam_up: Vec4,
+    /// The XY-quad plane basis (zero unless flagged); `w`: the spin.
+    pub plane_r: Vec4,
+    /// `w`: the tail time.
+    pub plane_u: Vec4,
+    /// The three colour keys.
+    pub color0: Vec4,
+    pub color1: Vec4,
+    pub color2: Vec4,
+    /// The three size keys, then the split `mid`.
+    pub scale: Vec4,
+    /// The head ramps `(base, span)` for segments A and B.
+    pub head: Vec4,
+    /// The tail ramps likewise.
+    pub tail: Vec4,
+    /// The segment repeats, then the atlas columns and rows.
+    pub atlas: Vec4,
+    /// `x`: `head_tail | xy_quad << 2 | tail_clamps << 3 | committed << 4`; `yzw`: the committed
+    /// light the RGB folds by.
+    pub mode: Vec4,
+    /// Spare, keeping the record one 256-byte slot.
+    pub spare: Vec4,
+}
+
 /// fork: perf — what a point draw builds around each [`EffectPoint`]: the weather's four sprites.
 /// The laws are in `effect_points.wgsl`; the numbers are the producer's.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -178,6 +232,10 @@ pub enum EffectTopology {
     /// fork: perf — a range of [`EffectQuads::points`], each built into this shape by the vertex
     /// stage.
     Points(EffectShape),
+    /// fork: perf — a range of [`EffectQuads::particles`], one particle pool whose head and tail
+    /// quads the vertex stage builds from [`EffectQuads::pools`]`[pool]` (`wow_effect.wgsl`'s
+    /// `EFFECT_PARTICLES`, the CPU writer's law, `quads::expand_quads`).
+    Particles { pool: u32, quads: u32 },
 }
 
 /// One draw's fog colour policy, one canonical row of the shader's params uniform.
@@ -302,6 +360,9 @@ pub struct EffectQuads {
     pub verts: Vec<EffectVertex>,
     /// fork: perf — the point draws' records ([`EffectTopology::Points`]).
     pub points: Vec<EffectPoint>,
+    /// fork: perf — the GPU-expanded pools' particles and records ([`EffectTopology::Particles`]).
+    pub particles: Vec<GpuParticle>,
+    pub pools: Vec<ParticlePool>,
     pub draws: Vec<EffectDraw>,
     // fork: fsr (FORK.md) — each vertex's world displacement since the last world frame,
     /// parallel to [`Self::verts`] once a draw commits ([`EffectMotion`]).
@@ -320,6 +381,8 @@ impl Default for EffectQuads {
         Self {
             verts: Vec::new(),
             points: Vec::new(),
+            particles: Vec::new(),
+            pools: Vec::new(),
             draws: Vec::new(),
             motion: Vec::new(),
             track_motion: false,
@@ -420,6 +483,39 @@ impl EffectQuads {
         }
     }
 
+    /// fork: perf — commit one GPU-expanded pool: its particles, its record, and a draw of
+    /// `quads` quads a particle (a head, a tail, or both). An empty pool commits nothing. A
+    /// particle draw keeps no motion: the stream is only kept while FSR runs, and then every pool
+    /// takes the CPU writer.
+    pub fn commit_particles(
+        &mut self,
+        pool: ParticlePool,
+        particles: &[GpuParticle],
+        quads: u32,
+        spec: EffectDrawSpec,
+    ) {
+        debug_assert!(
+            self.cleared_this_frame,
+            "effect-stream write before `begin_effect_frame`: this draw is about to be erased"
+        );
+        debug_assert!(
+            !self.track_motion,
+            "a GPU pool while the motion stream is kept"
+        );
+        if particles.is_empty() || quads == 0 {
+            return;
+        }
+        let start = self.particles.len() as u32;
+        self.particles.extend_from_slice(particles);
+        let index = self.pools.len() as u32;
+        self.pools.push(pool);
+        self.draws.push(EffectDraw::new(
+            spec,
+            EffectTopology::Particles { pool: index, quads },
+            start..self.particles.len() as u32,
+        ));
+    }
+
     /// fork: perf — open a point draw: remember where its points start.
     pub fn begin_points(&mut self) -> u32 {
         self.points.len() as u32
@@ -477,6 +573,8 @@ pub fn begin_effect_frame(
 ) {
     quads.verts.clear();
     quads.points.clear();
+    quads.particles.clear();
+    quads.pools.clear();
     quads.draws.clear();
     quads.motion.clear();
     quads.track_motion = !fsr.is_empty();

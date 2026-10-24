@@ -43,7 +43,8 @@ use bevy::shader::Shader;
 use crate::lighting::SharedLightBuffer;
 
 use super::buffer::{
-    EffectBlend, EffectFog, EffectPoint, EffectQuads, EffectTopology, EffectVertex,
+    EffectBlend, EffectFog, EffectPoint, EffectQuads, EffectTopology, EffectVertex, GpuParticle,
+    ParticlePool,
 };
 
 /// One extracted draw: the render-world copy of a [`super::buffer::EffectDraw`].
@@ -76,6 +77,9 @@ pub(crate) struct MergedDraw {
     pub(crate) params_offset: u32,
     /// A point draw's instances; `None` draws [`Self::index_range`].
     pub(crate) points: Option<PointRun>,
+    /// fork: perf — a GPU-expanded pool's particles, and its record's offset in
+    /// [`EffectMeta::pools`]; `None` on every other draw.
+    pub(crate) particles: Option<(PointRun, u32)>,
     // fork: fsr (FORK.md) — the camera whose phase drew it, and what its pipeline keyed on,
     /// for the velocity pass's redraw.
     pub(crate) view: MainEntity,
@@ -99,6 +103,16 @@ pub struct EffectMeta {
     vertices: RawBufferVec<EffectVertex>,
     /// fork: perf — the point draws' instances ([`EffectTopology::Points`]).
     points: RawBufferVec<EffectPoint>,
+    /// fork: perf — the GPU-expanded pools' particles ([`EffectTopology::Particles`]), one
+    /// instance a particle, and the pools' records, one dynamic-offset row a pool after a zero row
+    /// every other draw binds.
+    particles: RawBufferVec<GpuParticle>,
+    pools: DynamicUniformBuffer<ParticlePool>,
+    /// The main world's pool records, by pool index, and each one's row offset once written.
+    pool_records: Vec<ParticlePool>,
+    pool_offsets: Vec<u32>,
+    /// The pool buffer last written; a new one invalidates the bind-group cache.
+    pools_buffer: Option<BufferId>,
     // fork: fsr (FORK.md) — each vertex's world displacement ([`super::buffer::EffectMotion`]).
     motion: RawBufferVec<[f32; 3]>,
     // fork: fsr (FORK.md) — [`Self::motion`] holds this frame's stream, one row a vertex;
@@ -133,6 +147,11 @@ impl Default for EffectMeta {
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
             points: RawBufferVec::new(BufferUsages::VERTEX),
+            particles: RawBufferVec::new(BufferUsages::VERTEX),
+            pools: DynamicUniformBuffer::default(),
+            pool_records: Vec::new(),
+            pool_offsets: Vec::new(),
+            pools_buffer: None,
             motion: RawBufferVec::new(BufferUsages::VERTEX),
             motion_valid: false,
             indices: RawBufferVec::new(BufferUsages::INDEX),
@@ -250,6 +269,16 @@ impl EffectMeta {
         }
         self.params.write_buffer(device, queue);
         self.params_buffer = self.params.buffer().map(|b| b.id());
+        // fork: perf — the pool rows: a zero row first, which every draw but a pool's binds.
+        self.pools.clear();
+        self.pools.push(&ParticlePool::default());
+        self.pool_offsets.clear();
+        for record in &self.pool_records {
+            let off = self.pools.push(record);
+            self.pool_offsets.push(off);
+        }
+        self.pools.write_buffer(device, queue);
+        self.pools_buffer = self.pools.buffer().map(|b| b.id());
         clip_rows
     }
 }
@@ -261,6 +290,8 @@ pub struct EffectBindGroups {
     images: HashMap<(AssetId<Image>, Option<BufferId>), BindGroup>,
     /// The params buffer the cached groups bind.
     params_buffer: Option<BufferId>,
+    /// fork: perf — the pool-row buffer the cached groups bind.
+    pools_buffer: Option<BufferId>,
     /// fork: modern lighting (FORK.md, P4) — the fog volume's view the cached groups bind.
     fog_volume: Option<bevy::render::render_resource::TextureViewId>,
 }
@@ -306,6 +337,9 @@ pub fn init_effect_pipeline(mut commands: Commands, asset_server: Res<AssetServe
                 texture_3d(TextureSampleType::Float { filterable: true })
                     .visibility(ShaderStages::VERTEX),
                 sampler(SamplerBindingType::Filtering).visibility(ShaderStages::VERTEX),
+                // fork: perf — a GPU-expanded pool's record, by dynamic offset (`EFFECT_PARTICLES`);
+                // every other draw binds the zero row.
+                uniform_buffer::<ParticlePool>(true).visibility(ShaderStages::VERTEX),
             ),
         ),
     );
@@ -333,6 +367,23 @@ pub struct EffectPipelineKey {
     /// fork: perf — a point draw: one instance a point, built by the vertex stage
     /// (`EFFECT_POINTS`).
     points: bool,
+    /// fork: perf — a GPU-expanded pool: one instance a particle, its quads built by the vertex
+    /// stage from the pool's record (`EFFECT_PARTICLES`).
+    particles: bool,
+}
+
+/// fork: perf — a pool draw's vertex buffer: one [`GpuParticle`] an instance.
+pub(crate) fn particle_layout() -> VertexBufferLayout {
+    VertexBufferLayout::from_vertex_formats(
+        VertexStepMode::Instance,
+        // position + age, velocity + normalized age, twinkle, phase
+        vec![
+            VertexFormat::Float32x4,
+            VertexFormat::Float32x4,
+            VertexFormat::Float32,
+            VertexFormat::Uint32,
+        ],
+    )
 }
 
 /// fork: perf — a point draw's vertex buffer: one [`EffectPoint`] an instance.
@@ -350,6 +401,8 @@ impl SpecializedRenderPipeline for EffectPipeline {
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
         let vertex_layout = if key.points {
             point_layout()
+        } else if key.particles {
+            particle_layout()
         } else {
             VertexBufferLayout::from_vertex_formats(
                 VertexStepMode::Vertex,
@@ -413,6 +466,9 @@ impl SpecializedRenderPipeline for EffectPipeline {
         }
         if key.points {
             shader_defs.push("EFFECT_POINTS".into());
+        }
+        if key.particles {
+            shader_defs.push("EFFECT_PARTICLES".into());
         }
         // `$WOW_PARTICLE_FLAT`: solid magenta, no fragment inputs.
         if std::env::var_os("WOW_PARTICLE_FLAT").is_some() {
@@ -494,6 +550,10 @@ fn extract_effects(
     meta.vertices.extend(quads.verts.iter().copied());
     meta.points.clear();
     meta.points.extend(quads.points.iter().copied());
+    meta.particles.clear();
+    meta.particles.extend(quads.particles.iter().copied());
+    meta.pool_records.clear();
+    meta.pool_records.extend(quads.pools.iter().copied());
     // fork: fsr (FORK.md) — the motion stream, padded to the vertices it runs beside, while
     // a camera runs FSR; otherwise empty, and `write_buffer` uploads nothing.
     meta.motion.clear();
@@ -573,12 +633,14 @@ fn queue_effects(
                 lit: draw.lit,
                 no_depth_test: draw.no_depth_test,
                 points: matches!(draw.topology, EffectTopology::Points(_)),
+                particles: matches!(draw.topology, EffectTopology::Particles { .. }),
             };
             let pipeline = pipelines.specialize(&pipeline_cache, &effect_pipeline, key);
             // fork: perf — the weather's point draws take the free-floating Mod2x and Alpha
             // states: their pipelines compile with the vertex twin's, so the first shower does
             // not wait on one.
             if !key.points
+                && !key.particles
                 && key.raster_bias == 0
                 && !key.lit
                 && !key.no_depth_test
@@ -659,7 +721,10 @@ fn prepare_effects(
     for draw in &meta.draws {
         // fork: perf — a point draw has no vertices here: its range is in `points`, and its
         // shader rebases.
-        if matches!(draw.topology, EffectTopology::Points(_)) {
+        if matches!(
+            draw.topology,
+            EffectTopology::Points(_) | EffectTopology::Particles { .. }
+        ) {
             continue;
         }
         // Coplanar draws stay absolute: `DECAL_WORLD_CLIP` keys on the same `raster_bias != 0`.
@@ -683,6 +748,7 @@ fn prepare_effects(
     }
     meta.vertices.write_buffer(&device, &queue);
     meta.points.write_buffer(&device, &queue);
+    meta.particles.write_buffer(&device, &queue);
     meta.motion.write_buffer(&device, &queue);
 
     // The merge walk, over each live view's sorted items, never the raw phase map (an unswept
@@ -749,6 +815,43 @@ fn prepare_effects(
                         instances: draw.range.clone(),
                         vertices: shape.vertices(),
                     }),
+                    particles: None,
+                    view: view.retained_view_entity.main_entity,
+                    blend: draw.blend,
+                    raster_bias: draw.raster_bias,
+                    raster_slope: draw.raster_slope,
+                    no_depth_test: draw.no_depth_test,
+                });
+                phase.items[i].batch_range = m..m + 1;
+                continue;
+            }
+            if let EffectTopology::Particles { pool, quads } = draw.topology {
+                // fork: perf — a pool draw is never merged: its record row is its own.
+                close(phase, &mut open, meta.merged.len());
+                let Some(&pool_offset) = meta.pool_offsets.get(pool as usize) else {
+                    phase.items[i].batch_range = 0..0;
+                    continue;
+                };
+                let params_offset = match draw.clip {
+                    None => meta.params_offsets[draw.fog.slot() as usize],
+                    Some(clip) => *clip_rows
+                        .get(&(draw.fog.slot(), clip.to_array().map(f32::to_bits)))
+                        .unwrap_or(&meta.params_offsets[draw.fog.slot() as usize]),
+                };
+                let m = meta.merged.len() as u32;
+                meta.merged.push(MergedDraw {
+                    index_range: 0..0,
+                    texture: draw.texture,
+                    light: draw.light.clone(),
+                    params_offset,
+                    points: None,
+                    particles: Some((
+                        PointRun {
+                            instances: draw.range.clone(),
+                            vertices: 6 * quads,
+                        },
+                        pool_offset,
+                    )),
                     view: view.retained_view_entity.main_entity,
                     blend: draw.blend,
                     raster_bias: draw.raster_bias,
@@ -774,7 +877,7 @@ fn prepare_effects(
                         meta.indices.push(k);
                     }
                 }
-                EffectTopology::Points(_) => {}
+                EffectTopology::Points(_) | EffectTopology::Particles { .. } => {}
             }
             let index_end = meta.indices.len() as u32;
             if let (true, Some(lane)) = (trace, decal_lane(draw.bias)) {
@@ -817,6 +920,7 @@ fn prepare_effects(
                         light: draw.light.clone(),
                         params_offset,
                         points: None,
+                        particles: None,
                         view: view.retained_view_entity.main_entity,
                         blend: draw.blend,
                         raster_bias: draw.raster_bias,
@@ -877,6 +981,14 @@ fn prepare_effect_bind_groups(
         bind_groups.images.clear();
         bind_groups.params_buffer = meta.params_buffer;
     }
+    // fork: perf — likewise the pool rows.
+    let Some(pools_binding) = meta.pools.binding() else {
+        return;
+    };
+    if bind_groups.pools_buffer != meta.pools_buffer {
+        bind_groups.images.clear();
+        bind_groups.pools_buffer = meta.pools_buffer;
+    }
     // fork: modern lighting (FORK.md, P4) — every group binds the fog volume and the
     // modern block; a re-allocated volume (a modern world entry) invalidates the cache like a new params
     // buffer does.
@@ -921,6 +1033,7 @@ fn prepare_effect_bind_groups(
                     fog_block.buffer.as_entire_binding(),
                     &fog_volume.texture_view,
                     &fog_volume.sampler,
+                    pools_binding.clone(),
                 )),
             ),
         );
@@ -974,7 +1087,17 @@ impl<P: PhaseItem> RenderCommand<P> for DrawEffectBatch {
         let Some(image_bind_group) = bind_groups.into_inner().images.get(&key) else {
             return RenderCommandResult::Skip;
         };
-        pass.set_bind_group(1, image_bind_group, &[draw.params_offset]);
+        // The pool row's offset: a pool draw's own, the zero row (offset 0) for every other.
+        let pool_offset = draw.particles.as_ref().map_or(0, |(_, off)| *off);
+        pass.set_bind_group(1, image_bind_group, &[draw.params_offset, pool_offset]);
+        if let Some((run, _)) = &draw.particles {
+            let Some(particles) = meta.particles.buffer() else {
+                return RenderCommandResult::Failure("effect lane particles not available");
+            };
+            pass.set_vertex_buffer(0, particles.slice(..));
+            pass.draw(0..run.vertices, run.instances.clone());
+            return RenderCommandResult::Success;
+        }
         if let Some(run) = &draw.points {
             let Some(points) = meta.points.buffer() else {
                 return RenderCommandResult::Failure("effect lane points not available");

@@ -62,6 +62,30 @@ struct EffectParams {
 @group(1) @binding(5) var modern_fog_volume: texture_3d<f32>;
 @group(1) @binding(6) var modern_fog_samp: sampler;
 
+#ifdef EFFECT_PARTICLES
+// fork: perf — a GPU-expanded particle pool's record (`particles::buffer::ParticlePool`): the CPU
+// writer's per-pool inputs (`particles::quads::expand_quads`), one 256-byte row by dynamic offset.
+struct ParticlePool {
+    center_x: vec4<f32>, // the stored frame to the world, row-major; w the translation
+    center_y: vec4<f32>,
+    center_z: vec4<f32>,
+    cam_right: vec4<f32>, // w: the size unit
+    cam_up: vec4<f32>,    // w: the model's render alpha
+    plane_r: vec4<f32>,   // the XY-quad basis; w: the spin
+    plane_u: vec4<f32>,   // w: the tail time
+    color0: vec4<f32>,
+    color1: vec4<f32>,
+    color2: vec4<f32>,
+    scale: vec4<f32>,     // three size keys, then mid
+    head: vec4<f32>,      // the head ramps (base, span) for segments A and B
+    tail: vec4<f32>,      // the tail ramps likewise
+    atlas: vec4<f32>,     // the segment repeats, then the atlas columns and rows
+    mode: vec4<f32>,      // x: head_tail | xy << 2 | tail_clamps << 3 | committed << 4; yzw: light
+    spare: vec4<f32>,
+};
+@group(1) @binding(7) var<uniform> particle_pool: ParticlePool;
+#endif
+
 // The rain pass's forced fog colour: 0x80808080 → grey (render-state 0x0d).
 const RAIN_FOG_GREY: vec3<f32> = vec3<f32>(0.50196078, 0.50196078, 0.50196078);
 
@@ -74,6 +98,17 @@ struct Vertex {
     @location(1) point_b: vec4<f32>, // the shape's vector, its second scalar
 };
 #else
+#ifdef EFFECT_PARTICLES
+// fork: perf — a pool draw: one instance a particle (`particles::buffer::GpuParticle`), six
+// vertices a quad, its head first.
+struct Vertex {
+    @builtin(vertex_index) index: u32,
+    @location(0) pos_age: vec4<f32>, // stored-frame position, age
+    @location(1) vel_u: vec4<f32>,   // stored-frame velocity, normalized age
+    @location(2) twinkle: f32,       // the gated twinkle's size multiplier
+    @location(3) phase: u32,
+};
+#else
 struct Vertex {
     // Camera-relative for f32 precision (absolute verts through `clip_from_world` shear thin
     // geometry far from the origin), except decals under DECAL_WORLD_CLIP, which arrive absolute.
@@ -81,6 +116,7 @@ struct Vertex {
     @location(1) uv: vec2<f32>,
     @location(2) color: vec4<f32>,    // raw authored gamma RGBA; α is the blend weight
 };
+#endif
 #endif
 
 struct VertexOutput {
@@ -92,6 +128,171 @@ struct VertexOutput {
     // fork: modern lighting (FORK.md, P4) — rgb = in-scatter, a = transmittance (1 in a classic frame).
     @location(3) fog: vec4<f32>,
 };
+
+#ifdef EFFECT_PARTICLES
+// One corner of a particle's quad, its world position relative to the camera and its texel.
+struct ParticleCorner {
+    rel: vec3<f32>,
+    uv: vec2<f32>,
+    color: vec4<f32>,
+};
+
+// `CellRamp::sample`: `floor(base + span·t) & 0xFF`.
+fn particle_cell(base: f32, span: f32, t: f32) -> u32 {
+    return u32(i32(floor(base + span * t)) & 0xFF);
+}
+
+// The CPU writer's law, `particles::quads::expand_quads`, for corner `index` of the particle.
+fn particle_corner(v: Vertex) -> ParticleCorner {
+    let p = particle_pool;
+    let bits = u32(p.mode.x);
+    let head_tail = bits & 3u;
+    let xy_quad = (bits & 4u) != 0u;
+    let tail_clamps = (bits & 8u) != 0u;
+    let committed = (bits & 16u) != 0u;
+    let has_head = head_tail != 1u;
+    let quad = v.index / 6u;
+    // Two triangles over the perimeter-order corners, as the lane's `[0,1,2, 0,2,3]` indices.
+    var order = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
+    let corner = order[v.index % 6u];
+    let is_head = has_head && quad == 0u;
+
+    // The over-life ramps (`OverLife::sample`).
+    let u = clamp(v.vel_u.w, 0.0, 1.0);
+    let mid = clamp(p.scale.w, 1e-3, 1.0);
+    var t: f32;
+    var seg: u32;
+    var c0: vec4<f32>;
+    var c1: vec4<f32>;
+    var s0: f32;
+    var s1: f32;
+    if (u <= mid) {
+        t = u / mid;
+        seg = 0u;
+        c0 = p.color0;
+        c1 = p.color1;
+        s0 = p.scale.x;
+        s1 = p.scale.y;
+    } else {
+        t = (u - mid) / max(1.0 - mid, 1e-3);
+        seg = 1u;
+        c0 = p.color1;
+        c1 = p.color2;
+        s0 = p.scale.y;
+        s1 = p.scale.z;
+    }
+    t = clamp(t, 0.0, 1.0) * 0.99 + 0.005;
+    var rgba = c0 + (c1 - c0) * t;
+    let size = s0 + (s1 - s0) * t;
+    let repeat = select(p.atlas.y, p.atlas.x, seg == 0u);
+    var ct = t;
+    if (repeat != 1.0) {
+        ct = fract(t * repeat);
+    }
+    var cell: u32;
+    if (is_head) {
+        cell = select(
+            particle_cell(p.head.z, p.head.w, ct),
+            particle_cell(p.head.x, p.head.y, ct),
+            seg == 0u,
+        );
+    } else {
+        cell = select(
+            particle_cell(p.tail.z, p.tail.w, ct),
+            particle_cell(p.tail.x, p.tail.y, ct),
+            seg == 0u,
+        );
+    }
+    // The model's render alpha scales alpha alone (`0x7b9b10`).
+    rgba.a = rgba.a * p.cam_up.w;
+    // A committed light folds into the RGB, the product clamped (`fold_committed_light`).
+    if (committed) {
+        rgba = vec4<f32>(clamp(rgba.rgb * p.mode.yzw, vec3<f32>(0.0), vec3<f32>(1.0)), rgba.a);
+    }
+
+    let pos = v.pos_age.xyz;
+    let age = v.pos_age.w;
+    let world = vec3<f32>(
+        dot(p.center_x.xyz, pos) + p.center_x.w,
+        dot(p.center_y.xyz, pos) + p.center_y.w,
+        dot(p.center_z.xyz, pos) + p.center_z.w,
+    );
+    let center = world - view.world_position.xyz;
+    let half = size * v.twinkle * p.cam_right.w;
+    let cam_right = p.cam_right.xyz;
+    let cam_up = p.cam_up.xyz;
+
+    // The atlas cell: `col = idx & (cols − 1)`, `row = idx >> log2(cols)`.
+    let cols = u32(p.atlas.z);
+    let inv_cols = 1.0 / p.atlas.z;
+    let inv_rows = 1.0 / p.atlas.w;
+    let cx = f32(cell & (cols - 1u));
+    let cy = f32(cell >> countTrailingZeros(cols));
+    let u0 = cx * inv_cols;
+    let u1 = (cx + 1.0) * inv_cols;
+    let v0 = cy * inv_rows;
+    let v1 = (cy + 1.0) * inv_rows;
+
+    var out: ParticleCorner;
+    out.color = rgba;
+    var offsets: array<vec3<f32>, 4>;
+    var uvs: array<vec2<f32>, 4>;
+    if (is_head) {
+        var base_r = cam_right;
+        var base_u = cam_up;
+        if (xy_quad) {
+            base_r = p.plane_r.xyz;
+            base_u = p.plane_u.xyz;
+        }
+        var r = base_r * half;
+        var up = base_u * half;
+        let spin = p.plane_r.w;
+        if (spin != 0.0) {
+            // `spin_angle`: a negative angle negated on a bit-5 particle.
+            var angle = spin * age;
+            if (angle < 0.0 && (v.phase & 0x20u) != 0u) {
+                angle = -angle;
+            }
+            let sa = sin(angle);
+            let ca = cos(angle);
+            r = (base_r * ca + base_u * sa) * half;
+            up = (base_u * ca - base_r * sa) * half;
+        }
+        offsets = array<vec3<f32>, 4>(-r - up, r - up, r + up, -r + up);
+        uvs = array<vec2<f32>, 4>(vec2(u0, v1), vec2(u1, v1), vec2(u1, v0), vec2(u0, v0));
+    } else {
+        // The tail streak: |velocity|·tailTime back along the motion, 2·half wide on screen.
+        let vel_world = vec3<f32>(
+            dot(p.center_x.xyz, v.vel_u.xyz),
+            dot(p.center_y.xyz, v.vel_u.xyz),
+            dot(p.center_z.xyz, v.vel_u.xyz),
+        );
+        var t_eff = p.plane_u.w;
+        if (tail_clamps) {
+            t_eff = min(t_eff, age);
+        }
+        let tail = -vel_world * t_eff;
+        let tr = dot(tail, cam_right);
+        let tu = dot(tail, cam_up);
+        let l2 = tr * tr + tu * tu;
+        if (l2 < 7.7e-4) {
+            // Degenerate: the plain-billboard fallback (`0x7b33fa`).
+            let r = cam_right * half;
+            let up = cam_up * half;
+            offsets = array<vec3<f32>, 4>(-r - up, r - up, r + up, -r + up);
+            uvs = array<vec2<f32>, 4>(vec2(u0, v1), vec2(u1, v1), vec2(u1, v0), vec2(u0, v0));
+        } else {
+            let inv_l = half / sqrt(l2);
+            let perp = (cam_up * tr - cam_right * tu) * inv_l;
+            offsets = array<vec3<f32>, 4>(-perp, perp, tail + perp, tail - perp);
+            uvs = array<vec2<f32>, 4>(vec2(u0, v1), vec2(u0, v0), vec2(u1, v0), vec2(u1, v1));
+        }
+    }
+    out.rel = center + offsets[corner];
+    out.uv = uvs[corner];
+    return out;
+}
+#endif
 
 @vertex
 fn vertex(v: Vertex) -> VertexOutput {
@@ -112,9 +313,16 @@ fn vertex(v: Vertex) -> VertexOutput {
     let uv = built.uv;
     let color = built.color;
 #else
+#ifdef EFFECT_PARTICLES
+    let built = particle_corner(v);
+    let position = built.rel;
+    let uv = built.uv;
+    let color = built.color;
+#else
     let position = v.position;
     let uv = v.uv;
     let color = v.color;
+#endif
 #endif
 #ifdef DECAL_WORLD_CLIP
     // Decals (raster_bias ≠ 0) take absolute verts through the world meshes' `clip_from_world`:
