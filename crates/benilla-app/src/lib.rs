@@ -101,6 +101,7 @@ mod hd_models;
 #[cfg(feature = "dev")]
 mod hover_log;
 mod item_lane;
+mod item_names;
 mod item_watch;
 mod items;
 mod lanes;
@@ -148,7 +149,6 @@ mod shaders;
 #[cfg(test)]
 mod data_load_guard_tests;
 mod game_tip;
-mod name_persist;
 /// Where "the client is going down" is observed, in `Last`; every system that persists state on the
 /// way out registers through it.
 mod shutdown;
@@ -246,6 +246,7 @@ mod vplates;
     )
 ))]
 mod wasm_alloc;
+mod wdb;
 mod weapon_trail;
 /// The web build's env-var stand-in (a browser tab has no process environment) — see the
 /// module doc. `pub` because the plan's "Env/config on web" interface names it as

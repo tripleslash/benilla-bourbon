@@ -1080,6 +1080,18 @@ enum StreamEnd {
     Back(&'static str),
 }
 
+/// A packet's events in the order the app hears them. A saved store's answer sends its bytes
+/// ([`SessionEvent::SavedAnswer`]) ahead of its decoded record, so a store never holds a record
+/// whose bytes are still on the way.
+pub(crate) fn inbound(opcode: u16, events: Vec<SessionEvent>, body: Vec<u8>) -> Vec<SessionEvent> {
+    if !crate::wdb::is_saved_answer(opcode) {
+        return events;
+    }
+    std::iter::once(SessionEvent::SavedAnswer { opcode, body })
+        .chain(events)
+        .collect()
+}
+
 /// The world stream: every packet off the socket into [`SessionEvent`]s until a logout or a refused
 /// character login ends the world session, the socket fails or the app exits.
 async fn stream(
@@ -1119,7 +1131,7 @@ async fn stream(
                         &wire_trace::in_line(opcode, events.len(), &body),
                     );
                 }
-                for ev in events {
+                for ev in inbound(opcode, events, body) {
                     // The pong bypass: the reference's `OnData` (`0x537b10`) hands `SMSG_PONG` to
                     // `HandlePong` (`0x537d60`) inline, not onto the game thread's queue, so it is
                     // timed and consumed here.
@@ -1476,6 +1488,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::CreatureQuery { entry, guid } => w.creature_query(entry, guid),
         ClientCommand::PetNameQuery { pet_number, guid } => w.pet_name_query(pet_number, guid),
         ClientCommand::ItemQuery { entry, guid } => w.item_query(entry, guid),
+        ClientCommand::ItemNameQuery { entry, guid } => w.item_name_query(entry, guid),
         ClientCommand::UseItem {
             bag_index,
             slot,
