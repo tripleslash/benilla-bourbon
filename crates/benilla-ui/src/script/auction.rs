@@ -358,6 +358,11 @@ pub enum AuctionCall {
     /// `StartAuction` past its slot: with an auctioneer (`0x4ce7da`), the damaged item's refusal
     /// or the send and the sell slot's clear (`0x4ce925`, `0x4ce92a`).
     Start(Result<AuctionStartRequest, &'static str>),
+    /// `SortAuctionItems` past its names (`0x4cfc00`): list `list`'s driver promotes `column` in
+    /// the engine's stack, with a session or without (`0x4cd850`).
+    Sort { list: usize, column: u8 },
+    /// `CloseAuctionHouse()` (`0x4ce160`): the close core `0x4cd5f0`.
+    Close,
 }
 
 impl super::UiScript {
@@ -495,17 +500,6 @@ impl super::UiScript {
         super::tick::verb(&self.lua, |model| {
             patch_row(model, list, page, auction_id, bid)
         });
-    }
-
-    /// Drain the header clicks: `(list index, sort key)`, in click order, which the app replays
-    /// onto its own copy of the stacks, the one that outlives the session and the VM.
-    pub fn take_auction_sorts(&mut self) -> Vec<(usize, String)> {
-        drain_field!(self, auction_sorts)
-    }
-
-    /// Whether `CloseAuctionHouse` was called since the last drain (and clear the flag).
-    pub fn take_auction_close(&mut self) -> bool {
-        drain_field!(self, auction_close)
     }
 
     /// The sell slot's `(bag, slot)`, resolved by the app to the item guid on `StartAuction`.
@@ -1030,8 +1024,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // SortAuctionItems(type, sort) (`0x4cfc00`): the sort name is matched first, then the type;
     // either unknown sorts nothing (`0x4cfd90`). Otherwise the list's driver promotes the column
-    // and runs the sort tail, which sorts and signals before the call returns (`0x4cd850`,
-    // `0x4cdc70`, `0x4cdd60`); the click is queued for the app's copy of the stack.
+    // in the engine's stack, the one that outlives the session and the VM, then runs the sort
+    // tail, which sorts and signals before the call returns (`0x4cd850`, `0x4cdc70`, `0x4cdd60`).
     g.set(
         "SortAuctionItems",
         lua.create_function(|lua, (kind, sort): (Value, Value)| {
@@ -1047,10 +1041,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(list) = list_index(&kind) else {
                 return Ok(());
             };
+            submit(lua, AuctionCall::Sort { list, column })?;
             super::tick::verb(lua, |model| {
-                model
-                    .auction_sorts
-                    .push((list, SORT_KEYS[usize::from(column)].to_string()));
                 if let Some(a) = model.auction.as_mut() {
                     a.lists[list].sort.promote(column);
                 }
@@ -1537,16 +1529,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // CloseAuctionHouse(): the client-side close; nothing goes on the wire.
+    // CloseAuctionHouse() (`0x4ce160`): the close core `0x4cd5f0` inside the call; nothing goes
+    // on the wire.
     g.set(
         "CloseAuctionHouse",
-        lua.create_function(|lua, ()| {
-            let mut model = lua
-                .app_data_mut::<crate::script::ModelCell>()
-                .expect("model app_data");
-            model.auction_close = true;
-            Ok(())
-        })?,
+        lua.create_function(|lua, ()| submit(lua, AuctionCall::Close))?,
     )?;
 
     Ok(())
@@ -1639,6 +1626,7 @@ mod tests {
     #[test]
     fn list_types_and_sort_names_match_without_case() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_auction(page(&[7]));
         assert_eq!(
             s.eval::<i64>(r#"return (GetNumAuctionItems("LIST"))"#)
@@ -1651,12 +1639,19 @@ mod tests {
             "Item 7"
         );
         s.run(r#"SortAuctionItems("LIST", "Name")"#).unwrap();
-        assert_eq!(s.take_auction_sorts(), [(LIST, "name".to_string())]);
+        let name = crate::auction_sort::sort_column("name").unwrap();
+        assert_eq!(
+            s.take_auction_calls(),
+            [AuctionCall::Sort {
+                list: LIST,
+                column: name
+            }]
+        );
         s.run(r#"SortAuctionItems("list", "nonsense") SortAuctionItems("nowhere", "name")"#)
             .unwrap();
         s.run("SortAuctionItems(1, 2)").unwrap();
         assert!(
-            s.take_auction_sorts().is_empty(),
+            s.take_auction_calls().is_empty(),
             "an unknown one sorts nothing"
         );
         let err = s
@@ -1705,6 +1700,7 @@ mod tests {
     #[test]
     fn a_sort_signals_its_list_inside_the_call_with_the_rows_in_order() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut state = page(&[1, 2]);
         state.lists[LIST].rows[0].name = Some("Cheap".into());
         state.lists[LIST].rows[0].buyout_price = 100;
@@ -1859,6 +1855,7 @@ mod tests {
     #[test]
     fn the_selection_follows_its_auction_through_a_resort() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_auction(page(&[11, 22]));
 
         s.eval::<()>(r#"SetSelectedAuctionItem("list", 2)"#)

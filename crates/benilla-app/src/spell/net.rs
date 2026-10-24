@@ -304,10 +304,14 @@ fn on_spell_start(
 #[allow(clippy::type_complexity)] // a Bevy system's full input set
 fn on_spell_go(
     In(ev): In<SessionEvent>,
-    mut set: ParamSet<(
-        (Lifecycle, Scene),
-        crate::script_calls::VmWith<crate::target::SelectCommit<'static, 'static>>,
-    )>,
+    mut set: crate::script_calls::disjoint::Pair<
+        (Lifecycle<'static>, Scene<'static, 'static>),
+        crate::script_calls::VmWith<
+            'static,
+            'static,
+            crate::target::SelectCommit<'static, 'static>,
+        >,
+    >,
 ) {
     let mark = crate::lanes::mark();
     if let SessionEvent::SpellGo {
@@ -318,12 +322,19 @@ fn on_spell_go(
         misses,
         target,
         go_target,
+        target_mask,
+        source,
         dest,
         ammo_display_id,
         item_caster,
         unit_caster,
     } = ev
     {
+        let points = GoPoints {
+            mask: target_mask,
+            source,
+            dest,
+        };
         let deferred = {
             let (mut l, mut sc) = set.p0();
             let engaged = sc
@@ -338,7 +349,7 @@ fn on_spell_go(
                 misses,
                 target,
                 go_target,
-                dest,
+                points,
                 ammo_display_id,
                 item_caster,
                 unit_caster,
@@ -641,8 +652,10 @@ fn spell_book(
     // `ResetSpellBook 0x4b23a0` empties the opener list (`0x4b2464`-`0x4b2470`) before the
     // arrival's replay learns the list in wire order (`0x5dea8b`-`0x5deab9`).
     actions.openers.clear();
+    // It zeroes the effect-spell globals too (`0x4b2433`), `Stuck()`'s among them.
+    actions.stuck_spell = None;
     for &spell_id in &spell_ids {
-        list_opener(spell_id, spells, actions);
+        register_in_book(spell_id, spells, actions);
     }
     actions.spells.clear();
     actions.profession_order.clear();
@@ -687,7 +700,7 @@ fn learned_spell(
         actions.dirty = true;
     }
     list_learn(spell_id, actions);
-    list_opener(spell_id, spells, actions);
+    register_in_book(spell_id, spells, actions);
     announce_learn(spell_id, spells, errors);
     tab_flash.0.push(spell_id);
 }
@@ -713,6 +726,23 @@ fn list_unlearn(spell_id: u32, actions: &mut PlayerActions) {
     }
     if let Some(at) = actions.craft_order.iter().position(|&id| id == spell_id) {
         actions.craft_order.remove(at);
+    }
+}
+
+/// `SPELL_EFFECT_STUCK` in `Effect[0]`, the registrar's test for `Stuck()`'s spell (`0x4b2614`).
+const SPELL_EFFECT_STUCK: u32 = 0x54;
+
+/// The registrar `0x4b25b0`'s effect legs this client keeps: the opener list, and `Stuck()`'s
+/// spell `[0xb70098]`, which each registered spell whose `Effect[0]` is `SPELL_EFFECT_STUCK`
+/// overwrites (`0x4b2614`-`0x4b261d`), so the last such learn holds it. No unlearn clears it; the
+/// book's reset does.
+fn register_in_book(spell_id: u32, spells: Option<&Spells>, actions: &mut PlayerActions) {
+    list_opener(spell_id, spells, actions);
+    if spells
+        .and_then(|s| s.catalog.get(spell_id))
+        .is_some_and(|d| d.effects[0] == SPELL_EFFECT_STUCK)
+    {
+        actions.stuck_spell = Some(spell_id);
     }
 }
 
@@ -828,7 +858,7 @@ fn superceded_spell(
     // unlearn of the old rank (`0x5e6392` → `0x5ea24c`) then runs the removal once more, and its
     // learn of the new one (`0x5e63a4`) skips the registrar (`0x5e9c5a`).
     unlist_opener(old_spell_id, actions);
-    list_opener(new_spell_id, spells, actions);
+    register_in_book(new_spell_id, spells, actions);
     unlist_opener(old_spell_id, actions);
     // A rank-up announces once, like a first learn: the supersede pair `0x4b2f50` calls the
     // unlearn `0x4b2c50`, which prints nothing, then the registrar `0x4b25b0` with `edx = 1`
@@ -1149,7 +1179,7 @@ fn spell_go(
     misses: Vec<benilla_protocol::messages::SpellGoMiss>,
     target: Option<u64>,
     go_target: Option<u64>,
-    dest: Option<[f32; 3]>,
+    points: GoPoints,
     ammo_display_id: Option<u32>,
     item_caster: Option<u64>,
     // The packet's second guid as written, the caster slot `0x6e7f8b` looks up as a unit.
@@ -1178,10 +1208,11 @@ fn spell_go(
     attack_ctx: (&crate::creature_anim::UnitEdits, bool, &mut super::CastCore),
     seq: u64,
 ) -> Option<u64> {
+    let GoPoints { mask, source, dest } = points;
     debug!(
         "net: spell go {spell_id} by {caster:#x} ({} hit(s), {} miss(es), flags \
-         {cast_flags:#x}, target {target:?}, go_target {go_target:?}, dest {dest:?}, \
-         ammo {ammo_display_id:?})",
+         {cast_flags:#x}, target {target:?}, go_target {go_target:?}, mask {mask:#x}, \
+         source {source:?}, dest {dest:?}, ammo {ammo_display_id:?})",
         hits.len(),
         misses.len()
     );
@@ -1330,10 +1361,16 @@ fn spell_go(
         .iter()
         .filter_map(|&g| index.0.get(&g).map(|&e| (g, e)))
         .collect();
-    let misses: Vec<(Entity, u8)> = misses
+    let misses: Vec<(Entity, u8, u8)> = misses
         .iter()
-        .filter_map(|m| index.0.get(&m.target).map(|&e| (e, m.info)))
+        .filter_map(|m| {
+            index
+                .0
+                .get(&m.target)
+                .map(|&e| (e, m.info, m.reflect_result))
+        })
         .collect();
+
     // The caster slot is the second guid looked up as a unit (`0x6e7f8b`, mask 8): a game object's
     // cast writes it 0, so it finds none and skips every leg that needs one.
     let unit = index
@@ -1351,7 +1388,9 @@ fn spell_go(
                 spell_id,
                 hits: hits.into_iter().map(|(_, e)| e).collect(),
                 misses,
+                source: None,
                 dest: None,
+                target_mask: mask,
                 ammo_display_id,
                 seq,
             });
@@ -1384,20 +1423,32 @@ fn spell_go(
         item_cast: item_caster.is_some(),
         seq,
     });
-    // A pure dest cast (ground AoE, empty lists) rides the same message: the point is a target.
+    // A pure point cast (ground AoE, empty lists) rides the same message: the point is a target.
+    let source = source.map(benilla_assets::coords::wow_to_bevy);
     let dest = dest.map(benilla_assets::coords::wow_to_bevy);
-    if !hits.is_empty() || !misses.is_empty() || dest.is_some() {
+    if !hits.is_empty() || !misses.is_empty() || source.is_some() || dest.is_some() {
         go_targets.write(SpellGoTargets {
             caster: Some(e),
             spell_id,
             hits: hits.into_iter().map(|(_, e)| e).collect(),
             misses,
+            source,
             dest,
+            target_mask: mask,
             ammo_display_id,
             seq,
         });
     }
     deferred
+}
+
+/// The GO target block's mask and its two points, raw WoW (`0x7e4ed0`): SOURCE_LOCATION (0x20)
+/// and DEST_LOCATION (0x40).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct GoPoints {
+    pub(super) mask: u16,
+    pub(super) source: Option<[f32; 3]>,
+    pub(super) dest: Option<[f32; 3]>,
 }
 
 /// `SMSG_SPELL_FAILED_OTHER`: a cast was interrupted; ends the caster's `Casting` as [`spell_go`]
@@ -2327,7 +2378,7 @@ mod tests {
                             vec![],
                             None,
                             None,
-                            None,
+                            GoPoints::default(),
                             None,
                             None,
                             Self::SELF,
@@ -3254,7 +3305,7 @@ mod tests {
                         vec![],
                         None,
                         None,
-                        None,
+                        GoPoints::default(),
                         None,
                         item_caster,
                         caster,
@@ -3452,7 +3503,7 @@ mod tests {
                         vec![],
                         None,
                         None,
-                        None,
+                        GoPoints::default(),
                         None,
                         None,
                         10,
@@ -3832,7 +3883,7 @@ mod tests {
                             // A different guid from `hits[0]`, which the arm must take.
                             Some(99),
                             None,
-                            None,
+                            GoPoints::default(),
                             None,
                             None,
                             caster,

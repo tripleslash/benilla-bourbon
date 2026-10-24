@@ -1,7 +1,7 @@
 //! Benilla's options window (`OptionsFrame.xml`): the shell, the search and scroll, and every
 //! page's rows against the real CVar set, the saved option globals and the API rows.
 
-use benilla_ui::script::{QuadContent, SoundRequest, UiScript, WornDisplay};
+use benilla_ui::script::{QuadContent, SoundRequest, TutorialCall, UiScript, WornDisplay};
 
 /// The options window and the game menu over the manifest slice they need.
 fn harness() -> UiScript {
@@ -17,6 +17,8 @@ fn harness_on(s: UiScript) -> UiScript {
 /// [`harness_on`] with a page's `definers` merged in: the files its rows read, each loaded once
 /// and in the production order.
 fn harness_with(mut s: UiScript, definers: &[&str]) -> UiScript {
+    // No engine: what `UIParent`'s `OnUpdate` calls each tick is kept.
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     const WINDOW: &[&str] = &[
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -664,7 +666,8 @@ fn a_slider_rows_readout_sits_on_its_labels_line() {
 
 /// A VM with the real registered CVar set, before any XML loads, as the app boots.
 fn audio_harness() -> UiScript {
-    let s = UiScript::new().unwrap();
+    let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.register_cvars(crate::cvars::registered_pairs());
     s
 }
@@ -683,6 +686,8 @@ fn combat_harness() -> UiScript {
 fn interface_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
+    // No host: the tutorial row's calls are kept for the tests to read, not applied.
+    s.keep_calls();
     harness_with(
         s,
         &[
@@ -2725,7 +2730,8 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     let src = chain
         .read_file("Interface\\FrameXML\\GlobalStrings.lua")
         .expect("GlobalStrings.lua in the chain");
-    let strings = UiScript::new().expect("VM");
+    let mut strings = UiScript::new().expect("VM");
+    strings.keep_calls();
     strings
         .run(&String::from_utf8_lossy(&src))
         .expect("GlobalStrings runs clean");
@@ -3551,13 +3557,15 @@ fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
     );
 
     let _ = s.take_cvar_changes();
-    let _ = s.take_tutorial_clears();
-    let _ = s.take_tutorial_resets();
+    let _ = s.take_tutorial_calls();
 
     s.run("BenillaOptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:Click()")
         .unwrap();
-    assert_eq!(s.take_tutorial_clears(), 1, "off clears the bank");
-    assert_eq!(s.take_tutorial_resets(), 0);
+    assert_eq!(
+        s.take_tutorial_calls(),
+        [TutorialCall::Clear],
+        "off clears the bank"
+    );
     assert!(
         s.take_cvar_changes().is_empty(),
         "there is no tutorial CVar in 1.12 — the row must not invent one"
@@ -3580,8 +3588,11 @@ fn show_tutorials_reads_the_bank_and_writes_through_clear_and_reset() {
 
     s.run("BenillaOptionsFrameContainerBodyInterfaceRowShowTutorialsCheck:Click()")
         .unwrap();
-    assert_eq!(s.take_tutorial_resets(), 1, "on resets the bank");
-    assert_eq!(s.take_tutorial_clears(), 0);
+    assert_eq!(
+        s.take_tutorial_calls(),
+        [TutorialCall::Reset],
+        "on resets the bank"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -3595,15 +3606,14 @@ fn a_no_op_write_does_not_re_arm_the_tutorials() {
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
-    let _ = s.take_tutorial_clears();
-    let _ = s.take_tutorial_resets();
+    let _ = s.take_tutorial_calls();
 
     // Defaults writes "1" over a row that already reads "1".
     s.run("BenillaOptionsFrameContainerDefaults:Click()")
         .unwrap();
     assert_eq!(
-        (s.take_tutorial_resets(), s.take_tutorial_clears()),
-        (0, 0),
+        s.take_tutorial_calls(),
+        [],
         "the guard held: no bank write for a value that had not moved"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -4592,6 +4602,7 @@ impl benilla_ui::script::TextMeasure for SteppedFont {
 fn the_two_option_tabs_fit_their_labels_at_the_drawn_scale() {
     benilla_formats::wow_data_or_skip!();
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_text_measurer(Box::new(SteppedFont(6.0)));
     let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();

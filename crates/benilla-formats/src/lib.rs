@@ -240,11 +240,11 @@ mod spells;
 pub use spells::{
     cc_exemption, grants_immunity, load_shapeshift_forms, load_spell_cast_times,
     load_spell_catalog, load_spell_dispel_types, load_spell_durations, load_spell_radii,
-    load_spell_ranges, min_max_range, min_max_range_reads_units, resolve_parts, soft_modify,
-    substitute, substitute_parts, CcExemption, ExpandAt, FormRefusal, LearnAnnouncement,
-    LearnEffect, OpenLock, RangeTargets, RangeUnit, ShapeshiftForm, SpellCastTime,
-    SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes, SpellDisplay, SpellDuration,
-    SpellDurationCatalog, SpellMods, SpellRadius, SpellRadiusCatalog, SpellRange,
+    load_spell_ranges, min_max_range, min_max_range_reads_ranged_slot, min_max_range_reads_units,
+    resolve_parts, soft_modify, substitute, substitute_parts, CcExemption, ExpandAt, FormRefusal,
+    LearnAnnouncement, LearnEffect, OpenLock, RangeTargets, RangeUnit, ShapeshiftForm,
+    SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes, SpellDisplay,
+    SpellDuration, SpellDurationCatalog, SpellMods, SpellRadius, SpellRadiusCatalog, SpellRange,
     SpellRangeCatalog, TokenContext, TokenNumber, TokenPart, UnitMotion, ATTR_CASTABLE_WHILE_DEAD,
     ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED, COMBAT_REACH_ADD, MELEE_RANGE_FLOOR,
     MOVING_BONUS_FLAGS, MOVING_RANGE_BONUS, ON_NEXT_SWING_RANGE, SPELL_ATTR_IS_TRADESKILL,
@@ -261,7 +261,9 @@ mod spell_mechanic;
 pub use spell_focus::{load_spell_focus_catalog, SpellFocusCatalog};
 pub use spell_mechanic::{load_spell_mechanic_catalog, SpellMechanicCatalog};
 mod talents;
-pub use talents::{load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX_TALENT_RANK};
+pub use talents::{
+    load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX_TALENT_RANK, TALENT_PREREQS,
+};
 mod spell_visual;
 pub use spell_visual::{
     char_proc_small_int, char_proc_type, load_spell_visual_catalog, ChainEffect, ChainProc,

@@ -229,6 +229,8 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 misses: s.misses,
                 target: s.targets.unit_target,
                 go_target: s.targets.go_target,
+                target_mask: s.targets.mask,
+                source: s.targets.source.map(|d| [d.x, d.y, d.z]),
                 dest: s.targets.dest.map(|d| [d.x, d.y, d.z]),
                 ammo_display_id: s.ammo_display_id,
                 // Against the resolved caster: a GameObject's own guid in slot 1 is not an item.
@@ -919,6 +921,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         }
         ServerPacket::GameObjectDespawnAnim { guid } => {
             vec![SessionEvent::GameObjectDespawnAnim { guid }]
+        }
+        ServerPacket::GameObjectPageText { guid } => {
+            vec![SessionEvent::GameObjectPageText { guid }]
         }
         ServerPacket::OpenContainer { item } => vec![SessionEvent::OpenContainer { item }],
         ServerPacket::StandStateUpdate { state } => {

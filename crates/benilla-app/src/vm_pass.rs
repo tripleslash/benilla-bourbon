@@ -207,15 +207,15 @@ pub(crate) fn shared_sinks(world: &World) -> Vec<ComponentId> {
 /// already orders keep that order and its sync point. Panics on a cycle in the declared order,
 /// the pass's ends included.
 pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Vec<String> {
+    let label = label.intern();
+    if !world.resource::<Schedules>().contains(label) {
+        return Vec::new();
+    }
     let host = System::initialize(
         &mut IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {}),
         world,
     );
     let sinks = shared_sinks(world);
-    let label = label.intern();
-    if !world.resource::<Schedules>().contains(label) {
-        return Vec::new();
-    }
     world.schedule_scope(label, |world, schedule| {
         schedule.graph_mut().systems.initialize(world);
         let accesses = system_accesses(schedule, world);
@@ -269,6 +269,9 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
             Always,
             Sink,
         }
+        // A host's access holds the call host's: adding the host's changes nothing. The sum is
+        // made in one buffer, reused for every system, so the host's access is never cloned.
+        let mut with_host = bevy::ecs::query::Access::default();
         let joins: Vec<Joins> = graph
             .systems
             .iter()
@@ -280,11 +283,10 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
                     return Joins::No;
                 }
                 let combined = declared.combined_access();
-                let mut with_host = declared.clone();
-                with_host.extend(host.clone());
-                let hosted = with_host.combined_access() == combined;
-                let meets = in_phase[index[&key]] && !declared.is_compatible(&host);
-                if hosted || meets {
+                with_host.clone_from(combined);
+                with_host.extend(host.combined_access());
+                let hosted = with_host == *combined;
+                if hosted || (in_phase[index[&key]] && !declared.is_compatible(&host)) {
                     Joins::Always
                 } else if sinks.iter().any(|id| names_read(combined, *id)) {
                     Joins::Sink
@@ -1010,33 +1012,6 @@ mod tests {
             (Some((key, _)), None) => *key,
             _ => panic!("exactly one system named `…{suffix}` in Update"),
         }
-    }
-
-    /// A window the Lua closes hides before the frame paints: the drains that take a close
-    /// (`CloseGossip()` and its kin) queue it as a world command, which a sync point applies
-    /// ahead of the paint, so the frame the call is made never paints the window.
-    #[test]
-    fn a_window_the_lua_closes_is_hidden_before_the_paint() {
-        let mut app = headless_client();
-        if pass_order(&app).is_none() {
-            return;
-        }
-        let built = census(&mut app, Update, SyncPoints::Built);
-        let paint = one(&built, "::paint_script");
-        let late: Vec<&str> = [
-            "ui_gossip::drain_gossip",
-            "ui_merchant::drain_merchant",
-            "ui_trade::drain_trade",
-            "ui_bank::drain_bank",
-            "ui_quest::drain_quest",
-        ]
-        .into_iter()
-        .filter(|drain| !built.applies_before(one(&built, drain), paint))
-        .collect();
-        assert!(
-            late.is_empty(),
-            "drains whose closes apply after the paint: {late:?}"
-        );
     }
 
     /// A follow the Lua asks (`FollowUnit`, `FollowByName`) starts the frame it is made: the

@@ -44,7 +44,9 @@ pub(crate) use corpse::fixture as corpse_fixture;
 pub(crate) use corpse::{corpse_pick_admits, publish_corpse_pick, CorpsePick};
 pub(crate) use cursor::{drive_targeting_cursor, ground_cast_radius};
 pub(crate) use item::EnchantConfirmItem;
-pub(crate) use pick::{publish_unit_pick, PickChecks, UnitPick};
+pub(crate) use pick::{
+    publish_go_pick, publish_unit_pick, spell_opens_go, GoPick, GoPickChecks, PickChecks, UnitPick,
+};
 pub(crate) use world::{commit_ground_cast_on_click, commit_object_cast_on_click};
 
 use bevy::prelude::*;
@@ -82,6 +84,8 @@ pub(crate) struct BindChecks<'w, 's> {
     /// The caster, a unit and the caster's auto-attack target (`[caster+0xc48]`, which
     /// `GetMinMaxRange` looks up) as the range compare reads them.
     range_units: super::RangeUnits<'w, 's>,
+    /// The item cache the range's ranged-slot scale reads ([`super::with_ranged_slot`]).
+    items: Option<Res<'w, crate::items::Items>>,
 }
 
 impl BindChecks<'_, '_> {
@@ -197,7 +201,7 @@ impl BindChecks<'_, '_> {
                 .range_units
                 .unit(unit)
                 .unwrap_or(benilla_formats::RangeUnit::still(super::DEFAULT_REACH)),
-            _ => self.range_units.caster(),
+            _ => self.player_caster(self.range_units.caster()),
         };
         super::cast_target::RangeInputs {
             self_pos: me
@@ -211,6 +215,23 @@ impl BindChecks<'_, '_> {
             caster,
             target: None,
         }
+    }
+
+    /// The active player as `GetMinMaxRange` reads it, its ranged-slot item included.
+    pub(super) fn player_caster(
+        &self,
+        unit: benilla_formats::RangeUnit,
+    ) -> benilla_formats::RangeUnit {
+        let me = self.self_q.iter().next().and_then(|(_, store)| store);
+        super::with_ranged_slot(
+            unit,
+            me.map(|s| &s.0),
+            |g| {
+                let e = *self.index.as_deref()?.0.get(&g)?;
+                self.stores.get(e).ok().map(|s| &s.0)
+            },
+            self.items.as_deref(),
+        )
     }
 
     fn refusal(&self, spell_id: u32, range: super::cast_target::RangeInputs) -> Option<u8> {
@@ -433,6 +454,21 @@ impl SpellTargeting {
             .map(|t| (t.spell_id, t.commit))
     }
 
+    /// `BindLocation 0x6e60f0` at `point` (WoW space): the pending cast, its commit and the bind,
+    /// when the word wants a location; `None` binds nothing. The terrain click's and the minimap
+    /// click's.
+    pub(crate) fn location_commit(
+        &self,
+        point: [f32; 3],
+    ) -> Option<(
+        u32,
+        super::cast_send::CastCommit,
+        super::cast_send::TargetedBind,
+    )> {
+        let (spell_id, commit) = self.pending_for(TargetingWants::Location)?;
+        Some((spell_id, commit, self.location_bind(point)?))
+    }
+
     /// `BindLocation 0x6e60f0`'s fork: SOURCE (`0x20`) is tested before DEST (`0x40`). The
     /// reference takes a second click for a word carrying both; no 1.12 spell does, so only the
     /// precedence is built.
@@ -522,6 +558,8 @@ fn push_targeting_view(
 ) {
     script.set_spell_targeting(targeting.active());
     script.set_item_pick_armed(targeting.wants(TargetingWants::Item));
+    // `SpellTargetWantsLocation` (`0x6e6320`), which `Minimap:PingLocation` asks (`0x4eee74`).
+    script.set_location_pick_armed(targeting.wants(TargetingWants::Location));
     // `SpellCanTargetUnit(unit)`: the VM resolves the token to a guid (`0x6e6d3a`), and
     // `0x6e6460`'s unit leg answers for that guid. The units to ask are the held ones the
     // resolver's inputs list, the `target` chains' included.
@@ -641,6 +679,19 @@ impl ScriptCursor<'_, '_> {
     /// ([`CursorPicks`]), before the next call reads the cursor and the selection.
     pub(crate) fn bind_parked(&mut self) {
         self.picks.bind_all(&mut self.ladder, &self.checks);
+    }
+
+    /// `Minimap:PingLocation`'s ground cast (`0x4eef05`): the ground point `at` (WoW space) bound
+    /// as the waiting spell's location and sent ([`SpellTargeting::location_commit`]).
+    pub(crate) fn bind_location(&mut self, at: [f32; 3]) {
+        let Some((spell_id, commit, bound)) = self.ladder.ground.location_commit(at) else {
+            return;
+        };
+        debug!(
+            "ui_action: minimap ground cast {spell_id} at wow ({:.2}, {:.2}, {:.2}) as {bound:?}",
+            at[0], at[1], at[2]
+        );
+        self.ladder.commit_targeted(spell_id, commit, bound);
     }
 
     /// The ESC chain's `SpellStopTargeting()` (`0x6e6e30`): `StopTargeting 0x6e4900`.

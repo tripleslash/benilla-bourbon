@@ -204,6 +204,67 @@ pub enum ScriptCall {
     /// A stable request past its binding's checks ([`super::StableCall`]): its packet inside the
     /// call.
     Stable(super::StableCall),
+    /// A session verb ([`super::SessionRequest`]): the logout's request, its cancel, the quit,
+    /// the reload's flag and the cinematic's stop, inside the call (`0x489390` → `0x5ab000`).
+    Session(super::SessionRequest),
+    /// A tutorial verb ([`super::TutorialCall`]): the bank's write and its packet inside the call
+    /// (`0x4b59dc` → `0x4b54c0`).
+    Tutorial(super::TutorialCall),
+    /// A bank verb ([`super::BankCall`]): `PurchaseSlot`'s refusal or packet, `CloseBankFrame`'s
+    /// close core, inside the call.
+    Bank(super::BankCall),
+    /// A profession window verb ([`super::TradeSkillCall`]): `DoTradeSkill`'s cast, the close's
+    /// marker, inside the call.
+    TradeSkill(super::TradeSkillCall),
+    /// The craft window's close ([`super::CraftCall`]): its marker, inside the call.
+    Craft(super::CraftCall),
+    /// A battleground verb ([`super::BattlefieldCall`]): its refusal, its packet and its throttle
+    /// inside the call.
+    Battlefield(super::BattlefieldCall),
+    /// A death verb ([`super::DeathAction`]): its gates and its packet, or the soulstone's item
+    /// use, inside the call.
+    Death(super::DeathAction),
+    /// A duel verb ([`super::DuelRequest`]): its packet or the duel spell's cast inside the call.
+    Duel(super::DuelRequest),
+    /// A group loot vote ([`super::LootRollCall`]): its packet and the engine's close inside the
+    /// call, ahead of `CANCEL_LOOT_ROLL`.
+    LootRoll(super::LootRollCall),
+    /// The innkeeper's Accept ([`super::BinderCall`]): its packet inside the call.
+    Binder(super::BinderCall),
+    /// The summon's Accept ([`super::SummonCall`]): its packet inside the call.
+    Summon(super::SummonCall),
+    /// The meeting stone's leave ([`super::MeetingStoneCall`]): its refusal or packet inside the
+    /// call.
+    MeetingStone(super::MeetingStoneCall),
+    /// The lockouts' reset ([`super::InstanceCall`]): its packet inside the call.
+    Instance(super::InstanceCall),
+    /// The PvP flag's toggle ([`super::PvpCall`]): its packet inside the call.
+    Pvp(super::PvpCall),
+    /// `ShowHelm` or `ShowCloak` past the belief's test ([`super::WornDisplay`]): the flip's packet
+    /// inside the call (`0x5ee6e3`).
+    WornDisplay(super::WornDisplay),
+    /// An action bar verb's packet ([`super::ActionBarCall`]): the toggles' send, or a slot write
+    /// stored and sent ahead of its signal (`0x4e58e0`).
+    ActionBar(super::ActionBarCall),
+    /// A GM ticket verb's packet, or `Stuck`'s cast ([`super::GmTicketCall`]), inside the call.
+    GmTicket(super::GmTicketCall),
+    /// A send of a system no 1.12 server runs ([`super::UnservedSend`]), inside its verb.
+    Unserved(super::UnservedSend),
+    /// An inspect verb ([`super::InspectCall`]): its packet and the target it sets inside the
+    /// call.
+    Inspect(super::InspectCall),
+    /// An item text verb ([`super::ItemTextCall`]): the page move and its ask, or the close core,
+    /// inside the call.
+    ItemText(super::ItemTextCall),
+    /// An aura cancel ([`super::AuraCall`]): `0x6e7040` whole inside the call.
+    Aura(super::AuraCall),
+    /// A minimap verb ([`super::MinimapCall`]): the ping or the ground cast inside the call.
+    Minimap(super::MinimapCall),
+    /// A posture verb ([`super::PostureCall`]): the stand-state setter inside the call.
+    Posture(super::PostureCall),
+    /// `ConfirmPetUnlearn()` (`0x48dca0` → `0x5dfba0(0, 0)`): `CMSG_PET_UNLEARN` to the
+    /// remembered trainer, or the money refusal's line, inside the call.
+    ConfirmPetUnlearn,
 }
 
 /// The mode the four `TargetNearest*` shims hand the TAB cycler `0x493f60`, the only byte that
@@ -233,6 +294,7 @@ impl ScriptCall {
             ScriptCall::PickItem(pick) => pick.may_cast,
             ScriptCall::EnchantConfirm(answer) => answer.may_cast,
             ScriptCall::Item(super::ItemCall::BindOnUse { may_cast }) => *may_cast,
+            ScriptCall::Death(super::DeathAction::UseSoulstone { may_cast }) => *may_cast,
             ScriptCall::CastSpell { may_cast, .. } => *may_cast,
             ScriptCall::CastShapeshiftForm { may_cast, .. } => *may_cast,
             ScriptCall::Select { may_cast, .. }
@@ -735,6 +797,12 @@ impl UiScript {
             .as_mut()
             .map(std::mem::take)
             .unwrap_or_default()
+    }
+
+    /// Take the kept calls equal to `call`, leaving the rest kept: how many there were.
+    pub fn take_calls_like(&mut self, call: &ScriptCall) -> usize {
+        self.take_calls_where(|kept| (kept == call).then_some(()))
+            .len()
     }
 
     /// Take the kept calls `pick` answers for, in call order, leaving the rest kept.

@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn the_ui_quad_shader_composes_and_translates() {
         use bevy::shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
-        let app = crate::game_plugins::schedule_tests::headless_client();
+        let app = crate::game_plugins::schedule_tests::headless_client_unrun();
         let server = app.world().resource::<AssetServer>();
         let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
         let mut files = Vec::new();

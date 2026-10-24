@@ -88,6 +88,8 @@ pub(crate) struct BindingsState {
     fired: Vec<Input>,
     /// Amount per one-shot this frame: a zoom's yards, else 1.0.
     amounts: Vec<(Input, f32)>,
+    /// This frame's `MoveView*` calls in call order, `(axis, start)`, for the camera's axes.
+    view_calls: Vec<(script_input::ViewAxis, bool)>,
     /// The keys we believe are down: a press of one is a repeat. The reference classifies
     /// auto-repeat off its own list (`0x4248b3`), never the Win32 `lParam` repeat bit.
     /// Normalized like [`latched`](Self::latched) and reconciled against `ButtonInput` every
@@ -174,6 +176,10 @@ impl BindingsState {
             .filter(|&&(a, _)| a == i)
             .map(|&(_, v)| v)
             .sum()
+    }
+    /// This frame's `MoveView*` calls in call order, `(axis, start)`.
+    pub(crate) fn view_calls(&self) -> &[(script_input::ViewAxis, bool)] {
+        &self.view_calls
     }
     /// Both mouse bits held by their Lua Starts, the both-button run: MOVEANDSTEER's body
     /// (`Bindings.xml:3-11`) runs `CameraOrSelectOrMoveStart` and `TurnOrActionStart`.
@@ -472,6 +478,7 @@ fn latch_and_dispatch(
     state.just.clear();
     state.fired.clear();
     state.amounts.clear();
+    state.view_calls.clear();
 
     // Deviation: latches die with the VM that made them, because a latch names a command of that
     // VM's table and releasing it against a new one would run another load's up-half. The
@@ -1651,7 +1658,7 @@ mod tests {
     }
 
     /// The ungated one-shots fire as the keys do: `CameraZoomIn(yards)` carries its amount to the
-    /// zoom (1.0 when absent, `0x50b42d`), `SitOrStand` and `ToggleSheath` fire.
+    /// zoom (1.0 when absent, `0x50b42d`), and `ToggleSheath` fires, one frame only.
     #[test]
     fn the_one_shot_functions_fire_their_inputs() {
         let mut app = harness();
@@ -1672,11 +1679,10 @@ mod tests {
             0.0,
             "one frame only"
         );
-        run(&mut app, "SitOrStand()");
-        assert!(state(&app).fired(Input::SitOrStand));
         run(&mut app, "ToggleSheath()");
         assert!(state(&app).fired(Input::ToggleSheath));
-        assert!(!state(&app).fired(Input::SitOrStand));
+        run(&mut app, "CameraZoomOut()");
+        assert!(!state(&app).fired(Input::ToggleSheath));
     }
 
     /// Two keys on one command share its one bit: W and UP both run MOVEFORWARD's body, so the
@@ -1945,10 +1951,10 @@ mod tests {
             state(&app).pressed(Input::MoveForward),
             "the capture edge is not a release — holding W keeps you running while you type"
         );
-        press_key(&mut app, KeyCode::KeyX);
+        press_key(&mut app, KeyCode::KeyZ);
         app.update();
         assert!(
-            !state(&app).fired(Input::SitOrStand),
+            !state(&app).fired(Input::ToggleSheath),
             "typed keys are not bindings"
         );
         // Letting go still stops you, box focused or not.
@@ -1959,12 +1965,12 @@ mod tests {
             "the release is delivered regardless of focus"
         );
         // Focus drops; keys work again.
-        release_key(&mut app, KeyCode::KeyX);
+        release_key(&mut app, KeyCode::KeyZ);
         app.world_mut().resource_mut::<UiKeyboardCapture>().typing = false;
         app.update();
-        press_key(&mut app, KeyCode::KeyX);
+        press_key(&mut app, KeyCode::KeyZ);
         app.update();
-        assert!(state(&app).fired(Input::SitOrStand));
+        assert!(state(&app).fired(Input::ToggleSheath));
     }
 
     /// A shown keyboard frame eating the key that closes it costs that key its binding and
@@ -1988,22 +1994,22 @@ mod tests {
         // The eaten key loses its binding...
         release_key(&mut app, KeyCode::KeyM);
         app.update();
-        frame_ate(&mut app, &[KeyCode::KeyX]);
-        press_key(&mut app, KeyCode::KeyX);
+        frame_ate(&mut app, &[KeyCode::KeyZ]);
+        press_key(&mut app, KeyCode::KeyZ);
         app.update();
         assert!(
-            !state(&app).fired(Input::SitOrStand),
+            !state(&app).fired(Input::ToggleSheath),
             "the frame ate this key: its binding must not also fire"
         );
 
         // ...and only that key.
-        release_key(&mut app, KeyCode::KeyX);
+        release_key(&mut app, KeyCode::KeyZ);
         app.update();
         frame_ate(&mut app, &[KeyCode::KeyM]);
-        press_key(&mut app, KeyCode::KeyX);
+        press_key(&mut app, KeyCode::KeyZ);
         app.update();
         assert!(
-            state(&app).fired(Input::SitOrStand),
+            state(&app).fired(Input::ToggleSheath),
             "consumption is per key, not per frame"
         );
         assert!(

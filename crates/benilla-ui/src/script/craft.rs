@@ -361,6 +361,17 @@ impl CraftState {
     }
 }
 
+/// A craft window verb the host applies inside its call ([`super::ScriptCall::Craft`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CraftCall {
+    /// `DoCraft(index)` past its row and gate (`0x4f7d10`): the row's cast through
+    /// `CastSpellAsActivePlayer` (`0x4f7d64` → `0x6e5a90`), with no count, as the 1.12 CraftFrame
+    /// has no Create All.
+    Do { spell_id: u32 },
+    /// `CloseCraft()` (`0x4f6c00` → `0x4f5fe0`): the open marker `[0xbdcfb8]` zeroed.
+    Close,
+}
+
 impl super::UiScript {
     /// Push the open craft window's snapshot, or mark it closed with `None`, which keeps the
     /// list and selection as the reference's close does (`0x4f5fe0`). A push builds the rows
@@ -406,14 +417,22 @@ impl super::UiScript {
         drain_field!(self, craft_item_waits)
     }
 
-    /// Drain the spell ids `DoCraft` queued, one per call, with no count.
+    /// The spell ids of the `DoCraft` calls a harness's VM kept ([`Self::keep_calls`]), one per
+    /// call.
     pub fn take_craft_dos(&mut self) -> Vec<u32> {
-        drain_field!(self, craft_dos)
+        self.take_calls_where(|c| match c {
+            super::ScriptCall::Craft(CraftCall::Do { spell_id }) => Some(*spell_id),
+            _ => None,
+        })
     }
 
-    /// Whether `CloseCraft` was called since the last drain; the close sends no packet.
-    pub fn take_craft_close(&mut self) -> bool {
-        drain_field!(self, craft_close)
+    /// The `CloseCraft` calls a harness's VM kept ([`Self::keep_calls`]).
+    pub fn take_craft_closes(&mut self) -> usize {
+        self.take_calls_where(|call| match call {
+            super::ScriptCall::Craft(CraftCall::Close) => Some(()),
+            _ => None,
+        })
+        .len()
     }
 
     /// Whether the VM holds the window open: `CloseCraft` closes it in the verb, so a feed that
@@ -811,27 +830,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // The recipe's cast is `TryCastSpell` (`0x4f7d64` → `0x6e5a90`), behind the gate's
             // tag 2 (`0x6e4bc1`).
             let may_cast = super::protected::gate(lua, super::protected::Tag::CAST);
-            let mut model = lua
-                .app_data_mut::<crate::script::ModelCell>()
-                .expect("model app_data");
-            if let Some(spell_id) = recipe(&model, index)
-                .map(|r| r.spell_id)
-                .filter(|_| may_cast)
-            {
-                model.craft_dos.push(spell_id);
+            let spell_id = recipe(
+                &lua.app_data_ref::<crate::script::ModelCell>()
+                    .expect("model app_data"),
+                index,
+            )
+            .map(|r| r.spell_id)
+            .filter(|_| may_cast);
+            match spell_id {
+                Some(spell_id) => {
+                    super::calls::submit(lua, super::ScriptCall::Craft(CraftCall::Do { spell_id }))
+                }
+                None => Ok(()),
             }
-            Ok(())
         })?,
     )?;
 
     // CloseCraft() (`0x4f6c00` → `0x4f5fe0`): no packet. It zeroes the open marker alone
-    // (`[0xbdcfb8]`), so `GetNumCrafts` (`0x4f6e70`) still answers the held list, and signals
-    // `CRAFT_CLOSE` unconditionally (`0x4f5fef`); the flag tells the app to clear its state.
+    // (`[0xbdcfb8]`), the engine's inside the call, so `GetNumCrafts` (`0x4f6e70`) still answers
+    // the held list, and signals `CRAFT_CLOSE` unconditionally (`0x4f5fef`).
     g.set(
         "CloseCraft",
         lua.create_function(|lua, ()| {
+            super::calls::submit(lua, super::ScriptCall::Craft(CraftCall::Close))?;
             super::tick::verb(lua, |model| {
-                model.craft_close = true;
                 model.craft_open = false;
                 model.raise("CRAFT_CLOSE", Vec::new());
             });
@@ -954,6 +976,7 @@ mod tests {
     #[test]
     fn craft_skill_line_answers_the_rows_group_name() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         for call in [
             "GetCraftSkillLine()",
             "GetCraftSkillLine(nil)",
@@ -1007,6 +1030,7 @@ mod tests {
     #[test]
     fn the_display_skill_line_answers_only_for_enchanting() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let triple = |s: &UiScript| {
             s.eval::<(Option<String>, i64, i64)>("return GetCraftDisplaySkillLine()")
                 .unwrap()
@@ -1036,6 +1060,7 @@ mod tests {
     #[test]
     fn craft_info_answers_the_training_point_cost_and_the_required_level() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut st = state();
         for r in &mut st.recipes {
             r.training_point_cost = 5;
@@ -1052,6 +1077,7 @@ mod tests {
     #[test]
     fn snapshot_feeds_the_api_tuples() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_craft(Some(state()));
 
         assert_eq!(
@@ -1179,6 +1205,7 @@ mod tests {
             ],
         };
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_craft(Some(st.clone()));
         let header = |s: &UiScript, line: &str| {
             (1..=2)
@@ -1233,6 +1260,7 @@ mod tests {
     #[test]
     fn two_groups_head_each_group_ahead_of_the_recipes() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_craft(Some(two_groups()));
         let header = |name: Option<&str>| {
             (
@@ -1285,6 +1313,7 @@ mod tests {
     fn the_fold_verbs_fold_a_header_and_every_group_at_zero() {
         use crate::script::tick::heard;
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         // Two named lines, so the header sort never ties (`0x4f6b1e`): Beast Training heads row 1.
         let mut st = two_groups();
         st.recipes[1].group = 270;
@@ -1337,6 +1366,7 @@ mod tests {
     #[test]
     fn the_button_token_is_the_open_craft_types_word() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let token = |s: &UiScript| {
             s.eval::<Option<String>>("return GetCraftButtonToken()")
                 .unwrap()
@@ -1365,6 +1395,7 @@ mod tests {
     #[test]
     fn selection_persists_across_a_repush_by_spell_id() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         // Minor Beastslaying (spell 7418) sorts to index 2 (trivial, behind the optimal row).
         s.set_craft(Some(state()));
         s.run("SelectCraft(2)").unwrap();
@@ -1387,6 +1418,7 @@ mod tests {
     #[test]
     fn do_craft_casts_only_inside_an_input_event() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_craft(Some(state()));
 
         s.run(r#"RunScript("DoCraft(1)")"#).unwrap();
@@ -1401,6 +1433,7 @@ mod tests {
     #[test]
     fn do_craft_drains_bare_spell_ids_no_count() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_craft(Some(state()));
 
         s.run("DoCraft(1) DoCraft(2)").unwrap();
@@ -1418,6 +1451,7 @@ mod tests {
     #[test]
     fn no_snapshot_shapes_unknown_name_and_nil_info() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         assert_eq!(
             s.eval::<String>("return GetCraftName()").unwrap(),
             "UNKNOWN"
@@ -1444,6 +1478,7 @@ mod tests {
     #[test]
     fn get_craft_spell_focus_multivalue_shape() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut c = state();
         // recipes[1] (Minor Health, optimal) is the row the sort puts at index 1.
         c.recipes[1].tools = vec![
@@ -1475,12 +1510,12 @@ mod tests {
     #[test]
     fn a_close_keeps_the_list() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_craft(Some(state()));
         s.run("SelectCraft(1)").unwrap();
         let held = s.eval::<i64>("return GetNumCrafts()").unwrap();
         assert!(held > 0);
 
-        assert!(!s.take_craft_close());
         crate::script::tick::heard::listen(&s, &["CRAFT_CLOSE"], Some("GetNumCrafts()"));
         s.run("CloseCraft()").unwrap();
         assert_eq!(
@@ -1488,8 +1523,7 @@ mod tests {
             [format!("CRAFT_CLOSE {held}")]
         );
         assert!(!s.craft_open());
-        assert!(s.take_craft_close());
-        assert!(!s.take_craft_close(), "drained");
+        assert_eq!(s.take_craft_closes(), 1);
 
         s.set_craft(None);
         assert_eq!(s.eval::<i64>("return GetNumCrafts()").unwrap(), held);
@@ -1530,6 +1564,7 @@ mod tests {
             rank(24463, "Fire Resistance", 40),
         ];
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_craft(Some(CraftState {
             name: "Beast Training".into(),
             display_line: None,
@@ -1586,6 +1621,7 @@ mod tests {
     #[test]
     fn the_craft_link_verbs_answer_the_clients_shapes() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_craft(Some(state()));
         // Row 1 is whichever recipe sorts first.
         let first = s.eval::<String>("return (GetCraftInfo(1))").unwrap();
@@ -1639,6 +1675,7 @@ mod tests {
     #[test]
     fn a_getter_that_misses_a_record_waits_on_it_once_per_call() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut st = state();
         for r in &mut st.recipes {
             r.reagents[0].name = None;

@@ -23,7 +23,7 @@ struct Stable {
 /// The whole client, headless, with us streamed (`summon` our summoned pet's guid, or none), a
 /// stable open on its master with one slot bought and pet 3 in it, and 1g in the purse.
 fn client(summon: u64) -> Stable {
-    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let (tx, rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
     let world = app.world_mut();
@@ -83,15 +83,6 @@ fn run(s: &mut Stable, lua: &str) {
     with_hosted_vm(s.app.world_mut(), |vm| vm.expect("a VM").run(lua)).expect("the chunk runs");
 }
 
-/// What the frame's stable drain sends after the chunk, if it sends anything.
-fn drain(s: &mut Stable) {
-    use bevy::ecs::system::RunSystemOnce;
-    s.app
-        .world_mut()
-        .run_system_once(super::drain_stable)
-        .expect("the drain runs");
-}
-
 /// The requests sent since the last read, as their debug lines.
 fn sent(s: &Stable) -> Vec<String> {
     s.rx.try_iter().map(|c| format!("{c:?}")).collect()
@@ -134,7 +125,6 @@ fn the_stable_verbs_send_inside_their_calls() {
 fn unstable_pet_is_refused_while_we_hold_a_summon() {
     let mut s = client(0xF140_0000_0700_002A);
     run(&mut s, "UnstablePet(1)");
-    drain(&mut s);
     assert_eq!(sent(&s), Vec::<String>::new());
 }
 

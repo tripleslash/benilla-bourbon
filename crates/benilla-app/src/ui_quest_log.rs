@@ -736,22 +736,26 @@ pub(crate) struct QuestLogReads<'w, 's> {
 #[allow(clippy::type_complexity)] // the VM beside the window its latch refreshes
 pub(crate) fn feed_quest_log(
     // The questgiver window is the host's too: the latch's refresh is bumped after the VM's run.
-    mut vm: ParamSet<(
-        crate::script_calls::HostedVm,
-        ResMut<crate::ui_quest::QuestGiver>,
-    )>,
+    // The item watchers' runs still to fire this frame are the host's too: the lanes' drain
+    // follows every feed.
+    mut vm: crate::script_calls::disjoint::Pair<
+        crate::script_calls::HostedVm<'static, 'static>,
+        (
+            ResMut<'static, crate::ui_quest::QuestGiver>,
+            Res<'static, crate::item_lane::ItemLane>,
+        ),
+    >,
     reads: QuestLogReads,
     mut quest_log: ResMut<QuestLog>,
     // The toasts are message-catalog rows, whose surface and sound the sink reads.
     mut sink: crate::ui_action::MessageSink,
     // The accept line's queue.
     mut quest_lines: ResMut<crate::ui_quest::QuestLines>,
-    // The item watchers' runs and the notices still to fire this frame: the lanes' drain follows
-    // every feed.
-    item_runs: Res<crate::item_lane::ItemLane>,
+    // The notices still to fire this frame: the lanes' drain follows every feed.
     field_notices: Res<crate::field_watch::NoticeLane>,
     mut memo: Local<crate::ui_script::VmMemo<FeedMemo>>,
 ) {
+    let items_queued = vm.p1().1.notices().next().is_some();
     let refreshes = vm.p0().run(|script| {
         let Some(script) = script else {
             return 0;
@@ -767,7 +771,7 @@ pub(crate) fn feed_quest_log(
         let slots_moved = field_notices
             .iter()
             .any(|n| matches!(n, FieldNotice::QuestLog));
-        let bags_moved = !reads.changed_items.is_empty() || item_runs.notices().next().is_some();
+        let bags_moved = !reads.changed_items.is_empty() || items_queued;
 
         let seat = memo.player != Some(guid.0);
         // The rebuild's misses, each looked up with a callback (`0x4de65f`) below.
@@ -943,7 +947,7 @@ pub(crate) fn feed_quest_log(
         refreshes
     });
     if refreshes > 0 {
-        vm.p1().bump_reask();
+        vm.p1().0.bump_reask();
     }
 }
 

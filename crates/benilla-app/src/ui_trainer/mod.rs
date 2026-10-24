@@ -1,6 +1,6 @@
 //! The trainer feed: [`TrainerOpen`] from `SMSG_TRAINER_LIST`, [`feed_trainer`] resolving it into
 //! Lua [`TrainerService`]s and firing the trainer events, and [`TrainerSteps`] sending the buys
-//! inside their calls; `CloseTrainer` sends nothing, and [`drain_trainer`] runs its close core. A
+//! and running `CloseTrainer`'s close core inside their calls. A
 //! bought row repaints through the re-evaluator ([`reeval`]), never through
 //! `SMSG_TRAINER_BUY_SUCCEEDED`, and a refusal goes only to the log.
 
@@ -14,8 +14,8 @@ use benilla_protocol::messages::{trainer_spell_state, TrainerSpell};
 use bevy::prelude::*;
 
 use benilla_ui::script::{
-    CallTail, TrainerAbilityReq, TrainerCall, TrainerService, TrainerServiceCategory,
-    TrainerSkillReq, TrainerState, TrainerTooltip, UiScript, TRAINER_GROUP_KNOWN,
+    TrainerAbilityReq, TrainerService, TrainerServiceCategory, TrainerSkillReq, TrainerState,
+    TrainerTooltip, UiScript, TRAINER_GROUP_KNOWN,
 };
 
 use crate::entities::ItemDisplays;
@@ -201,7 +201,6 @@ impl Plugin for UiTrainerPlugin {
                         .in_set(TrainerFeed)
                         .in_set(crate::ui_session::NpcWindowFeed)
                         .after(crate::ui_unit::UnitFeed),
-                    drain_trainer.in_set(crate::ui_script::UiDrain),
                 ),
             );
     }
@@ -227,6 +226,9 @@ fn train_error_log_line(code: u32) -> &'static str {
 pub(super) struct ReqBooks<'a> {
     pub(super) player: &'a BTreeSet<u32>,
     pub(super) pet: Option<&'a BTreeSet<u32>>,
+    /// The player's race and class, which index the taught spell's line (`0x60c920` →
+    /// `0x6de040`).
+    pub(super) race_class: (u8, u8),
 }
 
 /// Resolve one wire [`TrainerSpell`] into the Lua [`TrainerService`]; `books` colour each
@@ -295,7 +297,7 @@ fn resolve_service(
         trainer_type,
         cat,
         spells,
-        skill_lines,
+        skill_lines.map(|c| (c, books.race_class)),
         get,
     );
     if group_key == 0 && skill_lines.is_some() {
@@ -457,9 +459,11 @@ pub(crate) struct DescriptionReads<'w> {
 /// core's ([`close_core`]).
 #[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn feed_trainer(
-    mut vm: crate::script_calls::VmWith<ReEvalInputs<'static, 'static>>,
-    // Writes the re-derived states, as `0x4d7d40` overwrites its own records.
-    mut open: ResMut<TrainerOpen>,
+    // The window it writes the re-derived states to, as `0x4d7d40` overwrites its own records.
+    mut vm: crate::script_calls::VmWith<(
+        ReEvalInputs<'static, 'static>,
+        ResMut<'static, TrainerOpen>,
+    )>,
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
     skill_lines: Option<Res<SkillLines>>,
@@ -475,7 +479,7 @@ pub(crate) fn feed_trainer(
     mut closes: CoreCloses,
 ) {
     let mut extra_passes = 0;
-    vm.feed(|script, mut re_eval, fires| {
+    vm.feed(|script, (mut re_eval, mut open), fires| {
         let Some(script) = script else {
             return;
         };
@@ -618,9 +622,56 @@ pub(crate) fn feed_trainer(
                 .as_deref()
                 .and_then(|b| b.0)
                 .and_then(|id| desc.area_names.as_deref()?.0.resolve(id as i32));
-            let player_skill =
-                |id: u32| crate::spell::spell_skill_value(store, Some(&skill_lines.catalog), id);
-            let pet_skill = |_: u32| crate::spell::pet_skill_value(pet.map(|p| &p.0));
+            let skills = crate::spell::PlayerSkills {
+                lines: Some(&skill_lines.catalog),
+                spells: Some(&spells.catalog),
+                items: Some(&items),
+            };
+            let player_level = |d: &benilla_formats::SpellDisplay| {
+                crate::spell::player_spell_level(store, skills, d, &mut crate::spell::Unrecorded)
+            };
+            let pet_skill_level = |d: &benilla_formats::SpellDisplay| {
+                d.skill_level(crate::spell::pet_skill_value(pet.map(|p| &p.0)))
+            };
+            // `$c` and `$p` (`0x6e31b0`, `0x6e3300`) at the same caster's level and fields.
+            let mods = &*desc.spell_mods;
+            let player_cost = |d: &benilla_formats::SpellDisplay| {
+                store.map_or(-1, |s| {
+                    crate::spell::usable::power_cost(
+                        d,
+                        s,
+                        skills,
+                        mods,
+                        &mut crate::spell::Unrecorded,
+                    )
+                })
+            };
+            let player_per_second = |d: &benilla_formats::SpellDisplay| {
+                let level = crate::spell::SpellLevel::Player { me: store, skills };
+                crate::spell::usable::per_second_cost(d, level, &mut crate::spell::Unrecorded)
+            };
+            let pet_level = |d: &benilla_formats::SpellDisplay| {
+                crate::spell::SpellLevel::Known(pet_skill_level(d))
+            };
+            let pet_cost = |d: &benilla_formats::SpellDisplay| {
+                pet.map_or(-1, |p| {
+                    let level = pet_level(d);
+                    crate::spell::usable::power_cost_at(
+                        d,
+                        &p.0,
+                        level,
+                        mods,
+                        &mut crate::spell::Unrecorded,
+                    )
+                })
+            };
+            let pet_per_second = |d: &benilla_formats::SpellDisplay| {
+                crate::spell::usable::per_second_cost(
+                    d,
+                    pet_level(d),
+                    &mut crate::spell::Unrecorded,
+                )
+            };
             let get = |key: &str| {
                 script
                     .lua()
@@ -633,9 +684,11 @@ pub(crate) fn feed_trainer(
                 durations: &spells.durations,
                 radii: &spells.radii,
                 ranges: Some(&spells.ranges),
-                skill: &player_skill,
+                level: &player_level,
                 lookup: &|id| spells.catalog.get(id),
-                mods: Some(&*desc.spell_mods),
+                mods: Some(mods),
+                power_cost: &player_cost,
+                power_per_second: &player_per_second,
                 unmodified_points: false,
                 gender: &|| gender,
                 home_area: &|| home_area,
@@ -643,7 +696,9 @@ pub(crate) fn feed_trainer(
                 printf: &crate::ui_script::token_printf,
             };
             let pet_ctx = TokenContext {
-                skill: &pet_skill,
+                level: &pet_skill_level,
+                power_cost: &pet_cost,
+                power_per_second: &pet_per_second,
                 ..ctx
             };
             // `UNIT_FIELD_SUMMON`'s unit (`0x4d9860`-`0x4d987d`), its book read only as the pet
@@ -669,6 +724,7 @@ pub(crate) fn feed_trainer(
                 &ReqBooks {
                     player: &actions.spells,
                     pet: pet_book.as_ref(),
+                    race_class: store.map_or((0, 0), |s| s.race_class()),
                 },
                 icons.as_deref(),
                 &items,
@@ -756,7 +812,8 @@ pub(crate) fn feed_trainer(
     }
 }
 
-/// The trainer's cell `[0xb73a00]`; `CloseTrainer` (`0x4d8d50`) is the core with a zero guid.
+/// The trainer's cell `[0xb73a00]`; `CloseTrainer` (`0x4d8d50`) is the core with a zero guid, run
+/// inside its call ([`crate::script_calls::ScriptCallHost`]).
 impl LatchedWindow for TrainerOpen {
     const WINDOW: NpcWindow = NpcWindow::Trainer;
 
@@ -767,16 +824,13 @@ impl LatchedWindow for TrainerOpen {
     fn dispatched(world: &mut World) {
         close_core(world);
     }
-
-    fn take_close_verb(script: &mut UiScript) -> bool {
-        script.take_trainer_close()
-    }
 }
 
-/// The close core, `0x4d7440` with a zero guid: nothing with no trainer (`0x4d7459`, a zero guid
-/// against a zero cell), else `TRAINER_CLOSED` first (`0x4d7468`), then the latch release on the
-/// cell as it stands after the fire (`0x4d7474`) and the cell cleared (`0x4d747c`). The fire comes
-/// before the clear, so `OnHide`'s `CloseTrainer()` re-enters with the cell set.
+/// The close core, `0x4d7440` with a zero guid, as `0x493310` and the sweep enter it: nothing with
+/// no trainer (`0x4d7459`, a zero guid against a zero cell), else `TRAINER_CLOSED` first
+/// (`0x4d7468`), then the latch release on the cell as it stands after the fire (`0x4d7474`) and
+/// the cell cleared (`0x4d747c`). The fire comes before the clear, so `OnHide`'s `CloseTrainer()`
+/// re-enters with the cell set.
 pub(crate) fn close_core(world: &mut World) {
     if world.resource::<TrainerOpen>().trainer.is_none() {
         return;
@@ -815,50 +869,51 @@ pub(crate) fn open_trainer(
 /// ([`crate::script_calls::ScriptCallHost`]).
 #[derive(SystemParam)]
 pub(crate) struct TrainerSteps<'w, 's> {
+    /// Absent in a world with no trainer window, which closes nothing.
+    open: Option<ResMut<'w, TrainerOpen>>,
     net: Res<'w, NetCommands>,
     me: Query<'w, 's, &'static Guid, With<SelfPlayer>>,
 }
 
 impl TrainerSteps<'_, '_> {
-    /// Apply one trainer call; `OpenTrainer`'s close is left to the tail, where every
-    /// `CloseTrainer` goes.
-    pub(crate) fn apply(&mut self, call: TrainerCall) -> Option<CallTail> {
-        match call {
-            // The trainer's cell as the VM's open window holds it (`0x4d8a11`).
-            TrainerCall::Buy { trainer, spell_id } => {
-                debug!("ui_trainer: buy service (trainer {trainer:#x}, spell {spell_id})");
-                let _ = self
-                    .net
-                    .0
-                    .send(ClientCommand::TrainerBuySpell { trainer, spell_id });
-                None
-            }
-            // `TalkToTrainer` on the player's own guid (`0x5df680`), which the server answers
-            // with nothing for a player; all of it waits on the player (`0x4d8d24`).
-            TrainerCall::OpenOwn => {
-                let &Guid(trainer) = self.me.single().ok()?;
-                debug!(
-                    "ui_trainer: OpenTrainer closes the window and asks for the player's own list"
-                );
-                let _ = self.net.0.send(ClientCommand::TrainerList { trainer });
-                Some(Box::new(|script: &mut UiScript| {
-                    script.close_trainer_for_own_list()
-                }))
-            }
-        }
+    /// `BuyTrainerService`'s send, with the trainer's cell as the VM's open window holds it
+    /// (`0x4d8a11`).
+    pub(crate) fn buy(&mut self, trainer: u64, spell_id: u32) {
+        debug!("ui_trainer: buy service (trainer {trainer:#x}, spell {spell_id})");
+        let _ = self
+            .net
+            .0
+            .send(ClientCommand::TrainerBuySpell { trainer, spell_id });
     }
-}
 
-/// `CloseTrainer` runs the close core, which sends nothing; the core needs the latch, so it waits
-/// for the drain (Part of #2202). Every other trainer verb applies inside its call
-/// ([`TrainerSteps`]).
-fn drain_trainer(mut hosted_vm: crate::script_calls::HostedVm, mut world_commands: Commands) {
-    hosted_vm.run(|script| {
-        if script.is_some_and(|script| script.take_trainer_close()) {
-            debug!("ui_trainer: client-side close (no packet)");
-            crate::ui_session::queue(&mut world_commands, close_core);
-        }
-    })
+    /// The active player's guid, which `OpenTrainer` needs (`0x4d8d24`).
+    pub(crate) fn own_guid(&self) -> Option<u64> {
+        self.me.single().ok().map(|&Guid(g)| g)
+    }
+
+    /// The rest of `TalkToTrainer` on the player's own guid (`0x5df680`) after its close
+    /// (`0x5df6bb`): `CMSG_TRAINER_LIST` (`0x5df6fc`), which the server answers with nothing for
+    /// a player.
+    pub(crate) fn ask_own_list(&mut self, trainer: u64) {
+        debug!("ui_trainer: OpenTrainer asks for the player's own list");
+        let _ = self.net.0.send(ClientCommand::TrainerList { trainer });
+    }
+
+    /// The trainer's cell `[0xb73a00]`.
+    pub(crate) fn trainer(&self) -> Option<u64> {
+        self.open.as_deref().and_then(|o| o.trainer)
+    }
+
+    /// The close core's clear of the cell (`0x4d747c`), and the VM's window with it: whether a
+    /// trainer was stored.
+    pub(crate) fn clear_trainer(&mut self, script: &mut UiScript) -> bool {
+        let Some(open) = self.open.as_deref_mut().filter(|o| o.trainer.is_some()) else {
+            return false;
+        };
+        open.clear();
+        script.set_trainer(None);
+        true
+    }
 }
 
 mod law;

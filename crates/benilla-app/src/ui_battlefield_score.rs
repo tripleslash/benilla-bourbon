@@ -19,7 +19,7 @@ use benilla_protocol::messages::PvpLogData;
 use benilla_ui::script::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 
 use crate::names::NameCache;
-use crate::net::{ClientCommand, NetCommands};
+use crate::net::NetCommands;
 use crate::query_cache::Ask;
 use crate::ui_dialog_verbs::BattlefieldQueue;
 use crate::ui_script::UiFeed;
@@ -38,6 +38,18 @@ pub(crate) struct BattlefieldScoreboard {
 impl BattlefieldScoreboard {
     pub(crate) fn apply(&mut self, data: PvpLogData) {
         self.log = Some(data);
+    }
+
+    /// The request throttle (`0x4aa170`): `true`, and the stamp moves, when a request may go out
+    /// now.
+    pub(crate) fn request_due(&mut self, now: Instant) -> bool {
+        let throttled = self
+            .last_request
+            .is_some_and(|t| now.duration_since(t) < REQUEST_THROTTLE);
+        if !throttled {
+            self.last_request = Some(now);
+        }
+        !throttled
     }
 }
 
@@ -99,17 +111,21 @@ fn resolve_board(
     Some(rows)
 }
 
+#[allow(clippy::type_complexity)] // a Bevy system's full input set
 pub(crate) fn feed_battlefield_score(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut board: ResMut<BattlefieldScoreboard>,
-    mut queue: ResMut<BattlefieldQueue>,
+    // The board and the queue, which the score and leave calls read and stamp: an engine turn,
+    // its events signalled after.
+    mut vm: crate::script_calls::VmWith<(
+        ResMut<'static, BattlefieldScoreboard>,
+        ResMut<'static, BattlefieldQueue>,
+    )>,
     catalog: Option<Res<WorldStateUiRes>>,
     names: Res<NameCache>,
     commands: Res<NetCommands>,
     unit_names: crate::ui_unit::NameTables,
     mut last: Local<crate::ui_script::VmMemo<Option<BattlefieldScores>>>,
 ) {
-    hosted_vm.run(|script| {
+    vm.turn(|script, (mut board, mut queue)| {
         let Some(script) = script else {
             return;
         };
@@ -163,34 +179,6 @@ pub(crate) fn feed_battlefield_score(
     })
 }
 
-fn drain_battlefield_score(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut board: ResMut<BattlefieldScoreboard>,
-    queue: Res<BattlefieldQueue>,
-    commands: Res<NetCommands>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        if script.take_battlefield_score_requests() > 0 {
-            let now = Instant::now();
-            let throttled = board
-                .last_request
-                .is_some_and(|t| now.duration_since(t) < REQUEST_THROTTLE);
-            if !throttled {
-                board.last_request = Some(now);
-                let _ = commands.0.send(ClientCommand::RequestBattlefieldScoreData);
-            }
-        }
-        if script.take_battlefield_leave_requests() > 0 {
-            let _ = commands.0.send(ClientCommand::LeaveBattlefield {
-                map_id: queue.active_map().unwrap_or(0),
-            });
-        }
-    })
-}
-
 /// The scoreboard's packet handlers.
 mod net {
     use benilla_protocol::{SessionEvent, SessionEventKind};
@@ -224,13 +212,10 @@ impl Plugin for BattlefieldScorePlugin {
         net::register(app);
         app.init_resource::<BattlefieldScoreboard>().add_systems(
             Update,
-            (
-                // Before the queue feed: on status 3 the score event precedes the status event.
-                feed_battlefield_score
-                    .before(crate::ui_dialog_verbs::feed_dialog_verbs)
-                    .in_set(UiFeed),
-                drain_battlefield_score.in_set(crate::ui_script::UiDrain),
-            ),
+            // Before the queue feed: on status 3 the score event precedes the status event.
+            feed_battlefield_score
+                .before(crate::ui_dialog_verbs::feed_dialog_verbs)
+                .in_set(UiFeed),
         );
     }
 }

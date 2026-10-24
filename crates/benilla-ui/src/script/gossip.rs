@@ -95,11 +95,6 @@ impl super::UiScript {
         })
     }
 
-    /// Whether `CloseGossip` was called since the last drain; the 1.12 close sends no packet.
-    pub fn take_gossip_close(&mut self) -> bool {
-        drain_field!(self, gossip_close)
-    }
-
     /// The quest selects a harness's VM kept ([`Self::keep_calls`]): whether active, and the
     /// 1-based row in its list.
     pub fn take_gossip_quest_selects(&mut self) -> Vec<(bool, u32)> {
@@ -178,16 +173,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // CloseGossip(): the cell zeroed in the call, and the teardown owed to the app.
+    // CloseGossip() (`0x4e2b20`): the close core `0x4e1fa0` with a zero guid, inside the call.
     g.set(
         "CloseGossip",
-        lua.create_function(|lua, ()| {
-            submit(lua, GossipCall::Close)?;
-            lua.app_data_mut::<crate::script::ModelCell>()
-                .expect("model app_data")
-                .gossip_close = true;
-            Ok(())
-        })?,
+        lua.create_function(|lua, ()| submit(lua, GossipCall::Close))?,
     )?;
 
     // ══ The two quest lists ══
@@ -337,10 +326,13 @@ mod tests {
         );
         assert!(s.take_gossip_selects().is_empty(), "taken");
 
-        assert!(!s.take_gossip_close());
         s.run("CloseGossip()").unwrap();
-        assert!(s.take_gossip_close());
-        assert!(!s.take_gossip_close(), "drained");
+        assert!(
+            s.take_calls_where(|call| match call {
+                super::super::ScriptCall::Gossip(super::GossipCall::Close) => Some(()),
+                _ => None,
+            }) == [()]
+        );
     }
 
     #[test]

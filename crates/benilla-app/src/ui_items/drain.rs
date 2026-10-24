@@ -1626,7 +1626,9 @@ mod bind_confirm_tests {
 
         app.world_mut().spawn((
             SelfPlayer,
+            // `UNIT_FIELD_HEALTH` (22): alive.
             ObjectStore(ObjectFields::from_pairs(&[
+                (22, 100),
                 (F_PACK_SLOT_1, AXE_GUID as u32),
                 (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
             ])),
@@ -1916,7 +1918,9 @@ mod bind_confirm_tests {
             .insert_resource(NetCommands(tx));
         app.world_mut().spawn((
             SelfPlayer,
+            // `UNIT_FIELD_HEALTH` (22): alive.
             ObjectStore(ObjectFields::from_pairs(&[
+                (22, 100),
                 (F_PACK_SLOT_1, AXE_GUID as u32),
                 (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
             ])),
@@ -2020,7 +2024,9 @@ mod bind_confirm_tests {
             .insert_resource(NetCommands(tx));
         app.world_mut().spawn((
             SelfPlayer,
+            // `UNIT_FIELD_HEALTH` (22): alive.
             ObjectStore(ObjectFields::from_pairs(&[
+                (22, 100),
                 (F_PACK_SLOT_1, AXE_GUID as u32),
                 (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
             ])),
@@ -2157,7 +2163,9 @@ mod bind_confirm_tests {
                 .guid = Some(FRIEND);
             app.world_mut().spawn((
                 SelfPlayer,
+                // `UNIT_FIELD_HEALTH` (22): alive.
                 ObjectStore(ObjectFields::from_pairs(&[
+                    (22, 100),
                     (F_PACK_SLOT_1, AXE_GUID as u32),
                     (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
                 ])),
@@ -2212,7 +2220,9 @@ mod bind_confirm_tests {
         let (mut app, rx) = use_arm_app();
         app.world_mut().spawn((
             SelfPlayer,
+            // `UNIT_FIELD_HEALTH` (22): alive.
             ObjectStore(ObjectFields::from_pairs(&[
+                (22, 100),
                 (F_PACK_SLOT_1, AXE_GUID as u32),
                 (F_PACK_SLOT_1 + 1, (AXE_GUID >> 32) as u32),
             ])),

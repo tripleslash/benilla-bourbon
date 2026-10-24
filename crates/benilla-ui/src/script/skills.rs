@@ -617,7 +617,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 })
             };
             if let Some(skill_id) = send {
-                super::lottery::queue(lua, super::lottery::UnservedSend::SkillBuyStep { skill_id });
+                super::lottery::queue(
+                    lua,
+                    super::lottery::UnservedSend::SkillBuyStep { skill_id },
+                )?;
             }
             Ok(())
         })?,
@@ -687,6 +690,7 @@ mod tests {
     #[test]
     fn grouped_visible_rows_interleave_headers_ordered_by_category() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         assert_eq!(s.eval::<i64>("return GetNumSkillLines()").unwrap(), 0);
 
         s.set_skills(state());
@@ -715,6 +719,7 @@ mod tests {
     #[test]
     fn chosen_skill_points_follow_add_remove_and_cancel() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut st = state();
         // First Aid at 73 of 75 with a permanent bonus of +2: room for 2 more (75 + 2 = 77).
         let fa = st.entries.iter_mut().find(|e| e.skill_id == 129).unwrap();
@@ -783,6 +788,7 @@ mod tests {
     fn buy_skill_tier_follows_the_flags_the_tier_cost_and_the_points() {
         use crate::script::{TalentUiState, UnservedSend::SkillBuyStep};
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut st = state();
         // Rows: 1 Weapon Skills, 2 Defense, 3 Swords, 4 Professions, 5 First Aid, 6 Fishing.
         let fa = st.entries.iter_mut().find(|e| e.skill_id == 129).unwrap();
@@ -860,6 +866,7 @@ mod tests {
     #[test]
     fn skill_point_verbs_raise_their_usage_and_the_empty_ones_do_nothing() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_skills(state());
         for (verb, usage) in [
             ("AddSkillUp", "Usage: AddSkillUp(index)"),
@@ -917,6 +924,7 @@ mod tests {
     #[test]
     fn collapse_hides_a_groups_entries_and_remaps_indices() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_skills(state());
 
         // Fold Weapon Skills (row 1): its two entries go, the header stays with isExpanded nil.
@@ -946,6 +954,7 @@ mod tests {
     #[test]
     fn a_rebuild_keeps_the_selection_and_re_expands_every_group() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_skills(state());
 
         // Selecting a header clears the selection.
@@ -984,6 +993,7 @@ mod tests {
     #[test]
     fn header_and_entry_tuple_shapes() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_skills(state());
 
         // Header row 1: twelve values, no description (`0x4d3768`).
@@ -1054,6 +1064,7 @@ mod tests {
     #[test]
     fn the_permanent_bonus_folds_into_the_numbers_and_the_temporary_one_does_not() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut st = state();
         st.entries[1].perm_bonus = 10; // Defense 180/300, temp +5
         st.entries
@@ -1077,6 +1088,7 @@ mod tests {
     #[test]
     fn untrained_lines_sort_under_the_trained_ones_of_their_category() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut st = state();
         // "Alchemy" would sort first in Professions by name; at rank 0 it goes last.
         st.entries
@@ -1094,6 +1106,7 @@ mod tests {
     #[test]
     fn a_mono_line_reports_max_rank_one_whatever_the_server_said() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         let mut st = state();
         // Beast Mastery: category 3, so mono by the fixture rule; 300/300 from the server.
         st.entries.push(entry(
@@ -1160,6 +1173,7 @@ mod tests {
     #[test]
     fn adjusted_skill_points_answer_the_second_character_points_value() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_skills(state());
         for (points, want) in [(2u32, 2i64), (0, 0), (u32::MAX, -1)] {
             s.set_talents(crate::script::TalentUiState {

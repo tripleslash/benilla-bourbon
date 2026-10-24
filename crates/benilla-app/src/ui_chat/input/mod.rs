@@ -6,6 +6,7 @@
 //! them.
 
 use crate::query_cache::Ask;
+use benilla_ui::script::SessionRequest;
 use bevy::prelude::*;
 
 /// The channel verbs' slot writes and packets.
@@ -581,7 +582,7 @@ pub(super) fn drain_chat_input(
                         script.promote_by_name(&name);
                     }
                 }
-                // The duel verbs join the intent queue `StartDuel` and `CancelDuel` feed: the stock
+                // The duel verbs make the calls `StartDuel` and `CancelDuel` make: the stock
                 // handlers are one-line calls to them.
                 ParsedChat::Duel { name } => {
                     if let Some(name) =
@@ -591,7 +592,7 @@ pub(super) fn drain_chat_input(
                     }
                 }
                 ParsedChat::Forfeit => {
-                    script.queue_duel_request(benilla_ui::script::DuelRequest::Cancel);
+                    script.duel_call(benilla_ui::script::DuelRequest::Cancel);
                 }
                 // `crate::target`'s resolver (the reference's `0x493aa0`) commits through the one
                 // SetSelection path. A bare `/target` takes `GetSlashCmdTarget`'s fallback: a no-op
@@ -620,8 +621,8 @@ pub(super) fn drain_chat_input(
                         None => crate::player::FollowRequest::Unit("target".into()),
                     });
                 }
-                // `SlashCmdList["PVP"]` is `TogglePVP()`, the popup row's intent queue.
-                ParsedChat::Pvp => script.queue_pvp_toggle(),
+                // `SlashCmdList["PVP"]` is `TogglePVP()`, the same call.
+                ParsedChat::Pvp => script.toggle_pvp(),
                 ParsedChat::Help => {
                     // benilla's own summary, for a line that skipped the edit box; a typed `/help`
                     // runs the stock `ChatFrame_DisplayHelpText`.
@@ -698,7 +699,9 @@ pub(super) fn drain_chat_input(
                                         spell_id,
                                         hits: Vec::new(),
                                         misses: Vec::new(),
+                                        source: None,
                                         dest,
+                                        target_mask: 0x40,
                                         ammo_display_id: None,
                                         seq: play_seq.next(),
                                     });
@@ -708,7 +711,9 @@ pub(super) fn drain_chat_input(
                                         spell_id,
                                         hits: vec![me],
                                         misses: Vec::new(),
+                                        source: None,
                                         dest: None,
+                                        target_mask: 0x2,
                                         // A real GO carries the caster's ammo; this flies the
                                         // Rough Arrow, display id 5996.
                                         ammo_display_id: Some(5996),
@@ -728,15 +733,11 @@ pub(super) fn drain_chat_input(
                         .ok()
                         .filter(|t| !t.is_empty())
                 }),
-                // `SlashCmdList["LOGOUT"]` is `Logout()`, the game menu's route: `crate::ui_logout`
-                // sends the request and narrates the answer with the CAMP countdown.
-                ParsedChat::Logout => {
-                    script.queue_session_request(benilla_ui::script::SessionRequest::Logout)
-                }
-                // `Quit()`, the game menu Exit button's queue, countdown and confirmation.
-                ParsedChat::Quit => {
-                    script.queue_session_request(benilla_ui::script::SessionRequest::Quit)
-                }
+                // `SlashCmdList["LOGOUT"]` is `Logout()` and `SlashCmdList["QUIT"]` is `Quit()`,
+                // the game menu's routes: the call sends the request as the turn ends, and
+                // `crate::ui_logout` narrates the answer with the CAMP or QUIT countdown.
+                ParsedChat::Logout => session(script, SessionRequest::Logout),
+                ParsedChat::Quit => session(script, SessionRequest::Quit),
                 // Deferred to the world, since a command is `fn(&mut World, &str)`; its lines go to
                 // the log, never to chat ([`crate::console::run`]).
                 ParsedChat::Console { line } => {
@@ -848,6 +849,13 @@ impl LineLua {
 
 /// `/chattest`: one synthetic line of every renderable form (kinds, flags, the language header,
 /// channel prefixes, notices, item and player links) through the real event pipeline.
+/// A slash command's session verb, as its `SlashCmdList` handler calls it.
+fn session(script: &mut benilla_ui::script::UiScript, request: SessionRequest) {
+    if let Err(e) = script.session_call(request) {
+        warn!("chat: {request:?} was refused: {e}");
+    }
+}
+
 fn chattest_battery(log: &super::feed::ChatLog, get: &dyn Fn(&str) -> Option<String>) {
     use super::event::{ChatEvent, ChatEventKind as K};
     let player = |kind: K, text: &str, sender: &str| {

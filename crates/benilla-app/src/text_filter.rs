@@ -18,7 +18,7 @@
 //!
 //! The same startup init compiles `NamesProfanity.dbc` and `NamesReserved.dbc` for the character
 //! name check (`0x6c96c0`), which searches them with `ChatProfanity`'s compiled list, ungated by
-//! either CVar: [`NameFilter`], the glue VM's [`benilla_ui::script::NameLists`].
+//! either CVar: [`NameFilter`], every VM's [`benilla_ui::script::NameLists`].
 //!
 //! Three PCRE translations are the reference's own behaviour. `\<` and `\>` are the non-directional
 //! `\b`: the client's patched escape table (`.rdata 0x812330`) gives all three the code -4.
@@ -434,6 +434,20 @@ mod tests {
     }
 
     /// `\<` and `\>` are non-directional word boundaries, as the reference's compiler treats them.
+    /// Start-up compiles the lists (`0x402b7f` → `0x6c91a0`) before its first frame, so a name
+    /// check never runs without them: the load, a data loader ([`benilla_assets::run_data_load`]),
+    /// orders ahead of the `Startup` build of the glue VM, which is seated with them as it is made.
+    #[test]
+    fn the_word_lists_load_before_the_first_vm_is_built() {
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        assert!(crate::test_support::runs_before_in(
+            &mut app,
+            Startup,
+            benilla_assets::run_data_load,
+            crate::ui_script::setup_script
+        ));
+    }
+
     #[test]
     fn the_angle_escapes_are_non_directional_word_boundaries() {
         for spelling in [r"\<twat\>", r"\>twat\<", r"\btwat\b"] {

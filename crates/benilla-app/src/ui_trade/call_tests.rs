@@ -32,11 +32,12 @@ struct Trade {
     click: SystemId,
 }
 
-/// Our object with `extra` fields: `OBJECT_FIELD_TYPE` a player, the human template,
+/// Our object with `extra` fields: `OBJECT_FIELD_TYPE` a player, alive, the human template,
 /// player-controlled, and the two pack slots.
 fn me_fields(extra: &[(u16, u32)]) -> ObjectFields {
     let mut pairs = vec![
         (2, 0x19),
+        (22, 100),
         (35, fixture::HUMAN),
         (46, fixture::PC),
         (532, CLOTH as u32),
@@ -51,7 +52,7 @@ fn me_fields(extra: &[(u16, u32)]) -> ObjectFields {
 /// The whole client, headless, with us and Bob streamed as players of one faction group, Bob
 /// selected, two items in our backpack and 1g in the purse.
 fn client() -> Trade {
-    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let (tx, rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
     app.insert_resource(fixture::factions());

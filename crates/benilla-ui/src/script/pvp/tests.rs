@@ -68,6 +68,7 @@ fn player() -> UnitState {
 
 fn seated() -> UiScript {
     let mut s = UiScript::new().expect("VM");
+    s.keep_calls();
     s.set_honor(Some(honor_state()));
     s.set_unit("player", Some(player()));
     s
@@ -1036,19 +1037,16 @@ fn get_inspect_honor_data_answers_twelve_zeros_when_no_reply_is_held() {
 }
 
 /// `0x4c80a0` refuses a query while one is in flight and once data is held; `TogglePVP` has no
-/// latch.
+/// latch. The in-flight latch is the host's, set after its send (`0x4c811b`).
 #[test]
 fn the_intent_queues_drain_and_the_honor_query_refuses_to_double_up() {
     let mut s = seated();
     assert_eq!(s.take_inspect_honor_requests(), 0);
 
-    // Two calls, one query: the second sees `pending`.
-    s.eval::<()>("RequestInspectHonorData() RequestInspectHonorData()")
-        .unwrap();
+    // The query, then the host's latch after its send: the next call sees `pending`.
+    s.eval::<()>("RequestInspectHonorData()").unwrap();
     assert_eq!(s.take_inspect_honor_requests(), 1);
-    assert_eq!(s.take_inspect_honor_requests(), 0);
-
-    // Still latched after the drain: sent, not yet answered.
+    s.latch_inspect_honor_ask();
     s.eval::<()>("RequestInspectHonorData()").unwrap();
     assert_eq!(s.take_inspect_honor_requests(), 0, "still in flight");
 
@@ -1065,6 +1063,7 @@ fn the_intent_queues_drain_and_the_honor_query_refuses_to_double_up() {
     // The binding answers zero Lua values on every one of those paths (`0x4c9610`).
     assert_eq!(s.arity("RequestInspectHonorData()").unwrap(), 0);
 
+    s.keep_calls();
     s.eval::<()>("TogglePVP() TogglePVP()").unwrap();
     assert_eq!(s.take_pvp_toggles(), 2, "no latch here — two packets");
     assert_eq!(s.take_pvp_toggles(), 0);

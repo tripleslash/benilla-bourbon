@@ -16,7 +16,7 @@ mod composite;
 mod interior;
 /// The minimap ping, engine-owned and pinned to a world point.
 mod ping;
-pub(crate) use ping::MinimapPing;
+pub(crate) use ping::{MinimapPing, MinimapSteps};
 
 use std::collections::HashMap;
 
@@ -846,7 +846,8 @@ pub(crate) struct MinimapCorpse(pub(crate) Option<benilla_formats::AreaPoi>);
 /// identities change) and the party and pet records, by bearing. With an empty mask name the render
 /// returns before any of it (`0x4ec968`), so the arrows keep what they had.
 fn feed_minimap_arrows(
-    mut hosted_vm: crate::script_calls::HostedVm,
+    // The death stores, which the death calls write: the corpse is read before the Lua runs.
+    mut vm: crate::script_calls::VmWith<Res<'static, crate::death::DeathNet>>,
     assets: Option<Res<MinimapAssets>>,
     player: Res<Player>,
     map: Option<Res<CurrentMap>>,
@@ -862,19 +863,18 @@ fn feed_minimap_arrows(
             Without<benilla_world::view::WorldCamera>,
         ),
     >,
-    death_net: Res<crate::death::DeathNet>,
     self_store: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
     mut corpse: ResMut<MinimapCorpse>,
     inside: Res<MinimapInside>,
     mut listed: Local<crate::ui_script::VmMemo<Option<Vec<blips::ArrowKey>>>>,
 ) {
-    hosted_vm.run(|script| {
+    let corpse_point = vm.own().corpse;
+    vm.run(|script| {
         let (Some(script), Some(assets), Some(map)) = (script, assets, map) else {
             return;
         };
         // Same map only: a dungeon corpse's display coords are the entrance.
-        let dead = death_net
-            .corpse
+        let dead = corpse_point
             .filter(|cp| cp.display_map == map.0 as i32)
             .map(|cp| cp.position);
         let named = corpse.0.as_ref().map(|c| (c.pos, c.continent_id));
@@ -983,7 +983,7 @@ impl Plugin for MinimapPlugin {
                     // Before the script tick, so an addon's OnUpdate reads this frame's heading.
                     feed_minimap_player_facing.in_set(crate::ui_script::UiFeed),
                     // After this frame's movement (the plate driver's set is past it), the art
-                    // the tick set and every drain that moves a group, death or marker record,
+                    // the tick set and every drain that moves a group or marker record,
                     // before the paint that draws the arrows, as the reference aims them inside
                     // its draw. Unordered against the terrain stream and the snap-hold release,
                     // which touch nothing it reads, so the paint never waits on streaming.
@@ -991,7 +991,6 @@ impl Plugin for MinimapPlugin {
                         .after(crate::vplates::VPlateSet)
                         .after(crate::ui_chat::ChatDrain)
                         .after(crate::ui_party::drain_party)
-                        .after(crate::death::drain_death)
                         .after(crate::poi_marker::expire_marker)
                         .after(crate::poi_marker::clear_on_world_entry)
                         .after(feed_minimap_art)
@@ -1011,13 +1010,6 @@ impl Plugin for MinimapPlugin {
                         .after(ping::drive_minimap_ping)
                         .in_set(crate::ui_script::UiFeed)
                         .run_if(not(crate::ui_script::ingame_ui_up)),
-                    // A drain of what the Lua asked, after the tick whose `PingLocation` calls it
-                    // sends, and the chat and group drains, so a ping from a slash handler goes
-                    // against this frame's roster.
-                    ping::send_own_pings
-                        .in_set(crate::ui_script::UiDrain)
-                        .after(crate::ui_chat::ChatDrain)
-                        .after(crate::ui_party::drain_party),
                     // Before the script tick, so GameTimeFrame reads this frame's minute.
                     feed_game_time.in_set(crate::ui_script::UiFeed),
                     // In the feed, off the hover the last walk left; after the world drive only so

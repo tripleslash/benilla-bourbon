@@ -164,7 +164,12 @@ fn a_landed_item_template_also_lands_the_consumable_gate() {
 #[test]
 fn a_bar_drag_fires_its_slots_in_place_and_the_feed_adds_nothing() {
     let (mut app, _rx) = app_with_food_on_the_bar();
-    app.add_systems(Update, super::drain::drain_action_sets.after(feed_actions));
+    app.init_resource::<super::drain::ActionSlotWrites>()
+        .add_systems(
+            Update,
+            super::drain::store_action_writes.after(feed_actions),
+        );
+    app.world_mut().non_send_mut::<UiScript>().keep_calls();
     let mut info = test_template("Tough Jerky");
     info.display_info_id = JERKY_DISPLAY;
     info.spells = vec![ItemSpellEntry {
@@ -211,6 +216,12 @@ fn a_bar_drag_fires_its_slots_in_place_and_the_feed_adds_nothing() {
         ],
         "both slots signal before the verbs return, the placed one with its gate"
     );
+    // The slot writes as the host applies them inside the calls.
+    let sets = script(&mut app).take_action_sets();
+    let mut bar = bevy::ecs::system::SystemState::<super::ActionBarSteps>::new(app.world_mut());
+    for (id, packed) in sets {
+        bar.get(app.world()).unwrap().set(id, packed);
+    }
 
     app.update();
     app.update();
@@ -613,6 +624,49 @@ fn report_feed(spells: crate::ui_action::Spells, reports: crate::ui_cast::CastRe
     app
 }
 
+/// A validator rung's own line (`0x496720` from `0x6098a2`, `0x609930`, `0x6e6ab4`) shows as its
+/// catalog record does, its `%s` filled: `ERR_SPELL_ALREADY_KNOWN_S` with the taught spell's name,
+/// and `ERR_TAME_FAILED` with the `PETTAME_TOOMANY` string, each a `UI_ERROR_MESSAGE`.
+#[test]
+fn a_validator_line_shows_as_its_message_does() {
+    use crate::ui_action::{FillArg, Spells, UiError};
+    let mut reports = crate::ui_cast::CastReports::default();
+    reports.line(UiError {
+        key: "ERR_SPELL_ALREADY_KNOWN_S",
+        args: vec![FillArg::S("Fireball".into())],
+    });
+    reports.line(UiError {
+        key: "ERR_TAME_FAILED",
+        args: vec![FillArg::Global("PETTAME_TOOMANY".into())],
+    });
+    let mut app = report_feed(Spells::empty_for_tests(), reports);
+    app.world_mut()
+        .non_send::<UiScript>()
+        .run(
+            r#"ERR_SPELL_ALREADY_KNOWN_S = "You already know %s.";
+               ERR_TAME_FAILED = "%s.";
+               PETTAME_TOOMANY = "You have too many pets already";
+               SEEN = {}
+               local f = CreateFrame("Frame")
+               f:RegisterEvent("UI_ERROR_MESSAGE")
+               f:SetScript("OnEvent", function() table.insert(SEEN, arg1) end)"#,
+        )
+        .unwrap();
+    app.update();
+    let seen = app
+        .world_mut()
+        .non_send::<UiScript>()
+        .eval::<Vec<String>>("return SEEN")
+        .unwrap();
+    assert_eq!(
+        seen,
+        [
+            "You already know Fireball.",
+            "You have too many pets already."
+        ]
+    );
+}
+
 /// `HandleCastFailed 0x6e1a00` logs through `0x62c360`; `HandlePetCastFailed 0x6e8eb0` calls only
 /// the packet readers and `0x496720`, with no log line and no error sound. Both entries name the
 /// same spell, so only the caster differs.
@@ -855,6 +909,7 @@ fn a_refusal_of_the_armed_craft_disarms_the_batch() {
                 tools_pending: Vec::new(),
             }],
         }));
+        script.keep_calls();
         script.run("DoTradeSkill(2, 3)").unwrap();
     }
     let repeat = |app: &App| app.world().non_send::<UiScript>().trade_skill_repeat();

@@ -1,7 +1,7 @@
 //! `GetActionBarToggles` and `SetActionBarToggles`: the four extra action bars' visibility, the
 //! low nibble of the server's `PLAYER_FIELD_BYTES` byte 2.
 //!
-//! The setter (`0x4e76e0`) only posts `CMSG_SET_ACTIONBAR_TOGGLES`; the getter (`0x4e7660`) reads
+//! The setter (`0x4e76e0`) only sends `CMSG_SET_ACTIONBAR_TOGGLES`, inside its call; the getter (`0x4e7660`) reads
 //! the live descriptor byte, written only by the `SMSG_UPDATE_OBJECT` apply (`0x466590`), with no
 //! field-change hook (`0x468070`). A `Get` right after a `Set` returns the old value for a round
 //! trip; the stock UI reads it once, at `PLAYER_ENTERING_WORLD` (`UIParent.lua:364`).
@@ -28,10 +28,14 @@ impl super::UiScript {
         self.model_ref().action_bar_toggles
     }
 
-    /// Drain the queued `CMSG_SET_ACTIONBAR_TOGGLES` payloads, one per `SetActionBarToggles` call:
-    /// the binding has no did-it-change test and no connection check, so two calls are two packets.
+    /// The `CMSG_SET_ACTIONBAR_TOGGLES` payloads a harness's VM kept ([`Self::keep_calls`]), one
+    /// per `SetActionBarToggles` call: the binding has no did-it-change test and no connection
+    /// check, so two calls are two packets.
     pub fn take_action_bar_toggle_sends(&mut self) -> Vec<u8> {
-        drain_field!(self, action_bar_toggle_sends)
+        self.take_calls_where(|c| match c {
+            super::ScriptCall::ActionBar(super::ActionBarCall::Toggles(byte)) => Some(*byte),
+            _ => None,
+        })
     }
 }
 
@@ -74,11 +78,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     packed |= 1 << i;
                 }
             }
-            let mut model = lua
-                .app_data_mut::<crate::script::ModelCell>()
-                .expect("model app_data");
-            model.action_bar_toggle_sends.push(packed);
-            Ok(())
+            // `0x4e771d`: the packet, inside the call.
+            super::calls::submit(
+                lua,
+                super::ScriptCall::ActionBar(super::ActionBarCall::Toggles(packed)),
+            )
         })?,
     )?;
 
@@ -93,6 +97,7 @@ mod tests {
     #[test]
     fn the_four_arguments_pack_into_bits_0_through_3() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         for (call, want) in [
             ("SetActionBarToggles(1)", 0x01),
             ("SetActionBarToggles(nil, 1)", 0x02),
@@ -114,6 +119,7 @@ mod tests {
     #[test]
     fn the_arguments_are_coerced_the_binarys_way_not_luas() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
 
         s.run(r#"SetActionBarToggles("1", "0", "1", "0")"#).unwrap();
         assert_eq!(
@@ -152,6 +158,7 @@ mod tests {
     #[test]
     fn a_fifth_argument_is_accepted_and_dropped() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run("SetActionBarToggles(nil, nil, nil, nil, 1)").unwrap();
         assert_eq!(s.take_action_bar_toggle_sends(), vec![0x00]);
         s.run("SetActionBarToggles(1, 1, 1, 1, 1, 1, 1)").unwrap();
@@ -165,6 +172,7 @@ mod tests {
     #[test]
     fn a_set_destroys_whatever_the_server_held_above_the_low_nibble() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_action_bar_toggles(0xf5);
         s.run("SetActionBarToggles(1, 0, 0, 0)").unwrap();
         assert_eq!(
@@ -177,6 +185,7 @@ mod tests {
     #[test]
     fn the_getter_returns_four_ones_or_nils_from_the_pushed_byte() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
 
         // Nothing pushed reads as a zero byte, as no local player does (`0x4e7660`).
         assert!(s
@@ -213,6 +222,7 @@ mod tests {
     #[test]
     fn the_setter_does_not_touch_the_local_copy_so_the_read_lags_a_round_trip() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.set_action_bar_toggles(0x00);
         s.run("SetActionBarToggles(1, 1, 0, 0)").unwrap();
         assert_eq!(
@@ -239,6 +249,7 @@ mod tests {
     #[test]
     fn every_call_queues_a_packet_and_returns_nothing() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         s.run("SetActionBarToggles(1) SetActionBarToggles(1) SetActionBarToggles(nil)")
             .unwrap();
         assert_eq!(s.take_action_bar_toggle_sends(), vec![0x01, 0x01, 0x00]);

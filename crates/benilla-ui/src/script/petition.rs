@@ -70,8 +70,11 @@ pub enum PetitionCall {
     /// `GetTabardInfo()` (`0x4f5300`), not a getter: with a player, `MSG_TABARDVENDOR_ACTIVATE`
     /// for the registrar's guid unless the designer is already open on that guid, or the
     /// `ERR_EMBLEMERROR_NOTABARDGEOSET` refusal while the player's display id is not its native
-    /// one (`0x5e00e0`); then the registrar closes (`0x4f5355` → `0x4f5010`).
+    /// one (`0x5e00e0`); then the registrar's close core (`0x4f5355` → `0x4f5010`).
     TabardInfo,
+    /// `CloseGuildRegistrar()` (`0x4f5220`): the registrar's close core `0x4f5010`, its latch
+    /// release, its cell and its `GUILD_REGISTRAR_CLOSED` (`0x4f503a`).
+    CloseRegistrar,
     /// `SignPetition([n])`: a wire byte defaulting to 1, not 0 (`0x4f46d9`); vmangos skips it.
     Sign(i8),
     /// `OfferPetition()`: the host resolves the current target (`CGGameUI`'s selection pair, not
@@ -105,13 +108,6 @@ impl super::UiScript {
     /// The close's last step (`0x4f4078`): the record goes.
     pub fn drop_petition_record(&mut self) {
         set_field!(self, petition.record, None);
-    }
-
-    /// Take the `CloseGuildRegistrar()` calls made since the last take: the close core needs the
-    /// interaction latch, which a core answers when its own `GUILD_REGISTRAR_CLOSED` raised the
-    /// call through `OnHide`.
-    pub fn take_registrar_close(&mut self) -> bool {
-        drain_field!(self, registrar_close)
     }
 
     /// The charter calls a harness VM kept ([`Self::keep_calls`]), in call order.
@@ -154,7 +150,7 @@ pub fn validate_guild_name(
 
 /// [`validate_guild_name`] against the lists and the charsets this VM's client holds.
 fn check(model: &Model, name: &str) -> Result<(), &'static str> {
-    validate_guild_name(name, &*model.glue.name_lists(), model.name_charsets())
+    validate_guild_name(name, &*model.name_lists(), model.name_charsets())
 }
 
 /// A cached name as a string, an uncached one as nil.
@@ -263,36 +259,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // ── The verbs ────────────────────────────────────────────────────────────────────────────
-    // The five that carry nothing, registered in the reference's table order; none touches the
+    // The six that carry nothing, registered in the reference's table order; none touches the
     // snapshot, which the server owns. `GetTabardInfo`'s stock caller is commented out
     // (`GuildRegistrarFrame.xml:190`).
     let call = |call: PetitionCall| lua.create_function(move |lua, ()| submit(lua, call.clone()));
     g.set("TurnInGuildCharter", call(PetitionCall::TurnIn)?)?;
-    // CloseGuildRegistrar() (`0x4f5010`) is the close core, which needs the interaction latch, so
-    // it stays latch-driven ([`UiScript::take_registrar_close`]) and its `GUILD_REGISTRAR_CLOSED`
-    // signals after the verb, where the reference's signals inside it (`0x4f503a`).
-    g.set(
-        "CloseGuildRegistrar",
-        lua.create_function(|lua, ()| {
-            lua.app_data_mut::<crate::script::ModelCell>()
-                .expect("model app_data")
-                .registrar_close = true;
-            Ok(())
-        })?,
-    )?;
-    // GetTabardInfo() (`0x4f5300`): the activate inside the call, then the registrar's close core
-    // (`0x4f5355` → `0x4f5010`), latch-driven as `CloseGuildRegistrar` is, so its signal comes
-    // after the verb, not inside it (`0x4f503a`).
-    g.set(
-        "GetTabardInfo",
-        lua.create_function(|lua, ()| {
-            submit(lua, PetitionCall::TabardInfo)?;
-            lua.app_data_mut::<crate::script::ModelCell>()
-                .expect("model app_data")
-                .registrar_close = true;
-            Ok(())
-        })?,
-    )?;
+    g.set("CloseGuildRegistrar", call(PetitionCall::CloseRegistrar)?)?;
+    g.set("GetTabardInfo", call(PetitionCall::TabardInfo)?)?;
     g.set("OfferPetition", call(PetitionCall::Offer)?)?;
     g.set("ClosePetition", call(PetitionCall::Close)?)?;
 
@@ -636,7 +609,7 @@ mod tests {
     fn the_guild_name_check_is_the_clients() {
         let mut s = UiScript::new().unwrap();
         s.keep_calls();
-        s.set_glue_name_lists(std::rc::Rc::new(ThreeWords));
+        s.set_name_lists(std::rc::Rc::new(ThreeWords));
         let refused = |key: &'static str| PetitionCall::NameRefused(key);
         for (name, want) in [
             ("", refused("ERR_GUILD_ENTER_NAME")),
@@ -711,8 +684,8 @@ mod tests {
         assert_eq!(bought(&mut s, &long), PetitionCall::Buy(long.clone()));
     }
 
-    /// `GetTabardInfo()` pushes nothing (`0x4f535f`), hands the host the designer's opener and
-    /// leaves the registrar's close to the latch (`0x4f5355`).
+    /// `GetTabardInfo()` pushes nothing (`0x4f535f`) and hands the host one call: the designer's
+    /// opener, then the registrar's close core (`0x4f5355`).
     #[test]
     fn get_tabard_info_is_a_call_with_no_returns() {
         let mut s = UiScript::new().unwrap();
@@ -723,7 +696,7 @@ mod tests {
             0
         );
         assert_eq!(s.take_petition_calls(), vec![PetitionCall::TabardInfo]);
-        assert!(s.take_registrar_close());
-        assert!(!s.take_registrar_close(), "taken");
+        s.run("CloseGuildRegistrar()").unwrap();
+        assert_eq!(s.take_petition_calls(), vec![PetitionCall::CloseRegistrar]);
     }
 }

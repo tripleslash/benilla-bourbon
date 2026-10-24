@@ -196,15 +196,6 @@ impl Plugin for UiUnitPlugin {
                 .before(UnitSnapshots)
                 .before(crate::ui_aura::AuraEvents),
         )
-        .add_systems(Update, drain_pvp_toggles.in_set(crate::ui_script::UiDrain))
-        .add_systems(
-            Update,
-            drain_worn_display_toggles.in_set(crate::ui_script::UiDrain),
-        )
-        .add_systems(
-            Update,
-            drain_action_bar_toggles.in_set(crate::ui_script::UiDrain),
-        )
         .add_systems(Update, feed_default_language.in_set(UnitFeed))
         .add_systems(Update, feed_known_languages.in_set(UnitFeed))
         // `load_exhaustion_rows` pushes into the VM, so it runs per VM; the rest are one-shots.
@@ -249,6 +240,7 @@ pub(crate) fn known_languages(
     known: impl IntoIterator<Item = u32>,
     spells: &benilla_formats::SpellCatalog,
     skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+    (race, class): (u8, u8),
     has_skill_line: impl Fn(u32) -> bool,
     languages: &benilla_formats::Languages,
 ) -> Vec<String> {
@@ -264,7 +256,7 @@ pub(crate) fn known_languages(
             declared.get(id).is_some_and(|spells| {
                 spells.iter().any(|&spell| {
                     skill_lines
-                        .and_then(|sl| sl.spell_to_line(spell))
+                        .and_then(|sl| sl.spell_to_line(spell, race, class))
                         .is_some_and(&has_skill_line)
                 })
             })
@@ -312,6 +304,7 @@ fn feed_known_languages(
             actions.spells.iter().copied(),
             &spells.catalog,
             skill_lines.as_deref().map(|s| &s.catalog),
+            store.map_or((0, 0), |s| s.race_class()),
             has_skill_line,
             &languages.0,
         );
@@ -1177,53 +1170,36 @@ pub(crate) fn enrich_unit(
     }
 }
 
-/// Drain `TogglePVP` into `CMSG_TOGGLE_PVP`; `/pvp` is the reference's only caller.
-fn drain_pvp_toggles(mut hosted_vm: crate::script_calls::HostedVm, commands: Res<NetCommands>) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        for _ in 0..script.take_pvp_toggles() {
-            let _ = commands.0.send(crate::net::ClientCommand::TogglePvp);
-        }
-    })
+/// `TogglePVP()` inside its call ([`benilla_ui::script::PvpCall`]); `/pvp` is the reference's only
+/// caller.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct PvpSteps<'w> {
+    net: Res<'w, NetCommands>,
 }
 
-/// Drain the `ShowHelm`/`ShowCloak` flips into `CMSG_TOGGLE_HELM`/`CMSG_TOGGLE_CLOAK`; the VM,
-/// which alone knows what the Options row did, has already decided each is needed.
-fn drain_worn_display_toggles(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    commands: Res<NetCommands>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        for which in script.take_worn_display_toggles() {
-            let _ = commands.0.send(match which {
-                WornDisplay::Helm => crate::net::ClientCommand::ToggleHelm,
-                WornDisplay::Cloak => crate::net::ClientCommand::ToggleCloak,
-            });
-        }
-    })
+impl PvpSteps<'_> {
+    /// `0x48d700`: the empty `CMSG_TOGGLE_PVP` (`0x48d736`).
+    pub(crate) fn toggle(&self) {
+        let _ = self.net.0.send(crate::net::ClientCommand::TogglePvp);
+    }
 }
 
-/// Drain `SetActionBarToggles` into `CMSG_SET_ACTIONBAR_TOGGLES` (sent at `0x4e771d`), one packet
-/// per call: the reference binding neither checks for a change nor coalesces.
-fn drain_action_bar_toggles(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    commands: Res<NetCommands>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        for toggles in script.take_action_bar_toggle_sends() {
-            let _ = commands
-                .0
-                .send(crate::net::ClientCommand::SetActionBarToggles { toggles });
-        }
-    })
+/// `ShowHelm` and `ShowCloak` past the VM's belief, inside their calls
+/// ([`benilla_ui::script::ScriptCall::WornDisplay`]).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct WornDisplaySteps<'w> {
+    net: Res<'w, NetCommands>,
+}
+
+impl WornDisplaySteps<'_> {
+    /// The flip's bodiless packet (`0x5ee6e3`, `push 0x2b9`, and its cloak twin): the VM, which
+    /// alone knows what the Options row did, has already decided it is needed.
+    pub(crate) fn flip(&self, which: WornDisplay) {
+        let _ = self.net.0.send(match which {
+            WornDisplay::Helm => crate::net::ClientCommand::ToggleHelm,
+            WornDisplay::Cloak => crate::net::ClientCommand::ToggleCloak,
+        });
+    }
 }
 
 /// Inside a rest area (vmangos `Player.h:320`), the bit `IsResting` (`0x516ea0`) tests.

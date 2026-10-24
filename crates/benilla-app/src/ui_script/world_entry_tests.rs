@@ -1035,6 +1035,11 @@ fn a_reload_keeps_the_quest_folds_and_the_repeat() {
                 tools_pending: Vec::new(),
             }],
         }));
+    }
+    {
+        let mut script = world.non_send_mut::<benilla_ui::script::UiScript>();
+        // No engine behind this world: the cast is kept, the repeat armed in the verb.
+        script.keep_calls();
         script.run("DoTradeSkill(2, 3)").expect("arm the batch");
     }
     assert_eq!(visible(&mut world), 1);
@@ -1980,7 +1985,7 @@ JoinProbe.lua
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (tmp, _c, _h) = hermetic_addon("joinprobe", "JoinProbe", TOC, LUA);
     // The whole client, whose call host the load lends.
-    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let world = app.world_mut();
     boot(world);
     let (tx, wire) = crossbeam_channel::unbounded();
@@ -2305,7 +2310,7 @@ fn a_call_a_file_makes_at_the_load_applies_inside_its_verb() {
         "## Interface: 11200\nLoadCall.lua\n",
         "TargetUnit(\"player\") LoadCallSeen = UnitExists(\"target\")",
     );
-    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     let (tx, _rx) = crossbeam_channel::unbounded();
     app.insert_resource(crate::net::NetCommands(tx));
     app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
@@ -2730,6 +2735,67 @@ fn a_state_within_script_memory_shows_nothing() {
     assert!(
         stock_kb < 49_152 / 3,
         "the stock interface alone counts {stock_kb} KB, a third of the default or more"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The floating numbers' face is read once per world entry: `0x6c8470` reads `DAMAGE_TEXT_FONT`
+/// (`0x6c847c`) and has one caller, `0x401620` in the world-entry step `0x401570`, whose one
+/// caller is the character screen's Enter World (`0x46c236`). A `/reload` runs the teardown and
+/// the rebuild alone (`0x495664`, `0x495669`), so an addon's new value waits for the next login.
+#[test]
+fn a_reload_keeps_the_damage_text_font_the_login_read() {
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lua = |face: &str| format!("DAMAGE_TEXT_FONT = \"Fonts\\\\{face}.TTF\"\n");
+    let (tmp, _c, _h) = hermetic_addon(
+        "dmgfont",
+        "FontProbe",
+        "## Interface: 11200\nFontProbe.lua\n",
+        &lua("FIRST"),
+    );
+    let file = tmp
+        .join("benilla-config")
+        .join("AddOns")
+        .join("FontProbe")
+        .join("FontProbe.lua");
+    let face = |world: &World| {
+        world
+            .get_resource::<crate::combat_text::DamageTextFont>()
+            .and_then(|f| f.0.clone())
+    };
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(face(&world).as_deref(), Some("Fonts\\FIRST.TTF"));
+
+    std::fs::write(&file, lua("SECOND")).expect("the addon's new face");
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+    let assigned: String = world
+        .get_non_send::<benilla_ui::script::UiScript>()
+        .expect("in-world VM")
+        .eval("return DAMAGE_TEXT_FONT")
+        .expect("the global");
+    assert_eq!(
+        assigned, "Fonts\\SECOND.TTF",
+        "the reloaded addon assigned it"
+    );
+    assert_eq!(
+        face(&world).as_deref(),
+        Some("Fonts\\FIRST.TTF"),
+        "the reload does not re-read it"
+    );
+
+    super::end_ui_session(&mut world);
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(
+        face(&world).as_deref(),
+        Some("Fonts\\SECOND.TTF"),
+        "the next world entry does"
     );
 
     drop(world);
