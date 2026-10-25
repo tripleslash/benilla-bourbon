@@ -1447,6 +1447,7 @@ pub(super) fn mouseover_app() -> (App, Entity, Entity) {
         .init_resource::<Items>()
         .init_resource::<PlayerActions>()
         .init_resource::<crate::ui_guild::GuildState>()
+        .init_resource::<crate::ui_script::PointerOverUi>()
         .add_systems(Update, drive_mouseover_tooltip);
     app.world_mut()
         .spawn((SelfPlayer, ObjectStore(ObjectFields::default())));

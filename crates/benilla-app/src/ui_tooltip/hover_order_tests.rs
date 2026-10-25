@@ -87,6 +87,38 @@ fn a_window_entered_from_a_world_unit_keeps_its_tooltip() {
     assert!(script(&mut app).take_errors().is_empty());
 }
 
+/// The driver runs before this frame's pick, so in the frame the cursor reaches a window it still
+/// reads the unit the cursor left. Over the UI that pick has stood down (`0x481190`): the driver
+/// must not publish it again and rebuild the unit plate over the button's tooltip, which the
+/// button's one `OnEnter` would never take back.
+#[test]
+fn a_stale_world_pick_over_a_window_leaves_the_window_its_tooltip() {
+    let (mut app, wolf, _) = mouseover_app();
+    world_and_bag(&mut app, "ANCHOR_NONE");
+    hover_unit(&mut app, wolf, WOLF);
+
+    script(&mut app).mouse_move(120.0, 120.0);
+    app.world_mut()
+        .resource_mut::<crate::ui_script::PointerOverUi>()
+        .0 = true;
+    // Last frame's pick, as the driver reads it ahead of this frame's.
+    hover_unit(&mut app, wolf, WOLF);
+    hover(&mut app, Hovered::default(), HoveredObject::default());
+    script(&mut app).tick(2.5);
+    assert_eq!(
+        eval(
+            &mut app,
+            r#"return GameTooltip:IsVisible() and GameTooltip:IsOwned(Bag)
+                and GameTooltipTextLeft1:GetText() == "Bag slot"
+                and GameTooltip:GetAlpha() == 1 and 1"#
+        ),
+        Some(1),
+        "the button keeps its tooltip at full alpha"
+    );
+    assert_eq!(eval(&mut app, r#"return UnitExists("mouseover")"#), None);
+    assert!(script(&mut app).take_errors().is_empty());
+}
+
 /// With the cursor on the world, every mouseover change requests the fade on `GameTooltip`
 /// (`0x492909`), whoever holds it: an addon's tooltip shown over the world fades with the hover.
 #[test]

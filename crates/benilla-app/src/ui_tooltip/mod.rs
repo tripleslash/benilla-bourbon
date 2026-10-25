@@ -278,8 +278,11 @@ fn drive_mouseover_tooltip(
     guild: Res<crate::ui_guild::GuildState>,
     // A fresh hover's reach and visible items, which its event's handlers read.
     seat: (crate::ui_inspect::VisibleItemTables, Query<&Transform>),
-    // The meeting stone's area name (`0x5f6b49`).
-    areas: Option<Res<crate::area::AreaTableRes>>,
+    // The meeting stone's area name (`0x5f6b49`), and this frame's UI hover.
+    (areas, over_ui): (
+        Option<Res<crate::area::AreaTableRes>>,
+        Res<crate::ui_script::PointerOverUi>,
+    ),
 ) {
     let hover_relations = {
         let relations = vm.own();
@@ -323,6 +326,17 @@ fn drive_mouseover_tooltip(
         // plate holds the hover: a plate retired after the pick was taken has run its leave
         // (`0x7cb8b0`), which published the loss, and the hover re-picks to the WorldFrame.
         if hovered.plate && script.hovered_nameplate() != hovered.guid {
+            if std::mem::take(published) {
+                script.set_unit("mouseover", None);
+            }
+            script.publish_world_mouseover(None);
+            return;
+        }
+        // The pick runs after this driver, so `hovered` is last frame's. Over the UI the reference's
+        // pick stands down in the same frame (`0x481190`), and this frame's walk has already run the
+        // WorldFrame's leave and handed `GameTooltip` to the frame entered: republishing the stale
+        // pick would rebuild the world plate over that frame's tooltip.
+        if over_ui.0 && !hovered.plate {
             if std::mem::take(published) {
                 script.set_unit("mouseover", None);
             }
