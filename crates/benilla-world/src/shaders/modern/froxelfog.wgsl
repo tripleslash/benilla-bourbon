@@ -232,12 +232,13 @@ fn point_phase(mu: f32) -> f32 {
 
 // fork: **a thick air does not swell a halo without end.** The halo's scattering grows with the air
 // the lamps scatter off (`lamp_sigma`), and a brighter halo shows more of its tail: on a foggy
-// night in Darkshire each lamp stood in a glow yards wide. From `HAZY_HALO_FROM` per yard (about
-// twice a clear night's) to `HAZY_HALO_FULL` (about six times) the e-folding distance falls to
-// `HAZY_HALO_SHARE` of itself; under the first, a halo is unchanged.
+// night in Darkshire each lamp stood in a glow yards wide, and at 0.75 still too intense (the
+// director's call). From `HAZY_HALO_FROM` per yard (about twice a clear night's) to
+// `HAZY_HALO_FULL` (about six times) the e-folding distance falls to `HAZY_HALO_SHARE` of itself;
+// under the first, a halo is unchanged.
 const HAZY_HALO_FROM: f32 = 0.008;
 const HAZY_HALO_FULL: f32 = 0.024;
-const HAZY_HALO_SHARE: f32 = 0.75;
+const HAZY_HALO_SHARE: f32 = 0.375;
 
 // The extinction the lamps scatter off at `p` (1/yd), from the clear-weather air `halo_fog(f)`.
 fn lamp_sigma(clear_air: FroxelFog, p: vec3<f32>, room: f32, cover: f32) -> f32 {
