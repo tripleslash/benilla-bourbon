@@ -40,8 +40,8 @@ use std::time::Duration;
 #[derive(Clone, Copy, ShaderType)]
 struct CasterView {
     clip_from_world: Mat4,
-    /// fork: a lamp cube face's fixture sphere — xyz its light, w [`ShadowLight::clear`] (0 = none,
-    /// and always 0 for the cascades). Only the `FIXTURE_CLIP` static pipelines read it.
+    /// fork: a lamp cube face's fixture box — xyz its light, w [`ShadowLight::clear`] (0 = none, and
+    /// always 0 for the cascades). Only the `FIXTURE_CLIP` pipelines read it.
     clear: Vec4,
 }
 
@@ -183,7 +183,7 @@ struct EntityDraw {
     rig_slot: u32,
 }
 
-/// Entity caster pipelines by (mesh vertex layout, skinned, cutout).
+/// Entity caster pipelines by (mesh vertex layout, skinned, cutout, fixture clip).
 #[derive(Resource)]
 struct EntityShadowPipelines {
     view_layout: BindGroupLayoutDescriptor,
@@ -191,7 +191,88 @@ struct EntityShadowPipelines {
     skin_layout: BindGroupLayoutDescriptor,
     cut_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
-    by_key: StrideMap<(MeshVertexBufferLayoutRef, bool, bool), CachedRenderPipelineId>,
+    by_key: StrideMap<(MeshVertexBufferLayoutRef, bool, bool, bool), CachedRenderPipelineId>,
+}
+
+impl EntityShadowPipelines {
+    /// The caster pipeline for one mesh layout, queued on first sight. `clip` is the lamp atlas's
+    /// `FIXTURE_CLIP` variant, for a lamp's own model. `None` when the layout lacks an attribute
+    /// the variant reads.
+    fn get(
+        &mut self,
+        cache: &PipelineCache,
+        mesh: &RenderMesh,
+        skinned: bool,
+        cutout: bool,
+        clip: bool,
+    ) -> Option<CachedRenderPipelineId> {
+        let key = (mesh.layout.clone(), skinned, cutout, clip);
+        if let Some(id) = self.by_key.get(&key) {
+            return Some(*id);
+        }
+        let mut attrs = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)];
+        if cutout {
+            attrs.push(Mesh::ATTRIBUTE_UV_0.at_shader_location(2));
+        }
+        if skinned {
+            attrs.push(benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX.at_shader_location(10));
+            attrs.push(benilla_assets::ATTRIBUTE_WOW_JOINT_WEIGHT.at_shader_location(11));
+        }
+        let vertex_layout = mesh.layout.0.get_layout(&attrs).ok()?;
+        let mut defs: Vec<ShaderDefVal> = Vec::new();
+        let mut layout = vec![
+            self.view_layout.clone(),
+            if skinned {
+                self.skin_layout.clone()
+            } else {
+                self.draw_layout.clone()
+            },
+        ];
+        if skinned {
+            defs.push("SKINNED".into());
+        }
+        if cutout {
+            defs.push("CUTOUT".into());
+            layout.push(self.cut_layout.clone());
+        }
+        if clip {
+            defs.push("FIXTURE_CLIP".into());
+        }
+        if cutout || clip {
+            defs.push("CUTOUT_OR_CLIP".into());
+        }
+        let descriptor = RenderPipelineDescriptor {
+            label: Some("modern_shadow_entity".into()),
+            layout,
+            vertex: VertexState {
+                shader: self.shader.clone(),
+                shader_defs: defs.clone(),
+                entry_point: Some("vertex".into()),
+                buffers: vec![vertex_layout],
+            },
+            fragment: (cutout || clip).then(|| FragmentState {
+                shader: self.shader.clone(),
+                shader_defs: defs,
+                entry_point: Some("fragment".into()),
+                targets: vec![],
+            }),
+            primitive: PrimitiveState {
+                cull_mode: None,
+                ..default()
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: CORE_3D_DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::GreaterEqual),
+                stencil: StencilState::default(),
+                bias: DepthBiasState::default(),
+            }),
+            ..default()
+        };
+        let id = cache.queue_render_pipeline(descriptor);
+        self.by_key.insert(key, id);
+        Some(id)
+    }
 }
 
 #[derive(Resource, Default)]
@@ -204,6 +285,9 @@ struct CutoutBinds(StrideMap<AssetId<Image>, (TextureViewId, BindGroup)>);
 struct EntityDrawCmd {
     mesh: AssetId<Mesh>,
     pipeline: CachedRenderPipelineId,
+    /// fork: [`Self::pipeline`]'s `FIXTURE_CLIP` twin, queued only for a part that holds a shadowed
+    /// light ([`holds`]): the lamp atlas draws a lamp's own model with it.
+    fixture_pipeline: Option<CachedRenderPipelineId>,
     offset: u32,
     skinned: bool,
     cutout: Option<BindGroup>,
@@ -850,6 +934,7 @@ fn prepare_entity_shadows(
     light: Option<Res<crate::lighting::SharedLightBuffer>>,
     pipeline_cache: Res<PipelineCache>,
     pipes: Option<ResMut<EntityShadowPipelines>>,
+    lights: Option<Res<ModernLights>>,
     mut buffer: ResMut<EntityDrawBuffer>,
     mut cut_binds: ResMut<CutoutBinds>,
     mut frame: ResMut<EntityShadowFrame>,
@@ -873,83 +958,28 @@ fn prepare_entity_shadows(
             .cutout
             .and_then(|id| images.get(id).map(|gpu| (id, gpu)));
         let mut cutout = cut_image.is_some();
-        let key = (mesh.layout.clone(), skinned, cutout);
-        let pipeline = match pipes.by_key.get(&key) {
-            Some(id) => Some(*id),
-            None => {
-                let mut attrs = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)];
-                if cutout {
-                    attrs.push(Mesh::ATTRIBUTE_UV_0.at_shader_location(2));
-                }
-                if skinned {
-                    attrs.push(benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX.at_shader_location(10));
-                    attrs.push(benilla_assets::ATTRIBUTE_WOW_JOINT_WEIGHT.at_shader_location(11));
-                }
-                match mesh.layout.0.get_layout(&attrs) {
-                    Ok(vertex_layout) => {
-                        let mut defs: Vec<ShaderDefVal> = Vec::new();
-                        let mut layout = vec![
-                            pipes.view_layout.clone(),
-                            if skinned {
-                                pipes.skin_layout.clone()
-                            } else {
-                                pipes.draw_layout.clone()
-                            },
-                        ];
-                        if skinned {
-                            defs.push("SKINNED".into());
-                        }
-                        if cutout {
-                            defs.push("CUTOUT".into());
-                            layout.push(pipes.cut_layout.clone());
-                        }
-                        let descriptor = RenderPipelineDescriptor {
-                            label: Some("modern_shadow_entity".into()),
-                            layout,
-                            vertex: VertexState {
-                                shader: pipes.shader.clone(),
-                                shader_defs: defs.clone(),
-                                entry_point: Some("vertex".into()),
-                                buffers: vec![vertex_layout],
-                            },
-                            fragment: cutout.then(|| FragmentState {
-                                shader: pipes.shader.clone(),
-                                shader_defs: defs.clone(),
-                                entry_point: Some("fragment".into()),
-                                targets: vec![],
-                            }),
-                            primitive: PrimitiveState {
-                                cull_mode: None,
-                                ..default()
-                            },
-                            depth_stencil: Some(DepthStencilState {
-                                format: CORE_3D_DEPTH_FORMAT,
-                                depth_write_enabled: Some(true),
-                                depth_compare: Some(CompareFunction::GreaterEqual),
-                                stencil: StencilState::default(),
-                                bias: DepthBiasState::default(),
-                            }),
-                            ..default()
-                        };
-                        let id = pipeline_cache.queue_render_pipeline(descriptor);
-                        pipes.by_key.insert(key, id);
-                        Some(id)
-                    }
-                    // A cutout part without UVs casts opaque; anything else missing is skipped.
-                    Err(_) if cutout => {
-                        cutout = false;
-                        pipes
-                            .by_key
-                            .get(&(mesh.layout.clone(), skinned, false))
-                            .copied()
-                    }
-                    Err(_) => None,
-                }
+        // A cutout part without UVs casts opaque; anything else missing is skipped.
+        let pipeline = match pipes.get(&pipeline_cache, mesh, skinned, cutout, false) {
+            None if cutout => {
+                cutout = false;
+                pipes.get(&pipeline_cache, mesh, skinned, false, false)
             }
+            found => found,
         };
         let Some(pipeline) = pipeline else {
             continue;
         };
+        // fork: a part whose bounds hold a shadowed light is that lamp's own model (a swaying lantern
+        // on the entity lane), and its cube cuts the fixture's box out of it.
+        let fixture = lights.as_deref().is_some_and(|l| {
+            l.shadowed
+                .iter()
+                .flatten()
+                .any(|h| h.light.clear > 0.0 && holds(part.center, part.tight, &h.light))
+        });
+        let fixture_pipeline = fixture
+            .then(|| pipes.get(&pipeline_cache, mesh, skinned, cutout, true))
+            .flatten();
         let cutout_bind = match (cutout, cut_image) {
             (true, Some((id, gpu))) => {
                 let view_id = gpu.texture_view.id();
@@ -974,6 +1004,7 @@ fn prepare_entity_shadows(
         frame.draws.push(EntityDrawCmd {
             mesh: part.mesh,
             pipeline,
+            fixture_pipeline,
             offset,
             skinned,
             cutout: cutout_bind,
@@ -1925,7 +1956,14 @@ fn draw_atlas_entities(
                 if !face_sees(face, light.pos, cmd.center, cmd.radius) {
                     continue;
                 }
-                let Some(pipeline) = pipeline_cache.get_render_pipeline(cmd.pipeline) else {
+                // The lamp's own model cuts its fixture's box out; a body beside it is drawn whole.
+                let id = if light.clear > 0.0 && holds(cmd.center, cmd.tight, &light) {
+                    cmd.fixture_pipeline
+                } else {
+                    Some(cmd.pipeline)
+                };
+                let Some(pipeline) = id.and_then(|id| pipeline_cache.get_render_pipeline(id))
+                else {
                     continue;
                 };
                 let Some(mesh) = meshes.get(cmd.mesh) else {
@@ -2050,11 +2088,17 @@ fn dynamic_casters_for<'a>(
     draws
         .iter()
         .filter(|cmd| {
-            let d = cmd.center.distance(light.pos);
-            let host = cmd.tight <= HOST_MAX_RADIUS && d < cmd.tight + light.slack;
-            d <= reach + cmd.radius && !host
+            let host = cmd.tight <= HOST_MAX_RADIUS && holds(cmd.center, cmd.tight, light);
+            cmd.center.distance(light.pos) <= reach + cmd.radius && !host
         })
         .collect()
+}
+
+/// fork: do a part's own bounds (`center`, `tight`) hold `light` — is it that lamp's own model? A
+/// small one is the HOST and casts nothing into the cube ([`dynamic_casters_for`]); a larger one
+/// (a lamppost whose lantern sways on the entity lane) casts with its fixture's box cut out.
+fn holds(center: Vec3, tight: f32, light: &ShadowLight) -> bool {
+    center.distance(light.pos) < tight + light.slack
 }
 
 /// fork: pair each of this frame's casters beside a lamp with the one its faces were drawn with —

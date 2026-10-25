@@ -4,8 +4,8 @@
 // stride.
 struct CasterView {
     clip_from_world: mat4x4<f32>,
-    // fork: a lamp cube face's fixture sphere (xyz its light, w the radius; 0 = none). Read only by
-    // `static_gx_shadow.wgsl`'s `FIXTURE_CLIP` pipelines.
+    // fork: a lamp cube face's fixture box (xyz its light, w the half-extent; 0 = none). Read only by
+    // the `FIXTURE_CLIP` pipelines.
     clear: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> caster: CasterView;

@@ -4,8 +4,8 @@
 // Group 0: this cascade's light clip (`static_gx::render::modern_shadow::CasterView`).
 struct CasterView {
     clip_from_world: mat4x4<f32>,
-    // fork: a lamp cube face's fixture sphere (xyz its light, w the radius; 0 = none). Read only by
-    // `static_gx_shadow.wgsl`'s `FIXTURE_CLIP` pipelines.
+    // fork: a lamp cube face's fixture box (xyz its light, w the half-extent; 0 = none). Read only by
+    // the `FIXTURE_CLIP` pipelines.
     clear: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> caster: CasterView;
@@ -33,7 +33,7 @@ struct ShadowVsOut {
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) word: u32,
 #ifdef FIXTURE_CLIP
-    // fork: xyz = the vertex's offset from the lamp (interpolates exactly), w = the fixture radius.
+    // fork: xyz = the vertex's offset from the lamp (interpolates exactly), w = the fixture box.
     @location(2) from_light: vec4<f32>,
 #endif
 }
@@ -60,13 +60,14 @@ fn vertex(v: GxVertex) -> ShadowVsOut {
 }
 
 // Only the cutout and lamp-atlas pipelines have a fragment stage: alpha-keyed leaves and railings
-// cast their cut-out shape, and a lamp's own fixture (`ShadowLight::clear`, a sphere about the
-// light) casts nothing into its cube. A sphere and not the cube's near plane: that clipped a body's
-// legs and the ground beside a lamp too.
+// cast their cut-out shape, and a lamp's own fixture (`ShadowLight::clear`, a box about the light)
+// casts nothing into its cube. The box the cube's near plane used to clear, but not the near plane:
+// that clipped a body's legs and the ground beside a lamp too.
 @fragment
 fn fragment(in: ShadowVsOut) {
 #ifdef FIXTURE_CLIP
-    if (length(in.from_light.xyz) < in.from_light.w) {
+    let off = abs(in.from_light.xyz);
+    if (max(off.x, max(off.y, off.z)) < in.from_light.w) {
         discard;
     }
 #endif

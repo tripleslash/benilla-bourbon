@@ -4,8 +4,8 @@
 // `wow_model.wgsl` does; CUTOUT alpha-keys the base texture at the vanilla 224/255 reference.
 struct CasterView {
     clip_from_world: mat4x4<f32>,
-    // fork: a lamp cube face's fixture sphere (xyz its light, w the radius; 0 = none). Read only by
-    // `static_gx_shadow.wgsl`'s `FIXTURE_CLIP` pipelines.
+    // fork: a lamp cube face's fixture box (xyz its light, w the half-extent; 0 = none). Read only by
+    // the `FIXTURE_CLIP` pipelines.
     clear: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> caster: CasterView;
@@ -58,6 +58,10 @@ struct PartVsOut {
 #ifdef CUTOUT
     @location(0) uv: vec2<f32>,
 #endif
+#ifdef FIXTURE_CLIP
+    // fork: xyz = the vertex's offset from the lamp (interpolates exactly), w = the fixture box.
+    @location(1) from_light: vec4<f32>,
+#endif
 }
 
 @vertex
@@ -86,14 +90,28 @@ fn vertex(v: PartVertex) -> PartVsOut {
 #ifdef CUTOUT
     out.uv = v.uv;
 #endif
+#ifdef FIXTURE_CLIP
+    out.from_light = vec4<f32>(world - caster.clear.xyz, caster.clear.w);
+#endif
     return out;
 }
 
-#ifdef CUTOUT
+// fork: `FIXTURE_CLIP` cuts the fixture's box about the light (`ShadowLight::clear`) out of a lamp's
+// own model (a part whose bounds hold the light) in its cube: a swaying lantern on the entity lane
+// may not cage its own pool. A body merely beside the lamp is drawn whole.
+#ifdef CUTOUT_OR_CLIP
 @fragment
 fn fragment(in: PartVsOut) {
+#ifdef FIXTURE_CLIP
+    let off = abs(in.from_light.xyz);
+    if (max(off.x, max(off.y, off.z)) < in.from_light.w) {
+        discard;
+    }
+#endif
+#ifdef CUTOUT
     if (textureSampleLevel(base_tex, base_samp, in.uv, 0.0).a < 0.8784314) {
         discard;
     }
+#endif
 }
 #endif
