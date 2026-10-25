@@ -195,6 +195,7 @@
 - `WOW_AUDIT_START` — benilla-world/src/wmo_portal/audit/mod.rs
 - `WOW_AUDIT_WMO` — benilla-world/src/wmo_portal/audit/mod.rs
 - `WOW_AUTO_EXPOSURE` — benilla-world/src/modern/look.rs
+- `WOW_AUTO_EXPOSURE_ROOM` — benilla-world/src/modern/look.rs
 - `WOW_AUTO_EXPOSURE_TARGET` — benilla-world/src/modern/look.rs
 - `WOW_BARE_DOODAD_COLLIDERS` — benilla-world/src/terrain_stream/collider.rs
 - `WOW_BG` — benilla-world/src/bgwin.rs

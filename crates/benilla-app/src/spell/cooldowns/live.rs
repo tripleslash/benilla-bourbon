@@ -108,3 +108,9 @@ impl CooldownLive<'_, '_> {
         }
     }
 }
+
+impl crate::script_calls::live::LiveFamily for CooldownLive<'_, '_> {
+    fn answer(&mut self, ask: &mut benilla_ui::script::live::LiveAsk<'_>) -> bool {
+        ask.answer(|q: &CooldownQuery| self.read(*q))
+    }
+}
