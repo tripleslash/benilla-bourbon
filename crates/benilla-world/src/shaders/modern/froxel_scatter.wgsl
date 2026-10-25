@@ -262,8 +262,12 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // fork: the lamps scatter off the clear-weather air (`froxelfog::halo_fog`), so rain does not
     // swell their glow, and as it is beside the eye (`froxelfog::LAMP_EYE_DEPTH`), so distance does
     // not either; the storm's own medium still dims it on the way to the eye.
-    let lamp_sigma = froxelfog::lamp_sigma(froxelfog::halo_fog(f), p, room, cover);
-    let sigma_lamps = lamp_sigma + sigma_bank + sigma_sea;
+    //
+    // fork: **the lights do not scatter off the ground banks or the sea fog**, as the per-pixel halo
+    // never has. Those are several times the clear air in a dark zone's night, and a lamp past the
+    // per-pixel set (the table's nearest first) stood in a far brighter glow from afar, dimming as
+    // the camera walked in; a window's light lit a wide glow in the banks at any distance.
+    let sigma_lamps = froxelfog::lamp_sigma(froxelfog::halo_fog(f), p, room, cover);
 
     // In-scatter.
     let ray = p - f.camera.xyz;
@@ -339,11 +343,11 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         if (pair.w > 0u) {
             let far_w = bitcast<f32>(pair.z);
             if (far_w < 1.0) {
-                let near = cell_in_scatter(modern_block.light_cells[pair.x], p, to_eye, room, halo_count, lamp_sigma);
+                let near = cell_in_scatter(modern_block.light_cells[pair.x], p, to_eye, room, halo_count, sigma_lamps);
                 points = PointScatter(near.medium * (1.0 - far_w), near.lamp * (1.0 - far_w));
             }
             if (far_w > 0.0) {
-                let far = cell_in_scatter(modern_block.light_cells[pair.y], p, to_eye, room, halo_count, lamp_sigma);
+                let far = cell_in_scatter(modern_block.light_cells[pair.y], p, to_eye, room, halo_count, sigma_lamps);
                 points.medium = points.medium + far.medium * far_w;
                 points.lamp = points.lamp + far.lamp * far_w;
             }
@@ -351,7 +355,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         let count = min(u32(f.screen.w), u32(light_table.rows[20].x));
         for (var i = 0u; i < count; i = i + 1u) {
-            let one = point_in_scatter(i, p, to_eye, room, halo_count, lamp_sigma);
+            let one = point_in_scatter(i, p, to_eye, room, halo_count, sigma_lamps);
             points.medium = points.medium + one.medium;
             points.lamp = points.lamp + one.lamp;
         }
