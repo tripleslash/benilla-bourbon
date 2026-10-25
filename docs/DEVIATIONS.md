@@ -33,7 +33,7 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 
 Each entry is the first sentence of a `Deviation:` comment, linking to where it lives.
 
-- [benilla-app](#benilla-app): 259
+- [benilla-app](#benilla-app): 258
 - [benilla-assets](#benilla-assets): 6
 - [benilla-blp](#benilla-blp): 2
 - [benilla-formats](#benilla-formats): 25
@@ -161,7 +161,6 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 - The live window's aspect stands in for `gxResolution`'s, as in `portrait`'s `GxAspect`, because the window here takes any shape a drag gives it, where the reference's keeps `gxResolution`'s (`0x5989d7`). ([`src/loading_screen.rs:71`](../crates/benilla-app/src/loading_screen.rs#L71))
 - The page cannot block its one thread on a fetch, so there the stream cannot wait and the cover stands in. ([`src/loading_screen.rs:787`](../crates/benilla-app/src/loading_screen.rs#L787))
-- A long same-map snap is covered until the destination is presentable. The reference's `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of the screen's raises; benilla covers it so the destination is not seen streaming in. ---. ([`src/loading_screen.rs:810`](../crates/benilla-app/src/loading_screen.rs#L810))
 - The page holds no frame. A WebGPU canvas texture lives only until the end of the task that acquired it and the canvas shows whatever it holds then, so a withheld present is a blank canvas there, not the last frame; the destination streams in on screen instead. ([`src/loading_screen/hold.rs:66`](../crates/benilla-app/src/loading_screen/hold.rs#L66))
 - The wheel is swallowed, where the reference still zooms the hidden camera, because nothing should act through the screen. ([`src/loading_screen/input.rs:12`](../crates/benilla-app/src/loading_screen/input.rs#L12))
 - The world pick is cleared, where the reference's `0x481790` keeps picking at the frozen point, because ours is quieter and looks the same: the reference's pointer cannot move, so its pick changes nothing visible. ([`src/loading_screen/input.rs:14`](../crates/benilla-app/src/loading_screen/input.rs#L14))
@@ -489,7 +488,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference flushes every glyph cache on a window resize (`0x5c2b50` → `0x5ca6f0`); this keeps the old cells, because nameplate meshes bake UVs and a flush would rebuild them every resize frame. ([`src/ui_text/engine/mod.rs:13`](../crates/benilla-app/src/ui_text/engine/mod.rs#L13))
 - The reference's measure kernels (`0x5c6940`, `0x5c6b70`, `0x5c6c50`, `0x5c7300`, `0x5c7470`) rasterize each character, but the step law reads only the advance, so skipping the bitmap changes no width. ([`src/ui_text/engine/mod.rs:362`](../crates/benilla-app/src/ui_text/engine/mod.rs#L362))
 - The reference evicts the least recently used glyph and repacks its hole (`0x5cad2b`, over `[CGxFont+0x64..0x6c]`); this drops every cell, because a shelf allocator cannot reclaim an interior cell and the sheet is far larger than the reference's 256×256 pages. ([`src/ui_text/engine/mod.rs:652`](../crates/benilla-app/src/ui_text/engine/mod.rs#L652))
-- Every UI text block sits 1 px below the reference's row, because at that row UI text reads high. ([`src/ui_text/layout/mod.rs:115`](../crates/benilla-app/src/ui_text/layout/mod.rs#L115))
+- Every UI text block sits 1 device px below the reference's snapped row, because at that row UI text reads high. ([`src/ui_text/layout/mod.rs:119`](../crates/benilla-app/src/ui_text/layout/mod.rs#L119))
 - The cap is 32 logical units, not 32 device px, because the reference's raster-memory ceiling draws all big text at the same 32 device px on a modern display; at the 768-tall design height the two agree. ([`src/ui_text/mod.rs:54`](../crates/benilla-app/src/ui_text/mod.rs#L54))
 - `r × round(dpi)` passes, so the ring keeps its logical weight on a high-DPI raster. ([`src/ui_text/outline.rs:60`](../crates/benilla-app/src/ui_text/outline.rs#L60))
 - `r × round(dpi)` passes as in `outlined_cell`, the first `round(dpi)` of them the opaque ring. ([`src/ui_text/outline.rs:167`](../crates/benilla-app/src/ui_text/outline.rs#L167))
