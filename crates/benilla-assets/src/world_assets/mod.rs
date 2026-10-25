@@ -420,7 +420,7 @@ fn solid_green() -> (u32, u32, Vec<u8>) {
 /// One candidate's bytes through the decoder its name picks ([`decode_by_name`]). By
 /// `on_refusal`, a TGA load gates its header's size first ([`makes_texture`]), decoded or not, and
 /// a refused decode of one that passes leaves that size of opaque white; a refused BLP, or a
-/// decoded one at a size the device texture path refuses ([`makes_device_texture`]), is the solid
+/// decoded one at a size the device texture path refuses ([`makes_ui_texture`]), is the solid
 /// green.
 fn decode_candidate(candidate: &str, bytes: &[u8], on_refusal: OnRefusal) -> Candidate {
     let texture = on_refusal == OnRefusal::WhiteDefault;
@@ -436,7 +436,9 @@ fn decode_candidate(candidate: &str, bytes: &[u8], on_refusal: OnRefusal) -> Can
         // The BLP callback `0x44a560` asks `0x448450` for a texture of the decoded size; a size it
         // or `GxTexCreate` refuses (`0x448665`, `0x58ab40`) returns 0 and `0x44a500` leaves the
         // solid green (`0x44a50e`), with no next candidate.
-        let refused = texture && !is_tga_name(candidate) && !makes_device_texture(width, height);
+        let refused = texture
+            && !is_tga_name(candidate)
+            && !makes_ui_texture(width, height, benilla_formats::layers::turtle_mounted());
         if !refused {
             return Candidate::Pixels(width, height, rgba);
         }
@@ -457,6 +459,19 @@ fn decode_candidate(candidate: &str, bytes: &[u8], on_refusal: OnRefusal) -> Can
         }
         None => Candidate::Next,
     }
+}
+
+/// Whether `TextureCreate` makes a BLP texture of this size: the device path's sizes
+/// ([`makes_device_texture`]) at twice the side.
+///
+/// Deviation: `0x448450` refuses a side of 1024 or more, but benilla's containers carry the
+/// interface art upscaled to twice its size (`UI-TargetingFrame-BarFill` 1024 x 128, the loading
+/// screens 1024 x 1024), so the cap is 2048 here, and a stock-size texture passes as before. A
+/// Turtle WoW 1.18.1 realm also takes a side that is not a power of two, as its own map art is
+/// (`Interface\WorldMap\UpperKarazhan2f`, 2004 x 1336).
+fn makes_ui_texture(width: u32, height: u32, turtle: bool) -> bool {
+    let fits = |n: u32| (turtle || n.is_power_of_two()) && (8..2048).contains(&n);
+    makes_device_texture(width, height) || (fits(width) && fits(height))
 }
 
 /// Decode a candidate by its name: a `.tga` through the TGA decoder, anything else through the BLP
@@ -1971,6 +1986,21 @@ mod tests {
         Candidate::Pixels(8, 8, [0, 0xff, 0, 0xff].repeat(64))
     }
 
+    /// The upscaled containers' interface art at twice its size is a texture, up to a side of 2048;
+    /// a Turtle WoW 1.18.1 realm also takes a side that is not a power of two.
+    #[test]
+    fn the_upscaled_interface_art_is_a_texture() {
+        for (w, h) in [(1024, 128), (1024, 1024), (512, 1024), (1024, 8), (8, 8)] {
+            assert!(makes_ui_texture(w, h, false), "{w}x{h}");
+        }
+        for (w, h) in [(2048, 1024), (2004, 1336), (24, 8), (4, 1024)] {
+            assert!(!makes_ui_texture(w, h, false), "{w}x{h}");
+        }
+        assert!(makes_ui_texture(2004, 1336, true));
+        assert!(!makes_ui_texture(2048, 2048, true));
+        assert!(!makes_ui_texture(4, 1024, true));
+    }
+
     /// The BLP callback `0x44a560` hands `0x448450` the decoded size: it makes no texture for a
     /// side that is not a power of two or is 1024 or more (`0x4484ae`-`0x4484d0`), `GxTexCreate`
     /// refuses a side below 8 (`0x58ab40`, `0x58ab4c`), and `0x44a500` leaves the solid green
@@ -1987,6 +2017,10 @@ mod tests {
             (512, 512),
             (8, 512),
             (512, 8),
+            // The upscaled containers' twice-size art ([`makes_ui_texture`]'s deviation).
+            (1024, 8),
+            (8, 1024),
+            (1024, 1024),
         ] {
             assert!(
                 matches!(load(w, h), Candidate::Pixels(pw, ph, _) if (pw, ph) == (w, h)),
@@ -2002,9 +2036,8 @@ mod tests {
             (1, 1),
             (24, 8),
             (8, 24),
-            (1024, 8),
-            (8, 1024),
-            (1024, 1024),
+            (2048, 8),
+            (8, 2048),
             (2048, 64),
         ] {
             assert_eq!(load(w, h), green(), "{w}x{h} is the solid green");

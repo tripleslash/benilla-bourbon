@@ -34,7 +34,7 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 Each entry is the first sentence of a `Deviation:` comment, linking to where it lives.
 
 - [benilla-app](#benilla-app): 258
-- [benilla-assets](#benilla-assets): 6
+- [benilla-assets](#benilla-assets): 7
 - [benilla-blp](#benilla-blp): 2
 - [benilla-formats](#benilla-formats): 25
 - [benilla-lua](#benilla-lua): 11
@@ -552,6 +552,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### world_assets
 
 - The reference uploads the shipped frames as they are; this evens them because their means differ (`ocean_h` alpha 55.985..57.628 over its 30 frames, more down the DXT3 mips), and at distance, where mipping averages a level to one value, the far sheet brightens and dims once per 1.25 s loop. ([`src/world_assets/images.rs:71`](../crates/benilla-assets/src/world_assets/images.rs#L71))
+- `0x448450` refuses a side of 1024 or more, but benilla's containers carry the interface art upscaled to twice its size (`UI-TargetingFrame-BarFill` 1024 x 128, the loading screens 1024 x 1024), so the cap is 2048 here, and a stock-size texture passes as before. ([`src/world_assets/mod.rs:467`](../crates/benilla-assets/src/world_assets/mod.rs#L467))
 ### benilla-blp
 
 #### (crate root)
