@@ -102,7 +102,7 @@ fn spells() -> crate::ui_action::Spells {
 /// `GetSpellCooldown` for both spells, and the potion's `GetContainerItemCooldown`.
 fn client() -> Client {
     let mut app = crate::game_plugins::schedule_tests::headless_client();
-    app.insert_resource(bevy::ecs::error::DefaultErrorHandler(
+    app.insert_resource(bevy::ecs::error::FallbackErrorHandler(
         bevy::ecs::error::ignore,
     ));
     let (tx, sent) = crossbeam_channel::unbounded();

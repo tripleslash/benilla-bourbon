@@ -807,9 +807,10 @@ fn drive_loading_screen(
         screen.raise("ground under the body still arriving", false, map_id, now);
     }
 
-    // --- Deviation: a long same-map snap is covered until the destination is presentable. The
-    // reference's `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of the screen's
-    // raises; benilla covers it so the destination is not seen streaming in. ---
+    // --- Deviation, on the page alone: a long same-map snap is covered until the destination is
+    // presentable. The reference's `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of
+    // the screen's raises; native holds the last frame instead (`hold::decide_present_hold`), which
+    // the page cannot, so there the cover keeps the destination from being seen streaming in. ---
     let body = player.as_ref().map(|p| p.pos);
     let relocated = match (teleported, screen.last_pos, body) {
         (true, Some(was), Some(now_pos)) => was.distance(now_pos) >= SNAP_LOAD_MIN_YD,
@@ -818,7 +819,8 @@ fn drive_loading_screen(
         _ => false,
     };
     screen.last_pos = body;
-    if relocated
+    if cfg!(target_arch = "wasm32")
+        && relocated
         && !screen.active
         && *state.get() == crate::client_state::ClientState::InWorld
         && !(progress.is_ready() && progress.presentable())
@@ -1269,9 +1271,10 @@ mod tests {
     const SOUTH_SEAS: [f32; 3] = [-11880.0, -4700.0, 2.0];
     const NORTHSHIRE: [f32; 3] = [-8949.95, -132.493, 83.5312];
 
-    /// GM Island to the South Seas, both on Kalimdor.
+    /// GM Island to the South Seas, both on Kalimdor: the page covers the load; native holds the
+    /// frame instead and raises no screen (`player::teleport_hold_tests`).
     #[test]
-    fn a_same_map_teleport_across_the_continent_covers_its_load() {
+    fn a_same_map_teleport_across_the_continent_covers_its_load_on_the_page() {
         let mut app = in_world(GM_ISLAND);
         assert!(!covering(&app), "standing on resident ground");
 
@@ -1283,7 +1286,11 @@ mod tests {
             orientation: 0.0,
         });
         app.update();
-        assert!(covering(&app), "the deviation covers a long same-map snap");
+        assert_eq!(
+            covering(&app),
+            cfg!(target_arch = "wasm32"),
+            "the page's deviation covers a long same-map snap"
+        );
     }
 
     /// A charge-length snap (25 yd) onto ground still arriving is never covered.

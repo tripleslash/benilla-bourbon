@@ -35,6 +35,7 @@ fn progress(wow: [f32; 3], resident: bool) -> WorldLoadProgress {
         total: 9,
         focus_resident: resident,
         scene_ready: resident,
+        focus_collidable: resident,
         focus_tile: Some(tile_of(wow)),
         ..Default::default()
     }
@@ -117,6 +118,10 @@ fn on_gm_island() -> App {
         .init_resource::<Assets<Image>>()
         .insert_resource(CurrentMap(1))
         .insert_resource(progress(GM_ISLAND, true))
+        // The cover's drive reads the focus (the page's stall backstop).
+        .insert_resource(benilla_world::terrain_stream::ViewFocus::body(
+            GM_ISLAND, true,
+        ))
         .insert_resource(Player {
             active: true,
             pos: wow_to_bevy(GM_ISLAND),
