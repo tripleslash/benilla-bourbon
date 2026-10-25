@@ -10,6 +10,7 @@
 #import bevy_render::view::View
 #import benilla_modern::sunshadow
 #import benilla_modern::froxelfog
+#import benilla_modern::colorspace
 
 @group(0) @binding(0) var<uniform> view: View;
 #ifdef FOG_MSAA
@@ -197,9 +198,9 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
 
     // fork: the fog over the sky keeps the zone look's exposure, as the dome under it does
-    // (`look::sky_unlift`): the auto-exposure lifts the world alone.
+    // (`look::unlifted`): the auto-exposure lifts the world alone.
     if (sky) {
-        fog = vec4<f32>(fog.rgb * f.sky.x, fog.a);
+        fog = vec4<f32>(colorspace::unlifted(fog.rgb, f.sky.x, f.sky.y), fog.a);
     }
     return fog;
 }

@@ -9,13 +9,15 @@
     forward_io::VertexOutput,
     mesh_view_bindings::view,
 }
+#import benilla_modern::colorspace
 
 // `StarExt::params`: `.x` additive, `.y` stage 2 bound, `.z` the frame is linear, `.w` the
-// reciprocal of the modern post's exposure (1 on a classic frame).
+// reciprocal of the zone look's exposure (1 on a classic frame).
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> star: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var stage2_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var stage2_sampler: sampler;
-// fork: `StarExt::horizon`: gone below the view elevation (sine) `.x`, whole above `.y`; `.y` 0 = off.
+// fork: `StarExt::horizon`: gone below the view elevation (sine) `.x`, whole above `.y`; `.y` 0 = off;
+// `.zw` the auto-exposure's lift and room (`look::lift_room`).
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var<uniform> horizon: vec4<f32>;
 // fork: `StarExt::tint`: the sky's hue at luma 1 `.rgb`, and the share of the dome's colour that
 // takes it `.w` (0 = the authored colour).
@@ -52,8 +54,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
     // alpha folds in gamma first, then the product decodes, as `wow_model.wgsl` does: a linear
     // `texel × a` is far brighter than the reference's gamma one. `dst`'s share decodes likewise,
     // `(1 − a)` on gamma bytes being `(1 − a)^2.2` on linear ones.
-    // fork: and the colour leaves pre-divided by the post's exposure, which then multiplies it back
-    // to the classic level instead of lifting the night sky with the lit world.
+    // fork: and the colour leaves pre-divided by the look's exposure and at the auto-exposure's
+    // inverse (`look::unlifted`), which the post then multiplies back to the classic level
+    // instead of lifting the night sky with the lit world.
     if star.z > 0.5 {
         // fork: the horizon fade: the dome draws after the fog composite, so near the
         // horizon it gives way to the hazed sky band under it.
@@ -66,7 +69,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
         let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
         rgb = mix(rgb, min(tint.rgb * luma, vec3<f32>(1.0)), tint.w);
         let keep = pow(1.0 - a, 2.2);
-        return vec4<f32>(srgb_to_linear(rgb * a) * star.w, select(1.0 - keep, 0.0, star.x > 0.5));
+        let lin = colorspace::unlifted(srgb_to_linear(rgb * a) * star.w, horizon.z, horizon.w);
+        return vec4<f32>(lin, select(1.0 - keep, 0.0, star.x > 0.5));
     }
     // Premultiplied; alpha 0 leaves `dst` whole, the additive blend.
     return vec4<f32>(rgb * a, select(a, 0.0, star.x > 0.5));

@@ -72,15 +72,11 @@ fn update_modern_sky(
     let params = super::cloud_bake::cloud_params(&light, &look.0);
     let lit = smoothstep(-0.1, 0.45, params.key.y);
     let cloud_modern = quantized(params.key.extend(flag));
+    let (lift, room) = super::look::lift_room();
     let (cloud_light, cloud_shape, cloud_key, cloud_haze) = if on {
         (
-            // x: the auto-exposure's reciprocal, divided out as the sky's is (`look::sky_unlift`).
-            quantized(Vec4::new(
-                super::look::sky_unlift(),
-                CLOUD_SILVER * lit,
-                CLOUD_G,
-                0.0,
-            )),
+            // x, w: the auto-exposure's lift and room, inverted as the sky's is (`look::unlifted`).
+            quantized(Vec4::new(lift, CLOUD_SILVER * lit, CLOUD_G, room)),
             quantized(Vec4::new(
                 params.style.opacity,
                 0.0,

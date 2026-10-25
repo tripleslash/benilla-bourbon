@@ -51,3 +51,22 @@ fn modern_in(rgb: vec3<f32>, modern: f32) -> vec3<f32> {
 fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
+
+// fork: the auto-exposure's gain at luminance `y` (`look::lifted`): the whole `lift` in the dark,
+// never below 1, at most `room` of added brightness, so it lifts the dark and leaves the light.
+fn lift_gain(y: f32, lift: f32, room: f32) -> f32 {
+    let a = lift - 1.0;
+    return 1.0 + a / (1.0 + a * max(y, 0.0) / max(room, 1e-6));
+}
+
+// fork: `c` scaled so the lift lands its luminance where it is now (`look::unlifted`): the sky
+// keeps the zone look's exposure under the auto-exposure.
+fn unlifted(c: vec3<f32>, lift: f32, room: f32) -> vec3<f32> {
+    let y = max(luminance(c), 0.0);
+    let a = lift - 1.0;
+    let r = max(room, 1e-6);
+    let b = r * lift - a * y;
+    let d = sqrt(max(b * b + 4.0 * a * y * r, 0.0));
+    let u = select((d - b) / (2.0 * a), 2.0 * y * r / max(b + d, 1e-12), b >= 0.0);
+    return c * select(u / y, 1.0 / max(lift, 1e-3), y < 1e-8);
+}

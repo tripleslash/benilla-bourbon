@@ -600,16 +600,56 @@ pub fn exposure() -> f32 {
     f32::from_bits(EXPOSURE.load(Ordering::Relaxed))
 }
 
+/// The post's exposure for a modern frame without the auto-exposure's lift: the zone look's own.
+/// The combine applies the lift on top, by [`lifted`].
+pub fn base_exposure() -> f32 {
+    exposure() / auto_lift().max(1e-3)
+}
+
 /// The auto-exposure's share of [`exposure`]: 1 with it off or on a classic frame.
 pub fn auto_lift() -> f32 {
     f32::from_bits(AUTO_LIFT.load(Ordering::Relaxed))
 }
 
-/// fork: **the auto-exposure lifts the world, not the sky.** It is the eye adapting to a dark
-/// ground; at up to 8x it washed a dark zone's night sky out to a bright grey. The sky dome and the
-/// fog over sky pixels divide this back out, so the sky keeps the zone look's own exposure.
-pub fn sky_unlift() -> f32 {
-    1.0 / auto_lift().max(1e-3)
+/// The lift and its room in scene units (before [`base_exposure`]), as the combine and the sky
+/// passes read them: `(lift, AUTO_EXPOSURE_ROOM / base_exposure)`.
+pub fn lift_room() -> (f32, f32) {
+    (auto_lift(), exposure_room() / base_exposure().max(1e-3))
+}
+
+/// [`AUTO_EXPOSURE_ROOM`], or `$WOW_AUTO_EXPOSURE_ROOM` (browser `?auto_exposure_room=`) live, for
+/// tuning: a large room is the plain linear lift.
+fn exposure_room() -> f32 {
+    crate::launch_env::live_var("WOW_AUTO_EXPOSURE_ROOM")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(AUTO_EXPOSURE_ROOM)
+}
+
+/// fork: **the auto-exposure lifts the dark, not the light.** The eye adapting to a dark ground
+/// should not blow out what is already bright (a sun shaft's haze, a fogged far hill), so the lift
+/// is a gain on each pixel's luminance `y`, `1 + (lift - 1) / (1 + (lift - 1) y / room)`: the whole
+/// lift in the dark, never below 1, and at most `room` of added brightness. `colorspace::lifted`
+/// is the combine's twin.
+pub fn lifted(y: f32, lift: f32, room: f32) -> f32 {
+    let a = lift - 1.0;
+    y * (1.0 + a / (1.0 + a * y / room.max(1e-6)))
+}
+
+/// fork: [`lifted`]'s inverse: the luminance a pixel must hold for the lift to land it at `y`. The
+/// sky dome, the clouds and the fog over the sky draw at it, so the sky keeps the zone look's
+/// exposure at every brightness: a dark night sky is as dark as the ground the lift is for, which
+/// no luminance curve tells apart. `colorspace::unlifted` is the shaders' twin.
+pub fn unlifted(y: f32, lift: f32, room: f32) -> f32 {
+    // The root of `a u² + (room·lift − a y) u − y·room = 0`, in the form without cancellation.
+    let (a, room) = (lift - 1.0, room.max(1e-6));
+    let b = room * lift - a * y;
+    let d = (b * b + 4.0 * a * y * room).max(0.0).sqrt();
+    if b >= 0.0 {
+        2.0 * y * room / (b + d).max(1e-12)
+    } else {
+        (d - b) / (2.0 * a)
+    }
 }
 
 /// **The auto-exposure**: it lifts a dark picture into visible brightness and does nothing else.
@@ -644,6 +684,10 @@ const AUTO_EXPOSURE_SECONDS: f32 = 1.5;
 ///
 /// fork: 0.02 since 2026-10-25 (the director's call), from 0.06, with the strength above.
 const AUTO_EXPOSURE_TARGET: f32 = 0.02;
+/// The most brightness the auto-exposure adds to a pixel (linear luminance, as the zone look
+/// exposes it): five times [`AUTO_EXPOSURE_TARGET`], so a dark scene's key and its shadows take the
+/// whole lift and its lights almost none (a 0.5 haze under an 8x lift gains a fifth).
+const AUTO_EXPOSURE_ROOM: f32 = 0.1;
 /// Seconds without a new meter reading before the authored rows stand in again.
 const METER_STALE_SECONDS: f32 = 1.0;
 
@@ -938,6 +982,29 @@ fn update_look(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lift takes a dark pixel the whole way, a bright one barely, never darkens and never
+    /// crosses two pixels over; its inverse lands every pixel back where it was.
+    #[test]
+    fn the_lift_lifts_the_dark_and_leaves_the_light() {
+        let room = AUTO_EXPOSURE_ROOM;
+        for lift in [1.0, 1.5, 3.0, AUTO_EXPOSURE_MAX] {
+            let mut prev = 0.0;
+            for i in 1..=400 {
+                let y = i as f32 * 0.01 * 0.01 * i as f32;
+                let out = lifted(y, lift, room);
+                assert!(out >= y && out <= y * lift + 1e-6, "{lift} {y} {out}");
+                assert!(out - y <= room + 1e-6);
+                assert!(out > prev);
+                prev = out;
+                let back = lifted(unlifted(y, lift, room), lift, room);
+                assert!((back - y).abs() <= 1e-4 * y.max(1.0), "{lift} {y} {back}");
+            }
+        }
+        // A near-black pixel takes the whole 8x; a sun shaft's 0.5 haze about a fifth more.
+        assert!(lifted(1e-5, 8.0, room) / 1e-5 > 7.99);
+        assert!(lifted(0.5, 8.0, room) < 0.5 * 1.2);
+    }
 
     /// The screen lift leaves an open day alone, rises as the exposed picture darkens, counts the
     /// look's own exposure, and never passes its ceiling.

@@ -222,8 +222,8 @@ pub struct FroxelFog {
     /// fork: the lamp halos' clear-weather air: x = fog extinction, y = near-clear range, z = haze;
     /// w = the key's share on the shaft haze's and banks' isotropic half (`look::key_air_share`).
     pub halo_air: Vec4,
-    /// fork: x = the auto-exposure's reciprocal, which the composite scales sky pixels by
-    /// (`look::sky_unlift`); yzw reserved.
+    /// fork: x, y = the auto-exposure's lift and room (`look::lift_room`), whose inverse the
+    /// composite draws sky pixels at (`look::unlifted`); zw reserved.
     pub sky: Vec4,
 }
 
@@ -718,7 +718,10 @@ fn update_volume(
             halo_air.haze * halo_humid,
             super::look::key_air_share(),
         ),
-        sky: Vec4::new(super::look::sky_unlift(), 0.0, 0.0, 0.0),
+        sky: {
+            let (lift, room) = super::look::lift_room();
+            Vec4::new(lift, room, 0.0, 0.0)
+        },
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;

@@ -454,7 +454,7 @@ fn init_pipelines(
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
                 texture_2d(TextureSampleType::Float { filterable: true }),
-                uniform_buffer_sized(false, Some(std::num::NonZero::new(48).unwrap())),
+                uniform_buffer_sized(false, std::num::NonZero::new(COMBINE_BYTES)),
                 // In every combine's layout, dry included, so both entries share one bind group.
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
@@ -729,7 +729,7 @@ fn prepare_textures(
         );
         let gain_buf = render_device.create_buffer(&BufferDescriptor {
             label: Some("ffx_glow_gain"),
-            size: 48, // fork: modern lighting — + the grade row
+            size: COMBINE_BYTES,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -758,6 +758,11 @@ fn dither_armed() -> f32 {
         false => 0.0,
     }
 }
+
+/// The combine uniform's floats: the reference's 8, then the fork's grade and lift rows.
+const COMBINE_FLOATS: usize = 16;
+/// [`COMBINE_FLOATS`] in bytes, the buffer's and the layout's size.
+const COMBINE_BYTES: u64 = (COMBINE_FLOATS * 4) as u64;
 
 /// One view's combine uniform: the zone glow × [`FfxGlow::gain_scale`], the death gate and haze of
 /// its pass pair, the dither arm, then the wave phases, written every frame so the clock runs free.
@@ -1011,10 +1016,11 @@ fn blur_read(uniform: &[f32]) -> bool {
 
 /// One view's combine uniform and whether its underwater entry is armed, for both combine nodes.
 ///
-/// fork: modern lighting — the uniform is 12 floats, not 8: `wave.z` flags a modern scene,
-/// `wave.w` carries the zone look's exposure, and a third row carries its cinematic grade
-/// (zeros = off). Both combine sites (the world node and the UI camera's backdrop) write it whole.
-fn live_combine(world: &World, glow: &FfxGlow) -> ([f32; 12], bool) {
+/// fork: modern lighting — the uniform is [`COMBINE_FLOATS`] floats, not 8: `wave.z` flags a
+/// modern scene, `wave.w` carries the zone look's exposure, a third row its cinematic grade (zeros
+/// = off) and a fourth the auto-exposure's lift (`look::lift_room`). Both combine sites (the world
+/// node and the UI camera's backdrop) write it whole.
+fn live_combine(world: &World, glow: &FfxGlow) -> ([f32; COMBINE_FLOATS], bool) {
     let switches = *world.resource::<FfxSwitches>();
     let wave = *world.resource::<FfxWave>();
     let player = FfxPassState::world(
@@ -1029,12 +1035,15 @@ fn live_combine(world: &World, glow: &FfxGlow) -> ([f32; 12], bool) {
         glow,
         wave,
     );
-    let mut uniform = [0.0f32; 12];
+    let mut uniform = [0.0f32; COMBINE_FLOATS];
     uniform[..8].copy_from_slice(&classic);
     if modern_view(glow) {
         uniform[6] = 1.0;
-        uniform[7] = crate::modern::look::exposure();
-        uniform[8..].copy_from_slice(&crate::modern::look::grade());
+        uniform[7] = crate::modern::look::base_exposure();
+        uniform[8..12].copy_from_slice(&crate::modern::look::grade());
+        let (lift, room) = crate::modern::look::lift_room();
+        uniform[12] = lift;
+        uniform[13] = room;
     }
     (uniform, wave_armed(glow.state, wave, player))
 }

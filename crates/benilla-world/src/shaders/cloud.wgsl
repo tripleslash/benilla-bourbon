@@ -4,6 +4,7 @@
 // `sky_vertex.wgsl`.
 
 #import bevy_pbr::forward_io::VertexOutput
+#import benilla_modern::colorspace
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var cloud_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var cloud_samp: sampler;
@@ -14,8 +15,8 @@
 struct CloudLight {
     // xyz = toward the key light; w = modern flag.
     modern: vec4<f32>,
-    // x = the auto-exposure's reciprocal (`look::sky_unlift`); y = silver-lining strength; z = its
-    // lobe g.
+    // x = the auto-exposure's lift (`look::lift_room`); y = silver-lining strength; z = its lobe g;
+    // w = the lift's room.
     light: vec4<f32>,
     // x = the baked layer's peak opacity; w = the horizon fade's top (dome height).
     shape: vec4<f32>,
@@ -53,7 +54,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         rgb = mix(rgb, cloud_light.haze.rgb, low * low * 0.85);
         a *= smoothstep(0.0, cloud_light.shape.w, dir.y);
         // fork: the clouds keep the zone look's exposure, as the sky behind them does.
-        rgb *= cloud_light.light.x;
+        rgb = colorspace::unlifted(rgb, cloud_light.light.x, cloud_light.light.w);
     }
     // Premultiplied gamma blend; the RGB is already the reference's byte math.
     return vec4<f32>(rgb * a, a);

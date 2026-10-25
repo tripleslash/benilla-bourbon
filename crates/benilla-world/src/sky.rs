@@ -292,12 +292,13 @@ fn update_sky_colors(
     // (midday, or a `highlightSky` 0 zone) leaves the gradient untouched.
     let s = light.celestial_dir;
     let sun_az = s.z.atan2(s.x);
+    let (lift, room) = crate::modern::look::lift_room();
     let warp = Vec4::new(
         benilla_assets::quantize(light.sky_warp, 4096.0),
         benilla_assets::quantize(sun_az, 4096.0),
-        // A modern frame's sky divides the auto-exposure back out (`look::sky_unlift`).
-        benilla_assets::quantize(crate::modern::look::sky_unlift(), 1024.0),
-        0.0,
+        // A modern frame's sky inverts the auto-exposure (`look::unlifted`): its lift and room.
+        benilla_assets::quantize(lift, 1024.0),
+        benilla_assets::quantize(room, 4096.0),
     );
     benilla_assets::write_gated(
         &mut materials,

@@ -24,6 +24,10 @@ struct FfxCombine {
     // fork: modern lighting — the zone look's cinematic grade: x = contrast, y = saturation,
     // z = vignette, w = toe (gamma on the encoded picture; > 1 deepens the shadows). All 0 = off.
     grade: vec4<f32>,
+    // fork: the auto-exposure (`look::lift_room`): x = its lift, y = its room in scene units. The
+    // lift is a gain on each pixel's luminance (`colorspace::lift_gain`), so it lifts the dark and
+    // leaves the light; x = 1 is no lift.
+    lift: vec4<f32>,
 }
 @group(0) @binding(3) var<uniform> ffx: FfxCombine;
 // The 128×128 wave LUT and its repeat sampler: bound on every combine, sampled only underwater.
@@ -154,15 +158,16 @@ fn combine_body(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
     var bg = blur_raw;
     if (ffx.wave.z > 0.5) {
         let exposure = ffx.wave.w;
+        let scene_rgb = max(scene.rgb, vec3<f32>(0.0));
+        let scene_x = scene_rgb * exposure
+            * colorspace::lift_gain(colorspace::luminance(scene_rgb), ffx.lift.x, ffx.lift.y);
+        let blur_x = blur_raw * exposure
+            * colorspace::lift_gain(colorspace::luminance(blur_raw), ffx.lift.x, ffx.lift.y);
         // The death pass reads a byte framebuffer (`0x6cdf20`): a ghost's blur stops at white, so
         // it carries no surplus into the bloom below or the `blur²` glow term.
-        let blur_hdr = select(
-            blur_raw * exposure,
-            min(blur_raw * exposure, vec3<f32>(1.0)),
-            ffx.lane.y > 0.0,
-        );
+        let blur_hdr = select(blur_x, min(blur_x, vec3<f32>(1.0)), ffx.lane.y > 0.0);
         let bloom = max(blur_hdr - vec3<f32>(1.0), vec3<f32>(0.0)) * MODERN_BLOOM;
-        sg = colorspace::linear_to_srgb(modern_tonemap(max(scene.rgb, vec3<f32>(0.0)) * exposure + bloom));
+        sg = colorspace::linear_to_srgb(modern_tonemap(scene_x + bloom));
         if (ffx.grade.x > 0.0) {
             sg = cinematic_grade(sg, uv);
         }

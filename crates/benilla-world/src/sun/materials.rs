@@ -66,7 +66,7 @@ pub type StarMaterial = ExtendedMaterial<StandardMaterial, StarExt>;
 pub struct StarExt {
     /// `.x` 1 for an additive batch (M2 blend 3/4), 0 for alpha blend; `.y` 1 when
     /// [`Self::stage2`] is bound; `.z` 1 when the frame is linear (modern lighting) and `.w` the
-    /// reciprocal of the modern post's exposure, both written per frame.
+    /// reciprocal of the zone look's exposure, both written per frame.
     #[uniform(100)]
     pub(super) params: Vec4,
     /// The batch's second texture, on `UV_1`, modulated over stage 0: blend modes 1-4 set every
@@ -78,6 +78,7 @@ pub struct StarExt {
     /// fork: the modern horizon fade (`follow::MODERN_STAR_HORIZON`), modern frames only: the dome is
     /// gone below the view elevation (sine) `.x` and whole above `.y`; `.y` 0 = no fade. The dome
     /// draws after the fog composite, so without it the nebulae ran unhazed down to the horizon.
+    /// `.zw` the auto-exposure's lift and room (`look::lift_room`), which the dome inverts.
     #[uniform(103)]
     pub(super) horizon: Vec4,
     /// fork: the modern sky's hue (`follow::star_tint`), modern frames only: `.rgb` the hue of the
