@@ -75,6 +75,9 @@ struct FroxelFog {
     // x = fog extinction (1/yd), y = near-clear range (planar yd), z = haze extinction; w = the key's
     // share on the shaft haze's and banks' isotropic half (`look::key_air_share`).
     halo_air: vec4<f32>,
+    // fork: x = the auto-exposure's reciprocal (`look::sky_unlift`): the composite scales sky pixels
+    // by it, so the sky keeps the zone look's exposure. yzw reserved.
+    sky: vec4<f32>,
 }
 
 // fork: **the air a lamp's halo stands in** — `f` with the open air's medium swapped for its

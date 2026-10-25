@@ -295,7 +295,8 @@ fn update_sky_colors(
     let warp = Vec4::new(
         benilla_assets::quantize(light.sky_warp, 4096.0),
         benilla_assets::quantize(sun_az, 4096.0),
-        0.0,
+        // A modern frame's sky divides the auto-exposure back out (`look::sky_unlift`).
+        benilla_assets::quantize(crate::modern::look::sky_unlift(), 1024.0),
         0.0,
     );
     benilla_assets::write_gated(

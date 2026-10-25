@@ -196,5 +196,10 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         fog = vec4<f32>(max(fog.rgb + key * (shaft * f.proj.w * f.screen.z), vec3<f32>(0.0)), fog.a);
     }
 
+    // fork: the fog over the sky keeps the zone look's exposure, as the dome under it does
+    // (`look::sky_unlift`): the auto-exposure lifts the world alone.
+    if (sky) {
+        fog = vec4<f32>(fog.rgb * f.sky.x, fog.a);
+    }
     return fog;
 }

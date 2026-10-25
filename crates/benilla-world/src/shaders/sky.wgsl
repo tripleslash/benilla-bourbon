@@ -13,7 +13,8 @@ struct SkyColors {
     sky3: vec4<f32>, // 3.7°
     sky4: vec4<f32>, // 1.8°
     fog: vec4<f32>,  // horizon (0°) and below: LightIntBand row 7
-    warp: vec4<f32>, // x = dawn/dusk warp strength S (0 = off), y = sun azimuth (rad), zw reserved
+    warp: vec4<f32>, // x = dawn/dusk warp strength S (0 = off), y = sun azimuth (rad), z = the
+                     // auto-exposure's reciprocal (`look::sky_unlift`, modern only), w reserved
     // fork: modern lighting (FORK.md, P4) — xyz = camera→sun, w = modern flag.
     modern: vec4<f32>,
     // fork: modern lighting (P4) — rgb = the sun glow's linear radiance, w = its Mie g.
@@ -164,6 +165,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let horizon = 1.0 - 0.6 * smoothstep(0.0, 0.5, dir.y);
         let disk = smoothstep(0.9999, 0.99996, mu);
         col = col + sky.glow.rgb * (0.02 * mie * horizon + 24.0 * disk);
+        // fork: the sky keeps the zone look's exposure: the auto-exposure lifts the world alone.
+        col = col * sky.warp.z;
     }
     let rgb = col;
     return vec4<f32>(rgb, 1.0);

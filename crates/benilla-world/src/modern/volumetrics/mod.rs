@@ -42,7 +42,7 @@ pub(crate) use node::froxel_pass;
 pub(crate) use node::{fog_composite_pass, lamp_halo_pass};
 
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
-pub const FOG_BYTES: usize = 3 * 64 + 23 * 16;
+pub const FOG_BYTES: usize = 3 * 64 + 24 * 16;
 /// Offset of the `ground_x` row inside the tail: the render world writes the terrain heightfield's
 /// addressing there (`node::prepare_froxels`), which only it knows.
 pub(crate) const GROUND_OFFSET: usize = 3 * 64 + 19 * 16;
@@ -222,6 +222,9 @@ pub struct FroxelFog {
     /// fork: the lamp halos' clear-weather air: x = fog extinction, y = near-clear range, z = haze;
     /// w = the key's share on the shaft haze's and banks' isotropic half (`look::key_air_share`).
     pub halo_air: Vec4,
+    /// fork: x = the auto-exposure's reciprocal, which the composite scales sky pixels by
+    /// (`look::sky_unlift`); yzw reserved.
+    pub sky: Vec4,
 }
 
 impl FroxelFog {
@@ -257,6 +260,7 @@ impl FroxelFog {
             self.ground_y,
             self.ground,
             self.halo_air,
+            self.sky,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -714,6 +718,7 @@ fn update_volume(
             halo_air.haze * halo_humid,
             super::look::key_air_share(),
         ),
+        sky: Vec4::new(super::look::sky_unlift(), 0.0, 0.0, 0.0),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -896,7 +901,7 @@ mod tests {
     fn the_tail_matches_the_wgsl_layout() {
         let v = ModernVolume::default();
         assert_eq!(v.block.len(), BLOCK_TAIL_BYTES);
-        assert_eq!(FOG_BYTES, 560);
+        assert_eq!(FOG_BYTES, 576);
         // `ModernBlock` = cascades (400) + fog (416) + grid (4096): a multiple of its 16-byte alignment.
         assert_eq!(
             (crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16,

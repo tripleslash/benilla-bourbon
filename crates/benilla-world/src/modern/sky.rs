@@ -74,7 +74,13 @@ fn update_modern_sky(
     let cloud_modern = quantized(params.key.extend(flag));
     let (cloud_light, cloud_shape, cloud_key, cloud_haze) = if on {
         (
-            quantized(Vec4::new(0.0, CLOUD_SILVER * lit, CLOUD_G, 0.0)),
+            // x: the auto-exposure's reciprocal, divided out as the sky's is (`look::sky_unlift`).
+            quantized(Vec4::new(
+                super::look::sky_unlift(),
+                CLOUD_SILVER * lit,
+                CLOUD_G,
+                0.0,
+            )),
             quantized(Vec4::new(
                 params.style.opacity,
                 0.0,

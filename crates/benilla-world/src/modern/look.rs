@@ -505,6 +505,7 @@ static KEY: AtomicU32 = AtomicU32::new(ONE_BITS);
 static MOON_KEY_GAIN: AtomicU32 = AtomicU32::new(ONE_BITS);
 static FILL: AtomicU32 = AtomicU32::new(ONE_BITS);
 static EXPOSURE: AtomicU32 = AtomicU32::new(ONE_BITS);
+static AUTO_LIFT: AtomicU32 = AtomicU32::new(ONE_BITS);
 static FOG_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
 static SKY_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
 static KEY_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
@@ -599,18 +600,32 @@ pub fn exposure() -> f32 {
     f32::from_bits(EXPOSURE.load(Ordering::Relaxed))
 }
 
+/// The auto-exposure's share of [`exposure`]: 1 with it off or on a classic frame.
+pub fn auto_lift() -> f32 {
+    f32::from_bits(AUTO_LIFT.load(Ordering::Relaxed))
+}
+
+/// fork: **the auto-exposure lifts the world, not the sky.** It is the eye adapting to a dark
+/// ground; at up to 8x it washed a dark zone's night sky out to a bright grey. The sky dome and the
+/// fog over sky pixels divide this back out, so the sky keeps the zone look's own exposure.
+pub fn sky_unlift() -> f32 {
+    1.0 / auto_lift().max(1e-3)
+}
+
 /// **The auto-exposure**: it lifts a dark picture into visible brightness and does nothing else.
 /// It meters the screen: the scene's log-average luminance ([`super::meter`]) as the zone look
 /// exposes it, so a dark zone, a night and deep shade all lift as the eye would adapt. Below
-/// [`AUTO_EXPOSURE_TARGET`] it makes up about two thirds of the shortfall, in stops; at and above
+/// [`AUTO_EXPOSURE_TARGET`] it makes up four fifths of the shortfall, in stops; at and above
 /// it, an open day, it is exactly 1. It only ever brightens, by at most [`AUTO_EXPOSURE_MAX`]: a
 /// night still reads as night. Until the meter has a reading (boot, its pipeline compiling, no
 /// world view) the AUTHORED rows stand in (the ambient with its night floor, and the sun or moon
 /// diffuse at a typical incidence, against [`AUTO_EXPOSURE_DARK`]).
 ///
-/// fork: 0.65 since 2026-10-12 (the director's call), from 0.5, with the threshold and the ceiling
-/// below raised beside it: at the first numbers the lift was too slight to notice.
-const AUTO_EXPOSURE_STRENGTH: f32 = 0.65;
+/// fork: 0.8 since 2026-10-25 (the director's call), from 0.65 (from 0.5 before 2026-10-12), with
+/// the target below lowered beside it: a lamp-lit town at night (Darkshire, lifted 4.8x) was washed
+/// bright while a near-black storm night still needs the whole ceiling, so the lift starts later and
+/// climbs faster.
+const AUTO_EXPOSURE_STRENGTH: f32 = 0.8;
 /// The light rows (sRGB ambient, diffuse) below which the lift begins: a dusk, about a fifth of a
 /// forest noon's key (from `[0.25]`, `[0.3]`, a deep dusk).
 const AUTO_EXPOSURE_DARK: ([f32; 3], [f32; 3]) = ([0.3; 3], [0.36; 3]);
@@ -626,7 +641,9 @@ const AUTO_EXPOSURE_SECONDS: f32 = 1.5;
 /// The exposed scene key (log-average linear luminance) below which the lift begins: under an
 /// open daytime frame's, so a day is left alone. `$WOW_AUTO_EXPOSURE_TARGET` (browser
 /// `?auto_exposure_target=`) overrides it live, for tuning.
-const AUTO_EXPOSURE_TARGET: f32 = 0.06;
+///
+/// fork: 0.02 since 2026-10-25 (the director's call), from 0.06, with the strength above.
+const AUTO_EXPOSURE_TARGET: f32 = 0.02;
 /// Seconds without a new meter reading before the authored rows stand in again.
 const METER_STALE_SECONDS: f32 = 1.0;
 
@@ -713,6 +730,7 @@ fn publish(look: ZoneLook, auto_exposure: f32) {
         (super::MODERN_EXPOSURE * look.exposure * auto_exposure).to_bits(),
         Ordering::Relaxed,
     );
+    AUTO_LIFT.store(auto_exposure.to_bits(), Ordering::Relaxed);
     SILHOUETTE.store(look.silhouette.to_bits(), Ordering::Relaxed);
     for (i, v) in [look.contrast, look.saturation, look.vignette, look.toe]
         .into_iter()
