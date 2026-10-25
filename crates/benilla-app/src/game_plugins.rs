@@ -333,6 +333,11 @@ pub(crate) mod schedule_tests {
                     ..default()
                 }),
         );
+        // With no render app there is no extract, whose plugin keeps the render-sync queue: a
+        // synced component's removal hook (the world shadow's sun leaving) writes to it.
+        if !app.is_plugin_added::<bevy::render::sync_world::SyncWorldPlugin>() {
+            app.add_plugins(bevy::render::sync_world::SyncWorldPlugin);
+        }
         app.add_plugins(benilla_world::world_plugins::WorldPlugins);
         app.add_plugins(GamePlugins {
             connect: false,
@@ -1125,7 +1130,7 @@ pub(crate) mod schedule_tests {
     /// 1,756 -> 1,749 (-7) through 53e088b67 (the console, follow and plate verbs inside their calls).
     ///
     /// Upstream's input-first frame (d3b5df3f4, #2402) moved its ceiling 1,749 -> 1,694 (-55).
-    const UPDATE_ACTIONABLE_CEILING: usize = 2_043;
+    const UPDATE_ACTIONABLE_CEILING: usize = 1_973;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -2256,6 +2261,8 @@ pub(crate) mod schedule_tests {
          "`feed.vm: VmMemo<FollowFeedMemo>`; a fresh VM re-fires BEGIN for a follow in progress"),
         ("ui_gm_ticket.rs", "feed_gm_ticket", Because::MemoLatched,
          "`feed.vm: VmMemo<FedTicket>` counters restart per VM while `state.answers` keeps counting, so the latest answer is re-fired"),
+        ("ui_guild/lane.rs", "fire_guild", Because::Deliberate,
+         "a lane's firing, run only by the drain, which runs only with the interface up (`ingame_ui_up`): the lane holds what the packets queue until a drain fires it, so the login's message of the day, which lands ahead of the interface, fires into the VM that comes up"),
         ("ui_honor.rs", "feed_honor", Because::MemoLatched,
          "`state.vm: VmMemo<HonorFeedMemo>`; a fresh VM is pushed the block again and re-fires `INSPECT_HONOR_UPDATE` for a held reply"),
         ("ui_item_text.rs", "feed_item_text", Because::MemoLatched,

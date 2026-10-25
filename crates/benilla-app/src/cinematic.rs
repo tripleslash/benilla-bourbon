@@ -1148,6 +1148,7 @@ mod far_shots {
             total: 1,
             focus_resident: resident,
             scene_ready: resident,
+            focus_collidable: resident,
             focus_tile: Some(tile_of(wow)),
             ..Default::default()
         }

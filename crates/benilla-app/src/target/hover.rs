@@ -657,6 +657,10 @@ pub(super) fn update_hovered_object(
     // this they take every pick and the banner is unreachable. A store not yet streamed reads
     // eligible, the gate's own default.
     let mouseover_ok = |net: Entity| -> bool {
+        // While a word stands the grader forks before the gate (`0x4828f4` → `0x4829d4`).
+        if word.targeting() {
+            return true;
+        }
         let Ok(store) = stores.get(net) else {
             return true;
         };
