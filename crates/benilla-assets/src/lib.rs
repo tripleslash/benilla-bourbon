@@ -208,10 +208,26 @@ impl AssetReader for LooseAssetReader {
 /// The sampler-mode marker in an `mpq://` texture URL.
 const SAMPLER_MARKER: char = '@';
 
+/// The file a model texture name opens, as `TextureCreate` splits it (`0x449590`, then `.blp`
+/// first at `0x449d90`): a three-byte extension other than `.tga` becomes `.blp`, so a misspelt
+/// `skin.bpl` opens `skin.blp`, and a name with none (or a longer one) gets `.blp` appended.
+pub fn blp_file_name(internal: &str) -> String {
+    match internal.len().checked_sub(4) {
+        Some(dot) if internal.as_bytes()[dot] == b'.' => {
+            if internal[dot + 1..].eq_ignore_ascii_case("tga") {
+                internal.to_string()
+            } else {
+                format!("{}.blp", &internal[..dot])
+            }
+        }
+        _ => format!("{internal}.blp"),
+    }
+}
+
 /// The `mpq://` URL of a model texture at a sampler address mode. Bevy keys the sampler to the
 /// `Image` and the `Image` to its path, so a mode other than repeat/repeat marks the path before
-/// the extension (`…/leaves01@cc.blp`), which must stay `.blp` to pick the loader. A name with no
-/// extension (an HD model may store one so) asks for its `.blp`, as [`m2_url`] normalises models.
+/// the extension (`…/leaves01@cc.blp`), which must stay `.blp` to pick the loader. The file is
+/// [`blp_file_name`]'s, as [`m2_url`] normalises models.
 pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
     texture_url_on(MPQ_SOURCE, internal, wrap)
 }
@@ -219,10 +235,9 @@ pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
 /// [`texture_url`] on the asset source `source`: a model's textures are read from the source its
 /// `.m2` was, as they open with the model's flag (`0x71da64`).
 pub fn texture_url_on(source: &str, internal: &str, wrap: (bool, bool)) -> String {
-    let mut path = internal.replace('\\', "/").to_ascii_lowercase();
-    if !path.rsplit('/').next().unwrap_or(&path).contains('.') {
-        path.push_str(".blp");
-    }
+    let path = blp_file_name(internal)
+        .replace('\\', "/")
+        .to_ascii_lowercase();
     if wrap == (true, true) {
         return format!("{source}://{path}");
     }
@@ -419,6 +434,24 @@ mod tests {
             texture_url(r"Foo\Bar.blp", (true, false)),
             "mpq://foo/bar@rc.blp"
         );
+    }
+
+    /// `0x449590` drops any three-byte extension but `.tga` and `0x449d90` opens `.blp` first:
+    /// a misspelt `.bpl` (Turtle's `worgencasterskin.bpl`) opens the `.blp`, a long extension stays
+    /// in front of it.
+    #[test]
+    fn a_texture_extension_other_than_tga_opens_the_blp() {
+        let skin = "creature/worgencaster/worgencasterskin.bpl";
+        assert_eq!(
+            texture_url(skin, (true, true)),
+            "mpq://creature/worgencaster/worgencasterskin.blp"
+        );
+        assert_eq!(
+            texture_url(r"Foo\Bar.BMP", (false, false)),
+            "mpq://foo/bar@cc.blp"
+        );
+        assert_eq!(blp_file_name(r"Foo\Bar.TGA"), r"Foo\Bar.TGA");
+        assert_eq!(blp_file_name(r"Foo\Bar.jpeg"), r"Foo\Bar.jpeg.blp");
     }
 
     /// `0x706a50`'s extension rule: the last dot's `.mdx`/`.mdl` in any case is `.m2`, `.m2`

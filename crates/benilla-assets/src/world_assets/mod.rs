@@ -915,7 +915,7 @@ impl WorldAssets {
         wrap: (bool, bool),
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let key = (normalize_path(path), wrap.0, wrap.1);
+        let key = (normalize_path(&crate::blp_file_name(path)), wrap.0, wrap.1);
         if let Some(handle) = self.textures.fetch(&key) {
             return Some(handle);
         }
