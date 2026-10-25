@@ -168,9 +168,9 @@ fn heaviness(kind: WeatherKind, density: f32) -> f32 {
 pub const HEAVY_DARKEN: f32 = 0.4;
 /// The share of each band heavy rain turns to [`HEAVY_BLUE_HUE`] at the same luma.
 pub const HEAVY_BLUE: f32 = 0.8;
-/// The cold hue heavy rain casts (gamma): a deep teal-blue, green well over red (asked in the
-/// viewer: a thunderstorm should sink the zone into it).
-pub const HEAVY_BLUE_HUE: [f32; 3] = [0.18, 0.62, 1.0];
+/// The cold hue heavy rain casts (gamma): a deep teal, green close under blue and far over red
+/// (asked in the viewer: a thunderstorm should sink the zone into it, its sky teal).
+pub const HEAVY_BLUE_HUE: [f32; 3] = [0.12, 0.80, 0.95];
 
 /// The humid veil heavy rain adds to the air's shaft haze (1/yd), on top of the storm's
 /// (`media::STORM_HAZE`): with Elwynn's look the air keeps half the scene at 200 yd.
