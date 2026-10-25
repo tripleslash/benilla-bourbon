@@ -10,13 +10,14 @@ use crate::particles::buffer::{EffectPoint, EffectShape};
 use super::pool::{Drop, Patter};
 use super::*;
 
-/// The streak triangle (`0x80ff78`, `0x80ff74`), its apex leaned by the wind's `tilt`; fork: on
-/// a modern frame it shrinks away toward the eye (`modern::weather::streak_near`).
-pub(super) fn streak_shape(tilt: Quat) -> EffectShape {
+/// The streak triangle (`0x80ff78`, `0x80ff74`), its apex leaned by the wind's `tilt`; fork: it
+/// shrinks away toward the eye inside `near` yd (`modern::weather::streak_near`, 0 on a classic
+/// frame).
+pub(super) fn streak_shape(tilt: Quat, near: f32) -> EffectShape {
     EffectShape::Streak {
         half_w: STREAK_HALF_W,
         tail: STREAK_TAIL,
-        near: crate::modern::weather::streak_near(),
+        near,
         tilt,
     }
 }
@@ -198,18 +199,21 @@ mod tests {
         assert!((px(200.0) - 1.0).abs() < 1e-6, "flat past the floor");
     }
 
-    /// The streak's fixed world size (`0x80ff78`, `0x80ff74`) and the wind's lean ride the shape.
+    /// The streak's fixed world size (`0x80ff78`, `0x80ff74`) and the wind's lean ride the shape,
+    /// with the near shrink a modern frame asks for and none on a classic one.
     #[test]
     fn the_streak_shape_carries_the_references_size_and_the_tilt() {
         let tilt = Quat::from_rotation_x(0.3);
-        assert_eq!(
-            streak_shape(tilt),
-            EffectShape::Streak {
-                half_w: 0.05,
-                tail: 2.0,
-                near: 0.0,
-                tilt,
-            }
-        );
+        for near in [0.0, crate::modern::weather::STREAK_NEAR_YD] {
+            assert_eq!(
+                streak_shape(tilt, near),
+                EffectShape::Streak {
+                    half_w: 0.05,
+                    tail: 2.0,
+                    near,
+                    tilt,
+                }
+            );
+        }
     }
 }

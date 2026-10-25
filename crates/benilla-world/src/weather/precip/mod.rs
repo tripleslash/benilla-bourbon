@@ -479,7 +479,7 @@ fn push_precip(
     push_streaks(&mut quads.points, &precip.rain.drops);
     quads.commit_points(
         start,
-        streak_shape(wind.tilt),
+        streak_shape(wind.tilt, crate::modern::weather::streak_near()),
         spec(&assets.streak, EffectBlend::Mod2x, EffectFog::Rain),
     );
     let start = quads.begin_points();
