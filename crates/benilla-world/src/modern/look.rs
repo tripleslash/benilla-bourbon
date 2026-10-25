@@ -614,9 +614,13 @@ const AUTO_EXPOSURE_STRENGTH: f32 = 0.65;
 /// The light rows (sRGB ambient, diffuse) below which the lift begins: a dusk, about a fifth of a
 /// forest noon's key (from `[0.25]`, `[0.3]`, a deep dusk).
 const AUTO_EXPOSURE_DARK: ([f32; 3], [f32; 3]) = ([0.3; 3], [0.36; 3]);
-/// The ceiling on the auto-exposure's lift, ~1.2 stop (from 1.75): a moonless night under the
-/// night floor sits at it.
-const AUTO_EXPOSURE_MAX: f32 = 2.25;
+/// The ceiling on the auto-exposure's lift, ~2.6 stops: only a picture already near black reaches
+/// it, a dark zone's moonless storm night.
+///
+/// fork: 6 since 2026-10-25 (the director's call), from 2.25: under the eerie look's low exposure
+/// the old ceiling left Gilneas's moonless thunderstorm night all but black. Every scene the old
+/// ceiling did not bind keeps its lift.
+const AUTO_EXPOSURE_MAX: f32 = 6.0;
 /// The auto-exposure's time constant, in seconds — an eye adapting, not a meter snapping.
 const AUTO_EXPOSURE_SECONDS: f32 = 1.5;
 /// The exposed scene key (log-average linear luminance) below which the lift begins: under an
