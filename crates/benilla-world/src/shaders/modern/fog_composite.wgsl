@@ -201,6 +201,45 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // (`look::unlifted`): the auto-exposure lifts the world alone.
     if (sky) {
         fog = vec4<f32>(colorspace::unlifted(fog.rgb, f.sky.x, f.sky.y), fog.a);
+    } else if (farclip > 0.0) {
+        fog = backdrop_exposure(f, fog, -(view.view_from_world * vec4<f32>(p, 1.0)).z, farclip, mirror);
     }
     return fog;
+}
+
+// fork: **the distant band is backdrop, and keeps the sky's exposure.** The WDL band stands
+// against the unlifted sky; lifted with the world, a storm night's lift (up to
+// `AUTO_EXPOSURE_MAX`) stood it as a pale wall under a black horizon. A band pixel (planar depth
+// past the wall, `wdl.wgsl`'s push) is scaled so the combine's lift lands the whole pixel, band
+// and fog over it, where it is now; the seam fades the detailed world into the same scale.
+fn backdrop_exposure(
+    f: froxelfog::FroxelFog,
+    fog: vec4<f32>,
+    d: f32,
+    farclip: f32,
+    mirror: bool,
+) -> vec4<f32> {
+    var k = 1.0;
+    if (d <= farclip) {
+        if (mirror) {
+            return fog;
+        }
+        k = smoothstep(SEAM_FROM * farclip, farclip, d);
+        if (k <= 0.0) {
+            return fog;
+        }
+    }
+    // The band as `wdl.wgsl` draws it on a modern frame: the fog colour at the silhouette shade.
+    let band = colorspace::srgb_to_linear(
+        clamp(light_table.rows[4].xyz * light_table.rows[5].z, vec3<f32>(0.0), vec3<f32>(1.0)),
+    );
+    let total = fog.rgb + band * fog.a;
+    let y = colorspace::luminance(total);
+    if (y <= 1e-8) {
+        return fog;
+    }
+    let s = colorspace::luminance(colorspace::unlifted(total, f.sky.x, f.sky.y)) / y;
+    let g = mix(1.0, s, k);
+    // Both terms of `rgb + dst * a`: the frame's own band scales with the in-scatter.
+    return vec4<f32>(fog.rgb * g, fog.a * g);
 }
