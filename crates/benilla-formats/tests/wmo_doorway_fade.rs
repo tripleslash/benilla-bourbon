@@ -87,3 +87,32 @@ fn dire_maul_entrance_corridor_floors_are_lit() {
         }
     }
 }
+
+/// A unit's light reads the faded MOCV, not the authored one: the sampler `0x6b9a50` reads the
+/// group's `+0xf4` colours, which `0x6c43d0` fades in place. The Deadmines doorway floor of
+/// `AZ_Deadmines_D` g005 is baked near-black (luminance ~20) and the fade lights it; read raw, a
+/// unit standing in the doorway drew black.
+#[test]
+fn the_footprint_samples_the_faded_mocv() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let reader = Chain::open(&data).expect("open vanilla patch chain");
+    let stem = "World\\wmo\\Dungeon\\AZ_Deadmines\\AZ_Deadmines_D";
+    let root_bytes = reader.read(&format!("{stem}.wmo")).expect("read root");
+    let root = parse_wmo_root(&root_bytes).expect("parse root");
+    let gbytes = reader.read(&format!("{stem}_005.wmo")).expect("read group");
+    let raw = benilla_formats::wmo_group_raw_colors(&gbytes).expect("MOCV");
+    let fixed = wmo_group_fixed_colors(&gbytes, &root).expect("MOCV");
+    let fp = benilla_formats::wmo_group_footprint_tris(&gbytes, &root).expect("interior group");
+
+    let rgb = |c: &[u8; 4]| [c[2], c[1], c[0]];
+    assert_eq!(fp.mocv, fixed.iter().map(rgb).collect::<Vec<_>>());
+    let lifted = raw
+        .iter()
+        .zip(&fixed)
+        .filter(|(r, f)| r[3] == 0 && f[3] != 0 && r[..3].iter().all(|&c| c < 40))
+        .count();
+    assert!(
+        lifted >= 4,
+        "g005's doorway floor should be authored dark and faded lit; found {lifted} such slots"
+    );
+}

@@ -106,13 +106,16 @@ const FOOTPRINT_REJECT: u8 = 0x88;
 
 /// A group's [`FootprintTris`], `None` unless it is an interior group with MOCV parallel to its
 /// positions. Rejected faces drop at build: the set is static, so this equals the per-ray reject.
-pub fn wmo_group_footprint_tris(group_bytes: &[u8]) -> Option<FootprintTris> {
+/// The MOCV is the doorway-faded one the renderer uploads: the sampler `0x6b9a50` reads the group's
+/// `+0xf4` colours, which `0x6c43d0` fades in place on the group's first draw.
+pub fn wmo_group_footprint_tris(group_bytes: &[u8], root: &WmoRoot) -> Option<FootprintTris> {
     let Ok(ParsedWmo::Group(group)) = parse_wmo(&mut Cursor::new(group_bytes)) else {
         return None;
     };
-    if group.flags & 0x48 != 0 || group.vertex_colors.len() != group.vertex_positions.len() {
+    if group.flags & 0x48 != 0 {
         return None;
     }
+    let colors = fixed_colors(&group, group_bytes, root)?;
     let mut indices = Vec::new();
     let mut mopy_flags = Vec::new();
     let mut mopy_material = Vec::new();
@@ -132,11 +135,7 @@ pub fn wmo_group_footprint_tris(group_bytes: &[u8]) -> Option<FootprintTris> {
             .map(|v| [v.x, v.y, v.z])
             .collect(),
         indices,
-        mocv: group
-            .vertex_colors
-            .iter()
-            .map(|c| [c.r, c.g, c.b])
-            .collect(),
+        mocv: colors.iter().map(|c| [c.r, c.g, c.b]).collect(),
         mopy_flags,
         mopy_material,
     })

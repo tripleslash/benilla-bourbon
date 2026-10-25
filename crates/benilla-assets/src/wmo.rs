@@ -412,7 +412,7 @@ fn parse_group(gbytes: &[u8], root: &benilla_formats::WmoRoot) -> anyhow::Result
         camera_only_tris: indexed_tris(&dpos, &didx),
         doodad_refs: wmo_group_doodad_refs(gbytes),
         light_refs: wmo_group_light_refs(gbytes),
-        footprint: wmo_group_footprint_tris(gbytes),
+        footprint: wmo_group_footprint_tris(gbytes, root),
         liquid: wmo_group_liquid_mesh(gbytes),
     })
 }

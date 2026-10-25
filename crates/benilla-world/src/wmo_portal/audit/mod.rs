@@ -195,7 +195,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         };
         // The MLIQ surface as the asset loader stores it, for the down-ray's liquid leg.
         group_liquids[gi] = benilla_formats::wmo_group_liquid_mesh(&gbytes);
-        group_footprints[gi] = wmo_group_footprint_tris(&gbytes);
+        group_footprints[gi] = wmo_group_footprint_tris(&gbytes, &root);
         if let (Some(h), Some(nav)) = (wmo_group_header(&gbytes), group_nav.get_mut(gi)) {
             nav.flags = h.flags;
             nav.ref_start = h.portal_ref_start;
