@@ -161,7 +161,7 @@ pub(super) fn spawn_emissive_light_for(
     );
     // How far the fixture reaches around the light it houses, in world yards — the radius whose
     // geometry gets clipped out of this light's own cube, so a lantern does not project its frame
-    // over the pool it is supposed to be casting. See `ShadowLight::near`.
+    // over the pool it is supposed to be casting. See `ShadowLight::clear`.
     let scale = transform.scale.max_element().max(1e-3);
     for e in &out[before..] {
         commands.entity(*e).insert((

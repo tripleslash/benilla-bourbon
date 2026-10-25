@@ -40,6 +40,9 @@ use std::time::Duration;
 #[derive(Clone, Copy, ShaderType)]
 struct CasterView {
     clip_from_world: Mat4,
+    /// fork: a lamp cube face's fixture sphere — xyz its light, w [`ShadowLight::clear`] (0 = none,
+    /// and always 0 for the cascades). Only the `FIXTURE_CLIP` static pipelines read it.
+    clear: Vec4,
 }
 
 #[derive(Resource)]
@@ -47,6 +50,11 @@ struct GxShadowPipelines {
     view_layout: BindGroupLayoutDescriptor,
     opaque: CachedRenderPipelineId,
     cutout: CachedRenderPipelineId,
+    /// fork: the lamp atlas's static pipelines — the two above, discarding the light's own fixture
+    /// (`FIXTURE_CLIP`). A slot's static faces are drawn once and cached, so their fragment stage
+    /// costs nothing a frame.
+    atlas_opaque: CachedRenderPipelineId,
+    atlas_cutout: CachedRenderPipelineId,
     /// fork: P8b — clears one atlas tile by drawing over it (`depth_fill.wgsl`).
     fill: CachedRenderPipelineId,
     /// fork: P8b — restores a rectangle of a cascade from the static cache by drawing over it.
@@ -370,35 +378,45 @@ fn init_shadow_pipelines(
         "modern_shadow_caster_view",
         &BindGroupLayoutEntries::single(ShaderStages::VERTEX, uniform_buffer::<CasterView>(true)),
     );
-    let make = |label: &'static str, cutout: bool| RenderPipelineDescriptor {
-        label: Some(label.into()),
-        layout: vec![view_layout.clone(), pipes.cell_layout.clone()],
-        vertex: VertexState {
-            shader: shader.clone(),
-            shader_defs: vec![],
-            entry_point: Some("vertex".into()),
-            buffers: vec![vertex_layout()],
-        },
-        // Opaque casters need no fragment stage; cutout ones alpha-key their texture.
-        fragment: cutout.then(|| FragmentState {
-            shader: shader.clone(),
-            shader_defs: vec![],
-            entry_point: Some("fragment".into()),
-            targets: vec![],
-        }),
-        // Two-sided: foliage cards and thin WMO walls must cast from either face.
-        primitive: PrimitiveState {
-            cull_mode: None,
+    let make = |label: &'static str, cutout: bool, clip: bool| {
+        let mut defs: Vec<ShaderDefVal> = Vec::new();
+        if cutout {
+            defs.push("CUTOUT".into());
+        }
+        if clip {
+            defs.push("FIXTURE_CLIP".into());
+        }
+        RenderPipelineDescriptor {
+            label: Some(label.into()),
+            layout: vec![view_layout.clone(), pipes.cell_layout.clone()],
+            vertex: VertexState {
+                shader: shader.clone(),
+                shader_defs: defs.clone(),
+                entry_point: Some("vertex".into()),
+                buffers: vec![vertex_layout()],
+            },
+            // Opaque casters need no fragment stage; cutout ones alpha-key their texture, and the
+            // lamp atlas's discard its light's fixture.
+            fragment: (cutout || clip).then(|| FragmentState {
+                shader: shader.clone(),
+                shader_defs: defs,
+                entry_point: Some("fragment".into()),
+                targets: vec![],
+            }),
+            // Two-sided: foliage cards and thin WMO walls must cast from either face.
+            primitive: PrimitiveState {
+                cull_mode: None,
+                ..default()
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: CORE_3D_DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::GreaterEqual),
+                stencil: StencilState::default(),
+                bias: DepthBiasState::default(),
+            }),
             ..default()
-        },
-        depth_stencil: Some(DepthStencilState {
-            format: CORE_3D_DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(CompareFunction::GreaterEqual),
-            stencil: StencilState::default(),
-            bias: DepthBiasState::default(),
-        }),
-        ..default()
+        }
     };
     commands.insert_resource(EntityShadowPipelines {
         view_layout: view_layout.clone(),
@@ -504,8 +522,22 @@ fn init_shadow_pipelines(
         ..default()
     });
     commands.insert_resource(GxShadowPipelines {
-        opaque: pipeline_cache.queue_render_pipeline(make("modern_shadow_static", false)),
-        cutout: pipeline_cache.queue_render_pipeline(make("modern_shadow_static_cutout", true)),
+        opaque: pipeline_cache.queue_render_pipeline(make("modern_shadow_static", false, false)),
+        cutout: pipeline_cache.queue_render_pipeline(make(
+            "modern_shadow_static_cutout",
+            true,
+            false,
+        )),
+        atlas_opaque: pipeline_cache.queue_render_pipeline(make(
+            "modern_shadow_atlas_static",
+            false,
+            true,
+        )),
+        atlas_cutout: pipeline_cache.queue_render_pipeline(make(
+            "modern_shadow_atlas_static_cutout",
+            true,
+            true,
+        )),
         fill,
         restore,
         restore_layout,
@@ -709,7 +741,10 @@ fn prepare_modern_shadow(
         } else {
             Mat4::IDENTITY
         };
-        let offset = uniforms.0.push(&CasterView { clip_from_world });
+        let offset = uniforms.0.push(&CasterView {
+            clip_from_world,
+            clear: Vec4::ZERO,
+        });
         frame.offsets.push(offset);
     }
     // fork: modern lighting (FORK.md, P6) — the shadowed local lights' cube
@@ -720,14 +755,12 @@ fn prepare_modern_shadow(
         for light in &lights.shadowed {
             // A hole still gets its six offsets, so a slot's tiles are always at `slot * 6 + face`
             // however many lights are actually held — the identity the receivers' nibble depends on.
-            let (pos, near) = light.map_or((Vec3::ZERO, crate::modern::lights::CUBE_NEAR), |h| {
-                (h.light.pos, h.light.near)
-            });
+            let light = light.map_or_else(ShadowLight::default, |h| h.light);
             for face in 0..6 {
-                let clip_from_world = crate::modern::lights::cube_face_clip(pos, face, near);
-                frame
-                    .local_offsets
-                    .push(uniforms.0.push(&CasterView { clip_from_world }));
+                frame.local_offsets.push(uniforms.0.push(&CasterView {
+                    clip_from_world: light.face_clip(face),
+                    clear: light.pos.extend(light.clear),
+                }));
             }
         }
     }
@@ -1004,6 +1037,12 @@ pub(crate) fn gx_shadow_pass(
             Some((
                 pipeline_cache.get_render_pipeline(pipes.opaque)?,
                 pipeline_cache.get_render_pipeline(pipes.cutout)?,
+            ))
+        });
+        let atlas_ready = world.get_resource::<GxShadowPipelines>().and_then(|pipes| {
+            Some((
+                pipeline_cache.get_render_pipeline(pipes.atlas_opaque)?,
+                pipeline_cache.get_render_pipeline(pipes.atlas_cutout)?,
             ))
         });
 
@@ -1398,7 +1437,7 @@ pub(crate) fn gx_shadow_pass(
             frame,
             &casters,
             static_hash,
-            ready,
+            atlas_ready,
             pipeline_cache,
             meshes,
             allocator,

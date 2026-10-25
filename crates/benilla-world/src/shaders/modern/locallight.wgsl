@@ -306,7 +306,7 @@ fn local_visibility(
     light_pos: vec3<f32>,
     world_pos: vec3<f32>,
     normal: vec3<f32>,
-    // The cube's near plane FOR THIS SLOT (`ShadowLight::near`), which the caller reads from the
+    // The cube's near plane FOR THIS SLOT (`CUBE_NEAR`), which the caller reads from the
     // block's spare rows. It has to be the same number the face matrix was built with, or the
     // depth this compares is not the depth that was stored.
     near: f32,

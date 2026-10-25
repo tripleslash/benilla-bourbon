@@ -216,10 +216,8 @@ fn modern_cell_lights(
         // call, which would only have returned 1 (`locallight::local_visibility`'s first test).
         let slot = locallight::cell_slot(cell, i);
         if (!lite && slot < locallight::MAX_SHADOWED) {
-            // The slot's own near plane and cross-fade, from the block's spare rows (rows 0-2 and
-            // 3-5, four slots a row). A synthesized light's near plane is its fixture's radius, so
-            // a lantern is clipped out of its own cube instead of casting its frame across the
-            // floor. Each ROW is loaded to a value before a component is picked: indexing a vector
+            // The slot's own near plane (`CUBE_NEAR` for every cube) and cross-fade, from the block's spare
+            // rows (rows 0-2 and 3-5, four slots a row). Each ROW is loaded to a value before a component is picked: indexing a vector
             // component dynamically straight off a storage buffer is not something every backend
             // takes, and what it costs is the whole module.
             let row = modern_block.light_spare[slot / 4u];

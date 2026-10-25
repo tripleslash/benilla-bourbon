@@ -4,6 +4,9 @@
 // `wow_model.wgsl` does; CUTOUT alpha-keys the base texture at the vanilla 224/255 reference.
 struct CasterView {
     clip_from_world: mat4x4<f32>,
+    // fork: a lamp cube face's fixture sphere (xyz its light, w the radius; 0 = none). Read only by
+    // `static_gx_shadow.wgsl`'s `FIXTURE_CLIP` pipelines.
+    clear: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> caster: CasterView;
 

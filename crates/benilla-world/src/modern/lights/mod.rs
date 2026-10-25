@@ -61,15 +61,15 @@ pub const LIGHT_PARAM_BYTES: usize = 32 * 16;
 /// Everything P6 adds to the modern storage block.
 pub const BLOCK_LIGHT_BYTES: usize = LIGHT_PARAM_BYTES + CELL_ALLOC * CELL_BYTES;
 
-/// The cube faces' near plane (yd). A fixture light is a point, so this only has to clear the
-/// emitter's own geometry.
+/// The cube faces' near plane (yd), every cube's. A fixture's own geometry is cleared by a sphere
+/// ([`ShadowLight::clear`]), never by this: everything nearer is clipped, bodies and ground included.
 pub const CUBE_NEAR: f32 = 0.25;
-/// How far past its own radius a fixture's geometry is pushed out of its cube. A lantern's frame
+/// How far past its own radius a fixture's geometry is cleared out of its cube. A lantern's frame
 /// stands a little outside the glow it houses, so clipping exactly at the glow's extent still
 /// leaves the ironwork casting.
 const FIXTURE_CLEARANCE: f32 = 1.6;
 /// fork (perf): how far a grouped member's own fixture reaches past its light (yd), a torch's head
-/// and the top of its pole, for the group cube's near plane.
+/// and the top of its pole, for the group cube's fixture sphere.
 const GROUP_FIXTURE_REACH: f32 = 0.5;
 /// Shadow bias, in yards back toward the light.
 const CUBE_BIAS_YD: f32 = 0.12;
@@ -470,23 +470,20 @@ pub struct HeldSlot {
 pub struct ShadowLight {
     pub pos: Vec3,
     pub range: f32,
-    /// **The cube's near plane, per light** — and the whole reason it is per light rather than the
-    /// one [`CUBE_NEAR`] every cube used to share.
+    /// **The fixture's sphere** (yd, 0 = none): static geometry within it of [`Self::pos`] is not
+    /// drawn into this light's cube (`static_gx_shadow.wgsl`, `FIXTURE_CLIP`).
     ///
     /// A synthesized light sits INSIDE the thing that emits it: a lantern's flame is behind the
-    /// lantern's own glass and iron frame. Drawn into a cube with a 0.25yd near plane, that frame
-    /// is a caster a hand's breadth from the light, so it projects its bars over the whole pool and
-    /// takes up to `shade` of the lamp away — the floor got a cage pattern instead of a circle, and
-    /// the lamp went dark the moment it was close enough to earn a cube at all. A lamp far enough
-    /// off to be denied one stayed at full brightness, which is the "super bright at a distance,
-    /// dim up close" the player saw, and every acquire and release of a slot was that same step,
-    /// which is what made them flicker.
+    /// lantern's own glass and iron frame. Drawn into its cube, that frame is a caster a hand's
+    /// breadth from the light, so it projects its bars over the whole pool and takes up to `shade`
+    /// of the lamp away — the floor got a cage pattern instead of a circle.
     ///
-    /// Geometry nearer the light than the near plane is simply clipped, so setting this to the
-    /// fixture's own radius means the fixture is never drawn into its own cube. Walls, furniture
-    /// and everything beyond it still shadow normally. This is also what makes a shadowed lamp and
-    /// an unshadowed one look alike, which is the property the distance behaviour depends on.
-    pub near: f32,
+    /// A sphere and not the near plane, which this used to be: a near plane clips EVERYTHING that
+    /// close along the face's axis — a body's legs as casters, the ground beside it as receivers —
+    /// so a character standing by a torch cast a shadow that began yards off its feet. Every cube
+    /// is built at [`CUBE_NEAR`]; entity casters skip the sphere (their fixture is the HOST,
+    /// excluded by identity in the render world's `dynamic_casters_for`).
+    pub clear: f32,
     /// fork: **which light this is** — its entity's bits. A slot follows a light by identity, not by
     /// where it stands: a lantern on a swinging bone is somewhere new every frame, and matching on
     /// position made it lose its slot to itself each frame and redraw six faces doing so.
@@ -499,17 +496,28 @@ pub struct ShadowLight {
 
 impl ShadowLight {
     /// fork: what a slot's six faces depend on — where the cube is rendered from, how far it
-    /// reaches and its near plane. Not the fade (it ramps every frame and the faces do not change)
-    /// and not the slack (a matching tolerance, never rendered). The render world keys its cache on
-    /// this and publishes it back through [`publish_built`], so the two halves agree on what
-    /// "built" means.
+    /// reaches and its fixture sphere. Not the fade (it ramps every frame and the faces do not
+    /// change) and not the slack (a matching tolerance, never rendered). The render world keys its
+    /// cache on this and publishes it back through [`publish_built`], so the two halves agree on
+    /// what "built" means.
     pub fn map_key(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.pos.to_array().map(f32::to_bits).hash(&mut h);
         self.range.to_bits().hash(&mut h);
-        self.near.to_bits().hash(&mut h);
+        self.clear.to_bits().hash(&mut h);
         h.finish() | 1
+    }
+
+    /// The reverse-Z clip of one face of this light's cube, as every caster is drawn under it.
+    pub fn face_clip(&self, face: usize) -> Mat4 {
+        cube_face_clip(self.pos, face, CUBE_NEAR)
+    }
+
+    /// Whether static geometry at `p` is the fixture, dropped from this cube — the Rust twin of
+    /// `static_gx_shadow.wgsl`'s `FIXTURE_CLIP` discard.
+    pub fn clears(&self, p: Vec3) -> bool {
+        p.distance(self.pos) < self.clear
     }
 }
 
@@ -599,9 +607,9 @@ pub struct LightParams {
     /// `LightGrid.far`, taken from the padding that follows the struct.
     pub far: Vec4,
     pub shadow: [Vec4; MAX_SHADOWED],
-    /// The twelve per-light near planes ([`ShadowLight::near`]), four to a row — written into the
-    /// first three `spare` rows, which cost nothing: the region was already padded to
-    /// [`LIGHT_PARAM_BYTES`] to keep the GI probe offset aligned, and this only fills padding.
+    /// The twelve per-slot near planes the lookups read, four to a row, in the first three `spare`
+    /// rows. Every cube is built at [`CUBE_NEAR`] now (the fixture is a sphere,
+    /// [`ShadowLight::clear`]), so every entry holds it.
     pub slot_near: [Vec4; MAX_SHADOWED / 4],
     /// The twelve per-slot cross-fades — the next three `spare` rows, still inside the padding.
     pub slot_fade: [Vec4; MAX_SHADOWED / 4],
@@ -657,7 +665,7 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
     // `light_bin.wgsl`'s `shadow_slot` skips a zero-range slot rather than matching a light that
     // happens to stand at the world origin against it.
     let mut shadow = [Vec4::ZERO; MAX_SHADOWED];
-    let mut slot_near = [Vec4::splat(CUBE_NEAR); MAX_SHADOWED / 4];
+    let slot_near = [Vec4::splat(CUBE_NEAR); MAX_SHADOWED / 4];
     // fork: P8 — the per-slot cross-fade. 0 reads exactly as "this light has no cube", so a slot
     // ramping in or out is indistinguishable from one that was never there; the shader mixes the
     // lookup toward full visibility by it.
@@ -666,7 +674,6 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
     for (slot, held) in lights.shadowed.iter().enumerate().take(MAX_SHADOWED) {
         if let Some(held) = held {
             shadow[slot] = held.light.pos.extend(held.light.range);
-            slot_near[slot / 4][slot % 4] = held.light.near;
             slot_slack[slot / 4][slot % 4] = held.light.slack.max(MATCH_SLACK);
             slot_fade[slot / 4][slot % 4] = (held.fade
                 * shadow_distance_weight(tier, held.light.pos.distance(lights.eye)))
@@ -984,11 +991,11 @@ fn update_lights(
                     // Clear the fixture, with a margin — a card's extent is the glow, and the iron
                     // around it sits a little outside that. A group's cube clears every member's
                     // fixture too: from the centre between two torches, their poles would cast.
-                    near: fixture
-                        .map_or(CUBE_NEAR, |f| CUBE_NEAR.max(f.0 * FIXTURE_CLEARANCE))
-                        .max(group.map_or(0.0, |(_, g)| {
+                    clear: fixture.map_or(0.0, |f| f.0 * FIXTURE_CLEARANCE).max(
+                        group.map_or(0.0, |(_, g)| {
                             (g.spread + GROUP_FIXTURE_REACH) * FIXTURE_CLEARANCE
-                        })),
+                        }),
+                    ),
                     id: entity.to_bits(),
                     slack: track.reach() + MATCH_SLACK,
                 },
@@ -1434,7 +1441,7 @@ mod tests {
         ShadowLight {
             pos: Vec3::new(x, 0.0, 0.0),
             range: 20.0,
-            near: CUBE_NEAR,
+            clear: 0.0,
             id: 1000 + x as u64,
             slack: MATCH_SLACK,
         }
@@ -1705,7 +1712,7 @@ mod tests {
         let outside = ShadowLight {
             pos: Vec3::new(0.0, 0.0, -(d_admit * 1.05)),
             range,
-            near: CUBE_NEAR,
+            clear: 0.0,
             id: 1,
             slack: MATCH_SLACK,
         };
@@ -1834,31 +1841,56 @@ mod tests {
     }
 
     /// GOLDEN — **a fixture may not shadow its own light.** A synthesized light sits inside the
-    /// thing that emits it, so with one shared near plane the lantern's own frame was a caster a
-    /// hand's breadth away, projecting its bars across the pool and taking most of the lamp with
-    /// it. That is what made a lamp dim as soon as it was close enough to earn a cube while a
-    /// distant one stayed at full brightness — and, at every acquire and release, flicker.
-    ///
-    /// Geometry nearer than the near plane is clipped, so the fixture's radius IS the fix.
+    /// thing that emits it, so the lantern's own frame is a caster a hand's breadth away,
+    /// projecting its bars across the pool and taking most of the lamp with it. The fixture's
+    /// sphere ([`ShadowLight::clear`]) drops that geometry from the cube's static faces.
     #[test]
-    fn a_fixture_is_clipped_out_of_its_own_cube() {
-        let bare = CUBE_NEAR;
-        let housed = CUBE_NEAR.max(0.4 * FIXTURE_CLEARANCE);
+    fn a_fixture_is_cleared_out_of_its_own_cube() {
+        let lantern = ShadowLight {
+            clear: 0.4 * FIXTURE_CLEARANCE,
+            ..lamp(0.0)
+        };
         assert!(
-            housed > 0.4,
-            "the near plane must clear the fixture it houses, not sit inside it: {housed}"
+            lantern.clears(Vec3::new(0.4, 0.0, 0.0)),
+            "the frame at the glow's own radius is cleared"
         );
-        assert_eq!(bare, CUBE_NEAR, "an authored light keeps P6's near plane");
-
-        // And the matrix actually built for the cube uses it: a point at the fixture's own radius
-        // falls OUTSIDE the clip, while the floor the lamp lights stays inside.
-        let clip = cube_face_clip(Vec3::ZERO, 0, housed);
-        let on_the_frame = clip.project_point3(Vec3::new(0.4, 0.0, 0.0));
-        let on_the_floor = clip.project_point3(Vec3::new(6.0, 0.0, 0.0));
-        assert!(on_the_frame.z > 1.0, "the frame is clipped: {on_the_frame}");
         assert!(
-            (0.0..=1.0).contains(&on_the_floor.z),
-            "the floor still casts: {on_the_floor}"
+            !lantern.clears(Vec3::new(6.0, 0.0, 0.0)),
+            "the floor the lamp lights still casts"
+        );
+        assert!(
+            !lamp(0.0).clears(Vec3::new(0.1, 0.0, 0.0)),
+            "an authored light clears nothing"
+        );
+    }
+
+    /// GOLDEN — **a body beside a lamp casts from its feet.** The fixture used to be cleared by the
+    /// cube's near plane, which clipped everything that near along a face's axis: a character
+    /// standing by a torch lost its legs from the cube (and the ground beside it read as lit), so
+    /// its shadow began yards off its feet. Every cube is built at [`CUBE_NEAR`] whatever its
+    /// fixture, and the fixture's sphere touches static geometry only.
+    #[test]
+    fn a_body_beside_a_fixture_light_still_casts() {
+        let torch = ShadowLight {
+            pos: Vec3::new(0.0, 2.5, 0.0),
+            clear: 2.0 * FIXTURE_CLEARANCE,
+            ..lamp(0.0)
+        };
+        // A foot on the ground 1.5 yd out from the pole, seen through the downward face.
+        let foot = Vec3::new(1.5, 0.0, 0.0);
+        let (face, _, major) = cube_face_of(foot - torch.pos);
+        assert!(
+            major < torch.clear,
+            "the foot sits inside the old near plane: {major}"
+        );
+        let p = torch.face_clip(face).project_point3(foot);
+        assert!(
+            (0.0..=1.0).contains(&p.z) && p.x.abs() <= 1.0 && p.y.abs() <= 1.0,
+            "the foot is inside its face's clip: {p}"
+        );
+        assert!(
+            (p.z - CUBE_NEAR / major).abs() < 1e-5,
+            "and stores the depth the lookup compares: {p}"
         );
     }
 
