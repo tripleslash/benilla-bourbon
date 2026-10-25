@@ -33,6 +33,7 @@ mod mix_tap;
 mod mixer;
 mod money;
 mod mount;
+mod movie;
 mod net;
 // Crate-visible for the dev stall watchdog, which asks `output::device_open`.
 //
@@ -72,6 +73,7 @@ pub(crate) use greeting::NpcGreetingRequest;
 pub(crate) use kit::SoundKits;
 pub(crate) use message::MessageSounds;
 pub(crate) use mixer::Mixer;
+pub(crate) use movie::{MovieAudioReports, MovieAudioRequest};
 #[cfg(test)]
 pub(crate) use spell::HoldLoops;
 pub(crate) use ui::{AutoEquipSound, LootPickupSound};
@@ -257,6 +259,8 @@ pub(crate) struct SoundOutput {
     pub(crate) zone_streams: usize,
     pub(crate) glue_streams: usize,
     pub(crate) cinematic_streams: usize,
+    /// The movie frame's audio ([`movie`]).
+    pub(crate) movie_streams: usize,
     /// One-shots that lost their slot to a louder newcomer, and plays refused because nothing
     /// live was quieter.
     pub(crate) voices_stolen: u64,
@@ -268,7 +272,11 @@ pub(crate) struct SoundOutput {
 impl SoundOutput {
     /// Everything the device is mixing, the number [`kit::SOFTWARE_CHANNELS`] bounds.
     pub(crate) fn live_voices(&self) -> usize {
-        self.channels.len() + self.zone_streams + self.glue_streams + self.cinematic_streams
+        self.channels.len()
+            + self.zone_streams
+            + self.glue_streams
+            + self.cinematic_streams
+            + self.movie_streams
     }
 }
 
@@ -403,6 +411,7 @@ impl Plugin for SoundPlugin {
             zone_streams: 0,
             glue_streams: 0,
             cinematic_streams: 0,
+            movie_streams: 0,
             voices_stolen: 0,
             voices_denied: 0,
             copies_dropped: 0,
@@ -449,6 +458,7 @@ impl Plugin for SoundPlugin {
         vocal::plugin(app);
         message::plugin(app);
         glue::plugin(app);
+        movie::plugin(app);
         money::plugin(app);
         reverb::plugin(app);
         interior::plugin(app);

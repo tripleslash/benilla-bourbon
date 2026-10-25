@@ -854,9 +854,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "farclip default 1000 yd; 100 switches most visible relief to level 2",
     )
     .checked(benilla_ui::script::check_lod_dist),
+    // `movie` (`0x402bf5`: name `0x82e74c`, "1", flags 0, record `[0x8826e0]`), Show movie on
+    // startup: the startup puts the intro movies up while it is 1, setting it to "0"
+    // (`0x402b3b`-`0x402b65`, `ui_script::glue::startup_screen`).
+    same("movie", "1"),
     // `movieSubtitle` (`0x402c18`: name `0x82e9d8`, "0", flags 0, record `[0x882640]`), Cinematic
-    // Subtitles: the pre-rendered movies' subtitles, read by the glue's `GetMovieSubtitles`
-    // (`0x46dbc0`). No effect here: benilla plays no pre-rendered movie.
+    // Subtitles: the pre-rendered movies' subtitles, which the glue's `GetMovieSubtitles`
+    // (`0x46dbc0`) hands the movie frame's `EnableSubtitles` (`MovieFrame.lua:35`).
     same("movieSubtitle", "0"),
     // `useWeatherShaders` (`0x67b81d`: name `0x868598`, "1", flags 0, no callback, record
     // `[0xc7b588]`), Weather Shaders: read in each precipitation effect's constructor (`0x67480f`,

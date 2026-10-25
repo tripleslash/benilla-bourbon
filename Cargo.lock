@@ -600,6 +600,7 @@ dependencies = [
  "avian3d",
  "benilla-assets",
  "benilla-formats",
+ "benilla-movie",
  "benilla-mpq",
  "benilla-pack",
  "benilla-protocol",
@@ -813,6 +814,7 @@ name = "benilla-ui"
 version = "0.2.0"
 dependencies = [
  "benilla-mlua",
+ "benilla-movie",
  "js-sys",
  "libc",
  "roxmltree",
