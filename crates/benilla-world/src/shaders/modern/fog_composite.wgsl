@@ -67,7 +67,7 @@ fn point_halos(f: froxelfog::FroxelFog, eye: vec3<f32>, ray: vec3<f32>, seg: f32
         if (share <= 0.0) {
             continue;
         }
-        let halo_yd = froxelfog::point_halo_yd(room);
+        let halo_yd = froxelfog::point_halo_yd(room, froxelfog::lamp_sigma(clear_air, pos_range.xyz, room, 0.0));
         let reach = min(HALO_REACH * halo_yd, pos_range.w);
         if (miss2 >= reach * reach) {
             continue;

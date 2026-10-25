@@ -230,9 +230,26 @@ fn point_phase(mu: f32) -> f32 {
     return mix(1.0, hg, POINT_FORWARD);
 }
 
-// The halo's e-folding distance, its far share and its peak gain, by the room weight at the light.
-fn point_halo_yd(room: f32) -> f32 {
-    return mix(POINT_HALO_YD, ROOM_POINT_HALO_YD, room);
+// fork: **a thick air does not swell a halo without end.** The halo's scattering grows with the air
+// the lamps scatter off (`lamp_sigma`), and a brighter halo shows more of its tail: on a foggy
+// night in Darkshire each lamp stood in a glow yards wide. From `HAZY_HALO_FROM` per yard (about
+// twice a clear night's) to `HAZY_HALO_FULL` (about six times) the e-folding distance falls to
+// `HAZY_HALO_SHARE` of itself; under the first, a halo is unchanged.
+const HAZY_HALO_FROM: f32 = 0.008;
+const HAZY_HALO_FULL: f32 = 0.024;
+const HAZY_HALO_SHARE: f32 = 0.75;
+
+// The extinction the lamps scatter off at `p` (1/yd), from the clear-weather air `halo_fog(f)`.
+fn lamp_sigma(clear_air: FroxelFog, p: vec3<f32>, room: f32, cover: f32) -> f32 {
+    let ext = extinction(clear_air, p, LAMP_EYE_DEPTH, room, 1.0, cover);
+    return (ext.x + ext.y + ext.z) * LAMP_EYE_GAIN;
+}
+
+// The halo's e-folding distance, its far share and its peak gain, by the room weight at the light;
+// the distance also by the lamps' air there (`lamp_sigma`).
+fn point_halo_yd(room: f32, sigma: f32) -> f32 {
+    let hazy = mix(1.0, HAZY_HALO_SHARE, smoothstep(HAZY_HALO_FROM, HAZY_HALO_FULL, sigma));
+    return mix(POINT_HALO_YD, ROOM_POINT_HALO_YD, room) * hazy;
 }
 
 fn point_far_share(room: f32) -> f32 {

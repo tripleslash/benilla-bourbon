@@ -171,8 +171,9 @@ struct PointScatter {
 
 // One table light's in-scatter at a froxel (`froxelfog`'s point law). `to_eye` is the unit direction
 // from the froxel to the camera. A halo light (`froxelfog::is_halo_light`) scatters only its far
-// share here: the halo pass integrates its halo per pixel.
-fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_count: u32) -> PointScatter {
+// share here: the halo pass integrates its halo per pixel. `lamp_sigma` is the froxel's
+// `froxelfog::lamp_sigma`.
+fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_count: u32, lamp_sigma: f32) -> PointScatter {
     let pos_range = light_table.points[2u * i];
     let dl = length(pos_range.xyz - p);
     if (dl >= pos_range.w) {
@@ -186,7 +187,7 @@ fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_cou
         return PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
     }
     let excess = select(
-        (froxelfog::point_halo_gain(room) - far) * exp(-dl / froxelfog::point_halo_yd(room)),
+        (froxelfog::point_halo_gain(room) - far) * exp(-dl / froxelfog::point_halo_yd(room, lamp_sigma)),
         0.0,
         froxelfog::is_halo_light(i, halo_count, rgb_class.w) || !froxelfog::has_halo(rgb_class.w),
     );
@@ -197,11 +198,11 @@ fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_cou
 }
 
 // Every light one grid cell names, at a froxel.
-fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_count: u32) -> PointScatter {
+fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_count: u32, lamp_sigma: f32) -> PointScatter {
     var sum = PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
     let count = locallight::cell_count(cell);
     for (var i = 0u; i < count; i = i + 1u) {
-        let one = point_in_scatter(locallight::cell_light(cell, i), p, to_eye, room, halo_count);
+        let one = point_in_scatter(locallight::cell_light(cell, i), p, to_eye, room, halo_count, lamp_sigma);
         sum.medium = sum.medium + one.medium;
         sum.lamp = sum.lamp + one.lamp;
     }
@@ -261,8 +262,8 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // fork: the lamps scatter off the clear-weather air (`froxelfog::halo_fog`), so rain does not
     // swell their glow, and as it is beside the eye (`froxelfog::LAMP_EYE_DEPTH`), so distance does
     // not either; the storm's own medium still dims it on the way to the eye.
-    let lamp_ext = froxelfog::extinction(froxelfog::halo_fog(f), p, froxelfog::LAMP_EYE_DEPTH, room, 1.0, cover);
-    let sigma_lamps = (lamp_ext.x + lamp_ext.y + lamp_ext.z) * froxelfog::LAMP_EYE_GAIN + sigma_bank + sigma_sea;
+    let lamp_sigma = froxelfog::lamp_sigma(froxelfog::halo_fog(f), p, room, cover);
+    let sigma_lamps = lamp_sigma + sigma_bank + sigma_sea;
 
     // In-scatter.
     let ray = p - f.camera.xyz;
@@ -338,11 +339,11 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         if (pair.w > 0u) {
             let far_w = bitcast<f32>(pair.z);
             if (far_w < 1.0) {
-                let near = cell_in_scatter(modern_block.light_cells[pair.x], p, to_eye, room, halo_count);
+                let near = cell_in_scatter(modern_block.light_cells[pair.x], p, to_eye, room, halo_count, lamp_sigma);
                 points = PointScatter(near.medium * (1.0 - far_w), near.lamp * (1.0 - far_w));
             }
             if (far_w > 0.0) {
-                let far = cell_in_scatter(modern_block.light_cells[pair.y], p, to_eye, room, halo_count);
+                let far = cell_in_scatter(modern_block.light_cells[pair.y], p, to_eye, room, halo_count, lamp_sigma);
                 points.medium = points.medium + far.medium * far_w;
                 points.lamp = points.lamp + far.lamp * far_w;
             }
@@ -350,7 +351,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         let count = min(u32(f.screen.w), u32(light_table.rows[20].x));
         for (var i = 0u; i < count; i = i + 1u) {
-            let one = point_in_scatter(i, p, to_eye, room, halo_count);
+            let one = point_in_scatter(i, p, to_eye, room, halo_count, lamp_sigma);
             points.medium = points.medium + one.medium;
             points.lamp = points.lamp + one.lamp;
         }
