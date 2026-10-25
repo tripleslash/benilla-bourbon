@@ -958,7 +958,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "the fork's own — the modern model's quality tier",
     ),
     // `autoExposure` — the modern model's auto-exposure: a dark picture (night, a dark zone, deep
-    // shade), metered off the screen, is lifted toward visible, at most ~2.6 stops. 0 holds the exposure fixed. Applies to the
+    // shade), metered off the screen, is lifted toward visible, at most 3 stops. 0 holds the exposure fixed. Applies to the
     // next frame; a classic frame has no exposure and ignores it.
     ours(
         "autoExposure",
