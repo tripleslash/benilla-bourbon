@@ -58,9 +58,13 @@ struct VoxelView {
     info: Vec4,
 }
 
+/// `terrain_shadow.wgsl`'s `CasterView`, which the heightfield draws with: a binding smaller than
+/// the shader's struct fails the pipeline, and the heightfield is never drawn.
 #[derive(Clone, Copy, ShaderType)]
 struct HeightView {
     clip_from_world: Mat4,
+    /// The lamp cubes' fixture sphere; none here.
+    clear: Vec4,
 }
 
 #[derive(Resource)]
@@ -780,7 +784,10 @@ fn prepare_gi_voxels(
     }
     if key != 0 && key != state.height_key {
         heights.0.clear();
-        state.height_offset = heights.0.push(&HeightView { clip_from_world });
+        state.height_offset = heights.0.push(&HeightView {
+            clip_from_world,
+            clear: Vec4::ZERO,
+        });
         heights.0.write_buffer(&device, &queue);
         if let Some(binding) = heights.0.binding() {
             state.height_bind = Some(device.create_bind_group(
@@ -1089,6 +1096,24 @@ mod tests {
             let mid = clip.project_point3(0.5 * (lo + hi));
             assert!(mid.x.abs() < 1e-4 && mid.y.abs() < 1e-4, "{axis}: {mid}");
         }
+    }
+
+    /// The heightfield's view binds the whole of `terrain_shadow.wgsl`'s `CasterView`: a smaller
+    /// binding fails the pipeline, the heightfield goes undrawn and the ground banks lose their
+    /// terrain.
+    #[test]
+    fn the_height_view_binds_the_shaders_whole_caster_view() {
+        let source = include_str!("../../shaders/modern/terrain_shadow.wgsl");
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(module.to_ctx()).unwrap();
+        let (ty, _) = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("CasterView"))
+            .expect("the shader's view struct");
+        assert_eq!(u64::from(layouter[ty].size), HeightView::min_size().get());
     }
 
     #[test]
