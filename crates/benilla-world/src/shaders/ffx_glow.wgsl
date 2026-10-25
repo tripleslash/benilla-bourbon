@@ -154,7 +154,13 @@ fn combine_body(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
     var bg = blur_raw;
     if (ffx.wave.z > 0.5) {
         let exposure = ffx.wave.w;
-        let blur_hdr = blur_raw * exposure;
+        // The death pass reads a byte framebuffer (`0x6cdf20`): a ghost's blur stops at white, so
+        // it carries no surplus into the bloom below or the `blur²` glow term.
+        let blur_hdr = select(
+            blur_raw * exposure,
+            min(blur_raw * exposure, vec3<f32>(1.0)),
+            ffx.lane.y > 0.0,
+        );
         let bloom = max(blur_hdr - vec3<f32>(1.0), vec3<f32>(0.0)) * MODERN_BLOOM;
         sg = colorspace::linear_to_srgb(modern_tonemap(max(scene.rgb, vec3<f32>(0.0)) * exposure + bloom));
         if (ffx.grade.x > 0.0) {
