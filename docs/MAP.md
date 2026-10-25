@@ -571,6 +571,7 @@
 - `WOW_STOCK_UI` — benilla-app/src/ui_script/manifest.rs
 - `WOW_STREAM_TRACE` — benilla-app/src/perf/mod.rs
 - `WOW_SUPERSCALE` — benilla-app/src/lib.rs, benilla-world/src/perf_probe.rs
+- `WOW_SYNC_DUMP` — benilla-app/src/game_plugins.rs
 - `WOW_SYSTEM_PROFILE_SPIKE` — benilla-app/src/lib.rs, benilla-world/src/system_profile.rs
 - `WOW_SYSTEM_PROFILE_TOP` — benilla-app/src/lib.rs, benilla-world/src/system_profile.rs
 - `WOW_TABHOVER` — benilla-app/src/capture/fixtures.rs

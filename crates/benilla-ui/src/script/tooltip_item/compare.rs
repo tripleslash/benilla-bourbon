@@ -26,10 +26,7 @@ fn compare_against_worn(
             .expect("model app_data");
         let mut hit = None;
         for &slot in equip_slots_for(offered.inventory_type) {
-            let Some(worn) = model
-                .inv_slot("player", slot as usize)
-                .filter(|s| s.item_id != 0)
-            else {
+            let Some(worn) = model.own_inv_view(slot as usize).filter(|s| s.item_id != 0) else {
                 continue; // an empty slot is not counted
             };
             let same_class = model

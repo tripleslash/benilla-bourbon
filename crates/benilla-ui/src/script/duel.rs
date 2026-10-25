@@ -121,7 +121,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua
                     .app_data_ref::<crate::script::ModelCell>()
                     .expect("model app_data");
-                model.unit_guids.guid_of(&token)?.unwrap_or(0)
+                crate::script::unit::guid_of(lua, &model, &token)?.unwrap_or(0)
             };
             if guid != 0 && protected::gate(lua, Tag::CAST) {
                 submit(lua, DuelRequest::StartByGuid(guid))

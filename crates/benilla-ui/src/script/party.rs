@@ -638,10 +638,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua
                     .app_data_ref::<crate::script::ModelCell>()
                     .expect("model app_data");
-                model
-                    .unit("player")
-                    .and_then(|u| u.name.as_deref())
-                    .is_some_and(|own| own.eq_ignore_ascii_case(&name))
+                crate::script::unit::view(lua, &model, "player").is_some_and(|u| {
+                    u.name
+                        .as_deref()
+                        .is_some_and(|own| own.eq_ignore_ascii_case(&name))
+                })
             };
             if ours {
                 return display_error(lua, "ERR_INVITE_SELF");
@@ -682,7 +683,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     let model = lua
                         .app_data_ref::<crate::script::ModelCell>()
                         .expect("model app_data");
-                    let guid = model.unit_guids.guid_of(&token)?.unwrap_or(0);
+                    let guid = crate::script::unit::guid_of(lua, &model, &token)?.unwrap_or(0);
                     (model.unit_guids.player, guid)
                 };
                 if player != 0 && guid != 0 {
@@ -787,7 +788,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua
                     .app_data_ref::<crate::script::ModelCell>()
                     .expect("model app_data");
-                model.unit_guids.guid_of(&unit)?.unwrap_or(0)
+                crate::script::unit::guid_of(lua, &model, &unit)?.unwrap_or(0)
             };
             if guid != 0 {
                 call(lua, PartyRequest::SetRaidTarget { guid, index })?;
@@ -807,7 +808,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
-            let me = model.unit("player").map_or(0, |u| u.guid);
+            let me = crate::script::unit::view(lua, &model, "player").map_or(0, |u| u.guid);
             let officer = me != 0 && model.party.raid.iter().any(|m| m.guid == me && m.rank > 0);
             Ok(if officer {
                 Value::Integer(1)

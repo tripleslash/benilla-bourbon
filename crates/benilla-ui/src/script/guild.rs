@@ -360,7 +360,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
-            let Some(state) = unit.as_deref().and_then(|u| model.unit(u)) else {
+            let Some(state) = unit
+                .as_deref()
+                .and_then(|u| crate::script::unit::view(lua, &model, u))
+            else {
                 return Ok((Value::Nil, Value::Nil, Value::Integer(0)));
             };
             let Some(guild) = state.guild.as_ref() else {

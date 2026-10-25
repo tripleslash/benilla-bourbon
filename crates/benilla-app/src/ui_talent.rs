@@ -35,7 +35,8 @@ pub(crate) struct UiTalentPlugin;
 
 impl Plugin for UiTalentPlugin {
     fn build(&self, app: &mut App) {
-        // Feed before the input pass, so an open this frame sees a populated window.
+        // Feed after the packets and before the tick, so an open this frame sees a populated
+        // window.
         app.add_data_loaders(load_talents)
             .add_systems(Update, feed_talents.in_set(UnitFeed));
     }

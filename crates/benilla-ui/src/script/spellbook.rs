@@ -685,7 +685,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         on_self = true;
                         None
                     }
-                    Some(token) => model.unit_guids.guid_of(&token).ok().flatten(),
+                    Some(token) => crate::script::unit::guid_of(lua, &model, &token)
+                        .ok()
+                        .flatten(),
                     None => None,
                 };
                 let found = by_name::resolve_named(&model.spellbook, &model.pet_book, &name);
@@ -772,9 +774,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
-            let can = model
-                .unit_guids
-                .guid_of(&token)?
+            let can = crate::script::unit::guid_of(lua, &model, &token)?
                 .is_some_and(|guid| model.spell_targetable_units.contains(&guid));
             Ok(flag(can))
         })?,

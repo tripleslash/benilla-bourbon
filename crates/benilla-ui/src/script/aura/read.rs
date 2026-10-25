@@ -91,7 +91,7 @@ pub(crate) fn aura_unit(lua: &Lua, token: &str) -> mlua::Result<Option<u64>> {
     let model = lua
         .app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data");
-    model.unit_guids.guid_of(token)
+    crate::script::unit::guid_of(lua, &model, token)
 }
 
 /// `f` over the aura list of the unit held under `guid`, `None` for nobody and for a unit with
