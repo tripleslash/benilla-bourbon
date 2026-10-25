@@ -233,6 +233,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("world_map::CurrentMap", "record"),
     ("world_map::MapChange", "record"),
     ("world_plugins::WorldPlugins", "record"),
+    ("world_point::AreaUnderfoot", "wall"),
     ("world_point::Subject", "record"),
     ("world_point::TerrainHeights", "wall"),
     ("world_point::WorldPoint", "record"),
