@@ -30,6 +30,8 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("MouseMotion", Swallowed),
     ("MouseWheel", Swallowed),
     ("CursorMoved", Swallowed),
+    // The stream the input records are read from, in the window's order.
+    ("WindowEvent", Swallowed),
     ("AccumulatedMouseMotion", Swallowed),
     ("AccumulatedMouseScroll", Swallowed),
     // The pointer position is a field, not a message; the cover blanks it.
@@ -98,6 +100,7 @@ const VERDICTS: &[(&str, Verdict)] = &[
     // Bevy 0.19's `MouseWheel::phase`: a field of a swallowed event, named where one is built.
     ("TouchPhase", Plumbing),
     ("NativeKey", Plumbing),
+    ("NativeKeyCode", Plumbing),
     ("ExitCondition", Plumbing),
     // Bevy 0.19's window-exit set, which `shutdown.rs` orders `OnAppExit` after: a set name.
     ("ExitSystems", Plumbing),
