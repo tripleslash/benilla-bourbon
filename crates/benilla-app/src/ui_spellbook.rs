@@ -60,8 +60,9 @@ impl Plugin for UiSpellbookPlugin {
             .add_data_loaders(load_skill_lines)
             .add_systems(
                 Update,
-                // The feed precedes `CooldownEvents`, whose `SPELL_UPDATE_COOLDOWN` makes the book
-                // re-read its cooldowns. A click's cast is a script call (`cast_spell`).
+                // The feed precedes `CooldownEvents`, as every cooldown push does; the cooldown
+                // lane's `SPELL_UPDATE_COOLDOWN`, which makes the book re-read its cooldowns, fires
+                // after every feed. A click's cast is a script call (`cast_spell`).
                 feed_spellbook
                     .in_set(UnitFeed)
                     .in_set(BookFeed)
