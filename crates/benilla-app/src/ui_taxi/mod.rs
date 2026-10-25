@@ -355,9 +355,10 @@ mod tests {
     use benilla_protocol::field::FIELD_UNIT_FLAGS;
     use benilla_protocol::ObjectFields;
 
-    /// `1` with the bit, `nil` without it; the feed reads nothing about server splines.
+    /// The feed pushes the ride with the bit and clears it without; it reads nothing about server
+    /// splines.
     #[test]
-    fn unit_on_taxi_reads_the_taxi_flight_flag() {
+    fn the_feed_pushes_the_taxi_flight_flag() {
         let mut app = App::new();
         app.add_systems(Update, feed_on_taxi);
         app.insert_non_send(UiScript::new().unwrap());
@@ -370,10 +371,7 @@ mod tests {
             .id();
         let on_taxi = |app: &mut App| -> bool {
             app.update();
-            let s = app.world_mut().non_send_mut::<UiScript>();
-            s.eval::<Option<i64>>(r#"return UnitOnTaxi("player")"#)
-                .unwrap()
-                .is_some()
+            app.world().non_send::<UiScript>().on_taxi()
         };
         assert!(!on_taxi(&mut app), "no TAXI_FLIGHT bit: nil");
 

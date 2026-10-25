@@ -134,8 +134,12 @@ disjoint::disjoint_set! {
         /// The console's commands, against what they read and write, and the getters' lookups.
         console: crate::console::ConsoleSteps<'static, 'static>,
         asks: engine::RecordAsks<'static>,
-        /// The unit objects the getters read as they run.
+        /// The unit objects, the items, the stats and the auras the getters read as they run; the
+        /// auras' absent in a harness without the relations' inputs.
         units: UnitLive<'static, 'static>,
+        items_live: crate::ui_items::live::ItemLive<'static, 'static>,
+        stats_live: StatsLive<'static, 'static>,
+        auras_live: Option<crate::ui_aura::AuraLive<'static, 'static>>,
     }
 }
 
@@ -165,6 +169,82 @@ impl UnitLive<'_, '_> {
         };
         read(&crate::ui_unit::StoreObject(store));
         true
+    }
+}
+
+/// The unit objects the stat getters and the active player's getters read off as they run, as
+/// the reference's read the object they resolve (`UnitStat`, `0x518600`) and the active player's
+/// fields (`GetMoney`, `0x518160`): each store as of the drain's place, so a listener reads its
+/// own packet's, and the active player's worn weapons' records, read without asking.
+#[derive(SystemParam)]
+pub(crate) struct StatsLive<'w, 's> {
+    objects: crate::net::Objects<'w, 's>,
+    stores: crate::ui_unit::views::ViewStores<'w, 's>,
+    items: Res<'w, crate::items::Items>,
+}
+
+impl StatsLive<'_, '_> {
+    /// Hand `read` the object held under `guid` and its stats, as of here, the active player's
+    /// with its weapons; whether one was held.
+    fn read(
+        &self,
+        guid: u64,
+        read: &mut dyn FnMut(
+            &dyn benilla_ui::script::UnitObjectRead,
+            &dyn benilla_ui::script::CombatRead,
+        ),
+    ) -> bool {
+        let Some(entity) = self.objects.entity(guid) else {
+            return false;
+        };
+        let Ok(store) = self.stores.get(entity) else {
+            return false;
+        };
+        let entry = |guid| self.item_entry(guid);
+        let stats = if self.objects.player() == Some(entity) {
+            crate::ui_char::StatsObject::player(
+                store,
+                crate::ui_char::Worn::new(store, &entry, &self.items),
+            )
+        } else {
+            crate::ui_char::StatsObject::unit(store)
+        };
+        read(&crate::ui_unit::StoreObject(store), &stats);
+        true
+    }
+
+    /// An item's entry as of here, a worn weapon a later packet destroys included.
+    fn item_entry(&self, guid: u64) -> Option<u32> {
+        self.stores
+            .by_guid(guid, self.objects.store(guid))?
+            .0
+            .object_entry()
+    }
+
+    /// The active player's store as of here, `None` while none is held.
+    fn player(&self) -> Option<&crate::net::ObjectStore> {
+        self.objects.player().and_then(|e| self.stores.get(e).ok())
+    }
+
+    /// Hand `read` the active player's stats, as of here, `None` while none is held.
+    fn read_own(&self, read: &mut dyn FnMut(Option<&dyn benilla_ui::script::CombatRead>)) {
+        let Some(store) = self.player() else {
+            return read(None);
+        };
+        let entry = |guid| self.item_entry(guid);
+        read(Some(&crate::ui_char::StatsObject::player(
+            store,
+            crate::ui_char::Worn::new(store, &entry, &self.items),
+        )));
+    }
+
+    /// Hand `read` the active player's own fields as of here, [`benilla_ui::script::NoPlayer`]'s
+    /// while none is held.
+    fn read_self(&self, read: &mut dyn FnMut(&dyn benilla_ui::script::SelfRead)) {
+        match self.player() {
+            Some(store) => read(&crate::ui_unit::StoreObject(store)),
+            None => read(&benilla_ui::script::NoPlayer),
+        }
     }
 }
 
@@ -550,12 +630,59 @@ impl ScriptCallHost<'_, '_> {
 }
 
 impl CallHost for ScriptCallHost<'_, '_> {
+    fn read_item(
+        &mut self,
+        key: benilla_ui::script::ItemKey,
+        read: &mut dyn FnMut(&dyn benilla_ui::script::ItemRead),
+    ) -> bool {
+        self.appliers.items_live().read(key, read)
+    }
+
+    fn player_name(&mut self, guid: u64) -> Option<String> {
+        self.appliers.asks().player_name(guid)
+    }
+
     fn read_unit_object(
         &mut self,
         guid: u64,
         read: &mut dyn FnMut(&dyn benilla_ui::script::UnitObjectRead),
     ) -> bool {
         self.appliers.units().read(guid, read)
+    }
+
+    fn read_unit_stats(
+        &mut self,
+        guid: u64,
+        read: &mut dyn FnMut(
+            &dyn benilla_ui::script::UnitObjectRead,
+            &dyn benilla_ui::script::CombatRead,
+        ),
+    ) -> bool {
+        self.appliers.stats_live().read(guid, read)
+    }
+
+    fn read_own_stats(
+        &mut self,
+        read: &mut dyn FnMut(Option<&dyn benilla_ui::script::CombatRead>),
+    ) -> bool {
+        self.appliers.stats_live().read_own(read);
+        true
+    }
+
+    fn read_self(&mut self, read: &mut dyn FnMut(&dyn benilla_ui::script::SelfRead)) -> bool {
+        self.appliers.stats_live().read_self(read);
+        true
+    }
+
+    fn read_unit_auras(
+        &mut self,
+        guid: u64,
+        read: &mut dyn FnMut(Option<&dyn benilla_ui::script::AuraListRead>),
+    ) -> bool {
+        match self.appliers.auras_live() {
+            Some(auras) => auras.read(guid, read),
+            None => false,
+        }
     }
 
     fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
@@ -793,6 +920,9 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::Nameplates(write) => appliers.plates().apply(write),
             ScriptCall::Follow(request) => self.follow(script, &mut at.mark, request),
             ScriptCall::Console(line) => appliers.console().run(&engine::VmCvars(script), &line),
+            ScriptCall::RecordAsk(benilla_ui::script::RecordAsk::AuctionName { guid, list }) => {
+                appliers.auction().wait_for_name(guid, list);
+            }
             ScriptCall::RecordAsk(ask) => appliers.asks().apply(script, ask),
         }
         self.settle_selection(script, &mut at, owed);

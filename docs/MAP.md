@@ -17,6 +17,7 @@
 - **benilla-lua** (no Bevy) — The Lua interpreter benilla's script host runs: 5.1.5 with the 1.12.1 client's grammar, its state as plain Rust data
 - **benilla-m2** (no Bevy) — M2 (MD20) model reader for WoW 1.12.1 (build 5875)
 - **benilla-mlua** (no Bevy) — The slice of mlua's API benilla uses, over benilla-lua
+- **benilla-movie** (no Bevy) — The 1.12.1 intro movies: the AVI reader and an MPEG-4 Part 2 Simple-profile decoder
 - **benilla-mpq** (no Bevy) — Read-only MPQ archive reader for WoW 1.12.1 (build 5875)
 - **benilla-pack** (no Bevy) — The BENPACK container — a range-optional, streaming-friendly repackaging of the 1.12.1 MPQ chain for static hosting
 - **benilla-packer** (no Bevy) — benilla-pack — the one-time repackaging of a WoW 1.12.1 install into a BENPACK container for static hosting
@@ -117,6 +118,7 @@
 - **benilla-lua** (lib.rs): api cfmt compile heap lex lib_base lib_math lib_string lib_table number parse pools proto reload table value vm 
 - **benilla-m2** (lib.rs): error model skin tests track 
 - **benilla-mlua** (lib.rs): conv error 
+- **benilla-movie** (lib.rs): avi bits color decoder headers idct scan vlc 
 - **benilla-mpq** (lib.rs): crypto 
 - **benilla-pack** (lib.rs): find write 
 - **benilla-protocol** (lib.rs): auth events guid messages transport wire world 
@@ -451,6 +453,7 @@
 - `WOW_PICK_AT` — benilla-app/src/capture/pick_probe.rs
 - `WOW_PICK_COUNT` — benilla-app/src/capture/pick_probe.rs
 - `WOW_PICK_EVERY` — benilla-app/src/capture/pick_probe.rs
+- `WOW_PIN` — benilla-app/src/run_mode.rs
 - `WOW_PIN_ASPECT` — benilla-world/src/wmo_portal/audit/pin.rs
 - `WOW_PIN_COL` — benilla-world/src/wmo_portal/audit/pin.rs
 - `WOW_PIN_EYE` — benilla-world/src/wmo_portal/audit/pin.rs
@@ -460,6 +463,7 @@
 - `WOW_PIN_MAP` — benilla-world/src/wmo_portal/audit/pin.rs
 - `WOW_PIN_SITE` — benilla-world/src/wmo_portal/audit/pin.rs
 - `WOW_PIN_TILE` — benilla-world/src/wmo_portal/audit/pin.rs
+- `WOW_PIN_TOTP` — benilla-app/src/run_mode.rs
 - `WOW_PIN_UID` — benilla-world/src/wmo_portal/audit/pin.rs
 - `WOW_PIN_WMO` — benilla-world/src/wmo_portal/audit/pin.rs
 - `WOW_PIPE_TRACE` — benilla-app/src/pipe_warm/mod.rs

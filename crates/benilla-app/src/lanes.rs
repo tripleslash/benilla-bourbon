@@ -258,7 +258,7 @@ pub(crate) fn measure(world: &mut World) {
 struct DrainEnds(Vec<fn(&mut World)>);
 
 /// The drain's place: after every feed in [`crate::ui_script::UiFeed`] has pushed, and before
-/// the tick ([`crate::ui_script::UiInput`]).
+/// the tick ([`crate::ui_script::UiTick`]).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiLanes;
 
@@ -302,7 +302,7 @@ impl LaneApp for App {
                     Update,
                     UiLanes
                         .after(crate::ui_script::UiFeed)
-                        .before(crate::ui_script::UiInput),
+                        .before(crate::ui_script::UiTick),
                 )
                 .add_systems(
                     Update,
@@ -420,6 +420,8 @@ pub(crate) fn fire_in_order(world: &mut World) {
 }
 
 #[cfg(test)]
+mod aura_live_tests;
+#[cfg(test)]
 mod aura_view_tests;
 #[cfg(test)]
 mod bag_tests;
@@ -428,11 +430,15 @@ mod group_view_tests;
 #[cfg(test)]
 mod guard_tests;
 #[cfg(test)]
+mod item_live_tests;
+#[cfg(test)]
 mod item_tests;
 #[cfg(test)]
 mod packet_signal_tests;
 #[cfg(test)]
 mod quiet_tests;
+#[cfg(test)]
+mod stat_live_tests;
 #[cfg(test)]
 mod storm_tests;
 #[cfg(test)]

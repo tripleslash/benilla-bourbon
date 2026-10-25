@@ -29,8 +29,9 @@
 //! benilla-buildstamp = { git = "https://github.com/samwhosung/benilla" }
 //!
 //! # Cargo reads `[patch]` and `[profile]` from the root manifest only, so benilla's are repeated:
-//! # without the kira patch the mixer is not benilla's, and without the alsa one the lock holds two
-//! # `alsa-sys` and does not resolve.
+//! # without the kira patch the mixer is not benilla's, without the alsa one the lock holds two
+//! # `alsa-sys` and does not resolve, and without the wgpu-hal one a presentation stall past a
+//! # second loses the device on Vulkan.
 //! [patch.crates-io]
 //! kira = { git = "https://github.com/samwhosung/benilla" }
 //! # fork: the browser build's patches (threads, wasm32 atomics), from this fork.
@@ -47,6 +48,7 @@
 //! # fork: wgpu 29 with WebGPU's `subgroups` and `texture-formats-tier1` mapped, for FSR 3.1.5.
 //! wgpu = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! alsa = { git = "https://github.com/samwhosung/benilla" }
+//! wgpu-hal = { git = "https://github.com/samwhosung/benilla" }
 //!
 //! [profile.dev]
 //! opt-level = 1

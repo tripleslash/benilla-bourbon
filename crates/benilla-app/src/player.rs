@@ -38,6 +38,9 @@ mod controller;
 mod world_focus;
 #[cfg(test)]
 pub(crate) use world_focus::insert_test_room;
+/// The reload gate and the destination's residency, which a cinematic's far shot waits on as a
+/// teleport does.
+pub(crate) use world_focus::{is_far_reload, residency_reached};
 pub(crate) use world_focus::{publish_caster_outdoors, BarUnitOutdoors, PlayerOutdoors};
 // The remembered camera pose, inside `player/` to read the rig's `pub(super)` fields.
 mod camera_saved;
@@ -72,6 +75,8 @@ mod view_subject;
 /// A far-sight pose, for a test that seats the camera on another object.
 #[cfg(test)]
 pub(crate) use view_subject::RemoteView;
+#[cfg(test)]
+mod teleport_hold_tests;
 mod walk;
 mod wire_in;
 pub(crate) use wire_in::regain_control_on_arrival;

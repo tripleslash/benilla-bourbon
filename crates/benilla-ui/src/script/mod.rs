@@ -200,7 +200,7 @@ pub use glue::{glue_events, VmKind};
 pub use glue_core::scanf_d;
 pub use glue_core::{
     glue_status_key, launch_addon_url, launch_addon_url_allowed, launch_url_allowed, GlueCall,
-    GlueCredentials, GlueHost, GlueNotice, GlueNotices, GlueRequest, GlueSignal, GlueText,
+    GlueCredentials, GlueHost, GlueNotice, GlueNotices, GluePin, GlueRequest, GlueSignal, GlueText,
     NoticeState, GLUE_STATUS_KEYS,
 };
 pub use glue_create::{
@@ -232,6 +232,7 @@ mod input_verbs;
 mod inspect;
 mod inventory_verbs;
 mod item_calls;
+mod item_read;
 mod item_stats;
 mod item_text;
 pub mod keybind;
@@ -239,6 +240,7 @@ mod keyboard;
 mod layer_batch;
 mod lock_check;
 mod protected;
+mod stat_read;
 pub(crate) mod taint;
 pub(crate) mod texel;
 pub(crate) mod use_gates;
@@ -340,7 +342,7 @@ pub use auction::{
     AuctionStartRequest, AuctionState, AuctionSubCategory, BidVerdict, BIDDER, LIST, OWNER,
     SORT_KEYS,
 };
-pub use aura::{AuraCall, AuraState, TrackingState, UnitAuraList};
+pub use aura::{AuraCall, AuraListRead, AuraRead, AuraState, TrackingState, UnitAuraList};
 pub use backdrop::{Backdrop, Insets};
 pub use bank::{BankCall, BankState};
 pub use battlefield_positions::{BattlefieldFlagView, BattlefieldPositionView};
@@ -355,8 +357,8 @@ pub use calls::{spell_owner, ItemCallback, NearestMode, QueuedCall, RecordAsk, S
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use channel::{ChannelCommand, JoinedChannel, RecruitmentPlan, ZoneChannelRow};
 pub use char_stats::{
-    weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, UnitCombatStats,
-    BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
+    weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, BANK_BAG_SLOT_COUNT,
+    INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_misc::EmoteRequest;
 pub use chat_send::{
@@ -414,6 +416,7 @@ pub use guild::{
 pub use host::{CallHost, CallTail, Deferring};
 pub use input_verbs::{BindingInput, FiredInput, HeldInput, LookCall, PostureCall, ViewAxis};
 pub use item_calls::ItemCall;
+pub use item_read::{ItemInfoFields, ItemKey, ItemRead, ItemRoll};
 pub use lfg::LfgDungeon;
 pub use lottery::UnservedSend;
 pub use modelframe::{CharacterPaneFrame, ModelPaneFrame, ModelWanted};
@@ -422,6 +425,7 @@ pub use petition::{
     PETITION_TYPE_PETITION,
 };
 pub use protected::InputEvents;
+pub use stat_read::{CombatRead, NoPlayer, SelfRead, UnitCombatStats};
 pub use tabard::{
     emblem_mask_path, TabardCall, TabardHost, EMBLEM_MASK_TOKEN, TABARD_COUNTS,
     TABARD_CREATION_COST,

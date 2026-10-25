@@ -128,6 +128,12 @@ impl super::UiScript {
         model.battlefield_board.rebuild();
     }
 
+    /// The world-enter cascade's clear (`0x4a9db0`): no rows, not ended, no winner, no columns, the
+    /// filter back to `-1`. It signals nothing.
+    pub fn clear_battlefield_scores(&mut self) {
+        self.model_mut().battlefield_board = ScoreBoard::default();
+    }
+
     /// Whether a newer board waits on names the app is still resolving (`[0xb6ebd4]`).
     pub fn set_battlefield_score_names_pending(&mut self, pending: bool) {
         set_field!(self, battlefield_board.names_pending, pending);

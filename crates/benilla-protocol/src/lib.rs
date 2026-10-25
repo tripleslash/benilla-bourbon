@@ -284,6 +284,10 @@ pub struct Logon {
     /// [`transport::Conn`], not a `TcpStream`: the browser build has no sockets at all, and this
     /// connection is a `WebSocket` there (see [`transport`]).
     stream: Option<Conn>,
+    /// The PIN's digits, when the account asked for one: what the keys pressed showed.
+    pin: Option<Vec<u8>>,
+    /// The challenge asked for a PIN.
+    pin_asked: bool,
 }
 
 impl Logon {
@@ -327,6 +331,23 @@ impl Logon {
     pub fn close(&mut self) {
         self.stream = None;
     }
+
+    /// The digits of the PIN this logon proved, for a later logon of the same account to press
+    /// on its own grid ([`auth::pin::positions`]).
+    pub fn pin(&self) -> Option<&[u8]> {
+        self.pin.as_deref()
+    }
+
+    /// Forget the PIN, once a server has refused it: a logon of this account asks for it again.
+    pub fn forget_pin(&mut self) {
+        self.pin = None;
+    }
+
+    /// Whether a later logon of this account can go on its own: not once a PIN it asked for is
+    /// forgotten ([`Self::forget_pin`]), as only the player can enter one.
+    pub fn can_redial(&self) -> bool {
+        !self.pin_asked || self.pin.is_some()
+    }
 }
 
 /// The full SRP6 logon against a vanilla `realmd`, then the realm list — the blocking twin of
@@ -339,11 +360,68 @@ pub fn logon(realmlist: &str, username: &str, password: &str, locale: u32) -> Re
 /// The full SRP6 logon against a vanilla `realmd`, then the realm list. `realmlist` is one or more
 /// `host[:port]` separated by `;`, the server dialled one of their addresses (`logon_target`).
 /// `locale` is the client's locale tag the challenge carries ([`auth::write_logon_challenge`]).
+/// An account that asks for a PIN fails it: [`logon_with_pin_async`] is the logon that can answer.
 pub async fn logon_async(
     realmlist: &str,
     username: &str,
     password: &str,
     locale: u32,
+) -> Result<Logon> {
+    logon_with_pin_async(
+        realmlist,
+        username,
+        password,
+        locale,
+        &mut async |_: &[u8; 10]| {
+            Err(anyhow!(
+                "the account asks for a PIN, which this logon cannot enter"
+            ))
+        },
+        &mut |_| {},
+    )
+    .await
+}
+
+/// The blocking twin of [`logon_with_pin_async`], for the CLIs, the probes and the tests: `pin`
+/// answers at once.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn logon_with_pin(
+    realmlist: &str,
+    username: &str,
+    password: &str,
+    locale: u32,
+    pin: &mut dyn FnMut(&[u8; 10]) -> Result<Vec<u8>>,
+    stage: &mut dyn FnMut(LoginStage),
+) -> Result<Logon> {
+    futures_lite::future::block_on(logon_with_pin_async(
+        realmlist,
+        username,
+        password,
+        locale,
+        &mut async |grid: &[u8; 10]| pin(grid),
+        stage,
+    ))
+}
+
+/// [`logon_async`], with `pin` asked for the keys pressed when the challenge asks for a PIN: it
+/// gets the keypad's grid ([`auth::pin::grid`]) and returns the positions pressed on it, as
+/// `PINEntered` hands them on (`0x46d1c0` → `0x5b3120`), or an error that ends the logon there,
+/// before the proof. `pin` is awaited, since the keys come from the player: a browser cannot block
+/// for them on the event loop that delivers them.
+///
+/// `stage` is told each state the logon reaches as it reaches it, as the reference's logon object
+/// reports them to its listener: [`LoginStage::Authenticating`] as the challenge goes out
+/// (`0x5b2196`), [`LoginStage::CheckingVersions`] on a reply that asks for no PIN (`0x5b1cd7`;
+/// one that asks for one is `pin`'s call) and [`LoginStage::ProofSent`] once the proof is out
+/// (`0x5b1f93`). A redial for a fresh server key (below) is no new state, and a reply that
+/// authenticates with no exchange reports none.
+pub async fn logon_with_pin_async(
+    realmlist: &str,
+    username: &str,
+    password: &str,
+    locale: u32,
+    pin: &mut impl AsyncFnMut(&[u8; 10]) -> Result<Vec<u8>>,
+    stage: &mut dyn FnMut(LoginStage),
 ) -> Result<Logon> {
     let username_n =
         NormalizedString::new(username).map_err(|e| anyhow!("invalid username: {e}"))?;
@@ -357,8 +435,11 @@ pub async fn logon_async(
     // one; realmd counts nothing before the proof (`AuthSocket::_HandleLogonChallenge`).
     let (mut stream, reply, server_public_key) = {
         let mut dialed = None;
-        for _ in 0..MAX_CHALLENGE_DIALS {
+        for dial in 0..MAX_CHALLENGE_DIALS {
             let mut stream = connect(&target, port, &address).await?;
+            if dial == 0 {
+                stage(LoginStage::Authenticating);
+            }
             auth::write_logon_challenge(
                 &mut stream,
                 &username.to_uppercase(),
@@ -372,7 +453,7 @@ pub async fn logon_async(
             else {
                 // `SUCCESS_SURVEY` on the challenge authenticates with no SRP exchange; the
                 // reference's success arm copies no key (length 0 at `0x5b2e16`).
-                return finish_logon(stream, [0u8; SESSION_KEY_LENGTH]).await;
+                return finish_logon(stream, [0u8; SESSION_KEY_LENGTH], None, false).await;
             };
             let server_public_key = PublicKey::from_le_bytes(reply.server_public_key)
                 .map_err(|e| anyhow!("invalid server public key: {e}"))?;
@@ -395,13 +476,31 @@ pub async fn logon_async(
         reply.salt,
     );
 
+    // The keypad waits for the player (logon state 7, `0x5b1cd7`); the proof goes once the keys
+    // are in (`0x5b3120` reports state 9, whose arm sends it, `0x46bb2f`).
+    let (pin_proof, pin_digits) = match &reply.pin {
+        Some(challenge) => {
+            let grid = auth::pin::grid(challenge.grid_seed);
+            let positions = pin(&grid).await.context("entering the PIN")?;
+            (
+                Some(auth::PinProof::new(challenge, &positions)),
+                auth::pin::digits(&grid, &positions),
+            )
+        }
+        None => {
+            stage(LoginStage::CheckingVersions);
+            (None, None)
+        }
+    };
     auth::write_logon_proof(
         &mut stream,
         challenge.client_public_key(),
         challenge.client_proof(),
         &reply.crc_salt,
+        pin_proof.as_ref(),
     )
     .context("sending logon proof")?;
+    stage(LoginStage::ProofSent);
 
     let session_key = match auth::read_proof_reply(&mut stream)
         .await
@@ -415,11 +514,16 @@ pub async fn logon_async(
         // this exchange derived.
         None => challenge.into_unverified_session_key(),
     };
-    finish_logon(stream, session_key).await
+    finish_logon(stream, session_key, pin_digits, reply.pin.is_some()).await
 }
 
 /// An authenticated logon's tail: the realm list over the same socket.
-async fn finish_logon(mut stream: Conn, session_key: [u8; SESSION_KEY_LENGTH]) -> Result<Logon> {
+async fn finish_logon(
+    mut stream: Conn,
+    session_key: [u8; SESSION_KEY_LENGTH],
+    pin: Option<Vec<u8>>,
+    pin_asked: bool,
+) -> Result<Logon> {
     auth::write_realm_list_request(&mut stream).context("requesting realm list")?;
     let realms = auth::read_realm_list(&mut stream)
         .await
@@ -429,6 +533,8 @@ async fn finish_logon(mut stream: Conn, session_key: [u8; SESSION_KEY_LENGTH]) -
         session_key,
         realms,
         stream: Some(stream),
+        pin,
+        pin_asked,
     })
 }
 

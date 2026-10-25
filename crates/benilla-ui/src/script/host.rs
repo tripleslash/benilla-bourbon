@@ -29,6 +29,26 @@ pub trait CallHost {
     /// lines) is returned as the tail.
     fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail>;
 
+    /// Hand `read` the item `key` names, as a getter reads it now: its record off the item cache
+    /// and, for an object, its descriptor, each field derived as it is asked for. Whether there was
+    /// one to hand: `false` for an object the engine does not hold, and from a host that reads
+    /// none. `read` runs no Lua.
+    fn read_item(
+        &mut self,
+        key: super::ItemKey,
+        read: &mut dyn FnMut(&dyn super::ItemRead),
+    ) -> bool {
+        let _ = (key, read);
+        false
+    }
+
+    /// The player-name cache's record for `guid` as a getter reads it now (`0x55f080` on a valid
+    /// node), reading only: `None` for a miss, a refusal, and from a host that reads none.
+    fn player_name(&mut self, guid: u64) -> Option<String> {
+        let _ = guid;
+        None
+    }
+
     /// Hand `read` the unit object the engine holds under `guid`, as a getter reads it now: its
     /// descriptor's own fields, each derived as it is asked for, as of the place the getter runs
     /// (`UnitHealth` reads the object, `0x5174d0`). Whether there was one to hand: `false` when it
@@ -37,6 +57,53 @@ pub trait CallHost {
         &mut self,
         guid: u64,
         read: &mut dyn FnMut(&dyn super::UnitObjectRead),
+    ) -> bool {
+        let _ = (guid, read);
+        false
+    }
+
+    /// Hand `read` the unit object the engine holds under `guid` and its combat stats, as a stat
+    /// getter reads them now, each field derived as it is asked for, as of the place the getter
+    /// runs (`UnitStat` reads the object it resolved, `0x518600`): the active player's with what
+    /// its equipment and skills answer, any other unit's with their defaults. Whether there was
+    /// one to hand: `false` when it holds no object there, and from a host that reads none.
+    /// `read` runs no Lua.
+    fn read_unit_stats(
+        &mut self,
+        guid: u64,
+        read: &mut dyn FnMut(&dyn super::UnitObjectRead, &dyn super::CombatRead),
+    ) -> bool {
+        let _ = (guid, read);
+        false
+    }
+
+    /// Hand `read` the active player's combat stats as a getter with no unit argument reads them
+    /// now, with what its equipment and skills answer, as of the place it runs
+    /// (`GetDodgeChance`, `0x516f00`); `None` while it holds no player (0 at `0x516f42`). Whether
+    /// it read: `false` from a host that reads none. `read` runs no Lua.
+    fn read_own_stats(&mut self, read: &mut dyn FnMut(Option<&dyn super::CombatRead>)) -> bool {
+        let _ = read;
+        false
+    }
+
+    /// Hand `read` the active player's own fields as a getter reads them now (`GetMoney` reads
+    /// the coinage, `0x518160`), as of the place it runs; [`super::NoPlayer`] while it holds no
+    /// player (`0x5181db`). Whether it read: `false` from a host that reads none. `read` runs no
+    /// Lua.
+    fn read_self(&mut self, read: &mut dyn FnMut(&dyn super::SelfRead)) -> bool {
+        let _ = read;
+        false
+    }
+
+    /// Hand `read` the aura list of the unit held under `guid` as the aura walks read it now: the
+    /// object's slots with `UnitBuff`'s gate on the active player as it stands (`0x519617`,
+    /// `0x5195be`), else the roster record of a member with no object (`0x519735`), as of the
+    /// place the getter runs; `None` for neither. Whether it read: `false` from a host that reads
+    /// none. `read` runs no Lua.
+    fn read_unit_auras(
+        &mut self,
+        guid: u64,
+        read: &mut dyn FnMut(Option<&dyn super::AuraListRead>),
     ) -> bool {
         let _ = (guid, read);
         false

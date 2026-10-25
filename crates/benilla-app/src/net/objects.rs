@@ -749,6 +749,7 @@ fn unit_move(
             fall_time: mv.fall_time,
             jump: mv.jump,
             transport: mv.transport,
+            teleport: mv.verb == benilla_protocol::RelayVerb::Teleport,
         });
         return;
     }

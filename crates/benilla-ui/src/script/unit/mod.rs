@@ -228,7 +228,7 @@ pub struct UnitState {
     /// The unit's own stat, resistance, damage, speed and attack-power fields, which the stat
     /// getters read for any unit but the active player (`ui/unitstats`); zeros where the server
     /// sends the field to the owner alone.
-    pub combat: super::char_stats::UnitCombatStats,
+    pub combat: super::stat_read::UnitCombatStats,
     /// `UNIT_FIELD_SUMMONEDBY` (fields 12-13), 0 for none: `UnitDefense` and `UnitAttackBothHands`
     /// answer a unit the active player summoned (`0x519272`, `0x518881`).
     pub summoned_by: u64,
@@ -606,8 +606,17 @@ fn with_unit<T>(
     })
 }
 
+/// Whether `token` names the active player: `"player"`, or any token the resolver turns into the
+/// player's guid (`target` on yourself, `0x5173ad`-`0x5173c9`). The private player blocks
+/// (`UnitXP`, `UnitCharacterPoints`) answer for this unit alone.
+pub(super) fn names_self(model: &Model, token: &str) -> bool {
+    token.eq_ignore_ascii_case("player")
+        || (model.unit_guids.player != 0
+            && model.unit_guids.resolve(token).ok().flatten() == Some(model.unit_guids.player))
+}
+
 /// [`read_object`] on `token`, or `default` for an absent unit, after the token check.
-fn with_object<T>(
+pub(super) fn with_object<T>(
     lua: &Lua,
     token: &Option<String>,
     default: T,

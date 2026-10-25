@@ -707,6 +707,14 @@ pub(crate) enum RealmRequest {
     /// select drops and the thread returns to the logon park, the realmd link as it was (closed
     /// since a world entry). Elsewhere, nothing.
     Leave,
+    /// `PINEntered`'s keys for the logon waiting at the keypad (`0x5ab5a0` → `0x5b3120`), for the
+    /// prompt numbered `prompt` alone ([`benilla_protocol::LoginStage::Pin`]), or no keys when no
+    /// screen can show the keypad, which fails the logon. Elsewhere, nothing. The keys never print
+    /// ([`benilla_ui::script::GluePin`]).
+    Pin {
+        prompt: u64,
+        keys: Option<benilla_ui::script::GluePin>,
+    },
 }
 
 /// The credentials channel to the IO thread's pre-logon park, sent by [`crate::glue_session::login`].
@@ -2529,6 +2537,9 @@ pub(crate) struct SelfMoveMessage {
     /// The server's deck-local pose for us. Never re-derive it from the boat's transform, which
     /// [`crate::transport::tick_transports`] holds at the far pose across a map seam.
     pub(crate) transport: Option<benilla_protocol::TransportPose>,
+    /// `MSG_MOVE_TELEPORT`, whose apply is a teleport's (`0x6016e2` → `0x602f90` → `0x6186b0` →
+    /// `0x617e90`), where the other relays only place the mover.
+    pub(crate) teleport: bool,
 }
 
 /// `SMSG_CLIENT_CONTROL_UPDATE`, verbatim; the controller decides. `mover` is the unit spoken

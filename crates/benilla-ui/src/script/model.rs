@@ -913,13 +913,10 @@ pub(crate) struct Model {
     /// first push, and the auction calls. `auction_selected` is each list's selected auction id, 0
     /// for none (`0x4cfda0`/`0x4cfec0`); `auction_can_query` is the 5 s throttle.
     pub(crate) auction: Option<auction::AuctionState>,
-    /// The Browse tab's class tree, pushed once per login.
+    /// The Browse tab's class tree, seeded once per VM.
     pub(crate) auction_item_classes: Vec<auction::AuctionCategory>,
     pub(crate) auction_selected: [u32; 3],
     pub(crate) auction_can_query: bool,
-    /// The guids `GetAuctionItemInfo` missed in the name cache, each with the list whose callback
-    /// it registers, for the app to ask (`0x4cf167`, `0x4cf1c8`).
-    pub(crate) auction_name_asks: Vec<(u64, usize)>,
     /// The sell slot's item, resolved to its guid when `StartAuction` fires.
     pub(crate) auction_sell_item: Option<cursor::CursorItem>,
 
@@ -1077,7 +1074,7 @@ pub(crate) struct Model {
     pub(crate) exhaustion: HashMap<u8, (String, f64)>,
 
     /// The paper doll's combat stats, `None` until the first push.
-    pub(crate) player_combat_stats: Option<char_stats::UnitCombatStats>,
+    pub(crate) player_combat_stats: Option<super::stat_read::UnitCombatStats>,
     pub(crate) inventory_slots: char_stats::InventorySlots,
     /// The six bank-bag slots, ids 64..=69, fed from the player descriptor's guids.
     pub(crate) bank_bag_slots: char_stats::BankBagSlots,
@@ -1635,7 +1632,6 @@ impl Model {
             auction_item_classes: Vec::new(),
             auction_selected: [0; 3],
             auction_can_query: true,
-            auction_name_asks: Vec::new(),
             auction_sell_item: None,
             trade: None,
             trade_partner: 0,

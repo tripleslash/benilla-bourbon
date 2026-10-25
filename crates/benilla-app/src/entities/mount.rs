@@ -119,9 +119,12 @@ pub(super) type MountChildren<'w, 's> = Query<
 >;
 
 /// The seat leg of the first build and the transition: spawn the mount child when missing, drop
-/// one built for a display the field has left, and resolve the seat once its rig is up.
+/// one built for a display the field has left, and resolve the seat once its rig is up. A child it
+/// despawns is pushed on `dropped`, which a caller still iterating children must skip: its query
+/// predates the despawn.
 pub(super) fn seat_or_spawn_mount(
     commands: &mut Commands,
+    dropped: &mut Vec<Entity>,
     children: &MountChildren,
     poses: &mut Query<&mut RigPose>,
     creatures: Option<&super::Creatures>,
@@ -149,9 +152,8 @@ pub(super) fn seat_or_spawn_mount(
     // Built for a display the field has left, or gone: drop it and start over next pass.
     let built = children.get(child).map(|(_, _, n)| n.display_id).ok();
     if built != Some(Some(mount_display)) {
-        if let Ok(mut ec) = commands.get_entity(child) {
-            ec.try_despawn();
-        }
+        commands.entity(child).try_despawn();
+        dropped.push(child);
         commands.entity(unit).try_remove::<MountChild>();
         return Seat::Wait;
     }
@@ -225,9 +227,7 @@ fn reseat_rig(commands: &mut Commands, rig: &mut RigPose, frame: Entity, conform
     rig.pose_dirty = true;
     // A conform node the rig just left is empty, so it goes; a seat anchor dies with its mount.
     if conform {
-        if let Ok(mut ec) = commands.get_entity(old) {
-            ec.try_despawn();
-        }
+        commands.entity(old).try_despawn();
     }
 }
 
@@ -274,9 +274,7 @@ pub(super) fn reseat_mounts(
         // sweep any child, which the settled test would otherwise re-fire on every frame.
         let Ok(seated_root) = poses.get(entity).map(|r| r.joints_root) else {
             if let Some(&MountChild(child)) = child {
-                if let Ok(mut ec) = commands.get_entity(child) {
-                    ec.try_despawn();
-                }
+                commands.entity(child).try_despawn();
                 commands.entity(entity).try_remove::<MountChild>();
             }
             commands.entity(entity).try_insert(AppliedMount(live));
@@ -296,9 +294,7 @@ pub(super) fn reseat_mounts(
                 }
             }
             if let Some(child) = child {
-                if let Ok(mut ec) = commands.get_entity(child) {
-                    ec.try_despawn();
-                }
+                commands.entity(child).try_despawn();
             }
             commands
                 .entity(entity)
@@ -309,6 +305,8 @@ pub(super) fn reseat_mounts(
         // ── Leg 2 · `0x607a00`: build the mount model and attach the body to its seat.
         match seat_or_spawn_mount(
             &mut commands,
+            // This system walks riders, never children, so nothing here revisits a despawned one.
+            &mut Vec::new(),
             &children,
             &mut poses,
             creatures.as_deref(),
