@@ -73,7 +73,6 @@ use crate::ui_quest_log::UiQuestLogPlugin;
 use crate::ui_quest_share::QuestSharePlugin;
 use crate::ui_saved::UiSavedPlugin;
 use crate::ui_script::UiScriptPlugin;
-use crate::ui_shapeshift::UiShapeshiftPlugin;
 use crate::ui_social::UiSocialPlugin;
 use crate::ui_spellbook::UiSpellbookPlugin;
 use crate::ui_stable::UiStablePlugin;
@@ -178,6 +177,7 @@ impl PluginGroup for GamePlugins {
             .add(crate::game_tip::GameTipPlugin)
             .add(crate::text_filter::TextFilterPlugin)
             .add(TutorialPlugin)
+            .add(crate::account_data::AccountDataPlugin)
             .add(crate::swing_refusal::SwingRefusalPlugin)
             .add(UiSummonPlugin)
             .add(UiGmTicketPlugin)
@@ -210,9 +210,6 @@ impl PluginGroup for GamePlugins {
             // After UiActionPlugin, whose `Spells` catalog it shares.
             .add(UiTalentPlugin)
             .add(UiTalentWipePlugin)
-            // The form list by the reference's admission and order (`0x4b25b0`, `0x4b2bb0`); after
-            // UiActionPlugin (`Spells`) and SpellPlugin (the cast tail).
-            .add(UiShapeshiftPlugin)
             // After UiActionPlugin, whose `Spells` and cooldown clock it shares.
             .add(UiPetPlugin)
             .add(ChrClassesPlugin)
@@ -1024,8 +1021,6 @@ pub(crate) mod schedule_tests {
     /// - the fx attaches and `entities::update_display_models`/`attach_entity_visuals` against
     ///   the mat-anim tick over `MatAnimTable`/`UvAnimMaterials`: attach writes the rows a tick
     ///   would, off the same clock;
-    /// - `ui_session::feed_interact_npc` against `query_cache::release_on_enter::<MailOpen>`: the
-    ///   feed reads the mailbox's guid, and the release clears only the pending queries;
     /// - Click to Move's steer (`player::approach::steer_approach`) against what `steer_follow`
     ///   already pairs with: the steer is chained after follow's and writes the same `Player`
     ///   fields;
@@ -1572,7 +1567,6 @@ pub(crate) mod schedule_tests {
             "::player::controller::control",
             "::ui_unit::feed_player_control",
             "::ui_action::state::feed_action_state",
-            "::ui_shapeshift::feed_shapeshift_bar",
             "::player::camera_saved::load_camera_pose",
             "::tutorial::watch_self",
             "::ui_trade::answer_trade_request",
@@ -2243,8 +2237,6 @@ pub(crate) mod schedule_tests {
          "no system: the item lane's firing calls it per run (`item_lane::fire_run`), inside the lanes' drain, which runs only with the interface up (`ingame_ui_up`)"),
         ("ui_bank/mod.rs", "feed_bank", Because::PlayerRoundTrip,
          "`BankErrors` answers a `BuyBankSlot` click; the OPENED edge rides `VmMemo`s"),
-        ("ui_battlefield.rs", "feed_battlefield", Because::SelfHealing,
-         "`reset_on_world_enter` runs before it at each world-enter cascade, clears the session and re-sends `BattlefieldStatusRequest`"),
         ("ui_binder.rs", "feed_binder", Because::PlayerRoundTrip,
          "`SMSG_BINDER_CONFIRM` only answers the innkeeper's gossip line"),
         ("ui_char.rs", "feed_char", Because::FilledByVm,
@@ -2295,16 +2287,12 @@ pub(crate) mod schedule_tests {
          "its takes are the sound side's stream reports, sent again every frame and keyed by a movie number only the VM that started the movie holds, and the VM's own audio starts, which only `StartMovie` leaves"),
         ("ui_script/movie.rs", "upload_movie_pictures", Because::Deliberate,
          "per-frame upload scratch, not a queue: it reads each playing movie's picture as it stands"),
-        ("ui_social/feed.rs", "feed_social", Because::Deliberate,
-         "its take is the handlers' list events and lines: those taken into the glue VM are lost there, and the in-game VM's first feed fires both list events again over the lists as they stand"),
         ("ui_stable/mod.rs", "feed_stable", Because::PlayerRoundTrip,
          "both packets follow a stable master's gossip and a click in its window"),
         ("ui_summon.rs", "feed_summon", Because::PlayerRoundTrip,
          "only another player's Ritual of Summoning latches the ask (the duel's shape; coincidence-only residual)"),
         ("ui_tabard.rs", "feed_tabard", Because::PlayerRoundTrip,
          "every latch follows a tabard-vendor click, and `reset_on_world_enter` zeroes the resource on entry"),
-        ("ui_talent_wipe.rs", "feed_talent_wipe", Because::PlayerRoundTrip,
-         "`MSG_TALENT_WIPE_CONFIRM` answers the trainer's gossip option"),
         ("ui_taxi/mod.rs", "feed_taxi", Because::PlayerRoundTrip,
          "both packets follow talking to a flight master"),
         ("ui_tradeskill.rs", "fire_list_rebuilds", Because::Deliberate,

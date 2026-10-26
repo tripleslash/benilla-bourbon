@@ -1,10 +1,14 @@
-//! The battleground scoreboard verbs of `WorldStateFrame.lua`, over a board the app pushes with
-//! every name resolved, as the reference waits for the last name (`0x4aa580`); until then the
-//! board's rebuild only stores a filter. The filter sorts its team first rather than compacting,
-//! so an index past the filtered count answers a real row.
+//! The battleground scoreboard verbs of `WorldStateFrame.lua`. The getters read the board the
+//! app's handlers keep (`0xb6e880`) through the lent host at the call
+//! ([`super::battlefield_live`]), and `SetBattlefieldScoreFaction` sets its filter inside its call
+//! ([`super::BattlefieldCall::ScoreFaction`]). With no host the VM's copy answers: a board set with
+//! every name resolved, whose rebuild only stores a filter while names are pending (`0x4aa580`).
+//! The filter sorts its team first rather than compacting, so an index past the filtered count
+//! answers a real row.
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::battlefield_live as live;
 use super::binding_abi::number_arg;
 
 /// One scoreboard row as the app resolved it, in wire order.
@@ -110,17 +114,16 @@ impl ScoreBoard {
         true
     }
 
-    fn row(&self, index_1based: i32) -> Option<&BattlefieldScoreRow> {
+    pub(crate) fn row(&self, index_1based: i32) -> Option<&BattlefieldScoreRow> {
         let i = usize::try_from(index_1based).ok()?.checked_sub(1)?;
         // Bounded by the wire count (`0xb6ebc0`), not the filtered one.
         self.order.get(i).map(|&r| &self.scores.rows[r])
     }
 }
 
+/// The VM's copy of the board, which the getters read with no host to ask: only a test sets it.
 impl super::UiScript {
-    /// Push the resolved board; the filter survives. The app fires `UPDATE_BATTLEFIELD_SCORE`
-    /// itself, keeping the reference's order against `UPDATE_BATTLEFIELD_STATUS` on the status-3
-    /// message (`0x4aaa5a`/`0x4aab05`).
+    /// Set the resolved board; the filter survives.
     pub fn set_battlefield_scores(&mut self, scores: BattlefieldScores) {
         let mut model = self.model_mut();
         model.battlefield_board.scores = scores;
@@ -148,7 +151,7 @@ impl super::UiScript {
         }
     }
 
-    /// `GetBattlefieldInstanceRunTime()`'s answer in ms, pushed each frame.
+    /// `GetBattlefieldInstanceRunTime()`'s answer in ms.
     pub fn set_battlefield_run_time_ms(&mut self, ms: u32) {
         set_field!(self, battlefield_run_time_ms, ms);
     }
@@ -177,7 +180,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
-            Ok(model.battlefield_board.filtered as i64)
+            Ok(live::score_summary(lua, &model).filtered as i64)
         })?,
     )?;
 
@@ -189,7 +192,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
-            let Some(r) = model.battlefield_board.row(index) else {
+            let Some(r) = live::score_row(lua, &model, index)
+                .filter(|r| r.named)
+                .map(|r| r.row)
+            else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
                     Value::Number(0.0),
@@ -228,7 +234,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
-            let b = &model.battlefield_board.scores;
+            let b = live::score_summary(lua, &model);
             Ok(if b.ended {
                 Value::Integer(i64::from(b.winner))
             } else {
@@ -239,13 +245,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // Never raises; a stored filter rebuilds the board and fires `UPDATE_BATTLEFIELD_SCORE` in
     // place (`0x4abc90` → `0x4aa5a0` → `0x4aa200`, the signal at `0x4aa308`), or, while names
-    // are pending, is only stored.
+    // are pending, is only stored: the host's board inside the call, else the VM's copy.
     g.set(
         "SetBattlefieldScoreFaction",
         lua.create_function(|lua, faction: Option<Value>| {
             let f = faction.as_ref().and_then(number_of).unwrap_or(-1);
             if !(-1..=1).contains(&f) {
                 return Ok(());
+            }
+            if super::host::open(lua) {
+                return super::battlefield_queue::submit(
+                    lua,
+                    super::BattlefieldCall::ScoreFaction(f as i8),
+                );
             }
             super::tick::verb(lua, |model| {
                 if model.battlefield_board.set_filter(f) {
@@ -262,7 +274,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
-            Ok(model.battlefield_board.scores.columns.len() as i64)
+            Ok(live::score_summary(lua, &model).columns as i64)
         })?,
     )?;
 
@@ -274,11 +286,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
-            let col = usize::try_from(index)
-                .ok()
-                .and_then(|i| i.checked_sub(1))
-                .and_then(|i| model.battlefield_board.scores.columns.get(i));
-            let Some(c) = col else {
+            let Some(c) = live::stat_column(lua, &model, index) else {
                 return Ok(MultiValue::from_vec(vec![
                     Value::Nil,
                     Value::Nil,
@@ -304,11 +312,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
-            let v = model
-                .battlefield_board
-                .row(player)
+            let v = live::score_row(lua, &model, player)
                 .zip(usize::try_from(stat).ok().and_then(|s| s.checked_sub(1)))
-                .and_then(|(r, s)| r.stats.get(s).copied())
+                .and_then(|(r, s)| r.row.stats.get(s).copied())
                 .unwrap_or(0);
             Ok(i64::from(v))
         })?,
@@ -330,7 +336,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua
                     .app_data_ref::<crate::script::ModelCell>()
                     .expect("model app_data");
-                model.battlefield_board.scores.ended
+                live::score_summary(lua, &model).ended
             };
             if !ended {
                 return Ok(());
@@ -346,7 +352,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
-            Ok(i64::from(model.battlefield_run_time_ms))
+            Ok(i64::from(live::times(lua, &model).run_time_ms))
         })?,
     )?;
 

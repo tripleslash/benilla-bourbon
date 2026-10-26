@@ -780,15 +780,16 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 let model = lua
                     .app_data_mut::<crate::script::ModelCell>()
                     .expect("model app_data");
-                match super::spellbook::book_slot(&model, book_id, &book_type) {
+                match super::spellbook::book_slot(lua, &model, book_id, &book_type) {
                     Some(s) => {
-                        let cooldown = s.cooldown.map(|(start_ms, duration_ms, enabled)| {
-                            (
-                                start_ms as f64 / 1000.0,
-                                f64::from(duration_ms) / 1000.0,
-                                enabled,
-                            )
-                        });
+                        // The slot's cooldown off its book's list now (`0x6e2ea0`), else the copy.
+                        let query = if super::spellbook::is_pet_book(&book_type) {
+                            super::CooldownQuery::PetSpell(s.spell_id)
+                        } else {
+                            super::CooldownQuery::Spell(s.spell_id)
+                        };
+                        let cooldown = super::cooldown_read::read_live(lua, query)
+                            .unwrap_or_else(|| s.cooldown.map(super::cooldown_read::seconds));
                         (
                             s.spell_id,
                             Some(s.name.clone()),
@@ -813,21 +814,14 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetShapeshift",
         lua.create_function(|lua, (this, index): (Table, Value)| {
             // `is-number` else `Usage: SetShapeshift(slot)` (`0x85523c`, `0x532ad6`).
-            let index = binding_abi::index_arg(lua, index, "Usage: SetShapeshift(slot)")?;
+            let index = binding_abi::index_arg32(lua, index, "Usage: SetShapeshift(slot)")?;
             let now = crate::script::clock::now(lua);
-            let (spell_id, name, remaining_ms) = {
-                let model = lua
-                    .app_data_mut::<crate::script::ModelCell>()
-                    .expect("model app_data");
-                match model.shapeshift_forms.get(index.saturating_sub(1)) {
-                    Some(f) => (
-                        f.view.spell_id,
-                        Some(f.view.name.clone()),
-                        live_remaining_ms(f.cooldown, now),
-                    ),
-                    None => return Ok(Value::Nil),
-                }
+            // `index - 1` against the count, unsigned (`0x5329fe`, `0x532a01`): 0 is past it.
+            let Some((spell_id, name, cooldown)) = super::shapeshift::tooltip_form(lua, index)
+            else {
+                return Ok(Value::Nil);
             };
+            let remaining_ms = live_remaining_ms(cooldown, now);
             // Both legs pass the rank and the `UberTooltips` compact flag (`0x532a62`-`0x532a84`,
             // `0x532aaf`-`0x532abe`).
             let opts = SpellRenderOpts {

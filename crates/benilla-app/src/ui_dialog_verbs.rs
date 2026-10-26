@@ -190,7 +190,6 @@ impl AreaSpiritHealer {
 #[derive(Resource, Default)]
 pub(crate) struct BattlefieldQueue {
     slots: [Option<(BattlefieldStatus, Instant)>; 3],
-    changed: bool,
     /// The slot the player is in (`[0x8457cc]`, set by status 3) and its map.
     active: Option<(usize, u32)>,
     /// The instance's run-time stamp (`[0xb6ebbc]`) and expiration (`[0xb6ebb8]`): set by status
@@ -199,45 +198,57 @@ pub(crate) struct BattlefieldQueue {
     /// `Instant` precedes the clock's origin.
     run_started: Option<(Instant, std::time::Duration)>,
     instance_expiration: Option<Instant>,
-    /// Status 3 fires `UPDATE_BATTLEFIELD_SCORE` before `_STATUS` (`0x4aaa5a`, then `0x4aab05`).
-    score_dirty: bool,
-    /// The player left the battleground: the active slot lost its instance, or the same slot's map
-    /// went to zero. The handler already zeroes the run-time clocks on both, so the scoreboard's
-    /// winner goes with them — [`crate::ui_battlefield_score::feed_battlefield_score`] takes this.
-    board_cleared: bool,
-    /// Tutorials the handler triggers (`0x2f` on queued, `0x30` on confirm), owed to the next feed.
-    tutorials: Vec<u32>,
+}
+
+/// What one `SMSG_BATTLEFIELD_STATUS` did, for the rest of its handler (`0x4aa850`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StatusApplied {
+    /// The tutorial it arms: `0x2f` on queued, `0x30` on confirm (`0x4b5390`).
+    pub(crate) tutorial: Option<u32>,
+    /// The map of a status 3, whose arm builds the stat columns and resets the filter.
+    pub(crate) active_map: Option<u32>,
+    /// A zero map cleared the slot.
+    pub(crate) cleared: bool,
+    /// fork: the player left the battleground, the active slot's map gone to zero or its instance
+    /// lost, the two branches that zero the run-time clocks. The reference leaves the board
+    /// standing there, so `GetBattlefieldWinner()` answers the finished match in the open world and
+    /// the stock frame shows its panel again (`WorldStateFrame.lua:351-355`); Turtle WoW's own Lua
+    /// drops its board on the same exit, and this fork drops the board with the clocks.
+    pub(crate) left: bool,
 }
 
 impl BattlefieldQueue {
     /// `SMSG_BATTLEFIELD_STATUS` (`0x4aa850`). A zero map clears the slot, and the instance clocks
-    /// only if it was active, but leaves the active index (`[0x8457cc]`) alone.
-    pub(crate) fn apply(&mut self, status: BattlefieldStatus) {
-        self.apply_at(status, Instant::now());
+    /// only if it was active, but leaves the active index (`[0x8457cc]`) alone. `None` for a slot
+    /// past the three, which ends the handler before any write or signal.
+    pub(crate) fn apply(&mut self, status: BattlefieldStatus) -> Option<StatusApplied> {
+        self.apply_at(status, Instant::now())
     }
 
-    fn apply_at(&mut self, status: BattlefieldStatus, now: Instant) {
+    fn apply_at(&mut self, status: BattlefieldStatus, now: Instant) -> Option<StatusApplied> {
         let index = status.slot as usize;
-        let Some(slot) = self.slots.get_mut(index) else {
-            return;
-        };
+        let slot = self.slots.get_mut(index)?;
         if status.map_id == 0 {
-            if self.active.is_some_and(|(i, _)| i == index) {
+            let left = self.active.is_some_and(|(i, _)| i == index);
+            if left {
                 self.run_started = None;
                 self.instance_expiration = None;
-                self.board_cleared = true;
             }
             *slot = None;
-            self.changed = true;
-            return;
+            return Some(StatusApplied {
+                cleared: true,
+                left,
+                ..Default::default()
+            });
         }
-        match status.status {
-            1 => self.tutorials.push(crate::tutorial::id::BATTLEGROUND_QUEUE),
-            2 => self
-                .tutorials
-                .push(crate::tutorial::id::PORT_TO_BATTLEGROUND),
-            _ => {}
-        }
+        let mut applied = StatusApplied {
+            tutorial: match status.status {
+                1 => Some(crate::tutorial::id::BATTLEGROUND_QUEUE),
+                2 => Some(crate::tutorial::id::PORT_TO_BATTLEGROUND),
+                _ => None,
+            },
+            ..Default::default()
+        };
         match status.in_progress {
             Some((expires_ms, elapsed_ms)) => {
                 self.active = Some((index, status.map_id));
@@ -245,19 +256,19 @@ impl BattlefieldQueue {
                     .then(|| now + std::time::Duration::from_millis(u64::from(expires_ms)));
                 self.run_started = (elapsed_ms != 0)
                     .then(|| (now, std::time::Duration::from_millis(u64::from(elapsed_ms))));
-                self.score_dirty = true;
+                applied.active_map = Some(status.map_id);
             }
             None => {
                 self.run_started = None;
                 self.instance_expiration = None;
                 if self.active.is_some_and(|(i, _)| i == index) {
                     self.active = None;
-                    self.board_cleared = true;
+                    applied.left = true;
                 }
             }
         }
         *slot = Some((status, now));
-        self.changed = true;
+        Some(applied)
     }
 
     pub(crate) fn slots(&self) -> &[Option<(BattlefieldStatus, Instant)>; 3] {
@@ -285,15 +296,6 @@ impl BattlefieldQueue {
                 .as_millis()
                 .min(u128::from(u32::MAX)) as u32
         })
-    }
-
-    pub(crate) fn take_score_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.score_dirty)
-    }
-
-    /// Take the "the player left the battleground" mark. One packet, one board to zero.
-    pub(crate) fn take_board_cleared(&mut self) -> bool {
-        std::mem::take(&mut self.board_cleared)
     }
 
     /// The map id `AcceptBattlefieldPort` sends for a 1-based slot, if the slot holds a queue.
@@ -576,7 +578,8 @@ pub(crate) enum StoneJoin {
 }
 
 /// The meeting stone's use slot `0x5f69d0`. With no local player it is silent (`0x5f69f8`);
-/// otherwise four refusals in this order, the first two only in a group (`0x5f6a10`):
+/// otherwise four refusals in this order, the first two only with party slot 1 set (`0x5f6a05`,
+/// `[0xbc6f48]`), never from the raid roster or the wire's member list:
 ///
 /// 1. not the leader (`0x5f6a2f`, the full 64-bit guid against `[0xbc75f8]`);
 /// 2. four other members (`0x5f6a4f`, `GetNumPartyMembers` at `0x4e86d0`);
@@ -594,12 +597,13 @@ pub(crate) fn meeting_stone_join_refusal(
     let (Some(self_guid), Some(level)) = (self_guid, level) else {
         return StoneJoin::Silent;
     };
-    let in_group = group.is_some_and(|g| g.in_group);
-    if in_group {
+    // The party slots alone: none after an ending (`0x4e84a0`), our own subgroup in a raid.
+    let party = group.map_or(0, |g| g.party_slots().count());
+    if party > 0 {
         if group.map(|g| g.leader) != Some(self_guid) {
             return StoneJoin::Refuse("ERR_MEETING_STONE_MUST_BE_LEADER");
         }
-        if group.is_some_and(|g| g.members.len() >= MEETING_STONE_PARTY_CAP) {
+        if party >= MEETING_STONE_PARTY_CAP {
             return StoneJoin::Refuse("ERR_MEETING_STONE_GROUP_FULL");
         }
     }
@@ -608,7 +612,8 @@ pub(crate) fn meeting_stone_join_refusal(
     if level < min_level || level > max_level {
         return StoneJoin::Refuse("ERR_MEETING_STONE_INVALID_LEVEL");
     }
-    if in_group && group.is_some_and(|g| g.group_type == crate::ui_party::GROUPTYPE_RAID) {
+    // The raid roster's count, whatever the party test found (`0x5f6aca`).
+    if group.is_some_and(GroupState::raid_held) {
         return StoneJoin::Refuse("ERR_MEETING_STONE_NO_RAID_GROUP");
     }
     StoneJoin::Send
@@ -686,23 +691,19 @@ fn area_spirit_healer_leave_world(mut spirit: ResMut<AreaSpiritHealer>) {
 
 #[allow(clippy::type_complexity)] // a Bevy system's full input set
 pub(crate) fn feed_dialog_verbs(
-    // The healer and the queue, which the death and battleground calls read: taken first.
+    // The healer, which the death calls read: taken first.
     mut vm: crate::script_calls::VmWith<(
         ResMut<'static, AreaSpiritHealer>,
-        ResMut<'static, BattlefieldQueue>,
         ResMut<'static, PetUnlearnState>,
     )>,
     mut boot: ResMut<InstanceBoot>,
     mut sink: crate::ui_action::MessageSink,
-    mut tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
 ) {
     let now = Instant::now();
-    let (spirit_secs, queue_tutorials, queue_changed, unlearn_pending, unlearn_ask) = {
-        let (spirit, mut queue, mut pet) = vm.own();
+    let (spirit_secs, unlearn_pending, unlearn_ask) = {
+        let (spirit, mut pet) = vm.own();
         (
             spirit.secs(now),
-            std::mem::take(&mut queue.tutorials),
-            std::mem::take(&mut queue.changed),
             pet.pending().is_some(),
             std::mem::take(&mut pet.ask).then_some(pet.cost),
         )
@@ -738,15 +739,6 @@ pub(crate) fn feed_dialog_verbs(
         // The time packet's `AREA_SPIRIT_HEALER_IN_RANGE` is its handler's, on the notice lane
         // after this push, so `GetAreaSpiritHealerTime` reads the deadline it stored.
         script.set_area_spirit_healer_secs(spirit_secs);
-
-        for id in queue_tutorials {
-            if let Some(t) = tutorials.as_mut() {
-                t.write(crate::tutorial::TutorialEvent::trigger(id));
-            }
-        }
-        if queue_changed {
-            script.fire_event("UPDATE_BATTLEFIELD_STATUS", vec![]);
-        }
     })
 }
 
@@ -981,7 +973,6 @@ mod net {
         app.net_handler(K::PetUnlearnConfirm, on_pet_unlearn_confirm)
             .net_handler(K::RaidGroupOnly, on_raid_group_only)
             .net_handler(K::AreaSpiritHealerTime, on_area_spirit_healer_time)
-            .net_handler(K::BattlefieldStatus, on_battlefield_status)
             .net_handler(K::MeetingStoneSetQueue, on_meeting_stone)
             .net_handler(K::MeetingStoneNotice, on_meeting_stone)
             .net_handler(K::Disconnected, on_session_end);
@@ -1045,12 +1036,6 @@ mod net {
                     id: id::AREA_SPIRIT_HEALER_IN_RANGE,
                 });
             }
-        }
-    }
-
-    fn on_battlefield_status(In(ev): In<SessionEvent>, mut queue: ResMut<BattlefieldQueue>) {
-        if let SessionEvent::BattlefieldStatus(status) = ev {
-            queue.apply(status);
         }
     }
 
@@ -1451,19 +1436,25 @@ mod tests {
             max_level: 60,
             area: 1519,
         });
-        let party = |leader: u64, others: usize, group_type: u8| GroupState {
-            in_group: true,
-            group_type,
-            leader,
-            members: (0..others)
-                .map(|i| benilla_protocol::messages::GroupMemberEntry {
-                    name: format!("Mate{i}"),
-                    guid: 0xb000 + i as u64,
-                    status: 1,
-                    flags: 0,
-                })
-                .collect(),
-            ..GroupState::default()
+        let party = |leader: u64, others: usize, group_type: u8| {
+            let mut group = GroupState {
+                in_group: true,
+                group_type,
+                leader,
+                members: (0..others)
+                    .map(|i| benilla_protocol::messages::GroupMemberEntry {
+                        name: format!("Mate{i}"),
+                        guid: 0xb000 + i as u64,
+                        status: 1,
+                        flags: 0,
+                    })
+                    .collect(),
+                ..GroupState::default()
+            };
+            if group_type == crate::ui_party::GROUPTYPE_RAID {
+                group.rebuild_raid(ME);
+            }
+            group
         };
 
         assert_eq!(
@@ -1513,6 +1504,25 @@ mod tests {
         assert_eq!(
             meeting_stone_join_refusal(Some(&party(MATE, 4, 1)), Some(ME), Some(40), stone),
             StoneJoin::Refuse("ERR_MEETING_STONE_MUST_BE_LEADER")
+        );
+
+        // The party terms read the party slots (`0x5f6a05`, `0x4e86d0`), not the wire's list: a
+        // raid leader with one other in their subgroup is not full, and the raid refuses.
+        let mut raid = party(ME, 6, 1);
+        for m in raid.members.iter_mut().skip(1) {
+            m.flags = 1;
+        }
+        assert_eq!(
+            meeting_stone_join_refusal(Some(&raid), Some(ME), Some(40), stone),
+            StoneJoin::Refuse("ERR_MEETING_STONE_NO_RAID_GROUP")
+        );
+        // After a leave or a kick the slots are empty and the leader cell 0: no party terms.
+        let mut ended = party(MATE, 2, 0);
+        ended.slots_emptied = true;
+        ended.leader = 0;
+        assert_eq!(
+            meeting_stone_join_refusal(Some(&ended), Some(ME), Some(40), stone),
+            StoneJoin::Send
         );
 
         // An uncached template reads 0/0 (`0x5f8150`) and refuses.
@@ -1605,8 +1615,17 @@ mod tests {
         assert_eq!(joins(&rx), vec![STONE], "the clicked stone's own guid");
 
         // In a party led by someone else: the same click sends nothing.
-        app.world_mut().resource_mut::<GroupState>().in_group = true;
-        app.world_mut().resource_mut::<GroupState>().leader = MATE;
+        {
+            let mut group = app.world_mut().resource_mut::<GroupState>();
+            group.in_group = true;
+            group.leader = MATE;
+            group.members = vec![benilla_protocol::messages::GroupMemberEntry {
+                name: "Mate".into(),
+                guid: MATE,
+                status: 1,
+                flags: 0,
+            }];
+        }
         app.world_mut()
             .write_message(MeetingStoneUse { go_guid: STONE });
         app.update();
@@ -1866,7 +1885,11 @@ mod tests {
             in_progress: Some((90_000, 30_000)),
             queued: None,
         };
-        q.apply_at(active.clone(), now);
+        assert_eq!(
+            q.apply_at(active.clone(), now).and_then(|a| a.active_map),
+            Some(489),
+            "the status-3 arm's map, for the stat columns"
+        );
         assert_eq!(q.active_map(), Some(489));
         assert_eq!(q.instance_expiration_ms(now), 90_000);
         assert_eq!(q.run_time_ms(now), 30_000);
@@ -1875,7 +1898,6 @@ mod tests {
             32_000,
             "the stamp runs on from the status"
         );
-        assert!(q.take_score_dirty());
         // A queued status for slot 2 zeroes both clocks too.
         let mut queued = active.clone();
         queued.slot = 1;
@@ -2048,7 +2070,7 @@ mod tests {
             }],
         );
 
-        let mut q = app.world_mut().resource_mut::<BattlefieldQueue>();
+        let q = app.world().resource::<BattlefieldQueue>();
         assert!(
             q.slots().iter().all(Option::is_none),
             "all three slots empty"
@@ -2056,6 +2078,5 @@ mod tests {
         assert_eq!(q.active_map(), None);
         assert_eq!(q.run_time_ms(now), 0);
         assert_eq!(q.instance_expiration_ms(now), 0);
-        assert!(!q.take_score_dirty());
     }
 }

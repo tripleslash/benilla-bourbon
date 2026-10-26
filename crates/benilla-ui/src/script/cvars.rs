@@ -107,6 +107,82 @@ impl std::fmt::Display for ScreenResolution {
     }
 }
 
+/// The Video menus' resolution list and the client's current entry, as the host reads them where
+/// a verb runs: the reference builds the list on the first use of any resolution verb
+/// (`0x48bc90`), so a call during the UI load answers it. Declined with no display to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenModesQuery;
+
+/// The host's answer to [`ScreenModesQuery`], as [`UiScript::set_screen_resolutions`] takes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenModes {
+    pub offered: Vec<ScreenResolution>,
+    pub current: Option<ScreenResolution>,
+}
+
+impl super::live::LiveQuery for ScreenModesQuery {
+    type Answer = ScreenModes;
+}
+
+/// The device's multisample formats, read where a multisample verb runs: the reference builds the
+/// list on the first use of any of them (`0x48c3e0`). Declined before the device is enumerated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MultisampleFormatsQuery;
+
+impl super::live::LiveQuery for MultisampleFormatsQuery {
+    type Answer = Vec<MultisampleFormat>;
+}
+
+/// Seat the live resolution list in the model before a resolution verb reads it (`0x48bc90`); the
+/// model's own list stands with no host to ask.
+fn read_screen_modes(lua: &Lua) {
+    if let Some(modes) = super::live::ask(lua, &ScreenModesQuery) {
+        seat_resolutions(
+            &mut lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data"),
+            modes.offered,
+            modes.current,
+        );
+    }
+}
+
+/// Seat the live multisample list in the model before a multisample verb reads it (`0x48c3e0`).
+fn read_multisample_formats(lua: &Lua) {
+    if let Some(formats) = super::live::ask(lua, &MultisampleFormatsQuery) {
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data");
+        // An equal list is not written: a write moves the extract's mutation count.
+        if model.multisample_formats != formats {
+            model.multisample_formats = formats;
+        }
+    }
+}
+
+/// Sort and dedupe `offered` by [`ScreenResolution::sort_key`], insert `current` when the list
+/// lacks it and seat both.
+fn seat_resolutions(
+    model: &mut crate::script::ModelCell,
+    mut offered: Vec<ScreenResolution>,
+    current: Option<ScreenResolution>,
+) {
+    offered.sort_by_key(ScreenResolution::sort_key);
+    offered.dedup();
+    let current = current.map(|c| {
+        offered.iter().position(|r| *r == c).unwrap_or_else(|| {
+            let at = offered.partition_point(|r| r.sort_key() < c.sort_key());
+            offered.insert(at, c);
+            at
+        })
+    });
+    // An equal list is not written: a write moves the extract's mutation count.
+    if model.screen_resolutions != offered || model.current_resolution != current {
+        model.screen_resolutions = offered;
+        model.current_resolution = current;
+    }
+}
+
 /// What `GetVideoCaps` answers, in `OptionsFrame.lua:59`'s order: anisotropic, pixel shaders,
 /// vertex shaders, trilinear, triple buffering, max anisotropy, hardware cursor. The host pushes
 /// what wgpu and this client's presentation path really offer.
@@ -349,21 +425,10 @@ impl super::UiScript {
     /// `arg[GetCurrentResolution()]` and silently falls back to 4:3 on a miss.
     pub fn set_screen_resolutions(
         &mut self,
-        mut offered: Vec<ScreenResolution>,
+        offered: Vec<ScreenResolution>,
         current: Option<ScreenResolution>,
     ) {
-        offered.sort_by_key(ScreenResolution::sort_key);
-        offered.dedup();
-        let current = current.map(|c| {
-            offered.iter().position(|r| *r == c).unwrap_or_else(|| {
-                let at = offered.partition_point(|r| r.sort_key() < c.sort_key());
-                offered.insert(at, c);
-                at
-            })
-        });
-        let mut model = self.model_mut();
-        model.screen_resolutions = offered;
-        model.current_resolution = current;
+        seat_resolutions(&mut self.model_mut(), offered, current);
     }
 
     /// Publish what this run's device and presentation path offer, behind `GetVideoCaps`.
@@ -668,6 +733,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetMultisampleFormats",
         lua.create_function(|lua, ()| {
+            read_multisample_formats(lua);
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
@@ -684,6 +750,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetCurrentMultisampleFormat",
         lua.create_function(|lua, ()| {
+            read_multisample_formats(lua);
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
@@ -710,6 +777,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "SetMultisampleFormat",
         lua.create_function(|lua, id: Value| {
+            read_multisample_formats(lua);
             // `lua_isnumber` (`0x48c659`): a non-number is a missing id, which the deviation below
             // ignores.
             let id = crate::script::binding_abi::is_number(lua, id);
@@ -831,6 +899,7 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetScreenResolutions",
         lua.create_function(|lua, ()| {
+            read_screen_modes(lua);
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
@@ -853,6 +922,7 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetCurrentResolution",
         lua.create_function(|lua, ()| {
+            read_screen_modes(lua);
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
@@ -873,6 +943,7 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "SetScreenResolution",
         lua.create_function(|lua, id: Option<Value>| {
+            read_screen_modes(lua);
             // `is-number` (`0x48bfe8`) false leaves the index at entry 1 (`0x48bfe6`).
             let idx = match id {
                 Some(v) => lua.coerce_number(v)?.map_or(0, super::binding_abi::ftol),

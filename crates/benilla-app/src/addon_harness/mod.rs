@@ -1249,7 +1249,8 @@ fn seat_a_session(script: &mut UiScript) {
             ..Default::default()
         };
         script.set_quest_log_player(true);
-        script.quest_log_changed(slots);
+        script.set_quest_slots(slots);
+        script.quest_log_changed();
         script.flush_quest_log_refires();
     }
 
@@ -1368,7 +1369,10 @@ fn talent_snapshot() -> Option<benilla_ui::script::TalentUiState> {
     // Human (`ChrRaces.dbc` 1) warrior (`ChrClasses.dbc` 1), the character `seat_a_session` seats.
     Some(crate::ui_talent::build_pages(
         talents,
-        &BTreeSet::new(),
+        crate::ui_talent::Known {
+            spells: &BTreeSet::new(),
+            lines: None,
+        },
         spells,
         1,
         1,

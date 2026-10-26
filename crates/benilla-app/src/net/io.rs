@@ -1746,6 +1746,10 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::MeetingStoneJoin { go_guid } => w.meeting_stone_join(go_guid),
         ClientCommand::MeetingStoneLeave => w.meeting_stone_leave(),
         ClientCommand::MeetingStoneStatusQuery => w.meeting_stone_status_query(),
+        ClientCommand::RequestAccountData { section } => w.request_account_data(section),
+        ClientCommand::UpdateAccountData { section, contents } => {
+            w.update_account_data(section, &contents)
+        }
         ClientCommand::TutorialFlag { id } => w.tutorial_flag(id),
         ClientCommand::TutorialClear => w.tutorial_clear(),
         ClientCommand::TutorialReset => w.tutorial_reset(),

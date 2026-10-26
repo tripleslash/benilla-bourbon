@@ -33,14 +33,14 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 
 Each entry is the first sentence of a `Deviation:` comment, linking to where it lives.
 
-- [benilla-app](#benilla-app): 258
+- [benilla-app](#benilla-app): 261
 - [benilla-assets](#benilla-assets): 7
 - [benilla-blp](#benilla-blp): 2
 - [benilla-formats](#benilla-formats): 25
 - [benilla-lua](#benilla-lua): 11
-- [benilla-protocol](#benilla-protocol): 28
+- [benilla-protocol](#benilla-protocol): 31
 - [benilla-srp](#benilla-srp): 2
-- [benilla-ui](#benilla-ui): 135
+- [benilla-ui](#benilla-ui): 134
 - [benilla-world](#benilla-world): 58
 
 ### benilla-app
@@ -85,7 +85,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### bindings
 
 - A press with Super (Cmd) held runs no binding, so a system chord such as Cmd+Tab or Cmd+Q never acts in game. ([`src/bindings.rs:19`](../crates/benilla-app/src/bindings.rs#L19))
-- Latches die with the VM that made them, because a latch names a command of that VM's table and releasing it against a new one would run another load's up-half. ([`src/bindings.rs:522`](../crates/benilla-app/src/bindings.rs#L522))
+- Latches die with the VM that made them, because a latch names a command of that VM's table and releasing it against a new one would run another load's up-half. ([`src/bindings.rs:596`](../crates/benilla-app/src/bindings.rs#L596))
 - The Windows key table stops at `VK_F12` and drops later F-keys; they are named here so a stored `F13`-`F24` can be pressed. ([`src/bindings/chord.rs:165`](../crates/benilla-app/src/bindings/chord.rs#L165))
 - On the Mac and Linux a key its platform reports no character for keeps its US name too, where the Mac reference drops it (`0x8a4aa`), and a Linux dead key not yet pressed bare stays bindable. ([`src/bindings/layout.rs:116`](../crates/benilla-app/src/bindings/layout.rs#L116))
 - A character above U+00FF names the key by itself. The reference's `MapVirtualKeyA` returns an ANSI code-page byte, which `0x42da4b` drops past `0xff` and the namer's UTF-8 encoder (`0x41abb0`) otherwise reads as Latin-1, so such a key is mislabelled or dropped; named by what it types, it stays bindable and readable. ([`src/bindings/layout.rs:216`](../crates/benilla-app/src/bindings/layout.rs#L216))
@@ -111,7 +111,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### combat_text
 
-- The reference stretches a raster of at most 32 px; each whole-pixel size is rasterized here, so the crit pop stays crisp. ([`src/combat_text/mod.rs:264`](../crates/benilla-app/src/combat_text/mod.rs#L264))
+- The reference stretches a raster of at most 32 px; each whole-pixel size is rasterized here, so the crit pop stays crisp. ([`src/combat_text/mod.rs:273`](../crates/benilla-app/src/combat_text/mod.rs#L273))
 
 #### console
 
@@ -130,7 +130,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 - The reference's list runs in creation order, the records `Config.wtf` created first in file order (`0x63d8eb`), then each registration as start-up reaches it (`containers`), an order benilla-re has not traced. benilla lists in the table's order, which is register-site address order, then the rows the table lacks (benilla's own, an addon's) as they registered. ([`src/cvars/listing.rs:5`](../crates/benilla-app/src/cvars/listing.rs#L5))
 - For a row that is not latched the observers fire, where the reference runs no callback here (`0x63dff0`, `0x63e010`), because a knob moves only through its `CvarChanged` observer, which also stands in for the reference's direct reads of the record; without it knob and value would disagree until the next write. ([`src/cvars/mod.rs:500`](../crates/benilla-app/src/cvars/mod.rs#L500))
-- The reference's `SaveConfig` (`0x63d980`) writes only at world entry (`0x46b6f6`), at the leave-world tail (`0x490c35`-`0x490c64`) and at shutdown (`0x63daf0`), so a crash or a kill loses every change since; here a player's settings survive one. ([`src/cvars/mod.rs:1619`](../crates/benilla-app/src/cvars/mod.rs#L1619))
+- The reference's `SaveConfig` (`0x63d980`) writes only at world entry (`0x46b6f6`), at the leave-world tail (`0x490c35`-`0x490c64`) and at shutdown (`0x63daf0`), so a crash or a kill loses every change since; here a player's settings survive one. ([`src/cvars/mod.rs:1624`](../crates/benilla-app/src/cvars/mod.rs#L1624))
 - The reference clips at full scale and has no headroom mechanism (its SFX-bus duck `0x457960` is a sidechain armed only by server-pushed voice lines); benilla limits because every SFX is mastered to full scale and overlapping kits clip. ([`src/cvars/table.rs:243`](../crates/benilla-app/src/cvars/table.rs#L243))
 - Here the dial multiplies the camera's own rate, because benilla does not change the OS pointer speed, a system-wide setting. ([`src/cvars/table.rs:505`](../crates/benilla-app/src/cvars/table.rs#L505))
 - "0" raises a borderless fullscreen window instead of mode-setting the display, because Wayland and macOS offer no mode-set and X11's leaves the desktop changed after a crash (`crate::video`). ([`src/cvars/table.rs:658`](../crates/benilla-app/src/cvars/table.rs#L658))
@@ -138,7 +138,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### death
 
-- The minutes come from the server's table, not from spell 15007's `Spell.dbc` duration, because the aura the server applies is what the dialog must warn about. ([`src/death/mod.rs:529`](../crates/benilla-app/src/death/mod.rs#L529))
+- A `/reload` dead keeps the release window and signals `PLAYER_DEAD` again, where the reference zeroes the timer at every UI start (`0x490131`) and its cascade never calls `0x495850` (`0x490168`), because without both a player who reloads dead has no Release. ([`src/death/mod.rs:127`](../crates/benilla-app/src/death/mod.rs#L127))
+- With no death this session to arm it (dead at login or after a `/reload`), the window runs from the first sight of the body dead, while the bit is set. ([`src/death/mod.rs:206`](../crates/benilla-app/src/death/mod.rs#L206))
+- The minutes come from the server's table, not from spell 15007's `Spell.dbc` duration, because the aura the server applies is what the dialog must warn about. ([`src/death/mod.rs:536`](../crates/benilla-app/src/death/mod.rs#L536))
 
 #### entities
 
@@ -167,7 +169,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### local_state
 
-- The reference writes `Screenshots\\` inside the install, which benilla never writes to; the folder keeps the reference's name. ([`src/local_state.rs:425`](../crates/benilla-app/src/local_state.rs#L425))
+- The reference writes `Screenshots\\` inside the install, which benilla never writes to; the folder keeps the reference's name. ([`src/local_state.rs:466`](../crates/benilla-app/src/local_state.rs#L466))
 
 #### memory_pressure
 
@@ -182,7 +184,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - `AlphaMode::Blend` writes no depth where the reference does, because overlapping names resolving by sort order look the same. ([`src/nameplates.rs:4`](../crates/benilla-app/src/nameplates.rs#L4))
 - A mounted plate keeps only this fraction of its seat's oscillation about a slow mean, because the raw seat, which the reference also rides, read more intense than the reference side by side. `1.0` is the raw seat; on-foot plates are untouched. ([`src/nameplates.rs:309`](../crates/benilla-app/src/nameplates.rs#L309))
 - Larger than the reference's 32 px `UNIT_NAME_FONT` raster, which it magnifies (`0x6c749b`), because a larger source is crisper up close. ([`src/nameplates.rs:318`](../crates/benilla-app/src/nameplates.rs#L318))
-- `ShouldShowName`'s first leg is `IsSelectable` (`0x60be60`), which passes our own unit; what hides the own name in first person in 1.12.1 is untraced, so the avatar's fade stands in. ([`src/nameplates.rs:552`](../crates/benilla-app/src/nameplates.rs#L552))
+- `ShouldShowName`'s first leg is `IsSelectable` (`0x60be60`), which passes our own unit; what hides the own name in first person in 1.12.1 is untraced, so the avatar's fade stands in. ([`src/nameplates.rs:550`](../crates/benilla-app/src/nameplates.rs#L550))
 
 #### names
 
@@ -198,8 +200,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference paces a self move through the same replay chain as a remote's, which would only delay a correction to our own pose. ([`src/net/motion/remote.rs:84`](../crates/benilla-app/src/net/motion/remote.rs#L84))
 - \*\*a body nobody can see is stepped every `HIDDEN_STRIDE`th frame\*\*, with the time it is owed, where the reference steps every mover every frame. ([`src/net/motion/remote.rs:355`](../crates/benilla-app/src/net/motion/remote.rs#L355))
 - Its rate-limited hover climb (`0x636fa1`, 7 yd/s) is not reproduced, because the cache gate needs a pure function; it converges to this answer. ([`src/net/motion/spline.rs:749`](../crates/benilla-app/src/net/motion/spline.rs#L749))
-- A first-pass values block the clear header byte left unwritten re-fires, for a live object, its last write's edges against the watch copy (`0x465570`, `0x466686`); benilla compares against this packet's copies, which hold none for it, so a stale edge never fires twice. ([`src/net/objects/update.rs:903`](../crates/benilla-app/src/net/objects/update.rs#L903))
-- The create notify uses its lookup's result untested (`0x465c97`, `0x465d79`). ([`src/net/objects/update.rs:915`](../crates/benilla-app/src/net/objects/update.rs#L915))
+- A first-pass values block the clear header byte left unwritten re-fires, for a live object, its last write's edges against the watch copy (`0x465570`, `0x466686`); benilla compares against this packet's copies, which hold none for it, so a stale edge never fires twice. ([`src/net/objects/update.rs:925`](../crates/benilla-app/src/net/objects/update.rs#L925))
+- The create notify uses its lookup's result untested (`0x465c97`, `0x465d79`). ([`src/net/objects/update.rs:937`](../crates/benilla-app/src/net/objects/update.rs#L937))
 
 #### no_install
 
@@ -293,7 +295,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### spell
 
 - An out-of-range byte drops the packet, because the reference's unchecked write overruns the table (`(64, 19)` lands on the class family at `0xcecaac`). ([`src/spell/mods.rs:132`](../crates/benilla-app/src/spell/mods.rs#L132))
-- The fallback is the packet's target guid, never the nearest-hostile acquire, because that would attack something the player never named. ([`src/spell/net.rs:1289`](../crates/benilla-app/src/spell/net.rs#L1289))
+- The fallback is the packet's target guid, never the nearest-hostile acquire, because that would attack something the player never named. ([`src/spell/net.rs:1316`](../crates/benilla-app/src/spell/net.rs#L1316))
 - A range failure leaves targeting armed and working. The reference's report cancels the cast (`0x6e2218` → `0x6e4940`): its line, `SPELLCAST_FAILED` and the tradeskill disarm, which benilla keeps; with the word the bind emptied it also sends `CMSG_CANCEL_CAST` for the unsent spell (`0x6e4970`) and clears the caster, then restores the pre-click word (`0x6e6096`), so every later click fails the caster test (`0x6e5b93`) and the cursor is stranded until a cancel. ([`src/spell/targeting/mod.rs:624`](../crates/benilla-app/src/spell/targeting/mod.rs#L624))
 
 #### target
@@ -303,8 +305,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The rank is held to 7, the top of the ring scale's eight entries (`0..=7`), where the reference keeps any value; a server rank past 7 would index outside our palette. ([`src/target/relations.rs:487`](../crates/benilla-app/src/target/relations.rs#L487))
 - TAB uses Classic Era's screen-space priority, not 1.12's ±30° facing cone and snapshot cursor (`0x493f60`), because the cone skips a close mob in front of the camera, which sits behind the character. ([`src/target/scan.rs:3`](../crates/benilla-app/src/target/scan.rs#L3))
 - Our own body is never a candidate. The reference's friendly scan picks the player at some facings (`CanAssist(P, P)` is true, `0x6061e0`; the cone test `0x47f220`), but our scoring always puts the player dead centre at distance 0, so CTRL-TAB would pick us on every press. ([`src/target/scan.rs:194`](../crates/benilla-app/src/target/scan.rs#L194))
-- No scene-attach gate (the reference's `0x6704c0`), because the draw election hides every body outside the frustum, which would empty the off-screen tier. ([`src/target/scan.rs:368`](../crates/benilla-app/src/target/scan.rs#L368))
-- Sampled each frame, not stamped in `SetSelection`, so every selection writer is covered; a selected unit that turns hostile is remembered, where the reference's is not. ([`src/target/scan.rs:931`](../crates/benilla-app/src/target/scan.rs#L931))
+- No scene-attach gate (the reference's `0x6704c0`), because the draw election hides every body outside the frustum, which would empty the off-screen tier. ([`src/target/scan.rs:369`](../crates/benilla-app/src/target/scan.rs#L369))
+- Sampled each frame, not stamped in `SetSelection`, so every selection writer is covered; a selected unit that turns hostile is remembered, where the reference's is not. ([`src/target/scan.rs:932`](../crates/benilla-app/src/target/scan.rs#L932))
 
 #### textinput
 
@@ -320,9 +322,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### ui_aura
 
-- On a catalog miss the reference keeps the record's stale value (`0x4e4533`, `0x4e4550` skip the write); this answers from the joined expiry, because a stale value is no mechanism to reproduce. ([`src/ui_aura.rs:673`](../crates/benilla-app/src/ui_aura.rs#L673))
-- On other units' rows an id the catalog lacks stays visible, because every wire id is a real spell and failing closed would blank every aura on a catalog failure; the reference skips one there (`[0xc0d78c]`), though its player cache inserts one, as here. ([`src/ui_aura.rs:701`](../crates/benilla-app/src/ui_aura.rs#L701))
-- The reference never clears its expiry array (`0xbc5f68`); this does, because vmangos sends no durations at login to overwrite a kept stamp (`SMSG_UPDATE_AURA_DURATION` is an empty placeholder in `Player::SendInitialPacketsBeforeAddToMap`, `Player.cpp:19248`). ([`src/ui_aura.rs:1154`](../crates/benilla-app/src/ui_aura.rs#L1154))
+- On a catalog miss the reference keeps the record's stale value (`0x4e4533`, `0x4e4550` skip the write); this answers from the joined expiry, because a stale value is no mechanism to reproduce. `None` is that miss: the call reads the expiry (`AuraState::until_cancelled_unknown`). ([`src/ui_aura.rs:658`](../crates/benilla-app/src/ui_aura.rs#L658))
+- On other units' rows an id the catalog lacks stays visible, because every wire id is a real spell and failing closed would blank every aura on a catalog failure; the reference skips one there (`[0xc0d78c]`), though its player cache inserts one, as here. ([`src/ui_aura.rs:686`](../crates/benilla-app/src/ui_aura.rs#L686))
+- The reference never clears its expiry array (`0xbc5f68`); this does, because vmangos sends no durations at login to overwrite a kept stamp (`SMSG_UPDATE_AURA_DURATION` is an empty placeholder in `Player::SendInitialPacketsBeforeAddToMap`, `Player.cpp:19248`). ([`src/ui_aura.rs:1138`](../crates/benilla-app/src/ui_aura.rs#L1138))
 
 #### ui_binder
 
@@ -339,7 +341,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The files live in `benilla-config/Logs/`, not the install's `Logs`, because the install is read-only. ([`src/ui_chat/logging.rs:4`](../crates/benilla-app/src/ui_chat/logging.rs#L4))
 - No re-run when a remote player streams in, because the reference's re-run only repeats the join, which vmangos swallows, or the leave, whose "Not on channel" notice nothing prints. ([`src/ui_chat/recruitment.rs:7`](../crates/benilla-app/src/ui_chat/recruitment.rs#L7))
 - `set_chat_window_looks` drops an out-of-range window, where the reference's `WINDOW` bound is off by one (`0x498d1c`, `ja` where the array needs `jae`), because that write would land past the array. ([`src/ui_chat/settings.rs:31`](../crates/benilla-app/src/ui_chat/settings.rs#L31))
-- The debounce also writes Lua's changes (`dirty`) after the quiet time, where the reference writes only at teardown, so a crash loses at most a second of changes. ([`src/ui_chat/settings.rs:575`](../crates/benilla-app/src/ui_chat/settings.rs#L575))
+- The debounce also writes Lua's changes (`dirty`) after the quiet time, where the reference writes only at teardown, so a crash loses at most a second of changes. ([`src/ui_chat/settings.rs:603`](../crates/benilla-app/src/ui_chat/settings.rs#L603))
 
 #### ui_dressup
 
@@ -389,10 +391,10 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### ui_loot
 
-- It is the display row, where the reference's is the item index plus one (`0x4c2885`), so an addon's `GetLootSlotInfo(arg1)` reads the row the dialog is for. ([`src/ui_loot/mod.rs:267`](../crates/benilla-app/src/ui_loot/mod.rs#L267))
-- `autoLootDefault` is benilla's own option, 1.12 auto-looting only on a shift-click, and off is 1.12's behaviour. ([`src/ui_loot/mod.rs:681`](../crates/benilla-app/src/ui_loot/mod.rs#L681))
-- Our close paths clear it guid-matched, where `CloseInteraction` clears it unconditionally (`0x48f2c9`), so closing an old window keeps a newer `CMSG_LOOT`'s latch. ([`src/ui_loot/mod.rs:709`](../crates/benilla-app/src/ui_loot/mod.rs#L709))
-- A negative answer releases the row, where the reference's callback `0x4c2ac0` returns on a failed query and the window never opens, because an entry the server cannot describe would otherwise keep the loot shut for good. ([`src/ui_loot/mod.rs:890`](../crates/benilla-app/src/ui_loot/mod.rs#L890))
+- It is the display row, where the reference's is the item index plus one (`0x4c2885`), so an addon's `GetLootSlotInfo(arg1)` reads the row the dialog is for. ([`src/ui_loot/mod.rs:265`](../crates/benilla-app/src/ui_loot/mod.rs#L265))
+- `autoLootDefault` is benilla's own option, 1.12 auto-looting only on a shift-click, and off is 1.12's behaviour. ([`src/ui_loot/mod.rs:679`](../crates/benilla-app/src/ui_loot/mod.rs#L679))
+- Our close paths clear it guid-matched, where `CloseInteraction` clears it unconditionally (`0x48f2c9`), so closing an old window keeps a newer `CMSG_LOOT`'s latch. ([`src/ui_loot/mod.rs:707`](../crates/benilla-app/src/ui_loot/mod.rs#L707))
+- A negative answer releases the row, where the reference's callback `0x4c2ac0` returns on a failed query and the window never opens, because an entry the server cannot describe would otherwise keep the loot shut for good. ([`src/ui_loot/mod.rs:888`](../crates/benilla-app/src/ui_loot/mod.rs#L888))
 
 #### ui_loot_roll
 
@@ -418,7 +420,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### ui_mirror
 
-- A type with no bar is dropped, because no bar appears either way: the reference fires it as `"UNKNOWN"` (`0x5e7ae0`) and `MirrorTimer_Show` errors on its nil colour before `Show()`. vmangos's `NUM_CLIENT_TIMERS` keeps its fourth timer off the wire. ([`src/ui_mirror.rs:66`](../crates/benilla-app/src/ui_mirror.rs#L66))
+- A type with no bar is dropped, because no bar appears either way: the reference fires it as `"UNKNOWN"` (`0x5e7ae0`) and `MirrorTimer_Show` errors on its nil colour before `Show()`. vmangos's `NUM_CLIENT_TIMERS` keeps its fourth timer off the wire. ([`src/ui_mirror.rs:145`](../crates/benilla-app/src/ui_mirror.rs#L145))
 
 #### ui_models
 
@@ -451,13 +453,13 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - Each is off (`## DefaultState: disabled`) until the player ticks it on the AddOns screen, where a folder addon defaults on; the reference ships none, and a player never asked for these. ([`src/ui_script/addons.rs:367`](../crates/benilla-app/src/ui_script/addons.rs#L367))
 - That file is renamed to `<Name>.lua.bak`, where the reference deletes it, so an addon update that drops its toc line costs the player nothing they cannot get back. ([`src/ui_script/addons.rs:752`](../crates/benilla-app/src/ui_script/addons.rs#L752))
 - The reference writes none (its file opens with a blank line); ours names the file, because players open this folder. ([`src/ui_script/addons.rs:810`](../crates/benilla-app/src/ui_script/addons.rs#L810))
-- The reference then re-reads the aspect (`0x492f13`), and on a change of 0.001 or more calls `0x491380`, which sets the reload trigger (`[0xb4b3f4]`) when the script-context check `0x494a50(0xa)` allows it; here a resize re-lays out the live UI, the chat bubbles' window-derived `BubbleGeometry` with it, because the window resizes freely and a reload on each resize would tear down every addon's state mid-play. ([`src/ui_script/extract/mod.rs:561`](../crates/benilla-app/src/ui_script/extract/mod.rs#L561))
-- The V-plate border is resampled sharp to the quad's physical size rather than GPU-magnified, so its 1 px bevel stays crisp; keyed by that size, so only a resize re-rasterises it. ([`src/ui_script/extract/mod.rs:1517`](../crates/benilla-app/src/ui_script/extract/mod.rs#L1517))
+- The reference then re-reads the aspect (`0x492f13`), and on a change of 0.001 or more calls `0x491380`, which sets the reload trigger (`[0xb4b3f4]`) when the script-context check `0x494a50(0xa)` allows it; here a resize re-lays out the live UI, the chat bubbles' window-derived `BubbleGeometry` with it, because the window resizes freely and a reload on each resize would tear down every addon's state mid-play. ([`src/ui_script/extract/mod.rs:568`](../crates/benilla-app/src/ui_script/extract/mod.rs#L568))
+- The V-plate border is resampled sharp to the quad's physical size rather than GPU-magnified, so its 1 px bevel stays crisp; keyed by that size, so only a resize re-rasterises it. ([`src/ui_script/extract/mod.rs:1532`](../crates/benilla-app/src/ui_script/extract/mod.rs#L1532))
 - No signature or digest check (`0x46a90b`, `0x46a9d3`, `0x401560(9)`), so the chain's toc always loads and `FRAMES_LOADED` follows, because the check verifies Blizzard's signature with a key carried in the client binary, which benilla does not ship, and a modified interface file is loaded rather than refused. ([`src/ui_script/glue.rs:14`](../crates/benilla-app/src/ui_script/glue.rs#L14))
 - The page starts at the login screen and leaves the CVar as it stands: its packs carry no movie converted for the web, so the movie frame has nothing to play there. ([`src/ui_script/glue.rs:198`](../crates/benilla-app/src/ui_script/glue.rs#L198))
 - The reference's size callback only re-scales `GlueParent` and re-lays it out (`0x46ac51`, `0x46ac56`), as its root keeps `gxResolution`'s aspect until a rebuild (`0x41ad10` at `0x46a828`) and its window keeps that shape while dragged (`0x5989d7`); here the root is the window's, which takes any shape, so the box follows it on every resize, where a rebuild would reset the screen (the create screen's character and name, the typed password, the selection). ([`src/ui_script/glue.rs:351`](../crates/benilla-app/src/ui_script/glue.rs#L351))
 - The reference's handler completes whichever operation is current; here only the character list's does, in state 3, and a reply of another cause (a roster nothing of the screen asked for) or of another link (before a realm change) completes nothing. ([`src/ui_script/glue_mgr.rs:1538`](../crates/benilla-app/src/ui_script/glue_mgr.rs#L1538))
-- The character is the platform's Unicode text, so a player can type any language on any platform. ([`src/ui_script/input.rs:630`](../crates/benilla-app/src/ui_script/input.rs#L630))
+- The character is the platform's Unicode text, so a player can type any language on any platform. ([`src/ui_script/input.rs:637`](../crates/benilla-app/src/ui_script/input.rs#L637))
 - A capture run (`scenario_active`) keeps the CRT's default seed, 1, so its frames reproduce. ([`src/ui_script/lifecycle.rs:177`](../crates/benilla-app/src/ui_script/lifecycle.rs#L177))
 - The page installs no reader, so `StartMovie` answers nil and the stock movie frame hides at once: its packs carry no movie converted for the web. ([`src/ui_script/lifecycle.rs:275`](../crates/benilla-app/src/ui_script/lifecycle.rs#L275))
 - The files are under `benilla-config/Logs/`, since the install is read-only. ([`src/ui_script/load_log.rs:5`](../crates/benilla-app/src/ui_script/load_log.rs#L5))
@@ -470,6 +472,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### ui_social
 
+- After a full 50 the reference reads the 160 bytes past the array (`0xc2a0f8`, the counts at `0xc2a120` among them); benilla answers the miss. ([`src/ui_social/live.rs:72`](../crates/benilla-app/src/ui_social/live.rs#L72))
 - A filter of 127 bytes or more puts the copy's NUL in the name buffer's first byte (`0x5aec1a`), so a name an earlier tag set is scanned as more filter. benilla ends the copy at its own NUL: the run-on reads one stack buffer through another. ([`src/ui_social/query.rs:76`](../crates/benilla-app/src/ui_social/query.rs#L76))
 - `C1_SPACE` from `GetStringTypeW` is the Windows system's own table, which no file of the client holds; benilla answers Unicode's `White_Space` for those units, and nothing for a lone surrogate. ([`src/ui_social/query.rs:164`](../crates/benilla-app/src/ui_social/query.rs#L164))
 
@@ -479,8 +482,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### ui_talent_wipe
 
-- Vmangos answers a reset with nothing to reset by asking again with a zero guid (`SkillHandler.cpp:52`), which the 1.12 client takes as its Accept and answers, looping; this drops a zero-guid question, because it means there is nothing to ask. ([`src/ui_talent_wipe.rs:14`](../crates/benilla-app/src/ui_talent_wipe.rs#L14))
-- The reference never clears its latch (`0xc4d7a0`); this does once the answer is sent, because the reference's dialog is gone by then and a second Accept would reset twice. ([`src/ui_talent_wipe.rs:141`](../crates/benilla-app/src/ui_talent_wipe.rs#L141))
+- Vmangos answers a reset with nothing to reset by asking again with a zero guid (`SkillHandler.cpp:52`), which the 1.12 client takes as its Accept and answers, looping; this drops a zero-guid question, because it means there is nothing to ask. ([`src/ui_talent_wipe.rs:16`](../crates/benilla-app/src/ui_talent_wipe.rs#L16))
+- The reference never clears its latch (`0xc4d7a0`); this does once the answer is sent, because the reference's dialog is gone by then and a second Accept would reset twice. ([`src/ui_talent_wipe.rs:110`](../crates/benilla-app/src/ui_talent_wipe.rs#L110))
 
 #### ui_text
 
@@ -490,8 +493,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference evicts the least recently used glyph and repacks its hole (`0x5cad2b`, over `[CGxFont+0x64..0x6c]`); this drops every cell, because a shelf allocator cannot reclaim an interior cell and the sheet is far larger than the reference's 256×256 pages. ([`src/ui_text/engine/mod.rs:652`](../crates/benilla-app/src/ui_text/engine/mod.rs#L652))
 - Every UI text block sits 1 device px below the reference's snapped row, because at that row UI text reads high. ([`src/ui_text/layout/mod.rs:119`](../crates/benilla-app/src/ui_text/layout/mod.rs#L119))
 - The cap is 32 logical units, not 32 device px, because the reference's raster-memory ceiling draws all big text at the same 32 device px on a modern display; at the 768-tall design height the two agree. ([`src/ui_text/mod.rs:54`](../crates/benilla-app/src/ui_text/mod.rs#L54))
-- `r × round(dpi)` passes, so the ring keeps its logical weight on a high-DPI raster. ([`src/ui_text/outline.rs:60`](../crates/benilla-app/src/ui_text/outline.rs#L60))
-- `r × round(dpi)` passes as in `outlined_cell`, the first `round(dpi)` of them the opaque ring. ([`src/ui_text/outline.rs:167`](../crates/benilla-app/src/ui_text/outline.rs#L167))
+- `r × floor(dpi)` passes, so the ring keeps its logical weight on a whole-number high-DPI raster; a fractional scale such as 1.5 rounds down to the reference's one texel a pass. ([`src/ui_text/outline.rs:60`](../crates/benilla-app/src/ui_text/outline.rs#L60))
+- `r × floor(dpi)` passes as in `outlined_cell`, the first `floor(dpi)` of them the opaque ring. ([`src/ui_text/outline.rs:168`](../crates/benilla-app/src/ui_text/outline.rs#L168))
 - One sheet, where the reference keeps up to 8 pages per font (`[CGxFont+0x18c]`), because a nameplate bakes its glyphs into one mesh with one material, which a page would split. ([`src/ui_text/pack.rs:11`](../crates/benilla-app/src/ui_text/pack.rs#L11))
 
 #### ui_tooltip
@@ -520,7 +523,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference dims non-target plates to `0x7F`; raised because that fades them too far to read. ([`src/vplates.rs:128`](../crates/benilla-app/src/vplates.rs#L128))
 - The reference draws at fractional device coordinates; the snap keeps the magnified border crisp. ([`src/vplates.rs:187`](../crates/benilla-app/src/vplates.rs#L187))
 - The reference's plates grow with the diagonal without limit (`0x7705b0`), which reads too big and soft; past this diagonal, where the frame is the border art's native 128x32 px, the basis grows at `PLATE_GROWTH_DAMP` of that rate. ([`src/vplates.rs:193`](../crates/benilla-app/src/vplates.rs#L193))
-- A constant one-logical-pixel shadow, not the reference's 0.001 gx, which draws 2 px thick and too heavy at larger windows. ([`src/vplates.rs:697`](../crates/benilla-app/src/vplates.rs#L697))
+- A constant one-logical-pixel shadow, not the reference's 0.001 gx, which draws 2 px thick and too heavy at larger windows. ([`src/vplates.rs:708`](../crates/benilla-app/src/vplates.rs#L708))
 - The reference magnifies the 128 × 32 `Interface\Tooltips\Nameplate-Border` art with `GL_LINEAR` (`0x770200`, filter `[0x878cf0]` = 1), smearing its 1 px bevel once the plate is larger than native; we resample the same pixels to the plate's physical size with sharp bilinear and draw it 1:1, because the chosen look is the same art with a crisp bevel. `super::drive_vplates` regenerates it when the physical size changes. ([`src/vplates/border.rs:3`](../crates/benilla-app/src/vplates/border.rs#L3))
 
 #### wdb
@@ -672,9 +675,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### events
 
-- `benilla::spell_mods` refuses an out-of-range pair, because the reference would overrun it. ([`src/events.rs:754`](../crates/benilla-protocol/src/events.rs#L754))
-- An out-of-range list past the first block reads no body in the write passes (`0x466076`), which misread every block behind it, while the notify pass reads past it (`0x465fd0`) and stays in step; benilla reads the list and drops it, keeping the blocks behind it whole. ([`src/events/decode.rs:1134`](../crates/benilla-protocol/src/events/decode.rs#L1134))
-- The flagged pass reads a movement block's guid as 8 raw bytes (`0x467140`, `0x46714d`) where the wire packs it, so unless the packed guid happens to be 8 bytes the reference misreads the rest of that pass; benilla reads the block once, packed, as pass 0 does (`0x467080`). ([`src/events/decode.rs:1151`](../crates/benilla-protocol/src/events/decode.rs#L1151))
+- `benilla::spell_mods` refuses an out-of-range pair, because the reference would overrun it. ([`src/events.rs:759`](../crates/benilla-protocol/src/events.rs#L759))
+- An out-of-range list past the first block reads no body in the write passes (`0x466076`), which misread every block behind it, while the notify pass reads past it (`0x465fd0`) and stays in step; benilla reads the list and drops it, keeping the blocks behind it whole. ([`src/events/decode.rs:1136`](../crates/benilla-protocol/src/events/decode.rs#L1136))
+- The flagged pass reads a movement block's guid as 8 raw bytes (`0x467140`, `0x46714d`) where the wire packs it, so unless the packed guid happens to be 8 bytes the reference misreads the rest of that pass; benilla reads the block once, packed, as pass 0 does (`0x467080`). ([`src/events/decode.rs:1153`](../crates/benilla-protocol/src/events/decode.rs#L1153))
 
 #### examples
 
@@ -682,6 +685,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### messages
 
+- A stream that fails to inflate is no file, where the reference writes its buffer unchecked (`0x5afcbc`), because those bytes are whatever its stack held. ([`src/messages/account_data.rs:48`](../crates/benilla-protocol/src/messages/account_data.rs#L48))
+- The whole stream is sent, where the reference cuts it at the file's size (`0x5afb42`), because the server refuses a cut stream and the next login then downloads its old copy over the player's file. ([`src/messages/account_data.rs:85`](../crates/benilla-protocol/src/messages/account_data.rs#L85))
 - A fixed list, not read off the install, because no third-party addon sets `## Secure:`, so the two differ only where the `.pub` files were altered. ([`src/messages/addons.rs:93`](../crates/benilla-protocol/src/messages/addons.rs#L93))
 - Every row is kept, because the reference takes the count unclamped into its 80 row blocks and a larger one overruns them. ([`src/messages/battlefield.rs:98`](../crates/benilla-protocol/src/messages/battlefield.rs#L98))
 - A larger count keeps the first 40, where the reference's handler writes past the store. ([`src/messages/battlefield.rs:188`](../crates/benilla-protocol/src/messages/battlefield.rs#L188))
@@ -690,11 +695,12 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - Zone and position are kept, not set to the viewer's zone and the object's position, because nothing in benilla reads them. ([`src/messages/group.rs:256`](../crates/benilla-protocol/src/messages/group.rs#L256))
 - String reads are unbounded. The reference `0x4191b0` caps each field, counting the NUL (roster name `0x30`, notes `0x80`, MOTD `0x200`, info `0x7d0`, guild name `0x60`, rank name `0x40`), and on overflow empties it and no-ops every later read in the packet. ([`src/messages/guild.rs:4`](../crates/benilla-protocol/src/messages/guild.rs#L4))
 - A reason of 3 or more is silent, where the reference prints an uninitialized stack buffer, because 3 is the server's `INSTANCERESET_FAIL_SILENTLY`. ([`src/messages/instance.rs:70`](../crates/benilla-protocol/src/messages/instance.rs#L70))
-- 2 or more prints nothing, because the reference prints an uninitialized buffer. ([`src/messages/opcode.rs:1044`](../crates/benilla-protocol/src/messages/opcode.rs#L1044))
-- The consumer refuses 64 and up, because there the reference's store overruns its table. ([`src/messages/packet.rs:637`](../crates/benilla-protocol/src/messages/packet.rs#L637))
+- 2 or more prints nothing, because the reference prints an uninitialized buffer. ([`src/messages/opcode.rs:1052`](../crates/benilla-protocol/src/messages/opcode.rs#L1052))
+- The consumer refuses 64 and up, because there the reference's store overruns its table. ([`src/messages/packet.rs:641`](../crates/benilla-protocol/src/messages/packet.rs#L641))
 - A body too short for the position gives `None` where the client redisplays a stale global, because showing a stale queue position as current is a client bug. ([`src/messages/parse.rs:285`](../crates/benilla-protocol/src/messages/parse.rs#L285))
 - A type outside 1-7 reads as nothing rather than the reference's default arm, which under-pushes its returns. ([`src/messages/pet.rs:71`](../crates/benilla-protocol/src/messages/pet.rs#L71))
 - Both are read, told apart exactly by the tail length (`12n` vs `1 + 14n`), since the 1.12 client mis-parses vmangos's. ([`src/messages/pet.rs:191`](../crates/benilla-protocol/src/messages/pet.rs#L191))
+- The active player's gender is this byte too, where `CGPlayer_C::GetGender` (`0x5ed5b0`) reads `PLAYER_BYTES_3` byte 0 whole, because that byte also carries the drunk bits (`gender | drunk & 0xFFFE` on vmangos), so a drunk female reads as male. ([`src/messages/update_object/fields/player.rs:573`](../crates/benilla-protocol/src/messages/update_object/fields/player.rs#L573))
 
 #### world
 
@@ -740,10 +746,10 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference fails silently; we report it, as a player needs to know, and hold the file so the shutdown write keeps it. ([`src/script/addon.rs:860`](../crates/benilla-ui/src/script/addon.rs#L860))
 - The reference drops a send that resolves to PARTY while party slot 0's guid (`0xbc6f48`) is zero (`0x49fa9f`-`0x49faab`); benilla sends it, because `PartyState` is empty until the first `SMSG_GROUP_LIST` and the gate would swallow a real broadcast. vmangos drops a group-less party line anyway (`ChatHandler.cpp:476`). ([`src/script/addon_message.rs:7`](../crates/benilla-ui/src/script/addon_message.rs#L7))
 - Backed off to a char boundary, because a `String` must stay UTF-8; the cut is the same for ASCII. ([`src/script/addon_message.rs:115`](../crates/benilla-ui/src/script/addon_message.rs#L115))
-- `GetPlayerBuffApplications` answers 1 for a cleared record where the reference reads its stale `+0x9`, the previous occupant's count, because no guarded caller reaches it. ([`src/script/aura/player_buff.rs:70`](../crates/benilla-ui/src/script/aura/player_buff.rs#L70))
-- The reference's usage line names `GetPlayerBuffTimeLeft` (`0x84bcc0`, shared with `0x4e4930`); ours names this verb, because nothing can depend on the wrong name. ([`src/script/aura/player_buff.rs:152`](../crates/benilla-ui/src/script/aura/player_buff.rs#L152))
-- `None` answers `nil` where the reference's `-1` faction leg pushes nothing (Lua reads below the tuple), because no playable race reaches that leg. ([`src/script/battlefield_queue.rs:38`](../crates/benilla-ui/src/script/battlefield_queue.rs#L38))
-- The reference (`0x4abdc0`) admits 9 and reads one dword past its block; we answer 0 because that read is out of bounds. ([`src/script/battlefield_score.rs:296`](../crates/benilla-ui/src/script/battlefield_score.rs#L296))
+- `GetPlayerBuffApplications` answers 1 for a cleared record where the reference reads its stale `+0x9`, the previous occupant's count, because no guarded caller reaches it. ([`src/script/aura/player_buff.rs:98`](../crates/benilla-ui/src/script/aura/player_buff.rs#L98))
+- The reference's usage line names `GetPlayerBuffTimeLeft` (`0x84bcc0`, shared with `0x4e4930`); ours names this verb, because nothing can depend on the wrong name. ([`src/script/aura/player_buff.rs:180`](../crates/benilla-ui/src/script/aura/player_buff.rs#L180))
+- `None` answers `nil` where the reference's `-1` faction leg pushes nothing (Lua reads below the tuple), because no playable race reaches that leg. ([`src/script/battlefield_queue.rs:40`](../crates/benilla-ui/src/script/battlefield_queue.rs#L40))
+- The reference (`0x4abdc0`) admits 9 and reads one dword past its block; we answer 0 because that read is out of bounds. ([`src/script/battlefield_score.rs:304`](../crates/benilla-ui/src/script/battlefield_score.rs#L304))
 - `pow(10, n)` is the platform's, where the reference's (`0x73f940`, `fyl2x`) rounds its extended-precision steps at 53 bits, so a power or a fraction term can differ in the last place. ([`src/script/binding_abi.rs:275`](../crates/benilla-ui/src/script/binding_abi.rs#L275))
 - The disabled-checked leg (`0x785380`) tests and reloads the checked slot (`[+0x4e0]`, `0x785388`/`0x7853a5`), a copy of the checked leg's (`0x785270`), so in 1.12.1 a check box with a checked texture repaints that one and never gets its disabled-checked texture from a path. benilla tests and reloads the slot the method names. ([`src/script/button.rs:607`](../crates/benilla-ui/src/script/button.rs#L607))
 - The slot is read before the handler, where the reference reads it after (`[esi+0x4dc]`), because reading first keeps the borrow simple and no stock handler re-slots its row. ([`src/script/button.rs:1216`](../crates/benilla-ui/src/script/button.rs#L1216))
@@ -771,14 +777,14 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The top is 1000, not the reference's 250, so the fork's shipped 500 (a 1000 yd far clip) is in range; `benilla_world::horizon::LOD_DIST_RANGE` is the same span. ([`src/script/cvar_checks.rs:336`](../crates/benilla-ui/src/script/cvar_checks.rs#L336))
 - The list is the window sizes this client can present, not the device's display modes, because benilla makes no exclusive mode-set. `"WxH"` is a contract: `OptionsFrame.lua:281-284` splits on the `x` and `CT_Viewport.lua:107` matches `"(%d+)x(%d+)"`, both failing silently. ([`src/script/cvars.rs:81`](../crates/benilla-ui/src/script/cvars.rs#L81))
 - The tie-break is ours, because area alone with the reference's adjacent-only dedupe can leave a duplicate `"WxH"` when two modes share an area (1280x960, 1600x768). ([`src/script/cvars.rs:93`](../crates/benilla-ui/src/script/cvars.rs#L93))
-- An id out of range is ignored, because the reference reads one entry past the last (`0x48c67c`) and a clamp would apply a format the player did not pick. ([`src/script/cvars.rs:719`](../crates/benilla-ui/src/script/cvars.rs#L719))
-- The reference then runs the console command `gxRestart` (`0x842978` through `0x63ce00`); none is queued here, because `gxMultisample` applies at next launch anyway: the camera reads its sample count once, at spawn. ([`src/script/cvars.rs:733`](../crates/benilla-ui/src/script/cvars.rs#L733))
-- The reference (`0x48dad0` into `0x639a20`) writes hardware-recommended values from its matched `VideoHardware.dbc` row and the `CGxFormat` preset it names (`[0xc4e6ac]`): twelve `gx*` CVars, a synchronous `RestartGx`, then sixteen more. benilla has no such matching, so its registered defaults are its recommended configuration. ([`src/script/cvars.rs:794`](../crates/benilla-ui/src/script/cvars.rs#L794))
-- The index is of the live window size, not of the `gxResolution` CVar the reference parses (`0x48bf20`), because the window here can be dragged to any size, where the reference's backbuffer stays at `gxResolution`'s, and `CT_Viewport` scales by the live one. ([`src/script/cvars.rs:848`](../crates/benilla-ui/src/script/cvars.rs#L848))
-- 0, a negative or an index past the count clamps to the nearer end, because the reference reads one element past the last there (`0x48c00d`), uninitialised memory. ([`src/script/cvars.rs:867`](../crates/benilla-ui/src/script/cvars.rs#L867))
-- Always empty, because a refresh rate is only selectable through an exclusive mode-set and benilla has none. ([`src/script/cvars.rs:909`](../crates/benilla-ui/src/script/cvars.rs#L909))
-- 1.12 has no such CVar; it exists because our Graphics page needs somewhere to keep the stop, and takes the API's name. ([`src/script/cvars.rs:1043`](../crates/benilla-ui/src/script/cvars.rs#L1043))
-- The getter reads `CVAR_WORLD_DETAIL`, where the reference's reads only `smallCull` (`0x488d77`), because benilla's stop follows the knob that draws: a console `frillDensity` write moves the ground clutter and `WorldDetail` with it, and no renderer reads `smallCull` (its callback's `[0x868620]` has no reader). ([`src/script/cvars.rs:1071`](../crates/benilla-ui/src/script/cvars.rs#L1071))
+- An id out of range is ignored, because the reference reads one entry past the last (`0x48c67c`) and a clamp would apply a format the player did not pick. ([`src/script/cvars.rs:787`](../crates/benilla-ui/src/script/cvars.rs#L787))
+- The reference then runs the console command `gxRestart` (`0x842978` through `0x63ce00`); none is queued here, because `gxMultisample` applies at next launch anyway: the camera reads its sample count once, at spawn. ([`src/script/cvars.rs:801`](../crates/benilla-ui/src/script/cvars.rs#L801))
+- The reference (`0x48dad0` into `0x639a20`) writes hardware-recommended values from its matched `VideoHardware.dbc` row and the `CGxFormat` preset it names (`[0xc4e6ac]`): twelve `gx*` CVars, a synchronous `RestartGx`, then sixteen more. benilla has no such matching, so its registered defaults are its recommended configuration. ([`src/script/cvars.rs:862`](../crates/benilla-ui/src/script/cvars.rs#L862))
+- The index is of the live window size, not of the `gxResolution` CVar the reference parses (`0x48bf20`), because the window here can be dragged to any size, where the reference's backbuffer stays at `gxResolution`'s, and `CT_Viewport` scales by the live one. ([`src/script/cvars.rs:917`](../crates/benilla-ui/src/script/cvars.rs#L917))
+- 0, a negative or an index past the count clamps to the nearer end, because the reference reads one element past the last there (`0x48c00d`), uninitialised memory. ([`src/script/cvars.rs:937`](../crates/benilla-ui/src/script/cvars.rs#L937))
+- Always empty, because a refresh rate is only selectable through an exclusive mode-set and benilla has none. ([`src/script/cvars.rs:980`](../crates/benilla-ui/src/script/cvars.rs#L980))
+- 1.12 has no such CVar; it exists because our Graphics page needs somewhere to keep the stop, and takes the API's name. ([`src/script/cvars.rs:1114`](../crates/benilla-ui/src/script/cvars.rs#L1114))
+- The getter reads `CVAR_WORLD_DETAIL`, where the reference's reads only `smallCull` (`0x488d77`), because benilla's stop follows the knob that draws: a console `frillDensity` write moves the ground clutter and `WorldDetail` with it, and no renderer reads `smallCull` (its callback's `[0x868620]` has no reader). ([`src/script/cvars.rs:1142`](../crates/benilla-ui/src/script/cvars.rs#L1142))
 - The promotion's IME legs (`0x77d417`–`0x77d431`) and the IME writer's `or 6` (`0x77acde`, in `0x77ac60`) are not modelled: benilla has no IME composition. ([`src/script/editbox/flush.rs:34`](../crates/benilla-ui/src/script/editbox/flush.rs#L34))
 - The nameplate glow is shown but never drawn, because its additive rim reads as hard edge lines in our linear-blending pipeline; the lit plate brightens its bar instead. ([`src/script/extract.rs:226`](../crates/benilla-ui/src/script/extract.rs#L226))
 - A host of 0x80 bytes or more is refused. The reference copies the host into a 0x80-byte buffer (`0x5abc7c`-`0x5abc9c`) and writes its terminator one byte past the end, and the cut host could end in a whitelisted suffix the real one does not; this takes the safe side. ([`src/script/glue_core.rs:415`](../crates/benilla-ui/src/script/glue_core.rs#L415))
@@ -791,14 +797,14 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - Bounds-checked where the reference indexes unguarded, so none reads past it. ([`src/script/item_stats.rs:525`](../crates/benilla-ui/src/script/item_stats.rs#L525))
 - Nil for a display row with no icon, where the reference answers the unloadable `Interface\Icons\`, because `SetTexture` shows no icon for either. ([`src/script/item_stats.rs:688`](../crates/benilla-ui/src/script/item_stats.rs#L688))
 - A key rebound to the command it already has keeps a duplicate index in 1.12.1 (`0x4b7786` lowers the other keys' indices before `0x4b77ac` returns on the same name), so both getters there answer one key too few; that client fault is not reproduced. ([`src/script/keybind.rs:223`](../crates/benilla-ui/src/script/keybind.rs#L223))
-- An addon file whose first binding has no header opens a `HEADER_<addon>` row, where the reference files those rows under the previous file's last header, because under a foreign header the player could not find them. ([`src/script/keybind.rs:297`](../crates/benilla-ui/src/script/keybind.rs#L297))
+- An addon file whose first binding has no header opens a `HEADER_<addon>` row, where the reference files those rows under the previous file's last header, because under a foreign header the player could not find them. ([`src/script/keybind.rs:326`](../crates/benilla-ui/src/script/keybind.rs#L326))
 - The handle's value is the address of a `CGxTex` (`SMemAlloc(0x54)`, `0x594a96`), which benilla cannot reproduce; each texture ranks instead by a creation stamp, one global sequence number taken when its cache key is first created and taken anew once its last region has let go of it (`super::texel::Texels`). ([`src/script/layer_batch.rs:9`](../crates/benilla-ui/src/script/layer_batch.rs#L9))
-- The reference's byte copy can end inside a character and keep the stray bytes; a `String` must stay UTF-8, so the cut stops at the character boundary. ([`src/script/macros.rs:134`](../crates/benilla-ui/src/script/macros.rs#L134))
-- A listing that finds no icon stays empty, to be listed again on the next ask, where the reference's dedup then reads below its null list (`0x4f0134`-`0x4f0145`) and faults. ([`src/script/macros.rs:562`](../crates/benilla-ui/src/script/macros.rs#L562))
+- The reference's byte copy can end inside a character and keep the stray bytes; a `String` must stay UTF-8, so the cut stops at the character boundary. ([`src/script/macros.rs:135`](../crates/benilla-ui/src/script/macros.rs#L135))
+- A listing that finds no icon stays empty, to be listed again on the next ask, where the reference's dedup then reads below its null list (`0x4f0134`-`0x4f0145`) and faults. ([`src/script/macros.rs:564`](../crates/benilla-ui/src/script/macros.rs#L564))
 - Each line is trimmed, because the reference sends an indented `" /say hi"` as plain chat, never as the command meant. ([`src/script/macros/bind.rs:30`](../crates/benilla-ui/src/script/macros/bind.rs#L30))
 - The `/cast` argument is trimmed, because the reference binds `/cast  Fireball` (two spaces) to a name that never resolves. ([`src/script/macros/bind.rs:50`](../crates/benilla-ui/src/script/macros/bind.rs#L50))
-- The client's Lua has no such bound, as nothing sets a hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that never ends hangs it. ([`src/script/mod.rs:1077`](../crates/benilla-ui/src/script/mod.rs#L1077))
-- The reference sets the cells only when glue or the interface is built, `0x41ad10` from `0x46a828` (`0x46a7b0`) and `0x48fe2b` (`0x48fbf0`), and a resize reaches them only through the rebuild it asks for. ([`src/script/mod.rs:1128`](../crates/benilla-ui/src/script/mod.rs#L1128))
+- The client's Lua has no such bound, as nothing sets a hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that never ends hangs it. ([`src/script/mod.rs:1095`](../crates/benilla-ui/src/script/mod.rs#L1095))
+- The reference sets the cells only when glue or the interface is built, `0x41ad10` from `0x46a828` (`0x46a7b0`) and `0x48fe2b` (`0x48fbf0`), and a resize reaches them only through the rebuild it asks for. ([`src/script/mod.rs:1157`](../crates/benilla-ui/src/script/mod.rs#L1157))
 - A path that does not resolve is stored, where the reference raises `Invalid model file: %s` (`0x878b44`), because the file loads asynchronously here and the call cannot know yet. ([`src/script/modelframe.rs:341`](../crates/benilla-ui/src/script/modelframe.rs#L341))
 - The reference's free list is FIFO; either keeps every index stable, all an addon can observe. ([`src/script/nameplate.rs:478`](../crates/benilla-ui/src/script/nameplate.rs#L478))
 - The reference adds this rim over the bar; we brighten the bar (`LIT_BOOST`), because the rim reads as hard edge lines in our linear-blending pipeline. ([`src/script/nameplate.rs:934`](../crates/benilla-ui/src/script/nameplate.rs#L934))
@@ -808,10 +814,10 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - A third `%s` gets an empty string, because the reference pushes two varargs (`0x6093f2 add esp,0x14`) and would read uninitialised stack. ([`src/script/pvp/mod.rs:282`](../crates/benilla-ui/src/script/pvp/mod.rs#L282))
 - A token resolving to guid 0 answers nil too. The reference jumps from the guid test (`0x5172f6`) to `return 1` (`0x517343`) with nothing pushed, so the one value is its top argument, the token it read (`0x5172e6`); that is a stack quirk, not an answer. ([`src/script/pvp/mod.rs:565`](../crates/benilla-ui/src/script/pvp/mod.rs#L565))
 - With `UNIT_PVP_NAME` or the title missing from `_G` (no install) this answers the plain name, where the reference would format an empty string, because the decoration is install data. ([`src/script/pvp/mod.rs:569`](../crates/benilla-ui/src/script/pvp/mod.rs#L569))
-- An in-flight name reads `...`, where the reference's reads `" "` (`0x82ee00`), because a blank looks like a nameless objective. ([`src/script/quest_log.rs:54`](../crates/benilla-ui/src/script/quest_log.rs#L54))
-- One signal per missed record, where the reference runs every callback of every miss as its record lands (creatures in `0x556e20` at `0x556f91`, items in `0x55bc70` via `0x55bdb0` from `0x555140`; `0x4e07ea`, `0x4e083a`), 2^k - 1 updates for a walking handler over k first-seen records. ([`src/script/quest_log.rs:1116`](../crates/benilla-ui/src/script/quest_log.rs#L1116))
-- A local clock step mid-session (an NTP correction) jumps the reference's countdown but not ours, because the step changes no time the quest has left. ([`src/script/quest_log.rs:1171`](../crates/benilla-ui/src/script/quest_log.rs#L1171))
-- Four set ids count 4, where the loop's exit `jmp 0x4e0a4c` (`0x4e0a42`) skips the store at `0x4e0a49` and answers 0, a client bug. ([`src/script/quest_log.rs:1542`](../crates/benilla-ui/src/script/quest_log.rs#L1542))
+- An in-flight name reads `...`, where the reference's reads `" "` (`0x82ee00`), because a blank looks like a nameless objective. ([`src/script/quest_log.rs:55`](../crates/benilla-ui/src/script/quest_log.rs#L55))
+- One signal per missed record, where the reference runs every callback of every miss as its record lands (creatures in `0x556e20` at `0x556f91`, items in `0x55bc70` via `0x55bdb0` from `0x555140`; `0x4e07ea`, `0x4e083a`), 2^k - 1 updates for a walking handler over k first-seen records. ([`src/script/quest_log.rs:1134`](../crates/benilla-ui/src/script/quest_log.rs#L1134))
+- A local clock step mid-session (an NTP correction) jumps the reference's countdown but not ours, because the step changes no time the quest has left. ([`src/script/quest_log.rs:1190`](../crates/benilla-ui/src/script/quest_log.rs#L1190))
+- Four set ids count 4, where the loop's exit `jmp 0x4e0a4c` (`0x4e0a42`) skips the store at `0x4e0a49` and answers 0, a client bug. ([`src/script/quest_log.rs:1566`](../crates/benilla-ui/src/script/quest_log.rs#L1566))
 - The reference bounds the index with `jbe` against the entry count (`0xb73760`), so an index one past the last entry reads the pool entry after it, which only an earlier, longer list wrote, or uninitialised heap (`0x4d5310`, the rebuild resetting the count without clearing, `0x4d547f`); that stale read answers 0 here, as an index further on does. ([`src/script/reputation.rs:562`](../crates/benilla-ui/src/script/reputation.rs#L562))
 - The folds are keyed by header, not by the reference's mask positions, whose rebuild folds bit N-1 by registration index before the sort (`0x4d5d49`-`0x4d5d68`) and whose fold verbs search `0xb736c0` before `0x4d5c40` sorts it (`0x4d6400`), so Inactive opens at login whenever a childless header exists and inactivating a header's last child shows it expanded; that is a reference bug, and the folds follow the header the player clicked. ([`src/script/reputation.rs:630`](../crates/benilla-ui/src/script/reputation.rs#L630))
 - Nesting stops at 32 where the reference recurses uncapped (its indent saturates at `0x80`), so a hostile structure cannot exhaust the stack. ([`src/script/saved.rs:21`](../crates/benilla-ui/src/script/saved.rs#L21))
@@ -822,7 +828,6 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference prints these to the console; here they are host warnings, because a malformed page is bad content, not a script error. ([`src/script/simplehtml/mod.rs:104`](../crates/benilla-ui/src/script/simplehtml/mod.rs#L104))
 - Only `%s` and `%%` are expanded and other specs copied, because the real `printf` would read the string pointers as other types. ([`src/script/simplehtml/parse.rs:247`](../crates/benilla-ui/src/script/simplehtml/parse.rs#L247))
 - Skipped because it is no command; the reference raises. ([`src/script/slash.rs:65`](../crates/benilla-ui/src/script/slash.rs#L65))
-- After a full 50 the reference reads the 160 bytes past the array (`0xc2a0f8`, the counts at `0xc2a120` among them); benilla answers the miss. ([`src/script/social.rs:470`](../crates/benilla-ui/src/script/social.rs#L470))
 - The app plays the queued file after the call, so the refusals (the bus-3 cap, a muted SFX channel, a missing file) come too late to answer, and a queued file answers 1. ([`src/script/sound.rs:66`](../crates/benilla-ui/src/script/sound.rs#L66))
 - `BOOKTYPE_SPELL`/`BOOKTYPE_PET` are engine globals here, where the reference defines them in `SpellBookFrame.lua:5-6`, so this module's tests run without the stock file. ([`src/script/spellbook.rs:10`](../crates/benilla-ui/src/script/spellbook.rs#L10))
 - Ours answers milliseconds, since a cycle count of unknown rate is no use to an addon timing its code. ([`src/script/stdlib.rs:77`](../crates/benilla-ui/src/script/stdlib.rs#L77))
@@ -831,7 +836,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - Returns nothing. The handler ends `mov eax,1` with nothing pushed (`0x4dcd7c`), so Lua 5.0 hands back the stack top, the node argument: an accident of the handler, not an API, and copying a stack-top leak would copy a bug. ([`src/script/taxi.rs:226`](../crates/benilla-ui/src/script/taxi.rs#L226))
 - A handler that unregisters the saved next ends the dispatch, because the reference then reads a freed node. ([`src/script/tick.rs:29`](../crates/benilla-ui/src/script/tick.rs#L29))
 - `0x530a52` lays it out at once; getters resolve first, so only OnSizeChanged fires later. ([`src/script/tooltip/size.rs:180`](../crates/benilla-ui/src/script/tooltip/size.rs#L180))
-- No time line follows, where the reference's rides the record's `+0xc` (`0x532bdf`), a byte an empty record keeps from its history. 0 after `ClearBuffRecord 0x4e4490` prints a lone "0 seconds remaining" (`0x4e447e`); else it is whatever the last occupant left, as `ResetBuffCache 0x4e40c0` and the compaction's tail reset (`0x4e4237`) call `0x4e44b0` with slot -1, which writes `+0x0` and `+0x4` alone (`0x4e44bc`-`0x4e44c0`). ([`src/script/tooltip_aura.rs:238`](../crates/benilla-ui/src/script/tooltip_aura.rs#L238))
+- No time line follows, where the reference's rides the record's `+0xc` (`0x532bdf`), a byte an empty record keeps from its history. 0 after `ClearBuffRecord 0x4e4490` prints a lone "0 seconds remaining" (`0x4e447e`); else it is whatever the last occupant left, as `ResetBuffCache 0x4e40c0` and the compaction's tail reset (`0x4e4237`) call `0x4e44b0` with slot -1, which writes `+0x0` and `+0x4` alone (`0x4e44bc`-`0x4e44c0`). ([`src/script/tooltip_aura.rs:241`](../crates/benilla-ui/src/script/tooltip_aura.rs#L241))
 - The reference's builder hides and clears on a missing record (`0x52b72e`..`0x52b73f`), where a source that knows the item's name shows that, because a blank plate under an on-screen name reads as broken; the template's arrival then builds it whole. ([`src/script/tooltip_item/build.rs:54`](../crates/benilla-ui/src/script/tooltip_item/build.rs#L54))
 - An object no longer held rebuilds from the instance the build read, where the reference's lookup finds no object and builds from the record and the block alone; benilla's views carry no object to read once it is gone, and the kept instance is what the plate showed. ([`src/script/tooltip_item/build.rs:188`](../crates/benilla-ui/src/script/tooltip_item/build.rs#L188))
 - The reference recurses without a bound (`0x52dbce` builds the product whatever the depth), so a product that teaches a recipe for itself would recurse until the stack overflows; benilla stops here, so a cyclic `Spell.dbc` chain cannot crash the client. ([`src/script/tooltip_item/render.rs:195`](../crates/benilla-ui/src/script/tooltip_item/render.rs#L195))
@@ -841,10 +846,10 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - A header clears it too, because it has no spell id; the reference stores its `0xffffffff` (`0x4d7b05`) and reads back 1, which the stock window's `> 1` test treats the same as 0. ([`src/script/trainer/mod.rs:1266`](../crates/benilla-ui/src/script/trainer/mod.rs#L1266))
 - Index 0 is a no-op, because one stray call would spend the purse; the reference buys every visible service for any index at or below 0 (`0x4da244`, `0x4d8a70`). ([`src/script/trainer/mod.rs:1294`](../crates/benilla-ui/src/script/trainer/mod.rs#L1294))
 - Kept apart from `Self::vertex_color`, which the reference's `Texture:SetAlpha` (`0x79b580`) rewrites, because the drawn product differs only on a region that sets both, or a gradient and an alpha, which no stock code does, and a FontString's `SetAlpha` then keeps its font colour. ([`src/script/types.rs:428`](../crates/benilla-ui/src/script/types.rs#L428))
-- Among whole-name matches ours picks the nearest, because the reference's first-walked pick is order-dependent and reads as a bug. ([`src/script/unit/bindings.rs:1058`](../crates/benilla-ui/src/script/unit/bindings.rs#L1058))
+- Among whole-name matches ours picks the nearest, because the reference's first-walked pick is order-dependent and reads as a bug. ([`src/script/unit/bindings.rs:1080`](../crates/benilla-ui/src/script/unit/bindings.rs#L1080))
 - The reference's matcher takes a whole-string hit at once only when it is nearer than the best so far (`0x493c88`-`0x493ca2`); an exact hit that is not nearer competes on prefix length alone (`0x493cf8`-`0x493d09`), so a nearer "Bobby" walked first beats an exact "Bob", and the pick follows the object list's order. ([`src/script/unit/by_name.rs:19`](../crates/benilla-ui/src/script/unit/by_name.rs#L19))
 - A full tie goes to the lower guid, where the reference keeps the first unit its walk (`0x493aa0`) reaches, an order neither of ours has; a guid keeps the two picks equal. ([`src/script/unit/by_name.rs:61`](../crates/benilla-ui/src/script/unit/by_name.rs#L61))
-- `0x4e81d0` has no bound and reads past its four-entry table, which is stale memory, not a mechanism; past it, nobody. ([`src/script/unit/resolve.rs:83`](../crates/benilla-ui/src/script/unit/resolve.rs#L83))
+- `0x4e81d0` has no bound and reads past its four-entry table, which is stale memory, not a mechanism; past it, nobody. ([`src/script/unit/resolve.rs:85`](../crates/benilla-ui/src/script/unit/resolve.rs#L85))
 - The reference ties a miss against a hit (`0x5adab6`); no total order can, and `sort_by` may panic on one that is not, so the miss goes last. ([`src/script/who_sort.rs:159`](../crates/benilla-ui/src/script/who_sort.rs#L159))
 - The engine's own pushes (the world-enter sync, the explored areas, the landmark sources, the catalog) queue `WORLD_MAP_UPDATE` for the next frame's tick and fire only on a change, where the reference fires in place from the handler that moved the data: the app's feeds run after the frame's tick. ([`src/script/worldmap.rs:13`](../crates/benilla-ui/src/script/worldmap.rs#L13))
 - The reference fires it only after an init rebuild (`0x48fa12`) or a zone-defense channel flip (`0x49bdd6`); we fire on a value change too, because our rows are resolved values its Lua would re-read live. ([`src/script/worldstate.rs:33`](../crates/benilla-ui/src/script/worldstate.rs#L33))

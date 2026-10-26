@@ -79,6 +79,26 @@ live_reads! {
         reputation: crate::ui_reputation::ReputationLive<'static, 'static>,
         /// The name caches' reads: a player's name and a unit's creature record.
         names: crate::names::NameLive<'static, 'static>,
+        /// The Video menus' lists: the display's resolutions and the device's multisample formats.
+        display: crate::video::DisplayLive<'static, 'static>,
+        /// The quest slots, the held counts, the standings, the coinage and the clock the quest
+        /// log getters read.
+        quest_log: crate::ui_quest_log::QuestLogLive<'static, 'static>,
+        /// The target and the interaction globals.
+        selection: crate::target::SelectionLive<'static, 'static>,
+        /// The talent pages, the known spells they rank by and the two point counters.
+        talents: crate::ui_talent::TalentLive<'static, 'static>,
+        /// The active player's skill slots, which the skill list walks and reads.
+        skills: crate::ui_char::SkillLive<'static, 'static>,
+        /// The spell book's order off the known spells, and each slot's record and icon.
+        book: crate::ui_spellbook::BookLive<'static, 'static>,
+        /// The battleground queue slots, list, board and positions.
+        battlefield: crate::ui_battlefield::BattlefieldLive<'static, 'static>,
+        /// The friend list, its selections and the `/who` array.
+        social: crate::ui_social::SocialLive<'static>,
+        /// The stance bar's form list and its entries; absent in a harness without the relations'
+        /// inputs.
+        stance: Option<crate::ui_shapeshift::StanceLive<'static, 'static>>,
         #[cfg(test)]
         probe: tests::ProbeLive<'static>,
     }
@@ -86,7 +106,6 @@ live_reads! {
 
 impl LiveFamily for UnitLive<'_, '_> {}
 impl LiveFamily for crate::ui_items::live::ItemLive<'_, '_> {}
-impl LiveFamily for crate::ui_aura::AuraLive<'_, '_> {}
 
 impl LiveFamily for StatsLive<'_, '_> {
     fn answer(&mut self, ask: &mut LiveAsk<'_>) -> bool {

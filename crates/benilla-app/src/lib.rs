@@ -56,6 +56,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[global_allocator]
 static ALLOC: wasm_alloc::PageAlloc = wasm_alloc::PageAlloc;
 
+mod account_data;
 pub mod addon_harness;
 mod area;
 mod area_poi;

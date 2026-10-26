@@ -428,9 +428,15 @@ mod aura_view_tests;
 #[cfg(test)]
 mod bag_tests;
 #[cfg(test)]
+mod battlefield_live_tests;
+#[cfg(test)]
+mod book_live_tests;
+#[cfg(test)]
 mod cast_live_tests;
 #[cfg(test)]
 mod cooldown_live_tests;
+#[cfg(test)]
+mod duration_live_tests;
 #[cfg(test)]
 mod group_view_tests;
 #[cfg(test)]
@@ -448,9 +454,17 @@ mod name_live_tests;
 #[cfg(test)]
 mod packet_signal_tests;
 #[cfg(test)]
+mod quest_log_live_tests;
+#[cfg(test)]
 mod quiet_tests;
 #[cfg(test)]
 mod reputation_live_tests;
+#[cfg(test)]
+mod selection_live_tests;
+#[cfg(test)]
+mod social_live_tests;
+#[cfg(test)]
+mod stance_live_tests;
 #[cfg(test)]
 mod stat_live_tests;
 #[cfg(test)]

@@ -1,7 +1,8 @@
-//! Player macros. 1.12 keeps them client-side with no opcode (`macros-cache.txt`), and
-//! `CreateMacro` must return the new index at once, so the table lives here: the app seeds it
-//! ([`UiScript::set_macros`]), saves it when [`UiScript::take_macros_dirty`] says, and installs
-//! what lists the icon chooser ([`UiScript::set_macro_icon_source`]), run on first use.
+//! Player macros. 1.12 keeps them in `macros-cache.txt`, two account-data sections the server
+//! holds a copy of, and `CreateMacro` must return the new index at once, so the table lives here:
+//! the app seeds it ([`UiScript::set_macros`]), saves it when [`UiScript::take_macros_dirty`]
+//! says, and installs what lists the icon chooser ([`UiScript::set_macro_icon_source`]), run on
+//! first use.
 //!
 //! A macro is a record with an id, kept in one list in the order it was made or loaded
 //! (`0xbdcc44`). Lua addresses it by position in a table of 36 ids (`0xbdcc60`): positions 1..=18
@@ -22,7 +23,7 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi;
 use super::cursor::{set_cursor, CursorMacro, CursorPayload};
-use super::Model;
+use super::{Model, SpellBookState};
 
 /// Macros per scope (`0x4f1010` refuses the 19th, `cmp edx,0x12`), and so the character tab's base.
 pub const MAX_MACROS: usize = 18;
@@ -61,7 +62,7 @@ pub struct MacroView {
     /// by `\n` (`0x4f0a2b`).
     pub body: String,
     /// `isLocal` and the `local` argument, carried but not saved here. The 1.12 client saves these
-    /// to `macros-local.txt` beside `macros-cache.txt` (`0x45de74`, `0x45de88`); the stock UI never
+    /// to `macros-local.txt` beside `macros-cache.txt` (`0x85de74`, `0x85de88`); the stock UI never
     /// sets it.
     pub local_only: bool,
 }
@@ -348,13 +349,14 @@ impl super::UiScript {
                 (id, body, was, options)
             })
             .collect();
+        let book = super::live::ask(self.lua(), &super::spellbook::BookNow);
         let mut model = self.model_mut();
         let model: &mut crate::script::Model = &mut model;
         for (id, body, was, options) in picked {
             let next = bind::derive(
                 &aliases,
                 &body,
-                &model.spellbook,
+                book.as_ref().unwrap_or(&model.spellbook),
                 &model.pet_book,
                 was,
                 &options,
@@ -410,7 +412,7 @@ fn create_macro(
     texture: Option<String>,
     body: &str,
     (local_only, per_character): (bool, bool),
-    (aliases, options): (&[String], bind::Options<'_>),
+    (aliases, book, options): (&[String], Option<&SpellBookState>, bind::Options<'_>),
 ) -> mlua::Result<usize> {
     let state = &mut model.macros;
     if state.count(per_character) >= MAX_MACROS {
@@ -435,7 +437,7 @@ fn create_macro(
     let binding = bind::derive(
         aliases,
         &cut_body(body),
-        &model.spellbook,
+        book.unwrap_or(&model.spellbook),
         &model.pet_book,
         MacroBinding::default(),
         options,
@@ -460,7 +462,7 @@ fn edit_macro(
     index: usize,
     (name, texture, body): (Option<String>, Option<String>, Option<String>),
     local_only: bool,
-    (aliases, options): (&[String], bind::Options<'_>),
+    (aliases, book, options): (&[String], Option<&SpellBookState>, bind::Options<'_>),
 ) -> usize {
     let id = model.macros.id_at(index);
     if let Some(record) = model
@@ -485,7 +487,7 @@ fn edit_macro(
         let binding = bind::derive(
             aliases,
             &view.body,
-            &model.spellbook,
+            book.unwrap_or(&model.spellbook),
             &model.pet_book,
             was,
             options,
@@ -729,13 +731,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let flags = (flag(a.get(3)), flag(a.get(4)));
             let aliases = bind::cast_aliases(lua);
             let options = bind::options_now(lua, &aliases, &cut_body(&body));
+            // The book as it stands, which the derivation reads in the call (`0x4f123c`).
+            let book = super::live::ask(lua, &super::spellbook::BookNow);
             super::tick::verb(lua, |model| {
                 // `0x4f1632`, `0x4f163c`.
                 let texture = match icon {
                     Some(n) => icon_at(model, n),
                     None => named,
                 };
-                create_macro(model, &name, texture, &body, flags, (&aliases, &options))
+                let reads = (
+                    aliases.as_slice(),
+                    book.as_ref(),
+                    &options as bind::Options<'_>,
+                );
+                create_macro(model, &name, texture, &body, flags, reads)
             })
             .map(|i| Value::Integer(i as i64))
         })?,
@@ -787,17 +796,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 model.macros.by_id(id).map(|m| m.body.clone())
             });
             let options = bind::options_now(lua, &aliases, &cut_body(&after.unwrap_or_default()));
+            // The book as it stands, which the derivation reads in the call (`0x4f1313`).
+            let book = super::live::ask(lua, &super::spellbook::BookNow);
             let at = super::tick::verb(lua, |model| {
                 // `0x4f1966`-`0x4f1983`: a miss leaves the pointer null, and the macro its old
                 // icon.
                 let texture = icon.and_then(|n| icon_at(model, n)).or(named);
-                edit_macro(
-                    model,
-                    index,
-                    (name, texture, body),
-                    local_only,
-                    (&aliases, &options),
-                )
+                let reads = (
+                    aliases.as_slice(),
+                    book.as_ref(),
+                    &options as bind::Options<'_>,
+                );
+                edit_macro(model, index, (name, texture, body), local_only, reads)
             });
             Ok(Value::Integer(at as i64))
         })?,

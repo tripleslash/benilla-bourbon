@@ -807,7 +807,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 crate::ui_craft::do_craft(&mut appliers.cast(), spell_id);
             }
             ScriptCall::Craft(CraftCall::Close) => appliers.craft().close(),
-            ScriptCall::Battlefield(call) => appliers.battlefield().apply(script, call),
+            ScriptCall::Battlefield(call) => tail = appliers.battlefield().apply(script, call),
             ScriptCall::Death(DeathAction::AcceptAreaSpiritHeal) => {
                 self.accept_area_spirit_heal(script, &mut at.mark);
             }
@@ -1605,28 +1605,11 @@ mod tests {
     fn with_fortitude(f: &mut Frame) {
         let world = f.app.world_mut();
         let display = benilla_formats::SpellDisplay {
+            name: "Fortitude".into(),
             implicit_target_a1: 21,
             ..Default::default()
         };
-        world.insert_resource(crate::ui_action::Spells {
-            catalog: benilla_formats::SpellCatalog::from_displays([(FORTITUDE, display)].into()),
-            ..crate::ui_action::Spells::empty_for_tests()
-        });
-        world
-            .non_send_mut::<UiScript>()
-            .set_spellbook(SpellBookState {
-                tabs: vec![SpellTabView {
-                    name: "Priest".into(),
-                    texture: None,
-                    offset: 0,
-                    num_spells: 1,
-                }],
-                slots: vec![SpellSlotView {
-                    spell_id: FORTITUDE,
-                    name: "Fortitude".into(),
-                    ..Default::default()
-                }],
-            });
+        seat_book(world, FORTITUDE, display);
     }
 
     /// The bind runs the ordinary relation chain over the player: with a unit we cannot assist
@@ -2157,6 +2140,19 @@ mod tests {
         }
     }
 
+    /// The world's group as a party we lead, `member` alone in `party1`: what the loot setters'
+    /// gates read at the call (`0x4e92a6`-`0x4e92eb`).
+    fn lead_party(world: &mut World, member: u64, name: &str) {
+        let mut group = world.resource_mut::<crate::ui_party::GroupState>();
+        group.members = vec![GroupMemberEntry {
+            name: name.into(),
+            guid: member,
+            status: 1,
+            flags: 0,
+        }];
+        group.leader = ME;
+    }
+
     /// The `CMSG_LOOT_METHOD`s `chunk` sends inside its calls, run with the host lent.
     fn loot_methods_sent(f: &mut Frame, chunk: &str) -> Vec<(u32, u64, u32)> {
         let _ = f.rx.try_iter().count();
@@ -2180,7 +2176,6 @@ mod tests {
     /// dead one is no candidate, so the name finds nobody and the binding sends nothing.
     #[test]
     fn set_loot_method_resolves_a_held_groupmate_only_while_alive() {
-        use benilla_ui::script::{PartyMemberInfo, PartyState};
         for (health, resolved) in [(100, true), (0, false)] {
             let mut f = frame(false);
             // OLD is a friendly player, our groupmate "Olly" in `party1`.
@@ -2192,17 +2187,8 @@ mod tests {
             world
                 .run_system_once(crate::ui_unit::feed_name_candidates)
                 .expect("the candidate feed runs as a one-shot system");
+            lead_party(f.app.world_mut(), OLD, "Olly");
             let mut script = f.app.world_mut().non_send_mut::<UiScript>();
-            script.set_party(PartyState {
-                members: vec![PartyMemberInfo {
-                    name: "Olly".into(),
-                    guid: OLD,
-                }],
-                leader_index: 0,
-                leader_guid: ME,
-                own_guid: ME,
-                ..Default::default()
-            });
             script.set_unit(
                 "player",
                 Some(benilla_ui::script::UnitState {
@@ -2235,7 +2221,6 @@ mod tests {
     /// above 0 (`0x493eca`): a ghost, at health 1, does; a corpse, at 0, does not.
     #[test]
     fn set_loot_method_resolves_our_own_name_through_the_feed() {
-        use benilla_ui::script::PartyState;
         for (health, resolved) in [(100, true), (1, true), (0, false)] {
             let mut f = frame(false);
             with_factions(&mut f, FRIEND, &[]);
@@ -2256,16 +2241,8 @@ mod tests {
             world
                 .run_system_once(crate::ui_unit::feed_name_candidates)
                 .expect("the candidate feed runs as a one-shot system");
+            lead_party(f.app.world_mut(), OLD, "Olly");
             let mut script = f.app.world_mut().non_send_mut::<UiScript>();
-            script.set_party(PartyState {
-                members: vec![benilla_ui::script::PartyMemberInfo {
-                    name: "Olly".into(),
-                    guid: OLD,
-                }],
-                leader_guid: ME,
-                own_guid: ME,
-                ..Default::default()
-            });
             script.set_unit(
                 "player",
                 Some(benilla_ui::script::UnitState {
@@ -2286,9 +2263,9 @@ mod tests {
 
     /// The commit's `IsSelectable` (`0x4935ee`) refuses a `UNIT_FLAG_NOT_SELECTABLE` unit: the
     /// nearer namesake is the ranked pick and it is refused, so the commit keeps its selection,
-    /// not the farther namesake, and the chunk keeps the old target's view.
+    /// not the farther namesake, and the chunk reads the old target.
     #[test]
-    fn target_by_name_shows_nothing_when_the_commit_refuses_its_pick() {
+    fn target_by_name_keeps_the_old_target_when_the_commit_refuses_its_pick() {
         /// `UNIT_FLAG_NOT_SELECTABLE`, `UNIT_FIELD_FLAGS` bit 25.
         const NOT_SELECTABLE: u32 = 1 << 25;
         /// A selectable namesake of `MOB` farther off, told apart by its health.
@@ -2308,6 +2285,13 @@ mod tests {
             ))
             .id();
         world.resource_mut::<GuidIndex>().0.insert(TWIN, twin);
+        // The old target told apart from the mob by its health.
+        let old = world.resource::<GuidIndex>().0[&OLD];
+        world
+            .get_mut::<ObjectStore>(old)
+            .expect("the old target's store")
+            .0
+            .merge(benilla_protocol::ObjectFields::from_pairs(&[(HEALTH, 70)]));
         let mut names = world.resource_mut::<crate::names::NameCache>();
         names.insert_player(MOB, "Red Affinity".into(), None);
         names.insert_player(TWIN, "Red Affinity".into(), None);
@@ -2319,8 +2303,8 @@ mod tests {
             "TargetByName('Red Affinity') return UnitHealth('target')",
         );
         assert_eq!(
-            shown, 0,
-            "the old target's view, not the twin's 40 or the mob's 100"
+            shown, 70,
+            "the old target's health, not the twin's 40 or the mob's 100"
         );
         assert_eq!(selected(&f), Some(OLD), "the commit refuses the same pick");
     }
@@ -2602,16 +2586,17 @@ mod tests {
     const GHOST_WOLF: u32 = 2645;
 
     /// Ghost Wolf in the catalog, the book and the form bar, and up on us as a cancelable aura.
+    /// The bar admits it by `AttributesEx2 & 0x10` (`0x4b2815`), the arm whose cast toggles by its
+    /// aura (`0x4b48d4`).
     fn with_ghost_wolf_up(f: &mut Frame, up: bool) {
         let world = f.app.world_mut();
         let display = benilla_formats::SpellDisplay {
+            name: "Ghost Wolf".into(),
             active_icon_id: 1,
+            attributes_ex2: 0x10,
             ..Default::default()
         };
-        world.insert_resource(crate::ui_action::Spells {
-            catalog: benilla_formats::SpellCatalog::from_displays([(GHOST_WOLF, display)].into()),
-            ..crate::ui_action::Spells::empty_for_tests()
-        });
+        seat_book(world, GHOST_WOLF, display);
         let me = world.resource::<GuidIndex>().0[&ME];
         let mut pairs = vec![(2, 0x19), (HEALTH, 100), (28, 100), (FLAGS, 0x8)];
         if up {
@@ -2624,26 +2609,6 @@ mod tests {
             .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(
                 &pairs,
             )));
-        let mut script = world.non_send_mut::<UiScript>();
-        script.set_spellbook(SpellBookState {
-            tabs: vec![SpellTabView {
-                name: "Druid".into(),
-                texture: None,
-                offset: 0,
-                num_spells: 1,
-            }],
-            slots: vec![SpellSlotView {
-                spell_id: GHOST_WOLF,
-                name: "Ghost Wolf".into(),
-                ..Default::default()
-            }],
-        });
-        script.set_shapeshift_forms(vec![benilla_ui::script::ShapeshiftFormView {
-            spell_id: GHOST_WOLF,
-            name: "Ghost Wolf".into(),
-            castable: true,
-            ..Default::default()
-        }]);
     }
 
     /// The `CMSG_CANCEL_AURA`s sent, as spell ids.
@@ -3897,25 +3862,24 @@ mod tests {
         display: benilla_formats::SpellDisplay,
     ) {
         let world = f.app.world_mut();
+        let display = benilla_formats::SpellDisplay {
+            name: name.into(),
+            ..display
+        };
+        seat_book(world, spell_id, display);
+    }
+
+    /// `spell_id` known and alone in the book, its record `display`, which the book getters read
+    /// through the host.
+    fn seat_book(world: &mut World, spell_id: u32, display: benilla_formats::SpellDisplay) {
         world.insert_resource(crate::ui_action::Spells {
             catalog: benilla_formats::SpellCatalog::from_displays([(spell_id, display)].into()),
             ..crate::ui_action::Spells::empty_for_tests()
         });
         world
-            .non_send_mut::<UiScript>()
-            .set_spellbook(SpellBookState {
-                tabs: vec![SpellTabView {
-                    name: "Book".into(),
-                    texture: None,
-                    offset: 0,
-                    num_spells: 1,
-                }],
-                slots: vec![SpellSlotView {
-                    spell_id,
-                    name: name.into(),
-                    ..Default::default()
-                }],
-            });
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .spells
+            .insert(spell_id);
     }
 
     /// `party1` (`NEW`) a friendly player-controlled player, alive or dead.
