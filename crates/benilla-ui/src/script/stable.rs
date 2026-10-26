@@ -564,7 +564,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 slot_index(i).and_then(|i| view.state.as_mut()?.slots[i].take())
             };
             if let Some(pet) = pet {
-                super::cursor::set_cursor(lua, true, |_| {
+                super::cursor::set_cursor(lua, true, super::cursor::Setter::Free, |_| {
                     let texture = pet.icon?;
                     Some(super::cursor::CursorPayload::StablePet(
                         super::cursor::CursorStablePet {
@@ -689,8 +689,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua
                     .app_data_ref::<crate::script::ModelCell>()
                     .expect("model app_data");
-                // Affordability reads `model.money`, the purse `GetMoney()` answers.
-                let money = model.money;
+                // Affordability reads the purse `GetMoney()` answers (`0x4cb122`).
+                let money = super::stat_read::purse(lua, &model);
                 view(lua, &model).state.as_ref().is_some_and(|s| {
                     s.num_stable_slots as usize != NUM_STABLE_SLOTS - 1
                         && s.next_slot_cost != 0

@@ -2,7 +2,7 @@
 
 use mlua::{Lua, Value};
 
-use super::{clear, clear_cursor, set_cursor, Clear, CursorMoney, CursorPayload};
+use super::{clear, clear_cursor, set_cursor, Clear, CursorMoney, CursorPayload, Setter};
 use crate::script::binding_abi::{flag, number_arg};
 use crate::script::tick::verb;
 use crate::script::Model;
@@ -41,11 +41,12 @@ pub(crate) fn cursor_money(model: &Model) -> u32 {
 /// Put coins on the cursor as `0x494cc0` does. Its inner `ClearCursor(1,1)` (`0x494cd9`) drops
 /// whatever is held with that arm's events, an item's unlock or coins' `PLAYER_MONEY`, and fires
 /// `CURSOR_UPDATE` (`0x4952cc`) on the empty cursor, so that handler sees no coins; then the coins
-/// land and `PLAYER_MONEY` fires (`0x494d0a`), with no second `CURSOR_UPDATE`.
-fn install_money(lua: &Lua, copper: u32) {
-    set_cursor(lua, true, |_| {
+/// land and `PLAYER_MONEY` fires (`0x494d0a`), with no second `CURSOR_UPDATE`. Without control
+/// the setter does nothing (`0x494cc5`). Returns whether the coins went on.
+fn install_money(lua: &Lua, copper: u32) -> bool {
+    set_cursor(lua, true, Setter::Controlled, |_| {
         Some(CursorPayload::Money(CursorMoney { copper }))
-    });
+    })
 }
 
 /// `PickupPlayerMoney` after the argument gate; each refusal is silent.
@@ -54,12 +55,9 @@ pub(crate) fn pickup_player_money(lua: &Lua, copper: u32) -> bool {
         let model = lua
             .app_data_ref::<crate::script::ModelCell>()
             .expect("model app_data");
-        copper != 0 && model.player_control && u64::from(copper) <= model.money
+        copper != 0 && u64::from(copper) <= crate::script::stat_read::purse(lua, &model)
     };
-    if allowed {
-        install_money(lua, copper);
-    }
-    allowed
+    allowed && install_money(lua, copper)
 }
 
 /// `DropCursorMoney` (`0x48aba0`), `SetCursorMoney(0)`: its `ClearCursor(1,1)` fires the coin
@@ -72,16 +70,16 @@ pub(crate) fn drop_cursor_money(model: &mut Model) -> bool {
     true
 }
 
-/// The new offer `0x5d4500` sends for the held coins: offer plus cursor, when the purse covers it
-/// (`0x5d4570`); `None` with no coins held.
-pub(crate) fn trade_money_total(model: &Model) -> Option<u32> {
+/// The new offer `0x5d4500` sends for the held coins: offer plus cursor, when `purse`, the coinage,
+/// covers it (`0x5d4570`); `None` with no coins held.
+pub(crate) fn trade_money_total(model: &Model, purse: u64) -> Option<u32> {
     let copper = cursor_money(model);
     if copper == 0 {
         return None;
     }
     let offer = model.trade.as_ref().map_or(0, |t| t.player.gold);
     let total = u64::from(offer) + u64::from(copper);
-    (total <= model.money).then_some(total as u32)
+    (total <= purse).then_some(total as u32)
 }
 
 /// Our money offer `[0xc4be70]` as a sender stores it after its send.
@@ -101,7 +99,8 @@ pub(crate) fn add_trade_money(lua: &Lua) -> mlua::Result<bool> {
         let model = lua
             .app_data_ref::<crate::script::ModelCell>()
             .expect("model app_data");
-        (cursor_money(&model) != 0, trade_money_total(&model))
+        let purse = crate::script::stat_read::purse(lua, &model);
+        (cursor_money(&model) != 0, trade_money_total(&model, purse))
     };
     let Some(total) = total else {
         return Ok(held);

@@ -102,8 +102,12 @@ live_reads! {
         /// Another player's visible items, the active player's honor block and the inspect-honor
         /// slot.
         inspect: crate::ui_inspect::InspectLive<'static, 'static>,
-        /// The vendor window's rows, the buy-back rows and the repair total.
+        /// The vendor window's rows, the buy-back rows, the repair total and each item's cost.
         merchant: crate::ui_merchant::MerchantLive<'static, 'static>,
+        /// The bank's purchase row.
+        bank: crate::ui_bank::BankLive<'static, 'static>,
+        /// The gossip message's slots and drawn text.
+        gossip: crate::ui_gossip::GossipLive<'static>,
         /// The taxi map's slots and fares.
         taxi: crate::ui_taxi::TaxiLive<'static, 'static>,
         /// The dialogs' latches, clocks, meeting stone, summon and instance terms.
@@ -118,6 +122,10 @@ live_reads! {
         petition: crate::ui_petition::PetitionLive<'static, 'static>,
         /// The pet bar, the pet it names, its stat block, its menu and its book.
         pet: crate::ui_pet::PetLive<'static, 'static>,
+        /// The requirement state, the known-spell list and the lock openers an item is judged by.
+        requirements: crate::ui_items::RequirementsLive<'static, 'static>,
+        /// The item set blocks: the set table, the member names and the bonuses.
+        item_sets: crate::ui_items::ItemSetLive<'static, 'static>,
         #[cfg(test)]
         probe: tests::ProbeLive<'static>,
     }

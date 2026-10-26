@@ -233,13 +233,13 @@ impl super::UiScript {
     }
 
     /// `SetTradePartner`'s open leg for a trade we started by dropping coins (`0x4bf5fe`-
-    /// `0x4bf61c`): the offer becomes offer plus the held coins through `0x5d4500` when the purse
-    /// covers it. The new offer, for the app's send, the coins still held for
+    /// `0x4bf61c`): the offer becomes offer plus the held coins through `0x5d4500` when `purse`,
+    /// the coinage the app reads at the handler, covers it. The new offer, for the app's send, the coins still held for
     /// [`Self::trade_open_money_clear`]; `None` with no coins held or a purse short of the total,
     /// which leaves the cursor as it is.
-    pub fn trade_open_money(&mut self) -> Option<u32> {
+    pub fn trade_open_money(&mut self, purse: u64) -> Option<u32> {
         super::tick::verb(&self.lua, |model| {
-            let total = cursor::money::trade_money_total(model)?;
+            let total = cursor::money::trade_money_total(model, purse)?;
             cursor::money::set_own_offer(model, total);
             Some(total)
         })
@@ -634,7 +634,9 @@ fn click_trade_button(lua: &Lua, id: i32) -> mlua::Result<()> {
     match index {
         Some(i) => place(lua, i, held, AfterPlace::Click { old }),
         None => {
-            cursor::set_cursor(lua, true, |_| old.map(CursorPayload::Item));
+            cursor::set_cursor(lua, true, cursor::Setter::Item, |_| {
+                old.map(CursorPayload::Item)
+            });
             Ok(())
         }
     }
@@ -733,7 +735,9 @@ fn finish_placement(lua: &Lua, place: u64, sent: bool) {
     }
     match then {
         AfterPlace::Click { old } => {
-            cursor::set_cursor(lua, !wrote, |_| old.map(CursorPayload::Item));
+            cursor::set_cursor(lua, !wrote, cursor::Setter::Item, |_| {
+                old.map(CursorPayload::Item)
+            });
         }
         AfterPlace::Offer if wrote => {
             super::tick::verb(lua, |model| cursor::clear(model, cursor::Clear::KEEP_LOCK));
@@ -1005,7 +1009,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let slot = slot_at(&model, id, |t| &t.target);
                 let usable = slot
                     .as_ref()
-                    .is_none_or(|s| super::item_stats::item_usable_by_id(&model, s.item_id));
+                    .is_none_or(|s| super::item_stats::item_usable_by_id(lua, &model, s.item_id));
                 (slot, usable)
             };
             // The record off the item cache as the call runs (`0x4c017f`); a miss asks for it.
@@ -1147,12 +1151,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 copper,
                 "Usage: SetTradeMoney(amount)",
             )? as u32;
-            if u64::from(n)
-                > lua
+            let money = {
+                let model = lua
                     .app_data_ref::<crate::script::ModelCell>()
-                    .expect("model app_data")
-                    .money
-            {
+                    .expect("model app_data");
+                crate::script::stat_read::purse(lua, &model)
+            };
+            if u64::from(n) > money {
                 return Ok(());
             }
             submit(lua, TradeCall::Gold(n))?;

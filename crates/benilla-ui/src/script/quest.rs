@@ -428,7 +428,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         let model = lua
                             .app_data_ref::<crate::script::ModelCell>()
                             .expect("model app_data");
-                        super::item_stats::item_usable_by_id(&model, it.item_id)
+                        super::item_stats::item_usable_by_id(lua, &model, it.item_id)
                     };
                     (
                         it.name.unwrap_or_default(),

@@ -768,7 +768,7 @@ fn resolve_slot(
     // Nil until the template answers: the link embeds the name and the quality colour.
     let link = live.link();
     // Only a wrapped gift names its giver (`0x52e288`, `0x52e29d`). Only read: the slot tooltip's
-    // build asks it (`crate::ui_items::feed::ask_item_build_lookups`).
+    // build asks it in its call ([`benilla_ui::script::RecordAsk::ItemBuildName`]).
     let gift_creator = (item.wrapped && item.gift_creator != 0)
         .then(|| names.resolve_player(item.gift_creator, Ask::Read))
         .flatten()
@@ -1289,7 +1289,12 @@ fn feed_trade(
             // `SetTradePartner`'s open leg (`0x4bf5f1`): only a trade we started by dropping
             // something on the partner moves what the cursor holds into the offer (`0x5d3f80`).
             if trade.opens_with_held() {
-                if let Some(offer) = script.trade_open_money() {
+                // The coinage `0x5d4570` tests the total against, as the handler finds it.
+                let purse = objects
+                    .player_fields()
+                    .and_then(|p| p.player_money())
+                    .map_or(0, u64::from);
+                if let Some(offer) = script.trade_open_money(purse) {
                     // Coins (`0x4bf5fe`-`0x4bf644`): `0x5d4500` sends the new offer, then the
                     // cursor clears (`0x4bf61c`), the cache of our money `[0xb71740]` takes it
                     // (`0x4bf62b`), and `PLAYER_TRADE_MONEY`, `PLAYER_MONEY` and `TRADE_SHOW` fire

@@ -508,7 +508,8 @@ fn slot_view(
         crate::items::record_flags(items, entry, guid),
         rolls.enchants,
     );
-    // Only read: the tooltip build asks the creator (`crate::ui_items::feed::ask_item_build_lookups`).
+    // Only read: the tooltip build asks the creator in its call
+    // ([`benilla_ui::script::RecordAsk::ItemBuildName`]).
     let creator = obj
         .item_creator()
         .filter(|&g| g != 0)
@@ -672,7 +673,8 @@ fn inventory_slots(
             name: live.name(),
             link: live.link(),
             roll: Default::default(),
-            // No click or drag path reaches the ammo slot: nothing locks it, it fits nowhere.
+            // The ammo leg names the ammo by entry, never by an item object (`0x4c7509`): no guid
+            // to lock, and no equip slots, as `CursorCanGoInSlot(0)` answers held ammo alone.
             guid: 0,
             equip_slots: Vec::new(),
             bar_placeable: false,

@@ -137,7 +137,7 @@ disjoint::disjoint_set! {
         follow_feed: Option<ResMut<'static, crate::ui_follow::FollowFeed>>,
         /// The console's commands, against what they read and write, and the getters' lookups.
         console: crate::console::ConsoleSteps<'static, 'static>,
-        asks: engine::RecordAsks<'static>,
+        asks: engine::RecordAsks<'static, 'static>,
         /// What the getters read as they run ([`live::LiveReads`]).
         live: live::LiveReads<'static, 'static>,
     }
@@ -3407,11 +3407,13 @@ mod tests {
     fn a_refused_bar_set_still_auto_equips_what_is_held() {
         let mut f = frame(false);
         with_bar_helm(&mut f, 0);
+        // Picked up with control: `PickupContainerItem` refuses without it (`0x4f9b87`).
+        run(&mut f, "PickupContainerItem(0, 1)");
         f.app
             .world_mut()
             .non_send_mut::<UiScript>()
             .set_player_control(false);
-        run(&mut f, "PickupContainerItem(0, 1) UseAction(1, 0)");
+        run(&mut f, "UseAction(1, 0)");
         let sent: Vec<_> = f.rx.try_iter().collect();
         assert!(
             matches!(
