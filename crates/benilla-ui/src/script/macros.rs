@@ -23,7 +23,7 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi;
 use super::cursor::{set_cursor, CursorMacro, CursorPayload, Setter};
-use super::{Model, SpellBookState};
+use super::{Model, PetBookState, SpellBookState};
 
 /// Macros per scope (`0x4f1010` refuses the 19th, `cmp edx,0x12`), and so the character tab's base.
 pub const MAX_MACROS: usize = 18;
@@ -301,6 +301,7 @@ impl super::UiScript {
         model.macros_generation += 1;
         model.macro_derives = MacroDerives { loaded: true };
         model.macro_bindings.clear();
+        model.macro_show_icons.clear();
     }
 
     /// Take the derivations owed since the last take ([`MacroDerives`]).
@@ -345,7 +346,7 @@ impl super::UiScript {
         let picked: Vec<_> = picked
             .into_iter()
             .map(|(id, body, was)| {
-                let options = bind::options_now(self.lua(), &aliases, &body);
+                let options = bind::options_static(&aliases, &body);
                 (id, body, was, options)
             })
             .collect();
@@ -362,7 +363,7 @@ impl super::UiScript {
                 was,
                 &options,
             );
-            model.macro_bindings.insert(id, next);
+            bind_record(model, id, next, (book.as_ref(), pet_book.as_ref()));
         }
     }
 
@@ -451,12 +452,38 @@ fn create_macro(
         MacroBinding::default(),
         options,
     );
-    model.macro_bindings.insert(id, binding);
+    bind_record(model, id, binding, (book, pet_book));
     model.macros_dirty = true;
     model.macros_generation += 1;
     // The order's rebuild (`0x4f125c` into `0x4f0d30`), which signals no slot.
     model.raise("UPDATE_MACROS", vec![]);
     Ok(model.macros.index_of_id(id).unwrap_or(0))
+}
+
+/// Store a record's derived cast and, fixed with it (this fork), the icon a `#show` button draws:
+/// the bound spell's in the book it came from, the books as the derivation read them (the
+/// model's copies when the host lent none). `GetActionTexture` reads it and derives nothing.
+fn bind_record(
+    model: &mut Model,
+    id: u32,
+    binding: MacroBinding,
+    (book, pet_book): (Option<&SpellBookState>, Option<&PetBookState>),
+) {
+    let slots = if binding.pet_book {
+        &pet_book.unwrap_or(&model.pet_book).slots
+    } else {
+        &book.unwrap_or(&model.spellbook).slots
+    };
+    let icon = u32::try_from(binding.spell)
+        .ok()
+        .filter(|&s| s != 0)
+        .and_then(|s| slots.iter().find(|slot| slot.spell_id == s))
+        .and_then(|slot| slot.texture.clone());
+    match icon {
+        Some(icon) => model.macro_show_icons.insert(id, icon),
+        None => model.macro_show_icons.remove(&id),
+    };
+    model.macro_bindings.insert(id, binding);
 }
 
 /// `EditMacro(index, name, icon, body, local)` (`0x4f18b0`): an omitted name, icon or body leaves
@@ -496,7 +523,7 @@ fn edit_macro(
         let player = book.unwrap_or(&model.spellbook);
         let pet = pet_book.unwrap_or(&model.pet_book);
         let binding = bind::derive(aliases, &view.body, player, pet, was, options);
-        model.macro_bindings.insert(id, binding);
+        bind_record(model, id, binding, (book, pet_book));
         model.macros_dirty = true;
         model.macros_generation += 1;
         model.macro_edits += 1;
@@ -535,6 +562,7 @@ fn delete_macro(model: &mut Model, index: usize) -> bool {
     };
     model.macros.list.remove(at);
     model.macro_bindings.remove(&id);
+    model.macro_show_icons.remove(&id);
     super::cursor::clear_macro_slots(model, id);
     model.macros_dirty = true;
     model.macros_generation += 1;
@@ -736,7 +764,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .unwrap_or_default();
             let flags = (flag(a.get(3)), flag(a.get(4)));
             let aliases = bind::cast_aliases(lua);
-            let options = bind::options_now(lua, &aliases, &cut_body(&body));
+            let options = bind::options_static(&aliases, &cut_body(&body));
             // The books as they stand, which the derivation reads in the call (`0x4f123c`).
             let book = super::live::ask(lua, &super::spellbook::BookNow);
             let pet_book = super::live::ask(lua, &super::PetBookNow);
@@ -799,7 +827,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let id = model.macros.id_at(index);
                 model.macros.by_id(id).map(|m| m.body.clone())
             });
-            let options = bind::options_now(lua, &aliases, &cut_body(&after.unwrap_or_default()));
+            let options = bind::options_static(&aliases, &cut_body(&after.unwrap_or_default()));
             // The books as they stand, which the derivation reads in the call (`0x4f1313`).
             let book = super::live::ask(lua, &super::spellbook::BookNow);
             let pet_book = super::live::ask(lua, &super::PetBookNow);
@@ -1140,6 +1168,45 @@ mod tests {
             ),
             "a body save touches neither the name nor the icon"
         );
+    }
+
+    /// fork: a `#showtooltip` macro with option brackets binds its first clause's spell once,
+    /// whatever its conditions, and its button draws that spell's icon from the bind on, with no
+    /// unit to resolve: a `[@mouseover,help,nodead]` clause with nothing under the cursor still
+    /// shows Blessing of Might, not the question mark.
+    #[test]
+    fn a_conditional_show_macro_draws_its_spells_icon_fixed_at_the_bind() {
+        const MIGHT: &str = r"Interface\Icons\Spell_Holy_FistOfJustice";
+        let mut s = seeded();
+        s.set_spellbook(SpellBookState {
+            tabs: Vec::new(),
+            slots: vec![super::super::SpellSlotView {
+                spell_id: 19740,
+                name: "Blessing of Might".into(),
+                rank: Some("Rank 1".into()),
+                texture: Some(MIGHT.into()),
+                ..Default::default()
+            }],
+        });
+        s.run(r#"SLASH_CAST1 = "/cast""#).unwrap();
+        s.run(
+            "BODY = [[#showtooltip
+/cast [@mouseover,help,nodead][] Blessing of Might]]              INDEX = CreateMacro(\"BoM\", 1, BODY, nil, true)",
+        )
+        .unwrap();
+        let id = s.macros().views().next().expect("the macro").id;
+        assert_eq!(s.macro_bindings()[&id].spell, 19740, "bound statically");
+        let (kind, action) = crate::script::macro_slot_word(id);
+        s.set_action(
+            1,
+            Some(crate::script::ActionSlot {
+                kind,
+                action,
+                ..Default::default()
+            }),
+        );
+        let tex = s.eval::<String>("return GetActionTexture(1)").unwrap();
+        assert_eq!(tex, MIGHT);
     }
 
     /// The verbs store a body as text: a macro's option brackets (`run::bound_spell`'s) come

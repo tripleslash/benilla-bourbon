@@ -406,15 +406,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .actions
                     .get(&action)
                     .and_then(|s| macro_slot_id(s.kind, s.action))
-                    .and_then(|id| super::macro_options::shown_spell(&model, id))
-                    .and_then(|(spell, _)| {
-                        model
-                            .spellbook
-                            .slots
-                            .iter()
-                            .find(|slot| slot.spell_id == spell)
-                            .and_then(|slot| slot.texture.clone())
-                    });
+                    .filter(|&id| super::macro_options::shown_spell(&model, id).is_some())
+                    .and_then(|id| model.macro_show_icons.get(&id).cloned());
                 shown.or_else(|| {
                     model
                         .actions
