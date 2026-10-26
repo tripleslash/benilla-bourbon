@@ -461,7 +461,7 @@ pub use worldmap_arrow::ARROW_MODEL;
 
 pub(crate) use button::{refresh_label_lua, state_font_lua, LabelFont};
 pub(crate) use font_block::{face_loads, own_font_lua, SAME_FONT_HEIGHT};
-pub use inspect::{InspectCall, UnitReach};
+pub use inspect::{InspectCall, UnitReach, VisibleSlotQuery};
 pub use instance::InstanceCall;
 pub use item_stats::{
     item_usable, ItemRecipe, ItemSetView, ItemSpellLine, ItemTemplateView, PlayerReqState,
@@ -482,7 +482,10 @@ pub use mail::{
     StationeryView,
 };
 pub use measure::TextMeasure;
-pub use merchant::{ItemStatsHead, MerchantCall, MerchantItem, MerchantState, RepairCosts};
+pub use merchant::{
+    BuybackRowQuery, ItemStatsHead, MerchantCall, MerchantHead, MerchantHeadQuery, MerchantItem,
+    MerchantRowQuery, MerchantState, RepairAllCostQuery, RepairCosts,
+};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub use minimap::{
     MinimapCall, MinimapRimArrow, CORPSE_ARROW as MINIMAP_CORPSE_ARROW,
@@ -499,8 +502,8 @@ pub use party::{
 };
 pub use pet::{PetActionView, PetCall, PetStats, PET_DISMISS_WORD};
 pub use pvp::{
-    decorated_name, medal_line, pvp_name_global_keys, HonorState, InspectHonorData, PvpCall,
-    RankTitle,
+    decorated_name, medal_line, pvp_name_global_keys, HonorNow, HonorState, InspectHonorData,
+    InspectHonorNow, InspectHonorSlot, PvpCall, RankTitle,
 };
 pub use quest::{QuestCall, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState};
 pub use quest_live::{
@@ -538,7 +541,9 @@ pub use talent::{
     CharacterPoints, TalentAt, TalentCall, TalentCount, TalentMasterPending, TalentPrereqView,
     TalentReq, TalentTabView, TalentTabs, TalentUiState, TalentView,
 };
-pub use taxi::{TaxiCall, TaxiNodeType, TaxiUiNode, TaxiUiState};
+pub use taxi::{
+    TaxiCall, TaxiMapHead, TaxiMapQuery, TaxiNodeQuery, TaxiNodeType, TaxiUiNode, TaxiUiState,
+};
 pub use tooltip_aura::{AuraKey, AuraTooltipView};
 pub use tooltip_spell::{ReputationRequirement, SpellTooltipView};
 pub use tooltip_text::{KeyedArg, TextPart, TooltipText};

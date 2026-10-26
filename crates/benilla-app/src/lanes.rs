@@ -446,9 +446,13 @@ mod guild_live_tests;
 #[cfg(test)]
 mod host_read_tests;
 #[cfg(test)]
+mod inspect_live_tests;
+#[cfg(test)]
 mod item_live_tests;
 #[cfg(test)]
 mod item_tests;
+#[cfg(test)]
+mod merchant_live_tests;
 #[cfg(test)]
 mod name_live_tests;
 #[cfg(test)]
@@ -469,6 +473,8 @@ mod stance_live_tests;
 mod stat_live_tests;
 #[cfg(test)]
 mod storm_tests;
+#[cfg(test)]
+mod taxi_live_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

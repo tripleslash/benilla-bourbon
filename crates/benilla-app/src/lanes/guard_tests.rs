@@ -145,11 +145,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::Queue,
-        "::ui_honor::InspectHonor",
-        "the inspected honor",
-    ),
-    (
-        Row::Queue,
         "::ui_instance::InstanceState",
         "the instance state",
     ),
@@ -169,11 +164,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
         Row::Queue,
         "::ui_session::latch::LatchCloses",
         "the close counts each window's core adds to, which every latched window's feed compares",
-    ),
-    (
-        Row::Queue,
-        "::ui_merchant::MerchantErrors",
-        "the merchant errors",
     ),
     (
         Row::HostHeld,
@@ -222,12 +212,6 @@ const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
         "::ui_tabard::TabardOpen",
         "the tabard vendor's packets, which `feed_tabard` fires from; the designer's save, acting \
          in its call, holds it in the host",
-    ),
-    (
-        Row::HostHeld,
-        "::ui_taxi::TaxiState",
-        "the flight master's packets, which `feed_taxi` fires from; the taxi verbs, acting in \
-         their calls, hold it in the host",
     ),
     (
         Row::HostHeld,
@@ -352,12 +336,21 @@ const HOST_HELD_UNREAD: &[&str] = &[
     // Read, and quiet: `feed_dialog_verbs` pushes the deadline the time packet stores and fires
     // nothing off it, as the packet's `AREA_SPIRIT_HEALER_IN_RANGE` goes on the notice lane.
     "::ui_dialog_verbs::AreaSpiritHealer",
+    // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: the inspect-honor getters read it
+    // through the host, and no feed fires off it, as the reply's `INSPECT_HONOR_UPDATE` goes on
+    // the notice lane at its handler and a re-target's fires in its call.
+    "::ui_honor::InspectHonor",
     "::ui_loot::AutoLootByte",
     "::ui_loot::LootLatch",
+    // Read through the host by the merchant getters, and quiet: its events fire on the merchant
+    // lane at their handlers and callbacks.
     "::ui_merchant::MerchantOpen",
     "::ui_petition::GuildRegistrarState",
     "::ui_petition::PetitionRecords",
     "::ui_session::latch::InteractLatch",
+    // Read through the host by the taxi getters, and quiet: its events fire on the taxi lane at
+    // their handlers.
+    "::ui_taxi::TaxiState",
     // Read, and quiet: `CheckTalentMasterDist` reads the latch through the host and the Accept
     // holds it; the question's `CONFIRM_TALENT_WIPE` fires on the notice lane.
     "::ui_talent_wipe::TalentWipeState",
@@ -444,10 +437,6 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     // The ammo getters' hits fire after the push that carries their record, whenever it runs.
     ("::ui_char::feed_char", &["items::Countdowns", "items::Items", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore", "ui_char::AmmoRecordHits"]),
-    ("::ui_inspect::feed_inspect", &["items::Items", "names::NameCache", "net::GuidIndex",
-        "net::ObjectStore", "net::SelfGuid"]),
-    ("::ui_honor::feed_honor", &["net::ObjectStore", "target::Selection", "ui_honor::InspectHonor",
-        "ui_inspect::InspectTarget", "ui_party::GroupState"]),
     ("::ui_action::recount::recount_item_actions", &["items::Countdowns", "items::Items",
         "net::GuidIndex", "net::ObjectStore"]),
     ("::ui_action::feed::feed_actions", &["items::Countdowns", "items::Items", "net::GuidIndex",
@@ -511,9 +500,8 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "net::ObjectStore", "ui_action::PlayerActions"]),
     ("::ui_gossip::feed_gossip", &["items::Countdowns", "names::NameCache", "net::GuidIndex",
         "net::ObjectStore", "ui_gossip::GossipState", "world_state::WorldStates"]),
-    ("::ui_merchant::feed_merchant", &["items::Countdowns", "items::Items", "names::NameCache",
-        "net::GuidIndex", "net::ObjectStore", "ui_merchant::MerchantErrors",
-        "ui_merchant::MerchantOpen"]),
+    // The purse the trade and mail verbs read off the VM; `GetMoney` reads it through the host.
+    ("::ui_merchant::feed_purse", &["net::ObjectStore"]),
     ("::ui_merchant::feed_repair_costs", &["items::Countdowns", "items::Items", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore", "net::SelfGuid", "net::reputations::Reputations",
         "ui_merchant::MerchantOpen"]),
@@ -540,9 +528,6 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "net::HomeBind", "net::ObjectStore", "spell::mods::SpellModifiers",
         "ui_action::PlayerActions", "ui_pet::PetBar", "ui_trainer::TrainerErrors",
         "ui_trainer::TrainerOpen"]),
-    ("::ui_taxi::feed_taxi", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
-        "net::SelfGuid", "net::reputations::Reputations", "ui_taxi::TaxiState",
-        "ui_taxi::routing::TaxiRouteCache"]),
     ("::ui_taxi::feed_on_taxi", &["net::ObjectStore"]),
     // The getters' item callbacks, kept inside their calls, are spent as the frame left them.
     ("::ui_tradeskill::feed_trade_skill", &["items::Countdowns", "items::Items", "net::GuidIndex",
@@ -713,7 +698,7 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
 ];
 
 /// Every lane's queue, by type: what a handler fills there fires in the packets' order.
-fn lane_types() -> [TypeId; 24] {
+fn lane_types() -> [TypeId; 26] {
     [
         TypeId::of::<crate::ui_items::feed::BagView>(),
         // The views lane: what each packet changed in the stores.
@@ -756,12 +741,16 @@ fn lane_types() -> [TypeId; 24] {
         // answers, at their packets, and the lists it seats around each.
         TypeId::of::<crate::ui_social::SocialLane>(),
         TypeId::of::<crate::ui_social::SocialState>(),
+        // The merchant lane: the vendor packets' and record callbacks' signals and lines.
+        TypeId::of::<crate::ui_merchant::MerchantLane>(),
+        // The taxi lane: the map's open and the flight master's replies.
+        TypeId::of::<crate::ui_taxi::TaxiLane>(),
     ]
 }
 
 /// [`lane_types`] by the lane that drains each: a queue is stripped only from its own lane's row,
 /// so another lane's read of the same type shows as the state it is.
-fn lane_queue_owners() -> [(&'static str, TypeId); 24] {
+fn lane_queue_owners() -> [(&'static str, TypeId); 26] {
     [
         ("bag view", TypeId::of::<crate::ui_items::feed::BagView>()),
         ("unit views", TypeId::of::<crate::ui_unit::views::ViewLog>()),
@@ -805,6 +794,8 @@ fn lane_queue_owners() -> [(&'static str, TypeId); 24] {
         ),
         ("social", TypeId::of::<crate::ui_social::SocialLane>()),
         ("social", TypeId::of::<crate::ui_social::SocialState>()),
+        ("merchant", TypeId::of::<crate::ui_merchant::MerchantLane>()),
+        ("taxi", TypeId::of::<crate::ui_taxi::TaxiLane>()),
     ]
 }
 
@@ -1030,12 +1021,14 @@ fn the_drain_runs_after_the_feeds_and_before_the_tick() {
             "item watchers",
             "list rebuilds",
             "loot",
+            "merchant",
             "party",
             "pet cooldowns",
             "quest events",
             "releases",
             "reputation",
             "social",
+            "taxi",
             "unit views"
         ]
     );

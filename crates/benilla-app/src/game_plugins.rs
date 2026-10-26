@@ -194,8 +194,6 @@ impl PluginGroup for GamePlugins {
             .add(UiTooltipPlugin)
             .add(UiCharPlugin)
             .add(crate::ui_reputation::UiReputationPlugin)
-            .add(crate::ui_inspect::InspectUiPlugin)
-            // After the inspect feed, whose target it asks about.
             .add(crate::ui_honor::UiHonorPlugin)
             .add(crate::ui_dressup::DressUpUiPlugin)
             .add(UiActionPlugin)
@@ -2028,11 +2026,9 @@ pub(crate) mod schedule_tests {
             "::ui_gossip::feed_gossip",
             "::ui_quest::feed_quest",
             "::ui_bank::feed_bank",
-            "::ui_taxi::feed_taxi",
             "::ui_stable::feed_stable",
             "::ui_tabard::feed_tabard",
             "::ui_petition::feed::feed_petition",
-            "::ui_merchant::feed_merchant",
             "::ui_trainer::feed_trainer",
             "::ui_auction::feed_auction",
             "::ui_trade::feed_trade",
@@ -2255,8 +2251,6 @@ pub(crate) mod schedule_tests {
          "`feed.vm: VmMemo<FedTicket>` counters restart per VM while `state.answers` keeps counting, so the latest answer is re-fired"),
         ("ui_guild/lane.rs", "fire_guild", Because::Deliberate,
          "a lane's firing, run only by the drain, which runs only with the interface up (`ingame_ui_up`): the lane holds what the packets queue until a drain fires it, so the login's message of the day, which lands ahead of the interface, fires into the VM that comes up"),
-        ("ui_honor.rs", "feed_honor", Because::MemoLatched,
-         "`state.vm: VmMemo<HonorFeedMemo>`; a fresh VM is pushed the block again and re-fires `INSPECT_HONOR_UPDATE` for a held reply"),
         ("ui_item_text.rs", "feed_item_text", Because::MemoLatched,
          "`told` is a `VmMemo` inside the session (a fresh VM re-begins), and the open is a player click"),
         ("ui_logout.rs", "feed_logout", Because::PlayerRoundTrip,
@@ -2271,8 +2265,6 @@ pub(crate) mod schedule_tests {
          "`MacroFiles.identity` is a `VmMemo`, so a new session re-reads the files and re-fires UPDATE_MACROS; also `InWorldGated`"),
         ("ui_mail/mod.rs", "feed_mail", Because::SelfHealing,
          "the window queues are mailbox-click replies; the one server push (`SMSG_RECEIVED_MAIL`) is re-asked by `send_query_next_mail_time_on_enter`, whose reply sets `notify` unconditionally"),
-        ("ui_merchant/mod.rs", "feed_merchant", Because::PlayerRoundTrip,
-         "a buy/sell refusal answers a click on an open merchant; show/update ride `VmMemo`s"),
         ("ui_panes.rs", "feed_character_panes", Because::FilledByVm,
          "the answers answer the VM's own build requests and arms on panes it listed; a frameless VM lists none, and an answer for another VM's rows is dropped"),
         ("ui_petition/feed.rs", "feed_petition", Because::PlayerRoundTrip,
@@ -2293,8 +2285,6 @@ pub(crate) mod schedule_tests {
          "only another player's Ritual of Summoning latches the ask (the duel's shape; coincidence-only residual)"),
         ("ui_tabard.rs", "feed_tabard", Because::PlayerRoundTrip,
          "every latch follows a tabard-vendor click, and `reset_on_world_enter` zeroes the resource on entry"),
-        ("ui_taxi/mod.rs", "feed_taxi", Because::PlayerRoundTrip,
-         "both packets follow talking to a flight master"),
         ("ui_tradeskill.rs", "fire_list_rebuilds", Because::Deliberate,
          "a lane's firing, run only by the drain: `drop_list_rebuilds`, gated on the interface being down, empties the lane the frame its items land, so none fires into a later VM"),
         ("ui_trainer/mod.rs", "feed_trainer", Because::PlayerRoundTrip,
