@@ -547,7 +547,7 @@ fn expand(
 
 /// The token engine's parts as the render reads them: each template it names by key, its stand-in
 /// the token as written.
-pub(super) fn tooltip_text(parts: Vec<benilla_formats::TokenPart>) -> TooltipText {
+pub(crate) fn tooltip_text(parts: Vec<benilla_formats::TokenPart>) -> TooltipText {
     use benilla_formats::{TokenNumber, TokenPart};
     TooltipText(
         parts
