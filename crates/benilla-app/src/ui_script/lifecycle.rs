@@ -206,7 +206,7 @@ fn seed_vm_clock(world: &mut World, script: &mut UiScript) {
 }
 
 /// Start the new VM's `GetGameTime()` at the game clock as it stands: the reference's clock is one
-/// object (`0xce8538`) built at start-up with every field -1 (`0x643300`, `0x642300`) and reset
+/// object (`0xce8538`) built at start-up with its time at -1 (`0x643300`, `0x642300`) and reset
 /// by no logout or `ReloadUI`, so a VM answers -1, -1 before any server time and the last known
 /// time after it, from the first line its addons run. fork: moved by the `serverTimeOffset` hours.
 fn seed_game_time(world: &World, script: &mut UiScript) {
@@ -1543,6 +1543,9 @@ pub(crate) fn run_pending_reload(world: &mut World) {
         .next()
         .is_some();
     if seated {
+        // The cascade's questgiver reset (`0x49099c` → `0x500af0`), which a login's and a
+        // worldport's run from their own packets.
+        crate::ui_quest::world_enter_cascade(world);
         world.write_message(crate::net::WorldEnterCascadeMessage);
     }
 }
@@ -1961,7 +1964,7 @@ mod tests {
         }
     }
 
-    /// The game clock is one object built at start-up with every field -1 (`0x643300`, `0x642300`)
+    /// The game clock is one object built at start-up with its time at -1 (`0x643300`, `0x642300`)
     /// that no logout or `ReloadUI` resets, and `GetGameTime` reads it unguarded (`0x515ee0`), so a
     /// VM answers -1, -1 before any server time and the last known time after it, from the first
     /// line its addons run.
@@ -2142,6 +2145,50 @@ mod tests {
         assert_eq!(
             reload(false).1,
             0,
+            "no cascade before our own player's create"
+        );
+    }
+
+    /// The reload's cascade runs the questgiver's world-enter reset (`0x490168` → `0x4908c0` →
+    /// `0x49099c` → `0x500af0`): the old panel's texts and pools read empty in the new UI.
+    #[test]
+    fn a_reload_resets_the_questgiver_cells_once_the_player_exists() {
+        use benilla_protocol::messages::{QuestGiverList, QuestListEntry};
+        let reload = |seated: bool| {
+            let mut world = World::new();
+            world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+            world.insert_resource(crate::run_mode::CaptureMode);
+            world.init_resource::<Messages<crate::net::WorldEnterCascadeMessage>>();
+            world.init_resource::<super::super::SweptWorlds>();
+            world.init_resource::<super::super::LeavingWorldArmed>();
+            world.init_resource::<crate::ui_quest::QuestGiver>();
+            if seated {
+                world.spawn(crate::net::SelfPlayer);
+            }
+            world.resource_mut::<crate::ui_quest::QuestGiver>().open(
+                0x42,
+                crate::ui_quest::QuestView::Greeting(QuestGiverList {
+                    npc: 0x42,
+                    greeting: "Well met.".into(),
+                    emote_delay: 0,
+                    emote: 0,
+                    quests: vec![QuestListEntry {
+                        quest_id: 7,
+                        icon: 3,
+                        level: 5,
+                        title: "Wolves".into(),
+                    }],
+                }),
+            );
+            world.insert_resource(ReloadUiPending(true));
+            run_pending_reload(&mut world);
+            let cells = &world.resource::<crate::ui_quest::QuestGiver>().cells.state;
+            (cells.greeting.clone(), cells.active_titles.clone())
+        };
+        assert_eq!(reload(true), (String::new(), Vec::<String>::new()));
+        assert_eq!(
+            reload(false),
+            ("Well met.".to_string(), vec!["Wolves".to_string()]),
             "no cascade before our own player's create"
         );
     }

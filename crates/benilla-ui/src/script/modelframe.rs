@@ -216,13 +216,8 @@ pub(super) fn with_model<T>(
 
 /// `lua_tonumber`, which the reference's coordinate and angle setters read through: a number or a
 /// numeric string, anything else 0.0.
-fn num(v: &Value) -> f32 {
-    match v {
-        Value::Number(n) => *n as f32,
-        Value::Integer(i) => *i as f32,
-        Value::String(s) => s.to_str().ok().and_then(|t| t.parse().ok()).unwrap_or(0.0),
-        _ => 0.0,
-    }
+fn num(lua: &Lua, v: &Value) -> f32 {
+    super::binding_abi::coerced_number(lua, Some(v.clone())) as f32
 }
 
 /// `SetSequence`/`SetSequenceTime` on any model pane: a character pane's copy takes the arm (the
@@ -232,20 +227,16 @@ fn arm_pane(m: &mut ModelState, id: i32, ms: i64, facts: Option<&ModelFileFacts>
     m.arm_key_bone(id, ms, false, facts);
 }
 
-/// Same, as an integer (sequence and camera indices).
-fn int(v: &Value) -> i32 {
-    num(v) as i32
+/// `lua_tonumber` then `_ftol` on the double, as the integer setters read it (`SetSequence`
+/// `0x76df62`, `SetSequenceTime` `0x76e072`/`0x76e084`, `SetCamera` `0x76e182`).
+fn int(lua: &Lua, v: &Value) -> i32 {
+    super::binding_abi::ftol(super::binding_abi::coerced_number(lua, Some(v.clone())))
 }
 
 /// `lua_isnumber`: a number or a string that converts. Separate from [`num`] because `SetLight`
 /// raises on a non-number where the coordinate setters read 0.
-fn number(v: &Value) -> Option<f32> {
-    match v {
-        Value::Number(n) => Some(*n as f32),
-        Value::Integer(i) => Some(*i as f32),
-        Value::String(s) => s.to_str().ok().and_then(|t| t.trim().parse().ok()),
-        _ => None,
-    }
+fn number(lua: &Lua, v: &Value) -> Option<f32> {
+    super::binding_abi::is_number(lua, v.clone()).map(|n| n as f32)
 }
 
 /// `[0x8029d4]`, the client's float-zero epsilon: `SetLight`'s intensity gate, `0x71b6a0`'s
@@ -276,8 +267,8 @@ enum SetLight {
 /// A colour triple is read only when its intensity is nonzero and all three are numbers; otherwise
 /// it is white and the cursor does not advance, so `SetLight(1, 0, x, y, z, ambI, dirI)` reads the
 /// second intensity at index 8, not 11.
-fn parse_set_light(a: &[Value]) -> SetLight {
-    let Some(enabled) = a.first().and_then(number) else {
+fn parse_set_light(lua: &Lua, a: &[Value]) -> SetLight {
+    let Some(enabled) = a.first().and_then(|v| number(lua, v)) else {
         return SetLight::Raise;
     };
     if enabled as i32 == 0 {
@@ -286,7 +277,7 @@ fn parse_set_light(a: &[Value]) -> SetLight {
     // Lua indices 3..=7 (omni, x, y, z, ambient intensity) are required once enabled.
     let mut head = [0.0f32; 5];
     for (i, slot) in head.iter_mut().enumerate() {
-        match a.get(i + 1).and_then(number) {
+        match a.get(i + 1).and_then(|v| number(lua, v)) {
             Some(v) => *slot = v,
             None => return SetLight::Raise,
         }
@@ -304,7 +295,7 @@ fn parse_set_light(a: &[Value]) -> SetLight {
     let quantize = |v: f32| ((v.clamp(0.0, 1.0) * 255.0).round()) / 255.0;
     let block = |at: usize| -> Option<[f32; 3]> {
         let c: Vec<f32> = (at..at + 3)
-            .filter_map(|k| a.get(k).and_then(number))
+            .filter_map(|k| a.get(k).and_then(|v| number(lua, v)))
             .collect();
         (c.len() == 3).then(|| [quantize(c[0]), quantize(c[1]), quantize(c[2])])
     };
@@ -320,7 +311,7 @@ fn parse_set_light(a: &[Value]) -> SetLight {
         ambient: ambient_rgb.map(|c| c * ambient_i),
         diffuse: [0.0; 3],
     };
-    if let Some(diffuse_i) = a.get(next).and_then(number) {
+    if let Some(diffuse_i) = a.get(next).and_then(|v| number(lua, v)) {
         let rgb = block(next + 1)
             .filter(|_| diffuse_i.abs() > FLOAT_EPS)
             .unwrap_or([1.0; 3]);
@@ -376,7 +367,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetSequence",
         lua.create_function(|lua, (this, seq): (Table, Value)| {
-            let seq = int(&seq);
+            let seq = int(lua, &seq);
             let facts = facts_of_pane(lua, &this)?;
             with_model(lua, &this, |m| arm_pane(m, seq, 0, facts.as_deref()))
         })?,
@@ -384,7 +375,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetSequenceTime",
         lua.create_function(|lua, (this, seq, ms): (Table, Value, Value)| {
-            let (seq, ms) = (int(&seq), int(&ms));
+            let (seq, ms) = (int(lua, &seq), int(lua, &ms));
             let facts = facts_of_pane(lua, &this)?;
             with_model(lua, &this, |m| {
                 arm_pane(m, seq, i64::from(ms), facts.as_deref())
@@ -399,7 +390,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetFacing",
         lua.create_function(|lua, (this, rad): (Table, Value)| {
-            let rad = num(&rad);
+            let rad = num(lua, &rad);
             with_model(lua, &this, |m| m.facing = rad)
         })?,
     )?;
@@ -410,7 +401,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetModelScale",
         lua.create_function(|lua, (this, s): (Table, Value)| {
-            let s = num(&s);
+            let s = num(lua, &s);
             with_model(lua, &this, |m| m.scale = s)
         })?,
     )?;
@@ -425,7 +416,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetCamera",
         lua.create_function(|lua, (this, c): (Table, Value)| {
-            let c = int(&c);
+            let c = int(lua, &c);
             with_model(lua, &this, |_| ())?;
             let h = frame_handle_of(lua, &this)?;
             lua.app_data_mut::<crate::script::ModelCell>()
@@ -437,7 +428,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetPosition",
         lua.create_function(|lua, (this, x, y, z): (Table, Value, Value, Value)| {
-            let p = (num(&x), num(&y), num(&z));
+            let p = (num(lua, &x), num(lua, &y), num(lua, &z));
             with_model(lua, &this, |m| m.position = p)
         })?,
     )?;
@@ -459,7 +450,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 _ => return Err(mlua::Error::runtime("expected a Model")),
             };
             let a: Vec<Value> = it.collect();
-            match parse_set_light(&a) {
+            match parse_set_light(lua, &a) {
                 SetLight::Raise => Err(mlua::Error::runtime(SET_LIGHT_USAGE)),
                 SetLight::NoOp => with_model(lua, &this, |_| ()),
                 SetLight::Set(l) => with_model(lua, &this, |m| m.light = l),
@@ -497,8 +488,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // The fifth argument is alpha, clamped like the rest but 1.0 when absent, where an
                 // absent r, g or b reads 0.0: `SetFogColor(r, g, b)` is opaque.
                 let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-                let a = a.as_ref().map_or(1.0, num);
-                let packed = (q(a) << 24) | (q(num(&r)) << 16) | (q(num(&g)) << 8) | q(num(&b));
+                let a = a.as_ref().map_or(1.0, |v| num(lua, v));
+                let packed = (q(a) << 24)
+                    | (q(num(lua, &r)) << 16)
+                    | (q(num(lua, &g)) << 8)
+                    | q(num(lua, &b));
                 // Setting the colour arms the fog (`0x76f059`), the only verb that does.
                 with_model(lua, &this, |m| {
                     m.fog_color = packed;
@@ -522,7 +516,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetFogNear",
         lua.create_function(|lua, (this, v): (Table, Value)| {
-            let v = num(&v);
+            let v = num(lua, &v);
             with_model(lua, &this, |m| m.fog_near = v)
         })?,
     )?;
@@ -533,7 +527,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetFogFar",
         lua.create_function(|lua, (this, v): (Table, Value)| {
-            let v = num(&v);
+            let v = num(lua, &v);
             with_model(lua, &this, |m| m.fog_far = v)
         })?,
     )?;
@@ -631,7 +625,7 @@ pub(super) fn install_player_model(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetRotation",
         lua.create_function(|lua, (this, rad): (Table, Value)| {
-            let rad = num(&rad);
+            let rad = num(lua, &rad);
             let now_ms = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data")

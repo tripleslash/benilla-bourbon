@@ -518,9 +518,12 @@ pub use pvp::{
     decorated_name, medal_line, pvp_name_global_keys, HonorNow, HonorState, InspectHonorData,
     InspectHonorNow, InspectHonorSlot, PvpCall, RankTitle,
 };
-pub use quest::{QuestCall, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState};
+pub use quest::{
+    QuestCall, QuestGiverQuery, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect,
+    QuestState,
+};
 pub use quest_live::{
-    QuestClock, QuestClockRead, QuestCoinage, QuestHeld, QuestSlots, QuestStanding,
+    QuestClock, QuestClockRead, QuestCoinage, QuestHeld, QuestObjectName, QuestSlots, QuestStanding,
 };
 pub use quest_log::{
     QuestLogCarry, QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS,
