@@ -119,6 +119,10 @@ mimalloc = { version = "0.1", default-features = false }
 cpal = "0.17"
 
 [dev-dependencies]
+# `crash`'s test reads what a failed command logs: bevy_ecs 0.19's error handlers log through
+# `log`, which reaches a tracing subscriber only through this bridge (bevy_log's own, unexported).
+tracing-log = "0.2"
+
 # tests/boot_manifest.rs parses web/boot-manifest.json (the boot-prefetch read-set). Dev-only:
 # the 0978 decision to keep serde_json out of the shipped app stands.
 serde_json = "1"

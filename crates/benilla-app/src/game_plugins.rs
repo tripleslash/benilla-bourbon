@@ -2420,7 +2420,11 @@ pub(crate) mod schedule_tests {
                             .filter(|s| !s.starts_with("SystemTypeSet"))
                             .map(String::as_str)
                             .collect();
-                        format!(" (sets: {})", named.join(", "))
+                        format!(
+                            " (sets: {}; conditions: {})",
+                            named.join(", "),
+                            i.conditions.join(", ")
+                        )
                     }
                 };
                 offenders.push(format!("{rel}: `{name}`{where_}"));

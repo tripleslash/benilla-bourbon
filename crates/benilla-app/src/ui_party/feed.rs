@@ -2879,6 +2879,12 @@ mod tests {
                GetMouseFocus = function() return HOVER end"#,
         )
         .unwrap();
+        let reads = s
+            .eval::<String>(
+                r#"return tostring(UnitExists("party1")) .. " " .. tostring(UnitCanAssist("player", "party1"))
+                    .. " " .. tostring(UnitIsDeadOrGhost("party1"))"#,
+            )
+            .unwrap();
         let parse = |unit: &str| {
             s.run(&format!(r#"HOVER.unit = "{unit}""#)).unwrap();
             s.eval::<(Option<String>, Option<String>)>(
@@ -2888,7 +2894,8 @@ mod tests {
         };
         assert_eq!(
             parse("party1"),
-            (Some("Flash Heal".into()), Some("party1".into()))
+            (Some("Flash Heal".into()), Some("party1".into())),
+            "exists, assist, dead on party1: {reads}"
         );
         assert_eq!(parse("party2"), (None, None));
     }

@@ -268,6 +268,9 @@ mod tests {
         let gone = app.world_mut().spawn_empty().id();
         app.world_mut().despawn(gone);
 
+        // bevy_ecs's handlers log through `log`: bridged into tracing, as `LogPlugin` does. Another
+        // test may have installed the bridge already, which is the same bridge.
+        let _ = tracing_log::LogTracer::init();
         let lines = Arc::new(Mutex::new(Vec::new()));
         let subscriber = bevy::log::tracing_subscriber::registry().with(Capture(lines.clone()));
         bevy::log::tracing::subscriber::with_default(subscriber, || {

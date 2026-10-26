@@ -645,6 +645,7 @@ dependencies = [
  "smithay-clipboard",
  "symphonia",
  "toml",
+ "tracing-log",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
