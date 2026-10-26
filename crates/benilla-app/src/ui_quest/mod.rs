@@ -510,7 +510,7 @@ pub(crate) fn open_panel(world: &mut World, npc: u64, view: QuestView) {
     };
     let mut macros = bevy::ecs::system::SystemState::<PanelMacros>::new(world);
     world.resource_scope(|world, mut giver: Mut<QuestGiver>| {
-        let m = macros.get(world);
+        let m = macros.get(world).expect("`PanelMacros` validates");
         let subject = m.names.as_deref().and_then(|names| {
             crate::npc_text::player_identity(&m.self_q, names, m.unit_names.get())
         });

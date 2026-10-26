@@ -573,6 +573,9 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     // (`0x48f566`-`0x48f584`); `end_ui_session` is `ShutdownGame`'s clear. A `/reload` keeps them.
     if world.resource::<PendingEntryUiLoad>().stage == EntryStage::Armed {
         flag_world_read_only(world);
+        // `UI_Init` zeroes the release timer (`0x490131`, `0x490137`), with or without a UI, as
+        // the one-shot load does ([`load_ingame_ui_seated`]).
+        crate::death::zero_release_timer(world);
     }
     if !ui_wanted(world) {
         world.remove_resource::<PendingEntryUiLoad>();
@@ -1116,6 +1119,9 @@ fn flag_world_read_only(world: &mut World) {
 
 /// [`load_ingame_ui_on_world_entry`] under the `"player"` its edge has.
 fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
+    // `UI_Init` zeroes the release timer (`0x490131`, `0x490137`), with or without a UI; its
+    // place in the load is unseen here, as the new VM reads the death snapshot only after it.
+    crate::death::zero_release_timer(world);
     // The parked VM goes back into the world, where the CVar fold reads it; a reload has none
     // parked and uses the live one.
     unpark_glue_vm(world);
@@ -2146,6 +2152,29 @@ mod tests {
             reload(false).1,
             0,
             "no cascade before our own player's create"
+        );
+    }
+
+    /// `UI_Init` zeroes the release timer at each load (`0x490131`, `0x490137`), so a `/reload`
+    /// after our death answers 0 (`0x4962b6`) and shows no DEATH popup.
+    #[test]
+    fn a_reload_zeroes_the_release_timer() {
+        let mut world = World::new();
+        world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+        world.insert_resource(crate::run_mode::CaptureMode);
+        world.init_resource::<Messages<crate::net::WorldEnterCascadeMessage>>();
+        world.init_resource::<super::super::SweptWorlds>();
+        world.init_resource::<super::super::LeavingWorldArmed>();
+        world.init_resource::<crate::death::DeathNet>();
+        world.spawn(crate::net::SelfPlayer);
+        world
+            .resource_mut::<crate::death::DeathNet>()
+            .arm_release(true, 0.0);
+        world.insert_resource(ReloadUiPending(true));
+        run_pending_reload(&mut world);
+        assert_eq!(
+            world.resource::<crate::death::DeathNet>().release,
+            crate::death::ReleaseTimer::Unset
         );
     }
 
