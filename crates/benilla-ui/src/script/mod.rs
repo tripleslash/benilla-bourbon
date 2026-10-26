@@ -506,7 +506,10 @@ pub(crate) use model::{Model, ModelCell};
 pub use party::{
     PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, ReadyCheckState, SavedInstanceInfo,
 };
-pub use pet::{PetActionView, PetCall, PetStats, PET_DISMISS_WORD};
+pub use pet::{
+    PetActionView, PetBarFlags, PetBarFlagsView, PetBookNow, PetCall, PetMenuNow, PetSlot,
+    PetSlots, PetStats, PetStatsNow, PET_DISMISS_WORD,
+};
 pub use pvp::{
     decorated_name, medal_line, pvp_name_global_keys, HonorNow, HonorState, InspectHonorData,
     InspectHonorNow, InspectHonorSlot, PvpCall, RankTitle,

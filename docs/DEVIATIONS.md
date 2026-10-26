@@ -428,11 +428,11 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### ui_pet
 
-- It counts characters where the reference counts bytes, because a byte cut can split a UTF-8 character. ([`src/ui_pet/steps.rs:148`](../crates/benilla-app/src/ui_pet/steps.rs#L148))
+- It counts characters where the reference counts bytes, because a byte cut can split a UTF-8 character. ([`src/ui_pet/steps.rs:147`](../crates/benilla-app/src/ui_pet/steps.rs#L147))
 
 #### ui_pet_stats
 
-- Fired when the bucket or its two tooltip figures change, not on every change of the happiness field as in the reference, because no stock consumer reads the raw value. ([`src/ui_pet_stats.rs:204`](../crates/benilla-app/src/ui_pet_stats.rs#L204))
+- Fired when the bucket or its two tooltip figures change, not on every change of the happiness field as in the reference, because no stock consumer reads the raw value. ([`src/ui_pet_stats.rs:170`](../crates/benilla-app/src/ui_pet_stats.rs#L170))
 
 #### ui_quest
 
@@ -741,7 +741,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### script
 
-- An out-of-range slot answers nil, because the reference indexes `0xbc6980` with no bounds check and reads the memory beside its 120 slots. ([`src/script/action.rs:447`](../crates/benilla-ui/src/script/action.rs#L447))
+- An out-of-range slot answers nil, because the reference indexes `0xbc6980` with no bounds check and reads the memory beside its 120 slots. ([`src/script/action.rs:446`](../crates/benilla-ui/src/script/action.rs#L446))
 - The files the handler writes beside the install (`<Name>.pub` with the key, `<Name>.url`; `0x51dce0`, `0x51dde0`) are not written, as the install is read-only; the key is never read either, as there is no signature to verify with it. ([`src/script/addon.rs:219`](../crates/benilla-ui/src/script/addon.rs#L219))
 - The reference fails silently; we report it, as a player needs to know, and hold the file so the shutdown write keeps it. ([`src/script/addon.rs:860`](../crates/benilla-ui/src/script/addon.rs#L860))
 - The reference drops a send that resolves to PARTY while party slot 0's guid (`0xbc6f48`) is zero (`0x49fa9f`-`0x49faab`); benilla sends it, because `PartyState` is empty until the first `SMSG_GROUP_LIST` and the gate would swallow a real broadcast. vmangos drops a group-less party line anyway (`ChatHandler.cpp:476`). ([`src/script/addon_message.rs:7`](../crates/benilla-ui/src/script/addon_message.rs#L7))
@@ -800,11 +800,11 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - An addon file whose first binding has no header opens a `HEADER_<addon>` row, where the reference files those rows under the previous file's last header, because under a foreign header the player could not find them. ([`src/script/keybind.rs:326`](../crates/benilla-ui/src/script/keybind.rs#L326))
 - The handle's value is the address of a `CGxTex` (`SMemAlloc(0x54)`, `0x594a96`), which benilla cannot reproduce; each texture ranks instead by a creation stamp, one global sequence number taken when its cache key is first created and taken anew once its last region has let go of it (`super::texel::Texels`). ([`src/script/layer_batch.rs:9`](../crates/benilla-ui/src/script/layer_batch.rs#L9))
 - The reference's byte copy can end inside a character and keep the stray bytes; a `String` must stay UTF-8, so the cut stops at the character boundary. ([`src/script/macros.rs:135`](../crates/benilla-ui/src/script/macros.rs#L135))
-- A listing that finds no icon stays empty, to be listed again on the next ask, where the reference's dedup then reads below its null list (`0x4f0134`-`0x4f0145`) and faults. ([`src/script/macros.rs:564`](../crates/benilla-ui/src/script/macros.rs#L564))
+- A listing that finds no icon stays empty, to be listed again on the next ask, where the reference's dedup then reads below its null list (`0x4f0134`-`0x4f0145`) and faults. ([`src/script/macros.rs:568`](../crates/benilla-ui/src/script/macros.rs#L568))
 - Each line is trimmed, because the reference sends an indented `" /say hi"` as plain chat, never as the command meant. ([`src/script/macros/bind.rs:30`](../crates/benilla-ui/src/script/macros/bind.rs#L30))
 - The `/cast` argument is trimmed, because the reference binds `/cast  Fireball` (two spaces) to a name that never resolves. ([`src/script/macros/bind.rs:50`](../crates/benilla-ui/src/script/macros/bind.rs#L50))
-- The client's Lua has no such bound, as nothing sets a hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that never ends hangs it. ([`src/script/mod.rs:1109`](../crates/benilla-ui/src/script/mod.rs#L1109))
-- The reference sets the cells only when glue or the interface is built, `0x41ad10` from `0x46a828` (`0x46a7b0`) and `0x48fe2b` (`0x48fbf0`), and a resize reaches them only through the rebuild it asks for. ([`src/script/mod.rs:1171`](../crates/benilla-ui/src/script/mod.rs#L1171))
+- The client's Lua has no such bound, as nothing sets a hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that never ends hangs it. ([`src/script/mod.rs:1112`](../crates/benilla-ui/src/script/mod.rs#L1112))
+- The reference sets the cells only when glue or the interface is built, `0x41ad10` from `0x46a828` (`0x46a7b0`) and `0x48fe2b` (`0x48fbf0`), and a resize reaches them only through the rebuild it asks for. ([`src/script/mod.rs:1174`](../crates/benilla-ui/src/script/mod.rs#L1174))
 - A path that does not resolve is stored, where the reference raises `Invalid model file: %s` (`0x878b44`), because the file loads asynchronously here and the call cannot know yet. ([`src/script/modelframe.rs:341`](../crates/benilla-ui/src/script/modelframe.rs#L341))
 - The reference's free list is FIFO; either keeps every index stable, all an addon can observe. ([`src/script/nameplate.rs:478`](../crates/benilla-ui/src/script/nameplate.rs#L478))
 - The reference adds this rim over the bar; we brighten the bar (`LIT_BOOST`), because the rim reads as hard edge lines in our linear-blending pipeline. ([`src/script/nameplate.rs:934`](../crates/benilla-ui/src/script/nameplate.rs#L934))
@@ -840,7 +840,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference's builder hides and clears on a missing record (`0x52b72e`..`0x52b73f`), where a source that knows the item's name shows that, because a blank plate under an on-screen name reads as broken; the template's arrival then builds it whole. ([`src/script/tooltip_item/build.rs:55`](../crates/benilla-ui/src/script/tooltip_item/build.rs#L55))
 - An object no longer held rebuilds from the instance the build read, where the reference's lookup finds no object and builds from the record and the block alone; benilla's views carry no object to read once it is gone, and the kept instance is what the plate showed. ([`src/script/tooltip_item/build.rs:193`](../crates/benilla-ui/src/script/tooltip_item/build.rs#L193))
 - The reference recurses without a bound (`0x52dbce` builds the product whatever the depth), so a product that teaches a recipe for itself would recurse until the stack overflows; benilla stops here, so a cyclic `Spell.dbc` chain cannot crash the client. ([`src/script/tooltip_item/render.rs:195`](../crates/benilla-ui/src/script/tooltip_item/render.rs#L195))
-- The reference's padding repeats a mana stat once per zero entry; not emulated, since only the internal test ring 6674 has one. ([`src/script/tooltip_item/render.rs:554`](../crates/benilla-ui/src/script/tooltip_item/render.rs#L554))
+- The reference's padding repeats a mana stat once per zero entry; not emulated, since only the internal test ring 6674 has one. ([`src/script/tooltip_item/render.rs:557`](../crates/benilla-ui/src/script/tooltip_item/render.rs#L557))
 - The unknown-skill "Requires %s" shares it, though its reference red is `0xffff0000`, because a 32/255 difference in G and B does not show. ([`src/script/tooltip_unit.rs:126`](../crates/benilla-ui/src/script/tooltip_unit.rs#L126))
 - The selection clears to 0, because the header the reference re-selects (`0x4d7b42`, reading 1) has no spell id; the stock window's `> 1` test treats 0 and 1 alike. ([`src/script/trainer/mod.rs:306`](../crates/benilla-ui/src/script/trainer/mod.rs#L306))
 - A header clears it too, because it has no spell id; the reference stores its `0xffffffff` (`0x4d7b05`) and reads back 1, which the stock window's `> 1` test treats the same as 0. ([`src/script/trainer/mod.rs:1320`](../crates/benilla-ui/src/script/trainer/mod.rs#L1320))

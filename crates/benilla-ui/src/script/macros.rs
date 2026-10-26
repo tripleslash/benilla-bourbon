@@ -350,6 +350,7 @@ impl super::UiScript {
             })
             .collect();
         let book = super::live::ask(self.lua(), &super::spellbook::BookNow);
+        let pet_book = super::live::ask(self.lua(), &super::PetBookNow);
         let mut model = self.model_mut();
         let model: &mut crate::script::Model = &mut model;
         for (id, body, was, options) in picked {
@@ -357,7 +358,7 @@ impl super::UiScript {
                 &aliases,
                 &body,
                 book.as_ref().unwrap_or(&model.spellbook),
-                &model.pet_book,
+                pet_book.as_ref().unwrap_or(&model.pet_book),
                 was,
                 &options,
             );
@@ -404,6 +405,14 @@ impl super::UiScript {
     }
 }
 
+/// What a derivation reads: the `/cast` aliases and the two books as they stand through the host,
+/// `None` where the VM's copy answers.
+type Books<'a> = (
+    &'a [String],
+    Option<&'a SpellBookState>,
+    Option<&'a super::PetBookState>,
+);
+
 /// `CreateMacro`'s worker (`0x4f1010`): the new macro's 1-based index in the rebuilt table
 /// (`0x4f16ba`), or the full-scope error (`0x84cbdc`). The verb has refused an empty name already.
 fn create_macro(
@@ -412,7 +421,7 @@ fn create_macro(
     texture: Option<String>,
     body: &str,
     (local_only, per_character): (bool, bool),
-    (aliases, book, options): (&[String], Option<&SpellBookState>, bind::Options<'_>),
+    ((aliases, book, pet_book), options): (Books<'_>, bind::Options<'_>),
 ) -> mlua::Result<usize> {
     let state = &mut model.macros;
     if state.count(per_character) >= MAX_MACROS {
@@ -438,7 +447,7 @@ fn create_macro(
         aliases,
         &cut_body(body),
         book.unwrap_or(&model.spellbook),
-        &model.pet_book,
+        pet_book.unwrap_or(&model.pet_book),
         MacroBinding::default(),
         options,
     );
@@ -462,7 +471,7 @@ fn edit_macro(
     index: usize,
     (name, texture, body): (Option<String>, Option<String>, Option<String>),
     local_only: bool,
-    (aliases, book, options): (&[String], Option<&SpellBookState>, bind::Options<'_>),
+    ((aliases, book, pet_book), options): (Books<'_>, bind::Options<'_>),
 ) -> usize {
     let id = model.macros.id_at(index);
     if let Some(record) = model
@@ -484,14 +493,9 @@ fn edit_macro(
         view.local_only = local_only;
         // The record's cast derived again in the call (`0x4f1313`), against the book as it is.
         let was = model.macro_bindings.get(&id).copied().unwrap_or_default();
-        let binding = bind::derive(
-            aliases,
-            &view.body,
-            book.unwrap_or(&model.spellbook),
-            &model.pet_book,
-            was,
-            options,
-        );
+        let player = book.unwrap_or(&model.spellbook);
+        let pet = pet_book.unwrap_or(&model.pet_book);
+        let binding = bind::derive(aliases, &view.body, player, pet, was, options);
         model.macro_bindings.insert(id, binding);
         model.macros_dirty = true;
         model.macros_generation += 1;
@@ -731,19 +735,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let flags = (flag(a.get(3)), flag(a.get(4)));
             let aliases = bind::cast_aliases(lua);
             let options = bind::options_now(lua, &aliases, &cut_body(&body));
-            // The book as it stands, which the derivation reads in the call (`0x4f123c`).
+            // The books as they stand, which the derivation reads in the call (`0x4f123c`).
             let book = super::live::ask(lua, &super::spellbook::BookNow);
+            let pet_book = super::live::ask(lua, &super::PetBookNow);
             super::tick::verb(lua, |model| {
                 // `0x4f1632`, `0x4f163c`.
                 let texture = match icon {
                     Some(n) => icon_at(model, n),
                     None => named,
                 };
-                let reads = (
-                    aliases.as_slice(),
-                    book.as_ref(),
-                    &options as bind::Options<'_>,
-                );
+                let books = (aliases.as_slice(), book.as_ref(), pet_book.as_ref());
+                let reads = (books, &options as bind::Options<'_>);
                 create_macro(model, &name, texture, &body, flags, reads)
             })
             .map(|i| Value::Integer(i as i64))
@@ -796,17 +798,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 model.macros.by_id(id).map(|m| m.body.clone())
             });
             let options = bind::options_now(lua, &aliases, &cut_body(&after.unwrap_or_default()));
-            // The book as it stands, which the derivation reads in the call (`0x4f1313`).
+            // The books as they stand, which the derivation reads in the call (`0x4f1313`).
             let book = super::live::ask(lua, &super::spellbook::BookNow);
+            let pet_book = super::live::ask(lua, &super::PetBookNow);
             let at = super::tick::verb(lua, |model| {
                 // `0x4f1966`-`0x4f1983`: a miss leaves the pointer null, and the macro its old
                 // icon.
                 let texture = icon.and_then(|n| icon_at(model, n)).or(named);
-                let reads = (
-                    aliases.as_slice(),
-                    book.as_ref(),
-                    &options as bind::Options<'_>,
-                );
+                let books = (aliases.as_slice(), book.as_ref(), pet_book.as_ref());
+                let reads = (books, &options as bind::Options<'_>);
                 edit_macro(model, index, (name, texture, body), local_only, reads)
             });
             Ok(Value::Integer(at as i64))
@@ -903,6 +903,67 @@ mod tests {
             )
             .unwrap(),
             (None, Some("Interface\\Icons\\".into()))
+        );
+    }
+
+    /// A host answering the pet's book with `.0`, as the app's pet family does.
+    struct PetBookHost(crate::script::PetBookState);
+
+    impl crate::script::CallHost for PetBookHost {
+        fn apply(
+            &mut self,
+            _: &mut UiScript,
+            _: crate::script::ScriptCall,
+        ) -> Option<crate::script::CallTail> {
+            None
+        }
+
+        fn read_live(&mut self, ask: &mut crate::script::live::LiveAsk<'_>) -> bool {
+            ask.answer(|_: &crate::script::PetBookNow| Some(self.0.clone()))
+        }
+    }
+
+    fn pet_book_of(spell_id: u32, name: &str) -> crate::script::PetBookState {
+        crate::script::PetBookState {
+            token: Some("PET".into()),
+            slots: vec![crate::script::SpellSlotView {
+                spell_id,
+                name: name.into(),
+                ..Default::default()
+            }],
+        }
+    }
+
+    /// `CreateMacro` and `EditMacro` derive the record's cast in the call against the pet's book
+    /// as it stands (`0x4f123c`, `0x4f1313` → `0x4b3950`), the host's, not the VM's empty copy.
+    #[test]
+    fn create_and_edit_derive_against_the_pets_book_as_it_stands() {
+        let mut s = seeded();
+        // The shipped `/cast` alias the derivation reads (`0x703bf0`).
+        s.run(r#"SLASH_CAST1 = "/cast""#).unwrap();
+        let bound = |s: &UiScript| s.macro_bindings().values().next().copied().unwrap();
+        let mut host = PetBookHost(pet_book_of(16827, "Claw"));
+        s.hosted(&mut host, |s| {
+            s.run(r#"CreateMacro("Claw", 1, "/cast Claw", nil, nil)"#)
+                .unwrap()
+        });
+        assert_eq!(
+            bound(&s),
+            MacroBinding {
+                spell: 16827,
+                pet_book: true
+            }
+        );
+        let mut host = PetBookHost(pet_book_of(2649, "Growl"));
+        s.hosted(&mut host, |s| {
+            s.run(r#"EditMacro(1, nil, nil, "/cast Growl")"#).unwrap()
+        });
+        assert_eq!(
+            bound(&s),
+            MacroBinding {
+                spell: 2649,
+                pet_book: true
+            }
         );
     }
 

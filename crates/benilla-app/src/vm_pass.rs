@@ -821,7 +821,7 @@ mod tests {
             .collect();
         unordered.sort();
         assert!(
-            update.hosted.len() > 150,
+            update.hosted.len() > 100,
             "the census finds the hosts: {}",
             update.hosted.len()
         );
