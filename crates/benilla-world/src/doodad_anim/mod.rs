@@ -351,16 +351,22 @@ fn reroll_doodad_variation(
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn gate_doodad_anim(
     time: Res<Time>,
-    mut hosts: Query<(
-        Entity,
-        &mut DoodadAnimHost,
-        Option<&lazy::LazyRig>,
-        Option<&RigPose>,
-        Has<crate::rig_palette::RigSkin>,
-        Option<&mut AnimationPlayer>,
-        Option<&mut GlobalSeqDrive>,
-        Option<&RidingSphere>,
+    // The walk, and a still frame's one reason to walk anyway: a host born since.
+    mut host_set: ParamSet<(
+        Query<(
+            Entity,
+            &mut DoodadAnimHost,
+            Option<&lazy::LazyRig>,
+            Option<&RigPose>,
+            Has<crate::rig_palette::RigSkin>,
+            Option<&mut AnimationPlayer>,
+            Option<&mut GlobalSeqDrive>,
+            Option<&RidingSphere>,
+        )>,
+        Query<(), Added<DoodadAnimHost>>,
     )>,
+    // A riding host's sphere moves under a still camera: it is judged every frame.
+    riders: Query<(), (With<DoodadAnimHost>, With<RidingSphere>)>,
     vis: Query<&Visibility>,
     cam: Query<
         (
@@ -385,9 +391,11 @@ fn gate_doodad_anim(
     mut twin_parts: lazy::TwinParts,
     mut commands: Commands,
     mut logged: Local<bool>,
+    // A still frame re-judges nothing; only a new host or a retried rig promote needs the walk.
+    mut promote_pending: Local<bool>,
 ) {
     // One log line per session, the first frame any host exists.
-    if !*logged && !hosts.is_empty() {
+    if !*logged && !host_set.p0().is_empty() {
         *logged = true;
         info!("doodad anim: first host armed");
     }
@@ -399,6 +407,10 @@ fn gate_doodad_anim(
         !tf.is_changed() && !proj.is_changed() && !local.as_ref().is_some_and(|l| l.is_changed())
     }) && !scene.changed()
         && changed_vis.is_empty();
+    if verdicts_still && riders.is_empty() && host_set.p1().is_empty() && !*promote_pending {
+        return;
+    }
+    let mut pending = false;
     // Fixed at spawn (`EmitterFade`), so a reused verdict never sees the sphere move; a
     // [`RidingSphere`] host is the exception and is judged every frame.
     let in_frustum = |frustum: &bevy::camera::primitives::Frustum,
@@ -411,6 +423,7 @@ fn gate_doodad_anim(
             false,
         )
     };
+    let mut hosts = host_set.p0();
     for (entity, mut host, lazy, pose, has_rig, player, drive, riding) in &mut hosts {
         // A riding sphere at the root's propagated pose, last frame's as this runs before
         // propagation; a mover never reuses a verdict, as its sphere moves under a still camera.
@@ -452,7 +465,8 @@ fn gate_doodad_anim(
         // judged, so every far doodad of a new tile reads drawn.
         if drawn && host.active && !has_rig {
             if let Some(lazy) = lazy {
-                lazy::promote_lazy_rig(
+                // A full table re-walks next frame to retry; a landed promote rigs the host.
+                pending |= !lazy::promote_lazy_rig(
                     &mut commands,
                     &mut palettes,
                     &ibps,
@@ -501,6 +515,7 @@ fn gate_doodad_anim(
             d.set_paused(!drawn);
         }
     }
+    *promote_pending = pending;
 }
 
 pub struct DoodadAnimPlugin;
@@ -659,6 +674,38 @@ mod tests {
             app.world().entity(part).get::<MatAnim>().unwrap().current,
             1.0,
             "playing sequence 1 ⇒ the batch draws"
+        );
+    }
+
+    /// A constant sample leaves the instance unmarked: the Visibility authority re-walks every
+    /// marked batch, and a city holds thousands of animated materials.
+    #[test]
+    fn a_constant_mat_anim_is_written_once() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, sample_mat_anim);
+        let part = app
+            .world_mut()
+            .spawn(MatAnim::new(two_seq_alpha(), 0.0, false))
+            .id();
+        app.update();
+        let stamped = app
+            .world()
+            .entity(part)
+            .get_ref::<MatAnim>()
+            .unwrap()
+            .last_changed();
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            app.world()
+                .entity(part)
+                .get_ref::<MatAnim>()
+                .unwrap()
+                .last_changed(),
+            stamped,
+            "a constant sample re-marked the instance"
         );
     }
 

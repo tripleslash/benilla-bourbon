@@ -528,8 +528,15 @@ pub(crate) fn face_billboards(
             } else if !tracked && !cam_moved && !vis.is_changed() {
                 return;
             }
-            // The gseq attach anchor, stamped on the first placement pass (`CM2Model+0x68`).
-            let attach_ms = *card.gseq_attach_ms.get_or_insert(elapsed_ms);
+            // The gseq attach anchor, stamped on the first placement pass (`CM2Model+0x68`). Written
+            // once: a `get_or_insert` through the `Mut` would mark the card changed every frame.
+            let attach_ms = match card.gseq_attach_ms {
+                Some(ms) => ms,
+                None => {
+                    card.gseq_attach_ms = Some(elapsed_ms);
+                    elapsed_ms
+                }
+            };
             let card = &*card;
             // Each carrier turns the offset to the pivot below it by its own replaced basis, which
             // is also the rotation the next arm keeps its axis from.

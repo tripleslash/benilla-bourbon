@@ -22,7 +22,7 @@ use crate::model_fade::{PendingAppearFade, RenderFade};
 use crate::terrain_stream::{
     fold_interior_probe, interior_light_up, PropLobeLight, TerrainStreamer,
 };
-use crate::wmo_portal::{indoor_verdict_at, IndoorVerdict, WmoPortalInstance};
+use crate::wmo_portal::{IndoorVerdict, WmoPortalInstance};
 use benilla_assets::materials::WowModelMaterial;
 
 /// Squared distance (yd²) before a re-test: an epsilon, since the reference re-runs a unit's
@@ -351,6 +351,51 @@ pub fn classify_entity_interior(
     // Anchors with no part to ask, the tripwire for a fade lockout creeping back.
     let mut n_fade_blocked = 0usize;
     let mut resolve_us = 0.0f32;
+    let mut buildings: Option<Vec<crate::wmo_portal::VerdictBuilding<'_, Entity>>> = None;
+    // The verdict rays, a pure read of an anchor's position and the resident buildings, run first
+    // for every anchor the walk will re-resolve, on the compute pool when there are several (a
+    // city's walkers re-resolve ~30 a frame at ~10 us a ray); the walk applies them in its order.
+    let mut verdicts: bevy::ecs::entity::EntityHashMap<(IndoorVerdict, Option<(Entity, usize)>)> =
+        Default::default();
+    {
+        let due: Vec<(Entity, crate::wmo_portal::LightAttach, Vec3)> = anchors
+            .iter()
+            .filter(|(_, anchor_t, _, state, ..)| {
+                !state.as_deref().is_some_and(|s| {
+                    s.generation == residency.generation
+                        && anchor_t.translation().distance_squared(s.last_pos) < RESAMPLE_DIST_SQ
+                })
+            })
+            .filter(|(_, _, lit_parts, _, _, bake_center, lit_emitters, ..)| {
+                anchor_bake(*lit_parts, lit_emitters.is_some(), *bake_center, &parts).is_some()
+            })
+            .map(|(anchor, anchor_t, _, _, containment, bake_center, ..)| {
+                let (attach, at) = attach_anchor(containment, bake_center, anchor_t);
+                (anchor, attach, at)
+            })
+            .collect();
+        if !due.is_empty() {
+            let buildings = buildings.get_or_insert_with(|| {
+                crate::wmo_portal::verdict_buildings(&wmos, instances.iter())
+            });
+            let (buildings, streamer, adt_tiles) = (&*buildings, &*streamer, &*adt_tiles);
+            let ray = |&(anchor, attach, at): &(Entity, crate::wmo_portal::LightAttach, Vec3)| {
+                let v = crate::wmo_portal::indoor_verdict_among(
+                    buildings, streamer, adt_tiles, at, attach,
+                );
+                (anchor, v)
+            };
+            if due.len() >= PAR_VERDICTS_MIN {
+                use bevy::tasks::{ComputeTaskPool, ParallelSlice};
+                let rayed = due.par_chunk_map(ComputeTaskPool::get(), VERDICT_CHUNK, |_, c| {
+                    c.iter().map(ray).collect::<Vec<_>>()
+                });
+                verdicts.extend(rayed.into_iter().flatten());
+            } else {
+                verdicts.extend(due.iter().map(ray));
+            }
+        }
+    }
     for (
         anchor,
         anchor_t,
@@ -368,11 +413,12 @@ pub fn classify_entity_interior(
         let had_state = state.is_some();
         // A settled anchor skips the ray. On the Bake law it refolds from the cached products while
         // its ramps chase, so a unit that stops in a warm room does not freeze mid-ramp.
-        if let Some(state) = state.as_deref_mut() {
-            let settled = state.generation == residency.generation
-                && pos.distance_squared(state.last_pos) < RESAMPLE_DIST_SQ;
+        // Read through `&`: a settled anchor's record is rewritten only when its fog flips.
+        if let Some(settled_state) = state.as_deref() {
+            let settled = settled_state.generation == residency.generation
+                && pos.distance_squared(settled_state.last_pos) < RESAMPLE_DIST_SQ;
             if settled {
-                if let AppliedLaw::Bake(slot) = state.law {
+                if let AppliedLaw::Bake(slot) = settled_state.law {
                     if let (Ok(node), Ok(bake)) = (nodes.get(anchor), bake_states.get(anchor)) {
                         if !node.ramps_settled() {
                             let words = (
@@ -401,50 +447,46 @@ pub fn classify_entity_interior(
                 }
                 // The fog is not settled: its gate is the camera's chain, so a still unit leaves
                 // and rejoins its building's MFOG as the camera walks between rooms.
-                let fog = anchor_room_fogged(state.room, &instances);
-                if state.fog != fog {
-                    state.fog = fog;
-                    n_written += write_anchor_parts(state.law, fog, lit_parts, &mut parts);
+                let fog = anchor_room_fogged(settled_state.room, &instances);
+                if settled_state.fog != fog {
+                    let law = settled_state.law;
+                    if let Some(mut state) = state {
+                        state.fog = fog;
+                    }
+                    n_written += write_anchor_parts(law, fog, lit_parts, &mut parts);
                 }
                 continue;
             }
         }
-        // Re-resolving. The law's one input is the fold's reference point (`None` for the matte),
-        // asked of the first part; an emitter-only anchor bakes from its own centre.
-        let part_bake = lit_parts
-            .into_iter()
-            .flat_map(LitParts::iter)
-            .find_map(|part| {
-                parts.get(part).ok().map(|(lit, ..)| match &lit.kind {
-                    InteriorKind::Bake { center, .. } => Some(*center),
-                    InteriorKind::Matte => None,
-                })
-            });
-        let bake = match part_bake {
-            Some(center) => center,
-            None if lit_emitters.is_some() => Some(bake_center.map_or(Vec3::ZERO, |c| c.0)),
-            None => {
-                n_fade_blocked += 1;
-                continue;
-            }
+        // Re-resolving, with the bake input the pre-pass read the same way.
+        let Some(bake) = anchor_bake(lit_parts, lit_emitters.is_some(), bake_center, &parts) else {
+            n_fade_blocked += 1;
+            continue;
         };
         let seated = seats.get(anchor).ok().map(|s| s.0);
         n_resolved += 1;
         let _r = bevy::platform::time::Instant::now();
         let (attach, attach_at) = attach_anchor(containment, bake_center, anchor_t);
+        // Rayed in the pre-pass; a miss (none expected) rays here.
+        let verdict = verdicts.remove(&anchor).unwrap_or_else(|| {
+            crate::wmo_portal::indoor_verdict_among(
+                buildings.get_or_insert_with(|| {
+                    crate::wmo_portal::verdict_buildings(&wmos, instances.iter())
+                }),
+                &streamer,
+                &adt_tiles,
+                attach_at,
+                attach,
+            )
+        });
         let (law, room) = resolve_anchor_law(
             &mut commands,
             &mut probes,
-            &wmos,
-            &instances,
-            &streamer,
-            &adt_tiles,
+            verdict,
             &lighting,
             &mut nodes,
             anchor,
             anchor_t,
-            attach,
-            attach_at,
             bake,
             seated,
         );
@@ -690,6 +732,34 @@ fn attach_anchor(
     }
 }
 
+/// Fewest due verdicts worth the compute pool, and the verdicts per task: a ray is ~10 us.
+const PAR_VERDICTS_MIN: usize = 4;
+const VERDICT_CHUNK: usize = 2;
+
+/// The law's one input, the fold's reference point (`Some(None)` for the matte), asked of the
+/// first part; an emitter-only anchor bakes from its own centre; `None` with nothing to ask.
+fn anchor_bake(
+    lit_parts: Option<&LitParts>,
+    has_emitters: bool,
+    bake_center: Option<&BodyBakeCenter>,
+    parts: &PartWrite,
+) -> Option<Option<Vec3>> {
+    let part_bake = lit_parts
+        .into_iter()
+        .flat_map(LitParts::iter)
+        .find_map(|part| {
+            parts.get(part).ok().map(|(lit, ..)| match &lit.kind {
+                InteriorKind::Bake { center, .. } => Some(*center),
+                InteriorKind::Matte => None,
+            })
+        });
+    match part_bake {
+        Some(center) => Some(center),
+        None if has_emitters => Some(Some(bake_center.map_or(Vec3::ZERO, |c| c.0))),
+        None => None,
+    }
+}
+
 /// Rays one anchor and resolves its law, updating its node and, on the Bake law, folding into the
 /// anchor's own probe slot. `seated`, the anchor's live [`PropProbeSlot`], is the only authority
 /// on that slot: a part's cached `Bake(slot)` is never believed, or a fresh part could free the
@@ -697,27 +767,14 @@ fn attach_anchor(
 fn resolve_anchor_law(
     commands: &mut Commands,
     probes: &mut PropProbes,
-    wmos: &Assets<WmoModel>,
-    instances: &Query<(Entity, &WmoPortalInstance)>,
-    streamer: &TerrainStreamer,
-    adt_tiles: &Assets<AdtTile>,
+    (verdict, claimed): (IndoorVerdict, Option<(Entity, usize)>),
     lighting: &crate::lighting::WowLighting,
     nodes: &mut Query<&mut crate::entity_shade::GroundShade>,
     anchor: Entity,
     anchor_t: &GlobalTransform,
-    attach: crate::wmo_portal::LightAttach,
-    attach_at: Vec3,
     bake_center: Option<Vec3>,
     seated: Option<u16>,
 ) -> (AppliedLaw, Option<crate::wmo_portal::WmoRoom>) {
-    let (verdict, claimed) = indoor_verdict_at(
-        wmos,
-        instances.iter(),
-        streamer,
-        adt_tiles,
-        attach_at,
-        attach,
-    );
     // An outdoor-class WMO surface (street, deck, porch) sets the node's skip-shadow bit: the lit
     // 2.5 target with no MCSH beneath, which `entity_shade` reads.
     let on_wmo = matches!(verdict, IndoorVerdict::OutdoorsOnWmo);
@@ -1059,6 +1116,17 @@ mod tests {
             world.get::<MeshTag>(part).unwrap().0 & crate::mesh_tag::INTERIOR_FOG_BIT != 0
         };
         assert!(fog_of(&world, part), "gate on ⇒ the room's fog");
+        // Nothing moved: the settled record is read, not rewritten.
+        let record = |world: &World| {
+            world
+                .entity(anchor)
+                .get_ref::<InteriorAnchor>()
+                .unwrap()
+                .last_changed()
+        };
+        let settled = record(&world);
+        world.run_system_once(classify_entity_interior).unwrap();
+        assert_eq!(record(&world), settled, "a still frame rewrote the anchor");
 
         // The camera moves out of the chain; the anchor does not move at all.
         world

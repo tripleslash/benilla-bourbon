@@ -213,7 +213,7 @@
 - `WOW_CAPTURE_OUT` — benilla-app/src/capture/mod.rs
 - `WOW_CAPTURE_REHOVER` — benilla-app/src/ui_script/mod.rs
 - `WOW_CAPTURE_STABLE` — benilla-app/src/capture/mod.rs
-- `WOW_CAPTURE_UI` — benilla-app/src/capture/scenarios.rs, benilla-app/src/ui_script/mod.rs, benilla-app/src/video.rs
+- `WOW_CAPTURE_UI` — benilla-app/src/capture/scenarios.rs, benilla-app/src/cvars/mod.rs, benilla-app/src/ui_script/mod.rs, benilla-app/src/video.rs
 - `WOW_CAPTURE_WIND_T` — benilla-world/src/wind/mod.rs
 - `WOW_CAST_TRACE` — benilla-app/src/net.rs
 - `WOW_CHAR` — benilla-app/src/capture/probe_mail.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/glue_session/realm_smoke.rs, benilla-app/src/glue_session/roster.rs, benilla-app/src/net.rs, benilla-app/src/run_mode.rs
@@ -622,7 +622,7 @@
 - `WOW_WFX_HEAD` — benilla-app/src/capture/mod.rs
 - `WOW_WFX_MODE` — benilla-app/src/capture/mod.rs
 - `WOW_WFX_SPEED` — benilla-app/src/capture/mod.rs
-- `WOW_WIN` — benilla-app/src/video.rs, benilla-world/src/worldview.rs
+- `WOW_WIN` — benilla-app/src/cvars/mod.rs, benilla-app/src/video.rs, benilla-world/src/worldview.rs
 - `WOW_WMO_BIAS` — benilla-world/src/model_render.rs, benilla-world/src/static_gx/mod.rs
 - `WOW_WMO_PIN_ASPECT` — benilla-world/src/wmo_portal/audit/pin.rs
 - `WOW_WMO_PIN_COL` — benilla-world/src/wmo_portal/audit/pin.rs

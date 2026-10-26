@@ -122,12 +122,10 @@ impl EntityOutdoors<'_, '_> {
     /// [`entity_outdoors`] for a unit node whose feet stand at `feet_world`, placed as the down-ray
     /// attach places it (`0x6a8a20`): the group of its one global nearest hit ([`nearest_claim`]).
     pub fn at(&self, feet_world: Vec3) -> bool {
-        let instances: Vec<((), &WmoPortalInstance)> =
-            self.instances.iter().map(|inst| ((), inst)).collect();
+        let buildings = verdict_buildings(&self.wmos, self.instances.iter().map(|inst| ((), inst)));
         let probe_world = feet_world + Vec3::Y * POSITION_PROBE_LIFT;
         let group_flags = nearest_claim(
-            &self.wmos,
-            &instances,
+            &buildings,
             &self.streamer,
             &self.adt_tiles,
             probe_world,
@@ -159,12 +157,11 @@ pub(super) fn track_area_interior(
     } else {
         return;
     };
-    let placements: Vec<((), &WmoPortalInstance)> = instances.iter().map(|i| ((), i)).collect();
+    let buildings = verdict_buildings(&wmos, instances.iter().map(|i| ((), i)));
     // The zone-text law is `0x8` alone: a `0x40`-only street group is indoors for naming
     // (`[node+0x90]` bit 0 is set before the `0x40` test).
     let found = nearest_claim(
-        &wmos,
-        &placements,
+        &buildings,
         &streamer,
         &adt_tiles,
         eye_world,
@@ -341,10 +338,9 @@ fn room_cast(
     rise: f32,
 ) -> Option<WmoRoom> {
     let probe_world = feet_world + Vec3::Y * (POSITION_PROBE_LIFT + rise);
-    let placements: Vec<(Entity, &WmoPortalInstance)> = instances.iter().collect();
+    let buildings = verdict_buildings(wmos, instances.iter());
     nearest_claim(
-        wmos,
-        &placements,
+        &buildings,
         streamer,
         adt_tiles,
         probe_world,
@@ -423,18 +419,55 @@ pub enum IndoorVerdict {
 /// `(key, group)`, or `None` outdoors: the per-(instance, group) render record the attach creates
 /// (`0x685f85`, `[P+0x98]`), where the interior-fog gate is asked. Pass `()` as the key to skip it.
 pub fn indoor_verdict_at<'a, K: Copy>(
-    wmos: &Assets<WmoModel>,
+    wmos: &'a Assets<WmoModel>,
     instances: impl IntoIterator<Item = (K, &'a WmoPortalInstance)>,
     streamer: &TerrainStreamer,
     adt_tiles: &Assets<AdtTile>,
     anchor_world: Vec3,
     attach: LightAttach,
 ) -> (IndoorVerdict, Option<(K, usize)>) {
+    let buildings = verdict_buildings(wmos, instances);
+    indoor_verdict_among(&buildings, streamer, adt_tiles, anchor_world, attach)
+}
+
+/// A resident building made ready for many verdicts in one frame: its loaded model and inverse
+/// placement, so each verdict skips the asset lookup and the inverse per building.
+pub struct VerdictBuilding<'a, K> {
+    key: K,
+    inst: &'a WmoPortalInstance,
+    model: &'a WmoModel,
+    local_from_world: bevy::math::Affine3A,
+}
+
+/// The loaded buildings among `instances`, for [`indoor_verdict_among`].
+pub fn verdict_buildings<'a, K: Copy>(
+    wmos: &'a Assets<WmoModel>,
+    instances: impl IntoIterator<Item = (K, &'a WmoPortalInstance)>,
+) -> Vec<VerdictBuilding<'a, K>> {
+    instances
+        .into_iter()
+        .filter_map(|(key, inst)| {
+            Some(VerdictBuilding {
+                key,
+                inst,
+                model: wmos.get(&inst.handle)?,
+                local_from_world: inst.world_from_local.inverse(),
+            })
+        })
+        .collect()
+}
+
+/// [`indoor_verdict_at`] against buildings prepared once for the frame.
+pub fn indoor_verdict_among<K: Copy>(
+    buildings: &[VerdictBuilding<'_, K>],
+    streamer: &TerrainStreamer,
+    adt_tiles: &Assets<AdtTile>,
+    anchor_world: Vec3,
+    attach: LightAttach,
+) -> (IndoorVerdict, Option<(K, usize)>) {
     let probe_world = anchor_world + Vec3::Y * POSITION_PROBE_LIFT;
-    let instances: Vec<(K, &WmoPortalInstance)> = instances.into_iter().collect();
     let Some((claim, model, inst, probe_local, key)) = nearest_claim(
-        wmos,
-        &instances,
+        buildings,
         streamer,
         adt_tiles,
         probe_world,
@@ -493,28 +526,24 @@ type NearestClaim<'m, 'a, K> = (
 
 /// An attach ray's one global nearest hit (`0x6a8a20`, `0x6a8840`): each placement's claim from
 /// `probe_world`, classified under `mask`, the nearest across placements winning.
-fn nearest_claim<'m, 'a, K: Copy>(
-    wmos: &'m Assets<WmoModel>,
-    instances: &[(K, &'a WmoPortalInstance)],
+fn nearest_claim<'a, K: Copy>(
+    buildings: &[VerdictBuilding<'a, K>],
     streamer: &TerrainStreamer,
     adt_tiles: &Assets<AdtTile>,
     probe_world: Vec3,
     attach: LightAttach,
     mask: u32,
-) -> Option<NearestClaim<'m, 'a, K>> {
+) -> Option<NearestClaim<'a, 'a, K>> {
     let terrain = terrain_height_under(streamer, adt_tiles, probe_world);
-    let mut best: Option<NearestClaim<'m, 'a, K>> = None;
+    let mut best: Option<NearestClaim<'a, 'a, K>> = None;
     // The containment lane's upward retry (`0x6a9093`, +1000 yd) runs only when the whole downward
     // pass found nothing, so no claim is arbitrated against one cast the other way.
     for retry_up in [false, true] {
         if retry_up && (best.is_some() || !matches!(attach, LightAttach::Containment)) {
             break;
         }
-        for (key, inst) in instances.iter().copied() {
-            let Some(model) = wmos.get(&inst.handle) else {
-                continue;
-            };
-            let local_from_world = inst.world_from_local.inverse();
+        for b in buildings {
+            let (key, inst, model, local_from_world) = (b.key, b.inst, b.model, b.local_from_world);
             let probe_local = bevy_to_wow(local_from_world.transform_point3(probe_world));
             if !column_in_collision_bounds(model.collision_bounds, probe_local, retry_up) {
                 continue; // no face of this building can own the probe column
