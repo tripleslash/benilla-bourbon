@@ -2849,9 +2849,9 @@ mod tests {
         app.init_resource::<crate::net::Reputations>();
         // The relation functions the verbs ask, pushed as the client's unit feed pushes them.
         app.add_systems(Update, crate::ui_unit::relations::feed_unit_relations);
-        // Field 2 the type word (a player), 35 the faction template (Human), 46 the flags
-        // (player-controlled).
-        let human_player = [PLAYER_TYPE[0], (35, 1), (46, 0x8)];
+        // Field 2 the type word (a player), 22 the health (alive: `[nodead]` reads it live), 35
+        // the faction template (Human), 46 the flags (player-controlled).
+        let human_player = [PLAYER_TYPE[0], (22, 100), (35, 1), (46, 0x8)];
         let me = stream(&mut app, ME, &human_player);
         app.world_mut().entity_mut(me).insert(SelfPlayer);
         party(&mut app, 2, true);

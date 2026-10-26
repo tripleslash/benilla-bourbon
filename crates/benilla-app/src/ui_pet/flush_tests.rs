@@ -361,7 +361,7 @@ fn a_teardown_and_a_new_bar_do_not_hide_the_next_flush() {
 fn a_natural_expiry_fires_nothing() {
     let brief = || SpellDisplay {
         name: "Brief".into(),
-        recovery_ms: 30,
+        recovery_ms: 400,
         ..Default::default()
     };
     let mut rig = rig(vec![(GROWL, brief())], &[GROWL], Some(summoned_pet()));
@@ -369,7 +369,10 @@ fn a_natural_expiry_fires_nothing() {
     assert_eq!(rig.frame(), FLUSH);
     assert!(rig.cooldown(1).1 > 0.0, "running");
 
-    rig.step_clock(Duration::from_millis(80));
+    // The live read meets the platform clock: the recovery must pass on it, not only on the
+    // frame's (long enough that a loaded machine's frames do not end it before "running").
+    std::thread::sleep(Duration::from_millis(450));
+    rig.step_clock(Duration::from_millis(450));
 
     assert!(
         rig.frame().is_empty(),

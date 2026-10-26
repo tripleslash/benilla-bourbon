@@ -1836,6 +1836,13 @@ mod tests {
     /// initial value; a locale that does not leaves every knob where it was.
     #[test]
     fn a_locale_default_reaches_its_knob_at_load() {
+        // `VideoConfig::default` opens windowed under a capture or `$WOW_WIN`, which other tests
+        // set process-wide under the env lock.
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = ["WOW_WIN", "WOW_CAPTURE", "WOW_CAPTURE_UI"].map(EnvGuard::unset);
         let boot = |locale: usize| {
             let mut app = cvar_app();
             app.insert_resource(Cvars::for_locale(locale));
