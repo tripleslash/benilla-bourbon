@@ -319,6 +319,9 @@ impl UiScript {
     /// `"<Button>ButtonUp"`. Its `down` argument is not 1.12, whose firer (`0x779540`) passes only
     /// the button name. Returns whether the UI consumed the event.
     pub fn mouse_button(&mut self, x: f32, y: f32, button: &str, down: bool) -> bool {
+        if down {
+            set_field!(self, press_hooked, false);
+        }
         // ── The layout drag, ahead of everything ─────────────────────────────────────────────────
         //
         // With `SetLayoutMode` on, a press with Control (`0x41f8f0(1)`) or Alt (`0x41f8f0(2)`) held
@@ -390,6 +393,7 @@ impl UiScript {
             // `ClearCursor(1, 1)` at `0x492bb5`; the handler returns without a capture, a raise or
             // a press slot, so no frame sees this press and its release finds none to go to.
             set_field!(self, cursor_pos, (x, y));
+            set_field!(self, press_hooked, true);
             verb(&self.lua, cursor::clear_cursor);
             return true;
         }

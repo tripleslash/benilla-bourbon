@@ -1035,6 +1035,11 @@ pub(crate) mod schedule_tests {
     ///   the precast tail's loot release) is the name cache alone, a pure cache;
     ///   `lanes::guard_tests` checks that it stays so, and that no exclusive system is among them. Commands a firing defers, which the drain applies after
     ///   it, are outside that model;
+    /// - the input records' dispatch (`ui_script::input::dispatch_input_records`), exclusive as
+    ///   each record's world steps run the click's legs before the next record, against the 72
+    ///   world systems no declared order places against it, which bevy lists with no component:
+    ///   every one of them the net drain (`net::apply::apply_net_updates`), exclusive too, meets
+    ///   the same way, none a host;
     /// - the minimap's draw (`minimap::emit_minimap`), which reads `QuestGiver`'s dialog statuses,
     ///   against `ui_panes::feed_character_panes`, which lends the call host, whose quest verbs
     ///   write that window's cell and panel latches and never a status.
@@ -1115,7 +1120,10 @@ pub(crate) mod schedule_tests {
     /// 1,756 -> 1,749 (-7) through 53e088b67 (the console, follow and plate verbs inside their calls).
     ///
     /// Upstream's input-first frame (d3b5df3f4, #2402) moved its ceiling 1,749 -> 1,694 (-55).
-    const UPDATE_ACTIONABLE_CEILING: usize = 1_973;
+    ///
+    /// Upstream's mouse records (fcc83ee96, #2732) moved its ceiling 1,694 -> 1,732 (+38); the
+    /// fork's follows it.
+    const UPDATE_ACTIONABLE_CEILING: usize = 2_011;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1610,7 +1618,11 @@ pub(crate) mod schedule_tests {
     #[test]
     fn a_plates_interact_runs_after_the_bind_of_the_unit_its_click_parked() {
         let mut app = headless_client();
-        let c = census(&mut app, Update, SyncPoints::Declared);
+        let c = census(
+            &mut app,
+            crate::target::WorldClickLegs,
+            SyncPoints::Declared,
+        );
         if !type_names_available(&c) {
             eprintln!(
                 "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
@@ -1621,7 +1633,7 @@ pub(crate) mod schedule_tests {
             let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
             match (hits.next(), hits.next()) {
                 (Some((k, _)), None) => *k,
-                _ => panic!("exactly one system named `…{suffix}` in Update"),
+                _ => panic!("exactly one system named `…{suffix}` in the click's legs"),
             }
         };
         let (select, bind, interact) = (
@@ -1707,7 +1719,11 @@ pub(crate) mod schedule_tests {
     #[test]
     fn the_world_clicks_trade_leg_runs_before_its_select() {
         let mut app = headless_client();
-        let c = census(&mut app, Update, SyncPoints::Declared);
+        let c = census(
+            &mut app,
+            crate::target::WorldClickLegs,
+            SyncPoints::Declared,
+        );
         if !type_names_available(&c) {
             eprintln!(
                 "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
@@ -1718,7 +1734,7 @@ pub(crate) mod schedule_tests {
             let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
             match (hits.next(), hits.next()) {
                 (Some((k, _)), None) => *k,
-                _ => panic!("exactly one system named `…{suffix}` in Update"),
+                _ => panic!("exactly one system named `…{suffix}` in the click's legs"),
             }
         };
         let trade = one("::ui_action::drop_item::trade_on_world_click");
@@ -1929,7 +1945,7 @@ pub(crate) mod schedule_tests {
     }
 
     /// The sets of the frame's input records, which run ahead of the net drain.
-    const INPUT_RECORD_SETS: &[&str] = &["UiInput", "WorldMouse", "WorldClicks"];
+    const INPUT_RECORD_SETS: &[&str] = &["UiInput", "WorldMouse"];
 
     /// The VM ticks once a frame (`extract::tick_script`, in `UiTick`): the window input rides
     /// the input records' sets ([`INPUT_RECORD_SETS`]) ahead of the net drain, and a push the tick
