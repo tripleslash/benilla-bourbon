@@ -333,7 +333,7 @@ fn rebind_macro_spells(
     // With the host lent, so a derivation reads the book as it stands.
     vm.run(|script| {
         if let Some(script) = script {
-            script.derive_macro_bindings(|id, b| every || (pet_moved && b.follows_the_pet_book()));
+            script.derive_macro_bindings(|_, b| every || (pet_moved && b.follows_the_pet_book()));
         }
     });
     vm.turn(|script, (_, slots, mut bound, _)| {
