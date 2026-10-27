@@ -34,7 +34,7 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 Each entry is the first sentence of a `Deviation:` comment, linking to where it lives.
 
 - [benilla-app](#benilla-app): 264
-- [benilla-assets](#benilla-assets): 7
+- [benilla-assets](#benilla-assets): 8
 - [benilla-blp](#benilla-blp): 2
 - [benilla-formats](#benilla-formats): 28
 - [benilla-lua](#benilla-lua): 11
@@ -555,6 +555,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### shaders
 
 - This is the `specular`/`pixelShaders` = 1 leg the reference install runs; both CVars (`0x6886a0`/`0x688712`) default to 0, where water has no program, no specular, a plain ADD combine and no blend. ([`src/shaders/liquid.wgsl:18`](../crates/benilla-assets/src/shaders/liquid.wgsl#L18))
+- The bend is also scaled by the water in front of what it lands on, a second depth read at the tentative offset; the reference sizes it by the column under this pixel alone (`c33.z` = 0.1 per unit normal, the ×100 view-depth ratio). ([`src/shaders/liquid_cata.wgsl:929`](../crates/benilla-assets/src/shaders/liquid_cata.wgsl#L929))
 - `min(I, 1)`. The reference bakes I into the SH unclamped (`0x71c4e0`), so a lit entity commits ×2.5 there and ×1.0 here; lifting the cap takes sun-facing surfaces past 1.0. `entity_shade::LIT_T` aims the lit ramp at 1.0 because of it: lift the cap and set `LIT_T` back to 0.0 together. ([`src/shaders/wow_model.wgsl:1005`](../crates/benilla-assets/src/shaders/wow_model.wgsl#L1005))
 
 #### wmo

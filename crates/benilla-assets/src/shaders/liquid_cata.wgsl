@@ -606,6 +606,8 @@ const MODERN_FOAM_MOTTLE: f32 = 0.04;
 // has its full swell back, and the most water (yd along the ray) the refraction bends through.
 const MODERN_WAVE_FULL_DEPTH: f32 = 3.0;
 const MODERN_REFRACT_MAX_PATH: f32 = 6.0;
+// fork: the view depth (yd) of water in front of a refracted read by which its bend is whole.
+const REFRACT_FRONT_FULL: f32 = 1.0;
 // fork: modern lighting — the experimental tier's wind ripples: how many trains (only the long, high-
 // amplitude end of the ladder, so water seen up close keeps the Modern swell), the rungs the ladder
 // was cut from, the longest wavelength (yd), the step down to the next, how much the long ones outweigh the short (slope ∝ wavelength to
@@ -924,6 +926,15 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         let bend = min(w.look_b.z * min(ray_len, MODERN_REFRACT_MAX_PATH) * per_yd, 0.1 * offset_amount);
         refract_uv = uv + n.xz * bend;
     }
+    // Deviation: the bend is also scaled by the water in front of what it lands on, a second
+    // depth read at the tentative offset; the reference sizes it by the column under this pixel
+    // alone (`c33.z` = 0.1 per unit normal, the ×100 view-depth ratio). With that law alone a body
+    // just under the surface showed twice: the water beside it, over a deep bed, bent its read
+    // onto the body and painted a shifted copy beside the one seen in place. Over a bed a yard or
+    // more behind the read the bend is the reference's; onto a body or a rising shore it fades.
+    let tentative_z = scene_depth_at(refract_uv);
+    let front = clamp((tentative_z - frag_view_z) / REFRACT_FRONT_FULL, 0.0, 1.0);
+    refract_uv = uv + (refract_uv - uv) * front;
     var bed_z = scene_depth_at(refract_uv);
     if (bed_z < frag_view_z) {
         refract_uv = uv;
