@@ -7,7 +7,7 @@
 
 use mlua::Lua;
 
-use super::{view, UnitState};
+use super::{view_held, UnitState};
 use crate::script::live::{ask, LiveQuery};
 
 /// The player-name cache's record for a guid as a getter reads it, reading only (`0x55f080` on a
@@ -51,7 +51,7 @@ impl UnitRecord {
 }
 
 /// The unit `token` names, mapped through `f` with its snapshot and its creature record; `None`
-/// for no unit. The token resolves at the call ([`view`]); a held unit's record legs are read off
+/// for no unit. The token resolves at the call ([`view_held`]); a held unit's record legs are read off
 /// the name caches through the lent host, so a record that landed after the frame's push, or for a
 /// unit no snapshot holds, answers; with no host free to ask, or no object held, the snapshot does.
 pub(crate) fn read_record<T>(
@@ -62,7 +62,7 @@ pub(crate) fn read_record<T>(
     let model = lua
         .app_data_ref::<crate::script::ModelCell>()
         .expect("model app_data");
-    let unit = view(lua, &model, token)?;
+    let unit = view_held(lua, &model, token)?;
     let live = (unit.has_object && unit.guid != 0)
         .then(|| ask(lua, &UnitRecordQuery(unit.guid)))
         .flatten();

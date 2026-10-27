@@ -320,6 +320,10 @@ pub enum RecordAsk {
     /// The quest log's leaderboard on a creature objective whose name the mirror lacks: the
     /// creature cache, with the callback `0x4e07d0`, whose wait the VM keeps (`0x4e044c`).
     QuestCreature(u32),
+    /// The quest log's leaderboard on a GameObject objective with no text whose template the
+    /// cache lacks: the object cache by the id less its top bit, with the callback `0x4e0800`,
+    /// which signals `QUEST_LOG_UPDATE` when the record lands (`0x4e0387`-`0x4e039c`, `0x4e081a`).
+    QuestObject(u32),
     /// `GetStablePetInfo` or `GetStablePetFoodTypes` (`0x4cb2ce`, `0x4cbb05`), or with `paperdoll`
     /// `SetPetStablePaperdoll` (`0x4cba13`), on a stable record whose creature the cache lacks: the
     /// creature cache by the record's entry, owned by the active player (`0x468550`), with the
@@ -727,8 +731,12 @@ fn file_raise(lua: &Lua, seq: u64, message: String) {
         // The reference never defers a call: its verb raises in its own body, so the lines after
         // it never run and a `pcall` around it catches the error. A call that waited for the host
         // had its verb return without an error, the script's later lines ran, and a `pcall` saw
-        // nothing; the error reaches the handler only now, after them.
-        model.record_lua_error(&mlua::Error::runtime(message));
+        // nothing; the error reaches the handler only now, after them, outside any script.
+        drop(model);
+        super::stdlib::call_error_function(lua, message.as_bytes());
+        lua.app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data")
+            .record_lua_error(&mlua::Error::runtime(message));
     }
 }
 
@@ -1251,7 +1259,6 @@ mod tests {
         s.hosted(&mut host, |s| s.run("TargetLastEnemy()"))
             .expect("the outer verb's own call raised nothing");
         assert_eq!(host.applied, vec![LAST_ENEMY, ScriptCall::ClearTarget]);
-        s.dispatch_script_errors_to_handler();
         let heard: Vec<String> = s.eval("return HEARD").expect("the handler's record");
         assert_eq!(heard.len(), 1, "{heard:?}");
         assert!(heard[0].contains("refused in the call"), "{heard:?}");

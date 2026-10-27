@@ -93,20 +93,29 @@ impl GlueNotices {
     }
 }
 
-/// The first `%d` of the CRT's `sscanf` (`0x73fb5d`): leading whitespace skipped, an optional sign
-/// and the leading digits; `None` when no digit follows, which leaves the out-slot untouched; 0
-/// for a number past `i64`.
-pub fn scanf_d(s: &str) -> Option<i64> {
-    let s = s.trim_start();
-    let (sign, digits) = match s.as_bytes().first() {
-        Some(b'-') => (-1, &s[1..]),
-        Some(b'+') => (1, &s[1..]),
-        _ => (1, s),
-    };
-    let end = digits
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(digits.len());
-    (end > 0).then(|| sign * digits[..end].parse::<i64>().unwrap_or(0))
+/// The first `%d` of the CRT's `sscanf` (`0x73fb5d`, `__input` `0x744e21`) over `s` as a C
+/// string: blanks skipped (`__whiteout`, `0x7458ae`), an optional sign and the leading digits,
+/// accumulated in 32 bits that wrap (`0x7456c9`, `0x74570f`), negated for `-` (`0x745744`) and
+/// stored as a dword (`0x745781`). `None` when no digit follows, which leaves the out-slot
+/// untouched.
+pub fn scanf_d(s: &str) -> Option<i32> {
+    let b = s.as_bytes();
+    let b = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
+    let mut i = b
+        .iter()
+        .take_while(|&&c| c == b' ' || (0x09..=0x0d).contains(&c))
+        .count();
+    let neg = b.get(i) == Some(&b'-');
+    if matches!(b.get(i), Some(b'+' | b'-')) {
+        i += 1;
+    }
+    let digits = b[i..].iter().take_while(|c| c.is_ascii_digit());
+    let (mut n, mut v) = (0, 0i32);
+    for &c in digits {
+        v = v.wrapping_mul(10).wrapping_add(i32::from(c - b'0'));
+        n += 1;
+    }
+    (n > 0).then(|| if neg { v.wrapping_neg() } else { v })
 }
 
 /// `DefaultServerLogin`'s two strings. Never logged: the `Debug` form names the account only.
@@ -453,7 +462,8 @@ pub fn launch_url_allowed(url: &str) -> bool {
 /// What the browser is given for an add-on's URL, or `None` for one benilla will not open. The
 /// reference hands the server's string to `0x429ff0` with no whitelist (`0x46d5e0`): a C string of
 /// fewer than 0x400 bytes, each `%XY` replaced by the byte it spells (table `0x801490`: a
-/// non-hex digit reads 0; a `%` with fewer than two bytes after it ends the string), then
+/// non-hex ASCII digit reads 0, and one from 0x80 up, sign-extended at `0x42a059`, reads the 128
+/// bytes before the table; a `%` with fewer than two bytes after it ends the string), then
 /// `ShellExecute "open"`.
 ///
 /// Deviation: benilla keeps that decode and then encodes it again, every byte outside the URL
@@ -467,6 +477,7 @@ pub fn launch_addon_url(url: &str) -> Option<String> {
     if url.is_empty() || url.len() >= 0x400 {
         return None;
     }
+    // Any non-hex byte reads 0: the reference's read below its table from 0x80 up is not copied.
     let hex = |b: u8| -> u8 {
         match b {
             b'1'..=b'9' => b - b'0',
@@ -1202,6 +1213,24 @@ mod tests {
         (s, host)
     }
 
+    /// `sscanf`'s `%d` accumulates in 32 bits that wrap, after C's blanks only.
+    #[test]
+    fn scanf_d_wraps_in_32_bits() {
+        assert_eq!(scanf_d(" 42x"), Some(42));
+        assert_eq!(scanf_d("-7"), Some(-7));
+        assert_eq!(scanf_d("+7"), Some(7));
+        assert_eq!(scanf_d("2147483647"), Some(i32::MAX));
+        assert_eq!(scanf_d("2147483648"), Some(i32::MIN));
+        assert_eq!(scanf_d("-2147483648"), Some(i32::MIN));
+        assert_eq!(scanf_d("4294967296"), Some(0));
+        assert_eq!(scanf_d("4294967301"), Some(5));
+        assert_eq!(scanf_d("99999999999999999999"), Some(1_661_992_959));
+        assert_eq!(scanf_d("\u{a0}1"), None, "no blank past C's");
+        for text in ["", " ", "-", "+x", "x1"] {
+            assert_eq!(scanf_d(text), None, "{text:?}");
+        }
+    }
+
     /// A seated host runs the call inside the verb, and what it raised has run its handlers by
     /// the verb's next Lua line, in order, with nothing left for a tick or a queue.
     #[test]
@@ -1707,9 +1736,9 @@ mod tests {
         assert!(s.take_errors().is_empty());
     }
 
-    /// `0x429ff0`'s copy: `%XY` is the byte it spells, a non-hex digit reads 0, a `%` with fewer
-    /// than two bytes after it ends the string, a decoded NUL ends it too; then the web-address
-    /// rule on the result.
+    /// `0x429ff0`'s copy: `%XY` is the byte it spells, a non-hex ASCII digit reads 0 (one from
+    /// 0x80 up reads before the table, `0x42a059`; benilla reads 0), a `%` with fewer than two
+    /// bytes after it ends the string, a decoded NUL ends it too; then the web-address rule.
     #[test]
     fn the_addon_url_is_decoded_as_the_launcher_decodes_it_and_must_be_a_web_address() {
         for (url, want) in [

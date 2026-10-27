@@ -532,6 +532,8 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // `console_error_panic_hook` — which is where a web bug report's backtrace comes from.
     #[cfg(not(target_arch = "wasm32"))]
     crash::install(build);
+    // The zone is read once per process; reading it now spares the first `date` the wait.
+    benilla_ui::civil::warm();
 
     // **Before anything builds a task pool.** `TaskPoolPlugin` creates all three inside
     // `Plugin::build`, so the spawner and the thread count have to be in place ahead of

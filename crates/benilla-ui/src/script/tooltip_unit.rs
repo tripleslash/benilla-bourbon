@@ -5,7 +5,7 @@
 //! health on the `<name>StatusBar` child. The world mouseover drives it through
 //! [`super::UiScript::world_tooltip_unit`]; unit-frame hovers call `SetUnit` from Lua.
 
-use mlua::{Lua, Table};
+use mlua::{Lua, Table, Value};
 
 use super::object::frame_handle_of;
 use super::tooltip::{append_line, clear, set_owner_core, show_or_hide_empty};
@@ -90,15 +90,17 @@ struct Viewer {
 
 /// The active player toward `u`, through the host's relation functions as `UnitCanAttack` and
 /// `UnitCanAssist` ask them.
-fn viewer(model: &Model, u: &UnitState) -> Option<Viewer> {
+fn viewer(lua: &Lua, model: &Model, u: &UnitState) -> Option<Viewer> {
     let me = model.unit_guids.player;
     if me == 0 {
         return None;
     }
     let player = model.snapshot_unit("player");
-    let rel = model.unit_relations.as_deref();
     let ask = |f: &dyn Fn(&dyn super::UnitRelations) -> Option<bool>| {
-        u.has_object && rel.and_then(f).unwrap_or(false)
+        u.has_object
+            && super::unit::with_relations(lua, model, f)
+                .flatten()
+                .unwrap_or(false)
     };
     Some(Viewer {
         drunk: player.map_or(0, |p| p.drunk),
@@ -241,7 +243,7 @@ fn render_unit(lua: &Lua, this: &Table, token: &str) -> mlua::Result<bool> {
                 .and_then(|row| row.tooltip.party.clone());
             u
         });
-        let viewer = unit.as_ref().and_then(|u| viewer(&model, u));
+        let viewer = unit.as_ref().and_then(|u| viewer(lua, &model, u));
         let req = crate::script::requirements::player_req(lua, &model);
         (unit, viewer, req, model.unit_guids.player)
     };
@@ -556,7 +558,7 @@ impl super::UiScript {
             let Some(root) = model.arena.lookup("UIParent") else {
                 return false;
             };
-            (h, model.frame_id(h), root)
+            (h, model.frame_id(h), model.frame_id(root))
         };
         if cursor {
             set_owner_core(&self.lua, h, Some(root), TooltipAnchor::Cursor, 0.0, 0.0);
@@ -596,7 +598,7 @@ impl super::UiScript {
             let Some(root) = model.arena.lookup("Minimap") else {
                 return false;
             };
-            (h, model.frame_id(h), root)
+            (h, model.frame_id(h), model.frame_id(root))
         };
         let wrapper = match super::object::frame_wrapper(&self.lua, id) {
             Ok(w) => w,
@@ -621,9 +623,12 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // GameTooltip:SetUnit(token) → 1 or nil, which `UnitFrame_OnEnter` reads to arm its re-poll.
     m.set(
         "SetUnit",
-        lua.create_function(|lua, (this, token): (Table, String)| {
-            // The token gate every `Unit*` verb uses: an unknown token raises. Not in
-            // `render_unit`, which the app calls with canonical tokens.
+        lua.create_function(|lua, (this, token): (Table, Value)| {
+            frame_handle_of(lua, &this)?;
+            // `is-number-or-string` else `Usage: SetUnit("unit")` (`0x534a42`, `0x84f284`).
+            let token = super::binding_abi::string_arg(lua, token, r#"Usage: SetUnit("unit")"#)?;
+            // The token gate every `Unit*` verb uses (`0x515970`): an unknown token raises. Not
+            // in `render_unit`, which the app calls with canonical tokens.
             crate::script::unit::check_unit_token(&Some(token.clone()))?;
             let ok = render_unit(lua, &this, &token)?;
             Ok(if ok {

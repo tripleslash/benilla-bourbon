@@ -208,6 +208,103 @@ fn debugstack_frames_end_in_newline_and_count1_does_not_clamp() {
     assert_eq!(lines[1], "...", "the marker is its own complete line");
 }
 
+/// `debugstack` takes each level off the front while `is-number` passes (`0x703782`), so a
+/// numeric string is a level, and joins what is left in front of the frames (`0x7039b0`); a first
+/// remainder that is no string or number returns the last argument (`0x70382d` → `0x7039b6`).
+#[test]
+fn debugstack_coerces_its_levels_and_joins_the_rest() {
+    let s = script();
+    let f = |src: &str| s.eval::<String>(src).unwrap();
+    assert_eq!(
+        f(r#"return debugstack("99")"#),
+        "",
+        "\"99\" is a level past the stack"
+    );
+    assert_eq!(f(r#"return debugstack(99, "msg")"#), "msg");
+    let late = f(r#"return debugstack("msg", 99)"#);
+    assert!(
+        late.starts_with("msg99") && late.ends_with('\n'),
+        "a level only in front: {late:?}"
+    );
+    assert_eq!(f(r#"return debugstack(99, 1, 1, "a", 2)"#), "a2");
+    let msg = f(r#"return debugstack("msg: ")"#);
+    assert!(msg.starts_with("msg: ") && msg.ends_with('\n'), "{msg:?}");
+    assert_eq!(f(r#"return debugstack({}, "last")"#), "last");
+    assert!(s
+        .eval::<bool>("local t = {} return debugstack(1, t) == t")
+        .unwrap());
+    let err = s
+        .eval::<String>(r#"return debugstack("a", {})"#)
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("attempt to concatenate a table value"),
+        "{err}"
+    );
+}
+
+/// The levels are 32-bit: a level below 0 is `lua_getstack`'s tail-call pseudo-frame
+/// (`0x6fbad4`-`0x6fbade`, filled by `0x6fbd20`), and the window adds with wrap and compares
+/// unsigned (`0x70384c`, `0x703857`), so a negative `start + count1` prints every level.
+#[test]
+fn debugstack_levels_wrap_as_32_bit_and_a_negative_one_is_a_tail_call() {
+    let s = script();
+    s.run(
+        "function DSDeep(n) \
+           if n == 0 then local r = debugstack(unpack(DSArgs)) return r end \
+           local r = DSDeep(n - 1) return r \
+         end",
+    )
+    .unwrap();
+    let at = |args: &str| -> Vec<String> {
+        s.run(&format!("DSArgs = {{{args}}}")).unwrap();
+        let out = s.eval::<String>("local r = DSDeep(30) return r").unwrap();
+        assert!(out.ends_with('\n'), "{args}: {out:?}");
+        out.lines().map(str::to_owned).collect()
+    };
+    let whole = at("0, 99, 0");
+    let deep = whole.len();
+    assert!(deep > 30, "{whole:?}");
+    assert!(whole.iter().all(|l| l != "..." && l != "(tail call): ?"));
+
+    // -1: the pseudo-frame, then levels 0..=10, then the marker and the last 10.
+    let minus_one = at("-1");
+    assert_eq!(minus_one[0], "(tail call): ?");
+    assert_eq!(minus_one[1..12], whole[..11]);
+    assert_eq!(minus_one[12], "...");
+    assert_eq!(minus_one[13..], whole[deep - 10..]);
+
+    // -12: the window's limit is 0, below the first `next` compared unsigned, and the probe lands
+    // on a pseudo-frame: the marker and the last `count2` levels alone.
+    assert_eq!(
+        at("-12, 12, 3"),
+        [&["...".to_string()][..], &whole[deep - 3..]].concat()
+    );
+
+    // A negative `start + count1` is a huge unsigned limit: every level, no marker.
+    assert_eq!(at("1, -3"), whole[1..]);
+    assert_eq!(
+        at("1, 2147483648"),
+        whole[1..],
+        "2^31 truncates to i32::MIN"
+    );
+}
+
+/// `luaV_concat` works down from the top, so with frames on top of two bad remainders the raise
+/// names the upper one; with no frame the top pair fails on its lower value.
+#[test]
+fn debugstack_raises_for_the_bad_remainder_nearest_the_top() {
+    let s = script();
+    let err = |src: &str| s.eval::<String>(src).unwrap_err().to_string();
+    let e = err(r#"return debugstack("a", {}, function() end)"#);
+    assert!(e.contains("attempt to concatenate a function value"), "{e}");
+    let e = err(r#"return debugstack(99, 1, 1, "a", {}, true)"#);
+    assert!(e.contains("attempt to concatenate a table value"), "{e}");
+    let e = err(r#"return debugstack(99, 1, 1, "a", "b", true)"#);
+    assert!(e.contains("attempt to concatenate a boolean value"), "{e}");
+    assert_eq!(s.eval::<i64>("return debugstack(99, 1, 1, 5)").unwrap(), 5);
+}
+
 /// An addon chunk is named as the reference names it, `@Interface\AddOns\<folder>\<file>`:
 /// `FuBarPlugin-2.0.lua:752` finds its folder with a greedy `"\\AddOns\\(.*)\\"`, which captures
 /// up to the last backslash, so the file must be in the name. The test bounds the capture at the
@@ -819,4 +916,145 @@ fn a_frame_no_instruction_names_takes_a_globals_name() {
         named.contains("in function <"),
         "no global holds it: {named}"
     );
+}
+
+/// The bare aliases are the client's `compat.lua` chunk (`0x8722e8`, named at `0x872cbc`): an error
+/// inside one is `[string "compat.lua"]:<line>:` with the line the alias has in the client's
+/// 53-line text (`sin` 36, `cos` 20, `tan` 38, `asin` 16), and the closures capture the chunk's own
+/// `math`, so a script that replaces the global leaves them working.
+#[test]
+fn the_bare_aliases_are_the_clients_compat_chunk() {
+    let s = script();
+    let f = |src: &str| s.eval::<String>(src).unwrap();
+    assert_eq!(
+        f(r#"local ok, e = pcall(sin, "a") return e"#),
+        r#"[string "compat.lua"]:36: bad argument #1 to `rad' (number expected, got string)"#
+    );
+    assert_eq!(
+        f(r#"local ok, e = pcall(cos, nil) return e"#),
+        r#"[string "compat.lua"]:20: bad argument #1 to `rad' (number expected, got nil)"#
+    );
+    assert_eq!(
+        f(r#"local ok, e = pcall(tan, {}) return e"#),
+        r#"[string "compat.lua"]:38: bad argument #1 to `rad' (number expected, got table)"#
+    );
+    assert_eq!(
+        f(r#"local ok, e = pcall(asin, "x") return e"#),
+        r#"[string "compat.lua"]:16: bad argument #1 to `asin' (number expected, got string)"#
+    );
+    assert_eq!(
+        f(r#"math = nil
+             return string.format("%.4f %.4f %.4f", sin(30), tan(45), atan2(1, 1))"#),
+        "0.5000 1.0000 45.0000"
+    );
+}
+
+/// `seterrorhandler` (`0x702900`) checks that argument 1 is a function, then `luaL_ref`s the
+/// stack's top (`0x702930`): the last argument, and a nil there is -1 (`0x6f534a`), no handler.
+/// `geterrorhandler` (`0x702950`) answers the referenced value, nil for -1.
+#[test]
+fn seterrorhandler_keeps_the_top_value() {
+    let s = script();
+    let f = |src: &str| s.eval::<String>(src).unwrap();
+    assert_eq!(
+        f(r#"local a, b = function() end, function() end
+             seterrorhandler(a) local r1 = geterrorhandler() == a
+             seterrorhandler(a, b) local r2 = geterrorhandler() == b
+             seterrorhandler(a, nil) local r3 = geterrorhandler()
+             seterrorhandler(b) seterrorhandler(a, 5) local r4 = geterrorhandler()
+             return table.concat({tostring(r1), tostring(r2), tostring(r3), tostring(r4)}, " ")"#),
+        "true true nil 5"
+    );
+    // Argument 1 must be a function, whatever follows it. The 5 is cleared first: a raise runs it.
+    s.run("seterrorhandler(function() end, nil)").unwrap();
+    for call in [
+        "seterrorhandler()",
+        "seterrorhandler(nil)",
+        "seterrorhandler(nil, print)",
+    ] {
+        let e = s.run(call).expect_err(call).to_string();
+        assert!(e.contains("Usage: seterrorhandler(errfunc)"), "{call}: {e}");
+    }
+}
+
+/// With the slot cleared the catch closure calls nothing (`0x703b45`); a held value that is no
+/// function is called, and the call raises.
+#[test]
+fn a_cleared_error_handler_is_not_called() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        "caught = {} h = function(m) table.insert(caught, m) end \
+         seterrorhandler(h, nil) \
+         local b = CreateFrame('Button') \
+         b:SetScript('OnClick', function() error('click boom') end) \
+         b:Click()",
+    )
+    .unwrap();
+    assert_eq!(s.eval::<i32>("return table.getn(caught)").unwrap(), 0);
+    // A held value that is no function is called all the same, and the call raises: as the error
+    // function of a running call it recurses to `error in error handling` (`0x6f65cf`), and for a
+    // chunk that failed to compile it is called directly (`0x704b42`).
+    s.run(
+        "seterrorhandler(h, 5) \
+         local b = CreateFrame('Button') \
+         b:SetScript('OnClick', function() error('again') end) \
+         b:Click()",
+    )
+    .unwrap();
+    let errors = s.take_errors().join("|");
+    assert!(
+        errors.contains("again — error handler failed: error in error handling"),
+        "the host log keeps the message and the handler's failure: {errors}"
+    );
+    s.run("x = = 1").expect_err("a compile failure");
+    let errors = s.take_errors().join("|");
+    assert!(
+        errors.contains(
+            "unexpected symbol near `=' — error handler failed: attempt to call a number value"
+        ),
+        "{errors}"
+    );
+}
+
+/// The error function answers the held handler's result (`0x703b6d`, `lua_call(1, 1)`), which is
+/// what a status reads (`0x704b7f`); with the slot at -1, the message itself (`0x703b45`).
+#[test]
+fn the_error_function_answers_the_handlers_result() {
+    let s = script();
+    let f: mlua::Function = s.eval("return function() error('raw', 0) end").unwrap();
+    let h = crate::script::stdlib::error_function(s.lua()).expect("installed");
+    let answer = || {
+        let e = f.call_under::<()>(&h, ()).expect_err("raised");
+        e.lua_value(s.lua())
+    };
+    assert_eq!(answer().unwrap().to_string().unwrap(), "raw");
+    s.run("seterrorhandler(function(m) return 'replaced ' .. m end)")
+        .unwrap();
+    assert_eq!(answer().unwrap().to_string().unwrap(), "replaced raw");
+    s.run("seterrorhandler(function(m) end)").unwrap();
+    assert!(answer().is_none_or(|v| v.is_nil()));
+}
+
+/// The engine's `GetText` call is a runner's call of its own (`0x703cad`): an error the handler
+/// hears inside it is never taken for the error of the script the call runs in, whose own fault
+/// the host log keeps.
+#[test]
+fn a_failed_get_text_inside_a_script_leaves_the_scripts_own_error() {
+    let s = script();
+    s.run("function GetText() error('inner', 0) end seterrorhandler(function(m) return m end)")
+        .unwrap();
+    let outer: mlua::Function = s.eval("return function() error('outer', 0) end").unwrap();
+    let h = crate::script::stdlib::error_function(s.lua()).expect("installed");
+    let e = crate::script::stdlib::with_capture(|| {
+        let text = crate::strings::Strings::Vm(s.lua()).get_text("T", None, Some(2));
+        assert_eq!(
+            text.as_deref(),
+            Some("inner"),
+            "the handler's answer is the text"
+        );
+        outer.call_under::<()>(&h, ())
+    })
+    .expect_err("the outer script raised");
+    assert_eq!(crate::script::lua_message(&e), "outer");
 }

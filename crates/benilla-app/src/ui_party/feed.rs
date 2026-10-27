@@ -2447,7 +2447,7 @@ mod tests {
         frame(&mut app);
         assert_eq!(
             bar(&mut app),
-            (0.0, 0.0, benilla_ui::color::quant::read(1.0)),
+            (0.0, 0.0, benilla_ui::color::quant::read_via_f32(1.0)),
             "the mana colour"
         );
         assert_eq!(
@@ -2460,14 +2460,19 @@ mod tests {
         frame(&mut app);
         assert_eq!(flag(&mut app, "UnitIsConnected('party1')"), None);
         let grey = benilla_ui::color::quant::read(0.5);
-        assert_eq!(bar(&mut app), (grey, grey, grey), "the disconnected grey");
+        let grey32 = benilla_ui::color::quant::read_via_f32(0.5);
+        assert_eq!(
+            bar(&mut app),
+            (grey, grey32, grey32),
+            "the disconnected grey"
+        );
         assert_eq!(flag(&mut app, "PartyMemberFrame1PetFrame:IsShown()"), None);
 
         resend(&mut app, &[ON], ME, None);
         frame(&mut app);
         assert_eq!(
             bar(&mut app),
-            (0.0, 0.0, benilla_ui::color::quant::read(1.0)),
+            (0.0, 0.0, benilla_ui::color::quant::read_via_f32(1.0)),
             "back online"
         );
         assert_eq!(
@@ -2848,7 +2853,7 @@ mod tests {
         app.insert_resource(crate::spell::targeting::corpse_fixture::factions());
         app.init_resource::<crate::net::Reputations>();
         // The relation functions the verbs ask, pushed as the client's unit feed pushes them.
-        app.add_systems(Update, crate::ui_unit::relations::feed_unit_relations);
+        app.add_systems(Update, crate::ui_unit::relations::seat);
         // Field 2 the type word (a player), 22 the health (alive: `[nodead]` reads it live), 35
         // the faction template (Human), 46 the flags (player-controlled).
         let human_player = [PLAYER_TYPE[0], (22, 100), (35, 1), (46, 0x8)];

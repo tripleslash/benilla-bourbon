@@ -81,7 +81,8 @@ pub struct MultisampleFormat {
 /// One screen resolution the Video options dropdown offers, in physical pixels. Deviation: the
 /// list is the window sizes this client can present, not the device's display modes, because
 /// benilla makes no exclusive mode-set. `"WxH"` is a contract: `OptionsFrame.lua:281-284` splits
-/// on the `x` and `CT_Viewport.lua:107` matches `"(%d+)x(%d+)"`, both failing silently.
+/// on the `x`, raising on a string without one, and `CT_Viewport.lua:107` matches
+/// `"(%d+)x(%d+)"`, failing silently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenResolution {
     pub width: u32,
@@ -1070,11 +1071,12 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
             let gamma = model
                 .cvars
                 .get(&CVAR_GAMMA.to_ascii_lowercase())
-                .and_then(|slot| slot.value.parse::<f64>().ok())
+                // The record's float (`fld dword [eax+0x24]`, `0x4891cd`), not the text.
+                .map(|slot| super::binding_abi::record_float(&slot.value))
                 // A bare VM with no `gamma` row answers as if the default stood; the reference
                 // always finds its record (`0x63de30`).
                 .unwrap_or(1.0);
-            Ok(1.0 - gamma)
+            Ok(1.0 - f64::from(gamma))
         })?,
     )?;
     lua.globals().set(
@@ -1082,17 +1084,7 @@ fn install_video_verbs(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, value: Value| {
             // `lua_isnumber` (`0x4891fe`): a number or a numeric string; anything else raises
             // (`0x6f4940`).
-            let v = match &value {
-                Value::Integer(i) => *i as f64,
-                Value::Number(n) => *n,
-                Value::String(s) => {
-                    match s.to_str().ok().and_then(|s| s.trim().parse::<f64>().ok()) {
-                        Some(n) => n,
-                        None => return Err(mlua::Error::runtime(USAGE_SET_GAMMA)),
-                    }
-                }
-                _ => return Err(mlua::Error::runtime(USAGE_SET_GAMMA)),
-            };
+            let v = super::binding_abi::float_arg(lua, value, USAGE_SET_GAMMA)?;
             let mut model = lua
                 .app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data");
@@ -1150,27 +1142,13 @@ fn install_world_detail_verbs(lua: &Lua) -> mlua::Result<()> {
         "SetWorldDetail",
         lua.create_function(|lua, value: Value| {
             // `lua_isnumber`: a number or a numeric string; anything else is the usage error.
-            let n = match &value {
-                Value::Integer(i) => *i as f64,
-                Value::Number(n) => *n,
-                Value::String(s) => {
-                    match s.to_str().ok().and_then(|s| s.trim().parse::<f64>().ok()) {
-                        Some(n) => n,
-                        None => return Err(mlua::Error::runtime(USAGE_SET_WORLD_DETAIL)),
-                    }
-                }
-                _ => return Err(mlua::Error::runtime(USAGE_SET_WORLD_DETAIL)),
+            let n = super::binding_abi::number_arg(lua, value, USAGE_SET_WORLD_DETAIL)?;
+            // `_ftol` (`0x488e0a`), then a signed `0..3` (`0x488e13`, `0x488e1c`): -0.5 is stop 0,
+            // only <= -1 raises, and NaN is stop 0, its QWORD `fistp` having a low dword of 0.
+            let stop = match usize::try_from(n) {
+                Ok(stop) if stop < 3 => stop,
+                _ => return Err(mlua::Error::runtime(RANGE_SET_WORLD_DETAIL)),
             };
-            // Truncate toward zero, then the reference's bounds: -0.5 is stop 0 and only <= -1
-            // raises. NaN raises too, as the reference's `fistp` gives the negative indefinite.
-            if n.is_nan() {
-                return Err(mlua::Error::runtime(RANGE_SET_WORLD_DETAIL));
-            }
-            let stop = n.trunc();
-            if !(0.0..3.0).contains(&stop) {
-                return Err(mlua::Error::runtime(RANGE_SET_WORLD_DETAIL));
-            }
-            let stop = stop as usize;
             let mut model = lua
                 .app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data");

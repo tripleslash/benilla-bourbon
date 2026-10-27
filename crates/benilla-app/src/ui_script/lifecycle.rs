@@ -206,7 +206,7 @@ fn seed_vm_clock(world: &mut World, script: &mut UiScript) {
 }
 
 /// Start the new VM's `GetGameTime()` at the game clock as it stands: the reference's clock is one
-/// object (`0xce8538`) built at start-up with every field -1 (`0x643300`, `0x642300`) and reset
+/// object (`0xce8538`) built at start-up with its time at -1 (`0x643300`, `0x642300`) and reset
 /// by no logout or `ReloadUI`, so a VM answers -1, -1 before any server time and the last known
 /// time after it, from the first line its addons run. fork: moved by the `serverTimeOffset` hours.
 fn seed_game_time(world: &World, script: &mut UiScript) {
@@ -573,6 +573,9 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
     // (`0x48f566`-`0x48f584`); `end_ui_session` is `ShutdownGame`'s clear. A `/reload` keeps them.
     if world.resource::<PendingEntryUiLoad>().stage == EntryStage::Armed {
         flag_world_read_only(world);
+        // `UI_Init` zeroes the release timer (`0x490131`, `0x490137`), with or without a UI; its
+        // place in the load is unseen here, as the new VM reads the death snapshot only after it.
+        crate::death::zero_release_timer(world);
     }
     if !ui_wanted(world) {
         world.remove_resource::<PendingEntryUiLoad>();
@@ -915,16 +918,16 @@ fn entry_prepare(
         .is_none_or(crate::cvars::Cvars::addon_version_check);
     // Per-VM `Update` claims the load itself reads, seeded now: the zone-channel catalog (empty,
     // `General` would be filed and joined as a custom channel), the binding table (stock
-    // `ActionButton_OnLoad` paints the hotkeys), the default language (`ChatFrame_OnEvent`'s
-    // `PLAYER_ENTERING_WORLD` arm stores it, `ChatFrame.lua:1275-1276`) and the language table a
-    // file-scope `SendChatMessage` names its tongue from.
+    // `ActionButton_OnLoad` paints the hotkeys) and the language table a file-scope
+    // `SendChatMessage` names its tongue from. The default language is never seeded: it is the
+    // held player's (`0x49fce9`), and a login's load runs before the player's create can arrive
+    // (the login-verify handler is registered after it, `0x401789`), so the load reads none.
     crate::ui_chat::seed_zone_channel_catalog(world, script);
     crate::bindings::seed_bindings_for_vm(world, script);
     // The engine globals a previous VM folded out: the quest log's fold mask and the tradeskill
     // repeat.
     crate::ui_quest_log::seed_quest_folds(world, script);
     crate::ui_tradeskill::seed_repeat(world, script);
-    crate::ui_unit::seed_default_language(world, script);
     crate::ui_unit::seed_language_table(world, script);
     // The world map's continent and zone lists: static DBC data in the reference, read at file
     // scope (Astrolabe builds its whole zone table from `GetMapContinents`/`GetMapZones` there).
@@ -1116,6 +1119,8 @@ fn flag_world_read_only(world: &mut World) {
 
 /// [`load_ingame_ui_on_world_entry`] under the `"player"` its edge has.
 fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
+    // `UI_Init` zeroes the release timer (`0x490131`, `0x490137`), with or without a UI.
+    crate::death::zero_release_timer(world);
     // The parked VM goes back into the world, where the CVar fold reads it; a reload has none
     // parked and uses the live one.
     unpark_glue_vm(world);
@@ -1543,6 +1548,9 @@ pub(crate) fn run_pending_reload(world: &mut World) {
         .next()
         .is_some();
     if seated {
+        // The cascade's questgiver reset (`0x49099c` → `0x500af0`), which a login's and a
+        // worldport's run from their own packets.
+        crate::ui_quest::world_enter_cascade(world);
         world.write_message(crate::net::WorldEnterCascadeMessage);
     }
 }
@@ -1834,6 +1842,7 @@ mod tests {
             "::camera_saved::save_on_session_end",
             // The look session's cursor, handed back to the glue screens.
             "::player::camera::end_look_on_session_end",
+            "::area::clear_committed_zone",
             // The pass's end: the hosts' unit edits applied after them (`crate::vm_pass`).
             "::creature_anim::edits::flush_unit_edits",
         ];
@@ -1961,7 +1970,7 @@ mod tests {
         }
     }
 
-    /// The game clock is one object built at start-up with every field -1 (`0x643300`, `0x642300`)
+    /// The game clock is one object built at start-up with its time at -1 (`0x643300`, `0x642300`)
     /// that no logout or `ReloadUI` resets, and `GetGameTime` reads it unguarded (`0x515ee0`), so a
     /// VM answers -1, -1 before any server time and the last known time after it, from the first
     /// line its addons run.
@@ -2142,6 +2151,73 @@ mod tests {
         assert_eq!(
             reload(false).1,
             0,
+            "no cascade before our own player's create"
+        );
+    }
+
+    /// `UI_Init` zeroes the release timer at each load (`0x490131`, `0x490137`), so a `/reload`
+    /// after our death answers 0 (`0x4962b6`) and shows no DEATH popup.
+    #[test]
+    fn a_reload_zeroes_the_release_timer() {
+        let mut world = World::new();
+        world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+        world.insert_resource(crate::run_mode::CaptureMode);
+        world.init_resource::<Messages<crate::net::WorldEnterCascadeMessage>>();
+        world.init_resource::<super::super::SweptWorlds>();
+        world.init_resource::<super::super::LeavingWorldArmed>();
+        world.init_resource::<crate::death::DeathNet>();
+        world.spawn(crate::net::SelfPlayer);
+        world
+            .resource_mut::<crate::death::DeathNet>()
+            .arm_release(true, 0.0);
+        world.insert_resource(ReloadUiPending(true));
+        run_pending_reload(&mut world);
+        assert_eq!(
+            world.resource::<crate::death::DeathNet>().release,
+            crate::death::ReleaseTimer::Unset
+        );
+    }
+
+    /// The reload's cascade runs the questgiver's world-enter reset (`0x490168` → `0x4908c0` →
+    /// `0x49099c` → `0x500af0`): the old panel's texts and pools read empty in the new UI.
+    #[test]
+    fn a_reload_resets_the_questgiver_cells_once_the_player_exists() {
+        use benilla_protocol::messages::{QuestGiverList, QuestListEntry};
+        let reload = |seated: bool| {
+            let mut world = World::new();
+            world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+            world.insert_resource(crate::run_mode::CaptureMode);
+            world.init_resource::<Messages<crate::net::WorldEnterCascadeMessage>>();
+            world.init_resource::<super::super::SweptWorlds>();
+            world.init_resource::<super::super::LeavingWorldArmed>();
+            world.init_resource::<crate::ui_quest::QuestGiver>();
+            if seated {
+                world.spawn(crate::net::SelfPlayer);
+            }
+            world.resource_mut::<crate::ui_quest::QuestGiver>().open(
+                0x42,
+                crate::ui_quest::QuestView::Greeting(QuestGiverList {
+                    npc: 0x42,
+                    greeting: "Well met.".into(),
+                    emote_delay: 0,
+                    emote: 0,
+                    quests: vec![QuestListEntry {
+                        quest_id: 7,
+                        icon: 3,
+                        level: 5,
+                        title: "Wolves".into(),
+                    }],
+                }),
+            );
+            world.insert_resource(ReloadUiPending(true));
+            run_pending_reload(&mut world);
+            let cells = &world.resource::<crate::ui_quest::QuestGiver>().cells.state;
+            (cells.greeting.clone(), cells.active_titles.clone())
+        };
+        assert_eq!(reload(true), (String::new(), Vec::<String>::new()));
+        assert_eq!(
+            reload(false),
+            ("Well met.".to_string(), vec!["Wolves".to_string()]),
             "no cascade before our own player's create"
         );
     }

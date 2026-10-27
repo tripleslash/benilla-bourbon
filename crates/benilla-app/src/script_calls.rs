@@ -1480,6 +1480,26 @@ mod tests {
     }
 
     /// `MOB` at 3 yd, alive, with `fields` over its health.
+    /// `guid`'s object typed a player (`OBJECT_FIELD_TYPE` 0x19, player-controlled), as the getters
+    /// name a unit the object manager holds (typemask 8).
+    pub(super) fn as_player(world: &mut World, guid: u64) {
+        typed(world, guid, &[(2, 0x19), (46, 0x8)]);
+    }
+
+    /// `guid`'s object typed a creature (`OBJECT_FIELD_TYPE` 0x9).
+    pub(super) fn as_creature(world: &mut World, guid: u64) {
+        typed(world, guid, &[(2, 0x9)]);
+    }
+
+    fn typed(world: &mut World, guid: u64, pairs: &[(u16, u32)]) {
+        let entity = world.resource::<GuidIndex>().0[&guid];
+        world
+            .get_mut::<ObjectStore>(entity)
+            .unwrap()
+            .0
+            .merge(benilla_protocol::ObjectFields::from_pairs(pairs));
+    }
+
     fn spawn_mob(f: &mut Frame, fields: &[(u16, u32)]) {
         let world = f.app.world_mut();
         let mut pairs = vec![(HEALTH, 100), (28, 100)];
@@ -1792,6 +1812,10 @@ mod tests {
                 (16, ME as u32),
                 (17, 0),
             ])));
+        // Our name as the getters read it off the name cache at the call (`0x609210`).
+        world
+            .resource_mut::<crate::names::NameCache>()
+            .insert_player(ME, "Me".into(), None);
         let mut script = world.non_send_mut::<UiScript>();
         let named = |guid, name: &str| UnitState {
             exists: true,
@@ -1936,9 +1960,7 @@ mod tests {
         world
             .resource_mut::<crate::names::NameCache>()
             .insert_player(NEW, "Red Whelp".into(), None);
-        world
-            .run_system_once(crate::ui_unit::feed_name_candidates)
-            .expect("the candidate feed runs as a one-shot system");
+        as_player(world, NEW);
         run(
             &mut f,
             r#"local l = CreateFrame("Frame")
@@ -1968,9 +1990,7 @@ mod tests {
         world
             .resource_mut::<crate::names::NameCache>()
             .insert_player(NEW, "Red Whelp".into(), None);
-        world
-            .run_system_once(crate::ui_unit::feed_name_candidates)
-            .expect("the candidate feed runs as a one-shot system");
+        as_player(world, NEW);
         let plate = |key: u64| PlateState {
             key,
             top_centre: (400.0, 400.0),
@@ -2044,9 +2064,7 @@ mod tests {
         world
             .resource_mut::<crate::names::NameCache>()
             .insert_player(NEW, "Red Whelp".into(), None);
-        world
-            .run_system_once(crate::ui_unit::feed_name_candidates)
-            .expect("the candidate feed runs as a one-shot system");
+        as_player(world, NEW);
         benilla_world::world_point::init_world_point_resources(world);
         world.insert_resource(crate::ui_chat::commands::SlashCommands::build(
             |name| (name == "SLASH_SCRIPT1").then(|| "/script".to_string()),
@@ -2073,9 +2091,7 @@ mod tests {
         names.insert_player(OLD, "Old Mob".into(), None);
         names.insert_player(MOB, "Red Affinity".into(), None);
         names.insert_player(NEW, "Red Whelp".into(), None);
-        world
-            .run_system_once(crate::ui_unit::feed_name_candidates)
-            .expect("the candidate feed runs as a one-shot system");
+        as_creature(world, MOB);
         let named = eval::<String>(
             &mut f,
             "TargetByName('Red Affinity', true) return UnitName('target')",
@@ -2132,9 +2148,6 @@ mod tests {
             let mut names = world.resource_mut::<crate::names::NameCache>();
             names.insert_player(MOB, "Red Affinity".into(), None);
             names.insert_player(TWIN, "Red Affinity".into(), None);
-            world
-                .run_system_once(crate::ui_unit::feed_name_candidates)
-                .expect("the candidate feed runs as a one-shot system");
             let shown = eval::<i64>(
                 &mut f,
                 "TargetByName('Red Affinity') return UnitHealth('target')",
@@ -2188,9 +2201,6 @@ mod tests {
             let mut names = world.resource_mut::<crate::names::NameCache>();
             names.insert_player(OLD, "Olly".into(), None);
             names.insert_player(ME, "Me".into(), None);
-            world
-                .run_system_once(crate::ui_unit::feed_name_candidates)
-                .expect("the candidate feed runs as a one-shot system");
             lead_party(f.app.world_mut(), OLD, "Olly");
             let mut script = f.app.world_mut().non_send_mut::<UiScript>();
             script.set_unit(
@@ -2242,9 +2252,6 @@ mod tests {
             world
                 .resource_mut::<crate::names::NameCache>()
                 .insert_player(ME, "Kelvin".into(), None);
-            world
-                .run_system_once(crate::ui_unit::feed_name_candidates)
-                .expect("the candidate feed runs as a one-shot system");
             lead_party(f.app.world_mut(), OLD, "Olly");
             let mut script = f.app.world_mut().non_send_mut::<UiScript>();
             script.set_unit(
@@ -2299,9 +2306,6 @@ mod tests {
         let mut names = world.resource_mut::<crate::names::NameCache>();
         names.insert_player(MOB, "Red Affinity".into(), None);
         names.insert_player(TWIN, "Red Affinity".into(), None);
-        world
-            .run_system_once(crate::ui_unit::feed_name_candidates)
-            .expect("the candidate feed runs as a one-shot system");
         let shown = eval::<i64>(
             &mut f,
             "TargetByName('Red Affinity') return UnitHealth('target')",
@@ -3594,10 +3598,6 @@ mod tests {
         ] {
             let mut f = frame(true);
             with_things_to_select(&mut f);
-            f.app
-                .world_mut()
-                .run_system_once(crate::ui_unit::feed_name_candidates)
-                .unwrap();
             let seen = with_hosted_vm(f.app.world_mut(), |s| {
                 s.expect("a VM")
                     .eval::<Option<String>>(&format!(r#"{lua} return UnitName("target")"#))

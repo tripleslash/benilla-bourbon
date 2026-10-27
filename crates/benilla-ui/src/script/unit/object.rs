@@ -114,6 +114,8 @@ pub trait UnitIdentityRead {
     fn race(&self) -> Option<(String, String)>;
     /// [`UnitState::class`] and [`UnitState::class_file`].
     fn class(&self) -> Option<(String, String)>;
+    /// [`UnitState::family`].
+    fn family(&self) -> Option<String>;
 }
 
 impl UnitIdentityRead for UnitState {
@@ -125,5 +127,8 @@ impl UnitIdentityRead for UnitState {
     }
     fn class(&self) -> Option<(String, String)> {
         self.class.clone().zip(self.class_file.clone())
+    }
+    fn family(&self) -> Option<String> {
+        self.family.clone()
     }
 }

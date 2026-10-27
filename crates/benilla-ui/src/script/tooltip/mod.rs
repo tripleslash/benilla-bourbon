@@ -15,15 +15,15 @@ use super::event;
 use super::object::frame_handle_of;
 use super::visibility;
 use super::Model;
-use crate::layout::{Anchor, Anchors, Point};
+use crate::layout::{Anchor, Anchors, Handle, Point};
 use crate::widget::{FrameHandle, KindState, TooltipAnchor, TooltipState, TOOLTIP_FADE_SECS};
 
 /// Registry key of the GameTooltip method table, a named registry root (the MAXCSTACK discipline).
 pub(super) const REG_TOOLTIP_METHODS: &str = "__benilla_tooltip_methods";
 
 impl super::UiScript {
-    /// The name of the frame that owns the GameTooltip named `tooltip`; `None` for no such
-    /// tooltip, no owner or an unnamed one. 1.12 answers only `IsOwned(frame)`, so the host's
+    /// The name of the frame or region that owns the GameTooltip named `tooltip`; `None` for no
+    /// such tooltip, no owner or an unnamed one. 1.12 answers only `IsOwned(frame)`, so the host's
     /// recorders read the owner here.
     pub fn tooltip_owner_name(&self, tooltip: &str) -> Option<String> {
         let model = self.model_ref();
@@ -32,7 +32,14 @@ impl super::UiScript {
             KindState::Tooltip(t) => t.owner?,
             _ => return None,
         };
-        model.arena.frame(owner)?.name.clone()
+        match model.id_to_frame.get(&owner) {
+            Some(&f) => model.arena.frame(f)?.name.clone(),
+            None => model
+                .arena
+                .region(*model.id_to_region.get(&owner)?)?
+                .name
+                .clone(),
+        }
     }
 }
 
@@ -366,7 +373,7 @@ pub(in crate::script) fn hide_override(lua: &Lua, h: FrameHandle) {
 pub(in crate::script) fn set_owner_core(
     lua: &Lua,
     h: FrameHandle,
-    owner: Option<FrameHandle>,
+    owner: Option<Handle>,
     anchor: TooltipAnchor,
     x: f32,
     y: f32,
@@ -397,7 +404,7 @@ pub(in crate::script) fn set_owner_core(
 fn apply_anchor(
     model: &mut Model,
     h: FrameHandle,
-    owner: FrameHandle,
+    owner: Handle,
     anchor: TooltipAnchor,
     x: f32,
     y: f32,
@@ -422,8 +429,7 @@ fn apply_anchor(
         }
     }
     if let Some((own, rel)) = pts {
-        let owner_id = model.frame_id(owner);
-        let new = Anchors::from([Anchor::new(own, owner_id, rel, x, y)]);
+        let new = Anchors::from([Anchor::new(own, owner, rel, x, y)]);
         let input = model.layout_inputs.entry(h).or_default();
         // No-op when unchanged, so the bag hover's per-frame SetOwner does not dirty the layout;
         // a real one is `SetPoint` with the invalidate flag (`0x52ff12`..`0x52ffb2`).
@@ -482,12 +488,12 @@ pub(in crate::script) const DEFAULT_TEXT_GOLD: [f32; 4] = [1.0, 210.0 / 255.0, 0
 /// The client's duration formatter (`0x52fa50`): days, hours, minutes or seconds by threshold,
 /// each dividing by its own unit. `round_up` ceils every arm but seconds, which truncates, so 61 s
 /// reads "2 minutes" and 3 599 999 ms "60 minutes". The text is the player's own
-/// `GlobalStrings.lua` through `get`; a missing key renders no line.
+/// `GlobalStrings.lua` through `strings`; a missing key renders no line.
 pub(in crate::script) fn duration_text(
     ms: u32,
     key_prefix: &str,
     round_up: bool,
-    get: &dyn Fn(&str) -> Option<String>,
+    strings: crate::strings::Strings<'_>,
 ) -> Option<String> {
     const DAY_MS: u32 = 86_400_000;
     const HOUR_MS: u32 = 3_600_000;
@@ -508,7 +514,7 @@ pub(in crate::script) fn duration_text(
     } else {
         ms / divisor
     };
-    let template = plural_template(&format!("{key_prefix}_{suffix}"), n, get)?;
+    let template = plural_template(&format!("{key_prefix}_{suffix}"), n, strings)?;
     Some(template.replacen("%d", &n.to_string(), 1))
 }
 
@@ -518,9 +524,9 @@ pub(in crate::script) fn duration_text(
 pub(in crate::script) fn plural_template(
     token: &str,
     n: u32,
-    get: &dyn Fn(&str) -> Option<String>,
+    strings: crate::strings::Strings<'_>,
 ) -> Option<String> {
-    crate::strings::plural(token, Some(n), get)
+    crate::strings::plural(token, Some(n), strings)
 }
 
 /// A colour component by `lua_tonumber`'s coercion: a number or a string `luaO_str2d` reads as

@@ -522,20 +522,16 @@ pub(super) fn inventory_reader(lua: &Lua, model: &Model, token: &str) -> Option<
     if token.eq_ignore_ascii_case("player") {
         return Some(InvReader::Own);
     }
-    model.inventory_reader_of(super::unit::guid_of(lua, model, token).ok().flatten()?)
+    let guid = super::unit::guid_of(lua, model, token).ok().flatten()?;
+    if guid == model.unit_guids.player {
+        return Some(InvReader::Own);
+    }
+    let reach = super::inspect::reach_of(lua, model, guid)?;
+    (reach.inspectable && super::inspect::in_inspect_range(&reach))
+        .then_some(InvReader::Visible(guid))
 }
 
 impl Model {
-    /// [`InvReader`] for the unit `guid`, `None` for one the getters may not read.
-    fn inventory_reader_of(&self, guid: u64) -> Option<InvReader> {
-        if guid == self.unit_guids.player {
-            return Some(InvReader::Own);
-        }
-        let reach = self.unit_reach.get(&guid)?;
-        (reach.inspectable && super::inspect::in_inspect_range(reach))
-            .then_some(InvReader::Visible(guid))
-    }
-
     /// The active player's item at live-API id `slot` ([`Self::inv_slot_as`] of our own).
     pub(super) fn own_inv_view(&self, slot: usize) -> Option<InvSlotView> {
         self.own_inv_slot(slot)
@@ -1354,22 +1350,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // `0x848894`, verbatim.
+    const INVALID_SLOT: &str = "Invalid inventory slot in GetInventorySlotInfo";
     // GetInventorySlotInfo(slotName) → (slotId, textureName, checkRelic) from `SLOT_INFO`.
     // `checkRelic` is a property of the slot; stock pairs it with `UnitHasRelicSlot("player")`
     // (`PaperDollFrame.lua:680`, `:744`).
     g.set(
         "GetInventorySlotInfo",
-        lua.create_function(|lua, name: String| {
+        lua.create_function(|lua, name: Value| {
+            // A non-string misses `is-number-or-string` and takes the unknown name's raise
+            // (`0x4c81ca` → `0x4c822c`).
+            let name = crate::script::binding_abi::string_arg(lua, name, INVALID_SLOT)?;
             // A full-string ASCII case-insensitive match: `0x4c8215` calls `_strnicmp` (`0x64a4c0`
             // -> `0x414310`) with no length limit. The 36 names stay distinct after folding.
             let Some((_, id, art)) = SLOT_INFO
                 .iter()
                 .find(|(n, _, _)| n.eq_ignore_ascii_case(&name))
             else {
-                // An unknown name raises, never nil; the string is `0x848894`'s, verbatim.
-                return Err(mlua::Error::runtime(
-                    "Invalid inventory slot in GetInventorySlotInfo",
-                ));
+                // An unknown name raises, never nil.
+                return Err(mlua::Error::runtime(INVALID_SLOT));
             };
             Ok((
                 *id,

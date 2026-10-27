@@ -917,6 +917,41 @@ fn the_roster_flag_outlives_a_reload_and_not_a_login() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// `GetDefaultLanguage` reads the held player (`0x49fce9`, zero values without one at `0x49fcf0`),
+/// and a login's load runs before the player's create can arrive (`0x401789`): its file scope gets
+/// nothing, whatever the roster row's race.
+#[test]
+fn a_logins_load_has_no_default_language() {
+    use benilla_ui::script::UiScript;
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon(
+        "default-language",
+        "LanguageProbe",
+        "## Interface: 11200\nLanguageProbe.lua\n",
+        "LanguageProbeCount = table.getn({ GetDefaultLanguage() })\n",
+    );
+    let mut world = booted_world();
+    world.insert_resource(crate::ui_unit::DefaultLanguagesRes(
+        benilla_formats::DefaultLanguages::from_rows(&[(1, "Common")]),
+    ));
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(
+        world
+            .non_send::<UiScript>()
+            .eval::<i64>("return LanguageProbeCount")
+            .unwrap(),
+        0,
+        "no player yet, so no language"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The connection's billing group reaches every in-game VM, as `GetBillingTimeRested` reads the
 /// session's word (`0x48ec59`), a reload's VM included; the world entry arms the play-time warning
 /// (`0x48f630`) and a reload, which jumps to `UI_Init` alone (`0x495669`), does not.
@@ -1203,17 +1238,15 @@ fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads()
         "the addon AFTER the broken one still loads — a neighbour's error drops only itself"
     );
 
-    // The app's per-frame drain runs the dispatch; the test runs the same call.
-    let mut script = world
+    let script = world
         .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
-    script.dispatch_script_errors_to_handler();
     assert!(
         script
             .eval::<bool>("return ScriptErrors:IsVisible()")
             .expect("ScriptErrors exists — BasicControls loaded"),
         "the ScriptErrors dialog is on screen — `seterrorhandler(_ERRORMESSAGE)` is installed \
-         and the engine dispatched the caught error to it"
+         and heard the file's error as it ran"
     );
     let shown: String = script
         .eval::<Option<String>>("return ScriptErrors_Message:GetText()")
@@ -1249,11 +1282,11 @@ fn a_looping_addon_cannot_freeze_world_entry() {
         Some("Onehunter"),
         "the addon after the spinner still loads — the budget failed one addon, not the entry"
     );
-    // The budget raise reaches the handler queue, so the dialog names the loop.
-    let mut script = world
+    // The budget's abort runs no handler; disarming the budget hands it to the error function,
+    // so the dialog names the loop.
+    let script = world
         .remove_non_send::<benilla_ui::script::UiScript>()
         .expect("VM");
-    script.dispatch_script_errors_to_handler();
     let shown: String = script
         .eval::<Option<String>>("return ScriptErrors_Message:GetText()")
         .expect("eval")

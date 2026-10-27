@@ -4,7 +4,7 @@
 use mlua::{Lua, MultiValue, Table, Value};
 
 use super::object::anchor_args::{parse_set_point, resolve_rel_target, UNNAMED};
-use super::object::{decode_id, id_to_lud, NamedTarget};
+use super::object::{decode_id, id_to_lud};
 use super::region_map::{set_shared, Side};
 use super::{
     Model, REG_FONTSTRING_META, REG_FONTSTRING_METHODS, REG_REGION_META, REG_REGION_METHODS,
@@ -84,10 +84,17 @@ pub(super) fn link_region(
         // the region keeps its rect until the resolve reaches it.
         model.unsettle_region(rh);
     }
-    if let Some(r) = model.arena.region_mut(rh) {
-        r.draw_layer = layer;
-    }
+    let relayered = model
+        .arena
+        .region_mut(rh)
+        .map(|r| std::mem::replace(&mut r.draw_layer, layer) != layer)
+        .unwrap_or(false);
     model.relink_region_layout(rh, drew, old_loading, moved, Some(shown));
+    // A new owner's link took the tail already; the same owner registers again on a start or on a
+    // new layer, which unregisters first (`0x77fda5`-`0x77fdbb`).
+    if !moved {
+        model.note_region_registered(rh, drew, relayered);
+    }
 }
 
 /// Apply a Button state machine's writes to the regions' shown bit, the one `Show`/`Hide` write.
@@ -318,7 +325,10 @@ pub(crate) fn load_xml_font_file(
                 .is_some_and(|h| (h.script(u) - height.script(u)).abs() < super::SAME_FONT_HEIGHT)
             && (d.outline, d.monochrome) == (outline, monochrome)
     });
-    if !held && !super::face_loads(&model, path) {
+    if !held
+        && !(super::font_block::fontstring_size_loads(&model, rh, height)
+            && super::face_loads(&model, path))
+    {
         return Ok(false);
     }
     let d = model.region_data.entry(rh).or_default();
@@ -465,14 +475,19 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua
                 .app_data_mut::<crate::script::ModelCell>()
                 .expect("model");
+            // Blanked first (`0x519fd3`), then the resolver raises `Unknown unit name` for a token
+            // it does not know (`0x519fe6` → `0x515970`), so a bad token leaves the texture blank.
             model.set_texel(rh, super::texel::TexSet::Own(None));
+            let data = model.region_data.entry(rh).or_default();
+            data.portrait_unit = None;
+            model.note_art(rh);
+            crate::script::unit::check_unit_token(&Some(unit.clone()))?;
             let data = model.region_data.entry(rh).or_default();
             // Lowercased: the reference resolves the token case-insensitively (`0x519ef0` →
             // `0x515970`), stock `MerchantFrame.lua:68` passes `"NPC"`, and the app's bakes are
             // keyed lowercase.
             data.portrait_unit = Some(unit.to_ascii_lowercase());
             data.circular = true;
-            model.note_art(rh);
             Ok(())
         })?,
     )?;
@@ -515,7 +530,7 @@ pub(crate) use paint::{
     apply_texture_name, load_blend_mode, load_texture_file, load_texture_name, orientation,
     texture_name_verdict, FileLoad,
 };
-pub(crate) use text::store_text_of;
+pub(crate) use text::{justify_word, set_justify, store_text_of};
 
 fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
@@ -578,8 +593,8 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
 
     // SetParent(frame) lives in the Region table (`0x7a1550`), which Texture and FontString
     // lookups fall back to (`0x79c650`, `0x79ee50`); `FuBar_FuXPFu.lua:210` calls it on a texture.
-    // A non-frame raises (`0x7a16ea`, `0x87cb78`); no argument raises (`0x87cb48`) where nil
-    // detaches, hence the `MultiValue`. Anchors are untouched, and nothing is returned.
+    // The argument is read as the Frame's is ([`super::object::frame_arg`]): nil detaches, and no
+    // argument raises, hence the `MultiValue`. Anchors are untouched, and nothing is returned.
     set_shared(
         lua,
         &m,
@@ -591,47 +606,12 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 return Err(mlua::Error::runtime("SetParent: expected a region"));
             };
             let rh = region_handle_of(lua, &this)?;
-            let Some(parent) = it.next() else {
-                return Err(mlua::Error::runtime(
-                    "SetParent(): Couldn't find region named '' (no argument)",
-                ));
-            };
-            let wrong_type =
-                || mlua::Error::runtime("SetParent(): Wrong parent object type, expected frame");
-            // `_G[name]` is read before the model borrow, with no `$parent` expansion (`0x76c760`).
-            let named = match &parent {
-                Value::String(s) => Some(match s.to_str() {
-                    Ok(n) => super::object::prefetch_named_target(lua, n.as_ref(), None),
-                    Err(_) => NamedTarget::unreadable(),
-                }),
-                _ => None,
-            };
+            let who = super::binding_abi::name_of(lua, &this);
+            let new_owner =
+                super::object::frame_arg(lua, &who, &super::object::SET_PARENT_LINES, it.next())?;
             let mut model = lua
                 .app_data_mut::<crate::script::ModelCell>()
                 .expect("model");
-            let new_owner = match &parent {
-                Value::Nil => None,
-                // A region or font-object wrapper is no frame: the same "expected frame" raise.
-                Value::Table(t) => Some(
-                    decode_id(t)
-                        .ok()
-                        .and_then(|id| model.id_to_frame.get(&id).copied())
-                        .ok_or_else(wrong_type)?,
-                ),
-                // A name resolves through `_G[name]` and the Frame tag check (`[0xcf0c10]`).
-                Value::String(_) => {
-                    let nt = named.as_ref().expect("a String argument is prefetched");
-                    let hit = super::object::resolve_named_target(&model, nt)
-                        .and_then(|id| model.id_to_frame.get(&id).copied());
-                    Some(hit.ok_or_else(|| {
-                        mlua::Error::runtime(format!(
-                            "SetParent(): Couldn't find region named '{}'",
-                            nt.name
-                        ))
-                    })?)
-                }
-                _ => return Err(wrong_type()),
-            };
             let drew = model.region_draws(rh);
             let old_loading = model.region_owner_loading(rh);
             let moved = model.arena.set_region_owner(rh, new_owner);
@@ -1053,7 +1033,7 @@ pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> ml
     let me = model.region_id(rh);
     let owner = region_owner_id(&mut model, rh);
     let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, owner)?;
-    let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
+    let (point, rel_point, x, y) = (p.point, p.rel_point(&who)?, p.x, p.y);
 
     // The frame's store and its unchanged-anchor test (`0x767c70`), which queues no resolve.
     let units = model.layout_units();

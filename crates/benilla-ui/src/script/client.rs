@@ -192,20 +192,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let name = raw.to_vec();
             // The chunk and every call it makes run under `[0x83de24]` (`0x48b9bb`), the macro
             // context the protected-action gate refuses ([`super::taint`]).
-            let ran = lua
-                .load(&*raw)
-                .set_name(name)
-                .set_mode(mlua::ChunkMode::Text)
-                .into_function()
-                .and_then(|chunk| {
-                    super::taint::tag(lua, &chunk, &super::taint::Context::Macro);
-                    chunk.call::<()>(())
-                });
+            let ran = super::execute_buffer(lua, &raw, name, |chunk| {
+                super::taint::tag(lua, chunk, &super::taint::Context::Macro);
+            });
             if let Err(e) = ran {
                 let bare = super::stdlib::lua_message(&e);
                 lua.app_data_mut::<crate::script::ModelCell>()
                     .expect("model")
-                    .record_error(bare, super::model::HandlerArg::Error(e));
+                    .record_error(bare);
             }
             Ok(())
         })?,
@@ -234,15 +228,21 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // `GetBindLocation()`: the hearthstone's bind location name, which the instance-boot dialog
-    // formats into its text (`StaticPopup.lua:1742`). `""` until `SMSG_BINDPOINTUPDATE` lands, as
-    // the reference's empty buffer, never nil, since addons concatenate it.
+    // formats into its text (`StaticPopup.lua:1742`). A bind zone below 0, past the max or without
+    // an AreaTable row, which is every zone before `SMSG_BINDPOINTUPDATE` lands, answers the
+    // `HOME_INN` text (`48db19`-`48db2c`), never nil.
     g.set(
         "GetBindLocation",
         lua.create_function(|lua, ()| {
-            let model = lua
+            let named = lua
                 .app_data_ref::<crate::script::ModelCell>()
-                .expect("model app_data");
-            lua.create_string(&model.bind_location)
+                .expect("model app_data")
+                .bind_location
+                .clone();
+            match named {
+                Some(name) => lua.create_string(name),
+                None => lua.create_string(super::glue_core::global_text(lua, "HOME_INN")),
+            }
         })?,
     )?;
 
@@ -276,12 +276,19 @@ impl super::UiScript {
         self.take_calls_like(&super::ScriptCall::OpeningCinematic) as u32
     }
 
+    /// The bind location's name as `GetBindLocation` has it pushed: `None` while the bind zone has
+    /// no AreaTable row, which the `$z` token reads as the `HOME_INN` text.
+    pub fn bind_location(&self) -> Option<String> {
+        self.model_ref().bind_location.clone()
+    }
+
     /// Push the bind location's name, resolved from `SMSG_BINDPOINTUPDATE`'s AreaTable id through
-    /// the catalog the hearthstone's `$z` uses, so the two agree; empty until the packet lands.
-    pub fn set_bind_location(&mut self, area_name: &str) {
+    /// the catalog the hearthstone's `$z` uses, so the two agree; `None` until the packet lands, or
+    /// for an area with no row, which `GetBindLocation` answers with the `HOME_INN` text.
+    pub fn set_bind_location(&mut self, area_name: Option<&str>) {
         let mut model = self.model_mut();
-        if model.bind_location != area_name {
-            model.bind_location = area_name.to_string();
+        if model.bind_location.as_deref() != area_name {
+            model.bind_location = area_name.map(str::to_string);
         }
     }
 

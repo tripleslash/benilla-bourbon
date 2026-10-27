@@ -290,6 +290,7 @@ pub(crate) mod region;
 mod region_map;
 mod reputation;
 mod saved;
+mod script_map;
 mod scrollframe;
 mod session;
 mod shapeshift;
@@ -306,6 +307,10 @@ mod statusbar;
 mod stdlib;
 /// An mlua error's bare Lua message, the one value the error handler is called with.
 pub use stdlib::lua_message;
+pub(crate) use stdlib::{
+    call_global_under_error_function, execute_buffer, execute_buffer_reported,
+    run_under_error_function,
+};
 mod summon;
 mod talent;
 mod taxi;
@@ -369,7 +374,7 @@ pub use battlefield_queue::{
 pub use battlefield_score::{BattlefieldScoreRow, BattlefieldScores, BattlefieldStatColumn};
 pub use bind_confirm::PendingEquipAnswer;
 pub use binder::BinderCall;
-pub use binding_abi::{ftol, s_str_to_float, s_str_to_int};
+pub use binding_abi::{ftol, record_float, s_str_to_float, s_str_to_int};
 pub use calls::{spell_owner, ItemCallback, NearestMode, QueuedCall, RecordAsk, ScriptCall};
 pub use camera_view::{CameraViewRequest, CAMERA_VIEW_COUNT};
 pub use channel::{ChannelCommand, JoinedChannel, RecruitmentPlan, ZoneChannelRow};
@@ -379,8 +384,8 @@ pub use char_stats::{
 };
 pub use chat_misc::EmoteRequest;
 pub use chat_send::{
-    expand_target_tokens, validate_escapes, ChatGroup, ChatSend, InvalidEscape, INVALID_ESCAPE,
-    SEND_CHAT_TOKENS,
+    expand_target_tokens, validate_escapes, ChatGroup, ChatSend, DefaultLanguageQuery,
+    InvalidEscape, KnownLanguagesQuery, INVALID_ESCAPE, SEND_CHAT_TOKENS,
 };
 pub use chat_types::ChatTypeColor;
 pub use chat_window::{message_group_index, ChatWindowLook, MESSAGE_GROUPS};
@@ -467,8 +472,8 @@ pub use video_pairs::VIDEO_PAIR_CVARS;
 pub use worldmap_arrow::ARROW_MODEL;
 
 pub(crate) use button::{refresh_label_lua, state_font_lua, LabelFont};
-pub(crate) use font_block::{face_loads, own_font_lua, SAME_FONT_HEIGHT};
-pub use inspect::{InspectCall, UnitReach, VisibleSlotQuery};
+pub(crate) use font_block::{face_loads, font_size_loads, own_font_lua, SAME_FONT_HEIGHT};
+pub use inspect::{InspectCall, UnitReach, UnitReachQuery, VisibleSlotQuery};
 pub use instance::InstanceCall;
 pub use item_stats::{
     item_usable, ItemRecipe, ItemSetQuery, ItemSetView, ItemSpellLine, ItemTemplateView,
@@ -518,9 +523,12 @@ pub use pvp::{
     decorated_name, medal_line, pvp_name_global_keys, HonorNow, HonorState, InspectHonorData,
     InspectHonorNow, InspectHonorSlot, PvpCall, RankTitle,
 };
-pub use quest::{QuestCall, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect, QuestState};
+pub use quest::{
+    QuestCall, QuestGiverQuery, QuestItemView, QuestPanel, QuestRewardSpell, QuestSelect,
+    QuestState,
+};
 pub use quest_live::{
-    QuestClock, QuestClockRead, QuestCoinage, QuestHeld, QuestSlots, QuestStanding,
+    QuestClock, QuestClockRead, QuestCoinage, QuestHeld, QuestObjectName, QuestSlots, QuestStanding,
 };
 pub use quest_log::{
     QuestLogCarry, QuestObjectiveView, QuestRecordView, QuestSlotView, QUEST_LOG_SLOTS,
@@ -564,6 +572,7 @@ pub use taxi::{
     TaxiCall, TaxiMapHead, TaxiMapQuery, TaxiNodeQuery, TaxiNodeType, TaxiUiNode, TaxiUiState,
 };
 pub use tooltip_aura::{AuraKey, AuraTooltipView};
+pub use tooltip_item::SpellCastUiQuery;
 pub use tooltip_spell::{ReputationRequirement, SpellTooltipView};
 pub use tooltip_text::{KeyedArg, TextPart, TooltipText};
 pub use trade::{TradeCall, TradeOpenItem, TradeSideState, TradeSlotItem, TradeState, TRADE_SLOTS};
@@ -582,14 +591,18 @@ pub use types::{
     ExtractedQuad, FontObject, FontShadow, Gradient, JustifyH, JustifyV, LineMeasureRequest,
     MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords, TextShadow,
 };
-pub use unit::by_name::{self, NameCandidate, SeatedSelection};
+pub use unit::by_name::{
+    self, HeldCandidatesQuery, LiveCandidate, LiveCandidates, NameCandidate, SeatedSelection,
+};
 pub use unit::{
     grey_band, level_reads_unknown, parse_unit_token, power_token, resolve_unit_in, unit_is_grey,
-    ObjectNameQuery, PlayerNameQuery, PlayerRecord, SelectionGlobals, SelectionQuery,
-    SelectionRequest, UnitBase, UnitGuids, UnitIdentityRead, UnitObject, UnitObjectRead,
-    UnitRecord, UnitRecordQuery, UnitRelations, UnitState, UnitTokenGlobals, UnitTokenObjects,
+    ObjectNameQuery, PlayerNameQuery, PlayerRecord, RelationAnswer, RelationQuery,
+    SelectionGlobals, SelectionQuery, SelectionRequest, UnitBase, UnitGuids, UnitHeld,
+    UnitHeldQuery, UnitIdentityRead, UnitObject, UnitObjectRead, UnitRecord, UnitRecordQuery,
+    UnitRelations, UnitState, UnitStateAnswer, UnitStateQuery, UnitTokenGlobals, UnitTokenObjects,
     UnitTokenParse,
 };
+pub use use_gates::ControlBypassQuery;
 pub use weapon_enchant::WeaponEnchant;
 pub use who_sort::{WhoSortChain, WhoSortKey};
 pub use worldmap::{
@@ -725,112 +738,12 @@ pub(crate) fn ping_args(token: &str, a: f64, b: f64) -> Vec<ScriptValue> {
 /// which a top-level `SetPoint` without `relativeTo` anchors to; frame ids, from 1, are the rest.
 pub const SCREEN: crate::layout::Handle = 0;
 
-/// The FrameScript handler kinds `SetScript` accepts, each only with the code that fires it
-/// ([`crate::script::object::events_regions::set_script`]). The list is flat, where the reference
-/// resolves names per widget type (base map `0x76a0d0` plus the type's own; a `<Frame>` has no
-/// `OnClick`), so any widget accepts any kind here.
-///
-/// `OnValueChanged` is the StatusBar's (`+0x32c`) and the Slider's (`+0x330`) own slot; the
-/// ScrollFrame's three scroll kinds are `+0x32c`/`+0x334`/`+0x33c` (script-name map `0x786c40`).
-/// The EditBox's vtable (`0x81c910`) replaces the key and char slots: an EditBox never fires
-/// `OnKeyDown`, and fires `OnChar` only from `Insert`, with the inserted text (`0x77c13c`).
-const SCRIPT_KINDS: [&str; 46] = [
-    "OnLoad",
-    "OnEvent",
-    "OnUpdate",
-    // The model pane's two: `OnUpdateModel` from its paint in the draw pass
-    // (`paint_model_panes`), `OnAnimFinished` from its clock advance in the update walk
-    // (`advance_pane`) when the armed sequence completes.
-    "OnUpdateModel",
-    "OnAnimFinished",
-    "OnShow",
-    "OnHide",
-    "OnClick",
-    "OnEnter",
-    "OnLeave",
-    "OnMouseDown",
-    "OnMouseUp",
-    "OnMouseWheel",
-    "OnValueChanged",
-    "OnEnterPressed",
-    "OnEscapePressed",
-    "OnSpacePressed",
-    "OnTabPressed",
-    "OnTextChanged",
-    "OnTextSet",
-    // The caret leg's own (`0x77da80`), fired by the box's flush on dirty bit 2, which a caret
-    // move, an edit, a focus change and a re-seat raise: the edge `ScrollingEdit_OnCursorChanged`
-    // scrolls a multiline box by.
-    "OnCursorChanged",
-    "OnEditFocusGained",
-    "OnEditFocusLost",
-    // The EditBox's input-method slot (script map `0x77a310`, `0x77a40d`, `+0x430`), fired only
-    // when an input-method event changes the box's language (`0x77abb0`, stored at `0x77abf2`).
-    // benilla has no input method, so it is stored and never runs, as on a western layout.
-    "OnInputLanguageChanged",
-    "OnHorizontalScroll",
-    "OnVerticalScroll",
-    "OnScrollRangeChanged",
-    "OnDragStart",
-    "OnDragStop",
-    "OnReceiveDrag",
-    // A text frame's hyperlink button hands it these ([`hyperlink`]): the click as
-    // `OnHyperlinkClick(link, text, button)`, which `ChatFrameTemplate` passes to `SetItemRef`
-    // (`ChatFrame.xml:15`, `ChatFrame.lua:1534`), and the enter and leave with the link alone.
-    "OnHyperlinkClick",
-    "OnHyperlinkEnter",
-    "OnHyperlinkLeave",
-    // The ScrollingMessageFrame's own (script map `0x787d90`, `+0x3bc`), fired by a relayout that
-    // moved its anchor (`0x788a9a`).
-    "OnMessageScrollChanged",
-    // The GameTooltip's engine-fired scripts: money render, money clear and world-hover default
-    // placement, all three wired by the stock template (`GameTooltipTemplate.xml:617-625`).
-    "OnTooltipAddMoney",
-    "OnTooltipCleared",
-    "OnTooltipSetDefaultAnchor",
-    // The ColorSelect's own slot (script map `0x78b4f0`, `+0x338`), fired by its `SetColorRGB`.
-    "OnColorSelect",
-    // The Button/CheckButton double click (script map `0x778c50`, `+0x4d4`), fired by
-    // [`pointer`]'s release edge in place of the second `OnClick` within 300 ms (`0x77937b`).
-    "OnDoubleClick",
-    // The layout event (base map `0x76a0d0`, `+0x120`), fired by the resolve pass on a size change.
-    "OnSizeChanged",
-    // The movie frame's three (script map `0x78c2e0`), fired by its player ([`movieframe`]).
-    "OnMovieFinished",
-    "OnMovieShowSubtitle",
-    "OnMovieHideSubtitle",
-    // The key channels: `OnChar` and `OnKeyDown` fired by [`keyboard`]'s walks (`0x765df0`,
-    // `0x765f10`), `OnKeyUp` by the key-up dispatcher (`0x765fd0`) on the frame that took the
-    // key's down. A frame carrying only `OnKeyUp` still consumes every key-down and runs nothing
-    // on it, the reference's own asymmetry.
-    "OnChar",
-    "OnKeyDown",
-    "OnKeyUp",
-];
-
-/// What a Turtle WoW VM takes beyond [`SCRIPT_KINDS`]. `OnInputLanguageChanged` is a real slot the
-/// reference accepts on every client and fires only when an input method changes the language;
-/// with no input method here nothing fires it, so a 1.12.1 VM refuses it (a documented deviation,
-/// `SCRIPT_KINDS`' rule), and a Turtle VM takes the reference's behaviour: stored, never fired.
-const TURTLE_SCRIPT_KINDS: [&str; 1] = ["OnInputLanguageChanged"];
-
-/// The kind `name` names in a VM of `flavor`, in its canonical spelling, matched
-/// case-insensitively.
-pub(crate) fn script_kind(flavor: UiFlavor, name: &str) -> Option<&'static str> {
-    let extra: &[&'static str] = match flavor {
-        UiFlavor::Vanilla => &[],
-        UiFlavor::Turtle => &TURTLE_SCRIPT_KINDS,
-    };
-    SCRIPT_KINDS
-        .iter()
-        .chain(extra)
-        .copied()
-        .find(|k| k.eq_ignore_ascii_case(name))
-}
-
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // UiScript: the public host
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The budget aborts' messages waiting for the error function ([`UiScript::set_instruction_budget`]).
+struct BudgetAborts(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
 
 /// The Lua scripting host: owns the VM, whose `Model` lives in `lua.app_data`. Its `impl` blocks
 /// sit beside their concerns: [`extract`], [`tick`], [`editbox::seam`], [`layout`] and [`pointer`].
@@ -1120,9 +1033,21 @@ impl UiScript {
     /// session's first frame. Deviation: the client's Lua has no such bound, as nothing sets a
     /// hook (`lua_sethook`, `0x6fba40`, has no caller and no pointer to it), so a load that
     /// never ends hangs it.
+    ///
+    /// An abort runs no error handler, so its message waits and is handed to the error function
+    /// when the budget is disarmed, as a compile failure is (`0x704b42`), once per arming: the
+    /// player's `ScriptErrors` names the runaway loop.
     pub fn set_instruction_budget(&self, budget: u64) {
         let used = self.instructions.clone();
         used.store(0, std::sync::atomic::Ordering::Relaxed);
+        let aborts = match self.lua.app_data_ref::<BudgetAborts>() {
+            Some(a) => a.0.clone(),
+            None => {
+                let a = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                self.lua.set_app_data(BudgetAborts(a.clone()));
+                a
+            }
+        };
         let _ = self.lua.set_hook(
             mlua::HookTriggers {
                 every_nth_instruction: Some(INSTRUCTION_HOOK_STEP),
@@ -1134,10 +1059,14 @@ impl UiScript {
                     std::sync::atomic::Ordering::Relaxed,
                 ) + u64::from(INSTRUCTION_HOOK_STEP);
                 if n > budget {
-                    return Err(mlua::Error::runtime(format!(
+                    let message = format!(
                         "benilla: instruction budget exhausted after {n} VM instructions — \
                          treating this as a non-terminating loop"
-                    )));
+                    );
+                    if n - u64::from(INSTRUCTION_HOOK_STEP) <= budget {
+                        aborts.borrow_mut().push(message.clone());
+                    }
+                    return Err(mlua::Error::runtime(message));
                 }
                 Ok(mlua::VmState::Continue)
             },
@@ -1147,6 +1076,16 @@ impl UiScript {
     /// Remove the instruction budget; the counter keeps its value for [`Self::instructions_used`].
     pub fn clear_instruction_budget(&self) {
         self.lua.remove_hook();
+        let waiting = self
+            .lua
+            .app_data_ref::<BudgetAborts>()
+            .map(|a| std::mem::take(&mut *a.0.borrow_mut()))
+            .unwrap_or_default();
+        for message in waiting {
+            host::unheld(&self.lua, || {
+                stdlib::call_error_function(&self.lua, message.as_bytes())
+            });
+        }
     }
 
     /// VM instructions since the last [`Self::set_instruction_budget`], to the resolution of
@@ -1372,14 +1311,12 @@ impl UiScript {
         self.run_chunk_named(chunk, "(chunk)")
     }
 
-    /// Run a chunk under the name the 1.12 client gives it ([`addon_chunk_name`] for addon files).
+    /// Run a chunk under the name the 1.12 client gives it ([`addon_chunk_name`] for addon files),
+    /// as a file runs (`0x704ae0`): its error, or its compile failure, reaches the Lua error
+    /// handler before this returns it.
     pub fn run_chunk_named(&self, chunk: &[u8], name: &str) -> mlua::Result<()> {
         host::unheld(&self.lua, || {
-            self.lua
-                .load(crate::source::chunk(chunk))
-                .set_name(name)
-                .set_mode(mlua::ChunkMode::Text)
-                .exec()
+            execute_buffer(&self.lua, crate::source::chunk(chunk), name, |_| {})
         })
     }
 
@@ -1855,47 +1792,6 @@ impl UiScript {
     /// Drain the non-fatal host warnings, for the host to log.
     pub fn take_warnings(&mut self) -> Vec<String> {
         drain_field!(self, warnings)
-    }
-
-    /// Report a script error the host caught outside the VM's dispatch (an addon file that failed
-    /// to compile or raised at file scope): it joins the handler-dispatch queue and the retained
-    /// log, not `errors`, since the caller has already logged it. `log` is the decorated text the
-    /// log keeps; `handler` is the one value the error handler is called with, the bare Lua
-    /// message as `lua_pcall` leaves it (`0x703b40`).
-    pub fn report_script_error(&self, log: &str, handler: &str) {
-        // A Load row, not an Error one: to the player a file scope that raised and a missing file
-        // are the same fact, the addon is not running.
-        diagnostics::record_load_failure(&self.lua, log);
-        self.model_mut()
-            .pending_error_dispatch
-            .push(model::HandlerArg::Text(handler.to_string()));
-    }
-
-    /// Hand each queued script error to the Lua error handler, as the reference's catch closure
-    /// (`0x703b40`) calls the one `seterrorhandler` (`0x702900`) holds, read from its slot and not
-    /// through the `geterrorhandler` global; FrameXML installs `_ERRORMESSAGE`, the ScriptErrors
-    /// dialog (`BasicControls.xml:16`). With none installed the error stays on the host channel,
-    /// [`UiScript::errors`], alone; a handler that raises is recorded there only and stops the
-    /// batch, so the path cannot recurse.
-    pub fn dispatch_script_errors_to_handler(&mut self) {
-        let pending = drain_field!(self, pending_error_dispatch);
-        if pending.is_empty() {
-            return;
-        }
-        let Some(handler) = stdlib::error_handler(&self.lua) else {
-            return;
-        };
-        for arg in pending {
-            let ran = host::unheld(&self.lua, || {
-                arg.value(&self.lua).and_then(|v| handler.call::<()>(v))
-            });
-            if let Err(e) = ran {
-                self.model_mut()
-                    .errors
-                    .push(format!("error handler itself failed: {e}"));
-                break;
-            }
-        }
     }
 
     /// Register a named [`FontObject`] (a resolved `<Font>`), its block replaced by `font` and the

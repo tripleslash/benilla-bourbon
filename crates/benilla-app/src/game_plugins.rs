@@ -2064,14 +2064,10 @@ pub(crate) mod schedule_tests {
             "feed_units runs after feed_interact_npc, which publishes the latch it names \"npc\" by"
         );
         let seated = after(units);
-        let stale: Vec<&str> = [
-            "::ui_quest::feed_quest",
-            "::ui_auction::feed_auction",
-            "::ui_trade::feed_trade",
-        ]
-        .into_iter()
-        .filter(|feed| !seated.contains(&one(feed)))
-        .collect();
+        let stale: Vec<&str> = ["::ui_auction::feed_auction", "::ui_trade::feed_trade"]
+            .into_iter()
+            .filter(|feed| !seated.contains(&one(feed)))
+            .collect();
         assert!(
             stale.is_empty(),
             "these windows' shows can read \"npc\" before feed_units seats it: {stale:?}"
@@ -2250,15 +2246,17 @@ pub(crate) mod schedule_tests {
           player's body in the world, and its `.drain(..)` is of the VM's own script errors, \
           raised by the gesture it just made"),
         ("death/mod.rs", "feed_death", Because::MemoLatched,
-         "`feed.vm: VmMemo<DeathAnnounced>`: a fresh memo makes the first snapshot an edge and re-announces a held offer, confirm and corpse range"),
-        ("death/mod.rs", "signal_death", Because::MemoLatched,
-         "our death's leg, run in its packet with the VM deferred: its `PLAYER_DEAD` is parked for the deaths lane, whose drain runs only with the interface up (`ingame_ui_up`), and its memo is `feed.vm`, a `VmMemo<DeathAnnounced>`, which a fresh VM reads as `None`, so `feed_death` signals `PLAYER_DEAD` at its first sight of the body dead"),
+         "`feed.vm: VmMemo<DeathAnnounced>`: a fresh memo takes the first snapshot as no edge and re-announces a held offer, confirm and corpse range; the arrival's owed signal is world-scoped and spent only under the interface"),
+        ("death/mod.rs", "signal", Because::MemoLatched,
+         "the death state's signal: our death's leg (`signal_death`), run in its packet with the VM deferred, its `PLAYER_DEAD` parked for the deaths lane, whose drain runs only with the interface up (`ingame_ui_up`); and an arrival's, which `feed_death` spends only while `ingame_ui_up` holds and keeps owed in the world-scoped `arrival_owed` until then. Its memo is `feed.vm`, a `VmMemo<DeathAnnounced>`"),
         ("net/objects/update.rs", "on_update_end", Because::Deliberate,
          "a net handler whose take is the packet's own pass, the blocks its write pass recorded, documented at the line: it publishes nothing to the VM, whose `UNKNOWNOBJECT` text it reads only to name a party member's pet; its notices go to the gated field-notice firing"),
         ("screenshot.rs", "ask_for_captures", Because::FilledByVm,
          "`pending` holds only the VM's own `Screenshot()` asks, and the take spawns a capture, publishing nothing"),
         ("screenshot.rs", "report_captures", Because::FilledByVm,
          "the outcome chain starts with the VM's own `Screenshot()` call"),
+        ("vplates.rs", "drive_vplates", Because::Deliberate,
+         "its take is the hits queued for plates: a hit before the interface is up has no plate to flash, since a plate exists only once this driver has bound it under a loaded interface, so a dropped one loses nothing"),
         ("target/click.rs", "select_on_plate_click", Because::FilledByVm,
          "filled only by a nameplate frame's click, which a frameless VM has no plate to make"),
         ("ui_action/cooldown_lane.rs", "fire_cooldowns", Because::Deliberate,

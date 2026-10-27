@@ -173,10 +173,11 @@ fn template_view(
     // The active player's gender byte, the trigger text's `$g`/`$G` branch (`0x508214`) and the
     // standing label's (`0x612bf0`).
     gender: &dyn Fn() -> u8,
-    // The VM's own `GlobalStrings.lua`, for the reputation-requirement line and the `$`-engine's
-    // keyed tokens.
-    get: &dyn Fn(&str) -> Option<String>,
+    // The VM's own `GlobalStrings.lua` and its `GetText`, for the reputation-requirement line
+    // and the `$`-engine's keyed tokens.
+    strings: benilla_ui::strings::Strings<'_>,
 ) -> benilla_ui::script::ItemTemplateView {
+    let get = |key: &str| strings.global(key);
     let ViewTables {
         skill_lines,
         factions,
@@ -191,7 +192,7 @@ fn template_view(
             .and_then(|s| s.catalog.get(id))
             .map(|sd| sd.name.clone())
     };
-    let spell_text = |id: u32| spell_desc_text(spells, id, caster, home_area, gender, mods, get);
+    let spell_text = |id: u32| spell_desc_text(spells, id, caster, home_area, gender, mods, &get);
     benilla_ui::script::ItemTemplateView {
         name: t.name.clone(),
         quality: t.quality,
@@ -276,8 +277,11 @@ fn template_view(
                 let faction = factions
                     .and_then(|c| c.faction_name(t.required_rep_faction))
                     .unwrap_or("UNKNOWN");
-                let standing =
-                    benilla_ui::strings::standing_label(get, t.required_rep_rank, gender() == 1);
+                let standing = benilla_ui::strings::standing_label(
+                    strings,
+                    t.required_rep_rank,
+                    gender() == 1,
+                );
                 Some(benilla_ui::strings::fill(
                     &get("ITEM_REQ_REPUTATION")?,
                     &[
@@ -559,7 +563,7 @@ pub(super) fn feed_item_stats(
             .and_then(|id| area_names.as_deref()?.0.resolve(id as i32));
         // Pushed on change, per VM: a rebuilt VM is fed again the frame it appears.
         if last_home.as_deref() != home_area {
-            script.set_bind_location(home_area.unwrap_or_default());
+            script.set_bind_location(home_area);
             *last_home = home_area.map(str::to_string);
             // Re-substitute every held view, or one pushed before the bind point carries a raw
             // `$z`.
@@ -630,14 +634,7 @@ pub(super) fn feed_item_stats(
         // Built first, pushed after: the lookup borrows the VM that `set_item_template` needs
         // mutably.
         let views: Vec<(u32, benilla_ui::script::ItemTemplateView)> = {
-            let get = |key: &str| {
-                script
-                    .lua()
-                    .globals()
-                    .get::<String>(key)
-                    .ok()
-                    .filter(|t| !t.is_empty())
-            };
+            let strings = benilla_ui::strings::Strings::Vm(script.lua());
             ready
                 .into_iter()
                 .filter_map(|id| {
@@ -666,7 +663,7 @@ pub(super) fn feed_item_stats(
                         tables,
                         home_area,
                         &|| gender,
-                        &get,
+                        strings,
                     );
                     Some((id, view))
                 })
@@ -1616,7 +1613,7 @@ mod tests {
             Default::default(),
             None,
             &|| 0,
-            &|_| None,
+            benilla_ui::strings::Strings::Host(&|_| None),
         );
         assert_eq!(view.item_level, 33);
         assert_eq!(
@@ -1646,7 +1643,7 @@ mod tests {
                 tables,
                 None,
                 &|| 0,
-                &|_| None,
+                benilla_ui::strings::Strings::Host(&|_| None),
             );
             (v.area_name, v.map_name)
         };
@@ -1819,7 +1816,7 @@ mod tests {
                 Default::default(),
                 None,
                 &move || gender,
-                &get,
+                benilla_ui::strings::Strings::Host(&get),
             )
             .required_rep_line
         };

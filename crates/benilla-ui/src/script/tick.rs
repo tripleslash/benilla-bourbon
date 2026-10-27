@@ -19,9 +19,10 @@ impl UiScript {
             .push((event.to_string(), args));
     }
 
-    /// Fire an event to every frame registered for it, shown or not, setting both the
-    /// `this`/`event`/`arg1..argN` globals and the `(self, event, ...)` arguments (`0x704d50`,
-    /// `0x704f10`); handler errors go to [`UiScript::errors`]. Frames fire in registration order,
+    /// Fire an event to every frame registered for it, shown or not, setting the
+    /// `this`/`event`/`arg1..argN` globals and calling each handler with no arguments, as
+    /// `lua_pcall(0, 0)` (`0x704e79`, `0x705199`) calls it; a handler's error reaches the Lua error
+    /// handler at the raise, then [`UiScript::errors`]. Frames fire in registration order,
     /// as `SignalEvent` (`0x703e50`) walks its tail-appended list (`0x7052d0`), and consumers rely
     /// on it: both ZoneText frames write `PVPInfoTextString` on one event, and the last one wins.
     ///
@@ -393,6 +394,11 @@ impl super::UiScript {
         });
         if let Some((x, y)) = repick {
             self.mouse_move(x, y);
+        }
+        // The draw pass opens with the overlap bits of the strata whose levels went dirty; with
+        // none dirty it takes no mutable borrow, so the mutation count stands ([`super::ModelCell`]).
+        if self.model_ref().arena.levels_dirty() != 0 {
+            super::object::toplevel::refresh_overlap_bits(&mut self.model_mut());
         }
         self.paint_model_panes();
         self.paint_movies();

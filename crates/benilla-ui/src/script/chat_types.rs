@@ -198,10 +198,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set(
         "GetChatTypeIndex",
-        lua.create_function(|lua, name: Option<String>| {
-            let Some(name) = name else {
-                return Ok(0);
-            };
+        lua.create_function(|lua, name: Value| {
+            // `is-number-or-string` else `Usage: GetChatTypeIndex(type)` (`0x844d54`, `0x4a0a9c`).
+            let name = binding_abi::string_arg(lua, name, "Usage: GetChatTypeIndex(type)")?;
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
@@ -307,7 +306,6 @@ mod tests {
             "extras are 95… — count_before_match + 0x5f"
         );
         assert_eq!(s.eval::<i64>("return GetChatTypeIndex('NOPE')").unwrap(), 0);
-        assert_eq!(s.eval::<i64>("return GetChatTypeIndex()").unwrap(), 0);
     }
 
     #[test]
