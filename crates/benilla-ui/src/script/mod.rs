@@ -224,6 +224,7 @@ mod gossip;
 mod guild;
 mod guild_read;
 mod handler_prof;
+mod held;
 mod host;
 mod hyperlink;
 mod lfg;
@@ -445,7 +446,8 @@ pub use guild::{
     UnitGuild, MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
 };
 pub use guild_read::{GuildAnswer, GuildRead, OwnGuild, UnitGuildRead};
-pub use host::{CallHost, CallTail, Deferring};
+pub use held::{BagGuidQuery, BagHead, BagItemsQuery, BagQuery, BagSlotQuery, HasKeyQuery};
+pub use host::{CallHost, CallTail, Deferring, LiveReader};
 pub use input_verbs::{BindingInput, FiredInput, HeldInput, LookCall, PostureCall, ViewAxis};
 pub use item_calls::ItemCall;
 pub use item_read::{ItemInfoFields, ItemKey, ItemRead, ItemRoll};
@@ -943,6 +945,8 @@ impl UiScript {
         let lua = install_framescript(VmKind::InGame)?;
         install_in_game(&lua)?;
         object::guard_receivers(&lua)?;
+        #[cfg(any(test, feature = "test-support"))]
+        census::survey_listener(&lua);
         Ok(Self::host(lua))
     }
 
