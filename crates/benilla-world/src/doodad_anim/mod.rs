@@ -1319,6 +1319,70 @@ mod tests {
         );
     }
 
+    /// A lazy-rig host born in view under a still camera rigs on its second drawn frame: the
+    /// promote waits for `active`, which the birth frame sets, so a still frame must still walk.
+    #[test]
+    fn a_lazy_host_born_under_a_still_camera_rigs() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_resource::<crate::view::ViewDistance>();
+        app.init_resource::<crate::wmo_portal::ExteriorWindows>();
+        app.init_resource::<crate::wmo_portal::CameraInteriorClaim>();
+        app.init_resource::<crate::rig_palette::RigPalettes>();
+        app.init_asset::<SkinnedMeshInverseBindposes>();
+        app.add_systems(Update, gate_doodad_anim);
+
+        let seat =
+            Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::new(0.0, 0.0, -20.0), Vec3::Y);
+        let projection = bevy::camera::Projection::from(bevy::camera::PerspectiveProjection {
+            far: 5000.0,
+            ..default()
+        });
+        let frustum = bevy::camera::primitives::Frustum(
+            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+                &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
+            ),
+        );
+        app.world_mut().spawn((
+            crate::view::WorldCamera,
+            GlobalTransform::from(seat),
+            seat,
+            frustum,
+            projection,
+        ));
+        let mesh = app.world_mut().spawn(Visibility::Inherited).id();
+        let host = app
+            .world_mut()
+            .spawn((
+                DoodadAnimHost {
+                    meshes: vec![mesh],
+                    fade: crate::particles::EmitterFade::sphere(2.0, Vec3::new(0.0, 0.0, -30.0)),
+                    clip: Some((AnimationNodeIndex::new(1), 2.0)),
+                    armed_at: 0.0,
+                    window_hi: f32::INFINITY,
+                    anim_id: Some(0),
+                    then: None,
+                    active: false,
+                    parked_at: 0.0,
+                },
+                LazyRig {
+                    bones: 1,
+                    ibp: Handle::default(),
+                    parts: Vec::new(),
+                },
+            ))
+            .id();
+        for _ in 0..4 {
+            app.update();
+        }
+        assert!(
+            app.world()
+                .entity(host)
+                .contains::<crate::rig_palette::RigSkin>(),
+            "a drawn lazy host under a still camera never promoted its rig"
+        );
+    }
+
     /// A transport's prop: its spawn sphere is entity-local (behind the camera here), and the
     /// gate must judge where the root is now, every frame, even with the camera still.
     #[test]

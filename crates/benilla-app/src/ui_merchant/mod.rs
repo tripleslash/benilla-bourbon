@@ -633,7 +633,7 @@ pub(crate) mod purse_fixture {
         let world = app.world_mut();
         let mut script = world.remove_non_send::<UiScript>().expect("a VM");
         let mut state = bevy::ecs::system::SystemState::<live::MerchantLive>::new(world);
-        let mut family = state.get_mut(world);
+        let mut family = state.get_mut(world).expect("the merchant reads validate");
         let r = script.hosted(&mut Host(&mut family), |s| {
             s.eval::<T>(chunk).expect("runs")
         });

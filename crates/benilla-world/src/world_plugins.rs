@@ -240,16 +240,25 @@ impl Plugin for WorldFoundation {
     }
 
     fn finish(&self, app: &mut App) {
-        // Bevy's prepass copies every mesh's `GlobalTransform` into `PreviousGlobalTransform` each
-        // frame for motion vectors; no view here asks for them (no `MotionVectorPrepass`, no TAA:
-        // the FSR velocity pass keeps its own last-world-frame poses, `fsr::velocity`), and a mesh
-        // without the component extracts its current transform as its previous one.
-        let _ = app.remove_systems_in_set(
-            PreUpdate,
+        app.add_systems(Startup, drop_previous_transform_copy);
+    }
+}
+
+/// Bevy's prepass copies every mesh's `GlobalTransform` into `PreviousGlobalTransform` each frame
+/// for motion vectors; no view here asks for them (no `MotionVectorPrepass`, no TAA: the FSR
+/// velocity pass keeps its own last-world-frame poses, `fsr::velocity`), and a mesh without the
+/// component extracts its current transform as its previous one. Removed at the first frame's
+/// startup, ahead of its `PreUpdate`, and not at build: a removal builds the schedule, and a
+/// `PreUpdate` built before the app runs hides its systems' run conditions from the schedule
+/// census (`game_plugins::schedule_tests`).
+fn drop_previous_transform_copy(world: &mut World) {
+    let _ = world.try_schedule_scope(PreUpdate, |world, schedule| {
+        let _ = schedule.remove_systems_in_set(
             bevy::pbr::update_mesh_previous_global_transforms,
+            world,
             bevy::ecs::schedule::ScheduleCleanupPolicy::RemoveSetAndSystems,
         );
-    }
+    });
 }
 
 /// The browser's default per-frame GPU upload cap in MB (native stays unlimited unless

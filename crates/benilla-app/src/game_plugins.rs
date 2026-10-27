@@ -996,7 +996,15 @@ pub(crate) mod schedule_tests {
     /// `PlacedLight` lamps against the nine transform writers `build_light_data` already pairs
     /// with (nameplates, raid marks, billboards, the cloud dome, the camera followers), populations
     /// it never shares an entity with: fourteen pairs in the dump; the census measures 485.
-    const POST_UPDATE_CEILING: usize = 485;
+    ///
+    /// **681 (fork: measured at the merge of upstream 9e4d24081)** — 116 are avian's exclusive
+    /// `run_physics_schedule`, which a47941ba4 moved from the fixed loop into `PostUpdate` once a
+    /// frame, against every `PostUpdate` system it is not ordered with (an exclusive system runs
+    /// alone either way; the pairs name no component). The other 80 came with the fork's
+    /// 2026-10-21..25 work (the parallel passes of ffaecab86 among it), mostly `GlobalTransform`
+    /// and `EffectQuads` between the camera followers and the effect lanes, as before; not yet
+    /// read pair by pair. `WOW_AMBIGUITY_DUMP=1` prints them (`POST …`).
+    const POST_UPDATE_CEILING: usize = 681;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
@@ -1149,6 +1157,33 @@ pub(crate) mod schedule_tests {
         // The declared graph: a barrier bevy placed is not a declared order (`SyncPoints`).
         let update = census(&mut app, Update, SyncPoints::Declared);
         let post = census(&mut app, PostUpdate, SyncPoints::Declared);
+        if std::env::var_os("WOW_AMBIGUITY_DUMP").is_some() {
+            let mut rows: Vec<String> = post
+                .conflicts
+                .iter()
+                .map(|(a, b, what)| {
+                    let (x, y) = if post.name(*a) <= post.name(*b) {
+                        (*a, *b)
+                    } else {
+                        (*b, *a)
+                    };
+                    format!(
+                        "  POST {}  <->  {}
+      on {}",
+                        post.name(x),
+                        post.name(y),
+                        what.iter()
+                            .map(|id| post.component(*id))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect();
+            rows.sort();
+            for r in rows {
+                eprintln!("{r}");
+            }
+        }
         let mut explained: BTreeMap<&str, usize> = BTreeMap::new();
         let mut actionable = Vec::new();
         for (a, b, what) in &update.conflicts {
@@ -1262,7 +1297,10 @@ pub(crate) mod schedule_tests {
     /// That is upstream's count, 58 at d3b5df3f4; this fork's own systems with commands (the
     /// lighting, liquid, SSILVB, FSR and web-build lanes) place three more. Declaring them away
     /// is fork-side work.
-    const UPDATE_SYNC_POINT_CEILING: usize = 61;
+    ///
+    /// 62 measured at the merge of upstream 9e4d24081, and already on the tree before it: one
+    /// more from the fork's 2026-10-21..26 work, not yet read barrier by barrier.
+    const UPDATE_SYNC_POINT_CEILING: usize = 62;
     const UPDATE_SYNC_POINT_SLACK: usize = 4;
 
     #[test]
