@@ -751,6 +751,7 @@ version = "0.2.0"
 dependencies = [
  "benilla-bytes",
  "flate2",
+ "zlib-rs",
 ]
 
 [[package]]
