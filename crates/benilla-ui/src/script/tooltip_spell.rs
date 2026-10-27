@@ -963,6 +963,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         spell,
                         None,
                         SpellRenderOpts {
+                            compact: compact_tooltips(lua),
                             show_rank: true,
                             remaining_ms,
                             ..Default::default()

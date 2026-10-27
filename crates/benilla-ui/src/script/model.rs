@@ -613,6 +613,8 @@ pub(crate) struct Model {
     /// Each macro's cached cast by id, derived in the verbs and the app's pass; an absent macro
     /// reads unbound.
     pub(crate) macro_bindings: HashMap<u32, macros::MacroBinding>,
+    /// fork: each `#show` macro's icon, fixed when its cast is derived (`macros::bind_record`).
+    pub(crate) macro_show_icons: HashMap<u32, String>,
     /// The macro icon chooser's paths, behind `GetMacroIconInfo`: `0x4f0090`'s listing of
     /// `Interface\Icons\`, not `SpellIcon.dbc`.
     pub(crate) macro_icons: Vec<String>,
@@ -1527,6 +1529,7 @@ impl Model {
             macro_edits: 0,
             macro_derives: Default::default(),
             macro_bindings: HashMap::new(),
+            macro_show_icons: HashMap::new(),
             macro_icons: Vec::new(),
             macro_icon_source: None,
             cast_view: Default::default(),

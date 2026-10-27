@@ -101,8 +101,7 @@ fn bound_name(aliases: &[String], body: &str) -> Option<(CastArm, String)> {
     shown.or_else(|| cast_name(aliases, body))
 }
 
-/// Whether a body reads retail macro options, whose choice moves with the world (this fork), so
-/// its binding is derived again at every pass.
+/// Whether a body reads retail macro options (this fork).
 pub fn reads_options(body: &str) -> bool {
     body.contains('[') || body.contains(';')
 }
@@ -111,23 +110,26 @@ pub fn reads_options(body: &str) -> bool {
 /// holds selects, `None` with none holding.
 pub(crate) type Options<'a> = &'a dyn Fn(&str) -> Option<String>;
 
-/// fork: the options [`derive`] reads for one body, evaluated now, before a verb borrows the
-/// model the evaluator's unit verbs read: the value the clause that holds selects, `None` with
-/// none holding.
-pub(crate) fn options_now(
-    lua: &mlua::Lua,
-    aliases: &[String],
-    body: &str,
-) -> impl Fn(&str) -> Option<String> {
+/// fork: the options [`derive`] reads for one body, picked once and never evaluated: the first
+/// clause's value, whatever its conditions, so the button's spell and icon are fixed by the body
+/// alone and nothing re-derives as the world moves. The press still evaluates its clauses.
+pub(crate) fn options_static(aliases: &[String], body: &str) -> impl Fn(&str) -> Option<String> {
     let answer = bound_name(aliases, body)
         .filter(|(_, name)| crate::script::macro_has_options(name))
-        .and_then(|(_, name)| {
-            super::super::macro_options::evaluate(lua, &name)
-                .ok()
-                .flatten()
-        })
-        .map(|(value, _)| value);
+        .and_then(|(_, name)| first_clause_value(&name));
     move |_| answer.clone()
+}
+
+/// The first non-empty value of `options`' `;`-separated clauses, its `[...]` groups dropped.
+fn first_clause_value(options: &str) -> Option<String> {
+    options.split(';').find_map(|clause| {
+        let mut rest = clause.trim_start();
+        while let Some(open) = rest.strip_prefix('[') {
+            rest = open.split_once(']').map_or("", |(_, r)| r).trim_start();
+        }
+        let value = rest.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
 }
 
 /// The macro's cast, derived again (`0x4efe00`) from `was`: [`cast_name`] resolved as
@@ -135,8 +137,8 @@ pub(crate) fn options_now(
 /// press agree on the rank. A match writes the book it came from; a miss leaves the selector.
 ///
 /// Deviation (this fork): a `#show` argument names the spell in the cast line's place, and a name
-/// with retail macro options binds the value `options` selects as the world stands (the VM's
-/// evaluator), nothing when no clause holds. A plain name binds as in 1.12.
+/// with retail macro options binds the value `options` picks ([`options_static`]), nothing when
+/// it picks none. A plain name binds as in 1.12.
 pub(crate) fn derive(
     aliases: &[String],
     body: &str,

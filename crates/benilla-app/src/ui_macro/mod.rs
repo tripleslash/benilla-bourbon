@@ -256,9 +256,6 @@ fn save_dirty_macros(
 struct BindingsSeen {
     macros: Option<u64>,
     pet_book: Option<u32>,
-    /// Whether a macro reads retail options, whose choice moves with the world (this fork), so
-    /// every pass derives again.
-    conditional: bool,
 }
 
 /// Derive the bound spells the engine's verbs do not (they derive the record a create or an edit
@@ -300,12 +297,7 @@ fn rebind_macro_spells(
         let book_sorts = pet_bar.map_or(0, |b| b.book_sorts);
         let table_moved = seen.macros != Some(generation);
         let pet_moved = seen.pet_book != Some(book_sorts);
-        if !table_moved
-            && !pet_moved
-            && !*arrived
-            && actions.superseded.is_empty()
-            && !seen.conditional
-        {
+        if !table_moved && !pet_moved && !*arrived && actions.superseded.is_empty() {
             return None;
         }
         seen.macros = Some(generation);
@@ -333,26 +325,15 @@ fn rebind_macro_spells(
             }
             script.set_macro_bindings(records);
         }
-        // fork: a macro that reads retail options is derived again at every pass, as its choice
-        // moves with the world.
-        let conditional: std::collections::HashSet<u32> = script
-            .macros()
-            .views()
-            .filter(|m| benilla_ui::script::macro_reads_options(&m.body))
-            .map(|m| m.id)
-            .collect();
-        seen.conditional = !conditional.is_empty();
-        Some((every, pet_moved, conditional))
+        Some((every, pet_moved))
     });
-    let Some((every, pet_moved, conditional)) = derive else {
+    let Some((every, pet_moved)) = derive else {
         return;
     };
     // With the host lent, so a derivation reads the book as it stands.
     vm.run(|script| {
         if let Some(script) = script {
-            script.derive_macro_bindings(|id, b| {
-                every || conditional.contains(&id) || (pet_moved && b.follows_the_pet_book())
-            });
+            script.derive_macro_bindings(|id, b| every || (pet_moved && b.follows_the_pet_book()));
         }
     });
     vm.turn(|script, (_, slots, mut bound, _)| {
