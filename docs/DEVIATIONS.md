@@ -36,7 +36,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - [benilla-app](#benilla-app): 264
 - [benilla-assets](#benilla-assets): 7
 - [benilla-blp](#benilla-blp): 2
-- [benilla-formats](#benilla-formats): 27
+- [benilla-formats](#benilla-formats): 28
 - [benilla-lua](#benilla-lua): 11
 - [benilla-protocol](#benilla-protocol): 30
 - [benilla-srp](#benilla-srp): 2
@@ -620,6 +620,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The fx lane redraws them as projected decals (`ground_fx`) so they drape the terrain. ([`src/models/types.rs:394`](../crates/benilla-formats/src/models/types.rs#L394))
 - Consumers light such a card off the side it presents, because the reference's shading of it is inverted and follows the camera. ([`src/models/types.rs:465`](../crates/benilla-formats/src/models/types.rs#L465))
 - The UV comes from the model-space position, not each surface's own `(i, j)`, because the two agree on cell-aligned surfaces and the position never seams where they are not. ([`src/models/wmo/group.rs:19`](../crates/benilla-formats/src/models/wmo/group.rs#L19))
+- A non-black SIDN colour glows without the `0x10` flag too. Turtle WoW's `Stormwind.wmo` (patch-3) zeroes every MOMT flag but keeps the colours, which left its lamp glass and windows dark at night; no 1.12.1 root has such a colour unflagged. ([`src/models/wmo/group.rs:578`](../crates/benilla-formats/src/models/wmo/group.rs#L578))
 
 #### particles
 
