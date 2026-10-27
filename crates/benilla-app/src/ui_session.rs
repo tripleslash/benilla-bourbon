@@ -26,7 +26,7 @@ pub(crate) use latch::{
     release_latch, with_script, CoreCloses, InteractLatch, LatchApp, LatchCloses, LatchSteps,
     LatchVocal, LatchedWindow, NpcWindow,
 };
-pub(crate) use release::form_bars_interaction;
+pub(crate) use release::{form_bars_interaction, on_field_edge};
 
 /// Owns [`InteractLatch`], its watchdog and [`InteractNpc`], read by the `"npc"` portrait and the
 /// interaction face-me.
@@ -55,12 +55,6 @@ impl Plugin for UiSessionPlugin {
                     latch::watch_interaction_range
                         .after(WorldStage::Net)
                         .before(crate::ui_script::UiFeed),
-                    // The form change and the service flags that release the latch, off the
-                    // apply pass's field edges; a death's are its handler's (`crate::target`).
-                    release::release_on_field_edges
-                        .in_set(WorldStage::Net)
-                        .after(crate::net::apply_net_updates)
-                        .before(feed_interact_npc),
                     // Inside the net chain, after the apply pass that opens and closes windows
                     // and before the facing chain: a `MERCHANT_SHOW` handler reads
                     // `UnitName("NPC")` the frame it opens.
@@ -249,6 +243,7 @@ mod tests {
             let (tx, rx) = crossbeam_channel::unbounded();
             let (mut app, _) = latched_app::<QuestGiver>(giver, dist);
             app.insert_resource(NetCommands(tx));
+            crate::ui_quest::hold_for_test(app.world_mut(), giver);
             crate::ui_quest::open_panel(app.world_mut(), giver, detail(giver));
             app.update();
             (

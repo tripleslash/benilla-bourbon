@@ -121,13 +121,30 @@ pub struct QuestRecordView {
     pub reward_money: u32,
     /// The template's money at the top level (`+0x2c`), in copper.
     pub reward_money_max_level: i32,
-    /// `(item id, count)`, the ids that are set, in order (`+0x3c`, `+0x4c`).
+    /// `(item id, count)` per slot as the template stores them, 0 for an unset id (`+0x3c` x 4,
+    /// `+0x5c` x 6): the counts stop at the first unset one and the getters index the slots.
     pub rewards: Vec<(u32, u32)>,
     pub choices: Vec<(u32, u32)>,
     /// `GetQuestLogQuestText`'s two returns, the macros expanded.
     pub description: String,
     pub objectives_text: String,
     pub reward_spell: Option<QuestRewardSpell>,
+    /// The quest's map point, the template's `PointX`, `PointY` (`+0x90`, `+0x94`) and `PointOpt`
+    /// (`+0x98`), which the selected quest's minimap arrow takes ([`QuestBlip`]).
+    pub point: (f32, f32),
+    pub point_opt: u32,
+}
+
+/// The selected quest's static minimap blip, slot 0 (`0x6dacb0`: icon 5, no flags): the record's
+/// point, its `PointOpt` as the rank and its title as the name, set by `SelectQuestLogEntry` and
+/// by the selected record's arrival (`0x4def70`), cleared when the quest leaves the log
+/// (`0x4df0e0`). The point (0, 0) hides it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuestBlip {
+    pub x: f32,
+    pub y: f32,
+    pub rank: u32,
+    pub name: String,
 }
 
 /// One row of the display list `0xbb71c0`: a header, or a quest and its slot (`+0x4`).
@@ -396,6 +413,7 @@ fn sort_rows(model: &mut Model, selected: Option<u32>) {
         quest_log_collapsed: collapsed,
         quest_store,
         quest_log_selection,
+        quest_blip,
         ..
     } = model;
     let records = &quest_store.records;
@@ -466,6 +484,10 @@ fn sort_rows(model: &mut Model, selected: Option<u32>) {
                 .position(|e| !e.is_header && e.quest_id == id)
         })
         .map_or(0, |i| i as u32 + 1);
+    // The selected quest left the log: its blip goes (`0x4df0e0`, on the selected id).
+    if selected.is_some() && *quest_log_selection == 0 {
+        *quest_blip = None;
+    }
 }
 
 /// Tutorial 0x21, "Quest Completion": a turn-in test that passes triggers it (`0x4df78d`-`0x4df792`
@@ -580,6 +602,28 @@ impl Model {
     pub(crate) fn selected_quest_record(&self) -> Option<&QuestRecordView> {
         self.quest_row_parts(self.quest_log_selection as usize)
             .map(|(record, _)| record)
+    }
+
+    /// The selected quest's id (`0xbb7480`): the row the selection names.
+    fn selected_quest_id(&self) -> Option<u32> {
+        self.quest_row(self.quest_log_selection as usize)
+            .filter(|r| !r.is_header)
+            .map(|r| r.quest_id)
+    }
+
+    /// `0x4def70`: with the selected quest's record held, static blip 0 is set at its point
+    /// (`0x4defb9`-`0x4defd3`); with none the callback `0x4defe0` runs it again when the record
+    /// lands, and the blip stays as it was.
+    fn set_quest_blip(&mut self) {
+        let Some(record) = self.selected_quest_record() else {
+            return;
+        };
+        self.quest_blip = Some(QuestBlip {
+            x: record.point.0,
+            y: record.point.1,
+            rank: record.point_opt,
+            name: record.title.clone(),
+        });
     }
 
     /// An item's record with a callback (`0x55ba30` with `0x4e0830`): the name, quality and icon,
@@ -876,6 +920,11 @@ fn line_parts(lua: &Lua, model: &mut Model, index: usize, line: usize) -> Option
     }
 }
 
+/// The reward or choice slots up to the first unset id, the count the log's getters make.
+fn count_to_first_unset(slots: &[(u32, u32)]) -> i64 {
+    slots.iter().take_while(|&&(id, _)| id != 0).count() as i64
+}
+
 /// One reward or choice of the selected quest as a [`QuestItemView`], the item record read
 /// without a callback; `None` past the list or with no selection.
 pub(crate) fn selected_quest_item(
@@ -892,7 +941,10 @@ pub(crate) fn selected_quest_item(
     } else {
         return None;
     };
-    let &(item_id, count) = list.get(index.checked_sub(1)?)?;
+    // An unset slot holds no item.
+    let &(item_id, count) = list
+        .get(index.checked_sub(1)?)
+        .filter(|&&(id, _)| id != 0)?;
     let template = model.item_templates.get(&item_id);
     Some(QuestItemView {
         name: template.map(|t| t.name.clone()),
@@ -1047,9 +1099,18 @@ impl super::UiScript {
             let store = &mut model.quest_store;
             let ids: Vec<u32> = records.iter().map(|&(id, _)| id).collect();
             store.records.extend(records);
-            ids.into_iter()
-                .map(|id| store.record_waits.remove(&id).unwrap_or(0))
-                .collect()
+            let waits: Vec<u32> = ids
+                .iter()
+                .map(|id| store.record_waits.remove(id).unwrap_or(0))
+                .collect();
+            // The selected quest's record arriving is the blip's callback (`0x4defe0`).
+            if model
+                .selected_quest_id()
+                .is_some_and(|id| ids.contains(&id))
+            {
+                model.set_quest_blip();
+            }
+            waits
         };
         for _ in 0..waits.into_iter().sum::<u32>() {
             let ran = {
@@ -1151,9 +1212,9 @@ impl super::UiScript {
     /// Fire one `QUEST_LOG_UPDATE` for each missed record that landed, after the frame's landings,
     /// so a handler that walks the log reads every one of them.
     // Deviation: one signal per missed record, where the reference runs every callback of every
-    // miss as its record lands (creatures in `0x556e20` at `0x556f91`, items in `0x55bc70` via
-    // `0x55bdb0` from `0x555140`; `0x4e07ea`, `0x4e083a`), 2^k - 1 updates for a walking handler
-    // over k first-seen records.
+    // miss as its record lands (creatures in `0x556e20` at `0x556f91`, items at `0x55bea8` and
+    // `0x55bf39` in `0x55bdb0`, from `0x555140`; `0x4e07ea`, `0x4e083a`), 2^k - 1 updates for a
+    // walking handler over k first-seen records.
     pub fn flush_quest_log_refires(&mut self) {
         let due = drain_field!(self, quest_store.due);
         for _ in 0..due {
@@ -1196,6 +1257,22 @@ impl super::UiScript {
             super::ScriptCall::Quest(super::QuestCall::Push(id)) => Some(*id),
             _ => None,
         })
+    }
+
+    /// The selected quest's blip for the minimap's rim arrow, nothing at the point (0, 0)
+    /// (`0x6dac10`'s hidden position).
+    pub fn quest_blip(&self) -> Option<QuestBlip> {
+        self.model_ref()
+            .quest_blip
+            .clone()
+            .filter(|b| (b.x, b.y) != (0.0, 0.0))
+    }
+
+    /// The static blips are cleared when the world is entered (`0x6d8f92`, `0x6d8fb0`).
+    pub fn clear_quest_blip(&mut self) {
+        if self.model_ref().quest_blip.is_some() {
+            self.model_mut().quest_blip = None;
+        }
     }
 
     /// Set the selection.
@@ -1438,8 +1515,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua
                 .app_data_mut::<crate::script::ModelCell>()
                 .expect("model app_data");
+            // The old selection's blip goes first, ahead of the index test (`0x4def39` →
+            // `0x4df0e0`): a header, a bad index or a quest not yet cached leaves no arrow.
+            if model.selected_quest_id().is_some() {
+                model.quest_blip = None;
+            }
             if model.quest_row(i as usize).is_some_and(|r| !r.is_header) {
                 model.quest_log_selection = i;
+                // `0x4def63` stores the selection, then `0x4def70` sets the blip.
+                model.set_quest_blip();
             }
             Ok(())
         })?,
@@ -1585,11 +1669,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     }
     // The reference counts the reward ids to the first unset one (`0x4e0a34`-`0x4e0a40`), so
     // `[A, 0, B, 0]` counts 1, and `GetQuestLogRewardInfo` indexes the raw array (`0x4e0b98`);
-    // the record holds the set ids compacted.
+    // the choices count the same way (`0x4e0ac4`-`0x4e0ad0`).
     // Deviation: four set ids count 4, where the loop's exit `jmp 0x4e0a4c` (`0x4e0a42`) skips
     // the store at `0x4e0a49` and answers 0, a client bug.
-    install_detail_count(lua, "GetNumQuestLogRewards", |r| r.rewards.len() as i64)?;
-    install_detail_count(lua, "GetNumQuestLogChoices", |r| r.choices.len() as i64)?;
+    install_detail_count(lua, "GetNumQuestLogRewards", |r| {
+        count_to_first_unset(&r.rewards)
+    })?;
+    install_detail_count(lua, "GetNumQuestLogChoices", |r| {
+        count_to_first_unset(&r.choices)
+    })?;
     // `0x4e1070`: the base money when not negative (`0x4e10f7`), plus the top-level money
     // (`+0x2c`, `0x4e1102`) for a player of level 60 or more (`0x4e10b2`, signed), summed as a
     // signed dword (`fild` at `0x4e1108`).
@@ -1632,7 +1720,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         .expect("model app_data");
                     let pair = model.selected_quest_record().and_then(|r| {
                         let list = if choices { &r.choices } else { &r.rewards };
-                        usize::try_from(row).ok().and_then(|n| list.get(n)).copied()
+                        usize::try_from(row)
+                            .ok()
+                            .and_then(|n| list.get(n))
+                            .copied()
+                            // An unset slot holds no item.
+                            .filter(|&(id, _)| id != 0)
                     });
                     pair.and_then(|(id, count)| {
                         let (name, quality, icon) = model.quest_item_lookup(id)?;
@@ -2412,6 +2505,62 @@ mod tests {
             ["QUEST_LOG_UPDATE 2"],
             "past the rows folds all"
         );
+    }
+
+    /// `SelectQuestLogEntry` sets the minimap's static blip 0 at the quest's point, ranked by its
+    /// `PointOpt` and named by its title (`0x4def63` → `0x4def70` → `0x6dacb0`); a quest with the
+    /// point (0, 0) hides it; the quest leaving the log clears it (`0x4df0e0`); a record landing
+    /// after the selection sets it from the callback (`0x4defe0`).
+    #[test]
+    fn the_selected_quests_point_is_the_static_minimap_blip() {
+        let mut s = UiScript::new().unwrap();
+        let (mut a, b) = (threat_within(), camp_cleanup());
+        a.point = (-8900.0, 600.0);
+        a.point_opt = 3;
+        seat(&mut s, &[(5, a, slot(5, 0, 0)), (6, b, slot(6, 0, 0))]);
+        assert_eq!(s.quest_blip(), None, "nothing selected");
+        // The header row selects nothing (`0x4def55`).
+        s.run("SelectQuestLogEntry(1)").unwrap();
+        assert_eq!(s.quest_blip(), None);
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        let blip = s.quest_blip().expect("the quest's point");
+        assert_eq!(
+            (blip.x, blip.y, blip.rank, blip.name.as_str()),
+            (-8900.0, 600.0, 3, "A Threat Within")
+        );
+        s.run("SelectQuestLogEntry(3)").unwrap();
+        assert_eq!(s.quest_blip(), None, "the point (0, 0) is hidden");
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        assert!(s.quest_blip().is_some());
+        // The old selection's blip goes before the new index is judged (`0x4def39`): a header
+        // click hides the arrow, and the selection stays.
+        s.run("SelectQuestLogEntry(1)").unwrap();
+        assert_eq!(s.quest_blip(), None);
+        assert_eq!(s.quest_log_selection(), 2);
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        assert!(s.quest_blip().is_some());
+        s.clear_quest_blip();
+        assert_eq!(
+            s.quest_blip(),
+            None,
+            "a world entry zeroes the static records"
+        );
+
+        // A record that lands after the selection sets it from the callback (`0x4defe0`).
+        let mut late = threat_within();
+        late.point = (10.0, 20.0);
+        s.refuse_quest_record(5);
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        assert_eq!(s.quest_blip(), None, "no record, no blip");
+        s.land_quest_records(vec![(5, late)]);
+        assert_eq!(s.quest_blip().map(|b| b.x), Some(10.0));
+
+        // The quest leaving the log takes its blip.
+        let mut slots = [QuestSlotView::default(); QUEST_LOG_SLOTS];
+        slots[0] = slot(6, 0, 0);
+        s.set_quest_slots(slots);
+        s.quest_log_changed();
+        assert_eq!(s.quest_blip(), None);
     }
 
     /// The selection follows its quest across a fold and a rebuild, the reference's quest id.

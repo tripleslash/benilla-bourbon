@@ -63,7 +63,7 @@ fn tip_ref(model: &Model, h: FrameHandle) -> Option<&TooltipState> {
 pub(super) fn tip_mut(model: &mut Model, h: FrameHandle) -> mlua::Result<&mut TooltipState> {
     match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
         Some(KindState::Tooltip(t)) => Ok(t),
-        _ => Err(mlua::Error::runtime("not a GameTooltip")),
+        _ => Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
     }
 }
 
@@ -609,7 +609,7 @@ pub(super) fn append_line(
         .expect("model app_data");
     let (lh, rh) = match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::Tooltip(t)) => (t.left_lines[n - 1], t.right_lines[n - 1]),
-        _ => return Err(mlua::Error::runtime("not a GameTooltip")),
+        _ => return Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
     };
     if !left.0.is_empty() {
         write_cell(

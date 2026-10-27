@@ -596,7 +596,9 @@ fn a_movement_block_for_the_mover_brings_nothing_back() {
     send(world, [unit(MOB, &[(ENTRY, 299)])]);
     send(world, [out_of_range(&[MOB])]);
     world.init_resource::<crate::player::Player>();
-    world.resource_mut::<crate::player::Player>().foreign_mover = Some(MOB);
+    world
+        .resource_mut::<crate::player::MoverLock>()
+        .foreign_mover = Some(MOB);
 
     send(world, [moved(MOB)]);
     assert!(!held(world, MOB), "the mover's block is dropped");
@@ -611,7 +613,9 @@ fn a_movement_block_for_the_mover_brings_nothing_back() {
 
     // Control lost zeroes the mover (`0x5fa600`), and the block brings the unit back.
     send(world, [out_of_range(&[MOB])]);
-    world.resource_mut::<crate::player::Player>().control_lost = true;
+    world
+        .resource_mut::<crate::player::MoverLock>()
+        .control_lost = true;
     send(world, [moved(MOB)]);
     assert!(
         held(world, MOB),
@@ -1096,13 +1100,14 @@ fn a_groupmates_pet_leaving_its_field_tears_down_that_pets_selection() {
             None,
             Some(ME),
         );
-    let torn = |world: &mut World| -> Vec<u64> {
-        world
-            .resource_mut::<Messages<crate::target::DeselectGuid>>()
-            .drain()
-            .map(|d| d.0)
-            .collect()
+    // The selection `guid` names, by its guid alone, then whether the packet tore it down.
+    let select = |world: &mut World, guid: u64| {
+        *world.resource_mut::<crate::target::Selection>() = crate::target::Selection {
+            guid: Some(guid),
+            ..Default::default()
+        };
     };
+    let torn = |world: &mut World| world.resource::<crate::target::Selection>().guid.is_none();
     send(
         world,
         [
@@ -1113,17 +1118,19 @@ fn a_groupmates_pet_leaving_its_field_tears_down_that_pets_selection() {
             unit(NEAR_PET, &[(2, 0x9)]),
         ],
     );
-    torn(world);
 
+    select(world, PET);
     send(world, [values(MATE, &guid(0, 8))]);
-    assert_eq!(torn(world), [PET], "a groupmate's summon");
+    assert!(torn(world), "a groupmate's summon");
+    select(world, PET);
     send(world, [values(STRANGER, &guid(0, 8))]);
-    assert!(torn(world).is_empty(), "a player outside the group");
+    assert!(!torn(world), "a player outside the group");
     send(world, [values(ME, &guid(PET, 6))]);
     send(world, [values(ME, &guid(NEAR_PET, 6))]);
-    assert_eq!(torn(world), [PET], "our own charm, moved off");
+    assert!(torn(world), "our own charm, moved off");
+    select(world, NEAR_PET);
     send(world, [values(ME, &guid(0, 6))]);
-    assert!(torn(world).is_empty(), "an old pet still held");
+    assert!(!torn(world), "an old pet still held");
 }
 
 /// A transport's clock is anchored at the instant its packet arrived, the time the queue node

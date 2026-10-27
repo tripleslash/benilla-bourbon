@@ -23,9 +23,10 @@ use super::motion::{
 };
 use super::{
     ActiveMover, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity, NetHandlerApp, ObjectStore,
-    RemoteMotion, SelfGuid, SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
+    RemoteMotion, SelfGuid, SelfPlayer, SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
 };
 
+mod arrival;
 mod update;
 
 pub(crate) use update::{release_unheld, Listed, ReleasePending, Released};
@@ -97,8 +98,9 @@ pub(crate) struct Scene<'w, 's> {
     /// ([`crate::ui_unit::views`]).
     view_log: ResMut<'w, crate::ui_unit::views::ViewLog>,
     field_notices: ResMut<'w, crate::field_watch::NoticeLane>,
-    /// The guid-scoped selection teardowns (`0x493910(guid, 1)`) a watcher raises.
-    deselect: MessageWriter<'w, crate::target::DeselectGuid>,
+    /// The guid-scoped selection teardowns (`0x493910(guid, 1)`) a watcher raises, run at the
+    /// packet's end; absent in a harness without targets.
+    deselect: Option<ResMut<'w, crate::target::OwedSelects>>,
     speed_changes: MessageWriter<'w, SpeedChangeMessage>,
     self_moves: MessageWriter<'w, super::SelfMoveMessage>,
     hard_landings: MessageWriter<'w, crate::creature_anim::HardLanding>,
@@ -143,8 +145,15 @@ pub(crate) struct Scene<'w, 's> {
     pending: Query<'w, 's, (Entity, &'static Guid), With<update::ReleasePending>>,
     creatures: Option<Res<'w, crate::entities::Creatures>>,
     held_displays: Query<'w, 's, &'static mut update::HeldDisplay>,
+    /// What our own `ShowHelm` and `ShowCloak` calls left on the model, which a hide bit's edge
+    /// ends.
+    worn_pins: Query<'w, 's, &'static mut crate::entities::WornPins>,
     /// The viewer's zone and the objects' positions a party member's snapshot stores (`0x5f0880`).
     place: crate::ui_party::net::SnapshotPlace<'w, 's>,
+    /// The active mover, which its unit's release and destroy zero.
+    mover: Option<ResMut<'w, super::MoverClaim>>,
+    /// Who we drive and whether we may, which our own arrival gives back.
+    mover_lock: Option<ResMut<'w, crate::player::MoverLock>>,
 }
 
 /// The item watchers' reads of the scene ([`crate::item_watch::Watch`]).
@@ -723,6 +732,11 @@ fn object_create(
             }
             if let Some(s) = walk {
                 entity.insert(s);
+            }
+            // Our own player is the active one from its write: the reference finds it by its guid
+            // (`0x468550`), here by the tag, given in the same commands as the entity.
+            if sc.self_guid.0 == Some(guid) {
+                entity.insert(SelfPlayer);
             }
             let e = entity.id();
             sc.index.0.insert(guid, e);

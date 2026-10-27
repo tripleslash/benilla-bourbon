@@ -124,7 +124,7 @@ disjoint::disjoint_set! {
         /// The sends of the action bar, the worn display, the Help window, the unserved systems,
         /// the inspect window, the reader, the aura cancel, the minimap and the pet trainer.
         action_bar: crate::ui_action::ActionBarSteps<'static>,
-        worn: crate::ui_unit::WornDisplaySteps<'static>,
+        worn: crate::ui_unit::WornDisplaySteps<'static, 'static>,
         gm_ticket: crate::ui_gm_ticket::GmTicketSteps<'static>,
         inspect: crate::ui_inspect::InspectSteps<'static, 'static>,
         item_text: crate::ui_item_text::ItemTextSteps<'static>,
@@ -186,8 +186,7 @@ impl ScriptCallHost<'_, '_> {
     /// `SetSelection` (`0x493540`) signals inside whatever runs it: the teardown's
     /// `PET_BAR_UPDATE` (`0x4bd6b4`) before the store and the send, the change's signals before
     /// the re-swing (`0x4938c8`), each point running its listeners there, and what they left
-    /// applied once the turn ends, with the host lent. The unit, action and pet feeds take the
-    /// change as heard.
+    /// applied once the turn ends, with the host lent.
     pub(crate) fn engine_select(&mut self, script: &mut UiScript, select: EngineSelect) {
         #[cfg(test)]
         self.census_probe();
@@ -221,6 +220,25 @@ impl ScriptCallHost<'_, '_> {
                 mark: self.appliers.reports().mark_at(mark),
             };
             let owed = self.appliers.select().start_attack(guid);
+            self.settle_selection(script, &mut at, owed);
+            self.commit_views(script);
+        });
+        script.hosted(self, |_| ());
+    }
+
+    /// `SelectTarget(0)` (`0x493540`) from an engine writer outside any call, such as the
+    /// world-enter cascade's (`0x490927`): the deselect and its teardown signal in place, a
+    /// charmed player's refused (`0x493590`) and an empty selection a no-op.
+    pub(crate) fn engine_clear_target(&mut self, script: &mut UiScript, mark: crate::lanes::Mark) {
+        #[cfg(test)]
+        self.census_probe();
+        script.host_out(|script| {
+            let mut at = Signalled {
+                selected: self.appliers.select().selected(),
+                latched: self.appliers.pet().attack_latched(),
+                mark: self.appliers.reports().mark_at(mark),
+            };
+            let owed = self.appliers.select().clear_target();
             self.settle_selection(script, &mut at, owed);
             self.commit_views(script);
         });
@@ -359,8 +377,7 @@ impl ScriptCallHost<'_, '_> {
     /// signalled, in its order: the release's `PET_BAR_UPDATE` when it called a possessed unit off
     /// (`0x493a18` → `0x4bd6b4`), the usable refresh (`0x493892`, `0x493a69`), then
     /// `PLAYER_TARGET_CHANGED` (`0x49389c`, `0x493a73`), with `"target"` seated for the
-    /// listeners and the script's next line. The unit feed takes the change as heard. Whether
-    /// it signalled.
+    /// listeners and the script's next line. Whether it signalled.
     fn signal_selection(&mut self, script: &mut UiScript, at: &mut Signalled) -> bool {
         let selected = self.appliers.select().selected();
         if selected == at.selected {
@@ -376,7 +393,6 @@ impl ScriptCallHost<'_, '_> {
             states.usable_refresh(script).fire(script);
         }
         script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-        script.announce_selection(selected);
         at.selected = selected;
         at.latched = appliers.pet().attack_latched();
         true
@@ -641,6 +657,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
             latched: appliers.pet().attack_latched(),
             mark: appliers.reports().mark(),
         };
+        let owed_from = appliers.select().owed_mark();
         let mut tail: Option<CallTail> = None;
         // The confirm popup an item pick or a Yes raised, signalled with the call's reports.
         let mut popup = None;
@@ -833,7 +850,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
             }
             ScriptCall::Instance(InstanceCall::Reset) => appliers.instance().reset(),
             ScriptCall::Pvp(PvpCall::Toggle) => appliers.pvp().toggle(),
-            ScriptCall::WornDisplay(which) => appliers.worn().flip(which),
+            ScriptCall::WornDisplay(set) => appliers.worn().set(set),
             ScriptCall::ActionBar(call) => appliers.action_bar().apply(call),
             ScriptCall::GmTicket(GmTicketCall::Ticket(intent)) => {
                 appliers.gm_ticket().ticket(intent);
@@ -871,6 +888,11 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::RecordAsk(ask) => appliers.asks().apply(script, ask),
         }
         self.settle_selection(script, &mut at, owed);
+        // A deselect the call's own steps raised, a dead unit's loot close's (`0x48f369`), signals
+        // inside it (`0x493a73`), before the call returns.
+        while let Some(owed) = self.appliers.select().owed_deselect(owed_from) {
+            self.settle_selection(script, &mut at, owed);
+        }
         let appliers = &mut self.appliers;
         // A selection this call made with the targeting cursor up was handed to the cast
         // (`SelectTarget`, `0x4935d5`) and is bound now, before the next call reads either.
@@ -1103,6 +1125,17 @@ impl<P: SystemParam + 'static> VmWith<'_, '_, P> {
         if let Some(script) = self.script.as_deref_mut() {
             if let Some(host) = self.set.p1().as_mut() {
                 host.engine_slot_written(script);
+            }
+        }
+    }
+
+    /// An engine writer's `SelectTarget(0)`, signalled in place with the host
+    /// ([`ScriptCallHost::engine_clear_target`]); with no VM or no host nobody listens and the
+    /// selection stands.
+    pub(crate) fn engine_clear_target(&mut self, mark: crate::lanes::Mark) {
+        if let Some(script) = self.script.as_deref_mut() {
+            if let Some(host) = self.set.p1().as_mut() {
+                host.engine_clear_target(script, mark);
             }
         }
     }
@@ -1368,13 +1401,6 @@ mod tests {
                 status: 1,
                 flags: 0,
             });
-        if selected {
-            *world.resource_mut::<Selection>() = Selection {
-                target: Some(old),
-                guid: Some(OLD),
-                ..Default::default()
-            };
-        }
         let mut script = UiScript::new().expect("a VM");
         script.set_spellbook(SpellBookState {
             tabs: vec![SpellTabView {
@@ -1389,9 +1415,21 @@ mod tests {
                 ..Default::default()
             }],
         });
+        record_reports(&script);
+        world.insert_non_send(script);
+        let mut f = Frame { app, rx };
         if selected {
+            // The world entry first, as a session has it (`0x490927` clears a target there): the
+            // target comes after.
+            settle(&mut f);
+            f.rx.try_iter().for_each(drop);
+            *f.app.world_mut().resource_mut::<Selection>() = Selection {
+                target: Some(old),
+                guid: Some(OLD),
+                ..Default::default()
+            };
             // The frame's unit snapshot, as the last feed pushed it.
-            script.set_unit(
+            f.app.world_mut().non_send_mut::<UiScript>().set_unit(
                 "target",
                 Some(benilla_ui::script::UnitState {
                     exists: true,
@@ -1399,9 +1437,7 @@ mod tests {
                 }),
             );
         }
-        record_reports(&script);
-        world.insert_non_send(script);
-        Frame { app, rx }
+        f
     }
 
     /// Every catalog line and cast-failure string defined as its own key, but the default
@@ -2707,6 +2743,11 @@ mod tests {
             }],
         });
         f.app.world_mut().insert_non_send(script);
+        // This VM's world entry first, as a session has it (`0x490927` clears a target there):
+        // the selection comes after.
+        let selected = std::mem::take(&mut *f.app.world_mut().resource_mut::<Selection>());
+        settle(f);
+        *f.app.world_mut().resource_mut::<Selection>() = selected;
     }
 
     /// The unit feed, which signals the selection's change; the calls its handlers make apply

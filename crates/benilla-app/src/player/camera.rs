@@ -2339,6 +2339,7 @@ mod tests {
             super::super::input::look_input(
                 &crate::bindings::BindingsState::default(),
                 &super::super::Player::default(),
+                &super::super::MoverLock::default(),
                 &rig,
             )
             .follow_command

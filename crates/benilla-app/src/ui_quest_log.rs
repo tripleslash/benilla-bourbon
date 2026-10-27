@@ -62,12 +62,6 @@ pub(crate) struct QuestLog {
     pub(crate) giver_failures: Vec<u32>,
 }
 
-impl crate::query_cache::AskOnce for QuestLog {
-    fn clear_pending(&mut self) {
-        self.templates.clear_pending();
-    }
-}
-
 impl QuestLog {
     /// The template, read as `ask` says: an ask sends `CMSG_QUEST_QUERY`, once while in flight.
     /// vmangos answers nothing for an id it does not know (`QuestHandler.cpp:229-231`); an answer
@@ -563,7 +557,6 @@ impl Plugin for UiQuestLogPlugin {
     fn build(&self, app: &mut App) {
         use crate::lanes::LaneApp;
         net::register(app);
-        crate::query_cache::register::<QuestLog>(app);
         app.init_resource::<QuestLog>()
             .init_resource::<crate::ui_quest::LatchRefreshes>()
             .init_resource::<crate::item_lane::ItemLane>()
@@ -626,9 +619,6 @@ fn record_view(t: &QuestTemplate, tables: &RecordTables) -> QuestRecordView {
             .unwrap_or_default()
             .to_string()
     };
-    let set = |list: &[(u32, u32)]| -> Vec<(u32, u32)> {
-        list.iter().copied().filter(|&(id, _)| id != 0).collect()
-    };
     QuestRecordView {
         title: t.title.clone(),
         level: t.level,
@@ -668,12 +658,16 @@ fn record_view(t: &QuestTemplate, tables: &RecordTables) -> QuestRecordView {
         required_money,
         reward_money,
         reward_money_max_level: t.money_max_level as i32,
-        rewards: set(&t.rewards),
-        choices: set(&t.choices),
+        // The raw slots, an unset one 0: the log's counts stop at the first and its getters index
+        // the array (`0x4e0a34`, `0x4e0b98`).
+        rewards: t.rewards.to_vec(),
+        choices: t.choices.to_vec(),
         // Quest text arrives with its `$N`, `$B`, `$G` and `$<n>w` macros unexpanded.
         description: crate::npc_text::substitute(&t.details, tables.macros),
         objectives_text: crate::npc_text::substitute(&t.objectives_text, tables.macros),
         reward_spell: crate::ui_quest::reward_spell_view(t.reward_spell, tables.spells),
+        point: (t.point_x, t.point_y),
+        point_opt: t.point_opt,
     }
 }
 

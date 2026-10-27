@@ -174,19 +174,24 @@ pub(super) fn message_text(lua: &mlua::Lua, v: &mlua::Value) -> Option<String> {
     super::binding_abi::optional_string(lua, v).filter(|s| !s.is_empty())
 }
 
-/// The text a line is drawn and measured as. `SetText`'s expand flag swaps the number separators
-/// while `SetEuropeanNumbers` holds: a MessageFrame does it when the line is added (`0x7863fe`,
-/// [`Model::localized_text`] at the verb), a ScrollingMessageFrame each time it shows the line
-/// (`ShowLine`, `0x788b3c`), from the raw text it keeps, so a line reads the switch as it stands.
+/// The text a line is drawn and measured as. `SetText`'s expand flag rewrites the grammar escapes
+/// and, while `SetEuropeanNumbers` holds, swaps the number separators: a MessageFrame does it when
+/// the line is added (`0x7863fe`, [`Model::localized_text`] at the verb), a ScrollingMessageFrame
+/// each time it shows the line (`ShowLine`, `0x788b3c`), from the raw text it keeps, so a line
+/// reads the switch as it stands.
 pub(super) fn shown_text<'a>(
     european_numbers: bool,
     kind: &KindState,
     text: &'a str,
 ) -> std::borrow::Cow<'a, str> {
-    if european_numbers && matches!(kind, KindState::ScrollingMessage(_)) {
-        std::borrow::Cow::Owned(crate::strings::swap_number_separators(text))
+    if !matches!(kind, KindState::ScrollingMessage(_)) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let text = crate::strings::expand_grammar_escapes(text);
+    if european_numbers {
+        std::borrow::Cow::Owned(crate::strings::swap_number_separators(&text))
     } else {
-        std::borrow::Cow::Borrowed(text)
+        text
     }
 }
 
@@ -401,6 +406,28 @@ pub(crate) fn set_xml_insets(
         .and_then(|f| f.kind_state.message_insets_mut())
     {
         *slot = insets;
+    }
+    Ok(())
+}
+
+/// XML `<FontString bytes="N">` on a MessageFrame or a ScrollingMessageFrame (`0x785b10`,
+/// `0x787d19`): `SStrToInt` of a non-empty value, the length each line's text buffer takes
+/// (`0x771680`).
+pub(crate) fn set_xml_bytes(lua: &mlua::Lua, frame: &mlua::Table, bytes: &str) -> mlua::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let n = crate::script::binding_abi::s_str_to_int(bytes);
+    let h = frame_handle_of(lua, frame)?;
+    let mut model = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model app_data");
+    if let Some(slot) = model
+        .arena
+        .frame_mut(h)
+        .and_then(|f| f.kind_state.message_line_bytes_mut())
+    {
+        *slot = n.into();
     }
     Ok(())
 }

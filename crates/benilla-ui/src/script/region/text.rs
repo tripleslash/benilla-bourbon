@@ -50,7 +50,7 @@ pub(crate) fn set_justify(
         .app_data_mut::<crate::script::ModelCell>()
         .expect("model");
     let Some(rh) = region(&mut model) else {
-        return Err(mlua::Error::runtime("not a text holder"));
+        return Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE));
     };
     let d = model.region_data.entry(rh).or_default();
     d.justify.0 = justify::set_axis(d.justify.0, mask, bits);
@@ -69,9 +69,10 @@ pub(crate) fn store_text_of(lua: &Lua, this: &Table, text: Option<String>) -> ml
 
 /// [`store_text_of`] by handle, the tail Lua's `SetText` shares.
 fn store_text(lua: &Lua, rh: crate::widget::RegionHandle, text: Option<String>) {
-    // The separator pass runs before the same-text test (`0x771d9f`, `0x771dea`). The text held
-    // returns there, and empty over empty at `0x771dba`, before anything is touched: read first,
-    // so the per-frame caller re-setting a label leaves the mutation count standing.
+    // The grammar rewrite and the separator pass run before the same-text test (`0x771d98`,
+    // `0x771d9f`, `0x771dea`). The text held returns there, and empty over empty at `0x771dba`,
+    // before anything is touched: read first, so the per-frame caller re-setting a label leaves
+    // the mutation count standing.
     let text = {
         let model = lua
             .app_data_ref::<crate::script::ModelCell>()

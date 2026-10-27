@@ -2051,33 +2051,6 @@ pub(crate) fn service_action(
     }
 }
 
-/// Drain the guid-scoped deselects ([`DeselectGuid`]). `ClearTarget()`, the last leg of the Esc
-/// chain (`UIParent.lua:1492`), is a script call and lands in call order
-/// ([`crate::script_calls`]).
-#[allow(clippy::type_complexity)] // a Bevy system's full input set
-pub(crate) fn clear_target_requests(
-    mut vm: crate::script_calls::VmWith<(
-        ResMut<'static, Selection>,
-        crate::creature_anim::AttackSeam<'static, 'static>,
-        // In the set: the host's loot verbs write it.
-        MessageReader<'static, 'static, DeselectGuid>,
-    )>,
-) {
-    let select = {
-        let (mut selection, mut seam, mut guid_asks) = vm.own();
-        if !guid_asks.read().any(|ask| selection.guid == Some(ask.0)) {
-            return;
-        }
-        let before = Standing::of(&selection, &seam);
-        let send = clear_owing(&mut selection, &mut seam);
-        before.owing(scan::Owed { send, swing: None })
-    };
-    // The teardown signals inside the deselect ([`crate::script_calls::ScriptCallHost::engine_select`]).
-    vm.engine_select(select, |(mut selection, mut seam, ..), owed| {
-        owed.pay(&mut selection, &mut seam);
-    });
-}
-
 /// The UI shutdown's own deselect (`0x490bdf` → `SetSelection(0, 0)`), ahead of its
 /// active-player guard, so every shutdown root and a `/reload` drop the target: what its signals
 /// owe when one was selected, for [`signal_ui_shutdown_deselect`].
@@ -2132,11 +2105,6 @@ pub(crate) fn clear_with_no_world(selection: &mut Selection) {
     selection.guid = None;
     selection.lit = None;
 }
-
-/// A deselect that applies only if the selection is this guid (`0x493910(guid, 1)`), raised by
-/// every loot close for a dead unit (`0x48f369`) and drained by [`clear_target_requests`].
-#[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
-pub(crate) struct DeselectGuid(pub(crate) u64);
 
 /// `SetSelection(0,0)` (`0x493540` → `0x4938f3`): the deselect of Esc, a click off and a target's
 /// death, which stamps the outgoing target into the last-target pair before its teardown
@@ -2615,6 +2583,7 @@ mod tests {
         });
         let with_quest = armed(&|w| {
             w.init_resource::<crate::ui_quest::QuestGiver>();
+            crate::ui_quest::hold_for_test(w, NPC);
             crate::ui_quest::open_panel(
                 w,
                 NPC,
@@ -2791,6 +2760,7 @@ mod tests {
         world.init_resource::<crate::player::Approach>();
         world.init_resource::<crate::player::FollowState>();
         world.init_resource::<crate::player::Player>();
+        world.init_resource::<crate::player::MoverLock>();
         world.init_resource::<crate::player::OwnControlLost>();
         world.init_resource::<crate::ui_script::CursorPayloadHeld>();
         world.init_resource::<Messages<Interact>>();
@@ -2905,7 +2875,8 @@ mod tests {
             let (tx, rx) = crossbeam_channel::unbounded();
             // In world: the body we drive.
             app.insert_resource(NetCommands(tx))
-                .init_resource::<crate::player::Player>();
+                .init_resource::<crate::player::Player>()
+                .init_resource::<crate::player::MoverLock>();
             let world = app.world_mut();
             let mut mine = vec![(2, 0x19), (F_HEALTH, 100), (F_MAXHEALTH, 100)];
             if mounted {

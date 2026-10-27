@@ -10,7 +10,6 @@ use benilla_protocol::SessionEvent;
 
 use super::front_tests::{fix, Fix, ME, OLD};
 use super::{by_name, scan, Selection};
-use crate::creature_anim::SwingMessage;
 use crate::net::{ClientCommand, GuidIndex, ObjectStore};
 use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_party::{GroupState, GROUPTYPE_RAID};
@@ -114,18 +113,10 @@ fn stream_out(f: &mut Fix, guid: u64) {
     );
 }
 
-/// One packet through the handler table, then the drain of the guid-scoped teardowns
+/// One packet through the handler table, whose end runs the guid-scoped teardowns
 /// (`0x493910(guid, 1)`) the packet raised.
 fn deliver(f: &mut Fix, ev: SessionEvent) {
     crate::net::handlers::dispatch(f.app.world_mut(), vec![ev]);
-    let world = f.app.world_mut();
-    world
-        .run_system_once(super::click::clear_target_requests)
-        .expect("the drain runs");
-    // A one-shot reader starts at the oldest message, as the frame's reader does not.
-    world
-        .resource_mut::<Messages<super::DeselectGuid>>()
-        .clear();
 }
 
 /// `SMSG_GROUP_LIST` naming `members` (our subgroup is 0), as the handler table delivers it.
@@ -339,24 +330,9 @@ fn clear_target_ends_a_selection_with_no_object() {
 fn an_attacker_never_replaces_a_selection_with_no_object() {
     let mut f = grouped();
     select_unheld(&mut f, MEMBER);
-    let (me, mob) = (f.app.world().resource::<GuidIndex>().0[&ME], f.mob);
-    f.app
-        .world_mut()
-        .resource_mut::<Messages<SwingMessage>>()
-        .write(SwingMessage {
-            attacker: mob,
-            victim: Some(me),
-            hit_info: 0,
-            victim_state: 1,
-            damage: 1,
-            school: 0,
-            displayed: true,
-            seq: 0,
-        });
-    f.app
-        .world_mut()
-        .run_system_once(scan::auto_acquire)
-        .expect("the acquire runs");
+    let mob = f.mob;
+    super::scan::owe_acquire(f.app.world_mut(), mob, super::scan::Acquire::Attacker);
+    super::scan::run_owed_selects_now(f.app.world_mut());
     assert_eq!(selection(&f), (Some(MEMBER), None));
     assert_eq!(picks(&f), Vec::<u64>::new());
 }
@@ -697,4 +673,40 @@ fn a_far_spell_at_a_selection_with_no_object_sends_with_no_target() {
     assert_eq!(cast(MIND_VISION_2), (vec![None], false), "Mind Vision 2");
     assert_eq!(cast(EAGLE_EYE), (vec![None], false), "Eagle Eye");
     assert_eq!(cast(MIND_VISION_1), (vec![], true), "Mind Vision 1");
+}
+
+/// A transfer releases no target (`~CGUnit_C 0x5fb5e0` never reaches `0x493910`): a groupmate
+/// selected out of sight, with no object to deactivate, and a held unit both stay selected through
+/// the port, by guid, with nothing sent or signalled; the arrival's `SelectTarget(0)` (`0x490927`)
+/// clears them (`unit_feed_live_tests`).
+#[test]
+fn a_world_port_keeps_the_selection_by_guid() {
+    for held in [false, true] {
+        let mut f = grouped();
+        run(
+            &mut f,
+            r#"SEEN = 0 local f = CreateFrame("Frame") f:RegisterEvent("PLAYER_TARGET_CHANGED")
+            f:SetScript("OnEvent", function() SEEN = SEEN + 1 end)"#,
+        );
+        let guid = if held {
+            OLD
+        } else {
+            select_unheld(&mut f, MEMBER);
+            MEMBER
+        };
+        f.wire();
+        deliver(
+            &mut f,
+            SessionEvent::Worldport {
+                map_id: 1,
+                position: [0.0; 3],
+                orientation: 0.0,
+                needs_ack: true,
+            },
+        );
+        assert_eq!(selection(&f), (Some(guid), None), "held: {held}");
+        assert_eq!(picks(&f), Vec::<u64>::new(), "the port sends nothing");
+        let seen: u32 = crate::script_calls::eval_in_vm(f.app.world_mut(), "return SEEN");
+        assert_eq!(seen, 0);
+    }
 }

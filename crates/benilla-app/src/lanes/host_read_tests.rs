@@ -38,7 +38,7 @@ use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoin
 /// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
 /// them: each only falls, so lower it when a row or an input goes.
 const FRAME_FINAL_FEEDS: usize = 43;
-const FRAME_FINAL_INPUTS: usize = 237;
+const FRAME_FINAL_INPUTS: usize = 238;
 
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the host's live
@@ -52,22 +52,10 @@ const FRAME_FINAL_INPUTS: usize = 237;
 /// access does not show; `exclusive` a system whose access Bevy does not report.
 #[rustfmt::skip]
 const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
-    ("::net::apply::tag_self_player", &["Commands net::SelfPlayer"],
-        "tags our created entity as the player, which the token resolver finds it by; the \
-         reference makes it the active player inside its create (`0x5dea50`)"),
     ("::net::motion::remote::extrapolate_remote_units", &["Transform"],
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
-    ("::player::wire_in::regain_control_on_arrival", &["player::state::OwnControlLost"],
-        "gives control back on our own create, which the stance bar's usability walk reads \
-         (`0x6e3dc3`); the reference raises it inside the create (`0x5deb56`)"),
     ("::spell::group_relation::publish_group_roster", &["spell::group_relation::GroupRoster"],
         "copies the group's roster, which the relation reads take, once the packets are in"),
-    ("::spell::mods::track_class_family", &["spell::mods::SpellModifiers"],
-        "keeps the class family the stance bar's usability walk prices a cost through; the \
-         reference stores it inside our own create (`0x5debcc` → `0x6e6ca0`)"),
-    ("::swing_refusal::apply_swing_refusals", &["ui_pet::PetAttackLatch"],
-        "holds the attack seam, whose selection release lowers the pet's attack latch \
-         (`0x493a18`); the server's silent stop it runs (`0x625ab8`) reaches no release"),
     ("::transport::compose_riders", &["Transform"],
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
     ("::ui_action::feed::feed_actions", &["ui_action::PlayerActions"],
@@ -110,8 +98,7 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
     ("::ui_pet::drain::arm_owed_pet_gcds", &["ui_pet::PetBar"],
         "puts the GCDs the pet's sends owe into its list, which the reference arms at the send \
          (`0x6e58fb`)"),
-    ("::ui_pet::unit::feed_pet_unit", &["UiScript", "names::NameCache"],
-        "a field event's listeners read its push; it watches the name cache's record of the pet's name"),
+    ("::ui_pet::unit::feed_pet_unit", &["UiScript"], "a field event's listeners read its push"),
     ("::ui_session::close_npc_session_out_of_range<benilla_app::ui_binder::BinderState>",
         &["ui_binder::BinderState"],
         "closes the bind question once the player leaves service range, which \

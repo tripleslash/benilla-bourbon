@@ -372,10 +372,6 @@ pub(crate) mod schedule_tests {
         /// The systems whose declared access covers the call host's
         /// ([`crate::script_calls::ScriptCallHost`]): every one that writes the VM.
         pub hosted: HashSet<SystemKey>,
-        /// The systems whose own access names [`crate::net::SelfPlayer`]: a read of the
-        /// component, or a `With`, `Without`, `Added` or `Has` on it. Read off each system's
-        /// access set; a system that reads every component (`EntityRef`, `&World`) names none.
-        pub uses_self: HashSet<SystemKey>,
         /// The build's own order, system to system, with the sync points it placed when the
         /// census reads [`SyncPoints::Built`].
         pub built: Vec<(SystemKey, SystemKey)>,
@@ -515,22 +511,10 @@ pub(crate) mod schedule_tests {
                     )
                 })
                 .collect();
-            let self_player = world
-                .components()
-                .get_id(TypeId::of::<crate::net::SelfPlayer>());
             let mut systems = HashMap::new();
             let mut holds_vm = HashSet::new();
             let mut hosted = HashSet::new();
-            let mut uses_self = HashSet::new();
             for (key, system, conds) in graph.systems.iter() {
-                if let (Some(id), Some(access)) = (self_player, accesses.get(&key)) {
-                    let names_it = access.filtered_accesses().iter().any(|fa| {
-                        fa.contains(id) || (!fa.access().has_read_all() && fa.access().has_read(id))
-                    });
-                    if names_it {
-                        uses_self.insert(key);
-                    }
-                }
                 if let (Some(vm), Some(set)) = (vm, accesses.get(&key)) {
                     let access = set.combined_access();
                     if access.has_read(vm) || access.has_write(vm) {
@@ -683,7 +667,6 @@ pub(crate) mod schedule_tests {
                 non_send,
                 holds_vm,
                 hosted,
-                uses_self,
                 built,
             }
         })
@@ -1560,9 +1543,9 @@ pub(crate) mod schedule_tests {
         ),
     ];
 
-    /// The create's control restore (`player::regain_control_on_arrival`) is registered in the
-    /// built client and ordered: after the self create it answers, before the controller and the
-    /// readers of the flags it clears. A lost `add_systems` line, or a lost `.after`, fails here.
+    /// The create's control restore (`player::regain_control_on_arrival`) runs inside the net
+    /// drain, our own create's packet, and the controller and the readers of the lock it clears
+    /// run after the drain. A lost `.after` fails here.
     #[test]
     fn the_control_restore_runs_after_the_create_and_before_its_readers() {
         let mut app = headless_client();
@@ -1596,16 +1579,12 @@ pub(crate) mod schedule_tests {
             }
             seen
         };
-        let restore = one("::wire_in::regain_control_on_arrival");
-        let create = one("::net::apply::enter_world_on_self_create");
-        assert!(
-            reach(create).contains(&restore),
-            "the restore runs after the self create"
-        );
+        let restore = one("::net::apply::apply_net_updates");
         let after_restore = reach(restore);
         for reader in [
             "::player::controller::control",
-            "::ui_unit::feed_player_control",
+            // The drain, which fires the notices the restore signals.
+            "::lanes::fire_in_order",
             "::ui_action::state::feed_action_state",
             "::player::camera_saved::load_camera_pose",
             "::tutorial::watch_self",
@@ -1618,134 +1597,6 @@ pub(crate) mod schedule_tests {
                 "`{reader}` runs after the control restore"
             );
         }
-    }
-
-    /// Why an `Update` system that names [`crate::net::SelfPlayer`] may run with no declared order
-    /// after `tag_self_player`, keyed by a fragment of its full name (a generic's whole family is one row), with the reason it
-    /// is safe. The world-enter drain spawns our entity and every creature in one frame and the tag comes
-    /// later in the Net stage, so a system between the two sees no self.
-    const UNORDERED_AFTER_THE_SELF_TAG: &[(&str, &str)] = &[
-        ("::ui_chat::language::feed_language_skills",
-         "with no self it resets to the default list and a `have_player` flag forces a recompute once self exists"),
-        ("::ui_chat::language::feed_default_language",
-         "with no self it resets to the default language and a `have_player` flag forces a recompute once self exists"),
-        ("::sound::money::play_coin_on_coinage_change",
-         "the first sighting of the coinage only seeds the memo, so a frame with no self plays nothing and loses nothing"),
-        ("::ui_script::sweep::arm_leaving_world_on_self_create",
-         "`Added<SelfPlayer>` is relative to this system's own last run, so a tag that lands after a run is still seen at the next"),
-        ("::ui_session::release::release_on_field_edges",
-         "it is in Net after `apply_net_updates`, unordered against the tag; its self-only branch needs a form change on a latch that is not open, which a create burst never raises"),
-        ("::death::drive_death_look",
-         "level-driven: it writes the fade from the ghost flag every frame and re-reads self each time, so a frame with no self is overwritten by the next"),
-        ("::tutorial::run_world_enter_cascade",
-         "`armed` stays set until self exists, so the welcome and questgiver triggers wait for the tag rather than being spent, and the arrival's `Added<SelfPlayer>` is relative to this system's own last run, so a tag that lands after a run is still seen at the next"),
-    ];
-
-    /// Every `Update` system that names `SelfPlayer` (reads it, or filters on it) is ordered after
-    /// `tag_self_player`, or ahead of the net drain, or argued in
-    /// [`UNORDERED_AFTER_THE_SELF_TAG`]: a system that reads self and uses change detection must
-    /// not run between the drain's changes and the tag, or a frame that finds no self still
-    /// advances its change ticks and loses what changed. One ahead of the drain (the frame's input
-    /// records) reads the world as the last frame left it, and sees the tag and every change the
-    /// drain made at its next run. Fails an unordered user, a row for a system that is ordered
-    /// after all, and a stale row.
-    #[test]
-    fn every_system_that_names_self_runs_after_the_tag_or_argues_why_not() {
-        let mut app = headless_client();
-        let c = census(&mut app, Update, SyncPoints::Declared);
-        if !type_names_available(&c) {
-            eprintln!(
-                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
-            );
-            return;
-        }
-        let tag = {
-            let suffix = "::net::apply::tag_self_player";
-            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
-            match (hits.next(), hits.next()) {
-                (Some((k, _)), None) => *k,
-                _ => panic!("exactly one system named `…{suffix}` in Update"),
-            }
-        };
-        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
-        for (a, b) in &c.dependencies {
-            succ.entry(*a).or_default().push(*b);
-        }
-        let reach = |start: SystemKey| {
-            let mut seen = HashSet::new();
-            let mut stack = vec![start];
-            while let Some(n) = stack.pop() {
-                for m in succ.get(&n).into_iter().flatten() {
-                    if seen.insert(*m) {
-                        stack.push(*m);
-                    }
-                }
-            }
-            seen
-        };
-        let after_tag = reach(tag);
-        let drain = {
-            let suffix = "::net::apply::apply_net_updates";
-            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
-            match (hits.next(), hits.next()) {
-                (Some((k, _)), None) => *k,
-                _ => panic!("exactly one system named `…{suffix}` in Update"),
-            }
-        };
-        let mut pred: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
-        for (a, b) in &c.dependencies {
-            pred.entry(*b).or_default().push(*a);
-        }
-        let before_drain = {
-            let mut seen = HashSet::new();
-            let mut stack = vec![drain];
-            while let Some(n) = stack.pop() {
-                for m in pred.get(&n).into_iter().flatten() {
-                    if seen.insert(*m) {
-                        stack.push(*m);
-                    }
-                }
-            }
-            seen
-        };
-        let mut users: Vec<SystemKey> = c.uses_self.iter().copied().filter(|k| *k != tag).collect();
-        users.sort_by(|a, b| c.name(*a).cmp(c.name(*b)));
-        let (mut ordered, mut argued) = (0, 0);
-        let mut offenders = Vec::new();
-        let mut stale = Vec::new();
-        for k in &users {
-            let name = c.name(*k);
-            let row = UNORDERED_AFTER_THE_SELF_TAG
-                .iter()
-                .find(|(part, _)| name.contains(part));
-            match (after_tag.contains(k) || before_drain.contains(k), row.is_some()) {
-                (true, false) => ordered += 1,
-                (true, true) => stale.push(format!(
-                    "{name}: argued in UNORDERED_AFTER_THE_SELF_TAG but ordered after the tag or ahead of the drain — drop the row"
-                )),
-                (false, true) => argued += 1,
-                (false, false) => offenders.push(name.to_string()),
-            }
-        }
-        for (part, _) in UNORDERED_AFTER_THE_SELF_TAG {
-            if !users.iter().any(|k| c.name(*k).contains(part)) {
-                stale.push(format!(
-                    "`…{part}…` does not name SelfPlayer in Update — drop its row"
-                ));
-            }
-        }
-        eprintln!(
-            "SelfPlayer users in Update: {} — {ordered} after the tag or ahead of the drain, {argued} argued",
-            users.len()
-        );
-        assert!(
-            offenders.is_empty(),
-            "these systems name `SelfPlayer` in `Update` with no declared order after \
-             `tag_self_player` or ahead of the drain — `.after(WorldStage::Net)`, or argue it in \
-             UNORDERED_AFTER_THE_SELF_TAG:\n  {}",
-            offenders.join("\n  ")
-        );
-        assert!(stale.is_empty(), "stale rows:\n  {}", stale.join("\n  "));
     }
 
     /// A nameplate's right-click is `SelectTarget` (`0x492870`), which with a targeting cursor up
@@ -2301,6 +2152,8 @@ pub(crate) mod schedule_tests {
          "its takes are the sound side's stream reports, sent again every frame and keyed by a movie number only the VM that started the movie holds, and the VM's own audio starts, which only `StartMovie` leaves"),
         ("ui_script/movie.rs", "upload_movie_pictures", Because::Deliberate,
          "per-frame upload scratch, not a queue: it reads each playing movie's picture as it stands"),
+        ("world_state_ui.rs", "fire_world_states", Because::Deliberate,
+         "a lane's firing, run only by the drain: `drop_world_state_signals`, gated on the interface being down, empties the lane the frame its items land, so none fires into a later VM"),
         ("ui_tradeskill.rs", "fire_list_rebuilds", Because::Deliberate,
          "a lane's firing, run only by the drain: `drop_list_rebuilds`, gated on the interface being down, empties the lane the frame its items land, so none fires into a later VM"),
     ];

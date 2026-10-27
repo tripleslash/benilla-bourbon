@@ -423,9 +423,6 @@ pub(crate) struct Model {
     pub(crate) call_raises: super::calls::CallRaises,
     /// The binding functions' queue and mouselook state.
     pub(crate) input: super::input_verbs::InputState,
-    /// The selection a script call last moved to and signalled `PLAYER_TARGET_CHANGED` for inside
-    /// itself, for the unit feed to take as heard ([`super::UiScript::announce_selection`]).
-    pub(crate) announced_selection: Option<Option<u64>>,
     /// The protected-action gate's input events ([`super::protected`]).
     pub(crate) protected: super::protected::Flags,
     /// `DropItemOnUnit` tokens (`0x48d960`), gated by the app; a refusal silently keeps the item.
@@ -439,8 +436,9 @@ pub(crate) struct Model {
     pub(crate) ready_check: party::ReadyCheckState,
     /// Saved raid lockouts from `SMSG_RAID_INSTANCE_INFO`, which outlive any roster change.
     pub(crate) saved_instances: Vec<party::SavedInstanceInfo>,
-    /// `SetRaidRosterSelection`'s raid row index, client-side only.
-    pub(crate) raid_selection: i64,
+    /// `SetRaidRosterSelection`'s member guid (`[0xb713e8]`), client-side only; 0 selects none.
+    /// A `/reload` carries it into the next VM ([`super::UiScript::take_raid_selection`]).
+    pub(crate) raid_selection: u64,
     /// `GetTime()`'s session seconds, which only the host moves ([`super::UiScript::tick`],
     /// [`super::UiScript::set_now`]); off `_G`, as the reference's clock is the OS tick count.
     pub(crate) now: f64,
@@ -519,8 +517,8 @@ pub(crate) struct Model {
     /// An inspect-honor query is out (`0xb71fcc`); `RequestInspectHonorData` (`0x4c80a0`) refuses
     /// while set. Cleared by a reply (`0x4c6f4c`) or by the app clearing the slot (`0x4c6f9d`).
     pub(crate) inspect_honor_pending: bool,
-    /// `ShowingHelm()`: `PLAYER_FLAGS`' `HIDE_HELM` bit as pushed, set ahead on `ShowHelm` because
-    /// the wire verb is a blind toggle. Starts shown, as a fresh character's flags are 0.
+    /// `ShowingHelm()` with no host free to ask: `PLAYER_FLAGS`' `HIDE_HELM` bit clear, as
+    /// pushed. Starts shown, as a fresh character's flags are 0.
     pub(crate) helm_shown: bool,
     /// `ShowingCloak()`, the same for `HIDE_CLOAK`.
     pub(crate) cloak_shown: bool,
@@ -939,6 +937,8 @@ pub(crate) struct Model {
     pub(crate) quest_log: quest_log::QuestLogState,
     pub(crate) quest_log_selection: u32,
     pub(crate) quest_log_abandon_mark: u32,
+    /// The selected quest's minimap blip (static slot 0).
+    pub(crate) quest_blip: Option<quest_log::QuestBlip>,
     /// Item id to its tooltip view.
     pub(crate) item_templates: HashMap<u32, ItemTemplateView>,
     /// Item ids asked for and missing, for the app to answer: a lookup with a callback, which
@@ -1202,9 +1202,14 @@ impl Model {
             .unwrap_or_else(|| std::rc::Rc::new(super::NoNameLists))
     }
 
-    /// The text a `SetText` stores (`0x771d80` with its expand flag): the separator pass
-    /// `0x771c50` while `SetEuropeanNumbers` holds the switch (`0x771d9f`), else the text itself.
+    /// The text a `SetText` stores (`0x771d80` with its expand flag): the grammar escapes `|1` and
+    /// `|2` rewritten (`0x7716f0`, no locale gate), then the separator pass `0x771c50` while
+    /// `SetEuropeanNumbers` holds the switch (`0x771d9f`).
     pub(crate) fn localized_text(&self, text: String) -> String {
+        let text = match crate::strings::expand_grammar_escapes(&text) {
+            std::borrow::Cow::Borrowed(_) => text,
+            std::borrow::Cow::Owned(rewritten) => rewritten,
+        };
         if self.european_numbers {
             crate::strings::swap_number_separators(&text)
         } else {
@@ -1449,7 +1454,6 @@ impl Model {
             call_raises: Default::default(),
             input: Default::default(),
             protected: Default::default(),
-            announced_selection: None,
             drop_item_on_unit: Vec::new(),
             joined_channels: Vec::new(),
             party: party::PartyState::default(),
@@ -1656,6 +1660,7 @@ impl Model {
             quest_log: quest_log::QuestLogState::default(),
             quest_log_selection: 0,
             quest_log_abandon_mark: 0,
+            quest_blip: None,
             item_templates: HashMap::new(),
             item_sets: HashMap::new(),
             random_properties: HashMap::new(),

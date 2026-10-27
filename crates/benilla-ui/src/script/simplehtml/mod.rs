@@ -315,7 +315,7 @@ fn html_handle(lua: &Lua, this: &Table) -> mlua::Result<FrameHandle> {
         .expect("model");
     match model.arena.frame(h).map(|f| f.kind) {
         Some(FrameKind::SimpleHtml) => Ok(h),
-        _ => Err(mlua::Error::runtime("not a SimpleHTML")),
+        _ => Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
     }
 }
 

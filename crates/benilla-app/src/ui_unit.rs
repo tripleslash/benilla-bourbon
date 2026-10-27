@@ -11,7 +11,7 @@ use benilla_formats::{ChrClasses, ChrRaces, Reaction};
 use benilla_protocol::messages::ObjectType;
 use benilla_ui::script::{
     parse_unit_token, resolve_unit_in, ScriptValue, UiScript, UnitObject, UnitObjectRead,
-    UnitState, UnitTokenGlobals, UnitTokenObjects, UnitTokenParse, WornDisplay,
+    UnitState, UnitTokenGlobals, UnitTokenObjects, UnitTokenParse, WornDisplay, WornDisplaySet,
 };
 
 use crate::creature_type::CreatureTypeSources;
@@ -48,11 +48,6 @@ pub(crate) struct WorldEnterSeats;
 /// feed's `RAID_TARGET_UPDATE`, whose TargetFrame handler asks `GetRaidTargetIndex("target")`.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UnitSnapshots;
-
-/// [`fire_unit_events`]' signal, `PLAYER_TARGET_CHANGED`: a feed whose state its handlers read
-/// runs `.before(UnitEvents)`.
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct UnitEvents;
 
 /// One `UNIT_COMBAT` over a unit, the portrait hit indicator's feed. The emitter `0x494600` fires
 /// `(token, action, descriptor, amount, type)` once per token naming the unit, with no
@@ -103,7 +98,6 @@ struct UnitFeedMemo {
     /// The descriptors the last run's snapshots read: the target's, its target's, the
     /// interaction NPC's and what their relations reached.
     reads: held::StoreReads,
-    target_guid: Option<u64>,
     last_xp: Option<(u32, u32)>,
     /// `(rest state, pool, PLAYER_FLAGS)`, pushed as one so no binding reads it half-updated.
     last_rest: Option<(u8, u32, u32)>,
@@ -111,19 +105,10 @@ struct UnitFeedMemo {
     last_combo: Option<(u8, u64)>,
     /// Our faction template's `(friend, enemy)` masks, as last pushed.
     faction_masks: Option<Option<(u32, u32)>>,
-    /// `(HIDE_HELM, HIDE_CLOAK)`, pushed on the edge only: the Options setter flips the VM's
-    /// belief ahead of the server, and a per-frame push would snap it back.
+    /// `(HIDE_HELM, HIDE_CLOAK)`, as last pushed.
     worn_hidden: Option<(bool, bool)>,
     /// `PLAYER_FIELD_BYTES` byte 2 (`GetActionBarToggles`, `0x4e7660`); no field watch, no event.
     action_bar_toggles: Option<u8>,
-    /// The events the pushes owe, which [`fire_unit_events`] signals after the action feed.
-    pending: PendingUnitEvents,
-}
-
-/// What [`feed_units`] pushed this frame that owes an event after the usable refresh.
-#[derive(Default)]
-struct PendingUnitEvents {
-    target_changed: bool,
 }
 
 /// Adds the per-frame unit feed; the `Unit*` bindings live in `benilla-ui`.
@@ -164,16 +149,6 @@ impl Plugin for UiUnitPlugin {
                     .in_set(field_events::FieldEventPushes)
                     .in_set(UnitSnapshots)
                     .after(WorldEnterSeats),
-                // After the snapshots its handlers read, and ahead of the action feed's events:
-                // `SetPlayerControl` stores the flag (`0x4958ea`) and signals its event
-                // (`0x4958f7`, `0x49590b`) before the usable refresh (`0x4958fc`, `0x495910`).
-                feed_player_control
-                    .after(crate::player::ControlRestore)
-                    .before(crate::ui_action::CooldownEvents),
-                // After the action feed, whose usable refresh precedes these events.
-                fire_unit_events
-                    .in_set(UnitEvents)
-                    .after(crate::ui_action::CooldownEvents),
                 feed_far_sight_bit,
             )
                 .chain()
@@ -710,32 +685,6 @@ fn dist_sq(q: Vec3, p: Vec3) -> f64 {
     (dz * dz + dx * dx) + dy * dy
 }
 
-/// `PLAYER_CONTROL_LOST`/`GAINED` on a change of the flag `SMSG_CLIENT_CONTROL_UPDATE` writes
-/// (`0x4958e0`), for our own character only (`0x5fa6d0`); the boot value, and a fresh VM's memo, is in control (`0x48f626`).
-fn feed_player_control(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    own_control: Option<Res<crate::player::OwnControlLost>>,
-    mut lost: Local<crate::ui_script::VmMemo<bool>>,
-) {
-    hosted_vm.run(|script| {
-        let (Some(script), Some(own_control)) = (script, own_control) else {
-            return;
-        };
-        let lost = lost.get(script);
-        if *lost != own_control.0 {
-            *lost = own_control.0;
-            // `HasFullControl`'s flag rides the same edge.
-            script.set_player_control(!own_control.0);
-            let event = if own_control.0 {
-                "PLAYER_CONTROL_LOST"
-            } else {
-                "PLAYER_CONTROL_GAINED"
-            };
-            script.fire_event(event, vec![]);
-        }
-    })
-}
-
 /// Seat the far-sight bit `HasFullControl` refuses on (`0x51a142`). Its event,
 /// `PLAYER_FARSIGHT_FOCUS_CHANGED`, is the field watch's (`0x5de0d0`, `crate::field_watch`).
 fn feed_far_sight_bit(
@@ -1121,6 +1070,12 @@ impl benilla_ui::script::SelfRead for StoreObject<'_> {
     fn shapeshift_form(&self) -> u8 {
         self.0 .0.unit_shapeshift_form()
     }
+    fn shows_helm(&self) -> bool {
+        !self.0 .0.player_hides_helm()
+    }
+    fn shows_cloak(&self) -> bool {
+        !self.0 .0.player_hides_cloak()
+    }
 }
 
 /// `PLAYER_FLAGS` bit 7, free-for-all PvP (vmangos `Player.h:322`).
@@ -1203,21 +1158,54 @@ impl PvpSteps<'_> {
     }
 }
 
-/// `ShowHelm` and `ShowCloak` past the VM's belief, inside their calls
+/// `ShowHelm` and `ShowCloak`, inside their calls
 /// ([`benilla_ui::script::ScriptCall::WornDisplay`]).
 #[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct WornDisplaySteps<'w> {
+pub(crate) struct WornDisplaySteps<'w, 's> {
     net: Res<'w, NetCommands>,
+    me: Query<
+        'w,
+        's,
+        (&'static ObjectStore, &'static mut crate::entities::WornPins),
+        With<SelfPlayer>,
+    >,
+    items: Res<'w, crate::items::Items>,
 }
 
-impl WornDisplaySteps<'_> {
-    /// The flip's bodiless packet (`0x5ee6e3`, `push 0x2b9`, and its cloak twin): the VM, which
-    /// alone knows what the Options row did, has already decided it is needed.
-    pub(crate) fn flip(&self, which: WornDisplay) {
-        let _ = self.net.0.send(match which {
-            WornDisplay::Helm => crate::net::ClientCommand::ToggleHelm,
-            WornDisplay::Cloak => crate::net::ClientCommand::ToggleCloak,
-        });
+impl WornDisplaySteps<'_, '_> {
+    /// The show or hide method on the active player, nothing with none (`0x48de43`): the model's
+    /// piece re-dressed, then the toggle the live bit owes.
+    pub(crate) fn set(&mut self, set: WornDisplaySet) {
+        let Ok((store, mut pins)) = self.me.single_mut() else {
+            return;
+        };
+        let s = &store.0;
+        let hidden = match set.piece {
+            WornDisplay::Helm => s.player_hides_helm(),
+            WornDisplay::Cloak => s.player_hides_cloak(),
+        };
+        // The piece on the model, on the native display alone (`0x5ee690`, `0x5ee75e`); a show only
+        // for a worn item whose record gives a display (`0x5ee66e`, `0x5ee67b`).
+        let display = s
+            .player_visible_item_entry(crate::entities::WornPins::equipment_slot(set.piece))
+            .and_then(|entry| self.items.template(entry, 0, crate::query_cache::Ask::Read))
+            .map_or(0, |t| t.display_info_id);
+        let native =
+            s.unit_displayid().is_some() && s.unit_displayid() == s.unit_native_displayid();
+        if native && (display != 0 || !set.show) {
+            // A hide while the record is still asked for is re-dressed when it lands (`0x5ed880`).
+            let waiting = s
+                .player_visible_item_entry(crate::entities::WornPins::equipment_slot(set.piece))
+                .is_some_and(|entry| !self.items.template_known(entry));
+            pins.pin(set.piece, set.show, waiting);
+        }
+        // The bodiless toggle only while the bit says the opposite (`0x5ee6c4`, `0x5ee783`).
+        if set.show == hidden {
+            let _ = self.net.0.send(match set.piece {
+                WornDisplay::Helm => crate::net::ClientCommand::ToggleHelm,
+                WornDisplay::Cloak => crate::net::ClientCommand::ToggleCloak,
+            });
+        }
     }
 }
 
@@ -1369,17 +1357,13 @@ pub(crate) fn live_player_seat(
     })
 }
 
-/// One pass of the unit feed and its events, for a test that follows a selection change to its
-/// event.
+/// One pass of the unit feed, for a test that follows a frame's pushes.
 #[cfg(test)]
 pub(crate) fn run_feed_units_once(world: &mut World) {
     use bevy::ecs::system::RunSystemOnce;
     world
         .run_system_once(feed_units)
         .expect("the unit feed runs as a one-shot system");
-    world
-        .run_system_once(fire_unit_events)
-        .expect("the unit events run as a one-shot system");
 }
 
 /// Whether the unit feed runs before `system` in `app`'s `Update`, for a reader of its pushes.
@@ -1732,8 +1716,8 @@ fn feed_units(
 
         // The memo the pushes above diff against. Pushing fires nothing: a unit's events are its
         // own changes' (`crate::field_watch`), and a token that comes to name another unit is
-        // announced by `PLAYER_TARGET_CHANGED` below alone (`0x493540` signals only that,
-        // `0x49389c`).
+        // announced by the selection's `PLAYER_TARGET_CHANGED` alone (`0x493540` signals only
+        // that, `0x49389c`), where each writer makes it.
         for (token, snap) in [
             ("player", &player),
             ("target", &target),
@@ -1751,22 +1735,7 @@ fn feed_units(
             }
         }
 
-        // `PLAYER_TARGET_CHANGED`, argless, when the selection changes, owed to
-        // [`fire_unit_events`]; a script call signalled its own change inside itself, as
-        // `SetSelection` does (`0x49389c`, `0x493a73`), so the feed hears only a change no call
-        // made. A `/reload`'s fresh memo finds none: the shutdown dropped the target and told the
-        // dying VM (`0x490bdf`).
-        if let Some(announced) = script.take_announced_selection() {
-            memo.target_guid = announced;
-        }
-        if selection.guid != memo.target_guid {
-            gate.audit("feed_units", "the PLAYER_TARGET_CHANGED edge");
-            memo.target_guid = selection.guid;
-            memo.pending.target_changed = true;
-        }
-
-        // The hide bits for `ShowingHelm()`/`ShowingCloak()`, on the edge only: the setter flips
-        // the VM's belief on the click, and a stale push before the server answers would undo it.
+        // The hide bits for `ShowingHelm()`/`ShowingCloak()` with no host free to ask.
         if let Some((store, _)) = self_pair {
             let hidden = (store.0.player_hides_helm(), store.0.player_hides_cloak());
             if memo.worn_hidden != Some(hidden) {
@@ -1797,7 +1766,7 @@ fn feed_units(
         && enter_usable
             .as_deref_mut()
             .is_some_and(|u| std::mem::take(&mut u.0));
-    let world_enter = vm.run(|script| {
+    vm.run(|script| {
         let script = script?;
         if owed.book_sorted {
             // The language legs, fired ahead of the form edges, which the replay interleaves with
@@ -1814,13 +1783,20 @@ fn feed_units(
         if owed.unghost {
             script.fire_event("PLAYER_UNGHOST", vec![]);
         }
-        let enter = owed.world_enter?;
-        script.fire_world_enter_head(enter.bonus_bar_offset, usable_changed);
-        Some(enter)
+        Some(())
     });
-    let Some(enter) = world_enter else {
+    let Some(enter) = owed.world_enter else {
         return;
     };
+    // The cascade's `SelectTarget(0)` (`0x490927`) comes ahead of `PLAYER_LOGIN` and
+    // `PLAYER_ENTERING_WORLD` (`0x490965`): a transfer released no target, so whatever the guid
+    // still names goes here, as an engine turn on the selection.
+    vm.engine_clear_target(crate::lanes::mark());
+    vm.run(|script| {
+        if let Some(script) = script {
+            script.fire_world_enter_head(enter.bonus_bar_offset, usable_changed);
+        }
+    });
     // `0x4909c9` → `0x4bc6f0`: `SetPetGuid(0, 0)` as an engine turn on the bar and the VM, its
     // signals, then `CMSG_REQUEST_PET_INFO` (`0x4bc738`), then the cascade's rest. Its trainer
     // refresh (`0x4bc872`) never runs here: the cascade zeroes the trainer cell before it
@@ -1874,27 +1850,9 @@ struct WorldEnter {
     ask_pet: bool,
 }
 
-/// The event [`feed_units`]' pushes owe for a selection change no script call made (a world
-/// click, the server's), signalled after the action feed's usable refresh as the reference orders
-/// them: `SelectTarget` stores the target (`0x4936e2`) and refreshes (`0x493892`) before
-/// `PLAYER_TARGET_CHANGED` (`0x49389c`), and so does a release (`0x4939d3`, `0x493a69`,
-/// `0x493a73`). A usable handler reads the new target, and hears this after it.
-fn fire_unit_events(mut hosted_vm: crate::script_calls::HostedVm, mut feed: ResMut<UnitFeedState>) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        let pending = std::mem::take(&mut feed.vm.get(script).pending);
-        if pending.target_changed {
-            script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-        }
-    })
-}
-
 /// The bare unit feed, for a test driving the stock unit frames off engine state, which lends no
-/// host: the relation functions' seat, the pushes, the control edge, the unit events, then the
-/// field notices' events, under the plugin's sets so a test's action feed takes its place around
-/// them.
+/// host: the relation functions' seat, the pushes, then the field notices' events, under the
+/// plugin's sets so a test's action feed takes its place around them.
 #[cfg(test)]
 pub(crate) fn add_unit_feed(app: &mut App) {
     app.init_resource::<UnitFeedState>()
@@ -1904,8 +1862,6 @@ pub(crate) fn add_unit_feed(app: &mut App) {
             (
                 relations::seat,
                 feed_units.in_set(UnitSnapshots),
-                feed_player_control.before(crate::ui_action::CooldownEvents),
-                fire_unit_events.after(crate::ui_action::CooldownEvents),
                 field_events::fire_field_notices,
             )
                 .chain(),
@@ -2928,78 +2884,6 @@ mod tests {
         assert_eq!(teams, crate::chr_classes::RacePvpTeams::stock().0);
     }
 
-    /// LOST going down, GAINED going up (boot is in control).
-    #[test]
-    fn the_control_edges_fire_once_each_way() {
-        use bevy::prelude::*;
-        let mut app = App::new();
-        app.init_resource::<crate::player::Player>()
-            .init_resource::<crate::player::OwnControlLost>()
-            .add_systems(Update, (feed_player_control, feed_far_sight_bit));
-        let mut script = UiScript::new().unwrap();
-        script
-            .run(
-                r#"
-                SEEN = {}
-                local f = CreateFrame("Frame")
-                f:RegisterEvent("PLAYER_CONTROL_LOST")
-                f:RegisterEvent("PLAYER_CONTROL_GAINED")
-                f:RegisterEvent("PLAYER_FARSIGHT_FOCUS_CHANGED")
-                f:SetScript("OnEvent", function() table.insert(SEEN, event) end)
-            "#,
-            )
-            .unwrap();
-        // The player object `HasFullControl` needs, alive.
-        script.set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                exists: true,
-                health: 100,
-                ..Default::default()
-            }),
-        );
-        app.insert_non_send(script);
-        app.world_mut().spawn((
-            SelfPlayer,
-            Guid(0x77),
-            ObjectStore(benilla_protocol::ObjectFields::default()),
-        ));
-        let seen = |app: &mut App| -> Vec<String> {
-            app.update();
-            let mut s = app.world_mut().non_send_mut::<UiScript>();
-            s.resolve();
-            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
-            s.run("SEEN = {}").unwrap();
-            out
-        };
-        assert_eq!(
-            seen(&mut app),
-            Vec::<String>::new(),
-            "in control, no far sight: quiet"
-        );
-        app.world_mut()
-            .resource_mut::<crate::player::OwnControlLost>()
-            .0 = true;
-        assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_LOST".to_string()]);
-        assert_eq!(seen(&mut app), Vec::<String>::new(), "held, not repeated");
-        app.world_mut()
-            .resource_mut::<crate::player::OwnControlLost>()
-            .0 = false;
-        assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_GAINED".to_string()]);
-
-        // A possessed creature stuck under fear or confusion is not our character losing control:
-        // `0x5fa600` writes `[0xb4b3e4]` for our own guid alone, so no event and no flag.
-        app.world_mut()
-            .resource_mut::<crate::player::Player>()
-            .control_lost = true;
-        assert_eq!(seen(&mut app), Vec::<String>::new());
-        assert!(app
-            .world()
-            .non_send::<UiScript>()
-            .eval::<bool>("return HasFullControl() == 1")
-            .unwrap());
-    }
-
     /// The flag events are the field watches' (`crate::field_watch`): the feed that pushes our
     /// flags fires none of them on any edge, so a values block raises each once.
     #[test]
@@ -3424,9 +3308,9 @@ mod tests {
                 },
             );
             app.world_mut().run_system_once(feed_units).unwrap();
-            // `feed_units` owes the event; `fire_unit_events` signals it.
-            app.world_mut().run_system_once(fire_unit_events).unwrap();
+            // The selection's writer signals the change (`0x49389c`); here after the feed's pushes.
             let mut s = app.world_mut().non_send_mut::<UiScript>();
+            s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
             s.resolve();
             let out = s.eval::<Vec<String>>("return SEEN").unwrap();
             s.run("SEEN = {}").unwrap();

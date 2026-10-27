@@ -90,6 +90,7 @@ mod debug_panel;
 mod dev;
 mod doodad_events;
 mod entities;
+mod field_callbacks;
 mod field_watch;
 mod fishing_line;
 mod flavor;

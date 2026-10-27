@@ -68,8 +68,11 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::Queue,
-        "Messages<benilla_app::net::FieldChanged>",
-        "the field changes",
+        "Messages<benilla_app::net::WorldEnterCascadeMessage>",
+        "the world-enter cascade, which our own create's arrival writes inside its packet \
+         (`0x5deb60` → `0x4908c0`) and whose readers (the action bar's slot pass, the item \
+         recount) fire off it in system order, where the reference runs the cascade in the \
+         arrival",
     ),
     (
         Row::Queue,
@@ -197,17 +200,10 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::Edge,
-        "::ui_unit::feed_units",
-        "the selection's change, `PLAYER_TARGET_CHANGED`",
-    ),
-    (
-        Row::Edge,
         "::ui_action::state::fire_action_events",
-        "the usable refresh `0x4b31c0` (`ACTIONBAR_UPDATE_USABLE`, `SPELL_ACTIVE`, \
-         `SPELL_UPDATE_USABLE`) of the callers outside the field watchers and the cooldown list, \
-         which refresh on their lanes: the selection's select and release where no call made \
-         them (`0x493892`, `0x493a69`) and the control flag (`0x4958fc`, `0x495910`), one pass \
-         a frame over the bar's 120 slots and the reactive list, diffed against the usable \
+        "the usable cache's refresh `0x4e5c00` (`ACTIONBAR_UPDATE_USABLE`) of `EditMacro` \
+         (`0x4f132e`) and `RaiseBagUpdate` (`0x4f9374`), which the reference runs in the call and \
+         in the item watcher's run, one pass a frame over the bar's 120 slots diffed against the \
          cache",
     ),
 ];
@@ -235,6 +231,10 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // response's `QUEST_LOG_UPDATE` fires on the quest log lane.
     "::net::ServerWallClock",
     "::net::game_time::ServerTime",
+    // Read, and quiet: the control packet's handler and our own create's arrival signal its
+    // changes on the notice lane in place (`0x4958e0`), and the action bar's diff of it is
+    // `fire_action_events`'s edge row.
+    "::player::state::OwnControlLost",
     "::spell::cast_send::HeldForPick",
     "::spell::cast_send::ScriptCastPermit",
     "::spell::cast_send::unit_caster::PetGcdsOwed",
@@ -379,9 +379,9 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
         "net::UnitSpeeds", "net::game_time::ServerTime", "net::motion::modes::UnitMoveModes",
         "net::motion::remote::RemoteMotion", "net::reputations::Reputations",
-        "player::state::StandPending", "spell::cooldowns::Cooldowns", "spell::mods::SpellModifiers",
-        "target::Selection", "ui_action::ActionSlots", "ui_action::PlayerActions",
-        "ui_action::state::ActionStateMemory", "ui_pet::PetBar"]),
+        "player::state::OwnControlLost", "player::state::StandPending", "spell::cooldowns::Cooldowns",
+        "spell::mods::SpellModifiers", "target::Selection", "ui_action::ActionSlots",
+        "ui_action::PlayerActions", "ui_action::state::ActionStateMemory", "ui_pet::PetBar"]),
     // The ranged-slot item scales a ranged spell's range, read as the frame left it (#2217).
     ("::spell::targeting::feed_targeting_to_vm", &["items::Items", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore", "net::UnitSpeeds", "net::motion::modes::UnitMoveModes",
@@ -533,6 +533,8 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::SelfGuid",
     "::OwnControlLost",
     "::Player",
+    // Who we drive, which the loot response reads; our own create's arrival writes it.
+    "::player::state::MoverLock",
     "::player::state::StandPending",
     // The page cache the host's page turns read.
     "::ui_item_text::PageTexts",
@@ -622,7 +624,7 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
 ];
 
 /// Every lane's queue, by type: what a handler fills there fires in the packets' order.
-fn lane_types() -> [TypeId; 34] {
+fn lane_types() -> [TypeId; 36] {
     [
         TypeId::of::<crate::ui_items::feed::BagView>(),
         // The views lane: what each packet changed in the stores.
@@ -640,10 +642,12 @@ fn lane_types() -> [TypeId; 34] {
         TypeId::of::<crate::ui_party::PartyLane>(),
         // The list rebuilds a learn, an unlearn or a pet's spells owe, stamped at their packets.
         TypeId::of::<crate::ui_tradeskill::ListRebuilds>(),
-        // The deaths lane: the signals each death's legs parked, stamped under its health edge.
-        TypeId::of::<crate::target::Deaths>(),
+        // The field callbacks' lane: the signals each callback's legs parked, stamped under its
+        // edge.
+        TypeId::of::<crate::field_callbacks::FieldCallbacks>(),
         // The release lane: the signals each selection teardown parked, stamped under its release.
         TypeId::of::<crate::target::Releases>(),
+        TypeId::of::<crate::target::OwedSelects>(),
         // The item-text lane: the page-text packets' reads, stamped at their packets.
         TypeId::of::<crate::ui_item_text::ItemTextLane>(),
         // The cooldown lanes: the player's list and the pet's, which log their writes and flushes
@@ -669,6 +673,8 @@ fn lane_types() -> [TypeId; 34] {
         TypeId::of::<crate::ui_merchant::MerchantLane>(),
         // The taxi lane: the map's open and the flight master's replies.
         TypeId::of::<crate::ui_taxi::TaxiLane>(),
+        // The world-state lane: each packet's map and readout signals.
+        TypeId::of::<crate::world_state::WorldStateLane>(),
         // The dialogs' lane: the service questions, the boot, the stone, the summon, the
         // lockouts, the duel and the ticket answers, at their packets.
         TypeId::of::<crate::ui_dialog_verbs::DialogLane>(),
@@ -691,7 +697,7 @@ fn lane_types() -> [TypeId; 34] {
 
 /// [`lane_types`] by the lane that drains each: a queue is stripped only from its own lane's row,
 /// so another lane's read of the same type shows as the state it is.
-fn lane_queue_owners() -> [(&'static str, TypeId); 34] {
+fn lane_queue_owners() -> [(&'static str, TypeId); 36] {
     [
         ("bag view", TypeId::of::<crate::ui_items::feed::BagView>()),
         ("unit views", TypeId::of::<crate::ui_unit::views::ViewLog>()),
@@ -714,8 +720,12 @@ fn lane_queue_owners() -> [(&'static str, TypeId); 34] {
             "list rebuilds",
             TypeId::of::<crate::ui_tradeskill::ListRebuilds>(),
         ),
-        ("deaths", TypeId::of::<crate::target::Deaths>()),
+        (
+            "field callbacks",
+            TypeId::of::<crate::field_callbacks::FieldCallbacks>(),
+        ),
         ("releases", TypeId::of::<crate::target::Releases>()),
+        ("owed selects", TypeId::of::<crate::target::OwedSelects>()),
         (
             "item text",
             TypeId::of::<crate::ui_item_text::ItemTextLane>(),
@@ -737,6 +747,10 @@ fn lane_queue_owners() -> [(&'static str, TypeId); 34] {
         ("social", TypeId::of::<crate::ui_social::SocialState>()),
         ("merchant", TypeId::of::<crate::ui_merchant::MerchantLane>()),
         ("taxi", TypeId::of::<crate::ui_taxi::TaxiLane>()),
+        (
+            "world states",
+            TypeId::of::<crate::world_state::WorldStateLane>(),
+        ),
         (
             "dialogs",
             TypeId::of::<crate::ui_dialog_verbs::DialogLane>(),
@@ -970,9 +984,9 @@ fn the_drain_runs_after_the_feeds_and_before_the_tick() {
             "chat",
             "chat setup arrivals",
             "cooldowns",
-            "deaths",
             "dialogs",
             "equip errors",
+            "field callbacks",
             "field notices",
             "gossip",
             "guild",
@@ -981,6 +995,7 @@ fn the_drain_runs_after_the_feeds_and_before_the_tick() {
             "list rebuilds",
             "loot",
             "merchant",
+            "owed selects",
             "party",
             "pet cooldowns",
             "quest events",
@@ -992,7 +1007,8 @@ fn the_drain_runs_after_the_feeds_and_before_the_tick() {
             "tabard",
             "taxi",
             "trainer",
-            "unit views"
+            "unit views",
+            "world states"
         ]
     );
     let c = census(&mut app, Update, SyncPoints::Declared);
@@ -1245,24 +1261,11 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
 
 /// The systems outside the phase that lend the call host and take a handler queue, firing off it
 /// in system order: remaining work, which only shrinks, by a suffix of the system's name.
-pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[
-    (
-        "::swing_refusal::apply_swing_refusals",
-        "the server's swing stop `0x5ecac0`, `CancelNextSwingSpells` (`0x6e6f30`) and the \
-         tutorials 0xa and 0xb, which the reference runs inside its packet (`0x625ab8`, \
-         `0x5e7dd0`), off the swing refusals",
-    ),
-    (
-        "::target::scan::auto_acquire",
-        "the attacked and cast-at acquires' `SelectTarget`, which the reference runs inside its \
-         packet (`0x6259fe`, `0x6e799c`), off the swings and the spell starts",
-    ),
-    (
-        "::ui_tradeskill::drain_trade_skill",
-        "the repeat craft's hook, which the reference runs inside the cast's go, its call to \
+pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[(
+    "::ui_tradeskill::drain_trade_skill",
+    "the repeat craft's hook, which the reference runs inside the cast's go, its call to \
          `0x4fd7b0` (`0x6e81e7`), off the cast events",
-    ),
-];
+)];
 
 /// The systems that take a placed queue ([`placed_queues`]) after the dispatch and push onto a
 /// lane, at the item's place or, from their commands, at their own, by a suffix of the system's
@@ -1270,30 +1273,9 @@ pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[
 /// as the drain fires the whole frame by stamp after them; once
 /// the dispatch fires each packet's lanes after its handlers, an item stamped at an earlier
 /// packet and pushed after the dispatch fires behind every later packet's. The reference runs
-/// each of these inside the update packet's notify pass (`0x465277` → `0x465330`).
-pub(super) const PLACED_OUTSIDE_THE_DISPATCH: &[(&str, &str)] = &[
-    (
-        "::ui_chat::combat::watch::aura_lines",
-        "the combat log's aura lines, which the aura watchers write (`0x604d00`, `0x604ea0`)",
-    ),
-    (
-        "::ui_chat::combat::watch::death_lines",
-        "the unit-death line, which the health watcher writes (`0x6046f0` → `0x625190`)",
-    ),
-    (
-        "::ui_chat::combat::watch::pet_loyalty_lines",
-        "the pet-loyalty line, which the loyalty watcher writes (`0x5ff860`)",
-    ),
-    (
-        "::ui_pet::unit::feed_pet_unit",
-        "the pet's rename, `LOCALPLAYER_PET_RENAMED`, off its name stamp's edge",
-    ),
-    (
-        "::ui_session::release::release_on_field_edges",
-        "the form change's latch release and the lost service flags' closes, run from its \
-         commands at its own place, behind every packet of the frame",
-    ),
-];
+/// each such consumer inside the update packet's notify pass (`0x465277` → `0x465330`), as
+/// [`crate::field_callbacks`] runs the field edges' callbacks at the packet's end.
+pub(super) const PLACED_OUTSIDE_THE_DISPATCH: &[(&str, &str)] = &[];
 
 /// The placed queues' readers that defer work to their commands and push nothing onto a lane
 /// from them, by a suffix of the system's name, with what the commands do.
@@ -1652,6 +1634,7 @@ const QUEUES_NOT_VIEWS: &[&str] = &[
     "ui_items::EquipErrors",
     "ui_unit::views::ViewLog",
     "ui_items::feed::BagView",
+    "target::scan::OwedSelects",
 ];
 
 /// A type's name as [`READS_FRAME_FINAL`] spells it: the crate's own by its path in the crate, an
@@ -1800,6 +1783,10 @@ const VERSIONED_FOR_THE_DRAIN: &[&str] = &["net::reputations::Reputations"];
 /// longer matches its firing fails.
 #[rustfmt::skip]
 pub(super) const LANE_READS_FRAME_FINAL: &[(&str, &[&str])] = &[
+    // A packet's firing rebuilds the world map's landmarks and the readout's rows off the states,
+    // the gossip marker, our explored bits and the defense channel as the frame left them.
+    ("world states", &["net::ObjectStore", "poi_marker::PoiMarker", "ui_chat::edit::ChannelState",
+        "world_state::WorldStates"]),
     // The chat setup's restore reads the channel rows its shortcuts and auto-joins come from as
     // the frame left them, past the notices of the packets after the section's.
     ("chat setup arrivals", &["ui_chat::edit::ChannelState"]),

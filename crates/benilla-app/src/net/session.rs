@@ -46,9 +46,9 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::Disconnected, on_disconnected)
         .net_handler(K::Teleport, on_mover_edge)
         .net_handler(K::KnockBack, on_mover_edge)
-        .net_handler(K::ClientControl, on_mover_edge)
+        .net_handler(K::ClientControl, on_client_control)
         .net_handler(K::Worldport, on_worldport)
-        .net_handler(K::TransferPending, on_transfer)
+        .net_handler(K::TransferPending, on_transfer_pending)
         .net_handler(K::TransferAborted, on_transfer)
         .net_handler(K::TimeSpeed, on_clock)
         .net_handler(K::GameSpeedSet, on_clock)
@@ -112,6 +112,8 @@ pub(crate) struct Bridge<'w, 's> {
     net: Res<'w, NetCommands>,
     stores: Query<'w, 's, &'static mut ObjectStore>,
     transports: Query<'w, 's, &'static crate::transport::Transport>,
+    /// The active mover, which the world entry zeroes and the teardowns free with its unit.
+    mover: Option<ResMut<'w, super::MoverClaim>>,
 }
 
 fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
@@ -192,12 +194,16 @@ fn on_connected(In(ev): In<SessionEvent>, mut e: Edges, mut b: Bridge) {
     } = ev
     {
         e.billing.0 = billing;
+        // `CGUnit_C::Initialize` zeroes the active mover (`0x6039a9`) at every world entry
+        // (`ClientInitializeGame`, `0x401639`), so the first create of a session claims it.
+        if let Some(mover) = b.mover.as_deref_mut() {
+            mover.reset();
+        }
         connected(
             guid,
             name,
             tutorial_flags,
             addon_info,
-            &mut b.commands,
             &mut e.addon_reply,
             &mut b.self_guid,
             &mut b.status,
@@ -221,6 +227,11 @@ fn on_logged_out(
             &mut b.self_guid,
             &mut e.logged_out,
         );
+        // The teardown destroys every object (`0x402011` → `0x467700`), the mover's unit with it
+        // (`0x5fb650`).
+        if let Some(mover) = b.mover.as_deref_mut() {
+            mover.forget_unless_held(&b.index);
+        }
         // The reference zeroes the forced table's count and the 64 slots only in teardown
         // `0x4d5360` (`0x4d5419`, `0x4d541f`), whose one caller is `ShutdownGame 0x491180`
         // (`0x4911dc`), never on a worldport. The session's end stands in for that shutdown: the
@@ -231,6 +242,13 @@ fn on_logged_out(
     }
 }
 
+/// The selection a session's loss ends, and where its signals are owed.
+#[derive(bevy::ecs::system::SystemParam)]
+struct LostSelection<'w> {
+    selection: Option<ResMut<'w, crate::target::Selection>>,
+    owed: Option<ResMut<'w, crate::target::OwedSelects>>,
+}
+
 /// The bridge's half of the session end; each window's own listener runs after it.
 fn on_disconnected(
     In(ev): In<SessionEvent>,
@@ -238,14 +256,33 @@ fn on_disconnected(
     mut b: Bridge,
     mut released: ResMut<super::objects::Released>,
     view_log: Option<ResMut<crate::ui_unit::views::ViewLog>>,
-    selection: Option<ResMut<crate::target::Selection>>,
+    lost: LostSelection,
 ) {
     if let SessionEvent::Disconnected { reason, end } = ev {
         log_teardown(view_log, &b);
         // Every object goes with no release, kept link or not; the reference has no reconnect,
         // so the selection ends as at the world's teardown, with nothing sent or signalled.
+        //
+        // Deviation: on benilla's unattended reconnect, which the reference lacks, the world's VM
+        // survives the loss, so the clear signals its `PLAYER_TARGET_CHANGED` and usable refresh
+        // as a release's teardown does (`0x493a69`, `0x493a73`), still sending nothing, and the
+        // surviving target frame lets the lost unit go.
+        let LostSelection { selection, owed } = lost;
         if let Some(mut selection) = selection.filter(|s| s.guid.is_some()) {
+            let before = selection.guid;
             crate::target::clear_with_no_world(&mut selection);
+            let reconnects = end == benilla_protocol::SessionEnd::Lost && !super::session_over(end);
+            if let (true, Some(owed)) = (reconnects, owed) {
+                owed.into_inner().push(crate::target::OwedSelect::Signals(
+                    crate::script_calls::EngineSelect {
+                        before,
+                        // No teardown lowers the pet's latch: no `PET_BAR_UPDATE`.
+                        latched: false,
+                        mark: crate::lanes::mark(),
+                        owed: crate::target::SelectDebt::default(),
+                    },
+                ));
+            }
         }
         // The same teardown as `on_logged_out`'s.
         b.reputations.tear_down();
@@ -264,6 +301,9 @@ fn on_disconnected(
             &mut e.transfer,
             &mut e.disconnects,
         );
+        if let Some(mover) = b.mover.as_deref_mut() {
+            mover.forget_unless_held(&b.index);
+        }
     }
 }
 
@@ -297,11 +337,52 @@ fn on_mover_edge(In(ev): In<SessionEvent>, mut e: Edges, b: Bridge) {
             counter,
             launch,
         } => knock_back(guid, counter, launch, &b.self_guid, &mut e.knockbacks),
-        SessionEvent::ClientControl { mover, allow_move } => {
-            e.client_control
-                .write(ClientControlMessage { mover, allow_move });
-        }
         _ => {}
+    }
+}
+
+/// What [`on_client_control`] holds beside the host: the cast its fall cancels, our guid, the flag,
+/// and the notice lane its signals go on (absent in a harness without the unit feed).
+type ControlSet = (
+    crate::spell::SelfCancel<'static>,
+    Res<'static, SelfGuid>,
+    ResMut<'static, crate::player::OwnControlLost>,
+    Option<ResMut<'static, crate::field_watch::NoticeLane>>,
+);
+
+/// `SMSG_CLIENT_CONTROL_UPDATE` (`0x5fa6b1` → `SetPlayerControl 0x4958e0`), its movement judged by
+/// the controller later. For our own mover a change of the flag `[0xb4b3e4]` is stored here
+/// (`0x4958ea`); its fall drops the cursor's payload and the cast (`0x4958e8`-`0x495901` →
+/// `0x495920`), and the change signals on the notice lane at this packet's place, then runs the
+/// usable refresh (`0x4958f7`/`0x49590b`, `0x4958fc`/`0x495910`). A store that changes nothing does
+/// nothing (`0x4958e6`).
+fn on_client_control(
+    In(ev): In<SessionEvent>,
+    mut e: Edges,
+    // The flag and our guid are the host's too, so they sit in the set it shares with the cast.
+    mut vm: crate::script_calls::VmWith<ControlSet>,
+) {
+    let SessionEvent::ClientControl { mover, allow_move } = ev else {
+        return;
+    };
+    e.client_control
+        .write(ClientControlMessage { mover, allow_move });
+    {
+        let (_, self_guid, mut own, _) = vm.own();
+        if self_guid.0 != Some(mover) || own.0 == !allow_move {
+            return;
+        }
+        own.0 = !allow_move;
+    }
+    if !allow_move {
+        crate::spell::drop_hold(&mut vm, |(mut cancel, ..)| cancel.abort_cast());
+    }
+    if let (.., Some(mut lane)) = vm.own() {
+        use crate::field_watch::FieldNotice;
+        lane.write(FieldNotice::PlayerControl {
+            in_control: allow_move,
+        });
+        lane.write(FieldNotice::UsableRefresh);
     }
 }
 
@@ -315,7 +396,6 @@ fn on_worldport(
     view_log: Option<ResMut<crate::ui_unit::views::ViewLog>>,
     player: Option<Res<crate::player::Player>>,
     selection: Option<ResMut<crate::target::Selection>>,
-    owed_releases: Option<ResMut<crate::target::OwedReleases>>,
     place: crate::ui_party::net::SnapshotPlace,
     transforms: Query<&Transform>,
 ) {
@@ -344,27 +424,12 @@ fn on_worldport(
             log.records(&before, &group.stats);
         }
         log_teardown(view_log, &b);
-        // The transfer frees every object with no release (`0x467700` → `0x467800`), and the
-        // reference's own clear is the arrival's `SetSelection(0, 0)` (`0x490927`), which benilla
-        // does not run: the selected unit's object is torn down here as its release would.
-        let mut selection = selection;
-        if let Some(guid) = selection.as_ref().and_then(|s| s.guid) {
-            if b.index.0.contains_key(&guid) {
-                let held = |g: u64| {
-                    b.index
-                        .0
-                        .get(&g)
-                        .and_then(|e| b.stores.get(*e).ok())
-                        .map(|s| &s.0)
-                };
-                let me = b.self_guid.0;
-                crate::target::unit_released(
-                    selection.as_mut(),
-                    owed_releases.map(|o| o.into_inner()),
-                    guid,
-                    || crate::target::raid_member_or_pet(&group, guid, me, &held),
-                );
-            }
+        // The transfer frees every object with no release (`0x467700` → `0x467800`): the selection
+        // keeps its guid, its object gone, until the arrival's `SelectTarget(0)` (`0x490927`)
+        // clears it (the unit feed's world-enter turn).
+        if let Some(mut selection) = selection {
+            selection.target = None;
+            selection.lit = None;
         }
         worldport(
             map_id,
@@ -378,20 +443,37 @@ fn on_worldport(
             player.as_ref().and_then(|p| p.ride_entity()),
             &mut e.worldports,
         );
+        // The world load destroys every object (`0x401bf7` → `0x467700` → `0x467800`), our own
+        // player too, whose destructor zeroes the active mover it names (`0x5fb650`).
+        if let Some(mover) = b.mover.as_deref_mut() {
+            mover.forget_unless_held(&b.index);
+        }
         // Loading a new world frees the released objects with the live ones (`0x467700`).
         released.clear();
     }
 }
 
+/// The handler `0x401900` reaches `0x495920` on both of its arms (`0x40194c`), ahead of the
+/// loading screen: the cursor's payload and the cast are dropped.
+fn on_transfer_pending(
+    In(ev): In<SessionEvent>,
+    mut e: Edges,
+    mut vm: crate::script_calls::VmWith<crate::spell::SelfCancel<'static>>,
+) {
+    if let SessionEvent::TransferPending {
+        map_id,
+        transport_entry,
+        from_map,
+    } = ev
+    {
+        crate::spell::drop_hold(&mut vm, |mut cancel| cancel.abort_cast());
+        transfer_pending(map_id, transport_entry, from_map, &mut e.transfer);
+    }
+}
+
 fn on_transfer(In(ev): In<SessionEvent>, mut e: Edges) {
-    match ev {
-        SessionEvent::TransferPending {
-            map_id,
-            transport_entry,
-            from_map,
-        } => transfer_pending(map_id, transport_entry, from_map, &mut e.transfer),
-        SessionEvent::TransferAborted { reason } => transfer_aborted(reason, &mut e.transfer),
-        _ => {}
+    if let SessionEvent::TransferAborted { reason } = ev {
+        transfer_aborted(reason, &mut e.transfer);
     }
 }
 
@@ -736,7 +818,6 @@ fn connected(
     name: String,
     tutorial_flags: Option<Vec<u8>>,
     addon_info: Option<Vec<benilla_protocol::messages::AddonRecord>>,
-    commands: &mut Commands,
     addon_reply: &mut crate::net::AddonInfoReply,
     self_guid: &mut SelfGuid,
     status: &mut NetStatus,
@@ -747,12 +828,11 @@ fn connected(
     status.connected = true;
     status.last_reason = None;
     info!("net: in world as {name} (guid {guid})");
-    // The reference clears player and pet names at every world entry (`0x555740`, arm
-    // `0x5557ad`), since a guid may name a new character; creature templates survive.
+    // The reference clears the caches built unsaved at every world entry (`DBCacheClearUnsaved`,
+    // `0x555740`, ahead of the world's first packet): player and pet names here, since a guid may
+    // name a new character, and the guild and petition stores in [`crate::wdb`]. A saved
+    // cache, creature templates included, keeps its records and its asks.
     names.clear_world_session();
-    // And every ask-once cache's in-flight asks, applied with this handler's commands, before
-    // the next packet's handlers can ask.
-    commands.queue(crate::query_cache::release_pending);
     // Our own name came with the login, so "player" never queries.
     names.insert_player(guid, name, None);
     // Set before the world-entry UI load reads it, and every login, so a silent server inherits
@@ -1505,10 +1585,102 @@ mod login_ask_tests {
             "the login handler ran"
         );
         frame(&mut app, vec![requested()]);
+        // The world session's packets wait for the entry load (`net::apply::InboundHold`).
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(
+            !app.world()
+                .contains_resource::<crate::ui_script::PendingEntryUiLoad>(),
+            "the entry load ran"
+        );
         let asked = crate::query_cache::queries(&sent)
             .into_iter()
             .filter(|c| matches!(c, crate::net::ClientCommand::NameQuery { guid: CHALLENGER }))
             .count();
         assert_eq!(asked, 1, "the login frame forgot its packet's pending ask");
+    }
+
+    /// `DBCacheClearUnsaved` (`0x555740`) wipes a cache whole, records and asks, only when its
+    /// persist byte is 0 (player names `0xc0e228`, guilds, pet names and petitions); a saved
+    /// cache keeps both. The item cache's and the page cache's in-flight asks stand, and an
+    /// unsaved player name's ask and record are gone.
+    #[test]
+    fn the_world_entry_wipes_the_unsaved_caches_and_leaves_the_saved_ones() {
+        use crate::query_cache::Ask;
+        const ITEM: u32 = 5_000;
+        const PAGE: u32 = 358;
+        const ANSWERED_PAGE: u32 = 359;
+        const ASKED: u64 = 0x77;
+        const KNOWN: u64 = 0x78;
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        app.insert_resource(bevy::ecs::error::FallbackErrorHandler(
+            bevy::ecs::error::ignore,
+        ));
+        let (tx, sent) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        let (inbound, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetEvents::for_test(rx));
+        let ask_all = |app: &App| {
+            let commands = app.world().resource::<NetCommands>();
+            app.world()
+                .resource::<Items>()
+                .template(ITEM, 0, Ask::Event(commands));
+            app.world()
+                .resource::<crate::ui_item_text::PageTexts>()
+                .page(PAGE, 0, Ask::Event(commands));
+            app.world()
+                .resource::<NameCache>()
+                .resolve_player(ASKED, Ask::Event(commands));
+            crate::query_cache::queries(&sent)
+        };
+        use crate::net::ClientCommand as C;
+        assert_eq!(ask_all(&app).len(), 3, "each cache sends its ask");
+        app.world_mut()
+            .resource_mut::<crate::ui_item_text::PageTexts>()
+            .insert(ANSWERED_PAGE, "A saved page.".into(), 0);
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(KNOWN, "Unsaved".into(), None);
+
+        inbound
+            .send(SessionEvent::Connected {
+                self_guid: 0x2a,
+                name: "Probeseven".into(),
+                billing: Default::default(),
+                tutorial_flags: None,
+                addon_info: None,
+            })
+            .unwrap();
+        app.update();
+
+        let again = ask_all(&app);
+        assert!(
+            !again
+                .iter()
+                .any(|c| matches!(c, C::ItemQuery { .. } | C::PageTextQuery { .. })),
+            "a saved cache's ask stands, so it is not sent again: {again:?}"
+        );
+        assert!(
+            again
+                .iter()
+                .any(|c| matches!(c, C::NameQuery { guid: ASKED })),
+            "an unsaved cache's ask is gone, so it is sent again: {again:?}"
+        );
+        let world = app.world();
+        assert!(
+            world
+                .resource::<crate::ui_item_text::PageTexts>()
+                .page(ANSWERED_PAGE, 0, Ask::Read)
+                .is_some(),
+            "a saved cache keeps its records"
+        );
+        assert_eq!(
+            world
+                .resource::<NameCache>()
+                .resolve_player(KNOWN, Ask::Read),
+            None,
+            "an unsaved cache loses its records"
+        );
     }
 }

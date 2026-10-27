@@ -511,9 +511,10 @@ fn unpark_glue_vm(world: &mut World) {
 /// socket threads only enqueue (`0x537b7c`; `SMSG_PONG` at `0x537b56` the one bypass), and the
 /// login request waits for the UI (`0x46c272`).
 ///
-/// Two terms, because the latch trails the wire by a frame: `apply_net_updates` drains `Connected`
-/// and the login burst behind it in one pass, and the `InWorld` transition that arms the latch and
-/// parks the VM runs at the next frame's `StateTransition`; the `InWorld` term covers that frame.
+/// Two terms, because the latch trails the wire by a frame: [`crate::net::apply_net_updates`]
+/// drains `Connected`, holding the login burst behind it until the load has run, and the `InWorld`
+/// transition that arms the latch and parks the VM runs at the next frame's `StateTransition`; the
+/// `InWorld` term covers that frame.
 pub(crate) fn ingame_ui_up(
     pending: Option<Res<PendingEntryUiLoad>>,
     state: Option<Res<State<crate::client_state::ClientState>>>,
@@ -971,6 +972,12 @@ fn entry_finish(
     } else {
         Default::default()
     };
+    // Our own `[0xb4b3e4]`, which `HasFullControl` reads and a reload leaves as it stands; its
+    // changes signal where the control packet stores them.
+    let in_control = !world
+        .get_resource::<crate::player::OwnControlLost>()
+        .is_some_and(|c| c.0);
+    script.set_player_control(in_control);
     // Each phase runs with a call host lent, built off the world as a system's would be, so a call
     // an `ADDON_LOADED` or `VARIABLES_LOADED` handler makes applies inside its verb, as the
     // reference's do; the world reads between them are the load's own.
@@ -1368,9 +1375,18 @@ fn cancel_move_action(world: &mut World) {
 /// ordered against each other; the layout save is here because a `/reload` never leaves
 /// `InWorld`. No autosave, as the reference has none (the layout cache's crash-only debounce in
 /// [`crate::ui_layout`] is ours).
-pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String, String)>) {
+///
+/// `layout_held`: the layout section is pending, its reader held, so its write is skipped
+/// (`0x5afed0` returns at `0x5afee0`).
+pub(crate) fn shutdown_ui_state(
+    script: &mut UiScript,
+    identity: Option<&(String, String)>,
+    layout_held: bool,
+) {
     script.fire_event("PLAYER_LOGOUT", vec![]);
-    crate::ui_layout::save_now(script, identity);
+    if !layout_held {
+        crate::ui_layout::save_now(script, identity);
+    }
     crate::ui_saved::save(script);
     addons::save_addon_variables(script, identity);
     addons::save_enable_state(script, identity);
@@ -1450,10 +1466,13 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     let identity = world
         .get_resource::<AddOnIdentity>()
         .and_then(|id| id.0.clone());
+    let layout_held = world
+        .get_resource::<crate::account_data::AccountData>()
+        .is_some_and(|data| data.pending(crate::account_data::LAYOUT));
     if !ui_never_loaded {
         crate::script_calls::with_hosted_vm(world, |script| {
             if let Some(script) = script {
-                shutdown_ui_state(script, identity.as_ref());
+                shutdown_ui_state(script, identity.as_ref(), layout_held);
             }
         });
         // The shutdown's account-data writes (`0x490c55`-`0x490c79` through `0x5afed0`) arm
@@ -1500,8 +1519,8 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     if let Some(mut minimap) = world.get_resource_mut::<crate::minimap::MinimapWidget>() {
         minimap.0 = None;
     }
-    // And the signals the frame's deaths and releases parked in it, for their lanes.
-    crate::target::drop_parked_deaths(world);
+    // And the signals the frame's field callbacks and releases parked in it, for their lanes.
+    crate::field_callbacks::drop_parked(world);
     crate::target::drop_parked_releases(world);
 }
 
@@ -1583,9 +1602,12 @@ pub(crate) fn shutdown_on_exit(
     let identity = world
         .get_resource::<AddOnIdentity>()
         .and_then(|id| id.0.clone());
+    let layout_held = world
+        .get_resource::<crate::account_data::AccountData>()
+        .is_some_and(|data| data.pending(crate::account_data::LAYOUT));
     crate::script_calls::with_hosted_vm(world, |script| {
         if let Some(script) = script {
-            shutdown_ui_state(script, identity.as_ref());
+            shutdown_ui_state(script, identity.as_ref(), layout_held);
         }
     });
     if silenced {

@@ -502,6 +502,14 @@ pub(crate) fn fire(
             ],
         ),
         FieldNotice::LevelUp(info) => level_up(script, &info),
+        FieldNotice::PlayerControl { in_control } => {
+            script.set_player_control(in_control);
+            if in_control {
+                script.fire_event("PLAYER_CONTROL_GAINED", vec![]);
+            } else {
+                script.fire_event("PLAYER_CONTROL_LOST", vec![]);
+            }
+        }
         // Caught by [`fire_lane`] before it reaches here: the refresh runs on the host's action
         // states ([`crate::script_calls::ScriptCallHost::engine_usable_refresh`]).
         FieldNotice::UsableRefresh => {}
@@ -682,6 +690,7 @@ fn global_event(id: u16) -> Option<&'static str> {
         id::PLAYERBANKBAGSLOTS_CHANGED => "PLAYERBANKBAGSLOTS_CHANGED",
         id::PLAYER_FARSIGHT_FOCUS_CHANGED => "PLAYER_FARSIGHT_FOCUS_CHANGED",
         id::LANGUAGE_LIST_CHANGED => "LANGUAGE_LIST_CHANGED",
+        id::LOCALPLAYER_PET_RENAMED => "LOCALPLAYER_PET_RENAMED",
         _ => return None,
     })
 }

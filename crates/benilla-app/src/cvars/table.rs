@@ -729,7 +729,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "maintainer's call, reversing 1642: at mode 4 an oblique surface takes the mip of its long \
          axis and smears; 16x anisotropy costs nothing measurable on a current GPU",
-    ),
+    )
+    .checked(benilla_ui::script::check_anisotropic),
     // The four video CVars the stock window's verbs read and write (`benilla_ui` `video_pairs`);
     // benilla has no mechanism behind any of them. `shadowLevel` (`0x6885bc`, "1", flags 1,
     // callback `0x688c10`, record `[0xc7f350]`) is behind `Get/SetTerrainMip` as `1 − level`: the
@@ -771,7 +772,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
          `SET weatherDensity \"3\"` (K = 1.0) — so 3 is the value a benilla-vs-reference \
          side-by-side is correct at, and the registered 2 would thin every rate to 0.66 against \
          the only client we compare with. The slider is how a player takes it back down",
-    ),
+    )
+    .checked(benilla_ui::script::check_weather_density),
     // `gamma` (`0x402d70`: name `0x82e924` "Gamma", default `0x82e92c` "1.0", flags 0, callback
     // `0x4034d0`). The reference uploads `pow(i/255, gamma)` (`0x591680`) through
     // `SetDeviceGammaRamp`, except when windowed (`byte[dev+0x20b]`). Deviation: benilla, which

@@ -14,7 +14,7 @@ use super::super::item_glow::{self, ItemGlows};
 use super::super::Creatures;
 use super::{
     attach_id, ensure_item_model_mut, DisarmFreeze, Equipment, HeldItems, HeldSlot, ItemDisplays,
-    ItemModelKind, ATTACH_SLOTS, COMPOSITE_SLOTS, HELD_SLOTS, NO_GLOW, PLAYER_HELD_SLOTS,
+    ItemModelKind, WornPins, ATTACH_SLOTS, COMPOSITE_SLOTS, HELD_SLOTS, NO_GLOW, PLAYER_HELD_SLOTS,
     TABARD_BODYSLOT,
 };
 
@@ -103,6 +103,8 @@ pub(in crate::entities) struct ResolveKey {
     visual_sheath: Option<[u8; 2]>,
     nocked: Option<u32>,
     latched: bool,
+    /// `(helm hidden, cloak hidden)`, the bits or a call's re-dress ahead of them ([`WornPins`]).
+    worn_hidden: (bool, bool),
 }
 
 /// The item entries a player's resolve last looked up, by visible slot and by quiver bag slot.
@@ -187,7 +189,7 @@ pub(crate) struct DressKey {
 #[allow(clippy::type_complexity)]
 pub(in crate::entities) fn resolve_equipment(
     mut commands: Commands,
-    units: Query<(
+    mut units: Query<(
         Entity,
         &NetEntity,
         Ref<ObjectStore>,
@@ -201,7 +203,7 @@ pub(in crate::entities) fn resolve_equipment(
         Option<&ResolveKey>,
         Option<&DressKey>,
         Option<&DisarmFreeze>,
-        Has<crate::net::SelfPlayer>,
+        (Has<crate::net::SelfPlayer>, Option<&mut WornPins>),
         Option<&LookedUp>,
     )>,
     held: Option<ResMut<ItemDisplays>>,
@@ -252,9 +254,9 @@ pub(in crate::entities) fn resolve_equipment(
         current_key,
         current_dress,
         freeze,
-        is_self,
+        (is_self, mut pins),
         looked_up,
-    ) in &units
+    ) in &mut units
     {
         if !matches!(net_entity.kind, EntityKind::Unit | EntityKind::Player) {
             continue;
@@ -265,11 +267,23 @@ pub(in crate::entities) fn resolve_equipment(
             .and_then(|c| c.state())
             .or_else(|| s.unit_sheath_state())
             .unwrap_or(0);
+        // A piece whose record a call waited on goes by the flag once the record lands.
+        if let Some(pins) = pins.as_mut() {
+            let landed = |slot| {
+                s.player_visible_item_entry(slot)
+                    .is_some_and(|entry| templates.template(entry, 0, Ask::Read).is_some())
+            };
+            pins.records_landed(landed);
+        }
         let key = ResolveKey {
             committed_sheath: committed,
             visual_sheath: visual_sheath.map(|v| v.0),
             nocked: nocked.map(|n| n.display_id),
             latched: nock_latched,
+            // `PLAYER_FLAGS`' `HIDE_HELM 0x400` and `HIDE_CLOAK 0x800` are public, so another
+            // player's choice shows here; a hidden piece is display id 0, so its model and
+            // `0x4799a0` masks go.
+            worn_hidden: WornPins::hidden(pins.as_deref(), s),
         };
         if !caches_moved && !store.is_changed() && current_key == Some(&key) {
             continue;
@@ -277,9 +291,7 @@ pub(in crate::entities) fn resolve_equipment(
         if current_key != Some(&key) {
             commands.entity(entity).insert(key);
         }
-        // `PLAYER_FLAGS`' `HIDE_HELM 0x400` and `HIDE_CLOAK 0x800` are public, so another player's
-        // choice shows here; a hidden piece is display id 0, so its model and `0x4799a0` masks go.
-        let (hide_helm, hide_cloak) = (s.player_hides_helm(), s.player_hides_cloak());
+        let (hide_helm, hide_cloak) = key.worn_hidden;
         let prev = looked_up.copied().unwrap_or_default();
         let mut reads = SlotReads {
             templates: &templates,

@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 
-use super::{Player, SETTLE_TIMEOUT};
+use super::{MoverLock, Player, SETTLE_TIMEOUT};
 use benilla_world::terrain_stream::{ViewFocus, WorldLoadProgress};
 use benilla_world::view::Viewer;
 
@@ -152,7 +152,6 @@ pub(super) fn release_post_snap_hold(
         ),
         (With<crate::net::SelfPlayer>, With<crate::net::Embodied>),
     >,
-    self_guid: Option<Res<crate::net::SelfGuid>>,
 ) {
     let Some(p) = progress else { return };
     // Our create block has landed and any seat in it is a ride by now: the seat takes the tag's
@@ -210,7 +209,6 @@ pub(super) fn release_post_snap_hold(
             info!("worldport: ack sent, the world is resident");
         }
     }
-    let was_settling = player.settling;
     if player.world_reload && now >= player.reload_ceiling {
         // The reload's ceiling, which nothing below extends.
         player.awaiting_arrival = false;
@@ -231,26 +229,6 @@ pub(super) fn release_post_snap_hold(
     } else if now >= player.settle_deadline {
         player.awaiting_arrival = false;
         player.end_settle(false, now);
-    }
-    // A transfer is a mover change, and the server's revoke belonged to the body on the map we
-    // left: vmangos takes control for the teleport (`SetClientControl(player, 0)`) and does not
-    // promise the restore. Left set, `control_lost` parks the body for the rest of the session,
-    // because nothing else clears it: the worldport arm replaces the pose and the settle releases,
-    // and neither asks. Re-claim our own body when the settle ends, with the ack, the way login
-    // does; the reference's `SetActiveMover` reset (`wire_in.rs`) is the same teardown. A
-    // possession is left alone: there the lock is the point.
-    if was_settling && !player.settling && player.control_lost && player.foreign_mover.is_none() {
-        if let (Some(net), Some(guid)) =
-            (net_cmds.as_deref(), self_guid.as_deref().and_then(|g| g.0))
-        {
-            player.control_lost = false;
-            player.reseat = true;
-            super::move_trace::mover_claim("WORLDPORT", guid);
-            let _ = net
-                .0
-                .send(crate::net::ClientCommand::SetActiveMover { guid });
-            info!("worldport: re-claimed our own body after the transfer");
-        }
     }
     // A timeout release still pays the ack: the server keeps an unacked transfer out of world
     // until logout.
@@ -273,6 +251,7 @@ const FLOOR_REACH: f32 = 20.0;
 /// this catches what no stand-in describes. Runs after the stream stage, before the release.
 pub(super) fn hold_unsupported_body(
     mut player: ResMut<Player>,
+    lock: Option<Res<MoverLock>>,
     progress: Option<Res<WorldLoadProgress>>,
     world: benilla_world::collision::WorldCollision,
     time: Res<Time>,
@@ -286,7 +265,8 @@ pub(super) fn hold_unsupported_body(
             .ray_body(pos + Vec3::Y * 0.5, Dir3::NEG_Y, FLOOR_REACH + 0.5)
             .is_some()
     };
-    let unsupported = falls_unsupported(&player, &p) && !floor_below(player.pos);
+    let driving = lock.is_some_and(|l| l.foreign_mover.is_some());
+    let unsupported = falls_unsupported(&player, driving, &p) && !floor_below(player.pos);
     if !catch_edge(unsupported, player.settling, &mut caught) {
         return;
     }
@@ -305,14 +285,14 @@ pub(super) fn hold_unsupported_body(
 
 /// The body is our own walker in the air, over ground the world says is still arriving: the case
 /// [`hold_unsupported_body`] holds once nothing solid is found below it. A server ride, a deck, a
-/// swim and GM flight have no floor to wait for.
-fn falls_unsupported(player: &Player, p: &WorldLoadProgress) -> bool {
+/// swim, GM flight and `driving` another unit have no floor to wait for.
+fn falls_unsupported(player: &Player, driving: bool, p: &WorldLoadProgress) -> bool {
     player.active
         && !player.detached
         && !player.server_riding
         && player.ride.is_none()
         && player.pending_board.is_none()
-        && player.foreign_mover.is_none()
+        && !driving
         && !player.swimming
         && !player.modes.levitating
         && player.airborne_since.is_some()
@@ -360,6 +340,7 @@ pub(crate) struct BarUnitOutdoors(pub(crate) Option<(u64, bool)>);
 pub(crate) fn publish_caster_outdoors(
     test: benilla_world::wmo_portal::EntityOutdoors,
     player: Option<Res<Player>>,
+    lock: Option<Res<MoverLock>>,
     mut outdoors: ResMut<PlayerOutdoors>,
     bar: Option<Res<crate::ui_pet::PetBar>>,
     index: Option<Res<crate::net::GuidIndex>>,
@@ -369,7 +350,14 @@ pub(crate) fn publish_caster_outdoors(
     let now = match player.as_deref() {
         // `pos` is another unit's while we drive it, and still the last mover's until the new
         // one's pose is adopted (`reseat`): our own body's answer holds.
-        Some(p) if p.active && (p.foreign_mover.is_some() || p.reseat) => None,
+        Some(p)
+            if p.active
+                && lock
+                    .as_deref()
+                    .is_some_and(|l| l.foreign_mover.is_some() || l.reseat) =>
+        {
+            None
+        }
         Some(p) if p.active => Some(test.at(p.pos)),
         // No body: a null entity reads outdoors (`0x6706fa`).
         _ => Some(true),
@@ -982,7 +970,7 @@ mod tests {
     #[test]
     fn a_body_walking_off_into_a_wmo_still_arriving_is_held_not_dropped() {
         let (player, progress) = walked_off();
-        assert!(falls_unsupported(&player, &progress));
+        assert!(falls_unsupported(&player, false, &progress));
         let mut caught = false;
         assert!(
             catch_edge(true, false, &mut caught),
@@ -1017,7 +1005,10 @@ mod tests {
         for (name, tweak) in cases {
             let (mut player, mut progress) = walked_off();
             tweak(&mut player, &mut progress);
-            assert!(!falls_unsupported(&player, &progress), "{name} was caught");
+            assert!(
+                !falls_unsupported(&player, false, &progress),
+                "{name} was caught"
+            );
         }
     }
 
@@ -1061,16 +1052,21 @@ mod tests {
         use benilla_assets::coords::wow_to_bevy;
 
         // One frame of the system over the test room, from the answer `last`.
+        let ask_locked =
+            |flags: u32, player: Player, lock: MoverLock, viewer: Viewer, last: bool| {
+                let mut app = App::new();
+                insert_test_room(app.world_mut(), flags);
+                app.insert_resource(player)
+                    .insert_resource(lock)
+                    .insert_resource(viewer)
+                    .insert_resource(PlayerOutdoors(last))
+                    .init_resource::<BarUnitOutdoors>()
+                    .add_systems(Update, publish_caster_outdoors);
+                app.update();
+                app.world().resource::<PlayerOutdoors>().0
+            };
         let ask = |flags: u32, player: Player, viewer: Viewer, last: bool| {
-            let mut app = App::new();
-            insert_test_room(app.world_mut(), flags);
-            app.insert_resource(player)
-                .insert_resource(viewer)
-                .insert_resource(PlayerOutdoors(last))
-                .init_resource::<BarUnitOutdoors>()
-                .add_systems(Update, publish_caster_outdoors);
-            app.update();
-            app.world().resource::<PlayerOutdoors>().0
+            ask_locked(flags, player, MoverLock::default(), viewer, last)
         };
         let (inside, outside) = (
             wow_to_bevy([1.0, 2.0, 30.0]),
@@ -1115,20 +1111,20 @@ mod tests {
             !ask(0, body(inside), seen(outside), true),
             "the body, not the viewer"
         );
-        let driving = Player {
+        let driving = MoverLock {
             foreign_mover: Some(0xF130_0000_0000_0043),
-            ..body(outside)
+            ..MoverLock::default()
         };
         assert!(
-            !ask(0, driving, seen(outside), false),
+            !ask_locked(0, body(outside), driving, seen(outside), false),
             "driving another unit holds the answer"
         );
-        let reseating = Player {
+        let reseating = MoverLock {
             reseat: true,
-            ..body(outside)
+            ..MoverLock::default()
         };
         assert!(
-            !ask(0, reseating, seen(outside), false),
+            !ask_locked(0, body(outside), reseating, seen(outside), false),
             "so does the frame before our own body's pose is adopted"
         );
     }

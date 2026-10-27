@@ -614,6 +614,18 @@ impl LootState {
         self.window.source
     }
 
+    /// `ClearLootRollState` (`0x5ebcf0`), from `SMSG_LOOT_ALL_PASSED` (`0x61b5dd`) and
+    /// `SMSG_LOOT_ROLL_WON` (`0x61b97c`): the row at `slot` of the open source `guid` goes back to
+    /// the type 0 its click re-reads (`0x4c28a9` → `0x5ebce0`), so the freed item loots.
+    pub(crate) fn roll_resolved(&mut self, guid: u64, slot: u8) {
+        if self.window.source != Some(guid) {
+            return;
+        }
+        if let Some(row) = self.window.items.iter_mut().find(|i| i.slot == slot) {
+            row.slot_type = benilla_protocol::messages::slot_type::ALLOW_LOOT;
+        }
+    }
+
     /// `LootHasContents` (`0x4c2a70`): the source resolves as any object (`0x4c2a8c`, mask 1) and
     /// has money above 0 or a row left.
     fn has_contents(&self, objects: &crate::net::Objects) -> bool {
@@ -643,7 +655,11 @@ impl LootState {
 
     /// `0xb71b44` above 0: a row's item record is still being fetched, counted from the copier
     /// (`0x4c1e77`) until its callback (`0x4c2ac0`); a negative answer releases the row, as
-    /// [`templates_outstanding`] has it.
+    /// [`templates_outstanding`] has it. Deviation: a row cleared meanwhile stops counting, where
+    /// `ClearLootRow` (`0x4c1f00`) cancels its callback (`0x4c1f52`) and never lowers the count
+    /// (its writers are `0x4c1def`, `0x4c1e94` and `0x4c2af6` alone), so in 1.12.1 a group
+    /// member's take of an uncached item before the answer leaves that corpse's window shut until
+    /// the next loot response resets the count (`0x4c1def`), and ours opens.
     fn records_pending(&self, items: &Items) -> bool {
         let w = &self.window;
         w.items.iter().any(|it| {
@@ -1606,7 +1622,7 @@ pub(crate) fn seat_loot_steps(world: &mut World) {
     world.init_resource::<crate::net::GuidIndex>();
     world.init_resource::<Items>();
     world.init_resource::<Messages<crate::sound::LootPickupSound>>();
-    world.init_resource::<Messages<crate::target::DeselectGuid>>();
+    world.init_resource::<crate::target::OwedSelects>();
 }
 
 /// Whether a take must raise `LOOT_BIND_CONFIRM` first (`0x4c28f2`/`0x4c28fb`): bind on pickup
@@ -1733,16 +1749,22 @@ pub(crate) struct DeadUnitDeselect<'w, 's> {
             &'static crate::net::ObjectStore,
         ),
     >,
-    asks: MessageWriter<'w, crate::target::DeselectGuid>,
+    /// Where the deselect is owed ([`crate::target::OwedSelect::Deselect`]); absent in a harness
+    /// without targets.
+    owed: Option<ResMut<'w, crate::target::OwedSelects>>,
 }
 
 impl DeadUnitDeselect<'_, '_> {
     pub(crate) fn after_close(&mut self, closed: Option<u64>) {
-        let Some(source) = closed else {
-            return;
-        };
-        let dead_unit = self
-            .index
+        if let Some(source) = self.dead_unit(closed) {
+            self.deselect(source);
+        }
+    }
+
+    /// The closed source, when it is a dead unit.
+    pub(super) fn dead_unit(&self, closed: Option<u64>) -> Option<u64> {
+        let source = closed?;
+        self.index
             .0
             .get(&source)
             .and_then(|&e| self.objects.get(e).ok())
@@ -1751,10 +1773,20 @@ impl DeadUnitDeselect<'_, '_> {
                     net_entity.kind,
                     benilla_protocol::EntityKind::Unit | benilla_protocol::EntityKind::Player
                 ) && (store.0.unit_health().unwrap_or(0) as i32) <= 0 // signed, `jg` at `0x48f360`
-            });
-        if dead_unit {
-            self.asks.write(crate::target::DeselectGuid(source));
+            })
+            .then_some(source)
+    }
+
+    /// Owe `0x493910(source, 1)`.
+    pub(super) fn deselect(&mut self, source: u64) {
+        if let Some(owed) = self.owed.as_deref_mut() {
+            owed.deselect(source);
         }
+    }
+
+    /// Where a handler that owes its own selects owes them, beside this deselect.
+    pub(crate) fn owed_selects(&mut self) -> Option<&mut crate::target::OwedSelects> {
+        self.owed.as_deref_mut()
     }
 }
 
@@ -1901,7 +1933,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.add_message::<crate::sound::LootPickupSound>()
-            .add_message::<crate::target::DeselectGuid>()
+            .init_resource::<crate::target::OwedSelects>()
             .init_resource::<LootState>()
             .init_resource::<LootLatch>()
             .init_resource::<LootMoveStart>()
@@ -3180,11 +3212,7 @@ mod tests {
 
     /// The deselects asked for since the last call.
     fn deselects(app: &mut App) -> Vec<u64> {
-        app.world_mut()
-            .resource_mut::<bevy::ecs::message::Messages<crate::target::DeselectGuid>>()
-            .drain()
-            .map(|d| d.0)
-            .collect()
+        crate::target::take_owed_deselects(app.world_mut())
     }
 
     /// Opens a window as an admitted response does: the rows and the latch.

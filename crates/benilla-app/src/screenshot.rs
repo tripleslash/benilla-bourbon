@@ -239,31 +239,12 @@ impl Plugin for ScreenshotPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_state::test_env::ENV_LOCK;
+    use benilla_ui::civil::ZoneGuard;
     use benilla_ui::script::UiScript;
-
-    /// Holds `TZ` for a test where the C runtime reads it too ([`benilla_ui::civil::set_tz`]),
-    /// and puts the old value back.
-    struct Zone(Option<String>);
-
-    impl Zone {
-        fn set(tz: &str) -> Self {
-            let old = std::env::var("TZ").ok();
-            benilla_ui::civil::set_tz(Some(tz));
-            Self(old)
-        }
-    }
-
-    impl Drop for Zone {
-        fn drop(&mut self) {
-            benilla_ui::civil::set_tz(self.0.as_deref());
-        }
-    }
 
     #[test]
     fn names_follow_the_reference_and_never_collide() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _tz = Zone::set("UTC0");
+        let _zone = ZoneGuard::set("UTC0");
         let mut s = ScreenshotState::default();
         // 2026-08-21T13:45:07Z.
         assert_eq!(s.next_name(1_787_319_907), "WoWScrnShot_082126_134507.png");
@@ -284,11 +265,25 @@ mod tests {
     /// 13:45:07Z is 19:30:07, and 20:00Z is past local midnight.
     #[test]
     fn names_stamp_the_local_time() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _tz = Zone::set("NPT-05:45");
+        let _zone = ZoneGuard::set("NPT-05:45");
         let mut s = ScreenshotState::default();
         assert_eq!(s.next_name(1_787_319_907), "WoWScrnShot_082126_193007.png");
         assert_eq!(s.next_name(1_787_342_400), "WoWScrnShot_082226_014500.png");
+    }
+
+    /// The zone is the process's, read once (`0x414568`): a test holds its own through the guard,
+    /// so the stamp follows each zone set in turn, whatever ran before.
+    #[test]
+    fn the_stamp_follows_the_zone_a_test_holds() {
+        for (tz, name) in [
+            ("NPT-05:45", "WoWScrnShot_082126_193007.png"),
+            ("UTC0", "WoWScrnShot_082126_134507.png"),
+            ("NPT-05:45", "WoWScrnShot_082126_193007.png"),
+        ] {
+            let _zone = ZoneGuard::set(tz);
+            let mut s = ScreenshotState::default();
+            assert_eq!(s.next_name(1_787_319_907), name, "TZ {tz}");
+        }
     }
 
     /// An ask made during frame N is spawned on frame N+1.
