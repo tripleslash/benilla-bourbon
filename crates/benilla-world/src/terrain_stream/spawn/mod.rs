@@ -65,6 +65,8 @@ type SpawnTables<'w, 's> = (
     // The eye the dormant placements wake and sleep by, and where they were last judged from.
     Query<'w, 's, &'static GlobalTransform, With<crate::view::WorldCamera>>,
     Local<'s, Option<Vec3>>,
+    // The placement hosts gone since last frame, a release's or a sleep's: their keyed materials go.
+    RemovedComponents<'w, 's, crate::doodad_anim::DoodadAnimHost>,
 );
 
 /// Yards the eye moves before the dormant placements are judged again.
@@ -139,7 +141,16 @@ pub(super) fn spawn_loaded_placements(
         mut staticgx,
         camera,
         mut judged_at,
+        mut gone_hosts,
     ) = tables;
+    // A per-sequence material is keyed by its placement's host, a new entity at every spawn and
+    // every wake, so the cache drops a host's own as the host goes; kept, they and their textures
+    // would outlive the tile until the map changes. Read before any return, so none is missed.
+    let gone: bevy::ecs::entity::EntityHashSet = gone_hosts.read().collect();
+    let mut placements = placements;
+    if !gone.is_empty() {
+        crate::model_render::forget_instances(&mut placements.materials, &gone);
+    }
     let Some(shared_light) = shared_light else {
         return;
     };

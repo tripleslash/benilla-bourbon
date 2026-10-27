@@ -701,19 +701,22 @@ fn new_archetypes(world: &World, since: usize) -> String {
 fn census(world: &mut World) -> Counts {
     let mut components: HashMap<ComponentId, u32> = HashMap::new();
     let mut archetypes = 0usize;
+    // Live entities, the archetypes' sum: Bevy 0.19's `Entities::len` counts allocated indices.
+    let mut entities = 0u32;
     for arch in world.archetypes().iter() {
         if arch.is_empty() {
             continue;
         }
         archetypes += 1;
         let n = arch.len();
+        entities += n;
         for &c in arch.components().iter() {
             *components.entry(c).or_default() += n;
         }
     }
 
     Counts {
-        entities: world.entities().len(),
+        entities,
         archetypes,
         archetypes_made: world.archetypes().len(),
         components,
