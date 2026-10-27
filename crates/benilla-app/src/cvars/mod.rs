@@ -2714,11 +2714,12 @@ mod tests {
                 "weatherDensity",
                 "3",
             ),
+            // The value kept is the fork's default, its `Deviates` row's 16.
             (
                 "anisotropic 32",
                 "Anisotropy must be between 1 and 16 inclusive",
                 "anisotropic",
-                "1",
+                "16",
             ),
             (
                 "ErrorLevelMin 7",

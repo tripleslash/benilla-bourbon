@@ -1585,15 +1585,17 @@ mod login_ask_tests {
             "the login handler ran"
         );
         frame(&mut app, vec![requested()]);
-        // The world session's packets wait for the entry load (`net::apply::InboundHold`).
-        for _ in 0..3 {
+        // The world session's packets wait for the entry load (`net::apply::InboundHold`), which
+        // the fork slices over frames, as many as its budget needs.
+        let mut frames = 0;
+        while app
+            .world()
+            .contains_resource::<crate::ui_script::PendingEntryUiLoad>()
+        {
             app.update();
+            frames += 1;
+            assert!(frames < 10_000, "the entry load ran");
         }
-        assert!(
-            !app.world()
-                .contains_resource::<crate::ui_script::PendingEntryUiLoad>(),
-            "the entry load ran"
-        );
         let asked = crate::query_cache::queries(&sent)
             .into_iter()
             .filter(|c| matches!(c, crate::net::ClientCommand::NameQuery { guid: CHALLENGER }))

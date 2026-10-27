@@ -141,6 +141,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("interact::WorldPick", "record"),
     ("interact::cast_pick_ray", "record"),
     ("interior::NodeAmbient", "record"),
+    ("interior::WmoResidency", "wall"),
     ("launch_env::seed", "wall"),
     ("launch_env::set_live_reader", "wall"),
     ("lighting::LavaLightGain", "wall"),
@@ -211,6 +212,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("system_profile::plugin", "wall"),
     ("system_profile::set_web_hooks", "wall"),
     ("terrain_stream::SPAWN_XY", "wall"),
+    ("terrain_stream::SpawnMode", "wall"),
     ("terrain_stream::StreamActivity", "wall"),
     ("terrain_stream::ViewFocus", "record"),
     ("terrain_stream::WorldLoadProgress", "wall"),
@@ -367,8 +369,10 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
 /// horizon's culling knob and set (`horizon::*`), and the portrait's every-frame pose
 /// (`rig_anim::PoseEveryFrame`), the placed-light marker the app's lamps carry so the modern
 /// frame can merge near lights (`lighting::PlacedLight`), and the per-system CPU profile
-/// (`system_profile::plugin`, with its subscriber's `install` and the page's `set_web_hooks`). They
-/// gate nothing; only the leaks do. Upstream's own count is 111.
+/// (`system_profile::plugin`, with its subscriber's `install` and the page's `set_web_hooks`), the
+/// resident-WMO stamp the minimap's indoor memo keys on (`interior::WmoResidency`) and the spawn
+/// mode a transport's props ask whole with (`terrain_stream::SpawnMode`). They gate nothing; only
+/// the leaks do. Upstream's own count is 111.
 const LEAK_CEILING: usize = 111;
 
 /// How far under [`LEAK_CEILING`] the count may sit before the test asks for the ceiling to be

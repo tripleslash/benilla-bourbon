@@ -987,7 +987,10 @@ pub(crate) mod schedule_tests {
     /// 2026-10-21..25 work (the parallel passes of ffaecab86 among it), mostly `GlobalTransform`
     /// and `EffectQuads` between the camera followers and the effect lanes, as before; not yet
     /// read pair by pair. `WOW_AMBIGUITY_DUMP=1` prints them (`POST …`).
-    const POST_UPDATE_CEILING: usize = 681;
+    ///
+    /// **682 (fork: measured at the merge of upstream 39de572fc)** — upstream's new
+    /// `doodad_anim::play_carrier_animation` against the exclusive `run_physics_schedule`, as above.
+    const POST_UPDATE_CEILING: usize = 682;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may

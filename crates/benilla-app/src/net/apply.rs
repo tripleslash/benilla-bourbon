@@ -218,7 +218,8 @@ mod hold_tests {
         {
             app.update();
             frames += 1;
-            assert!(frames < 10, "the entry load ran");
+            // The fork slices the load over frames, as many as its budget needs.
+            assert!(frames < 10_000, "the entry load ran");
         }
         assert!(!pending(&app), "released after the load, in wire order");
         drop(app);
