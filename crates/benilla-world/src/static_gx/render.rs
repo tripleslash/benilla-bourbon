@@ -675,10 +675,10 @@ fn prepare_static_gx(
     // the runs. A cell that changed out of view syncs on re-entry.
     let mut killed_synced = false;
     for vis in &gx.visible {
-        let GxDoodadVis::Cell(cell) = vis else {
-            continue; // prop regions carry no faders
-        };
-        let (Some(gpu), Some(draw)) = (cache.cells.get_mut(cell), gx.cells.get(cell)) else {
+        let (Some(gpu), Some(draw)) = (match vis {
+            GxDoodadVis::Cell(cell) => (cache.cells.get_mut(cell), gx.cells.get(cell)),
+            GxDoodadVis::Prop(entity, _) => (cache.props.get_mut(entity), gx.props.get(entity)),
+        }) else {
             continue;
         };
         if gpu.killed_applied == draw.killed_rev {

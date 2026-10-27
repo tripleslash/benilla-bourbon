@@ -37,17 +37,18 @@ impl UiScript {
         let (renumbers, mut joins, mut seen) = {
             let mut model = self.model_mut();
             // `SetScript` keeps the OnUpdate list; a destroyed frame's handle compacts out here.
+            // Both reads go through the arena's glance table, never a frame node.
             if model
                 .on_update_frames
                 .iter()
-                .any(|&h| model.arena.frame(h).is_none())
+                .any(|&h| model.arena.glance(h).is_none())
             {
                 let arena = &model.arena;
                 let live: Vec<FrameHandle> = model
                     .on_update_frames
                     .iter()
                     .copied()
-                    .filter(|&h| arena.frame(h).is_some())
+                    .filter(|&h| arena.glance(h).is_some())
                     .collect();
                 model.on_update_frames = live;
             }
@@ -61,7 +62,11 @@ impl UiScript {
                 .chain(model.arena.walked_kinds())
                 .chain(&plates)
             {
-                if let Some(f) = model.arena.frame(h).filter(|f| f.effective_visible) {
+                // Most of the roster is hidden: the glance table rules those out unread.
+                if !model.arena.is_visible(h) {
+                    continue;
+                }
+                if let Some(f) = model.arena.frame(h) {
                     let place = (f.strata as u8, f.level, 0, u64::from(f.insertion_seq));
                     ahead.insert(place, h);
                     seen.insert(h);

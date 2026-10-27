@@ -157,6 +157,15 @@ pub use kinds::{
 
 // ── Frame and Region nodes ───────────────────────────────────────────────────────────────────
 
+/// A frame slot's few hot facts, mirrored from its node by the arena's mutators.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Glance {
+    generation: u32,
+    live: bool,
+    pub visible: bool,
+    pub kind: FrameKind,
+}
+
 /// A frame node, the modelled subset of `CSimpleFrame`. The `effective_*` fields and the tree
 /// links belong to the [`WidgetArena`] mutators: change state through them so it propagates.
 #[derive(Clone, Debug, PartialEq)]
@@ -374,6 +383,9 @@ pub struct WidgetArena {
     minimap_kinds: Vec<FrameHandle>,
     /// The live EditBoxes, kept the same way, for the resize re-seat (`reseat_resized`).
     editbox_kinds: Vec<FrameHandle>,
+    /// Each frame slot's generation, kind and effective visibility, beside the arena: the update
+    /// walk filters hundreds of rostered frames on these alone, without touching a frame node.
+    glances: Vec<Glance>,
 }
 
 impl Default for WidgetArena {
@@ -424,6 +436,7 @@ impl WidgetArena {
             tooltip_kinds: Vec::new(),
             minimap_kinds: Vec::new(),
             editbox_kinds: Vec::new(),
+            glances: Vec::new(),
         }
     }
 
@@ -435,6 +448,28 @@ impl WidgetArena {
     /// The frames whose kind has an update of its own in the walk ([`FrameKind::kind_update`]).
     pub fn walked_kinds(&self) -> &[FrameHandle] {
         &self.walked_kinds
+    }
+
+    /// A live frame's kind and effective visibility, read off the compact side table.
+    #[inline]
+    pub fn glance(&self, h: FrameHandle) -> Option<Glance> {
+        self.glances
+            .get(h.index as usize)
+            .copied()
+            .filter(|g| g.live && g.generation == h.generation)
+    }
+
+    /// Whether `h` is live and effectively visible ([`Self::glance`]).
+    #[inline]
+    pub fn is_visible(&self, h: FrameHandle) -> bool {
+        self.glance(h).is_some_and(|g| g.visible)
+    }
+
+    /// Mirror a live frame's effective visibility into its glance.
+    fn glance_visible(&mut self, h: FrameHandle, visible: bool) {
+        if let Some(g) = self.glances.get_mut(h.index as usize) {
+            g.visible = visible;
+        }
     }
 
     pub fn tooltip_kinds(&self) -> &[FrameHandle] {
@@ -723,6 +758,16 @@ impl WidgetArena {
         let (strata, level) = (frame.strata, frame.level);
         let (index, generation) = self.frames.insert(frame);
         let handle = FrameHandle { index, generation };
+        let glance = Glance {
+            generation,
+            live: true,
+            visible,
+            kind,
+        };
+        match self.glances.get_mut(index as usize) {
+            Some(g) => *g = glance,
+            None => self.glances.push(glance),
+        }
         if visible {
             self.link_bound(strata, level);
             if let Some(log) = &mut self.link_log {
@@ -817,7 +862,9 @@ impl WidgetArena {
                 self.names.remove(&n);
             }
         }
-        self.frames.remove(h.index, h.generation);
+        if self.frames.remove(h.index, h.generation).is_some() {
+            self.glances[h.index as usize].live = false;
+        }
     }
 
     pub fn create_region(

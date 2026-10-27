@@ -1,14 +1,17 @@
 //! Spawns streamed placements as their model assets land, under a per-frame time and count budget.
 
 mod assemble;
+mod dormancy;
 mod fx;
 pub(crate) mod prop_light;
 
-pub use assemble::{spawn_model_entities, SpawnedModel};
+pub use assemble::{spawn_model_entities, SpawnMode, SpawnedModel};
+pub(crate) use dormancy::Sleeper;
+use dormancy::{entity_tail, SceneTag};
 pub use fx::point_light;
 use fx::{
-    emitter_fade, spawn_emissive_light_for, spawn_emitters_for, spawn_lights_for,
-    spawn_ribbons_for, spawn_window_lights_for, spawn_wmo_lights_for,
+    emitter_fade, spawn_emissive_light_for, spawn_lights_for, spawn_window_lights_for,
+    spawn_wmo_lights_for,
 };
 
 use bevy::platform::time::Instant;
@@ -50,7 +53,7 @@ use prop_light::{fold_interior_probe, PropLight, PropLobeLight, WmoDoodadInst};
 const SPAWN_COUNT_CAP: usize = 150;
 
 /// The nested resources of [`spawn_loaded_placements`], under Bevy's 16-parameter limit.
-type SpawnTables<'w> = (
+type SpawnTables<'w, 's> = (
     ResMut<'w, PropProbes>,
     ResMut<'w, crate::terrain_stream::StreamActivity>,
     Res<'w, crate::terrain_stream::ViewFocus>,
@@ -59,7 +62,13 @@ type SpawnTables<'w> = (
     ResMut<'w, StaticMerge>,
     // `None` only under `WOW_STATIC_GX=0`, when the retained pass is not armed.
     Option<ResMut<'w, crate::static_gx::StaticGx>>,
+    // The eye the dormant placements wake and sleep by, and where they were last judged from.
+    Query<'w, 's, &'static GlobalTransform, With<crate::view::WorldCamera>>,
+    Local<'s, Option<Vec3>>,
 );
+
+/// Yards the eye moves before the dormant placements are judged again.
+const DORMANT_STEP: f32 = 1.0;
 
 /// Retires a placement, or a WMO prop, whose model load failed: it spawns nothing and stops
 /// counting as pending, as a missing WDT falls back rather than stalling the world; warned once.
@@ -120,16 +129,31 @@ pub(super) fn spawn_loaded_placements(
     mut anim_table: ResMut<crate::mat_anim_table::MatAnimTable>,
     tables: SpawnTables,
 ) {
-    let (mut probes, mut activity, focus, mut forms, mut welds, mut merge, mut staticgx) = tables;
+    let (
+        mut probes,
+        mut activity,
+        focus,
+        mut forms,
+        mut welds,
+        mut merge,
+        mut staticgx,
+        camera,
+        mut judged_at,
+    ) = tables;
     let Some(shared_light) = shared_light else {
         return;
     };
+    let eye = camera.single().ok().map(GlobalTransform::translation);
+    // The dormant placements are judged again once the eye has moved a step.
+    let tend = eye.is_some_and(|e| judged_at.is_none_or(|j| j.distance(e) >= DORMANT_STEP));
     // Steady state: the pending count, kept by register, handoff and release, skips the walk.
-    if placements.pending_spawns == 0 {
+    if placements.pending_spawns == 0 && !tend {
         return;
     }
     let placements = placements.into_inner();
-    retire_failed_placements(placements, &asset_server);
+    if placements.pending_spawns > 0 {
+        retire_failed_placements(placements, &asset_server);
+    }
     let t0 = Instant::now();
     // The count cap bounds the render-side wave a time budget misses; off until the focus is
     // paced, as the loading cover absorbs the burst and a cap would only lengthen the reveal.
@@ -154,6 +178,169 @@ pub(super) fn spawn_loaded_placements(
     // At most `SPAWN_BUDGET` per frame, resumed next frame through the `spawned` flags; the check
     // follows the work, so every frame spawns at least one.
     let deadline = Instant::now() + SPAWN_BUDGET;
+
+    // 0. Wake the dormant placements the eye nears and put to sleep those it left, on the same
+    //    budget as the spawns below. A wake whose model or forms are not resident yet is judged
+    //    again next frame.
+    if let (true, Some(eye)) = (tend, eye) {
+        *judged_at = Some(eye);
+        let mut deferred = false;
+        for p in by_id.values_mut() {
+            if !p.spawned {
+                continue;
+            }
+            if let (ModelHandle::M2(h), Some(s)) = (&p.model, p.sleeper.as_mut()) {
+                let awake = s.awake;
+                if awake && !dormancy::near(eye, &s.fade, dormancy::SLEEP_MARGIN) {
+                    dormancy::sleep(&mut commands, s, &mut p.entities);
+                } else if !awake && dormancy::near(eye, &s.fade, dormancy::WAKE_MARGIN) {
+                    let Some(m) = m2s.get(h) else {
+                        deferred = true;
+                        continue;
+                    };
+                    let key = ModelKey::from(h);
+                    let kinds = WANT_STATIC | if wants_rig(m) { WANT_SKINNED } else { 0 };
+                    if !forms.require(
+                        key,
+                        &m.submeshes,
+                        kinds,
+                        placement_priority(&streamer, p.transform.translation),
+                    ) {
+                        deferred = true;
+                        continue;
+                    }
+                    let SpawnedModel {
+                        entities: mut ents,
+                        host,
+                        ..
+                    } = spawn_model_entities(
+                        &mut commands,
+                        mat_cache,
+                        materials,
+                        light,
+                        &m.submeshes,
+                        FormSlices {
+                            stat: forms.static_meshes(key).unwrap_or(&[]),
+                            skin: forms.skinned_meshes(key),
+                            billboard: forms.palette_billboards(key),
+                        },
+                        p.transform,
+                        &s.object,
+                        s.shade,
+                        None,
+                        Some(&s.fade),
+                        s.radius,
+                        s.center,
+                        s.anim_bound,
+                        Some((m, now)),
+                        &mut uv_reg,
+                        &mut tint_reg,
+                        &mut anim_table,
+                        false,
+                        None,
+                        None,
+                        None,
+                        SpawnMode::Entities(&s.mask),
+                    );
+                    entity_tail(
+                        &mut commands,
+                        &mut ents,
+                        host.as_ref(),
+                        m,
+                        p.transform,
+                        &s.fade,
+                        &SceneTag::Exterior,
+                        &s.object,
+                    );
+                    p.entities.extend(ents.iter().copied());
+                    s.awake = true;
+                    s.live = ents;
+                    spawned_n += 1;
+                }
+            }
+            let portal_instance = p.portal_instance;
+            for d in p.doodads.iter_mut().filter(|d| d.spawned) {
+                let Some(s) = d.sleeper.as_mut() else {
+                    continue;
+                };
+                let awake = s.awake;
+                if awake && !dormancy::near(eye, &s.fade, dormancy::SLEEP_MARGIN) {
+                    dormancy::sleep(&mut commands, s, &mut p.entities);
+                } else if !awake && dormancy::near(eye, &s.fade, dormancy::WAKE_MARGIN) {
+                    let Some(m) = m2s.get(&d.handle) else {
+                        deferred = true;
+                        continue;
+                    };
+                    let key = ModelKey::from(&d.handle);
+                    let kinds = WANT_STATIC | if wants_rig(m) { WANT_SKINNED } else { 0 };
+                    if !forms.require(
+                        key,
+                        &m.submeshes,
+                        kinds,
+                        placement_priority(&streamer, d.transform.translation),
+                    ) {
+                        deferred = true;
+                        continue;
+                    }
+                    let SpawnedModel {
+                        entities: mut ents,
+                        host,
+                        ..
+                    } = spawn_model_entities(
+                        &mut commands,
+                        mat_cache,
+                        materials,
+                        light,
+                        &m.submeshes,
+                        FormSlices {
+                            stat: forms.static_meshes(key).unwrap_or(&[]),
+                            skin: forms.skinned_meshes(key),
+                            billboard: forms.palette_billboards(key),
+                        },
+                        d.transform,
+                        &s.object,
+                        s.shade,
+                        s.interior_slot,
+                        Some(&s.fade),
+                        s.radius,
+                        s.center,
+                        s.anim_bound,
+                        Some((m, now)),
+                        &mut uv_reg,
+                        &mut tint_reg,
+                        &mut anim_table,
+                        false,
+                        None,
+                        None,
+                        None,
+                        SpawnMode::Entities(&s.mask),
+                    );
+                    entity_tail(
+                        &mut commands,
+                        &mut ents,
+                        host.as_ref(),
+                        m,
+                        d.transform,
+                        &s.fade,
+                        &prop_tag(portal_instance, &d.groups),
+                        &s.object,
+                    );
+                    p.entities.extend(ents.iter().copied());
+                    s.awake = true;
+                    s.live = ents;
+                    spawned_n += 1;
+                }
+            }
+            if Instant::now() >= deadline {
+                // Judged again next frame, from where the rest still waits.
+                deferred = true;
+                break;
+            }
+        }
+        if deferred {
+            *judged_at = None;
+        }
+    }
 
     // The buildings the body is in or about to be in go first, their forms ahead of the focus
     // tile's: their collider is built at spawn, and until it attaches the body has no floor there.
@@ -224,10 +411,20 @@ pub(super) fn spawn_loaded_placements(
                         id: unique_id,
                         detail: format!("emitters: {}", m.emitters.len()),
                     });
+                    // A placement out of its range spawns only its diverts, and sleeps.
+                    let sleepy = dormancy::sleepy(&fade);
+                    let mode = if sleepy
+                        && eye.is_some_and(|e| !dormancy::near(e, &fade, dormancy::WAKE_MARGIN))
+                    {
+                        SpawnMode::DivertOnly
+                    } else {
+                        SpawnMode::Full
+                    };
                     let SpawnedModel {
                         entities: mut ents,
                         by_batch,
                         host,
+                        entity_batches,
                     } = spawn_model_entities(
                         &mut commands,
                         mat_cache,
@@ -257,18 +454,41 @@ pub(super) fn spawn_loaded_placements(
                         staticgx
                             .as_deref_mut()
                             .map(|gx| (gx, crate::static_gx::GxSite::Doodad { owner: p.owner })),
+                        mode,
                     );
                     // ADT doodads are exterior scene: from inside a WMO they draw only through a
                     // portal window (`0x683700`, fed only by the per-window walk `0x682fa0`).
                     // Deviation: tagged per submesh, where the reference tests the whole object,
-                    // because a placement has no root entity to carry the bound. The anim-host root
-                    // is skipped: with no geometry it has no `Aabb`, and would only pad the counts.
-                    let anim_root = host.as_ref().map(|h| h.root);
-                    for e in ents.iter().filter(|e| Some(**e) != anim_root) {
-                        commands
-                            .entity(*e)
-                            .insert(crate::exterior_cull::ExteriorScene);
+                    // because a placement has no root entity to carry the bound.
+                    if !matches!(mode, SpawnMode::DivertOnly) {
+                        entity_tail(
+                            &mut commands,
+                            &mut ents,
+                            host.as_ref(),
+                            m,
+                            p.transform,
+                            &fade,
+                            &SceneTag::Exterior,
+                            &object,
+                        );
                     }
+                    p.sleeper =
+                        (sleepy && dormancy::has_entity_phase(&entity_batches, m)).then(|| {
+                            Sleeper {
+                                mask: entity_batches,
+                                awake: !matches!(mode, SpawnMode::DivertOnly),
+                                live: ents.clone(),
+                                fade: fade.clone(),
+                                shade,
+                                object: object.clone(),
+                                radius,
+                                center,
+                                anim_bound,
+                                interior_slot: None,
+                            }
+                        });
+                    // The entity phase above; the hull and lights below stay while it sleeps.
+                    let first_kept = ents.len();
                     // The collision hull, welded into the owner tile's batch: the body's alone, as
                     // the mouse pick tests the drawn batches (`interact::DoodadOccluders`).
                     if let Some((verts, tris)) = (!doodad_bodies_disabled())
@@ -289,22 +509,6 @@ pub(super) fn spawn_loaded_placements(
                             welds.add_tile(p.owner, verts, tris);
                         }
                     }
-                    spawn_emitters_for(
-                        &mut commands,
-                        &m.emitters,
-                        p.transform,
-                        host.as_ref(),
-                        &fade,
-                        &mut ents,
-                    );
-                    spawn_ribbons_for(
-                        &mut commands,
-                        &m.ribbons,
-                        p.transform,
-                        host.as_ref(),
-                        ents.first().copied(),
-                        &fade,
-                    );
                     spawn_lights_for(&mut commands, &m.lights, p.transform, None, &mut ents);
                     // fork: modern lighting (P8) — and, on Cinematic, the lamps that ship with no
                     // light block at all. No-op on every other tier.
@@ -322,7 +526,7 @@ pub(super) fn spawn_loaded_placements(
                             .unwrap_or(0),
                         &mut ents,
                     );
-                    tag_world_object(&mut commands, &ents, &object);
+                    tag_world_object(&mut commands, &ents[first_kept..], &object);
                     if let Some((target, r)) = fade_near_target() {
                         let pos = p.transform.translation;
                         let d = bevy::math::Vec2::new(pos.x, pos.z).distance(target);
@@ -443,6 +647,7 @@ pub(super) fn spawn_loaded_placements(
                                 )
                             })
                         }),
+                        SpawnMode::Full,
                     );
                     if let Some((target, r)) = fade_near_target() {
                         let pos = p.transform.translation;
@@ -606,7 +811,7 @@ pub(super) fn spawn_loaded_placements(
 
         // 2. Each WMO doodad prop as its M2 lands; its entities join `p.entities`.
         let portal_instance = p.portal_instance;
-        for d in &mut p.doodads {
+        for (prop_index, d) in p.doodads.iter_mut().enumerate() {
             if d.spawned {
                 continue;
             }
@@ -680,9 +885,18 @@ pub(super) fn spawn_loaded_placements(
                     d.light.inspector_label()
                 ),
             });
+            let sleepy = dormancy::sleepy(&fade);
+            let mode = if sleepy
+                && eye.is_some_and(|e| !dormancy::near(e, &fade, dormancy::WAKE_MARGIN))
+            {
+                SpawnMode::DivertOnly
+            } else {
+                SpawnMode::Full
+            };
             let SpawnedModel {
                 entities: mut ents,
                 host,
+                entity_batches,
                 ..
             } = spawn_model_entities(
                 &mut commands,
@@ -726,6 +940,7 @@ pub(super) fn spawn_loaded_placements(
                             instance,
                             groups: &d.groups,
                             slot: interior_slot,
+                            key: u32::try_from(prop_index).unwrap_or(u32::MAX),
                         },
                     )),
                     (None, Some(gx)) => {
@@ -734,15 +949,18 @@ pub(super) fn spawn_loaded_placements(
                     }
                     _ => None,
                 },
+                mode,
             );
-            // A despawn hook returns the slot to the table. A prop whose every batch merged spawns
-            // a bare carrier for it, since a blob cannot own one prop's slot.
+            // A despawn hook returns the slot to the table. A prop whose every batch merged, or
+            // one that can sleep, holds it on a bare carrier, since a blob or a sleeping part
+            // cannot own one prop's slot.
+            let mut kept: Vec<Entity> = Vec::new();
             if let Some(slot) = interior_slot {
                 let owner = match ents.first() {
-                    Some(&first) => first,
-                    None => {
+                    Some(&first) if !sleepy => first,
+                    _ => {
                         let carrier = commands.spawn_empty().id();
-                        ents.push(carrier);
+                        kept.push(carrier);
                         carrier
                     }
                 };
@@ -750,22 +968,49 @@ pub(super) fn spawn_loaded_placements(
             }
             // Cull the prop with the rooms that name it: the reference admits a WMO's doodads to
             // the frame per group its portal walk reaches (`0x685d70` → `0x6838f0` over the
-            // group's MODR list), so a prop is drawn from any of them. The anim-host root is
-            // skipped, as at the ADT site.
-            let anim_root = host.as_ref().map(|h| h.root);
-            if let (Some(instance), false) = (portal_instance, d.groups.is_empty()) {
-                for &entity in ents.iter().filter(|e| Some(**e) != anim_root) {
-                    commands.entity(entity).insert((
+            // group's MODR list), so a prop is drawn from any of them. Exterior scene with its
+            // building, exempt in the camera's own; a prop no group names has no instance key, so
+            // it stays untagged.
+            let tag = prop_tag(portal_instance, &d.groups);
+            if !matches!(mode, SpawnMode::DivertOnly) {
+                entity_tail(
+                    &mut commands,
+                    &mut ents,
+                    host.as_ref(),
+                    m,
+                    d.transform,
+                    &fade,
+                    &tag,
+                    &object,
+                );
+            }
+            if let SceneTag::Room(instance, groups) = &tag {
+                for &e in &kept {
+                    commands.entity(e).insert((
                         WmoGroupVis {
-                            instance,
-                            groups: d.groups.clone(),
+                            instance: *instance,
+                            groups: Arc::clone(groups),
                         },
-                        // Exterior scene with its building, exempt in the camera's own; a prop no
-                        // group names has no instance key, so it stays untagged.
                         crate::exterior_cull::ExteriorScene,
                     ));
                 }
             }
+            d.sleeper =
+                (sleepy && dormancy::has_entity_phase(&entity_batches, m)).then(|| Sleeper {
+                    mask: entity_batches,
+                    awake: !matches!(mode, SpawnMode::DivertOnly),
+                    live: ents.clone(),
+                    fade: fade.clone(),
+                    shade,
+                    object: object.clone(),
+                    radius,
+                    center,
+                    anim_bound,
+                    interior_slot,
+                });
+            // The entity phase above; the carrier, hull and lights below stay while it sleeps.
+            let first_kept = ents.len();
+            ents.extend(kept);
             // Solid to body and camera iff it has a collision hull, like a map doodad; welded per
             // placement, as every prop despawns with its building. Not a pick clamp, as above.
             if let Some((verts, tris)) = (!doodad_bodies_disabled())
@@ -786,22 +1031,6 @@ pub(super) fn spawn_loaded_placements(
                     welds.add_prop(unique_id, verts, tris);
                 }
             }
-            spawn_emitters_for(
-                &mut commands,
-                &m.emitters,
-                d.transform,
-                host.as_ref(),
-                &fade,
-                &mut ents,
-            );
-            spawn_ribbons_for(
-                &mut commands,
-                &m.ribbons,
-                d.transform,
-                host.as_ref(),
-                ents.first().copied(),
-                &fade,
-            );
             spawn_lights_for(
                 &mut commands,
                 &m.lights,
@@ -826,7 +1055,7 @@ pub(super) fn spawn_loaded_placements(
                     .unwrap_or(0),
                 &mut ents,
             );
-            tag_world_object(&mut commands, &ents, &object);
+            tag_world_object(&mut commands, &ents[first_kept..], &object);
             p.entities.extend(ents);
             d.spawned = true;
             *pending_spawns -= 1;
@@ -838,6 +1067,14 @@ pub(super) fn spawn_loaded_placements(
         }
     }
     activity.spawn_ms += t0.elapsed().as_secs_f32() * 1000.0;
+}
+
+/// A WMO prop's cull tags: its building's rooms when any names it, else none.
+fn prop_tag(portal_instance: Option<Entity>, groups: &Arc<[u16]>) -> SceneTag {
+    match portal_instance {
+        Some(instance) if !groups.is_empty() => SceneTag::Room(instance, Arc::clone(groups)),
+        _ => SceneTag::None,
+    }
 }
 
 /// A WMO placement's doodad props: set 0, always shown, plus its MODF-selected set.
@@ -898,6 +1135,7 @@ fn resolve_wmo_doodads(
                 groups: wmo.doodad_groups.get(di).cloned().unwrap_or_default(),
                 light,
                 spawned: false,
+                sleeper: None,
             });
         }
     }
@@ -1033,6 +1271,7 @@ mod retire_tests {
             portal_instance: None,
             refs: 1,
             owner: (0, 0),
+            sleeper: None,
         }
     }
 
@@ -1043,6 +1282,7 @@ mod retire_tests {
             groups: Arc::from([]),
             light: PropLight::Exterior,
             spawned: false,
+            sleeper: None,
         }
     }
 

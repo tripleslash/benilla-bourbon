@@ -57,7 +57,9 @@ pub use collider::{build_collider_task, placement_collider_data, PendingCollider
 // The stand-in collision lane (`provisional`): its marker is public so an instrument can tell a
 // stand-in floor from real ground; everything else about it is the streamer's own business.
 pub use provisional::ProvisionalCollider;
-pub use spawn::{m2_anim_bound, m2_fade, point_light, spawn_model_entities, SpawnedModel};
+pub use spawn::{
+    m2_anim_bound, m2_fade, point_light, spawn_model_entities, SpawnMode, SpawnedModel,
+};
 // The position queries and the area authority.
 use queries::update_current_area;
 pub use queries::{
@@ -366,6 +368,8 @@ struct Placement {
     /// The tile owning an M2 doodad's hull weld and merged blobs, first the registering tile;
     /// WMOs never read it.
     owner: (i32, i32),
+    /// An M2 doodad's wake record when it can sleep ([`spawn::Sleeper`]).
+    sleeper: Option<spawn::Sleeper>,
     /// The building's authored **world-space bounding box** in WoW coords (MODF), `None` for an M2
     /// doodad and for a MODF entry whose box is degenerate.
     ///
@@ -1564,6 +1568,7 @@ fn register_doodad<'a>(
             portal_instance: None,
             refs: 1,
             owner: tile,
+            sleeper: None,
             // MDDF authors no bounding box — an M2 doodad's extents live in the model header, which
             // is the thing that has not arrived. A tree with no stand-in hull is the right answer
             // anyway: doodads are what you walk *past*, not what holds you up.
@@ -1605,6 +1610,7 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
             portal_instance: None,
             refs: 1,
             owner: (0, 0), // unread for WMOs: their prop hulls weld per placement
+            sleeper: None,
             bounds: w.bounds,
         },
     );
@@ -1875,6 +1881,8 @@ fn handoff_straddlers(
             for e in p.entities.drain(..) {
                 commands.entity(e).try_despawn();
             }
+            // The respawn under the new owner records its own.
+            p.sleeper = None;
             p.spawned = false;
             placements.pending_spawns += 1;
             placements.spawn_epoch += 1;
@@ -2112,6 +2120,7 @@ mod straddler_tests {
             portal_instance: None,
             refs: 1,
             owner,
+            sleeper: None,
             bounds: None,
         }
     }

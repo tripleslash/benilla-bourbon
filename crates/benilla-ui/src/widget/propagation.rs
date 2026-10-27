@@ -40,6 +40,7 @@ impl WidgetArena {
             }
         }
         f.effective_visible = true;
+        self.glance_visible(h, true);
         self.resequence_to_tail(h);
         // The show registers each region in list order (`0x76ae8a`-`0x76aeac` → `0x77fcb0`), which
         // takes only the shown ones. Every attached region is re-stamped here, hidden ones too: a
@@ -63,6 +64,7 @@ impl WidgetArena {
                 if let KindState::Model(m) = &mut f.kind_state {
                     m.release_on_hide();
                 }
+                self.glance_visible(h, false);
                 true
             }
             _ => false,

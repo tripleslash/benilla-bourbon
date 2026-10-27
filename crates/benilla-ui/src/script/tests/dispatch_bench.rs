@@ -57,6 +57,23 @@ fn dispatch_bench() {
         &format!("for _ = 1, {N} do local m = F.GetWidth end"),
     );
     floor(
+        "call F:IsShown()",
+        &format!("for _ = 1, {N} do local v = F:IsShown() end"),
+    );
+    floor(
+        "call F:IsVisible()",
+        &format!("for _ = 1, {N} do local v = F:IsVisible() end"),
+    );
+    floor(
+        "call GetTime()",
+        &format!("for _ = 1, {N} do local v = GetTime() end"),
+    );
+    // Lua 5.0: no `%` operator, so the index cycles through `math.mod`.
+    floor(
+        "_G[\"F\"..i] concat lookup",
+        &format!("for i = 1, {N} do local v = _G[\"StaticPopup\"..math.mod(i, 4)] end"),
+    );
+    floor(
         "Frame miss",
         &format!("for _ = 1, {N} do local m = F.NoSuchMethod end"),
     );

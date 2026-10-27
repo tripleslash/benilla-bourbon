@@ -89,6 +89,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
         wmos,
         props,
         world,
+        draw_epoch,
         ..
     } = &mut *gx;
 
@@ -103,6 +104,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
             continue;
         }
         state.dirty = false;
+        *draw_epoch += 1;
         if state.items.is_empty() {
             world.cells.remove(&cell);
             continue;
@@ -122,6 +124,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
             continue;
         }
         state.dirty = false;
+        *draw_epoch += 1;
         if state.items.is_empty() {
             world.wmos.remove(&instance);
             continue;
@@ -145,6 +148,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
             continue;
         }
         state.dirty = false;
+        *draw_epoch += 1;
         if state.items.is_empty() {
             world.props.remove(&instance);
             continue;
@@ -156,6 +160,7 @@ pub(super) fn flush_static_gx(mut gx: ResMut<StaticGx>, mut meshes: ResMut<Asset
                 i.prop.as_ref().map_or(0, |p| p.set),
             )
         });
+        remap_fader_items(state);
         due.push(GxRegion::Props(instance));
     }
     if due.is_empty() {
@@ -765,6 +770,7 @@ mod tests {
             instance,
             groups: Arc::clone(groups),
             slot,
+            key: 0,
         };
         // Set B arrives first, so the dedup gives B index 0 and A index 1.
         let mut b = batch(&g, Vec3::new(1.0, 0.0, 1.0), None, ModelBlend::Opaque);

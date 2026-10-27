@@ -41,7 +41,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - [benilla-protocol](#benilla-protocol): 30
 - [benilla-srp](#benilla-srp): 2
 - [benilla-ui](#benilla-ui): 138
-- [benilla-world](#benilla-world): 58
+- [benilla-world](#benilla-world): 59
 
 ### benilla-app
 
@@ -202,7 +202,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference places collision and culling by the raw facing, ours follow the display facing, because a capsule and a sphere barely change under rotation. ([`src/net/motion/facing.rs:9`](../crates/benilla-app/src/net/motion/facing.rs#L9))
 - The reference paces a self move through the same replay chain as a remote's, which would only delay a correction to our own pose. ([`src/net/motion/remote.rs:84`](../crates/benilla-app/src/net/motion/remote.rs#L84))
 - \*\*a body nobody can see is stepped every `HIDDEN_STRIDE`th frame\*\*, with the time it is owed, where the reference steps every mover every frame. ([`src/net/motion/remote.rs:355`](../crates/benilla-app/src/net/motion/remote.rs#L355))
-- Its rate-limited hover climb (`0x636fa1`, 7 yd/s) is not reproduced, because the cache gate needs a pure function; it converges to this answer. ([`src/net/motion/spline.rs:786`](../crates/benilla-app/src/net/motion/spline.rs#L786))
+- Its rate-limited hover climb (`0x636fa1`, 7 yd/s) is not reproduced, because the cache gate needs a pure function; it converges to this answer. ([`src/net/motion/spline.rs:787`](../crates/benilla-app/src/net/motion/spline.rs#L787))
 - A first-pass values block the clear header byte left unwritten re-fires, for a live object, its last write's edges against the watch copy (`0x465570`, `0x466686`); benilla compares against this packet's copies, which hold none for it, so a stale edge never fires twice. ([`src/net/objects/update.rs:945`](../crates/benilla-app/src/net/objects/update.rs#L945))
 - The create notify uses its lookup's result untested (`0x465c97`, `0x465d79`). ([`src/net/objects/update.rs:957`](../crates/benilla-app/src/net/objects/update.rs#L957))
 - On benilla's unattended reconnect, which the reference lacks, the world's VM survives the loss, so the clear signals its `PLAYER_TARGET_CHANGED` and usable refresh as a release's teardown does (`0x493a69`, `0x493a73`), still sending nothing, and the surviving target frame lets the lost unit go. ([`src/net/session.rs:266`](../crates/benilla-app/src/net/session.rs#L266))
@@ -885,8 +885,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - An index past 5 reads the last entry, where 1.12.1 reads past both six-entry tables (`0x6da9d5`, `0x6da9c4`), a client fault a hand-edited CVar reaches. ([`src/widget/kinds/mod.rs:959`](../crates/benilla-ui/src/widget/kinds/mod.rs#L959))
 - `None` until then, not the ctor's 0, so that an unset row takes nothing rather than slot 0. ([`src/widget/kinds/mod.rs:1061`](../crates/benilla-ui/src/widget/kinds/mod.rs#L1061))
 - On the thumb it is the grabbed point, where `CSimpleSlider` (`0x789ba0`/`0x789ca0`) always centers it, because that feels less surprising and a stock-sized thumb hides the difference. ([`src/widget/kinds/mod.rs:1519`](../crates/benilla-ui/src/widget/kinds/mod.rs#L1519))
-- Levels pack contiguously, because the reference's resuming cursor (`0x764fd3`/`0x764fd8`) leaves a hole past a wide gap ({0, 4, 6} at bound 7 gives {0, 1, 3} at bound 4). ([`src/widget/propagation.rs:189`](../crates/benilla-ui/src/widget/propagation.rs#L189))
-- The frame is still in the old parent's child list during `OnHide`, unlike the reference (`0x76ab34` unlinks first), because a handler that itself reparents must not find the lists half-spliced. ([`src/widget/propagation.rs:312`](../crates/benilla-ui/src/widget/propagation.rs#L312))
+- Levels pack contiguously, because the reference's resuming cursor (`0x764fd3`/`0x764fd8`) leaves a hole past a wide gap ({0, 4, 6} at bound 7 gives {0, 1, 3} at bound 4). ([`src/widget/propagation.rs:191`](../crates/benilla-ui/src/widget/propagation.rs#L191))
+- The frame is still in the old parent's child list during `OnHide`, unlike the reference (`0x76ab34` unlinks first), because a handler that itself reparents must not find the lists half-spliced. ([`src/widget/propagation.rs:314`](../crates/benilla-ui/src/widget/propagation.rs#L314))
 ### benilla-world
 
 #### clouds
@@ -910,7 +910,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 - Every instance scrolls in one phase, where the reference phases a band loop per arm and a gseq loop from each instance's attach (`CM2Model+0x68`), because one uniform serves the material and a seamless scroll looks the same at any phase. ([`src/doodad_anim/mat_anim.rs:195`](../crates/benilla-world/src/doodad_anim/mat_anim.rs#L195))
 - The stage's rotation and scaling are not applied. ([`src/doodad_anim/mat_anim.rs:235`](../crates/benilla-world/src/doodad_anim/mat_anim.rs#L235))
-- This runs for every resident host, where the reference stops a doodad culled out of its scene list (`[CM2Scene+0x20]`) and re-arms it at once on re-link (`0x7074b0`, `0x683f80`), because gating it so would re-roll the whole field on the frame the camera turns back. ([`src/doodad_anim/mod.rs:297`](../crates/benilla-world/src/doodad_anim/mod.rs#L297))
+- This runs for every resident host, where the reference stops a doodad culled out of its scene list (`[CM2Scene+0x20]`) and re-arms it at once on re-link (`0x7074b0`, `0x683f80`), because gating it so would re-roll the whole field on the frame the camera turns back. ([`src/doodad_anim/mod.rs:305`](../crates/benilla-world/src/doodad_anim/mod.rs#L305))
 
 #### entity_shade
 
@@ -971,20 +971,21 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### static_gx
 
-- The reference tests each doodad's sphere against the horizon (`0x683700` → `0x686000`); a retained cell is one batched draw of its 4×4 chunks' doodads, so the test takes the cell's box, which only ever hides less. ([`src/static_gx/cull.rs:362`](../crates/benilla-world/src/static_gx/cull.rs#L362))
+- The reference tests each doodad's sphere against the horizon (`0x683700` → `0x686000`); a retained cell is one batched draw of its 4×4 chunks' doodads, so the test takes the cell's box, which only ever hides less. ([`src/static_gx/cull.rs:460`](../crates/benilla-world/src/static_gx/cull.rs#L460))
 
 #### terrain_stream
 
-- The debug free-fly eye holds nothing: it is benilla's own tool with no reference counterpart, and a stall there only slows the developer. ([`src/terrain_stream.rs:596`](../crates/benilla-world/src/terrain_stream.rs#L596))
-- A tile is released only one chunk past the outer window (`StreamWindow::keeps`), where the reference releases by window membership (`0x6984f0`), because our reload is a re-decode and re-spawn, not a cheap async read. ([`src/terrain_stream.rs:1020`](../crates/benilla-world/src/terrain_stream.rs#L1020))
-- A read still loading after `INNER_WAIT_CAP` is given up on with a warning, once per request, and its tile then streams on unwaited like the outer ring, where the reference waits for ever: a hung read costs one capped stall, not one every frame. ([`src/terrain_stream.rs:1117`](../crates/benilla-world/src/terrain_stream.rs#L1117))
-- The page waits for nothing. Its one thread cannot block on a fetch, which lands only once the frame yields to the browser; the held inner tiles are still requested first and built unbudgeted, and the stand-in lane (`provisional`) and the loading cover's backstop stand in for the wait. ([`src/terrain_stream.rs:1186`](../crates/benilla-world/src/terrain_stream.rs#L1186))
+- The debug free-fly eye holds nothing: it is benilla's own tool with no reference counterpart, and a stall there only slows the developer. ([`src/terrain_stream.rs:600`](../crates/benilla-world/src/terrain_stream.rs#L600))
+- A tile is released only one chunk past the outer window (`StreamWindow::keeps`), where the reference releases by window membership (`0x6984f0`), because our reload is a re-decode and re-spawn, not a cheap async read. ([`src/terrain_stream.rs:1024`](../crates/benilla-world/src/terrain_stream.rs#L1024))
+- A read still loading after `INNER_WAIT_CAP` is given up on with a warning, once per request, and its tile then streams on unwaited like the outer ring, where the reference waits for ever: a hung read costs one capped stall, not one every frame. ([`src/terrain_stream.rs:1121`](../crates/benilla-world/src/terrain_stream.rs#L1121))
+- The page waits for nothing. Its one thread cannot block on a fetch, which lands only once the frame yields to the browser; the held inner tiles are still requested first and built unbudgeted, and the stand-in lane (`provisional`) and the loading cover's backstop stand in for the wait. ([`src/terrain_stream.rs:1190`](../crates/benilla-world/src/terrain_stream.rs#L1190))
 - The page cannot block its one thread on a build (a worker's result needs `Atomics.wait`, a local one the frame to yield), so an unfinished one is handed back to `finish_colliders` and the stand-in lane (`super::provisional`) holds the body meanwhile. ([`src/terrain_stream/collider.rs:243`](../crates/benilla-world/src/terrain_stream/collider.rs#L243))
 - The reference rebuilds a changed chunk's indices the frame it draws; a cell rebuild here costs a vertex upload too, so at most `REBUILDS_PER_FRAME` cells rebuild a frame, the nearest first, and a far cell may draw its old level for a few frames after a turn. ([`src/terrain_stream/lod.rs:13`](../crates/benilla-world/src/terrain_stream/lod.rs#L13))
 - Benilla gates on terrain alone, which is more permissive; the settle hold covers a building or doodad arriving after a teleport. ([`src/terrain_stream/residency.rs:9`](../crates/benilla-world/src/terrain_stream/residency.rs#L9))
 - On the page a tile a stand-in floor holds (`super::provisional`) is resident too. ([`src/terrain_stream/residency.rs:113`](../crates/benilla-world/src/terrain_stream/residency.rs#L113))
-- Tagged per submesh, where the reference tests the whole object, because a placement has no root entity to carry the bound. ([`src/terrain_stream/spawn/mod.rs:263`](../crates/benilla-world/src/terrain_stream/spawn/mod.rs#L263))
-- The box, where the reference tests its circumsphere (`0x683700` → `0x682ef0` → `0x686b80` on the `[rec+0x5c]` centre and `[rec+0x68]` radius × scale), because Bevy culls by box and the box is tighter. ([`src/terrain_stream/spawn/mod.rs:974`](../crates/benilla-world/src/terrain_stream/spawn/mod.rs#L974))
+- A woken placement's animation and particles start fresh, where the reference's frozen ones resume; the restart falls at the far edge of its fade band, where it is faint. ([`src/terrain_stream/spawn/dormancy.rs:9`](../crates/benilla-world/src/terrain_stream/spawn/dormancy.rs#L9))
+- Tagged per submesh, where the reference tests the whole object, because a placement has no root entity to carry the bound. ([`src/terrain_stream/spawn/mod.rs:461`](../crates/benilla-world/src/terrain_stream/spawn/mod.rs#L461))
+- The box, where the reference tests its circumsphere (`0x683700` → `0x682ef0` → `0x686b80` on the `[rec+0x5c]` centre and `[rec+0x68]` radius × scale), because Bevy culls by box and the box is tighter. ([`src/terrain_stream/spawn/mod.rs:1212`](../crates/benilla-world/src/terrain_stream/spawn/mod.rs#L1212))
 - Whole tiles, because benilla loads, spawns and releases ADT tiles, not chunks: a tile is wanted when any of its chunks lies in the outer window, and waited for when any lies in the inner one, so each edge is a tile line where the reference's is a chunk line. ([`src/terrain_stream/window.rs:7`](../crates/benilla-world/src/terrain_stream/window.rs#L7))
 - A one-chunk keep band (`KEEP_BAND_CHUNKS`), because a tile reload re-decodes and re-spawns where the reference's is a cheap read: a tile releases only past `outer + 1`. ([`src/terrain_stream/window.rs:10`](../crates/benilla-world/src/terrain_stream/window.rs#L10))
 

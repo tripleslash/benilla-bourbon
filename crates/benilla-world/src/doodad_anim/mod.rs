@@ -149,6 +149,14 @@ pub fn wants_rig(m: &M2Model) -> bool {
         )
 }
 
+/// Whether [`spawn_anim_host`] makes a host for `m`, read without spawning one: a dormant
+/// placement classifies its batches by the host its wake will get.
+pub(crate) fn hosts(m: &M2Model) -> bool {
+    wants_rig(m)
+        || (!crate::dev_state::deterministic_run()
+            && m.animations.as_ref().is_some_and(arms_for_sound))
+}
+
 /// Spawn the animation host for one placed M2 that animates: a root at the placement transform
 /// with the collapsed [`RigPose`] and, per tier, an `AnimationPlayer` looping the loader-idle seed
 /// (the reference's load arm `0x70ebd0` → `0x7121a0(bone 0, animation id 0, linkFlag=1)`) and/or

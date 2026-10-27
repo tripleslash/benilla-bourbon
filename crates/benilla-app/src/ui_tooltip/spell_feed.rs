@@ -792,6 +792,10 @@ pub(super) fn feed_spell_tooltips(
         let Some(script) = script else {
             return;
         };
+        // This feed only reads the item cache and asks it for a missing template, which books a
+        // query and changes nothing a reader shows; the template's landing marks it. Through `Mut`,
+        // every frame's borrow would mark the cache changed for every feed gated on it.
+        let items: &mut Items = items.bypass_change_detection();
         let memory = memory.get(script);
         let Some(spells) = spells.as_deref() else {
             return;
@@ -878,7 +882,7 @@ pub(super) fn feed_spell_tooltips(
             range_units.caster(),
             self_store.map(|s| &s.0),
             |g| objects.object(g),
-            Some(&items),
+            Some(&*items),
         );
         let attack_target = range_units.caster_attack_target();
         // What moved since the last frame, which each pushed view is checked against: the bind
@@ -892,7 +896,7 @@ pub(super) fn feed_spell_tooltips(
             RangeSeen::of(&caster_unit, attack_target.as_ref()),
             ranged_slot_seen(&caster_unit),
             &objects,
-            &items,
+            items,
         );
         if let Some(reputations) = reputations.as_deref() {
             seen = seen.with_reputations(reputations);
@@ -915,7 +919,7 @@ pub(super) fn feed_spell_tooltips(
         let reagent_state: Reagents = memory
             .reagents
             .keys()
-            .map(|&entry| (entry, reagent_state(entry, self_store, &objects, &items)))
+            .map(|&entry| (entry, reagent_state(entry, self_store, &objects, items)))
             .collect();
         changes = changes.with_reagents(&memory.reagents, &reagent_state);
         memory.reagents = reagent_state;
@@ -953,7 +957,7 @@ pub(super) fn feed_spell_tooltips(
                 range_caster: caster_unit,
                 attack_target,
                 objects: &objects,
-                items: &mut items,
+                items: &mut *items,
                 commands: &commands,
                 sub_classes: sub_classes.as_deref().map(|c| &c.0),
                 skill_lines: skill_lines.as_deref().map(|s| &s.catalog),

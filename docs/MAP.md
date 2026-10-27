@@ -126,7 +126,7 @@
 - **benilla-srp** (lib.rs): vanilla_header 
 - **benilla-ui** (lib.rs): auction_sort bindings_xml civil color crt framexml justify layout loader markup messages order screencoord script source status strings test_support toc widget 
 - **benilla-visual** (lib.rs): relight 
-- **benilla-world** (lib.rs): art_scope assets bgwin billboard boot build_id clouds clutter collision decal dev_state doodad_anim entity_shade exterior_cull ffx_glow final_pass frame_pace fsr ground_fx horizon instance_tint interact interior launch_env layout_keys lighting liquid log_ring mac_quit map_proj mat_anim_table mesh_tag model_fade model_forms model_render modern modkeys particles perf_probe ribbons ride_frame rig_anim rig_palette rig_rider schedule shaders sky sky_order skybox ssilvb static_gx static_merge straddle sun surface system_profile terrain_stream thread_qos view vis_chain water_fx wdl weather wind wmo_portal world_census world_flags world_map world_plugins world_point world_unit worldview zfill 
+- **benilla-world** (lib.rs): art_scope assets bgwin billboard boot build_id card_store clouds clutter collision decal dev_state doodad_anim entity_shade exterior_cull ffx_glow final_pass frame_pace fsr ground_fx horizon instance_tint interact interior launch_env layout_keys lighting liquid log_ring mac_quit map_proj mat_anim_table mesh_tag model_fade model_forms model_render modern modkeys particles perf_probe ribbons ride_frame rig_anim rig_palette rig_rider schedule shaders sky sky_order skybox ssilvb static_gx static_merge straddle sun surface system_profile terrain_stream thread_qos view vis_chain water_fx wdl weather wind wmo_portal world_census world_flags world_map world_plugins world_point world_unit worldview zfill 
 - **wenilla-host** (lib.rs): data packs remote static_site ws 
 - **benilla-packer** (main.rs): append group inspect merge overlay plan sidecars 
 
@@ -246,6 +246,7 @@
 - `WOW_DEPTH_QUADS` — benilla-app/src/capture/depth_probe.rs, benilla-app/src/dev.rs
 - `WOW_DIAG` — benilla-app/src/webdiag.rs
 - `WOW_DITHER` — benilla-app/src/lib.rs, benilla-world/src/ffx_glow.rs
+- `WOW_DORMANT` — benilla-world/src/terrain_stream/spawn/dormancy.rs
 - `WOW_DPI` — benilla-app/src/video.rs
 - `WOW_DRESS_CENSUS` — benilla-app/src/capture/probes/dress_census.rs, benilla-app/src/dev.rs
 - `WOW_DRESS_CENSUS_RADIUS` — benilla-app/src/capture/probes/dress_census.rs
@@ -562,6 +563,7 @@
 - `WOW_STATIC_GX_WMO` — benilla-world/src/static_gx/mod.rs
 - `WOW_STATIC_MERGE` — benilla-world/src/terrain_stream/merge.rs
 - `WOW_STOCK_UI` — benilla-app/src/ui_script/manifest.rs
+- `WOW_STORED_CARDS` — benilla-world/src/card_store.rs
 - `WOW_STREAM_TRACE` — benilla-app/src/perf/mod.rs
 - `WOW_SUPERSCALE` — benilla-app/src/lib.rs, benilla-world/src/perf_probe.rs
 - `WOW_SYNC_DUMP` — benilla-app/src/game_plugins.rs

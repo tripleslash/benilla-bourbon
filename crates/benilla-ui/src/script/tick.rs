@@ -496,18 +496,19 @@ impl UiScript {
         // The roster compaction is bookkeeping, and a frame with no pane to paint changed nothing.
         let quiet = self.visual_epoch();
         let mut model = self.model_mut();
-        // Kept by `SetScript`; a destroyed frame's handle compacts out on its first miss.
+        // Kept by `SetScript`; a destroyed frame's handle compacts out on its first miss. The
+        // liveness and visibility reads go through the arena's glance table, not a frame node.
         if model
             .on_update_model_frames
             .iter()
-            .any(|&h| model.arena.frame(h).is_none())
+            .any(|&h| model.arena.glance(h).is_none())
         {
             let arena = &model.arena;
             let live: Vec<FrameHandle> = model
                 .on_update_model_frames
                 .iter()
                 .copied()
-                .filter(|&h| arena.frame(h).is_some())
+                .filter(|&h| arena.glance(h).is_some())
                 .collect();
             model.on_update_model_frames = live;
         }
@@ -519,10 +520,11 @@ impl UiScript {
             .iter()
             .copied()
             .filter(|&h| {
-                model
-                    .arena
-                    .frame(h)
-                    .is_some_and(|f| f.effective_visible && is_character(f) && has_model_file(f))
+                model.arena.is_visible(h)
+                    && model
+                        .arena
+                        .frame(h)
+                        .is_some_and(|f| is_character(f) && has_model_file(f))
             })
             .collect();
         if model.on_update_model_frames.is_empty() && copies.is_empty() {

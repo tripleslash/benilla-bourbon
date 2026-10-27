@@ -72,7 +72,8 @@ pub(in crate::minimap) fn emit_quest_dots(
     self_guid: Option<u64>,
     icons: &Handle<Image>,
     player_indoors: bool,
-    unit_indoors: impl Fn(Vec3) -> bool,
+    // By the dot's guid and feet, so a caller can keep a still unit's verdict.
+    mut unit_indoors: impl FnMut(u64, Vec3) -> bool,
     quads: &mut UiQuads,
     hover: &mut MinimapBlipHover,
 ) {
@@ -95,7 +96,7 @@ pub(in crate::minimap) fn emit_quest_dots(
         }
         // The grey `0xffb0b0b0` marks a dot across an interior boundary; the reference decides
         // through `0x670540`, untraced, and this uses an indoor-containment mismatch.
-        let grey = unit_indoors(tf.translation()) != player_indoors;
+        let grey = unit_indoors(npc, tf.translation()) != player_indoors;
         let tint = if grey { 0xb0 as f32 / 255.0 } else { 1.0 };
         let rect = Rect::from_center_size(
             ctx.center + ctx.offset(w),
@@ -176,7 +177,8 @@ pub(in crate::minimap) fn emit_tracking_dots(
     forms: Option<&HashMap<u32, ShapeshiftForm>>,
     icons: &Handle<Image>,
     player_indoors: bool,
-    unit_indoors: impl Fn(Vec3) -> bool,
+    // By the dot's guid and feet, so a caller can keep a still object's verdict.
+    mut unit_indoors: impl FnMut(u64, Vec3) -> bool,
     quads: &mut UiQuads,
     hover: &mut MinimapBlipHover,
 ) {
@@ -188,7 +190,7 @@ pub(in crate::minimap) fn emit_tracking_dots(
         if d3 > ctx.radius_yd {
             return;
         }
-        let grey = unit_indoors(tf.translation()) != player_indoors;
+        let grey = unit_indoors(guid, tf.translation()) != player_indoors;
         let tint = if grey { 0xb0 as f32 / 255.0 } else { 1.0 };
         let rect = Rect::from_center_size(
             ctx.center + ctx.offset(w),

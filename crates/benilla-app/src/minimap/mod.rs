@@ -373,7 +373,13 @@ fn emit_minimap(
     wmos: Res<Assets<WmoModel>>,
     world: benilla_world::world_point::WorldPoint,
     asset_server: Res<AssetServer>,
-    statics: Res<MinimapStatics>,
+    // The last indoor verdict per dot, and the stamps it was rayed against.
+    (statics, mut indoor_memo, residency, collider_epoch): (
+        Res<MinimapStatics>,
+        Local<IndoorMemo>,
+        Res<benilla_world::interior::WmoResidency>,
+        Res<benilla_world::collision::ColliderEpoch>,
+    ),
     blip_inputs: blips::BlipInputs,
     mut composite: ResMut<composite::MinimapComposite>,
     rig: Option<Res<composite::CompositeRig>>,
@@ -700,6 +706,10 @@ fn emit_minimap(
     // then quest (3) and party (4) dots.
     if let Some(ctx) = &blip_ctx {
         if let Some(icons) = assets.tex(MinimapArtSlot::Blips) {
+            // A dot's own containment, the faces-only down-ray the entity lights use, rayed again
+            // only when the object moved or the world under it changed.
+            let stamp = (residency.generation(), collider_epoch.get());
+            indoor_memo.begin();
             blips::emit_tracking_dots(
                 ctx,
                 tracking,
@@ -712,7 +722,7 @@ fn emit_minimap(
                 assets.forms.as_ref(),
                 icons,
                 player_indoors,
-                |feet| world.indoors_at(feet),
+                |guid, feet| indoor_memo.verdict(guid, feet, stamp, |at| world.indoors_at(at)),
                 &mut quads,
                 &mut hover,
             );
@@ -723,8 +733,7 @@ fn emit_minimap(
                 self_guid,
                 icons,
                 player_indoors,
-                // A dot NPC's own containment, the faces-only down-ray the entity lights use.
-                |feet| world.indoors_at(feet),
+                |guid, feet| indoor_memo.verdict(guid, feet, stamp, |at| world.indoors_at(at)),
                 &mut quads,
                 &mut hover,
             );
@@ -736,6 +745,39 @@ fn emit_minimap(
         }
     }
     *blip_hover = hover;
+}
+
+/// The dots' indoor verdicts by guid: the feet and the world stamps (resident buildings, collider
+/// set) each was rayed at. An object that has not moved over an unchanged world keeps its verdict,
+/// so only walkers ray; the map keeps only the frame's dots.
+#[derive(Default)]
+struct IndoorMemo {
+    last: std::collections::HashMap<u64, (Vec3, (u32, u64), bool)>,
+    next: std::collections::HashMap<u64, (Vec3, (u32, u64), bool)>,
+}
+
+impl IndoorMemo {
+    /// Start a frame: last frame's verdicts become the ones to reuse.
+    fn begin(&mut self) {
+        std::mem::swap(&mut self.last, &mut self.next);
+        self.next.clear();
+    }
+
+    /// The verdict for `guid` at `feet`, rayed by `ray` only when the object or the world moved.
+    fn verdict(
+        &mut self,
+        guid: u64,
+        feet: Vec3,
+        stamp: (u32, u64),
+        ray: impl FnOnce(Vec3) -> bool,
+    ) -> bool {
+        let inside = match self.last.get(&guid) {
+            Some(&(at, s, inside)) if at == feet && s == stamp => inside,
+            _ => ray(feet),
+        };
+        self.next.insert(guid, (feet, stamp, inside));
+        inside
+    }
 }
 
 /// Push the player's WMO containment, the indoor byte `0xceaa60`, so the zoom buttons drive the
@@ -1245,5 +1287,36 @@ mod tests {
     fn pitch_black_light_still_tints_partway_to_white() {
         // The +96 luma floor keeps the map dimly visible with no light: 0.75·(0+1·0.375) ≈ 0.28.
         approx(minimap_day_tint([0.0; 3], [0.0; 3]), [0.281; 3]);
+    }
+}
+
+#[cfg(test)]
+mod indoor_memo_tests {
+    use super::IndoorMemo;
+    use bevy::math::Vec3;
+
+    /// A still object rays once; a move, a world stamp change, or dropping out of a frame rays again.
+    #[test]
+    fn a_still_blip_keeps_its_verdict_until_it_or_the_world_moves() {
+        let mut memo = IndoorMemo::default();
+        let rays = std::cell::Cell::new(0);
+        let frame = |memo: &mut IndoorMemo, feet: Vec3, stamp: (u32, u64)| {
+            memo.begin();
+            memo.verdict(7, feet, stamp, |_| {
+                rays.set(rays.get() + 1);
+                true
+            })
+        };
+        let here = Vec3::new(1.0, 2.0, 3.0);
+        assert!(frame(&mut memo, here, (1, 1)));
+        assert!(frame(&mut memo, here, (1, 1)));
+        assert_eq!(rays.get(), 1, "still: one ray");
+        frame(&mut memo, here + Vec3::X, (1, 1));
+        assert_eq!(rays.get(), 2, "moved: rayed");
+        frame(&mut memo, here + Vec3::X, (2, 1));
+        assert_eq!(rays.get(), 3, "a building streamed: rayed");
+        memo.begin(); // a frame the object is not a blip in
+        frame(&mut memo, here + Vec3::X, (2, 1));
+        assert_eq!(rays.get(), 4, "a frame away forgets it");
     }
 }
