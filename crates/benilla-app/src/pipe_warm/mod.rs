@@ -30,6 +30,7 @@ use benilla_assets::materials::WowModelMaterial;
 use benilla_world::model_render::MaterialCache;
 use benilla_world::particles::buffer::{
     begin_effect_frame, EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex,
+    GpuParticle, ParticlePool,
 };
 
 mod menagerie;
@@ -95,10 +96,24 @@ pub(crate) fn plugin(app: &mut App) {
     render_app.add_systems(Render, watch_pipelines.in_set(RenderSystems::Cleanup));
 }
 
-/// Tell the render thread a compile burst is on, so it leaves the frame-critical QoS band.
-fn publish_compile_burst(warm: Res<WarmPass>) {
+/// Tell the render thread a compile burst is on, so it leaves the frame-critical QoS band, and
+/// optimize the collider trees inline for its length: where the compiles run as tasks on the
+/// async-compute pool, an optimize task queued behind them stalls every physics step that blocks
+/// on it. Outside a burst the trees go back to avian's platform default (async off wasm32), where
+/// the task overlaps the step.
+fn publish_compile_burst(
+    warm: Res<WarmPass>,
+    tree_opt: Option<ResMut<avian3d::collider_tree::ColliderTreeOptimization>>,
+) {
     let bursting = warm.spawned_at.is_some() && !warm.done;
     benilla_world::thread_qos::COMPILE_BURST.store(bursting, Ordering::Relaxed);
+    if let Some(mut tree_opt) = tree_opt {
+        let use_async_tasks = !bursting
+            && avian3d::collider_tree::ColliderTreeOptimization::default().use_async_tasks;
+        if tree_opt.use_async_tasks != use_async_tasks {
+            tree_opt.use_async_tasks = use_async_tasks;
+        }
+    }
 }
 
 /// Publish whether the frame is covered to the render world.
@@ -271,13 +286,19 @@ pub(crate) struct WarmPass {
     /// The 1x1 stand-in texture [`warm_effect_lane`] binds, held strong for the pass's life.
     effect_tex: Option<Handle<Image>>,
     /// The menagerie drained cleanly once. The warm set does not depend on the map and the
-    /// pipeline cache never evicts, so later covers skip the pass; a timeout does not latch this.
+    /// pipeline cache never evicts, so a later cover skips the pass while the world camera's view
+    /// key is one already warmed; a timeout does not latch this.
     warmed_once: bool,
     /// The cameras the menagerie parents rigs to, whose live view keys [`record_warmed_views`]
     /// reads.
     anchors: Vec<Entity>,
-    /// The view keys those anchors carried while the pass ran: the census's only notion of warm.
+    /// The view keys those anchors carried through every pass that drained: the census's and the
+    /// skip test's only notion of warm.
     warmed_views: Vec<ViewClass>,
+    /// The view keys the running pass has seen, committed to [`Self::warmed_views`] on its drain.
+    warming_views: Vec<ViewClass>,
+    /// The world camera's view key as of last frame, by [`record_warmed_views`].
+    world_view: Option<ViewClass>,
     /// Pacing state: rigs warmed so far, when the last slice went out, frames the reveal spanned,
     /// and the slice on screen now (hidden again next frame).
     revealed: usize,
@@ -294,6 +315,11 @@ impl WarmPass {
     /// Cover-lift gate: false while the menagerie still has pipelines in flight.
     pub(crate) fn satisfied(&self) -> bool {
         self.done
+    }
+
+    /// Whether a drained pass already compiled the world camera's view key `class`.
+    fn covers(&self, class: Option<ViewClass>) -> bool {
+        self.warmed_once && class.is_some_and(|c| self.warmed_views.contains(&c))
     }
 }
 
@@ -374,8 +400,9 @@ fn run_warm_pass(
         return;
     }
     let now = time.elapsed_secs();
-    // Already warmed in this process: nothing to compile.
-    if warm.warmed_once {
+    // Already warmed at this view key: nothing to compile. A `gxMultisample` change is a new key,
+    // warmed again under the next cover.
+    if warm.covers(warm.world_view) {
         warm.done = true;
         return;
     }
@@ -410,7 +437,7 @@ fn run_warm_pass(
         // Every camera the menagerie hangs rigs on, for the census.
         warm.anchors = vec![cam, warm_booth.0, warm_ortho.0];
         warm.anchors.extend(booth.iter().next().map(|(e, _)| e));
-        warm.warmed_views.clear();
+        warm.warming_views.clear();
         let count = spawn_menagerie(
             &mut commands,
             cam,
@@ -480,6 +507,11 @@ fn run_warm_pass(
         warm.done = true;
         warm.warmed_once = true;
         warm.effect_tex = None;
+        for class in std::mem::take(&mut warm.warming_views) {
+            if !warm.warmed_views.contains(&class) {
+                warm.warmed_views.push(class);
+            }
+        }
         despawn_rigs(&mut commands, &rigs);
         let line = format!(
             "{} rigs drained in {:.2}s over {} paced frames",
@@ -594,23 +626,32 @@ type AnchorViewQuery<'w, 's> = Query<
         Option<&'static Projection>,
         Option<&'static Msaa>,
         Has<bevy::camera::Hdr>,
+        Has<benilla_world::view::WorldCamera>,
     ),
     With<Camera3d>,
 >;
 
-/// Record the live view key of every anchor camera while the pass runs.
+/// Record the world camera's view key, and the live view key of every anchor camera while the
+/// pass runs.
 fn record_warmed_views(mut warm: ResMut<WarmPass>, cams: AnchorViewQuery) {
+    let world_view = cams
+        .iter()
+        .find(|c| c.4)
+        .map(|(_, projection, msaa, hdr, _)| view_class(projection, msaa, hdr));
+    if warm.world_view != world_view {
+        warm.world_view = world_view;
+    }
     if warm.spawned_at.is_none() || warm.done {
         return;
     }
     let anchors = warm.anchors.clone();
-    for (e, projection, msaa, hdr) in &cams {
+    for (e, projection, msaa, hdr, _) in &cams {
         if !anchors.contains(&e) {
             continue;
         }
         let class = view_class(projection, msaa, hdr);
-        if !warm.warmed_views.contains(&class) {
-            warm.warmed_views.push(class);
+        if !warm.warming_views.contains(&class) {
+            warm.warming_views.push(class);
         }
     }
 }
@@ -719,6 +760,40 @@ fn warm_effect_lane(
                     );
                 }
             }
+            // The GPU-expanded pool topology is a key axis too (`EFFECT_PARTICLES`); an emitter's
+            // pool takes its blend and lighting, never a rasterizer settle. The default pool's
+            // zero basis builds zero-sized quads, so it draws nothing.
+            for lighting in [
+                benilla_world::particles::buffer::EffectLighting::None,
+                benilla_world::particles::buffer::EffectLighting::Scene,
+            ] {
+                quads.commit_particles(
+                    ParticlePool::default(),
+                    &[GpuParticle {
+                        u_age: 0.5,
+                        twinkle: 1.0,
+                        ..bytemuck::Zeroable::zeroed()
+                    }],
+                    1,
+                    EffectDrawSpec {
+                        cam,
+                        texture: tex.id(),
+                        blend,
+                        fog: EffectFog::Off,
+                        lighting,
+                        anchor: Vec3::ZERO,
+                        bias: 0.0,
+                        raster_bias: 0,
+                        raster_slope: 0.0,
+                        cam_relative: false,
+                        no_depth_test: false,
+                        main_entity: cam,
+                        light: None,
+                        clip: None,
+                        motion: benilla_world::particles::buffer::EffectMotion::Static,
+                    },
+                );
+            }
         }
         // Depth-test off, warmed as the one combination that ships: the weapon swing trail,
         // alpha-blended, unlit, no rasterizer settle.
@@ -755,7 +830,7 @@ fn warm_effect_lane(
 
 #[cfg(test)]
 mod census_tests {
-    use super::{view_class, ViewClass};
+    use super::{view_class, ViewClass, WarmPass};
     use bevy::camera::{OrthographicProjection, PerspectiveProjection, Projection};
     use bevy::render::view::Msaa;
 
@@ -815,6 +890,26 @@ mod census_tests {
         let without = view_class(Some(&perspective()), Some(&Msaa::Off), false);
         assert_ne!(with, without);
         assert!(!warm_set_without_an_orthographic_arm().contains(&without));
+    }
+
+    /// A `gxMultisample` change gives the world camera a new view key, which a later cover warms;
+    /// a key seen only by a pass that has not drained is not warm.
+    #[test]
+    fn a_new_sample_count_is_warmed_again_and_an_undrained_pass_counts_for_nothing() {
+        let world = |msaa| view_class(Some(&perspective()), Some(&msaa), true);
+        let mut warm = WarmPass {
+            warmed_once: true,
+            warmed_views: vec![world(Msaa::Off)],
+            ..Default::default()
+        };
+        assert!(warm.covers(Some(world(Msaa::Off))));
+        assert!(!warm.covers(Some(world(Msaa::Sample8))));
+        warm.warming_views.push(world(Msaa::Sample8));
+        assert!(
+            !warm.covers(Some(world(Msaa::Sample8))),
+            "the running pass's own keys must not end it"
+        );
+        assert!(!warm.covers(None), "no world camera: nothing to skip on");
     }
 }
 
