@@ -50,8 +50,8 @@ pub enum DoodadAnimTier<'a> {
 pub(crate) const SOUND_EVENT_TAGS: [&[u8; 4]; 4] = [b"$DSL", b"$DSO", b"$DSE", b"$SND"];
 
 /// Whether the model's arm chain (the loader-idle seed and its variations, the only sequences a
-/// placed doodad plays) carries a sound-event marker. Kept out of [`classify`], which answers what
-/// the model renders: the reference arms every placed doodad (`0x695100` → `0x7121a0`), and its
+/// placed doodad plays but for a transport's, [`CarrierAnimation`]) carries a sound-event marker.
+/// Kept out of [`classify`], which answers what the model renders: the reference arms every placed doodad (`0x695100` → `0x7121a0`), and its
 /// event track runs on that clock even when no bone moves (`KalidarStreetLamp01.m2`'s `$DSL`).
 pub(crate) fn arms_for_sound(anims: &ModelAnimations) -> bool {
     let Some(idle) = anims.idle_clip() else {
@@ -83,7 +83,7 @@ pub fn classify<'a>(
     // pose renders identically to the static mesh.
     match anims.first_seq.and_then(|i| anims.clips.get(i)) {
         Some(clip) => DoodadAnimTier::FirstSeq(clip),
-        // A transport prop is re-armed by its transport's motion (ShipStart, ShipMoving,
+        // A transport prop plays its transport's phase ([`CarrierAnimation`]: ShipStart, ShipMoving,
         // ShipStop), so it rigs even when its idle holds bind pose: the zeppelin's rotor.
         None if is_ship_prop(anims) => anims
             .idle_clip()
@@ -95,7 +95,7 @@ pub fn classify<'a>(
 
 /// Whether a model authors `AnimationData.dbc` 163 ShipMoving, the sequence a moving transport
 /// hands its props ([`benilla_formats::ShipMotion`]).
-pub fn is_ship_prop(anims: &ModelAnimations) -> bool {
+fn is_ship_prop(anims: &ModelAnimations) -> bool {
     anims.clips.iter().any(|c| c.anim_id == SHIP_MOVING)
 }
 
@@ -248,38 +248,96 @@ pub struct DoodadAnimHost {
     pub(crate) window_hi: f32,
     /// The animation id to re-roll over; `None` on the gseq-only tier, which has no window.
     pub(crate) anim_id: Option<u16>,
-    /// The id to arm when the current play-window ends, in place of a fresh roll of
-    /// [`Self::anim_id`]: an object's sequence-finished chain ([`Self::rearm`]).
-    pub(crate) then: Option<u16>,
     /// Whether the host was ticking last frame (edge-triggered pause/resume).
     pub active: bool,
     /// `Time::elapsed_secs` when `active` last went false: the reaper demotes the longest-parked.
     pub(crate) parked_at: f32,
 }
 
-/// On the anim root of a placement hosted on a streamed entity (a transport's cargo): its fade
-/// sphere's centre in the root's own frame. [`DoodadAnimHost::fade`] is built from the
-/// entity-local placement, which names no world point, so the gate re-centres it on the root's
-/// live pose each frame: a promoted rig parked on a wrong verdict draws its palette rows where it
-/// parked, and the boat sails without its sails.
+/// The animation a moving map object plays on its doodads, set on the object: the transport
+/// tick's `PlayEntityAnimation` (`0x5f52f9` → `0x6709f0` → `0x6a24b0` → `0x6a20f0`), which plays it
+/// on every doodad of the object with a drawn variation; `None` until the first. A write plays it
+/// again.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CarrierAnimation(pub Option<u16>);
+
+/// A doodad its map object plays animations on ([`CarrierAnimation`]); its window ends through
+/// the transport's done callback `0x5f49b0`, which the ready tick installs on the object's doodads
+/// over their own `0x6951b0` (`0x5f52d7` → `0x670a30`).
+#[derive(Component, Debug, Default)]
+pub(crate) struct CarriedDoodad {
+    /// The animation its object asked for, armed on the host's next re-roll pass.
+    play: Option<u16>,
+    /// The key bone's blend slot (`+0xc4`): the outgoing sequence, fading out.
+    fade: Option<BlendSlot>,
+}
+
+/// The sequence in the blend slot, its weight falling to 0 at `until` (`[blk+0x100]`) over the
+/// incoming sequence's `M2Sequence.blendTime` (`0x7125f2`).
+#[derive(Clone, Copy, Debug)]
+struct BlendSlot {
+    node: AnimationNodeIndex,
+    until: f32,
+    span: f32,
+}
+
+impl BlendSlot {
+    /// The fraction of the fade still to run, 1 to 0: `(blendEnd − now) · blendRate`.
+    fn left(&self, now: f32) -> f32 {
+        (self.until - now) / self.span
+    }
+}
+
+/// `0x5f49b0` for a window that ended (reason 0): accelerating (0xa2) plays cruising (0xa3) and
+/// decelerating (0xa4) standing (0); standing and cruising play nothing, and any other animation
+/// replays itself, through the bytes `0x5f4a04`.
+fn carrier_done(anim_id: u16) -> Option<u16> {
+    match anim_id {
+        0xa2 => Some(0xa3),
+        0xa4 => Some(0),
+        0 | 0xa3 => None,
+        other => Some(other),
+    }
+}
+
+/// Play each carrier's animation on the animated doodads hosted under it: on every host when it
+/// changes, and on a host that arrives later, as a play on a doodad whose model is still loading
+/// waits in its queue until it loads (`0x7121b3`).
+fn play_carrier_animation(
+    mut commands: Commands,
+    carriers: Query<(Ref<CarrierAnimation>, &Children)>,
+    mut hosts: Query<Option<&mut CarriedDoodad>, With<DoodadAnimHost>>,
+) {
+    for (anim, children) in &carriers {
+        let Some(id) = anim.0 else {
+            continue; // nothing played yet
+        };
+        for &child in children {
+            match hosts.get_mut(child) {
+                Ok(Some(mut doodad)) if anim.is_changed() => doodad.play = Some(id),
+                Ok(None) => {
+                    commands.entity(child).insert(CarriedDoodad {
+                        play: Some(id),
+                        ..default()
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The model-local sphere centre of a host that rides a mover (a transport's prop): the gate takes
+/// its world centre from the host root's `GlobalTransform` every frame, as the transport tick
+/// re-poses each doodad def of its map object with new bounds before the def cull reads them
+/// (`0x5f50a0` → `0x6709a0` → `0x698f50` → `0x6a2070` → `0x6a81d0`; `0x683700`, `0x6838f0`).
 #[derive(Component, Clone, Copy)]
-pub(crate) struct RidingSphere(pub(crate) Vec3);
+pub(crate) struct CarriedSphere(pub(crate) Vec3);
 
 impl DoodadAnimHost {
     /// The animation id the host plays; `None` on the gseq-only tier.
     pub fn anim_id(&self) -> Option<u16> {
         self.anim_id
-    }
-
-    /// Re-arm onto `anim_id`, as the reference's `ObjectSetSequence` sets a transport's sequence:
-    /// the window expires now, so `reroll_doodad_variation` snaps to a variation of it this or
-    /// next frame. With `then`, the play-window that follows ends on `then` instead of a fresh
-    /// roll of `anim_id`, as a sequence-finished handler moves a one-shot on (ShipStart plays once
-    /// and hands over to ShipMoving); without it, `anim_id` loops.
-    pub fn rearm(&mut self, anim_id: u16, then: Option<u16>) {
-        self.anim_id = Some(anim_id);
-        self.then = then;
-        self.window_hi = f32::NEG_INFINITY;
     }
 
     /// The armed clip's `(node, seek)` on the shared clock, `(now − armed_at) mod duration`. It
@@ -302,6 +360,9 @@ impl DoodadAnimHost {
 /// `0x6951c8`, no cross-fade) and write the next window. An undrawn host only updates
 /// [`DoodadAnimHost::clip`], for [`gate_doodad_anim`]'s resume to arm.
 ///
+/// A carried doodad ([`CarriedDoodad`]) arms its object's play first, and its window ends through
+/// `0x5f49b0` instead ([`carrier_done`]).
+///
 /// Deviation: this runs for every resident host, where the reference stops a doodad culled out
 /// of its scene list (`[CM2Scene+0x20]`) and re-arms it at once on re-link (`0x7074b0`,
 /// `0x683f80`), because gating it so would re-roll the whole field on the frame the camera turns
@@ -313,44 +374,150 @@ fn reroll_doodad_variation(
         &mut DoodadAnimHost,
         &ModelAnimations,
         Option<&mut AnimationPlayer>,
+        Option<&mut CarriedDoodad>,
     )>,
 ) {
     let now = time.elapsed_secs();
-    for (mut host, anims, player) in &mut hosts {
-        let Some(anim_id) = host.anim_id else {
-            continue; // gseq-only: never armed
+    for (mut host, anims, mut player, mut carried) in &mut hosts {
+        // The object's play arms at once; else a window's end runs the done callback, the doodad's
+        // own `0x6951b0` replaying its id or its carrier's `0x5f49b0`.
+        let played = carried
+            .as_mut()
+            .filter(|c| c.play.is_some())
+            .and_then(|c| c.play.take());
+        let has = |id: u16| anims.clips.iter().any(|c| c.anim_id == id);
+        let anim_id = match played {
+            // `0x7121a0` returns for an id with no record, and the running play goes on.
+            Some(id) if !has(id) => None,
+            Some(id) => Some(id),
+            None => match host.anim_id {
+                None => None, // gseq-only: never armed
+                Some(_) if now < host.window_hi => None,
+                Some(id) if carried.is_none() => Some(id),
+                Some(id) => carrier_done(id).filter(|&n| has(n)).or_else(|| {
+                    // Nothing plays: the clip runs on, its done latched (`+0xc0`).
+                    host.window_hi = f32::INFINITY;
+                    None
+                }),
+            },
         };
-        if now < host.window_hi {
-            continue;
+        if let Some(anim_id) = anim_id {
+            arm_variation(
+                &mut host,
+                anims,
+                player.as_deref_mut(),
+                carried.as_deref_mut(),
+                &mut rng,
+                anim_id,
+                played.is_none(),
+                now,
+            );
         }
-        // A finished window with a chain hands over; a fresh arm (`NEG_INFINITY`) plays its own id
-        // first.
-        let anim_id = match host.then {
-            Some(next) if host.window_hi > f32::NEG_INFINITY => {
-                host.then = None;
-                host.anim_id = Some(next);
-                next
-            }
-            _ => anim_id,
-        };
-        let Some(clip) = anims.pick_variation(anim_id, rng.draw()) else {
-            // No chain for this id: stop asking.
-            host.anim_id = None;
-            continue;
-        };
-        let (node, duration) = (clip.node, clip.duration);
-        let replay = rng.replay_count(clip.replay);
-        host.armed_at = now;
-        // `span · R`, one loop for `replay = (0, 0)`; a zero-duration clip gets a minimum window.
-        host.window_hi = now + (duration * replay as f32).max(f32::EPSILON);
-        host.clip = Some((node, duration));
-        if host.active {
-            if let Some(mut p) = player {
-                p.stop_all(); // the snap
-                p.play(node).repeat();
-            }
+        if let (Some(c), Some(p)) = (carried.as_deref_mut(), player.as_deref_mut()) {
+            advance_blend(&host, c, p, now);
         }
     }
+}
+
+/// One arm of `anim_id`'s variations, its window `span · R` (one loop for `replay = (0, 0)`; a
+/// zero-duration clip gets a minimum window). A placed doodad's own replay snaps (`0x6951bf`
+/// pushes blend 0); a carried play blends (`0x6a2128` and `0x5f49dd` push 1): the outgoing
+/// sequence moves to the blend slot over the incoming one's blend time (`0x7125d6`-`0x7125f2`),
+/// unless one still blends in past half (`0x7125c9`), or the sequence that ran to its end is
+/// written again (`0x712553`). A re-arm of the sequence the slot holds runs on its twin track.
+#[allow(clippy::too_many_arguments)] // one arm's full input set
+fn arm_variation(
+    host: &mut DoodadAnimHost,
+    anims: &ModelAnimations,
+    player: Option<&mut AnimationPlayer>,
+    carried: Option<&mut CarriedDoodad>,
+    rng: &mut benilla_assets::AnimRng,
+    anim_id: u16,
+    completed: bool,
+    now: f32,
+) {
+    let Some(clip) = anims.pick_variation(anim_id, rng.draw()) else {
+        // No chain for this id: stop asking.
+        host.anim_id = None;
+        return;
+    };
+    let replay = rng.replay_count(clip.replay);
+    let outgoing = host.clip.map(|(n, _)| n);
+    let mut node = clip.node;
+    let mut slot = None;
+    if let Some(c) = carried {
+        let blend_time = clip.blend_time.max(0.0);
+        let same = outgoing.is_some_and(|n| n == clip.node || Some(n) == clip.blend_node);
+        if same && completed {
+            // The primary alone; the slot stays as it is.
+        } else if c.fade.is_none_or(|f| blend_lambda(f.left(now)) <= 0.5) {
+            slot = c.fade.take().map(|f| f.node);
+            c.fade = outgoing.filter(|_| blend_time > 0.0).map(|node| BlendSlot {
+                node,
+                until: now + blend_time,
+                span: blend_time,
+            });
+        }
+        match (c.fade, clip.blend_node) {
+            (Some(f), Some(twin)) if f.node == clip.node => node = twin,
+            (Some(f), None) if f.node == clip.node => c.fade = None,
+            _ => {}
+        }
+        if host.active {
+            if let Some(p) = player {
+                // The emptied slot's track and the replaced primary stop; the slot's stays.
+                for old in slot.into_iter().chain(outgoing) {
+                    if old != node && c.fade.is_none_or(|f| f.node != old) {
+                        p.stop(old);
+                    }
+                }
+                p.start(node).repeat();
+            }
+        }
+    } else if host.active {
+        if let Some(p) = player {
+            p.stop_all(); // the snap
+            p.play(node).repeat();
+        }
+    }
+    host.anim_id = Some(anim_id);
+    host.armed_at = now;
+    host.window_hi = now + (clip.duration * replay as f32).max(f32::EPSILON);
+    host.clip = Some((node, clip.duration));
+}
+
+/// The blend slot's weight λ, the smoothstep of the fade still to run (`0x714880`), and the
+/// primary's `1 − λ`; at the fade's end the slot's track stops. A parked host has stopped both.
+fn advance_blend(
+    host: &DoodadAnimHost,
+    carried: &mut CarriedDoodad,
+    player: &mut AnimationPlayer,
+    now: f32,
+) {
+    let Some(fade) = carried.fade else {
+        return;
+    };
+    let left = fade.left(now);
+    let lambda = if left <= 0.0 || !host.active {
+        carried.fade = None;
+        player.stop(fade.node);
+        0.0
+    } else {
+        let lambda = blend_lambda(left);
+        if let Some(out) = player.animation_mut(fade.node) {
+            out.set_weight(lambda);
+        }
+        lambda
+    };
+    if let Some(cur) = host.clip.and_then(|(n, _)| player.animation_mut(n)) {
+        cur.set_weight(1.0 - lambda);
+    }
+}
+
+/// The client's per-bone blend weight (`0x714880`-`0x714921`), `t` the fraction of the fade left.
+fn blend_lambda(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    (3.0 - 2.0 * t) * t * t
 }
 
 /// The draw gate: stop a doodad's animation while it is not drawn, and on resume seek the player
@@ -369,12 +536,12 @@ fn gate_doodad_anim(
             Has<crate::rig_palette::RigSkin>,
             Option<&mut AnimationPlayer>,
             Option<&mut GlobalSeqDrive>,
-            Option<&RidingSphere>,
+            Option<(&CarriedSphere, Ref<GlobalTransform>)>,
         )>,
         Query<(), Added<DoodadAnimHost>>,
     )>,
-    // A riding host's sphere moves under a still camera: it is judged every frame.
-    riders: Query<(), (With<DoodadAnimHost>, With<RidingSphere>)>,
+    // A carried host whose mover moved under a still camera is judged again.
+    carried_moved: Query<(), (With<CarriedSphere>, Changed<GlobalTransform>)>,
     vis: Query<&Visibility>,
     cam: Query<
         (
@@ -415,12 +582,11 @@ fn gate_doodad_anim(
         !tf.is_changed() && !proj.is_changed() && !local.as_ref().is_some_and(|l| l.is_changed())
     }) && !scene.changed()
         && changed_vis.is_empty();
-    if verdicts_still && riders.is_empty() && host_set.p1().is_empty() && !*promote_pending {
+    if verdicts_still && carried_moved.is_empty() && host_set.p1().is_empty() && !*promote_pending {
         return;
     }
     let mut pending = false;
-    // Fixed at spawn (`EmitterFade`), so a reused verdict never sees the sphere move; a
-    // [`RidingSphere`] host is the exception and is judged every frame.
+    // Fixed at spawn (`EmitterFade`) but on a mover, whose moves re-judge it below.
     let in_frustum = |frustum: &bevy::camera::primitives::Frustum,
                       fade: &crate::particles::EmitterFade| {
         frustum.intersects_sphere(
@@ -432,20 +598,22 @@ fn gate_doodad_anim(
         )
     };
     let mut hosts = host_set.p0();
-    for (entity, mut host, lazy, pose, has_rig, player, drive, riding) in &mut hosts {
-        // A riding sphere at the root's propagated pose, last frame's as this runs before
-        // propagation; a mover never reuses a verdict, as its sphere moves under a still camera.
-        let riding_fade = riding.map(|r| crate::particles::EmitterFade {
-            center: worlds.get(entity).map_or(r.0, |g| g.transform_point(r.0)),
-            ..host.fade.clone()
+    for (entity, mut host, lazy, pose, has_rig, player, drive, carried) in &mut hosts {
+        // A carried host's sphere follows its mover; one that moved has no verdict to reuse.
+        let moved = carried.is_some_and(|(local, world)| {
+            let center = world.transform_point(local.0);
+            if host.fade.center != center {
+                host.fade.center = center;
+            }
+            world.is_changed()
         });
-        let fade = riding_fade.as_ref().unwrap_or(&host.fade);
         // A host born this frame has no verdict to reuse (`active` starts false).
-        let drawn = if verdicts_still && !host.is_added() && riding.is_none() {
+        let drawn = if verdicts_still && !host.is_added() && !moved {
             host.active
         } else if host.meshes.is_empty() {
             // Meshless: the reference ticks any model in the draw set, and a 0-batch model is
             // admitted on its fade sphere like its emitters, through the same `in_draw_set`.
+            let fade = &host.fade;
             world_cam.as_ref().is_some_and(|(cam_tf, frustum, _, _)| {
                 fade.in_draw_set(
                     cam_tf.translation(),
@@ -465,7 +633,7 @@ fn gate_doodad_anim(
                 .any(|&e| vis.get(e).is_ok_and(|v| *v != Visibility::Hidden))
                 && world_cam
                     .as_ref()
-                    .is_none_or(|(_, frustum, _, _)| in_frustum(frustum, fade))
+                    .is_none_or(|(_, frustum, _, _)| in_frustum(frustum, &host.fade))
         };
         // The lazy-rig promote, retried every frame the host stays drawn so a full table is only
         // a delay. It needs a second drawn frame (`host.active`): on its first, a spawned part's
@@ -546,7 +714,11 @@ impl Plugin for DoodadAnimPlugin {
         // resumes the old variation for a frame.
         app.add_systems(
             PostUpdate,
-            (reroll_doodad_variation, gate_doodad_anim)
+            (
+                play_carrier_animation,
+                reroll_doodad_variation,
+                gate_doodad_anim,
+            )
                 .chain()
                 .before(AnimationSystems),
         );
@@ -841,7 +1013,6 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::NEG_INFINITY,
                     anim_id: Some(0),
-                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -900,6 +1071,172 @@ mod tests {
         );
     }
 
+    /// `ZepAnimation.m2`'s sequences, the zeppelin's one prop: cruising (0xa3, two variations) and
+    /// speeding up (0xa2) key the engine's `$DSL`, slowing down (0xa4) and standing (0) its `$DSE`.
+    fn zeppelin_anims() -> ModelAnimations {
+        let key = |time: f32, ident: &[u8; 4]| benilla_assets::ClipEvent {
+            time,
+            ident: *ident,
+            data: 0,
+            bone: 0,
+            offset: Vec3::ZERO,
+            point: Vec3::ZERO,
+        };
+        let seq =
+            |anim_id: u16, i: usize, duration: f32, events: Vec<benilla_assets::ClipEvent>| {
+                AnimClip {
+                    duration,
+                    frequency: 0x7fff,
+                    events: events.into(),
+                    ..seq_clip(anim_id, i, i + 1)
+                }
+            };
+        anims(
+            vec![
+                seq(0xa3, 0, 4.0, vec![key(0.0, b"$DSL")]),
+                seq(0xa3, 1, 4.0, vec![key(0.0, b"$DSL")]),
+                seq(0xa4, 2, 3.0, vec![key(1.966, b"$DSE")]),
+                seq(0xa2, 3, 2.0, vec![key(0.8, b"$DSL")]),
+                seq(0, 4, 0.166, vec![key(0.0, b"$DSE")]),
+            ],
+            None,
+            false,
+        )
+    }
+
+    /// A carried prop plays its ship's phase (`0x6a20f0`) and ends each window through `0x5f49b0`,
+    /// so the zeppelin's engine `$DSL` runs while it moves, where its own Stand holds only `$DSE`.
+    #[test]
+    fn a_carried_prop_plays_its_ships_phase_and_chains_through_the_transport_callback() {
+        let mut app = reroll_app();
+        app.add_systems(
+            Update,
+            play_carrier_animation.before(reroll_doodad_variation),
+        );
+        // The zeppelin's prop is meshed and animated (its propeller, bone 1, spins in 0xa3); the
+        // events run on the host's clock alone, so this one carries no player. Armed on Stand.
+        let host = app
+            .world_mut()
+            .spawn((
+                DoodadAnimHost {
+                    meshes: Vec::new(),
+                    fade: crate::particles::EmitterFade::sphere(1.0, Vec3::ZERO),
+                    clip: None,
+                    armed_at: 0.0,
+                    window_hi: f32::NEG_INFINITY,
+                    anim_id: Some(0),
+                    active: true,
+                    parked_at: 0.0,
+                },
+                zeppelin_anims(),
+            ))
+            .id();
+        let ship = app
+            .world_mut()
+            .spawn(CarrierAnimation(Some(0xa2)))
+            .add_child(host)
+            .id();
+        let step = |app: &mut App, secs: f32| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(secs));
+            app.update();
+            let h = app.world().entity(host).get::<DoodadAnimHost>().unwrap();
+            let now = app.world().resource::<Time>().elapsed_secs();
+            let (node, _) = h.arm_clock(now).expect("armed");
+            let anims = app.world().entity(host).get::<ModelAnimations>().unwrap();
+            let clip = anims.clip_at(node).expect("an armed clip");
+            let engine = clip.events.iter().any(|e| &e.ident == b"$DSL");
+            (clip.anim_id, engine, h.window_hi.is_finite())
+        };
+        assert_eq!(step(&mut app, 0.0), (0xa2, true, true), "speeding up");
+        assert_eq!(
+            step(&mut app, 2.1),
+            (0xa3, true, true),
+            "0xa2 done ⇒ cruising"
+        );
+        assert_eq!(
+            step(&mut app, 4.1),
+            (0xa3, true, false),
+            "0xa3 done ⇒ nothing"
+        );
+        app.world_mut().get_mut::<CarrierAnimation>(ship).unwrap().0 = Some(0xa4);
+        assert_eq!(step(&mut app, 0.1), (0xa4, false, true), "slowing down");
+        assert_eq!(
+            step(&mut app, 3.1),
+            (0, false, true),
+            "0xa4 done ⇒ standing"
+        );
+        assert_eq!(step(&mut app, 0.2), (0, false, false), "0 done ⇒ nothing");
+    }
+
+    /// A carried play cross-fades (`0x6a2128`, `0x5f49dd` push blend 1): the ship's sails, whose
+    /// phases share one band and blend over 0.5 s, fade from the outgoing phase into the new one
+    /// on the smoothstep weight (`0x7125d6`-`0x7125f2`, `0x714880`); a blend time of 0 snaps.
+    #[test]
+    fn a_carried_phase_change_cross_fades_over_its_blend_time() {
+        let weights = |blend_time: f32| {
+            let mut app = reroll_app();
+            let seq = |anim_id: u16, i: usize| AnimClip {
+                duration: 40.0,
+                blend_time,
+                blend_node: Some(AnimationNodeIndex::new(i + 11)),
+                frequency: 0x7fff,
+                ..seq_clip(anim_id, i, i + 1)
+            };
+            let (cruise, speed_up) = (AnimationNodeIndex::new(1), AnimationNodeIndex::new(2));
+            let mut player = AnimationPlayer::default();
+            player.play(cruise).repeat();
+            let host = app
+                .world_mut()
+                .spawn((
+                    DoodadAnimHost {
+                        meshes: Vec::new(),
+                        fade: crate::particles::EmitterFade::sphere(1.0, Vec3::ZERO),
+                        clip: Some((cruise, 40.0)),
+                        armed_at: 0.0,
+                        window_hi: f32::INFINITY,
+                        anim_id: Some(0xa3),
+                        active: true,
+                        parked_at: 0.0,
+                    },
+                    anims(vec![seq(0xa3, 0), seq(0xa2, 1)], Some(0), false),
+                    player,
+                    CarriedDoodad {
+                        play: Some(0xa2),
+                        ..default()
+                    },
+                ))
+                .id();
+            [0.0, 0.25, 0.3]
+                .into_iter()
+                .map(|secs| {
+                    app.world_mut()
+                        .resource_mut::<Time>()
+                        .advance_by(std::time::Duration::from_secs_f32(secs));
+                    app.update();
+                    let p = app.world().entity(host).get::<AnimationPlayer>().unwrap();
+                    let w = |n| p.animation(n).map(|a| a.weight());
+                    (w(cruise), w(speed_up))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            weights(0.5),
+            [
+                (Some(1.0), Some(0.0)),
+                (Some(0.5), Some(0.5)),
+                (None, Some(1.0))
+            ],
+            "the outgoing phase fades out as the new one fades in"
+        );
+        assert_eq!(
+            weights(0.0),
+            [(None, Some(1.0)); 3],
+            "no blend time: a snap"
+        );
+    }
+
     /// Global sequences loop with no arming, so the gseq-only tier opens no window.
     #[test]
     fn a_gseq_only_host_never_rerolls() {
@@ -914,7 +1251,6 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::NEG_INFINITY,
                     anim_id: None,
-                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -1011,7 +1347,6 @@ mod tests {
                     // Far future: no window may expire and change the armed clip mid-test.
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
-                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -1128,7 +1463,6 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
-                    then: None,
                     active: false,
                     parked_at: 0.0,
                 })
@@ -1219,7 +1553,6 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
-                    then: None,
                     active: true,
                     parked_at: 0.0,
                 },
@@ -1307,7 +1640,6 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
-                    then: None,
                     // The born state every spawn site uses (`terrain_stream::spawn::assemble`).
                     // This test once spawned `active: true`, so it passed while a host that was
                     // never drawn was never parked either.
@@ -1372,7 +1704,6 @@ mod tests {
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
-                    then: None,
                     active: false,
                     parked_at: 0.0,
                 },
@@ -1394,10 +1725,12 @@ mod tests {
         );
     }
 
-    /// A transport's prop: its spawn sphere is entity-local (behind the camera here), and the
-    /// gate must judge where the root is now, every frame, even with the camera still.
+    /// A transport's prop builds its sphere in the transport's frame; the gate judges it where the
+    /// prop is this frame, as the tick re-poses the map object's defs before the def cull
+    /// (`0x698f50` → `0x6a2070` → `0x6a81d0`, then `0x683700`), and re-judges it as the ship moves under a
+    /// still camera.
     #[test]
-    fn a_riding_host_is_judged_where_its_root_is_now() {
+    fn a_carried_host_is_culled_where_its_mover_has_it() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()));
         app.init_resource::<crate::view::ViewDistance>();
@@ -1426,50 +1759,44 @@ mod tests {
             frustum,
             projection,
         ));
+        // The prop sits 30 yd behind the camera in the ship's frame, and the ship has it 30 yd
+        // ahead in the world.
+        let local = Transform::from_xyz(0.0, 0.0, 30.0);
+        let ahead = GlobalTransform::from_xyz(0.0, 0.0, -30.0);
         let mesh = app.world_mut().spawn(Visibility::Inherited).id();
-        // The root has docked 30 yd ahead; the spawn sphere names the entity-local point behind.
         let host = app
             .world_mut()
             .spawn((
                 DoodadAnimHost {
                     meshes: vec![mesh],
-                    fade: crate::particles::EmitterFade::sphere(2.0, Vec3::new(0.0, 0.0, 30.0)),
+                    fade: crate::particles::EmitterFade::sphere(2.0, local.translation),
                     clip: Some((AnimationNodeIndex::new(1), 2.0)),
                     armed_at: 0.0,
                     window_hi: f32::INFINITY,
                     anim_id: Some(0),
-                    then: None,
-                    active: false,
+                    active: true,
                     parked_at: 0.0,
                 },
-                RidingSphere(Vec3::ZERO),
-                GlobalTransform::from_xyz(0.0, 0.0, -30.0),
+                CarriedSphere(Vec3::ZERO),
+                local,
+                ahead,
             ))
             .id();
-        let active = |app: &App| {
-            app.world()
-                .entity(host)
-                .get::<DoodadAnimHost>()
-                .unwrap()
-                .active
-        };
+        app.update();
         app.update();
         assert!(
-            active(&app),
-            "the root is in front of the camera ⇒ drawn, whatever the spawn sphere said"
+            !app.world().entity(host).contains::<AnimParked>(),
+            "ahead of the camera in the world ⇒ drawn, wherever it sits on the ship"
         );
-        app.update();
-        assert!(active(&app), "still drawn while the root stays put");
-
-        // The boat sails behind the camera, which does not move.
+        // The ship carries it behind the camera; nothing else moves.
         *app.world_mut()
             .entity_mut(host)
             .get_mut::<GlobalTransform>()
-            .unwrap() = GlobalTransform::from_xyz(0.0, 0.0, 30.0);
+            .unwrap() = GlobalTransform::from_xyz(0.0, 0.0, 60.0);
         app.update();
         assert!(
-            !active(&app),
-            "a still camera does not freeze a mover's verdict: behind ⇒ parked"
+            app.world().entity(host).contains::<AnimParked>(),
+            "carried behind the camera ⇒ parked, under a still camera"
         );
     }
 
@@ -1482,7 +1809,6 @@ mod tests {
             armed_at: 10.0,
             window_hi: f32::NEG_INFINITY,
             anim_id: Some(0),
-            then: None,
             // Parked, and the clock still answers: honouring the animate set is the caller's job.
             active: false,
             parked_at: 0.0,
