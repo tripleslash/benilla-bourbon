@@ -500,7 +500,12 @@ mod tests {
     fn the_zone_changes_at_its_second() {
         let _zone = ZoneGuard::set("CET-1CEST,M3.5.0,M10.5.0/3");
         // 2024-03-31 01:00 UTC, when 02:00 CET becomes 03:00 CEST.
+        #[cfg(not(windows))]
         let at = 1_711_846_800;
+        // The Windows runtime reads only the names and offsets of `TZ` and applies the US
+        // rules: 2024-03-10 01:00 UTC.
+        #[cfg(windows)]
+        let at = 1_710_032_400;
         assert_eq!(local(at - 1).0.hour, 1);
         assert!(!local(at - 1).1);
         assert_eq!(local(at).0.hour, 3);
