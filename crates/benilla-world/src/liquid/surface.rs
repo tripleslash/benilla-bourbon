@@ -19,6 +19,7 @@ use super::screen::LiquidScreenTargets;
 use super::WaterDetail;
 use crate::collision::liquid_layers;
 use crate::lighting::{CATA_WATER_SHININESS, WATER_SHININESS};
+use crate::terrain_stream::{build_collider_task, PendingCollider};
 use avian3d::prelude::{Collider, RigidBody};
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::materials::{LiquidCataExt, LiquidCataMaterial, LiquidExt, LiquidMaterial};
@@ -279,8 +280,13 @@ pub(crate) fn spawn_liquids<'a>(
             facts.insert(FoamPatch); // white surf is a water thing
         }
         // The waterline for the camera sweep under `cameraWaterCollision`; nothing else queries it.
-        if let Some(collider) = liquid_collider(lq) {
-            facts.insert((collider, RigidBody::Static, liquid_layers()));
+        // Built off-thread like the terrain's own trimesh: a tile carries up to 256 layers.
+        if let Some((verts, tris)) = liquid_collider_data(lq) {
+            facts.insert(PendingCollider::new(
+                build_collider_task(verts, tris),
+                Some(liquid_layers()),
+                true,
+            ));
         }
         entities.push(facts.id());
 
@@ -316,9 +322,9 @@ pub(crate) fn spawn_liquids<'a>(
     }
 }
 
-/// The collision trimesh for one [`LiquidMesh`]: the render mesh's own wet-cell triangles, `None`
-/// when every cell is dry. Built inline, as a layer is at most 128 triangles.
-fn liquid_collider(lq: &LiquidMesh) -> Option<Collider> {
+/// The collision trimesh input for one [`LiquidMesh`]: the render mesh's own wet-cell triangles,
+/// `None` when every cell is dry.
+fn liquid_collider_data(lq: &LiquidMesh) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
     let tris: Vec<[u32; 3]> = lq
         .indices
         .as_chunks::<3>()
@@ -330,7 +336,12 @@ fn liquid_collider(lq: &LiquidMesh) -> Option<Collider> {
         return None;
     }
     let verts: Vec<Vec3> = lq.positions.iter().map(|p| wow_to_bevy(*p)).collect();
-    Some(Collider::trimesh(verts, tris))
+    Some((verts, tris))
+}
+
+/// [`liquid_collider_data`] built inline, for a WMO group's few pools.
+fn liquid_collider(lq: &LiquidMesh) -> Option<Collider> {
+    liquid_collider_data(lq).map(|(verts, tris)| Collider::trimesh(verts, tris))
 }
 
 /// The render mesh for `layers` in their own space (absolute for MCLQ, model-local for WMO

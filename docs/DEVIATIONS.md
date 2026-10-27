@@ -948,7 +948,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - Cell 12 is completed, because the initialiser's last store (`0x68efa5`) leaves its bottom-right corner at zero and one magma mote in four would smear across the atlas diagonal. ([`src/liquid/drift.rs:72`](../crates/benilla-world/src/liquid/drift.rs#L72))
 - Floored at the frustum, because the cone stops containing the view at about 21:9, and a wider window would lose motes in bands down its sides. ([`src/liquid/drift.rs:95`](../crates/benilla-world/src/liquid/drift.rs#L95))
 - The reference emits nothing at or below it, which leaves a light rain (a server's intensity under 0.4, a density under 0.2) falling into still water. ([`src/liquid/ripple.rs:144`](../crates/benilla-world/src/liquid/ripple.rs#L144))
-- Water frames have their per-frame mean flattened (`flatten_frame_dc`), because mipping turns the shipped frames' drifting means into a flicker on distant water; magma and slime keep theirs, the body's intended pulse. ([`src/liquid/surface.rs:854`](../crates/benilla-world/src/liquid/surface.rs#L854))
+- Water frames have their per-frame mean flattened (`flatten_frame_dc`), because mipping turns the shipped frames' drifting means into a flicker on distant water; magma and slime keep theirs, the body's intended pulse. ([`src/liquid/surface.rs:865`](../crates/benilla-world/src/liquid/surface.rs#L865))
 
 #### modkeys
 
