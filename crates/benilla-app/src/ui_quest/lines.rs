@@ -143,12 +143,16 @@ pub(super) fn register(app: &mut App) {
 }
 
 /// The quest cache's answer runs the accept and completion lines waiting on it, in the order
-/// raised (`0x5ddeb0`, `0x5dc710`); a refusal shows none (`0x5ddec6`, `0x5dc719`).
+/// raised (`0x5ddeb0`, `0x5dc710`); a refusal shows none (`0x5ddec6`, `0x5dc719`). A turn-in's
+/// callback also makes the giver sweep its handler deferred, for a `QuestMethod` of 0 and only
+/// with an active player (`0x5dc76c`-`0x5dc792`).
 fn on_template(
     In(ev): In<SessionEvent>,
     mut lines: ResMut<QuestLines>,
     mut lane: ResMut<QuestGiverLane>,
     mut notices: ResMut<NoticeLane>,
+    mut quest: ResMut<super::QuestGiver>,
+    player: Query<(), With<crate::net::SelfPlayer>>,
 ) {
     let SessionEvent::QuestTemplate(t) = ev else {
         return;
@@ -162,6 +166,9 @@ fn on_template(
     }
     for line in waiting {
         show_quest_line(line, &t, &mut lane, &mut notices);
+        if matches!(line, QuestLine::Completed(_)) && t.method == 0 && !player.is_empty() {
+            quest.bump_reask();
+        }
     }
 }
 
@@ -245,7 +252,8 @@ mod tests {
             .init_resource::<QuestLog>()
             .init_resource::<Items>()
             .init_resource::<QuestGiverLane>()
-            .init_resource::<NoticeLane>();
+            .init_resource::<NoticeLane>()
+            .init_resource::<super::super::QuestGiver>();
         register(&mut app);
         (app, rx)
     }
@@ -397,6 +405,36 @@ mod tests {
         });
         assert!(shown(world).is_empty());
         assert!(world.resource::<QuestLines>().queued().is_empty());
+    }
+
+    /// A turn-in whose record is in flight sweeps the givers at the record's answer, only for a
+    /// `QuestMethod` of 0 and with an active player (`0x5dc76c`-`0x5dc792`).
+    #[test]
+    fn a_pending_turn_in_sweeps_the_givers_at_its_record_for_method_zero_only() {
+        let (mut app, _rx) = app();
+        let world = app.world_mut();
+        let epoch = |world: &World| world.resource::<super::super::QuestGiver>().reask_epoch();
+        let answer = |world: &mut World, id: u32, method: u32| {
+            let mut t = template(id, "Kobold Camp Cleanup", 0);
+            t.method = method;
+            crate::net::handlers::dispatch(world, vec![SessionEvent::QuestTemplate(Box::new(t))]);
+        };
+        let start = epoch(world);
+        raise(world, &[QuestLine::Completed(7)]);
+        answer(world, 7, 0);
+        assert_eq!(epoch(world), start, "no active player, no sweep");
+
+        world.spawn(crate::net::SelfPlayer);
+        raise(world, &[QuestLine::Completed(8), QuestLine::Completed(9)]);
+        assert_eq!(
+            epoch(world),
+            start,
+            "nothing sweeps before the records land"
+        );
+        answer(world, 8, 2);
+        assert_eq!(epoch(world), start, "a QuestMethod of 2 sweeps nothing");
+        answer(world, 9, 0);
+        assert_eq!(epoch(world), start.wrapping_add(1));
     }
 
     fn words(key: &str) -> String {

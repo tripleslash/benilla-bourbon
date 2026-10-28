@@ -312,8 +312,9 @@ impl QuestGiver {
     }
 
     /// Re-ask every visible questgiver's status, as the reference does after
-    /// `SMSG_SET_FACTION_STANDING`, `SMSG_GROUP_LIST`, a turn-in and `SMSG_QUESTUPDATE_*`. A
-    /// counter, folded into the marker query's generation, so no bump is lost to ordering.
+    /// `SMSG_SET_FACTION_STANDING`, `SMSG_GROUP_LIST` and the turn-in of a quest whose
+    /// `QuestMethod` is 0. A counter, folded into the marker query's generation, so no bump is lost
+    /// to ordering.
     pub(crate) fn bump_reask(&mut self) {
         self.reask = self.reask.wrapping_add(1);
     }

@@ -96,9 +96,14 @@ fn on_complete(
 ) {
     if let SessionEvent::QuestComplete(c) = ev {
         // The turn-in looks the quest up with a callback (`0x5dc4cb`).
-        let chained = quest_log
-            .template(c.quest_id, Ask::Event(&net_commands))
-            .is_some_and(|t| t.next_quest_in_chain != 0);
+        let record = quest_log.template(c.quest_id, Ask::Event(&net_commands));
+        let chained = record.is_some_and(|t| t.next_quest_in_chain != 0);
+        // The giver sweep runs only for a quest whose record's `+0x4`, `QuestMethod`, is 0
+        // (`0x5dc6ee`-`0x5dc6f9`); an uncached record sweeps at its answer
+        // ([`super::lines`], `0x5dc76c`-`0x5dc792`).
+        if record.is_some_and(|t| t.method == 0) {
+            quest.bump_reask();
+        }
         let mut raise = super::lines::Raise {
             quest_log: &quest_log,
             items: &items,
@@ -115,7 +120,7 @@ fn on_complete(
     }
 }
 
-fn on_objective_kill(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+fn on_objective_kill(In(ev): In<SessionEvent>) {
     if let SessionEvent::QuestObjectiveKill {
         quest_id: _,
         entry,
@@ -123,19 +128,19 @@ fn on_objective_kill(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
         required,
     } = ev
     {
-        quest_objective_kill(entry, count, required, &mut quest);
+        quest_objective_kill(entry, count, required);
     }
 }
 
-fn on_objective_item(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+fn on_objective_item(In(ev): In<SessionEvent>) {
     if let SessionEvent::QuestObjectiveItem { item_id, count } = ev {
-        quest_objective_item(item_id, count, &mut quest);
+        quest_objective_item(item_id, count);
     }
 }
 
-fn on_objectives_complete(In(ev): In<SessionEvent>, mut quest: ResMut<QuestGiver>) {
+fn on_objectives_complete(In(ev): In<SessionEvent>) {
     if let SessionEvent::QuestObjectivesComplete { quest_id } = ev {
-        quest_objectives_complete(quest_id, &mut quest);
+        quest_objectives_complete(quest_id);
     }
 }
 
@@ -347,30 +352,27 @@ fn quest_complete(c: QuestComplete, quest: &mut QuestGiver, raise: &mut dyn FnMu
     if quest.chosen_reward != 0 {
         raise(QuestLine::Item(std::mem::take(&mut quest.chosen_reward)));
     }
-    // A turn-in can move every giver's marker, so the reference re-asks from here.
-    quest.bump_reask();
 }
 
-/// `SMSG_QUESTUPDATE_ADD_KILL`: its progress toast is the quest log's handler's
-/// (`crate::ui_quest_log`), and the reference prints no chat line for it.
-fn quest_objective_kill(entry: u32, count: u32, required: u32, quest: &mut QuestGiver) {
+/// `SMSG_QUESTUPDATE_ADD_KILL` (0x199, `0x5e5d61`): its progress toast is the quest log's
+/// handler's (`crate::ui_quest_log`), and the reference prints no chat line for it. It asks no
+/// giver: the count moves a quest-log slot field, whose watch (`0x5ddd80`) sweeps.
+fn quest_objective_kill(entry: u32, count: u32, required: u32) {
     debug!("net: quest kill/use objective {entry:#x} at {count}/{required}");
-    quest.bump_reask();
 }
 
-/// `SMSG_QUESTUPDATE_ADD_ITEM`, which carries only the count added; its toast is resolved in
-/// `crate::ui_quest_log`, from the bags as they stand when the packet arrives.
-fn quest_objective_item(item_id: u32, count: u32, quest: &mut QuestGiver) {
+/// `SMSG_QUESTUPDATE_ADD_ITEM` (0x19a, `0x5e5afa`), which carries only the count added; its toast
+/// is resolved in `crate::ui_quest_log`, from the bags as they stand when the packet arrives. It
+/// reaches `0x5dd060` and no giver sweep.
+fn quest_objective_item(item_id: u32, count: u32) {
     debug!("net: quest item objective {item_id} +{count}");
-    quest.bump_reask();
 }
 
-/// `SMSG_QUESTUPDATE_COMPLETE` (0x198): its `ERR_QUEST_OBJECTIVE_COMPLETE_S` toast (kind 1, never
-/// chat) is the quest log's handler's, as the progress toasts are.
-fn quest_objectives_complete(quest_id: u32, quest: &mut QuestGiver) {
+/// `SMSG_QUESTUPDATE_COMPLETE` (0x198, `0x5e5d12`): its `ERR_QUEST_OBJECTIVE_COMPLETE_S` toast
+/// (kind 1, never chat) is the quest log's handler's, as the progress toasts are. Its arm makes no
+/// giver sweep; the slot's state field moving does (`0x5ddd80`).
+fn quest_objectives_complete(quest_id: u32) {
     debug!("net: quest {quest_id} objectives complete");
-    // The turn-in `?` can turn gold with no quest-log change, so the reference re-asks here.
-    quest.bump_reask();
 }
 
 /// `SMSG_QUESTUPDATE_FAILED` (`0x196`) or `_FAILEDTIMER` (`0x197`): `ERR_QUEST_FAILED_S` (msg
