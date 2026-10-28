@@ -335,6 +335,17 @@ pub(crate) mod schedule_tests {
             connect: false,
             start: crate::client_state::ClientState::Login,
         });
+        // Frame generation off, as each frame ends: with a window it holds every other update,
+        // which runs no schedule (`fsr::cadence`), so a record a test sends would wait for an
+        // update the test never runs. The boot's `frameGeneration` CVar writes it on.
+        app.add_systems(
+            Last,
+            |fg: Option<ResMut<benilla_world::fsr::FrameGeneration>>| {
+                if let Some(mut fg) = fg.filter(|fg| fg.0) {
+                    fg.0 = false;
+                }
+            },
+        );
         more(&mut app);
         app.finish();
         app

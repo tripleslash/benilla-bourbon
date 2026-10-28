@@ -31,10 +31,6 @@ fn client_with(size: UVec2, widescreen: bool) -> App {
     let (_inbound, rx) = crossbeam_channel::unbounded();
     app.insert_resource(crate::net::NetEvents::for_test(rx));
     app.update();
-    // Frame generation off, after the boot's CVars applied it: with a window it holds every
-    // other update (`fsr::cadence`), which runs no schedule, and a record sent into a held frame
-    // waits for the next one.
-    app.insert_resource(benilla_world::fsr::FrameGeneration(false));
     let mut script = UiScript::new().expect("a VM");
     script.set_default_bindings(benilla_ui::script::keybind::parse_bindings_wtf(
         "bind 1 PROBEKEY\r\nbind SHIFT-1 PROBESHIFT\r\nbind ENTER PROBEBOX\r\n\
