@@ -195,11 +195,11 @@ pub fn wmo_group_liquid_mesh(group_bytes: &[u8]) -> Option<LiquidMesh> {
         return None;
     };
     let lq = group.liquid?;
-    build_wmo_liquid_mesh(&lq, group.group_liquid)
+    build_wmo_liquid_mesh(&lq)
 }
 
-/// The [`LiquidMesh`] for a parsed [`WmoLiquid`] grid and its group's `groupLiquid`.
-fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh> {
+/// The [`LiquidMesh`] for a parsed [`WmoLiquid`] grid.
+fn build_wmo_liquid_mesh(lq: &WmoLiquid) -> Option<LiquidMesh> {
     let (xv, yv, xt, yt) = (
         lq.xverts as usize,
         lq.yverts as usize,
@@ -213,13 +213,13 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
         return None;
     }
 
-    // One kind per surface: the `groupLiquid` override, else the first wet nibble (`0x6ba970`).
-    let type_nibble = if group_liquid != NO_GROUP_LIQUID {
-        (group_liquid & 0xf) as u8
-    } else {
-        let first_wet = lq.tile_flags.iter().map(|&f| f & 0xf).find(|&n| n != 0xf)?;
-        first_wet
-    };
+    // One kind per surface, `0x6ba970`'s: the first wet nibble of the grid's first row of tiles
+    // only (`0x6ba971`); the group's liquid word is not read (`0x6b62ef`). A first row all holes
+    // is type 0xf, whose frame the reference requests anyway, a client fault: it draws nothing.
+    let type_nibble = lq.tile_flags[..xt]
+        .iter()
+        .map(|&f| f & 0xf)
+        .find(|&n| n != 0xf)?;
     let kind = LiquidKind::from_nibble(type_nibble)?;
     // Fullbright kinds read no ramp and their vertex bytes are a UV pair: the channel stays 0.
     let water = !kind.is_fullbright();
@@ -622,7 +622,7 @@ mod tests {
             opacity: vec![0, 51, 102, 153, 204, 255],
             tile_flags: vec![0x44, 0x0f], // wet (type 4 + fishable), hole
         };
-        let m = build_wmo_liquid_mesh(&lq, 0xf).expect("a wet mesh");
+        let m = build_wmo_liquid_mesh(&lq).expect("a wet mesh");
         assert_eq!(m.kind, LiquidKind::Still);
         assert_eq!(m.positions.len(), 6); // full 3×2 grid emitted
         assert_eq!(m.indices.len(), 6); // one wet tile → 2 tris → 6 indices
@@ -666,8 +666,8 @@ mod tests {
             opacity: Vec::new(),
             tile_flags: vec![0x44, 0x44],
         };
-        let ma = build_wmo_liquid_mesh(&a, 0xf).unwrap();
-        let mb = build_wmo_liquid_mesh(&b, 0xf).unwrap();
+        let ma = build_wmo_liquid_mesh(&a).unwrap();
+        let mb = build_wmo_liquid_mesh(&b).unwrap();
         // A's vertex (2, 0) and B's (0, 0) are the same point.
         let (ua, ub) = (ma.uvs[2], mb.uvs[0]);
         assert!(
@@ -679,28 +679,30 @@ mod tests {
     }
 
     #[test]
-    fn wmo_liquid_type_override_and_all_holes() {
-        // groupLiquid override = 2 (magma) forces the kind regardless of the wet tile's nibble.
+    fn wmo_liquid_type_is_the_first_rows_first_wet_tile() {
+        // A 2×2-tile grid: the first row's second tile is magma (2); the second row's first tile,
+        // slime (3), comes earlier in no row scan `0x6ba970` makes.
         let lq = WmoLiquid {
-            xverts: 2,
-            yverts: 2,
-            xtiles: 1,
-            ytiles: 1,
+            xverts: 3,
+            yverts: 3,
+            xtiles: 2,
+            ytiles: 2,
             base: [0.0, 0.0, 0.0],
             material_id: 0,
-            heights: vec![0.0; 4],
+            heights: vec![0.0; 9],
             opacity: Vec::new(),
-            tile_flags: vec![0x40], // nibble 0 (would be Still), but the override wins
+            tile_flags: vec![0x0f, 0x42, 0x43, 0x40],
         };
-        let m = build_wmo_liquid_mesh(&lq, 2).expect("magma mesh");
+        let m = build_wmo_liquid_mesh(&lq).expect("magma mesh");
         assert_eq!(m.kind, LiquidKind::Magma);
         assert!(m.depths.iter().all(|&v| v == 0.0)); // fullbright ⇒ depth V unused
 
-        let all_holes = WmoLiquid {
-            tile_flags: vec![0x0f],
+        // A first row all holes is the reference's type 0xf: no surface, though the second is wet.
+        let dry_first_row = WmoLiquid {
+            tile_flags: vec![0x0f, 0x0f, 0x40, 0x40],
             ..lq
         };
-        assert!(build_wmo_liquid_mesh(&all_holes, 0xf).is_none());
+        assert!(build_wmo_liquid_mesh(&dry_first_row).is_none());
     }
 
     #[test]
