@@ -659,12 +659,9 @@ pub(crate) enum CastEventKind {
     Reap,
     /// The spell landed on this unit: impact kit, then state kit. A missile's hit arrival
     /// (`0x61dc50`) plays the wound first (`wound`); a missile at a point plays the kits alone on
-    /// each unit of its hit list (`0x61da2d`). `weapon_visual` is the caster's ranged-weapon
-    /// `SpellVisual` (`0x60d450`), carried from the GO since the caster may despawn.
-    Impact {
-        weapon_visual: Option<u32>,
-        wound: bool,
-    },
+    /// each unit of its hit list (`0x61da2d`). Both read the spell's own `SpellVisual` row
+    /// (`0x61e240` → `0x6ec1e0`): the ranged-weapon merge `0x60d450` runs at the GO only.
+    Impact { wound: bool },
     /// A projectile with no live target at arrival (`0x61d870`, a despawned target too): the kit
     /// plays on the caster (`entity`) at `pos` (`0x61d8e7`), `SpellVisual` field 13, stage 3. Sent
     /// here for a missile flown at the GO's point (`MissileSpawn::grounds`).

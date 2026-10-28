@@ -906,10 +906,7 @@ fn a_harmful_go_wounds_each_hit_once_and_a_missile_arrival_always() {
     app.world_mut().write_message(cast_event(
         target,
         HELPFUL,
-        CastEventKind::Impact {
-            weapon_visual: None,
-            wound: true,
-        },
+        CastEventKind::Impact { wound: true },
     ));
     app.update();
     assert_eq!(wounds(&mut app), vec![target], "missile arrival");

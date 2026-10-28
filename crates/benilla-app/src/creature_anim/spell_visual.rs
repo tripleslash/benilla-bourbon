@@ -230,8 +230,6 @@ pub(crate) struct MissileSpawn {
     /// The missiles at the GO's point, one per list that took the location arm, arriving as
     /// [`super::CastEventKind::GroundImpact`].
     pub(crate) grounds: Vec<GroundShot>,
-    /// The caster's ranged fallback visual, carried to arrival when the caster may be gone.
-    pub(crate) weapon_visual: Option<u32>,
     /// `SpellVisual` field 10: the sound the projectile loops in flight (`CMissile+0x40`).
     pub(crate) missile_sound: Option<u32>,
     /// Launch at the cast animation's release event (`0x5ffbd0` → `0x60c940`), not at GO; the
@@ -625,15 +623,25 @@ struct ImpactPlay {
     spell_id: u32,
     /// The caster's ranged fallback, resolved before the caster can vanish.
     weapon_visual: Option<u32>,
-    /// Lay the victim's severity-0 wound flinch beside the kit.
-    flinch: bool,
+    /// Where the victim's severity-0 wound flinch goes.
+    flinch: Flinch,
     seq: u64,
+}
+
+/// Where an impact lays its wound flinch.
+#[derive(Clone, Copy)]
+enum Flinch {
+    /// A missile's hit arrival: before the kits, whatever they are (`0x61dc58`).
+    First(bool),
+    /// An instant hit (`0x6e8bf0`): after the impact kit, and only with a visual whose impact
+    /// kit has a record (`0x6e8c02`, `0x6e8c32`); the wound for a hostile spell
+    /// (`0x6e8c74`-`0x6e8c89`).
+    AfterKit(bool),
 }
 
 /// The unit-impact hand-off (`0x61dc50`): the impact kit (stage 1), then the state kit's anim and
 /// sound, its models owned by [`arm_aura_state_fx`]. The stage-2 gate `0x61dc20` is not built: its
-/// content is untraced. The flinch comes after the kit for a harmful instant hit (`0x6e8bf0`),
-/// before it for every missile target.
+/// content is untraced. An instant hit with no impact kit plays nothing ([`Flinch::AfterKit`]).
 fn play_impact(
     entity: Entity,
     impact: ImpactPlay,
@@ -647,27 +655,28 @@ fn play_impact(
         flinch,
         seq,
     } = impact;
-    if flinch {
+    let impact_kit = resolve_kit(spells, visuals, spell_id, |s| s.impact, || weapon_visual);
+    match flinch {
+        Flinch::First(true) => {
+            out.wounds.write(WoundAnim { entity });
+        }
+        Flinch::AfterKit(_) if impact_kit.is_none() => return,
+        Flinch::First(false) | Flinch::AfterKit(_) => {}
+    }
+    if let Some(kit) = impact_kit {
+        play_kit(entity, spell_id, &kit, KitPlay::DISCRETE, seq, visuals, out);
+    }
+    if let Flinch::AfterKit(true) = flinch {
         out.wounds.write(WoundAnim { entity });
     }
-    for (stage, play) in [
-        (
-            (|s: &VisualStages| s.impact) as fn(&VisualStages) -> u32,
-            KitPlay::DISCRETE,
-        ),
-        (
-            |s: &VisualStages| s.state,
-            KitPlay {
-                effects: false,
-                stage_2: true,
-                stage: FxStage::State,
-                ..KitPlay::DISCRETE
-            },
-        ),
-    ] {
-        if let Some(kit) = resolve_kit(spells, visuals, spell_id, stage, || weapon_visual) {
-            play_kit(entity, spell_id, &kit, play, seq, visuals, out);
-        }
+    let state = KitPlay {
+        effects: false,
+        stage_2: true,
+        stage: FxStage::State,
+        ..KitPlay::DISCRETE
+    };
+    if let Some(kit) = resolve_kit(spells, visuals, spell_id, |s| s.state, || weapon_visual) {
+        play_kit(entity, spell_id, &kit, state, seq, visuals, out);
     }
 }
 
@@ -980,17 +989,16 @@ pub(super) fn route_cast_visuals(
                     );
                 }
             }
-            CastEventKind::Impact {
-                weapon_visual,
-                wound,
-            } => {
-                // A hit arrival flinches every living target, no hostility test (`0x61dc74`).
+            CastEventKind::Impact { wound } => {
+                // A hit arrival flinches every living target, no hostility test (`0x61dc74`),
+                // before its kits; they read the spell's own row, the weapon merge being the
+                // GO's (`0x61e240` → `0x6ec1e0`).
                 play_impact(
                     ev.entity,
                     ImpactPlay {
                         spell_id: ev.spell_id,
-                        weapon_visual,
-                        flinch: wound,
+                        weapon_visual: None,
+                        flinch: Flinch::First(wound),
                         seq: ev.seq,
                     },
                     spells,
@@ -1058,7 +1066,7 @@ pub(super) fn route_cast_visuals(
         }
         if display.speed <= 0.0 {
             // Each hit flinches after its impact kit iff the spell is harmful (`0x6e8c7b`).
-            let flinch = display.is_harmful();
+            let flinch = Flinch::AfterKit(display.is_harmful());
             for &target in &go.hits {
                 play_impact(
                     target,
@@ -1099,12 +1107,15 @@ pub(super) fn route_cast_visuals(
                     .is_ok_and(|(_, store)| store.is_unit() && store.0.is_dead_or_ghost())
             });
             if !shots.targets.is_empty() || !shots.grounds.is_empty() {
-                // The release gate (`0x6e7a70`, inverted): a cast kit animation above 0 waits for
-                // the release keyframe (`0x6e8295 jg`); Stand launches at once (`0x6e829d`).
-                let awaits_release = (stages.cast != 0)
+                // The release at GO (`0x6e827e`-`0x6e829d`): only with the merged row's `+0x18`
+                // (field 6) set, and a cast kit absent or with no animation above 0
+                // (`0x6e8295 jg`); otherwise the missiles wait on the caster's queue for a release
+                // event.
+                let cast_animates = (stages.cast != 0)
                     .then(|| visuals.0.kit(stages.cast))
                     .flatten()
                     .is_some_and(|k| k.positive_anim().is_some());
+                let awaits_release = stages.missile_gate == 0 || cast_animates;
                 missiles.write(MissileSpawn {
                     caster,
                     spell_id: go.spell_id,
@@ -1114,7 +1125,6 @@ pub(super) fn route_cast_visuals(
                     speed: display.speed,
                     targets: shots.targets,
                     grounds: shots.grounds,
-                    weapon_visual: wv,
                     missile_sound: stages.missile_sound,
                     awaits_release,
                 });

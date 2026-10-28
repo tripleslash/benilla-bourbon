@@ -12,7 +12,9 @@
 //! The arrival deadline is fixed at GO: the launch (`0x61ceb0`) flies `distance / Speed` less the
 //! time queued, at no more than 100 yd/s, and a release already past it, as at melee range, still
 //! flies, at 100 yd/s. In flight the missile homes on the target's live attachment and arrives on
-//! time (`0x61e2a0`).
+//! time (`0x61e2a0`). A missed one (flag 0x8) is aimed once, half a second of flight past its
+//! target and turned up to 3° ([`miss_destination`]), never re-aimed, and fades over that last
+//! half second ([`miss_fade`]); its miss is reported on arrival there.
 //!
 //! On arrival `0x61e1d0` picks an arm by whether the target guid still resolves, then by the hit
 //! bit `[missile+0x38] & 1`, set at the spawn (`0x60a4e8`) and by a reflection with no outcome
@@ -146,6 +148,9 @@ pub(super) struct Missile {
     /// Where the flight is headed: the live aim of the last step (`+0x2c`), which a target that
     /// stops resolving leaves it flying to.
     last_aim: Vec3,
+    /// A missed missile's fixed destination past its target ([`miss_destination`]), never
+    /// re-aimed in flight (`0x61e2fa`).
+    overshoot: Option<Vec3>,
     /// The list a missile at a point carries and walks on arrival (`+0x5c`, `+0x6c`).
     list: Option<GroundList>,
     /// The speed the launch fitted (`+0x1c`, `0x61d0c3`), which a relaunch divides by.
@@ -159,9 +164,6 @@ pub(super) struct Missile {
     /// Remaining flight time in seconds, the arrive-on-time integrator's state.
     arrive_in: f32,
     parts_spawned: bool,
-    /// The caster's ranged-weapon `SpellVisual`, resolved at GO, so a basic shot's impact kit
-    /// resolves even if the caster despawns mid-flight.
-    weapon_visual: Option<u32>,
 }
 
 /// The unit-side inputs of an attachment or marker position read: the base frame, the tables and
@@ -268,7 +270,6 @@ impl PendingMissiles {
             speed: 40.0,
             targets: Vec::new(),
             grounds: Vec::new(),
-            weapon_visual: None,
             missile_sound: None,
             awaits_release: true,
         };
@@ -353,6 +354,46 @@ fn launch_outcome(code: u8) -> (u8, u32) {
         11 => (code, REFLECTED),
         _ => (code, 0),
     }
+}
+
+/// `0x61d230`'s destination for a missed missile (flag 0x8), launched from `from` at `aim` with
+/// speed `s`: the path extended by half a second of flight, `u·(|d| + s·0.5)` (`0x61d36b`), turned
+/// about the axis `(−dx·dz, −dy·dz, dx² + dy²)` across it (`0x61d39f`) by `sin(x·π/2)·π/60`, `x` in
+/// (−1, 1] from the `CRandom` draw `draw`'s low 23 bits (`0x61d3d5`, `0x61d41b`). A path under
+/// 2^-22 long or straight up is not turned or extended. `None` for any other outcome, which aims
+/// at the target itself.
+fn miss_destination(outcome: u32, from: Vec3, aim: Vec3, s: f32, draw: u32) -> Option<Vec3> {
+    const TINY: f32 = 1.0 / 4_194_304.0;
+    if outcome & MISSED == 0 {
+        return None;
+    }
+    let d = aim - from;
+    let len = d.length();
+    if len < TINY || (d.y / len - 1.0).abs() < TINY {
+        return None;
+    }
+    let path = d / len * (len + s * 0.5);
+    // WoW's up is Bevy's Y: the axis in the vertical plane of the path, square to it.
+    let axis = Vec3::new(-d.x * d.y, d.x * d.x + d.z * d.z, -d.z * d.y);
+    let f = f32::from_bits(0x3f80_0000 | (draw & 0x007f_ffff));
+    let x = if (draw as i32) < 0 { 2.0 - f } else { f - 2.0 };
+    let angle = (x * std::f32::consts::FRAC_PI_2).sin() * (std::f32::consts::PI / 60.0);
+    let turned = axis
+        .try_normalize()
+        .map_or(path, |axis| Quat::from_axis_angle(axis, angle) * path);
+    Some(from + turned)
+}
+
+/// `0x61d790`: a missed missile's model alpha within half a second of flight of its destination,
+/// `a²(3 − 2a)` with `a` the distance left over that radius, clamped to [0, 1]; `None` outside it
+/// or for any other outcome (a deflection's 0.7 s fade rides its curve, which is not built).
+fn miss_fade(outcome: u32, speed: f32, left: f32) -> Option<f32> {
+    let r = speed * 0.5;
+    if outcome & MISSED == 0 || left * left >= r * r {
+        return None;
+    }
+    let a = (left / r).clamp(0.0, 1.0);
+    Some((3.0 - 2.0 * a) * a * a)
 }
 
 /// The [`DefenseAnim`] victim states: Dodge (30) and ShieldBlock (24), as the melee `$CPP`
@@ -453,10 +494,7 @@ fn arrival_handoff(
         Aim::Unit {
             target, miss: None, ..
         } => {
-            let kind = CastEventKind::Impact {
-                weapon_visual: missile.weapon_visual,
-                wound: true,
-            };
+            let kind = CastEventKind::Impact { wound: true };
             out.impacts.write(event(target, kind));
         }
         Aim::Unit {
@@ -489,7 +527,9 @@ fn arrival_handoff(
                 let Some(to) = aim_point(missile.aim, units, joints) else {
                     return false; // the caster is gone
                 };
-                launch_flight(missile, at, to, out);
+                missile.overshoot =
+                    miss_destination(missile.outcome, at, to, missile.speed, rand::random());
+                launch_flight(missile, at, missile.overshoot.unwrap_or(to), out);
                 return true;
             }
         }
@@ -504,10 +544,7 @@ fn arrival_handoff(
             match &missile.list {
                 Some(GroundList::Hits(hits)) => {
                     for &unit in hits.iter().filter(|&&u| units.contains(u)) {
-                        let kind = CastEventKind::Impact {
-                            weapon_visual: missile.weapon_visual,
-                            wound: false,
-                        };
+                        let kind = CastEventKind::Impact { wound: false };
                         out.impacts.write(event(unit, kind));
                     }
                 }
@@ -567,6 +604,7 @@ fn launch_go(
             outcome,
             reaction: None,
             last_aim: aim,
+            overshoot: None,
             list,
             speed: go.spawn.speed.max(f32::EPSILON),
             age: go.queued,
@@ -575,8 +613,9 @@ fn launch_go(
             arrive_in: 0.0,
             // An invisible flight has no parts to wait on.
             parts_spawned: go.key.is_none(),
-            weapon_visual: go.spawn.weapon_visual,
         };
+        missile.overshoot = miss_destination(outcome, launch, aim, missile.speed, rand::random());
+        let aim = missile.overshoot.unwrap_or(aim);
         launch_flight(&mut missile, launch, aim, out);
         let dir = (aim - launch).normalize_or(-Vec3::Z);
         let entity = commands
@@ -819,7 +858,8 @@ pub(super) fn move_missiles(
         // A target that no longer resolves stops steering it (`0x61e2e9`): it flies on to where it
         // was headed and lands with no target, on the caster (`0x61e24c` → `0x61d870`).
         let aim = match aim_point(missile.aim, &units, &joints) {
-            Some(aim) => aim,
+            // A miss keeps its destination past the target (`0x61e2fa`).
+            Some(aim) => missile.overshoot.unwrap_or(aim),
             None => {
                 missile.aim = Aim::Ground(missile.last_aim);
                 missile.last_aim
@@ -847,6 +887,13 @@ pub(super) fn move_missiles(
         }
         transform.translation += to_target * (dt / missile.arrive_in);
         missile.arrive_in -= dt;
+        // A miss fades as it nears its destination (`0x61d790`).
+        let left = aim.distance(transform.translation);
+        if let Some(alpha) = miss_fade(missile.outcome, missile.speed, left) {
+            commands
+                .entity(entity)
+                .insert(benilla_world::model_fade::ModelFade(alpha));
+        }
         if let Some(dir) = to_target.try_normalize() {
             transform.rotation = missile_facing(dir);
         }
@@ -865,6 +912,36 @@ mod tests {
     use super::*;
     use crate::creature_anim::spell_visual::{GroundShot, MissileTarget};
     use crate::creature_anim::PlaySeq;
+
+    /// `0x61d230`: a miss flies half a second of flight past the aim point, turned at most 3°
+    /// about the axis across its path; a hit, or a path straight up, aims at the point.
+    #[test]
+    fn a_miss_is_aimed_half_a_second_past_its_target() {
+        let (from, aim, s) = (Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), 20.0);
+        // Low bits 0 and a clear sign: x = 1 − 2 = −1, the full −3°.
+        let dest = miss_destination(MISSED, from, aim, s, 0).expect("a miss overshoots");
+        assert!((dest.length() - 20.0).abs() < 1e-4, "|d| + s·0.5: {dest}");
+        let turn = dest.normalize().angle_between(Vec3::X).to_degrees();
+        assert!((turn - 3.0).abs() < 1e-3, "{turn}°");
+        // The sign bit set and low bits 0: x = 2 − 1 = 1, sin(π/2) = 1, the other way.
+        // A level path turns about the vertical, so sideways.
+        let other = miss_destination(MISSED, from, aim, s, 0x8000_0000).unwrap();
+        assert!(
+            dest.z.abs() > 0.1 && (other.z + dest.z).abs() < 1e-4,
+            "{dest} vs {other}"
+        );
+        assert_eq!(miss_destination(0, from, aim, s, 0), None);
+        assert_eq!(miss_destination(MISSED, from, Vec3::Y * 5.0, s, 0), None);
+    }
+
+    /// `0x61d790`: `a²(3 − 2a)` within half a second of flight, a miss only.
+    #[test]
+    fn a_miss_fades_by_smoothstep_over_its_last_half_second() {
+        assert_eq!(miss_fade(MISSED, 20.0, 10.0), None, "at the radius");
+        assert_eq!(miss_fade(MISSED, 20.0, 5.0), Some(0.5));
+        assert_eq!(miss_fade(MISSED, 20.0, 0.0), Some(0.0));
+        assert_eq!(miss_fade(BLOCKED, 20.0, 1.0), None);
+    }
 
     /// `Spell.dbc` Speed such that the test target's 24-unit range is a 1.000 s flight.
     const SPEED: f32 = 24.0;
@@ -925,7 +1002,6 @@ mod tests {
                 reflect: 0,
             }],
             grounds: Vec::new(),
-            weapon_visual: None,
             missile_sound: None,
             awaits_release,
         }
@@ -1271,13 +1347,7 @@ mod tests {
                 assert!(words.is_empty(), "a reflected hit reports nothing");
                 assert_eq!(
                     impacts,
-                    [(
-                        caster,
-                        CastEventKind::Impact {
-                            weapon_visual: None,
-                            wound: true,
-                        }
-                    )],
+                    [(caster, CastEventKind::Impact { wound: true })],
                     "the hit arrival at the caster"
                 );
             } else {
@@ -1332,10 +1402,7 @@ mod tests {
             .into_iter()
             .map(|e| (e.entity, e.kind))
             .collect();
-        let impact = CastEventKind::Impact {
-            weapon_visual: None,
-            wound: false,
-        };
+        let impact = CastEventKind::Impact { wound: false };
         let ground = CastEventKind::GroundImpact { pos: at };
         assert_eq!(
             events,
