@@ -216,32 +216,6 @@ impl ScriptCallHost<'_, '_> {
         script.hosted(self, |_| ());
     }
 
-    /// An engine writer's StartAttack (`0x5ecb70`) at `guid` outside any call, such as a spell's
-    /// deferred melee start (`0x6e8402` → `0x6131a0`): its own select (`0x5eccaa`) signals in
-    /// place, before its swing, behind the cast reports made since `mark`.
-    pub(crate) fn engine_start_attack(
-        &mut self,
-        script: &mut UiScript,
-        guid: u64,
-        mark: crate::lanes::Mark,
-    ) {
-        #[cfg(test)]
-        self.census_probe();
-        script.host_out(|script| {
-            let mut at = Signalled {
-                selected: self.appliers.select().selected(),
-                latched: self.appliers.pet().attack_latched(),
-                mark: self.appliers.reports().mark_at(mark),
-            };
-            let owed = self.appliers.select().start_attack(guid);
-            self.settle_selection(script, &mut at, owed);
-            self.commit_views(script);
-            #[cfg(test)]
-            self.census_done();
-        });
-        script.hosted(self, |_| ());
-    }
-
     /// `SelectTarget(0)` (`0x493540`) from an engine writer outside any call, such as the
     /// world-enter cascade's (`0x490927`): the deselect and its teardown signal in place, a
     /// charmed player's refused (`0x493590`) and an empty selection a no-op.
@@ -1208,23 +1182,6 @@ impl<P: SystemParam + 'static> VmWith<'_, '_, P> {
                 host.engine_clear_target(script, mark);
             }
         }
-    }
-
-    /// An engine writer's StartAttack at `guid`, its select signalled in place with the host
-    /// ([`ScriptCallHost::engine_start_attack`]); with no VM or no host, `start` runs it on `P`.
-    pub(crate) fn engine_start_attack(
-        &mut self,
-        guid: u64,
-        mark: crate::lanes::Mark,
-        start: impl FnOnce(SystemParamItem<'_, '_, P>),
-    ) {
-        if let Some(script) = self.script.as_deref_mut() {
-            if let Some(host) = self.set.p1().as_mut() {
-                host.engine_start_attack(script, guid, mark);
-                return;
-            }
-        }
-        start(self.set.p0());
     }
 }
 

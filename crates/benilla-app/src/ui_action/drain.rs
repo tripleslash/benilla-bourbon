@@ -90,6 +90,40 @@ pub(crate) fn attack_nearest_probe(
     }
 }
 
+/// A spell's GO-deferred swing (`0x6e8402` → `0x6131a0`) at `guid`, the unit the GO hit: the
+/// attack validator `0x612df0` runs first (`0x6131aa`), so a dead, charmed, stunned, pacified,
+/// fleeing, confused or mounted player, or a target that is dead or that `CanAttack` refuses, ends
+/// it with its `ERR_ATTACK_*` or `ERR_INVALID_ATTACK_TARGET` line and sends no swing
+/// (`0x612e10`-`0x61305a`, `0x613171`). The pick keeps the passed unit and selects it, signalled
+/// in place behind the GO's reports since `mark`; then the swing goes out at the validated unit.
+pub(crate) fn go_deferred_attack(
+    mut vm: crate::script_calls::VmWith<'_, '_, AttackPress<'static, 'static>>,
+    guid: u64,
+    mark: crate::lanes::Mark,
+) {
+    let select = {
+        let mut press = vm.own();
+        let before = press.selection.guid;
+        let latched = press.seam.pet_latch.as_deref().is_some_and(|l| l.up());
+        let Some(owed) = press.begin_validate(Some(guid), false) else {
+            return;
+        };
+        crate::script_calls::EngineSelect {
+            before,
+            latched,
+            mark,
+            owed: owed.into(),
+        }
+    };
+    vm.engine_select(select, |mut press, debt| {
+        debt.pay(&mut press.selection, &mut press.seam)
+    });
+    let mut press = vm.own();
+    if let Some(target) = press.settle_attack() {
+        press.start_attack(target);
+    }
+}
+
 /// What the player's Attack reads and writes: `AttackTarget` (`0x489b50`), the ATTACKTARGET
 /// binding and `UseAction`'s Attack slot (through `TryCast`, `0x6e4c90`) all run `0x6131a0`.
 #[derive(bevy::ecs::system::SystemParam)]
