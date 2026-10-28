@@ -40,9 +40,9 @@ pub(crate) struct GameTime {
     tick: u32,
     /// `+0x3c`: the minute of day after the last step plus the fraction then, the day phase's anchor.
     phase_base: f32,
-    /// The day count moon02's phase reads, `year·372 + month·31 + day` of the date last taken from
-    /// the wire, stepped with each midnight the clock passes; the reference reads the date's day
-    /// number instead (`0x482bea`).
+    /// The day count moon02's phase reads, the date's day number (`0x642320`, read by
+    /// `StampLightState` at `0x482bea`) as last taken from the wire, stepped with each midnight the
+    /// clock passes (`0x643afc`): a mod-1.7 phase depends on its epoch.
     day_count: i64,
     /// Whether a server has given the clock a time; until then the sky stays at noon.
     live: bool,
@@ -184,8 +184,7 @@ impl GameTime {
     /// The clock takes a time as sent: the copy at `0x6434eb`, `0x6437be`.
     fn take(&mut self, time: WowTime) {
         self.time = time;
-        self.day_count =
-            i64::from(time.year) * 372 + i64::from(time.month) * 31 + i64::from(time.day);
+        self.day_count = i64::from(day_number(&time));
         self.live = true;
     }
 
@@ -1035,7 +1034,7 @@ mod tests {
             0,
         );
         let before = clock.day_count();
-        assert_eq!(before, 26 * 372 + 9 * 31 + 30);
+        assert_eq!(before, 20_757, "2026-10-31, days since 1970");
         clock.tick_frame(60.0, 60_000);
         assert_eq!(hm(&clock), (0, 0));
         assert_eq!(
@@ -1053,7 +1052,7 @@ mod tests {
             },
             0,
         );
-        assert_eq!(clock.day_count(), 26 * 372 + 9 * 31 + 30);
+        assert_eq!(clock.day_count(), 20_757);
     }
 
     /// `0x642c80`.
@@ -1164,7 +1163,7 @@ mod tests {
         assert!(t.live);
         assert_eq!(t.minute, 870);
         assert!((t.minute_f - 870.0).abs() < 1e-3);
-        let serial = (26 * 372 + 9 * 31 + 17) as f64;
+        let serial = 20_744.0; // 2026-10-18
         assert!((t.day - (serial + 870.0 / 1440.0)).abs() < 1e-6);
     }
 

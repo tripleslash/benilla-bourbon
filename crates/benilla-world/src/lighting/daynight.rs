@@ -69,9 +69,9 @@ pub(super) fn moon_direction(minute: f32) -> Vec3 {
 
 /// `moon02` (`moon02.blp`), the third sky body: its Bevy direction and size multiplier. It is drawn
 /// every frame but vertex-black, since its colour field `[0xce98a4]` has no writer, so it never
-/// shows as a second moon. Its tracks run on `fmod(dayCounter + todPhase, 1.7)` (`0x6d41b9`;
-/// `day_continuous` is that sum), which the track kernel `0x6cf6c0` clamps to [0, 1], so the whole
-/// [1.0, 1.7) leg parks at azimuth 135°, elevation +55°. Azimuth `0xce8ccc` sweeps 135° to 165°,
+/// shows as a second moon. Its tracks run on `fmod(dayCounter + todPhase, 1.7) / 1.7`
+/// (`0x6d41b9`-`0x6d425f`, the float 1.7 at `[0xce98b4]`; `day_continuous` is that sum), in
+/// [0, 1), so moon02 is up about 21% of the time. Azimuth `0xce8ccc` sweeps 135° to 165°,
 /// elevation `0xce8ce4` has the white moon's shape, and the size samples `0xce8c8c` at base ×1.0.
 pub(super) fn moon02_state(day_continuous: f64) -> (Vec3, f32) {
     // (dayFraction, azimuth rad): 135° = π·0.75 [0x8012cc], 150° = π·0.8333 [0x810018],
@@ -89,8 +89,10 @@ pub(super) fn moon02_state(day_continuous: f64) -> (Vec3, f32) {
         (0.916667, 1.7453293), // 100°
         (0.996528, 0.6108652), // 35°
     ];
-    // The kernel clamp: past 1.0 the phase evaluates at 1.0 (`0x6cf6c0`).
-    let phase = (day_continuous.rem_euclid(1.7) as f32).min(1.0);
+    // The remainder over the float 1.7 (`0x6d425f`). Deviation: the reference takes the remainder
+    // in 1/65536 steps (`0x6d41b9`-`0x6d4259`), whose exact rounding is untraced; this one is exact.
+    let span = f64::from(1.7_f32);
+    let phase = (day_continuous.rem_euclid(span) / span) as f32;
     let theta = interp_daynight(&AZ_TABLE, phase);
     let phi = interp_daynight(&ELEV_TABLE, phase);
     let (sp, cp) = (phi.sin(), phi.cos());
@@ -453,30 +455,28 @@ mod tests {
         assert!((m(60) - 1.0).abs() < 1e-3, "01:00 overhead = 1×");
     }
 
-    // moon02's precessed clock (`0x6d41b9`'s fmod by 1.7, then `0x6cf6c0`'s clamp): the normal
-    // leg follows the white moon's shape on its own bearing, and [1.0, 1.7) parks at the clamp.
+    // moon02's precessed clock (`0x6d41b9`'s fmod by 1.7, over 1.7 at `0x6d425f`): one pass of the
+    // white moon's shape spread over 1.7 days, on its own bearing.
     #[test]
-    fn moon02_precesses_and_parks_on_the_clamp_leg() {
+    fn moon02_runs_its_track_over_one_point_seven_days() {
         // Phase 0, day 0 midnight: up at +55°, azimuth on the 135° key.
         let (dir, scale) = moon02_state(0.0);
         assert!(dir.y > 0.5, "phase 0: up");
         assert!((scale - 1.0).abs() < 1e-3, "phase 0: overhead size 1×");
-        assert!(moon02_state(0.5).0.y < 0.0, "phase 0.5: below horizon");
-        // Any remainder in [1.0, 1.7) evaluates at 1.0: parked up, one state.
-        let (park_a, sa) = moon02_state(1.05);
-        let (park_b, sb) = moon02_state(1.65);
-        assert!(park_a.y > 0.5, "clamp leg: parked above the horizon");
+        assert!(moon02_state(0.85).0.y < 0.0, "phase 0.5: below the horizon");
+        // No clamp leg: 1.05 days is phase 0.62, below, and the track rises again near its end.
         assert!(
-            (park_a - park_b).length() < 1e-6 && (sa - sb).abs() < 1e-6,
-            "clamp leg: frozen"
+            moon02_state(1.05).0.y < 0.0,
+            "phase 0.62: below the horizon"
+        );
+        assert!(
+            moon02_state(1.7 * 0.995).0.y > 0.0,
+            "phase 0.995: risen again"
         );
         // The same time on consecutive days lands on different phases: day 10 midnight is
-        // fmod(10, 1.7) ≈ 1.5 (parked up), day 11 is ≈ 0.8 (below the horizon).
-        assert!(moon02_state(10.0).0.y > 0.5, "day 10 midnight: parked leg");
-        assert!(
-            moon02_state(11.0).0.y < 0.0,
-            "day 11 midnight: below horizon"
-        );
+        // phase fmod(10, 1.7)/1.7 ≈ 0.88, day 12 ≈ 0.06.
+        assert!(moon02_state(10.0).0.y < 0.0, "day 10 midnight: below");
+        assert!(moon02_state(12.0).0.y > 0.0, "day 12 midnight: up");
         // moon02's bearing is its own (135° to 165°), never the white moon's 45°.
         let heading = |d: Vec3| d.x.atan2(d.z).to_degrees();
         let h02 = heading(moon02_state(0.0).0);
