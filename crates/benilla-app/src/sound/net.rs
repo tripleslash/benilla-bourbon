@@ -47,17 +47,20 @@ fn play_music(music_id: u32, out: &mut MessageWriter<ServerSoundMessage>) {
     });
 }
 
-/// `SMSG_PLAY_OBJECT_SOUND`: a one-shot at a streamed object, silent while its guid is not
-/// streamed in.
+/// `SMSG_PLAY_OBJECT_SOUND`: a one-shot at a streamed object. With no object held for the guid the
+/// arm returns having played nothing (`0x48f88b`, `0x48f894`).
 fn play_object_sound(
     sound_id: u32,
     guid: u64,
     index: &GuidIndex,
     out: &mut MessageWriter<ServerSoundMessage>,
 ) {
+    let Some(&source) = index.0.get(&guid) else {
+        return;
+    };
     out.write(ServerSoundMessage {
         kind: ServerSoundKind::ObjectSound,
         sound_id,
-        source: index.0.get(&guid).copied(),
+        source: Some(source),
     });
 }
