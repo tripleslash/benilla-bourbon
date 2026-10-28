@@ -271,6 +271,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, unit: Value| {
             let unit = binding_abi::string_arg(lua, unit, "Usage: NotifyInspect(unit)")?;
             if !super::battlefield_queue::player_exists(
+                lua,
                 &lua.app_data_ref::<crate::script::ModelCell>()
                     .expect("model app_data"),
             ) {

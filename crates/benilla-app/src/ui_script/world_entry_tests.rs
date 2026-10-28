@@ -1436,8 +1436,8 @@ fn leaving_inside_the_deferral_window_drops_the_load_and_writes_nothing() {
 
 // ───────────── The login one-shots wait for the in-game UI ─────────────
 
-/// An app running the unit feed after `Startup`, with what the feed reads; the receiver is the
-/// wire, kept alive beside it.
+/// An app running the unit-feed pass and the arrival lane after `Startup`, with what they read;
+/// the receiver is the wire, kept alive beside it.
 fn unit_feed_app() -> (App, crossbeam_channel::Receiver<crate::net::ClientCommand>) {
     let mut app = App::new();
     app.add_plugins(crate::ui_unit::UiUnitPlugin);
@@ -1459,8 +1459,8 @@ fn unit_feed_app() -> (App, crossbeam_channel::Receiver<crate::net::ClientComman
     (app, rx)
 }
 
-/// The unit feed's login one-shots (`PLAYER_ENTERING_WORLD`, the first `PLAYER_XP_UPDATE` and
-/// `UPDATE_EXHAUSTION`) wait for the in-game UI instead of reaching a VM with no frames.
+/// The arrival's `PLAYER_ENTERING_WORLD` waits for the in-game UI instead of reaching a VM with no
+/// frames.
 #[test]
 fn the_login_one_shots_wait_for_the_in_game_ui() {
     let _l = ENV_LOCK
@@ -1484,7 +1484,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
     };
     probe(app.world().non_send::<benilla_ui::script::UiScript>());
 
-    // Our own descriptor has landed, the feed's condition for the one-shots.
+    // Our own create has landed, and its arrival is on the lane.
     app.world_mut().spawn((
         crate::net::SelfPlayer,
         crate::net::Guid(1),
@@ -1520,11 +1520,11 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
         assert_eq!(
             seen(&app),
             0,
-            "frame {frame}: the feed must not spend PLAYER_ENTERING_WORLD on a UI-less VM"
+            "frame {frame}: the arrival must not spend PLAYER_ENTERING_WORLD on a UI-less VM"
         );
     }
 
-    // The entry load has run, its VM in place of the glue's: the next feed delivers the one-shots.
+    // The entry load has run, its VM in place of the glue's: the next frame fires the arrival.
     let ingame = benilla_ui::script::UiScript::new().expect("the entry's VM");
     probe(&ingame);
     app.world_mut().insert_non_send(ingame);
@@ -1534,7 +1534,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
     assert_eq!(
         seen(&app),
         1,
-        "with the UI up the one-shot fires — once, on the first feed after the load"
+        "with the UI up the one-shot fires — once, on the first frame after the load"
     );
     app.update();
     assert_eq!(seen(&app), 1, "and exactly once per world entry");
@@ -2453,6 +2453,23 @@ fn a_login_and_a_reload_load_without_the_lost_target_sound() {
 
 // ───────────── PLAYER_LOGIN fires from the world-enter cascade ─────────────
 
+/// The whole client's world in game for `name`, driven by hand as the app's frame drives it: the
+/// load, then each create's arrival fired on its lane ([`fire_lanes`]) with the host lent, so every
+/// getter reads the objects through it. The receiver is the wire, kept alive beside it.
+fn hosted_entry_app(name: &str) -> (App, crossbeam_channel::Receiver<crate::net::ClientCommand>) {
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    app.insert_resource(crate::net::NetCommands(tx));
+    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+    app.insert_resource(roster_named(name, 1));
+    (app, rx)
+}
+
+/// The frame's lanes, the arrival's among them, as the drain fires them.
+fn fire_lanes(app: &mut App) {
+    crate::lanes::fire_in_order(app.world_mut());
+}
+
 /// Records what file scope and the two cascade events see of `"player"`, in order.
 const LOGIN_PROBE_LUA: &str = "\
 LoginProbe = { order = \"\", fileExists = tostring(UnitExists(\"player\")),
@@ -2475,8 +2492,10 @@ const LOGIN_PROBE_TOC: &str = "## Interface: 11200\nLoginProbe.lua\n";
 /// Our own player as its create lands: level 17, 1234 of 5000 XP.
 fn spawn_self_player(world: &mut World) -> Entity {
     use benilla_protocol::messages::{ObjectFields, ObjectType};
-    // `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP`, 716 and 717 in the 1.12 descriptor.
+    // `OBJECT_FIELD_TYPE`, then `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP`, 716 and 717 in the 1.12
+    // descriptor.
     let fields = ObjectFields::from_pairs(&[
+        (2, 0x19),
         (benilla_protocol::field::FIELD_UNIT_LEVEL, 17),
         (716, 1234),
         (717, 5000),
@@ -2489,6 +2508,12 @@ fn spawn_self_player(world: &mut World) -> Entity {
             crate::net::ObjectStore(fields),
         ))
         .id();
+    if let Some(mut index) = world.get_resource_mut::<crate::net::GuidIndex>() {
+        index.0.insert(1, me);
+    }
+    if let Some(mut own) = world.get_resource_mut::<crate::net::SelfGuid>() {
+        own.0 = Some(1);
+    }
     // The create's arrival (`0x5dec7b`), as our own create's handler pushes it.
     crate::ui_world_enter::push_arrival(world);
     me
@@ -2515,9 +2540,7 @@ fn player_login_fires_from_the_world_entry_with_the_player_seated() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (tmp, _c, _h) = hermetic_addon("login", "LoginProbe", LOGIN_PROBE_TOC, LOGIN_PROBE_LUA);
-    let (mut app, _rx) = unit_feed_app();
-    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
-    app.insert_resource(roster_named("Probelogin", 1));
+    let (mut app, _rx) = hosted_entry_app("Probelogin");
     super::load_ingame_ui_on_world_entry(app.world_mut());
 
     assert_eq!(
@@ -2532,20 +2555,20 @@ fn player_login_fires_from_the_world_entry_with_the_player_seated() {
     );
 
     let me = spawn_self_player(app.world_mut());
-    app.update();
+    fire_lanes(&mut app);
     assert_eq!(
         login_probe(&app, "order"),
         "LOGIN:1:17:1234 PEW ",
         "PLAYER_LOGIN sees the player's own unit, then PLAYER_ENTERING_WORLD fires at once"
     );
-    app.update();
+    fire_lanes(&mut app);
     assert_eq!(login_probe(&app, "order"), "LOGIN:1:17:1234 PEW ");
 
     // A cross-map worldport: the player object is destroyed and created again.
     app.world_mut().despawn(me);
-    app.update();
+    fire_lanes(&mut app);
     spawn_self_player(app.world_mut());
-    app.update();
+    fire_lanes(&mut app);
     assert_eq!(
         login_probe(&app, "order"),
         "LOGIN:1:17:1234 PEW PEW ",
@@ -2627,12 +2650,10 @@ fn the_world_enter_cascade_resolves_the_player_for_its_handlers() {
         "## Interface: 11200\nPaneProbe.lua\n",
         PANE_PROBE_LUA,
     );
-    let (mut app, _rx) = unit_feed_app();
-    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
-    app.insert_resource(roster_named("Probepane", 1));
+    let (mut app, _rx) = hosted_entry_app("Probepane");
     super::load_ingame_ui_on_world_entry(app.world_mut());
     spawn_self_player(app.world_mut());
-    app.update();
+    fire_lanes(&mut app);
 
     let s = app.world().non_send::<benilla_ui::script::UiScript>();
     let doll = s.frame_handle("PaneProbeDoll").expect("the probe loaded");
@@ -2654,12 +2675,10 @@ fn a_reload_fires_player_login_once_against_the_live_player() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (tmp, _c, _h) = hermetic_addon("relogin", "LoginProbe", LOGIN_PROBE_TOC, LOGIN_PROBE_LUA);
-    let (mut app, _rx) = unit_feed_app();
-    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
-    app.insert_resource(roster_named("Probelogin", 1));
+    let (mut app, _rx) = hosted_entry_app("Probelogin");
     super::load_ingame_ui_on_world_entry(app.world_mut());
     spawn_self_player(app.world_mut());
-    app.update();
+    fire_lanes(&mut app);
     assert_eq!(login_probe(&app, "order"), "LOGIN:1:17:1234 PEW ");
 
     reload(app.world_mut(), crate::client_state::ClientState::InWorld);
@@ -2671,8 +2690,8 @@ fn a_reload_fires_player_login_once_against_the_live_player() {
         ("1".to_string(), "17".to_string()),
         "the reloaded file scope runs against the live player"
     );
-    app.update();
-    app.update();
+    fire_lanes(&mut app);
+    fire_lanes(&mut app);
     assert_eq!(
         login_probe(&app, "order"),
         "LOGIN:1:17:1234 PEW ",
@@ -2684,19 +2703,18 @@ fn a_reload_fires_player_login_once_against_the_live_player() {
 }
 
 /// fork: the sliced entry load ([`super::lifecycle::run_pending_entry_load`]) is the world-entry
-/// edge too. Its files run under the roster's stand-in even when the player's create lands
-/// mid-load, it only arms `PLAYER_LOGIN`, and the VM stays parked until the last slice, so the
-/// feed fires the cascade once, on the published VM with the player seated.
+/// edge too. It only arms `PLAYER_LOGIN`, and the VM stays parked until the last slice, so the
+/// arrival fires the cascade once, on the published VM with the player seated. A slice's file
+/// scope after a create that landed mid-load reads the live player through the host, which the
+/// reference's load, done before any create, never meets.
 #[test]
 fn the_sliced_entry_load_arms_player_login_for_the_feed() {
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (tmp, _c, _h) = hermetic_addon("sliced", "LoginProbe", LOGIN_PROBE_TOC, LOGIN_PROBE_LUA);
-    let (mut app, _rx) = unit_feed_app();
-    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+    let (mut app, _rx) = hosted_entry_app("Probelogin");
     app.insert_resource(crate::loading_screen::LoadingScreen::default());
-    app.insert_resource(roster_named("Probelogin", 1));
     app.insert_resource(super::PendingEntryUiLoad::default());
     // The player's create beats the load's first slice.
     spawn_self_player(app.world_mut());
@@ -2707,36 +2725,25 @@ fn the_sliced_entry_load_arms_player_login_for_the_feed() {
         .get_resource::<super::PendingEntryUiLoad>()
         .is_some()
     {
+        // Mid-load the VM is parked and the in-game interface is not up, so the frame's drain,
+        // which runs only with it up, leaves the arrival on its lane.
         super::lifecycle::run_pending_entry_load(app.world_mut());
         frames += 1;
         assert!(frames < 10_000, "the sliced entry load never finished");
-        if app
-            .world()
-            .get_resource::<super::PendingEntryUiLoad>()
-            .is_some()
-        {
-            // Mid-load: the VM is parked, so the feed has nothing to fire at.
-            app.update();
-        }
     }
-    assert_eq!(
-        login_probe(&app, "fileExists"),
-        "nil",
-        "the entry's file scope runs under the roster's stand-in, as before the player's create"
-    );
     assert_eq!(
         login_probe(&app, "order"),
         "",
         "the sliced load arms PLAYER_LOGIN; nothing fired over its {frames} frame(s)"
     );
 
-    app.update();
+    fire_lanes(&mut app);
     assert_eq!(
         login_probe(&app, "order"),
         "LOGIN:1:17:1234 PEW ",
-        "the feed's first pass over the published VM fires both, the player seated"
+        "the arrival's first firing over the published VM fires both, the player seated"
     );
-    app.update();
+    fire_lanes(&mut app);
     assert_eq!(login_probe(&app, "order"), "LOGIN:1:17:1234 PEW ");
 
     drop(app);

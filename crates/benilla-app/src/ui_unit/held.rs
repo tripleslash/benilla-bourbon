@@ -15,7 +15,7 @@ use super::{
 };
 use crate::creature_type::CreatureTypeSources;
 use crate::names::NameCache;
-use crate::net::{NetCommands, ObjectStore};
+use crate::net::ObjectStore;
 use crate::query_cache::Ask;
 use crate::target::{RelUnit, Relations};
 
@@ -43,8 +43,6 @@ pub(crate) fn reach_between(
 /// What a held unit's snapshot reads beside its descriptor.
 pub(super) struct HeldUnits<'a> {
     pub(super) names: &'a NameCache,
-    /// The channel a missing name is asked on; `None` reads the cache alone.
-    pub(super) commands: Option<&'a NetCommands>,
     pub(super) group: &'a crate::ui_party::GroupState,
     /// Our own descriptor, which the faction line reads.
     pub(super) self_store: Option<&'a ObjectStore>,
@@ -60,25 +58,10 @@ pub(super) struct HeldUnits<'a> {
 }
 
 impl HeldUnits<'_> {
-    /// The snapshot of the held unit `guid`, whose descriptor is `store`, as a token naming a unit
-    /// other than the player carries it, however the token spells it: `GetGuildInfo` resolves the
-    /// token and reads that object's guild (`0x4c9330`), so the guild leg is every held unit's.
-    pub(super) fn state(&self, store: &ObjectStore, guid: u64) -> UnitState {
-        // The unit's create looked its name up with a callback (`0x5dec12`); a frame asks only
-        // a name the cache holds nothing for, as one invalidated since, and a refused one waits
-        // for the next create.
-        let ask = match self.commands {
-            Some(commands) => Ask::New(commands),
-            None => Ask::Read,
-        };
-        let name = self
-            .names
-            .resolve_unit(guid, Some(store), ask)
-            .map(str::to_string);
-        self.state_named(store, guid, name)
-    }
-
-    /// [`Self::state`] under a name the caller looked up, which sends no name query.
+    /// The snapshot of the held unit `guid`, whose descriptor is `store`, under `name`, as a token
+    /// naming a unit other than the player carries it, however the token spells it:
+    /// `GetGuildInfo` resolves the token and reads that object's guild (`0x4c9330`), so the guild
+    /// leg is every held unit's.
     pub(super) fn state_named(
         &self,
         store: &ObjectStore,
@@ -99,41 +82,6 @@ impl HeldUnits<'_> {
         // `[[unit+0xe68]+0xc]` (`0x4c93a3`) against the cache; a miss is `GetGuildInfo`'s to ask.
         s.guild = crate::ui_guild::cached_unit_guild(&store.0, self.guild);
         s
-    }
-}
-
-/// The objects a gated feed's last run read by descriptor, beside our own. The feed's gate opens
-/// on a change to one of them, where a change to any unit's would hold it open on every frame of
-/// a crowd. A guid that named no object is kept and opens the gate once the object manager holds
-/// it. It is every such input because which objects a run reads is decided by the feed's other
-/// gate inputs and by these descriptors themselves.
-#[derive(Default)]
-pub(super) struct StoreReads {
-    held: Vec<Entity>,
-    missing: Vec<u64>,
-}
-
-impl StoreReads {
-    /// A read of the object `entity`.
-    pub(super) fn held(&mut self, entity: Entity) {
-        self.held.push(entity);
-    }
-
-    /// A read of `guid`'s object, `entity` when the object manager holds it.
-    pub(super) fn looked_up(&mut self, guid: u64, entity: Option<Entity>) {
-        match entity {
-            Some(entity) => self.held.push(entity),
-            None => self.missing.push(guid),
-        }
-    }
-
-    /// Whether a read object's descriptor `changed`, or the manager now `holds` a missing one.
-    pub(super) fn moved(
-        &self,
-        changed: impl Fn(Entity) -> bool,
-        holds: impl Fn(u64) -> bool,
-    ) -> bool {
-        self.held.iter().any(|e| changed(*e)) || self.missing.iter().any(|g| holds(*g))
     }
 }
 
@@ -187,7 +135,7 @@ pub(crate) fn traits_from_name_cache(
 mod tests {
     use super::*;
     use crate::names::CreatureRecord;
-    use crate::net::{Guid, GuidIndex, Reputations, SelfPlayer};
+    use crate::net::{Guid, GuidIndex, NetCommands, Reputations, SelfPlayer};
     use crate::target::Selection;
     use crate::ui_party::{GroupState, GROUPTYPE_RAID};
     use benilla_protocol::messages::{member_status, GroupMemberEntry};

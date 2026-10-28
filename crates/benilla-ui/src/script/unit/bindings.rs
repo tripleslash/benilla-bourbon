@@ -946,10 +946,12 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     // GetComboPoints() (`0x51a190`): `PLAYER_FIELD_BYTES` byte 1, behind two gates stock
     // `ComboFrame.lua` does not repeat: the class is rogue or druid (`0x51a1cc`), so a warrior's
     // dodge point never shows, and `PLAYER_FIELD_COMBO_TARGET` equals the current target
-    // (`0x51a205`), so the points read per target. Both are plain equality, GUID 0 included.
+    // (`0x51a205`), so the points read per target. Both are plain equality, GUID 0 included. The
+    // pair is read off the object as the call runs ([`read_self`]).
     g.set(
         "GetComboPoints",
         lua.create_function(|lua, ()| {
+            let (points, banked) = read_self(lua, |own| (own.combo_points(), own.combo_target()));
             let model = lua
                 .app_data_ref::<crate::script::ModelCell>()
                 .expect("model app_data");
@@ -960,10 +962,10 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(0_i64);
             }
             let target = super::view(lua, &model, "target").map_or(0, |u| u.guid);
-            if model.combo_target != target {
+            if banked != target {
                 return Ok(0_i64);
             }
-            Ok(i64::from(model.combo_points))
+            Ok(i64::from(points))
         })?,
     )?;
 
