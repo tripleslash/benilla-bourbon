@@ -868,7 +868,18 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::Instance(InstanceCall::Reset) => appliers.instance().reset(),
             ScriptCall::Pvp(PvpCall::Toggle) => appliers.pvp().toggle(),
             ScriptCall::WornDisplay(set) => appliers.worn().set(set),
-            ScriptCall::ActionBar(call) => appliers.action_bar().apply(call),
+            ScriptCall::ActionBar(call) => {
+                let written = matches!(call, benilla_ui::script::ActionBarCall::Set { .. });
+                appliers.action_bar().apply(call);
+                // The write `0x4e58e0` stores the slot's usable pair (`0x4e5903`-`0x4e5914`) ahead
+                // of the `ACTIONBAR_SLOT_CHANGED` the VM signals after it (`0x4e5998`), so the
+                // stock handler's `IsUsableAction` reads a placed spell lit.
+                if written {
+                    if let Some(states) = appliers.action_states().as_mut() {
+                        states.slot_written(script);
+                    }
+                }
+            }
             ScriptCall::GmTicket(GmTicketCall::Ticket(intent)) => {
                 appliers.gm_ticket().ticket(intent);
             }

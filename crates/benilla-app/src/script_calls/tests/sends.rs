@@ -360,6 +360,51 @@ fn pickup_and_place_action_send_ahead_of_their_slot_signal() {
     assert_eq!(slots.buttons.get(&4).map(|b| b.action), Some(FIREBALL));
 }
 
+/// `0x4e58e0` stores the written slot's usable pair (`0x4e5903`-`0x4e5914`) ahead of its
+/// `ACTIONBAR_SLOT_CHANGED` (`0x4e5998`), so the stock handler's `IsUsableAction`
+/// (`ActionButton_UpdateUsable`) reads a placed spell usable and paints its icon lit.
+#[test]
+fn a_placed_slots_signal_reads_its_usable_pair() {
+    const STUCK: u32 = 7355;
+    let (mut app, _rx) = client();
+    seat(&mut app, &[]);
+    spell_rows(&mut app, &[(STUCK, 0, 84)]);
+    app.world_mut()
+        .resource_mut::<crate::ui_action::PlayerActions>()
+        .spells
+        .insert(STUCK);
+    vm(&mut app).set_action(
+        3,
+        Some(benilla_ui::script::ActionSlot {
+            kind: 0,
+            action: STUCK,
+            ..Default::default()
+        }),
+    );
+    app.world_mut()
+        .resource_mut::<crate::ui_action::ActionSlots>()
+        .buttons
+        .insert(
+            2,
+            benilla_protocol::messages::ActionButton {
+                slot: 2,
+                action: STUCK,
+                kind: 0,
+            },
+        );
+    listen(
+        &mut app,
+        &["ACTIONBAR_SLOT_CHANGED"],
+        "if arg1 == 5 then U = IsUsableAction(5) end",
+    );
+    eval::<()>(&mut app, "PickupAction(3) PlaceAction(5)");
+    assert_eq!(
+        eval::<Option<i64>>(&mut app, "return U"),
+        Some(1),
+        "the place's signal reads the slot's pair"
+    );
+}
+
 /// `0x4e58e0` writes the slot arrays inside the call (`0x4e590a`), so a later verb of the chunk
 /// reads the slot as the write left it: `UseAction` on a slot just picked up finds it empty, and on
 /// one just placed casts what was placed (`0x4e5ee0`).
