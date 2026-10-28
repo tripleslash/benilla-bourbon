@@ -96,9 +96,9 @@ pub fn elevator_period_ms(frames: &[ElevatorKeyframe]) -> u32 {
 
 /// The reference's type-11 evaluator (`0x5f6280`): the car's world position at `cycle_ms`, from
 /// the spawn position and its `GAMEOBJECT_ROTATION` quaternion `(x, y, z, w)`, and whether the
-/// bracketing span moves. The offset turns by `R(q)`, as the reference's transposed 3×3 does;
-/// vmangos's `d * q` with a y sign flip (`Transport.cpp:425-426`) agrees on the 1.12 data's
-/// vertical paths and pure-yaw spawns.
+/// bracketing span moves. Bit-exact to it: `A·(1−f) + B·f` on the stored floats, turned through the
+/// spawn's 3×3 matrix, with the x87 at 53 bits and each store rounding to `f32` where the
+/// reference stores (benilla-re's `gameobject_path_eval`).
 pub fn elevator_sample(
     frames: &[ElevatorKeyframe],
     spawn_pos: [f32; 3],
@@ -113,42 +113,55 @@ pub fn elevator_sample(
     let hi = frames.partition_point(|f| f.time_ms <= target);
     let (prev, next) = (frames[hi - 1], frames[hi.min(frames.len() - 1)]);
 
-    let local = if prev.pos == next.pos || next.time_ms == prev.time_ms {
-        prev.pos
+    // The bracket is strict, so the span is never empty; the guard keeps a malformed one finite.
+    let offset = if next.time_ms == prev.time_ms {
+        turn_by_quat(lerp_nodes(prev.pos, prev.pos, 0.0), spawn_quat)
     } else {
-        let frac = (target - prev.time_ms) as f32 / (next.time_ms - prev.time_ms) as f32;
-        [
-            prev.pos[0] + (next.pos[0] - prev.pos[0]) * frac,
-            prev.pos[1] + (next.pos[1] - prev.pos[1]) * frac,
-            prev.pos[2] + (next.pos[2] - prev.pos[2]) * frac,
-        ]
+        // A `fild` of the zero-extended difference, `fidiv` by the signed span, stored as a float.
+        let frac = (f64::from(target - prev.time_ms)
+            / f64::from(next.time_ms.wrapping_sub(prev.time_ms) as i32)) as f32;
+        turn_by_quat(lerp_nodes(prev.pos, next.pos, frac), spawn_quat)
     };
-
-    let rotated = rotate_by_quat(local, spawn_quat);
-    (
-        [
-            spawn_pos[0] + rotated[0],
-            spawn_pos[1] + rotated[1],
-            spawn_pos[2] + rotated[2],
-        ],
-        prev.pos != next.pos,
-    )
+    // The tick adds the offset to the fields' position at 53 bits and stores it.
+    let world = std::array::from_fn(|i| (f64::from(spawn_pos[i]) + f64::from(offset[i])) as f32);
+    (world, prev.pos != next.pos)
 }
 
-/// `R(q)·v` for a unit quaternion `(x, y, z, w)`.
-fn rotate_by_quat(v: [f32; 3], q: [f32; 4]) -> [f32; 3] {
-    let [x, y, z, w] = q;
-    // t = 2·(q.xyz × v); v' = v + w·t + q.xyz × t
-    let t = [
-        2.0 * (y * v[2] - z * v[1]),
-        2.0 * (z * v[0] - x * v[2]),
-        2.0 * (x * v[1] - y * v[0]),
+/// `A·(1−f) + B·f` with the reference's stores: x stores the sum; y stores only `(1−f)·A`, its sum
+/// kept at 53 bits; z stores both products, its sum kept. `x` returns as a float and `y`, `z` as
+/// the registers the turn reads.
+fn lerp_nodes(a: [f32; 3], b: [f32; 3], frac: f32) -> (f32, f64, f64) {
+    let (f, g) = (f64::from(frac), 1.0 - f64::from(frac));
+    let x = (g * f64::from(a[0]) + f * f64::from(b[0])) as f32;
+    let y = f64::from((g * f64::from(a[1])) as f32) + f * f64::from(b[1]);
+    let z = f64::from((g * f64::from(a[2])) as f32) + f64::from((f * f64::from(b[2])) as f32);
+    (x, y, z)
+}
+
+/// The offset turned through the spawn's 3×3 (`0x5f630c`-`0x5f6445`): `2qz`, the products with
+/// `qw` and `qx` and `2qz·qz` stored as floats, `2qx`, `2qy`, `2qy·qy` and `2qz·qy` kept; each
+/// entry stored (`0x5f8d20`), and `out[r] = m[r]·x + (m[r+3]·y + m[r+6]·z)`, stored.
+fn turn_by_quat((x, y, z): (f32, f64, f64), q: [f32; 4]) -> [f32; 3] {
+    let [qx, qy, qz, qw] = q.map(f64::from);
+    let (two_x, two_y) = (qx + qx, qy + qy);
+    let two_z = f64::from((qz + qz) as f32);
+    let s = |v: f64| f64::from(v as f32);
+    let (xw, yw, zw) = (s(two_x * qw), s(two_y * qw), s(two_z * qw));
+    let (xx, yx, zx) = (s(two_x * qx), s(two_y * qx), s(two_z * qx));
+    let (yy, zy, zz) = (two_y * qy, two_z * qy, s(two_z * qz));
+    let m = [
+        s(1.0 - (zz + yy)),
+        s(yx + zw),
+        s(zx - yw),
+        s(yx - zw),
+        s(1.0 - (zz + xx)),
+        s(zy + xw),
+        s(zx + yw),
+        s(zy - xw),
+        s(1.0 - (yy + xx)),
     ];
-    [
-        v[0] + w * t[0] + (y * t[2] - z * t[1]),
-        v[1] + w * t[1] + (z * t[0] - x * t[2]),
-        v[2] + w * t[2] + (x * t[1] - y * t[0]),
-    ]
+    let x = f64::from(x);
+    std::array::from_fn(|r| (m[r] * x + (m[r + 3] * y + m[r + 6] * z)) as f32)
 }
 
 #[cfg(test)]
