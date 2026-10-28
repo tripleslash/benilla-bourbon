@@ -1726,6 +1726,10 @@ pub(crate) enum ClientCommand {
     AreaTrigger {
         trigger_id: u32,
     },
+    /// `CMSG_ZONEUPDATE`: an outdoor area change's zone ([`crate::area`], `0x67e940`).
+    ZoneUpdate {
+        zone: u32,
+    },
     /// `CMSG_GAMEOBJECT_QUERY`, asked once per entry ([`crate::go_templates`]).
     GameObjectQuery {
         entry: u32,

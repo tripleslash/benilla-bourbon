@@ -477,6 +477,7 @@ pub const CMSG_ATTACKSTOP: u16 = 0x0142; // 322
 pub const CMSG_SETSHEATHED: u16 = 0x01E0; // 480
 pub const CMSG_AUTH_SESSION: u16 = 0x01ED;
 pub const CMSG_SET_ACTIVE_MOVER: u16 = 0x026A;
+pub const CMSG_ZONEUPDATE: u16 = 0x01F4; // 500
 /// Give up a mover: its full u64 guid, then a `MovementInfo`. The server re-broadcasts a stop for
 /// it; unsent, observers keep its last relayed pose (`MovementHandler.cpp:886-965`).
 pub const CMSG_MOVE_NOT_ACTIVE_MOVER: u16 = 0x02D1; // 721

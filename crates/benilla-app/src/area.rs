@@ -136,6 +136,10 @@ fn feed_zone_events(
     realm_pvp: Option<Res<RealmPvp>>,
     mut cache: Local<crate::ui_script::VmMemo<ZoneCache>>,
     mut committed: ResMut<CommittedZone>,
+    // The outdoor update's cache (`0x67e7f0`): zone, leaf and map, `None` once indoors.
+    mut outdoor: Local<Option<(u32, u32, u32)>>,
+    map: Option<Res<benilla_world::world_map::CurrentMap>>,
+    net: Option<Res<crate::net::NetCommands>>,
 ) {
     *ticks += 1;
     let due = *ticks >= 10;
@@ -174,6 +178,20 @@ fn feed_zone_events(
         committed.set_if_neq(CommittedZone(Some(zone)));
         let real_zone_text = areas.0.name(zone).unwrap_or_default().to_string();
         let indoor = world.area_interior().is_some();
+        // The outdoor update (`0x67e7f0`) on a new zone, leaf or map, or the first outdoors after
+        // indoors, sends the zone update (`0x67e925` → `0x67e940`), never for zone 0; the indoor
+        // update (`0x67e670`) sends none.
+        if indoor {
+            *outdoor = None;
+        } else {
+            let key = (zone, leaf, map.as_ref().map_or(0, |m| m.0));
+            if *outdoor != Some(key) {
+                *outdoor = Some(key);
+                if let Some(net) = net.as_ref().filter(|_| zone != 0) {
+                    let _ = net.0.send(crate::net::ClientCommand::ZoneUpdate { zone });
+                }
+            }
+        }
 
         // The outdoor texts `0x67e670` starts from.
         let mut zone_text = real_zone_text.clone();

@@ -1797,6 +1797,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::SetWatchedFaction { rep_list_id } => w.set_watched_faction(rep_list_id),
         ClientCommand::GameObjUse { guid } => w.gameobj_use(guid),
         ClientCommand::AreaTrigger { trigger_id } => w.area_trigger(trigger_id),
+        ClientCommand::ZoneUpdate { zone } => w.zone_update(zone),
         ClientCommand::GameObjectQuery { entry, guid } => w.gameobject_query(entry, guid),
         ClientCommand::PageTextQuery { page_id, guid } => w.page_text_query(page_id, guid),
         ClientCommand::CastSpellGameObject { spell_id, go_guid } => {
