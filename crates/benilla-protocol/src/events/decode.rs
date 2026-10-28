@@ -1200,9 +1200,7 @@ fn decode_objects(first_pass: bool, objects: Vec<Object>) -> Vec<SessionEvent> {
                 movement,
                 mask,
             } => {
-                let Some(create) = create_event(guid, object_type, movement, mask) else {
-                    continue;
-                };
+                let create = create_event(guid, object_type, movement, mask);
                 if guid::first_pass(guid) {
                     let block = match &create {
                         SessionEvent::ObjectCreate { kind, .. } => NotifyBlock::Create(*kind),
@@ -1223,26 +1221,24 @@ fn decode_objects(first_pass: bool, objects: Vec<Object>) -> Vec<SessionEvent> {
     first
 }
 
-/// A create block's event: an item's or a container's, else a placed object's, which needs the
-/// block's position.
+/// A create block's event: an item's or a container's, else a placed object's, at the block's
+/// position or the origin.
 fn create_event(
     guid: u64,
     object_type: ObjectType,
     movement: crate::messages::MovementBlock,
     mask: ObjectFields,
-) -> Option<SessionEvent> {
-    // Items have no pose: route them before the placement gate, which would drop them.
+) -> SessionEvent {
+    // Items have no pose.
     if matches!(object_type, ObjectType::Item | ObjectType::Container) {
-        return Some(SessionEvent::ItemCreate {
+        return SessionEvent::ItemCreate {
             guid,
             container: object_type == ObjectType::Container,
             fields: mask,
-        });
+        };
     }
-    // The block's own position, for every type ([`create_placement`], which also creates a
-    // Turtle core's pose-less ship).
-    let (position, orientation) = create_placement(object_type, &movement)?;
-    Some(SessionEvent::ObjectCreate {
+    let (position, orientation) = create_placement(&movement);
+    SessionEvent::ObjectCreate {
         guid,
         kind: entity_kind(object_type),
         display_id: display_id(object_type, &mask),
@@ -1260,7 +1256,7 @@ fn create_event(
         transport: movement.transport,
         spline: movement.spline,
         fields: mask,
-    })
+    }
 }
 
 fn entity_kind(t: ObjectType) -> EntityKind {
@@ -1309,22 +1305,19 @@ fn object_scale(t: ObjectType, mask: &ObjectFields) -> f32 {
 /// it over `GAMEOBJECT_POS_X`..`FACING` (`0x5f7046`..`0x5f706b`), so the descriptor's copy never
 /// places anything.
 ///
-/// A Turtle core sends every ship and zeppelin at login with its path progress alone. Its pose is
-/// the timetable's from the first tick, so it is created at the origin (spawned hidden until that
-/// tick); any other object with no pose is dropped.
-fn create_placement(object_type: ObjectType, movement: &MovementBlock) -> Option<(Vector3d, f32)> {
-    movement.position.or_else(|| {
-        (object_type == ObjectType::GameObject && movement.transport_progress.is_some()).then_some(
-            (
-                Vector3d {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                },
-                0.0,
-            ),
-        )
-    })
+/// A block with neither update flag 0x20 nor 0x40 carries no position: the create handler reads
+/// none (`0x46618d`, `0x4661a0`), leaves the block zeroed (`ClearMovementStatus` `0x469b70` at
+/// `0x466164`) and makes the object anyway (`0x466265`-`0x46629f`), at the origin. A Turtle core's
+/// ship sent with its path progress alone is one, which its timetable places from the first tick.
+fn create_placement(movement: &MovementBlock) -> (Vector3d, f32) {
+    movement.position.unwrap_or((
+        Vector3d {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        0.0,
+    ))
 }
 
 #[cfg(test)]
@@ -1342,21 +1335,20 @@ mod placement_tests {
         }
     }
 
-    /// A ship sent with its path progress and no pose is still created: the timetable places it.
-    /// Anything else without a pose has nowhere to be and is dropped.
+    /// A create with no pose (update flags 0x00) is still made, at the origin (`0x466164`,
+    /// `0x466265`-`0x46629f`): a ship sent with its path progress, and any other object.
     #[test]
-    fn a_transport_without_a_pose_is_created_at_the_origin() {
-        let ship = create_placement(ObjectType::GameObject, &block(None, Some(47_030)));
-        assert!(ship.is_some_and(|(p, yaw)| (p.x, p.y, p.z, yaw) == (0.0, 0.0, 0.0, 0.0)));
-        assert!(create_placement(ObjectType::GameObject, &block(None, None)).is_none());
-        assert!(create_placement(ObjectType::Unit, &block(None, Some(1))).is_none());
+    fn a_create_without_a_pose_is_made_at_the_origin() {
+        let origin = |(p, yaw): (Vector3d, f32)| (p.x, p.y, p.z, yaw) == (0.0, 0.0, 0.0, 0.0);
+        assert!(origin(create_placement(&block(None, Some(47_030)))));
+        assert!(origin(create_placement(&block(None, None))));
         // A pose that was sent is kept.
         let at = Vector3d {
             x: 1.0,
             y: 2.0,
             z: 3.0,
         };
-        let placed = create_placement(ObjectType::GameObject, &block(Some((at, 0.5)), Some(1)));
-        assert!(placed.is_some_and(|(p, yaw)| (p.x, p.y, p.z, yaw) == (1.0, 2.0, 3.0, 0.5)));
+        let (p, yaw) = create_placement(&block(Some((at, 0.5)), Some(1)));
+        assert_eq!((p.x, p.y, p.z, yaw), (1.0, 2.0, 3.0, 0.5));
     }
 }
