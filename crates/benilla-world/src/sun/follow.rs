@@ -205,7 +205,9 @@ fn submersion_glare_fade(depth: f32) -> f32 {
 }
 
 /// The weather alpha seed (`0x6d2c74`): with `bcc > 0` the recompute writes `floor(255·(1−bcc))`
-/// over all five body alpha bytes, moon02's included; clear weather leaves them alone.
+/// over all five body alpha bytes, moon02's included; clear weather leaves them alone. The other
+/// four are refilled from band 9 every build (`0x6d2914`-`0x6d2932`), but moon02's byte is written
+/// nowhere else, so it keeps the last seed ([`follow_moons`]).
 fn celestial_alpha_seed(bcc: f32) -> Option<f32> {
     (bcc > 0.0).then(|| (255.0 * (1.0 - bcc.min(1.0))).floor() / 255.0)
 }
@@ -375,6 +377,8 @@ pub(super) fn follow_moons(
     mut gate: FlareGate,
     mut mats: ResMut<Assets<CelestialMaterial>>,
     mut sprites: BodySprites<MoonSprite>,
+    // moon02's alpha byte (`0xce98a7`), 0 until a storm first seeds it.
+    mut moon02_alpha: Local<f32>,
 ) {
     let Some((cam_gt, proj)) = cam.iter().next() else {
         return;
@@ -388,6 +392,9 @@ pub(super) fn follow_moons(
     let hidden = debug.lighting.disable_sky_dome;
     let tint = benilla_assets::quant255(light.celestial_tint);
     let seed = celestial_alpha_seed(light.storm_bcc);
+    if let Some(seed) = seed {
+        *moon02_alpha = seed;
+    }
     // One envelope, along the white moon's ray, the only glare; its dnCurve is 0 until 22:45.
     let to_white = light.moon_dir_white.normalize_or_zero();
     let env30 = if to_white == Vec3::ZERO {
@@ -447,8 +454,9 @@ pub(super) fn follow_moons(
             }
             MoonPart::Moon02 => {
                 // Base ×1.0 on its own phase clock. Its colour (`0xce98a4`) is never written, black
-                // at alpha 0, but the weather seed lands on its alpha byte, a faint dark disc
-                // (`0x6d2c74`); the span still drives its wedge in the horizon band.
+                // at alpha 0, but the weather seed lands on its alpha byte, a dark disc that keeps
+                // the last seed once the weather has passed (`0x6d2c74`); the span still drives its
+                // wedge in the horizon band.
                 tf.translation = cam_pos + to_moon * dist;
                 let size = if hidden {
                     0.0
@@ -457,7 +465,7 @@ pub(super) fn follow_moons(
                 };
                 tf.scale = Vec3::splat(size * dist);
                 let span = quant_span(disc_span(to_moon.y, size));
-                let fade_w = benilla_assets::quantize(seed.unwrap_or(0.0), 255.0);
+                let fade_w = benilla_assets::quantize(*moon02_alpha, 255.0);
                 benilla_assets::write_gated(
                     &mut mats,
                     &mat.0,
