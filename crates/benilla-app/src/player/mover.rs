@@ -545,7 +545,7 @@ pub(crate) fn grounded_step(
         let travel = speed * dt.as_secs_f32();
         // The look-ahead is this frame's travel; the advance is the body's certify reach,
         // `rise · tan 50°`, or the travel when a long frame covers more.
-        step_up(
+        step_up_along(
             &cast,
             center,
             horiz_vel / speed,
@@ -556,6 +556,7 @@ pub(crate) fn grounded_step(
     } else {
         StepAttempt {
             contact: None,
+            distance: 0.0,
             verdict: StepVerdict::NoFace,
         }
     };
@@ -883,13 +884,57 @@ impl std::fmt::Display for StepVerdict {
 pub(crate) struct StepAttempt {
     /// The face's contact point and authored normal; `None` when there was nothing to step.
     pub(crate) contact: Option<(Vec3, Vec3)>,
+    /// The travel along the input to the face; 0 when there was none.
+    pub(crate) distance: f32,
     pub(crate) verdict: StepVerdict,
+}
+
+/// The walk resolver's face loop (`0x6367b0`): each steep face the frame's travel meets that the
+/// floor test rejects gets the step-up probe (`0x636b6e` → `0x636100`), and a refused one turns
+/// the rest of the travel along it (`0x635d80`, 0.001 yd off the face at `0x635e63`) toward the
+/// next, at most five hits a frame (`0x6369e1`). So a body pressed into a corner steps onto
+/// whichever side certifies. The first certified attempt wins; with none, the last refusal goes
+/// to the slide.
+fn step_up_along(
+    cast: &impl Fn(Vec3, Vec3) -> Option<BodyHit>,
+    center: Vec3,
+    dir_h: Vec3,
+    look: f32,
+    advance: f32,
+    rise: f32,
+) -> StepAttempt {
+    let (mut from, mut dir, mut look) = (center, dir_h, look);
+    let mut attempt = step_up(cast, from, dir, look, advance, rise);
+    for _ in 1..5 {
+        let Some((_, n)) = attempt.contact else {
+            break;
+        };
+        if matches!(attempt.verdict, StepVerdict::Commit { .. }) {
+            break;
+        }
+        // The push drops the travel's component into the face and keeps 0.001 yd off it.
+        let n_h = Vec3::new(n.x, 0.0, n.z).normalize_or_zero();
+        let left = (look - attempt.distance).max(0.0);
+        let next = (dir - n_h * dir.dot(n_h)) * left + n_h * 0.001;
+        let len = next.length();
+        if len < 1.0e-3 {
+            break;
+        }
+        from += dir * attempt.distance;
+        (dir, look) = (next / len, len);
+        let again = step_up(cast, from, dir, look, advance, rise);
+        if again.contact.is_none() {
+            break;
+        }
+        attempt = again;
+    }
+    attempt
 }
 
 /// The step-up certification, a standard kinematic-controller probe rather than the reference
 /// resolver's: against a steep opposing face within `look`, rise by the free headroom (at most
-/// `rise`), advance by `advance` along the input, and settle by the snap's reach onto a walkable
-/// floor that is higher. A graze or a wall taller than `rise` lands no higher, and a pinch between
+/// `rise`), advance by `advance` square into the face, as `0x636100` steps (its step 1), and settle
+/// by the snap's reach onto a walkable floor that is higher. A graze or a wall taller than `rise` lands no higher, and a pinch between
 /// trunks only on steep faces, so none commits and the plain slide keeps the frame.
 /// [`super::step_probe`] sweeps `advance` to find where a step would clear.
 pub(crate) fn step_up(
@@ -902,6 +947,7 @@ pub(crate) fn step_up(
 ) -> StepAttempt {
     let none = |verdict| StepAttempt {
         contact: None,
+        distance: 0.0,
         verdict,
     };
     // A steep, non-overhanging face opposing the motion within `look`. The reference has no
@@ -916,15 +962,23 @@ pub(crate) fn step_up(
     }
     let at = |verdict| StepAttempt {
         contact: Some((ahead.point1, n)),
+        distance: ahead.distance,
         verdict,
     };
+    // The step goes square into the face: the reach along `-n_h` (`0x6361a1`-`0x63622d`) sets the
+    // direction to it when it meets a face with exactly this normal (`0x63623f`-`0x63627b`), else
+    // the input's (`0x6362cb`).
+    let into = Vec3::new(-n.x, 0.0, -n.z).normalize_or_zero();
+    let dir_h = cast(center, into * advance)
+        .filter(|h| h.face_normal == n)
+        .map_or(dir_h, |_| into);
 
     // Rise: the free headroom, at most `rise`.
     let up = cast(center, Vec3::Y * rise).map_or(rise, |h| h.distance);
     if up < 1e-3 {
         return at(StepVerdict::NoHeadroom);
     }
-    // Advance: along the input dir, swept at the raised height.
+    // Advance: into the face, swept at the raised height.
     let raised = center + Vec3::Y * up;
     let fwd = cast(raised, dir_h * advance).map_or(advance, |h| h.distance);
     let over = raised + dir_h * fwd;
@@ -969,6 +1023,26 @@ mod tests {
     use crate::player::CAPSULE_RADIUS;
     use bevy::ecs::system::RunSystemOnce;
 
+    /// A body pressed into the corner of a front above the step-up and the side of two steps
+    /// against it climbs them from the side (benilla-wotlk's Stormwind Trade District case, WoW
+    /// `(-8806.1, 651.4, 95.0)` facing 2.02): the front refuses, the walk loop turns the travel
+    /// along it into the steps' side (`0x635d80`), and that face certifies a step square into it
+    /// (`0x636100`'s step 1).
+    #[test]
+    fn a_body_wedged_beside_stairs_climbs_them_from_the_side() {
+        let world = world_from_boxes(&[
+            (Vec3::new(0.4, 0.0, -3.0), Vec3::new(3.0, 1.22, 3.0)),
+            (Vec3::new(-0.4, 0.0, 0.35), Vec3::new(0.0, 0.38, 3.0)),
+            (Vec3::new(0.0, 0.0, 0.35), Vec3::new(0.4, 0.76, 3.0)),
+        ]);
+        let dir = Vec3::new(0.8, 0.0, 0.6);
+        let frames = walk_from(world, Vec3::new(-0.6, 0.0, -0.6), dir, 25);
+        assert!(
+            frames.last().unwrap().0 > 1.20,
+            "the body must climb the steps onto the 1.22 yd platform: {frames:?}"
+        );
+    }
+
     /// A Stormwind Trade District kerb: a 0.28 yd sidewalk behind a ~61° bevel, profiled from a
     /// `stup` scan at the spot.
     fn world_with_kerb() -> App {
@@ -980,18 +1054,6 @@ mod tests {
     /// authored normal points up and back at the approaching body: faces are one-sided.
     fn world_from_profile(profile: &[(f32, f32)]) -> App {
         const W: f32 = 3.0;
-        let mut app = App::new();
-        // `WorldCollision` needs the mover's trace exclusions, which the world plugins insert.
-        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
-        // avian's collider backend reads `Assets<Mesh>` and `SceneSpawner` even without meshes.
-        app.add_plugins((
-            MinimalPlugins,
-            bevy::transform::TransformPlugin,
-            bevy::asset::AssetPlugin::default(),
-            bevy::world_serialization::WorldSerializationPlugin,
-            PhysicsPlugins::new(bevy::app::PostUpdate),
-        ));
-        app.init_asset::<Mesh>();
         let (mut verts, mut tris) = (Vec::new(), Vec::new());
         for w in profile.windows(2) {
             let (&(x0, y0), &(x1, y1)) = (&w[0], &w[1]);
@@ -1006,6 +1068,59 @@ mod tests {
             // the riser; the reverse winding would block nothing.
             tris.extend([[b, b + 2, b + 1], [b, b + 3, b + 2]]);
         }
+        world_from_trimesh(verts, tris)
+    }
+
+    /// A headless world of a floor at `y = 0` and solid boxes `(min, max)` on it, every face wound
+    /// outward.
+    fn world_from_boxes(boxes: &[(Vec3, Vec3)]) -> App {
+        let mut verts = vec![
+            Vec3::new(-5.0, 0.0, -5.0),
+            Vec3::new(-5.0, 0.0, 5.0),
+            Vec3::new(5.0, 0.0, 5.0),
+            Vec3::new(5.0, 0.0, -5.0),
+        ];
+        let mut tris = vec![[0, 1, 2], [0, 2, 3]];
+        // Corner `i` takes `max` on x, y, z for bits 0, 1, 2; each quad runs counter-clockwise
+        // seen from outside.
+        const QUADS: [[u32; 4]; 6] = [
+            [0, 4, 6, 2],
+            [1, 3, 7, 5],
+            [0, 1, 5, 4],
+            [2, 6, 7, 3],
+            [0, 2, 3, 1],
+            [4, 5, 7, 6],
+        ];
+        for &(lo, hi) in boxes {
+            let b = verts.len() as u32;
+            verts.extend((0..8).map(|i| {
+                Vec3::new(
+                    if i & 1 != 0 { hi.x } else { lo.x },
+                    if i & 2 != 0 { hi.y } else { lo.y },
+                    if i & 4 != 0 { hi.z } else { lo.z },
+                )
+            }));
+            for [p, q, r, t] in QUADS {
+                tris.extend([[b + p, b + q, b + r], [b + p, b + r, b + t]]);
+            }
+        }
+        world_from_trimesh(verts, tris)
+    }
+
+    /// A headless world of one static trimesh.
+    fn world_from_trimesh(verts: Vec<Vec3>, tris: Vec<[u32; 3]>) -> App {
+        let mut app = App::new();
+        // `WorldCollision` needs the mover's trace exclusions, which the world plugins insert.
+        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
+        // avian's collider backend reads `Assets<Mesh>` and `SceneSpawner` even without meshes.
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::world_serialization::WorldSerializationPlugin,
+            PhysicsPlugins::new(bevy::app::PostUpdate),
+        ));
+        app.init_asset::<Mesh>();
         app.world_mut().spawn((
             RigidBody::Static,
             Collider::trimesh(verts, tris),
