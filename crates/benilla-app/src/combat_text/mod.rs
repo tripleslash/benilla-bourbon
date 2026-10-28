@@ -139,6 +139,7 @@ fn free_slot(texts: &[WorldText], anchor: Entity) -> Option<u8> {
 /// The per-frame engine: admit spawns, expire the dead and project the living into quads appended
 /// to [`UiQuads`]. The [`UiQuadAppend`] set keeps the mesh rebuild from landing between the
 /// script's replace and this append.
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(crate) fn float_combat_text(
     mut spawns: MessageReader<CombatTextSpawn>,
     mut texts: ResMut<WorldTexts>,
