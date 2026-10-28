@@ -335,6 +335,11 @@ impl WaterChunkInfo {
             return None; // the bounding box is the cheap reject
         }
         match self.grid.wet_cell_at(x, y) {
+            // An ADT ocean tile (`type & 3 == 1`, `0x6b758c`) answers 0 without a vertex
+            // (`0x6b7773`). The surface's kind is its cells' class, one class per shipped block.
+            Some(_) if self.source == LiquidSource::AdtChunk && self.kind == LiquidKind::Ocean => {
+                Some(0.0)
+            }
             Some((i, j, fx, fy)) => Some(self.grid.height_in_cell(i, j, fx, fy)),
             // A grid that cannot be inverted answers its whole box at the highest wet vertex: a
             // wrong "dry" drops a player through a lake.
