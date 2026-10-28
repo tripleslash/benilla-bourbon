@@ -13,7 +13,8 @@
 //!
 //! Drawn in the names' world pass, unlit and blended. Deviation: no depth write, as for the names,
 //! because blended sorting looks the same.
-//! The reference's third gate (`0x605f30() == 0`) is untraced and not applied.
+//! The third gate (`0x6c70c2`-`0x6c70c9`) is `0x605f30`: a unit at 0 health or less, or a player
+//! with its ghost bit, draws no marker; the server keeps the mark, so a revive shows it again.
 
 use bevy::prelude::*;
 
@@ -120,6 +121,7 @@ fn drive_raid_marks(
     vplates: Res<VPlates>,
     plates: Res<Nameplates>,
     units: Query<&Transform>,
+    stores: Query<&crate::net::ObjectStore>,
     camera: Query<&Transform, With<WorldCamera>>,
     anchor_q: (
         Query<&BoneAttach>,
@@ -157,8 +159,13 @@ fn drive_raid_marks(
         let unit = (guid != 0)
             .then(|| index.0.get(&guid).copied())
             .flatten()
-            // The plate exclusion and a despawning unit both drop the marker.
-            .filter(|e| !vplates.0.contains(e) && units.contains(*e));
+            // The plate exclusion, a despawning unit and a dead or ghost one (`0x605f30`) drop the
+            // marker.
+            .filter(|e| {
+                !vplates.0.contains(e)
+                    && units.contains(*e)
+                    && !stores.get(*e).is_ok_and(|s| s.0.is_dead_or_ghost())
+            });
         let stale = match (marks.live[slot], unit) {
             (Some(live), Some(unit)) if live.unit == unit => continue, // placed per frame below
             (live, _) => live,
