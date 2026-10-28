@@ -80,7 +80,10 @@ fn tear_down_visual(entity: &mut EntityCommands) {
             bevy::animation::transition::AnimationTransitions,
             AnimationGraphHandle,
             benilla_assets::ModelAnimations,
-            crate::creature_anim::AnimDriver,
+            (
+                crate::creature_anim::AnimDriver,
+                crate::creature_anim::BlendSlot,
+            ),
             (
                 benilla_world::rig_anim::RigPose,
                 crate::creature_anim::BodyTwist,

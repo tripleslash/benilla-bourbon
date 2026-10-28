@@ -21,6 +21,10 @@ pub(crate) use select::{
 };
 use select::{Mode, Special};
 
+/// The primary and its one blend slot, which every unit body and pane copy arms through.
+mod blend_slot;
+pub(crate) use blend_slot::BlendSlot;
+
 /// The strafe body counter-twist, composed onto SpineLow and Head after animation.
 mod twist;
 pub(crate) use twist::{wrap_pi, BodyTwist};

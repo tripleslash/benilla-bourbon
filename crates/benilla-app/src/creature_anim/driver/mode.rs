@@ -1,16 +1,17 @@
 //! The mode machine: what the base track (bone 0) plays this frame. It reads only [`Frame`], none
-//! of the pass's frame-local flags, and writes the driver, the player and the transitions.
+//! of the pass's frame-local flags, and writes the driver, the player and the blend slot.
 
 use benilla_assets::ModelAnimations;
 use benilla_formats::AnimDataCatalog;
-use bevy::animation::transition::AnimationTransitions;
 use bevy::prelude::*;
 
 use crate::net::ObjectStore;
 use crate::sound::EmoteSounds;
 
 use super::super::select::{self, base_candidates, playback_rate, ready_anim, Mode, DEATH, STAND};
-use super::super::{find_resolved, move_flags, AnimDriver, CastHold, MovementState, Wielded};
+use super::super::{
+    find_resolved, move_flags, AnimDriver, BlendSlot, CastHold, MovementState, Wielded,
+};
 use super::play::{enter_special, leave_special, oneshot_finished, play, play_clip, roll_loop};
 use super::transplant_up;
 
@@ -50,7 +51,7 @@ pub(super) struct Frame<'a> {
 pub(super) fn run(
     f: Frame<'_>,
     drv: &mut AnimDriver,
-    tr: &mut AnimationTransitions,
+    tr: &mut BlendSlot,
     player: &mut AnimationPlayer,
     rng: &mut benilla_assets::AnimRng,
 ) {
@@ -446,22 +447,22 @@ pub(super) fn run(
                         }
                         // The ranged Load and Loot 50 are authored clamp: played once, they hold
                         // their last frame (full draw, the rummage pose), where a loop would wrap.
-                        let repeat = if select::is_ranged_load(target) || target == select::LOOT {
-                            // No watchdog window either, so nothing re-arms them.
-                            drv.loop_window = None;
+                        // No watchdog window either, so nothing re-arms them.
+                        let clamp = select::is_ranged_load(target) || target == select::LOOT;
+                        let repeat = if clamp {
                             bevy::animation::RepeatAnimation::Never
                         } else {
-                            drv.loop_window = Some((c.node, budget));
                             bevy::animation::RepeatAnimation::Forever
                         };
                         drv.gait_rate = playback_rate(c, mv.speed, model_scale);
                         let rate = drv.gait_rate;
-                        armed = play_clip(&mut drv.base_lock, tr, player, c, repeat, rate);
+                        let node = play_clip(&mut drv.base_lock, tr, player, c, repeat, rate);
+                        // The window is on the track the primary took.
+                        drv.loop_window = node.filter(|_| !clamp).map(|n| (n, budget));
+                        armed = node.is_some();
                         if armed {
                             drv.gait = Some(target);
                             drv.gait_pinned = kit_pin == Some(target);
-                        } else {
-                            drv.loop_window = None;
                         }
                     }
                 } else {

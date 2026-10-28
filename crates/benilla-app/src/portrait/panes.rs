@@ -10,7 +10,6 @@
 
 use std::collections::HashMap;
 
-use bevy::animation::graph::AnimationNodeIndex;
 use bevy::animation::RepeatAnimation;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{PerspectiveProjection, Projection, RenderTarget};
@@ -31,6 +30,7 @@ use super::{
     BoothPanes, Booths, DressUpBake, DressedLook, GxAspect, PortraitStandIn, SnapKey,
     BOOTH_SETTLE_FRAMES,
 };
+use crate::creature_anim::BlendSlot;
 use crate::entities::Creatures;
 use crate::net::{NetEntity, SelfPlayer};
 use crate::ui_models::{PaneLights, PaneScene};
@@ -178,37 +178,11 @@ struct StandIn {
 pub(super) struct Turn {
     /// The serial of the engine arm last played.
     played: Option<u64>,
-    /// The node the primary runs, either of its clip's two tracks; the spawn's idle Stand until
-    /// the first arm (`0x70ebd0`).
-    pub(super) playing: Option<AnimationNodeIndex>,
-    pub(super) fade: Option<Fade>,
+    /// The primary and its blend slot; the primary is the spawn's idle Stand until the first arm
+    /// (`0x70ebd0`), and the latch is set when it runs to its end and calls back.
+    pub(super) slot: BlendSlot,
     /// When the primary's window closes, `start + span·R` (`0x712692`); `None` once reported.
     ends: Option<f64>,
-    /// The completion latch `[+0xc0]`: the primary ran to its end and called back.
-    completed: bool,
-}
-
-/// The secondary blend slot (`[blk+0xc4]`, `0x7125d6`): the pose an arm replaced, on its own clock
-/// and a track the primary is not using, faded out by λ.
-#[derive(Clone, Copy)]
-pub(super) struct Fade {
-    pub(super) node: AnimationNodeIndex,
-    /// When λ reaches 0 (`[blk+0x100]`).
-    pub(super) until: f64,
-    /// The incoming clip's `M2Sequence.blendTime` (`0x7125f2`).
-    span: f32,
-}
-
-/// The fade still to run, 1 to 0: `(blendEnd − now) · blendRate`, recomputed every frame.
-fn fade_frac(fade: &Fade, now: f64) -> f32 {
-    ((fade.until - now) / f64::from(fade.span)) as f32
-}
-
-/// Empty the secondary slot, stopping its track.
-fn clear_fade(player: &mut AnimationPlayer, turn: &mut Turn) {
-    if let Some(old) = turn.fade.take() {
-        player.stop(old.node);
-    }
 }
 
 /// One engine arm, `0x7121a0(bone −1, id, variation −1, offset, 1.0, blend, 1)`. The id resolves
@@ -225,52 +199,12 @@ fn play_arm(
     offset: f32,
     now: f64,
 ) -> bool {
-    let outgoing = turn.playing;
     let res = anims.resolve(id, catalog);
     let Some(clip) = anims.pick_variation(res.id, rng.draw()) else {
         return false;
     };
     let replays = rng.replay_count(clip.replay);
-    let blend_time = clip.blend_time.max(0.0);
-    // The primary's record (`[blk+0xa4]`), on either of its clip's tracks.
-    let same = outgoing.is_some_and(|n| n == clip.node || Some(n) == clip.blend_node);
-    if !blend {
-        // No blend: the secondary slot is cleared (`0x712635`, `[blk+0xd0] = −1`).
-        clear_fade(player, turn);
-    } else if same && turn.completed {
-        // The shortcut (`0x712553` → `0x71262d`): the sequence that ran to its end is written
-        // again as the primary alone; the secondary and its window stay as they are.
-    } else if turn
-        .fade
-        .is_none_or(|f| crate::creature_anim::select::blend_lambda(fade_frac(&f, now)) <= 0.5)
-    {
-        // The copy (`0x7125d6`): the outgoing primary becomes the secondary, its clock kept, over
-        // the incoming clip's blendTime (`0x7125f2`). A zero blendTime ends it on the next pass.
-        clear_fade(player, turn);
-        turn.fade = outgoing.filter(|_| blend_time > 0.0).map(|node| Fade {
-            node,
-            until: now + f64::from(blend_time),
-            span: blend_time,
-        });
-    }
-    // Else the half-blend refusal (`0x7125c9`/`0x7125d4`): λ > 0.5 keeps the secondary and its
-    // window, and the primary alone is written.
-    // The primary runs on the clip's track the secondary is not on, so a re-arm of the sequence
-    // the secondary holds leaves that clock alone.
-    let node = match (turn.fade, clip.blend_node) {
-        (Some(f), Some(twin)) if f.node == clip.node => twin,
-        (Some(f), None) if f.node == clip.node => {
-            // A model built with one track per clip: the arm takes it, and the secondary ends.
-            turn.fade = None;
-            clip.node
-        }
-        _ => clip.node,
-    };
-    // The primary write replaces the outgoing primary (`0x712692`), unless the copy kept it.
-    if let Some(out) = outgoing.filter(|&o| o != node && turn.fade.is_none_or(|f| f.node != o)) {
-        player.stop(out);
-    }
-    let active = player.start(node);
+    let active = turn.slot.arm(player, clip, blend);
     active.set_repeat(if clip.looping {
         RepeatAnimation::Forever
     } else {
@@ -278,35 +212,8 @@ fn play_arm(
     });
     active.set_speed(1.0);
     active.seek_to(offset);
-    // λ = 1 on a blended arm's first frame, so the pose does not move on the frame it lands.
-    active.set_weight(if turn.fade.is_some() { 0.0 } else { 1.0 });
-    turn.playing = Some(node);
-    turn.completed = false;
     turn.ends = Some(now - f64::from(offset) + f64::from(clip.duration) * f64::from(replays));
     true
-}
-
-/// Advance the fade: λ, smoothstep of the window still to run (`0x714880`), weights the secondary
-/// and the primary takes `1 − λ`. At the window's end (`0x7147b1`) the secondary alone stops.
-fn advance_fade(player: &mut AnimationPlayer, turn: &mut Turn, now: f64) {
-    let Some(fade) = turn.fade else {
-        return;
-    };
-    let frac = fade_frac(&fade, now);
-    let lambda = if frac <= 0.0 {
-        turn.fade = None;
-        player.stop(fade.node);
-        0.0
-    } else {
-        let lambda = crate::creature_anim::select::blend_lambda(frac);
-        if let Some(out) = player.animation_mut(fade.node) {
-            out.set_weight(lambda);
-        }
-        lambda
-    };
-    if let Some(cur) = turn.playing.and_then(|n| player.animation_mut(n)) {
-        cur.set_weight(1.0 - lambda);
-    }
 }
 
 /// One frame of a copy's key bone: play the engine's arm if it is new, advance the fade, and
@@ -320,6 +227,7 @@ fn step_copy(
     arm: PaneArm,
     now: f64,
 ) -> Option<u64> {
+    turn.slot.set_clock(now);
     if turn.played != Some(arm.serial) {
         // A fresh copy's arm blends from the idle Stand its load armed (`0x71d5d0` → `0x70ebd0`).
         let offset = arm.offset_ms as f32 / 1000.0;
@@ -339,11 +247,11 @@ fn step_copy(
         }
         turn.played = Some(arm.serial);
     }
-    advance_fade(player, turn, now);
+    turn.slot.advance(player);
     let end = turn.ends?;
     (now >= end).then(|| {
         turn.ends = None;
-        turn.completed = true;
+        turn.slot.latch();
         arm.serial
     })
 }
@@ -1014,13 +922,13 @@ fn build(
     // The spawn plays the idle the load arms, Stand variation 0 (`0x70ebd0`); the engine's first
     // arm blends from it.
     pane.turn = Turn {
-        playing: rig.as_ref().and_then(|r| r.animations).and_then(|a| {
+        slot: BlendSlot::seeded(rig.as_ref().and_then(|r| r.animations).and_then(|a| {
             let stand = render
                 .anim_data
                 .as_deref()
                 .map_or(ANIM_STAND, |d| a.resolve(ANIM_STAND, &d.0).id);
             a.find(stand).map(|c| c.node)
-        }),
+        })),
         ..Turn::default()
     };
     booth.live = true;
