@@ -2,7 +2,9 @@
 //!
 //! The classifier `0x607710` runs on every unit with a loaded model and caches its verdict for
 //! 10 s ([`classify_breath`]). A cold area is `AreaTable.Flags & 0x1`, inherited one hop from the
-//! parent zone unless the leaf sets `0x2` (`0x67e9c0`); weather and indoors play no part. On `$BTH`
+//! parent zone unless the leaf sets `0x2` (`0x67e9c0`); weather plays no part. Indoors the area is
+//! the hit group's `WMOAreaTable` row's AreaTable id, else the whole-WMO row's, with no terrain
+//! fallback (`0x67ea0a`, `0x67ea23`): both 0 is no area and no breath (`0x67ea61`). On `$BTH`
 //! the handler `0x5ffbd0` runs `drunk ≥ 50 → underwater → cold → nothing`, exclusively
 //! ([`fire_breath`]), and the cold puff (`SpellVisualEffectName` 107, a 1.5 s one-shot) hangs at
 //! the mouth. `$BTH` is authored across the idle family and nothing latches it, so the puff
@@ -84,9 +86,16 @@ pub(super) fn classify_breath(
         if env.is_some_and(|e| now < e.stale_at) {
             continue;
         }
-        // The player's area includes the WMO interior claim; other units get the terrain's.
+        // The player's area reads the WMO interior claim's rows; other units get the terrain's.
         let area = if self_units.contains(entity) {
-            world.area()
+            match world.area_interior_rows() {
+                Some((_, group, default)) => [group, default]
+                    .into_iter()
+                    .flatten()
+                    .map(|row| row.area_table_id)
+                    .find(|&id| id != 0),
+                None => world.area(),
+            }
         } else {
             world.area_id_under(transform.translation())
         };
