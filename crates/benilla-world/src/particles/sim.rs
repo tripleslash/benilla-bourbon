@@ -126,7 +126,12 @@ fn drive_child(
             &mut child.accumulator,
             &mut child.gate_prev,
         );
-        while child.accumulator >= 1.0 && child.particles.len() < MAX_PARTICLES {
+        // `0x7b57d0`: `ftol(acc + 0.5)` births while slots last, each taken off the owed count,
+        // which can fall to −0.5 (`0x7b5861`-`0x7b5874`).
+        let owed = (child.accumulator + 0.5) as i32;
+        let mut born = 0;
+        while born < owed && child.particles.len() < MAX_PARTICLES {
+            born += 1;
             child.accumulator -= 1.0;
             let (base, dir) = emit_local(&child.def, now, &mut child.rng);
             let local = base - origin;
@@ -869,7 +874,12 @@ pub(super) fn simulate_particles(
             if burst > 0.0 && benilla_assets::trace::enabled() {
                 benilla_assets::trace::line("fx", &format!("burst n={burst} t={elapsed_s:.2}s"));
             }
-            while *accumulator >= 1.0 && particles.len() < MAX_PARTICLES {
+            // `0x7b57d0` (`0x7b56b0` on the 0x1000 path): `ftol(acc + 0.5)` births while slots
+            // last, each taken off the owed count, which can fall to −0.5 (`0x7b5861`-`0x7b5874`).
+            let owed = (*accumulator + 0.5) as i32;
+            let mut born = 0;
+            while born < owed && particles.len() < MAX_PARTICLES {
+                born += 1;
                 *accumulator -= 1.0;
                 let (base, dir) = emit_local(def, &now, rng);
                 let speed =
