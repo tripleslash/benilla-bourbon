@@ -672,6 +672,34 @@ pub(crate) fn item_use_route(
     }
 }
 
+/// The worn-item rungs of `CGItem::Use` (`0x5d8fc7`-`0x5d90fc`), after the charter arm: an
+/// equippable item with a use spell must be held by the active player (`ITEM_FIELD_CONTAINED`,
+/// else `ERR_MUST_EQUIP_ITEM`, 0x9d), not broken when unwrapped (`ITEM_FIELD_FLAGS` 0x8 clear,
+/// positive maximum durability and durability 0: `ERR_MUST_REPAIR_DURABILITY`, `0x5d9027`), and in
+/// one of the first 23 slots of its list (0x9d, `0x5d90fc`). Nothing is sent on a refusal.
+fn worn_use_refusal(
+    it: &ItemUse,
+    fields: Option<&ObjectFields>,
+    inventory_type: u32,
+    me: Option<u64>,
+) -> Option<&'static str> {
+    if it.use_spell.is_none() || inventory_type == 0 {
+        return None;
+    }
+    let fields = fields?;
+    if me.is_some() && fields.item_contained() != me {
+        return Some("ERR_MUST_EQUIP_ITEM");
+    }
+    let wrapped = fields.item_flags().unwrap_or(0) & 0x8 != 0;
+    if !wrapped
+        && fields.item_max_durability().unwrap_or(0) > 0
+        && fields.item_durability().unwrap_or(0) == 0
+    {
+        return Some("ERR_MUST_REPAIR_DURABILITY");
+    }
+    (it.bag_index == PLAYER_ARRAY && it.slot >= SLOT_PACK_FIRST).then_some("ERR_MUST_EQUIP_ITEM")
+}
+
 /// `CGItem::Use`'s first gate (`0x5d8d32`): a locked item is refused, silently. Of its callers the
 /// doll (`0x4c7af0`) and the bag (`0x4fa430`, behind `UseContainerItem`'s own `0x4fa1cd`) are
 /// refused in their Lua call and the bar (`0x4e607b`) against the locks its call read
@@ -733,7 +761,24 @@ pub(crate) fn send_item_use(
     let disarmed_hand = ctx.rel.self_store.and_then(|store| {
         crate::items::disarmed_equipment_slot(store, &ladder.objects, &ladder.items)
     });
-    match item_use_route(it, aura_cancels, disarmed_hand) {
+    let route = item_use_route(it, aura_cancels, disarmed_hand);
+    // The worn-item rungs sit below the quest and charter arms and above the disarm rung.
+    if !matches!(
+        route,
+        ItemUseRoute::QuestOffer { .. } | ItemUseRoute::ShowPetition { .. }
+    ) {
+        let inventory_type = ladder
+            .items
+            .template(it.entry, 0, Ask::Read)
+            .map_or(0, |t| t.inventory_type);
+        let fields = it.guid.and_then(|g| ladder.objects.object(g));
+        if let Some(key) = worn_use_refusal(&it, fields, inventory_type, ctx.self_guid) {
+            debug!("ui_items: item use refused — {key}");
+            ui_errors.push(crate::ui_action::UiError::key(key));
+            return false;
+        }
+    }
+    match route {
         ItemUseRoute::CantUseDisarmed => {
             debug!(
                 "ui_items: item use refused — that hand is disarmed (slot {})",
@@ -1087,6 +1132,60 @@ mod tests {
             "97 is past KEYRING_SLOT_END — not a position on this wire"
         );
         assert_eq!(wire_pos(KEYRING_CONTAINER, 0), None);
+    }
+
+    /// `0x5d8fc7`-`0x5d90fc`: an equippable use item must be the player's own, unbroken unless
+    /// wrapped, and among the first 23 slots; a non-equippable one and a spell-less one pass.
+    #[test]
+    fn a_worn_use_item_must_be_held_unbroken_and_in_the_first_23_slots() {
+        use benilla_protocol::ObjectFields;
+        let me = 0x0000_0000_0000_0042_u64;
+        let at = |slot: u8| ItemUse {
+            entry: 7,
+            guid: Some(0x4000_0000_0000_0001),
+            start_quest: 0,
+            bag_index: super::PLAYER_ARRAY,
+            slot,
+            spell_index: 0,
+            use_spell: Some(8690),
+            on_object: None,
+            is_charter: false,
+        };
+        // Contained by the player (field 8), flags 21, durability 46 of 47.
+        let item = |contained: u64, flags: u32, durability: u32| {
+            ObjectFields::from_pairs(&[
+                (8, contained as u32),
+                (9, (contained >> 32) as u32),
+                (21, flags),
+                (46, durability),
+                (47, 50),
+            ])
+        };
+        let refusal = |it: ItemUse, f: &ObjectFields, inv: u32| {
+            super::worn_use_refusal(&it, Some(f), inv, Some(me))
+        };
+        assert_eq!(refusal(at(7), &item(me, 0, 30), 8), None);
+        assert_eq!(
+            refusal(at(7), &item(0x4000_0000_0000_0009, 0, 30), 8),
+            Some("ERR_MUST_EQUIP_ITEM"),
+            "held in a bag"
+        );
+        assert_eq!(
+            refusal(at(7), &item(me, 0, 0), 8),
+            Some("ERR_MUST_REPAIR_DURABILITY")
+        );
+        assert_eq!(refusal(at(7), &item(me, 0x8, 0), 8), None, "wrapped");
+        assert_eq!(
+            refusal(at(23), &item(me, 0, 30), 8),
+            Some("ERR_MUST_EQUIP_ITEM"),
+            "the backpack"
+        );
+        assert_eq!(refusal(at(23), &item(me, 0, 0), 0), None, "not equippable");
+        let spellless = ItemUse {
+            use_spell: None,
+            ..at(23)
+        };
+        assert_eq!(refusal(spellless, &item(me, 0, 0), 8), None);
     }
 
     /// Rung 15 turns on the worn position alone, and beats the cast tail below it.
