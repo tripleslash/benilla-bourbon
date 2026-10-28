@@ -543,6 +543,10 @@ pub enum SessionEvent {
     /// `SMSG_GAMEOBJECT_DESPAWN_ANIM`: the reference arms substate 12 (AnimationData 157 Despawn)
     /// and keeps the object alive through the same-tick `SMSG_DESTROY_OBJECT` while it plays.
     GameObjectDespawnAnim { guid: u64 },
+    /// `SMSG_GAMEOBJECT_RESET_STATE` (`0x6e9790`): the object's animation state re-applied from its
+    /// descriptor's `GAMEOBJECT_STATE` (`0x5f8c00` → `0x5f8bd0`), undoing the client's own
+    /// predictions.
+    GameObjectResetState { guid: u64 },
     /// `SMSG_GAMEOBJECT_PAGETEXT`: the reference resolves the GameObject and opens the item-text
     /// reader on it (`0x5f88c0` → `0x4e32e0(guid, 0)`), as a right-click on a TEXT object does.
     GameObjectPageText { guid: u64 },

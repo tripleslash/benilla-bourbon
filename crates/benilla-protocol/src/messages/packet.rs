@@ -395,6 +395,11 @@ pub enum ServerPacket {
     GameObjectDespawnAnim {
         guid: u64,
     },
+    /// `SMSG_GAMEOBJECT_RESET_STATE`: a bare `u64` guid; the client re-applies the descriptor's
+    /// `GAMEOBJECT_STATE` (`0x6e9790`).
+    GameObjectResetState {
+        guid: u64,
+    },
     /// `SMSG_GAMEOBJECT_PAGETEXT`: a bare `u64` guid, the object whose page the reader opens on.
     GameObjectPageText {
         guid: u64,
@@ -1412,6 +1417,7 @@ impl ServerPacket {
             ServerPacket::PageTextQueryResponse { .. } => "SMSG_PAGE_TEXT_QUERY_RESPONSE".into(),
             ServerPacket::GameObjectCustomAnim { .. } => "SMSG_GAMEOBJECT_CUSTOM_ANIM".into(),
             ServerPacket::GameObjectDespawnAnim { .. } => "SMSG_GAMEOBJECT_DESPAWN_ANIM".into(),
+            ServerPacket::GameObjectResetState { .. } => "SMSG_GAMEOBJECT_RESET_STATE".into(),
             ServerPacket::GameObjectPageText { .. } => "SMSG_GAMEOBJECT_PAGETEXT".into(),
             ServerPacket::ReadItemOk { .. } => "SMSG_READ_ITEM_OK".into(),
             ServerPacket::ReadItemFailed { .. } => "SMSG_READ_ITEM_FAILED".into(),

@@ -35,15 +35,23 @@ pub(crate) use update::{release_unheld, Listed, ReleasePending, Released};
 /// `SMSG_GAMEOBJECT_CUSTOM_ANIM` and `SMSG_GAMEOBJECT_DESPAWN_ANIM` (`0x5f8930`, `0x5f8990`): an
 /// event on the object's one-shot channel (`0x5f8c50`), armed at the packet so the hold its play
 /// takes is there for a release in the same tick; vmangos sends `SMSG_DESTROY_OBJECT` right after
-/// the despawn. An object whose model has no state machine yet drops the event.
+/// the despawn. An object whose model has no state machine yet holds the newest event for its
+/// load ([`crate::go_anim::HeldOneShot`], `0x5f8c62`).
 fn gameobject_anim_event(
     guid: u64,
     index: &GuidIndex,
     go_anims: &mut Query<&mut crate::go_anim::GoAnim>,
-    arm: impl FnOnce(&mut crate::go_anim::GoAnim),
+    commands: &mut Commands,
+    anim: u16,
 ) {
-    if let Some(mut go) = index.0.get(&guid).and_then(|&e| go_anims.get_mut(e).ok()) {
-        arm(&mut go);
+    let Some(&e) = index.0.get(&guid) else {
+        return;
+    };
+    match go_anims.get_mut(e) {
+        Ok(mut go) => go.arm_one_shot(anim),
+        Err(_) => {
+            commands.entity(e).insert(crate::go_anim::HeldOneShot(anim));
+        }
     }
 }
 
@@ -63,6 +71,7 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::GameObjectUnknown, on_gameobject_unknown)
         .net_handler(K::GameObjectCustomAnim, on_gameobject_anim)
         .net_handler(K::GameObjectDespawnAnim, on_gameobject_anim)
+        .net_handler(K::GameObjectResetState, on_gameobject_anim)
         .net_handler(K::SplineMoveMode, on_spline_move_mode)
         .net_handler(K::ForceSpeedChange, on_speed)
         .net_handler(K::SpeedChanged, on_speed);
@@ -535,11 +544,31 @@ fn on_gameobject_anim(In(ev): In<SessionEvent>, mut sc: Scene) {
     match ev {
         SessionEvent::GameObjectCustomAnim { guid, anim_id } => {
             debug!("net: gameobject {guid:#x} custom anim {anim_id}");
-            gameobject_anim_event(guid, &sc.index, &mut sc.go_anims, |go| go.custom(anim_id));
+            // Rejected from 4 on (`0x5f8971`), before the channel.
+            if let Some(anim) = crate::go_anim::one_shot_for_custom(anim_id) {
+                gameobject_anim_event(guid, &sc.index, &mut sc.go_anims, &mut sc.commands, anim);
+            }
         }
         SessionEvent::GameObjectDespawnAnim { guid } => {
             debug!("net: gameobject {guid:#x} despawn anim");
-            gameobject_anim_event(guid, &sc.index, &mut sc.go_anims, |go| go.despawn());
+            gameobject_anim_event(
+                guid,
+                &sc.index,
+                &mut sc.go_anims,
+                &mut sc.commands,
+                crate::go_anim::ANIM_DESPAWN,
+            );
+        }
+        // `0x6e9790`: the game object (`0x468460`, mask 0x20) takes its descriptor's state again
+        // (`0x5f8c00` â†’ `0x5f8bd0`), undoing the open-lock and loot-release predictions.
+        SessionEvent::GameObjectResetState { guid } => {
+            debug!("net: gameobject {guid:#x} reset state");
+            if let Some(&e) = sc.index.0.get(&guid) {
+                let descriptor = sc.stores.get(e).ok().and_then(|s| s.0.gameobject_state());
+                if let Ok(mut go) = sc.go_anims.get_mut(e) {
+                    go.reset_state(descriptor);
+                }
+            }
         }
         _ => {}
     }

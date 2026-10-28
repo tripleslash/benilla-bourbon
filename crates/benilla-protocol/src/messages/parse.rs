@@ -1329,6 +1329,9 @@ fn parse_server_body(
             let guid = gameobject::read_gameobject_despawn_anim(&mut r)?;
             ServerPacket::GameObjectDespawnAnim { guid }
         }
+        opcode::SMSG_GAMEOBJECT_RESET_STATE => ServerPacket::GameObjectResetState {
+            guid: gameobject::read_gameobject_reset_state(&mut r)?,
+        },
         opcode::SMSG_GAMEOBJECT_PAGETEXT => ServerPacket::GameObjectPageText {
             guid: gameobject::read_gameobject_page_text(&mut r)?,
         },

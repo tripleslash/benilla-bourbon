@@ -34,7 +34,7 @@ const GO_STATE_READY: u32 = 1;
 
 /// `AnimationData.dbc` 157 Despawn, the one-shot channel's code 6 (`0x80b0e0[6]` = substate 12,
 /// `0x8607e4[12]` = 157): the object plays it once, then goes.
-const ANIM_DESPAWN: u16 = 157;
+pub(crate) const ANIM_DESPAWN: u16 = 157;
 
 /// An animated GameObject's client-side state, tagged by [`crate::entities::attach`] in place of a
 /// creature's `AnimDriver`, and driven by [`drive_go_anim`].
@@ -141,22 +141,27 @@ impl GoAnim {
         self.state = Some(state);
     }
 
-    /// `SMSG_GAMEOBJECT_CUSTOM_ANIM` (`0x5f8930`): Custom `n` on the one-shot channel (`0x5f8c50`),
-    /// rejected from 4 on (`0x5f8971`); the bobber's splash is `n` 0.
-    pub(crate) fn custom(&mut self, anim_id: u32) {
-        if let Some(id) = custom_anim_id(anim_id) {
-            self.one_shot = Some(id);
-        }
-    }
-
-    /// `SMSG_GAMEOBJECT_DESPAWN_ANIM` (`0x5f8990`): Despawn on the one-shot channel, code 6.
-    pub(crate) fn despawn(&mut self) {
-        self.one_shot = Some(ANIM_DESPAWN);
+    /// An event on the one-shot channel (`0x5f8c50`): Custom `n` from `SMSG_GAMEOBJECT_CUSTOM_ANIM`
+    /// ([`one_shot_for_custom`]) or Despawn from `SMSG_GAMEOBJECT_DESPAWN_ANIM` ([`ANIM_DESPAWN`]).
+    pub(crate) fn arm_one_shot(&mut self, anim: u16) {
+        self.one_shot = Some(anim);
     }
 }
 
 #[cfg(test)]
 impl GoAnim {
+    /// `SMSG_GAMEOBJECT_CUSTOM_ANIM`'s arm: Custom `n`, rejected from 4 on (`0x5f8971`).
+    pub(crate) fn custom(&mut self, anim_id: u32) {
+        if let Some(anim) = one_shot_for_custom(anim_id) {
+            self.arm_one_shot(anim);
+        }
+    }
+
+    /// `SMSG_GAMEOBJECT_DESPAWN_ANIM`'s arm: Despawn, code 6.
+    pub(crate) fn despawn(&mut self) {
+        self.arm_one_shot(ANIM_DESPAWN);
+    }
+
     /// A machine settled on Closed and playing Despawn, which holds its object.
     pub(crate) fn holding() -> Self {
         Self {
@@ -398,6 +403,23 @@ fn resolve(prev: Option<u32>, cur: u32) -> Option<Play> {
     }
 }
 
+/// A one-shot event that arrived before the model had a state machine: with no loaded model
+/// `0x5f8c50` keeps the newest at `+0x280` (`0x5f8c62`), a later one replacing it, and the
+/// model-loaded step plays it (`0x5f7ad0`-`0x5f7add`).
+#[derive(Component)]
+pub(crate) struct HeldOneShot(pub(crate) u16);
+
+/// The model-loaded step's play of a [`HeldOneShot`] (`0x5f7ad0`-`0x5f7add`).
+fn arm_held_one_shot(
+    mut commands: Commands,
+    mut gos: Query<(Entity, &mut GoAnim, &HeldOneShot), Added<GoAnim>>,
+) {
+    for (e, mut anim, held) in &mut gos {
+        anim.arm_one_shot(held.0);
+        commands.entity(e).remove::<HeldOneShot>();
+    }
+}
+
 /// Caller 1, the wire (`0x5f89e0`): its edges store the state in the notify pass
 /// ([`GoAnim::set_wire_state`]); a machine the model brings later seeds from the descriptor.
 fn seed_wire_go_state(mut gos: Query<(&ObjectStore, &mut GoAnim), Added<GoAnim>>) {
@@ -434,7 +456,7 @@ fn open_go_lid(
 
 /// The wire Custom index to its `AnimationData` id (`153 + n`); the reference handler (`0x5f8971`)
 /// rejects `anim_id >= 4` and plays substate `8 + n`.
-fn custom_anim_id(anim_id: u32) -> Option<u16> {
+pub(crate) fn one_shot_for_custom(anim_id: u32) -> Option<u16> {
     (anim_id < 4).then(|| 153 + anim_id as u16)
 }
 
@@ -786,6 +808,7 @@ pub(crate) fn plugin(app: &mut App) {
             (
                 (
                     seed_wire_go_state,
+                    arm_held_one_shot,
                     open_go_lid,
                     // After the selection writers, whose teardown can close the loot.
                     close_go_lid.after(crate::target::TargetUpdate),
@@ -891,12 +914,12 @@ mod tests {
     /// sequence `G_FishingBobber.m2` authors.
     #[test]
     fn custom_anim_maps_the_wire_index_and_rejects_past_3() {
-        assert_eq!(custom_anim_id(0), Some(153)); // Custom0, the bobber splash
-        assert_eq!(custom_anim_id(1), Some(154));
-        assert_eq!(custom_anim_id(2), Some(155));
-        assert_eq!(custom_anim_id(3), Some(156));
-        assert_eq!(custom_anim_id(4), None);
-        assert_eq!(custom_anim_id(u32::MAX), None);
+        assert_eq!(one_shot_for_custom(0), Some(153)); // Custom0, the bobber splash
+        assert_eq!(one_shot_for_custom(1), Some(154));
+        assert_eq!(one_shot_for_custom(2), Some(155));
+        assert_eq!(one_shot_for_custom(3), Some(156));
+        assert_eq!(one_shot_for_custom(4), None);
+        assert_eq!(one_shot_for_custom(u32::MAX), None);
     }
 
     /// The delta [`step_clock`] uses next frame: with `TimePlugin` live a stalled frame would run

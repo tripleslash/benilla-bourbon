@@ -74,6 +74,11 @@ pub(super) fn read_gameobject_despawn_anim(r: &mut &[u8]) -> io::Result<u64> {
     read_u64_le(r)
 }
 
+/// Read `SMSG_GAMEOBJECT_RESET_STATE`, only the guid (`0x6e9790`; vmangos `GameObject.cpp:2460`).
+pub(super) fn read_gameobject_reset_state(r: &mut &[u8]) -> io::Result<u64> {
+    read_u64_le(r)
+}
+
 /// Read `SMSG_GAMEOBJECT_PAGETEXT`, only the guid (`GameObject.cpp:1549-1554`); the 1.12 client
 /// reads it with `0x4190b0` (`0x5f88e0`).
 pub(super) fn read_gameobject_page_text(r: &mut &[u8]) -> io::Result<u64> {
