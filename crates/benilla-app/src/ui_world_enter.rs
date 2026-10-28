@@ -138,45 +138,12 @@ fn fire(In(until): In<Until>, world: &mut World) {
         else {
             return;
         };
-        if waits_for_spell_views(world) {
-            return;
-        }
         world.resource_mut::<ArrivalLane>().0.pop_front();
         let ((), moved) = crate::lanes::firing(at, || run(world, entry));
         if moved {
             return;
         }
     }
-}
-
-/// How long an item may wait for the book's spell views ([`waits_for_spell_views`]).
-const WORLD_ENTER_VIEW_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// When the lane's head first waited on the book's spell views, cleared as it fires.
-#[derive(Resource, Default)]
-struct SpellViewWait(Option<bevy::platform::time::Instant>);
-
-/// wenilla carry: **an arrival or a reload waits for the book's spell views, a few frames at
-/// most.** The reference builds a spell tooltip whole at the call (`0x52e610`), so an addon that
-/// scans the book with `SetSpell` at `PLAYER_ENTERING_WORLD` reads every line; here each view is
-/// pushed a frame after the book is known (`ui_tooltip::feed_spell_tooltips`), so that scan read
-/// the name alone and CallOfElements' heal scan raised on a nil `TextLeft2` (the owner's report,
-/// 2026-10-20). The head holds while a view, or a tool or reagent name one needs, is missing, for
-/// at most [`WORLD_ENTER_VIEW_WAIT`]; a lane that fires nothing ends the drain, so every item
-/// stamped after it waits with it and the order stands.
-fn waits_for_spell_views(world: &mut World) -> bool {
-    let ready = world
-        .get_non_send::<benilla_ui::script::UiScript>()
-        .is_none_or(|script| script.book_spell_views_ready());
-    let mut wait = world.get_resource_or_init::<SpellViewWait>();
-    let since = *wait
-        .0
-        .get_or_insert_with(bevy::platform::time::Instant::now);
-    if ready || since.elapsed() >= WORLD_ENTER_VIEW_WAIT {
-        wait.0 = None;
-        return false;
-    }
-    true
 }
 
 /// One item's sequence.
@@ -397,8 +364,8 @@ fn replay_book(world: &mut World) {
 }
 
 /// `0x6e6ca0` at the arrival's end (`0x5debcc`): the spell modifiers' class family, `ChrClasses`
-/// field 15 of our class, byte 1 of `UNIT_FIELD_BYTES_0`. Written only on a move, as the tooltip
-/// feed diffs the tables whenever they are marked changed.
+/// field 15 of our class, byte 1 of `UNIT_FIELD_BYTES_0`. Written only on a move, as the
+/// item-tooltip feed rebuilds whenever the tables are marked changed.
 fn class_family(
     me: Query<&ObjectStore, With<SelfPlayer>>,
     mods: Option<ResMut<crate::spell::SpellModifiers>>,

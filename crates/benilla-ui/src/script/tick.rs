@@ -413,8 +413,8 @@ impl super::UiScript {
         self.advance_clock_and_events(elapsed);
     }
 
-    /// The `GetTime()` clock, then the events queued since the last tick and the item tooltips the
-    /// caches answered (`0x52e530`), all ahead of the tick's `OnUpdate`.
+    /// The `GetTime()` clock, then the events queued since the last tick and the item and spell
+    /// tooltips the caches answered (`0x52e530`, `0x52f820`), all ahead of the tick's `OnUpdate`.
     fn advance_clock_and_events(&mut self, elapsed: f32) {
         if self.model_ref().nameplates.paint_pending() {
             self.model_mut().nameplates.begin_update();
@@ -429,6 +429,9 @@ impl super::UiScript {
             self.fire_event(&event, args);
         }
         for e in super::tooltip_item::build::answer_item_caches(&self.lua) {
+            self.push_error(e);
+        }
+        for e in super::tooltip_spell::answer_spell_items(&self.lua) {
             self.push_error(e);
         }
     }

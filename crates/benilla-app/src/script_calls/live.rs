@@ -139,6 +139,14 @@ live_reads! {
         mail: crate::ui_mail::MailLive<'static, 'static>,
         /// The auction rows' records, the browse throttle and the house's deposit rate.
         auction: crate::ui_auction::AuctionLive<'static, 'static>,
+        /// The loot window's cells, its rows' records and the master-loot candidates' names.
+        loot: crate::ui_loot::LootLive<'static, 'static>,
+        /// The spell and aura tooltip views, built at the setter's call; absent in a harness
+        /// without the catalogs.
+        tooltips: Option<crate::ui_tooltip::TooltipLive<'static, 'static>>,
+        /// The targeting word's halves and `SpellCanTargetUnit`'s unit leg; absent in a harness
+        /// without the unit checks' inputs.
+        targeting: Option<crate::spell::targeting::TargetingLive<'static, 'static>>,
         #[cfg(test)]
         probe: tests::ProbeLive<'static>,
     }
