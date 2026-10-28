@@ -152,10 +152,26 @@ fn fire(script: &mut UiScript, sink: &mut MessageSink, event: QuestGiverEvent) {
         QuestGiverEvent::Fanfare => script.queue_sound_kit("QUESTCOMPLETED"),
         QuestGiverEvent::Parked { session, key } => {
             if script.session() == session {
+                REPLAYING_CLOSE.set(true);
                 script.run_parked(key);
+                REPLAYING_CLOSE.set(false);
             }
         }
     }
+}
+
+thread_local! {
+    /// A close core's parked signals are firing: the core zeroed the cell where it ran.
+    static REPLAYING_CLOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the signals firing now are a close core's, parked behind the lane: a verb their
+/// listeners call finds the cell as that core left it, zero (`0x501201`), though a panel packet
+/// after it has opened the window again since. The stock frame's `QUEST_FINISHED` hides it, whose
+/// `OnHide` calls `CloseQuest()` (`QuestFrame.lua:293`): in the reference that close finds the cell
+/// zero (`0x501149`) and leaves the next panel's giver standing.
+pub(super) fn replaying_close() -> bool {
+    REPLAYING_CLOSE.get()
 }
 
 /// Run the close `core` behind the lane ([`crate::lanes::behind`]), so a close never fires ahead

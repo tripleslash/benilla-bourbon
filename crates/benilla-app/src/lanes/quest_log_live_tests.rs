@@ -705,3 +705,55 @@ fn the_givers_name_landing_fires_no_quest_event() {
     crate::lanes::fire_in_order(c.app.world_mut());
     assert!(c.seen().is_empty(), "a landed name fires nothing");
 }
+
+/// A turn-in whose quest names no next step closes the window (`0x5dc6e5`), and the server's
+/// follow-up detail in the same frame opens it again: the stock frame's `QUEST_FINISHED` hides it,
+/// whose `OnHide` calls `CloseQuest()` (`QuestFrame.lua:293`). In the reference that close finds
+/// the cell the turn-in zeroed (`0x501149`) and does nothing, so the follow-up's accept still
+/// goes to its giver.
+#[test]
+fn a_follow_ups_detail_in_the_turn_ins_frame_survives_the_frames_close() {
+    let mut c = client();
+    c.eval::<()>(
+        false,
+        r#"
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("QUEST_DETAIL")
+        f:RegisterEvent("QUEST_FINISHED")
+        f:SetScript("OnEvent", function()
+            table.insert(Seen, event)
+            if event == "QUEST_FINISHED" then CloseQuest() end
+        end)
+        "#,
+    );
+    crate::net::handlers::dispatch(c.app.world_mut(), vec![progress(5)]);
+    crate::lanes::fire_in_order(c.app.world_mut());
+    c.seen();
+    let _ = c._sent.try_iter().count();
+    crate::net::handlers::dispatch(
+        c.app.world_mut(),
+        vec![
+            SessionEvent::QuestComplete(benilla_protocol::messages::QuestComplete {
+                quest_id: QUEST,
+                xp: 0,
+                money: 0,
+                items: Vec::new(),
+            }),
+            detail(),
+        ],
+    );
+    crate::lanes::fire_in_order(c.app.world_mut());
+    assert_eq!(c.seen(), ["QUEST_FINISHED", "QUEST_DETAIL"]);
+    c.eval::<()>(true, "AcceptQuest()");
+    let sent: Vec<_> = c._sent.try_iter().collect();
+    assert!(
+        sent.iter().any(|s| matches!(
+            s,
+            ClientCommand::QuestgiverAccept {
+                npc: GIVER,
+                quest: 51
+            }
+        )),
+        "the follow-up's accept goes to its giver: {sent:?}"
+    );
+}
