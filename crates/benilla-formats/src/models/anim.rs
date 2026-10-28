@@ -503,8 +503,30 @@ impl<T: super::key_anim::Lerp + PartialEq> ChannelTrack<T> {
         if last_ms < end && at(end).is_some_and(|t| t != last_v) {
             out.push((rebase(end), at(end).unwrap()));
         }
+        if self.step {
+            hold_steps(&mut out);
+        }
         out
     }
+}
+
+/// How far ahead of the next key a step track's hold key sits, in seconds.
+const STEP_HOLD: f32 = 1.0e-4;
+
+/// A step track holds each key until the next (`0x714fe6`-`0x714fed`, `0x713ea0` for rotation):
+/// a hold key with the previous value just ahead of each change, so the clip's interpolating curve
+/// cannot glide between them.
+fn hold_steps<T: Copy + PartialEq>(keys: &mut Vec<(f32, T)>) {
+    let mut held = Vec::with_capacity(keys.len() * 2);
+    for pair in keys.windows(2) {
+        let ((t0, v0), (t1, v1)) = (pair[0], pair[1]);
+        held.push((t0, v0));
+        if v1 != v0 && t1 - t0 > STEP_HOLD {
+            held.push((t1 - STEP_HOLD, v0));
+        }
+    }
+    held.extend(keys.last().copied());
+    *keys = held;
 }
 
 /// Each bone's rotation, `[x, y, z, w]`, as the reference samples it at the HandsClosed frame
@@ -810,6 +832,17 @@ pub fn parse_m2_global_sequence_bones(b: &[u8]) -> Vec<GlobalSeqBone> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `0x714fe6`: a step track holds each key until the next; equal neighbours need no hold.
+    #[test]
+    fn a_step_track_holds_each_key_until_the_next() {
+        let mut keys = vec![(0.0, 1.0_f32), (0.5, 1.0), (1.0, 3.0)];
+        hold_steps(&mut keys);
+        assert_eq!(
+            keys,
+            vec![(0.0, 1.0), (0.5, 1.0), (1.0 - STEP_HOLD, 1.0), (1.0, 3.0)]
+        );
+    }
 
     #[test]
     fn hostile_event_and_key_counts_reserve_only_what_the_file_holds() {
