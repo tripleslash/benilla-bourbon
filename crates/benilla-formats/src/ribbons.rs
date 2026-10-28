@@ -79,6 +79,10 @@ pub struct RibbonEmitterDef {
     pub blend: ParticleBlend,
     /// The raw blend behind the lossy [`Self::blend`] fold, when the material resolves.
     pub blend_mode: Option<u16>,
+    /// The material's render flag `0x2`, unfogged: the load inverts flags 0-4 into the emitter's
+    /// material word (`0x70f6ce`-`0x70f74d`) and the draw sets fog state `0xf` from it
+    /// (`0x7b81f0`-`0x7b8269`), so such a trail draws with fog off. False when unresolved.
+    pub unfogged: bool,
     /// Trail tint (colorTrack, RGB 0..1, keyed on the clip clock; constant white when unkeyed).
     pub color: ValueTrack<[f32; 3]>,
     /// Trail opacity (alphaTrack, int16 / 32767; constant 1.0 when unkeyed).
@@ -232,15 +236,22 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
                 .then(|| le_u16(bytes, ofs) as usize)
                 .and_then(|ti| textures.get(ti).cloned().flatten())
         };
-        // materialIndices[0] → render-flags entry → blend u16.
-        let blend_mode = {
+        // materialIndices[0] → render-flags entry → flags u16, blend u16.
+        let material = {
             let n = le_u32(bytes, e + 0x1c);
             let ofs = le_u32(bytes, e + 0x20) as usize;
             (n > 0 && ofs + 2 <= bytes.len())
                 .then(|| le_u16(bytes, ofs) as usize)
                 .filter(|&m| m < rf_count && rf_base + m * 4 + 4 <= bytes.len())
-                .map(|m| le_u16(bytes, rf_base + m * 4 + 2))
+                .map(|m| {
+                    (
+                        le_u16(bytes, rf_base + m * 4),
+                        le_u16(bytes, rf_base + m * 4 + 2),
+                    )
+                })
         };
+        let blend_mode = material.map(|(_, blend)| blend);
+        let unfogged = material.is_some_and(|(flags, _)| flags & 0x2 != 0);
         // Shipped ribbons author Add (4) 527 times, Alpha (2) 51 and Mod2x (6) 12
         // (`benilla-extract ribbonscan`). `ParticleBlend` has no Mod2x, so those 12 fold to
         // `Opaque` and draw unblended, where the reference multiplies.
@@ -261,6 +272,7 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
             texture,
             blend,
             blend_mode,
+            unfogged,
             color: track_keys_with(bytes, e + 0x24, [1.0; 3], band, 12, |b, o| {
                 [le_f32(b, o), le_f32(b, o + 4), le_f32(b, o + 8)]
             }),

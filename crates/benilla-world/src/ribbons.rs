@@ -494,9 +494,14 @@ pub(crate) fn simulate_ribbons(
                 cam,
                 texture: texture.id(),
                 blend: def.blend.into(),
-                // The M2 batch state's per-blend fog colour (`0x70baf0`): additive trails fog
-                // toward black, the rest toward the scene colour. No ribbon has the unfogged flag.
-                fog: EffectFog::for_blend(0, def.blend),
+                // The material's unfogged flag turns fog off (`0x7b81f0`-`0x7b8269`); otherwise the
+                // M2 batch state's per-blend fog colour (`0x70baf0`): additive trails fog toward
+                // black, the rest toward the scene colour.
+                fog: if def.unfogged {
+                    EffectFog::Off
+                } else {
+                    EffectFog::for_blend(0, def.blend)
+                },
                 // Unlit: the ribbon record has no flag word for the particles' unlit bit, and the
                 // reference's ribbon batch lighting is untraced.
                 lighting: crate::particles::buffer::EffectLighting::None,
