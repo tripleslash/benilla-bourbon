@@ -251,11 +251,21 @@ pub(super) fn stream_self_movement(
     // The mouse-look pitch set, drained after the facing set its hand-off queued first
     // (`0x510582`, `0x51058e`). `MSG_MOVE_SET_PITCH` is class 1, sent only while swimming
     // (`0x60e0d4`), under the same throttle.
-    if std::mem::take(&mut player.set_pitch_due)
-        && swimming
-        && facing_set_passes(player, facing, swimming)
-    {
+    let pitch_set = std::mem::take(&mut player.set_pitch_due);
+    if pitch_set && swimming && facing_set_passes(player, facing, swimming) {
         send_move!(MoveKind::SetPitch);
+    }
+    // `SetPitch` under the floor for a water walker that is not swimming and has none of `0x200f`
+    // set starts the fall and returns 1 (`0x7c6fb3`-`0x7c6fd3`), and the drain builds a heartbeat
+    // for it (`0x615bf9`-`0x615c1b`): the sink goes out the frame it starts.
+    if pitch_set
+        && !out.sent
+        && !swimming
+        && player.modes.water_walking
+        && player.move_flags & (move_flags::ANY_MOVE | move_flags::FALLING) == 0
+        && player.mover_pitch <= super::WATER_WALK_PITCH_FLOOR
+    {
+        send_move!(MoveKind::Heartbeat);
     }
     // Boarding or leaving a deck has no opcode of its own, so a heartbeat carries the flip that
     // frame if nothing else went out.
