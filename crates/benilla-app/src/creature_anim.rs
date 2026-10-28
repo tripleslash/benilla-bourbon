@@ -874,8 +874,8 @@ mod env_damage;
 pub(crate) mod net;
 pub(crate) mod spell_visual;
 use blood::{blood_spurts, load_blood_tables};
+pub(crate) use env_damage::{fall_height, EnvDamageTable, HardLanding, HARD_LANDING_DESCENT};
 use env_damage::{hard_landing_dust, load_env_damage_table};
-pub(crate) use env_damage::{EnvDamageTable, HardLanding, HARD_LANDING_DESCENT};
 use spell_visual::{
     arm_aura_state_fx, arm_level_up_fx, arm_loot_fx, arm_morph_latch, arm_mount_poof_fx,
     load_spell_visuals, replay_morph_kit, route_cast_visuals, MorphLatch,

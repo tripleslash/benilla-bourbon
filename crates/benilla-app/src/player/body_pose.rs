@@ -28,11 +28,16 @@ pub(super) fn drive(
             crate::creature_anim::swim_body_rotation(player.model_yaw, move_flags_now, swim_pitch);
         // The landing predictor (`0x602d00`) plays a hard landing's grunt and dust this frame;
         // the server's `SMSG_ENVIRONMENTALDAMAGELOG` dust follows a round trip later, as in the
-        // reference. `fall_start_y` still holds this arc's launch height.
+        // reference. `fall_start_y` still holds this arc's launch height and `launch_vz` its
+        // launch speed, whose climb the height adds (`0x7c60c0`).
         if landed {
             hard_landing.write(crate::creature_anim::HardLanding {
                 entity,
-                descent: player.fall_start_y - player.pos.y,
+                descent: crate::creature_anim::fall_height(
+                    player.fall_start_y,
+                    player.pos.y,
+                    player.launch_vz,
+                ),
             });
         }
         // `0x50f880` picks the swim pivot preset off the camera target's own SWIMMING bit, read

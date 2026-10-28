@@ -34,6 +34,7 @@ fn at(z: f32) -> FallHeight {
     FallHeight {
         world_z: z,
         aboard: None,
+        launch_v: 0.0,
     }
 }
 
@@ -43,9 +44,10 @@ fn remote_fall_arc_reports_height_only_on_the_landing_edge() {
         fall_arc_step(false, true, None, at(100.0)),
         (Some(at(100.0)), None)
     );
+    // Each falling packet's re-derived start replaces the last (`0x7c6490`).
     assert_eq!(
-        fall_arc_step(true, true, Some(at(100.0)), at(80.0)),
-        (Some(at(100.0)), None)
+        fall_arc_step(true, true, Some(at(100.0)), at(104.0)),
+        (Some(at(104.0)), None)
     );
     assert_eq!(
         fall_arc_step(true, false, Some(at(100.0)), at(70.0)),
@@ -64,6 +66,7 @@ fn a_remote_jump_on_a_descending_lift_lands_with_no_fall_height() {
     let aboard = |world_z: f32| FallHeight {
         world_z,
         aboard: Some((LIFT, 0.4)),
+        launch_v: 0.0,
     };
     let (start, _) = fall_arc_step(false, true, None, aboard(100.0));
     let (_, descent) = fall_arc_step(true, false, start, aboard(100.0 - 28.95 * 0.825));
@@ -78,6 +81,20 @@ fn a_remote_jump_on_a_descending_lift_lands_with_no_fall_height() {
         fall_arc_step(true, false, start, aboard(100.0)),
         (None, Some(20.0))
     );
+}
+
+/// `0x7c60c0`: a jump's fall height counts from its apex, the launch's climb `v²/(2g)` added, so a
+/// land jump (`zspeed` −7.955547) off a 12 yd ledge passes the 13 yd gate it would miss from the
+/// launch.
+#[test]
+fn a_remote_jump_measures_its_fall_from_the_apex() {
+    let jump = FallHeight {
+        launch_v: -7.955_547,
+        ..at(112.0)
+    };
+    let (_, descent) = fall_arc_step(true, false, Some(jump), at(100.0));
+    let descent = descent.unwrap();
+    assert!((descent - 13.640_41).abs() < 1e-3, "{descent}");
 }
 
 fn motion(flags: u32, orientation: f32) -> RemoteMotion {

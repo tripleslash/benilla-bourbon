@@ -49,25 +49,66 @@ pub(crate) struct FallHeight {
     pub(crate) world_z: f32,
     /// The transport's guid and the deck-local z.
     pub(crate) aboard: Option<(u64, f32)>,
+    /// The launch's vertical speed, the wire's down-positive `+0xa0` (`jump.zspeed`), 0 for a
+    /// step-off; a landing pose's is unread.
+    pub(crate) launch_v: f32,
 }
 
 impl FallHeight {
+    /// A landing packet's pose.
     fn of(ev: &RelayMove) -> Self {
         Self {
             world_z: ev.position[2],
             aboard: ev.transport.as_ref().map(|t| (t.guid, t.pos.z)),
+            launch_v: 0.0,
         }
     }
 
-    /// The drop from `self` down to `landing`. Aboard one transport at both ends it is the deck
-    /// frame's, where a rider's `+0x7c` lives (`0x7c6900` re-seats it from the local pose), so a
-    /// moving lift adds nothing. Otherwise it is the world's: a takeoff aboard reads the deck at
-    /// takeoff, where the reference's leave (`0x7c6790`) maps `+0x7c` by the deck at the leave.
-    fn drop_to(self, landing: Self) -> f32 {
-        match (self.aboard, landing.aboard) {
-            (Some((from, start)), Some((to, end))) if from == to => start - end,
-            _ => self.world_z - landing.world_z,
+    /// A falling packet's fall start, re-derived from its own fall time and launch speed:
+    /// `0x7c6490` stores them (`+0x78`, `+0xa0`) and sets `+0x7c` to `0x7c5f30(+0x78)`, the height
+    /// plus the drop the arc has run, in each frame the packet carries. So a mover first seen
+    /// mid-fall still gets the true start of its fall.
+    fn start_of(ev: &RelayMove) -> Self {
+        let launch_v = ev.jump.map_or(0.0, |j| j.zspeed);
+        let terminal = if ev.flags & move_flags::SAFE_FALL != 0 {
+            crate::player::FEATHER_TERMINAL_VELOCITY
+        } else {
+            TERMINAL_VELOCITY
+        };
+        let drop = fall_drop(launch_v, ev.fall_time, terminal);
+        let up = |z: f32| (f64::from(z) + drop) as f32;
+        Self {
+            world_z: up(ev.position[2]),
+            aboard: ev.transport.as_ref().map(|t| (t.guid, up(t.pos.z))),
+            launch_v,
         }
+    }
+
+    /// The fall height from `self` down to `landing` (`0x7c60c0`, with the launch's climb to its
+    /// apex). Aboard one transport at both ends it is the deck frame's, where a rider's `+0x7c`
+    /// lives (`0x7c6900` re-seats it from the local pose), so a moving lift adds nothing.
+    /// Otherwise it is the world's: a takeoff aboard reads the deck at takeoff, where the
+    /// reference's leave (`0x7c6790`) maps `+0x7c` by the deck at the leave.
+    fn drop_to(self, landing: Self) -> f32 {
+        let (start, end) = match (self.aboard, landing.aboard) {
+            (Some((from, start)), Some((to, end))) if from == to => (start, end),
+            _ => (self.world_z, landing.world_z),
+        };
+        crate::creature_anim::fall_height(start, end, -self.launch_v)
+    }
+}
+
+/// `0x7c5e70`'s drop after `ms` of fall from the down-positive launch speed `v`, at 53 bits: the
+/// parabola `(v + (g/2)·t)·t` while `v + g·t` stays at or under the terminal speed, then straight on
+/// at it from `tT = (T − v)/g` (`0x7c5eae`); `t = ms · 0.001` stored as a float (`0x7c5f00`).
+fn fall_drop(v: f32, ms: u32, terminal: f32) -> f64 {
+    let (v, g, cap) = (f64::from(v), f64::from(GRAVITY), f64::from(terminal));
+    let t = f64::from((f64::from(ms) * 0.001) as f32);
+    if v + g * t <= cap {
+        (v + g / 2.0 * t) * t
+    } else {
+        let t_cap = (cap - v) * (1.0 / g);
+        (v + g / 2.0 * t_cap) * t_cap + (t - t_cap) * cap
     }
 }
 
@@ -300,8 +341,12 @@ pub(in crate::net) fn apply_move(
     let now_falling = ev.flags & FALLING != 0;
     // The `FALLING` to grounded edge is a landing; its fall height gates the grunt and dust puff.
     let was_falling = rm.flags & FALLING != 0;
-    let (new_start, descent) =
-        fall_arc_step(was_falling, now_falling, rm.fall_start, FallHeight::of(ev));
+    let pose = if now_falling {
+        FallHeight::start_of(ev)
+    } else {
+        FallHeight::of(ev)
+    };
+    let (new_start, descent) = fall_arc_step(was_falling, now_falling, rm.fall_start, pose);
     rm.fall_start = new_start;
     if let Some(descent) = descent {
         landings.write(crate::creature_anim::HardLanding { entity: e, descent });
@@ -682,8 +727,9 @@ pub(crate) fn jump_seed(jump: Option<JumpInfo>, fall_time: u32, feather: bool) -
     }
 }
 
-/// One packet's step of the landing predictor: `(fall_start, descent)`, the descent
-/// `takeoff - landing` only on the `FALLING` to grounded edge with a known takeoff.
+/// One packet's step of the landing predictor: `(fall_start, descent)`. Every falling packet's
+/// re-derived start ([`FallHeight::start_of`]) replaces the last (`0x618e1b` → `0x7c6490`); the
+/// `FALLING` to grounded edge reports the fall height down to the landing pose.
 pub(in crate::net) fn fall_arc_step(
     was_falling: bool,
     now_falling: bool,
@@ -691,10 +737,9 @@ pub(in crate::net) fn fall_arc_step(
     packet: FallHeight,
 ) -> (Option<FallHeight>, Option<f32>) {
     match (was_falling, now_falling) {
-        (false, true) => (Some(packet), None), // takeoff
-        (true, true) => (fall_start, None),    // still airborne
+        (_, true) => (Some(packet), None), // a takeoff or a packet in flight
         (true, false) => (None, fall_start.map(|start| start.drop_to(packet))), // landing edge
-        (false, false) => (None, None),        // grounded
+        (false, false) => (None, None),    // grounded
     }
 }
 
