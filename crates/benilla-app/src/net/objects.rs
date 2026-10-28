@@ -560,7 +560,7 @@ fn on_gameobject_anim(In(ev): In<SessionEvent>, mut sc: Scene) {
             );
         }
         // `0x6e9790`: the game object (`0x468460`, mask 0x20) takes its descriptor's state again
-        // (`0x5f8c00` â†’ `0x5f8bd0`), undoing the open-lock and loot-release predictions.
+        // (`0x5f8c00` → `0x5f8bd0`), undoing the open-lock and loot-release predictions.
         SessionEvent::GameObjectResetState { guid } => {
             debug!("net: gameobject {guid:#x} reset state");
             if let Some(&e) = sc.index.0.get(&guid) {
