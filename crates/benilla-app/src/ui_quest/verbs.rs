@@ -53,10 +53,10 @@ impl QuestVerbs<'_, '_> {
     /// The teardown `0x501130(0, report)` as far as its cell: nothing with the cell zero
     /// (`0x501149`); with `report`, a sharing player in view is sent `MSG_QUEST_PUSH_RESULT`
     /// DECLINE (`0x501159`-`0x5011e0`); then the cell is zeroed (`0x501201`). The source, whose
-    /// latch release (`0x50120d`) and `QUEST_FINISHED` (`0x501217`) the host runs next. Inside a
-    /// close core's parked signals the cell reads as that core left it ([`super::lane::replaying_close`]).
+    /// latch release (`0x50120d`) and `QUEST_FINISHED` (`0x501217`) the host runs next.
     fn teardown(&mut self, report: bool) -> Option<u64> {
-        if super::lane::replaying_close() {
+        // A parked close's re-entry finds its cell zero ([`crate::ui_session::parked_close`]).
+        if crate::ui_session::parked_close(crate::ui_session::NpcWindow::Quest) {
             return None;
         }
         let source = self.giver.as_deref().and_then(|g| g.npc)?;

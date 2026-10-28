@@ -252,6 +252,8 @@ pub(crate) struct TalentSteps<'w, 's> {
     net: Res<'w, NetCommands>,
     /// Absent in a world with no trainer flow, which drops the Accept.
     wipe: Option<ResMut<'w, crate::ui_talent_wipe::TalentWipeState>>,
+    /// The latched trainer's range, which the Accept tests at the call.
+    reach: crate::ui_dialog_verbs::DialogReach<'w, 's>,
     self_q: Query<'w, 's, &'static ObjectStore, With<SelfPlayer>>,
     sink: crate::ui_action::MessageSink<'w>,
 }
@@ -275,7 +277,14 @@ impl TalentSteps<'_, '_> {
                     return;
                 };
                 let money = store.0.player_money().unwrap_or(0);
-                crate::ui_talent_wipe::accept(wipe, money, &self.net, script, &mut self.sink);
+                crate::ui_talent_wipe::accept(
+                    wipe,
+                    &self.reach,
+                    money,
+                    &self.net,
+                    script,
+                    &mut self.sink,
+                );
             }
         }
     }
