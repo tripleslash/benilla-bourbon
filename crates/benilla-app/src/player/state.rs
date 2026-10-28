@@ -444,6 +444,9 @@ pub(crate) struct Player {
     /// standing, since the straight-down ground probe sees only the steep face; re-earned each
     /// frame.
     pub(super) steep_support: bool,
+    /// The centre height the step that set [`Self::steep_support`] began at, the reference's
+    /// `+0x80` ([`super::mover::Support::step_start`]); `None` with the bit clear.
+    pub(super) step_start: Option<f32>,
     /// A hover grant owes a jump: the reference's handler `0x61a620` calls `CMovement::Jump(0)`
     /// (`0x61a630`) before setting the flag, and its disable arm calls `StartFalling` (`0x61a637`).
     /// Latched for the take-off site, since our mover re-derives ground contact every frame and

@@ -215,6 +215,7 @@ pub(super) fn step(
         player.horiz_vel = Vec3::new(launch.x, 0.0, launch.z);
         player.wedged = false;
         player.steep_support = false;
+        player.step_start = None;
         jumped = true;
         knocked = true;
         // The launch plants FORWARD in the direction nibble (`0x617a18`) whatever its speed, so
@@ -233,6 +234,7 @@ pub(super) fn step(
             player.launch_vz = JUMP_SPEED;
             player.wedged = false;
             player.steep_support = false;
+            player.step_start = None;
             jumped = true;
             // A moving jump is locked to its momentum; a standing one may steer once.
             player.arc_dirs_set = moving;
@@ -314,6 +316,7 @@ pub(super) fn step(
                 offset: hover_offset,
                 water: water_floor,
                 steep: player.steep_support,
+                step_start: player.step_start,
             },
         );
         // Only this mover has a fall to elect, so it spends the no-floor drop (`pos.z -= achieved`
@@ -333,6 +336,7 @@ pub(super) fn step(
         climb = g.climb;
         snap_probe = g.snap;
         player.steep_support = g.steep_support;
+        player.step_start = g.step_start;
         on_liquid |= g.liquid;
         if let Some(e) = g.ground {
             ground_entity = Some(e);
@@ -350,6 +354,7 @@ pub(super) fn step(
         };
         center = airborne_step(world, capsule, center, velocity, time.delta());
         player.steep_support = false;
+        player.step_start = None;
     }
     // The wedge rest: falling, yet achieving under [`WEDGE_STALL_RATIO`] of gravity's intent for
     // [`WEDGE_STILL_FRAMES`] frames, is a capsule pinched between steep faces with no way down
@@ -486,6 +491,9 @@ pub(crate) struct Support {
     /// The support entering the frame is a certified steep contact, the reference's `0x4000000`,
     /// which opens the step-down's deep reach.
     pub(crate) steep: bool,
+    /// The capsule centre's height when the step that set [`Self::steep`] was allowed, the
+    /// reference's `+0x80`; `None` for a caller that keeps none.
+    pub(crate) step_start: Option<f32>,
 }
 
 impl Default for Support {
@@ -496,6 +504,7 @@ impl Default for Support {
             offset: 0.0,
             water: None,
             steep: false,
+            step_start: None,
         }
     }
 }
@@ -516,6 +525,9 @@ pub(crate) struct GroundedStep {
     /// On a certified steep contact, the reference's `0x4000000`: riding a cone up, or following a
     /// surface down off a ledge. The caller keeps it grounded until a walkable floor takes over.
     pub(crate) steep_support: bool,
+    /// The step start to carry with [`Self::steep_support`] ([`Support::step_start`]); `None` once
+    /// the bit clears.
+    pub(crate) step_start: Option<f32>,
     /// For the trace: the snap's reach and the `(distance, normal.y)` it found.
     pub(crate) snap: Option<(f32, Option<(f32, f32)>)>,
     /// The no-floor drop, when the snap found nothing and no ride is in progress; not in
@@ -597,10 +609,28 @@ pub(crate) fn grounded_step(
     // only relatively (`0x6367b0`-`0x637140`), and the certified arm rises `(0, 0, H)`
     // (`0x635d5b`) before `0x63694d` resumes the heading. The snap then reaches past the rise, as
     // the reference keeps `0x4000000` set until its settle has sized the probe (`0x636edf`).
+    // An allowed step records the entry height only while the steep bit is clear (`0x6365f0`);
+    // while it is set, no rise passes that height plus H (`0x636d10`), so a body held up by steep
+    // faces cannot chain pops up a wall.
+    let committed = matches!(attempt.verdict, StepVerdict::Commit { .. });
+    let step_start = if committed && !support.steep {
+        Some(center.y)
+    } else {
+        support.step_start
+    };
+    let ceiling = step_start
+        .filter(|_| support.steep)
+        .map(|s| s + support.rise);
+    let ride_to = ride_to.map(|y| ceiling.map_or(y, |c| y.min(c)));
     let popped = match attempt.verdict {
-        StepVerdict::Commit { up, .. } if ride_to.is_none() => Some(up),
+        StepVerdict::Commit { up, .. } if ride_to.is_none() => {
+            Some(ceiling.map_or(up, |c| up.min(c - center.y)))
+        }
         _ => None,
     };
+    // A rise the cap cuts below 0.001 makes the mover fall (`0x636d5c`-`0x636f99`).
+    let cut = popped.is_some_and(|up| up < 0.001);
+    let popped = popped.filter(|_| !cut);
     let start = center + Vec3::Y * popped.unwrap_or(0.0);
     let mut rode = false;
     let out = world.slide_mover(
@@ -698,11 +728,17 @@ pub(crate) fn grounded_step(
         // ride is exempt, since mid-ride the body hangs clear by design.
         unsupported = Some((reach - surface_offset).max(0.0).min(cone_reach));
     }
+    // A ride or a pop that found no walkable floor is held up by the edge it climbs.
+    let steep_support = !cut && (((rode || popped.is_some()) && ground.is_none()) || steep_support);
+    if cut {
+        ground = None;
+    }
     GroundedStep {
         center: slid,
         climb: (rode || popped.is_some()).then_some(slid.y - center.y),
-        // A ride or a pop that found no walkable floor is held up by the edge it climbs.
-        steep_support: ((rode || popped.is_some()) && ground.is_none()) || steep_support,
+        steep_support,
+        // The bit's clears take the start with it (`0x636edf`, `0x7c6206`).
+        step_start: step_start.filter(|_| steep_support),
         ground,
         contact,
         liquid,
@@ -1043,6 +1079,38 @@ mod tests {
         );
     }
 
+    /// While the steep bit holds, no rise passes the height its allowed step began at plus H
+    /// (`0x636d10`, the start recorded at `0x6365f0`): risers under H with treads too short to settle
+    /// on chain pops from the hang, and each steep run gains at most H over the frame before it.
+    #[test]
+    fn a_steep_run_rises_at_most_h_above_its_start() {
+        let mut profile = vec![(-2.0, 0.0), (0.3, 0.0)];
+        let (mut x, mut y) = (0.3, 0.0);
+        for _ in 0..8 {
+            y += 0.6;
+            profile.push((x + 0.02, y));
+            x += 0.2;
+            profile.push((x, y));
+        }
+        profile.push((x + 3.0, y));
+        let frames = walk_profile(world_from_profile(&profile), 0.0, 90);
+        let mut before = 0.0;
+        let mut run_start: Option<f32> = None;
+        for &(feet, _, steep, _) in &frames {
+            if steep {
+                let start = *run_start.get_or_insert(before);
+                assert!(
+                    feet - start <= STEP_UP_HEIGHT + 0.01,
+                    "a steep run rose {:.3} yd over its start: {frames:?}",
+                    feet - start
+                );
+            } else {
+                run_start = None;
+            }
+            before = feet;
+        }
+    }
+
     /// A Stormwind Trade District kerb: a 0.28 yd sidewalk behind a ~61° bevel, profiled from a
     /// `stup` scan at the spot.
     fn world_with_kerb() -> App {
@@ -1196,6 +1264,7 @@ mod tests {
                         let g = grounded_step(&world, &capsule, center, dir * 7.0, dt, support);
                         center = g.center;
                         support.steep = g.steep_support;
+                        support.step_start = g.step_start;
                         (
                             center.y - CAPSULE_HEIGHT * 0.5,
                             g.climb,
@@ -1297,6 +1366,7 @@ mod tests {
                         let g = grounded_step(&world, &capsule, center, dir * 7.0, dt, support);
                         center = g.center - Vec3::Y * g.unsupported.unwrap_or(0.0);
                         support.steep = g.steep_support;
+                        support.step_start = g.step_start;
                         center.y - half.y
                     })
                     .collect::<Vec<_>>()
@@ -1678,6 +1748,7 @@ mod tests {
                     rows.push((g.center.x - center.x, g.center.y - CAPSULE_HEIGHT * 0.5));
                     center = g.center;
                     support.steep = g.steep_support;
+                    support.step_start = g.step_start;
                 }
                 rows
             })
@@ -1788,6 +1859,7 @@ mod tests {
                     let g = grounded_step(&world, &capsule, center, v, dt, support);
                     center = g.center;
                     support.steep = g.steep_support;
+                    support.step_start = g.step_start;
                     rows.push((v.length() > 0.0, g.steep_support));
                 }
                 rows
