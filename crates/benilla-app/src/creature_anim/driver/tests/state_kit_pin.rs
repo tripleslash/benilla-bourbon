@@ -1,7 +1,7 @@
 //! The stationary state-kit pin (`0x5fde80`): a live aura state kit's id takes a still unit's plays.
 
+use crate::creature_anim::BlendSlot;
 use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
-use bevy::animation::transition::AnimationTransitions;
 use bevy::animation::AnimationClip;
 use bevy::prelude::*;
 
@@ -71,7 +71,7 @@ fn spawn_orc(app: &mut App) -> (Entity, [AnimationNodeIndex; 3]) {
         .spawn((
             anims,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
             MovementState::default(),
@@ -96,9 +96,9 @@ fn base(app: &App, unit: Entity) -> Option<u16> {
 fn main_node(app: &App, unit: Entity) -> Option<AnimationNodeIndex> {
     app.world()
         .entity(unit)
-        .get::<AnimationTransitions>()
+        .get::<BlendSlot>()
         .unwrap()
-        .get_main_animation()
+        .primary()
 }
 
 fn elapsed(app: &App, unit: Entity, node: AnimationNodeIndex) -> f32 {
@@ -420,7 +420,7 @@ fn spawn_runner(app: &mut App) -> (Entity, [AnimationNodeIndex; 6]) {
         .spawn((
             anims,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
             MovementState::default(),

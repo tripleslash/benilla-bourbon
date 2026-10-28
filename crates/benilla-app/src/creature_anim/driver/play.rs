@@ -1,14 +1,12 @@
 //! Base-track playback: arming clips, the base-animation lock, entering and leaving Specials.
 
-use std::time::Duration;
-
 use benilla_assets::{AnimClip, ModelAnimations};
 use benilla_formats::AnimDataCatalog;
-use bevy::animation::transition::AnimationTransitions;
+use bevy::animation::graph::AnimationNodeIndex;
 use bevy::animation::RepeatAnimation;
 use bevy::prelude::*;
 
-use super::super::{find_resolved, AnimDriver};
+use super::super::{find_resolved, AnimDriver, BlendSlot};
 use super::select::{self, jump_land_pick, Mode, Special};
 
 /// The base-animation lock, the reference's `[unit+0xd58] & 0xc0000`: while it is held,
@@ -61,32 +59,26 @@ impl BaseAnimLock {
     }
 }
 
-/// Cross-fades into an already-resolved clip unless the lock refuses, returning whether it armed;
-/// `repeat` is always set, so a reused node keeps no stale count. On `false` the caller must not
-/// record the clip as held: the reference's guard returns before the arm's `[bone+0xf8] = animId`.
+/// Cross-fades into an already-resolved clip unless the lock refuses, returning the node the
+/// primary took, either of the clip's two tracks; `repeat` is always set, so a reused node keeps
+/// no stale count. On `None` the caller must not record the clip as held: the reference's guard
+/// returns before the arm's `[bone+0xf8] = animId`.
 pub(super) fn play_clip(
     lock: &mut BaseAnimLock,
-    tr: &mut AnimationTransitions,
+    tr: &mut BlendSlot,
     player: &mut AnimationPlayer,
     c: &AnimClip,
     repeat: RepeatAnimation,
     rate: f32,
-) -> bool {
+) -> Option<AnimationNodeIndex> {
     // The guard comes first. `arm` stays ungated: the reference reaches it past the guard from the
     // dismount, the sheath family and the weapon attach.
     if lock.refuses() {
-        return false;
+        return None;
     }
-    arm(
-        tr,
-        player,
-        c,
-        repeat,
-        rate,
-        Duration::from_secs_f32(c.blend_time.max(0.0)),
-    );
+    let node = arm(tr, player, c, repeat, rate, true);
     lock.took(c.anim_id);
-    true
+    Some(node)
 }
 
 /// Arms a looping clip with no cross-fade, as the dismount teardown `0x607ce0` calls op4
@@ -94,34 +86,45 @@ pub(super) fn play_clip(
 /// primary-to-secondary copy (`0x7125d9`–`0x7125ea`), so the clip is the pose at once and a
 /// full-body secondary overlay survives, while `[bone+0xf8] = animId` (`0x71252f`) still runs.
 pub(super) fn cut_loop(
-    tr: &mut AnimationTransitions,
+    tr: &mut BlendSlot,
     player: &mut AnimationPlayer,
     anims: &ModelAnimations,
     id: u16,
     catalog: Option<&AnimDataCatalog>,
     rng: &mut benilla_assets::AnimRng,
-    window: &mut Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
+    window: &mut Option<(AnimationNodeIndex, u32)>,
 ) {
     let Some(head) = find_resolved(anims, id, catalog) else {
         return;
     };
     // op4's arg3 is a literal `-1` here (`0x607d25`): the variation always rolls.
     let (c, r) = roll_loop(anims, head, true, rng);
-    *window = Some((c.node, r));
-    arm(tr, player, c, RepeatAnimation::Forever, 1.0, Duration::ZERO);
+    let node = arm(tr, player, c, RepeatAnimation::Forever, 1.0, false);
+    *window = Some((node, r));
 }
 
-fn arm(
-    tr: &mut AnimationTransitions,
+/// One bone-0 primary arm through the blend slot, returning the node the primary took. A primary
+/// whose one-shot window ran out is latched first (`0x7194bc`), so its own record re-armed writes
+/// the primary alone (`0x712553`); a loop's window end is latched by the watchdog.
+pub(super) fn arm(
+    tr: &mut BlendSlot,
     player: &mut AnimationPlayer,
     c: &AnimClip,
     repeat: RepeatAnimation,
     rate: f32,
-    blend: Duration,
-) {
-    let active = tr.play(player, c.node, blend);
+    blend: bool,
+) -> AnimationNodeIndex {
+    if tr
+        .primary()
+        .and_then(|n| player.animation(n))
+        .is_some_and(|a| a.is_finished())
+    {
+        tr.latch();
+    }
+    let active = tr.arm(player, c, blend);
     active.set_repeat(repeat);
     active.set_speed(rate);
+    tr.primary().unwrap_or(c.node)
 }
 
 /// A one-shot arm's rolls in op4's order: the variation (`0x71249a`), then the picked clip's replay
@@ -175,7 +178,7 @@ pub(super) fn roll_loop<'a>(
 /// publishes its `(node, R)` to `window` for the watchdog, a one-shot clears it.
 pub(super) fn play(
     lock: &mut BaseAnimLock,
-    tr: &mut AnimationTransitions,
+    tr: &mut BlendSlot,
     player: &mut AnimationPlayer,
     anims: &ModelAnimations,
     id: u16,
@@ -184,7 +187,7 @@ pub(super) fn play(
     rate: f32,
     catalog: Option<&AnimDataCatalog>,
     rng: &mut benilla_assets::AnimRng,
-    window: &mut Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
+    window: &mut Option<(AnimationNodeIndex, u32)>,
 ) {
     // The guard returns (`0x5fe3a1`) before the arm helper `0x5fdba0` rolls, so a refused play
     // draws nothing from the one shared random stream.
@@ -192,15 +195,15 @@ pub(super) fn play(
         return;
     }
     if let Some(c) = find_resolved(anims, id, catalog) {
-        let (c, repeat) = if looping {
+        if looping {
             let (c, r) = roll_loop(anims, c, relaxed, rng);
-            *window = Some((c.node, r));
-            (c, RepeatAnimation::Forever)
+            let node = play_clip(lock, tr, player, c, RepeatAnimation::Forever, rate);
+            *window = node.map(|n| (n, r));
         } else {
             *window = None;
-            roll_oneshot(anims, c, rng)
-        };
-        play_clip(lock, tr, player, c, repeat, rate);
+            let (c, repeat) = roll_oneshot(anims, c, rng);
+            play_clip(lock, tr, player, c, repeat, rate);
+        }
     }
 }
 
@@ -212,24 +215,26 @@ pub(super) fn play(
 /// node.
 pub(super) fn sync_base_rate(
     drv: &mut AnimDriver,
-    tr: &AnimationTransitions,
+    tr: &BlendSlot,
     player: &mut AnimationPlayer,
     anims: &ModelAnimations,
     speed: f32,
     model_scale: f32,
 ) {
-    let Some(node) = tr.get_main_animation() else {
+    let Some(node) = tr.primary() else {
         return;
     };
+    // The primary runs on either of its clip's two tracks.
+    let holds = |c: &AnimClip| c.node == node || c.blend_node == Some(node);
     if drv.frozen != Some(node) {
         drv.frozen = None;
         let index = match drv
             .rate_clip
-            .filter(|&(n, i)| n == node && anims.clips.get(i).is_some_and(|c| c.node == node))
+            .filter(|&(n, i)| n == node && anims.clips.get(i).is_some_and(holds))
         {
             Some((_, i)) => Some(i),
             None => {
-                let i = anims.clips.iter().position(|c| c.node == node);
+                let i = anims.clips.iter().position(holds);
                 drv.rate_clip = i.map(|i| (node, i));
                 i
             }
@@ -247,7 +252,7 @@ pub(super) fn sync_base_rate(
 }
 
 /// Whether one-shot `id`, resolved as [`play`] resolved it, has finished in every variation (the
-/// play rolled one); a model with no clip for it counts as finished.
+/// play rolled one) on both its tracks; a model with no clip for it counts as finished.
 pub(super) fn oneshot_finished(
     player: &AnimationPlayer,
     anims: &ModelAnimations,
@@ -259,7 +264,8 @@ pub(super) fn oneshot_finished(
             .clips
             .iter()
             .filter(|c| c.anim_id == head.anim_id)
-            .all(|c| player.animation(c.node).is_none_or(|a| a.is_finished())),
+            .flat_map(|c| std::iter::once(c.node).chain(c.blend_node))
+            .all(|n| player.animation(n).is_none_or(|a| a.is_finished())),
         None => true,
     }
 }
@@ -271,9 +277,9 @@ pub(super) fn holds_own_clip(
     anims: &ModelAnimations,
     catalog: Option<&AnimDataCatalog>,
     sp: Special,
-    node: bevy::animation::graph::AnimationNodeIndex,
+    node: AnimationNodeIndex,
 ) -> bool {
-    let Some(cur) = anims.clips.iter().find(|c| c.node == node) else {
+    let Some(cur) = anims.clip_at(node) else {
         return false;
     };
     [sp.enter(), sp.loop_id()]
@@ -288,12 +294,12 @@ pub(super) fn enter_special(
     lock: &mut BaseAnimLock,
     sp: Special,
     relaxed: bool,
-    tr: &mut AnimationTransitions,
+    tr: &mut BlendSlot,
     player: &mut AnimationPlayer,
     anims: &ModelAnimations,
     catalog: Option<&AnimDataCatalog>,
     rng: &mut benilla_assets::AnimRng,
-    window: &mut Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
+    window: &mut Option<(AnimationNodeIndex, u32)>,
 ) -> Mode {
     if sp == Special::Fall {
         play(
@@ -337,20 +343,20 @@ pub(super) fn leave_special(
     moving: bool,
     relaxed: bool,
     flags: u32,
-    tr: &mut AnimationTransitions,
+    tr: &mut BlendSlot,
     player: &mut AnimationPlayer,
     anims: &ModelAnimations,
     catalog: Option<&AnimDataCatalog>,
     rng: &mut benilla_assets::AnimRng,
-    window: &mut Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
-    frozen: &mut Option<bevy::animation::graph::AnimationNodeIndex>,
+    window: &mut Option<(AnimationNodeIndex, u32)>,
+    frozen: &mut Option<AnimationNodeIndex>,
 ) -> Mode {
     // Stills the cut airborne clip, so the gait fades in over a held kick as the reference shows.
     // How the reference holds it is untraced, and it is no pose snapshot (its blend source keeps
     // its own clock: `0x7125ea`, `0x7146b2`–`0x7147a5`), so this must not spread to other
     // cross-fades. Only the arc's own clip is stilled; `frozen` names it for the rate write.
     if matches!(sp, Special::Jump | Special::Fall) {
-        if let Some(node) = tr.get_main_animation() {
+        if let Some(node) = tr.primary() {
             if holds_own_clip(anims, catalog, sp, node) {
                 if let Some(active) = player.animation_mut(node) {
                     active.set_speed(0.0);
@@ -358,11 +364,7 @@ pub(super) fn leave_special(
                 }
             } else if benilla_assets::trace::enabled() {
                 // Traced, since a declined freeze is otherwise invisible.
-                let held = anims
-                    .clips
-                    .iter()
-                    .find(|c| c.node == node)
-                    .map(|c| c.anim_id);
+                let held = anims.clip_at(node).map(|c| c.anim_id);
                 benilla_assets::trace::line(
                     "anim",
                     &format!(

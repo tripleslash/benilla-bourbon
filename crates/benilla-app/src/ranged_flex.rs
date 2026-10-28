@@ -220,7 +220,14 @@ fn remaining(player: &AnimationPlayer, anims: &ModelAnimations, anim_id: u16) ->
         .clips
         .iter()
         .filter(|c| c.anim_id == anim_id)
-        .find_map(|c| Some((c, player.animation(c.node)?)))?;
+        // Either track: the body's primary runs on the clip's twin while its blend slot holds it.
+        .flat_map(|c| {
+            std::iter::once(c.node)
+                .chain(c.blend_node)
+                .map(move |n| (c, n))
+        })
+        .filter_map(|(c, n)| Some((c, player.animation(n)?)))
+        .min_by(|a, b| a.1.seek_time().total_cmp(&b.1.seek_time()))?;
     Some(clip.0.duration - clip.1.seek_time())
 }
 

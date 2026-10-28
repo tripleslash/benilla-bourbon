@@ -1,7 +1,7 @@
 //! Headless tests of [`super::drive_animations`] on synthetic units, across frames.
 
+use crate::creature_anim::BlendSlot;
 use bevy::animation::graph::AnimationNodeIndex;
-use bevy::animation::transition::AnimationTransitions;
 use bevy::prelude::*;
 
 use benilla_assets::{AnimClip, ModelAnimations};
@@ -171,7 +171,7 @@ fn stationary_cast_hold_stows_an_engaged_casters_weapon() {
         .spawn((
             caster_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             Engaged(0),
             Wielded {
@@ -217,7 +217,7 @@ fn moving_cast_hold_keeps_its_stow_between_plays() {
         .spawn((
             caster_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             Engaged(0),
             Wielded {
@@ -319,7 +319,7 @@ fn spawn_fidgeter(app: &mut App) -> (Entity, Vec<AnimationNodeIndex>) {
         .spawn((
             anims,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
         ))
@@ -418,7 +418,7 @@ fn cast_hold_stows_even_when_the_model_lacks_the_spell_anims() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             Engaged(0),
             Wielded {
@@ -481,7 +481,7 @@ fn spell_impact_wound_rides_the_secondary_slot() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
         ))
         .id();
@@ -532,7 +532,7 @@ fn spell_flinch_picks_the_wound_by_engagement() {
         .spawn((
             model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             Engaged(0),
         ))
@@ -542,7 +542,7 @@ fn spell_flinch_picks_the_wound_by_engagement() {
         .spawn((
             model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
         ))
         .id();
@@ -583,7 +583,7 @@ fn a_rate_override_node_refuses_the_wound() {
         let mut e = app.world_mut().spawn((
             model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
         ));
         if let Some(n) = nodes {
@@ -651,7 +651,7 @@ fn whiff_slowdown_spares_a_non_swing_oneshot() {
         .spawn((
             model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             holding_a_non_weapon(),
         ))
@@ -661,7 +661,7 @@ fn whiff_slowdown_spares_a_non_swing_oneshot() {
         .spawn((
             model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             holding_a_non_weapon(),
         ))
@@ -735,7 +735,7 @@ fn same_frame_collision_fast_paths_the_second_combat_clip() {
             .spawn((
                 model(),
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
                 holding_a_non_weapon(),
             ))
@@ -838,7 +838,7 @@ fn deferred_combat_clip_plays_once_the_body_frees() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
         ))
         .id();
@@ -893,7 +893,7 @@ fn a_movement_flag_change_cuts_a_full_body_oneshot_immediately() {
         .spawn((
             model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             MovementState::default(),
         ))
@@ -965,7 +965,7 @@ fn turning_in_place_never_unpins_the_stationary_cast_hold() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             MovementState::default(),
             CastHold {
@@ -1041,7 +1041,7 @@ fn the_swim_relatch_holds_the_kick_but_a_ground_cut_freezes_it() {
         .spawn((
             model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             MovementState::default(),
         ))
@@ -1126,7 +1126,7 @@ fn unit_flag_looting_kneels_stationary_units_only() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             crate::net::ObjectStore(alive(&[(46, 0x400)])),
         ))
@@ -1173,7 +1173,7 @@ fn the_self_kneel_rides_the_loot_latch_not_the_flag() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             crate::net::SelfPlayer,
             crate::net::ObjectStore(alive(&[(46, 0x400)])),
@@ -1232,7 +1232,7 @@ fn the_creep_vis_flag_prowls_the_body() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             crate::net::SelfPlayer,
             crate::net::ObjectStore(alive(&[(138, 0)])),
@@ -1313,7 +1313,7 @@ fn a_looping_arm_advances_through_its_variations_at_window_end() {
         .spawn((
             anims,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
         ))
@@ -1322,12 +1322,8 @@ fn a_looping_arm_advances_through_its_variations_at_window_end() {
     let mut seen = std::collections::HashSet::new();
     for _ in 0..60 {
         advance(&mut app, 25);
-        let tr = app
-            .world()
-            .entity(unit)
-            .get::<AnimationTransitions>()
-            .unwrap();
-        if let Some(n) = tr.get_main_animation() {
+        let tr = app.world().entity(unit).get::<BlendSlot>().unwrap();
+        if let Some(n) = tr.primary() {
             seen.insert(n);
         }
     }
@@ -1369,7 +1365,7 @@ fn jumper(app: &mut App) -> Entity {
         .spawn((
             jumper_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             MovementState::default(),
             holding_a_non_weapon(),
@@ -1680,7 +1676,7 @@ fn a_jump_does_not_cut_the_moving_cast_hold() {
         .spawn((
             caster_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             MovementState {
                 flags: move_flags::FORWARD,
@@ -1773,7 +1769,7 @@ fn a_finished_masked_cast_fades_out_instead_of_snapping() {
                 pose: Default::default(),
             },
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
             MovementState {
@@ -1868,7 +1864,7 @@ fn the_step_off_arc_freezes_the_gait_against_live_pins() {
         .spawn((
             caster_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             MovementState::default(),
         ))
@@ -2022,7 +2018,7 @@ fn a_landed_swing_snaps_its_attacker_out_of_the_ranged_stance() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             crate::net::SelfPlayer,
             Wielded {
@@ -2139,7 +2135,7 @@ fn a_melee_to_ranged_toggle_stows_both_hands_before_it_reaches_for_the_bow() {
         .spawn((
             anims,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
             // The Z toggle is the local player's alone.
@@ -2263,7 +2259,7 @@ fn the_toggle_draws_nothing_on_a_model_without_sheathe_animations_or_mid_shot() 
                     pose: Default::default(),
                 },
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimationGraphHandle(graph),
                 AnimDriver::default(),
                 Wielded {
@@ -2329,7 +2325,7 @@ fn a_relic_class_player_refuses_the_ranged_sheath_state() {
             .spawn((
                 caster_model(),
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
                 store,
             ))
@@ -2382,7 +2378,7 @@ fn a_rebuilt_driver_keeps_the_units_committed_sheath_state() {
         .spawn((
             caster_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             paladin(1),
         ))
@@ -2566,7 +2562,7 @@ fn a_scaled_creatures_walk_cycles_slower_than_an_unscaled_ones() {
         .spawn((
             walker_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             Transform::from_scale(Vec3::splat(2.2)),
             walking,
@@ -2577,7 +2573,7 @@ fn a_scaled_creatures_walk_cycles_slower_than_an_unscaled_ones() {
         .spawn((
             walker_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             Transform::from_scale(Vec3::splat(1.0)),
             walking,
@@ -2611,7 +2607,7 @@ fn a_slow_wearing_off_takes_the_gait_back_to_run_with_no_flag_edge() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             MovementState {
                 flags: move_flags::FORWARD,
@@ -2624,9 +2620,9 @@ fn a_slow_wearing_off_takes_the_gait_back_to_run_with_no_flag_edge() {
     let main = |app: &App| {
         app.world()
             .entity(unit)
-            .get::<AnimationTransitions>()
+            .get::<BlendSlot>()
             .unwrap()
-            .get_main_animation()
+            .primary()
     };
     let set_speed = |app: &mut App, speed: f32| {
         app.world_mut()
@@ -2683,7 +2679,7 @@ fn a_mounts_gait_rate_composes_the_riders_scale_with_the_mounts() {
         .spawn((
             walker_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             Transform::from_scale(Vec3::splat(1.5)),
             crate::entities::mount::MountBody { host: rider },
@@ -2708,7 +2704,7 @@ fn a_mounted_landing_runs_at_the_gaits_rate_not_at_one_times() {
         .spawn((
             mount_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             Transform::from_scale(Vec3::splat(1.0)),
             MovementState::default(),
@@ -2812,7 +2808,7 @@ fn the_mount_transition_takes_bone_0_back_from_a_full_body_one_shot() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             crate::net::ObjectStore(alive(&[(FIELD_MOUNTDISPLAYID, 0)])),
             MovementState::default(),
@@ -2888,7 +2884,7 @@ fn the_dismount_cuts_the_saddle_pose_where_the_mount_up_blends_into_it() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             crate::net::ObjectStore(alive(&[(FIELD_MOUNTDISPLAYID, 0)])),
             MovementState::default(),
@@ -2958,7 +2954,7 @@ fn a_running_shooter_drops_the_nocked_arrow_and_keeps_its_ammo_cache() {
         .spawn((
             archer_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             crate::net::SelfPlayer,
             Wielded {
@@ -3011,7 +3007,7 @@ fn the_precast_bit_alone_never_puts_a_shooter_in_the_drawn_idle() {
         let mut e = app.world_mut().spawn((
             archer_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             crate::net::SelfPlayer,
             Wielded {
@@ -3114,7 +3110,7 @@ fn a_mid_volley_fire_clip_re_pulls_and_the_pull_promotes_to_the_hold() {
                 pose: Default::default(),
             },
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
             crate::net::SelfPlayer,
@@ -3253,7 +3249,7 @@ fn every_shot_of_a_volley_re_arms_the_fire_clip_through_the_emote_lane() {
                 pose: Default::default(),
             },
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
             crate::net::SelfPlayer,
@@ -3404,7 +3400,7 @@ fn spawn_vendor(app: &mut App) -> (Entity, Vec<AnimationNodeIndex>) {
         .spawn((
             anims,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
             crate::net::NetEntity {
@@ -3536,7 +3532,7 @@ fn a_disarmed_attacker_swings_and_stands_unarmed() {
             .spawn((
                 model(),
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
                 Engaged(0),
                 Wielded {
@@ -3645,7 +3641,7 @@ fn an_off_hand_only_fighter_is_the_case_that_punches_off_hand() {
                 pose: Default::default(),
             },
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             Wielded {
                 main: None,          // nothing here to take the disarm
@@ -3703,7 +3699,7 @@ fn a_special_goes_unarmed_only_when_both_hands_are_empty() {
             .spawn((
                 model(),
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
                 w,
             ))
@@ -3811,7 +3807,7 @@ fn a_no_wound_creature_takes_no_flinch() {
             .spawn((
                 model(),
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
                 streamed(entry),
             ))
@@ -3897,7 +3893,7 @@ fn the_no_wound_flag_takes_the_parry_but_not_the_dodge() {
             .spawn((
                 model(),
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
                 // A 1H sword: `defense_anim` sends class 2 subclass 7 to Parry1H(21).
                 Wielded {
@@ -3925,9 +3921,9 @@ fn the_no_wound_flag_takes_the_parry_but_not_the_dodge() {
     let base = |e: Entity| {
         app.world()
             .entity(e)
-            .get::<AnimationTransitions>()
+            .get::<BlendSlot>()
             .unwrap()
-            .get_main_animation()
+            .primary()
             .map(|n| n.index())
     };
     assert_eq!(
@@ -3954,7 +3950,7 @@ fn a_gait_change_raises_the_anim_edge_and_a_steady_frame_does_not() {
         .spawn((
             caster_model(),
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             MovementState::default(),
         ))
@@ -4077,7 +4073,7 @@ mod base_anim_lock {
             .spawn((
                 model(),
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
             ))
             .id()
@@ -4086,9 +4082,9 @@ mod base_anim_lock {
     fn main_node(app: &App, unit: Entity) -> Option<AnimationNodeIndex> {
         app.world()
             .entity(unit)
-            .get::<AnimationTransitions>()
+            .get::<BlendSlot>()
             .unwrap()
-            .get_main_animation()
+            .primary()
     }
 
     fn oneshot(app: &mut App, unit: Entity, anim_id: u16) {
@@ -4201,7 +4197,7 @@ mod base_anim_lock {
             .spawn((
                 airborne_model(),
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
                 MovementState::default(),
             ))
@@ -4316,7 +4312,7 @@ mod routing {
             .spawn((
                 model,
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
                 crate::net::ObjectStore(alive(&[(FIELD_MOUNTDISPLAYID, mount_display)])),
                 MovementState::default(),
@@ -4368,7 +4364,7 @@ mod routing {
             .spawn((
                 model(vec![clip(0, 1, true), masked(SHUFFLE, 2, 12)]),
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
                 crate::entities::mount::MountBody { host: rider },
             ))
@@ -4440,7 +4436,7 @@ mod routing {
             super::super::armed_id(
                 e.get::<AnimDriver>().unwrap(),
                 e.get::<AnimationPlayer>().unwrap(),
-                e.get::<AnimationTransitions>().unwrap(),
+                e.get::<BlendSlot>().unwrap(),
                 e.get::<ModelAnimations>().unwrap(),
             )
         };
@@ -4468,7 +4464,7 @@ mod routing {
             .spawn((
                 model(vec![clip(0, 1, true), clip(SHUFFLE, 2, false)]),
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
             ))
             .id();
@@ -4657,7 +4653,7 @@ mod emote_state {
                 model,
                 graph,
                 AnimationPlayer::default(),
-                AnimationTransitions::new(),
+                BlendSlot::default(),
                 AnimDriver::default(),
                 ObjectStore(alive(&[(FIELD_NPC_EMOTESTATE, state)])),
             ))
@@ -4891,7 +4887,7 @@ fn the_emote_player_skips_an_id_already_armed_but_plays_a_different_one() {
                 pose: Default::default(),
             },
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimationGraphHandle(graph_handle),
             AnimDriver::default(),
         ))

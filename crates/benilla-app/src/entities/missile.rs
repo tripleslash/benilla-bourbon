@@ -52,7 +52,6 @@
 //! (`0x61e7c0`), rebuilds a RESIST or IMMUNE model (`0x707350` on `0x861790`) and curves a
 //! DEFLECT away (`0x4531e0`, `0x7be490`), where every miss but a REFLECT ends on arrival here.
 
-use bevy::animation::transition::AnimationTransitions;
 use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
@@ -652,7 +651,7 @@ pub(super) fn spawn_missiles(
     casters: Query<(
         &AnimDriver,
         &AnimationPlayer,
-        &AnimationTransitions,
+        &crate::creature_anim::BlendSlot,
         &benilla_assets::ModelAnimations,
     )>,
     anim_data: Option<Res<AnimData>>,

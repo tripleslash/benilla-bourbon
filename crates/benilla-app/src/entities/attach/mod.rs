@@ -202,8 +202,8 @@ fn arm_sequence_clock(
             commands
                 .entity(entity)
                 .try_insert((
-                    // Cross-fades over each clip's blend-in time, so a gait change eases.
-                    AnimationTransitions::new(),
+                    // Bone 0's primary and its one blend slot, so a gait change eases.
+                    crate::creature_anim::BlendSlot::default(),
                     AnimDriver::default(),
                 ))
                 // A rebuilt rig is born live: a stale park marker would desync the LOD gate's

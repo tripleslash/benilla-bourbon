@@ -3,12 +3,9 @@
 //! fades, trace, wound, sheath reconcile). The phases share many frame-local bindings, so they
 //! stay in one function.
 
-use std::time::Duration;
-
 use benilla_assets::ModelAnimations;
 use benilla_formats::AnimDataCatalog;
 use bevy::animation::graph::AnimationNodeIndex;
-use bevy::animation::transition::AnimationTransitions;
 use bevy::prelude::*;
 
 use crate::names::type_flags::DO_NOT_PLAY_WOUND_ANIM;
@@ -26,8 +23,8 @@ use super::sheath::{
     advance_sheath_ceremony, model_refuses_toggle, setter_refuses, start_sheath_ceremony,
 };
 use super::{
-    find_resolved, move_flags, AnimData, AnimDriver, AutoRepeatArmed, BaseAnimRecompute, CastHold,
-    CommittedSheath, DefenseAnim, EmoteAnim, Engaged, MovementState, NockLatch, Overlay,
+    find_resolved, move_flags, AnimData, AnimDriver, AutoRepeatArmed, BaseAnimRecompute, BlendSlot,
+    CastHold, CommittedSheath, DefenseAnim, EmoteAnim, Engaged, MovementState, NockLatch, Overlay,
     OverlayFade, SheathRequest, SheathSwapMessage, StateKitPins, SwingImpact, SwingMessage,
     SwingSlowdown, Wielded, WoundAnim,
 };
@@ -67,7 +64,7 @@ enum OneShotReq {
 fn live_oneshot(
     drv: &AnimDriver,
     player: &AnimationPlayer,
-    tr: &AnimationTransitions,
+    tr: &BlendSlot,
     anims: &ModelAnimations,
     catalog: Option<&AnimDataCatalog>,
 ) -> Option<(u16, AnimationNodeIndex)> {
@@ -78,7 +75,7 @@ fn live_oneshot(
     }
     if let Mode::Swing { id: m, .. } = drv.mode {
         if !oneshot_finished(player, anims, m, catalog) {
-            return tr.get_main_animation().map(|n| (m, n));
+            return tr.primary().map(|n| (m, n));
         }
     }
     None
@@ -91,22 +88,17 @@ fn live_oneshot(
 fn armed_id(
     drv: &AnimDriver,
     player: &AnimationPlayer,
-    tr: &AnimationTransitions,
+    tr: &BlendSlot,
     anims: &ModelAnimations,
 ) -> Option<u16> {
     let running = |n| player.animation(n).is_some_and(|a| !a.is_finished());
     if let Some(ov) = drv.overlay.filter(|ov| running(ov.node)) {
         return Some(ov.id);
     }
-    let node = tr.get_main_animation().filter(|&n| running(n))?;
+    let node = tr.primary().filter(|&n| running(n))?;
     // The clip's own id only when the mode holds no requested id.
-    drv.active_anim().or_else(|| {
-        anims
-            .clips
-            .iter()
-            .find(|c| c.node == node)
-            .map(|c| c.anim_id)
-    })
+    drv.active_anim()
+        .or_else(|| anims.clip_at(node).map(|c| c.anim_id))
 }
 
 /// Whether a one-shot is live on the unit; the missile queue polls it to launch a missile whose
@@ -114,7 +106,7 @@ fn armed_id(
 pub(crate) fn oneshot_is_live(
     drv: &AnimDriver,
     player: &AnimationPlayer,
-    tr: &AnimationTransitions,
+    tr: &BlendSlot,
     anims: &ModelAnimations,
     catalog: Option<&AnimDataCatalog>,
 ) -> bool {
@@ -189,7 +181,7 @@ fn overlay_fade_upkeep(drv: &mut AnimDriver, player: &mut AnimationPlayer, dt: f
 fn transplant_up(
     drv: &mut AnimDriver,
     player: &mut AnimationPlayer,
-    tr: &AnimationTransitions,
+    tr: &BlendSlot,
     anims: &ModelAnimations,
     entity: Entity,
     id: u16,
@@ -197,7 +189,7 @@ fn transplant_up(
     if drv.overlay.is_some() || !(select::is_cast_anim(id) || select::is_combat_anim(id)) {
         return false;
     }
-    let Some(node) = tr.get_main_animation() else {
+    let Some(node) = tr.primary() else {
         return false;
     };
     // Read off the armed variation node, which also names the masked twin to resume on.
@@ -208,12 +200,7 @@ fn transplant_up(
     else {
         return false;
     };
-    let Some(upper) = anims
-        .clips
-        .iter()
-        .find(|c| c.node == node)
-        .and_then(|c| c.upper_node)
-    else {
+    let Some(upper) = anims.clip_at(node).and_then(|c| c.upper_node) else {
         return false;
     };
     let active = player.play(upper);
@@ -245,7 +232,7 @@ pub(super) fn drive_animations(
         Entity,
         &ModelAnimations,
         &mut AnimationPlayer,
-        &mut AnimationTransitions,
+        &mut BlendSlot,
         &mut AnimDriver,
         Option<&Spline>,
         Option<&RemoteMotion>,
@@ -307,8 +294,8 @@ pub(super) fn drive_animations(
         Option<Res<EmoteSounds>>,
         // Whether the latched loot target is one the self unit kneels at; false while cold.
         Option<Res<crate::ui_loot::LootKneel>>,
-        // The key-bone cross-fade's clock: its retiring node is frozen, so it has no playback
-        // clock of its own.
+        // The cross-fades' clock: bone 0's blend slot reads it as op4's scene clock, and the
+        // key bone's retiring node is frozen, so it has no playback clock of its own.
         Res<Time>,
         // Read for `DO_NOT_PLAY_WOUND_ANIM`; a missing cache reads as an unreceived template.
         Option<Res<crate::names::NameCache>>,
@@ -464,6 +451,8 @@ pub(super) fn drive_animations(
         ),
     ) in &mut units
     {
+        // The scene clock the frame's arms and the blend kernel read.
+        tr.set_clock(time.elapsed_secs_f64());
         // A mount child drives from its host's movement view, so it plays the locomotion the
         // rider suppresses; a vanished host reads as stationary. `ridden_by_self` feeds only the
         // trace, never `is_self`: the sheath reconcile and wire echoes mean the player's own unit.
@@ -614,12 +603,17 @@ pub(super) fn drive_animations(
                     } else {
                         anims.pick_variation(c.anim_id, rng.draw()).unwrap_or(c)
                     };
-                    let active =
-                        tr.play(&mut player, c.node, Duration::from_secs_f32(c.blend_time));
-                    if c.looping {
-                        active.repeat();
-                    } else if first {
-                        active.seek_to(c.duration); // streamed in dead: settled, not replayed
+                    let repeat = if c.looping {
+                        bevy::animation::RepeatAnimation::Forever
+                    } else {
+                        bevy::animation::RepeatAnimation::Never
+                    };
+                    let node = play::arm(&mut tr, &mut player, c, repeat, 1.0, true);
+                    if first && !c.looping {
+                        // Streamed in dead: settled, not replayed.
+                        if let Some(active) = player.animation_mut(node) {
+                            active.seek_to(c.duration);
+                        }
                     }
                 }
                 // A blended bone-0 arm overwrites bone 0's secondary slot: it evicts a full-body
@@ -632,6 +626,7 @@ pub(super) fn drive_animations(
                 drv.gait_pinned = false; // a death is never pinned (`0x5fda90`)
                 drv.deferred = None; // a normal arm clears the cache
             }
+            tr.advance(&mut player);
             continue;
         }
 
@@ -1034,7 +1029,7 @@ pub(super) fn drive_animations(
                     special.filter(|sp| matches!(sp, select::Special::Jump | select::Special::Fall))
                 {
                     if let Some(active) = tr
-                        .get_main_animation()
+                        .primary()
                         .filter(|&n| holds_own_clip(anims, catalog, sp, n))
                         .and_then(|n| player.animation_mut(n))
                     {
@@ -1067,7 +1062,7 @@ pub(super) fn drive_animations(
             let node = match drv.overlay {
                 Some(ov) if is_swing_id(ov.id) => Some(ov.node),
                 _ if matches!(drv.mode, Mode::Swing { id: m, .. } if is_swing_id(m)) => {
-                    tr.get_main_animation()
+                    tr.primary()
                 }
                 _ => None,
             };
@@ -1090,24 +1085,25 @@ pub(super) fn drive_animations(
         // clearing the target lets `mode::run` re-pick, which is what ends a turn-shuffle. A
         // Special loop re-arms its id.
         if let Some((node, budget)) = drv.loop_window {
-            if tr.get_main_animation() == Some(node)
+            if tr.primary() == Some(node)
                 && player
                     .animation(node)
                     .is_some_and(|a| a.completions() >= budget)
             {
+                // The window's end sets the latch (`0x7194bc`): re-armed, its own record writes
+                // the primary alone.
+                tr.latch();
                 if drv.mode == Mode::Gait {
                     drv.gait = None;
                     drv.interact_hold = false; // the window's end is a re-pick (`0x5fc45a`)
                 } else {
                     let head = anims
-                        .clips
-                        .iter()
-                        .find(|c| c.node == node)
+                        .clip_at(node)
                         .and_then(|armed| find_resolved(anims, armed.anim_id, catalog));
                     if let Some(head) = head {
                         let rate = player.animation(node).map_or(1.0, |a| a.speed());
                         let (c, fresh) = roll_loop(anims, head, relaxed, &mut rng);
-                        play_clip(
+                        let armed = play_clip(
                             &mut drv.base_lock,
                             &mut tr,
                             &mut player,
@@ -1115,7 +1111,7 @@ pub(super) fn drive_animations(
                             bevy::animation::RepeatAnimation::Forever,
                             rate,
                         );
-                        drv.loop_window = Some((c.node, fresh));
+                        drv.loop_window = armed.map(|n| (n, fresh));
                     }
                 }
             }
@@ -1133,8 +1129,8 @@ pub(super) fn drive_animations(
                 .map(|ov| ov.id)
                 .or_else(|| drv.active_anim())
                 .or_else(|| {
-                    tr.get_main_animation()
-                        .and_then(|n| anims.clips.iter().find(|c| c.node == n))
+                    tr.primary()
+                        .and_then(|n| anims.clip_at(n))
                         .map(|c| c.anim_id)
                 });
             if armed != Some(want) && matches!(drv.mode, Mode::Swing { .. } | Mode::Gait) {
@@ -1280,8 +1276,9 @@ pub(super) fn drive_animations(
             }
             _ => {}
         }
-        // The cross-fade advances last, after every arm and release, as the reference's kernel
-        // runs λ after the frame's PlayAnimation calls.
+        // The cross-fades advance last, after every arm and release, as the reference's kernel
+        // runs λ after the frame's PlayAnimation calls: bone 0's blend slot, then the key bone's.
+        tr.advance(&mut player);
         overlay_fade_upkeep(&mut drv, &mut player, dt);
 
         // The anim half of the `WOW_MOVE_TRACE` trace: one line whenever the traced unit's settled
@@ -1289,8 +1286,8 @@ pub(super) fn drive_animations(
         // node with no clip record); `+fade` marks a fade running.
         if traced && benilla_assets::trace::enabled() {
             let base = tr
-                .get_main_animation()
-                .and_then(|n| anims.clips.iter().find(|c| c.node == n))
+                .primary()
+                .and_then(|n| anims.clip_at(n))
                 .map_or_else(|| "?".to_string(), |c| c.anim_id.to_string());
             let state = format!(
                 "{subject}mode={:?} gait={:?} base={base} special={:?} flags={:08x} \

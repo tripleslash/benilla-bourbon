@@ -5,7 +5,7 @@ use benilla_assets::{AnimClip, ModelAnimations};
 use bevy::animation::graph::AnimationNodeIndex;
 use bevy::prelude::*;
 
-use super::{resolved_id, AnimData, AnimDriver};
+use super::{resolved_id, AnimData, AnimDriver, BlendSlot};
 use crate::names::type_flags::MORE_AUDIBLE;
 
 /// A model event keyframe (an M2 `$xxx` tag) crossed during playback this frame.
@@ -113,6 +113,8 @@ pub(super) fn fire_anim_events(
         Option<&crate::net::ObjectStore>,
         &GlobalTransform,
         Option<&benilla_world::rig_anim::RigPose>,
+        // Bone 0's primary, the track the base's keys are read on.
+        Option<&BlendSlot>,
     )>,
     // The joint roots the composed poses hang off.
     globals: Query<&GlobalTransform>,
@@ -125,7 +127,7 @@ pub(super) fn fire_anim_events(
     names: Res<crate::names::NameCache>,
 ) {
     let catalog = anim_data.as_deref().map(|d| &d.0);
-    for (entity, anims, player, drv, parked, store, world, pose) in &units {
+    for (entity, anims, player, drv, parked, store, world, pose, slot) in &units {
         // A parked unit's tracks are not scanned, as the reference's second walk never ticks it
         // (`0x683dd0` skips `0x710b90`), unless its template carries `MORE_AUDIBLE` (the
         // `0x607da0` re-link); a missing template reads not audible (`0x623b70`). Dropping the
@@ -140,21 +142,27 @@ pub(super) fn fire_anim_events(
             last_overlay.remove(&entity);
             continue;
         }
-        // Base track: the resolved id's playing variation, each variation its own node and event
-        // track; in a same-id cross-fade the newest play (the smallest seek) is scanned.
+        // Base track: the resolved id's playing variation on the primary's track, either of the
+        // clip's two; with no slot, the variation's newest play (the smallest seek).
         let frame = EventFrame {
             world,
             rig: pose.and_then(|p| Some((p, globals.get(p.joints_root).ok()?))),
         };
         if let Some(id) = drv.resolved_anim(anims, catalog) {
-            let playing = anims
-                .clips
-                .iter()
-                .filter(|c| c.anim_id == id)
-                .filter_map(|c| player.animation(c.node).map(|a| (c, a.seek_time())))
-                .min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((clip, cur)) = playing {
-                if let Some(prev) = advance_track(&mut last, entity, clip.node, cur) {
+            let playing = match slot.and_then(BlendSlot::primary) {
+                Some(n) => anims
+                    .clip_at(n)
+                    .filter(|c| c.anim_id == id)
+                    .and_then(|c| player.animation(n).map(|a| (c, n, a.seek_time()))),
+                None => anims
+                    .clips
+                    .iter()
+                    .filter(|c| c.anim_id == id)
+                    .filter_map(|c| player.animation(c.node).map(|a| (c, c.node, a.seek_time())))
+                    .min_by(|a, b| a.2.total_cmp(&b.2)),
+            };
+            if let Some((clip, node, cur)) = playing {
+                if let Some(prev) = advance_track(&mut last, entity, node, cur) {
                     scan_events(clip, entity, prev, cur, &frame, &mut out);
                 }
             }
