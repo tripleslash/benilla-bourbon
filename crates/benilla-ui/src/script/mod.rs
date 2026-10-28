@@ -501,7 +501,7 @@ pub use loot::{
     LootCall, LootRow, LootSlotQuery, LootState, LootWindow, LootWindowQuery, MasterLootCandidate,
     MasterLootCandidateQuery, LOOT_PORTRAIT_UNIT,
 };
-pub use loot_roll::{LootRollCall, LootRollEntry, LootRollsState};
+pub use loot_roll::{LootRollCall, LootRollEntry, LootRollQuery, LootRollsState};
 pub use macro_options::{has_options as macro_has_options, show_directive, ShowDirective};
 pub use macros::{
     macro_lines, reads_options as macro_reads_options, MacroBinding, MacroDerives, MacroState,
