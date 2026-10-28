@@ -116,7 +116,7 @@ impl super::UiScript {
     /// reference builds a spell tooltip whole at the call (`0x52e610`); here the view is pushed by
     /// the host a frame after it is known, so an addon that scans the book through `SetSpell` at
     /// `PLAYER_ENTERING_WORLD` (CallOfElements' heal scan reads `TextLeft2`) found only the name.
-    /// The host holds the world-enter cascade on this (`ui_unit::feed_units`).
+    /// The host holds the arrival lane's head on this (`ui_world_enter::waits_for_spell_views`).
     pub fn book_spell_views_ready(&self) -> bool {
         let model = self.model_ref();
         model.spellbook.slots.iter().all(|s| {
