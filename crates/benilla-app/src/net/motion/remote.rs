@@ -412,6 +412,7 @@ pub(in crate::net) fn extrapolate_remote_units(
             Option<&crate::net::UnitMoveModes>,
             // The draw election's verdict, for the hidden stride (see [`HIDDEN_STRIDE`]).
             Option<&Visibility>,
+            Option<&mut super::facing::RemoteDisplayFacing>,
         ),
         (Without<Spline>, Without<ActiveMover>),
     >,
@@ -423,7 +424,9 @@ pub(in crate::net) fn extrapolate_remote_units(
     let frame_dt = time.delta_secs();
     *frame = frame.wrapping_add(1);
     let now_ms = time.elapsed_secs_f64() * 1000.0;
-    for (e, mut t, mut rm, speeds, twist, latched, mut rider, guid, granted, vis) in &mut q {
+    for (e, mut t, mut rm, speeds, twist, latched, mut rider, guid, granted, vis, mut face) in
+        &mut q
+    {
         let hidden = vis.is_some_and(|v| *v == Visibility::Hidden);
         let dt = if hidden {
             let acc = owed.entry(e).or_insert(0.0);
@@ -561,8 +564,24 @@ pub(in crate::net) fn extrapolate_remote_units(
                 pos = reconcile_lerp(pos, predicted, target_pos, swimming, dt, remaining_s);
             }
         }
+        // The display facing turns toward the raw one through the box filter, as every unit's but
+        // the camera's (`0x600cd0` from `0x608070`), in the frame the pose is kept in; a mover
+        // first seen turns from where it stands.
+        let swimming = rm.flags & move_flags::SWIMMING != 0;
+        let (before, display) = match face.as_deref_mut() {
+            Some(f) => f.pump(orientation, swimming),
+            None => {
+                let mut f = super::facing::RemoteDisplayFacing::seeded(match deck {
+                    Some((_, deck_yaw, ..)) => yaw_of(t.rotation) - deck_yaw,
+                    None => yaw_of(t.rotation),
+                });
+                let pumped = f.pump(orientation, swimming);
+                commands.entity(e).insert(f);
+                pumped
+            }
+        };
         // A mouse-turning mover sends no turn flag, only facing packets, so a standing, grounded
-        // mover's applied yaw latches the shuffle (the reference's display-facing latch,
+        // mover's pumped yaw latches the shuffle (the reference's display-facing latch,
         // `0x607ed0` to `+0xd58` `0x800`/`0x1000` to `0x712090`, anims 11 and 12).
         let grounded_still = rm.flags
             & (move_flags::ANY_MOVE
@@ -572,7 +591,7 @@ pub(in crate::net) fn extrapolate_remote_units(
                 | move_flags::SWIMMING)
             == 0;
         let step = if grounded_still {
-            wrap_pi(orientation - rm.orientation)
+            wrap_pi(display - before)
         } else {
             0.0
         };
@@ -582,6 +601,7 @@ pub(in crate::net) fn extrapolate_remote_units(
             commands.entity(e).remove::<super::FacingStep>();
         }
         let dz = pos[2] - prev[2];
+        let mut display = display;
         // The deck-local result is the rider's pose; the world one goes through the deck.
         if let (Some((boat, deck_yaw, ..)), Some(rider)) = (deck, rider.as_mut()) {
             if rider.local_pos != pos || rider.local_orientation != orientation {
@@ -591,6 +611,7 @@ pub(in crate::net) fn extrapolate_remote_units(
             rm.jump_xy_vel = rotate_xy(rm.jump_xy_vel, deck_yaw);
             pos = bevy_to_wow(boat.translation + boat.rotation * wow_to_bevy(pos));
             orientation += deck_yaw;
+            display += deck_yaw;
         }
         rm.wow_pos = pos;
         rm.orientation = orientation;
@@ -609,18 +630,16 @@ pub(in crate::net) fn extrapolate_remote_units(
         if t.translation != translation {
             t.translation = translation;
         }
-        // The strafe body pose, as our own avatar's; swimming snaps the display facing to the aim
-        // (`0x607ed0`'s `mov [esi+0xc94],[esi+0xc98]`).
-        let swimming = rm.flags & move_flags::SWIMMING != 0;
+        // The strafe body pose, as our own avatar's, on the display facing.
         let offset = if swimming {
             0.0
         } else {
             strafe_body_offset(rm.flags)
         };
         let yaw = if offset != 0.0 {
-            ease_strafe_yaw(yaw_of(t.rotation), orientation, offset, dt)
+            ease_strafe_yaw(yaw_of(t.rotation), display, offset, dt)
         } else {
-            orientation
+            display
         };
         // The swim body pitch from the reported pitch, as for our own avatar (`0x60a110`).
         let rotation = crate::creature_anim::swim_body_rotation(yaw, rm.flags, rm.pitch);

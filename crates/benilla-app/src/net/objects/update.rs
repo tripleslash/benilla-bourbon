@@ -22,7 +22,7 @@ use benilla_protocol::{guid, EntityKind, MoveSpeeds, NotifyBlock, ObjectFields, 
 use benilla_ui::script::UiScript;
 use bevy::prelude::*;
 
-use super::super::motion::{pose_transform, wire_yaw};
+use super::super::motion::{pose_transform, smoothed, wire_yaw};
 use super::super::{
     write_fields, FieldChanged, Guid, NetEntity, NetHandlerApp, ObjectStore, UnitMoveModes,
     UnitSpeeds,
@@ -547,6 +547,7 @@ fn on_object_move(In(ev): In<SessionEvent>, mut sc: Scene) {
     if active_mover(&sc) != Some(guid) {
         found_live(&mut sc, e);
     }
+    let smooth = smoothed(sc.nets.get(e).ok().map(|n| n.kind), sc.movers.contains(e));
     object_move(
         guid,
         position,
@@ -555,6 +556,7 @@ fn on_object_move(In(ev): In<SessionEvent>, mut sc: Scene) {
         &sc.index,
         &mut sc.transforms,
         &sc.movers,
+        smooth,
     );
 }
 

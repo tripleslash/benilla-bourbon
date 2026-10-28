@@ -71,11 +71,45 @@ pub(in crate::net) fn set_raw_facing(commands: &mut Commands, e: Entity, wire: f
 }
 
 /// Whether [`drive_display_facing`] turns this body's display facing: a unit, not the body we
-/// steer, which shows its raw facing at once (`0x600d03`). The reference smooths players too
-/// (`0x608070`, skipped only for the unit the camera follows at `0x60805b`); benilla's smoother
-/// does not yet, so a player here shows its raw facing at once.
+/// steer, which shows its raw facing at once (`0x600d03`). A remote player is smoothed too, by
+/// the extrapolator ([`RemoteDisplayFacing`]), as the reference skips only the unit the camera
+/// follows (`0x608070`, `0x60805b`); a player that has not moved yet shows its create pose.
 pub(in crate::net) fn smoothed(kind: Option<EntityKind>, active_mover: bool) -> bool {
     kind == Some(EntityKind::Unit) && !active_mover
+}
+
+/// A remote mover's display facing (`CGUnit+0xc94`) and its `+0xc9c` ring, which the extrapolator
+/// turns toward the raw facing through the same box filter as [`drive_display_facing`]: the
+/// reference runs `0x600cd0` on every unit but the camera's (`0x608070`), a player's goal being
+/// its raw facing (row 6). Kept in the frame the mover's pose is kept in, deck-local on a deck.
+#[derive(Component)]
+pub(crate) struct RemoteDisplayFacing {
+    yaw: f32,
+    hist: [f32; 4],
+}
+
+impl RemoteDisplayFacing {
+    /// The display seeded where it stands, with an empty ring.
+    pub(super) fn seeded(yaw: f32) -> Self {
+        Self {
+            yaw: yaw.rem_euclid(std::f32::consts::TAU),
+            hist: [0.0; 4],
+        }
+    }
+
+    /// One pump toward the raw facing `goal`, returning the display yaw before and after; swimming
+    /// snaps the display to the aim and wipes the ring (`0x607ed0`'s `mov [esi+0xc94],[esi+0xc98]`).
+    pub(super) fn pump(&mut self, goal: f32, swimming: bool) -> (f32, f32) {
+        let before = self.yaw;
+        let goal = goal.rem_euclid(std::f32::consts::TAU);
+        if swimming {
+            self.yaw = goal;
+            self.hist = [0.0; 4];
+        } else {
+            self.yaw = filter_step(self.yaw, goal, &mut self.hist);
+        }
+        (before, self.yaw)
+    }
 }
 
 /// The signed yaw the facing pump applied this frame (positive turns left), the client's
@@ -136,12 +170,6 @@ pub(super) fn heading_between(from: [f32; 3], to: [f32; 3]) -> f32 {
     dy.atan2(f64::from(dx)) as f32
 }
 
-/// The horizontal bearing from `from` to `to`, `None` when they coincide.
-fn bearing(from: [f32; 3], to: [f32; 3]) -> Option<f32> {
-    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
-    (dx * dx + dy * dy >= 1.0e-4).then(|| dy.atan2(dx))
-}
-
 /// Goal-chain row 3 (`600d6c`-`600d9d`): a state emote (`UNIT_NPC_EMOTESTATE`) whose
 /// `Emotes.dbc` flags lack [`EMOTE_PERMITS_FACING`] pins the unit to its raw facing; an absent
 /// or unknown emote suppresses nothing.
@@ -197,7 +225,7 @@ fn filter_step(cur: f32, goal: f32, hist: &mut [f32; 4]) -> f32 {
 /// | 3 | a state emote lacking [`EMOTE_PERMITS_FACING`] | raw |
 /// | 4 | [`UNIT_FLAG_STUNNED`] | raw |
 /// | 5 | the combat override `+0xc58 & 1` to `+0xcac` (writer `0x624f10`) | not built |
-/// | 6 | a remote player | raw, excluded by [`RemoteMotion`] |
+/// | 6 | a remote player | raw, smoothed by the extrapolator ([`RemoteDisplayFacing`]) |
 /// | 7 | `UNIT_FIELD_TARGET` resolves | bearing to that unit |
 /// | 9 | this unit is the interaction NPC | bearing to the local player |
 /// | - | none of the above | raw |
@@ -222,6 +250,8 @@ pub(crate) fn drive_display_facing(
     latched: Query<Entity, (With<FacingStep>, Without<RemoteMotion>)>,
     // A unit that starts moving drops its state, so the next seed reads the pose it stops at.
     ungoverned: Query<Entity, (With<DisplayFacing>, Or<(With<Spline>, With<RemoteMotion>)>)>,
+    // A remote mover's display state goes with its motion, so a later seed reads its pose then.
+    unreckoned: Query<Entity, (With<RemoteDisplayFacing>, Without<RemoteMotion>)>,
 ) {
     let self_pos = self_q
         .iter()
@@ -251,12 +281,13 @@ pub(crate) fn drive_display_facing(
             continue;
         };
         let unit_pos = bevy_to_wow(unit_t.translation);
-        // Row 7.
+        // Row 7: once the target resolves, its bearing is `0x47f220`'s, called unconditionally
+        // (`0x600e62` → `0x600e9e`), so a target on the unit's own spot takes a fixed heading.
         let target = fields
             .unit_target()
             .and_then(|g| index.0.get(&g).copied())
             .and_then(|te| transforms.get(te).ok())
-            .and_then(|t| bearing(unit_pos, bevy_to_wow(t.translation)));
+            .map(|t| heading_between(unit_pos, bevy_to_wow(t.translation)));
         if let Some(goal) = target {
             goals.push((e, Some(goal), GoalSource::Target));
             continue;
@@ -265,7 +296,7 @@ pub(crate) fn drive_display_facing(
         let facing_me = (interact_npc == Some(e))
             .then_some(self_pos)
             .flatten()
-            .and_then(|p| bearing(unit_pos, p));
+            .map(|p| heading_between(unit_pos, p));
         match facing_me {
             Some(goal) => goals.push((e, Some(goal), GoalSource::Interact)),
             None => goals.push((e, None, GoalSource::Raw)),
@@ -312,6 +343,9 @@ pub(crate) fn drive_display_facing(
     }
     for e in &ungoverned {
         commands.entity(e).remove::<DisplayFacing>();
+    }
+    for e in &unreckoned {
+        commands.entity(e).remove::<RemoteDisplayFacing>();
     }
 }
 
@@ -687,12 +721,5 @@ mod tests {
             (diag + 3.0 * std::f32::consts::FRAC_PI_4).abs() < 1.0e-6,
             "atan2: {diag}"
         );
-    }
-
-    #[test]
-    fn a_coincident_pair_has_no_bearing() {
-        assert!(bearing([1.0, 2.0, 3.0], [1.0, 2.0, 9.0]).is_none());
-        let b = bearing([0.0, 0.0, 0.0], [1.0, 1.0, 0.0]).expect("a real bearing");
-        assert!((b - std::f32::consts::FRAC_PI_4).abs() < 1.0e-5, "{b}");
     }
 }

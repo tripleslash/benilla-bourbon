@@ -815,14 +815,25 @@ pub(super) fn object_move(
     index: &GuidIndex,
     transforms: &mut Query<&mut Transform>,
     movers: &Query<(), With<ActiveMover>>,
+    smooth: bool,
 ) {
     if let Some(&e) = index.0.get(&guid) {
         if movers.contains(e) {
             return;
         }
         commands.entity(e).remove::<Spline>();
-        // A yaw only: the GameObjects that get one are transports, which their tick then owns.
-        write_pose(commands, transforms, e, position, wire_yaw(orientation));
+        if smooth {
+            // A move sets only the raw facing, which the display turns to through `0x600cd0`:
+            // `0x601020` resets the display only at create and reactivate (`0x5fbaa8`,
+            // `0x5fbd81`).
+            if let Ok(mut t) = transforms.get_mut(e) {
+                t.translation = benilla_assets::coords::wow_to_bevy(position);
+            }
+            set_raw_facing(commands, e, orientation);
+        } else {
+            // A yaw only: the GameObjects that get one are transports, which their tick then owns.
+            write_pose(commands, transforms, e, position, wire_yaw(orientation));
+        }
     }
 }
 
@@ -925,13 +936,12 @@ fn unit_move(
             debug_assert_eq!(fire_ms, now_ms, "a seeding packet fires at arrival");
             trace_relay(guid, &mv, &rm.relay, now_ms, 0, RelayOutcome::Seed);
             apply_move(e, &mv, &mut rm, now_ms, commands, landings);
-            write_pose(
-                commands,
-                transforms,
-                e,
-                mv.position,
-                wire_yaw(mv.orientation),
-            );
+            // The position only: the raw facing is the chain's, and the extrapolator turns the
+            // display toward it from where it stands, as no move resets it (`0x601020` runs at
+            // create and reactivate alone).
+            if let Ok(mut t) = transforms.get_mut(e) {
+                t.translation = benilla_assets::coords::wow_to_bevy(mv.position);
+            }
             commands.entity(e).insert(rm);
         }
     }

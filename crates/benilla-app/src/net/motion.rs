@@ -68,9 +68,10 @@ pub(super) fn pose_transform(position: [f32; 3], rotation: Quat) -> Transform {
 /// Writes a raw-WoW pose onto an existing entity, keeping the renderer's baked scale; an entity
 /// not yet query-visible on its spawn frame is skipped, as its spawn pose already placed it.
 ///
-/// A wire pose overrides the local facing turn, so it drops any [`DisplayFacing`] and the smoother
-/// re-seeds from this pose, as the reference's resync sets the goal and wipes the ring
-/// (`0x601020`).
+/// A create's pose, or a body the smoother does not govern: it drops any [`DisplayFacing`] and the
+/// smoother re-seeds from this pose, as the reference's reset at create sets the goal and wipes
+/// the ring (`0x601020` from `0x5fbaa8`). A move to a smoothed body sets only its raw facing
+/// ([`set_raw_facing`]).
 pub(super) fn write_pose(
     commands: &mut Commands,
     transforms: &mut Query<&mut Transform>,
