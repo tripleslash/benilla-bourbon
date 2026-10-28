@@ -18,9 +18,9 @@ use benilla_world::model_fade::DespawnFade;
 use benilla_world::vis_chain::VisChainOnly;
 
 use super::motion::{
-    create_spline, final_yaw, gameobject_rotation, monster_move_spline, pose_transform,
-    resolve_facing, trace_create_spline, trace_move_snap, wire_yaw, write_pose, SplineStopped,
-    ROOT_APPLY_WIPE,
+    create_spline, gameobject_rotation, monster_move_spline, pose_transform, resolve_facing,
+    set_raw_facing, smoothed, trace_create_spline, trace_move_snap, wire_yaw, write_pose,
+    SplineStopped, ROOT_APPLY_WIPE,
 };
 use super::{
     ActiveMover, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity, NetHandlerApp, ObjectStore,
@@ -52,6 +52,8 @@ pub(super) fn register(app: &mut App) {
     use SessionEventKind as K;
     update::register(app);
     app.net_handler(K::ItemTemplate, on_item)
+        // Next, so the stationery rebuild reads the record the cache now holds.
+        .net_handler(K::ItemTemplate, on_paper_record)
         .net_handler(K::ItemTime, on_item)
         .net_handler(K::ItemEnchantTime, on_item)
         .net_handler(K::MoveTimeSkipped, on_move_time_skipped)
@@ -132,6 +134,8 @@ pub(crate) struct Scene<'w, 's> {
     quest_giver: Option<ResMut<'w, crate::ui_quest::QuestGiverLane>>,
     // The quest log's leaderboard's object waits' `QUEST_LOG_UPDATE`.
     quest_log: Option<ResMut<'w, crate::ui_quest_log::QuestLog>>,
+    // The mail rows' and notices' callbacks' `MAIL_INBOX_UPDATE`.
+    mail: Option<ResMut<'w, crate::ui_mail::MailLane>>,
     pass: ResMut<'w, update::UpdatePass>,
     released: ResMut<'w, Released>,
     nets: Query<'w, 's, &'static NetEntity>,
@@ -175,6 +179,19 @@ fn item_watch<'a, 'w, 's>(
     }
 }
 
+/// `SMSG_ITEM_QUERY_SINGLE_RESPONSE`'s stationery callbacks (`0x4acbf0`), a record or a refusal,
+/// registered right after [`on_item`] so the rebuild they may run (`0x4acbf8`) reads the record
+/// [`on_item`] just cached ([`crate::ui_mail::StationeryRebuild::answered`]).
+fn on_paper_record(
+    In(ev): In<SessionEvent>,
+    paper: Option<crate::ui_mail::StationeryRebuild>,
+    items: Res<Items>,
+) {
+    if let (SessionEvent::ItemTemplate { entry, .. }, Some(mut paper)) = (ev, paper) {
+        paper.answered(entry, &items);
+    }
+}
+
 /// Items past their create block: `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, whose refusal the next
 /// create or entry change of that entry asks again; and the lifetime and enchant countdowns,
 /// written into the item's own [`crate::items::Countdowns`].
@@ -190,8 +207,9 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
             // (`0x5d96b0`), the loot window's rows (`0x4c2ac0`) and pushes (`0x491ee0`), the trade
             // getters' (`0x4c0340`), the ammo getters' (`0x4c84f0`), the parked swaps'
             // (`0x5e1020`) and auto-equips' (`0x5e17a0`), the vendor rows' (`0x4fada0`,
-            // `0x4fb570`), the trainer rows' (`0x4d9140`, `0x4d9db0`) and the questgiver rows'
-            // (`0x5018c0`).
+            // `0x4fb570`), the trainer rows' (`0x4d9140`, `0x4d9db0`), the questgiver rows'
+            // (`0x5018c0`), the mail rows' and notices' (`0x4af0a0`, `0x4ad010`), the mail
+            // attachment's (`0x4ae710`) and the auction notices' lines (`0x4cd190`).
             let callbacks = sc.items.take_callbacks(entry);
             for callback in callbacks {
                 use crate::items::RecordCallback as Cb;
@@ -259,6 +277,37 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
                         }
                     }
                     Cb::Quest => {}
+                    // `MAIL_INBOX_UPDATE` for a ready record only (`0x4af0a6`, `0x4ad016`); the
+                    // notice's subject reads the record as its row resolves.
+                    Cb::Mail if answered => {
+                        if let Some(lane) = sc.mail.as_mut() {
+                            lane.push(crate::ui_mail::MailEvent::InboxUpdate);
+                        }
+                    }
+                    Cb::Mail => {}
+                    // An auction notice's line, shown with the name or, for a refusal, dropped
+                    // (`0x4cd190`).
+                    Cb::AuctionMessage => {
+                        if let (Some(auction), Some(house)) =
+                            (sc.auction.as_mut(), sc.house.as_mut())
+                        {
+                            crate::ui_auction::message_answered(auction, house, &sc.items, entry);
+                        }
+                    }
+                    // `MAIL_SEND_INFO_UPDATE` for a ready record only (`0x4ae716`, `0x4ae71f`).
+                    Cb::SendMail if answered => {
+                        if let Some(lane) = sc.mail.as_mut() {
+                            lane.push(crate::ui_mail::MailEvent::SendInfoUpdate);
+                        }
+                    }
+                    Cb::SendMail => {}
+                    // `NEW_AUCTION_UPDATE` for a ready record only (`0x4ce2f6`-`0x4ce2ff`).
+                    Cb::AuctionSellItem if answered => {
+                        if let Some(house) = sc.house.as_mut() {
+                            crate::ui_auction::sell_item_answered(house);
+                        }
+                    }
+                    Cb::AuctionSellItem => {}
                 }
             }
             // The combat log's callback for its held lines (`0x6294b0`), which writes each one
@@ -405,6 +454,10 @@ fn on_monster_move(In(ev): In<SessionEvent>, mut sc: Scene) {
     } = ev
     {
         let rooted = modes_of(guid, &sc.index, &sc.modes).rooted();
+        let smooth =
+            sc.index.0.get(&guid).is_some_and(|&e| {
+                smoothed(sc.nets.get(e).ok().map(|n| n.kind), sc.movers.contains(e))
+            });
         monster_move(
             guid,
             transport,
@@ -417,6 +470,7 @@ fn on_monster_move(In(ev): In<SessionEvent>, mut sc: Scene) {
             flying,
             run_mode,
             rooted,
+            smooth,
             &mut sc.commands,
             &sc.index,
             &mut sc.transforms,
@@ -881,10 +935,11 @@ fn tear_down(mut ent: EntityWorldMut) {
     ent.insert(DespawnFade::default());
 }
 
-/// `SMSG_MONSTER_MOVE` or `SMSG_MONSTER_MOVE_TRANSPORT`: settles transport membership, snaps the
-/// facing, then attaches or clears the spline. With a `transport`, `start`, the path and an
-/// `Angle` facing are deck-local and the unit rides as a [`TransportRider`]; without one, a riding
-/// unit leaves the deck, as vmangos drops it (`MoveSplineInit.cpp:156-159`).
+/// `SMSG_MONSTER_MOVE` or `SMSG_MONSTER_MOVE_TRANSPORT`: settles transport membership, then
+/// attaches the spline, or clears it and turns the unit to the facing at once. With a
+/// `transport`, `start`, the path and an `Angle` facing are deck-local and the unit rides as a
+/// [`TransportRider`]; without one, a riding unit leaves the deck, as vmangos drops it
+/// (`MoveSplineInit.cpp:156-159`).
 fn monster_move(
     guid: u64,
     transport: Option<u64>,
@@ -897,6 +952,8 @@ fn monster_move(
     flying: bool,
     run_mode: bool,
     rooted: bool,
+    // The display smoother turns this unit (`facing::smoothed`).
+    smooth: bool,
     commands: &mut Commands,
     index: &GuidIndex,
     transforms: &mut Query<&mut Transform>,
@@ -915,9 +972,43 @@ fn monster_move(
             stop,
             duration_ms,
         );
-        // Transport membership, settled before any pose is read, and above the root gate, which
-        // refuses only the path. An `Angle` facing is deck-local (`MoveSplineInit.cpp:87`); a
-        // `Spot` or `Target` is not converted server-side, so it is rebased by the deck's yaw.
+        // A rooted unit takes no path: `0x6187a0`, the only route into the spline installer
+        // `0x7c6a50`, returns on ROOT (`0x6187c2`). Only the path is refused: the un-nock tail runs
+        // on every path (`0x6020ef`), and the rest for a rooted unit is untraced.
+        let spline = if rooted {
+            None
+        } else {
+            monster_move_spline(
+                path,
+                spline_id,
+                stop,
+                duration_ms,
+                flying,
+                run_mode,
+                facing,
+                transport,
+            )
+        };
+        // The final facing (moveType 2/3/4) turns the unit now only when no path installs
+        // (`0x601fee` to `0x60205e`): an `Angle` through `0x6198e0`, a `Target` through `0x602e80`,
+        // a `Spot` as `0x47f220` from the unit's position, each into the raw facing. A path keeps
+        // it for its end (`0x618840`, `0x618870`, `0x6188a0`; [`Spline::final_facing`]).
+        let face_now = if spline.is_none() {
+            facing
+        } else {
+            MonsterMoveFacing::None
+        };
+        let target_pos = |g: u64| {
+            index
+                .0
+                .get(&g)
+                .and_then(|&te| transforms.get(te).ok())
+                .map(|t| bevy_to_wow(t.translation))
+        };
+        // Transport membership, settled before any pose is read and whether or not the path was
+        // refused: the root gate refuses only the path. An `Angle` facing is deck-local
+        // (`MoveSplineInit.cpp:87`); a `Spot` or `Target` is not converted server-side, so it is
+        // rebased by the deck's yaw.
         let deck_yaw = |t: u64| {
             index
                 .0
@@ -925,25 +1016,17 @@ fn monster_move(
                 .and_then(|&te| transforms.get(te).ok())
                 .map(|tf| tf.rotation.to_euler(EulerRot::YXZ).0)
         };
+        // The unit's own position anchors the bearing (`0x6020a5`, `0x602ec1`, its world
+        // `GetPosition`), not the wire's `start`.
+        let world_pos = transforms.get(e).ok().map(|tf| bevy_to_wow(tf.translation));
         if let Some(t) = transport {
-            let local_facing = match facing {
+            let local_facing = match face_now {
                 MonsterMoveFacing::None => None,
                 MonsterMoveFacing::Angle(a) => Some(a),
-                other => {
-                    let target_pos = |g: u64| {
-                        index
-                            .0
-                            .get(&g)
-                            .and_then(|&te| transforms.get(te).ok())
-                            .map(|tf| bevy_to_wow(tf.translation))
-                    };
-                    // The world position anchors the bearing; the wire's `start` is deck-local.
-                    let world_pos = transforms.get(e).ok().map(|tf| bevy_to_wow(tf.translation));
-                    world_pos
-                        .and_then(|p| resolve_facing(other, p, target_pos))
-                        .zip(deck_yaw(t))
-                        .map(|(world, yaw)| world - yaw)
-                }
+                other => world_pos
+                    .and_then(|p| resolve_facing(other, p, target_pos))
+                    .zip(deck_yaw(t))
+                    .map(|(world, yaw)| world - yaw),
             };
             match riders.get_mut(e) {
                 Ok(mut rider) => {
@@ -961,28 +1044,21 @@ fn monster_move(
                     });
                 }
             }
-        } else if riders.get(e).is_ok() {
-            commands
-                .entity(e)
-                .remove::<crate::transport::TransportRider>();
-        }
-        // The final facing (moveType 2/3/4) snaps the raw facing (`0x7c6f30`) and resets the
-        // display smoother. A following path overrides it with the tangent each frame (`0x7c5490`),
-        // so it sticks only on a stop. A deck packet's facing is the rider's `local_orientation`.
-        if transport.is_none() && !matches!(facing, MonsterMoveFacing::None) {
-            let target_pos = |g: u64| {
-                index
-                    .0
-                    .get(&g)
-                    .and_then(|&te| transforms.get(te).ok())
-                    .map(|t| bevy_to_wow(t.translation))
-            };
-            if let Some(orientation) = resolve_facing(facing, start, target_pos) {
-                if let Ok(mut t) = transforms.get_mut(e) {
+        } else {
+            if riders.get(e).is_ok() {
+                commands
+                    .entity(e)
+                    .remove::<crate::transport::TransportRider>();
+            }
+            // Only the raw facing turns; the display follows through `0x600cd0`, never reset on
+            // a move. A body the smoother does not govern shows it at once.
+            if let Some(orientation) =
+                world_pos.and_then(|p| resolve_facing(face_now, p, target_pos))
+            {
+                if smooth {
+                    set_raw_facing(commands, e, orientation);
+                } else if let Ok(mut t) = transforms.get_mut(e) {
                     t.rotation = Quat::from_rotation_y(orientation);
-                    commands
-                        .entity(e)
-                        .remove::<crate::net::motion::DisplayFacing>();
                 }
             }
         }
@@ -999,32 +1075,13 @@ fn monster_move(
             e,
             crate::creature_anim::PrecastTail::Moving(!rooted),
         );
-        // A rooted unit takes no path: `0x6187a0`, the only route into the spline installer
-        // `0x7c6a50`, returns on ROOT (`0x6187c2`). Only the path is refused: the un-nock tail runs
-        // on every path (`0x6020ef`), and the rest for a rooted unit is untraced.
         if rooted {
             return;
         }
         // The spline supersedes the relay stream: a splined player (charge, taxi) would otherwise
         // keep stale flags that outrank the spline in the anim selector.
         commands.entity(e).remove::<RemoteMotion>();
-        // The yaw the path rests at. A deck path's `Angle` is already deck-local; its `Spot` is a
-        // world point against a deck-local path, so it keeps the tangent.
-        let final_facing = match (transport, facing) {
-            (Some(_), MonsterMoveFacing::Angle(a)) => Some(a),
-            (Some(_), _) => None,
-            (None, _) => final_yaw(facing, path.last().copied()),
-        };
-        match monster_move_spline(
-            path,
-            spline_id,
-            stop,
-            duration_ms,
-            flying,
-            run_mode,
-            final_facing,
-            transport,
-        ) {
+        match spline {
             Some(spline) => {
                 commands.entity(e).insert(spline).remove::<SplineStopped>();
             }
@@ -2674,6 +2731,7 @@ mod tests {
                             false,
                             true,
                             rooted,
+                            false,
                             &mut commands,
                             &index,
                             &mut transforms,
@@ -2738,6 +2796,7 @@ mod tests {
                             false,
                             true,
                             rooted,
+                            false,
                             &mut commands,
                             &index,
                             &mut transforms,
@@ -2801,6 +2860,7 @@ mod tests {
                         false,
                         true,
                         false,
+                        false,
                         &mut commands,
                         &index,
                         &mut transforms,
@@ -2815,10 +2875,14 @@ mod tests {
                 .expect("a transport path attaches its rider");
             assert_eq!(rider.transport_guid, BOAT);
             assert_eq!(rider.local_pos, [1.5, -2.5, 0.75], "seeded deck-local");
-            assert!(
-                (rider.local_orientation - 1.25).abs() < 1e-6,
-                "Angle is deck-local"
+            assert_eq!(
+                rider.local_orientation, 0.0,
+                "a path that installs keeps its facing for its end"
             );
+            assert!(matches!(
+                w.entity(e).get::<Spline>().expect("a path").final_facing,
+                MonsterMoveFacing::Angle(a) if a == 1.25
+            ));
             assert_eq!(
                 w.entity(e).get::<Spline>().expect("a path").deck,
                 Some(BOAT),
@@ -2848,6 +2912,7 @@ mod tests {
                         false,
                         true,
                         false,
+                        false,
                         &mut commands,
                         &index,
                         &mut transforms,
@@ -2863,6 +2928,112 @@ mod tests {
                 "a plain path takes the unit off the deck"
             );
             assert_eq!(w.entity(e).get::<Spline>().expect("a path").deck, None);
+        }
+
+        /// Runs one `monster_move` of `facing` at `start` on `e` (guid `MOB`); `duration_ms` 0
+        /// installs no path.
+        fn arrive(
+            w: &mut World,
+            start: [f32; 3],
+            facing: MonsterMoveFacing,
+            duration_ms: u32,
+            smooth: bool,
+        ) {
+            w.run_system_once(
+                move |mut commands: Commands,
+                      index: Res<GuidIndex>,
+                      mut transforms: Query<&mut Transform>,
+                      mut riders: Query<&mut crate::transport::TransportRider>| {
+                    monster_move(
+                        MOB,
+                        None,
+                        start,
+                        9,
+                        vec![start, [start[0] + 10.0, start[1], start[2]]],
+                        facing,
+                        false,
+                        duration_ms,
+                        false,
+                        true,
+                        false,
+                        smooth,
+                        &mut commands,
+                        &index,
+                        &mut transforms,
+                        &mut riders,
+                    );
+                },
+            )
+            .unwrap();
+        }
+
+        fn standing_unit(w: &mut World) -> Entity {
+            let e = w
+                .spawn((
+                    Transform::default(),
+                    NetEntity {
+                        kind: EntityKind::Unit,
+                        display_id: None,
+                        scale: 1.0,
+                    },
+                    ObjectStore::default(),
+                ))
+                .id();
+            let mut index = GuidIndex::default();
+            index.0.insert(MOB, e);
+            w.insert_resource(index);
+            e
+        }
+
+        fn yaw(w: &World, e: Entity) -> f32 {
+            let r = w.entity(e).get::<Transform>().unwrap().rotation;
+            r.to_euler(EulerRot::YXZ).0
+        }
+
+        /// A path that installs stores the facing (`0x601fee`); the unit is not turned on arrival.
+        #[test]
+        fn a_path_that_installs_does_not_turn_the_unit_on_arrival() {
+            let mut w = World::new();
+            let e = standing_unit(&mut w);
+            arrive(&mut w, [0.0; 3], MonsterMoveFacing::Angle(2.0), 3000, false);
+            assert_eq!(yaw(&w, e), 0.0);
+            assert!(w.entity(e).get::<Spline>().is_some());
+        }
+
+        /// No path (`0x60205e`): the raw facing turns now, and a smoothed unit's display follows
+        /// through the smoother rather than snapping; it is never reset.
+        #[test]
+        fn with_no_path_the_unit_turns_through_the_smoother() {
+            let mut w = World::new();
+            w.init_resource::<crate::ui_session::InteractNpc>();
+            let e = standing_unit(&mut w);
+            arrive(&mut w, [0.0; 3], MonsterMoveFacing::Angle(1.0), 0, true);
+            assert_eq!(yaw(&w, e), 0.0, "the display is not snapped");
+            w.run_system_once(crate::net::motion::drive_display_facing)
+                .unwrap();
+            assert!((yaw(&w, e) - 0.5).abs() < 1e-5, "half way: {}", yaw(&w, e));
+            for _ in 0..16 {
+                w.run_system_once(crate::net::motion::drive_display_facing)
+                    .unwrap();
+            }
+            assert!((yaw(&w, e) - 1.0).abs() < 1e-5, "settled: {}", yaw(&w, e));
+        }
+
+        /// A body the smoother does not govern shows the facing at once; a `Spot` heads from the
+        /// unit's own position (`0x6020a5`), not the packet's start.
+        #[test]
+        fn with_no_path_an_unsmoothed_body_faces_its_spot_from_where_it_stands() {
+            let mut w = World::new();
+            let e = standing_unit(&mut w);
+            arrive(
+                &mut w,
+                [5.0, 5.0, 0.0],
+                MonsterMoveFacing::Spot([0.0, 10.0, 0.0]),
+                0,
+                false,
+            );
+            let got = yaw(&w, e);
+            assert!((got - std::f32::consts::FRAC_PI_2).abs() < 1e-5, "{got}");
         }
     }
 }

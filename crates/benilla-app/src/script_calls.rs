@@ -29,6 +29,10 @@ pub(crate) mod disjoint;
 mod engine;
 pub(crate) mod live;
 mod windows;
+mod world_click;
+#[cfg(test)]
+pub(crate) use world_click::{error_lines, record_error_lines, release_click, take_error_lines};
+pub(crate) use world_click::{submit_waiting_clicks, InputHost};
 
 /// `DoEmote` (`0x5ef560`) in the reference's order: a posture emote's stand change to a state but 0
 /// runs its local apply's leave (`0x5f0790`), the loot close (`0x48f200` at `0x5f07d5`) then the
@@ -140,6 +144,8 @@ disjoint::disjoint_set! {
         asks: engine::RecordAsks<'static, 'static>,
         /// What the getters read as they run ([`live::LiveReads`]).
         live: live::LiveReads<'static, 'static>,
+        /// The world click's arm, its pick and its legs.
+        click: crate::target::ClickLegs<'static, 'static>,
     }
 }
 
@@ -542,15 +548,10 @@ impl ScriptCallHost<'_, '_> {
     /// the cell cleared (`0x4f502b`) and `GUILD_REGISTRAR_CLOSED` (`0x4f503a`), its signal once
     /// per run of the core, as the call's tail.
     fn close_registrar(&mut self) -> Option<CallTail> {
-        use crate::ui_session::NpcWindow;
         let npc = self.appliers.petition().registrar_npc()?;
         let reenters = self.appliers.latch().release(npc);
         self.appliers.petition().clear_registrar();
         let runs = 1 + usize::from(reenters);
-        let latch = self.appliers.latch();
-        for _ in 0..runs {
-            latch.note_closed(NpcWindow::Registrar);
-        }
         Some(Box::new(move |script: &mut UiScript| {
             for _ in 0..runs {
                 script.fire_event("GUILD_REGISTRAR_CLOSED", vec![]);
@@ -563,15 +564,10 @@ impl ScriptCallHost<'_, '_> {
     /// the latch, then the cell cleared (`0x4f58df`) and `CLOSE_TABARD_FRAME` (`0x4f58f8`), once
     /// per run of the core, as the call's tail, after the preview's undo (`0x4f58ce`).
     fn close_tabard(&mut self) -> Option<CallTail> {
-        use crate::ui_session::NpcWindow;
         let vendor = self.appliers.tabard().vendor()?;
         let reenters = self.appliers.latch().release(vendor);
         self.appliers.tabard().clear_vendor();
         let runs = 1 + usize::from(reenters);
-        let latch = self.appliers.latch();
-        for _ in 0..runs {
-            latch.note_closed(NpcWindow::Tabard);
-        }
         Some(Box::new(move |script: &mut UiScript| {
             script.end_tabard_preview();
             for _ in 0..runs {
@@ -713,6 +709,13 @@ impl CallHost for ScriptCallHost<'_, '_> {
                                 debug!("script_calls: macro {id} is empty");
                             }
                         }));
+                    }
+                    // `SetCursorItem`'s signals (`0x494bb6`, `0x494c54`) run their listeners
+                    // before `AutoEquipCursorItem` goes on (`0x5e18d5`), and its send.
+                    crate::ui_action::UseOutcome::Equip { picked } => {
+                        self.at_point(script, &mut at.mark);
+                        self.listened(&mut at);
+                        crate::ui_action::finish_equip(&mut self.appliers.action(), script, picked);
                     }
                     crate::ui_action::UseOutcome::Done => {}
                 }
@@ -900,6 +903,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 appliers.auction().wait_for_name(guid, list);
             }
             ScriptCall::RecordAsk(ask) => appliers.asks().apply(script, ask),
+            ScriptCall::WorldClick(step) => self.world_click(script, &mut at, step),
         }
         self.settle_selection(script, &mut at, owed);
         // A deselect the call's own steps raised, a dead unit's loot close's (`0x48f369`), signals

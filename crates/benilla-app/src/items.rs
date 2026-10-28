@@ -535,6 +535,18 @@ pub(crate) enum RecordCallback {
     Trainer,
     /// A questgiver row's, asked by `GetQuestItemInfo` (`0x5017de` with `0x5018c0`), one per call.
     Quest,
+    /// A mail row's, asked by `GetInboxHeaderInfo` and `GetInboxItem` (`0x4aecc7`, `0x4aed63`,
+    /// `0x4af66f` with `0x4af0a0`), one per call, or an auction notice's at the list parse
+    /// (`0x4acf38` with `0x4ad010`), one per notice.
+    Mail,
+    /// An auction notice's line whose item was not cached (`0x4ccf6e`, `0x4cd3eb`, `0x4cd4ef` with
+    /// `0x4cd190`), one per line.
+    AuctionMessage,
+    /// The attachment's, asked by `GetSendMailItem` (`0x4ae604` with `0x4ae710`), one per call.
+    SendMail,
+    /// The sell slot item's, asked by `CalculateAuctionDeposit` and `GetAuctionSellItemInfo`
+    /// (`0x4ce25e`, `0x4ce5e3` with `0x4ce2f0`), one per call.
+    AuctionSellItem,
 }
 
 impl Items {
@@ -737,9 +749,9 @@ impl Items {
         self.templates.iter().map(|(&id, _)| id).collect()
     }
 
-    /// Disconnect: drop the in-flight asks, the callbacks waiting on them or on the VM, and the
-    /// queued enchant times, keep the templates. The item objects and their countdowns go with
-    /// the index's sweep.
+    /// Disconnect: drop the callbacks waiting on asks or on the VM, and the queued enchant times,
+    /// keep the templates; [`crate::wdb`] clears their in-flight asks. The item objects and their
+    /// countdowns go with the index's sweep.
     pub(crate) fn clear_session(&mut self) {
         self.pending_enchant_times.clear();
         self.callbacks
@@ -750,7 +762,6 @@ impl Items {
             .get_mut()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        self.templates.clear_pending();
     }
 }
 
@@ -1246,6 +1257,7 @@ mod tests {
         items.insert_template(117, Some(info("Tough Jerky")));
         assert!(items.template(118, 0, Ask::New(&cmds)).is_none()); // leaves 118 in flight
         items.clear_session();
+        items.template_store_mut().clear_pending(); // the saved stores' clear, in `wdb`
         assert!(items.take_enchant_times(0x43).is_empty());
         assert!(
             items.template(117, 0, Ask::New(&cmds)).is_some(),

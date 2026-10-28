@@ -5,7 +5,7 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
     auction, backdrop, bank, camera_view, char_stats, chat_window, colorselect, container, craft,
-    cursor, death, gossip, guild, item_calls, item_text, loot, loot_roll, macros, mail, merchant,
+    cursor, death, gossip, guild, item_text, loot, loot_roll, macros, mail, merchant,
     parse_unit_token, party, petition, pvp, quest, quest_log, reputation, simplehtml, skills,
     slider, social, spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant,
     ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest, PlayerReqState, RegionData,
@@ -701,9 +701,6 @@ pub(crate) struct Model {
     /// The world pick under the cursor (`[this+0x350]`): a world click drops no payload on an
     /// object, only an item on terrain, and anything over nothing.
     pub(crate) world_pick: cursor::WorldPick,
-    /// The item calls the verb segment running now filed, which its binding hands the host as the
-    /// segment ends ([`item_calls::submit_item_calls`]).
-    pub(crate) item_calls: Vec<item_calls::ItemCall>,
     /// Targeting wants an item (`0x6e6330`): a bag or paper-doll click becomes a pick.
     pub(crate) item_pick_armed: bool,
     /// Targeting wants a location (`0x6e6320`, the word's `0x60`): a minimap click casts at the
@@ -760,9 +757,6 @@ pub(crate) struct Model {
     pub(crate) merchant: Option<merchant::MerchantState>,
     /// The repair costs `SetInventoryItem` and `SetBagItem` return.
     pub(crate) repair_costs: merchant::RepairCosts,
-    /// The buys a drop verb made of a held vendor row, into a slot or a bag, handed to the host as
-    /// the verb returns ([`merchant::MerchantCall::BuyInSlot`], [`merchant::MerchantCall::BuyIntoBag`]).
-    pub(crate) merchant_drops: Vec<merchant::MerchantCall>,
     /// Repair mode (`InRepairMode`).
     pub(crate) repair_mode: bool,
 
@@ -898,12 +892,11 @@ pub(crate) struct Model {
 
     /// The auction house's lists and session as the app last pushed them, `None` until this VM's
     /// first push, and the auction calls. `auction_selected` is each list's selected auction id, 0
-    /// for none (`0x4cfda0`/`0x4cfec0`); `auction_can_query` is the 5 s throttle.
+    /// for none (`0x4cfda0`/`0x4cfec0`).
     pub(crate) auction: Option<auction::AuctionState>,
     /// The Browse tab's class tree, seeded once per VM.
     pub(crate) auction_item_classes: Vec<auction::AuctionCategory>,
     pub(crate) auction_selected: [u32; 3],
-    pub(crate) auction_can_query: bool,
     /// The sell slot's item, resolved to its guid when `StartAuction` fires.
     pub(crate) auction_sell_item: Option<cursor::CursorItem>,
 
@@ -1570,7 +1563,6 @@ impl Model {
             cursor: None,
             cursor_grid: false,
             world_pick: cursor::WorldPick::default(),
-            item_calls: Vec::new(),
             item_pick_armed: false,
             location_pick_armed: false,
             pending_wrap: None,
@@ -1591,7 +1583,6 @@ impl Model {
             gossip: None,
             merchant: None,
             repair_costs: Default::default(),
-            merchant_drops: Vec::new(),
             repair_mode: false,
             stable: Default::default(),
             bank: None,
@@ -1648,7 +1639,6 @@ impl Model {
             auction: None,
             auction_item_classes: Vec::new(),
             auction_selected: [0; 3],
-            auction_can_query: true,
             auction_sell_item: None,
             trade: None,
             trade_partner: 0,

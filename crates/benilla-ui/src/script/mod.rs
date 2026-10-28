@@ -130,6 +130,7 @@ mod action;
 mod action_bar_toggles;
 mod addon_message;
 mod auction;
+mod auction_live;
 mod aura;
 mod backdrop;
 mod bank;
@@ -358,6 +359,7 @@ pub use auction::{
     AuctionStartRequest, AuctionState, AuctionSubCategory, BidVerdict, BIDDER, LIST, OWNER,
     SORT_KEYS,
 };
+pub use auction_live::{AuctionCanQuery, AuctionDepositRate, AuctionRowQuery};
 pub use aura::{
     AuraCall, AuraListRead, AuraRead, AuraState, PlayerBuffExpiry, TrackingState, UnitAuraList,
 };
@@ -449,7 +451,8 @@ pub use guild_read::{GuildAnswer, GuildRead, OwnGuild, UnitGuildRead};
 pub use held::{BagGuidQuery, BagHead, BagItemsQuery, BagQuery, BagSlotQuery, HasKeyQuery};
 pub use host::{CallHost, CallTail, Deferring, LiveReader};
 pub use input_verbs::{
-    BindingInput, ClickCall, ClickMode, FiredInput, HeldInput, LookCall, PostureCall, ViewAxis,
+    BindingInput, ClickCall, ClickMode, ClickPress, FiredInput, HeldInput, LookCall, PostureCall,
+    ViewAxis,
 };
 pub use item_calls::ItemCall;
 pub use item_read::{ItemInfoFields, ItemKey, ItemRead, ItemRoll};
@@ -498,8 +501,9 @@ pub use macros::{
     MacroView, CHARACTER_ID_BASE, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME,
 };
 pub use mail::{
-    MailCall, MailInboxRow, MailInvoice, MailRowVerb, MailSendRequest, MailState, PackageView,
-    StationeryView,
+    MailBox, MailBoxQuery, MailCall, MailInboxRow, MailInvoice, MailLookup, MailRowQuery,
+    MailRowVerb, MailSendRequest, MailState, NewMailQuery, PackageQuery, PackageView,
+    StationeryQuery, StationeryTextureQuery, StationeryView, MAIL_ROW_STRINGS,
 };
 pub use measure::TextMeasure;
 pub use merchant::{
@@ -581,7 +585,10 @@ pub use tooltip_aura::{AuraKey, AuraTooltipView};
 pub use tooltip_item::SpellCastUiQuery;
 pub use tooltip_spell::{ReputationRequirement, SpellTooltipView};
 pub use tooltip_text::{KeyedArg, TextPart, TooltipText};
-pub use trade::{TradeCall, TradeOpenItem, TradeSideState, TradeSlotItem, TradeState, TRADE_SLOTS};
+pub use trade::{
+    TradeCall, TradeMoney, TradeMoneyQuery, TradeOpenItem, TradeSideState, TradeSlotItem,
+    TradeSlotQuery, TradeState, TRADE_SLOTS,
+};
 pub use tradeskill::{
     TradeSkillCall, TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState,
 };

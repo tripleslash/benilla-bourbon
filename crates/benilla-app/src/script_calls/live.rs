@@ -133,6 +133,12 @@ live_reads! {
         item_sets: crate::ui_items::ItemSetLive<'static, 'static>,
         /// The questgiver panel's cells, its rows' records and the turn-in's held counts.
         quest_giver: crate::ui_quest::QuestGiverLive<'static, 'static>,
+        /// The trade window's offers, its partner cell and the money offers.
+        trade: crate::ui_trade::TradeLive<'static>,
+        /// The mailbox cell, its rows, the pending-mail time, the stationery and the packages.
+        mail: crate::ui_mail::MailLive<'static, 'static>,
+        /// The auction rows' records, the browse throttle and the house's deposit rate.
+        auction: crate::ui_auction::AuctionLive<'static, 'static>,
         #[cfg(test)]
         probe: tests::ProbeLive<'static>,
     }

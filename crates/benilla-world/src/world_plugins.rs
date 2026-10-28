@@ -53,8 +53,6 @@ impl PluginGroup for WorldPlugins {
             // The per-frame transition order (Input → Stream → Present) by which the loading
             // screen covers a teleport the frame it happens.
             .add(crate::schedule::SchedulePlugin)
-            // Mouseover picking and object identity.
-            .add(crate::interact::InteractPlugin)
             // M2 billboard cards (glow halos, chains), faced to the camera each frame.
             .add(crate::billboard::BillboardPlugin)
             // Fading world-static cards wait as records until the camera nears them.

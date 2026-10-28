@@ -20,12 +20,13 @@ pub(crate) use cast_lines::{CastFailLines, CastFailRedisplays};
 mod drain;
 // A `UseAction` press, applied in call order by `crate::script_calls`.
 pub(crate) use drain::{
-    attack_nearest_probe, drain_arrival_casts, use_action, ActionPress, AttackPress, UseOutcome,
+    attack_nearest_probe, drain_arrival_casts, finish_equip, use_action, ActionPress, AttackPress,
+    UseOutcome,
 };
 // The bar's sends and slot writes inside their calls.
 pub(crate) use drain::ActionBarSteps;
-// The right-click casts' drain, which the world's clicks run inside the click.
-pub(crate) use drain::drain_click_casts;
+// The right-click casts' drain, which the world click runs inside its call.
+pub(crate) use drain::{drain_click_casts, ClickCastDrain};
 #[cfg(test)]
 mod drain_tests;
 pub(crate) mod drop_item;
@@ -109,6 +110,11 @@ pub(crate) struct PlayerActions {
     /// item tooltip's lock walk `0x5da5e0` scan it from the front, so its order picks between
     /// 6478 "Opening" and 22810 "Opening - No Text", which open the same locks.
     pub openers: Vec<u32>,
+    /// `[0xb71118]`: the dispel list, each `EffectMiscValue` of a registered spell's
+    /// `SPELL_EFFECT_DISPEL` effects not aimed at an enemy, appended once at the registration
+    /// (`0x4b26a2`-`0x4b26ee`). No unlearn takes one out; the book's reset empties it
+    /// (`0x4b2486`-`0x4b24c2`). `raidFilter`'s debuff test reads it (`0x4b3920`).
+    pub dispels: Vec<u32>,
     /// `[0xb70098]`, the spell `Stuck()` casts: the last registered spell whose `Effect[0]` is
     /// `SPELL_EFFECT_STUCK` (`0x4b2614`-`0x4b261d`); `None` is its 0, after the book's reset
     /// (`0x4b2433`).
@@ -463,11 +469,7 @@ impl Plugin for UiActionPlugin {
                         .in_set(UnitFeed)
                         .after(crate::ui_items::locks::forget_gone_item_locks)
                         .before(feed::feed_actions),
-                    // Before the aura feed, whose `raidFilter` verdicts rebuild off the book
-                    // when `PlayerActions` moves, so a book this pass settles is read this frame.
-                    feed::feed_actions
-                        .in_set(UnitFeed)
-                        .before(crate::ui_aura::AuraEvents),
+                    feed::feed_actions.in_set(UnitFeed),
                     // A seat: the world-enter events' handlers read the slots' state, which the
                     // reference's arrival stores before its enter cascade (`0x5deafc`, `0x5deb60`).
                     // After the macros' bound spells, which a macro slot resolves through.

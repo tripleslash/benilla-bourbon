@@ -10,7 +10,7 @@ use benilla_ui::script::UiScript;
 use benilla_world::frame_pace::FrameStep;
 
 use super::manifest::silenced_ui_load;
-use super::{load_ingame_ui, CursorPayloadHeld, PlayerUiHover, UiClock, UiKeyboardCapture};
+use super::{load_ingame_ui, PlayerUiHover, UiClock, UiKeyboardCapture};
 use crate::ui_script::addons;
 
 /// The startup's glue: built, then put up on the screen the `movie` CVar picks
@@ -199,6 +199,12 @@ fn seed_vm_clock(world: &mut World, script: &mut UiScript) {
     script.set_now(now);
     if let Some(mut clock) = world.get_resource_mut::<UiClock>() {
         *clock = UiClock {
+            anchor,
+            ui_now: now,
+        };
+    }
+    if let Some(mut clock) = world.get_resource_mut::<super::HostClock>() {
+        clock.0 = UiClock {
             anchor,
             ui_now: now,
         };
@@ -934,8 +940,9 @@ fn entry_prepare(
     // scope (Astrolabe builds its whole zone table from `GetMapContinents`/`GetMapZones` there).
     crate::ui_world_map::seed_world_map_catalog(world, script);
     // The auction filter menus: `ItemClass.dbc` and `ItemSubClass.dbc` read inside the verbs, so a
-    // file-scope `GetAuctionItemClasses()` (and the stock `AuctionFrameBrowse_OnLoad`) sees them.
-    crate::ui_auction::seed_item_classes(world, script);
+    // file-scope `GetAuctionItemClasses()` (and the stock `AuctionFrameBrowse_OnLoad`) sees them;
+    // and the lists the house holds, with their order and key stacks.
+    crate::ui_auction::seed_vm(world, script);
     // Screen size and measurer before the first `<OnLoad>`: this VM is loaded before `tick_script`
     // seats either, and the load measures text (the stock tab template's `OnLoad` sizes from its
     // text width, `UIPanelTemplates.xml:370-373`), which answers 0 with no measurer.
@@ -1512,9 +1519,6 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
         keys.typing = false;
         keys.arrows_fall_through = false;
         keys.consumed.clear();
-    }
-    if let Some(mut held) = world.get_resource_mut::<CursorPayloadHeld>() {
-        *held = CursorPayloadHeld::default();
     }
     if let Some(mut minimap) = world.get_resource_mut::<crate::minimap::MinimapWidget>() {
         minimap.0 = None;

@@ -279,6 +279,10 @@ pub enum ScriptCall {
     /// `ConfirmPetUnlearn()` (`0x48dca0` → `0x5dfba0(0, 0)`): `CMSG_PET_UNLEARN` to the
     /// remembered trainer, or the money refusal's line, inside the call.
     ConfirmPetUnlearn,
+    /// A step of the world click a mouse command takes ([`super::ClickCall`]): the arm's pick at
+    /// the press (`ArmClick 0x514810` → `0x481f00`), or the last primary's release and its
+    /// dispatch (`ReleaseCommands 0x514b70` → `DispatchWorldClick 0x481f60`), inside the call.
+    WorldClick(super::ClickCall),
 }
 
 /// A getter's lookup with a callback, which the host makes inside the getter's call: the cache
@@ -349,6 +353,27 @@ pub enum RecordAsk {
     /// cache misses: the player-name cache by guid, with the list's callback (`0x4cf290`,
     /// `0x4cf2b0`, `0x4cf2d0`), kept once per name and list (`0x55f080`'s dedupe flag 1).
     AuctionName { guid: u64, list: usize },
+    /// `GetSendMailItem` on an attachment whose record the mirror lacks, by its object's guid:
+    /// for an object the engine holds (`0x468460`, `0x4ae5e1`), the item cache by the object's
+    /// entry (`[[obj+0x8]+0xc]`, `0x4ae5e7`-`0x4ae5f2`) with guid 0 (`0x4ae5ec`-`0x4ae5ef`) and the
+    /// callback `0x4ae710` (`0x4ae604`), kept once per call, which signals
+    /// `MAIL_SEND_INFO_UPDATE` for a found record (`0x4ae716`-`0x4ae71f`). A gone object asks
+    /// nothing.
+    SendMailItem(u64),
+    /// `CalculateAuctionDeposit` and `GetAuctionSellItemInfo` on a sell slot item whose record the
+    /// mirror lacks, by its object's guid: for an object the engine holds (`0x468460`, `0x4ce24e`,
+    /// `0x4ce5cf`), the item cache by the object's entry (`[[obj+0x8]+0xc]`) with the object's own
+    /// guid (`0x4ce263`, `0x4ce5e8`) and the callback `0x4ce2f0` (`0x4ce25e`, `0x4ce5e3`), kept once
+    /// per call, which signals `NEW_AUCTION_UPDATE` for a found record (`0x4ce2fa`-`0x4ce2ff`). A
+    /// gone object asks nothing.
+    AuctionSellItem(u64),
+    /// A mail getter's lookups on the row of `mail_id` that the mirror lacks a record for, each
+    /// with the callback that signals `MAIL_INBOX_UPDATE` for a found record, kept once per call
+    /// (dedupe flag 0): the session holds the keys ([`super::MailLookup`]).
+    Mail {
+        mail_id: u32,
+        lookup: super::MailLookup,
+    },
 }
 
 /// The owner id a profession or trainer getter's item lookup passes: `0xb0000000` over a spell id

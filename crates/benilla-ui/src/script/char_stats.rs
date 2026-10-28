@@ -1317,10 +1317,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // OffhandHasWeapon() → 1 or nil: whether the off hand holds a weapon (item class 2).
+    // OffhandHasWeapon() → 1 or nil: whether the off hand holds a weapon (item class 2). The
+    // active player is looked up first (`0x4c9578`, `0x4c9589` → `0x468460`) and nil is pushed with
+    // none held (`je 0x4c95c4` at `0x4c9590`), as in a `PLAYER_LOGOUT` handler.
     g.set(
         "OffhandHasWeapon",
         lua.create_function(|lua, (): ()| {
+            if !active_player_held(lua) {
+                return Ok(None);
+            }
             let (held, snapshot_class) = {
                 let model = lua
                     .app_data_ref::<crate::script::ModelCell>()
@@ -1397,7 +1402,7 @@ mod tests {
     const BOB: u64 = 0x20;
 
     /// A VM with the active player seated: its snapshot under `"player"` and its guid among the
-    /// resolver's inputs, as the unit feed and the aura feed seat them.
+    /// resolver's inputs, as the unit feed and the resolver feed seat them.
     fn seated() -> UiScript {
         let mut s = UiScript::new().unwrap();
         s.set_unit(

@@ -47,7 +47,7 @@ pub(crate) use item::EnchantConfirmItem;
 pub(crate) use pick::{
     publish_go_pick, publish_unit_pick, spell_opens_go, GoPick, GoPickChecks, PickChecks, UnitPick,
 };
-pub(crate) use world::{commit_ground_cast_on_click, commit_object_cast_on_click};
+pub(crate) use world::ClickCommits;
 
 use bevy::prelude::*;
 
@@ -491,7 +491,7 @@ impl SpellTargeting {
 /// The world frame's right-press hook's first leg (`0x492c20`, `0x492c26`-`0x492c3f`): a pending
 /// target is cancelled (`StopTargeting 0x6e4900`), sending nothing and consuming nothing, so the
 /// press still turns the camera. It tests no payload; a press the payload's clear consumed
-/// (`0x492b50`) or a UI frame took never reaches it ([`crate::target::right_press`]). The
+/// (`0x492b50`) or a UI frame took never reaches it ([`crate::target::right_press_hook`]). The
 /// rotate-placement skip on flag `0xceca90` (effect `0x51`) is not built.
 pub(crate) fn cancel_targeting_on_right_press(mut cursor: crate::spell::CursorCancel) {
     if cursor.active() {
@@ -512,9 +512,45 @@ pub(crate) fn publish_picks_self(
     spells: Option<Res<crate::ui_action::Spells>>,
     mut picks: ResMut<PicksSelf>,
 ) {
-    let now = targeting.picks_self(spells.as_deref());
-    if picks.0 != now {
-        picks.0 = now;
+    picks.publish(&targeting, spells.as_deref());
+}
+
+impl PicksSelf {
+    /// Whether the word `targeting` stands at takes our own body.
+    pub(crate) fn publish(
+        &mut self,
+        targeting: &SpellTargeting,
+        spells: Option<&crate::ui_action::Spells>,
+    ) {
+        let now = targeting.picks_self(spells);
+        if self.0 != now {
+            self.0 = now;
+        }
+    }
+}
+
+/// The world pick's readers of the targeting word, which the four feed systems publish
+/// ([`publish_picks_self`], [`publish_corpse_pick`], [`publish_unit_pick`],
+/// [`publish_go_pick`]), as one param: for a pick traced off the feed, against the word as it
+/// stands then (`0x481050`).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct PickWords<'w> {
+    targeting: Res<'w, SpellTargeting>,
+    spells: Option<Res<'w, crate::ui_action::Spells>>,
+    picks_self: ResMut<'w, PicksSelf>,
+    corpse: ResMut<'w, CorpsePick>,
+    unit: ResMut<'w, UnitPick>,
+    go: ResMut<'w, GoPick>,
+}
+
+impl PickWords<'_> {
+    /// Publish the word as it stands.
+    pub(crate) fn publish(&mut self) {
+        let targeting = &*self.targeting;
+        self.picks_self.publish(targeting, self.spells.as_deref());
+        self.corpse.publish(targeting);
+        self.unit.publish(targeting);
+        self.go.publish(targeting);
     }
 }
 
@@ -851,9 +887,10 @@ mod tests {
         );
     }
 
-    /// What the aura feed pushes each frame for the units this world holds, us and the selection:
-    /// the resolver's inputs, and the object manager's index of them. `SpellCanTargetUnit`
-    /// resolves its token through the inputs, and the feed asks the verdict of each unit they list.
+    /// What the resolver feed pushes each frame for the units this world holds, us and the
+    /// selection: the resolver's inputs, and the object manager's index of them.
+    /// `SpellCanTargetUnit` resolves its token through the inputs, and the feed asks the verdict of
+    /// each unit they list.
     fn publish_guids(world: &mut World) {
         let me = world
             .query_filtered::<Entity, With<SelfPlayer>>()
@@ -1107,7 +1144,7 @@ mod tests {
             let mut index = world.resource_mut::<crate::net::GuidIndex>();
             index.0.insert(PET, pet);
             arm(&mut world, HEAL, 0x0002);
-            // The index of us and the ally, then the aura feed's inputs with the chain's units:
+            // The index of us and the ally, then the resolver feed's inputs with the chain's units:
             // each held unit and the target it names.
             publish_guids(&mut world);
             world

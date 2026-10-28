@@ -24,15 +24,12 @@ fn feedable_pet(pet: &benilla_protocol::ObjectFields, self_guid: u64) -> bool {
         && pet.unit_created_by() == Some(self_guid)
 }
 
-/// Runs the pet leg for both of the reference's entries into `0x6ea1e0`: `DropItemOnUnit(unit)`
-/// on a token that resolves to the pet's unit (`0x48da6c`-`0x48da7f`, guids compared, so
-/// `"target"` and `"targettarget"` feed a targeted pet), and a left click on the pet's model with
-/// an item held (`0x4927e8`, in the world click's object leg `0x4925d0`, where the click still
-/// selects).
-#[allow(clippy::too_many_arguments)] // the two legs' reads
+/// Runs `DropItemOnUnit(unit)`'s legs (`0x48d960`): the trade leg, then the pet leg on a token
+/// that resolves to the pet's unit (`0x48da6c`-`0x48da7f`, guids compared, so `"target"` and
+/// `"targettarget"` feed a targeted pet). The world click's entry into the pet leg, a left click on
+/// the pet's model with an item held (`0x4927e8`), is [`ClickFeed`], inside the click's call.
 pub(crate) fn drop_item_on_unit(
     mut vm: crate::script_calls::VmWith<(
-        Res<'static, crate::ui_pet::PetBar>,
         crate::spell::ScriptCast<'static, 'static>,
         TradeLeg<'static, 'static>,
     )>,
@@ -40,22 +37,14 @@ pub(crate) fn drop_item_on_unit(
     stores: Query<&crate::net::ObjectStore>,
     index: Res<crate::net::GuidIndex>,
     learned: Res<super::LearnedAbilities>,
-    press: Res<crate::target::PressPick>,
-    mut clicks: MessageReader<benilla_world::interact::WorldClick>,
 ) {
-    vm.turn(|script, (pet_bar, mut cast, mut trade)| {
+    vm.turn(|script, (mut cast, mut trade)| {
         let Some(script) = script else {
-            clicks.clear();
             return;
         };
-        let pet_guid = pet_bar.spells.pet_guid;
-        let hovered = press.hovered;
+        let pet_guid = cast.ladder.pet_guid();
         let tokens = script.take_drop_item_on_unit();
-        // The world entry: a click whose press-time pick is the pet. That is the pick the click
-        // selects from; the live hover can differ after a drag.
-        let clicked_pet =
-            clicks.read().count() > 0 && pet_guid != 0 && hovered.guid == Some(pet_guid);
-        if tokens.is_empty() && !clicked_pet {
+        if tokens.is_empty() {
             return;
         }
         let Some((self_guid, self_store)) = self_q.iter().next() else {
@@ -69,7 +58,7 @@ pub(crate) fn drop_item_on_unit(
             feed_pet: learned.feed_pet,
         };
         // Each entry in turn: a token's trade leg, then the pet leg on the unit it resolves to
-        // (`0x515940`); the click's on the pet it hit.
+        // (`0x515940`).
         for token in tokens {
             // Only an item on the cursor drops (`0x48d98f`-`0x48d9aa`).
             if !matches!(script.cursor_payload(), Some(CursorPayload::Item(_))) {
@@ -80,10 +69,55 @@ pub(crate) fn drop_item_on_unit(
                 leg.run(script, &mut cast, guid);
             }
         }
-        if clicked_pet && matches!(script.cursor_payload(), Some(CursorPayload::Item(_))) {
-            leg.run(script, &mut cast, pet_guid);
-        }
     })
+}
+
+/// The world click's pet leg (`0x492793`-`0x4927f8`, in its object leg `0x4925d0`, ahead of the
+/// greeting and the select): a left click on our pet's model with an item held feeds it through
+/// `0x6ea1e0`, and the cursor clears on success. The press pick names the unit: the live hover can
+/// differ after a drag.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct ClickFeed<'w, 's> {
+    press: Res<'w, crate::target::PressPick>,
+    cast: crate::spell::ScriptCast<'w, 's>,
+    self_q: Query<
+        'w,
+        's,
+        (&'static crate::net::Guid, &'static crate::net::ObjectStore),
+        With<crate::net::SelfPlayer>,
+    >,
+    stores: Query<'w, 's, &'static crate::net::ObjectStore>,
+    index: Res<'w, crate::net::GuidIndex>,
+    learned: Res<'w, super::LearnedAbilities>,
+}
+
+impl ClickFeed<'_, '_> {
+    /// The leg on the left click's release.
+    pub(crate) fn click(&mut self, script: &mut benilla_ui::script::UiScript) {
+        let pet_guid = self.cast.ladder.pet_guid();
+        if pet_guid == 0 || self.press.hovered.guid != Some(pet_guid) {
+            return;
+        }
+        // The held item `[0xb4e248]` (`0x4927b9`-`0x4927c8`).
+        if !matches!(script.cursor_payload(), Some(CursorPayload::Item(_))) {
+            return;
+        }
+        let Some((self_guid, self_store)) = self.self_q.iter().next() else {
+            return;
+        };
+        let leg = PetLeg {
+            pet_guid,
+            pet: self
+                .index
+                .0
+                .get(&pet_guid)
+                .and_then(|&e| self.stores.get(e).ok()),
+            me: self_guid.0,
+            me_store: self_store,
+            feed_pet: self.learned.feed_pet,
+        };
+        leg.run(script, &mut self.cast, pet_guid);
+    }
 }
 
 /// What the pet leg of `DropItemOnUnit` reads: the pet's guid and object, ours, and the latched
@@ -172,6 +206,8 @@ pub(crate) struct TradeLeg<'w, 's> {
     trade: Option<ResMut<'w, crate::ui_trade::TradeSession>>,
     net: Res<'w, crate::net::NetCommands>,
     errors: Res<'w, crate::ui_action::UiErrorKeys>,
+    /// The initiate's name lookup (`0x5d4031`).
+    names: Res<'w, crate::names::NameCache>,
     /// The bags the world click's held-item tests read, lent with the host out; with no cooldown
     /// list, which a system holding this may hold to write, as those tests read none.
     bags: Option<crate::ui_items::BagReads<'w, 's>>,
@@ -215,7 +251,7 @@ impl TradeLeg<'_, '_> {
         match trade.cell() {
             Some(partner) if partner == guid => offer(script),
             Some(_) => {}
-            None => ask(trade, &self.net, guid),
+            None => ask(trade, &self.net, &self.names, &self.errors, guid),
         }
     }
 
@@ -283,7 +319,7 @@ impl TradeLeg<'_, '_> {
             Some(_) => self
                 .errors
                 .push(crate::ui_action::UiError::key("ERR_ALREADY_TRADING")),
-            None => ask(trade, &self.net, guid),
+            None => ask(trade, &self.net, &self.names, &self.errors, guid),
         }
     }
 }
@@ -296,32 +332,33 @@ fn offer(script: &mut benilla_ui::script::UiScript) {
 }
 
 /// `0x5d3fb0` with mode 1: `CMSG_INITIATE_TRADE`, the window to open with what the cursor holds.
-fn ask(trade: &mut crate::ui_trade::TradeSession, net: &crate::net::NetCommands, guid: u64) {
+fn ask(
+    trade: &mut crate::ui_trade::TradeSession,
+    net: &crate::net::NetCommands,
+    names: &crate::names::NameCache,
+    errors: &crate::ui_action::UiErrorKeys,
+    guid: u64,
+) {
     info!(target: "trade", "a drop on {guid:#x}; sending CMSG_INITIATE_TRADE");
-    trade.initiate(guid, true);
-    let _ = net
-        .0
-        .send(crate::net::ClientCommand::InitiateTrade { target: guid });
+    trade.initiate_send(guid, true, net, names, errors);
 }
 
-/// The world click's trade leg (`0x4925d0`), for a nameplate's left click (`0x7cb910` →
-/// `0x4949f0` action 1) and the body click's press pick alike, ahead of the select that follows it
-/// in the same function (`0x49280c`) and so ahead of the targeting cursor's bind, whose state it
-/// reads (`0x492668`). The body click's router returns first for a charmed player (`0x481f98`).
-#[allow(clippy::too_many_arguments)] // the click's two entries and its gates
-pub(crate) fn trade_on_world_click(
+/// The world click's trade leg (`0x4925d0`) for a nameplate's left click (`0x7cb910` →
+/// `0x4949f0` action 1), ahead of the select that follows it in the same function (`0x49280c`)
+/// and so ahead of the targeting cursor's bind, whose state it reads (`0x492668`). The body click's
+/// is [`ClickTrade`], inside the click's call.
+pub(crate) fn trade_on_plate_click(
     mut vm: crate::script_calls::VmWith<(
         TradeLeg<'static, 'static>,
         Res<'static, crate::spell::SpellTargeting>,
     )>,
-    mut clicks: MessageReader<benilla_world::interact::WorldClick>,
     plate: Res<crate::vplates::PlateClicks>,
-    press: Res<crate::target::PressPick>,
-    inspect: Res<crate::ui_script::InspectMode>,
     me: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
     guids: Query<&crate::net::Guid>,
 ) {
-    let clicked = clicks.read().count() > 0;
+    if plate.left.is_empty() {
+        return;
+    }
     vm.turn(|script, (mut trade, targeting)| {
         let Some(script) = script else {
             return;
@@ -334,20 +371,43 @@ pub(crate) fn trade_on_world_click(
             return;
         }
         let dead = me.0.is_dead_or_ghost();
-        let mut picks: Vec<(Entity, u64)> = plate
+        for (entity, guid) in plate
             .left
             .iter()
             .filter_map(|&e| guids.get(e).ok().map(|g| (e, g.0)))
-            .collect();
-        if clicked && !inspect.enabled && me.0.unit_charmed_by().is_none() {
-            if let (Some(entity), Some(guid)) = (press.hovered.target, press.hovered.guid) {
-                picks.push((entity, guid));
-            }
-        }
-        for (entity, guid) in picks {
+        {
             trade.click_on(script, entity, guid, dead);
         }
     })
+}
+
+/// The body click's trade leg (`0x4925d0`), on the press pick's unit, past the router's charmed
+/// return (`0x481f98`, in the click's call): the leg runs only with no spell awaiting a target
+/// (`0x492668`).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct ClickTrade<'w, 's> {
+    trade: TradeLeg<'w, 's>,
+    targeting: Res<'w, crate::spell::SpellTargeting>,
+    press: Res<'w, crate::target::PressPick>,
+    inspect: Res<'w, crate::ui_script::InspectMode>,
+    me: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
+}
+
+impl ClickTrade<'_, '_> {
+    /// The leg on the left click's release.
+    pub(crate) fn click(&mut self, script: &mut benilla_ui::script::UiScript) {
+        // The active player (`0x4925f4`).
+        let Some(me) = self.me.iter().next() else {
+            return;
+        };
+        if self.targeting.active() || self.inspect.enabled {
+            return;
+        }
+        let dead = me.0.is_dead_or_ghost();
+        if let (Some(entity), Some(guid)) = (self.press.hovered.target, self.press.hovered.guid) {
+            self.trade.click_on(script, entity, guid, dead);
+        }
+    }
 }
 
 #[cfg(test)]

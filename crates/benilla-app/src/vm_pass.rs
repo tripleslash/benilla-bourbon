@@ -191,7 +191,7 @@ pub(crate) fn names_read(access: &Access, id: ComponentId) -> bool {
 }
 
 /// The host's append-only sinks, which it and their other users share by `&self`: the chat log,
-/// the refusal keys, the message sounds and the unit edits. Each user's declared access reads
+/// the refusal keys, the message sounds, the unit edits and the gestures. Each user's declared access reads
 /// them only, so [`order_the_pass`] takes every user in as though it wrote them: one runs at a
 /// time, a call's refusals ([`crate::ui_cast::CallReports`]) are the call's alone, and the edits
 /// apply in the order they were made.
@@ -201,6 +201,7 @@ pub(crate) fn shared_sinks(world: &World) -> Vec<ComponentId> {
         std::any::TypeId::of::<crate::ui_action::UiErrorKeys>(),
         std::any::TypeId::of::<crate::sound::MessageSounds>(),
         std::any::TypeId::of::<crate::creature_anim::UnitEdits>(),
+        std::any::TypeId::of::<crate::creature_anim::GestureQueue>(),
         std::any::TypeId::of::<crate::player::FarSight>(),
     ]
     .into_iter()
@@ -997,7 +998,7 @@ mod tests {
     fn every_user_of_a_shared_sink_runs_in_one_order() {
         let mut app = headless_client_with(crate::dev::add_every_instrument);
         let sinks = super::shared_sinks(app.world());
-        assert_eq!(sinks.len(), 5, "the sinks are registered");
+        assert_eq!(sinks.len(), 6, "the sinks are registered");
         let users: Vec<SystemKey> = app.world_mut().schedule_scope(Update, |world, schedule| {
             schedule.graph_mut().systems.initialize(world);
             let accesses = super::system_accesses(schedule, world);

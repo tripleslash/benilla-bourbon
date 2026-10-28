@@ -15,6 +15,7 @@ use benilla_protocol::SessionEventKind;
 use benilla_world::schedule::WorldStage;
 
 mod latch;
+pub(crate) use latch::watch_interaction_range;
 #[cfg(test)]
 pub(crate) mod latch_tests;
 mod release;
@@ -22,9 +23,8 @@ mod release;
 mod release_tests;
 
 pub(crate) use latch::{
-    dispatch, fire, latch_reads, note_closed, queue, register, release, release_cell,
-    release_latch, with_script, CoreCloses, InteractLatch, LatchApp, LatchCloses, LatchSteps,
-    LatchVocal, LatchedWindow, NpcWindow,
+    dispatch, fire, latch_reads, queue, register, release, release_cell, release_latch,
+    with_script, InteractLatch, LatchApp, LatchSteps, LatchVocal, LatchedWindow, NpcWindow,
 };
 pub(crate) use release::{form_bars_interaction, on_field_edge};
 
@@ -36,7 +36,6 @@ impl Plugin for UiSessionPlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(Update, NpcWindowFeed.after(crate::ui_unit::UnitFeed));
         app.init_resource::<InteractLatch>()
-            .init_resource::<LatchCloses>()
             .add_message::<LatchVocal>()
             .init_resource::<InteractNpc>()
             .net_handler(

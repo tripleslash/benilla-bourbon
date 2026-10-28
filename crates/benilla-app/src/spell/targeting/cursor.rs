@@ -163,7 +163,7 @@ pub(crate) fn drive_targeting_cursor(
     let me = caster
         .and_then(|e| go_tf.get(e).ok())
         .map(|tf| tf.translation);
-    // The arm the click would take ([`super::world::commit_object_cast_on_click`]): a GameObject
+    // The arm the click would take ([`super::world::ClickCommits::object`]): a GameObject
     // word's nearest GameObject, else the picked unit or corpse, else the terrain.
     let able = if targeting.wants(TargetingWants::GameObject)
         && crate::target::go_is_nearest(&hovered, &hovered_object)
@@ -1017,7 +1017,7 @@ mod tests {
                     grounded: true,
                     run_mode: true,
                     deck: None,
-                    final_facing: None,
+                    final_facing: benilla_protocol::MonsterMoveFacing::None,
                 });
             }
             world.insert_resource(crate::target::Hovered {

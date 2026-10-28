@@ -40,12 +40,14 @@ fn family(rel: &str) -> Family {
 
 /// The standing count of `Game` files; raise it only with the reason written down.
 ///
-/// Upstream's 42 (41: the call host's window close cores, `script_calls/windows.rs`, the host's
+/// Upstream's 43 (41: the call host's window close cores, `script_calls/windows.rs`, the host's
 /// own code, which drives the VM at each core's signal point; 42: the host's engine appliers,
 /// `script_calls/engine.rs`, which show a refused follow's line in the calling VM and post its
-/// events at their signal points) and this fork's `webprogress.rs`, the boot-progress bridge to
+/// events at their signal points; 43: the host's world click, `script_calls/world_click.rs`,
+/// which applies the mouse commands' click inside their calls and keeps the steps that wait for
+/// an arm's pick in the calling VM) and this fork's `webprogress.rs`, the boot-progress bridge to
 /// the page, whose `"ready"` edge is the first frame the glue VM shows a scene.
-const CEILING: usize = 43;
+const CEILING: usize = 44;
 
 /// How far under [`CEILING`] the count may sit before the test asks for the ceiling to follow it.
 const SLACK: usize = 4;

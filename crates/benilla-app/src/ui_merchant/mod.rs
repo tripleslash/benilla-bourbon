@@ -445,7 +445,6 @@ pub(crate) fn close_core(world: &mut World) {
     lane::behind_lane(world, |world| {
         crate::ui_session::release(world, vendor);
         world.resource_mut::<MerchantOpen>().clear();
-        crate::ui_session::note_closed(world, NpcWindow::Merchant);
         crate::ui_session::fire(world, |script| {
             script.fire_event("MERCHANT_CLOSED", vec![]);
             close_tail(script);
@@ -490,7 +489,7 @@ pub(crate) fn close_tail(script: &mut UiScript) {
 
 /// The world frame's right-press hook's last leg (`0x492c20`, `0x492c59`-`0x492c72`): a Repair
 /// base mode returns to Point (`0x492c68`). It tests no payload and consumes nothing
-/// ([`crate::target::right_press`]).
+/// ([`crate::target::right_press_hook`]).
 pub(crate) fn end_repair_mode_on_right_press(mut hosted_vm: crate::script_calls::HostedVm) {
     hosted_vm.run(|script| {
         if let Some(script) = script {

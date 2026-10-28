@@ -65,7 +65,6 @@ use crate::ui_net::UiNetPlugin;
 use crate::ui_party::UiPartyPlugin;
 use crate::ui_pass::PlayerUiPlugin;
 use crate::ui_pet::UiPetPlugin;
-use crate::ui_pet_stats::UiPetStatsPlugin;
 use crate::ui_petition::UiPetitionPlugin;
 use crate::ui_quest::UiQuestPlugin;
 use crate::ui_quest_log::UiQuestLogPlugin;
@@ -210,7 +209,6 @@ impl PluginGroup for GamePlugins {
             // After UiActionPlugin, whose `Spells` and cooldown clock it shares.
             .add(UiPetPlugin)
             .add(ChrClassesPlugin)
-            .add(UiPetStatsPlugin)
             .add(UiNetPlugin)
             .add(UiCastPlugin)
             .add(UiMirrorPlugin)
@@ -1036,10 +1034,10 @@ pub(crate) mod schedule_tests {
     ///   `lanes::guard_tests` checks that it stays so, and that no exclusive system is among them. Commands a firing defers, which the drain applies after
     ///   it, are outside that model;
     /// - the input records' dispatch (`ui_script::input::dispatch_input_records`), exclusive as
-    ///   each record's world steps run the click's legs before the next record, against the 72
-    ///   world systems no declared order places against it, which bevy lists with no component:
-    ///   every one of them the net drain (`net::apply::apply_net_updates`), exclusive too, meets
-    ///   the same way, none a host;
+    ///   each record's binding runs the click's legs in its calls before the next record, against
+    ///   the 72 world systems no declared order places against it, which bevy lists with no
+    ///   component: every one of them the net drain (`net::apply::apply_net_updates`), exclusive
+    ///   too, meets the same way, none a host;
     /// - the minimap's draw (`minimap::emit_minimap`), which reads `QuestGiver`'s dialog statuses,
     ///   against `ui_panes::feed_character_panes`, which lends the call host, whose quest verbs
     ///   write that window's cell and panel latches and never a status.
@@ -1123,6 +1121,9 @@ pub(crate) mod schedule_tests {
     ///
     /// Upstream's mouse records (fcc83ee96, #2732) moved its ceiling 1,694 -> 1,732 (+38); the
     /// fork's follows it.
+    ///
+    /// Upstream's world click inside the mouse commands' calls (15cf220df..91dbe0666, #2748, #2758)
+    /// moved its ceiling 1,732 -> 1,731 (-1); the fork's follows it.
     const UPDATE_ACTIONABLE_CEILING: usize = 2_011;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
@@ -1294,6 +1295,10 @@ pub(crate) mod schedule_tests {
     ///
     /// 62 measured at the merge of upstream 9e4d24081, and already on the tree before it: one
     /// more from the fork's 2026-10-21..26 work, not yet read barrier by barrier.
+    ///
+    /// Upstream lowered its count 57 -> 54 when the click's dispatchers queued their window opens
+    /// as unit edits, the call host applying the world click inside its call (15cf220df..91dbe0666);
+    /// the fork's follows it.
     const UPDATE_SYNC_POINT_CEILING: usize = 62;
     const UPDATE_SYNC_POINT_SLACK: usize = 4;
 
@@ -1599,7 +1604,6 @@ pub(crate) mod schedule_tests {
             "::ui_action::state::feed_action_state",
             "::player::camera_saved::load_camera_pose",
             "::tutorial::watch_self",
-            "::ui_trade::answer_trade_request",
             "::poi_marker::expire_marker",
             "::glue_session::logout_smoke::debug_logout_smoke",
         ] {
@@ -1713,11 +1717,11 @@ pub(crate) mod schedule_tests {
         assert!(after(cancel).contains(&tick), "the cancel before the tick");
     }
 
-    /// The world click's trade leg runs ahead of its select (`0x4925d0`: the trade request at
+    /// A plate click's trade leg runs ahead of its select (`0x4925d0`: the trade request at
     /// `0x49278e`, `SelectTarget` at `0x49280c`), so the targeting cursor it tests (`0x492668`)
     /// is the one the click found, not what the select's bind left.
     #[test]
-    fn the_world_clicks_trade_leg_runs_before_its_select() {
+    fn a_plate_clicks_trade_leg_runs_before_its_select() {
         let mut app = headless_client();
         let c = census(
             &mut app,
@@ -1737,7 +1741,7 @@ pub(crate) mod schedule_tests {
                 _ => panic!("exactly one system named `…{suffix}` in the click's legs"),
             }
         };
-        let trade = one("::ui_action::drop_item::trade_on_world_click");
+        let trade = one("::ui_action::drop_item::trade_on_plate_click");
         let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
         for (a, b) in &c.dependencies {
             succ.entry(*a).or_default().push(*b);
@@ -1751,15 +1755,10 @@ pub(crate) mod schedule_tests {
                 }
             }
         }
-        for select in [
-            "::target::click::select_on_plate_click",
-            "::target::click::select_on_click",
-        ] {
-            assert!(
-                seen.contains(&one(select)),
-                "the trade leg runs before {select}"
-            );
-        }
+        assert!(
+            seen.contains(&one("::target::click::select_on_plate_click")),
+            "the trade leg runs before the plate's select"
+        );
     }
 
     /// The `Startup` VM, the stock glue's, is built after the glyph cache:
@@ -1894,8 +1893,8 @@ pub(crate) mod schedule_tests {
     /// `BankFrame.lua:127-128`, …), which the reference seats before the show: the packet's handler
     /// writes `[0xb4e2d0]` (`0x4e26fa` → `0x4e1fe9` → `0x4930d0`) and only then fires
     /// `GOSSIP_SHOW` (`0x4e27df`). Here the latch reaches the token through `feed_interact_npc` and
-    /// `feed_units`, so each window's feed runs after both, or a show whose text is cached fires in
-    /// the same frame as the open with the token unset. Read off the declared graph.
+    /// `feed_units`, so `feed_units` runs after the first; each window's show fires on its lane in
+    /// the drain, after every feed ([`crate::lanes`]). Read off the declared graph.
     #[test]
     fn every_latched_windows_show_reads_the_token_its_latch_seated() {
         let mut app = headless_client();
@@ -1932,15 +1931,6 @@ pub(crate) mod schedule_tests {
         assert!(
             after(one("::ui_session::feed_interact_npc")).contains(&units),
             "feed_units runs after feed_interact_npc, which publishes the latch it names \"npc\" by"
-        );
-        let seated = after(units);
-        let stale: Vec<&str> = ["::ui_auction::feed_auction", "::ui_trade::feed_trade"]
-            .into_iter()
-            .filter(|feed| !seated.contains(&one(feed)))
-            .collect();
-        assert!(
-            stale.is_empty(),
-            "these windows' shows can read \"npc\" before feed_units seats it: {stale:?}"
         );
     }
 
@@ -2132,7 +2122,7 @@ pub(crate) mod schedule_tests {
         ("ui_action/cooldown_lane.rs", "fire_cooldowns", Because::Deliberate,
          "a lane's firing, run only by the drain: `drop_cooldown_log`, gated on the interface being down, drops the log the frame it is written, so no signal fires into a later VM"),
         ("ui_action/drain.rs", "drain_click_casts", Because::FilledByVm,
-         "filled only by a world right-click on a GameObject or a body; the drain sends casts to the wire"),
+         "filled only by a nameplate's right-click, which a frameless VM has no plate to make, or a crate's `Interact`; the world click's own casts drain inside its call, and the drain sends casts to the wire"),
         ("ui_action/recount.rs", "recount", Because::Deliberate,
          "no system: the item lane's firing calls it per run (`item_lane::fire_run`), inside the lanes' drain, which runs only with the interface up (`ingame_ui_up`)"),
         ("ui_char.rs", "feed_char", Because::FilledByVm,
@@ -2157,8 +2147,6 @@ pub(crate) mod schedule_tests {
          "a roll exists only after a group member loots under group loot; leftovers are cleared at socket teardown (another player's act: coincidence-only residual)"),
         ("ui_macro/mod.rs", "load_macros", Because::MemoLatched,
          "`MacroFiles.identity` is a `VmMemo`, so a new session re-reads the files and re-fires UPDATE_MACROS; also `InWorldGated`"),
-        ("ui_mail/mod.rs", "feed_mail", Because::SelfHealing,
-         "the window queues are mailbox-click replies; the one server push (`SMSG_RECEIVED_MAIL`) is re-asked by `send_query_next_mail_time_on_enter`, whose reply sets `notify` unconditionally"),
         ("ui_panes.rs", "feed_character_panes", Because::FilledByVm,
          "the answers answer the VM's own build requests and arms on panes it listed; a frameless VM lists none, and an answer for another VM's rows is dropped"),
         ("ui_quest_share.rs", "feed_quest_share", Because::PlayerRoundTrip,
@@ -2175,6 +2163,8 @@ pub(crate) mod schedule_tests {
          "a lane's firing, run only by the drain: `drop_world_state_signals`, gated on the interface being down, empties the lane the frame its items land, so none fires into a later VM"),
         ("ui_tradeskill.rs", "fire_list_rebuilds", Because::Deliberate,
          "a lane's firing, run only by the drain: `drop_list_rebuilds`, gated on the interface being down, empties the lane the frame its items land, so none fires into a later VM"),
+        ("ui_trade/lane.rs", "open", Because::Deliberate,
+         "no system: the trade lane's firing calls it for the open's item, inside the drain, which runs only with the interface up; `drop_trade_events`, gated on the interface being down, empties the lane the frame its items land"),
     ];
 
     /// `ui_chat/feed.rs` → `ui_chat::feed`; `target/mod.rs` → `target`; `lib.rs` → ``.

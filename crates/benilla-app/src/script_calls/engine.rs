@@ -69,6 +69,8 @@ pub(crate) struct RecordAsks<'w, 's> {
     go_templates: Option<Res<'w, crate::go_templates::GameObjectTemplates>>,
     /// The charter records and the item objects whose enchantment slot 0 names one (`0x5ef337`).
     petitions: Option<Res<'w, crate::ui_petition::PetitionRecords>>,
+    /// The mail rows' keys and the name and body callbacks their lookups keep.
+    mail: crate::ui_mail::MailLookups<'w>,
     objects: crate::net::Objects<'w, 's>,
     me: Option<Res<'w, crate::net::SelfGuid>>,
     net: Res<'w, crate::net::NetCommands>,
@@ -102,6 +104,25 @@ impl RecordAsks<'_, '_> {
                         .and_then(|f| f.item_enchant(0))
                         .unwrap_or(0) as u32;
                     petitions.tooltip_view(id, item, names, Ask::Event(&self.net));
+                }
+            }
+            // The attachment's object first (`0x4ae5e1`), then its entry's record with guid 0.
+            RecordAsk::SendMailItem(guid) => {
+                let entry = self.objects.object(guid).and_then(|f| f.object_entry());
+                if let (Some(items), Some(entry)) = (self.items.as_deref(), entry) {
+                    if items.template(entry, 0, Ask::Event(&self.net)).is_none() {
+                        items.wait(entry, crate::items::RecordCallback::SendMail);
+                    }
+                }
+            }
+            // The sell item's object first (`0x4ce24e`, `0x4ce5cf`), then its entry's record with
+            // the object's guid (`0x4ce263`, `0x4ce5e8`).
+            RecordAsk::AuctionSellItem(guid) => {
+                let entry = self.objects.object(guid).and_then(|f| f.object_entry());
+                if let (Some(items), Some(entry)) = (self.items.as_deref(), entry) {
+                    if items.template(entry, guid, Ask::Event(&self.net)).is_none() {
+                        items.wait(entry, crate::items::RecordCallback::AuctionSellItem);
+                    }
                 }
             }
             RecordAsk::BattlefieldName(guid) => {
@@ -223,6 +244,7 @@ impl RecordAsks<'_, '_> {
             RecordAsk::AuctionName { guid, list } => {
                 debug!("record ask: auction name {guid:#x} for list {list} has no house here");
             }
+            RecordAsk::Mail { mail_id, lookup } => self.mail.look_up(&self.net, mail_id, lookup),
         }
     }
 }
