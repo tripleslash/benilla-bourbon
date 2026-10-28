@@ -35,15 +35,23 @@ pub enum WeatherKind {
 }
 
 impl WeatherKind {
-    pub(crate) fn from_wire(v: u32) -> Self {
+    /// The wire type; `None` outside 0 to 3, which `SetWeather` ignores whole (`0x67bb09`,
+    /// `0x67bb12`), a negative one included.
+    pub(crate) fn from_wire(v: u32) -> Option<Self> {
         match v {
-            1 => WeatherKind::Rain,
-            2 => WeatherKind::Snow,
-            3 => WeatherKind::Sand,
-            _ => WeatherKind::Fine,
+            0 => Some(WeatherKind::Fine),
+            1 => Some(WeatherKind::Rain),
+            2 => Some(WeatherKind::Snow),
+            3 => Some(WeatherKind::Sand),
+            _ => None,
         }
     }
 }
+
+/// Whether the precipitation pools still hold live drops or packets, `HasLiveWeather`
+/// (`0x67c6e0`), as the pools left them last frame.
+#[derive(Resource, Default)]
+pub(crate) struct WeatherLive(pub(crate) bool);
 
 /// One ramped channel of the reference's ramp (`0x67bc70`).
 #[derive(Clone, Copy, Debug)]
@@ -92,8 +100,14 @@ impl Channel {
 pub struct WeatherState {
     /// The latest wire type (`Fine` included).
     pub(crate) kind: WeatherKind,
-    /// The type whose effect spawns; it follows every type change at once.
+    /// The type whose effect spawns: it follows a type change at once, unless the change is
+    /// smooth while the old effect is live, when [`Self::pending`] holds it.
     pub effect_kind: WeatherKind,
+    /// A smooth type change's grade, held while the old effect's particles are live
+    /// (`0x67bfa9`, `0x67bfb2`); [`Self::kind`] is built once they are gone (`0x67c020`).
+    pending: Option<f32>,
+    /// [`WeatherLive`] as this tick read it.
+    live: bool,
     intensity: Channel,
     sky: Channel,
     /// Channel A this frame, for instruments. Consumers take `effect_density`, which also feeds
@@ -121,6 +135,8 @@ impl Default for WeatherState {
         Self {
             kind: WeatherKind::Fine,
             effect_kind: WeatherKind::Fine,
+            pending: None,
+            live: false,
             intensity: Channel::new(1.0),
             sky: Channel::new(4.0),
             intensity_a: 0.0,
@@ -133,23 +149,30 @@ impl Default for WeatherState {
 }
 
 impl WeatherState {
-    /// Applies one wire update as `SetWeather` (`0x67baf0`); `Fine` targets 0 whatever its grade.
+    /// Applies one wire update as `SetWeather` (`0x67baf0`). A fine type keeps its sent grade
+    /// (`0x67bb2a`-`0x67bb67`): only the effects key on the type, so it still darkens the sky.
     fn apply(&mut self, kind: WeatherKind, grade: f32, instant: bool, now: f64) {
-        let target = if kind == WeatherKind::Fine {
-            0.0
-        } else {
-            grade.clamp(0.0, 1.0)
-        };
-        // A type change cuts (`0x67585d`): `effect_kind` flips at once, so a rain-to-snow swap
-        // starts snow while the old drops fall out.
-        if kind != self.kind {
+        let target = grade.clamp(0.0, 1.0);
+        // A type change cuts (`0x67585d`): the old effect stops emitting.
+        let changed = kind != self.kind;
+        if changed {
             self.cut_seq = self.cut_seq.wrapping_add(1);
-            self.effect_kind = kind;
         }
         self.kind = kind;
         // `SetWeather` clamps both sky endpoints to 0.25 (`0x8029b0`); the full grade here would
         // hold the fog at 100% for most of every downswing.
         let sky_target = target.min(0.25);
+        // A smooth change while the old effect's particles are live waits for them: the grade
+        // ramps toward min(target, 0.25), so nothing new falls (`0x67bfec`-`0x67c010`).
+        if !instant && self.live && kind != self.effect_kind && (changed || self.pending.is_some())
+        {
+            self.pending = Some(target);
+            self.intensity.retarget(target.min(0.25), now);
+            self.sky.retarget(sky_target, now);
+            return;
+        }
+        self.pending = None;
+        self.effect_kind = kind;
         if instant {
             self.intensity.snap(target);
             self.sky.snap(sky_target);
@@ -159,8 +182,14 @@ impl WeatherState {
         }
     }
 
-    /// Resolves the frame's published values, as the reference's update driver (`0x67be40`) does.
+    /// Resolves the frame's published values, as the reference's update driver (`0x67be40`) does:
+    /// a pending type is built once the old effect has drained (`0x67ba50`, `0x67c020`).
     fn resolve(&mut self, now: f64) {
+        if let Some(target) = self.pending.filter(|_| !self.live) {
+            self.pending = None;
+            self.effect_kind = self.kind;
+            self.intensity.retarget(target, now);
+        }
         let a = self.intensity.value(now);
         self.intensity_a = a;
         self.effect_density = ((a - 0.25) * (4.0 / 3.0)).max(0.0);
@@ -224,6 +253,7 @@ fn weather_tick(
     time: Res<Time<Real>>,
     mut msgs: MessageReader<WeatherMessage>,
     mut state: ResMut<WeatherState>,
+    live: Res<WeatherLive>,
     mut debug: ResMut<DebugState>,
     mut env_script: Local<Option<Vec<EnvStep>>>,
     mut dump: Local<Option<bool>>,
@@ -247,27 +277,22 @@ fn weather_tick(
         debug.weather.grade = step.grade;
         debug.weather.instant = step.instant;
     }
+    state.live = live.0;
     // An armed panel override wins and consumes the wire messages, so a zone re-send cannot
     // fight it.
     if debug.weather.force {
         if debug.weather.dirty {
             debug.weather.dirty = false;
-            state.apply(
-                WeatherKind::from_wire(debug.weather.kind),
-                debug.weather.grade,
-                debug.weather.instant,
-                now,
-            );
+            if let Some(kind) = WeatherKind::from_wire(debug.weather.kind) {
+                state.apply(kind, debug.weather.grade, debug.weather.instant, now);
+            }
         }
         msgs.clear();
     } else {
         for m in msgs.read() {
-            state.apply(
-                WeatherKind::from_wire(m.weather_type),
-                m.grade,
-                m.instant,
-                now,
-            );
+            if let Some(kind) = WeatherKind::from_wire(m.weather_type) {
+                state.apply(kind, m.grade, m.instant, now);
+            }
         }
     }
     state.resolve(now);
@@ -311,6 +336,7 @@ pub struct WeatherMessage {
 impl Plugin for WeatherPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WeatherState>()
+            .init_resource::<WeatherLive>()
             // Registered where the command is owned.
             .add_message::<WeatherMessage>()
             .add_systems(Update, weather_tick.in_set(WeatherTick));
@@ -422,10 +448,40 @@ mod tests {
         assert_eq!(s.effect_kind, WeatherKind::Rain);
         s.resolve(102.0);
         assert!(s.effect_density > 0.5, "mid-drain, still raining");
-        // A type change to Fine cuts, and the effect kind flips at once.
+        // A type change to Fine cuts, and with nothing live the effect kind flips at once.
         s.apply(WeatherKind::Fine, 0.0, false, 105.0);
         assert_eq!(s.cut_seq, seq + 1);
         assert_eq!(s.effect_kind, WeatherKind::Fine);
+        assert_eq!(s.density_for(WeatherKind::Rain), 0.0);
+    }
+
+    /// `0x67be40`: a smooth change while the old drops are live ramps the grade toward
+    /// min(target, 0.25), so no snow falls among the rain, and builds snow once they are gone.
+    #[test]
+    fn a_smooth_type_change_waits_for_the_old_effect_to_drain() {
+        let mut s = WeatherState::default();
+        s.apply(WeatherKind::Rain, 1.0, true, 0.0);
+        s.live = true;
+        s.apply(WeatherKind::Snow, 1.0, false, 10.0);
+        s.resolve(30.0);
+        assert_eq!(s.effect_kind, WeatherKind::Rain, "the old effect stands");
+        assert_eq!(s.effect_density, 0.0, "nothing new falls");
+        s.live = false;
+        s.resolve(31.0);
+        assert_eq!(s.effect_kind, WeatherKind::Snow, "built once drained");
+        s.resolve(50.0);
+        assert!((s.effect_density - 1.0).abs() < 1e-5);
+    }
+
+    /// `0x67bb09`, `0x67bb12`: a type outside 0 to 3 is no packet; a fine type keeps its grade.
+    #[test]
+    fn an_unknown_type_is_ignored_and_a_fine_grade_darkens() {
+        assert_eq!(WeatherKind::from_wire(4), None);
+        assert_eq!(WeatherKind::from_wire(u32::MAX), None, "a negative type");
+        let mut s = WeatherState::default();
+        s.apply(WeatherKind::Fine, 1.0, true, 0.0);
+        s.resolve(0.0);
+        assert!((storm_blend(s.sky_density) - 1.0).abs() < 1e-6);
         assert_eq!(s.density_for(WeatherKind::Rain), 0.0);
     }
 

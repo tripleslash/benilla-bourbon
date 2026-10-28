@@ -292,6 +292,8 @@ fn simulate_precip(
     mut wind: ResMut<WeatherWind>,
     mut heights: ResMut<HeightCache>,
     mut precip: Option<ResMut<Precip>>,
+    // Absent where the weather plugin is not mounted.
+    live: Option<ResMut<super::WeatherLive>>,
     mut last_cut: Local<u32>,
     // Frames since the previous census line.
     mut census_frames: Local<u32>,
@@ -371,6 +373,15 @@ fn simulate_precip(
         dt,
         cam_pos,
     );
+
+    // `HasLiveWeather` (`0x67c6e0`) for the next tick's pending type.
+    let any = !rain.drops.is_empty()
+        || !snow.drops.is_empty()
+        || rain.pending_len() > 0
+        || snow.pending_len() > 0;
+    if let Some(mut live) = live.filter(|l| l.0 != any) {
+        live.0 = any;
+    }
 
     // The 1 Hz state log, while there is weather or anything left in the pools.
     *census_frames += 1;
