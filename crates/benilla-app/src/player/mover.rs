@@ -7,10 +7,11 @@ use benilla_world::collision::BodyHit;
 use bevy::prelude::*;
 
 use super::{
-    move_trace, Player, CAPSULE_HEIGHT, FEATHER_TERMINAL_VELOCITY, FOOT_CONE_HEIGHT, GRAVITY,
-    GROUND_COS, GROUND_PROBE, HOVER_CLIMB_RATE, HOVER_HEIGHT, JUMP_SPEED, LAND_PROBE, SKIN_WIDTH,
-    STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE_PER_YARD, STEP_UP_HEIGHT, TERMINAL_VELOCITY,
-    WATER_WALK_PITCH_FLOOR, WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+    move_trace, Player, CAPSULE_HEIGHT, CAPSULE_RADIUS, FEATHER_TERMINAL_VELOCITY,
+    FOOT_CONE_HEIGHT, GRAVITY, GROUND_COS, GROUND_PROBE, HOVER_CLIMB_RATE, HOVER_HEIGHT,
+    JUMP_SPEED, LAND_PROBE, SKIN_WIDTH, STEP_SLOPE_RATIO, STEP_SNAP_SLACK,
+    STEP_UP_ADVANCE_PER_YARD, STEP_UP_HEIGHT, TERMINAL_VELOCITY, WATER_WALK_PITCH_FLOOR,
+    WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 
 /// The trace-mask arm `0x6315f0` as a predicate: the liquid surface [`step`] may stand on this
@@ -682,13 +683,13 @@ pub(crate) fn grounded_step(
         (d <= reach).then_some(d.max(0.0))
     });
     let floor = match (hit, water) {
-        (Some(h), Some(w)) if w < h.distance => Some((w, 1.0, None)),
+        (Some(h), Some(w)) if w < h.distance => Some((w, Vec3::Y, None)),
         // The face's own normal classifies the floor, as the settle reads the record (`0x636ecf`).
-        (Some(h), _) => Some((h.distance, h.face_normal.y, Some(h.entity))),
-        (None, Some(w)) => Some((w, 1.0, None)),
+        (Some(h), _) => Some((h.distance, h.face_normal, Some(h.entity))),
+        (None, Some(w)) => Some((w, Vec3::Y, None)),
         (None, None) => None,
     };
-    let snap = Some((reach, floor.map(|(d, n, _)| (d, n))));
+    let snap = Some((reach, floor.map(|(d, n, _)| (d, n.y))));
     let mut ground = None;
     let mut liquid = false;
     let mut steep_support = false;
@@ -701,25 +702,33 @@ pub(crate) fn grounded_step(
     // descends the whole sweep before classifying (`0x636e45`-`0x636e52`), but its foot cone keeps
     // the skirt on the edge, so each sweep is short and the descent comes out at the cone's slope.
     // Our capsule hangs clear and would spend the whole drop at once; the cap ports the cone's
-    // effect. A steep landing stays grounded with the steep bit set, as the reference's multipass
-    // returns (`0x636f21`), and the deep reach keeps the ground in sight.
+    // effect. A steep landing stays grounded with the steep bit set only when the step probe allows
+    // it from where the whole sweep would rest (`0x636f03`, `0x636f21`); a refusal is a fall
+    // (`0x636e6d`), so a slope too steep to climb is not walked down past H.
     let cone_reach = d.x.hypot(d.z) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
-    if let Some((distance, normal_y, entity)) = floor {
+    if let Some((distance, normal, entity)) = floor {
         let drop = (distance - surface_offset).max(0.0);
-        let walkable = normal_y >= GROUND_COS;
+        let walkable = normal.y >= GROUND_COS;
         if !(rode && walkable && drop >= ride_rise) {
+            let rest = slid - Vec3::Y * drop;
             slid.y -= drop.min(cone_reach);
+            let allowed = || {
+                walkable
+                    || rode
+                    || popped.is_some()
+                    || step_off_allowed(world, capsule, rest, horiz_vel, normal, support.rise)
+            };
             if drop > cone_reach {
                 // Further down than a cone's worth but in sight: a step-down in progress, so stay
                 // grounded with the deep reach open and finish it over the next frames.
-                steep_support = true;
+                steep_support = allowed();
             } else if walkable {
                 ground = entity;
                 liquid = entity.is_none();
             } else {
                 // Support is earned by descending, not by touching: within reach alone would perch
                 // a motionless body on a steep bank.
-                steep_support = drop > STEP_SNAP_SLACK;
+                steep_support = drop > STEP_SNAP_SLACK && allowed();
             }
         }
     } else if !rode {
@@ -1049,6 +1058,74 @@ pub(crate) fn step_up(
         fwd,
         dy,
     })
+}
+
+/// The step probe as the settle runs it on a steep face it rests on (`0x636f03` → `0x636100`):
+/// `true` is its 2, a step down to keep walking, `false` its 1, a fall. From `center`, square into
+/// the face when the reach meets it, lift by `rise`, sweep the reach `max(H · tan 50°, r + 1/720)`,
+/// settle by the lift plus 0.01: a sweep still blocked within the radius refuses; no floor or a
+/// walkable one allows; a steep one asks the fall-away lookahead. So a kerb or bank lower than
+/// `rise` is walked down and a longer slope is fallen from. The reach's ride up a walkable face (the
+/// probe's step 4) is not modelled, as in [`step_up`].
+fn step_off_allowed(
+    world: &benilla_world::collision::WorldCollision<'_, '_>,
+    capsule: &Collider,
+    center: Vec3,
+    horiz_vel: Vec3,
+    n: Vec3,
+    rise: f32,
+) -> bool {
+    let cast = |from: Vec3, disp: Vec3| world.cast_mover(capsule, from, disp, SKIN_WIDTH);
+    // `0x636147`-`0x636190`.
+    let reach = (rise * STEP_UP_ADVANCE_PER_YARD).max(CAPSULE_RADIUS + 1.0 / 720.0);
+    // Square into the face when the reach meets a face with exactly this normal, for
+    // `0 ≤ n.z ≤ cos 50°` only (`0x6361a1`-`0x63627b`), else the heading.
+    let into = Vec3::new(-n.x, 0.0, -n.z).normalize_or_zero();
+    let heading = horiz_vel.normalize_or(into);
+    let dir = if (0.0..=GROUND_COS).contains(&n.y)
+        && cast(center, into * reach).is_some_and(|h| h.face_normal == n)
+    {
+        into
+    } else {
+        heading
+    };
+    // The lift; no headroom refuses (`0x6362ed`).
+    let up = cast(center, Vec3::Y * rise).map_or(rise, |h| h.distance);
+    if up < 1e-3 {
+        return false;
+    }
+    let raised = center + Vec3::Y * up;
+    // Still blocked within the radius refuses (`0x636516`).
+    let ahead = cast(raised, dir * reach);
+    let fwd = ahead.as_ref().map_or(reach, |h| h.distance);
+    if ahead.is_some() && fwd <= CAPSULE_RADIUS {
+        return false;
+    }
+    let over = raised + dir * fwd;
+    // Down by the lift plus 0.01 (`0x63651f`, `0x636524`); no floor or a walkable one allows
+    // (`0x6365a1`).
+    let Some(down) = cast(over, Vec3::NEG_Y * (up + 0.01)) else {
+        return true;
+    };
+    if down.face_normal.y >= GROUND_COS {
+        return true;
+    }
+    // The fall-away lookahead (`0x635f80`): a free fall for `T = √(2(h + 0.1)/g)`, `h` the lift less
+    // the settle, allows only when it leaves the body at least the radius from `center` within 10°
+    // of the probe's direction. The fall is one closed-form slide where the reference substeps it.
+    let landed = over - Vec3::Y * down.distance;
+    let t = (2.0 * (up - down.distance + 0.1) / GRAVITY).max(0.0).sqrt();
+    let (_, mean_vy) = fall_step(0.0, t, TERMINAL_VELOCITY);
+    let fell = airborne_step(
+        world,
+        capsule,
+        landed,
+        horiz_vel + Vec3::Y * mean_vy,
+        std::time::Duration::from_secs_f32(t),
+    );
+    let away = (fell - center).with_y(0.0);
+    let dist = away.length();
+    dist >= CAPSULE_RADIUS && away.dot(dir) > dist * 10.0_f32.to_radians().cos()
 }
 
 #[cfg(test)]
@@ -1676,6 +1753,38 @@ mod tests {
             "some frame past the lip must follow the face down rather than hold height: \
              {frames:?} (best drop {biggest:.3}, a cone's worth is {cone:.3})"
         );
+    }
+
+    #[test]
+    fn a_slope_too_steep_to_climb_is_fallen_from_not_walked_down() {
+        // A long 55° and 70° slope walked down from its lip: the settle's step probe allows the
+        // descent while the lip is within H above (`0x636100`'s lift), then refuses, and the body
+        // falls. The snap used to keep the steep bit on every descending frame, walking it down
+        // the whole slope.
+        for deg in [55.0_f32, 70.0] {
+            let fall = 6.0 * deg.to_radians().tan();
+            let p = [(-2.0, 0.0), (0.6, 0.0), (6.6, -fall), (12.0, -fall)];
+            // The approach moves a full yard, which ends 0.6 yd short of the lip.
+            let frames = walk_from(
+                world_from_profile(&p),
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::X,
+                60,
+            );
+            let lost = frames.iter().position(|f| !f.2 && !f.3);
+            let Some(i) = lost else {
+                panic!("{deg}°: the body walked the whole slope down: {frames:?}");
+            };
+            assert!(
+                frames[..i].iter().any(|f| f.0 < -0.1),
+                "{deg}°: the part within H of the lip is a step down, walked: {frames:?}"
+            );
+            assert!(
+                frames[i].0 > -(STEP_UP_HEIGHT + 0.5),
+                "{deg}°: support must end within H of the lip, not at {:.2}: {frames:?}",
+                frames[i].0
+            );
+        }
     }
 
     #[test]
