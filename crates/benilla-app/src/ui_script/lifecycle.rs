@@ -931,9 +931,9 @@ fn entry_prepare(
     // (the login-verify handler is registered after it, `0x401789`), so the load reads none.
     crate::ui_chat::seed_zone_channel_catalog(world, script);
     crate::bindings::seed_bindings_for_vm(world, script);
-    // The engine globals a previous VM folded out: the quest log's fold mask and the tradeskill
-    // repeat.
-    crate::ui_quest_log::seed_quest_folds(world, script);
+    // The engine globals a previous VM folded out: the quest log's fold mask, with the records its
+    // cache holds, and the tradeskill repeat.
+    crate::ui_quest_log::seed_quest_log(world, script);
     crate::ui_tradeskill::seed_repeat(world, script);
     crate::ui_unit::seed_language_table(world, script);
     // The world map's continent and zone lists: static DBC data in the reference, read at file
