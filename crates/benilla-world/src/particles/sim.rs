@@ -754,8 +754,10 @@ pub(super) fn simulate_particles(
                 })
                 // Model mode ignores the ride frame (`0x7b518e`, `0x7b3ef9`): it rides its host.
                 .filter(|_| anchored);
-            // Boarding and leaving re-express every live particle (`0x7187f0` → `0x7b5e60`); a
-            // moving deck folds nothing, the draw's live `A` carries it.
+            // Boarding and leaving re-express every live particle and its children's
+            // (`0x7187f0` → `0x7b5e60`, `0x7b5efc`-`0x7b5f0c`, `0x7b5f27`), never the emitter's
+            // previous position `+0x248` or inherited velocity `+0x258`; a moving deck folds
+            // nothing, the draw's live `A` carries it.
             if let Some(fold) = ride.retarget(deck) {
                 let rot = Quat::from_mat3a(&fold.matrix3);
                 for p in particles
@@ -765,10 +767,6 @@ pub(super) fn simulate_particles(
                     p.pos = fold.transform_point3(p.pos);
                     p.vel = rot * p.vel;
                 }
-                // The emitter-motion state crosses too, or the frame change reads as motion; whether
-                // the reference's `0x7b5e60` re-expresses `rt+0x248` is untraced.
-                *emitter_prev = emitter_prev.map(|prev| fold.transform_point3(prev));
-                *inherit_vel = rot * *inherit_vel;
             }
             // Births bake through `rt+0x1fc = srcMx · A⁻¹` (`0x7b51b0`), so the stored-frame terms
             // below are deck-relative; `placement` stays world for the LOD, water side and model draw.
