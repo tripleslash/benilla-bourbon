@@ -497,6 +497,9 @@ pub(super) const CAM_PITCH_LIMIT: f32 = 89.0 * std::f32::consts::PI / 180.0;
 const CAM_RETURN_RATE: f32 = 6.0;
 /// Floor on the world pivot height, 5/6 yd (`0x50ca90`'s clamp, `0x50e570`'s corridor bound).
 pub(super) const CAM_PIVOT_FLOOR: f32 = 5.0 / 6.0;
+/// `[0x8089b0]`: the camera distance under which `0x50d390` reports first person.
+const FIRST_PERSON_DISTANCE: f32 = 1.8315;
+
 /// Ceiling on the world framing-pivot height, 15 yd (`[0x8089c8]`, the same clamp in `0x50ca90`).
 pub(super) const CAM_PIVOT_CEIL: f32 = 15.0;
 /// Head height before a model has attached: about a human's neck height.
@@ -603,6 +606,9 @@ pub(crate) struct CameraControl {
     /// The self-avatar's alpha from the camera-to-pivot distance, 1 in third person to 0 in first
     /// (`self_model_fade_alpha`); applied by [`apply_self_model_fade`].
     pub(super) self_fade_alpha: f32,
+    /// The realized camera-to-pivot distance (`cam+0xec`), `None` before the rig has seated a
+    /// camera or while it is detached.
+    pub(super) pivot_distance: Option<f32>,
     /// The own-model flag `[0xc4d74c]` clear: the camera's fade writes it each update as whether
     /// its alpha byte is nonzero (`0x482c41`), and `showplayer` toggles it (`0x5ec8c0`). Nothing
     /// here reads it: the fade itself hides the body ([`apply_self_model_fade`]).
@@ -648,6 +654,13 @@ impl CameraControl {
     /// reference's shadow diffuse rides the body's model fade slot (`[model+0x180]`).
     pub(crate) fn self_fade(&self) -> f32 {
         self.self_fade_alpha
+    }
+
+    /// `0x50d390`: the camera sits closer to its pivot than 1.8315 yd (`[0x8089b0]`), where the
+    /// own model has faded out. The world texts over the camera's subject drop then (`0x6c7873`).
+    pub(crate) fn first_person(&self) -> bool {
+        self.pivot_distance
+            .is_some_and(|d| d < FIRST_PERSON_DISTANCE)
     }
 
     /// `ToggleShowOwnModel` (`0x5ec8c0`): flip the own-model flag and answer whether the model is
@@ -1479,6 +1492,7 @@ pub(super) fn seat_camera(
 
     // Fade by the realized camera-to-pivot distance from the seated eye, not the bobbed one, and
     // the live `nearclip`: the fade finishes where the near plane starts cutting.
+    rig.pivot_distance = Some((seated - pivot).length());
     rig.self_fade_alpha = self_model_fade_alpha(
         (seated - pivot).length(),
         dynamics.nearclip,
@@ -1707,6 +1721,7 @@ pub(super) fn fly_free(
     let keys_pressed = |k: KeyCode| !typing && keys.pressed(k);
     // Detached, the avatar stays opaque.
     rig.self_fade_alpha = 1.0;
+    rig.pivot_distance = None;
     cam_t.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
     let forward = *cam_t.forward();
     let right = *cam_t.right();

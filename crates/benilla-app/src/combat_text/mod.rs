@@ -161,8 +161,13 @@ pub(crate) fn float_combat_text(
     font: Option<Res<DamageTextFont>>,
     // The globals a word is read from; with no VM a word has no string.
     script: Option<NonSend<benilla_ui::script::UiScript>>,
-    // `widescreen`, which shapes the interface's screen the text is drawn on.
-    widescreen: Option<Res<crate::video::Widescreen>>,
+    // `widescreen`, which shapes the interface's screen the text is drawn on, and the camera rig
+    // and its subject, for the first-person drop.
+    (widescreen, rig, viewer): (
+        Option<Res<crate::video::Widescreen>>,
+        Option<Res<crate::player::CameraControl>>,
+        Query<(), With<benilla_world::world_unit::ViewerUnit>>,
+    ),
 ) {
     let now = time.elapsed_secs_f64();
     // Headless there is no camera: spawns and expiry run, nothing draws.
@@ -184,6 +189,11 @@ pub(crate) fn float_combat_text(
                 }
             }
         };
+        // `0x6c7840` drops a text over the camera's subject while `0x50d390` reports first
+        // person (`0x6c785d`-`0x6c7873`).
+        if viewer.contains(spawn.anchor) && rig.as_deref().is_some_and(|r| r.first_person()) {
+            continue;
+        }
         let Some(slot) = free_slot(&texts.0, spawn.anchor) else {
             continue; // the 4-slot hard drop
         };
