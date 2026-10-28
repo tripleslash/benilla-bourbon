@@ -244,18 +244,20 @@ pub fn billboard_basis(
             let bx = by.cross(bz);
             (bx, by, bz)
         }
-        // Lock-X/Y: lock-Z's structure per kept axis, the cyclically previous axis taking
-        // `Fwd × kept` and the third completing the right-handed WoW triple. Their in-plane sign
-        // follows lock-Z's by analogy, not from the reference.
+        // Lock-X (`0x10`, `0x715531`) keeps row 0 and sets row 1 to `(r0y, −r0x, 0)` normalised,
+        // row 2 to `row1 × row0` (`0x715575`-`0x715631`): in world terms `Y = Fwd × X`, then
+        // `Z = X × Y`.
         BillboardKind::LockX => {
             let bx = (kept_rot * -Vec3::Z).normalize_or(-fwd);
-            let bz = fwd.cross(bx).try_normalize().unwrap_or(up);
-            let by = bz.cross(bx);
+            let by = fwd.cross(bx).try_normalize().unwrap_or(right);
+            let bz = bx.cross(by);
             (bx, by, bz)
         }
+        // Lock-Y (`0x20`, `0x715639`) keeps row 1 and sets row 0 to `(−r1y, r1x, 0)`, row 2 to
+        // `row1 × row0`: in world terms `X = Y × Fwd`, then `Z = X × Y`.
         BillboardKind::LockY => {
             let by = (kept_rot * -Vec3::X).normalize_or(right);
-            let bx = fwd.cross(by).try_normalize().unwrap_or(-fwd);
+            let bx = by.cross(fwd).try_normalize().unwrap_or(-fwd);
             let bz = bx.cross(by);
             (bx, by, bz)
         }
