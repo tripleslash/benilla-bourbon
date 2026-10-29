@@ -1084,6 +1084,9 @@ fn the_swim_relatch_holds_the_kick_but_a_ground_cut_freezes_it() {
         1.0,
         "held, not frozen — the kick keeps playing"
     );
+    // The kick's own fade-in from Stand ends, so the landing's arm copies it into the slot rather
+    // than refusing the half-blend (`0x7125c9`).
+    advance(&mut app, 200);
 
     // Landing on a bank instead.
     app.world_mut().entity_mut(unit).insert(MovementState {

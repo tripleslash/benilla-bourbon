@@ -51,6 +51,13 @@ pub(crate) const RAISES_AT_THEIR_OWN_PLACE: &[Allow] = &[
               (`0x49156a`), outside any packet",
     },
     Allow {
+        frame: "ui_script::lifecycle::run_pending_entry_load",
+        why: "fork: the world entry's interface load, staged over frames behind the loading bar \
+              ([`crate::ui_script::PendingEntryUiLoad`]); it signals the load's own events, \
+              `VARIABLES_LOADED` among them (`0x49156a`), outside any packet, as \
+              `load_ingame_ui_seated` does",
+    },
+    Allow {
         frame: "ui_script::lifecycle::close_ui_session",
         why: "the interface's shutdown (`0x490bd0`) signals `PLAYER_LEAVING_WORLD` (`0x490b4d`) \
               and `PLAYER_LOGOUT` (`0x490c2a`) itself, at a logout's, a disconnect's or a \

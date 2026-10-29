@@ -2416,47 +2416,53 @@ mod tests {
         party(&mut app, 2, true);
         stream(&mut app, member(1), &human_player);
         frame(&mut app);
-        let mut s = app.world_mut().non_send_mut::<UiScript>();
-        // `UnitCanAssist` resolves both tokens before judging (`0x515940`), and `ui_unit`, which
-        // pushes `player` in the client, is not in this app.
-        s.set_unit(
-            "player",
-            Some(benilla_ui::script::UnitState {
-                guid: ME,
-                ..Default::default()
-            }),
-        );
-        let assist = |token: &str| {
-            s.eval::<Option<i64>>(&format!(r#"return UnitCanAssist("player", "{token}")"#))
-                .unwrap()
-        };
-        assert_eq!(assist("party1"), Some(1), "held: its descriptor answers");
-        assert_eq!(assist("party2"), None, "unstreamed: no object to ask");
-
-        s.run(
-            r#"HOVER = CreateFrame("Button")
-               GetMouseFocus = function() return HOVER end"#,
-        )
-        .unwrap();
-        let reads = s
-            .eval::<String>(
-                r#"return tostring(UnitExists("party1")) .. " " .. tostring(UnitCanAssist("player", "party1"))
-                    .. " " .. tostring(UnitIsDeadOrGhost("party1"))"#,
+        {
+            let mut s = app.world_mut().non_send_mut::<UiScript>();
+            // `UnitCanAssist` resolves both tokens before judging (`0x515940`), and `ui_unit`,
+            // which pushes `player` in the client, is not in this app.
+            s.set_unit(
+                "player",
+                Some(benilla_ui::script::UnitState {
+                    guid: ME,
+                    ..Default::default()
+                }),
+            );
+            s.run(
+                r#"HOVER = CreateFrame("Button")
+                   GetMouseFocus = function() return HOVER end"#,
             )
             .unwrap();
-        let parse = |unit: &str| {
-            s.run(&format!(r#"HOVER.unit = "{unit}""#)).unwrap();
-            s.eval::<(Option<String>, Option<String>)>(
-                r#"return SecureCmdOptionParse("[@mouseover,help,nodead] Flash Heal")"#,
-            )
-            .unwrap()
-        };
-        assert_eq!(
-            parse("party1"),
-            (Some("Flash Heal".into()), Some("party1".into())),
-            "exists, assist, dead on party1: {reads}"
-        );
-        assert_eq!(parse("party2"), (None, None));
+        }
+        // The party tokens resolve through the host at the call, as a macro's press reads them.
+        crate::ui_unit::live::with_lent_objects(app.world_mut(), |s| {
+            let s = &*s;
+            let assist = |token: &str| {
+                s.eval::<Option<i64>>(&format!(r#"return UnitCanAssist("player", "{token}")"#))
+                    .unwrap()
+            };
+            assert_eq!(assist("party1"), Some(1), "held: its descriptor answers");
+            assert_eq!(assist("party2"), None, "unstreamed: no object to ask");
+
+            let reads = s
+                .eval::<String>(
+                    r#"return tostring(UnitExists("party1")) .. " " .. tostring(UnitCanAssist("player", "party1"))
+                        .. " " .. tostring(UnitIsDeadOrGhost("party1"))"#,
+                )
+                .unwrap();
+            let parse = |unit: &str| {
+                s.run(&format!(r#"HOVER.unit = "{unit}""#)).unwrap();
+                s.eval::<(Option<String>, Option<String>)>(
+                    r#"return SecureCmdOptionParse("[@mouseover,help,nodead] Flash Heal")"#,
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                parse("party1"),
+                (Some("Flash Heal".into()), Some("party1".into())),
+                "exists, assist, dead on party1: {reads}"
+            );
+            assert_eq!(parse("party2"), (None, None));
+        });
     }
 
     /// Hold our own player: the feed reads our guid off the `SelfPlayer` entity, and the object

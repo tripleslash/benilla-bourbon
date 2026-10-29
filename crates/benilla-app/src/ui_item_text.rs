@@ -1216,6 +1216,17 @@ fn turn_page(list: &[u32], page: &mut usize, delta: i32) -> bool {
 mod tests {
     use super::*;
 
+    /// The item-text lane fired to empty, as the drain does: a firing ends when anything was
+    /// stamped meanwhile ([`crate::lanes::firing`]), and the stamp clock is the process's, so a
+    /// test running beside this one can end it early.
+    fn fire_lane(app: &mut App) {
+        while app.world().resource::<ItemTextLane>().head().is_some() {
+            app.world_mut()
+                .run_system_cached_with(fire_item_text, crate::lanes::Until::all())
+                .expect("the item-text lane fires");
+        }
+    }
+
     /// The open reader's text cell (`0xbc3fe8`), which the getter reads through the host.
     fn shown(app: &App) -> String {
         app.world()
@@ -1325,9 +1336,7 @@ mod tests {
             .insert(TABLET, tablet);
         let fire = |app: &mut App, events| {
             crate::net::handlers::dispatch(app.world_mut(), events);
-            app.world_mut()
-                .run_system_cached_with(fire_item_text, crate::lanes::Until::all())
-                .expect("the item-text lane fires");
+            fire_lane(app);
         };
         fire(
             &mut app,
@@ -1462,9 +1471,7 @@ mod tests {
                 }],
             };
             crate::net::handlers::dispatch(app.world_mut(), reply_events);
-            app.world_mut()
-                .run_system_cached_with(fire_item_text, crate::lanes::Until::all())
-                .expect("the item-text lane fires");
+            fire_lane(&mut app);
             for _ in 0..4 {
                 app.update();
             }
@@ -1482,9 +1489,7 @@ mod tests {
                     milliseconds: 175,
                 }];
                 crate::net::handlers::dispatch(app.world_mut(), stranger);
-                app.world_mut()
-                    .run_system_cached_with(fire_item_text, crate::lanes::Until::all())
-                    .expect("the item-text lane fires");
+                fire_lane(&mut app);
                 assert_eq!(seen(&mut app), "ITEM_TEXT_TRANSLATION:0.175");
             }
             if reply == "ok" {
@@ -1557,9 +1562,7 @@ mod tests {
             app.world_mut(),
             vec![benilla_protocol::SessionEvent::GameObjectPageText { guid: TABLET }],
         );
-        app.world_mut()
-            .run_system_cached_with(fire_item_text, crate::lanes::Until::all())
-            .expect("the item-text lane fires");
+        fire_lane(&mut app);
         app.update();
         app.update();
         let open = app.world().resource::<ItemTextOpen>();
@@ -1585,9 +1588,7 @@ mod tests {
                 next_page_id: 0,
             }],
         );
-        app.world_mut()
-            .run_system_cached_with(fire_item_text, crate::lanes::Until::all())
-            .expect("the item-text lane fires");
+        fire_lane(&mut app);
         let open = app.world().resource::<ItemTextOpen>();
         assert!(
             open.pending.as_ref().is_some_and(|s| s.registered),
@@ -1697,9 +1698,7 @@ mod tests {
                 app.world_mut(),
                 vec![benilla_protocol::SessionEvent::GameObjectPageText { guid: TABLET }],
             );
-            app.world_mut()
-                .run_system_cached_with(fire_item_text, crate::lanes::Until::all())
-                .expect("the item-text lane fires");
+            fire_lane(&mut app);
             for _ in 0..4 {
                 app.update();
             }
@@ -1807,9 +1806,7 @@ mod tests {
                 }],
             };
             crate::net::handlers::dispatch(app.world_mut(), reply_events);
-            app.world_mut()
-                .run_system_cached_with(fire_item_text, crate::lanes::Until::all())
-                .expect("the item-text lane fires");
+            fire_lane(&mut app);
             for _ in 0..4 {
                 app.update();
             }

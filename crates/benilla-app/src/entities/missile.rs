@@ -1209,6 +1209,11 @@ mod tests {
             });
             step(&mut app, 0.016);
             step(&mut app, 0.05);
+            // A miss (1, 3, 6) flies half a second past its target (`0x61d36b`) and arrives there:
+            // 14.4 units at speed 24, less the 0.2 s parked.
+            if matches!(code, 1 | 3 | 6) {
+                step(&mut app, 0.5);
+            }
             assert!(
                 missiles(&mut app).is_empty(),
                 "no flight entity (code {code})"

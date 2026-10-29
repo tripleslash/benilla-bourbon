@@ -642,7 +642,15 @@ impl Plugin for SsilvbPlugin {
                 ExtractResourcePlugin::<IndirectLighting>::default(),
                 ExtractComponentPlugin::<SsilvbView>::default(),
             ))
-            .add_systems(Update, (mark_world_camera, arm_depth_binding));
+            .add_systems(
+                Update,
+                (
+                    mark_world_camera,
+                    // After the frame's script calls, whose `ssao`/`ssgiStrength` callbacks write
+                    // the knob.
+                    arm_depth_binding.after(crate::schedule::WorldStage::Present),
+                ),
+            );
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

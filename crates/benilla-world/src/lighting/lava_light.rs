@@ -85,7 +85,13 @@ pub(super) fn register(app: &mut App) {
         .init_resource::<LavaSurfaces>()
         // `Update`, never `PostUpdate` (`modern/HOOKS.md`): the light packer runs in `PostUpdate`
         // and reads these the same frame.
-        .add_systems(Update, (reconcile, breathe, census).chain());
+        // After the frame's script calls, whose `lavaLight` callback writes the gain.
+        .add_systems(
+            Update,
+            (reconcile, breathe, census)
+                .chain()
+                .after(crate::schedule::WorldStage::Present),
+        );
 }
 
 // The wet vertices give the bounds, then the grid's own inverse sampler gives coverage and height:

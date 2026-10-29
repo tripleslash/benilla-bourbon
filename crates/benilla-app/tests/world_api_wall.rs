@@ -245,7 +245,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("world_point::WorldPoint", "record"),
     ("world_unit::ViewerUnit", "wall"),
     ("world_unit::WorldUnit", "wall"),
-    ("worldview::run", "record"),
+    ("worldview::run_with", "record"),
 ];
 
 /// The sorted leaks: crossings filed to close, with how. `CLOSE/absorb`: a facade takes the call;

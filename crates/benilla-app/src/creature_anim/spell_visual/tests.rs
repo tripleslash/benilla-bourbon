@@ -506,7 +506,19 @@ fn a_channelled_spells_go_keeps_its_kits_while_its_caster_channels() {
 #[test]
 fn a_go_with_no_caster_unit_plays_its_instant_impacts() {
     const BOLT: u32 = 5143;
+    const IMPACT_KIT: u32 = 556; // no anim
     let mut app = app();
+    // An instant hit plays only through an impact kit with a record (`0x6e8c02`, `0x6e8c32`).
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(
+            VISUAL,
+            VisualStages {
+                impact: IMPACT_KIT,
+                ..Default::default()
+            },
+        )]),
+        HashMap::from([(IMPACT_KIT, VisualKit::default())]),
+    )));
     app.insert_resource(crate::ui_action::Spells {
         catalog: SpellCatalog::from_displays(HashMap::from([(
             BOLT,

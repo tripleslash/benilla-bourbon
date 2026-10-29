@@ -766,7 +766,10 @@ pub(super) fn register(app: &mut App) {
             Update,
             (advance_clock, collect_stamps, pack_ripple_data)
                 .chain()
-                .run_if(resource_exists::<RippleField>),
+                .run_if(resource_exists::<RippleField>)
+                // After the frame's script calls, whose `weatherDensity` callback writes the
+                // weather the collector reads.
+                .after(crate::schedule::WorldStage::Present),
         )
         .add_systems(
             Update,

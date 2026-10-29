@@ -1131,8 +1131,10 @@ pub(crate) mod schedule_tests {
     /// moved its ceiling 1,732 -> 1,731 (-1); the fork's follows it.
     ///
     /// Upstream's ceiling moved 1,731 -> 1,467 (-264) through 65c83b188 (the CVar callbacks inside
-    /// their calls, the bars, crafts and tutorials read live); the fork's follows it.
-    const UPDATE_ACTIONABLE_CEILING: usize = 2_011;
+    /// their calls, the bars, crafts and tutorials read live); the merge of fcda90fd7 measures
+    /// 1,694 (-317), with the fork's own knob readers (SSILVB, water tier, ripples, lava light)
+    /// ordered after the calls whose callbacks write them.
+    const UPDATE_ACTIONABLE_CEILING: usize = 1_694;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1309,9 +1311,9 @@ pub(crate) mod schedule_tests {
     /// the fork's follows it.
     ///
     /// Upstream lowered its count 54 -> 46 when the CVar callbacks ran in place, inside the call or
-    /// the sync that takes the write, where their events had waited for a barrier; the fork's
-    /// follows it.
-    const UPDATE_SYNC_POINT_CEILING: usize = 62;
+    /// the sync that takes the write, where their events had waited for a barrier; the merge of
+    /// fcda90fd7 measures 47.
+    const UPDATE_SYNC_POINT_CEILING: usize = 47;
     const UPDATE_SYNC_POINT_SLACK: usize = 4;
 
     #[test]

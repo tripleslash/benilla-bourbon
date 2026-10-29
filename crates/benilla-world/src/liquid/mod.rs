@@ -188,7 +188,8 @@ impl Plugin for LiquidPlugin {
                 Update,
                 (
                     surface::sync_below_water.after(SubmersionVerdict),
-                    surface::sync_water_tier,
+                    // After the frame's script calls, whose `waterDetail` callback writes the tier.
+                    surface::sync_water_tier.after(crate::schedule::WorldStage::Present),
                     screen::resize_targets,
                 ),
             )
