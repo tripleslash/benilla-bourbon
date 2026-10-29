@@ -31,9 +31,17 @@ const POTION: u32 = 118;
 
 /// The spells on the bar: a Frostbolt at 50 mana, the druid's Cat and Bear forms, and Attack.
 const FROSTBOLT: u32 = 116;
+/// Frostbolt's second rank, which supersedes the first.
+const FROSTBOLT_2: u32 = 205;
 const CAT: u32 = 768;
 const BEAR: u32 = 5487;
 const ATTACK: u32 = 6603;
+/// Two reactive spells (`AttributesEx4 & 0x200`) that need the defense aura state, off the bar,
+/// which the login lists Overpower first.
+const OVERPOWER: u32 = 7384;
+const REVENGE: u32 = 6572;
+/// `UNIT_FIELD_AURASTATE`, whose bit 0 is the state the two need.
+const AURA_STATE: u16 = 125;
 /// The form bytes of Cat and Bear, and the bonus bars their rows page to.
 const CAT_FORM: u32 = 1;
 const BEAR_FORM: u32 = 5;
@@ -139,6 +147,10 @@ impl Client {
 
 /// The spells' rows and the two forms' rows.
 fn spells() -> crate::ui_action::Spells {
+    let reactive = |d: &mut SpellDisplay| {
+        d.attributes_ex4 = 0x200;
+        d.caster_aura_state = 1;
+    };
     let row = |id: u32, f: fn(&mut SpellDisplay)| {
         let mut d = SpellDisplay {
             id,
@@ -151,10 +163,13 @@ fn spells() -> crate::ui_action::Spells {
     };
     let catalog = SpellCatalog::from_displays(HashMap::from([
         row(FROSTBOLT, |d| d.mana_cost = 50),
+        row(FROSTBOLT_2, |d| d.mana_cost = 60),
         row(CAT, |d| d.shapeshift_form = Some(CAT_FORM)),
         row(BEAR, |d| d.shapeshift_form = Some(BEAR_FORM)),
         // `SPELL_EFFECT_ATTACK`, which makes the slot the Attack slot (`0x4e59de`).
         row(ATTACK, |d| d.effects[0] = 78),
+        row(OVERPOWER, reactive),
+        row(REVENGE, reactive),
     ]));
     let form = |bonus_bar: u32| ShapeshiftForm {
         bonus_bar,
@@ -214,10 +229,13 @@ fn client() -> Client {
     benilla_world::world_point::init_world_point_resources(app.world_mut());
     let world = app.world_mut();
     world.resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
-    world
-        .resource_mut::<crate::ui_action::PlayerActions>()
-        .spells
-        .extend([FROSTBOLT, CAT, BEAR, ATTACK]);
+    {
+        let mut actions = world.resource_mut::<crate::ui_action::PlayerActions>();
+        actions
+            .spells
+            .extend([FROSTBOLT, CAT, BEAR, ATTACK, OVERPOWER, REVENGE]);
+        actions.initial = vec![OVERPOWER, REVENGE];
+    }
     world
         .resource_mut::<crate::items::Items>()
         .insert_template(SWORD, Some(crate::items::test_template("Sword")));
@@ -238,7 +256,7 @@ fn client() -> Client {
                 .buttons
                 .insert(slot, ActionButton { slot, action, kind });
         }
-        slots.dirty = true;
+        slots.touch();
     }
     // The sword: entry, stack 1, durability 30 of 40, so the worn walk counts it.
     crate::items::test_spawn_item(
@@ -373,7 +391,6 @@ fn a_usable_listener_reads_its_own_packets_power() {
         vec![values(ME, &[(MANA, 30)])],
         vec![values(ME, &[(MANA, 100)])],
     ]);
-    let usable = |l: &String| l.split(':').take(3).collect::<Vec<_>>().join(":");
     let seen: Vec<String> = c
         .seen(&[
             "ACTIONBAR_UPDATE_USABLE",
@@ -381,7 +398,7 @@ fn a_usable_listener_reads_its_own_packets_power() {
             "UNIT_MANA",
         ])
         .iter()
-        .map(usable)
+        .map(|l| usable(l))
         .collect();
     assert_eq!(
         seen,
@@ -466,6 +483,112 @@ fn a_slot_changed_listener_reads_the_pair_its_recount_stored() {
     );
 }
 
+/// The usable pair a spy line carries: its event and `IsUsableAction(1)`.
+fn usable(l: &str) -> String {
+    l.split(':').take(3).collect::<Vec<_>>().join(":")
+}
+
+/// `EditMacro`'s worker ends in the bar's usable cache refresh (`0x4f132e` into `0x4e5c00`),
+/// inside the call: a pair that moved with no refresh signals `ACTIONBAR_UPDATE_USABLE` before the
+/// call returns, so the chunk's next line has heard it, and no later frame signals it again.
+#[test]
+fn an_edit_macro_refreshes_the_usable_cache_inside_its_call() {
+    let mut c = client();
+    c.eval::<()>(true, "CreateMacro('m', 1, '/say hi', 1)");
+    c.write_store(&[(MANA, 10)]);
+    let heard: Vec<String> = c.eval(
+        true,
+        "Seen = {} EditMacro(1, 'n') local s = Seen Seen = {} return s",
+    );
+    let heard: Vec<String> = heard
+        .iter()
+        .filter(|l| l.starts_with("ACTIONBAR_UPDATE_USABLE"))
+        .map(|l| usable(l))
+        .collect();
+    assert_eq!(heard, ["ACTIONBAR_UPDATE_USABLE:nil:1"], "inside the call");
+    c.frame(vec![]);
+    assert!(c.seen(&["ACTIONBAR_UPDATE_USABLE"]).is_empty());
+}
+
+/// Two packets in one frame: the potion's stack count, whose watcher's `RaiseBagUpdate`
+/// refreshes the bar's usable cache ahead of its `BAG_UPDATE` (`0x4f9370` → `0x4f9374`), then a
+/// power packet. The run's refresh reads the pair a quiet write moved and signals at the run,
+/// between the two packets' events.
+#[test]
+fn a_bag_updates_usable_refresh_signals_at_its_run() {
+    let mut c = client();
+    c.eval::<()>(
+        false,
+        "local f = CreateFrame('Frame') f:RegisterEvent('BAG_UPDATE') \
+         f:SetScript('OnEvent', function() table.insert(Seen, event) end)",
+    );
+    c.write_store(&[(MANA, 10)]);
+    c.frame(vec![
+        vec![values(POTION_GUID, &[(STACK_COUNT, 1)])],
+        vec![values(ME, &[(MANA, 100)])],
+    ]);
+    let seen: Vec<String> = c
+        .seen(&["ACTIONBAR_UPDATE_USABLE", "BAG_UPDATE", "UNIT_MANA"])
+        .iter()
+        .map(|l| usable(l))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            "ACTIONBAR_UPDATE_USABLE:nil:1",
+            "BAG_UPDATE",
+            "ACTIONBAR_UPDATE_USABLE:1:nil",
+            "UNIT_MANA:1:nil",
+        ]
+    );
+}
+
+/// `PlaceAction`'s write stores the slot's pair inside the call (`0x4e62e0` → `0x4e58e0`,
+/// `0x4e590a`), ahead of its `ACTIONBAR_SLOT_CHANGED` (`0x4e5998`): the listener reads the placed
+/// spell lit, and the slot the pickup cleared grey.
+#[test]
+fn a_placed_slots_listener_reads_the_pair_its_write_stored() {
+    let mut c = client();
+    let heard: Vec<String> = c.eval(
+        true,
+        "Seen = {} PickupAction(1) PlaceAction(8) local s = Seen Seen = {} return s",
+    );
+    let slots: Vec<&String> = heard
+        .iter()
+        .filter(|l| l.starts_with("ACTIONBAR_SLOT_CHANGED"))
+        .collect();
+    assert_eq!(
+        slots,
+        [
+            "ACTIONBAR_SLOT_CHANGED:1:nil:0",
+            "ACTIONBAR_SLOT_CHANGED:8:1:0"
+        ]
+    );
+}
+
+/// Our create's arrival empties the reactive list and its registrar runs take the initial spells in
+/// again in wire order (`0x5dea86`, `0x5dea96`-`0x5deab9` → `0x4b27b3`), so a refresh raises their
+/// words in that order (`0x4b31d7`-`0x4b3226`): Overpower, listed first, before Revenge, whose id
+/// is lower.
+#[test]
+fn the_arrival_lists_the_initial_reactive_spells_in_wire_order() {
+    let mut c = client();
+    c.eval::<()>(
+        false,
+        "local f = CreateFrame('Frame') f:RegisterEvent('COMBAT_TEXT_UPDATE') \
+         f:SetScript('OnEvent', function() \
+             table.insert(Seen, event .. ':' .. arg1 .. ':' .. arg2) end)",
+    );
+    c.frame(vec![vec![values(ME, &[(AURA_STATE, 1)])]]);
+    assert_eq!(
+        c.seen(&["COMBAT_TEXT_UPDATE"]),
+        [
+            "COMBAT_TEXT_UPDATE:SPELL_ACTIVE:Spell 7384",
+            "COMBAT_TEXT_UPDATE:SPELL_ACTIVE:Spell 6572",
+        ]
+    );
+}
+
 /// The worn walk resolves each item as of the drain's place, as the getter's `0x468460` finds the
 /// object at the call: a helm a later packet of the frame destroys is still worn to the listener
 /// of an earlier one.
@@ -490,6 +613,58 @@ fn an_equipped_listener_finds_an_item_a_later_packet_destroys() {
     };
     let seen: Vec<String> = c.seen(&["UNIT_MANA"]).iter().map(worn).collect();
     assert_eq!(seen, ["UNIT_MANA:1"]);
+}
+
+/// `SMSG_SUPERCEDED_SPELL` gives a bar macro that cast the old rank the new one in its record
+/// (`0x5e6356` → `0x4e5e60`, `0x4e5ec4`), with no signal; `GetActionCooldown` resolves the slot
+/// through that record at the call (`0x4e6ca0` → `0x4e5a50` → `0x4e5ba0`) and queries the new
+/// rank's cooldown (`0x6e2ea0`). So a getter inside the packet that rewrote the record reads the
+/// new rank's 10 s, where the frame's push still names the old rank.
+#[test]
+fn a_superseded_macro_slots_cooldown_reads_the_new_rank_inside_its_packet() {
+    use crate::ui_macro::{Bound, BoundSpell};
+    let mut c = client();
+    {
+        let world = c.app.world_mut();
+        crate::ui_macro::bind_for_test(
+            &mut world.non_send_mut::<UiScript>(),
+            &[(1, Bound::from(BoundSpell::Spell(FROSTBOLT)))],
+        );
+        world
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .spells
+            .insert(FROSTBOLT_2);
+        let mut slots = world.resource_mut::<crate::ui_action::ActionSlots>();
+        slots.buttons.insert(
+            5,
+            ActionButton {
+                slot: 5,
+                action: 1,
+                kind: benilla_protocol::messages::ACTION_KIND_MACRO,
+            },
+        );
+        slots.touch();
+    }
+    c.frame(vec![vec![SessionEvent::SpellCooldowns {
+        caster: ME,
+        cooldowns: vec![(FROSTBOLT_2, 10_000)],
+    }]]);
+    c.frame(vec![]);
+    let chunk = "local _, d = GetActionCooldown(6) return d";
+    assert_eq!(c.eval::<f64>(true, chunk), 0.0, "the macro casts rank 1");
+    crate::net::handlers::dispatch(
+        c.app.world_mut(),
+        vec![SessionEvent::SpellSuperceded {
+            old_spell_id: FROSTBOLT,
+            new_spell_id: FROSTBOLT_2,
+        }],
+    );
+    assert_eq!(c.eval::<f64>(true, chunk), 10.0, "live: the new rank's");
+    assert_eq!(
+        c.eval::<f64>(false, chunk),
+        0.0,
+        "the frame's push names rank 1"
+    );
 }
 
 /// The bar's getters' per-call cost with the host lent and off the snapshots: 10k calls of each.
@@ -537,7 +712,7 @@ fn action_getter_cost() {
                 },
             );
         }
-        slots.dirty = true;
+        slots.touch();
     }
     c.frame(vec![]);
     let mut times = Vec::new();

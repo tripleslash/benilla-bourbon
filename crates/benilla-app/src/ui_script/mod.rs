@@ -423,7 +423,10 @@ pub(crate) fn window_to_ui(screen: UiScreen, cursor: Vec2) -> Vec2 {
 pub(crate) struct UiScriptPlugin;
 
 /// `uiScale`'s change callback: the dial's own `[0.5, 1.5]` clamp.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut scale: ResMut<UiScaleCvar>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut scale: bevy::prelude::Mut<'_, UiScaleCvar>,
+) {
     if ev.is("uiScale") {
         scale.0 = ev.num().clamp(0.5, 1.5);
     }
@@ -448,7 +451,6 @@ fn console_reload_ui(steps: &mut crate::console::ConsoleSteps, _args: &str) -> V
 impl Plugin for UiScriptPlugin {
     fn build(&self, app: &mut App) {
         use crate::console::ConsoleCommandApp;
-        app.add_observer(on_cvar);
         // Category 1 with no help (`0x402ba6`-`0x402bb4`).
         app.console_command_in_call(
             "reloadUI",
@@ -622,13 +624,7 @@ impl Plugin for UiScriptPlugin {
             // A scripted run's startup movie skipped before its first tick.
             .add_systems(Update, glue::skip_unattended_startup_movie.in_set(UiInput))
             // The movie audio's play times, a feed of the tick whose clock reads them.
-            // After the tutorial's selection judge, which reads the same VM.
-            .add_systems(
-                Update,
-                movie::feed_movie_audio
-                    .in_set(UiFeed)
-                    .after(crate::tutorial::judge_selections),
-            )
+            .add_systems(Update, movie::feed_movie_audio.in_set(UiFeed))
             // The movie pictures the tick showed, ahead of the paint that draws them.
             .init_resource::<movie::MovieScreen>()
             .add_systems(
@@ -1153,7 +1149,7 @@ mod surface_gate;
 
 /// The reader of every fire site, for the event gates.
 #[cfg(test)]
-mod fire_scan;
+pub(crate) mod fire_scan;
 
 /// The event argument-shape gate: every fire site against `reference/event_args.tsv`.
 #[cfg(test)]

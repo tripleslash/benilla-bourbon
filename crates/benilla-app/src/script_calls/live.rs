@@ -119,6 +119,13 @@ live_reads! {
         dialogs: crate::ui_dialog_verbs::DialogLive<'static, 'static>,
         /// The trainer rows' icons, descriptions and ability tests.
         trainer: crate::ui_trainer::TrainerLive<'static, 'static>,
+        /// The open profession book as a build reads it, a recipe's reagents, tools and icon, and
+        /// its line's rank; absent in a harness without the window.
+        trade_skill: Option<crate::ui_tradeskill::TradeSkillLive<'static, 'static>>,
+        /// The open craft type's book as a build reads it, a recipe's reagents, tools, cost, level
+        /// and description, the effect slot's name and the display line; absent in a harness
+        /// without the window.
+        craft: Option<crate::ui_craft::CraftLive<'static, 'static>>,
         /// The tabard designer's guild record and save latch.
         tabard: crate::ui_tabard::TabardLive<'static, 'static>,
         /// The stable's records, counts and the summoned pet's display.
@@ -127,6 +134,9 @@ live_reads! {
         petition: crate::ui_petition::PetitionLive<'static, 'static>,
         /// The pet bar, the pet it names, its stat block, its menu and its book.
         pet: crate::ui_pet::PetLive<'static, 'static>,
+        /// The action slots' states, each derived at the call; absent in a harness without the
+        /// action feed's inputs.
+        actions: Option<crate::ui_action::ActionStates<'static, 'static>>,
         /// The requirement state, the known-spell list and the lock openers an item is judged by.
         requirements: crate::ui_items::RequirementsLive<'static, 'static>,
         /// The item set blocks: the set table, the member names and the bonuses.
@@ -143,10 +153,15 @@ live_reads! {
         loot: crate::ui_loot::LootLive<'static, 'static>,
         /// The listed group loot rolls, their items' records and the clock their bars read.
         loot_rolls: crate::ui_loot_roll::LootRollLive<'static>,
+        /// The death stores' timers, the offer, the healer's range and the self-res; absent in a
+        /// harness without the death stores.
+        death: Option<crate::death::DeathView<'static, 'static>>,
         /// The game clock's hour and minute.
         game_time: crate::net::GameTimeLive<'static>,
         /// The joined-channel slot array.
         channels: crate::ui_chat::edit::ChannelLive<'static>,
+        /// The acknowledged tutorial bank `TutorialsEnabled` scans.
+        tutorials: crate::tutorial::TutorialLive<'static>,
         /// The reader's cells and its object's name, creator and material; absent in a harness
         /// without the reader or the objects.
         item_text: Option<crate::ui_item_text::ItemTextLive<'static, 'static>>,

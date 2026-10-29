@@ -26,7 +26,10 @@ use bevy::prelude::*;
 pub(crate) struct RealmlistPlugin;
 
 /// `realmList`'s change callback: a value that is not an address is ignored with a warning.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut realmlist: ResMut<Realmlist>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut realmlist: bevy::prelude::Mut<'_, Realmlist>,
+) {
     if !ev.is(CVAR_REALMLIST) {
         return;
     }
@@ -40,7 +43,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut realmlist: ResMut<R
 
 impl Plugin for RealmlistPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
         app.init_resource::<Realmlist>();
     }
 }

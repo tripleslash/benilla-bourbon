@@ -245,8 +245,8 @@ pub enum ScriptCall {
     /// `ShowHelm` or `ShowCloak` ([`super::WornDisplaySet`]): the model's piece and the toggle
     /// the live bit owes, inside the call (`0x5ee660`-`0x5ee8d0`).
     WornDisplay(super::WornDisplaySet),
-    /// An action bar verb's packet ([`super::ActionBarCall`]): the toggles' send, or a slot write
-    /// stored and sent ahead of its signal (`0x4e58e0`).
+    /// An action bar verb's step ([`super::ActionBarCall`]): the toggles' send, a slot write
+    /// stored and sent ahead of its signal (`0x4e58e0`), or the usable cache's refresh.
     ActionBar(super::ActionBarCall),
     /// A GM ticket verb's packet, or `Stuck`'s cast ([`super::GmTicketCall`]), inside the call.
     GmTicket(super::GmTicketCall),
@@ -270,6 +270,24 @@ pub enum ScriptCall {
     /// A `ConsoleExec` line that is no CVar write: `ConsoleCommandExecute` (`0x63ce00`) inside the
     /// call (`0x515f43`), a registered command, a CVar's print or `Unknown command`.
     Console(String),
+    /// A CVar write a verb made in the VM's mirror (`SetCVar`, `ConsoleExec`'s `set` and resets):
+    /// `CVar::Set` (`0x63df50`) runs the row's change callback inside the write (`0x63df7d`), so
+    /// the host takes the queued writes into its registry and runs their callbacks before the verb
+    /// goes on ([`super::cvars::written`]).
+    CvarWritten,
+    /// A camera-view verb ([`super::CameraViewRequest`]): `SetView`, `SaveView`, `ResetView`,
+    /// `NextView`, `PrevView` or `FlipCameraYaw`, seated on the camera inside the call, its CVar
+    /// writes with it (`0x512f17`, `0x50fa09`).
+    CameraView(super::CameraViewRequest),
+    /// `gxRestart`'s handler (`0x639f60`), run inside `RestartGx`, `SetScreenResolution` and
+    /// `SetMultisampleFormat` (through `0x63ce00`, which calls it synchronously) and
+    /// `RestoreVideoDefaults` (directly, `0x639a51`): the host commits the latched display rows
+    /// (`0x639ec0`) and runs their callbacks before the verb goes on.
+    RestartGx,
+    /// A dressing-room verb ([`super::DressUpIntent`]): `Dress`, `Undress`, `TryOn`, or `SetUnit`
+    /// and `RefreshUnit` on a `DressUpModel`, applied to the room inside the call; a cached
+    /// record's try-on goes on, or refuses with `ERR_NOT_EQUIPPABLE`, there (`0x504540`).
+    DressUp(super::DressUpIntent),
     /// `FollowUnit` or `FollowByName` ([`super::FollowRequest`]): the start gate, its refusal's
     /// line or the follow armed and `AUTOFOLLOW_BEGIN` signalled, inside the call (`0x60fed0`).
     Follow(super::FollowRequest),
@@ -283,6 +301,14 @@ pub enum ScriptCall {
     /// the press (`ArmClick 0x514810` → `0x481f00`), or the last primary's release and its
     /// dispatch (`ReleaseCommands 0x514b70` → `DispatchWorldClick 0x481f60`), inside the call.
     WorldClick(super::ClickCall),
+    /// A movement or camera binding function's call ([`super::BindingInput`]) on the engine's
+    /// input state, inside the call: a command bit pressed or released through `SetCommands`
+    /// (`0x515090`) with the cast cancel a new direction makes (`0x5150ce`-`0x515193`), a
+    /// one-shot, or a camera axis.
+    Input(super::BindingInput),
+    /// `DropItemOnUnit(unit)` (`0x48d960`) on the token: the trade leg, then the pet leg's feed
+    /// on the unit it names, inside the call.
+    DropItemOnUnit(String),
 }
 
 /// A getter's lookup with a callback, which the host makes inside the getter's call: the cache
@@ -425,6 +451,11 @@ pub enum ItemCallback {
     /// `GetBuybackItemInfo` (`0x4fb40c`), whose callback `0x4fb570` signals `MERCHANT_UPDATE`; its
     /// query's guid is 0 (`0x4fb3f0`-`0x4fb3f7`).
     Buyback,
+    /// A tooltip build's miss, with the tooltip as the cookie: the item tooltip's `0x52e530`
+    /// (`0x52b722`, `0x52bf60`, `0x52dc27`, `0x535f53`, `0x5361ee`) or the spell tooltip's
+    /// reagent `0x52f820` (`0x52eda4`, `0x52f3f4`), whose answer rebuilds the tooltips the VM
+    /// keeps waiting on it.
+    Tooltip,
 }
 
 /// Make `ask` inside the getter's call. A getter never raises for its lookup: with no host lent,
@@ -726,6 +757,11 @@ pub(crate) fn submit(lua: &Lua, call: ScriptCall) -> mlua::Result<()> {
     if model.call_depth >= MAX_NESTING {
         return Err(mlua::Error::runtime(TOO_DEEP));
     }
+    if super::host::splitting(lua) {
+        drop(model);
+        apply_now(lua, call);
+        return Ok(());
+    }
     let seq = model.queue_call(call);
     model.call_raises.awaited.push(seq);
     drop(model);
@@ -876,6 +912,73 @@ pub(super) fn settle(lua: &Lua, script: &mut UiScript) {
                 drain(lua);
             }
         }
+    }
+}
+
+/// A held segment's calls inside a split stretch ([`super::host::splitting`]), each applied at
+/// once through the lent host in its order: what the segment raised ahead of a call is held as
+/// its own segment first, so what the call's apply signals waits behind it; the rest is returned
+/// to be held.
+pub(crate) fn apply_split_calls(
+    lua: &Lua,
+    raised: Vec<super::tick::Raised>,
+) -> Vec<super::tick::Raised> {
+    use super::tick::Raised;
+    if !super::host::splitting(lua) || !raised.iter().any(|r| matches!(r, Raised::Call(_))) {
+        return raised;
+    }
+    let mut rest = Vec::with_capacity(raised.len());
+    // Cursor views open in `rest`: a segment is cut only where none is, so each view stays with
+    // its end.
+    let mut views = 0usize;
+    for r in raised {
+        match r {
+            Raised::Call(call) if super::host::splitting(lua) => {
+                if views == 0 {
+                    hold_segment(lua, std::mem::take(&mut rest));
+                }
+                apply_now(lua, *call);
+            }
+            other => {
+                match other {
+                    Raised::CursorView(_) => views += 1,
+                    Raised::EndCursorView => views = views.saturating_sub(1),
+                    _ => {}
+                }
+                rest.push(other);
+            }
+        }
+    }
+    rest
+}
+
+/// Hold `raised` for the host as one segment ([`Held::Segment`]) when it holds anything a
+/// listener or a later read sees: an event, a lock or cursor write, or a call.
+pub(crate) fn hold_segment(lua: &Lua, raised: Vec<super::tick::Raised>) {
+    use super::tick::Raised;
+    if raised.iter().any(|r| {
+        matches!(
+            r,
+            Raised::Event(..) | Raised::Lock { .. } | Raised::CursorWrite(_) | Raised::Call(_)
+        )
+    }) {
+        hold(lua, Held::Segment(raised));
+    }
+}
+
+/// Apply `call` through the lent host at once, with its tail, inside a split stretch: what it
+/// signals waits; what it raises is the script's error.
+fn apply_now(lua: &Lua, call: ScriptCall) {
+    let outer = swap_raising(lua, None);
+    let mut script = UiScript::reentrant(lua);
+    let tail = super::host::with_host(lua, |host| host.apply(&mut script, call)).flatten();
+    if let Some(tail) = tail {
+        tail(&mut script);
+    }
+    if let Some(message) = swap_raising(lua, outer) {
+        lua.app_data_mut::<crate::script::ModelCell>()
+            .expect("model app_data")
+            .record_lua_error(&mlua::Error::runtime(message));
     }
 }
 
@@ -2013,6 +2116,46 @@ mod tests {
         assert!(s.item_locked(LOCKED), "the lock made again");
         assert!(s.cursor_payload().is_none(), "the clear made again");
         assert_eq!(global::<String>(&s, "SEEN"), "nil");
+    }
+
+    /// A host whose every call signals `PLAYER_TARGET_CHANGED`.
+    struct Signalling(Vec<ScriptCall>);
+
+    impl CallHost for Signalling {
+        fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
+            self.0.push(call);
+            script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+            None
+        }
+    }
+
+    /// In a split stretch, a verb that signals and then makes a call applies the call at once,
+    /// and what was raised before it waits ahead of what its apply signals.
+    #[test]
+    fn a_split_stretch_keeps_a_signal_ahead_of_a_later_calls_signals() {
+        let mut s = UiScript::new().unwrap();
+        on(&s, "LOOT_OPENED", r#"ORDER = (ORDER or "") .. "opened ""#);
+        on(
+            &s,
+            "PLAYER_TARGET_CHANGED",
+            r#"ORDER = (ORDER or "") .. "applied ""#,
+        );
+        let mut host = Signalling(Vec::new());
+        let lua = s.lua().clone();
+        let mark = s.waiting_mark();
+        let deferring = s.defer_split();
+        s.hosted(&mut host, |_| {
+            super::super::tick::verb(&lua, |model| {
+                model.raise("LOOT_OPENED", vec![]);
+                model.call_in_verb(ScriptCall::ClearTarget);
+            })
+        });
+        assert_eq!(host.0, vec![ScriptCall::ClearTarget], "applied at once");
+        assert_eq!(global::<Option<String>>(&s, "ORDER"), None, "held");
+        let key = s.park_since(mark).expect("parked");
+        drop(deferring);
+        s.hosted(&mut host, |s| s.run_parked(key));
+        assert_eq!(global::<String>(&s, "ORDER"), "opened applied ");
     }
 
     /// The deferral's guard ends with a panic that unwinds through it: nothing is held after.

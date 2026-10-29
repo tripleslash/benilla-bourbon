@@ -76,6 +76,8 @@ fn load_skill_lines(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct BookSignals<'w, 's> {
     lane: ResMut<'w, NoticeLane>,
+    // The learn's line, shown between the form list's edge and the book's signals.
+    errors: Res<'w, crate::ui_action::UiErrorKeys>,
     skill_lines: Option<Res<'w, SkillLines>>,
     me: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
 }
@@ -90,6 +92,12 @@ pub(crate) enum Learned {
 }
 
 impl BookSignals<'_, '_> {
+    /// The lane the book's signals go on, which the bar's legs of the same packet share
+    /// ([`crate::ui_action::SpellSlots`]), so the two keep the handler's order.
+    pub(crate) fn lane(&mut self) -> &mut NoticeLane {
+        &mut self.lane
+    }
+
     /// `0x4b25b0`'s tail for `spell_id`, now among `actions`' known spells. First its language
     /// leg's `LANGUAGE_LIST_CHANGED` for a spell whose first effect is `SPELL_EFFECT_LANGUAGE`
     /// (`0x4b2641`-`0x4b2659`, live or not), then the form list's leg on the stored list
@@ -97,18 +105,28 @@ impl BookSignals<'_, '_> {
     /// (`0x4b2904`), when it moved. Then the book's: the sort's `SPELLS_CHANGED` (`0x4b2b5a`),
     /// `LEARNED_SPELL_IN_TAB` with its tab's 1-based place in the order it left (`0x4b2b92`), then
     /// The Spellbook's tutorial (`0x4b2ba1`), none of them for a spell the gates keep out of the
-    /// book (`0x4b2911`, `0x4b2944`, `0x4b29c4`). With no player held a fresh learn joins the
-    /// initial list, which the arrival learns (`0x5e61fb` → `0x5e621e`), and signals nothing.
+    /// book (`0x4b2911`, `0x4b2944`, `0x4b29c4`). The learn's `line` shows between the form edge
+    /// and the book's (`0x4b2936`, `0x4b29b7`). With no player held a fresh learn joins the
+    /// initial list, which the arrival learns (`0x5e61fb` → `0x5e621e`), and signals nothing; a
+    /// rank-up still shows its line.
     pub(crate) fn entered(
         &mut self,
         spell_id: u32,
         how: Learned,
         actions: &mut crate::ui_action::PlayerActions,
         spells: Option<&Spells>,
+        line: Option<crate::ui_action::UiError>,
     ) {
         let Ok(store) = self.me.single() else {
-            if matches!(how, Learned::Fresh) {
-                actions.initial.push(spell_id);
+            match how {
+                Learned::Fresh => actions.initial.push(spell_id),
+                // A rank-up reaches the registrar ahead of its player test (`0x5e6363` →
+                // `0x4b2f68`, then `0x5e6385`), whose line reads no player (`0x4b29b7`).
+                Learned::Rank { .. } => {
+                    if let Some(line) = line {
+                        self.errors.push(line);
+                    }
+                }
             }
             return;
         };
@@ -136,6 +154,9 @@ impl BookSignals<'_, '_> {
             self.lane.write(FieldNotice::Global {
                 id: crate::field_watch::id::UPDATE_SHAPESHIFT_FORMS,
             });
+        }
+        if let Some(line) = line {
+            self.errors.push(line);
         }
         let (race, class) = (
             store.0.unit_race().unwrap_or(0),

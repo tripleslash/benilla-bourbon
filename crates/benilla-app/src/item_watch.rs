@@ -72,6 +72,11 @@ pub(crate) enum ItemNotice {
     /// with no dedupe (`0x4c017f`, `0x4c0582`), so an answer writes one notice per call, after the
     /// notices of the handlers that registered earlier. It concerns no item of ours.
     TradeRecord { entry: u32 },
+    /// A record landed that tooltips wait on: the item tooltips' callback `0x52e530` rebuilds
+    /// each from what it keeps, and the spell tooltips' `0x52f820` counts its answers down
+    /// ([`crate::ui_items::feed::tooltips_answered`]), for a found record only
+    /// (`0x52e551`, `0x52f826`). It concerns no item of ours.
+    TooltipRecord { entry: u32 },
 }
 
 /// What a notice asks of the trade's own column (`0x4bfb10`, `0x4bfb60`).
@@ -133,15 +138,6 @@ impl Run {
             && self.signals.is_empty()
             && self.unlocks.is_empty()
             && self.bags.is_empty()
-    }
-
-    /// How many times the run calls `RaiseBagUpdate` (`0x4f9370`), each of which runs the action
-    /// bar's usable refresh (`0x4e5c00`, `0x4f9374`) whether or not it signals.
-    pub(crate) fn bag_raises(&self) -> usize {
-        self.bags
-            .iter()
-            .filter(|e| matches!(e, BagEvent::Raise(_)))
-            .count()
     }
 }
 
@@ -341,7 +337,7 @@ impl ItemNotice {
             Self::Seat { old, new } => old.iter().chain(new.iter()).copied().collect(),
             Self::Bag { entries } => entries.clone(),
             Self::Visible { old, new } => vec![*old, *new],
-            Self::TradeRecord { .. } => Vec::new(),
+            Self::TradeRecord { .. } | Self::TooltipRecord { .. } => Vec::new(),
         }
     }
 

@@ -757,7 +757,7 @@ impl Default for PaneRate {
 pub(crate) struct PortraitPlugin;
 
 /// `boothHalfRate`'s change callback.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut rate: ResMut<PaneRate>) {
+pub(crate) fn on_cvar(ev: &crate::cvars::CvarChanged, mut rate: bevy::prelude::Mut<'_, PaneRate>) {
     if ev.is("boothHalfRate") {
         rate.half = ev.flag();
     }
@@ -771,7 +771,6 @@ impl Plugin for PortraitPlugin {
             .init_resource::<PortraitBakes>()
             .init_resource::<DisplayBakes>()
             .init_resource::<PaneRate>()
-            .add_observer(on_cvar)
             .init_resource::<PaneRequests>()
             .init_resource::<PaneDisplays>()
             .init_resource::<panes::PaneBooths>()
@@ -788,7 +787,14 @@ impl Plugin for PortraitPlugin {
             .init_resource::<BoothLight>()
             .add_systems(Startup, setup_booths)
             // The variant-cache reaper: booth twins die with their world source material.
-            .add_systems(Update, (light::reap_dead_variants, feed_gx_aspect))
+            // The aspect after the calls, whose `widescreen` callback writes the knob it reads.
+            .add_systems(
+                Update,
+                (
+                    light::reap_dead_variants,
+                    feed_gx_aspect.after(crate::vm_pass::VmPass::End),
+                ),
+            )
             // The test bake owns the booths when its env is set; the chain orders the shared
             // camera, booth and image access.
             .add_systems(
@@ -837,7 +843,9 @@ impl Plugin for PortraitPlugin {
                     // After the paint pass armed this frame's turns.
                     crate::ui_panes::feed_character_panes
                         .after(crate::ui_script::UiPaint)
-                        .before(panes::sync_panes),
+                        .before(panes::sync_panes)
+                        // Before the quads' appends, which read CVar knobs its calls write.
+                        .before(crate::ui_pass::UiQuadAppend),
                     // After the world's visuals (the display cache, the dressing room's
                     // assembly, the animation driver it shares the variation roll with), the
                     // window aspect and the portrait chain's booths.
@@ -2000,7 +2008,7 @@ mod tests {
     /// and `SetPortraitTexture` draws only a token a slot bakes.
     #[test]
     fn every_party_pet_token_has_a_portrait_slot() {
-        for token in crate::ui_party::PARTY_PET_TOKENS {
+        for token in ["partypet1", "partypet2", "partypet3", "partypet4"] {
             assert!(SLOTS.contains(&token), "{token} has no slot");
         }
     }

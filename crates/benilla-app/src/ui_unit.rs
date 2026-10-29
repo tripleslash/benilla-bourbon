@@ -28,7 +28,7 @@ pub(crate) mod relations;
 pub(crate) mod tooltip_facts;
 pub(crate) mod views;
 
-pub(crate) use held::{traits_from_name_cache, unheld_state};
+pub(crate) use held::unheld_state;
 
 /// The unit-feed pass, gated so none of its login one-shots or per-VM memos runs before the in-game
 /// interface exists; the demo override orders itself after it.
@@ -1001,6 +1001,9 @@ impl benilla_ui::script::SelfRead for StoreObject<'_> {
     fn action_bar_toggles(&self) -> u8 {
         self.0 .0.player_action_bar_toggles().unwrap_or(0)
     }
+    fn on_taxi(&self) -> bool {
+        self.0 .0.unit_flags() & crate::player::UNIT_FLAG_TAXI_FLIGHT != 0
+    }
 }
 
 /// `PLAYER_FLAGS` bit 7, free-for-all PvP (vmangos `Player.h:322`).
@@ -1015,11 +1018,6 @@ pub(crate) fn pvp_free_for_all(rel: &Relations, unit: &RelUnit) -> bool {
         && rel
             .controller(unit)
             .is_some_and(|c| c.player_flags & PLAYER_FLAGS_FFA_PVP != 0)
-}
-
-/// [`pvp_free_for_all`] on a held object's descriptor.
-pub(crate) fn pvp_free_for_all_of(rel: &Relations, guid: u64, store: &ObjectStore) -> bool {
-    pvp_free_for_all(rel, &RelUnit::of(guid, store))
 }
 
 /// Fill the guid-keyed tooltip fields: `is_player`, or a creature's record fields and its

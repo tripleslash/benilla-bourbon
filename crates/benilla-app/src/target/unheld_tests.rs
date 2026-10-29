@@ -9,7 +9,7 @@ use benilla_protocol::messages::{member_status, GroupMemberEntry, PartyMemberSta
 use benilla_protocol::SessionEvent;
 
 use super::front_tests::{fix, Fix, ME, OLD};
-use super::{by_name, scan, Selection};
+use super::{scan, Selection};
 use crate::net::{ClientCommand, GuidIndex, ObjectStore};
 use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_party::{GroupState, GROUPTYPE_RAID};
@@ -180,10 +180,16 @@ fn target_unit_selects_a_party_member_out_of_range_by_guid() {
 }
 
 /// The call's own chunk reads the new target at once: a party member selected out of range reads as
-/// its guid does, the party row's (`0x515970`, `0x496400`), not the old target's snapshot.
+/// its guid does, its name off the name cache (`0x515970`, `0x5171eb`), not the old target's
+/// snapshot.
 #[test]
 fn the_chunk_that_selects_a_party_member_out_of_range_reads_them() {
     let mut f = grouped();
+    // The name the list's lookup asked for, answered (`0x4e8477`).
+    f.app
+        .world_mut()
+        .resource_mut::<crate::names::NameCache>()
+        .insert_player(MEMBER, MEMBER_NAME.into(), None);
     let mut script = benilla_ui::script::UiScript::new().expect("a VM");
     script.set_unit_guids(&benilla_ui::script::UnitGuids {
         player: ME,
@@ -200,7 +206,6 @@ fn the_chunk_that_selects_a_party_member_out_of_range_reads_them() {
         ..Default::default()
     };
     script.set_unit("target", Some(unit(OLD, "Old", true)));
-    script.set_unit("party1", Some(unit(MEMBER, MEMBER_NAME, false)));
     f.app.world_mut().insert_non_send(script);
     run(&mut f, r#"TargetUnit("party1") SEEN = UnitName("target")"#);
     let seen = crate::script_calls::with_hosted_vm(f.app.world_mut(), |s| {
@@ -237,7 +242,7 @@ fn assist_selects_the_bases_target_out_of_range_by_guid() {
 /// holds (`0x489c0e`); `AssistByName` shows `ERR_UNIT_NOT_FOUND` for a name whose pick is no held
 /// unit (`0x489d17`), a party member out of range included (`0x489c9b`), and
 /// `ERR_GENERIC_NO_TARGET` for an empty name with nothing selected (`0x489d2b`). A call's line is
-/// signalled inside it; the stock `/assist`, which no call carries, queues the same lines.
+/// signalled inside it, the stock `/assist`'s included.
 #[test]
 fn an_assist_that_finds_no_unit_says_so() {
     let mut f = grouped();
@@ -283,33 +288,6 @@ fn an_assist_that_finds_no_unit_says_so() {
         "an empty name assists the selection"
     );
 
-    let assist = |f: &mut Fix, name: Option<&str>| {
-        let world = f.app.world_mut();
-        world
-            .resource_mut::<Messages<by_name::AssistRequest>>()
-            .write(by_name::AssistRequest {
-                name: name.map(str::to_string),
-            });
-        world
-            .run_system_once(by_name::assist_requests)
-            .expect("the /assist reader runs");
-        // A one-shot reader starts at the oldest message, as the frame's reader does not.
-        world
-            .resource_mut::<Messages<by_name::AssistRequest>>()
-            .clear();
-    };
-    assist(&mut f, None);
-    assert_eq!(
-        errors(&f),
-        vec![UiError::key("ERR_GENERIC_NO_TARGET")],
-        "a bare /assist"
-    );
-    assist(&mut f, Some("Nobody"));
-    assert_eq!(
-        errors(&f),
-        vec![UiError::key("ERR_UNIT_NOT_FOUND")],
-        "/assist Nobody"
-    );
     assert_eq!(selection(&f), (None, None), "no miss moves the selection");
 }
 

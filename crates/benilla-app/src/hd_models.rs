@@ -15,8 +15,9 @@
 //! own inputs. Natively a chain decides its archives as it opens, and the change takes effect at
 //! the next start ([`crate::cvars::apply_boot_layers`]).
 //!
-//! Nothing here runs per frame: the observer fires on a change of the CVar, and the rebuild wait
-//! runs only while a switch is waiting.
+//! Nothing here runs per frame but a test: the CVar's change callback asks for the switch
+//! ([`HdModelsAsk`]), the frame applies it, and the rebuild wait runs only while a switch is
+//! waiting.
 
 use std::collections::HashSet;
 
@@ -34,9 +35,15 @@ pub(crate) struct HdModelsPlugin;
 
 impl Plugin for HdModelsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar).add_systems(
+        app.init_resource::<HdModelsAsk>().add_systems(
             Update,
-            rebuild_when_reloaded.run_if(resource_exists::<PendingRebuild>),
+            (
+                // After the calls, whose `hdCharacterModels` callback asks.
+                apply_ask
+                    .run_if(|ask: Res<HdModelsAsk>| ask.0.is_some())
+                    .after(crate::vm_pass::VmPass::End),
+                rebuild_when_reloaded.run_if(resource_exists::<PendingRebuild>),
+            ),
         );
     }
 }
@@ -49,14 +56,25 @@ struct PendingRebuild {
     deadline: f64,
 }
 
-/// `hdCharacterModels` moved: switch the layer at this frame's command flush, with the whole
-/// world. The parse is [`benilla_formats::layers::layer_switch`]'s, as the boot read's is.
-fn on_cvar(ev: On<CvarChanged>, mut commands: Commands) {
+/// The switch the `hdCharacterModels` callback asked for, applied by the frame with the whole
+/// world.
+#[derive(Resource, Default)]
+pub(crate) struct HdModelsAsk(Option<bool>);
+
+/// `hdCharacterModels` moved: ask for the switch. The parse is
+/// [`benilla_formats::layers::layer_switch`]'s, as the boot read's is.
+pub(crate) fn on_cvar(ev: &CvarChanged, mut ask: Mut<'_, HdModelsAsk>) {
     if !ev.is("hdCharacterModels") {
         return;
     }
-    let on = benilla_formats::layers::layer_switch(&ev.new).unwrap_or(false);
-    commands.queue(move |world: &mut World| switch(world, on));
+    ask.0 = Some(benilla_formats::layers::layer_switch(&ev.new).unwrap_or(false));
+}
+
+/// Run the asked switch at this frame's command flush.
+fn apply_ask(mut ask: ResMut<HdModelsAsk>, mut commands: Commands) {
+    if let Some(on) = ask.0.take() {
+        commands.queue(move |world: &mut World| switch(world, on));
+    }
 }
 
 /// Mount or unmount the layer and rebuild everything built from it; a no-op when it already is

@@ -20,8 +20,8 @@ pub(crate) use cast_lines::{CastFailLines, CastFailRedisplays};
 mod drain;
 // A `UseAction` press, applied in call order by `crate::script_calls`.
 pub(crate) use drain::{
-    attack_nearest_probe, drain_arrival_casts, finish_equip, go_deferred_attack, use_action,
-    ActionPress, AttackPress, UseOutcome,
+    attack_nearest_probe, drain_arrival_casts, finish_equip, use_action, ActionPress, AttackPress,
+    UseOutcome,
 };
 // The bar's sends and slot writes inside their calls.
 pub(crate) use drain::ActionBarSteps;
@@ -39,33 +39,31 @@ pub(crate) use feed::{bonus_bar_offset, spell_action_icon, MISSING_ITEM_ICON};
 mod feed_tests;
 mod net;
 mod ranks;
-// The rank pass, which the macro load orders itself ahead of: it rewrites a bar word, too.
-pub(crate) use ranks::normalize_action_ranks;
+// The login's rank pass, run in the book's and the bar's handlers.
+pub(crate) use ranks::normalize_ranks;
 mod cooldown_lane;
 #[cfg(test)]
 pub(crate) use cooldown_lane::fire_cooldown_lane;
-mod reactive;
+pub(crate) mod reactive;
 #[cfg(test)]
 mod reactive_tests;
 pub(crate) mod recount;
 mod state;
 pub(crate) use state::{wears_entry, ActionStateMemory, ActionStates};
+mod spell_slots;
 pub(crate) mod toggle;
-mod unlearn;
+// The bar's legs of the spell packets, run in their handlers.
+pub(crate) use spell_slots::SpellSlots;
 mod weapon_icon;
-
-/// Every feed that pushes cooldown triples runs `.before` this set. Both lists' flushes fire on
-/// their cooldown lanes, after every feed ([`cooldown_lane`]).
-#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct CooldownEvents;
 
 pub(crate) use cast_fail::report_reaches_pop;
 #[cfg(test)]
 pub(crate) use cast_fail::CAST_FAIL_KEYS;
+#[cfg(test)]
+pub(crate) use errors::fire_ui_error_lane;
 pub(crate) use errors::{
     attack_actor_refusal, keyed_line, keyed_line_s, reagent_totem_refusal, show_messages, show_now,
-    ui_error_text, CastFail, Caster, FillArg, MessageSink, MountErrors, PetTameFailures, Shown,
-    UiError, UiErrorKeys, UiErrorTexts,
+    ui_error_text, CastFail, Caster, FillArg, MessageSink, Shown, UiError, UiErrorKeys,
 };
 pub(crate) use weapon_icon::{melee_auto_attack_icon, ranged_weapon_icon, substitutes_weapon_icon};
 
@@ -74,19 +72,55 @@ pub(crate) use weapon_icon::{melee_auto_attack_icon, ranged_weapon_icon, substit
 pub(crate) const SPELL_ATTACK: u32 = 6603;
 
 /// The action slots (wire 0..119), the reference's slot arrays, which `0x4e58e0` writes inside the
-/// call that places or clears one (`0x4e590a`), so the chunk's next verb reads the write. Apart
-/// from [`PlayerActions`] so the call host's bar verbs hold it alone ([`ActionBarSteps`]). The bar
-/// is client-authoritative: vmangos stores a slot without a reply
-/// (`MasterPlayer::addActionButton`).
+/// call that places or clears one (`0x4e590a`), so the chunk's next verb reads the write, and
+/// inside the spell packets' handlers that clear or replace one ([`spell_slots`]). Apart from
+/// [`PlayerActions`] so the call host's bar verbs hold it alone ([`ActionBarSteps`]). The bar is
+/// client-authoritative: vmangos stores a slot without a reply (`MasterPlayer::addActionButton`).
 #[derive(Resource, Default)]
 pub(crate) struct ActionSlots {
     /// Wire slot (0-based) to its packed action; the Lua action id is slot + 1.
     pub buttons: HashMap<u8, ActionButton>,
-    /// Set by every slot change, cleared once the feed re-resolves slot identity.
-    pub dirty: bool,
+    /// Moved by every write ([`Self::touch`]); the identity feed re-resolves when it moved past
+    /// the count it last resolved, and writes nothing here.
+    generation: u64,
+    /// Whether this login's `SMSG_ACTION_BUTTONS` has come, so the bar is this character's.
+    arrived: bool,
 }
 
-/// The known spells and the book's lists the registrar keeps.
+impl ActionSlots {
+    /// `SMSG_ACTION_BUTTONS`'s 120 words, every slot replaced (`0x5e6680` into `0xc4c2b4`).
+    pub(crate) fn arrive(&mut self, buttons: impl IntoIterator<Item = ActionButton>) {
+        self.buttons = buttons.into_iter().map(|b| (b.slot, b)).collect();
+        self.arrived = true;
+        self.touch();
+    }
+
+    /// Whether this login's bar has come ([`Self::arrive`]).
+    pub(crate) fn arrived(&self) -> bool {
+        self.arrived
+    }
+
+    /// The game entry's reset (`ResetActionBarState 0x4e4f50`): every word 0, and no bar yet for
+    /// this login.
+    fn game_entry(&mut self) {
+        self.buttons.clear();
+        self.arrived = false;
+        self.touch();
+    }
+
+    /// Mark the words written, for the identity feed's next resolve.
+    pub(crate) fn touch(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// The writes so far, which the identity feed compares with its last resolve's.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+/// The known spells and the book's lists the registrar keeps, which the learn, unlearn and
+/// supersede handlers write at their packet, the bar's slots apart ([`ActionSlots`]).
 #[derive(Resource, Default)]
 pub(crate) struct PlayerActions {
     /// The known spells (`SMSG_INITIAL_SPELLS` and the learns since), the reference's known-spell
@@ -119,14 +153,6 @@ pub(crate) struct PlayerActions {
     /// `SPELL_EFFECT_STUCK` (`0x4b2614`-`0x4b261d`); `None` is its 0, after the book's reset
     /// (`0x4b2433`).
     pub stuck_spell: Option<u32>,
-    /// `SMSG_SUPERCEDED_SPELL`'s `(old, new)` pairs in arrival order, for the macro arm of
-    /// `0x4e5e60`: a macro on the bar whose cached spell is `old` gets `new` (`0x4e5ec4`). The
-    /// macro rebind drains it ([`crate::ui_macro`]).
-    pub superseded: Vec<(u32, u32)>,
-    /// The spells unlearned (`0x5e9fe0`), by `SMSG_REMOVED_SPELL` or a supersede's old rank, in
-    /// arrival order, whose bar slots the unlearn clears (`0x5ea253` into `0x4e5e20`), drained by
-    /// the bar's clear (`unlearn`).
-    pub unlearned: Vec<u32>,
     /// `[0xc4d2a8]` (count `[0xc4d2a4]`): `SMSG_INITIAL_SPELLS`'s list in wire order, which our
     /// player's arrival learns one spell at a time (`0x5dea8b`-`0x5deab9`).
     pub initial: Vec<u32>,
@@ -137,10 +163,6 @@ pub(crate) struct PlayerActions {
     /// the reference's arrival runs inside the create's packet, ahead of every later learn, so the
     /// arrival's replay applies these after its own ([`crate::ui_world_enter`]).
     pub form_edits: Option<Vec<crate::ui_shapeshift::FormEdit>>,
-    /// Set by every book change, cleared once the feed re-resolves slot identity, which a
-    /// landed item template ([`crate::items::Items::template_epoch`]) also triggers. Between
-    /// resolves an item slot's count moves only by the item watchers' recount (`recount`).
-    pub dirty: bool,
 }
 
 impl PlayerActions {
@@ -155,6 +177,13 @@ impl PlayerActions {
         })
     }
 }
+
+/// `[0xb71148]`: the reactive spells, which the registrar takes in one learn at a time, our
+/// player's arrival empties and takes the initial spells into again, and each usable refresh
+/// re-checks ([`reactive::ReactiveList`]). Apart from [`PlayerActions`], which the refresh's
+/// callers read beside it.
+#[derive(Resource, Default)]
+pub(crate) struct ReactiveSpells(pub(crate) reactive::ReactiveList);
 
 /// The world right-click's casts, queued for the cast ladder later in the frame: the click system
 /// cannot also hold the ladder's resources, and only the ladder sends a cast, so a chest or a body
@@ -312,16 +341,6 @@ pub(crate) fn run_watcher_refresh_once(world: &mut World) {
         .expect("the watcher's refresh runs as a one-shot system");
 }
 
-/// One pass of the action-state feed and the events it owes, for a test that hears them.
-#[cfg(test)]
-pub(crate) fn run_action_events_once(world: &mut World) {
-    use bevy::ecs::system::RunSystemOnce;
-    run_feed_action_state_once(world);
-    world
-        .run_system_once(state::fire_action_events)
-        .expect("the action events run as a one-shot system");
-}
-
 /// The 5875 spell data; `None` skips where the install is absent.
 #[cfg(test)]
 pub(crate) fn real_spells() -> Option<Spells> {
@@ -337,9 +356,12 @@ pub(crate) fn real_spells() -> Option<Spells> {
     })
 }
 
-/// The reference's learned-ability latches: at learn time `0x4b25e0` stores a spell's id by its
-/// `Effect[0]`, and the unlearn path `0x4b2c50` clears it. The skin cursor requires the latch
-/// (`0x482589`), so a player who never learned Skinning gets no skin cursor.
+/// The reference's learned-ability latches, which the spell packets' handlers write at their
+/// packet: the registrar `0x4b25b0` stores a registered spell's id by its `Effect[0]`
+/// (`0x4b262c`, `0x4b263b`), `LearnSpell 0x5e9c20` the Feed Pet spell (`0x5e9e49` →
+/// `SetFeedPetSpell 0x6ea1d0`), and an unlearn's `0x4b2c50` clears the first two while they hold
+/// its spell (`0x4b2c83`-`0x4b2c9d`). The skin cursor requires the latch (`0x482589`), so a player
+/// who never learned Skinning gets no skin cursor.
 #[derive(Resource, Default)]
 pub(crate) struct LearnedAbilities {
     /// `[0xb700e4]`: the known `SPELL_EFFECT_SKINNING` spell, which the skin click also casts.
@@ -347,8 +369,54 @@ pub(crate) struct LearnedAbilities {
     /// `[0xb700e8]`: the known `SPELL_EFFECT_SKIN_PLAYER_CORPSE` spell; no cursor reads it yet.
     pub(crate) skin_player_corpse: Option<u32>,
     /// `[0xcecad8]`: the known `SPELL_EFFECT_FEED_PET` spell, latched by `0x6ea1d0` (from
-    /// `0x5e9e49`); gate 3 of [`drop_item::drop_item_on_unit`] and the spell it casts.
+    /// `0x5e9e49`); gate 3 of [`drop_item::drop_item_on_unit`] and the spell it casts. No unlearn
+    /// clears it; the world entry does (`0x6e7311`).
     pub(crate) feed_pet: Option<u32>,
+}
+
+impl LearnedAbilities {
+    /// The registrar's legs (`0x4b2623`-`0x4b263b`): each registered spell whose `Effect[0]` is
+    /// skinning or the corpse skin overwrites its latch, so the last registered holds it.
+    pub(crate) fn registered(&mut self, spell_id: u32, spells: Option<&Spells>) {
+        let effect = spells
+            .and_then(|s| s.catalog.get(spell_id))
+            .map(|d| d.effects[0]);
+        match effect {
+            Some(benilla_formats::SPELL_EFFECT_SKINNING) => self.skinning = Some(spell_id),
+            Some(SPELL_EFFECT_SKIN_PLAYER_CORPSE) => self.skin_player_corpse = Some(spell_id),
+            _ => {}
+        }
+    }
+
+    /// `LearnSpell`'s Feed Pet leg: a spell with no `Attributes & 0x20` (`0x5e9c8e`), no cast UI
+    /// (`0x5e9d88`) and `SPELL_EFFECT_FEED_PET` first (`0x5e9e42`).
+    pub(crate) fn learned(&mut self, spell_id: u32, spells: Option<&Spells>) {
+        let latches = spells
+            .and_then(|s| s.catalog.get(spell_id))
+            .is_some_and(|d| {
+                d.attributes & benilla_formats::SPELL_ATTR_IS_TRADESKILL == 0
+                    && (d.cast_ui as i32) <= 0
+                    && d.effects[0] == SPELL_EFFECT_FEED_PET
+            });
+        if latches {
+            self.feed_pet = Some(spell_id);
+        }
+    }
+
+    /// `0x4b2c50`'s legs: a latch holding `spell_id` goes to 0 (`0x4b2c83`-`0x4b2c9d`).
+    pub(crate) fn unregistered(&mut self, spell_id: u32) {
+        for latch in [&mut self.skinning, &mut self.skin_player_corpse] {
+            if *latch == Some(spell_id) {
+                *latch = None;
+            }
+        }
+    }
+
+    /// `ResetSpellBook 0x4b23a0` zeroes the two registrar latches (`0x4b2439`, `0x4b243f`).
+    pub(crate) fn book_reset(&mut self) {
+        self.skinning = None;
+        self.skin_player_corpse = None;
+    }
 }
 
 /// The "Remove Insignia" effect, the second one `0x4b25e0` latches.
@@ -356,53 +424,6 @@ const SPELL_EFFECT_SKIN_PLAYER_CORPSE: u32 = 0x74;
 
 /// The effect latched into `[0xcecad8]` at learn time (`0x5e9e42`); only Feed Pet 6991 has it.
 const SPELL_EFFECT_FEED_PET: u32 = 0x65;
-
-/// The latch `0x4b25e0` holds for `effect`: the last known spell in id order whose `Effect[0]` is
-/// it, as each learned rank overwrites the latch and a rank chain ascends by id (Skinning 8613,
-/// 8617, 8618, 10768).
-pub(crate) fn latched_ability(
-    actions: &PlayerActions,
-    spells: &Spells,
-    effect: u32,
-) -> Option<u32> {
-    actions.spells.iter().copied().rfind(|&id| {
-        spells
-            .catalog
-            .get(id)
-            .is_some_and(|d| d.effects[0] == effect)
-    })
-}
-
-/// Re-derives [`LearnedAbilities`] whenever the book changes, standing in for learn-time writes.
-pub(crate) fn track_learned_abilities(
-    actions: Res<PlayerActions>,
-    spells: Option<Res<Spells>>,
-    mut learned: ResMut<LearnedAbilities>,
-) {
-    let Some(spells) = spells else { return };
-    if !actions.is_changed() && !spells.is_changed() {
-        return;
-    }
-    let last_with = |effect: u32| latched_ability(&actions, &spells, effect);
-    let (skinning, skin_player_corpse, feed_pet) = (
-        last_with(benilla_formats::SPELL_EFFECT_SKINNING),
-        last_with(SPELL_EFFECT_SKIN_PLAYER_CORPSE),
-        last_with(SPELL_EFFECT_FEED_PET),
-    );
-    if (skinning, skin_player_corpse, feed_pet)
-        != (
-            learned.skinning,
-            learned.skin_player_corpse,
-            learned.feed_pet,
-        )
-    {
-        *learned = LearnedAbilities {
-            skinning,
-            skin_player_corpse,
-            feed_pet,
-        };
-    }
-}
 
 /// `SpellMechanic.dbc`: the name in `SPELL_FAILED_PREVENTED_BY_MECHANIC`'s `%s` (reason `0x8d`).
 #[derive(Resource)]
@@ -434,74 +455,32 @@ impl Plugin for UiActionPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
         cooldown_lane::add_cooldown_lane(app);
+        errors::add_ui_error_lane(app);
         // A UI-only harness has no net stack; declaring a message twice is idempotent.
         app.add_message::<crate::net::FieldChanged>()
-            .init_resource::<state::ActionEvents>()
             .init_resource::<state::ActionStateMemory>()
             .init_resource::<PlayerActions>()
+            .init_resource::<ReactiveSpells>()
             .init_resource::<ActionSlots>()
             .init_resource::<LearnedAbilities>()
             .init_resource::<CastFailRedisplays>()
-            .init_resource::<MountErrors>()
-            .init_resource::<PetTameFailures>()
-            .init_resource::<UiErrorKeys>()
-            .init_resource::<UiErrorTexts>()
             .init_resource::<ClickCasts>()
             .add_data_loaders((load_spells, load_spell_mechanics))
             .add_systems(
                 Update,
                 (
-                    // The feeds ride with the unit feed, before the VM ticks: the rank pass before
-                    // the identity feed that consumes its `dirty`, the state feed after it, so a
-                    // slot's rank fix and first state land the same frame. The drains follow the
-                    // input pass, in any order: a gesture fills only one of their queues.
-                    ranks::normalize_action_ranks
-                        .in_set(UnitFeed)
-                        .before(feed::feed_actions),
-                    // The unlearns' clears, after the macros' bound spells a macro slot resolves
-                    // through and after the rank pass, which stands in for the supersede's move
-                    // of the spell slots (`0x4e5e60`) that its unlearn (`0x5e6392`) follows; before
-                    // the identity feed that consumes their `dirty`.
-                    unlearn::clear_unlearned_slots
-                        .in_set(UnitFeed)
-                        .after(crate::ui_macro::MacroBindings)
-                        .after(ranks::normalize_action_ranks)
-                        .before(feed::feed_actions),
+                    // The feeds ride with the unit feed, before the VM ticks: the state feed
+                    // after the identity feed, so a slot's first state lands the same frame.
                     feed::feed_actions.in_set(UnitFeed),
                     // A seat: the world-enter events' handlers read the slots' state, which the
                     // reference's arrival stores before its enter cascade (`0x5deafc`, `0x5deb60`).
-                    // After the macros' bound spells, which a macro slot resolves through.
                     state::feed_action_state
                         .in_set(UnitFeed)
                         .after(crate::player::ControlRestore)
-                        .after(crate::ui_macro::MacroBindings)
-                        .after(feed::feed_actions),
-                    // Ahead of the events its producers precede: the select's `PLAYER_TARGET_CHANGED` and the
-                    // combo points' event (the unit events), the watched fields' own events (the
-                    // field notices, whose lane fires after every feed) and the form's cast
-                    // change (the cast reports).
-                    state::fire_action_events
-                        .in_set(UnitFeed)
-                        .in_set(CooldownEvents)
-                        .after(state::feed_action_state)
-                        .before(crate::ui_cast::feed_cast_reports),
-                    // The latches must be current before the target chain's cursor reads them.
-                    track_learned_abilities
-                        .in_set(UnitFeed)
                         .after(feed::feed_actions),
                 ),
-            )
-            .add_systems(
-                OnExit(crate::client_state::ClientState::InWorld),
-                drop_held_lines.in_set(crate::ui_script::SessionEnd::Clears),
             );
     }
-}
-
-/// `OnExit(InWorld)`: a line still held under the cover dies with the world's interface, as the
-/// reference's, drawn at once by `0x4945b0`, dies in the UI teardown (`0x490bd0`).
-fn drop_held_lines(mut texts: ResMut<UiErrorTexts>) {
-    texts.0.clear();
 }
 
 fn load_spells(mut commands: Commands, assets: Option<Res<WorldAssets>>) {

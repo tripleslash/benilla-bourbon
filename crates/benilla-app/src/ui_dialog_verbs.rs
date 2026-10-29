@@ -468,7 +468,7 @@ pub(crate) struct MeetingStoneInputs<'w, 's> {
     visuals: Option<Res<'w, SpellVisuals>>,
     fx: MessageWriter<'w, SpellKitFx>,
     self_q: Query<'w, 's, Entity, With<SelfPlayer>>,
-    tutorials: Option<MessageWriter<'w, crate::tutorial::TutorialEvent>>,
+    tutorials: Option<Res<'w, crate::tutorial::Tutorials>>,
 }
 
 /// `SMSG 0x295` (`0x4ca230`): the area stored, the line for the status (`0x4ca3a4`), status 1's
@@ -494,10 +494,8 @@ fn stone_set_queue(
                 inputs.fx.write(fx);
             }
         }
-        if let Some(t) = inputs.tutorials.as_mut() {
-            t.write(crate::tutorial::TutorialEvent::trigger(
-                crate::tutorial::id::MEETING_STONES,
-            ));
+        if let Some(t) = inputs.tutorials.as_deref() {
+            t.trigger_now(crate::tutorial::id::MEETING_STONES);
         }
     }
     lane.event("MEETINGSTONE_CHANGED", vec![]);
@@ -540,14 +538,18 @@ fn stone_notice(
 /// it (`0x55f426`): each meeting-stone member line waiting on the name (`0x4ca510`), which a
 /// refusal spends silently, and the duel's held challenge ([`crate::ui_duel`]).
 #[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct DialogNameAnswers<'w> {
+pub(crate) struct DialogNameAnswers<'w, 's> {
     /// Each absent in a harness without the dialogs.
     lane: Option<ResMut<'w, DialogLane>>,
     stone: Option<ResMut<'w, MeetingStone>>,
     duel: Option<ResMut<'w, crate::ui_duel::DuelState>>,
+    /// The resurrect offer whose caster's name it waited on, and the active player its show
+    /// tests.
+    death: Option<ResMut<'w, crate::death::DeathNet>>,
+    me: Query<'w, 's, &'static ObjectStore, With<crate::net::SelfPlayer>>,
 }
 
-impl DialogNameAnswers<'_> {
+impl DialogNameAnswers<'_, '_> {
     /// `guid`'s answer just filed in `names`.
     pub(crate) fn answered(&mut self, guid: u64, names: &NameCache) {
         let Some(lane) = self.lane.as_deref_mut() else {
@@ -566,6 +568,9 @@ impl DialogNameAnswers<'_> {
         }
         if let Some(duel) = self.duel.as_deref_mut() {
             crate::ui_duel::name_answered(duel, lane, guid, name);
+        }
+        if let Some(death) = self.death.as_deref_mut() {
+            crate::death::net::resurrecter_named(death, self.me.single().ok(), lane, guid, name);
         }
     }
 }

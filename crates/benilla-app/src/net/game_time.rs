@@ -476,8 +476,8 @@ impl TimeOffset {
 
 /// The CVar's change callback: rounded to the hour and held to [`TIME_OFFSET_MAX`] either way.
 pub(crate) fn time_offset_on_cvar(
-    ev: On<crate::cvars::CvarChanged>,
-    mut offset: ResMut<TimeOffset>,
+    ev: &crate::cvars::CvarChanged,
+    mut offset: bevy::prelude::Mut<'_, TimeOffset>,
 ) {
     if ev.is("serverTimeOffset") {
         let v = ev.num();
@@ -514,8 +514,7 @@ impl crate::script_calls::live::LiveFamily for GameTimeLive<'_> {
 /// (`0x401684`) and `ClientDestroyGame` removes it (`0x401f04`), while the clock, built once at
 /// start-up, outlives both, so it stands where the world left it.
 pub(super) fn register(app: &mut App) {
-    app.init_resource::<TimeOffset>()
-        .add_observer(time_offset_on_cvar);
+    app.init_resource::<TimeOffset>();
     app.add_systems(
         Update,
         (

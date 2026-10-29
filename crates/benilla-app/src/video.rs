@@ -22,7 +22,7 @@
 //! "vsync on" is `AutoNoVsync` paced to the monitor's refresh rate ([`present_choice`]), which
 //! keeps the synced look without the crash. `$WOW_PRESENT=fifo` restores plain `Fifo`.
 
-use benilla_ui::script::ScreenResolution;
+use benilla_ui::script::{ScreenResolution, UiScript};
 #[cfg(any(test, not(target_arch = "wasm32")))]
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -326,226 +326,248 @@ impl Default for Widescreen {
     }
 }
 
-/// The change callbacks of the reference's video-options registration block (`0x688470`); each
-/// arm writes only its own resource.
+/// The knobs the video rows' change callbacks write ([`VideoKnobs::on_cvar`]).
+#[derive(bevy::ecs::system::SystemParam)]
 #[allow(clippy::type_complexity)]
-pub(crate) fn on_cvar(
-    ev: On<crate::cvars::CvarChanged>,
-    mut cfg: ResMut<VideoConfig>,
-    mut view: ResMut<benilla_world::view::ViewDistance>,
-    mut msaa: ResMut<benilla_world::view::MsaaSetting>,
-    msaa_formats: Res<benilla_world::view::MsaaFormats>,
-    mut tex_filter: ResMut<benilla_assets::TexFilterSetting>,
-    mut clutter: ResMut<benilla_world::clutter::ClutterConfig>,
-    mut weather: ResMut<benilla_world::weather::WeatherState>,
-    particles: Option<ResMut<benilla_world::particles::ParticleTuning>>,
-    mut spell_effect_level: ResMut<SpellEffectLevel>,
-    mut ffx: ResMut<benilla_world::ffx_glow::FfxSwitches>,
-    mut widescreen: ResMut<Widescreen>,
-    mut cvars: ResMut<crate::cvars::Cvars>,
+pub(crate) struct VideoKnobs<'w> {
+    cfg: ResMut<'w, VideoConfig>,
+    view: ResMut<'w, benilla_world::view::ViewDistance>,
+    msaa: ResMut<'w, benilla_world::view::MsaaSetting>,
+    msaa_formats: Res<'w, benilla_world::view::MsaaFormats>,
+    tex_filter: ResMut<'w, benilla_assets::TexFilterSetting>,
+    clutter: ResMut<'w, benilla_world::clutter::ClutterConfig>,
+    weather: ResMut<'w, benilla_world::weather::WeatherState>,
+    particles: Option<ResMut<'w, benilla_world::particles::ParticleTuning>>,
+    spell_effect_level: ResMut<'w, SpellEffectLevel>,
+    ffx: ResMut<'w, benilla_world::ffx_glow::FfxSwitches>,
+    widescreen: ResMut<'w, Widescreen>,
     // fork: the Graphics page's own rows — screen-space indirect lighting, the modern lighting
     // model and the liquid renderer. Optional because each is the engine plugin's resource and a
     // stripped app (a headless test, the glue-only scenarios) may not carry the plugin.
-    mut fork: (
-        Option<ResMut<benilla_world::ssilvb::IndirectLighting>>,
-        Option<ResMut<benilla_world::modern::LightingSettings>>,
-        Option<ResMut<benilla_world::liquid::WaterDetail>>,
+    fork: (
+        Option<ResMut<'w, benilla_world::ssilvb::IndirectLighting>>,
+        Option<ResMut<'w, benilla_world::modern::LightingSettings>>,
+        Option<ResMut<'w, benilla_world::liquid::WaterDetail>>,
         // fork: the Everwood port (FORK.md) — the foliage wind tier and gain.
-        Option<ResMut<benilla_world::wind::FoliageWind>>,
-        Option<ResMut<benilla_world::wind::FoliageWindStrength>>,
-        Option<ResMut<benilla_world::weather::wetness::RainSurfaces>>,
-        Option<ResMut<benilla_world::lighting::LavaLightGain>>,
+        Option<ResMut<'w, benilla_world::wind::FoliageWind>>,
+        Option<ResMut<'w, benilla_world::wind::FoliageWindStrength>>,
+        Option<ResMut<'w, benilla_world::weather::wetness::RainSurfaces>>,
+        Option<ResMut<'w, benilla_world::lighting::LavaLightGain>>,
         // fork: the modern model's light auto-exposure.
-        Option<ResMut<benilla_world::modern::look::AutoExposure>>,
+        Option<ResMut<'w, benilla_world::modern::look::AutoExposure>>,
         // fork: the terrain horizon (FORK.md) — `lod` and `lodDist`.
-        Option<ResMut<benilla_world::horizon::HorizonCulling>>,
+        Option<ResMut<'w, benilla_world::horizon::HorizonCulling>>,
     ),
-) {
-    use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
-    let v = ev.num();
-    match ev.key().as_str() {
-        // A value that is not a size is ignored with a warning.
-        "gxresolution" => match parse_resolution(&ev.new) {
-            Some(size) => cfg.windowed = size,
-            None => warn!("cvar gxResolution: unparseable value '{}' ignored", ev.new),
-        },
-        "gxvsync" => cfg.vsync = ev.flag(),
-        "widescreen" => widescreen.0 = ev.flag(),
-        // The reference's polarity: `1` is windowed (the row is "Windowed Mode").
-        "gxwindow" => cfg.display = display_from_flag(v),
-        // Latched like `gxWindow`: the commit is `RestartGx`, which rebuilds the window
-        // (`0x58cf10` reads `+0x09`); `apply_window_mode` is that rebuild.
-        "gxmaximize" => cfg.maximize = ev.flag(),
-        // The FFX pass's three switches, read every frame by the reference (`0x6cd8a6`, `0x6cc5a8`,
-        // `0x6cdf10`), so a write shows on the next frame.
-        "ffx" | "ffxglow" | "ffxdeath" => {
-            match ev.key().as_str() {
-                "ffx" => ffx.master = ev.flag(),
-                "ffxglow" => ffx.glow = ev.flag(),
-                _ => ffx.death = ev.flag(),
+}
+
+impl VideoKnobs<'_> {
+    /// The change callbacks of the reference's video-options registration block (`0x688470`);
+    /// each arm writes only its own knob.
+    pub(crate) fn on_cvar(
+        &mut self,
+        ev: &crate::cvars::CvarChanged,
+        cvars: &mut crate::cvars::Cvars,
+    ) {
+        let VideoKnobs {
+            cfg,
+            view,
+            msaa,
+            msaa_formats,
+            tex_filter,
+            clutter,
+            weather,
+            particles,
+            spell_effect_level,
+            ffx,
+            widescreen,
+            fork,
+        } = self;
+        use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
+        let v = ev.num();
+        match ev.key().as_str() {
+            // A value that is not a size is ignored with a warning.
+            "gxresolution" => match parse_resolution(&ev.new) {
+                Some(size) => cfg.windowed = size,
+                None => warn!("cvar gxResolution: unparseable value '{}' ignored", ev.new),
+            },
+            "gxvsync" => cfg.vsync = ev.flag(),
+            "widescreen" => widescreen.0 = ev.flag(),
+            // The reference's polarity: `1` is windowed (the row is "Windowed Mode").
+            "gxwindow" => cfg.display = display_from_flag(v),
+            // Latched like `gxWindow`: the commit is `RestartGx`, which rebuilds the window
+            // (`0x58cf10` reads `+0x09`); `apply_window_mode` is that rebuild.
+            "gxmaximize" => cfg.maximize = ev.flag(),
+            // The FFX pass's three switches, read every frame by the reference (`0x6cd8a6`, `0x6cc5a8`,
+            // `0x6cdf10`), so a write shows on the next frame.
+            "ffx" | "ffxglow" | "ffxdeath" => {
+                match ev.key().as_str() {
+                    "ffx" => ffx.master = ev.flag(),
+                    "ffxglow" => ffx.glow = ev.flag(),
+                    _ => ffx.death = ev.flag(),
+                }
+                info!("video: full-screen effects {:?}", **ffx);
             }
-            info!("video: full-screen effects {:?}", *ffx);
-        }
-        // The registry refuses a value outside the callback's range (`0x688d40`); the clamp only
-        // keeps the knob in it.
-        "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
-        // World flag 4 (`0x688920`): the chunk level the horizon rows are taken at.
-        "lod" => {
-            if let Some(horizon) = fork.8.as_deref_mut() {
-                horizon.lod = ev.flag();
-            }
-        }
-        // `0x688ab0` takes 50 to 250 and stores 77 for anything else (`0x688af4`).
-        "loddist" => {
-            use benilla_world::horizon::{LOD_DIST_FALLBACK, LOD_DIST_RANGE};
-            if let Some(horizon) = fork.8.as_deref_mut() {
-                horizon.lod_dist = if LOD_DIST_RANGE.contains(&v) {
-                    v
-                } else {
-                    LOD_DIST_FALLBACK
-                };
-            }
-        }
-        // Clamped, where the reference refuses an out-of-range write and keeps the value
-        // (`0x688d90` echoes "NearClip must be in range 0.01 - 0.33" and returns 0).
-        "nearclip" => view.set_nearclip(v),
-        // The reference's `atoi` and clamp to `[1, 16]` (`0x63b250`), then this GPU's ceiling:
-        // an unoffered count is a wgpu validation error on the first frame. The camera reads it
-        // once, at spawn.
-        "gxmultisample" => {
-            let asked = (v as u32).clamp(*MSAA_RANGE.start(), *MSAA_RANGE.end());
-            let granted = msaa_formats.clamp(asked);
-            if granted != asked {
-                warn!("cvar gxMultisample: this GPU does not offer {asked}x multisampling — using {granted}x");
-            }
-            msaa.samples = granted;
-        }
-        // Not applied until the next launch (the filter policy is published once at the end of
-        // `CvarLoad`); the reference registers both with `flags = 1` and applies them live.
-        // `anisotropic` is refused outside `[1, 16]` before it reaches here (`0x689110`,
-        // `check_anisotropic`); the clamp covers a saved value, which the file read does not check.
-        "trilinear" => tex_filter.trilinear = ev.flag(),
-        "anisotropic" => {
-            tex_filter.aniso = (v as u32).clamp(
-                *benilla_assets::ANISO_RANGE.start(),
-                *benilla_assets::ANISO_RANGE.end(),
-            )
-        }
-        // The panel's 0/1/2 is the density multiplier x1/x2/x3, clamped to the 1.12 slider's
-        // range. `frillDensity` is the same knob, mirrored so `GetCVar` never answers two levels.
-        "worlddetail" => {
-            clutter.density = v.clamp(0.0, 2.0) + 1.0;
-            cvars.mirror(
-                benilla_ui::script::CVAR_FRILL_DENSITY,
-                &clutter.frill_density().to_string(),
-            );
-            // The stop's other half, as `SetWorldDetail` writes it, so a stop set as a CVar keeps
-            // `SmallCull` in step too.
-            cvars.mirror(
-                benilla_ui::script::CVAR_SMALL_CULL,
-                &benilla_ui::script::small_cull_text(v.clamp(0.0, 2.0) as usize),
-            );
-        }
-        // The same knob in the reference's cells per chunk, which the registry holds to `[1, 256]`
-        // (`0x688de0`); the callback hands on `SStrToInt`'s integer (`0x688dfa`), so "48.9" is 48.
-        // The loaded tiles re-scatter off the change.
-        "frilldensity" => {
-            clutter.set_frill_density(benilla_ui::script::s_str_to_int(&ev.new) as f32);
-            cvars.mirror(
-                benilla_ui::script::CVAR_WORLD_DETAIL,
-                &(clutter.density - 1.0).to_string(),
-            );
-        }
-        // Weather Intensity 0..3: the reference's callback `0x67b870` jumps (`0x67b8e8`) to the
-        // quality cells {0.1, 0.33, 0.66, 1.0} at `[0x8680ec]`, and refuses a value outside 0..=3
-        // before it applies (`check_weather_density`); the clamp covers a saved value.
-        "weatherdensity" => weather.weather_density = v.trunc().clamp(0.0, 3.0) as u8,
-        // Benilla's character shadow-map switch. `blob_shadow`'s gate reads the knob each frame,
-        // so the decal and the realtime silhouette hand over on the click.
-        "worldshadows" => cfg.world_shadows = ev.flag(),
-        // Screen-space indirect lighting. Clamped at the knob's edge like every other numeric
-        // row; the render node reads the resource each frame, so a drag tick previews live and
-        // nothing is reallocated by the move.
-        "ssaostrength" => {
-            if let Some(indirect) = fork.0.as_deref_mut() {
-                use benilla_world::ssilvb::SSILVB_RANGE;
-                indirect.ao = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
-            }
-        }
-        "ssgistrength" => {
-            if let Some(indirect) = fork.0.as_deref_mut() {
-                use benilla_world::ssilvb::SSILVB_RANGE;
-                indirect.gi = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
-            }
-        }
-        // The fork's modern lighting (FORK.md). The MODEL and the TIER are both
-        // live in the world (`benilla_world::modern::ActiveLighting`): the frame after this write
-        // is already rendered with them.
-        "lightingmodel" => {
-            if let Some(lighting) = fork.1.as_deref_mut() {
-                lighting.model = benilla_world::modern::LightingModel::from_cvar(v);
-            }
-        }
-        "lightingquality" => {
-            if let Some(lighting) = fork.1.as_deref_mut() {
-                lighting.quality = benilla_world::modern::LightingQuality::from_cvar(v);
-            }
-        }
-        // The liquid renderer. Not clamped into a range — the value space is a set of TIERS, so
-        // `WaterDetail::from_cvar` maps rather than clamps, and anything unrecognised reads as
-        // cata (the default, and the one that cannot look broken).
-        "waterdetail" => {
-            if let Some(water) = fork.2.as_deref_mut() {
-                *water = benilla_world::liquid::WaterDetail::from_cvar(v);
-            }
-        }
-        // fork: the foliage wind (FORK.md): 0 off, 1 grass, 2 grass and trees. A
-        // dev build's capture pin (`$WOW_FOLIAGE_WIND` under `$WOW_CAPTURE`) holds its tier.
-        "foliagewind" => {
-            if let Some(wind) = fork.3.as_deref_mut() {
-                let pinned = crate::run_mode::dev_affordances()
-                    && benilla_world::wind::FoliageWind::capture_override().is_some();
-                if !pinned {
-                    wind.0 = v.clamp(0.0, 2.0) as u8;
+            // The registry refuses a value outside the callback's range (`0x688d40`); the clamp only
+            // keeps the knob in it.
+            "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
+            // World flag 4 (`0x688920`): the chunk level the horizon rows are taken at.
+            "lod" => {
+                if let Some(horizon) = fork.8.as_deref_mut() {
+                    horizon.lod = ev.flag();
                 }
             }
-        }
-        // fork: the light auto-exposure; the look reads the knob each frame.
-        "autoexposure" => {
-            if let Some(auto) = fork.7.as_deref_mut() {
-                auto.0 = ev.flag();
+            // `0x688ab0` takes 50 to 250 and stores 77 for anything else (`0x688af4`).
+            "loddist" => {
+                use benilla_world::horizon::{LOD_DIST_FALLBACK, LOD_DIST_RANGE};
+                if let Some(horizon) = fork.8.as_deref_mut() {
+                    horizon.lod_dist = if LOD_DIST_RANGE.contains(&v) {
+                        v
+                    } else {
+                        LOD_DIST_FALLBACK
+                    };
+                }
             }
-        }
-        // fork: rain on surfaces; the wetness tick reads the knob each frame.
-        "rainsurfaces" => {
-            if let Some(rain) = fork.5.as_deref_mut() {
-                rain.0 = ev.flag();
+            // Clamped, where the reference refuses an out-of-range write and keeps the value
+            // (`0x688d90` echoes "NearClip must be in range 0.01 - 0.33" and returns 0).
+            "nearclip" => view.set_nearclip(v),
+            // The reference's `atoi` and clamp to `[1, 16]` (`0x63b250`), then this GPU's ceiling:
+            // an unoffered count is a wgpu validation error on the first frame. The camera reads it
+            // once, at spawn.
+            "gxmultisample" => {
+                let asked = (v as u32).clamp(*MSAA_RANGE.start(), *MSAA_RANGE.end());
+                let granted = msaa_formats.clamp(asked);
+                if granted != asked {
+                    warn!("cvar gxMultisample: this GPU does not offer {asked}x multisampling — using {granted}x");
+                }
+                msaa.samples = granted;
             }
-        }
-        // fork: lava light, on or off; the reconcile spawns and retires the lights on the edge.
-        "lavalight" => {
-            if let Some(lava) = fork.6.as_deref_mut() {
-                lava.0 = if ev.flag() { 1.0 } else { 0.0 };
+            // Not applied until the next launch (the filter policy is published once at the end of
+            // `CvarLoad`); the reference registers both with `flags = 1` and applies them live.
+            // `anisotropic` is refused outside `[1, 16]` before it reaches here (`0x689110`,
+            // `check_anisotropic`); the clamp covers a saved value, which the file read does not check.
+            "trilinear" => tex_filter.trilinear = ev.flag(),
+            "anisotropic" => {
+                tex_filter.aniso = (v as u32).clamp(
+                    *benilla_assets::ANISO_RANGE.start(),
+                    *benilla_assets::ANISO_RANGE.end(),
+                )
             }
-        }
-        "foliagewindstrength" => {
-            if let Some(strength) = fork.4.as_deref_mut() {
-                *strength = benilla_world::wind::FoliageWindStrength::from_cvar(v);
+            // The panel's 0/1/2 is the density multiplier x1/x2/x3, clamped to the 1.12 slider's
+            // range. `frillDensity` is the same knob, mirrored so `GetCVar` never answers two levels.
+            "worlddetail" => {
+                clutter.density = v.clamp(0.0, 2.0) + 1.0;
+                cvars.mirror(
+                    benilla_ui::script::CVAR_FRILL_DENSITY,
+                    &clutter.frill_density().to_string(),
+                );
+                // The stop's other half, as `SetWorldDetail` writes it, so a stop set as a CVar keeps
+                // `SmallCull` in step too.
+                cvars.mirror(
+                    benilla_ui::script::CVAR_SMALL_CULL,
+                    &benilla_ui::script::small_cull_text(v.clamp(0.0, 2.0) as usize),
+                );
             }
-        }
-        // Spell Detail (`0x689510`): `SStrToInt`, clamped to [0, 2] in the handler's own copy,
-        // echoed, then the emission scalar 0.33, 0.66 or 1.0 through `0x7adfb0`, shared with
-        // `particleDensity`. The reference runs it on every write, an unchanged one included; an
-        // observer fires only on a change.
-        "spelleffectlevel" => {
-            spell_effect_level.0 = benilla_ui::script::s_str_to_int(&ev.new);
-            let level = spell_effect_level.0.clamp(0, 2);
-            cvars.print(format!("Spell effect level set to {level}."));
-            if let Some(mut particles) = particles {
-                particles.set_density(spell_effect_scale(level));
+            // The same knob in the reference's cells per chunk, which the registry holds to `[1, 256]`
+            // (`0x688de0`); the callback hands on `SStrToInt`'s integer (`0x688dfa`), so "48.9" is 48.
+            // The loaded tiles re-scatter off the change.
+            "frilldensity" => {
+                clutter.set_frill_density(benilla_ui::script::s_str_to_int(&ev.new) as f32);
+                cvars.mirror(
+                    benilla_ui::script::CVAR_WORLD_DETAIL,
+                    &(clutter.density - 1.0).to_string(),
+                );
             }
+            // Weather Intensity 0..3: the reference's callback `0x67b870` jumps (`0x67b8e8`) to the
+            // quality cells {0.1, 0.33, 0.66, 1.0} at `[0x8680ec]`, and refuses a value outside 0..=3
+            // before it applies (`check_weather_density`); the clamp covers a saved value.
+            "weatherdensity" => weather.weather_density = v.trunc().clamp(0.0, 3.0) as u8,
+            // Benilla's character shadow-map switch. `blob_shadow`'s gate reads the knob each frame,
+            // so the decal and the realtime silhouette hand over on the click.
+            "worldshadows" => cfg.world_shadows = ev.flag(),
+            // Screen-space indirect lighting. Clamped at the knob's edge like every other numeric
+            // row; the render node reads the resource each frame, so a drag tick previews live and
+            // nothing is reallocated by the move.
+            "ssaostrength" => {
+                if let Some(indirect) = fork.0.as_deref_mut() {
+                    use benilla_world::ssilvb::SSILVB_RANGE;
+                    indirect.ao = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
+                }
+            }
+            "ssgistrength" => {
+                if let Some(indirect) = fork.0.as_deref_mut() {
+                    use benilla_world::ssilvb::SSILVB_RANGE;
+                    indirect.gi = v.clamp(*SSILVB_RANGE.start(), *SSILVB_RANGE.end());
+                }
+            }
+            // The fork's modern lighting (FORK.md). The MODEL and the TIER are both
+            // live in the world (`benilla_world::modern::ActiveLighting`): the frame after this write
+            // is already rendered with them.
+            "lightingmodel" => {
+                if let Some(lighting) = fork.1.as_deref_mut() {
+                    lighting.model = benilla_world::modern::LightingModel::from_cvar(v);
+                }
+            }
+            "lightingquality" => {
+                if let Some(lighting) = fork.1.as_deref_mut() {
+                    lighting.quality = benilla_world::modern::LightingQuality::from_cvar(v);
+                }
+            }
+            // The liquid renderer. Not clamped into a range — the value space is a set of TIERS, so
+            // `WaterDetail::from_cvar` maps rather than clamps, and anything unrecognised reads as
+            // cata (the default, and the one that cannot look broken).
+            "waterdetail" => {
+                if let Some(water) = fork.2.as_deref_mut() {
+                    *water = benilla_world::liquid::WaterDetail::from_cvar(v);
+                }
+            }
+            // fork: the foliage wind (FORK.md): 0 off, 1 grass, 2 grass and trees. A
+            // dev build's capture pin (`$WOW_FOLIAGE_WIND` under `$WOW_CAPTURE`) holds its tier.
+            "foliagewind" => {
+                if let Some(wind) = fork.3.as_deref_mut() {
+                    let pinned = crate::run_mode::dev_affordances()
+                        && benilla_world::wind::FoliageWind::capture_override().is_some();
+                    if !pinned {
+                        wind.0 = v.clamp(0.0, 2.0) as u8;
+                    }
+                }
+            }
+            // fork: the light auto-exposure; the look reads the knob each frame.
+            "autoexposure" => {
+                if let Some(auto) = fork.7.as_deref_mut() {
+                    auto.0 = ev.flag();
+                }
+            }
+            // fork: rain on surfaces; the wetness tick reads the knob each frame.
+            "rainsurfaces" => {
+                if let Some(rain) = fork.5.as_deref_mut() {
+                    rain.0 = ev.flag();
+                }
+            }
+            // fork: lava light, on or off; the reconcile spawns and retires the lights on the edge.
+            "lavalight" => {
+                if let Some(lava) = fork.6.as_deref_mut() {
+                    lava.0 = if ev.flag() { 1.0 } else { 0.0 };
+                }
+            }
+            "foliagewindstrength" => {
+                if let Some(strength) = fork.4.as_deref_mut() {
+                    *strength = benilla_world::wind::FoliageWindStrength::from_cvar(v);
+                }
+            }
+            // Spell Detail (`0x689510`): `SStrToInt`, clamped to [0, 2] in the handler's own copy,
+            // echoed, then the emission scalar 0.33, 0.66 or 1.0 through `0x7adfb0`, shared with
+            // `particleDensity`. The reference runs it on every write, an unchanged one included;
+            // ours runs only on a change.
+            "spelleffectlevel" => {
+                spell_effect_level.0 = benilla_ui::script::s_str_to_int(&ev.new);
+                let level = spell_effect_level.0.clamp(0, 2);
+                cvars.print(format!("Spell effect level set to {level}."));
+                if let Some(particles) = particles.as_deref_mut() {
+                    particles.set_density(spell_effect_scale(level));
+                }
+            }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -577,7 +599,6 @@ impl Plugin for VideoPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SpellEffectLevel>()
             .init_resource::<Widescreen>();
-        app.add_observer(on_cvar);
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Last, pace_to_refresh);
         app.init_resource::<VideoConfig>()
@@ -608,35 +629,50 @@ impl Plugin for VideoPlugin {
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct GxRestarts(u32);
 
-/// Carry `RestartGx()` calls into [`GxRestarts`] and commit the latched `gx*` rows (flags `3`),
-/// where the reference's restart calls `CVar::Update` (`0x63e060`) on each; `GetCVar` answers the
-/// applied value until then.
-fn drain_restart_gx(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    mut restarts: ResMut<GxRestarts>,
-    mut cvars: ResMut<crate::cvars::Cvars>,
-    mut commands: Commands,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
+/// `gxRestart`'s handler (`0x639f60`) inside the call that ran it
+/// ([`benilla_ui::script::ScriptCall::RestartGx`]): the latched `gx*` rows (flags `3`) committed,
+/// where the reference's restart calls `CVar::Update` (`0x63e060`) on each (`0x639ec0`), their
+/// callbacks run and the VM's mirror synced, so `GetCVar` reads the committed value on the
+/// verb's next line. The device switch it asks, a [`GxRestarts`] bump, is the window appliers' in
+/// the frame's drain: no script reads the window but through these rows.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct GxRestartSteps<'w> {
+    cvars: crate::cvars::CvarSteps<'w>,
+    /// Absent in a harness without the video plugin.
+    restarts: Option<ResMut<'w, GxRestarts>>,
+}
+
+impl GxRestartSteps<'_> {
+    /// `runs` restarts at once.
+    pub(crate) fn restart(&mut self, script: &mut UiScript, runs: u32) {
+        // The VM's writes no call took first, so a stage made before the restart is committed.
+        self.cvars.sync(Some(script));
+        let Some(cvars) = self.cvars.cvars() else {
             return;
         };
-        let asks = script.take_restart_gx_asks();
-        if asks == 0 {
-            // A `ResMut` deref-mut is a change signal, so a quiet frame touches nothing.
-            return;
-        }
-        restarts.0 = restarts.0.wrapping_add(asks);
         let committed = cvars.commit_latched();
-        if cvars.has_events() {
-            for event in cvars.take_events() {
-                commands.trigger(event);
-            }
+        if let Some(restarts) = self.restarts.as_deref_mut() {
+            restarts.0 = restarts.0.wrapping_add(runs);
         }
+        self.cvars.sync(Some(script));
         info!(
             "video: RestartGx — {committed} staged setting(s) committed; re-asserting the \
                display mode and present mode"
         );
+    }
+}
+
+/// The restarts no call took, a VM's with no host lent ([`GxRestartSteps`]).
+fn drain_restart_gx(mut vm: crate::script_calls::VmWith<GxRestartSteps<'static>>) {
+    vm.turn(|script, mut steps| {
+        let Some(script) = script else {
+            return;
+        };
+        let runs = script.take_restart_gx_asks();
+        // A `ResMut` deref-mut is a change signal, so a quiet frame touches nothing.
+        if runs > 0 {
+            steps.restart(script, runs);
+        }
     })
 }
 
@@ -713,14 +749,14 @@ type PublishedModes = Option<(Vec<ScreenResolution>, Option<ScreenResolution>)>;
 /// size here.
 /// The list is recomputed on change; the reference builds its list once and never invalidates it.
 fn publish_display_modes(
-    mut hosted_vm: crate::script_calls::HostedVm,
+    // `widescreen` is a CVar knob, which the call host's callbacks write.
+    mut vm: crate::script_calls::VmWith<Option<Res<'static, Widescreen>>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     monitors: Query<&Monitor>,
-    widescreen: Option<Res<Widescreen>>,
     mut last: Local<crate::ui_script::VmMemo<PublishedModes>>,
 ) {
-    let widescreen = widescreen.is_none_or(|w| w.0);
-    hosted_vm.run(|script| {
+    let widescreen = vm.own().is_none_or(|w| w.0);
+    vm.run(|script| {
         let Some(script) = script else {
             return;
         };
@@ -1457,7 +1493,7 @@ mod tests {
             app.world().entity(win).get::<Window>().unwrap().mode,
             WindowMode::Windowed
         );
-        // The commit's observer write, then the restart the stock Okay asks for.
+        // The commit's callback write, then the restart the stock Okay asks for.
         app.world_mut().resource_mut::<VideoConfig>().maximize = true;
         app.world_mut().resource_mut::<GxRestarts>().0 += 1;
         app.update();

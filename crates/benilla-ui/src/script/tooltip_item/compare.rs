@@ -91,6 +91,7 @@ fn offered_view(
         h,
         false,
     );
+    build::ask_tooltip_records(lua);
     v
 }
 

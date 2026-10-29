@@ -47,7 +47,6 @@ use crate::ui_chat::UiChatPlugin;
 use crate::ui_craft::UiCraftPlugin;
 use crate::ui_dialog_verbs::UiDialogVerbsPlugin;
 use crate::ui_duel::UiDuelPlugin;
-use crate::ui_follow::UiFollowPlugin;
 use crate::ui_gm_ticket::UiGmTicketPlugin;
 use crate::ui_gossip::UiGossipPlugin;
 use crate::ui_guild::UiGuildPlugin;
@@ -180,7 +179,6 @@ impl PluginGroup for GamePlugins {
             .add(crate::swing_refusal::SwingRefusalPlugin)
             .add(UiSummonPlugin)
             .add(UiGmTicketPlugin)
-            .add(UiFollowPlugin)
             .add(UiInstancePlugin)
             .add(crate::ui_billing::UiBillingPlugin)
             .add(crate::ui_memory::UiMemoryPlugin)
@@ -399,25 +397,21 @@ pub(crate) mod schedule_tests {
             self.components.get(&id).map(String::as_str).unwrap_or("?")
         }
 
-        /// Whether what `a` queues has applied by the time `b` runs: a sync point of the build
-        /// lies on a path from `a` to `b`, so it runs after `a` and before `b`, and applies every
-        /// buffer of a system that ran before it. Reads a [`SyncPoints::Built`] census.
-        pub fn applies_before(&self, a: SystemKey, b: SystemKey) -> bool {
+        /// Whether the build runs `a` before `b`: a path of its order leads from `a` to `b`.
+        pub fn runs_before(&self, a: SystemKey, b: SystemKey) -> bool {
             let mut next: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
             for (x, y) in &self.built {
                 next.entry(*x).or_default().push(*y);
             }
-            // Each node at most twice: before a sync point and past one.
-            let mut seen: HashSet<(SystemKey, bool)> = HashSet::new();
-            let mut stack = vec![(a, false)];
-            while let Some((n, synced)) = stack.pop() {
+            let mut seen: HashSet<SystemKey> = HashSet::new();
+            let mut stack = vec![a];
+            while let Some(n) = stack.pop() {
                 for m in next.get(&n).into_iter().flatten() {
-                    let synced = synced || is_sync_point(self.name(*m));
-                    if *m == b && synced {
+                    if *m == b {
                         return true;
                     }
-                    if seen.insert((*m, synced)) {
-                        stack.push((*m, synced));
+                    if seen.insert(*m) {
+                        stack.push(*m);
                     }
                 }
             }
@@ -815,7 +809,7 @@ pub(crate) mod schedule_tests {
     /// - A pure cache, where a miss records itself (`NameCache`, the GameObject templates, the
     ///   page texts, `WorldAssets`, `Creatures`' display models): two misses for one key commute.
     ///   A cache that is also a window's state is not pure, and not here.
-    /// - An append-only sink (`ChatLog`, `MessageSounds`, `UiErrorKeys`, `UiErrorTexts`):
+    /// - An append-only sink (`ChatLog`, `MessageSounds`, `UiErrorKeys`):
     ///   writers commute, and a drain's order against a writer is one frame of latency.
     /// - A random stream (`SoundKits`, `AnimRng`): any interleaving of draws is a valid draw,
     ///   the reference's contract for its single stream.
@@ -849,7 +843,6 @@ pub(crate) mod schedule_tests {
             ("ChatLog", TypeId::of::<crate::ui_chat::ChatLog>),
             ("MessageSounds", TypeId::of::<crate::sound::MessageSounds>),
             ("UiErrorKeys", TypeId::of::<crate::ui_action::UiErrorKeys>),
-            ("UiErrorTexts", TypeId::of::<crate::ui_action::UiErrorTexts>),
         ];
         const STREAMS: &[ClassRow] = &[
             ("SoundKits", TypeId::of::<crate::sound::SoundKits>),
@@ -1136,6 +1129,9 @@ pub(crate) mod schedule_tests {
     ///
     /// Upstream's world click inside the mouse commands' calls (15cf220df..91dbe0666, #2748, #2758)
     /// moved its ceiling 1,732 -> 1,731 (-1); the fork's follows it.
+    ///
+    /// Upstream's ceiling moved 1,731 -> 1,467 (-264) through 65c83b188 (the CVar callbacks inside
+    /// their calls, the bars, crafts and tutorials read live); the fork's follows it.
     const UPDATE_ACTIONABLE_CEILING: usize = 2_011;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
@@ -1294,11 +1290,11 @@ pub(crate) mod schedule_tests {
     /// on the dev build, whose schedule holds every system the player build does. Raised from 54
     /// when the frame's input records moved ahead of the net drain: what their handlers queue
     /// applies before the drain, as the reference's input acts inside its handlers; to 57 for the
-    /// input's CVar sync, whose observers must run before the look session reads their knobs; and
+    /// input's CVar sync, whose callbacks must run before the look session reads their knobs; and
     /// to 58 on the movie frame (#2398): `movie::upload_movie_pictures` runs after
     /// `video::apply_present_mode` and `video::apply_window_mode` and before `paint_script`, which
     /// puts the barrier between `video::drain_restart_gx` and those two applies on the paint's path
-    /// (its commands fire the `gx*` CVar events whose observer writes the `VideoConfig` they read).
+    /// (its commands fired the `gx*` CVar events whose callback writes the `VideoConfig` they read).
     /// Without those two edges the count is 57. `WOW_SYNC_DUMP=1` lists each barrier's neighbours.
     ///
     /// That is upstream's count, 58 at d3b5df3f4; this fork's own systems with commands (the
@@ -1311,6 +1307,10 @@ pub(crate) mod schedule_tests {
     /// Upstream lowered its count 57 -> 54 when the click's dispatchers queued their window opens
     /// as unit edits, the call host applying the world click inside its call (15cf220df..91dbe0666);
     /// the fork's follows it.
+    ///
+    /// Upstream lowered its count 54 -> 46 when the CVar callbacks ran in place, inside the call or
+    /// the sync that takes the write, where their events had waited for a barrier; the fork's
+    /// follows it.
     const UPDATE_SYNC_POINT_CEILING: usize = 62;
     const UPDATE_SYNC_POINT_SLACK: usize = 4;
 
@@ -2006,9 +2006,6 @@ pub(crate) mod schedule_tests {
     enum Because {
         /// The consumed queue is filled only by Lua asking; a frameless VM asks for nothing.
         FilledByVm,
-        /// Filled only by a server reply to a click in the interface, or (noted in the reason)
-        /// another player's act on us, which meets the login burst only by coincidence.
-        PlayerRoundTrip,
         /// Consumed in the window or not, the state is re-asked or re-derived once the UI is up.
         SelfHealing,
         /// The publication is driven by a `VmMemo` diff, so a new VM re-derives and re-fires it.
@@ -2028,10 +2025,10 @@ pub(crate) mod schedule_tests {
          "the drag probe: dev-only (`WOW_PROBE_DRAG`), it starts past `WOW_PROBE_DRAG_AT` with the \
           player's body in the world, and its `.drain(..)` is of the VM's own script errors, \
           raised by the gesture it just made"),
-        ("death/mod.rs", "feed_death", Because::MemoLatched,
-         "`feed.vm: VmMemo<DeathAnnounced>`: a fresh memo takes the first snapshot as no edge and re-announces a held offer, confirm and corpse range, and skips the edges of our create's frame, whose arrival item signals the state itself"),
-        ("death/mod.rs", "signal", Because::MemoLatched,
-         "the death state's signal: our death's leg (`signal_death`), run in its packet with the VM deferred, its `PLAYER_DEAD` parked for the deaths lane, whose drain runs only with the interface up (`ingame_ui_up`); and an arrival's, run by the arrival lane's firing inside the lanes' drain, which runs only with the interface up (`ingame_ui_up`). Its memo is `feed.vm`, a `VmMemo<DeathAnnounced>`"),
+        ("death/mod.rs", "signal", Because::Deliberate,
+         "the death state's signal: our death's leg (`signal_death`), run in its packet with the VM deferred, its `PLAYER_DEAD` parked for the deaths lane, whose drain runs only with the interface up (`ingame_ui_up`); and an arrival's, run by the arrival lane's firing inside the lanes' drain, which runs only with the interface up (`ingame_ui_up`)"),
+        ("death/mod.rs", "ask_spirit_healer", Because::Deliberate,
+         "no system: the spirit healer click's world edit runs it, inside the input pass's click legs, with the interface up"),
         ("death/mod.rs", "query_corpse_on_world_enter", Because::Deliberate,
          "no system: a leg the arrival lane's firing runs, inside the drain, which runs only with the interface up; its take is the range latch, which it zeroes into the live VM"),
         ("net/objects/update.rs", "on_update_end", Because::Deliberate,
@@ -2048,17 +2045,15 @@ pub(crate) mod schedule_tests {
          "a lane's firing, run only by the drain: `drop_cooldown_log`, gated on the interface being down, drops the log the frame it is written, so no signal fires into a later VM"),
         ("ui_action/drain.rs", "drain_click_casts", Because::FilledByVm,
          "filled only by a nameplate's right-click, which a frameless VM has no plate to make, or a crate's `Interact`; the world click's own casts drain inside its call, and the drain sends casts to the wire"),
+        ("ui_action/recount.rs", "arrival_slot_pass", Because::Deliberate,
+         "no system: a leg the arrival lane's firing runs, inside the drain, which runs only with the interface up"),
         ("ui_action/recount.rs", "recount", Because::Deliberate,
          "no system: the item lane's firing calls it per run (`item_lane::fire_run`), inside the lanes' drain, which runs only with the interface up (`ingame_ui_up`)"),
         ("ui_char.rs", "feed_char", Because::FilledByVm,
          "its take is the ammo getters' hits, which only a getter's call leaves, and a frameless VM \
           calls none; the doll's own pushes ride `VmMemo`s"),
-        ("ui_follow.rs", "feed_follow", Because::MemoLatched,
-         "`feed.vm: VmMemo<FollowFeedMemo>`; a fresh VM re-fires BEGIN for a follow in progress"),
         ("ui_guild/lane.rs", "fire_guild", Because::Deliberate,
          "a lane's firing, run only by the drain, which runs only with the interface up (`ingame_ui_up`): the lane holds what the packets queue until a drain fires it, so the login's message of the day, which lands ahead of the interface, fires into the VM that comes up"),
-        ("ui_logout.rs", "feed_logout", Because::PlayerRoundTrip,
-         "both packets answer the `CMSG_LOGOUT_REQUEST`/cancel the game menu sent"),
         ("ui_loot/mod.rs", "drain_loot", Because::Deliberate,
          "its takes of `LootMoveStart` and `LootCloseAtRest` close on the engine's side and publish nothing to the VM, whose `LOOT_CLOSED` is the loot lane's; the at-rest sweep signals only on a disenchant window, which the interface's own cast opens"),
         ("ui_macro/mod.rs", "load_macros", Because::MemoLatched,

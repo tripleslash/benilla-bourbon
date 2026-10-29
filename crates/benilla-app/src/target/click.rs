@@ -308,7 +308,6 @@ fn click_select(
 pub(crate) struct ServiceArms<'w> {
     /// The last `SMSG_QUESTGIVER_STATUS` per guid (`[unit+0xcb8]`), read by bit 1's `0x5df490`.
     pub(crate) quest: Res<'w, crate::ui_quest::QuestGiver>,
-    pub(crate) death: ResMut<'w, crate::death::DeathNet>,
     /// Bit 6 sends through the cache the proximity poll writes, so the two agree on the healer.
     pub(crate) spirit: ResMut<'w, crate::ui_dialog_verbs::AreaSpiritHealer>,
     /// The NPC whose window is open (`[0xb4e2d0]`), checked before the ladder.
@@ -1148,7 +1147,12 @@ impl Dispatch<'_, '_> {
                 debug!(
                     "right-click interact: {guid:#x} (spirit healer — CONFIRM_XP_LOSS, no packet)"
                 );
-                self.service.death.ask_spirit_healer(guid);
+                // `0x5df730` with the guid, its gates and its signal, with the world in hand.
+                self.feedback
+                    .edits
+                    .push_world(Box::new(move |world: &mut World| {
+                        let _ = world.run_system_cached_with(crate::death::ask_spirit_healer, guid);
+                    }));
             }
             ServiceAction::AcquireSpiritGuide => {
                 debug!("right-click interact: {guid:#x} (spirit guide — adopting, 0x2E2)");
@@ -1244,6 +1248,7 @@ impl ClickDispatch<'_, '_> {
                 }
                 _ => {}
             }
+            dispatch.auto.signal_follow_end(script);
             return None;
         }
         interact(dispatch, script, &press).map(ActOwed)
@@ -1319,8 +1324,20 @@ pub(super) fn act_on_right_click(mut c: ClickDispatch, held: Option<Res<PayloadH
 /// reach ([`Dispatch::in_service_reach`]); a GameObject's and a corpse's still ride the range gray
 /// the press latched (`unable`). Out of reach every send but attack is suppressed, the server
 /// holds attack until in reach; with Click to Move on, each dispatcher walks there instead
-/// (`CanAutoInteract` is their approach flag, `0x60c170`, `0x5d6c6f`).
+/// (`CanAutoInteract` is their approach flag, `0x60c170`, `0x5d6c6f`). A walk that ended a follow
+/// signals its `AUTOFOLLOW_END` as the dispatcher returns.
 fn interact(
+    dispatch: &mut Dispatch,
+    mut script: Option<&mut benilla_ui::script::UiScript>,
+    press: &PressPick,
+) -> Option<Owed> {
+    let owed = interact_legs(dispatch, script.as_deref_mut(), press);
+    dispatch.auto.signal_follow_end(script);
+    owed
+}
+
+/// [`interact`]'s legs.
+fn interact_legs(
     dispatch: &mut Dispatch,
     script: Option<&mut benilla_ui::script::UiScript>,
     press: &PressPick,
@@ -1673,7 +1690,10 @@ pub(super) fn act_on_arrival(
     index: Res<crate::net::GuidIndex>,
     kinds: Query<&crate::net::NetEntity>,
 ) {
-    vm.turn(|script, mut dispatch| act_on_arrival_with(&mut dispatch, script, &index, &kinds));
+    vm.turn(|mut script, mut dispatch| {
+        act_on_arrival_with(&mut dispatch, script.as_deref_mut(), &index, &kinds);
+        dispatch.auto.signal_follow_end(script);
+    });
 }
 
 fn act_on_arrival_with(
@@ -4441,7 +4461,7 @@ mod tests {
     #[test]
     fn an_enemy_in_melee_is_faced_without_a_walk() {
         let (world, rx) = attack_wolf_at(Vec3::new(0.0, 0.0, -6.0), 4.0);
-        assert!(world.resource::<crate::player::Approach>().facing());
+        assert!(world.resource::<crate::player::Approach>().facing_turn());
         assert!(rx
             .try_iter()
             .any(|c| matches!(c, ClientCommand::AttackSwing { guid: WOLF })));

@@ -120,6 +120,14 @@ pub(crate) fn firing_now() -> Option<Stamp> {
     FIRING.get()
 }
 
+/// Whether the item firing on this thread was pushed between `from` and `to`, or nests under one
+/// that was: it is part of what ran between the two marks.
+pub(crate) fn firing_between(from: Mark, to: Mark) -> bool {
+    FIRING
+        .get()
+        .is_some_and(|s| s.path().iter().any(|n| (from.0..to.0).contains(n)))
+}
+
 thread_local! {
     /// A close core is running held behind a lane: what a core it re-enters signals is its.
     static BEHIND: Cell<bool> = const { Cell::new(false) };
@@ -527,11 +535,17 @@ mod close_parked_tests;
 #[cfg(test)]
 mod cooldown_live_tests;
 #[cfg(test)]
+mod death_live_tests;
+#[cfg(test)]
 mod dialog_live_tests;
 #[cfg(test)]
 mod duration_live_tests;
 #[cfg(test)]
+mod follow_live_tests;
+#[cfg(test)]
 mod gossip_live_tests;
+#[cfg(test)]
+mod group_live_tests;
 #[cfg(test)]
 mod group_view_tests;
 #[cfg(test)]
@@ -543,11 +557,15 @@ mod host_read_tests;
 #[cfg(test)]
 mod inspect_live_tests;
 #[cfg(test)]
+mod instance_live_tests;
+#[cfg(test)]
 mod item_live_tests;
 #[cfg(test)]
 mod item_tests;
 #[cfg(test)]
 mod item_text_live_tests;
+#[cfg(test)]
+mod logout_live_tests;
 #[cfg(test)]
 mod loot_live_tests;
 #[cfg(test)]
@@ -565,9 +583,13 @@ mod pet_live_tests;
 #[cfg(test)]
 mod petition_live_tests;
 #[cfg(test)]
+mod profession_live_tests;
+#[cfg(test)]
 mod quest_log_live_tests;
 #[cfg(test)]
 mod quiet_tests;
+#[cfg(test)]
+mod record_callback_tests;
 #[cfg(test)]
 mod reputation_live_tests;
 #[cfg(test)]
@@ -576,6 +598,8 @@ mod requirement_live_tests;
 mod selection_live_tests;
 #[cfg(test)]
 mod social_live_tests;
+#[cfg(test)]
+mod spell_slot_live_tests;
 #[cfg(test)]
 mod stable_live_tests;
 #[cfg(test)]
@@ -599,11 +623,18 @@ mod trade_live_tests;
 #[cfg(test)]
 mod trainer_live_tests;
 #[cfg(test)]
+mod tutorial_live_tests;
+#[cfg(test)]
+mod ui_error_live_tests;
+#[cfg(test)]
 mod unit_feed_live_tests;
 #[cfg(test)]
 mod unit_live_tests;
 #[cfg(test)]
 mod unit_view_tests;
+
+#[cfg(test)]
+mod world_map_update_tests;
 
 #[cfg(test)]
 mod unit_tests {

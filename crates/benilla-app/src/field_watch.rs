@@ -18,8 +18,8 @@
 //! type watchers `0x6041f0` and the player type watchers `0x5e2510` whose callbacks signal; the
 //! active player's `0x5de4b0`, rest-state, coinage and charmed-by watches registered in
 //! `0x5dd8a0`, its skill watches `0x5de180`, `0x5de450` and `0x5de470`, its ammunition watch
-//! `0x4c70b0`, and the weapon arms of the visible-item watch `0x5e2810`. The item watchers' and the
-//! inventory watcher's runs are [`crate::item_watch`]'s.
+//! `0x4c70b0`, its explored-bytes watch `0x4a6460`, and the weapon arms of the visible-item watch
+//! `0x5e2810`. The item watchers' and the inventory watcher's runs are [`crate::item_watch`]'s.
 
 use benilla_protocol::messages::{quest_slot_state, ObjectType, PLAYER_QUEST_LOG_SLOTS};
 use benilla_protocol::{ObjectFields, OwnerFallback};
@@ -91,6 +91,10 @@ pub(crate) enum FieldNotice {
     /// (`0x4bc872`) and, for a player or our hunter's pet, `PET_UI_CLOSE` (`0x4bc907`); then
     /// `PET_BAR_UPDATE` every time (`0x4bc90c`).
     PetGuidSet { changed: bool, guid: u64 },
+    /// `SMSG_PET_SPELLS`' derivation after its book's sort (`0x4bdae0` →
+    /// `DeriveUnresolvedBoundSpells 0x4f0ce0`): the macros that follow the pet's book bound again,
+    /// with nothing signalled ([`crate::ui_macro::derive_pet_followers`]).
+    PetMacros,
     /// `SMSG_LEVELUP_INFO`'s arm of the notice handler `0x5e38c0`: `PLAYER_LEVEL_UP` with the
     /// message's level, health, first power, `level >= 10` and five stats (`0x5e413e`).
     LevelUp(benilla_protocol::messages::LevelUpInfo),
@@ -126,6 +130,10 @@ pub(crate) enum FieldNotice {
     /// The maximum's and the permanent bonus's watch `0x5de450`: the profession list's rebuild
     /// (`0x5de457`), then the skill list's (`0x5de45c`).
     SkillMax,
+    /// A spell packet's slot write, `0x4e58e0` from the unlearn's or the supersede's walk of the
+    /// bar ([`crate::ui_action::SpellSlots`]): the slot's usable pair recomputed (`0x4e5903`),
+    /// then `ACTIONBAR_SLOT_CHANGED` with the 1-based `action` (`0x4e5998`).
+    ActionSlotChanged { action: u32 },
     /// `0x4b25b0`'s live tail for a learned spell that entered the book: `LEARNED_SPELL_IN_TAB`
     /// (510) with its tab's 1-based place (`0x4b2b92`).
     LearnedInTab { tab: i64 },
@@ -164,10 +172,42 @@ pub(crate) enum FieldNotice {
     /// `SMSG_PLAYER_SKINNED`'s handler `0x5e7d40`: `PLAYER_SKINNED` with the byte's truth
     /// (`0x5e7d57` → `0x48f412`).
     Skinned { free_repop: bool },
+    /// The explored bytes' watcher `0x4a6460` on the active player (`PLAYER_EXPLORED_ZONES`, 0x100
+    /// bytes at the player section's `+0xe6c`, armed by `0x4a6430` in the world-enter cascade):
+    /// `0x4a6477` calls the map setter `0x4a67a0` over the map already shown. It reads the bytes
+    /// as the packet left them, rebuilds the overlays and the landmark list they gate and signals
+    /// `WORLD_MAP_UPDATE` (`0x4a6ce4`).
+    ExploredZones,
     /// A group member's ping, `0x4ee330` from `MSG_MINIMAP_PING`'s handler (`0x5e41bd`): the
     /// VM's statics store the point, then `MINIMAP_PING` with the token the packet resolved
     /// (`0x4ee48d`).
     MinimapPing(crate::minimap::MemberPing),
+    /// The health watcher's revive arm on the active player (`0x6047ee` → `0x5fef70`): every item
+    /// unlocked with its one `ITEM_LOCK_CHANGED` (`0x5fefae` → `0x495460`), then `PLAYER_ALIVE`
+    /// (274, `0x5fefb8`).
+    Revived,
+    /// A packet handler's `DisplayError(id)` (`0x496720`): the message row's line, by its
+    /// `GlobalStrings` key, shown at once.
+    Line { key: &'static str },
+    /// A watcher's stop of the unit's auto-move, which the notify walk runs at its place when the
+    /// unit is the active mover, and which reaches the lane only as the `AUTOFOLLOW_END` it owes:
+    /// the taxi flag's rise on the active player (`0x5ff538`-`0x5ff55a`, `StopAutoMove(0, 1)`), and
+    /// the feign-death bit's rise (`0x6004f5`-`0x600530`), whose tick runs with `apply` clear, so
+    /// both its predicates fail (`0x51468d`, `0x5146a6`) and it stops (`0x5146d6`).
+    AutoMoveStop,
+    /// A follow's stop clearing autorun (`0x60fc08` → `0x514630` at `0x60e83f`), right behind its
+    /// `AUTOFOLLOW_END`, which `StopAutoMove` signals first (`0x60fb84`): it runs after that
+    /// event's listeners, so a toggle one of them made is undone
+    /// ([`crate::player::CallAutorun::clear`]).
+    AutorunClear,
+    /// The stun bit's flip on the active player (`0x5ff4ef`-`0x5ff501`): the mover's input tick
+    /// with `apply` set, which stops the auto-move when the unit may neither translate nor turn
+    /// (`0x5146c1`-`0x5146d6`).
+    InputTick,
+    /// A far-sight start on `object` (`UpdateFarSight 0x5ee290` from `0x5de0d0`): with the object
+    /// held, the view goes out and the mover's tick stops its auto-move (`0x5ee4a2`), or a
+    /// controlled unit takes the mover, whose switch stops it (`0x5ee477` → `0x600742`).
+    FarSightStop { object: u64 },
 }
 
 /// The notice lane: each notice stamped as a handler writes it ([`crate::lanes::stamp`]), fired
@@ -291,6 +331,10 @@ pub(crate) mod id {
     pub(crate) const PET_BAR_UPDATE: u16 = 353;
     pub(crate) const AREA_SPIRIT_HEALER_IN_RANGE: u16 = 527;
     pub(crate) const AREA_SPIRIT_HEALER_OUT_OF_RANGE: u16 = 528;
+    pub(crate) const PLAYER_CAMPING: u16 = 276;
+    pub(crate) const PLAYER_QUITING: u16 = 277;
+    pub(crate) const LOGOUT_CANCEL: u16 = 278;
+    pub(crate) const AUTOFOLLOW_END: u16 = 368;
 }
 
 /// `CGPlayer_C::RefreshGuildTag` (`0x5e08e0`) on the player `guid`: `TABARD_CANSAVE_CHANGED` bare
@@ -395,6 +439,11 @@ const QUEST_SLOT_BYTES: u16 = 12;
 /// The active player's point counters' watch `0x4c7000`, `PLAYER_CHARACTER_POINTS1` and `2` at
 /// the player section's `+0xe48`, 8 bytes, registered at world entry (`0x4c6fce`, `0x4c6fd8`).
 const CHARACTER_POINTS: (u16, u16) = (0xe48, 8);
+
+/// The active player's explored-bytes watch `0x4a6460`, `PLAYER_EXPLORED_ZONES_1` onward at the
+/// player section's `+0xe6c`, 0x100 bytes (64 dwords), armed by `ClntObjMgrSetObjectMirrorHandler(4,
+/// 0xe6c, player, 0x100, 0x4a6460)` in `0x4a6430`, from the world-enter cascade (`0x4908c0`).
+const EXPLORED_ZONES: (u16, u16) = (0xe6c, 0x100);
 
 /// The active player's ammunition watch `0x4c70b0`, `PLAYER_AMMO_ID` at the player section's
 /// `+0x102c`, registered at world entry (`0x4c6fea`, from `0x49097e`).
@@ -769,6 +818,17 @@ pub(crate) fn placed_values(
 
     // The unit type watchers (`0x6041f0`), on every unit.
     let mine = around.me == Some(guid);
+    // The health watcher's revive arm (`0x6047ee`-`0x6047f4`, a health of 0 or less rising above
+    // it) for the active player (`0x5fef9f`): `0x5fef70`'s unlock and `PLAYER_ALIVE`, ahead of the
+    // watcher's usable refresh.
+    if let Some(at) = at(UNIT_SECTION, HEALTH, List::Type).filter(|_| mine) {
+        let rose = block
+            .edge(UNIT_SECTION + HEALTH.0 / 4)
+            .is_some_and(|(old, new)| old as i32 <= 0 && new as i32 > 0);
+        if rose {
+            pass.push(at, FieldNotice::Revived);
+        }
+    }
     // The health's and the powers' for the active player (`0x60483c`, `0x604868`), the aura
     // state's for it or the target (`0x604898`-`0x6048b4`).
     for (range, runs) in [
@@ -803,6 +863,10 @@ pub(crate) fn placed_values(
         // `0x5ff580` on the flipped bits, against the new flags.
         let flipped = block.flipped(UNIT_SECTION + UNIT_FLAGS.0 / 4);
         let flags = fields.unit_flags();
+        // The active player's arm opens on the stun bit's tick (`0x5ff4ef`-`0x5ff501`).
+        if mine && flipped & crate::player::UNIT_FLAG_STUNNED != 0 {
+            pass.push(at, FieldNotice::InputTick);
+        }
         // The active player's arm first (`0x5ff5b4`, `0x5ff5c7` → `0x5ff4e0`): a usable refresh
         // on bits 0x1c20000 (`0x5ff50e`), then the in-combat bit 0x80000's own (`0x5ff51b`) and
         // `PLAYER_REGEN_DISABLED` when now set, else `PLAYER_REGEN_ENABLED` (`0x5ff513`-
@@ -818,6 +882,10 @@ pub(crate) fn placed_values(
                 id::PLAYER_REGEN_ENABLED
             };
             pass.push(at, FieldNotice::Global { id });
+        }
+        // Last in the active player's arm, the taxi flag's rise (`0x5ff538`-`0x5ff55a`).
+        if mine && flipped & flags & crate::player::UNIT_FLAG_TAXI_FLIGHT != 0 {
+            pass.push(at, FieldNotice::AutoMoveStop);
         }
         // The reaction on 0x4080 (`0x5ff71c`) and again on 0x1000 (`0x5ff72b`).
         if flipped & 0x4080 != 0 {
@@ -863,13 +931,25 @@ pub(crate) fn placed_values(
         }
     }
     if let Some(at) = at(UNIT_SECTION, DYNAMIC_FLAGS, List::Type) {
-        // `0x600440` on the flipped bits: 0x20, the dead look, signals `UNIT_HEALTH` and the power
+        // `0x600440` on the flipped bits: first 0x1, the lootable bit, whose rise triggers Looting
+        // (`0x600482`-`0x60049b`); then 0x20, the dead look, signals `UNIT_HEALTH` and the power
         // event of `UNIT_FIELD_BYTES_0` byte 3 (`0x6004cd`, `0x6004f0`); 0x4, the tap,
         // `UNIT_FACTION` (`0x6005bb`).
-        let flipped = block.flipped(UNIT_SECTION + DYNAMIC_FLAGS.0 / 4);
+        let (old, new) = block
+            .edge(UNIT_SECTION + DYNAMIC_FLAGS.0 / 4)
+            .unwrap_or_default();
+        if old & 0x1 == 0 && new & 0x1 != 0 {
+            let id = tutorial::LOOTING;
+            pass.push(at, FieldNotice::Tutorial { id });
+        }
+        let flipped = old ^ new;
         if flipped & 0x20 != 0 {
             pass.signal(at, guid, id::UNIT_HEALTH);
             pass.signal(at, guid, id::POWER + u16::from(fields.unit_power_type()));
+            // Now set, the active mover's tick runs with `apply` clear (`0x600501`-`0x600530`).
+            if new & 0x20 != 0 {
+                pass.push(at, FieldNotice::AutoMoveStop);
+            }
         }
         if flipped & 0x4 != 0 {
             pass.signal(at, guid, id::UNIT_FACTION);
@@ -1015,6 +1095,10 @@ pub(crate) fn placed_values(
         // `0x5de0d0`: the far-sight update, then `PLAYER_FARSIGHT_FOCUS_CHANGED` bare on every
         // change, whether or not the new guid resolves (`0x5de14e`, `0x5de167`).
         if let Some(at) = at(PLAYER_SECTION, FARSIGHT, List::Object) {
+            let object = fields.player_farsight().unwrap_or(0);
+            if object != 0 {
+                pass.push(at, FieldNotice::FarSightStop { object });
+            }
             let id = id::PLAYER_FARSIGHT_FOCUS_CHANGED;
             pass.push(at, FieldNotice::Global { id });
         }
@@ -1104,6 +1188,10 @@ pub(crate) fn placed_values(
                     profession: delta(CHARACTER_POINTS.0 + 4),
                 },
             );
+        }
+        // `0x4a6460`: the map setter over the shown map, which signals `WORLD_MAP_UPDATE`.
+        if let Some(at) = at(PLAYER_SECTION, EXPLORED_ZONES, List::Object) {
+            pass.push(at, FieldNotice::ExploredZones);
         }
         // `0x4c70b0` sets the ammunition model (`0x4c70fc`, not built) and signals (`0x4c7110`).
         if let Some(at) = at(PLAYER_SECTION, AMMO_ID, List::Object) {
@@ -1875,15 +1963,21 @@ mod tests {
         );
     }
 
-    /// `0x600440`: the dead look signals the health and the power of the unit's power type, the
-    /// tap `UNIT_FACTION`, any other bit nothing of its own; the bridge follows.
+    /// `0x600440`: the dead look signals the health and the power of the unit's power type, then
+    /// on its rise stops the auto-move of a unit that is the active mover; the tap `UNIT_FACTION`,
+    /// any other bit nothing of its own; the bridge follows.
     #[test]
     fn the_dynamic_flags_watcher_signals_on_its_two_bits() {
         // Rage: `UNIT_FIELD_BYTES_0` byte 3 is 1.
         let mut mob = ObjectFields::from_pairs(&[(36, 1 << 24)]).into_created(ObjectType::Unit);
         assert_eq!(
             block(&mut mob, Some(ME), MOB, &[(143, 0x20)]),
-            [signal(MOB, 16), signal(MOB, 18), bridge(MOB, 137)]
+            [
+                signal(MOB, 16),
+                signal(MOB, 18),
+                FieldNotice::AutoMoveStop,
+                bridge(MOB, 137)
+            ]
         );
         assert_eq!(
             block(&mut mob, Some(ME), MOB, &[(143, 0x24)]),
@@ -1892,6 +1986,37 @@ mod tests {
         assert_eq!(
             block(&mut mob, Some(ME), MOB, &[(143, 0x2c)]),
             [bridge(MOB, 137)]
+        );
+    }
+
+    /// `0x600440`'s first leg: the lootable bit's rise triggers Looting (`0x600482`-`0x60049b`),
+    /// ahead of the dead look's signals; its fall triggers nothing, and a rise again asks again,
+    /// for the fire-once bank to gate.
+    #[test]
+    fn the_lootable_bits_rise_triggers_looting_ahead_of_the_dead_look() {
+        let looting = FieldNotice::Tutorial {
+            id: crate::tutorial::id::LOOTING,
+        };
+        let mut mob = ObjectFields::from_pairs(&[(36, 1 << 24)]).into_created(ObjectType::Unit);
+        assert_eq!(
+            block(&mut mob, Some(ME), MOB, &[(143, 0x21)]),
+            [
+                looting,
+                signal(MOB, 16),
+                signal(MOB, 18),
+                FieldNotice::AutoMoveStop,
+                bridge(MOB, 137)
+            ]
+        );
+        assert_eq!(
+            block(&mut mob, Some(ME), MOB, &[(143, 0x20)]),
+            [bridge(MOB, 137)],
+            "the fall"
+        );
+        assert_eq!(
+            block(&mut mob, Some(ME), MOB, &[(143, 0x21)]),
+            [looting, bridge(MOB, 137)],
+            "a rise again"
         );
     }
 
@@ -2379,8 +2504,13 @@ mod tests {
         let mut me = player();
         assert_eq!(
             block(&mut me, Some(ME), ME, &[(22, 90)]),
+            [FieldNotice::Revived, R, bridge(ME, 16)],
+            "the health, out of none: the revive arm runs first (`0x6047ee`)"
+        );
+        assert_eq!(
+            block(&mut me, Some(ME), ME, &[(22, 80)]),
             [R, bridge(ME, 16)],
-            "the health"
+            "the health, alive"
         );
         assert_eq!(
             block(&mut me, Some(ME), ME, &[(23, 480)]),

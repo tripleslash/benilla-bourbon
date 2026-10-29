@@ -343,19 +343,55 @@ fn the_entry_vms_icon_chooser_is_listed_on_first_use() {
         .starts_with("Interface\\Icons\\"));
 }
 
-/// A mini app around [`super::rebind_macro_spells`]: the VM with the shipped `/cast` alias, which
-/// the derivation reads from the globals (`0x703bf0`), and an empty bar.
+/// A mini app around the VM's macro records: the VM with the shipped `/cast` alias, which the
+/// derivation reads from the globals (`0x703bf0`), and an empty bar.
 fn rebind_app(script: UiScript) -> bevy::prelude::App {
     use bevy::prelude::*;
     script.run(r#"SLASH_CAST1 = "/cast""#).unwrap();
     let mut app = App::new();
     app.init_resource::<crate::ui_action::PlayerActions>()
         .init_resource::<crate::ui_action::ActionSlots>()
-        .init_resource::<super::MacroBoundSpells>()
         .init_resource::<crate::ui_pet::PetBar>()
-        .insert_non_send(script)
-        .add_systems(Update, super::rebind_macro_spells);
+        .init_resource::<crate::items::Items>()
+        .init_resource::<crate::net::GuidIndex>()
+        .init_resource::<crate::field_watch::NoticeLane>()
+        .insert_resource(crate::net::NetCommands(crossbeam_channel::unbounded().0))
+        .insert_non_send(script);
     app
+}
+
+/// The load's derivation of every record (`0x4f0a55` into `0x4f0ca0`), as the macro reader runs
+/// it after the table is read ([`super::load_macros`]).
+fn load(app: &mut bevy::prelude::App) {
+    app.world_mut()
+        .non_send_mut::<UiScript>()
+        .derive_macro_bindings(|_, _| true);
+}
+
+/// Macro `id`'s cached cast as the VM's record holds it.
+fn bound(app: &bevy::prelude::App, id: u32) -> super::run::Bound {
+    app.world()
+        .non_send::<UiScript>()
+        .macro_bindings()
+        .get(&id)
+        .copied()
+        .unwrap_or_default()
+        .into()
+}
+
+/// `SMSG_SUPERCEDED_SPELL`'s walk of the bar (`0x5e6356` into `0x4e5e60`), as its handler runs it
+/// ([`crate::ui_action::SpellSlots::replace_spell`]).
+fn supersede(app: &mut bevy::prelude::App, old: u32, new: u32) {
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+    app.world_mut()
+        .run_system_once(
+            move |mut bar: crate::ui_action::SpellSlots,
+                  mut lane: ResMut<crate::field_watch::NoticeLane>| {
+                bar.replace_spell(old, new, None, &mut lane)
+            },
+        )
+        .expect("the supersede's bar leg runs");
 }
 
 fn book_slot(spell_id: u32, name: &str) -> benilla_ui::script::SpellSlotView {
@@ -366,10 +402,10 @@ fn book_slot(spell_id: u32, name: &str) -> benilla_ui::script::SpellSlotView {
     }
 }
 
-/// One `SMSG_PET_SPELLS`'s sort of the pet book (`0x4bdadb`), which the derivation follows.
+/// One `SMSG_PET_SPELLS`'s derivation after its book's sort (`0x4bdae0` → `0x4f0ce0`), as its
+/// notice fires it.
 fn pet_spell_list(app: &mut bevy::prelude::App) {
-    let mut bar = app.world_mut().resource_mut::<crate::ui_pet::PetBar>();
-    bar.book_sorts = bar.book_sorts.wrapping_add(1);
+    super::derive_pet_followers(&mut app.world_mut().non_send_mut::<UiScript>());
 }
 
 /// `0x4f0ce0`, from each pet spell message (`0x4bdae0`), derives only the records whose cached
@@ -414,10 +450,7 @@ fn the_pets_spell_list_rebinds_the_failed_and_the_pet_bound_macros_only() {
         }),
     );
     let mut app = rebind_app(script);
-    app.update();
-    let bound = |app: &bevy::prelude::App, id: u32| {
-        app.world().resource::<super::MacroBoundSpells>().0[&id]
-    };
+    load(&mut app);
     let pet_spell = Bound {
         spell: BoundSpell::Spell(6358),
         pet_book: true,
@@ -676,7 +709,7 @@ fn a_position_numbered_character_bar_moves_to_macro_ids_once() {
 
 /// The bound spell of macro `id` in a [`rebind_app`].
 fn bound_of(app: &bevy::prelude::App, id: u32) -> super::run::BoundSpell {
-    app.world().resource::<super::MacroBoundSpells>().0[&id].spell
+    bound(app, id).spell
 }
 
 fn learn(app: &mut bevy::prelude::App, slots: Vec<benilla_ui::script::SpellSlotView>) {
@@ -691,7 +724,6 @@ fn learn(app: &mut bevy::prelude::App, slots: Vec<benilla_ui::script::SpellSlotV
         .world_mut()
         .resource_mut::<crate::ui_action::PlayerActions>();
     actions.spells.extend(ids);
-    actions.dirty = true;
 }
 
 /// `0x4efe00` has four callers (`0x4f0cbd`, `0x4f0d11`, `0x4f123c`, `0x4f1313`): a learned spell
@@ -709,7 +741,7 @@ fn only_a_create_or_an_edit_of_that_macro_derives_its_spell_again() {
         Vec::new(),
     ));
     let mut app = rebind_app(script);
-    app.update();
+    load(&mut app);
     assert_eq!(bound_of(&app, 1), BoundSpell::Unresolved, "not yet known");
 
     learn(&mut app, vec![book_slot(11366, "Pyroblast")]);
@@ -765,7 +797,7 @@ fn the_players_arrival_derives_every_macro() {
         Vec::new(),
     ));
     let mut app = rebind_app(script);
-    app.update();
+    load(&mut app);
     assert_eq!(bound_of(&app, 1), BoundSpell::Unresolved);
     // The book the arrival's learns built, with no bar or macro change beside it.
     app.world_mut()
@@ -781,7 +813,7 @@ fn the_players_arrival_derives_every_macro() {
         "a book alone derives nothing"
     );
     // The arrival's derivation leg, as the arrival lane fires it.
-    crate::script_calls::run_cached(app.world_mut(), super::derive_on_arrival)
+    crate::script_calls::run_cached(app.world_mut(), super::derive_every)
         .expect("the derivation runs");
     assert_eq!(bound_of(&app, 1), BoundSpell::Spell(11366));
 }
@@ -817,63 +849,24 @@ fn a_superseded_rank_rewrites_the_cached_spell_of_a_macro_on_the_bar() {
                 kind: ACTION_KIND_MACRO,
             },
         );
-    app.update();
+    load(&mut app);
     assert_eq!(
         (bound_of(&app, 1), bound_of(&app, 2)),
         (BoundSpell::Spell(116), BoundSpell::Spell(116))
     );
 
     learn(&mut app, vec![book_slot(205, "Frostbolt")]);
-    app.world_mut()
-        .resource_mut::<crate::ui_action::PlayerActions>()
-        .superseded
-        .push((116, 205));
+    supersede(&mut app, 116, 205);
+    assert_eq!(
+        (bound_of(&app, 1), bound_of(&app, 2)),
+        (BoundSpell::Spell(205), BoundSpell::Spell(116)),
+        "at the packet, in the VM's records"
+    );
     app.update();
     assert_eq!(
         (bound_of(&app, 1), bound_of(&app, 2)),
         (BoundSpell::Spell(205), BoundSpell::Spell(116))
     );
-}
-
-/// A supersede waits for the VM: the pairs are applied by the first pass that runs, not dropped by
-/// the passes that cannot.
-#[test]
-fn a_supersede_with_no_vm_yet_is_kept_for_the_first_pass() {
-    use super::run::BoundSpell;
-    use benilla_protocol::messages::{ActionButton, ACTION_KIND_MACRO};
-    let mut script = UiScript::new().unwrap();
-    script.set_spellbook(benilla_ui::script::SpellBookState {
-        tabs: Vec::new(),
-        slots: vec![book_slot(116, "Frostbolt")],
-    });
-    script.set_macros(MacroState::from_scopes(
-        vec![macro_view("Bar", "/cast Frostbolt")],
-        Vec::new(),
-    ));
-    let mut app = rebind_app(script);
-    app.world_mut()
-        .resource_mut::<crate::ui_action::ActionSlots>()
-        .buttons
-        .insert(
-            4,
-            ActionButton {
-                slot: 4,
-                action: 1,
-                kind: ACTION_KIND_MACRO,
-            },
-        );
-    app.update();
-    assert_eq!(bound_of(&app, 1), BoundSpell::Spell(116));
-
-    let script = app.world_mut().remove_non_send::<UiScript>().unwrap();
-    app.world_mut()
-        .resource_mut::<crate::ui_action::PlayerActions>()
-        .superseded
-        .push((116, 205));
-    app.update();
-    app.world_mut().insert_non_send(script);
-    app.update();
-    assert_eq!(bound_of(&app, 1), BoundSpell::Spell(205));
 }
 
 /// `EditMacroRecord` derives the record inside the call (`0x4f1313`), against the book as it
@@ -909,7 +902,7 @@ fn an_edit_derives_against_the_book_at_its_call() {
                 kind: ACTION_KIND_MACRO,
             },
         );
-    app.update();
+    load(&mut app);
     assert_eq!(bound_of(&app, 1), BoundSpell::None);
 
     app.world_mut()
@@ -923,40 +916,9 @@ fn an_edit_derives_against_the_book_at_its_call() {
             tabs: Vec::new(),
             slots: vec![ranked(205, "Rank 2")],
         });
-    app.world_mut()
-        .resource_mut::<crate::ui_action::PlayerActions>()
-        .superseded
-        .push((116, 205));
+    supersede(&mut app, 116, 205);
     app.update();
     assert_eq!(bound_of(&app, 1), BoundSpell::Spell(205));
-}
-
-/// A load and our player's arrival in one pass derive every record once: the next pass, with
-/// neither, derives nothing, so a spell learned after them leaves a `/cast` at -1.
-#[test]
-fn a_load_and_an_arrival_in_one_pass_derive_once() {
-    use super::run::BoundSpell;
-    let mut script = UiScript::new().unwrap();
-    script.set_macros(MacroState::from_scopes(
-        vec![macro_view("Pyro", "/cast Pyroblast")],
-        Vec::new(),
-    ));
-    let mut app = rebind_app(script);
-    app.world_mut().spawn(crate::net::SelfPlayer);
-    app.update();
-    assert_eq!(bound_of(&app, 1), BoundSpell::Unresolved);
-    learn(&mut app, vec![book_slot(11366, "Pyroblast")]);
-    // A change that runs the pass: the macro table's generation moves with no derive owed.
-    app.world_mut()
-        .non_send::<UiScript>()
-        .run("CreateMacro('Other', 1, '/say hi')")
-        .unwrap();
-    app.update();
-    assert_eq!(
-        bound_of(&app, 1),
-        BoundSpell::Unresolved,
-        "the load's flag was taken with the arrival's"
-    );
 }
 
 /// The macro load's harness over a state folder of its own: the loader and the saver, with the
@@ -1023,6 +985,69 @@ fn a_macro_section_from_the_server_is_read_again() {
         macro_names(&app),
         ["Old", "Two"],
         "the server's file merged: an id the table holds is kept (`0x4f0789`)"
+    );
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// The reader rebuilds the order, which signals `UPDATE_MACROS` (`0x4f0a50` → `0x4f0d30`), then
+/// derives every record (`0x4f0a55` → `0x4f0ca0`): a listener of the load's `UPDATE_MACROS` finds
+/// the loaded `/cast` unbound, and the record is bound once the reader returns.
+#[test]
+fn the_macro_reader_derives_after_its_update_macros() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = std::env::temp_dir().join(format!("benilla-macros-derive-{}", std::process::id()));
+    std::fs::remove_dir_all(&tmp).ok();
+    let _c = EnvGuard::unset("WOW_CAPTURE");
+    let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+    let account = crate::local_state::macros_account_path().unwrap();
+    crate::local_state::write_atomic(
+        &account,
+        "MACRO 1 \"Sed\" Ability_Ambush\n/cast Seduction\nEND\n",
+    )
+    .unwrap();
+    let mut script = UiScript::new().unwrap();
+    script.set_pet_book(benilla_ui::script::PetBookState {
+        token: None,
+        slots: vec![benilla_ui::script::SpellSlotView {
+            autocast: Some((true, false)),
+            ..book_slot(6358, "Seduction")
+        }],
+    });
+    script.set_action(
+        1,
+        Some(benilla_ui::script::ActionSlot {
+            kind: 0x40,
+            action: 1,
+            ..Default::default()
+        }),
+    );
+    script
+        .run(
+            r#"SLASH_CAST1 = "/cast"
+            SEEN = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("UPDATE_MACROS")
+            f:SetScript("OnEvent", function()
+                table.insert(SEEN, tostring(GetActionAutocast(1)))
+            end)"#,
+        )
+        .unwrap();
+    let mut app = file_app(script);
+    app.update();
+    let script = app.world().non_send::<UiScript>();
+    assert_eq!(
+        script.eval::<Vec<String>>("return SEEN").unwrap(),
+        ["nil"],
+        "the listener ran ahead of the derivation"
+    );
+    assert_eq!(
+        script
+            .eval::<Option<i64>>("return (GetActionAutocast(1))")
+            .unwrap(),
+        Some(1),
+        "bound out of the pet's book by the reader"
     );
     std::fs::remove_dir_all(&tmp).ok();
 }

@@ -354,10 +354,10 @@ pub(crate) struct WorldBackdropPlugin;
 /// camera's factor follow together on the next frame. fork: fsr (FORK.md) — and `frameGeneration`'s,
 /// a flag, and `rcasSharpness`'s, clamped to the SDK's `[0, 1]`.
 pub(crate) fn on_cvar(
-    ev: On<crate::cvars::CvarChanged>,
-    mut scale: ResMut<RenderScale>,
-    mut fg: ResMut<FrameGeneration>,
-    mut rcas: ResMut<benilla_world::fsr::RcasSharpness>,
+    ev: &crate::cvars::CvarChanged,
+    mut scale: bevy::prelude::Mut<'_, RenderScale>,
+    mut fg: bevy::prelude::Mut<'_, FrameGeneration>,
+    mut rcas: bevy::prelude::Mut<'_, benilla_world::fsr::RcasSharpness>,
 ) {
     if ev.is("rcasSharpness") {
         let v = ev.num();
@@ -379,7 +379,6 @@ pub(crate) fn on_cvar(
 
 impl Plugin for WorldBackdropPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
         app.init_resource::<RenderScale>()
             // fork: fsr (FORK.md) — the settings' knobs; `FsrPlugin` installs them too.
             .init_resource::<FrameGeneration>()
@@ -393,7 +392,9 @@ impl Plugin for WorldBackdropPlugin {
                     claim_backdrop,
                     sync_fsr_view,
                 )
-                    .chain(),
+                    .chain()
+                    // After the calls, whose `renderScale` callback writes the knob.
+                    .after(crate::vm_pass::VmPass::End),
             );
     }
 }

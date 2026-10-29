@@ -1,6 +1,7 @@
 //! The camera-view verbs from the reference's Lua table at `0x84f7a0`: `SetView`, `SaveView`,
 //! `ResetView`, `NextView`, `PrevView` and `FlipCameraYaw`. Each acts on engine state the VM does
-//! not hold, so each call queues a [`CameraViewRequest`] for the app's camera rig.
+//! not hold, so each hands its [`CameraViewRequest`] to the host, which seats it on the camera rig
+//! inside the call ([`super::ScriptCall::CameraView`]).
 //!
 //! The indexed verbs share one prologue and return silently, never reaching `luaL_error`
 //! (`0x6f4940`), on anything but a number that truncates to 1 to 5; `FlipCameraYaw` keeps its
@@ -34,11 +35,9 @@ pub enum CameraViewRequest {
     Zoom(f32),
 }
 
-impl super::UiScript {
-    /// Drain the camera-view intents queued since the last call.
-    pub fn take_camera_view_requests(&mut self) -> Vec<CameraViewRequest> {
-        drain_field!(self, camera_view_requests)
-    }
+/// Hand `request` to the host inside the call.
+fn submit(lua: &Lua, request: CameraViewRequest) -> mlua::Result<()> {
+    super::calls::submit(lua, super::ScriptCall::CameraView(request))
 }
 
 /// The indexed verbs' shared prologue: the internal index, or `None` for a silent return.
@@ -61,12 +60,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetView",
         lua.create_function(|lua, n: Value| {
             if let Some(view) = view_arg(lua, n) {
-                let mut model = lua
-                    .app_data_mut::<crate::script::ModelCell>()
-                    .expect("model app_data");
-                model
-                    .camera_view_requests
-                    .push(CameraViewRequest::Set(view));
+                return submit(lua, CameraViewRequest::Set(view));
             }
             Ok(())
         })?,
@@ -78,12 +72,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SaveView",
         lua.create_function(|lua, n: Value| {
             if let Some(view) = view_arg(lua, n) {
-                let mut model = lua
-                    .app_data_mut::<crate::script::ModelCell>()
-                    .expect("model app_data");
-                model
-                    .camera_view_requests
-                    .push(CameraViewRequest::Save(view));
+                return submit(lua, CameraViewRequest::Save(view));
             }
             Ok(())
         })?,
@@ -95,12 +84,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "ResetView",
         lua.create_function(|lua, n: Value| {
             if let Some(view) = view_arg(lua, n) {
-                let mut model = lua
-                    .app_data_mut::<crate::script::ModelCell>()
-                    .expect("model app_data");
-                model
-                    .camera_view_requests
-                    .push(CameraViewRequest::Reset(view));
+                return submit(lua, CameraViewRequest::Reset(view));
             }
             Ok(())
         })?,
@@ -109,23 +93,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // NextView() and PrevView(), `0x50b680` and `0x50b690`: neither reads the Lua stack.
     g.set(
         "NextView",
-        lua.create_function(|lua, ()| {
-            let mut model = lua
-                .app_data_mut::<crate::script::ModelCell>()
-                .expect("model app_data");
-            model.camera_view_requests.push(CameraViewRequest::Next);
-            Ok(())
-        })?,
+        lua.create_function(|lua, ()| submit(lua, CameraViewRequest::Next))?,
     )?;
     g.set(
         "PrevView",
-        lua.create_function(|lua, ()| {
-            let mut model = lua
-                .app_data_mut::<crate::script::ModelCell>()
-                .expect("model app_data");
-            model.camera_view_requests.push(CameraViewRequest::Prev);
-            Ok(())
-        })?,
+        lua.create_function(|lua, ()| submit(lua, CameraViewRequest::Prev))?,
     )?;
 
     // FlipCameraYaw(degrees), `0x50b6a0`: adds `degrees × π/180` to the camera's yaw, fraction
@@ -134,12 +106,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "FlipCameraYaw",
         lua.create_function(|lua, degrees: Value| {
             if let Some(d) = lua.coerce_number(degrees).ok().flatten() {
-                let mut model = lua
-                    .app_data_mut::<crate::script::ModelCell>()
-                    .expect("model app_data");
-                model
-                    .camera_view_requests
-                    .push(CameraViewRequest::FlipYaw(d as f32));
+                return submit(lua, CameraViewRequest::FlipYaw(d as f32));
             }
             Ok(())
         })?,
@@ -161,13 +128,7 @@ pub(super) fn install_turtle(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, amount: Value| {
                 let yards = lua.coerce_number(amount).ok().flatten().unwrap_or(1.0) as f32;
-                let mut model = lua
-                    .app_data_mut::<crate::script::ModelCell>()
-                    .expect("model app_data");
-                model
-                    .camera_view_requests
-                    .push(CameraViewRequest::Zoom(sign * yards));
-                Ok(())
+                submit(lua, CameraViewRequest::Zoom(sign * yards))
             })?,
         )?;
     }
@@ -177,22 +138,32 @@ pub(super) fn install_turtle(lua: &Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::CameraViewRequest;
-    use crate::script::{UiFlavor, UiScript};
+    use crate::script::{ScriptCall, UiFlavor, UiScript};
+
+    /// The camera-view calls a harness VM kept, oldest first.
+    fn views(s: &mut UiScript) -> Vec<CameraViewRequest> {
+        s.take_calls_where(|call| match call {
+            ScriptCall::CameraView(request) => Some(*request),
+            _ => None,
+        })
+    }
 
     /// A Turtle VM's zoom pair queues its amount, 1.0 for anything that is not a number; a 1.12.1
     /// VM's pair is the reference's binding input (`input_verbs`) and queues no view request.
     #[test]
     fn a_turtle_vm_zooms_by_its_argument_and_a_vanilla_one_keeps_the_binding_verbs() {
         let mut vanilla = UiScript::new().unwrap();
+        vanilla.keep_calls();
         vanilla.run("CameraZoomOut(2) CameraZoomIn()").unwrap();
-        assert!(vanilla.take_camera_view_requests().is_empty());
+        assert!(views(&mut vanilla).is_empty());
 
         let mut s = UiScript::new().unwrap();
         s.set_flavor(UiFlavor::Turtle);
+        s.keep_calls();
         s.run(r#"CameraZoomOut(2) CameraZoomIn("0.5") CameraZoomIn() CameraZoomOut({})"#)
             .unwrap();
         assert_eq!(
-            s.take_camera_view_requests(),
+            views(&mut s),
             vec![
                 CameraViewRequest::Zoom(-2.0),
                 CameraViewRequest::Zoom(0.5),

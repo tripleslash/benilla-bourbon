@@ -90,40 +90,6 @@ pub(crate) fn attack_nearest_probe(
     }
 }
 
-/// A spell's GO-deferred swing (`0x6e8402` → `0x6131a0`) at `guid`, the unit the GO hit: the
-/// attack validator `0x612df0` runs first (`0x6131aa`), so a dead, charmed, stunned, pacified,
-/// fleeing, confused or mounted player, or a target that is dead or that `CanAttack` refuses, ends
-/// it with its `ERR_ATTACK_*` or `ERR_INVALID_ATTACK_TARGET` line and sends no swing
-/// (`0x612e10`-`0x61305a`, `0x613171`). The pick keeps the passed unit and selects it, signalled
-/// in place behind the GO's reports since `mark`; then the swing goes out at the validated unit.
-pub(crate) fn go_deferred_attack(
-    mut vm: crate::script_calls::VmWith<'_, '_, AttackPress<'static, 'static>>,
-    guid: u64,
-    mark: crate::lanes::Mark,
-) {
-    let select = {
-        let mut press = vm.own();
-        let before = press.selection.guid;
-        let latched = press.seam.pet_latch.as_deref().is_some_and(|l| l.up());
-        let Some(owed) = press.begin_validate(Some(guid), false) else {
-            return;
-        };
-        crate::script_calls::EngineSelect {
-            before,
-            latched,
-            mark,
-            owed: owed.into(),
-        }
-    };
-    vm.engine_select(select, |mut press, debt| {
-        debt.pay(&mut press.selection, &mut press.seam)
-    });
-    let mut press = vm.own();
-    if let Some(target) = press.settle_attack() {
-        press.start_attack(target);
-    }
-}
-
 /// What the player's Attack reads and writes: `AttackTarget` (`0x489b50`), the ATTACKTARGET
 /// binding and `UseAction`'s Attack slot (through `TryCast`, `0x6e4c90`) all run `0x6131a0`.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -166,13 +132,30 @@ impl AttackPress<'_, '_> {
     /// actor checks, then the pick ([`crate::target::AttackPick::pick`]), what its commit owes;
     /// `None` once an actor check refused. Its `SelectTarget` calls (`0x613100`, `0x4941e6`) may
     /// hand a unit to the targeting cursor, which binds it before the swing goes out, so a caller
-    /// that owns the cursor binds between the halves.
-    pub(crate) fn pick_attack(&mut self, may_pick: bool) -> Option<crate::target::Owed> {
-        self.begin_validate(None, may_pick)
+    /// that owns the cursor binds between the halves. The candidate is `passed`, else the
+    /// selection: `AttackTarget` passes none, a go's deferred start its first hit (`0x6e8402` →
+    /// `0x6131a0`).
+    pub(crate) fn pick_attack_at(
+        &mut self,
+        passed: Option<u64>,
+        may_pick: bool,
+    ) -> Option<crate::target::Owed> {
+        self.begin_validate(passed, may_pick)
+    }
+
+    /// Whether the validator keeps `guid` as its candidate (`0x6130a3`) rather than dropping it to
+    /// the nearest-enemy cycle (`0x6130b5`).
+    pub(crate) fn keeps(&self, guid: u64) -> bool {
+        self.pick.keeps(guid)
+    }
+
+    /// Pay what the pick's commit owes now, for a caller with no listeners to run first.
+    pub(crate) fn pay(&mut self, owed: crate::target::Owed) {
+        crate::target::SelectDebt::from(owed).pay(&mut self.selection, &mut self.seam);
     }
 
     /// TryCast's attack pick (`0x6e4efb`) for a spell press held there
-    /// ([`crate::spell::HeldForPick`]), [`Self::pick_attack`] with the caster as the candidate
+    /// ([`crate::spell::HeldForPick`]), [`Self::pick_attack_at`] with the caster as the candidate
     /// for a self-cast press (`0x4e610e`): the validator alone, with no swing after it. The cast
     /// goes on, at the unit the pick left selected, when [`Self::settle_attack`] passes.
     pub(crate) fn pick_for_cast(
@@ -583,6 +566,8 @@ impl ActionBarSteps<'_> {
                     .send(ClientCommand::SetActionBarToggles { toggles });
             }
             ActionBarCall::Set { id, packed } => self.set(id, packed),
+            // The host's own, with the action states ([`crate::script_calls`]).
+            ActionBarCall::RefreshUsable | ActionBarCall::Notify { .. } => {}
         }
     }
 
@@ -616,6 +601,6 @@ impl ActionBarSteps<'_> {
                 },
             );
         }
-        slots.dirty = true;
+        slots.touch();
     }
 }

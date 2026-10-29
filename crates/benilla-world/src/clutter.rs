@@ -37,7 +37,10 @@ impl Plugin for ClutterPlugin {
                     evict_clutter_geometry,
                     scope_clutter_geometry,
                 )
-                    .chain(),
+                    .chain()
+                    // After the frame's script calls, whose `WorldDetail` callback writes the
+                    // density.
+                    .after(crate::schedule::WorldStage::Present),
             );
     }
 }

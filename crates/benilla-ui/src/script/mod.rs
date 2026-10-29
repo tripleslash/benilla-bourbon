@@ -347,8 +347,8 @@ pub(crate) mod xml_layout;
 mod zone_text;
 
 pub use action::{
-    macro_slot_id, macro_slot_word, ActionBarCall, ActionSlot, ActionState, ActionUse, CastView,
-    OpenProfessions, Profession, WearsItem,
+    macro_slot_id, macro_slot_word, ActionBarCall, ActionSlot, ActionState, ActionStateNow,
+    ActionUsableNow, ActionUse, CastView, OpenProfessions, Profession, WearsItem,
 };
 pub use addon::{addon_load_context, AddOnInfo, AddonLoad, AddonReply, AddonSecurity};
 pub use addon_enable::{AddonStateFiles, EnableHash, EnableStore};
@@ -405,7 +405,10 @@ pub use container::{
     PendingWrap, PetitionSlotView, RandomPropertyView, UiCursorMode, UseArm, UseFork,
 };
 pub use cooldown_read::{CooldownQuery, CooldownTriple};
-pub use craft::{CraftCall, CraftDifficulty, CraftReagent, CraftRecipe, CraftState, CraftTooltip};
+pub use craft::{
+    CraftBookQuery, CraftCall, CraftDifficulty, CraftDisplayLineQuery, CraftNameQuery,
+    CraftReagent, CraftRecipe, CraftRecipeQuery, CraftState, CraftTooltip,
+};
 pub use cursor::equip::{AutoEquip, BIND_WHEN_EQUIPPED};
 pub use cursor::money::coin_icon;
 pub use cursor::swap::Swap;
@@ -434,7 +437,7 @@ pub use cvars::{
     CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, LUA_CVAR_LIMIT, VIDEO_DEFAULT_CVARS,
     WORLD_DETAIL_STOPS,
 };
-pub use death::{DeathAction, DeathUiState};
+pub use death::{DeathAction, DeathQuery, DeathUiState, ResSicknessLevelQuery};
 pub use dialog_live::{
     meeting_stone_text, AreaSpiritHealerSecsQuery, BinderPendingQuery, CanResetInstancesQuery,
     InstanceBootSecsQuery, InstanceTypeQuery, MeetingStoneQuery, MeetingStoneStatus,
@@ -473,8 +476,8 @@ pub use petition::{
 };
 pub use protected::InputEvents;
 pub use roster_read::{
-    GroupCells, GroupCellsQuery, GroupRow, MemberOrPetQuery, MemberQuery, Membership, RaidRowQuery,
-    RosterName, RosterNames, RosterNamesQuery, RowQuery,
+    GroupCells, GroupCellsQuery, GroupRow, GroupRows, GroupRowsQuery, MemberOrPetQuery,
+    MemberQuery, Membership, RaidRowQuery, RosterName, RosterNames, RosterNamesQuery, RowQuery,
 };
 pub use stat_read::{CombatRead, NoPlayer, SelfRead, UnitCombatStats};
 pub use tabard::{
@@ -504,8 +507,8 @@ pub use loot::{
 pub use loot_roll::{LootRollCall, LootRollEntry, LootRollQuery, LootRollsState};
 pub use macro_options::{has_options as macro_has_options, show_directive, ShowDirective};
 pub use macros::{
-    macro_lines, reads_options as macro_reads_options, MacroBinding, MacroDerives, MacroState,
-    MacroView, CHARACTER_ID_BASE, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME,
+    macro_lines, reads_options as macro_reads_options, MacroBinding, MacroState, MacroView,
+    CHARACTER_ID_BASE, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME,
 };
 pub use mail::{
     MailBox, MailBoxQuery, MailCall, MailInboxRow, MailInvoice, MailLookup, MailRowQuery,
@@ -598,14 +601,15 @@ pub use trade::{
     TradeSlotQuery, TradeState, TRADE_SLOTS,
 };
 pub use tradeskill::{
-    TradeSkillCall, TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState,
+    TradeSkillBookQuery, TradeSkillCall, TradeSkillDifficulty, TradeSkillLineQuery,
+    TradeSkillReagent, TradeSkillRecipe, TradeSkillRecipeQuery, TradeSkillState,
 };
 pub use trainer::{
     ProductWait, TrainerAbilityReq, TrainerCall, TrainerGroup, TrainerService,
     TrainerServiceCategory, TrainerServiceLive, TrainerServiceQuery, TrainerSkillReq, TrainerState,
     TrainerTooltip, TRAINER_GROUP_KNOWN,
 };
-pub use tutorial::TutorialCall;
+pub use tutorial::{TutorialCall, TutorialsEnabledQuery};
 pub(crate) use types::{monochrome_flag, FontMask, MeasuredText, RegionData};
 pub use types::{
     BlendMode, EditAction, EditBoxAdvanceRequest, EditBoxTextUi, EditOutcome, EditUnit,

@@ -26,10 +26,9 @@ use crate::net::{ObjectStore, SelfPlayer};
 
 /// The item watchers' runs, each stamped as its packet's handler readied it
 /// ([`crate::lanes::stamp`]), with the trade half a close may run ahead of the lane
-/// ([`Self::take_trade_touches`]), and the count of the `RaiseBagUpdate` calls readied
-/// ([`Self::bag_raises`]).
+/// ([`Self::take_trade_touches`]).
 #[derive(Resource, Default)]
-pub(crate) struct ItemLane(VecDeque<(Stamp, Run, Option<TradeTouch>)>, u64);
+pub(crate) struct ItemLane(VecDeque<(Stamp, Run, Option<TradeTouch>)>);
 
 impl ItemLane {
     /// Queue `run` behind everything stamped before it; a run that does nothing is not queued.
@@ -37,7 +36,6 @@ impl ItemLane {
         if run.is_empty() {
             return;
         }
-        self.1 = self.1.wrapping_add(run.bag_raises() as u64);
         let stamp = crate::lanes::stamp();
         let trade = run.notice.as_ref().and_then(ItemNotice::trade);
         let at = self.0.partition_point(|(s, _, _)| *s < stamp);
@@ -58,12 +56,6 @@ impl ItemLane {
     /// Everything queued, dropped.
     pub(crate) fn clear(&mut self) {
         self.0.clear();
-    }
-
-    /// How many `RaiseBagUpdate` calls (`0x4f9370`) the runs readied so far make, each the action
-    /// bar's usable refresh (`0x4e5c00`, `0x4f9374`), which the action feed runs on its edge.
-    pub(crate) fn bag_raises(&self) -> u64 {
-        self.1
     }
 
     /// Take every run waiting with its stamp, in order, unfired.
@@ -96,6 +88,11 @@ pub(crate) fn add_item_lane(app: &mut App) {
             fire_item_runs,
             None,
         )
+        .add_drain_end(|world| {
+            if let Some(items) = world.get_resource::<crate::items::Items>() {
+                items.end_refusal_walks();
+            }
+        })
         .add_systems(
             Update,
             drop_item_runs
@@ -181,13 +178,9 @@ fn fire_run(vm: &mut RunVm, reads: &mut RunReads, run: Run, touch: Option<TradeT
         bags,
     } = run;
     let Some(notice) = notice else {
-        vm.run(|script| {
-            if let Some(script) = script {
-                fire_unlocks(script, unlocks);
-                fire_bags(script, &bags);
-                fire_signals(script, &mut reads.sink, signals);
-            }
-        });
+        on_vm(vm, |script| fire_unlocks(script, unlocks));
+        fire_bags(vm, &bags);
+        on_vm(vm, |script| fire_signals(script, &mut reads.sink, signals));
         return;
     };
     let rebuild = rebuild_at(&notice);
@@ -197,9 +190,7 @@ fn fire_run(vm: &mut RunVm, reads: &mut RunReads, run: Run, touch: Option<TradeT
         };
         fire_unlocks(script, unlocks);
         if rebuild == Some(Rebuild::BeforeRecount) {
-            rebuild_lists(script, &|entry| {
-                carried(&reads.me, &reads.trade.objects, entry)
-            });
+            rebuild_lists(script);
         }
         true
     });
@@ -221,17 +212,14 @@ fn fire_run(vm: &mut RunVm, reads: &mut RunReads, run: Run, touch: Option<TradeT
             }
         });
     }
+    fire_tail(vm, &mut reads.sink, &notice, &bags, signals, rebuild);
+}
+
+/// `f` on the VM with the host lent; nothing with no VM.
+fn on_vm(vm: &mut RunVm, f: impl FnOnce(&mut UiScript)) {
     vm.run(|script| {
         if let Some(script) = script {
-            let count = |entry| carried(&reads.me, &reads.trade.objects, entry);
-            fire_tail(
-                script,
-                &mut reads.sink,
-                &notice,
-                &bags,
-                signals,
-                (rebuild, &count),
-            );
+            f(script);
         }
     });
 }
@@ -264,33 +252,18 @@ fn rebuild_at(notice: &ItemNotice) -> Option<Rebuild> {
         | ItemNotice::SpellCharges { .. }
         | ItemNotice::Entry { .. }
         | ItemNotice::Enchantment { .. }
-        | ItemNotice::TradeRecord { .. } => None,
+        | ItemNotice::TradeRecord { .. }
+        | ItemNotice::TooltipRecord { .. } => None,
     }
 }
 
-/// The two rebuilds, each signalling its window's update while that window is open; `count` is
-/// the carried count of an entry the builds read (`0x622130`).
-fn rebuild_lists(script: &mut UiScript, count: &dyn Fn(u32) -> u32) {
-    script.rebuild_trade_skill(&mut |t| t.recount(count));
-    if script.rebuild_craft(&mut |c| c.recount(count)) {
+/// The two rebuilds, each reading its list as it stands and signalling its window's update while
+/// that window is open.
+fn rebuild_lists(script: &mut UiScript) {
+    script.rebuild_trade_skill(&mut |_| {});
+    if script.rebuild_craft(&mut |_| {}) {
         script.fire_event("CRAFT_UPDATE", vec![]);
     }
-}
-
-/// The player's carried count of an entry, 0 with no active player.
-fn carried(
-    me: &Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
-    objects: &crate::net::Objects,
-    entry: u32,
-) -> u32 {
-    me.iter().next().map_or(0, |s| {
-        crate::ui_items::count_of(
-            &s.0,
-            objects,
-            entry,
-            crate::ui_items::InventoryScope::DEFAULT,
-        )
-    })
 }
 
 /// What a run does after its recount and trade half, in its handler's order: the quest log's ask
@@ -298,41 +271,49 @@ fn carried(
 /// (`0x5d85d9`, `0x5d85e8`, `0x5d8606`) and the destroy (`0x5d87b2` before `0x5d87c1`), and behind
 /// both in the stack count's (`0x5d94ff`, `0x5d950e`, `0x5d9519`); the spell charges'
 /// `BAG_UPDATE_COOLDOWN` (`0x4f93d0`); a trade getter's record callback's `TRADE_UPDATE`
-/// (`0x4c034f`); and every other run's bag events, then its signals.
+/// (`0x4c034f`); the tooltips' record callbacks (`0x52e530`, `0x52f820`); and every other run's
+/// bag events, then its signals.
 fn fire_tail(
-    script: &mut UiScript,
+    vm: &mut RunVm,
     sink: &mut crate::ui_action::MessageSink,
     notice: &ItemNotice,
     bags: &[BagEvent],
     signals: Vec<FieldNotice>,
-    (rebuild, count): (Option<Rebuild>, &dyn Fn(u32) -> u32),
+    rebuild: Option<Rebuild>,
 ) {
     match *notice {
         ItemNotice::Record { entry, .. } | ItemNotice::Destroyed { entry, .. } => {
-            script.quest_item_changed(entry);
-            fire_bags(script, bags);
-            fire_signals(script, sink, signals);
+            on_vm(vm, |script| script.quest_item_changed(entry));
+            fire_bags(vm, bags);
+            on_vm(vm, |script| fire_signals(script, sink, signals));
         }
         ItemNotice::StackCount { entry, .. } => {
-            fire_bags(script, bags);
-            fire_signals(script, sink, signals);
-            script.quest_item_changed(entry);
+            fire_bags(vm, bags);
+            on_vm(vm, |script| {
+                fire_signals(script, sink, signals);
+                script.quest_item_changed(entry);
+            });
         }
-        ItemNotice::SpellCharges { .. } => {
+        ItemNotice::SpellCharges { .. } => on_vm(vm, |script| {
             script.fire_event("BAG_UPDATE_COOLDOWN", vec![]);
             fire_signals(script, sink, signals);
-        }
+        }),
         // Literal names: `reference_ui`'s producer test finds fire sites by literal.
-        ItemNotice::TradeRecord { .. } => script.fire_event("TRADE_UPDATE", vec![]),
+        ItemNotice::TradeRecord { .. } => {
+            on_vm(vm, |script| script.fire_event("TRADE_UPDATE", vec![]));
+        }
+        ItemNotice::TooltipRecord { entry } => {
+            on_vm(vm, |script| script.answer_item_tooltips(entry));
+        }
         _ => {
             if rebuild == Some(Rebuild::BeforeBags) {
-                rebuild_lists(script, count);
+                on_vm(vm, rebuild_lists);
             }
-            fire_bags(script, bags);
+            fire_bags(vm, bags);
             if rebuild == Some(Rebuild::AfterBags) {
-                rebuild_lists(script, count);
+                on_vm(vm, rebuild_lists);
             }
-            fire_signals(script, sink, signals);
+            on_vm(vm, |script| fire_signals(script, sink, signals));
         }
     }
 }
@@ -348,20 +329,23 @@ fn fire_unlocks(script: &mut UiScript, unlocks: Vec<Unlock>) {
     }
 }
 
-/// A run's bag events, each with its number (`"%d"`, `0x835154`).
-fn fire_bags(script: &mut UiScript, bags: &[BagEvent]) {
+/// A run's bag events, each with its number (`"%d"`, `0x835154`); a `RaiseBagUpdate` refreshes
+/// the bar's usable cache first, whatever it signals (`0x4f9374` into `0x4e5c00`).
+fn fire_bags(vm: &mut RunVm, bags: &[BagEvent]) {
     use benilla_ui::script::ScriptValue;
     for &event in bags {
-        match event {
+        if let BagEvent::Raise(_) = event {
+            vm.engine_usable_cache_refresh();
+        }
+        on_vm(vm, |script| match event {
             BagEvent::Raise(Some(n)) | BagEvent::Update(n) => {
                 script.fire_event("BAG_UPDATE", vec![ScriptValue::Int(n)]);
             }
-            // The usable refresh alone, the action feed's ([`ItemLane::bag_raises`]).
             BagEvent::Raise(None) => {}
             BagEvent::Closed(n) => script.fire_event("BAG_CLOSED", vec![ScriptValue::Int(n)]),
             BagEvent::BankSlots => script.fire_event("PLAYERBANKSLOTS_CHANGED", vec![]),
             BagEvent::Open(n) => script.fire_event("BAG_OPEN", vec![ScriptValue::Int(n)]),
-        }
+        });
     }
 }
 

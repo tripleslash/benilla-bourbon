@@ -42,7 +42,9 @@ pub(super) fn build(app: &mut App) {
             (answer_glue, drive_policy, to_select_on_auth)
                 .chain()
                 .in_set(LoginPolicy)
-                .after(benilla_world::schedule::WorldStage::Net),
+                .after(benilla_world::schedule::WorldStage::Net)
+                // After the calls, whose `realmList` callback writes the address it logs on to.
+                .after(crate::vm_pass::VmPass::End),
         )
         .add_systems(Update, debug_login_shot.after(LoginPolicy));
 }

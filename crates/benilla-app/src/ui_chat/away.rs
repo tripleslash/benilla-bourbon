@@ -186,15 +186,20 @@ pub(crate) fn reconcile_afk_mirror(
 /// clears; mouse-look turning never reaches `0x514f50`, and knockback, fear and splines press
 /// nothing. Jump is here but not in `player::follow`'s cancel set: two separate reference tables.
 pub(crate) fn movement_clears_afk(
-    binds: Res<crate::bindings::BindingsState>,
-    cvars: Res<crate::cvars::Cvars>,
-    // The mirror shares the host's param set, whose chat sends write it too.
-    mut vm: crate::script_calls::VmWith<ResMut<'static, AfkMirror>>,
+    // The mirror shares the host's param set, whose chat sends write it too, and so does the
+    // registry, whose callbacks run inside the calls that write it, and the input state, which
+    // the binding calls write inside theirs.
+    mut vm: crate::script_calls::VmWith<(
+        ResMut<'static, AfkMirror>,
+        Res<'static, crate::cvars::Cvars>,
+        Res<'static, crate::bindings::BindingsState>,
+    )>,
     commands: Res<crate::net::NetCommands>,
     chat: Res<ChatLog>,
 ) {
     use crate::bindings::Input;
-    if !vm.own().is_afk() || cvars.flag("autoClearAFK") == Some(false) {
+    let (mirror, cvars, binds) = vm.own();
+    if !mirror.is_afk() || cvars.flag("autoClearAFK") == Some(false) {
         return;
     }
     let moved = [
@@ -215,7 +220,7 @@ pub(crate) fn movement_clears_afk(
         .run(|script| script.and_then(|s| super::combat::global_string(s, "CLEARED_AFK")))
         .unwrap_or_default();
     push_system(&chat, line);
-    vm.own().0 = 0;
+    vm.own().0 .0 = 0;
     // `ClearAFK`'s own packet: the empty `0x14` the command path sends.
     let _ = commands.0.send(crate::net::ClientCommand::Chat {
         kind: crate::net::ChatKind::Afk,

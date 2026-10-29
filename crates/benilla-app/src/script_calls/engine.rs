@@ -27,19 +27,12 @@ impl ScriptCallHost<'_, '_> {
                 crate::player::FollowRequest::Name { name, exact }
             }
         };
-        let name = match self.appliers.follow().start(&request) {
+        let (name, replaced) = match self.appliers.follow().start(&request) {
             FollowStart::Refused(key) => return self.appliers.chat().display_error(script, key),
             FollowStart::Silent => return,
-            FollowStart::Started { name } => name,
+            FollowStart::Started { name, replaced } => (name, replaced),
         };
-        let guid = self.appliers.follow().followee();
-        let told = match self.appliers.follow_feed().as_deref_mut() {
-            Some(feed) => feed.tell(script, guid),
-            None => None,
-        };
-        // Deviation: the feed's stops fire `END` for every follow ([`crate::ui_follow`]), so the
-        // arm's stop fires it for the follow this VM was last told of.
-        if told.is_some() {
+        if replaced {
             script.fire_event("AUTOFOLLOW_END", vec![]);
             self.at_point(script, mark);
         }
@@ -60,13 +53,10 @@ pub(crate) struct RecordAsks<'w, 's> {
     summon: Option<Res<'w, crate::ui_summon::SummonState>>,
     battlefield: Option<ResMut<'w, crate::ui_battlefield_positions::BattlefieldPositions>>,
     ammo_hits: Option<ResMut<'w, crate::ui_char::AmmoRecordHits>>,
-    cooldowns: Option<ResMut<'w, crate::spell::Cooldowns>>,
     quest: Option<ResMut<'w, crate::ui_quest::QuestGiver>>,
     /// The quest cache the rebuild's lookups ask, and the leaderboard's creature waits.
     quest_log: Option<ResMut<'w, crate::ui_quest_log::QuestLog>>,
     latch_refreshes: Option<ResMut<'w, crate::ui_quest::LatchRefreshes>>,
-    craft: Option<ResMut<'w, crate::ui_craft::CraftItemWaits>>,
-    trade_skill: Option<ResMut<'w, crate::ui_tradeskill::TradeSkillItemWaits>>,
     merchant: Option<ResMut<'w, crate::ui_merchant::MerchantOpen>>,
     stable: Option<ResMut<'w, crate::ui_stable::StableCreatureWaits>>,
     go_templates: Option<Res<'w, crate::go_templates::GameObjectTemplates>>,
@@ -153,10 +143,8 @@ impl RecordAsks<'_, '_> {
                 }
             }
             RecordAsk::CooldownItem { entry, owner } => {
-                if let (Some(items), Some(cooldowns)) =
-                    (self.items.as_deref(), self.cooldowns.as_deref_mut())
-                {
-                    cooldowns.ask_item_record(items, &self.net, entry, owner);
+                if let Some(items) = self.items.as_deref() {
+                    crate::spell::Cooldowns::query_record(items, &self.net, entry, owner, true);
                 }
             }
             RecordAsk::Item {
@@ -177,20 +165,30 @@ impl RecordAsks<'_, '_> {
                         }
                     }
                     ItemCallback::Craft => {
-                        if let Some(waits) = self.craft.as_deref_mut() {
-                            crate::ui_craft::ask_item_record(items, &self.net, waits, entry, owner);
-                        }
+                        crate::ui_craft::ask_item_record(items, &self.net, entry, owner);
                     }
                     ItemCallback::TradeSkill => {
-                        if let Some(waits) = self.trade_skill.as_deref_mut() {
-                            crate::ui_tradeskill::ask_item_record(
-                                items, &self.net, waits, entry, owner,
-                            );
+                        crate::ui_tradeskill::ask_item_record(items, &self.net, entry, owner);
+                    }
+                    // The VM counts the landing; the callback, one per entry as the VM keeps its
+                    // waits, signals at its place in the entry's list.
+                    ItemCallback::QuestLog => {
+                        if items
+                            .template(entry, owner, Ask::Event(&self.net))
+                            .is_none()
+                        {
+                            items.wait_once(entry, crate::items::RecordCallback::QuestLog);
                         }
                     }
-                    // The VM keeps the callback: the cache only asks.
-                    ItemCallback::QuestLog => {
-                        let _ = items.template(entry, owner, Ask::Event(&self.net));
+                    // The VM keeps each tooltip's wait; the callback, one per entry, rebuilds them
+                    // at its place in the entry's list.
+                    ItemCallback::Tooltip => {
+                        if items
+                            .template(entry, owner, Ask::Event(&self.net))
+                            .is_none()
+                        {
+                            items.wait_once(entry, crate::items::RecordCallback::Tooltip);
+                        }
                     }
                     // A miss registers the callback and counts the window's wait (`0x4faf1a`,
                     // `0x4faf23`).

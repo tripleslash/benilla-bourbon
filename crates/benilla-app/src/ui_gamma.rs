@@ -300,9 +300,9 @@ pub(crate) struct UiGammaPlugin;
 /// The `gamma` CVar's change callback, clamped to [`GAMMA_RANGE`], and `brightness`'s, clamped to
 /// its slider's 0 to 1.
 pub(crate) fn on_cvar(
-    ev: On<crate::cvars::CvarChanged>,
-    mut gamma: ResMut<DisplayGamma>,
-    mut brightness: ResMut<DisplayBrightness>,
+    ev: &crate::cvars::CvarChanged,
+    mut gamma: bevy::prelude::Mut<'_, DisplayGamma>,
+    mut brightness: bevy::prelude::Mut<'_, DisplayBrightness>,
 ) {
     if ev.is(benilla_ui::script::CVAR_GAMMA) {
         gamma.0 = ev.num().clamp(*GAMMA_RANGE.start(), *GAMMA_RANGE.end());
@@ -313,11 +313,11 @@ pub(crate) fn on_cvar(
 
 impl Plugin for UiGammaPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
         app.init_resource::<DisplayGamma>()
             .init_resource::<DisplayBrightness>()
             .add_plugins(ExtractComponentPlugin::<UiGammaLane>::default())
-            .add_systems(Update, stamp_lane_gamma);
+            // After the calls, whose `gamma` callback writes the knob.
+            .add_systems(Update, stamp_lane_gamma.after(crate::vm_pass::VmPass::End));
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

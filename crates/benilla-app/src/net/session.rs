@@ -39,6 +39,7 @@ pub(super) fn register(app: &mut App) {
                 WorldportTimer::Sweep,
                 WorldportTimer::Objects,
                 WorldportTimer::Cooldowns,
+                WorldportTimer::Manager,
                 WorldportTimer::Rolls,
             )
                 .chain(),
@@ -334,39 +335,76 @@ fn log_teardown(view_log: Option<ResMut<crate::ui_unit::views::ViewLog>>, b: &Br
     }
 }
 
-/// Teleport, knockback and client control, forwarded unjudged to the controller, which applies
-/// and answers them.
-fn on_mover_edge(In(ev): In<SessionEvent>, mut e: Edges, b: Bridge) {
+/// Teleport and knockback, forwarded unjudged to the controller, which applies and answers them.
+/// A near teleport runs the movement guard first inside the packet (`OnForcedTeleport 0x602fb0`
+/// → `0x60e990(1, 0)` at `0x60300e`, [`MoveInput`]), before the move is queued (`0x603029`); the
+/// echo's own stop (`0x60e3b1`) finds none left.
+fn on_mover_edge(
+    In(ev): In<SessionEvent>,
+    mut e: Edges,
+    self_guid: Res<SelfGuid>,
+    mut moved: MoveInput,
+) {
     match ev {
         SessionEvent::Teleport {
             guid,
             counter,
             position,
             orientation,
-        } => teleport(
-            guid,
-            counter,
-            position,
-            orientation,
-            &b.self_guid,
-            &mut e.teleports,
-        ),
+        } => {
+            moved.stop(guid, self_guid.0);
+            teleport(
+                guid,
+                counter,
+                position,
+                orientation,
+                &self_guid,
+                &mut e.teleports,
+            );
+        }
+        // `QueueKnockBack 0x602670` runs the same guard first (`0x60267e`), ahead of the queue
+        // (`0x617a30`).
         SessionEvent::KnockBack {
             guid,
             counter,
             launch,
-        } => knock_back(guid, counter, launch, &b.self_guid, &mut e.knockbacks),
+        } => {
+            moved.stop(guid, self_guid.0);
+            knock_back(guid, counter, launch, &self_guid, &mut e.knockbacks);
+        }
         _ => {}
     }
 }
 
+/// The movement guard `CGUnit_C::OnMoveInput(1, 0)` (`0x60e990`) where a forced move's handler runs
+/// it on its unit: the active mover's auto-move stops (`0x60e99d`-`0x60e9b5`), the follow's
+/// `AUTOFOLLOW_END` on the notice lane, then the active player's loot window closes as on a
+/// movement start (`0x60e9c1`-`0x60e9dd`).
+#[derive(bevy::ecs::system::SystemParam)]
+struct MoveInput<'w, 's> {
+    auto_move: crate::player::AutoMoveStop<'w>,
+    lane: Option<ResMut<'w, crate::field_watch::NoticeLane>>,
+    loot: crate::ui_loot::MoveStartClose<'w, 's>,
+}
+
+impl MoveInput<'_, '_> {
+    fn stop(&mut self, guid: u64, me: Option<u64>) {
+        self.auto_move.stop(guid, self.lane.as_deref_mut());
+        if me == Some(guid) {
+            self.loot.close();
+        }
+    }
+}
+
 /// What [`on_client_control`] holds beside the host: the cast its fall cancels, our guid, the flag,
-/// and the notice lane its signals go on (absent in a harness without the unit feed).
+/// the notice lane its signals go on (absent in a harness without the unit feed), and the
+/// outgoing mover's auto-move.
 type ControlSet = (
     crate::spell::SelfCancel<'static>,
     Res<'static, SelfGuid>,
     ResMut<'static, crate::player::OwnControlLost>,
     Option<ResMut<'static, crate::field_watch::NoticeLane>>,
+    crate::player::AutoMoveStop<'static>,
 );
 
 /// `SMSG_CLIENT_CONTROL_UPDATE` (`0x5fa6b1` → `SetPlayerControl 0x4958e0`), its movement judged by
@@ -374,20 +412,38 @@ type ControlSet = (
 /// (`0x4958ea`); its fall drops the cursor's payload and the cast (`0x4958e8`-`0x495901` →
 /// `0x495920`), and the change signals on the notice lane at this packet's place, then runs the
 /// usable refresh (`0x4958f7`/`0x49590b`, `0x4958fc`/`0x495910`). A store that changes nothing does
-/// nothing (`0x4958e6`).
+/// nothing (`0x4958e6`). Ahead of it the unit's control moves the active mover (`0x5fa600`): a
+/// grant claims the unit (`0x5fa696`) and a stop of the mover zeroes it (`0x5fa678`-`0x5fa696`),
+/// and the switch ends the outgoing mover's auto-move first (`SetActiveMover`, `0x600731`-
+/// `0x600742`), its `AUTOFOLLOW_END` on the notice lane ahead of the flag's signal.
 fn on_client_control(
     In(ev): In<SessionEvent>,
     mut e: Edges,
     // The flag and our guid are the host's too, so they sit in the set it shares with the cast.
     mut vm: crate::script_calls::VmWith<ControlSet>,
+    // The unit whose `IsClientControlled` bit the update writes.
+    mut units: (Option<Res<super::GuidIndex>>, Commands),
 ) {
     let SessionEvent::ClientControl { mover, allow_move } = ev else {
         return;
     };
     e.client_control
         .write(ClientControlMessage { mover, allow_move });
+    // `0x5fa62a`/`0x5fa631`: the unit's own bit first (`0x5fa636`).
+    if let Some(&unit) = units.0.as_deref().and_then(|i| i.0.get(&mover)) {
+        let mut unit = units.1.entity(unit);
+        if allow_move {
+            unit.insert(super::ClientControlled);
+        } else {
+            unit.remove::<super::ClientControlled>();
+        }
+    }
     {
-        let (_, self_guid, mut own, _) = vm.own();
+        let (_, self_guid, mut own, mut lane, mut stop) = vm.own();
+        let switches = stop.mover().is_some_and(|m| (m == mover) != allow_move);
+        if switches {
+            stop.stop_mover(lane.as_deref_mut());
+        }
         if self_guid.0 != Some(mover) || own.0 == !allow_move {
             return;
         }
@@ -396,7 +452,7 @@ fn on_client_control(
     if !allow_move {
         crate::spell::drop_hold(&mut vm, |(mut cancel, ..)| cancel.abort_cast());
     }
-    if let (.., Some(mut lane)) = vm.own() {
+    if let (_, _, _, Some(mut lane), _) = vm.own() {
         use crate::field_watch::FieldNotice;
         lane.write(FieldNotice::PlayerControl {
             in_control: allow_move,
@@ -415,18 +471,32 @@ struct Destination {
 
 /// The world loads posted and not yet run: `SMSG_NEW_WORLD` (`0x401b00`) reads its destination
 /// into globals and posts the executor `0x401bc0` as a timer at no delay (`0x401ba5`-`0x401bae`),
-/// which the next tick runs ahead of its packets (`0x420d0c`, `0x420d55`).
+/// which the next tick runs ahead of its packets (`0x420d0c`, `0x420d55`). Beside them, the maps
+/// whose objects' leg has run, each owed its new object manager (`0x401c22`).
 #[derive(Resource, Default)]
 pub(crate) struct PendingWorldports {
     posted: Vec<Destination>,
     /// How many loads the objects' leg has run, which the legs after it test ([`world_ported`]).
     ported: u32,
+    /// The maps of the loads whose objects' leg has run, owed their new manager.
+    loaded: Vec<u32>,
 }
 
 impl PendingWorldports {
     /// Whether a timer is posted, for the connection's leave to run only then.
     pub(crate) fn is_posted(&self) -> bool {
         !self.posted.is_empty()
+    }
+
+    /// Whether a load's objects are gone and its new manager not yet made, for the manager's leg
+    /// ([`WorldportTimer::Manager`]) to run only then.
+    pub(crate) fn has_loaded(&self) -> bool {
+        !self.loaded.is_empty()
+    }
+
+    /// The maps of the loads whose objects are gone, in their order, taken by the manager's leg.
+    pub(crate) fn take_loaded(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.loaded)
     }
 
     /// A load posted, as `SMSG_NEW_WORLD` posts it, for a harness with no objects' leg.
@@ -451,8 +521,8 @@ impl PendingWorldports {
 /// request), then the movement and missiles go (`0x401bde`, `0x401bf2`), then the object manager
 /// is destroyed (`0x401bf7`), whose walk (`0x467800`) frees the objects in creation order and
 /// reaches the local player's destructor and its leave-world sweep (`0x5dd543`) at the player's
-/// turn; then the cooldowns are freed (`0x401c17`) and the open loot rolls cancelled (`0x401c2c`),
-/// ahead of the map load. The sets order those legs in `PreUpdate`.
+/// turn; then the cooldowns are freed (`0x401c17`), the new object manager made (`0x401c22`) and
+/// the open loot rolls cancelled (`0x401c2c`), ahead of the map load. The sets order those legs in `PreUpdate`.
 ///
 /// The sweep runs ahead of the objects' leg, so what was created after the player (the target, a
 /// pet, an NPC) is alive when `PLAYER_LEAVING_WORLD` fires, as in the reference. What remains: the
@@ -468,6 +538,10 @@ pub(crate) enum WorldportTimer {
     Objects,
     /// `0x401c17`: `ClearItemAndSpellCooldowns`, for a load the objects' leg ran.
     Cooldowns,
+    /// `0x401c22`: the new object manager for the map loaded (`ClntObjMgrCreate` `0x464ff0`), whose
+    /// map-change latch (`0x46500e`) is `crate::ui_instance`'s, for each map the objects' leg ran
+    /// ([`PendingWorldports::take_loaded`]).
+    Manager,
     /// `0x401c2c`: `CancelAllLootRolls`, for a load the objects' leg ran; the map load
     /// (`0x401c5c`) follows.
     Rolls,
@@ -589,6 +663,7 @@ pub(crate) fn fire_worldport_timer(world: &mut World) {
 /// The posted world loads' objects leg, at the frame's start ([`WorldportTimer::Objects`]).
 fn world_load_timer(mut pending: ResMut<PendingWorldports>, mut load: WorldLoad) {
     for dest in std::mem::take(&mut pending.posted) {
+        pending.loaded.push(dest.map_id);
         load.objects_destroyed(dest, true);
         pending.ported = pending.ported.wrapping_add(1);
     }

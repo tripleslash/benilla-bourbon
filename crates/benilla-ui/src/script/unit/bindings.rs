@@ -534,13 +534,15 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 if !exists || guid == 0 {
                     return Ok(Value::Nil);
                 }
+                // The party slots never hold the active player (`0x4e8fa0`); the raid roster does.
+                let own = roster_read::cells(lua, &model.party).own_guid;
                 let in_group = |guid: u64| {
-                    guid != 0
-                        && if raid {
-                            model.party.raid.iter().any(|m| m.guid == guid)
-                        } else {
-                            model.party.members.iter().any(|m| m.guid == guid)
-                        }
+                    let at = roster_read::membership(lua, &model.party, guid);
+                    if raid {
+                        at.raid
+                    } else {
+                        at.party && guid != own
+                    }
                 };
                 // The pets the last push resolved for the rows, else the owner's.
                 let pets = if raid {
@@ -1134,7 +1136,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // DropItemOnUnit(unit) (`0x48d960`): drop the cursor's item on a unit, feeding a pet or
-    // opening a trade with a player. Only the token is queued; the app runs every gate.
+    // opening a trade with a player, inside the call; the host runs every gate.
     g.set(
         "DropItemOnUnit",
         lua.create_function(|lua, token: Value| {
@@ -1149,10 +1151,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             if token != "pet"
                 || crate::script::protected::gate(lua, crate::script::protected::Tag::CAST)
             {
-                let mut model = lua
-                    .app_data_mut::<crate::script::ModelCell>()
-                    .expect("model app_data");
-                model.drop_item_on_unit.push(token);
+                submit(lua, ScriptCall::DropItemOnUnit(token))?;
             }
             Ok(())
         })?,

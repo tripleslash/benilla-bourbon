@@ -93,11 +93,8 @@ pub(crate) use scan::{fire_owed_selects_lane, take_owed_deselects, LastEnemy};
 pub(crate) use scan::{
     Acquire, AttackNearestRequest, AttackPick, CreatureTypes, Owed, OwedSelect, OwedSelects,
 };
-// The chat layer's by-name asks (`/target`, `/assist`), and the typemask `TargetByName`'s
-// candidate feed shares.
-pub(crate) use by_name::{
-    assistable_alive, AssistRequest, Candidacy, NameSearch, PlayerLookup, TargetByNameRequest,
-};
+// The typemask `TargetByName`'s candidate feed shares.
+pub(crate) use by_name::{assistable_alive, Candidacy, NameSearch, PlayerLookup};
 // The one SetSelection path, for the loot response's select (`0x48f3a0`), and what a selecting
 // call owes after its signals.
 pub(crate) use by_name::{SelectCommit, SelectDebt};
@@ -284,9 +281,9 @@ pub(crate) struct AssistAttack(pub(crate) bool);
 
 /// The targeting rows' change callback: two flags.
 pub(crate) fn on_cvar(
-    ev: On<crate::cvars::CvarChanged>,
-    mut click: ResMut<ClickConfig>,
-    mut assist: ResMut<AssistAttack>,
+    ev: &crate::cvars::CvarChanged,
+    mut click: bevy::prelude::Mut<'_, ClickConfig>,
+    mut assist: bevy::prelude::Mut<'_, AssistAttack>,
 ) {
     match ev.key().as_str() {
         "deselectonclick" => click.deselect_on_click = ev.flag(),
@@ -300,7 +297,6 @@ pub(crate) struct TargetPlugin;
 
 impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
         // The update packet's field callbacks, a death's among them, after the net plugin's
         // update end, which writes their edges.
         crate::field_callbacks::register(app);
@@ -329,8 +325,6 @@ impl Plugin for TargetPlugin {
             .init_resource::<scan::TabHistory>()
             .init_resource::<scan::LastEnemy>()
             .add_message::<AttackNearestRequest>()
-            .add_message::<TargetByNameRequest>()
-            .add_message::<AssistRequest>()
             .add_message::<click::PlateRightClick>()
             .add_message::<Interact>()
             .add_systems(Startup, (ring::setup_ring, reticle::setup_reticle))
@@ -355,12 +349,10 @@ impl Plugin for TargetPlugin {
                         .chain(),
                     // The units the plate selects parked with the targeting cursor up, bound to its
                     // cast; then the unit interact of a nameplate's right-click and a crate's
-                    // `Interact`, so the cast goes out ahead of the interact it came with; then
-                    // `DropItemOnUnit`'s legs.
+                    // `Interact`, so the cast goes out ahead of the interact it came with.
                     (
                         crate::script_calls::bind_parked_picks,
                         click::act_on_interact,
-                        crate::ui_action::drop_item::drop_item_on_unit,
                     )
                         .chain(),
                     // The casts the dispatchers queued (`0x5f35c0`, `0x5f06dc` → `0x6e5a90`).
@@ -393,14 +385,6 @@ impl Plugin for TargetPlugin {
                         click::act_on_arrival,
                         crate::script_calls::bind_arrival_picks,
                         crate::ui_action::drain_arrival_casts,
-                    )
-                        .chain(),
-                    // The chat layer's by-name asks: `/target` and `/assist` commit through
-                    // `scan::commit`; `/follow` hands its subject to `crate::player`.
-                    (
-                        by_name::target_by_name_requests,
-                        by_name::assist_requests,
-                        by_name::follow_requests,
                     )
                         .chain(),
                     // The melee probe's press, the player's Attack; the TAB keys and ATTACKTARGET

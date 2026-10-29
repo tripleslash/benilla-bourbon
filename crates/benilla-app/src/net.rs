@@ -29,6 +29,9 @@ pub(crate) mod io;
 pub(crate) mod motion;
 mod objects;
 #[cfg(test)]
+pub(crate) use objects::answer_item;
+pub(crate) use objects::continue_refusal_walk;
+#[cfg(test)]
 pub(crate) use objects::wire;
 pub(crate) use objects::Listed;
 pub(crate) use objects::{release_unheld, ReleasePending};
@@ -42,8 +45,7 @@ mod world;
 pub(crate) use reputations::Reputations;
 
 pub(crate) use apply::apply_net_updates;
-/// For the CVar tests' list of every observer; the plugin adds it itself.
-#[cfg(test)]
+// fork: the `serverTimeOffset` row's change callback ([`crate::cvars::callbacks`]).
 pub(crate) use game_time::time_offset_on_cvar;
 #[cfg(test)]
 pub(crate) use game_time::GameTime;
@@ -548,6 +550,13 @@ pub(crate) struct Embodied;
 #[derive(Component)]
 pub(crate) struct ActiveMover;
 
+/// `IsClientControlled` (`0x5fa5f0`): bit 0x400 of the unit's `+0xc58`, which the control update
+/// sets or clears on its unit (`0x5fa62a`, `0x5fa631`, stored at `0x5fa636`) and only the
+/// constructor clears besides (`0x5fae7a`), so it outlives a release. Our own character's is read
+/// off [`crate::player::OwnControlLost`], which the same update writes beside it.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub(crate) struct ClientControlled;
+
 /// The active-mover global (`0xc4da98`/`0xc4da9c`) as the claims read it: the guid the last
 /// `SetActiveMover` (`0x6006e0`) stored, or none. A claim of the guid it holds returns at once
 /// (`0x6006ee`-`0x6006fb` → `0x600852`), so `CMSG_SET_ACTIVE_MOVER` goes out only on a change.
@@ -573,6 +582,16 @@ impl MoverClaim {
             let _ = net.0.send(ClientCommand::SetActiveMover { guid });
         }
         true
+    }
+
+    /// The guid the global names.
+    pub(crate) fn get(&self) -> Option<u64> {
+        self.0
+    }
+
+    /// Whether the global names `guid` (`0x6103a0`'s first test).
+    pub(crate) fn holds(&self, guid: u64) -> bool {
+        self.0 == Some(guid)
     }
 
     /// The unit `guid` gone or stopped: the global is zeroed when it names it.

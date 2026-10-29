@@ -53,36 +53,6 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::Queue,
-        "::ui_action::errors::UiErrorKeys",
-        "the refusals the handlers push, which the action feed shows",
-    ),
-    (
-        Row::Queue,
-        "::tutorial::Tutorials",
-        "the tutorial banks a handler fires",
-    ),
-    (
-        Row::Queue,
-        "Messages<benilla_app::tutorial::TutorialEvent>",
-        "the tutorial events",
-    ),
-    (
-        Row::Queue,
-        "::ui_action::errors::MountErrors",
-        "the mount refusals",
-    ),
-    (
-        Row::Queue,
-        "::ui_action::errors::PetTameFailures",
-        "the pet-tame refusals",
-    ),
-    (
-        Row::Queue,
-        "::ui_action::errors::UiErrorTexts",
-        "the wire's error texts",
-    ),
-    (
-        Row::Queue,
         "::player::view_subject::FarSight",
         "the far-sight machine a handler's Lua runs through the host's buff cancel; every feed \
          that lends the host reads it, and none fires from it",
@@ -101,12 +71,6 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
          call, through the host's bar verbs",
     ),
     (
-        Row::HostHeld,
-        "::ui_logout::LogoutState",
-        "the logout state, which `feed_logout` fires from; the session verbs, acting in their \
-         calls, hold it in the host",
-    ),
-    (
         Row::Queue,
         "::ui_logout::SessionPosts",
         "the exit and the cinematic stop a session verb posts, which nothing the script reads \
@@ -114,73 +78,15 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
     ),
     (
         Row::HostHeld,
-        "::death::DeathNet",
-        "the death stores, which `feed_death` fires the offers and the corpse range from; the death verbs, acting in their calls, hold them in the host",
-    ),
-    (
-        Row::HostHeld,
-        "::ui_craft::CraftOpen",
-        "the craft window's line, which `feed_craft` fires from; `CloseCraft`, acting in its call, holds it in the host",
-    ),
-    (
-        Row::HostHeld,
-        "::ui_tradeskill::TradeSkillOpen",
-        "the profession window's line, which `feed_trade_skill` fires from; `CloseTradeSkill`, acting in its call, holds it in the host",
-    ),
-    (
-        Row::HostHeld,
-        "::ui_tradeskill::TradeSkillOpens",
-        "the profession openers a cast intercepted (`0x6e4bd7`), which `open_trade_skill` opens in \
-         the feed and `feed_trade_skill` and `feed_craft` signal `TRADE_SKILL_SHOW` and \
-         `CRAFT_SHOW` from, where the reference opens and signals inside the cast (`0x4fc910`, \
-         `0x4f6000`)",
-    ),
-    (
-        Row::HostHeld,
         "::items::Items",
-        "the record answers' callbacks: `replay_equip_records` runs the equip replays in the \
-         drain (`0x5e1020`: `AutoEquipCursorItem` again, a parked swap) and `feed_item_stats` \
-         fires the quest log's `QUEST_LOG_UPDATE` (`0x4e0830`) off the records it pushes, where \
-         the reference runs both in `ItemCacheReceive` `0x55bdb0`, inside the response's handler \
-         (`0x555140`, `0x555160`)",
-    ),
-    (
-        Row::HostHeld,
-        "::ui_action::PlayerActions",
-        "the book's unlearn and supersede queues and its known set, which `clear_unlearned_slots` \
-         clears the bar off with its sends (`0x4e5e20` from `0x5ea253`), `rebind_macro_spells` \
-         rewrites the bar's macros off (`0x4e5ec4`) and `feed_actions` signals \
-         `ACTIONBAR_SLOT_CHANGED` from, where the reference does each inside the spell packet's \
-         handler",
-    ),
-    (
-        Row::HostHeld,
-        "::ui_merchant::MerchantOpen",
-        "the vendor's cell, whose open `tutorial::watch_windows` turns into the Vendors tutorial \
-         `feed_tutorials` fires, where the list's handler triggers it (`0x4fad32`)",
-    ),
-    (
-        Row::HostHeld,
-        "::ui_trainer::TrainerOpen",
-        "the trainer's cell, whose open `tutorial::watch_windows` turns into the Trainers \
-         tutorial's acknowledge `feed_tutorials` applies, where the list's handler makes it \
-         (`0x4d74ae`)",
-    ),
-    (
-        Row::HostHeld,
-        "::spell::targeting::CursorPicks",
-        "the units a handler's select found the targeting cursor up for, the loot response's \
-         (`0x5ebc35` → `0x48f3a0`), which the next call or `bind_parked_picks` in the next \
-         frame's click legs binds, where `SelectTarget` binds in place (`0x4935d5` → `0x6e5b40`), \
-         inside the packet",
-    ),
-    (
-        Row::Edge,
-        "::ui_action::state::fire_action_events",
-        "the usable cache's refresh `0x4e5c00` (`ACTIONBAR_UPDATE_USABLE`) of `EditMacro` \
-         (`0x4f132e`) and `RaiseBagUpdate` (`0x4f9374`), which the reference runs in the call and \
-         in the item watcher's run, one pass a frame over the bar's 120 slots diffed against the \
-         cache",
+        "the record answers' callbacks still run off the frame's records rather than in the \
+         answer's list (`ItemCacheReceive` `0x55bdb0`, `0x55bf12`-`0x55bf39`): the action bar's \
+         slot records' (`0x4e5b80`) asked as a slot first shows, the \
+         dress-up's (`0x504ba0`), the cast failure's redisplay (`0x6e29b0`, `0x6e2a90`), the \
+         equipment display's (`0x5ed880`), and the lock-key tooltip's (`0x52ad10`), which \
+         `drive_mouseover_tooltip` rebuilds each frame; and the combat log's (`0x6294b0`) and the \
+         auction lists' (`0x4cca10`, `0x4ccc60`, `0x4cceb0`), which `run_answer_tail` runs after \
+         the answer's list rather than in it",
     ),
 ];
 
@@ -215,6 +121,9 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Quiet: our own guid, which the login's handlers set and everything reads; the arrival's
     // signals are the arrival lane's, and no feed fires off its change.
     "::net::SelfGuid",
+    // Written by the group handlers at their packets, read through the host by the relation
+    // getters (`0x4e7f70` inside `0x6061e0`), and quiet: no feed fires off it.
+    "::spell::group_relation::GroupRoster",
     // Read by the quest log getters through the host (`QuestClock`), and quiet: the time
     // response's `QUEST_LOG_UPDATE` fires on the quest log lane, and `send_query_time`'s hourly
     // resync is a timer.
@@ -222,14 +131,21 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Read through the host by `GetGameTime` (`0x515ee0`), and quiet: no event signals the clock.
     "::net::game_time::ServerTime",
     // Read, and quiet: the control packet's handler and our own create's arrival signal its
-    // changes on the notice lane in place (`0x4958e0`), and the action bar's diff of it is
-    // `fire_action_events`'s edge row.
+    // changes on the notice lane in place (`0x4958e0`), with the usable refresh after them.
     "::player::state::OwnControlLost",
     // Read through the host by the world click's legs (who we drive, the gathering skills its
     // cursor forks on), and quiet: no feed fires off them.
     "::player::state::MoverLock",
-    // Quiet: the cast ladder's per-call state, which the cast result's handler holds with the
-    // ladder and never writes. A press holds the first and its call resumes it before it returns
+    // Read, and quiet: the follow's arm reads them in its call (`0x611130` → `0x60fb60`), and the
+    // handlers that end an auto-move signal its `AUTOFOLLOW_END` on the notice lane in place
+    // (`0x60fb84`).
+    "::player::approach::Approach",
+    "::player::follow::FollowState",
+    // Quiet: the autorun bit as the frame's calls leave it, read and written inside each call
+    // (`0x513de7`), which an auto-move's stop clears in place (`0x514630`).
+    "::player::press::CallAutorun",
+    // Quiet: the cast ladder's per-call state, which the cast result's, the loot response's and the
+    // go's handlers hold with the ladder and never write. A press holds the first and its call resumes it before it returns
     // (`0x6e4efb`), each call sets and puts back the second, and the pet press applies the third
     // in its call; no feed reads them.
     "::spell::cast_send::HeldForPick",
@@ -245,6 +161,11 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Quiet: read by the cost and `$`-token builds; the feeds that read it push views
     // (`READS_FRAME_FINAL`), and none fires off it.
     "::spell::mods::SpellModifiers",
+    // Quiet: the units a select found the targeting cursor up for, which its writer binds at the
+    // select's place (`0x4935d5` → `0x6e5b40`): a handler's in its packet (the loot response's
+    // `0x48f3be`, the acquires' `0x6259fe` and `0x6e799c`, the go's deferred start's `0x5eccaa`), a
+    // call's before its next step; no feed reads it.
+    "::spell::targeting::CursorPicks",
     // Quiet: the targeting word, which `SpellIsTargeting` (`0x6e6cd0`) reads through the host;
     // `feed_cast_reports` pushes its view and the feed publishes the world pick's words for the
     // next frame's input, and no feed fires off it.
@@ -253,13 +174,37 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // getters' `"target"` reads it through the host (`0x515a86`); the feeds that read it push
     // views.
     "::target::Selection",
-    // Quiet: the world click's and `DropItemOnUnit`'s latches, read in their calls; no feed fires
-    // off them. `track_learned_abilities` rebuilds them in the feed off the book, where the
-    // reference writes them at the learn.
+    // Quiet: the world click's and `DropItemOnUnit`'s latches, read in their calls, which the
+    // learn, unlearn and supersede handlers write at their packet (`0x4b262c`, `0x5e9e49`,
+    // `0x4b2c83`); no feed fires off them.
     "::ui_action::LearnedAbilities",
+    // Quiet: the reactive list, which the learn and supersede handlers' registrar leg grows at
+    // their packet (`0x4b27b3`-`0x4b27c7`) and our create's arrival empties and fills again
+    // (`0x5dea86`); the usable refreshes re-check it in their places, and no feed reads it.
+    "::ui_action::ReactiveSpells",
+    // Quiet: the bar's usable cache, which the game entry's handler zeroes (`0x48f5a4` →
+    // `0x4e4f50`) and the host's slot writes and refreshes store in place (`0x4e590a`,
+    // `0x4e5c00`); the action-state feed pushes its pairs silently.
+    "::ui_action::state::ActionStateMemory",
+    // Quiet: the known spells and the book's lists, which the learn, unlearn and supersede handlers
+    // write at their packet beside the bar's clears and replaces, whose signals go on the notice
+    // lane there (`0x5ea253`, `0x5e6356`); the feeds that read it push views (`READS_FRAME_FINAL`),
+    // and none fires off it.
+    "::ui_action::PlayerActions",
     // Read through the host by the auction getters, and quiet: the hello's show, the lines, the
     // patches, the removals and the pages fire on the house lane at their handlers.
     "::ui_auction::AuctionOpen",
+    // Quiet: the craft and profession windows' open type and line, which an opener's cast
+    // toggles and signals inside its call (`0x4fc910`, `0x4f6000`), the closes zero in theirs, and
+    // the disconnect handlers (`ui_craft::on_session_end`, `ui_tradeskill::on_session_end`) clear
+    // without a signal; the profession and craft builds and getters read the line and the type
+    // through the host at their places.
+    "::ui_craft::CraftOpen",
+    "::ui_tradeskill::TradeSkillOpen",
+    // Quiet: the profession openers a cast intercepted (`0x6e4bd7`), which the call host toggles
+    // before the call returns and the disconnect handler (`ui_tradeskill::on_session_end`)
+    // empties; no feed reads it.
+    "::ui_tradeskill::TradeSkillOpens",
     // Read through the host by the bank getters, and quiet: its events fire on the bank lane at
     // their handlers, and `PurchaseSlot` and `CloseBankFrame` hold it in their calls.
     "::ui_bank::BankOpen",
@@ -307,8 +252,10 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // pending time in the world frame's update, as `0x4ade60` does after the packets.
     "::ui_mail::MailOpen",
     "::ui_mail::pending::MailPending",
-    // Read through the host by the stationery getters, and quiet: its rebuilds signal nothing.
-    "::ui_mail::stationery::UsableStationery",
+    // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: read through the host by the
+    // vendor's getters, and quiet. The list's handler triggers the Vendors tutorial on the
+    // tutorials lane at its packet (`0x4fad32`), and the window's events fire on the merchant lane.
+    "::ui_merchant::MerchantOpen",
     // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: read, and quiet. A new pet's
     // `SMSG_PET_SPELLS` lowers it inside `SetPet` (`0x4bc8ce`), whose `PET_BAR_UPDATE` (`0x4bc90c`)
     // fires on the notice lane; `IsPetAttackActive` and the bar's getters read it through the host,
@@ -334,6 +281,19 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // the world frame's update, after the packets. `feed_interact_npc` copies it as
     // `InteractNpc` right after the dispatch, for the engine's own token reads.
     "::ui_session::latch::InteractLatch",
+    // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: the session verbs read and write
+    // the logout bytes through the host in their calls, and quiet: the replies' handlers signal on
+    // the notice lane at their packets.
+    "::ui_logout::LogoutState",
+    // Quiet: the connection's state, which the session's handlers write and the death getters'
+    // body test reads through the host; no feed fires off it.
+    "::net::NetStatus",
+    // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: the death getters read the stores
+    // through the host and the death verbs hold them in their calls, and quiet: the offers and the
+    // corpse-range signals packets raise go on the dialogs' lane at their handlers, the revive's
+    // on the notice lane, and the corpse poll runs in the world frame's update, after the packets
+    // (`0x4818c5`).
+    "::death::DeathNet",
     // Read through the host by the taxi getters, and quiet: its events fire on the taxi lane at
     // their handlers.
     "::ui_taxi::TaxiState",
@@ -349,6 +309,10 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Read, and quiet: `CheckTalentMasterDist` reads the latch through the host and the Accept
     // holds it; the question's `CONFIRM_TALENT_WIPE` fires on the notice lane.
     "::ui_talent_wipe::TalentWipeState",
+    // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: read through the host by the
+    // trainer's getters, and quiet. The list's open acknowledges its tutorial on the tutorials lane
+    // at its packet (`0x4d74ae`), and the window's events fire on the trainer lane.
+    "::ui_trainer::TrainerOpen",
     // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: the trade getters read it through
     // the host, and no feed fires off it, as its statuses' events go on the trade lane at their
     // handlers and the initiate's name callback.
@@ -378,52 +342,39 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::ui_tooltip::drive_mouseover_tooltip", &["go_anim::GoAnim",
         "go_templates::GameObjectTemplates", "items::Countdowns", "items::Items",
         "names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
-        "net::reputations::Reputations", "ui_action::PlayerActions", "ui_guild::GuildState"]),
+        "net::reputations::Reputations", "spell::group_relation::GroupRoster",
+        "ui_action::PlayerActions", "ui_guild::GuildState",
+        // `widescreen`, which seats the object plate on the interface's screen: a listener's
+        // `SetCVar` moves it inside its call, and the build reads it as the frame left it.
+        "video::Widescreen"]),
 
-    ("::death::feed_death", &["Transform", "death::DeathNet", "items::Countdowns", "items::Items",
-        "names::NameCache", "net::GuidIndex", "net::NetStatus", "net::ObjectStore",
-        "net::SelfGuid"]),
-    // The party and raid tokens read the members' stores, records and the roster's cells as of
-    // the drain's place (`ui_unit::views`), and the group getters read the cells through the host;
-    // the roster push is their no-host fallback, and every snapshot's names and relations read as
-    // the frame left them.
+    // The group's push, the party and raid getters' no-host fallback: the roster's cells, its
+    // members' names and objects as the frame left them; the tokens read live at the call.
     ("::ui_party::feed::feed_party", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
-        "net::SelfGuid", "net::reputations::Reputations", "ui_guild::GuildState",
         "ui_party::GroupState"]),
-    ("::tutorial::feed_tutorials", &["items::Items", "net::ObjectStore"]),
-    ("::ui_logout::feed_logout", &["ui_logout::LogoutState"]),
-    // The engine's follow transitions, which a `FollowUnit` a handler's listener makes arms.
-    ("::ui_follow::feed_follow", &["player::follow::FollowState", "ui_follow::FollowFeed"]),
     // The ammo getters' hits fire after the push that carries their record, whenever it runs.
     ("::ui_char::feed_char", &["items::Countdowns", "items::Items", "names::NameCache",
         "net::GuidIndex", "net::ObjectStore", "ui_char::AmmoRecordHits"]),
     ("::ui_action::feed::feed_actions", &["items::Countdowns", "items::Items", "net::GuidIndex",
-        "net::ObjectStore", "ui_action::ActionSlots", "ui_action::PlayerActions",
-        "ui_action::errors::MountErrors",
-        "ui_action::errors::PetTameFailures", "ui_action::errors::UiErrorTexts"]),
+        "net::ObjectStore", "ui_action::ActionSlots"]),
     ("::ui_action::state::feed_action_state", &["Transform",
         "creature_anim::sheath::CommittedSheath", "items::Countdowns", "items::Items",
         "names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
         "net::UnitSpeeds", "net::game_time::ServerTime", "net::motion::modes::UnitMoveModes",
         "net::motion::remote::RemoteMotion", "net::reputations::Reputations",
-        "player::state::OwnControlLost", "player::state::StandPending", "spell::cooldowns::Cooldowns",
-        "spell::mods::SpellModifiers", "target::Selection", "ui_action::ActionSlots",
-        "ui_action::PlayerActions", "ui_action::state::ActionStateMemory", "ui_pet::PetBar"]),
+        "player::state::OwnControlLost", "player::state::StandPending",
+        // `autoSelfCast`, which picks the unit the range check measures: a listener's `SetCVar`
+        // moves it inside its call, and the push reads it as the frame left it.
+        "spell::cast_target::AutoSelfCast", "spell::cooldowns::Cooldowns",
+        "spell::group_relation::GroupRoster", "spell::mods::SpellModifiers", "target::Selection",
+        "ui_action::ActionSlots", "ui_action::state::ActionStateMemory", "ui_pet::PetBar"]),
     // The resolver's guids, pushed before the drain and read with the host lent too: the
     // mouseover, the group rows past a token's own, the pet records and every row of the field
     // events' fan-out, which the `UNIT_HAPPINESS` gate reads. The aura getters walk each unit
     // live, and the world entry's rebuild runs in its cascade (`0x490983`).
     ("::ui_aura::feed_unit_guids", &["net::GuidIndex", "net::ObjectStore", "target::Selection",
         "ui_party::GroupState"]),
-    // The pet book's sorts, which each pet spell list counts and the derivation follows
-    // (`0x4bdae0`): the frame's lists derive once, after the last.
-    ("::ui_macro::rebind_macro_spells", &["ui_action::ActionSlots", "ui_action::PlayerActions",
-        "ui_pet::PetBar"]),
     ("::ui_macro::load_macros", &["ui_action::ActionSlots"]),
-    // The pet's snapshot reads its store as of the drain's place (`ui_unit::views`); its name
-    // reads as the frame left it.
-    ("::ui_pet::unit::feed_pet_unit", &["names::NameCache", "net::GuidIndex", "net::ObjectStore",
-        "net::SelfGuid", "ui_party::GroupState"]),
     ("::ui_cast::feed_cast_reports", &["items::Countdowns", "items::Items", "net::GuidIndex",
         "net::ObjectStore", "spell::inflight::AutoRepeatActive", "spell::inflight::PendingCast",
         "spell::inflight::QueuedMeleeSpell", "spell::targeting::SpellTargeting",
@@ -432,17 +383,9 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("::ui_items::locks::forget_gone_item_locks", &["net::GuidIndex"]),
     ("::ui_items::feed::feed_item_stats", &["items::Items", "net::HomeBind", "net::ObjectStore",
         "spell::mods::SpellModifiers"]),
-    ("::ui_taxi::feed_on_taxi", &["net::ObjectStore"]),
-    // The getters' item callbacks, kept inside their calls, are spent as the frame left them.
-    ("::ui_tradeskill::feed_trade_skill", &["items::Countdowns", "items::Items", "net::GuidIndex",
-        "net::ObjectStore", "spell::cooldowns::Cooldowns", "ui_action::PlayerActions",
-        "ui_tradeskill::TradeSkillItemWaits", "ui_tradeskill::TradeSkillOpen"]),
-    // Beast Training reads the pet off its bar and its family off the creature record as the frame
-    // left them (#2217).
-    ("::ui_craft::feed_craft", &["items::Countdowns", "items::Items", "names::NameCache",
-        "net::GuidIndex", "net::ObjectStore", "spell::mods::SpellModifiers",
-        "ui_action::PlayerActions", "ui_craft::CraftItemWaits", "ui_craft::CraftOpen",
-        "ui_pet::PetBar"]),
+    // The resolution list's `widescreen` filter (`0x48bcac`), which a listener's `SetCVar` moves
+    // inside its call; the reference builds the list at the first resolution verb (`0x48bc90`).
+    ("::video::publish_display_modes", &["video::Widescreen"]),
 ];
 
 /// The view pushes [`READS_FRAME_FINAL`]'s test finds whose build the reference too makes outside
@@ -459,28 +402,28 @@ pub(super) const BUILT_OUTSIDE_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &
 ];
 
 /// The resources the handlers fill through a shared reference, which their declared access shows
-/// as a read: the error keys a refusal pushes, the tutorial banks a watcher fires, the close
-/// counts a window's core adds to and what a session verb posts. The lanes and the host's two
-/// other sinks (the message sounds and the unit edits, which raise no event) are not queues here.
-const FILLED_THROUGH_A_READ: &[&str] = &[
+/// as a read: the close counts a window's core adds to and what a session verb posts. The lanes
+/// (the tutorials' and the ui errors' among them) and the host's two other sinks (the message
+/// sounds and the unit edits, which raise no event) are not queues here.
+pub(super) const FILLED_THROUGH_A_READ: &[&str] = &[
     // The account-data sections, which the download's handler stores through `&self`.
     "::account_data::AccountData",
-    "::ui_action::errors::UiErrorKeys",
     // The far-sight machine the call host's buff cancel runs (`0x6e70ad`).
     "::player::view_subject::FarSight",
-    "::tutorial::Tutorials",
     "::ui_logout::SessionPosts",
     // The gestures a chat line or a world click's greeting plays, which `drive_gestures` takes.
     "::creature_anim::gesture::GestureQueue",
 ];
 
 /// Every other resource a handler reads and does not write: state, tables and caches it
-/// consults, none of them a queue a feed takes. A new one fails until it is placed here or in
+/// consults, none of them a queue a feed takes. A system between the dispatch and the drain that
+/// writes one has its row in `host_read_tests`'s lists, as a feed that rewrites what a handler
+/// reads would hand it the frame before's. A new one fails until it is placed here or in
 /// [`FILLED_THROUGH_A_READ`]. The list is kept by hand: an entry a handler in fact fills through a
 /// shared reference leaves that queue out of [`handler_queues`], so a feed that takes it and fires
 /// in system order, or a system that pushes onto a lane off it at its own place, passes every
 /// check here unseen.
-const READ_ONLY_TO_HANDLERS: &[&str] = &[
+pub(super) const READ_ONLY_TO_HANDLERS: &[&str] = &[
     // fork: the `serverTimeOffset` hours `GetGameTime` reads at the call; only the CVar's change
     // callback writes them.
     "::net::game_time::TimeOffset",
@@ -489,16 +432,24 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     // every frame, after the dispatch, from the skill lines the handlers write, where the
     // reference reads the skill live at the show (`0x4e3837` → `GetIndexedSpellSkill`). A show
     // inside a packet reads them as the last frame left them: a frame-final read the flip must
-    // make live (#2168), which no list here measures, a handler's read of a feed's output.
+    // make live (#2168), its row in `BETWEEN_THE_DISPATCH_AND_THE_DRAIN`.
     "::ui_chat::language::ChatLanguages",
     // The usable stationery list, whose first paper the list parse gives a row with none
-    // (`0x4ad565`); the paper callback's handler writes it, through its own `ResMut`.
+    // (`0x4ad565`); the paper callback writes it in the item answer's list, through its own
+    // `ResMut`.
     "::ui_mail::stationery::UsableStationery",
     // `ItemBagFamily.dbc`, which the inventory refusal's handler names a bag's family by
     // (`0x5ede00`).
     "::ui_items::ItemBagFamilies",
     // `AuctionHouse.dbc`, whose deposit rate the hello's show hands the VM.
     "::ui_auction::AuctionHouses",
+    // The corpse-range latch, which the reclaim delay's handler tests to signal again
+    // (`0x4962ec`); the corpse query's not-found handler and the corpse poll write it through
+    // their own `ResMut`.
+    "::death::DeathLatches",
+    // The connection's state, which the death getters' body test reads through the host; the
+    // socket's handlers write it through their own `ResMut`.
+    "::net::NetStatus",
     // The login pick, which names the character the account-data sections belong to.
     "::glue_session::roster::Roster",
     // `0xb4e314`, which the party snapshot reads; only the zone feed commits it.
@@ -541,11 +492,11 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::ChrClassTable",
     "::ChrRaceTable",
     "::RacePvpTeams",
-    "::MacroBoundSpells",
     "::NameCache",
-    // The Video menus' lists the host's resolution and multisample verbs read (`0x48bc90`, `0x48c3e0`).
-    "::video::Widescreen",
+    // The Video menu's list the host's multisample verbs read (`0x48c3e0`).
     "::view::MsaaFormats",
+    // A capture run, which parks the camera the view verbs would move.
+    "::run_mode::CaptureMode",
     "::ServerTime",
     "::GuidIndex",
     // The bag cache the open-container handler numbers its `BAG_OPEN`s from.
@@ -560,6 +511,12 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::ui_trade::BlockTrades",
     // Who we drive, which the loot response reads; our own create's arrival writes it.
     "::player::state::MoverLock",
+    // The active mover, which the handlers that end an auto-move test (`0x6103a0`); our own
+    // create's arrival claims it (`0x4958a0`).
+    "::net::MoverClaim",
+    // The far-sight subject, whose view-out term the stun's tick reads (`0x514537`); the frame's
+    // far-sight machine publishes it.
+    "::player::view_subject::ViewSubject",
     "::player::state::StandPending",
     // The page cache the host's page turns read.
     "::ui_item_text::PageTexts",
@@ -572,7 +529,6 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::PlayerOutdoors",
     "::EmoteSounds",
     "::ExplorationSounds",
-    "::ScriptCastPermit",
     "::AutoSelfCast",
     "::GroupRoster",
     "::ActiveChannel",
@@ -594,6 +550,8 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::GuildMemberNotify",
     "::PetitionRecords",
     "::ItemSubClasses",
+    // `showLootSpam`, which the roll handlers read as their lines compose (`0x61ba3a`,
+    // `0x61bafe`, `0x61c0b9`); a listener's `SetCVar` writes it inside its call.
     "::LootConfig",
     "::LootKneel",
     "::MailOpen",
@@ -654,15 +612,13 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
     "::ItemSets",
     "::ItemNames",
     // What the world click's legs read in the call (`0x481f60`): the lock tables an object's
-    // open gates on, the cover and the inspector that refuse an arm, the look tuning and the
-    // frame's motion its drag test reads, `deselectOnClick`, and Shift for `SetAutoLoot`.
+    // open gates on, the cover and the inspector that refuse an arm, the frame's motion its drag
+    // test reads, and Shift for `SetAutoLoot`.
     "::go_templates::LockTypes",
     "::go_templates::Locks",
     // The gathering skills the world click's cursor forks on, read through the host.
     "::ui_action::LearnedAbilities",
     "::loading_screen::LoadingScreen",
-    "::player::camera::LookConfig",
-    "::target::ClickConfig",
     "::ui_script::InspectMode",
     "bevy_input::button_input::ButtonInput<bevy_input::keyboard::KeyCode>",
     "bevy_input::mouse::AccumulatedMouseMotion",
@@ -671,7 +627,7 @@ const READ_ONLY_TO_HANDLERS: &[&str] = &[
 ];
 
 /// Every lane's queue, by type: what a handler fills there fires in the packets' order.
-fn lane_types() -> [TypeId; 39] {
+pub(super) fn lane_types() -> [TypeId; 41] {
     [
         // The views lane: what each packet changed in the stores.
         TypeId::of::<crate::ui_unit::views::ViewLog>(),
@@ -689,7 +645,7 @@ fn lane_types() -> [TypeId; 39] {
         // The list rebuilds a learn, an unlearn or a pet's spells owe, stamped at their packets.
         TypeId::of::<crate::ui_tradeskill::ListRebuilds>(),
         // The field callbacks' lane: the signals each callback's legs parked, stamped under its
-        // edge.
+        // edge, and the refused records' walks gone on behind their signals.
         TypeId::of::<crate::field_callbacks::FieldCallbacks>(),
         // The release lane: the signals each selection teardown parked, stamped under its release.
         TypeId::of::<crate::target::Releases>(),
@@ -747,12 +703,17 @@ fn lane_types() -> [TypeId; 39] {
         TypeId::of::<crate::ui_mail::MailLane>(),
         // Our player's arrival, stamped at its create.
         TypeId::of::<crate::ui_world_enter::ArrivalLane>(),
+        // The tutorials lane: each site's trigger, acknowledge and selection, and the flags'
+        // copy, stamped where it runs.
+        TypeId::of::<crate::tutorial::Tutorials>(),
+        // The ui-error lane: each refusal and notice, stamped where its handler or verb shows it.
+        TypeId::of::<crate::ui_action::UiErrorKeys>(),
     ]
 }
 
 /// [`lane_types`] by the lane that drains each: a queue is stripped only from its own lane's row,
 /// so another lane's read of the same type shows as the state it is.
-fn lane_queue_owners() -> [(&'static str, TypeId); 39] {
+fn lane_queue_owners() -> [(&'static str, TypeId); 41] {
     [
         ("unit views", TypeId::of::<crate::ui_unit::views::ViewLog>()),
         (
@@ -826,11 +787,13 @@ fn lane_queue_owners() -> [(&'static str, TypeId); 39] {
             "arrival",
             TypeId::of::<crate::ui_world_enter::ArrivalLane>(),
         ),
+        ("tutorials", TypeId::of::<crate::tutorial::Tutorials>()),
+        ("ui errors", TypeId::of::<crate::ui_action::UiErrorKeys>()),
     ]
 }
 
 /// Whether `id` names a `Messages<T>` buffer, which a reader takes from through a read.
-fn is_messages(world: &World, id: ComponentId) -> bool {
+pub(super) fn is_messages(world: &World, id: ComponentId) -> bool {
     name(world, id).contains("Messages<")
 }
 
@@ -841,7 +804,7 @@ pub(super) fn name(world: &World, id: ComponentId) -> String {
         .map_or_else(|| "?".to_string(), |n| n.to_string())
 }
 
-fn ends_with_any(name: &str, rows: &[&str]) -> bool {
+pub(super) fn ends_with_any(name: &str, rows: &[&str]) -> bool {
     rows.iter().any(|s| name.ends_with(s))
 }
 
@@ -850,14 +813,14 @@ fn ends_with_any(name: &str, rows: &[&str]) -> bool {
 /// beside the queries, and a `NonSend`'s an unfiltered one on a type that is not `Send`; an
 /// unbounded read (an `EntityRef` query) names none, as 0.18's never counted those.
 #[derive(Default)]
-struct ResourceAccess {
+pub(super) struct ResourceAccess {
     /// Read or written.
     reads: BTreeSet<ComponentId>,
     writes: BTreeSet<ComponentId>,
 }
 
 impl ResourceAccess {
-    fn of(world: &World, set: &bevy::ecs::query::FilteredAccessSet) -> Self {
+    pub(super) fn of(world: &World, set: &bevy::ecs::query::FilteredAccessSet) -> Self {
         let mut out = Self::default();
         for fa in set.filtered_accesses() {
             let resource = fa
@@ -890,7 +853,7 @@ impl ResourceAccess {
     }
 
     /// Read and not written.
-    fn resource_reads(&self) -> impl Iterator<Item = ComponentId> + '_ {
+    pub(super) fn resource_reads(&self) -> impl Iterator<Item = ComponentId> + '_ {
         self.reads.difference(&self.writes).copied()
     }
 
@@ -1071,6 +1034,8 @@ fn the_drain_runs_after_the_feeds_and_before_the_tick() {
             "taxi",
             "trade",
             "trainer",
+            "tutorials",
+            "ui errors",
             "unit views",
             "world states"
         ]
@@ -1315,7 +1280,12 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
     (
         "::ui_chat::channels::auto_join_zone_channels",
         "world entry only arms the zone-channel walk, an engine turn that runs no Lua: its one \
-         push is a walk's refusal into `UiErrorKeys`, which the action feed shows",
+         push is a walk's refusal onto the ui-error lane",
+    ),
+    (
+        "::player::controller::control",
+        "the mover's queue sends the root and unroot acks at its frame update (`0x616438`, \
+         `0x6164a9`), and their input tick stops an auto-move there (`0x60e33d` → `0x60e347`)",
     ),
     (
         "::ui_chat::channels::end_session_channels_on_disconnect",
@@ -1325,11 +1295,7 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
 
 /// The systems outside the phase that lend the call host and take a handler queue, firing off it
 /// in system order: remaining work, which only shrinks, by a suffix of the system's name.
-pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[(
-    "::ui_tradeskill::drain_trade_skill",
-    "the repeat craft's hook, which the reference runs inside the cast's go, its call to \
-         `0x4fd7b0` (`0x6e81e7`), off the cast events",
-)];
+pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[];
 
 /// The systems that take a placed queue ([`placed_queues`]) after the dispatch and push onto a
 /// lane, at the item's place or, from their commands, at their own, by a suffix of the system's
@@ -1866,9 +1832,9 @@ pub(super) const LANE_READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     ("chat setup arrivals", &["ui_chat::edit::ChannelState"]),
     // Our arrival's legs read and reset what later packets of its frame write, as the frame left
     // it: the book the replay learns, the battlefield and stone it resets and asks again for, the
-    // death stores its death state reads and its corpse ask resets, the class family it sets, and
-    // the connection the clock resync asks through.
-    ("arrival", &["death::DeathNet", "net::NetStatus", "spell::mods::SpellModifiers",
+    // corpse-range latch its corpse ask lowers, and the class family it sets.
+    ("arrival", &["chat_bubble::BubbleConfig", "death::DeathLatches",
+        "spell::mods::SpellModifiers",
         "ui_action::PlayerActions", "ui_battlefield::Battlefield",
         "ui_dialog_verbs::MeetingStone"]),
     // The watchers' callbacks: the quest log's slots, the skill line's race and class and the
@@ -1876,15 +1842,14 @@ pub(super) const LANE_READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     // watcher's own store is the one its packet left, and the buff timers read the duration
     // packet's stamps through the call host. The drunk line's name is read through the host.
     // `SetPetGuid`'s trainer refresh reads the open trainer, and its `PET_UI_CLOSE` the new
-    // pet's object and ours, as the frame left them.
-    ("field notices", &["net::GuidIndex", "net::ObjectStore", "ui_trainer::TrainerOpen"]),
-    // The views lane reads the stores, records and roster cells it rewinds as of each packet, and
-    // the reputations as the reputation lane replays them; the names, the relations' stores, the
-    // selection and the guild as the frame left them (#2217).
-    // The roster's cells and records it rewinds and seats while it builds; the rest as the frame
-    // left it.
-    ("unit views", &["names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
-        "target::Selection", "ui_guild::GuildState", "ui_party::GroupState"]),
+    // pet's object and ours, as the frame left them. The explored watcher's landmark rebuild
+    // (`0x4a67a0`) reads the guard-directions marker and the world states.
+    ("field notices", &["net::GuidIndex", "net::ObjectStore", "poi_marker::PoiMarker",
+        "ui_trainer::TrainerOpen", "world_state::WorldStates"]),
+    // The views lane rewinds the stores, records and roster cells as of each packet for the
+    // tokens' live reads; it reads the index and the selection as the frame left them (#2217).
+    ("unit views", &["net::GuidIndex", "net::ObjectStore", "target::Selection",
+        "ui_party::GroupState"]),
     ("cast reports", &["items::Countdowns", "items::Items", "net::GuidIndex", "net::ObjectStore",
         "ui_action::cast_lines::CastFailRedisplays"]),
     ("item watchers", &["items::Countdowns", "items::Items", "names::NameCache", "net::GuidIndex",
@@ -1895,7 +1860,7 @@ pub(super) const LANE_READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     // names, the source's object and the records a copier and a push read, as the frame left them
     // (#2217); the getters read the window each step's packet left through the host.
     ("loot", &["items::Countdowns", "items::Items", "names::NameCache", "net::GuidIndex",
-        "net::ObjectStore", "ui_loot::AutoLootByte", "ui_loot::LootLatch",
+        "net::ObjectStore", "ui_loot::AutoLootByte", "ui_loot::LootConfig", "ui_loot::LootLatch",
         "ui_loot::LootMoveStart", "ui_party::GroupState"]),
     // A list's copy reads the stable, the creature cache and the pet as the frame left them; its
     // listeners read the stable through the host (#2217).
@@ -1913,8 +1878,15 @@ pub(super) const LANE_READS_FRAME_FINAL: &[(&str, &[&str])] = &[
     // A close's tail parked behind the lane reads the deferred refresh at its place (`0x4acda8`),
     // past an arrival's arm by a later packet of the frame (`0x4ad642`).
     ("mail", &["ui_mail::pending::MailPending"]),
-    ("chat", &["go_templates::GameObjectTemplates", "items::Items", "names::NameCache",
-        "net::GuidIndex", "net::ObjectStore", "net::SelfGuid", "ui_chat::edit::ChannelState",
+    // A selection's tutorial ladder (`0x493789`-`0x49383c`) reads the lit unit, our own and the
+    // relation functions' inputs as the frame left them, where the reference judges it inside
+    // `SetSelection`.
+    ("tutorials", &["names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
+        "spell::group_relation::GroupRoster"]),
+    // With the bubble and filter switches, which a listener's `SetCVar` moves inside its call.
+    ("chat", &["chat_bubble::BubbleConfig", "go_templates::GameObjectTemplates", "items::Items",
+        "names::NameCache", "net::GuidIndex", "net::ObjectStore", "net::SelfGuid",
+        "text_filter::TextFilterSwitches", "ui_chat::edit::ChannelState",
         "world_state::WorldStates"]),
 ];
 
@@ -2035,4 +2007,108 @@ fn every_lane_reads_of_what_a_handler_writes_is_listed() {
          give each its row in LANE_READS_FRAME_FINAL as it stands:\n  {}",
         wrong.join("\n  ")
     );
+}
+
+/// The calls that queue an event on the VM's own lane for its next tick
+/// ([`crate::ui_script::fire_scan::host_queue_writers`]), by a suffix of the calling function's
+/// `path::fn` and the method it calls, with why. The tick fires that lane after the drain, behind
+/// every packet's events, whichever system or lane the call ran in, so no call is exempt; where
+/// the reference signals the event in place, inside the packet or the input that caused it, the
+/// row is remaining work. The flip leaves their order as it is: each fires behind every packet
+/// before it and after it. A new call fails until it has its row, and a row whose call is gone
+/// fails as stale.
+pub(super) const QUEUED_FOR_THE_TICK: &[(&str, &str, &str)] = &[
+    (
+        "capture/fixtures.rs::seed_ui_fixture",
+        "set_world_map_explored",
+        "a capture's fixture, dev tooling outside any session: no packet raises it",
+    ),
+    (
+        "capture/probe_service.rs::service_probe",
+        "take_cursor_item_for_sale",
+        "a probe's scripted sale, dev tooling outside any session",
+    ),
+    (
+        "target/click.rs::talk",
+        "take_cursor_item_for_sale",
+        "the vendor arm's sale clears the cursor outside a verb segment, so its `CURSOR_UPDATE` \
+         waits for the tick, where the interact ladder's `ClearCursor(0, 1)` signals inside the \
+         click (`0x5df5d0`, `0x5df5fc` → `0x495190`), ahead of the packets (I2, #1988)",
+    ),
+    (
+        "ui_world_map.rs::feed_landmarks",
+        "set_world_map_landmark_sources",
+        "rebuilds the landmark list once a frame off its inputs and queues `WORLD_MAP_UPDATE` on a \
+         change, where the reference rebuilds and signals in `0x4a67a0` (`0x4a6ce4`) at each \
+         input's place: the gossip marker's set in its handler (`0x4e2840` → `0x6dac10`, \
+         `0x6dac93`) and its expiry in the minimap's frame update (`0x6d9411`); the explored \
+         bits' watcher (`0x4a6477`) is a field notice of its own",
+    ),
+    (
+        "ui_world_map.rs::feed_world_map",
+        "sync_world_map_to_player_zone",
+        "the first world enter's selection, queued for the next tick (the module's deviation), \
+         where the zone updater selects (`0x4947ac` → `0x4a6650` → `0x4a67a0`) and signals in \
+         place (`0x4a6ce4`)",
+    ),
+    (
+        "ui_world_map.rs::install_world_loc_projector",
+        "set_world_loc_projector",
+        "installs benilla's own projection at a VM's first frame, whose first landmark list \
+         queues `WORLD_MAP_UPDATE`; no reference fact, as the reference projects inside \
+         `0x4a67a0`",
+    ),
+    (
+        "ui_world_map.rs::seed_world_map_catalog",
+        "set_world_map_catalog",
+        "the catalog's push at the interface load, ahead of the session's packets; its \
+         `WORLD_MAP_UPDATE` is benilla's own, as the reference's build (`0x4a5d00`, from \
+         `0x48f5d1`) signals nothing",
+    ),
+    (
+        "ui_world_map.rs::seed_world_map_catalog",
+        "set_world_map_direct_areas",
+        "the instance maps' push beside the catalog, from the same walk (`0x4a5d00`); its \
+         `WORLD_MAP_UPDATE` is benilla's own",
+    ),
+];
+
+/// Every call that queues an event on the VM's lane for its next tick has its row in
+/// [`QUEUED_FOR_THE_TICK`], so a feed that raises off state it compares cannot hide behind the
+/// tick.
+#[test]
+fn every_call_that_queues_for_the_tick_is_listed() {
+    let writers = crate::ui_script::fire_scan::host_queue_writers();
+    let row = |w: &crate::ui_script::fire_scan::QueueWriter| {
+        QUEUED_FOR_THE_TICK
+            .iter()
+            .find(|(f, m, _)| w.writer.ends_with(&format!("/{f}")) && w.method == *m)
+    };
+    let unlisted: Vec<String> = writers
+        .iter()
+        .filter(|w| row(w).is_none())
+        .map(|w| format!("{} calls {} at {}", w.writer, w.method, w.at))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "these queue an event for the VM's next tick, behind every packet's: signal it in place, \
+         or give the call its row in QUEUED_FOR_THE_TICK:\n  {}",
+        unlisted.join("\n  ")
+    );
+    let stale: Vec<String> = QUEUED_FOR_THE_TICK
+        .iter()
+        .filter(|(f, m, _)| {
+            !writers
+                .iter()
+                .any(|w| w.writer.ends_with(&format!("/{f}")) && w.method == *m)
+        })
+        .map(|(f, m, _)| format!("{f} {m}"))
+        .collect();
+    assert!(stale.is_empty(), "stale rows: {stale:?}");
+    let empty: Vec<&str> = QUEUED_FOR_THE_TICK
+        .iter()
+        .filter(|(_, _, why)| why.is_empty())
+        .map(|(f, _, _)| *f)
+        .collect();
+    assert!(empty.is_empty(), "rows with no reason: {empty:?}");
 }

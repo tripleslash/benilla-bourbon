@@ -88,14 +88,6 @@ impl MacroBinding {
     }
 }
 
-/// The derivations a load owes: the load derives every record (`0x4f0a55` into `0x4f0ca0`), each
-/// new with its selector clear (`0x4f1ca0`). The app makes them once the VM holds the book.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MacroDerives {
-    /// The table was loaded since the last take.
-    pub loaded: bool,
-}
-
 /// A record and the scope it belongs to (`rec+0x1c`).
 #[derive(Clone, Debug, PartialEq)]
 struct Record {
@@ -305,14 +297,8 @@ impl super::UiScript {
         model.macros = state;
         model.macros_dirty = false;
         model.macros_generation += 1;
-        model.macro_derives = MacroDerives { loaded: true };
         model.macro_bindings.clear();
         model.macro_show_icons.clear();
-    }
-
-    /// Take the derivations owed since the last take ([`MacroDerives`]).
-    pub fn take_macro_derives(&mut self) -> MacroDerives {
-        std::mem::take(&mut self.model_mut().macro_derives)
     }
 
     /// The live table, for the app's save.
@@ -328,6 +314,16 @@ impl super::UiScript {
     /// Each macro's cached cast by id; a record with none is bound to nothing.
     pub fn macro_bindings(&self) -> std::collections::HashMap<u32, MacroBinding> {
         self.model_ref().macro_bindings.clone()
+    }
+
+    /// The cached cast of macro `id` (`[rec+0x564]`, `[rec+0x568]`, read by `0x4e5ba0`), `None`
+    /// while no macro holds the id (`0x4e5030`): what an action slot's macro word resolves to.
+    pub fn macro_binding(&self, id: u32) -> Option<MacroBinding> {
+        let model = self.model_ref();
+        model
+            .macros
+            .by_id(id)
+            .map(|_| model.macro_bindings.get(&id).copied().unwrap_or_default())
     }
 
     /// Derive again (`0x4efe00`) each record `pick` names by its id and its cast now, against the
@@ -403,12 +399,6 @@ impl super::UiScript {
     /// owner, the save, and a second reader would steal its edge.
     pub fn macros_generation(&self) -> u64 {
         self.model_ref().macros_generation
-    }
-
-    /// How many `EditMacro` calls have edited a macro: each one's worker `EditMacroRecord 0x4f1280`
-    /// ends in the action bar's usable refresh `0x4e5c00` (`0x4f132e`), which the app runs.
-    pub fn macro_edits(&self) -> u64 {
-        self.model_ref().macro_edits
     }
 }
 
@@ -532,7 +522,6 @@ fn edit_macro(
         bind_record(model, id, binding, (book, pet_book));
         model.macros_dirty = true;
         model.macros_generation += 1;
-        model.macro_edits += 1;
         // The order's rebuild (`0x4f1322` into `0x4f0d30`), then each slot that holds the id,
         // lowest first, signalled and sent nothing (`0x4f1329` into `0x4e5cc0`, `0x4e58e0`).
         model.raise("UPDATE_MACROS", vec![]);
@@ -544,11 +533,18 @@ fn edit_macro(
             .collect();
         held.sort_unstable();
         for slot in held {
+            model.call_in_verb(crate::script::ScriptCall::ActionBar(
+                crate::script::ActionBarCall::Notify { id: slot },
+            ));
             model.raise(
                 "ACTIONBAR_SLOT_CHANGED",
                 vec![crate::script::ScriptValue::Int(i64::from(slot))],
             );
         }
+        // The bar's usable cache refreshed last (`0x4f132e` into `0x4e5c00`), in the call.
+        model.call_in_verb(crate::script::ScriptCall::ActionBar(
+            crate::script::ActionBarCall::RefreshUsable,
+        ));
     }
     model.macros.index_of_id(id).unwrap_or(0)
 }

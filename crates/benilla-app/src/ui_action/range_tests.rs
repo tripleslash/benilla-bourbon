@@ -3,6 +3,7 @@
 //! the spell it stands for.
 
 use super::*;
+use crate::net::SelfPlayer;
 use crate::spell::AutoRepeatActive;
 use crate::target::Selection;
 use benilla_formats::{SpellDisplay, SpellRange};
@@ -40,7 +41,6 @@ fn range_answers(
     };
     app.insert_resource(PlayerActions::default())
         .insert_resource(slots)
-        .insert_resource(crate::ui_macro::MacroBoundSpells::default())
         .insert_resource(Spells {
             catalog: benilla_formats::SpellCatalog::from_displays(
                 [(BOLT, bolt)].into_iter().collect(),
@@ -101,8 +101,7 @@ fn range_answers(
         lit: None,
     });
     app.insert_non_send(UiScript::new().unwrap());
-    app.init_resource::<ActionEvents>()
-        .init_resource::<ActionStateMemory>()
+    app.init_resource::<ActionStateMemory>()
         .add_systems(Update, feed_action_state);
     app.update();
     app.world()

@@ -13,7 +13,6 @@ use benilla_protocol::messages::PetSpells;
 
 use crate::net::{GuidIndex, ObjectStore};
 use crate::spell::Cooldowns;
-use crate::ui_unit::UnitFeed;
 
 mod bar;
 #[cfg(test)]
@@ -34,7 +33,7 @@ pub(crate) use usable::actions_usable as pet_actions_usable;
 pub(crate) use drain::call_pet_off;
 pub(crate) use drain::{arm_pet_gcd, cast_pet_press, PetPress, PetStep};
 pub(crate) use steps::PetSteps;
-pub(crate) use unit::{feed_pet_unit, on_field_edge, pet_state, PetSources};
+pub(crate) use unit::on_field_edge;
 
 #[cfg(test)]
 mod call_tests;
@@ -58,10 +57,6 @@ pub(crate) struct PetBar {
     /// press's GCD. Each mutation but the seed fires the flush at its place, on the pet's cooldown
     /// lane (`crate::ui_action::cooldown_lane`).
     pub(crate) cooldowns: Cooldowns,
-    /// The pet book's sorts, one per `SMSG_PET_SPELLS` (`0x4bdadb`), each followed by the
-    /// derivation of the macros that follow the pet's book (`0x4bdae0` → `0x4f0ce0`). Wrapping:
-    /// only a change is read, and [`Self::clear`] keeps it.
-    pub(crate) book_sorts: u32,
     /// `[0xb714a8]`: the charm or possess expiry, the packet's duration past its arrival; `None`
     /// when the duration is 0, as for a hunter's or warlock's own pet.
     pub(crate) expires: Option<Instant>,
@@ -90,7 +85,6 @@ impl Default for PetBar {
         Self {
             spells: PetSpells::default(),
             cooldowns: Cooldowns::pet(),
-            book_sorts: 0,
             expires: None,
         }
     }
@@ -103,14 +97,12 @@ impl PetBar {
     }
 
     /// No pet: every field back to its default, the cooldown list emptied with its counters kept
-    /// ([`Cooldowns::clear_silent`]) and the book's sorts kept, for the teardown packet and the
-    /// session end.
+    /// ([`Cooldowns::clear_silent`]), for the teardown packet and the session end.
     pub(crate) fn clear(&mut self) {
         let mut cooldowns = std::mem::take(&mut self.cooldowns);
         cooldowns.clear_silent();
         *self = Self {
             cooldowns,
-            book_sorts: self.book_sorts,
             ..Default::default()
         };
     }
@@ -154,15 +146,10 @@ impl Plugin for UiPetPlugin {
         app.init_resource::<PetBar>()
             .init_resource::<PetAttackLatch>()
             // `SMSG_PET_SPELLS` writes its `UNIT_PET` there; the unit plugin fires the lane.
-            .init_resource::<crate::field_watch::NoticeLane>()
-            .add_systems(
-                Update,
-                // The getters read the bar, its pet and its book at the call (`PetLive`), and every
-                // verb is a script call (`PetPress`, `PetSteps`).
-                feed_pet_unit
-                    .in_set(UnitFeed)
-                    .in_set(crate::ui_unit::field_events::FieldEventPushes),
-            );
+            // The getters read the bar, its pet and its book at the call (`PetLive`), the `"pet"`
+            // token its unit (`crate::ui_unit::live`), and every verb is a script call
+            // (`PetPress`, `PetSteps`).
+            .init_resource::<crate::field_watch::NoticeLane>();
     }
 }
 

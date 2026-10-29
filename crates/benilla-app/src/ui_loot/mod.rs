@@ -953,7 +953,10 @@ pub(crate) struct LootCloseAtRest(pub(crate) bool);
 pub(crate) struct UiLootPlugin;
 
 /// Applies a loot CVar change.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut loot: ResMut<LootConfig>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut loot: bevy::prelude::Mut<'_, LootConfig>,
+) {
     match ev.key().as_str() {
         "autolootdefault" => loot.auto_loot = ev.flag(),
         "showlootspam" => loot.show_loot_spam = ev.flag(),
@@ -964,7 +967,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut loot: ResMut<LootCo
 impl Plugin for UiLootPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.add_observer(on_cvar);
         use crate::lanes::LaneApp;
         app.init_resource::<LootState>()
             .add_lane("loot", peek_loot, fire_loot, None)
@@ -1126,6 +1128,7 @@ fn drain_receives(
     script: &mut UiScript,
     rolls: RollCatalogs,
     owner: &dyn Fn(u64) -> Option<Option<String>>,
+    received: &dyn Fn(&PendingReceive, &benilla_protocol::ItemInfo),
 ) -> Vec<PendingReceive> {
     let mut still = Vec::new();
     for r in pending {
@@ -1188,6 +1191,10 @@ fn drain_receives(
                         text,
                     ));
                 }
+                // The tutorials after the line (`0x491cdd`, then `0x491cec`).
+                if let Some(info) = items.template(r.entry, 0, Ask::Read) {
+                    received(&r, info);
+                }
             }
             // A record dropped since it was held (`0x491a93`): its callback waits on the answer.
             None => {
@@ -1239,6 +1246,10 @@ struct LootReads<'w, 's> {
     rolls: crate::items::Rolls<'w>,
     names: Res<'w, NameCache>,
     objects: LootSourceObjects<'w, 's>,
+    // Our own pushes' tutorials and the class the ranged one reads (`0x491ebc`); absent in a
+    // harness without the tutorials.
+    tutorials: Option<Res<'w, crate::tutorial::Tutorials>>,
+    me: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
 }
 
 impl LootReads<'_, '_> {
@@ -1262,6 +1273,8 @@ impl LootReads<'_, '_> {
             rolls: self.rolls.get(),
             names: &self.names,
             objects: &self.objects,
+            tutorials: self.tutorials.as_deref(),
+            class: self.me.single().ok().and_then(|s| s.0.unit_class()),
         }
     }
 }
@@ -1607,6 +1620,8 @@ struct PushInputs<'a> {
     rolls: RollCatalogs<'a>,
     names: &'a NameCache,
     objects: &'a LootSourceObjects<'a, 'a>,
+    tutorials: Option<&'a crate::tutorial::Tutorials>,
+    class: Option<u8>,
 }
 
 /// Fire `batch` as one turn ([`drain_receives`]); what still waits on its template comes back.
@@ -1634,6 +1649,15 @@ fn emit_pushes<P: bevy::ecs::system::SystemParam + 'static>(
                         .resolve_unit(guid, Some(store), Ask::Event(with.commands))
                         .map(str::to_string),
                 )
+            },
+            &|r, info| {
+                let Some(tutorials) = with.tutorials else {
+                    return;
+                };
+                let keyring = r.container == KEYRING_CONTAINER;
+                for id in crate::tutorial::item_tutorials(r.entry, keyring, info, with.class) {
+                    tutorials.trigger_now(id);
+                }
             },
         ),
         None => batch,
@@ -1894,6 +1918,30 @@ fn close_on_move_start(
     commands: &NetCommands,
 ) -> Option<u64> {
     move_start_close(loot, latch, commands, Unlocks::OnTheLane)
+}
+
+/// The move-start close where a packet's handler runs it, the movement guard `0x60e990` with
+/// `keepsLoot` clear (`0x60e9ba`-`0x60e9dd`): [`close_on_move_start`] and its dead source's
+/// deselect, the engine half at the handler, `LOOT_CLOSED` on the loot lane at its place.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct MoveStartClose<'w, 's> {
+    /// Absent in a harness without the loot window, which closes nothing.
+    loot: Option<ResMut<'w, LootState>>,
+    latch: Option<ResMut<'w, LootLatch>>,
+    net: Res<'w, NetCommands>,
+    dead: DeadUnitDeselect<'w, 's>,
+}
+
+impl MoveStartClose<'_, '_> {
+    /// `0x48f200(1, 1, 0)` (`0x60e9dd`); nothing with no loot target latched (`0x6126b0`).
+    pub(crate) fn close(&mut self) {
+        let (Some(loot), Some(latch)) = (self.loot.as_deref_mut(), self.latch.as_deref_mut())
+        else {
+            return;
+        };
+        let closed = close_on_move_start(loot, latch, &self.net);
+        self.dead.after_close(closed);
+    }
 }
 
 /// [`close_on_move_start`], its teardown's signals on the lane or in place by `unlocks`.
