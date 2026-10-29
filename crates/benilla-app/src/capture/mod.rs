@@ -173,7 +173,8 @@ fn glue_capture() -> bool {
 /// Knobs, defaults in parentheses: `WOW_FX_AGE` s after attach (1.0), `WOW_FX_AZ`/`WOW_FX_EL`
 /// orbit degrees (0/10), `WOW_FX_DIST` yd (5), `WOW_FX_FLY` yd/s along the facing (0),
 /// `WOW_FX_YAW` degrees (0), `WOW_FX_TURN` deg/s after spawn (0), `WOW_FX_GROUND=1` seats it on
-/// the terrain for ground decals, `WOW_FX_HOLD=1` keeps it past one sequence pass,
+/// the terrain for ground decals, `WOW_FX_SWIM=1` treads a unit in its swim idle, `WOW_FX_HOLD=1`
+/// keeps it past one sequence pass,
 /// `WOW_FX_MINUTE` the clock (720), `WOW_FX_SCENE=<tsv>` the spawns around it ([`SceneSpawn`]).
 #[derive(Resource)]
 pub(crate) struct FxViewRequest {
@@ -200,6 +201,8 @@ pub(crate) struct FxViewRequest {
     pub(crate) yaw_deg: f32,
     pub(crate) turn: f32,
     pub(crate) ground: bool,
+    /// `WOW_FX_SWIM=1`: the unit lane's subject carries the server's swimming flag.
+    pub(crate) swim: bool,
     pub(crate) hold: bool,
     /// `WOW_FX_AT=x,y,z`: a raw WoW point in place of [`FXVIEW_POS`], `WOW_MAP` the map. Ground
     /// decals depend on the surface: footprints need `TerrainType.Flags & 1` (snow, sand).
@@ -541,6 +544,7 @@ impl Plugin for CapturePlugin {
                     yaw_deg: knob("WOW_FX_YAW", 0.0),
                     turn: knob("WOW_FX_TURN", 0.0),
                     ground: knob("WOW_FX_GROUND", 0.0) > 0.5,
+                    swim: knob("WOW_FX_SWIM", 0.0) > 0.5,
                     hold: knob("WOW_FX_HOLD", 0.0) > 0.5,
                     up: knob("WOW_FX_UP", 0.0),
                     at,

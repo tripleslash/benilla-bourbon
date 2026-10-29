@@ -103,27 +103,28 @@ pub(crate) fn drive_fx_view(
                 pos.y -= hit.distance;
             }
             pos.y += req.up;
-            return commands
-                .spawn((
-                    crate::net::Guid(FXVIEW_UNIT_GUID),
-                    crate::net::NetEntity {
-                        kind: benilla_protocol::EntityKind::Unit,
-                        display_id: Some(display),
-                        scale: req.scale,
-                    },
-                    crate::net::ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(
-                        &[
-                            (22, 100), // UNIT_FIELD_HEALTH
-                            (28, 100), // UNIT_FIELD_MAXHEALTH
-                            (34, 60),  // UNIT_FIELD_LEVEL
-                            (35, 35),  // UNIT_FIELD_FACTIONTEMPLATE: friendly, no combat pose
-                        ],
-                    )),
-                    Transform::from_translation(pos)
-                        .with_rotation(Quat::from_rotation_y(req.yaw_deg.to_radians())),
-                    Visibility::default(),
-                ))
-                .id();
+            let mut unit = commands.spawn((
+                crate::net::Guid(FXVIEW_UNIT_GUID),
+                crate::net::NetEntity {
+                    kind: benilla_protocol::EntityKind::Unit,
+                    display_id: Some(display),
+                    scale: req.scale,
+                },
+                crate::net::ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(&[
+                    (22, 100), // UNIT_FIELD_HEALTH
+                    (28, 100), // UNIT_FIELD_MAXHEALTH
+                    (34, 60),  // UNIT_FIELD_LEVEL
+                    (35, 35),  // UNIT_FIELD_FACTIONTEMPLATE: friendly, no combat pose
+                ])),
+                Transform::from_translation(pos)
+                    .with_rotation(Quat::from_rotation_y(req.yaw_deg.to_radians())),
+                Visibility::default(),
+            ));
+            // `WOW_FX_SWIM=1`: the server's swimming flag, so the unit treads water in its swim idle.
+            if req.swim {
+                unit.insert(crate::net::CreatureSwimming);
+            }
+            return unit.id();
         }
         // `WOW_FX_GO`, the GameObject lane: a placed GO animates through `crate::go_anim`'s state
         // machine (`0x5f3cb0`), not the effect pool. The descriptor carries only display, TYPE_ID
