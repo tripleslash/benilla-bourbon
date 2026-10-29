@@ -5,7 +5,6 @@
 //! captures: the reference's edge-fade ramp (`0x6147f0`) is untraced.
 
 use benilla_formats::{load_faction_catalog, FactionCatalog, Reaction};
-use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
 use crate::net::{Guid, NetEntity, ObjectStore};
@@ -144,9 +143,8 @@ pub(crate) enum SelectorInput {
 
 /// The selector's colour class. The player path: X∧Y red, X∧¬Y soft blue, ¬X∧Y yellow
 /// (`0x605bb6`–`0x605c2c`), else green when PvP-flagged and blue when not, paler for a party
-/// member. Any other unit: gray when dead, else the rank palette. The reference takes the player
-/// path on `UNIT_FIELD_FLAGS` bit 3 (`0x605baa`), which a player's pet carries too; callers pass
-/// the object type.
+/// member. Any other unit: gray when dead, else the rank palette. [`selection_variant`] picks the
+/// path as the reference does, on `UNIT_FIELD_FLAGS` bit 3 (`0x605baa`).
 pub(crate) fn ring_variant(input: SelectorInput) -> RingVariant {
     match input {
         SelectorInput::Player(p) => match (p.attacks_us, p.attackable, p.pvp, p.in_party) {
@@ -169,13 +167,14 @@ pub(crate) fn ring_variant(input: SelectorInput) -> RingVariant {
 }
 
 /// `GetSelectionCircleColor 0x605960` below the combat flash, over the unit and the active player:
-/// the ground ring and the overhead name both paint with it. A unit whose descriptor has not
-/// streamed reads as neither attacking nor attackable, neutral and alive.
+/// the ground ring and the overhead name both paint with it. The player path is taken on the
+/// unit's `UNIT_FIELD_FLAGS` bit 3 (`0x605baa`), which a player's pet and a charmed unit carry, not
+/// on its object type. A unit whose descriptor has not streamed reads as no flags, neutral and
+/// alive.
 pub(crate) fn selection_variant(
     rel: &Relations,
     unit: Option<&RelUnit>,
     me: Option<&RelUnit>,
-    is_player: bool,
     dead: bool,
     in_party: bool,
 ) -> RingVariant {
@@ -189,7 +188,7 @@ pub(crate) fn selection_variant(
             }
         })
     };
-    ring_variant(if is_player {
+    ring_variant(if unit.is_some_and(RelUnit::player_controlled) {
         SelectorInput::Player(PlayerPath {
             attacks_us: attack(true),
             attackable: attack(false),
@@ -251,7 +250,6 @@ pub(super) fn update_ring(
                 &Transform,
                 Option<&SelectionRadius>,
                 Option<&ObjectStore>,
-                Option<&NetEntity>,
                 Option<&crate::entities::mount::MountChild>,
             ),
             With<Guid>,
@@ -268,7 +266,7 @@ pub(super) fn update_ring(
             true
         }
         Some(target) => match targets.0.get(target) {
-            Ok((unit, sel_radius, store, net, mount_child)) => {
+            Ok((unit, sel_radius, store, mount_child)) => {
                 // The footprint has no floor, as in the reference: a zero-bounds model already
                 // measures the degenerate-box 1.2.
                 let (local, mount_scale) = match mount_child.and_then(|mc| targets.1.get(mc.0).ok())
@@ -299,7 +297,7 @@ pub(super) fn update_ring(
                 let rank = subject
                     .zip(me)
                     .map_or(Reaction::Neutral as u8, |(u, me)| rel.reaction(&u, &me));
-                let is_player = net.is_some_and(|n| n.kind == EntityKind::Player);
+                let player_path = subject.as_ref().is_some_and(RelUnit::player_controlled);
                 // `0x4e7f70`: us or one of the four party slots, never the raid roster.
                 let in_party = selection.guid.is_some_and(|g| rel.in_party(g));
                 let is_dead = store.is_some_and(|s| s.0.unit_is_dead());
@@ -310,7 +308,7 @@ pub(super) fn update_ring(
                         selection.guid,
                         store.and_then(|s| s.0.unit_faction_template()),
                         me.and_then(|m| m.template),
-                        if is_player { " [player path]" } else { "" },
+                        if player_path { " [player path]" } else { "" },
                         if is_dead { " [dead→gray]" } else { "" },
                     );
                 }
@@ -318,15 +316,8 @@ pub(super) fn update_ring(
                 state.color = if flash.unit == Some(target) {
                     flash.color
                 } else {
-                    selection_variant(
-                        &rel,
-                        subject.as_ref(),
-                        me.as_ref(),
-                        is_player,
-                        is_dead,
-                        in_party,
-                    )
-                    .color()
+                    selection_variant(&rel, subject.as_ref(), me.as_ref(), is_dead, in_party)
+                        .color()
                 };
                 // No ground in the box hides the ring: the reference skips the draw (`0x6d74b5`).
                 !projected
@@ -479,7 +470,7 @@ mod tests {
         let variant = |unit: RelUnit, me: RelUnit, in_party| {
             let mut scene = Scene::new(me, None);
             let unit = scene.hold(unit);
-            selection_variant(&scene.rel(), Some(&unit), Some(&me), true, false, in_party)
+            selection_variant(&scene.rel(), Some(&unit), Some(&me), false, in_party)
         };
         // Yourself in the free-for-all ring keeps your PvP colour: neither direction attacks.
         let me = flagged(player(ME, HUMAN), FFA);
@@ -532,12 +523,48 @@ mod tests {
                 charmed_by: ME,
                 ..with_flags(player(OTHER, HUMAN), PVP)
             });
-            selection_variant(&scene.rel(), Some(&thrall), Some(&me), true, false, false)
+            selection_variant(&scene.rel(), Some(&thrall), Some(&me), false, false)
         };
         assert_eq!(variant(player(ME, HUMAN)), RingVariant::Player);
         assert_eq!(
             variant(with_flags(player(ME, HUMAN), PVP)),
             RingVariant::Friendly
+        );
+    }
+
+    /// A pet carries `UNIT_FIELD_FLAGS` bit 3, so it takes the player path (`0x605baa`), its PvP
+    /// split off its owner (`0x605ff0`) and the party test on its own guid (`0x605c46`): our own
+    /// unflagged pet and an unflagged enemy's are both blue, never the reaction's green or red. In
+    /// the free-for-all ring a stranger's pet attacks and is attacked: red. A creature without
+    /// the bit keeps the reaction path.
+    #[test]
+    fn a_pet_takes_the_player_path_by_its_flags() {
+        const PET: u64 = 0x30;
+        let variant = |owner: RelUnit, me: RelUnit| {
+            let mut scene = Scene::new(me, Some(factions()));
+            scene.hold(owner);
+            let pet = scene.hold(pet_of(PET, &owner));
+            selection_variant(&scene.rel(), Some(&pet), Some(&me), false, false)
+        };
+        let me = player(ME, HUMAN);
+        assert_eq!(variant(me, me), RingVariant::Player, "our own pet");
+        assert_eq!(
+            variant(player(OTHER, ORC), me),
+            RingVariant::Player,
+            "an unflagged enemy's pet"
+        );
+        let ffa = |guid| flagged(player(guid, HUMAN), FFA);
+        assert_eq!(
+            variant(ffa(OTHER), ffa(ME)),
+            RingVariant::Hostile,
+            "a free-for-all stranger's pet"
+        );
+        let mut scene = Scene::new(me, Some(factions()));
+        let orc = scene.hold(creature(NPC, ORC));
+        assert_eq!(
+            selection_variant(&scene.rel(), Some(&orc), Some(&me), false, false),
+            RingVariant::Hostile,
+            "a creature nobody controls reads its reaction"
         );
     }
 
@@ -555,7 +582,7 @@ mod tests {
         let mut variant = |unit: RelUnit, me: RelUnit| {
             scene.hold(me);
             let unit = scene.hold(unit);
-            selection_variant(&scene.rel(), Some(&unit), Some(&me), true, false, false)
+            selection_variant(&scene.rel(), Some(&unit), Some(&me), false, false)
         };
         let (me, me_flagged) = (human_warrior(ME), with_flags(human_warrior(ME), PVP));
         let orc = |flags| with_flags(player(OTHER, ORC), flags);

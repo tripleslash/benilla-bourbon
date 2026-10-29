@@ -616,7 +616,6 @@ pub(crate) fn drive_nameplates(
                 &rel,
                 store.map(|s| relations.unit_of(guid.0, s)).as_ref(),
                 me.as_ref(),
-                net.kind == EntityKind::Player,
                 store.is_some_and(|s| s.0.unit_is_dead()),
                 // `0x4e7f70`: us or one of the four party slots, never the raid roster.
                 rel.in_party(guid.0),
