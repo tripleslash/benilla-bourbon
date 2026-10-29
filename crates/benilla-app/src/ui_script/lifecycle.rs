@@ -327,6 +327,18 @@ pub(super) fn font_found(
     loose.find(path, LooseOpen::BareNameFirst).is_some() || chain.lock_recover().contains(path)
 }
 
+/// A capture without the UI enters on a boot VM, since the glue VM's frames would paint the login
+/// screen over the world; a reload already holds one. The glue VM is back in the world here.
+fn enter_without_ui(world: &mut World) {
+    if world
+        .get_non_send::<UiScript>()
+        .is_some_and(|s| s.vm_kind() == benilla_ui::script::VmKind::Glue)
+    {
+        crate::cvars::fold_dying_vm_cvars(world);
+        install_boot_vm(world);
+    }
+}
+
 /// Whether this run wants the player UI: always outside a capture, and in one only when opted in
 /// ([`crate::run_mode::capture_ui_opted_in`]), since capture baselines test the world render.
 fn ui_wanted(world: &World) -> bool {
@@ -597,6 +609,7 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
         world.remove_resource::<PendingEntryUiLoad>();
         unpark_glue_vm(world);
         crate::vplates::clear_at_world_entry(world);
+        enter_without_ui(world);
         return;
     }
     // **The first step builds the VM the load runs on** (decision 2226, [`mint_entry_vm`]): the
@@ -871,7 +884,7 @@ fn entry_prepare(
     // The item locks before any file or event runs: a `/reload`'s survive, as on the reference's
     // item objects.
     crate::ui_items::locks::seed_vm_item_locks(world, script, seat == LoadSeat::Live);
-    crate::ui_party::seed_vm_ready_check(world, script, seat == LoadSeat::Live);
+    crate::ui_party::seed_vm_party(world, script, seat == LoadSeat::Live);
     crate::ui_guild::seed_vm_guild(world, script, seat == LoadSeat::Live);
     // The realm before the load, since addons read `GetRealmName()` at file scope; the roster
     // carries the realm-list entry this session connected to.
@@ -922,11 +935,8 @@ fn entry_prepare(
             }
         }
     }
-    // A reload's group, before any file reads it: the reference's frames load over the engine's
-    // roster and hear no group event for it ([`crate::ui_party::seed_reloaded_vm`]).
+    // A reload's bar, which the engine keeps through the reload (`0xbc6980`, `0xbc6390`).
     if seat == LoadSeat::Live {
-        crate::ui_party::seed_reloaded_vm(world, script);
-        // And its bar, which the engine keeps through the reload (`0xbc6980`, `0xbc6390`).
         crate::ui_action::seed_reloaded_vm(world, script);
     }
     // The addon version gate, read from the persisted base the fold above just made current, so a
@@ -1150,6 +1160,7 @@ fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
     // parked and uses the live one.
     unpark_glue_vm(world);
     if !ui_wanted(world) {
+        enter_without_ui(world);
         return;
     }
     mint_entry_vm(world);
@@ -2133,6 +2144,28 @@ mod tests {
             .expect("the parked VM is back");
         assert_eq!(vm.session(), session, "the same VM, no session moved");
         assert!(world.get_non_send::<ParkedGlueVm>().is_none());
+    }
+
+    /// A capture without the UI enters the world on a boot VM, not the glue VM parked at the
+    /// entry edge, whose frames would paint the login screen over the world.
+    #[test]
+    fn a_capture_without_the_ui_enters_the_world_on_a_boot_vm() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _cap = EnvGuard::unset("WOW_CAPTURE");
+        let _ui = EnvGuard::unset("WOW_CAPTURE_UI");
+        let mut world = World::new();
+        world.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+        world.insert_resource(crate::run_mode::CaptureMode);
+        world.insert_non_send(UiScript::new_glue().unwrap());
+        arm_entry_ui_load(&mut world);
+        run_pending_entry_load(&mut world);
+        assert_eq!(
+            world.non_send::<UiScript>().vm_kind(),
+            benilla_ui::script::VmKind::InGame
+        );
     }
 
     /// The plate bits clear at the world entry (`0x401639`, in the entry setup `0x401570`) and

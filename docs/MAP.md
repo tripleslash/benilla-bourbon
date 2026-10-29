@@ -199,7 +199,7 @@
 - `WOW_AUTO_EXPOSURE_ROOM` — benilla-world/src/modern/look.rs
 - `WOW_AUTO_EXPOSURE_TARGET` — benilla-world/src/modern/look.rs
 - `WOW_BARE_DOODAD_COLLIDERS` — benilla-world/src/terrain_stream/collider.rs
-- `WOW_BG` — benilla-world/src/bgwin.rs
+- `WOW_BG` — benilla-app/src/cvars/mod.rs, benilla-world/src/bgwin.rs
 - `WOW_BILLBOARD_CARDS` — benilla-world/src/terrain_stream/spawn/assemble.rs
 - `WOW_BLOB_VIS` — benilla-world/src/terrain_stream/merge.rs
 - `WOW_BLOB_VIS_UID` — benilla-world/src/terrain_stream/merge.rs
@@ -213,7 +213,7 @@
 - `WOW_CAPTURE_OUT` — benilla-app/src/capture/mod.rs
 - `WOW_CAPTURE_REHOVER` — benilla-app/src/ui_script/mod.rs
 - `WOW_CAPTURE_STABLE` — benilla-app/src/capture/mod.rs
-- `WOW_CAPTURE_UI` — benilla-app/src/capture/scenarios.rs, benilla-app/src/cvars/mod.rs, benilla-app/src/ui_script/mod.rs, benilla-app/src/video.rs
+- `WOW_CAPTURE_UI` — benilla-app/src/capture/scenarios.rs, benilla-app/src/cvars/mod.rs, benilla-app/src/ui_script/lifecycle.rs, benilla-app/src/ui_script/mod.rs, benilla-app/src/video.rs
 - `WOW_CAPTURE_WIND_T` — benilla-world/src/wind/mod.rs
 - `WOW_CAST_TRACE` — benilla-app/src/net.rs
 - `WOW_CHAR` — benilla-app/src/capture/probe_mail.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/glue_session/realm_smoke.rs, benilla-app/src/glue_session/roster.rs, benilla-app/src/net.rs, benilla-app/src/run_mode.rs
@@ -415,7 +415,7 @@
 - `WOW_NODE_PROBE` — benilla-app/src/capture/probes/world_census.rs, benilla-app/src/dev.rs, benilla-world/src/bgwin.rs
 - `WOW_NOPORTALCULL` — benilla-world/src/dev_state.rs
 - `WOW_NOSOUND` — benilla-app/src/sound/mod.rs
-- `WOW_NOVSYNC` — benilla-app/src/video.rs, benilla-world/src/worldview.rs
+- `WOW_NOVSYNC` — benilla-app/src/cvars/mod.rs, benilla-app/src/video.rs, benilla-world/src/worldview.rs
 - `WOW_NO_ALPHATEST` — benilla-world/src/model_render.rs
 - `WOW_NO_ANIM_LOD` — benilla-app/src/creature_anim/lod.rs, benilla-app/src/lib.rs
 - `WOW_NO_BC` — benilla-assets/src/gpu_blp.rs
@@ -596,7 +596,7 @@
 - `WOW_UI_SCALE` — benilla-app/src/cvars/mod.rs, benilla-app/src/ui_script/mod.rs
 - `WOW_UI_SPLICE_VERIFY` — benilla-app/src/ui_script/extract/mod.rs
 - `WOW_UI_VERIFY` — benilla-app/src/ui_script/extract/mod.rs
-- `WOW_UNATTENDED` — benilla-app/src/glue_session/login.rs, benilla-app/src/lanes/selection_live_tests.rs, benilla-app/src/local_state.rs, benilla-app/src/net.rs, benilla-app/src/net/session.rs, benilla-app/src/run_mode.rs, benilla-world/src/bgwin.rs
+- `WOW_UNATTENDED` — benilla-app/src/cvars/mod.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/lanes/selection_live_tests.rs, benilla-app/src/local_state.rs, benilla-app/src/net.rs, benilla-app/src/net/session.rs, benilla-app/src/run_mode.rs, benilla-world/src/bgwin.rs
 - `WOW_UNIT_VISUALS` — benilla-app/src/capture/probes/visual_census.rs, benilla-app/src/dev.rs
 - `WOW_UNIT_VISUALS_RADIUS` — benilla-app/src/capture/probes/visual_census.rs
 - `WOW_UPLOAD_BUDGET` — benilla-world/src/world_plugins.rs
