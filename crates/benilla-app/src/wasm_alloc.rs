@@ -37,7 +37,9 @@
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::UnsafeCell;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 
 /// A slice: wasm's 64 KiB page.
 const SLICE_SHIFT: u32 = 16;
@@ -272,8 +274,6 @@ const BINS: usize = 64;
 
 struct Pool {
     bins: [u32; BINS],
-    /// Bit `b` set: bin `b` holds a span.
-    map: u64,
 }
 
 struct PoolCell(UnsafeCell<Pool>);
@@ -281,14 +281,13 @@ struct PoolCell(UnsafeCell<Pool>);
 // SAFETY: only a holder of `SPANS` touches the pool.
 unsafe impl Sync for PoolCell {}
 
-static POOL: PoolCell = PoolCell(UnsafeCell::new(Pool {
-    bins: [NIL; BINS],
-    map: 0,
-}));
+static POOL: PoolCell = PoolCell(UnsafeCell::new(Pool { bins: [NIL; BINS] }));
 
 /// Slices filed free in the pool's bins, kept by [`bin_insert`] and [`bin_remove`] under [`SPANS`];
 /// read without it by [`headroom`].
 static POOLED: AtomicUsize = AtomicUsize::new(0);
+/// Bit `b` set: bin `b` holds a span. Written under [`SPANS`]; read without it by [`largest_run`].
+static MAP: AtomicU64 = AtomicU64::new(0);
 
 fn pool(_turn: &FairGuard<'_>) -> *mut Pool {
     POOL.0.get()
@@ -301,6 +300,16 @@ fn bin_of(n: u32) -> usize {
     } else {
         let fl = 31 - n.leading_zeros();
         (3 + (fl - 2) * 4 + ((n >> (fl - 2)) & 3)) as usize
+    }
+}
+
+/// The shortest span bin `b` files: [`bin_of`] inverted.
+fn bin_low(b: usize) -> u32 {
+    if b < 3 {
+        b as u32 + 1
+    } else {
+        let (fl, sub) = (2 + (b as u32 - 3) / 4, (b as u32 - 3) % 4);
+        (4 + sub) << (fl - 2)
     }
 }
 
@@ -328,7 +337,7 @@ fn bin_insert(turn: &FairGuard<'_>, s: u32) {
             (*sp(head)).prev = s;
         }
         (*pool).bins[b] = s;
-        (*pool).map |= 1 << b;
+        MAP.fetch_or(1 << b, Ordering::Relaxed);
     }
 }
 
@@ -343,7 +352,7 @@ fn bin_remove(turn: &FairGuard<'_>, s: u32) {
         if prev == NIL {
             (*pool).bins[b] = next;
             if next == NIL {
-                (*pool).map &= !(1 << b);
+                MAP.fetch_and(!(1 << b), Ordering::Relaxed);
             }
         } else {
             (*sp(prev)).next = next;
@@ -397,7 +406,7 @@ fn take(turn: &FairGuard<'_>, n: u32) -> u32 {
     let pool = pool(turn);
     // SAFETY: the caller holds `SPANS`.
     unsafe {
-        let fits = (*pool).map & (!0u64 << b);
+        let fits = MAP.load(Ordering::Relaxed) & (!0u64 << b);
         if fits == 0 {
             return NIL;
         }
@@ -534,6 +543,24 @@ pub(crate) fn set_grow_step(bytes: usize) {
 /// a request for one contiguous run can still fail on a fragmented pool.
 pub(crate) fn headroom() -> usize {
     POOLED.load(Ordering::Relaxed) * SLICE + heap::max_bytes().saturating_sub(heap::bytes())
+}
+
+/// Bytes the largest block can still get in one run: the shortest span the pool's highest filled
+/// bin files, since [`take`] looks a bin up from the request, or the memory not grown yet, whichever
+/// is more. Near the top of the address space [`headroom`] is mostly scattered free slices, and a
+/// block bigger than every run fails while their sum looks ample. Read without [`SPANS`], so a span
+/// filed or taken meanwhile may or may not show; a grow's merge with the free span below it and
+/// [`DEFERRED`] spans are not counted, so it errs low.
+pub(crate) fn largest_run() -> usize {
+    (pooled_run() as usize * SLICE).max(heap::max_bytes().saturating_sub(heap::bytes()))
+}
+
+/// Slices the pool can give in one span: its highest filled bin's floor, or 0 when it is empty.
+fn pooled_run() -> u32 {
+    match MAP.load(Ordering::Relaxed) {
+        0 => 0,
+        map => bin_low(63 - map.leading_zeros() as usize),
+    }
 }
 
 /// Memory growth since the last call: (grows, grows by the step, bytes grown).
@@ -932,10 +959,13 @@ fn alloc_large(layout: Layout) -> *mut u8 {
     let Some(n) = slices_for(layout.size()) else {
         return ptr::null_mut();
     };
+    BIGGEST.fetch_max(layout.size(), Ordering::Relaxed);
     let extra = (layout.align() / SLICE).saturating_sub(1) as u32;
     let turn = SPANS.lock();
     let s = alloc_span(&turn, n.saturating_add(extra));
     if s == NIL {
+        drop(turn);
+        out_of_memory(layout.size());
         return ptr::null_mut();
     }
     let a = slice_of(addr_of(s).next_multiple_of(layout.align().max(SLICE)));
@@ -954,6 +984,29 @@ fn alloc_large(layout: Layout) -> *mut u8 {
     }
     addr_of(a) as *mut u8
 }
+
+/// The largest block request since the last [`take_biggest`], bytes.
+static BIGGEST: AtomicUsize = AtomicUsize::new(0);
+
+/// The largest block requested since the last call, bytes: what [`largest_run`] must hold.
+pub(crate) fn take_biggest() -> usize {
+    BIGGEST.swap(0, Ordering::Relaxed)
+}
+
+/// Name the block that found no run before the trap that follows: the out-of-memory abort reaches no
+/// panic hook, and std's message goes to a stderr the page does not have.
+#[cfg(target_arch = "wasm32")]
+fn out_of_memory(size: usize) {
+    crate::webdiag::out(&format!(
+        "wenilla: no run for {} KiB: largest run {} KiB, headroom {} MiB",
+        size >> 10,
+        largest_run() >> 10,
+        headroom() >> 20,
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn out_of_memory(_size: usize) {}
 
 /// Resize a large block in place: shrink it, or grow it into a free span right after it.
 fn resize_large(block: *mut u8, new_size: usize) -> bool {
@@ -1096,6 +1149,39 @@ mod tests {
             );
             assert!(b <= bin_of(n) + 1, "{n} skips past the next bin");
         }
+    }
+
+    /// Each bin's shortest span is filed there, the one shorter below it, and a fit from it searches
+    /// that bin: a span the highest bin holds serves a request of that length.
+    #[test]
+    fn a_bins_lower_bound_is_filed_there_and_fits_there() {
+        for b in 0..BINS {
+            let low = bin_low(b);
+            if low as usize >= MAX_SLICES {
+                break;
+            }
+            assert_eq!(bin_of(low), b, "{low}");
+            assert_eq!(bin_fit(low), b, "{low}");
+            if b > 0 {
+                assert_eq!(bin_of(low - 1), b - 1, "{low}");
+            }
+        }
+    }
+
+    /// The pool gives a span as long as its largest run in one take, without a grow, and the run
+    /// is never more than the headroom. Under the pool's lock throughout.
+    #[test]
+    fn the_pools_largest_run_is_one_take() {
+        let turn = SPANS.lock();
+        if pooled_run() == 0 {
+            assert!(grow(&turn, 64));
+        }
+        let n = pooled_run();
+        assert!(n > 0);
+        assert!(largest_run() <= headroom());
+        let s = take(&turn, n);
+        assert_ne!(s, NIL, "a run of {n} slices is filed");
+        release(&turn, s, n);
     }
 
     /// Fill a block with a pattern its owner can check.

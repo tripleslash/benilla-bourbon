@@ -3,8 +3,8 @@
 //! wasm32 linear memory stops at 4 GiB, and a long view distance over HD art can reach it: the
 //! allocator then fails and a worker traps with no message. The view distance decides what stays
 //! loaded (`farclip` sets the streamer's residency window, `terrain_stream::window`), so this
-//! lowers the effective `farclip` a step at a time while the allocator's [`headroom`] is short, and
-//! gives the steps back while there is room for them.
+//! lowers the effective `farclip` a step at a time while the allocator's [`headroom`] or its
+//! [`largest_run`] is short, and gives the steps back while there is room for them.
 //!
 //! What a step costs to take back depends on where the view is, so a step is tried: with the
 //! headroom a step's worth above the shed line, the tightest step comes back, and after its settle
@@ -21,14 +21,21 @@
 //! lacks.
 //!
 //! [`headroom`]: crate::wasm_alloc::headroom
+//! [`largest_run`]: crate::wasm_alloc::largest_run
 
 use benilla_world::view::FARCLIP_RANGE;
 use bevy::prelude::*;
 
-/// Below this many bytes of headroom, a step is shed. The headroom sums free slices, and a large
-/// block needs them in one run: flying the world viewer into Stormwind at 40 yd/s, about a taxi's
-/// speed, a worker trapped two seconds after the gauge read 452 MiB, so the line stays above that.
+/// Below this many bytes of headroom, a step is shed (`?mem_shed_mb=`, a measuring lever). Flying
+/// the world viewer into Stormwind at 40 yd/s, about a taxi's speed, the headroom fell 453 to 143
+/// MiB in 2 s, faster than a shed step unloads: a line at 256 trapped, and one at 384 trapped in one
+/// flight of two, each time with the step shed seconds before.
 const SHED_BELOW: usize = 512 << 20;
+/// Below this many bytes in the largest run, a step is shed (`?mem_run_mb=`, a measuring lever):
+/// the headroom sums free slices, and a large block needs them in one run. The largest block those
+/// flights asked for was 55.5 MiB, which a run from 56 MiB holds; both traps were a block of 16.5
+/// and 49.7 MiB finding no run that long with 134 and 143 MiB free.
+const RUN_BELOW: usize = 64 << 20;
 /// The room above [`SHED_BELOW`] a step needs to come back: the most a step was measured to cost
 /// with the view parked, about 200 MiB (Stormwind's 640 to 800 yd ring), and the headroom's 35 MiB
 /// wander as a window settles.
@@ -49,9 +56,12 @@ const DWELL_MAX_SECS: f64 = 300.0;
 /// long did, and the wait falls back to [`DWELL_SECS`].
 const REFIT_SECS: f64 = 60.0;
 
-/// The valve's state, apart from the clock and the headroom it is handed.
-#[derive(Resource, Default, Debug)]
+/// The valve's state, apart from the clock and the gauges it is handed.
+#[derive(Resource, Debug)]
 pub(crate) struct MemoryPressure {
+    /// The headroom and largest run under which a step is shed.
+    shed_below: usize,
+    run_below: usize,
     /// The player's view distance while a cap holds.
     setting: f32,
     /// The view distance this last wrote; any other value is the player's.
@@ -68,10 +78,26 @@ pub(crate) struct MemoryPressure {
     restored_at: Option<f64>,
 }
 
+impl Default for MemoryPressure {
+    fn default() -> Self {
+        Self {
+            shed_below: SHED_BELOW,
+            run_below: RUN_BELOW,
+            setting: 0.0,
+            applied: 0.0,
+            caps: Vec::new(),
+            changed_at: 0.0,
+            ample_since: None,
+            dwell: 0.0,
+            restored_at: None,
+        }
+    }
+}
+
 impl MemoryPressure {
-    /// One weighing at `now` seconds, given the allocator's `headroom` and the live `farclip`:
-    /// the view distance to write, if it changes.
-    fn weigh(&mut self, now: f64, headroom: usize, farclip: f32) -> Option<f32> {
+    /// One weighing at `now` seconds, given the allocator's `headroom`, its `largest_run` and the
+    /// live `farclip`: the view distance to write, if it changes.
+    fn weigh(&mut self, now: f64, headroom: usize, run: usize, farclip: f32) -> Option<f32> {
         // The player moved the setting while a cap holds: the new setting, under the cap.
         if let Some(&cap) = self.caps.last() {
             if farclip != self.applied {
@@ -83,14 +109,15 @@ impl MemoryPressure {
         // A step that came back is shed again as soon as its loads cross the line; any other
         // change waits out its settle.
         let came_back = self.restored_at == Some(self.changed_at);
-        if now - self.changed_at < SETTLE_SECS && !(came_back && headroom < SHED_BELOW) {
+        let short = headroom < self.shed_below || run < self.run_below;
+        if now - self.changed_at < SETTLE_SECS && !(came_back && short) {
             return None;
         }
         if self.restored_at.is_some_and(|t| now - t >= REFIT_SECS) {
             self.restored_at = None;
             self.dwell = DWELL_SECS;
         }
-        if headroom < SHED_BELOW {
+        if short {
             self.ample_since = None;
             let cap = (farclip * STEP).max(*FARCLIP_RANGE.start());
             if cap >= farclip {
@@ -107,7 +134,7 @@ impl MemoryPressure {
             self.changed_at = now;
             return Some(cap);
         }
-        if self.caps.is_empty() || headroom < SHED_BELOW + KEEP {
+        if self.caps.is_empty() || headroom < self.shed_below + KEEP {
             self.ample_since = None;
             return None;
         }
@@ -138,9 +165,38 @@ impl MemoryPressure {
     not(debug_assertions)
 ))]
 pub(crate) fn plugin(app: &mut App) {
-    app.init_resource::<MemoryPressure>()
+    app.insert_resource(MemoryPressure::from_page())
         .insert_resource(Ballast::from_page())
         .add_systems(First, relieve);
+}
+
+/// MiB from the page's `name` lever, if it names a number.
+#[cfg(all(
+    target_arch = "wasm32",
+    target_feature = "atomics",
+    not(debug_assertions)
+))]
+fn page_mib(name: &str) -> Option<usize> {
+    crate::webenv::var(name).and_then(|v| v.trim().parse::<usize>().ok())
+}
+
+#[cfg(all(
+    target_arch = "wasm32",
+    target_feature = "atomics",
+    not(debug_assertions)
+))]
+impl MemoryPressure {
+    /// The valve with the page's `?mem_shed_mb=` and `?mem_run_mb=` lines, where it sets them.
+    fn from_page() -> Self {
+        let mut valve = Self::default();
+        if let Some(mib) = page_mib("WOW_MEM_SHED_MB") {
+            valve.shed_below = mib << 20;
+        }
+        if let Some(mib) = page_mib("WOW_MEM_RUN_MB") {
+            valve.run_below = mib << 20;
+        }
+        valve
+    }
 }
 
 /// `?mem_ballast_mb=N`: N MiB held from the start, a measuring lever. The world viewer holds a
@@ -163,9 +219,7 @@ struct Ballast {
 ))]
 impl Ballast {
     fn from_page() -> Self {
-        let mib = crate::webenv::var("WOW_MEM_BALLAST_MB")
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(0);
+        let mib = page_mib("WOW_MEM_BALLAST_MB").unwrap_or(0);
         // In 16 MiB blocks, so the ballast takes no one run of address space the world could use.
         let _held = (0..mib.div_ceil(16))
             .map(|_| vec![0u8; 16 << 20].into_boxed_slice())
@@ -182,8 +236,9 @@ impl Ballast {
 ))]
 const GAUGE_SECS: f64 = 2.0;
 
-/// Weigh the headroom once a frame and apply the valve's answer, saying so on the console; under
-/// `?diag=1`, the headroom and the steps every [`GAUGE_SECS`] besides.
+/// Weigh the headroom and the largest run once a frame and apply the valve's answer, saying so on
+/// the console; under `?diag=1`, the gauges, the largest block asked for since the last line and
+/// the steps every [`GAUGE_SECS`] besides.
 #[cfg(all(
     target_arch = "wasm32",
     target_feature = "atomics",
@@ -196,24 +251,28 @@ fn relieve(
     mut gauge: Local<Option<(bool, f64)>>,
 ) {
     let headroom = crate::wasm_alloc::headroom();
+    let run = crate::wasm_alloc::largest_run();
     let now = time.elapsed_secs_f64();
     let (armed, next) = gauge.get_or_insert_with(|| (crate::webdiag::armed(), 0.0));
     if *armed && now >= *next {
         *next = now + GAUGE_SECS;
         crate::webdiag::out(&format!(
-            "[mem] t={now:.0}s headroom={} MiB linear={} MiB farclip={:.0} shed={}",
+            "[mem] t={now:.0}s headroom={} MiB run={} MiB biggest={} KiB linear={} MiB farclip={:.0} shed={}",
             headroom >> 20,
+            run >> 20,
+            crate::wasm_alloc::take_biggest() >> 10,
             core::arch::wasm32::memory_size(0) >> 4,
             view.farclip,
             valve.depth(),
         ));
     }
     let was = view.farclip;
-    if let Some(farclip) = valve.weigh(now, headroom, was) {
+    if let Some(farclip) = valve.weigh(now, headroom, run, was) {
         view.farclip = farclip;
         crate::webdiag::out(&format!(
-            "wenilla: memory headroom {} MiB, view distance {was:.0} -> {farclip:.0} yd ({} step(s) shed)",
+            "wenilla: memory headroom {} MiB, run {} MiB, view distance {was:.0} -> {farclip:.0} yd ({} step(s) shed)",
             headroom >> 20,
+            run >> 20,
             valve.depth(),
         ));
     }
@@ -224,15 +283,21 @@ mod tests {
     use super::*;
 
     const MIB: usize = 1 << 20;
+    /// A largest run that never sheds.
+    const RUN: usize = 4000 * MIB;
 
     /// Short headroom sheds a step at once, and another only after the settle.
     #[test]
     fn short_headroom_sheds_a_step_then_waits_for_the_unloads() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 600 * MIB, 1000.0), None, "above the line");
-        assert_eq!(v.weigh(10.0, 500 * MIB, 1000.0), Some(800.0));
-        assert_eq!(v.weigh(15.0, 100 * MIB, 800.0), None, "settling");
-        assert_eq!(v.weigh(18.0, 500 * MIB, 800.0), Some(640.0));
+        assert_eq!(
+            v.weigh(10.0, 600 * MIB, RUN, 1000.0),
+            None,
+            "above the line"
+        );
+        assert_eq!(v.weigh(10.0, 500 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(15.0, 100 * MIB, RUN, 800.0), None, "settling");
+        assert_eq!(v.weigh(18.0, 500 * MIB, RUN, 800.0), Some(640.0));
         assert_eq!(v.depth(), 2);
     }
 
@@ -241,7 +306,7 @@ mod tests {
     fn ample_headroom_leaves_the_view_alone() {
         let mut v = MemoryPressure::default();
         for t in 0..100 {
-            assert_eq!(v.weigh(f64::from(t), 3000 * MIB, 1000.0), None);
+            assert_eq!(v.weigh(f64::from(t), 3000 * MIB, RUN, 1000.0), None);
         }
     }
 
@@ -250,28 +315,40 @@ mod tests {
     #[test]
     fn cheap_steps_come_back_in_a_run_down_to_none() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 500 * MIB, 1000.0), Some(800.0));
-        assert_eq!(v.weigh(18.0, 500 * MIB, 800.0), Some(640.0));
-        assert_eq!(v.weigh(26.0, 700 * MIB, 640.0), None, "no room");
-        assert_eq!(v.weigh(30.0, 850 * MIB, 640.0), None, "the wait starts");
-        assert_eq!(v.weigh(33.0, 850 * MIB, 640.0), Some(800.0));
-        assert_eq!(v.weigh(37.0, 830 * MIB, 800.0), None, "settling");
-        assert_eq!(v.weigh(41.0, 830 * MIB, 800.0), Some(1000.0), "the run");
+        assert_eq!(v.weigh(10.0, 500 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(18.0, 500 * MIB, RUN, 800.0), Some(640.0));
+        assert_eq!(v.weigh(26.0, 700 * MIB, RUN, 640.0), None, "no room");
+        assert_eq!(
+            v.weigh(30.0, 850 * MIB, RUN, 640.0),
+            None,
+            "the wait starts"
+        );
+        assert_eq!(v.weigh(33.0, 850 * MIB, RUN, 640.0), Some(800.0));
+        assert_eq!(v.weigh(37.0, 830 * MIB, RUN, 800.0), None, "settling");
+        assert_eq!(
+            v.weigh(41.0, 830 * MIB, RUN, 800.0),
+            Some(1000.0),
+            "the run"
+        );
         assert_eq!(v.depth(), 0);
-        assert_eq!(v.weigh(80.0, 800 * MIB, 1000.0), None);
+        assert_eq!(v.weigh(80.0, 800 * MIB, RUN, 1000.0), None);
     }
 
     /// A run stops where the room ends, and holds there.
     #[test]
     fn a_run_stops_where_the_room_ends() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 500 * MIB, 1000.0), Some(800.0));
-        assert_eq!(v.weigh(18.0, 500 * MIB, 800.0), Some(640.0));
-        assert_eq!(v.weigh(26.0, 900 * MIB, 640.0), None, "the wait starts");
-        assert_eq!(v.weigh(29.0, 900 * MIB, 640.0), Some(800.0));
-        assert_eq!(v.weigh(37.0, 700 * MIB, 800.0), None, "it cost 200");
+        assert_eq!(v.weigh(10.0, 500 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(18.0, 500 * MIB, RUN, 800.0), Some(640.0));
+        assert_eq!(
+            v.weigh(26.0, 900 * MIB, RUN, 640.0),
+            None,
+            "the wait starts"
+        );
+        assert_eq!(v.weigh(29.0, 900 * MIB, RUN, 640.0), Some(800.0));
+        assert_eq!(v.weigh(37.0, 700 * MIB, RUN, 800.0), None, "it cost 200");
         for t in 38..200 {
-            assert_eq!(v.weigh(f64::from(t), 700 * MIB, 800.0), None);
+            assert_eq!(v.weigh(f64::from(t), 700 * MIB, RUN, 800.0), None);
         }
         assert_eq!(v.depth(), 1);
     }
@@ -280,12 +357,16 @@ mod tests {
     #[test]
     fn a_dip_restarts_the_wait() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 500 * MIB, 1000.0), Some(800.0));
-        assert_eq!(v.weigh(18.0, 2000 * MIB, 800.0), None, "the wait starts");
-        assert_eq!(v.weigh(20.0, 700 * MIB, 800.0), None, "the dip");
-        assert_eq!(v.weigh(21.0, 2000 * MIB, 800.0), None, "a new wait");
-        assert_eq!(v.weigh(23.0, 2000 * MIB, 800.0), None);
-        assert_eq!(v.weigh(24.0, 2000 * MIB, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(10.0, 500 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(
+            v.weigh(18.0, 2000 * MIB, RUN, 800.0),
+            None,
+            "the wait starts"
+        );
+        assert_eq!(v.weigh(20.0, 700 * MIB, RUN, 800.0), None, "the dip");
+        assert_eq!(v.weigh(21.0, 2000 * MIB, RUN, 800.0), None, "a new wait");
+        assert_eq!(v.weigh(23.0, 2000 * MIB, RUN, 800.0), None);
+        assert_eq!(v.weigh(24.0, 2000 * MIB, RUN, 800.0), Some(1000.0));
     }
 
     /// A step whose loads take the headroom under the line is shed again at once, without the
@@ -294,27 +375,43 @@ mod tests {
     #[test]
     fn a_step_that_does_not_fit_goes_at_once_and_waits_longer_each_time() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 500 * MIB, 1000.0), Some(800.0));
-        assert_eq!(v.weigh(18.0, 800 * MIB, 800.0), None, "the wait starts");
-        assert_eq!(v.weigh(21.0, 800 * MIB, 800.0), Some(1000.0));
-        assert_eq!(v.weigh(22.0, 600 * MIB, 1000.0), None, "loading");
+        assert_eq!(v.weigh(10.0, 500 * MIB, RUN, 1000.0), Some(800.0));
         assert_eq!(
-            v.weigh(23.0, 500 * MIB, 1000.0),
+            v.weigh(18.0, 800 * MIB, RUN, 800.0),
+            None,
+            "the wait starts"
+        );
+        assert_eq!(v.weigh(21.0, 800 * MIB, RUN, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(22.0, 600 * MIB, RUN, 1000.0), None, "loading");
+        assert_eq!(
+            v.weigh(23.0, 500 * MIB, RUN, 1000.0),
             Some(800.0),
             "under the line: shed at once"
         );
-        assert_eq!(v.weigh(31.0, 800 * MIB, 800.0), None, "the wait starts");
-        assert_eq!(v.weigh(60.0, 800 * MIB, 800.0), None, "half a minute");
-        assert_eq!(v.weigh(61.0, 800 * MIB, 800.0), Some(1000.0));
-        assert_eq!(v.weigh(65.0, 500 * MIB, 1000.0), Some(800.0), "again");
-        assert_eq!(v.weigh(73.0, 800 * MIB, 800.0), None, "the wait starts");
-        assert_eq!(v.weigh(132.0, 800 * MIB, 800.0), None, "a minute now");
-        assert_eq!(v.weigh(133.0, 800 * MIB, 800.0), Some(1000.0));
-        assert_eq!(v.weigh(193.0, 700 * MIB, 1000.0), None, "it held");
-        assert_eq!(v.weigh(200.0, 500 * MIB, 1000.0), Some(800.0));
-        assert_eq!(v.weigh(208.0, 800 * MIB, 800.0), None, "the wait starts");
         assert_eq!(
-            v.weigh(211.0, 800 * MIB, 800.0),
+            v.weigh(31.0, 800 * MIB, RUN, 800.0),
+            None,
+            "the wait starts"
+        );
+        assert_eq!(v.weigh(60.0, 800 * MIB, RUN, 800.0), None, "half a minute");
+        assert_eq!(v.weigh(61.0, 800 * MIB, RUN, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(65.0, 500 * MIB, RUN, 1000.0), Some(800.0), "again");
+        assert_eq!(
+            v.weigh(73.0, 800 * MIB, RUN, 800.0),
+            None,
+            "the wait starts"
+        );
+        assert_eq!(v.weigh(132.0, 800 * MIB, RUN, 800.0), None, "a minute now");
+        assert_eq!(v.weigh(133.0, 800 * MIB, RUN, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(193.0, 700 * MIB, RUN, 1000.0), None, "it held");
+        assert_eq!(v.weigh(200.0, 500 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(
+            v.weigh(208.0, 800 * MIB, RUN, 800.0),
+            None,
+            "the wait starts"
+        );
+        assert_eq!(
+            v.weigh(211.0, 800 * MIB, RUN, 800.0),
             Some(1000.0),
             "short again"
         );
@@ -325,28 +422,55 @@ mod tests {
     #[test]
     fn the_players_setting_is_kept_under_the_cap() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 100 * MIB, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(10.0, 100 * MIB, RUN, 1000.0), Some(800.0));
         assert_eq!(
-            v.weigh(12.0, 100 * MIB, 1200.0),
+            v.weigh(12.0, 100 * MIB, RUN, 1200.0),
             Some(800.0),
             "raised: capped"
         );
         assert_eq!(
-            v.weigh(13.0, 100 * MIB, 600.0),
+            v.weigh(13.0, 100 * MIB, RUN, 600.0),
             None,
             "lowered: below the cap"
         );
-        assert_eq!(v.weigh(20.0, 3000 * MIB, 600.0), None, "the wait starts");
         assert_eq!(
-            v.weigh(30.0, 3000 * MIB, 600.0),
+            v.weigh(20.0, 3000 * MIB, RUN, 600.0),
+            None,
+            "the wait starts"
+        );
+        assert_eq!(
+            v.weigh(30.0, 3000 * MIB, RUN, 600.0),
             None,
             "back to 600, already there"
         );
         assert_eq!(v.depth(), 0);
         assert_eq!(
-            v.weigh(40.0, 3000 * MIB, 1000.0),
+            v.weigh(40.0, 3000 * MIB, RUN, 1000.0),
             None,
             "no cap: the player's own"
+        );
+    }
+
+    /// A short largest run sheds a step though the headroom is ample, and a step that comes back
+    /// and shortens it is shed again at once.
+    #[test]
+    fn a_short_run_sheds_though_the_headroom_is_ample() {
+        let mut v = MemoryPressure {
+            run_below: 128 * MIB,
+            ..MemoryPressure::default()
+        };
+        assert_eq!(v.weigh(10.0, 2000 * MIB, 200 * MIB, 1000.0), None);
+        assert_eq!(v.weigh(11.0, 2000 * MIB, 100 * MIB, 1000.0), Some(800.0));
+        assert_eq!(
+            v.weigh(19.0, 2000 * MIB, 300 * MIB, 800.0),
+            None,
+            "the wait starts"
+        );
+        assert_eq!(v.weigh(22.0, 2000 * MIB, 300 * MIB, 800.0), Some(1000.0));
+        assert_eq!(
+            v.weigh(23.0, 2000 * MIB, 64 * MIB, 1000.0),
+            Some(800.0),
+            "did not fit"
         );
     }
 
@@ -355,8 +479,8 @@ mod tests {
     fn the_floor_sheds_nothing() {
         let mut v = MemoryPressure::default();
         let floor = *FARCLIP_RANGE.start();
-        assert_eq!(v.weigh(10.0, 100 * MIB, floor), None);
-        assert_eq!(v.weigh(10.0, 100 * MIB, 200.0), Some(floor));
-        assert_eq!(v.weigh(20.0, 100 * MIB, floor), None);
+        assert_eq!(v.weigh(10.0, 100 * MIB, RUN, floor), None);
+        assert_eq!(v.weigh(10.0, 100 * MIB, RUN, 200.0), Some(floor));
+        assert_eq!(v.weigh(20.0, 100 * MIB, RUN, floor), None);
     }
 }
