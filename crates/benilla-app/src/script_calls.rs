@@ -348,12 +348,67 @@ impl ScriptCallHost<'_, '_> {
         }
     }
 
-    /// Our player's arrival's slot pass (`0x5deafc`): every slot's usable pair stored but an
-    /// unknown spell's ([`crate::ui_action::ActionStates::arrival_slots`]).
+    /// Our player's arrival's slot pass (`0x5deae2`-`0x5deb12`): the staged words loaded into the
+    /// bar but an unknown spell's ([`crate::ui_action::ActionSlots::load_staged`]), then each
+    /// loaded word into the VM's copy, each item word recounted and its usable pair stored
+    /// ([`crate::ui_action::ActionStates::arrival_slots`]).
     pub(crate) fn engine_arrival_slots(&mut self, script: &mut UiScript) {
+        let Some(known) = self
+            .appliers
+            .action_states()
+            .as_ref()
+            .map(|states| states.known_spells())
+        else {
+            return;
+        };
+        let loaded = self
+            .appliers
+            .action_bar()
+            .load_staged(|word| known.contains(&word));
         if let Some(states) = self.appliers.action_states().as_mut() {
-            states.arrival_slots(script);
+            states.arrival_slots(script, &loaded);
         }
+    }
+
+    /// `0x4e6d20(entry)`, a recount's one count of its entry (`0x4e5c75`); `None` in a harness
+    /// without the action feed's inputs.
+    pub(crate) fn engine_item_count(&mut self, entry: u32) -> Option<u32> {
+        self.appliers
+            .action_states()
+            .as_ref()
+            .map(|states| states.item_count(entry))
+    }
+
+    /// `0x4e5de0`'s notify of the 1-based `action` when it stands for `spell` in the player's book:
+    /// its usable pair stored; whether it did
+    /// ([`crate::ui_action::ActionStates::spell_slot_notified`]).
+    pub(crate) fn engine_spell_slot_notified(
+        &mut self,
+        script: &mut UiScript,
+        action: u32,
+        spell: u32,
+    ) -> bool {
+        self.appliers
+            .action_states()
+            .as_mut()
+            .is_some_and(|states| states.spell_slot_notified(script, action, spell))
+    }
+
+    /// A recount's write of the 1-based `action` when it holds `entry`: `count` stored
+    /// (`0x4e5caa`), the VM's copy with it, and the slot's usable pair (`0x4e5cb1` into
+    /// `0x4e58e0`); whether it held the entry
+    /// ([`crate::ui_action::ActionStates::recounted`]).
+    pub(crate) fn engine_recounted(
+        &mut self,
+        script: &mut UiScript,
+        action: u32,
+        entry: u32,
+        count: u32,
+    ) -> bool {
+        self.appliers
+            .action_states()
+            .as_mut()
+            .is_some_and(|states| states.recounted(script, action, entry, count))
     }
 
     /// Push the views a call left for the script's next line, and for the listeners at a signal
@@ -927,7 +982,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
             ScriptCall::Stable(StableCall::Close) => self.close_stable(script, &mut at.mark),
             ScriptCall::Stable(call) => appliers.stable().apply(call),
             ScriptCall::Session(request) => appliers.session().apply(request),
-            ScriptCall::Tutorial(call) => appliers.tutorial().apply(call),
+            ScriptCall::Tutorial(call) => appliers.tutorial().apply(script, call),
             ScriptCall::Bank(BankCall::Close) => self.close_bank(script, &mut at.mark),
             ScriptCall::Bank(BankCall::Purchase) => appliers.bank().purchase(script),
             ScriptCall::TradeSkill(TradeSkillCall::Do { spell_id, count }) => {
@@ -969,10 +1024,13 @@ impl CallHost for ScriptCallHost<'_, '_> {
             }
             ScriptCall::ActionBar(call) => {
                 appliers.action_bar().apply(call);
-                // The write's store of the slot's pair (`0x4e5903`-`0x4e5914`), ahead of its
-                // signal.
+                // An item word's count (`0x4e66e9`-`0x4e66f1`), then the write's store of the
+                // slot's pair (`0x4e5903`-`0x4e5914`), ahead of its signal.
                 if let ActionBarCall::Set { id, .. } | ActionBarCall::Notify { id } = call {
                     if let Some(states) = appliers.action_states().as_mut() {
+                        if matches!(call, ActionBarCall::Set { .. }) {
+                            states.item_written(script, id);
+                        }
                         states.slot_written(script, id);
                     }
                 }
@@ -1323,6 +1381,36 @@ impl<P: SystemParam + 'static> VmWith<'_, '_, P> {
                 host.engine_arrival_slots(script);
             }
         }
+    }
+
+    /// A recount's count of `entry` with the host ([`ScriptCallHost::engine_item_count`]); `None`
+    /// with no VM or no host, where no slot is read.
+    pub(crate) fn engine_item_count(&mut self, entry: u32) -> Option<u32> {
+        self.script.as_ref()?;
+        self.set.p1().as_mut()?.engine_item_count(entry)
+    }
+
+    /// `0x4e5de0`'s notify of one slot with the host
+    /// ([`ScriptCallHost::engine_spell_slot_notified`]); with no VM or no host nothing is notified.
+    pub(crate) fn engine_spell_slot_notified(&mut self, action: u32, spell: u32) -> bool {
+        let Some(script) = self.script.as_deref_mut() else {
+            return false;
+        };
+        self.set
+            .p1()
+            .as_mut()
+            .is_some_and(|host| host.engine_spell_slot_notified(script, action, spell))
+    }
+
+    /// A recount's write of one slot with the host ([`ScriptCallHost::engine_recounted`]).
+    pub(crate) fn engine_recounted(&mut self, action: u32, entry: u32, count: u32) -> bool {
+        let Some(script) = self.script.as_deref_mut() else {
+            return false;
+        };
+        self.set
+            .p1()
+            .as_mut()
+            .is_some_and(|host| host.engine_recounted(script, action, entry, count))
     }
 
     /// An engine writer's `SelectTarget(0)`, signalled in place with the host
@@ -4839,10 +4927,11 @@ mod tests {
             crate::dev::add_every_instrument,
         );
         let (writers, unhosted) = vm_writers_and_the_unhosted(&mut app);
-        // The census reads the client's systems: a hundred writers at least in either build, and
-        // where the build carries type names, a feed and two frame polls among them.
+        // The census reads the client's systems: eighty writers at least in either build, a floor
+        // the feeds' going live lowers toward, and where the build carries type names, a feed and
+        // two frame polls among them.
         assert!(
-            writers.len() >= 100,
+            writers.len() >= 80,
             "the census reads the client's VM writers: {} read",
             writers.len()
         );

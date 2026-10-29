@@ -165,10 +165,9 @@ fn client() -> Client {
             (2, POTION, ACTION_KIND_ITEM),
         ] {
             slots
-                .buttons
+                .staged
                 .insert(slot, ActionButton { slot, action, kind });
         }
-        slots.touch();
     }
     crate::items::test_spawn_item(
         world,
@@ -285,12 +284,13 @@ fn a_cooldown_querys_record_flushes_at_its_answers_place() {
                 kind: ACTION_KIND_ITEM,
             },
         );
-        slots.touch();
     }
     world
         .resource_mut::<crate::spell::Cooldowns>()
         .apply_wire_item_cooldown(HEARTHSTONE, HEARTH, std::time::Instant::now());
     c.frame(vec![]);
+    // The button's cooldown read (`ActionButton_UpdateCooldown`), whose query misses the record.
+    c.eval::<()>(true, "GetActionCooldown(4)");
     c.seen(&[]);
     let mut record = crate::items::test_template("Hearthstone");
     record.use_spell = Some(benilla_protocol::messages::ItemUseSpell {
@@ -351,18 +351,7 @@ fn a_pet_spell_list_binds_its_macros_between_its_sort_and_its_pet() {
         // The load's derivation, with no pet: a miss.
         script.derive_macro_bindings(|_, _| true);
     }
-    {
-        let mut slots = world.resource_mut::<crate::ui_action::ActionSlots>();
-        slots.buttons.insert(
-            3,
-            ActionButton {
-                slot: 3,
-                action: 1,
-                kind: ACTION_KIND_MACRO,
-            },
-        );
-        slots.touch();
-    }
+    crate::ui_action::hold_for_test(world, 4, ACTION_KIND_MACRO, 1);
     c.frame(vec![]);
     c.eval::<()>(
         false,
@@ -386,11 +375,10 @@ fn a_pet_spell_list_binds_its_macros_between_its_sort_and_its_pet() {
     );
 }
 
-/// The getters answer the same through the lent host as off the frame's snapshots wherever the
-/// snapshots are current: every slot, cold and running. The book and the bags are read through
-/// the host alone, so their lines are the live read's.
+/// The getters answer through the lent host for every slot, the book and the bags, cold and
+/// running.
 #[test]
-fn every_cooldown_getter_answers_the_same_live_as_off_the_snapshot() {
+fn every_cooldown_getter_answers_live_cold_and_running() {
     let mut c = client();
     let chunk = r#"
         local out = {}
@@ -403,20 +391,8 @@ fn every_cooldown_getter_answers_the_same_live_as_off_the_snapshot() {
         note("bag 0 1", GetContainerItemCooldown(0, 1))
         note("bag 0 2", GetContainerItemCooldown(0, 2))
         return out"#;
-    let agree = |c: &mut Client, why: &str| {
-        let snapshot: Vec<String> = c.eval(false, chunk);
-        let live: Vec<String> = c.eval(true, chunk);
-        let unbooked = |lines: &[String]| -> Vec<String> {
-            lines
-                .iter()
-                .filter(|l| !l.starts_with("spell ") && !l.starts_with("bag "))
-                .cloned()
-                .collect()
-        };
-        assert_eq!(unbooked(&snapshot), unbooked(&live), "{why}");
-        live
-    };
-    let cold = agree(&mut c, "all cold");
+    let agree = |c: &mut Client| -> Vec<String> { c.eval(true, chunk) };
+    let cold = agree(&mut c);
     assert!(cold.iter().any(|l| l == "action 1 0,0,1"), "{cold:#?}");
     assert!(cold.iter().any(|l| l == "action 4 0,0,0"), "{cold:#?}");
     c.frame(vec![
@@ -426,7 +402,7 @@ fn every_cooldown_getter_answers_the_same_live_as_off_the_snapshot() {
             spell_id: POTION_SPELL,
         }],
     ]);
-    let running = agree(&mut c, "two running");
+    let running = agree(&mut c);
     for prefix in ["action 1 ", "spell 1 ", "action 3 ", "bag 0 1 "] {
         let line = running
             .iter()
@@ -575,18 +551,7 @@ fn the_pet_book_and_a_pet_bound_slot_read_the_pets_list_inside_their_packet() {
         .resource_mut::<crate::net::GuidIndex>()
         .0
         .insert(PET, pet);
-    {
-        let mut slots = world.resource_mut::<crate::ui_action::ActionSlots>();
-        slots.buttons.insert(
-            3,
-            ActionButton {
-                slot: 3,
-                action: 1,
-                kind: ACTION_KIND_MACRO,
-            },
-        );
-        slots.touch();
-    }
+    crate::ui_action::hold_for_test(world, 4, ACTION_KIND_MACRO, 1);
     c.frame(vec![]);
     c.frame(vec![]);
     crate::ui_macro::bind_for_test(

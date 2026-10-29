@@ -1,6 +1,6 @@
 //! The app side of the action bar: the action table, the spell catalogs and the plugin. [`feed`]
-//! pushes each slot's identity into the VM and [`state`] its per-frame cooldown, usability, range
-//! and checked state; [`drain`] sends `UseAction` as a cast, swing, item use or macro, and
+//! shows the engine's refusals and seeds a reloaded VM's copy of the bar, and [`state`] answers
+//! each slot's cooldown, usability, range and checked state at the getter's call; [`drain`] sends `UseAction` as a cast, swing, item use or macro, and
 //! `PickupAction`/`PlaceAction` as `CMSG_SET_ACTION_BUTTON`.
 
 use std::collections::{BTreeSet, HashMap};
@@ -16,7 +16,7 @@ use benilla_assets::{LockRecover, WorldAssets};
 
 mod cast_fail;
 mod cast_lines;
-pub(crate) use cast_lines::{CastFailLines, CastFailRedisplays};
+pub(crate) use cast_lines::CastFailLines;
 mod drain;
 // A `UseAction` press, applied in call order by `crate::script_calls`.
 pub(crate) use drain::{
@@ -34,7 +34,7 @@ pub(crate) mod drop_item;
 mod drop_item_tests;
 mod errors;
 mod feed;
-pub(crate) use feed::{bonus_bar_offset, spell_action_icon, MISSING_ITEM_ICON};
+pub(crate) use feed::{bonus_bar_offset, seed_reloaded_vm, spell_action_icon, MISSING_ITEM_ICON};
 #[cfg(test)]
 mod feed_tests;
 mod net;
@@ -80,42 +80,55 @@ pub(crate) const SPELL_ATTACK: u32 = 6603;
 pub(crate) struct ActionSlots {
     /// Wire slot (0-based) to its packed action; the Lua action id is slot + 1.
     pub buttons: HashMap<u8, ActionButton>,
-    /// Moved by every write ([`Self::touch`]); the identity feed re-resolves when it moved past
-    /// the count it last resolved, and writes nothing here.
-    generation: u64,
-    /// Whether this login's `SMSG_ACTION_BUTTONS` has come, so the bar is this character's.
-    arrived: bool,
+    /// `0xc4c2b4`: the words `SMSG_ACTION_BUTTONS` staged (`0x5e6680`), empty ones left out,
+    /// which only our player's arrival loads into the bar ([`Self::load_staged`]). No game entry
+    /// clears them.
+    pub(crate) staged: HashMap<u8, ActionButton>,
+    /// Whether the staged words are this login's and wait for our player's arrival to load them:
+    /// set by `SMSG_ACTION_BUTTONS`, cleared by the load and by the game entry.
+    unloaded: bool,
 }
 
 impl ActionSlots {
-    /// `SMSG_ACTION_BUTTONS`'s 120 words, every slot replaced (`0x5e6680` into `0xc4c2b4`).
-    pub(crate) fn arrive(&mut self, buttons: impl IntoIterator<Item = ActionButton>) {
-        self.buttons = buttons.into_iter().map(|b| (b.slot, b)).collect();
-        self.arrived = true;
-        self.touch();
+    /// `SMSG_ACTION_BUTTONS`'s 120 words staged, every one replaced (`0x5e6680` into `0xc4c2b4`);
+    /// the bar itself waits for our player's arrival.
+    pub(crate) fn stage(&mut self, buttons: impl IntoIterator<Item = ActionButton>) {
+        self.staged = buttons.into_iter().map(|b| (b.slot, b)).collect();
+        self.unloaded = true;
     }
 
-    /// Whether this login's bar has come ([`Self::arrive`]).
-    pub(crate) fn arrived(&self) -> bool {
-        self.arrived
+    /// Whether this login's staged words wait for the arrival's load ([`Self::stage`],
+    /// [`Self::load_staged`]): a worldport's book, which vmangos sends ahead of its bar
+    /// (`Player.cpp:19253`, `:19256`), finds the last staging loaded.
+    pub(crate) fn staged_unloaded(&self) -> bool {
+        self.unloaded
     }
 
-    /// The game entry's reset (`ResetActionBarState 0x4e4f50`): every word 0, and no bar yet for
-    /// this login.
+    /// Our player's arrival's load of the staged words (`0x5deae2`-`0x5deb12`): each stored into
+    /// the bar through `0x4e5d60`, but a word whose top nibble is clear and that `knows` does not
+    /// hold (`0x60c740`, skipped at `0x5deaf5`), an empty word among them, whose slot keeps what it
+    /// held. The 1-based ids stored, in slot order.
+    pub(crate) fn load_staged(&mut self, knows: impl Fn(u32) -> bool) -> Vec<u32> {
+        self.unloaded = false;
+        let mut staged: Vec<ActionButton> = self.staged.values().copied().collect();
+        staged.sort_by_key(|b| b.slot);
+        let mut loaded = Vec::new();
+        for b in staged {
+            let word = (u32::from(b.kind) << 24) | b.action;
+            if word & 0xf000_0000 == 0 && !knows(word) {
+                continue;
+            }
+            self.buttons.insert(b.slot, b);
+            loaded.push(u32::from(b.slot) + 1);
+        }
+        loaded
+    }
+
+    /// The game entry's reset (`ResetActionBarState 0x4e4f50`): every word 0, and no staging yet
+    /// for this login.
     fn game_entry(&mut self) {
         self.buttons.clear();
-        self.arrived = false;
-        self.touch();
-    }
-
-    /// Mark the words written, for the identity feed's next resolve.
-    pub(crate) fn touch(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-    }
-
-    /// The writes so far, which the identity feed compares with its last resolve's.
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
+        self.unloaded = false;
     }
 }
 
@@ -316,14 +329,61 @@ impl Spells {
     }
 }
 
-/// One pass of the action-state feed, for a test that reads a slot's pushed state.
+/// The bar's word at the 1-based `action` and the VM's copy of it, as a write leaves both, for a
+/// test that places a slot outside the verbs.
 #[cfg(test)]
-pub(crate) fn run_feed_action_state_once(world: &mut World) {
-    use bevy::ecs::system::RunSystemOnce;
+pub(crate) fn hold_for_test(world: &mut World, action: u32, kind: u8, id: u32) {
+    let slot = u8::try_from(action - 1).expect("a bar slot");
+    world.resource_mut::<ActionSlots>().buttons.insert(
+        slot,
+        ActionButton {
+            slot,
+            action: id,
+            kind,
+        },
+    );
+    if let Some(mut script) = world.get_non_send_mut::<benilla_ui::script::UiScript>() {
+        script.set_action(
+            action,
+            Some(benilla_ui::script::ActionSlot {
+                kind,
+                action: id,
+                ..Default::default()
+            }),
+        );
+    }
+}
+
+/// `chunk`'s answer with the bar's live reads lent as the call host lends them ([`ActionStates`],
+/// and the worn walk `IsEquippedAction` asks), for a test without the whole host.
+#[cfg(test)]
+pub(crate) fn eval_live<T: benilla_ui::mlua::FromLuaMulti>(world: &mut World, chunk: &str) -> T {
+    use crate::script_calls::live::LiveFamily;
+    type Reads = (
+        state::ActionStates<'static, 'static>,
+        crate::script_calls::live::StatsLive<'static, 'static>,
+    );
+    struct Lent<'a, A, B>(&'a mut A, &'a mut B);
+    impl<A: LiveFamily, B: LiveFamily> benilla_ui::script::LiveReader for Lent<'_, A, B> {
+        fn read_live(&mut self, ask: &mut benilla_ui::script::live::LiveAsk<'_>) -> bool {
+            self.0.answer(ask) || self.1.answer(ask)
+        }
+    }
     world.init_resource::<state::ActionStateMemory>();
-    world
-        .run_system_once(state::feed_action_state)
-        .expect("the action-state feed runs as a one-shot system");
+    let mut script = world
+        .remove_non_send::<benilla_ui::script::UiScript>()
+        .expect("a VM");
+    let mut state = bevy::ecs::system::SystemState::<Reads>::new(world);
+    let r = {
+        let (mut states, mut stats) = state.get_mut(world).expect("`Reads` validates");
+        script.reading(&mut Lent(&mut states, &mut stats), |s| {
+            s.eval::<T>(chunk)
+                .unwrap_or_else(|e| panic!("{chunk}: {e}"))
+        })
+    };
+    state.apply(world);
+    world.insert_non_send(script);
+    r
 }
 
 /// A field watcher's usable refresh (`0x4b31c0`), as its notice runs it inside the drain
@@ -463,22 +523,12 @@ impl Plugin for UiActionPlugin {
             .init_resource::<ReactiveSpells>()
             .init_resource::<ActionSlots>()
             .init_resource::<LearnedAbilities>()
-            .init_resource::<CastFailRedisplays>()
             .init_resource::<ClickCasts>()
             .add_data_loaders((load_spells, load_spell_mechanics))
             .add_systems(
                 Update,
-                (
-                    // The feeds ride with the unit feed, before the VM ticks: the state feed
-                    // after the identity feed, so a slot's first state lands the same frame.
-                    feed::feed_actions.in_set(UnitFeed),
-                    // A seat: the world-enter events' handlers read the slots' state, which the
-                    // reference's arrival stores before its enter cascade (`0x5deafc`, `0x5deb60`).
-                    state::feed_action_state
-                        .in_set(UnitFeed)
-                        .after(crate::player::ControlRestore)
-                        .after(feed::feed_actions),
-                ),
+                // The refusals ride with the unit feed, before the VM ticks.
+                feed::feed_actions.in_set(UnitFeed),
             );
     }
 }

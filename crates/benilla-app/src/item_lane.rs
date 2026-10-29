@@ -22,7 +22,6 @@ use benilla_ui::script::UiScript;
 use crate::field_watch::FieldNotice;
 use crate::item_watch::{BagEvent, ItemNotice, Run, TradeTouch, Unlock};
 use crate::lanes::{Stamp, Until};
-use crate::net::{ObjectStore, SelfPlayer};
 
 /// The item watchers' runs, each stamped as its packet's handler readied it
 /// ([`crate::lanes::stamp`]), with the trade half a close may run ahead of the lane
@@ -108,11 +107,10 @@ fn drop_item_runs(mut lane: ResMut<ItemLane>) {
     lane.clear();
 }
 
-/// What a run's firing reads: the active player, and what the trade scan reads, the objects and
-/// the item records the recount counts with among them.
+/// What a run's firing reads: what the trade scan reads, and the message sink. The recount counts
+/// through the host's action states.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct RunReads<'w, 's> {
-    me: Query<'w, 's, &'static ObjectStore, With<SelfPlayer>>,
     trade: crate::ui_trade::TouchReads<'w, 's>,
     sink: crate::ui_action::MessageSink<'w>,
 }
@@ -169,21 +167,34 @@ pub(crate) fn seat_item_lane(world: &mut World) {
 
 /// One run, in its handler's order: its unlocks, the recount of each entry it passes `0x4e5c70`,
 /// its trade half unless a close ran it, then its own tail ([`fire_tail`]). A run with no notice
-/// unlocks, then signals its bag events and its unit signals.
+/// unlocks, then signals its bag events and its unit signals. Its alert recompute (`0x4c7ee0`)
+/// reads the objects as of its place through the lent host: behind a visible item's rebuilds,
+/// ahead of its recounts (`0x5dee75`, `0x5dee7a`), else last, behind the stack count's quest log
+/// ask (`0x5d9519`, `0x5d952a`), the enchantment's slot signal (`0x5d9b2a`, `0x5d9b2f`), and alone
+/// for the flags' and the durability's.
 fn fire_run(vm: &mut RunVm, reads: &mut RunReads, run: Run, touch: Option<TradeTouch>) {
     let Run {
         notice,
         signals,
         unlocks,
         bags,
+        alerts,
     } = run;
     let Some(notice) = notice else {
         on_vm(vm, |script| fire_unlocks(script, unlocks));
         fire_bags(vm, &bags);
         on_vm(vm, |script| fire_signals(script, &mut reads.sink, signals));
+        if alerts {
+            on_vm(vm, UiScript::recompute_inventory_alerts);
+        }
         return;
     };
     let rebuild = rebuild_at(&notice);
+    let alerts_first = alerts
+        && matches!(
+            notice,
+            ItemNotice::Visible { .. } | ItemNotice::ForeignVisible
+        );
     let held = vm.run(|script| {
         let Some(script) = script else {
             return false;
@@ -192,17 +203,14 @@ fn fire_run(vm: &mut RunVm, reads: &mut RunReads, run: Run, touch: Option<TradeT
         if rebuild == Some(Rebuild::BeforeRecount) {
             rebuild_lists(script);
         }
+        if alerts_first {
+            script.recompute_inventory_alerts();
+        }
         true
     });
     if held {
-        let counter = crate::ui_action::recount::Counter {
-            store: reads.me.iter().next(),
-            objects: &reads.trade.objects,
-            items: &reads.trade.items,
-            commands: &reads.trade.commands,
-        };
         for entry in notice.recounts() {
-            crate::ui_action::recount::recount(vm, &counter, entry);
+            crate::ui_action::recount::recount(vm, entry);
         }
     }
     if let Some(touch) = touch {
@@ -213,6 +221,9 @@ fn fire_run(vm: &mut RunVm, reads: &mut RunReads, run: Run, touch: Option<TradeT
         });
     }
     fire_tail(vm, &mut reads.sink, &notice, &bags, signals, rebuild);
+    if alerts && !alerts_first {
+        on_vm(vm, UiScript::recompute_inventory_alerts);
+    }
 }
 
 /// `f` on the VM with the host lent; nothing with no VM.
@@ -229,7 +240,7 @@ fn on_vm(vm: &mut RunVm, f: impl FnOnce(&mut UiScript)) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rebuild {
     /// Ahead of the recount: the record set-up (`0x5d85be`), the destroy (`0x5d8788`), the stack
-    /// count (`0x5d94d1`) and a visible item (`0x5dee70`).
+    /// count (`0x5d94d1`) and anyone's visible item (`0x5dee70`).
     BeforeRecount,
     /// After the recounts, ahead of the bag update: a backpack or keyring seat (`0x4f8e65`) and a
     /// container's (`0x4f917c`).
@@ -245,7 +256,8 @@ fn rebuild_at(notice: &ItemNotice) -> Option<Rebuild> {
         ItemNotice::Record { .. }
         | ItemNotice::Destroyed { .. }
         | ItemNotice::StackCount { .. }
-        | ItemNotice::Visible { .. } => Some(Rebuild::BeforeRecount),
+        | ItemNotice::Visible { .. }
+        | ItemNotice::ForeignVisible => Some(Rebuild::BeforeRecount),
         ItemNotice::Seat { .. } => Some(Rebuild::BeforeBags),
         ItemNotice::Bag { .. } => Some(Rebuild::AfterBags),
         ItemNotice::EntryRecord { .. }
@@ -253,7 +265,8 @@ fn rebuild_at(notice: &ItemNotice) -> Option<Rebuild> {
         | ItemNotice::Entry { .. }
         | ItemNotice::Enchantment { .. }
         | ItemNotice::TradeRecord { .. }
-        | ItemNotice::TooltipRecord { .. } => None,
+        | ItemNotice::TooltipRecord { .. }
+        | ItemNotice::ActionRecord { .. } => None,
     }
 }
 
@@ -389,8 +402,10 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(crate::net::NetCommands(tx));
         app.insert_non_send(rx);
-        app.world_mut()
-            .spawn((SelfPlayer, ObjectStore(Default::default())));
+        app.world_mut().spawn((
+            crate::net::SelfPlayer,
+            crate::net::ObjectStore(Default::default()),
+        ));
         let mut script = UiScript::new().unwrap();
         script.set_trade_skill(Some(TradeSkillState {
             line: 197,

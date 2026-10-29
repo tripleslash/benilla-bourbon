@@ -326,6 +326,13 @@ fn run_callback(
             }
             Cb::CooldownQuery => {}
             Cb::Stationery => run_answer_step(world, paper_answered, entry),
+            // `ShowItemCastFailure 0x6e29b0`, for a record and a refusal alike: the line again,
+            // on the cast lane here.
+            Cb::CastFailure { spell, reason } => {
+                if let Some(mut reports) = world.get_resource_mut::<crate::ui_cast::CastReports>() {
+                    reports.redisplay(spell, reason, entry);
+                }
+            }
             // `QUEST_LOG_UPDATE` for a ready record only (`0x4e0838`), held and parked here.
             Cb::QuestLog if answered => crate::ui_items::feed::quest_log_answered(world),
             // The tooltips' rebuilds for a found record only (`0x52e551`, `0x52f826`).
@@ -414,11 +421,18 @@ fn run_record_callback(
                 id: crate::field_watch::id::UNIT_INVENTORY_CHANGED,
             }),
         Cb::Trade | Cb::Ammo => {}
+        // The bar's recount of the entry, for a ready record only (`0x4e5b86` → `0x4e5c70`).
+        Cb::ActionSlots if answered => sc.item_lane.push(crate::item_watch::Run {
+            notice: Some(crate::item_watch::ItemNotice::ActionRecord { entry }),
+            ..Default::default()
+        }),
+        Cb::ActionSlots => {}
         Cb::Swap
         | Cb::AutoEquip
         | Cb::ItemCooldown
         | Cb::CooldownQuery
         | Cb::Stationery
+        | Cb::CastFailure { .. }
         | Cb::QuestLog
         | Cb::Tooltip
         | Cb::TradeSkill

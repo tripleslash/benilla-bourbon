@@ -207,7 +207,7 @@
 - `WOW_BOOTH_LOG` — benilla-app/src/portrait/mod.rs
 - `WOW_CAM_CHANGED` — benilla-app/src/perf/mod.rs
 - `WOW_CAM_DUMP` — benilla-app/src/player/camera.rs
-- `WOW_CAPTURE` — benilla-app/src/account_data/sections.rs, benilla-app/src/account_data/tests.rs, benilla-app/src/bindings.rs, benilla-app/src/capture/mod.rs, benilla-app/src/capture/scenarios.rs, benilla-app/src/cvars/mod.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/lib.rs, benilla-app/src/local_state.rs, benilla-app/src/net.rs, benilla-app/src/net/apply.rs, benilla-app/src/player/camera_saved.rs, benilla-app/src/run_mode.rs, benilla-app/src/sound/mod.rs, benilla-app/src/ui_chat/settings.rs, benilla-app/src/ui_chat/tests.rs, benilla-app/src/ui_logout.rs, benilla-app/src/ui_macro/tests.rs, benilla-app/src/ui_saved.rs, benilla-app/src/ui_script/addons.rs, benilla-app/src/ui_script/layer_tests.rs, benilla-app/src/ui_script/lifecycle.rs, benilla-app/src/ui_script/mod.rs, benilla-app/src/ui_script/world_entry_tests.rs, benilla-app/src/video.rs, benilla-app/src/wdb/tests.rs, benilla-world/src/bgwin.rs, benilla-world/src/clouds/mod.rs, benilla-world/src/dev_state.rs, benilla-world/src/wind/mod.rs
+- `WOW_CAPTURE` — benilla-app/src/account_data/sections.rs, benilla-app/src/account_data/tests.rs, benilla-app/src/bindings.rs, benilla-app/src/capture/mod.rs, benilla-app/src/capture/scenarios.rs, benilla-app/src/cvars/mod.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/lanes/action_live_tests.rs, benilla-app/src/lib.rs, benilla-app/src/local_state.rs, benilla-app/src/net.rs, benilla-app/src/net/apply.rs, benilla-app/src/player/camera_saved.rs, benilla-app/src/run_mode.rs, benilla-app/src/sound/mod.rs, benilla-app/src/ui_chat/settings.rs, benilla-app/src/ui_chat/tests.rs, benilla-app/src/ui_logout.rs, benilla-app/src/ui_macro/tests.rs, benilla-app/src/ui_saved.rs, benilla-app/src/ui_script/addons.rs, benilla-app/src/ui_script/layer_tests.rs, benilla-app/src/ui_script/lifecycle.rs, benilla-app/src/ui_script/mod.rs, benilla-app/src/ui_script/world_entry_tests.rs, benilla-app/src/video.rs, benilla-app/src/wdb/tests.rs, benilla-world/src/bgwin.rs, benilla-world/src/clouds/mod.rs, benilla-world/src/dev_state.rs, benilla-world/src/wind/mod.rs
 - `WOW_CAPTURE_AGE` — benilla-app/src/capture/mod.rs
 - `WOW_CAPTURE_DEADLINE` — benilla-app/src/capture/mod.rs
 - `WOW_CAPTURE_OUT` — benilla-app/src/capture/mod.rs
@@ -359,6 +359,8 @@
 - `WOW_MATANIM_LIVE` — benilla-world/src/doodad_anim/mat_anim.rs
 - `WOW_MATANIM_PROBE` — benilla-world/src/doodad_anim/mat_anim.rs
 - `WOW_MEM_BALLAST_MB` — benilla-app/src/memory_pressure.rs
+- `WOW_MEM_RUN_MB` — benilla-app/src/memory_pressure.rs
+- `WOW_MEM_SHED_MB` — benilla-app/src/memory_pressure.rs
 - `WOW_MERGED_FADE` — benilla-assets/src/materials.rs
 - `WOW_MERGED_SLOT` — benilla-assets/src/materials.rs
 - `WOW_MERGE_CENSUS` — benilla-world/src/static_merge.rs

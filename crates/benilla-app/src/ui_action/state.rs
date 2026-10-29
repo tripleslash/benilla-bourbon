@@ -1,6 +1,7 @@
-//! Each action slot's per-frame state behind `IsUsableAction`, `IsActionInRange`,
-//! `IsCurrentAction` and `GetActionCooldown`, diff-pushed into the VM ahead of the world-enter
-//! events ([`feed_action_state`]). The usable cache's refresh `0x4e5c00` alone, with its
+//! Each action slot's state behind `IsUsableAction`, `IsActionInRange`, `IsCurrentAction` and
+//! `GetActionCooldown`, read at the getter's call through the lent host
+//! ([`ActionStates`]'s live family), as the reference's getters resolve the slot and test the live
+//! player inside the call (`0x4e5a50`). The usable cache's refresh `0x4e5c00` alone, with its
 //! `ACTIONBAR_UPDATE_USABLE` when a pair changed, runs in its callers' places
 //! ([`ActionStates::cache_refresh`]): the world entry's cascade, `EditMacro`'s call and each
 //! `RaiseBagUpdate` of an item watcher's run. The usable refresh `0x4b31c0`, with each reactive
@@ -31,7 +32,10 @@ use bevy::prelude::*;
 
 use benilla_formats::RangeTargets;
 use benilla_protocol::messages::{ACTION_KIND_ITEM, ACTION_KIND_SPELL};
-use benilla_ui::script::{macro_slot_id, ActionState, ActionStateNow, ActionUsableNow};
+use benilla_ui::script::{
+    macro_slot_id, ActionAttackFaceNow, ActionConsumableNow, ActionCountNow, ActionSlot,
+    ActionState, ActionStateNow, ActionTextureNow, ActionUsableNow,
+};
 
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore};
@@ -193,7 +197,7 @@ fn pet_book_state(leg: PetBookLeg) -> ActionState {
 
 /// `0x622270` at mask 1, `IsEquippedAction`'s walk (`0x4e5380`): whether the worn slots of the
 /// player `store` hold a whole item of `entry`. A broken copy is not worn (`0x6224f4`-`0x62250e`).
-/// The feed's snapshot and the lent host's read at the call are this one walk.
+/// The lent host's read at the call and the states the bar's writes push are this one walk.
 pub(crate) fn wears_entry(
     store: &ObjectStore,
     objects: &(impl crate::ui_items::ItemObjects + ?Sized),
@@ -284,6 +288,8 @@ pub(crate) struct ActionWalk<'w, 's> {
     commands: Res<'w, NetCommands>,
     // `ItemSubClass.dbc`, whose flags the walk's ammo leg reads.
     sub_classes: Option<Res<'w, crate::ui_items::ItemSubClasses>>,
+    /// `ItemDisplayInfo.dbc`, which an item slot's icon and the attack faces read.
+    icons: Option<Res<'w, crate::entities::ItemDisplays>>,
 }
 
 /// The slot walk ([`ActionWalk`]) with what the bar's writes and refreshes store: the usable
@@ -296,24 +302,34 @@ pub(crate) struct ActionWalk<'w, 's> {
 pub(crate) struct ActionStates<'w, 's> {
     walk: ActionWalk<'w, 's>,
     memory: ResMut<'w, ActionStateMemory>,
-    /// The known spells, which the arrival's slot pass tests (`0x60c740`).
+    /// The known spells, which the arrival's load tests (`0x60c740`).
     actions: Res<'w, PlayerActions>,
     /// The reactive list; absent in a harness that seeds none.
     reactive: Option<ResMut<'w, super::ReactiveSpells>>,
 }
 
-/// What the action states remember between passes: the bar's usable cache, which lives for the
-/// session, not for a VM.
+/// What the action states remember between passes: the bar's usable cache and its item counts,
+/// which live for the session, not for a VM.
 #[derive(Resource, Default)]
 pub(crate) struct ActionStateMemory {
     cache: UsableCache,
+    /// `0xbc6390`: each item slot's count, by Lua action id, which only a recount (`0x4e5caa`) and
+    /// an item word's write (`0x4e5d90`, `0x4e66f1`) store, and `GetActionCount` reads
+    /// (`0x4e6c70`).
+    counts: HashMap<u32, u32>,
 }
 
 impl ActionStateMemory {
-    /// `ResetActionBarState 0x4e4f50`'s zeroing of the usable and no-power flags, at the game
-    /// entry (`0x48f5a4`).
+    /// `ResetActionBarState 0x4e4f50`'s zeroing of the usable and no-power flags and the counts,
+    /// at the game entry (`0x48f5a4`).
     pub(super) fn game_entry(&mut self) {
         self.cache.pairs.clear();
+        self.counts.clear();
+    }
+
+    /// The count `0xbc6390` holds for `action`, 0 never stored.
+    fn count(&self, action: u32) -> u32 {
+        self.counts.get(&action).copied().unwrap_or(0)
     }
 }
 
@@ -350,8 +366,8 @@ impl ActionStates<'_, '_> {
     ) -> UsableSignals {
         let (fresh, activated) = self.walk.all(
             script,
+            &self.memory,
             Instant::now(),
-            false,
             self.reactive.as_mut().map(|r| &mut r.0),
         );
         let usable_changed = self.memory.cache.refresh(pairs(&fresh));
@@ -367,7 +383,7 @@ impl ActionStates<'_, '_> {
     /// `RaiseBagUpdate`'s (`0x4f9374`). Every slot's state recomputed and pushed and its pair
     /// stored; whether a pair changed, which signals `ACTIONBAR_UPDATE_USABLE` (`0x4e5c53`).
     pub(crate) fn cache_refresh(&mut self, script: &mut benilla_ui::script::UiScript) -> bool {
-        let fresh = self.walk.all(script, Instant::now(), false, None).0;
+        let fresh = self.walk.all(script, &self.memory, Instant::now(), None).0;
         let changed = self.memory.cache.refresh(pairs(&fresh));
         push(script, &fresh, &self.memory.cache, None);
         changed
@@ -388,7 +404,7 @@ impl ActionStates<'_, '_> {
         };
         let fresh = self
             .walk
-            .slots_states(script, Some(slot), Instant::now(), false, None)
+            .slots_states(script, &self.memory, Some(slot), Instant::now(), None)
             .0;
         let pair = fresh
             .get(&action)
@@ -397,22 +413,185 @@ impl ActionStates<'_, '_> {
         push(script, &fresh, &self.memory.cache, Some(action));
     }
 
-    /// Our player's arrival's slot pass (`0x5deae2`-`0x5deb12`): each slot written through
-    /// `0x4e5d60` with no send and quiet set (`0x5deafc`), so its pair is stored, but an empty one
-    /// or a spell word the player does not know (`0x60c740`, skipped at `0x5deaf5`).
-    pub(crate) fn arrival_slots(&mut self, script: &mut benilla_ui::script::UiScript) {
-        let fresh = self.walk.all(script, Instant::now(), false, None).0;
-        for (&slot, b) in &self.walk.slots.buttons {
-            if b.kind == ACTION_KIND_SPELL && !self.actions.spells.contains(&b.action) {
-                continue;
+    /// The known spells, which the arrival's load tests a spell word against (`0x60c740`).
+    pub(crate) fn known_spells(&self) -> std::collections::BTreeSet<u32> {
+        self.actions.spells.clone()
+    }
+
+    /// Our player's arrival's slot pass (`0x5deae2`-`0x5deb12`) over the 1-based slots `loaded`,
+    /// the words its load stored ([`super::ActionSlots::load_staged`]): each written through
+    /// `0x4e5d60` with no send and quiet set (`0x5deafc`), into the VM's copy, each item word
+    /// recounted first (`0x4e5d90`), and its pair stored (`0x4e58e0`). A slot the load skipped keeps
+    /// its word, its count and its pair. Nothing else recounts a worldport: its items are created
+    /// again before our player, outside the world latch, and run no record set-up.
+    pub(crate) fn arrival_slots(
+        &mut self,
+        script: &mut benilla_ui::script::UiScript,
+        loaded: &[u32],
+    ) {
+        let mut counted: HashMap<u32, u32> = HashMap::new();
+        for &action in loaded {
+            let button = self.walk.button(action).copied();
+            if let Some(b) = button.filter(|b| b.kind == ACTION_KIND_ITEM) {
+                let count = *counted
+                    .entry(b.action)
+                    .or_insert_with(|| self.walk.item_count(b.action));
+                self.memory.counts.insert(action, count);
             }
-            let action = u32::from(slot) + 1;
+            self.mirror(script, action);
+        }
+        let fresh = self.walk.all(script, &self.memory, Instant::now(), None).0;
+        for &action in loaded {
             let pair = fresh
                 .get(&action)
                 .map_or((false, false), |st| (st.usable, st.not_enough_mana));
             self.memory.cache.store(action, pair);
         }
         push(script, &fresh, &self.memory.cache, None);
+    }
+
+    /// A new VM's copy of every slot, with the counts the bar holds, and every slot's state, with
+    /// nothing signalled: the bar and its tables outlive a VM (`0x4e4f50` runs only at the game
+    /// entry, `0x48f5a4`).
+    pub(crate) fn seed(&mut self, script: &mut benilla_ui::script::UiScript) {
+        for action in 1..=120u32 {
+            self.mirror(script, action);
+        }
+        let fresh = self.walk.all(script, &self.memory, Instant::now(), None).0;
+        push(script, &fresh, &self.memory.cache, None);
+    }
+
+    /// `0x4e6d20(entry)`, the count a recount stores ([`ActionWalk::item_count`]).
+    pub(crate) fn item_count(&self, entry: u32) -> u32 {
+        self.walk.item_count(entry)
+    }
+
+    /// `0x4e5c70`'s write of the 1-based `action` when the bar holds `entry` there: `count` stored
+    /// (`0x4e5caa`), the VM's copy of the slot with it, then the slot's pair (`0x4e5cb1` into
+    /// `0x4e58e0`); whether it held the entry.
+    pub(crate) fn recounted(
+        &mut self,
+        script: &mut benilla_ui::script::UiScript,
+        action: u32,
+        entry: u32,
+        count: u32,
+    ) -> bool {
+        let holds = self
+            .walk
+            .button(action)
+            .is_some_and(|b| b.kind == ACTION_KIND_ITEM && b.action == entry);
+        if holds {
+            self.memory.counts.insert(action, count);
+            self.mirror(script, action);
+            self.slot_written(script, action);
+        }
+        holds
+    }
+
+    /// `0x4e5de0`'s step for the 1-based `action`: when the slot resolves to `spell` with book 0
+    /// (`0x4e5df5`-`0x4e5e03`), its pair stored as `0x4e58e0` with no send stores it; whether it
+    /// did.
+    pub(crate) fn spell_slot_notified(
+        &mut self,
+        script: &mut benilla_ui::script::UiScript,
+        action: u32,
+        spell: u32,
+    ) -> bool {
+        let stands = spell != 0 && self.slot_spell(script, action) == Some((spell, false));
+        if stands {
+            self.slot_written(script, action);
+        }
+        stands
+    }
+
+    /// `GetActionSlotSpell 0x4e5a50` for the 1-based `action`: the spell and its book flag. A spell
+    /// word's own with book 0; an item's on-use spell with book 0 (`0x4e5ae0`, its record looked
+    /// up with the bar's callback); a macro's record's cached spell and book (`0x4e5ba0`, `+0x564`,
+    /// `+0x568`) while the macro exists (`0x4e5030`). `None` for nothing to stand for.
+    fn slot_spell(
+        &self,
+        script: &benilla_ui::script::UiScript,
+        action: u32,
+    ) -> Option<(u32, bool)> {
+        let b = self.walk.button(action)?;
+        match b.kind {
+            ACTION_KIND_SPELL => Some((b.action, false)),
+            ACTION_KIND_ITEM => self
+                .walk
+                .bar_record(b.action)?
+                .use_spell
+                .map(|u| (u.spell_id, false)),
+            kind => {
+                let id = macro_slot_id(kind, b.action)?;
+                script.macros().by_id(id)?;
+                let record = script.macro_bindings().get(&id).copied()?;
+                Some((u32::try_from(record.spell).ok()?, record.pet_book))
+            }
+        }
+    }
+
+    /// An item word's write inside its verb (`PlaceAction`'s `0x4e66e9`-`0x4e66f1`,
+    /// `SetActionSlot`'s `0x4e5d90`): the slot's count taken and stored, the VM's copy with it.
+    pub(crate) fn item_written(&mut self, script: &mut benilla_ui::script::UiScript, action: u32) {
+        let Some(b) = self.walk.button(action).copied() else {
+            return;
+        };
+        if b.kind == ACTION_KIND_ITEM {
+            let count = self.walk.item_count(b.action);
+            self.memory.counts.insert(action, count);
+            self.mirror(script, action);
+        }
+    }
+
+    /// The VM's copy of the 1-based `action` set to the bar's word, with the count it holds and
+    /// what the cache holds of an item's record, asking nothing; cleared for an empty slot.
+    fn mirror(&self, script: &mut benilla_ui::script::UiScript, action: u32) {
+        let slot = self
+            .walk
+            .button(action)
+            .map(|b| self.walk.mirror_of(b, self.memory.count(action)));
+        script.set_action(action, slot);
+    }
+
+    /// `GetActionTexture`'s answer for a spell or item slot ([`ActionTextureNow`]).
+    fn texture_now(&self, action: u32) -> Option<String> {
+        let b = self.walk.button(action)?;
+        // `0x4e6a50`'s attack and ranged tests run on the slot's spell ahead of its kind arms
+        // (`0x4e6ab2`, `0x4e6acb`), an item word's its on-use spell (`0x4e5a50` → `0x4e5ae0`, its
+        // record looked up with the bar's callback); a spell word's are its own face's.
+        if b.kind == ACTION_KIND_ITEM {
+            let spell = self.walk.bar_record(b.action).and_then(|t| t.use_spell);
+            if let Some(face) = spell.and_then(|u| self.walk.attack_face(u.spell_id)) {
+                return Some(face);
+            }
+        }
+        self.walk.face(b, true)
+    }
+
+    /// A macro slot's attack faces for its bound `spell` ([`ActionAttackFaceNow`]).
+    fn attack_face_now(&self, spell: u32) -> Option<String> {
+        self.walk.attack_face(spell)
+    }
+
+    /// `GetActionCount`'s answer (`0x4e6c70`): the stored count for an item slot, else 0.
+    fn count_now(&self, action: u32) -> u32 {
+        match self.walk.button(action) {
+            Some(b) if b.kind == ACTION_KIND_ITEM => self.memory.count(action),
+            _ => 0,
+        }
+    }
+
+    /// `IsConsumableAction`'s answer (`0x4e5250`): an item slot whose record the cache holds and
+    /// that is consumable ([`benilla_protocol::messages::ItemInfo::is_consumable`]).
+    fn consumable_now(&self, action: u32) -> bool {
+        self.walk.button(action).is_some_and(|b| {
+            b.kind == ACTION_KIND_ITEM
+                && self
+                    .walk
+                    .items
+                    .template(b.action, 0, Ask::Read)
+                    .is_some_and(|t| t.is_consumable())
+        })
     }
 
     /// One slot's state as of here, for a getter's live read ([`ActionStateNow`]): its word's, a
@@ -487,6 +666,127 @@ fn push(
 }
 
 impl ActionWalk<'_, '_> {
+    /// The word the bar holds at the 1-based `action`.
+    fn button(&self, action: u32) -> Option<&benilla_protocol::messages::ActionButton> {
+        let slot = u8::try_from(action.checked_sub(1)?).ok()?;
+        self.slots.buttons.get(&slot)
+    }
+
+    /// The active player's object, `None` while none is held.
+    fn me_live(&self) -> Option<&ObjectStore> {
+        self.objects.player().and_then(|e| self.objects.store_of(e))
+    }
+
+    /// The item cache's lookup of `entry` with the bar's callback `0x4e5b80` and the dedupe flag
+    /// (`0x55ba30` from `0x4e5b30`, `0x4e6b10`, `0x4e6d69`, each with `push 1`): a miss asks the
+    /// record and keeps the callback once, which recounts the entry at the answer
+    /// ([`super::recount`]).
+    fn bar_record(&self, entry: u32) -> Option<&benilla_protocol::messages::ItemInfo> {
+        let template = self.items.template(entry, 0, Ask::Event(&self.commands));
+        if template.is_none() {
+            self.items
+                .wait_once(entry, crate::items::RecordCallback::ActionSlots);
+        }
+        template
+    }
+
+    /// `0x4e6d20(entry)`: 0 with no active player (`0x4e6d5e`), else the entry's record asked with
+    /// the bar's callback (`0x4e6d78`) and its charges or stacks over mask 0
+    /// ([`crate::ui_items::action_count`]).
+    pub(crate) fn item_count(&self, entry: u32) -> u32 {
+        let Some(store) = self.me_live() else {
+            return 0;
+        };
+        let template = self.bar_record(entry);
+        crate::ui_items::action_count(&store.0, &self.objects, entry, template)
+    }
+
+    /// The active player's object as of the drain's place, `None` while none is held.
+    fn me_view(&self) -> Option<&ObjectStore> {
+        self.objects.player().and_then(|e| self.views.get(e).ok())
+    }
+
+    /// `GetActionSlotTexture 0x4e6a50` for a spell or item word, off the player as of the drain's
+    /// place, so a toggle's listener reads its own packet's aura (`0x4e55f0`): an item's
+    /// display icon, never nil (the resolver `0x5d88b0`'s question mark while the record is not
+    /// cached or its display has no icon), looked up with the bar's callback when `ask`
+    /// (`0x4e6b24`); a spell's [`super::spell_action_icon`]. A macro's is its record's, the VM's.
+    fn face(&self, b: &benilla_protocol::messages::ActionButton, ask: bool) -> Option<String> {
+        match b.kind {
+            ACTION_KIND_ITEM => {
+                let template = if ask {
+                    self.bar_record(b.action)
+                } else {
+                    self.items.template(b.action, 0, Ask::Read)
+                };
+                Some(
+                    template
+                        .and_then(|t| {
+                            self.icons
+                                .as_ref()?
+                                .catalog
+                                .get(t.display_info_id)?
+                                .icon
+                                .clone()
+                        })
+                        .unwrap_or_else(|| super::feed::MISSING_ITEM_ICON.to_string()),
+                )
+            }
+            ACTION_KIND_SPELL => {
+                let spells = self.spells.as_deref()?;
+                let d = spells.catalog.get(b.action)?;
+                super::spell_action_icon(
+                    b.action,
+                    d,
+                    spells,
+                    self.me_view(),
+                    &self.objects,
+                    &self.items,
+                    self.icons.as_deref(),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    /// `0x4e6a50`'s attack tests on `spell` (`0x4e59b0`, `0x4e5a00`) and their faces, off the
+    /// player as [`Self::face`] reads it: the melee face for Attack, the ranged weapon's for a
+    /// ranged shot while it has one; `None` otherwise.
+    fn attack_face(&self, spell: u32) -> Option<String> {
+        let spells = self.spells.as_deref()?;
+        let d = spells.catalog.get(spell)?;
+        super::weapon_icon::auto_attack_icon(
+            d,
+            self.me_view(),
+            &spells.forms,
+            &self.objects,
+            &self.items,
+            self.icons.as_deref(),
+        )
+    }
+
+    /// The VM's copy of word `b` holding `count`: its icon, its record's consumable test and
+    /// on-use spell (`0x4e5ae0`) as the cache holds them, asking nothing.
+    fn mirror_of(&self, b: &benilla_protocol::messages::ActionButton, count: u32) -> ActionSlot {
+        let item = b.kind == ACTION_KIND_ITEM;
+        let template = item
+            .then(|| self.items.template(b.action, 0, Ask::Read))
+            .flatten();
+        ActionSlot {
+            texture: self.face(b, false),
+            kind: b.kind,
+            action: b.action,
+            count: if item { count } else { 0 },
+            consumable: template.is_some_and(|t| t.is_consumable()),
+            use_spell: template.and_then(|t| {
+                t.spells
+                    .iter()
+                    .find(|sp| sp.spell_id != 0 && sp.trigger == 0)
+                    .map(|sp| sp.spell_id)
+            }),
+        }
+    }
+
     /// The (`Instant`, `GetTime`) pair cooldown starts are mapped through: the interface clock's
     /// ([`crate::ui_script::HostClock`]), the same at every pass between two ticks, so a running
     /// cooldown derives the same start; with none, `now` against the VM's clock.
@@ -500,21 +800,21 @@ impl ActionWalk<'_, '_> {
     fn all(
         &self,
         script: &benilla_ui::script::UiScript,
+        memory: &ActionStateMemory,
         now: Instant,
-        trace_cd: bool,
         reactive: Option<&mut super::reactive::ReactiveList>,
     ) -> (HashMap<u32, ActionState>, Vec<String>) {
-        self.slots_states(script, None, now, trace_cd, reactive)
+        self.slots_states(script, memory, None, now, reactive)
     }
 
-    /// The states of the occupied slots, or of `only`, as the VM's macro records and item counts
-    /// stand (`0x4e5ba0`, `0xbc6390`).
+    /// The states of the occupied slots, or of `only`, as the VM's macro records and the bar's
+    /// counts stand (`0x4e5ba0`, `0xbc6390`).
     fn slots_states(
         &self,
         script: &benilla_ui::script::UiScript,
+        memory: &ActionStateMemory,
         only: Option<u8>,
         now: Instant,
-        trace_cd: bool,
         reactive: Option<&mut super::reactive::ReactiveList>,
     ) -> (HashMap<u32, ActionState>, Vec<String>) {
         let bound = &crate::ui_macro::MacroBoundSpells::of(
@@ -524,23 +824,14 @@ impl ActionWalk<'_, '_> {
                 .values()
                 .filter_map(|b| macro_slot_id(b.kind, b.action)),
         );
-        let counts: HashMap<u32, u32> = self
-            .slots
-            .buttons
-            .keys()
-            .map(|&slot| {
-                let action = u32::from(slot) + 1;
-                (action, script.action_slot(action).map_or(0, |s| s.count))
-            })
-            .collect();
-        let count = |action| counts.get(&action).copied().unwrap_or(0);
+        let count = |action| memory.count(action);
         let walk = Walk {
             bound,
             counts: &count,
             only,
             now,
             clock: self.clock_pair_at(now, script.now()),
-            trace_cd,
+            getter: false,
         };
         self.slot_states(walk, reactive)
     }
@@ -564,7 +855,7 @@ impl ActionWalk<'_, '_> {
             only: Some(slot),
             now,
             clock: self.clock_pair_at(now, q.ui_now),
-            trace_cd: false,
+            getter: true,
         };
         self.slot_states(walk, None).0.remove(&q.action)
     }
@@ -582,7 +873,7 @@ impl ActionWalk<'_, '_> {
             only,
             now,
             clock: (anchor, ui_now),
-            trace_cd,
+            getter,
         } = walk;
         let Self {
             cooldowns,
@@ -735,27 +1026,26 @@ impl ActionWalk<'_, '_> {
                     (st.has_range, st.in_range) = range;
                     let info = cooldowns.info(button.action, 0, Some(d), now);
                     st.cooldown = info.ui_triple(anchor, ui_now);
-                    if st.cooldown.is_some() && trace_cd {
-                        // The store's clock against the widget's; the sink stamps wall time.
-                        benilla_assets::trace::line(
-                            "cd",
-                            &format!(
-                                "tick action={} rem={}ms dur={}ms engine_now={ui_now:.3}",
-                                button.action, info.remaining_ms, info.duration_ms,
-                            ),
-                        );
-                    }
                 }
                 ACTION_KIND_ITEM => {
-                    // Only the `Copy` on-use spell, not a clone of the template per slot per frame.
-                    // The getter's lookup passes a callback (`0x4e5b3f`) on the bar's events, which
-                    // no event here marks: an entry is asked when it first shows.
-                    let template = items.template(button.action, 0, Ask::New(commands));
-                    // A missing record is asked with the callback `0x6e2f70` by the slot's cooldown
-                    // query and its usable test (`0x6e2efb`, `0x6e2fea`).
-                    if template.is_none() {
-                        Cooldowns::query_record(items, commands, button.action, 0, false);
-                    }
+                    // The count the slot holds (`0xbc6390`), which `GetActionCount` answers too:
+                    // the gate reads the cache the recount wrote, never the bags (`0x4e50ab`).
+                    let count = counts(action);
+                    // The usable test asks nothing with no player (`0x4e5080`) or a stored count
+                    // of 0 (`0x4e50ab`). Past them it looks the record up twice, each with its
+                    // callback and the dedupe flag, so a miss, a refused record asked again among
+                    // them, answers through both in that order: `0x6e2fc0` with `0x6e2f70`
+                    // (`0x4e50d0`, `0x6e2fe9`), then `0x4e5a50` → `0x4e5ae0` with the bar's
+                    // `0x4e5b80` (`0x4e5b30`), which recounts the entry. A getter's read asks as
+                    // its own legs do, whatever the count: `GetActionCooldown`'s query with
+                    // `0x6e2f70` (`0x6e2efb`), the range tests' `0x4e5a50` → `0x4e5ae0`.
+                    let template = if getter || (me.is_some() && count > 0) {
+                        Cooldowns::query_record(items, commands, button.action, 0, true);
+                        self.bar_record(button.action)
+                    } else {
+                        items.template(button.action, 0, Ask::Read)
+                    };
+                    // Only the `Copy` on-use spell, not a clone of the template per slot.
                     let use_spell = template.and_then(|t| t.use_spell);
                     // `IsCurrentAction`'s item arm holds the entry against the in-flight item
                     // (`0x4e53fc`-`0x4e5428`).
@@ -763,9 +1053,6 @@ impl ActionWalk<'_, '_> {
                     // `GetItemCooldown 0x6e2ed0` queries only an item whose record is cached and
                     // has an on-use spell (`0x6e2f14`, `0x6e2f20`-`0x6e2f34`).
                     st.no_cooldown_query = use_spell.is_none();
-                    // The count the slot holds (`0xbc6390`), which `GetActionCount` answers too:
-                    // the gate reads the cache the recount wrote, never the bags (`0x4e50ab`).
-                    let count = counts(action);
                     // `IsEquippedAction`, the green border: `0x622270` at mask 1
                     // (`0x4e5377`-`0x4e5380`), the walker over the worn slots, so a broken copy is
                     // not worn.
@@ -852,39 +1139,19 @@ struct Walk<'a> {
     only: Option<u8>,
     now: Instant,
     clock: (Instant, f64),
-    trace_cd: bool,
+    /// A getter's read at its call ([`ActionStates::state_now`]), whose lookups are its own legs'.
+    getter: bool,
 }
 
 impl crate::script_calls::live::LiveFamily for ActionStates<'_, '_> {
     fn answer(&mut self, ask: &mut benilla_ui::script::live::LiveAsk<'_>) -> bool {
         ask.answer(|q: &ActionStateNow| Some(self.state_now(q)))
             || ask.answer(|q: &ActionUsableNow| Some(self.usable_now(q.0)))
+            || ask.answer(|q: &ActionTextureNow| Some(self.texture_now(q.0)))
+            || ask.answer(|q: &ActionAttackFaceNow| Some(self.attack_face_now(q.0)))
+            || ask.answer(|q: &ActionCountNow| Some(self.count_now(q.0)))
+            || ask.answer(|q: &ActionConsumableNow| Some(self.consumable_now(q.0)))
     }
-}
-
-/// Pushes every slot's state ([`ActionWalk`]) and its stored pair into the VM, for a getter with
-/// no host lent; it stores nothing.
-pub(super) fn feed_action_state(
-    mut vm: crate::script_calls::VmWith<(
-        ActionWalk<'static, 'static>,
-        Res<'static, ActionStateMemory>,
-    )>,
-    // The cooldown-clock trace's last line (`WOW_MOVE_TRACE` sink, tag "cd").
-    mut last_cd_trace: Local<Option<Instant>>,
-) {
-    let now = Instant::now();
-    let trace_cd = benilla_assets::trace::enabled()
-        && last_cd_trace.is_none_or(|t| now.duration_since(t).as_secs_f32() >= 1.0);
-    if trace_cd {
-        *last_cd_trace = Some(now);
-    }
-    vm.turn(|script, (walk, memory)| {
-        let Some(script) = script else {
-            return;
-        };
-        let fresh = walk.all(script, now, trace_cd, None).0;
-        push(script, &fresh, &memory.cache, None);
-    })
 }
 
 #[cfg(test)]

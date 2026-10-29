@@ -926,6 +926,8 @@ fn entry_prepare(
     // roster and hear no group event for it ([`crate::ui_party::seed_reloaded_vm`]).
     if seat == LoadSeat::Live {
         crate::ui_party::seed_reloaded_vm(world, script);
+        // And its bar, which the engine keeps through the reload (`0xbc6980`, `0xbc6390`).
+        crate::ui_action::seed_reloaded_vm(world, script);
     }
     // The addon version gate, read from the persisted base the fold above just made current, so a
     // character-screen "Load out of date AddOns" click counts. A bare test world is check on.

@@ -348,8 +348,9 @@ pub(crate) mod xml_layout;
 mod zone_text;
 
 pub use action::{
-    macro_slot_id, macro_slot_word, ActionBarCall, ActionSlot, ActionState, ActionStateNow,
-    ActionUsableNow, ActionUse, CastView, OpenProfessions, Profession, WearsItem,
+    macro_slot_id, macro_slot_word, ActionAttackFaceNow, ActionBarCall, ActionConsumableNow,
+    ActionCountNow, ActionSlot, ActionState, ActionStateNow, ActionTextureNow, ActionUsableNow,
+    ActionUse, CastView, CastViewNow, OpenProfessions, Profession, WearsItem,
 };
 pub use addon::{addon_load_context, AddOnInfo, AddonLoad, AddonReply, AddonSecurity};
 pub use addon_enable::{AddonStateFiles, EnableHash, EnableStore};
@@ -387,8 +388,8 @@ pub use channel::{
     ZoneChannelRow,
 };
 pub use char_stats::{
-    weapon_subclass_skill, BankBagSlots, InvSlotView, InventorySlots, BANK_BAG_SLOT_COUNT,
-    INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
+    weapon_subclass_skill, AlertInputs, AlertItem, BankBagSlots, InvSlotView, InventoryAlertInputs,
+    InventorySlots, BANK_BAG_SLOT_COUNT, INVENTORY_SLOT_COUNT, SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use chat_misc::EmoteRequest;
 pub use chat_send::{
