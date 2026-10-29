@@ -411,7 +411,16 @@ pub fn run_worldview(build: BuildId) -> AppExit {
         }
     }
     webprogress::signal_ready_once();
-    benilla_world::worldview::run(build)
+    // fork: web — the viewer reaches the same 4 GiB ceiling, so it carries the same valve.
+    benilla_world::worldview::run_with(build, |app| {
+        #[cfg(all(
+            target_arch = "wasm32",
+            target_feature = "atomics",
+            not(debug_assertions)
+        ))]
+        memory_pressure::plugin(app);
+        let _ = app;
+    })
 }
 
 /// Did the page ask for the world viewer instead of the client (`?worldview=1`)?

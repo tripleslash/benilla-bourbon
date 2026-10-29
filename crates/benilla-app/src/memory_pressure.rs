@@ -4,7 +4,14 @@
 //! allocator then fails and a worker traps with no message. The view distance decides what stays
 //! loaded (`farclip` sets the streamer's residency window, `terrain_stream::window`), so this
 //! lowers the effective `farclip` a step at a time while the allocator's [`headroom`] is short, and
-//! gives the steps back, one at a time, once it is ample again.
+//! gives the steps back while there is room for them.
+//!
+//! What a step costs to take back depends on where the view is, so a step is tried: with the
+//! headroom a step's worth above the shed line, the tightest step comes back, and after its settle
+//! the next, while the room lasts. Where the shed steps held little (a city whose surroundings are
+//! sparse) they all come back a settle apart. A step that takes the headroom under the shed line
+//! while it loads is shed again at once; one shed again within a minute did not fit, and the wait
+//! before the next try grows.
 //!
 //! The player's setting is never touched: the `farclip` CVar and the saved config keep their value,
 //! and only `ViewDistance::farclip`, which every consumer reads, carries the cap. A setting moved
@@ -18,21 +25,28 @@
 use benilla_world::view::FARCLIP_RANGE;
 use bevy::prelude::*;
 
-/// Below this many bytes of headroom, a step is shed.
+/// Below this many bytes of headroom, a step is shed. The headroom sums free slices, and a large
+/// block needs them in one run: flying the world viewer into Stormwind at 40 yd/s, about a taxi's
+/// speed, a worker trapped two seconds after the gauge read 452 MiB, so the line stays above that.
 const SHED_BELOW: usize = 512 << 20;
-/// From this many bytes of headroom, held for the wait, a step comes back.
-const RESTORE_ABOVE: usize = 1 << 30;
+/// The room above [`SHED_BELOW`] a step needs to come back: the most a step was measured to cost
+/// with the view parked, about 200 MiB (Stormwind's 640 to 800 yd ring), and the headroom's 35 MiB
+/// wander as a window settles.
+const KEEP: usize = 256 << 20;
 /// Each step keeps this share of the view distance.
 const STEP: f32 = 0.8;
 /// Seconds after a change before the next is weighed: the window's tiles release and load over a
 /// few frames, and the allocator gets their memory back as their assets drop.
 const SETTLE_SECS: f64 = 8.0;
-/// Seconds the headroom must stay ample before a step comes back, so a passing burst of frees does
-/// not reload what the next one sheds again.
-const DWELL_SECS: f64 = 10.0;
-/// The longest that wait grows to.
+/// Seconds the headroom must have room for a step before the first of a run comes back, so a
+/// passing burst of frees does not reload what the next one sheds again. The next of the run
+/// follows after a settle.
+const DWELL_SECS: f64 = 3.0;
+/// The wait after a step that did not fit, doubling with each that does not, to the longest.
+const MISFIT_SECS: f64 = 30.0;
 const DWELL_MAX_SECS: f64 = 300.0;
-/// A shed this soon after a step came back means the step did not fit: the wait doubles.
+/// A shed this soon after a step came back means the step did not fit; a step that has held this
+/// long did, and the wait falls back to [`DWELL_SECS`].
 const REFIT_SECS: f64 = 60.0;
 
 /// The valve's state, apart from the clock and the headroom it is handed.
@@ -46,7 +60,7 @@ pub(crate) struct MemoryPressure {
     caps: Vec<f32>,
     /// When this last changed the view distance.
     changed_at: f64,
-    /// Since when the headroom has been ample.
+    /// Since when the headroom has had room for a step.
     ample_since: Option<f64>,
     /// The wait before a step comes back, past [`DWELL_SECS`] after steps that did not fit.
     dwell: f64,
@@ -66,8 +80,15 @@ impl MemoryPressure {
                 return (self.applied != farclip).then_some(self.applied);
             }
         }
-        if now - self.changed_at < SETTLE_SECS {
+        // A step that came back is shed again as soon as its loads cross the line; any other
+        // change waits out its settle.
+        let came_back = self.restored_at == Some(self.changed_at);
+        if now - self.changed_at < SETTLE_SECS && !(came_back && headroom < SHED_BELOW) {
             return None;
+        }
+        if self.restored_at.is_some_and(|t| now - t >= REFIT_SECS) {
+            self.restored_at = None;
+            self.dwell = DWELL_SECS;
         }
         if headroom < SHED_BELOW {
             self.ample_since = None;
@@ -75,12 +96,8 @@ impl MemoryPressure {
             if cap >= farclip {
                 return None;
             }
-            if self
-                .restored_at
-                .take()
-                .is_some_and(|t| now - t < REFIT_SECS)
-            {
-                self.dwell = (self.dwell.max(DWELL_SECS) * 2.0).min(DWELL_MAX_SECS);
+            if self.restored_at.take().is_some() {
+                self.dwell = (self.dwell * 2.0).clamp(MISFIT_SECS, DWELL_MAX_SECS);
             }
             if self.caps.is_empty() {
                 self.setting = farclip;
@@ -90,24 +107,21 @@ impl MemoryPressure {
             self.changed_at = now;
             return Some(cap);
         }
-        if self.caps.is_empty() || headroom < RESTORE_ABOVE {
+        if self.caps.is_empty() || headroom < SHED_BELOW + KEEP {
             self.ample_since = None;
             return None;
         }
+        // Kept across a step that comes back, so the next follows its settle if the room lasts.
         let since = *self.ample_since.get_or_insert(now);
         if now - since < self.dwell.max(DWELL_SECS) {
             return None;
         }
         self.caps.pop();
-        self.ample_since = None;
         self.restored_at = Some(now);
         self.applied = self
             .caps
             .last()
             .map_or(self.setting, |&cap| cap.min(self.setting));
-        if self.caps.is_empty() {
-            self.dwell = 0.0;
-        }
         self.changed_at = now;
         (self.applied != farclip).then_some(self.applied)
     }
@@ -125,10 +139,51 @@ impl MemoryPressure {
 ))]
 pub(crate) fn plugin(app: &mut App) {
     app.init_resource::<MemoryPressure>()
+        .insert_resource(Ballast::from_page())
         .add_systems(First, relieve);
 }
 
-/// Weigh the headroom once a frame and apply the valve's answer, saying so on the console.
+/// `?mem_ballast_mb=N`: N MiB held from the start, a measuring lever. The world viewer holds a
+/// fraction of what a logged-in client does (no interface, Lua or units), so it meets the valve
+/// only with the rest of a client's footprint stood in for.
+#[cfg(all(
+    target_arch = "wasm32",
+    target_feature = "atomics",
+    not(debug_assertions)
+))]
+#[derive(Resource)]
+struct Ballast {
+    _held: Vec<Box<[u8]>>,
+}
+
+#[cfg(all(
+    target_arch = "wasm32",
+    target_feature = "atomics",
+    not(debug_assertions)
+))]
+impl Ballast {
+    fn from_page() -> Self {
+        let mib = crate::webenv::var("WOW_MEM_BALLAST_MB")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        // In 16 MiB blocks, so the ballast takes no one run of address space the world could use.
+        let _held = (0..mib.div_ceil(16))
+            .map(|_| vec![0u8; 16 << 20].into_boxed_slice())
+            .collect();
+        Self { _held }
+    }
+}
+
+/// Seconds between the gauge lines `?diag=1` prints, a step or none.
+#[cfg(all(
+    target_arch = "wasm32",
+    target_feature = "atomics",
+    not(debug_assertions)
+))]
+const GAUGE_SECS: f64 = 2.0;
+
+/// Weigh the headroom once a frame and apply the valve's answer, saying so on the console; under
+/// `?diag=1`, the headroom and the steps every [`GAUGE_SECS`] besides.
 #[cfg(all(
     target_arch = "wasm32",
     target_feature = "atomics",
@@ -138,10 +193,23 @@ fn relieve(
     mut valve: ResMut<MemoryPressure>,
     mut view: ResMut<benilla_world::view::ViewDistance>,
     time: Res<Time<Real>>,
+    mut gauge: Local<Option<(bool, f64)>>,
 ) {
     let headroom = crate::wasm_alloc::headroom();
+    let now = time.elapsed_secs_f64();
+    let (armed, next) = gauge.get_or_insert_with(|| (crate::webdiag::armed(), 0.0));
+    if *armed && now >= *next {
+        *next = now + GAUGE_SECS;
+        crate::webdiag::out(&format!(
+            "[mem] t={now:.0}s headroom={} MiB linear={} MiB farclip={:.0} shed={}",
+            headroom >> 20,
+            core::arch::wasm32::memory_size(0) >> 4,
+            view.farclip,
+            valve.depth(),
+        ));
+    }
     let was = view.farclip;
-    if let Some(farclip) = valve.weigh(time.elapsed_secs_f64(), headroom, was) {
+    if let Some(farclip) = valve.weigh(now, headroom, was) {
         view.farclip = farclip;
         crate::webdiag::out(&format!(
             "wenilla: memory headroom {} MiB, view distance {was:.0} -> {farclip:.0} yd ({} step(s) shed)",
@@ -161,9 +229,10 @@ mod tests {
     #[test]
     fn short_headroom_sheds_a_step_then_waits_for_the_unloads() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 100 * MIB, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(10.0, 600 * MIB, 1000.0), None, "above the line");
+        assert_eq!(v.weigh(10.0, 500 * MIB, 1000.0), Some(800.0));
         assert_eq!(v.weigh(15.0, 100 * MIB, 800.0), None, "settling");
-        assert_eq!(v.weigh(18.0, 100 * MIB, 800.0), Some(640.0));
+        assert_eq!(v.weigh(18.0, 500 * MIB, 800.0), Some(640.0));
         assert_eq!(v.depth(), 2);
     }
 
@@ -176,52 +245,79 @@ mod tests {
         }
     }
 
-    /// Once the headroom has held above the restore line for the wait, the steps come back one at
-    /// a time, each after a settle, ending at the player's setting. The case seen live: shed to
-    /// 640 near 500 MiB, then about 1 GiB free.
+    /// Steps that cost little come back one after another, a settle apart, down to none, though
+    /// the headroom never reaches what was once the restore line (1 GiB): the city case.
     #[test]
-    fn steps_come_back_one_at_a_time_after_the_wait() {
+    fn cheap_steps_come_back_in_a_run_down_to_none() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 499 * MIB, 1000.0), Some(800.0));
-        assert_eq!(v.weigh(18.0, 511 * MIB, 800.0), Some(640.0));
-        assert_eq!(v.weigh(26.0, 1046 * MIB, 640.0), None, "the wait starts");
-        assert_eq!(v.weigh(35.0, 1046 * MIB, 640.0), None);
-        assert_eq!(v.weigh(36.0, 1046 * MIB, 640.0), Some(800.0));
-        assert_eq!(v.weigh(40.0, 1046 * MIB, 800.0), None, "settling");
-        assert_eq!(v.weigh(44.0, 1046 * MIB, 800.0), None, "a new wait");
-        assert_eq!(v.weigh(54.0, 1046 * MIB, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(10.0, 500 * MIB, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(18.0, 500 * MIB, 800.0), Some(640.0));
+        assert_eq!(v.weigh(26.0, 700 * MIB, 640.0), None, "no room");
+        assert_eq!(v.weigh(30.0, 850 * MIB, 640.0), None, "the wait starts");
+        assert_eq!(v.weigh(33.0, 850 * MIB, 640.0), Some(800.0));
+        assert_eq!(v.weigh(37.0, 830 * MIB, 800.0), None, "settling");
+        assert_eq!(v.weigh(41.0, 830 * MIB, 800.0), Some(1000.0), "the run");
         assert_eq!(v.depth(), 0);
-        assert_eq!(v.weigh(80.0, 3000 * MIB, 1000.0), None);
+        assert_eq!(v.weigh(80.0, 800 * MIB, 1000.0), None);
     }
 
-    /// A dip below the restore line restarts the wait.
+    /// A run stops where the room ends, and holds there.
+    #[test]
+    fn a_run_stops_where_the_room_ends() {
+        let mut v = MemoryPressure::default();
+        assert_eq!(v.weigh(10.0, 500 * MIB, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(18.0, 500 * MIB, 800.0), Some(640.0));
+        assert_eq!(v.weigh(26.0, 900 * MIB, 640.0), None, "the wait starts");
+        assert_eq!(v.weigh(29.0, 900 * MIB, 640.0), Some(800.0));
+        assert_eq!(v.weigh(37.0, 700 * MIB, 800.0), None, "it cost 200");
+        for t in 38..200 {
+            assert_eq!(v.weigh(f64::from(t), 700 * MIB, 800.0), None);
+        }
+        assert_eq!(v.depth(), 1);
+    }
+
+    /// A dip under the room a step needs restarts the wait.
     #[test]
     fn a_dip_restarts_the_wait() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 100 * MIB, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(10.0, 500 * MIB, 1000.0), Some(800.0));
         assert_eq!(v.weigh(18.0, 2000 * MIB, 800.0), None, "the wait starts");
-        assert_eq!(v.weigh(25.0, 900 * MIB, 800.0), None, "the dip");
-        assert_eq!(v.weigh(26.0, 2000 * MIB, 800.0), None, "a new wait");
-        assert_eq!(v.weigh(35.0, 2000 * MIB, 800.0), None);
-        assert_eq!(v.weigh(36.0, 2000 * MIB, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(20.0, 700 * MIB, 800.0), None, "the dip");
+        assert_eq!(v.weigh(21.0, 2000 * MIB, 800.0), None, "a new wait");
+        assert_eq!(v.weigh(23.0, 2000 * MIB, 800.0), None);
+        assert_eq!(v.weigh(24.0, 2000 * MIB, 800.0), Some(1000.0));
     }
 
-    /// A step that comes back and is shed again within a minute did not fit: the next wait is
-    /// twice as long.
+    /// A step whose loads take the headroom under the line is shed again at once, without the
+    /// settle, and the next try waits half a minute, then a minute: no back and forth a settle
+    /// apart. Once a step holds a minute, the wait is short again.
     #[test]
-    fn a_step_that_did_not_fit_doubles_the_wait() {
+    fn a_step_that_does_not_fit_goes_at_once_and_waits_longer_each_time() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 100 * MIB, 1000.0), Some(800.0));
-        assert_eq!(v.weigh(18.0, 1100 * MIB, 800.0), None, "the wait starts");
-        assert_eq!(v.weigh(28.0, 1100 * MIB, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(10.0, 500 * MIB, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(18.0, 800 * MIB, 800.0), None, "the wait starts");
+        assert_eq!(v.weigh(21.0, 800 * MIB, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(22.0, 600 * MIB, 1000.0), None, "loading");
         assert_eq!(
-            v.weigh(36.0, 400 * MIB, 1000.0),
+            v.weigh(23.0, 500 * MIB, 1000.0),
             Some(800.0),
-            "it did not fit"
+            "under the line: shed at once"
         );
-        assert_eq!(v.weigh(44.0, 1100 * MIB, 800.0), None, "the wait starts");
-        assert_eq!(v.weigh(54.0, 1100 * MIB, 800.0), None, "twice as long now");
-        assert_eq!(v.weigh(64.0, 1100 * MIB, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(31.0, 800 * MIB, 800.0), None, "the wait starts");
+        assert_eq!(v.weigh(60.0, 800 * MIB, 800.0), None, "half a minute");
+        assert_eq!(v.weigh(61.0, 800 * MIB, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(65.0, 500 * MIB, 1000.0), Some(800.0), "again");
+        assert_eq!(v.weigh(73.0, 800 * MIB, 800.0), None, "the wait starts");
+        assert_eq!(v.weigh(132.0, 800 * MIB, 800.0), None, "a minute now");
+        assert_eq!(v.weigh(133.0, 800 * MIB, 800.0), Some(1000.0));
+        assert_eq!(v.weigh(193.0, 700 * MIB, 1000.0), None, "it held");
+        assert_eq!(v.weigh(200.0, 500 * MIB, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(208.0, 800 * MIB, 800.0), None, "the wait starts");
+        assert_eq!(
+            v.weigh(211.0, 800 * MIB, 800.0),
+            Some(1000.0),
+            "short again"
+        );
     }
 
     /// A setting moved under a cap is the new setting: raised, it stays under the cap; lowered
