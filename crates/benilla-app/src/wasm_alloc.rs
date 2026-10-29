@@ -989,6 +989,13 @@ fn alloc_large(layout: Layout) -> *mut u8 {
 static BIGGEST: AtomicUsize = AtomicUsize::new(0);
 
 /// The largest block requested since the last call, bytes: what [`largest_run`] must hold.
+#[cfg_attr(
+    test,
+    expect(
+        dead_code,
+        reason = "the web build's memory gauge reads it; no test does"
+    )
+)]
 pub(crate) fn take_biggest() -> usize {
     BIGGEST.swap(0, Ordering::Relaxed)
 }
