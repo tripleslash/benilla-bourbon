@@ -541,6 +541,17 @@ fn scene_depth_at(uv: vec2<f32>) -> f32 {
     return textureLoad(scene_depth, px, 0).x;
 }
 
+/// fork: how far a refracted read at view depth `read_z` can be trusted to show what this pixel's
+/// own ray sees (`own_z`), through water whose surface is at `surface_z`: 1 while the water in front
+/// of the read is within [`REFRACT_SAME_SURFACE`] doublings of the water in front of this pixel's
+/// background, 0 by twice that. A bed reads as itself; a body just under the surface, read from
+/// water over a deep bed (or the bed read from water over the body), is a different surface, and so
+/// is anything nearer than the surface, which has no water in front of it at all.
+fn refract_trust(read_z: f32, own_z: f32, surface_z: f32) -> f32 {
+    let ratio = max(read_z - surface_z, 1e-4) / max(own_z - surface_z, 1e-4);
+    return 1.0 - smoothstep(REFRACT_SAME_SURFACE, 2.0 * REFRACT_SAME_SURFACE, abs(log2(ratio)));
+}
+
 /// **`ProcMagma`** — the Cataclysm magma/slime program, ported whole.
 ///
 /// The reference routes these kinds away from the water material entirely: `LiquidType.dbc`'s
@@ -606,8 +617,9 @@ const MODERN_FOAM_MOTTLE: f32 = 0.04;
 // has its full swell back, and the most water (yd along the ray) the refraction bends through.
 const MODERN_WAVE_FULL_DEPTH: f32 = 3.0;
 const MODERN_REFRACT_MAX_PATH: f32 = 6.0;
-// fork: the view depth (yd) of water in front of a refracted read by which its bend is whole.
-const REFRACT_FRONT_FULL: f32 = 1.0;
+// fork: how many doublings apart the water in front of a refracted read and in front of this
+// pixel's own background may be before the read stops being trusted (whole within one, none by two).
+const REFRACT_SAME_SURFACE: f32 = 1.0;
 // fork: modern lighting — the experimental tier's wind ripples: how many trains (only the long, high-
 // amplitude end of the ladder, so water seen up close keeps the Modern swell), the rungs the ladder
 // was cut from, the longest wavelength (yd), the step down to the next, how much the long ones outweigh the short (slope ∝ wavelength to
@@ -903,10 +915,10 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // ---- Refraction ----------------------------------------------------------------------------
     //
     // Offset the screen read by the bump, scaled by how much water is actually in front of what is
-    // behind it, then GUARD the result: if the offset lands on something nearer than this water
-    // surface, fall back to the unoffset read. Without that guard a wave at the shoreline bends the
-    // riverbank *over* the water — the classic refraction bleed, and the reference spends a `cmp`
-    // on it for the same reason.
+    // behind it, then GUARD the result: if the offset lands on something other than what this
+    // pixel looks at (`refract_trust`), fall back to the unoffset read. Without that guard a wave
+    // at the shoreline bends the riverbank *over* the water — the classic refraction bleed, and the
+    // reference spends a `cmp` on it for the same reason.
     let depth_ratio = clamp((scene_z - frag_view_z) / max(frag_view_z, 0.001) * 100.0, 0.0, 1.0);
     let offset_amount = clamp((1.2 - fres2) * depth_ratio, 0.0, 1.0);
     // **The NORMAL bends the read, not the slope.** `MULR R3.zw, R2.xyxy, R3.z` then
@@ -926,17 +938,16 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         let bend = min(w.look_b.z * min(ray_len, MODERN_REFRACT_MAX_PATH) * per_yd, 0.1 * offset_amount);
         refract_uv = uv + n.xz * bend;
     }
-    // Deviation: the bend is also scaled by the water in front of what it lands on, a second
-    // depth read at the tentative offset; the reference sizes it by the column under this pixel
-    // alone (`c33.z` = 0.1 per unit normal, the ×100 view-depth ratio). With that law alone a body
-    // just under the surface showed twice: the water beside it, over a deep bed, bent its read
-    // onto the body and painted a shifted copy beside the one seen in place. Over a bed a yard or
-    // more behind the read the bend is the reference's; onto a body or a rising shore it fades.
-    let tentative_z = scene_depth_at(refract_uv);
-    let front = clamp((tentative_z - frag_view_z) / REFRACT_FRONT_FULL, 0.0, 1.0);
-    refract_uv = uv + (refract_uv - uv) * front;
+    // Deviation: a bent read is kept only where it lands on the surface this pixel's own ray sees
+    // (`refract_trust`); the reference rejects it only when it lands nearer than the water (`cmp`
+    // against the surface depth). Under that guard alone a swimmer showed twice: the water beside
+    // the body, over a deep bed, bent its read onto the body, and the water over the body bent its
+    // read off onto the bed, so the submerged half drew as a shifted copy. A read nearer than the
+    // surface has no water in front of it, so the reference's own case is the trust's zero.
+    let trust = refract_trust(scene_depth_at(refract_uv), scene_z, frag_view_z);
+    refract_uv = uv + (refract_uv - uv) * trust;
     var bed_z = scene_depth_at(refract_uv);
-    if (bed_z < frag_view_z) {
+    if (refract_trust(bed_z, scene_z, frag_view_z) < 0.5) {
         refract_uv = uv;
         bed_z = scene_z;
     }
