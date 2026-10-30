@@ -893,6 +893,7 @@ fn entry_prepare(
     // item objects.
     crate::ui_items::locks::seed_vm_item_locks(world, script, seat == LoadSeat::Live);
     crate::ui_party::seed_vm_party(world, script, seat == LoadSeat::Live);
+    crate::ui_unit::field_events::seed_vm_token_flags(world, script, seat == LoadSeat::Live);
     crate::ui_guild::seed_vm_guild(world, script, seat == LoadSeat::Live);
     // The realm before the load, since addons read `GetRealmName()` at file scope; the roster
     // carries the realm-list entry this session connected to.
@@ -1537,6 +1538,8 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     crate::ui_items::locks::fold_dying_vm_item_locks(world);
     // And the ready check, engine state the reference's reload never writes.
     crate::ui_party::fold_dying_vm_ready_check(world);
+    // The units' token flags, which live on the unit objects, past the shutdown's deselect.
+    crate::ui_unit::field_events::fold_dying_vm_token_flags(world);
     // The guild roster's show-offline flag and selection, which only a login zeroes.
     crate::ui_guild::fold_dying_vm_guild(world);
     // So do the engine globals the VM holds for the session: the quest log's fold mask and the

@@ -273,9 +273,10 @@ mod messageframe;
 mod minimap;
 mod movieframe;
 pub mod nameplate;
+pub mod unit_watch;
 pub use nameplate::{
-    PlateAction, PlateBitWrite, PlateBitWrites, PlateClick, PlateGeometry, PlateState,
-    PLATE_BIT_ENEMY, PLATE_BIT_FRIEND,
+    PlateAction, PlateBitWrite, PlateBitWrites, PlateClick, PlateGateQuery, PlateGeometry,
+    PlateState, PlateUnit, PlateUnitQuery, PLATE_BIT_ENEMY, PLATE_BIT_FRIEND,
 };
 mod model;
 mod modelframe;
@@ -636,6 +637,10 @@ pub use unit::{
     UnitHeldQuery, UnitIdentityRead, UnitObject, UnitObjectRead, UnitRecord, UnitRecordQuery,
     UnitRelations, UnitState, UnitStateAnswer, UnitStateQuery, UnitTokenGlobals, UnitTokenObjects,
     UnitTokenParse,
+};
+pub use unit_watch::{
+    HealthWatch, TokenChange, TokenFlagsCarry, TOKEN_PARTY, TOKEN_PARTY_PET, TOKEN_PET,
+    TOKEN_PLAYER, TOKEN_RAID, TOKEN_RAID_PET, TOKEN_TARGET,
 };
 pub use use_gates::{ControlBypassQuery, FarSightOnQuery};
 pub use weapon_enchant::{WeaponEnchant, WeaponEnchantQuery};

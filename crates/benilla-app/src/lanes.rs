@@ -722,6 +722,8 @@ mod merchant_live_tests;
 #[cfg(test)]
 mod name_live_tests;
 #[cfg(test)]
+mod nameplate_live_tests;
+#[cfg(test)]
 mod packet_signal_tests;
 #[cfg(test)]
 mod pet_live_tests;
@@ -779,6 +781,8 @@ mod unit_feed_live_tests;
 mod unit_live_tests;
 #[cfg(test)]
 mod unit_view_tests;
+#[cfg(test)]
+mod watch_order_tests;
 
 #[cfg(test)]
 mod world_map_live_tests;
