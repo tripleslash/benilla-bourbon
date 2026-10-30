@@ -282,6 +282,9 @@ struct GxCell {
     ring: (f32, f32),
     /// The scan's last wholesale verdict (all steady or all gone); `None` walks every frame.
     settled: Option<bool>,
+    /// Where the camera stood at the last walk and how far it may move before any fader can change
+    /// class: the nearest band edge over the cell's faders. `None` walks.
+    slack: Option<(Vec2, f32)>,
     /// A prop region's distinct referrer sets, indexed by [`GxItemProp::set`].
     sets: Vec<Arc<[u16]>>,
     /// The union of the items' [`GxItem::world_bounds`], the pick's per-cell broad phase.
@@ -625,6 +628,7 @@ impl StaticGx {
                     (entry.ring.0.min(near), entry.ring.1.max(far))
                 };
                 entry.settled = None;
+                entry.slack = None;
             }
         }
         let world_bounds = b
@@ -713,6 +717,7 @@ impl StaticGx {
                     .values()
                     .fold((f32::MAX, 0.0), |(n, x), f| (n.min(f.near), x.max(f.far)));
                 cell.settled = None;
+                cell.slack = None;
                 cell.bits_stale = true;
             }
         }
