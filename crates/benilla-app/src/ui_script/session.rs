@@ -222,6 +222,8 @@ mod tests {
         ("ui_script/extract/mod.rs", "last_dpi"),
         // Pushed unconditionally every frame; there is nothing remembered to go stale.
         ("ui_script/mod.rs", "smoothed"),
+        // The containment verdict's world inputs, not memory about the VM.
+        ("minimap/mod.rs", "probed"),
         // A fact about the chat roster (a defense channel joined); its push has its own `VmMemo`.
         ("world_state_ui.rs", "defense_channel"),
         // The cursor systems on both platforms track OS cursor state, which outlives the VM.

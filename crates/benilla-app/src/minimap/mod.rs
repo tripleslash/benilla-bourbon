@@ -781,6 +781,17 @@ impl IndoorMemo {
     }
 }
 
+/// The inputs [`feed_minimap_inside`]'s verdict last read: the player, the ground under the probe,
+/// the world stamps [`IndoorMemo`] keys on, and the WMO store, by count as `Assets` is marked
+/// changed every frame.
+#[derive(Clone, Copy, PartialEq)]
+struct InsideProbe {
+    pos: Vec3,
+    terrain: Option<f32>,
+    stamp: (u32, u64),
+    models: usize,
+}
+
 /// Push the player's WMO containment, the indoor byte `0xceaa60`, so the zoom buttons drive the
 /// indoor index indoors and the outdoor one outside; the verdict is [`emit_minimap`]'s, as the
 /// reference keeps one flag. Pushed on the edge, which a new VM's first frame is. The edge also
@@ -795,10 +806,35 @@ fn feed_minimap_inside(
     asset_server: Res<AssetServer>,
     mut inside_res: ResMut<MinimapInside>,
     mut was_inside: Local<crate::ui_script::VmMemo<Option<bool>>>,
+    (mut probed, residency, collider_epoch): (
+        Local<Option<InsideProbe>>,
+        Res<benilla_world::interior::WmoResidency>,
+        Res<benilla_world::collision::ColliderEpoch>,
+    ),
 ) {
     hosted_vm.run(|script| {
-        let inside = minimap_interior(&player, &instances, &wmos, &world, &asset_server).is_some();
-        inside_res.0 = inside;
+        // A still player over the same ground under the same buildings keeps the verdict.
+        let inside = if !player.active || player.detached || world.area_interior().is_none() {
+            // `minimap_interior`'s own first exit, before any probe.
+            *probed = None;
+            false
+        } else {
+            let probe = InsideProbe {
+                pos: player.pos,
+                terrain: world.terrain_height_under(player.pos + Vec3::Y * INTERIOR_PROBE_HEIGHT),
+                stamp: (residency.generation(), collider_epoch.get()),
+                models: wmos.len(),
+            };
+            if *probed == Some(probe) {
+                inside_res.0
+            } else {
+                *probed = Some(probe);
+                minimap_interior(&player, &instances, &wmos, &world, &asset_server).is_some()
+            }
+        };
+        if inside_res.0 != inside {
+            inside_res.0 = inside;
+        }
         let Some(script) = script else { return };
         if *was_inside.get(script) != Some(inside) {
             script.set_minimap_inside(inside);
