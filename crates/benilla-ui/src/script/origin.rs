@@ -142,9 +142,9 @@ mod imp {
         let mut chars = symbol.chars().peekable();
         while let Some(c) = chars.next() {
             match c {
-                // A turbofish's arguments: `::<` opens them.
-                '<' if depth > 0 || out.ends_with("::") => {
-                    if depth == 0 {
+                // A function's generic arguments: `::<` opens them, or MSVC's `name<` with no `::`.
+                '<' if depth > 0 || out.ends_with(|c: char| c == ':' || c.is_alphanumeric()) => {
+                    if depth == 0 && out.ends_with("::") {
                         out.truncate(out.len() - 2);
                     }
                     depth += 1;
@@ -165,12 +165,15 @@ mod imp {
                 _ => out.push(c),
             }
         }
-        match out.rsplit_once("::h") {
-            Some((p, hash)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
-                p.to_string()
-            }
-            _ => out,
-        }
+        let path = match out.rsplit_once("::h") {
+            Some((p, hash)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => p,
+            _ => &out,
+        };
+        // MSVC names a closure `closure$0`, a segment of its own.
+        path.split("::")
+            .filter(|segment| !segment.starts_with("closure$"))
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// The nearest functions of benilla's own crates past the check, innermost first, each once.
@@ -381,5 +384,22 @@ mod tests {
         assert!(frame_matches("lanes::fire_in_order", &symbols));
         assert!(!frame_matches("map::feed_landmarks", &symbols));
         assert!(!frame_matches("ui_world_map::feed", &symbols));
+    }
+
+    /// MSVC's symbols spell a closure `closure$0` and open generic arguments with no `::`; its
+    /// optimizer can leave the closure's frame alone on the stack, its function's inlined away.
+    #[test]
+    #[cfg_attr(not(debug_assertions), ignore = "the check compiles out")]
+    fn a_frame_matches_through_msvc_symbols() {
+        let symbols = [
+            "benilla_app::bindings::sync_dispatch::closure$0",
+            "benilla_app::script_calls::hosted::closure$1::closure$0",
+            "benilla_ui::script::UiScript::hosted<tuple$<>,benilla_app::ui_social::feed::closure_env$0>",
+        ];
+        assert!(frame_matches("bindings::sync_dispatch", &symbols));
+        assert!(frame_matches("script_calls::hosted", &symbols));
+        assert!(frame_matches("script::UiScript::hosted", &symbols));
+        assert!(!frame_matches("ui_social::feed", &symbols));
+        assert!(!frame_matches("closure$0", &symbols));
     }
 }
