@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_protocol::{CreateSpline, EntityKind, MonsterMoveFacing};
-use bevy::ecs::batching::BatchingStrategy;
 use bevy::prelude::*;
+use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
 use bevy::utils::Parallel;
 
 use crate::entities::CollisionHeight;
@@ -621,21 +621,34 @@ pub(in crate::net) fn ground_clamp_creatures(
         trace,
         frame: *frame,
     };
-    // Each unit's probe reads only the world and writes only its own row, so units run in
-    // parallel; a cast is ~20 µs, so small batches spread a few dozen walkers over the pool. A
-    // traced run stays serial: the trace sink is a lock the page thread may not wait on.
-    let clamp = |row: ClampRow| {
+    // The gate runs serially over every row: most units are skipped or held, and fanning those
+    // out cost more in dispatch than the gate itself.
+    let mut gated = stats.borrow_local_mut();
+    let mut casts: Vec<ClampRow> = Vec::new();
+    for row in &mut q {
+        gated.visited += 1;
+        match clamp_gate(&ctx, &row) {
+            ClampGate::Skip => gated.skipped += 1,
+            ClampGate::Hold => gated.held += 1,
+            ClampGate::Cast => casts.push(row),
+        }
+    }
+    drop(gated);
+    // Each cast reads only the world and writes only its own row; a cast is ~20 µs, so small
+    // batches spread a few dozen walkers over the pool, and one batch's worth runs here. A traced
+    // run stays serial: the trace sink is a lock the page thread may not wait on.
+    let clamp = |row: &mut ClampRow| {
         let mut s = stats.borrow_local_mut();
         if let Some(first) = clamp_unit(&ctx, row, &mut s) {
             inserts.borrow_local_mut().push(first);
         }
     };
-    if trace.is_some() {
-        q.iter_mut().for_each(clamp);
+    if trace.is_some() || casts.len() <= CLAMP_BATCH {
+        casts.iter_mut().for_each(clamp);
     } else {
-        q.par_iter_mut()
-            .batching_strategy(BatchingStrategy::fixed(CLAMP_BATCH))
-            .for_each(clamp);
+        casts.par_chunk_map_mut(ComputeTaskPool::get(), CLAMP_BATCH, |_, chunk| {
+            chunk.iter_mut().for_each(&clamp);
+        });
     }
     for (entity, state) in inserts.drain() {
         commands.entity(entity).insert(state);
@@ -762,11 +775,62 @@ type ClampRow<'a> = (
     Option<&'a Visibility>,
 );
 
-/// One unit's clamp for [`ground_clamp_creatures`]: writes the unit's Y and its memo, and
-/// returns the memo to insert on a unit's first clamp.
+/// What [`clamp_gate`] decides for a row before any probe.
+enum ClampGate {
+    /// Somebody else owns this body's Z, or a hidden body waits for its stride turn.
+    Skip,
+    /// The last answer stands: the ray cannot answer differently.
+    Hold,
+    Cast,
+}
+
+/// The cheap half of one unit's clamp: whether its Z is ours to derive this frame, and whether the
+/// last answer still stands.
+fn clamp_gate(ctx: &ClampCtx, row: &ClampRow) -> ClampGate {
+    let (entity, net, spline, t, clamped, swimming, modes, embodied, relayed, vis) = row;
+    if vis.is_some_and(|v| *v == Visibility::Hidden)
+        && !super::remote::hidden_turn(*entity, ctx.frame)
+    {
+        return ClampGate::Skip;
+    }
+    if !ground_derived(
+        net.kind,
+        spline.is_some(),
+        clamped.is_some(),
+        *embodied,
+        *relayed,
+    ) {
+        return ClampGate::Skip;
+    }
+    // A flying path is authoritative on Z; a deck path has no terrain under the deck and a
+    // deck-local wire Z; in liquid the wire Z is the creature's swim depth.
+    if spline.is_some_and(|s| !s.grounded || s.deck.is_some()) || *swimming {
+        return ClampGate::Skip;
+    }
+    // The cast gate: same XZ, same collider epoch, same modes, and our own answer still the Y
+    // standing here, so the ray cannot answer differently. Testing the standing Y rather than
+    // the seat also re-grounds a re-sent identical wire pose. A miss holds too, as every collider
+    // attach moves the epoch; the epoch-blind legacy gate holds only a hit.
+    if let Some(c) = clamped.as_deref() {
+        let xz = [t.translation.x, t.translation.z];
+        let granted = modes.copied().unwrap_or_default();
+        let same_question = if ctx.legacy {
+            c.y_written == t.translation.y
+        } else {
+            c.y_written == t.translation.y && c.epoch == ctx.epoch && c.modes == granted
+        };
+        if (c.hit || !ctx.legacy) && c.xz == xz && same_question {
+            return ClampGate::Hold;
+        }
+    }
+    ClampGate::Cast
+}
+
+/// One unit's clamp for [`ground_clamp_creatures`], for a row [`clamp_gate`] passed: writes the
+/// unit's Y and its memo, and returns the memo to insert on a unit's first clamp.
 fn clamp_unit(
     ctx: &ClampCtx,
-    row: ClampRow,
+    row: &mut ClampRow,
     s: &mut ClampStats,
 ) -> Option<(Entity, GroundClamped)> {
     let ClampCtx {
@@ -777,38 +841,12 @@ fn clamp_unit(
         legacy,
         cost,
         trace,
-        frame,
+        ..
     } = *ctx;
-    let (entity, net, spline, mut t, mut clamped, swimming, modes, embodied, relayed, vis) = row;
-    s.visited += 1;
-    if vis.is_some_and(|v| *v == Visibility::Hidden) && !super::remote::hidden_turn(entity, frame) {
-        s.skipped += 1;
-        return None;
-    }
-    if !ground_derived(
-        net.kind,
-        spline.is_some(),
-        clamped.is_some(),
-        embodied,
-        relayed,
-    ) {
-        s.skipped += 1;
-        return None; // somebody else owns this body's Z
-    }
-    if spline.is_some_and(|s| !s.grounded) {
-        s.skipped += 1;
-        return None; // a flying path is authoritative on Z
-    }
-    if spline.is_some_and(|s| s.deck.is_some()) {
-        s.skipped += 1;
-        return None; // a deck path: no terrain under a deck, and the wire Z is deck-local
-    }
-    if swimming {
-        s.skipped += 1;
-        return None; // in-liquid: the wire Z is the creature's swim depth
-    }
+    let (entity, net, spline, t, clamped, _, modes, _, _, _) = row;
+    let (entity, net, spline, modes) = (*entity, *net, *spline, *modes);
     let xz = [t.translation.x, t.translation.z];
-    // The granted modes change the ray's answer, so they join the cache gate below.
+    // The granted modes change the ray's answer, so they join the cache gate.
     let granted = modes.copied().unwrap_or_default();
     // A Y other than the one our last clamp left was written by the unit's position owner and
     // is the new seat; with no memo, the spawn pose is the seat.
@@ -817,20 +855,7 @@ fn clamp_unit(
         Some(c) if c.y_written == t.translation.y => c.seat_y,
         _ => t.translation.y,
     };
-    // The cast gate: same XZ, same collider epoch, same modes, and our own answer still the Y
-    // standing here, so the ray cannot answer differently. Testing the standing Y rather than
-    // the seat also re-grounds a re-sent identical wire pose. A miss holds too, as every collider
-    // attach moves the epoch; the epoch-blind legacy gate holds only a hit.
     if let Some(c) = clamped.as_deref() {
-        let same_question = if legacy {
-            c.y_written == t.translation.y
-        } else {
-            c.y_written == t.translation.y && c.epoch == epoch && c.modes == granted
-        };
-        if (c.hit || !legacy) && c.xz == xz && same_question {
-            s.held += 1;
-            return None;
-        }
         if cost && !legacy {
             if c.xz == xz && c.seat_y == seat_y {
                 s.armed += 1; // the world changed under a unit that didn't move
@@ -1240,6 +1265,31 @@ mod under_floor {
 
     fn y_of(app: &App, e: Entity) -> f32 {
         app.world().get::<Transform>(e).unwrap().translation.y
+    }
+
+    /// More casts than one batch take the pool, and each row gets its own answer and memo.
+    #[test]
+    fn a_crowd_past_one_batch_grounds_every_unit() {
+        let (mut app, npc) = half_arrived_world();
+        let crowd: Vec<Entity> = (0..12)
+            .map(|i| {
+                app.world_mut()
+                    .spawn((
+                        NetEntity {
+                            kind: EntityKind::Unit,
+                            display_id: None,
+                            scale: 1.0,
+                        },
+                        Transform::from_xyz(i as f32 * 0.1, WIRE_Y, 0.0),
+                    ))
+                    .id()
+            })
+            .collect();
+        clamp(&mut app);
+        for e in crowd.into_iter().chain([npc]) {
+            assert_eq!(y_of(&app, e), TERRAIN_Y);
+            assert!(app.world().get::<GroundClamped>(e).is_some(), "its memo");
+        }
     }
 
     #[test]
