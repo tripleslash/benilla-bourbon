@@ -460,12 +460,11 @@ mod tests {
         (app, rx)
     }
 
-    /// What the logout replies' handlers put on the notice lane, taken.
+    /// What the logout replies' handlers put on the notice lane, taken at their packets' ends.
     fn notices(app: &mut App) -> Vec<crate::field_watch::FieldNotice> {
         app.world_mut()
-            .resource_mut::<crate::field_watch::NoticeLane>()
-            .drain()
-            .collect()
+            .resource_mut::<crate::lanes::tap_tests::Tapped>()
+            .fields()
     }
 
     /// Run `chunk` with the host lent; what it sent of the logout's and the roll's packets.
@@ -560,6 +559,7 @@ mod tests {
     #[test]
     fn the_ack_of_a_cancelled_logout_fires_nothing() {
         let (mut app, rx) = client();
+        crate::lanes::tap_tests::tap(&mut app);
         assert_eq!(
             sent_by(&mut app, &rx, "Logout() CancelLogout() CancelLogout()"),
             ["logout", "cancel", "cancel"]
@@ -578,6 +578,7 @@ mod tests {
     #[test]
     fn a_world_load_calls_off_a_pending_logout() {
         let (mut app, rx) = client();
+        crate::lanes::tap_tests::tap(&mut app);
         app.world_mut()
             .non_send::<UiScript>()
             .run(
@@ -623,12 +624,14 @@ mod tests {
     #[test]
     fn a_completed_logout_leaves_the_world_with_a_cancel() {
         let (mut app, rx) = client();
+        crate::lanes::tap_tests::tap(&mut app);
         assert_eq!(sent_by(&mut app, &rx, "Logout()"), ["logout"]);
         crate::net::handlers::dispatch(app.world_mut(), vec![SessionEvent::LoggedOut]);
         assert!(!app.world().resource::<LogoutState>().pending);
         assert_eq!(notices(&mut app), [LogoutSignal::Cancelled.notice()]);
 
         let (mut app, rx) = client();
+        crate::lanes::tap_tests::tap(&mut app);
         assert_eq!(sent_by(&mut app, &rx, "ForceLogout()"), ["force"]);
         crate::net::handlers::dispatch(app.world_mut(), vec![SessionEvent::LoggedOut]);
         assert!(notices(&mut app).is_empty());
@@ -639,6 +642,7 @@ mod tests {
     #[test]
     fn a_refused_login_calls_off_a_pending_logout() {
         let (mut app, rx) = client();
+        crate::lanes::tap_tests::tap(&mut app);
         assert_eq!(sent_by(&mut app, &rx, "Logout()"), ["logout"]);
         crate::net::handlers::dispatch(
             app.world_mut(),

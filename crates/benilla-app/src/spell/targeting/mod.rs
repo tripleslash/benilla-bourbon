@@ -413,7 +413,7 @@ impl SpellTargeting {
     }
 
     /// The pending cast and its standing word, whatever seam it wants.
-    fn pending(&self) -> Option<(u32, super::cast_send::CastCommit, u16)> {
+    pub(crate) fn pending(&self) -> Option<(u32, super::cast_send::CastCommit, u16)> {
         self.0.as_ref().map(|t| (t.spell_id, t.commit, t.word))
     }
 
@@ -1406,6 +1406,7 @@ mod tests {
                 Some(&def),
                 &CastCandidates {
                     selection: Some(guid),
+                    selected: true,
                     selection_held: true,
                     caster: Some(ME),
                     auto_self: Some(ME),
@@ -1656,6 +1657,7 @@ mod tests {
                             Some(&def),
                             &CastCandidates {
                                 selection: Some(guid),
+                                selected: true,
                                 selection_held: true,
                                 caster: Some(ME),
                                 auto_self: Some(ME),
