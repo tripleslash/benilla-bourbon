@@ -1201,6 +1201,10 @@ mod tests {
                 <crate::rig_anim::AnimParked as Component>::STORAGE_TYPE,
             ),
             (
+                "UnitAppearFade",
+                <crate::model_fade::UnitAppearFade as Component>::STORAGE_TYPE,
+            ),
+            (
                 "RigStarved",
                 <crate::rig_palette::RigStarved as Component>::STORAGE_TYPE,
             ),
