@@ -281,10 +281,8 @@ pub(super) fn control(
         // A knockback on our mover: latched by `wire_in`, flown below, acked after the launch.
         MessageReader<crate::net::KnockBackMessage>,
         crate::tutorial::InputHooks,
-        // The loot window's move-start close (`0x60e990`).
-        ResMut<crate::ui_loot::LootMoveStart>,
-        // `SMSG_STANDSTATE_UPDATE`, applied locally and ungated, with nothing sent back.
-        MessageReader<super::ServerStandState>,
+        // The loot window's move-start close (`0x60e990`), run where its guard does.
+        crate::ui_loot::MoveStartClose,
     ),
     mut speed_capsule: (
         Res<MoveSpeed>,
@@ -709,7 +707,6 @@ pub(super) fn control(
             &mut net.3,
             &mut net.13,
             &mut net.9,
-            &mut net.14,
             reads,
             speed_capsule.10.as_deref().map(|t| &t.0),
             moving,
@@ -1033,7 +1030,7 @@ pub(super) fn control(
         if steering_ourselves
             && (loot_walk_away(player.move_flags, move_flags_now) || jumped || pitched)
         {
-            net.13 .0 = true;
+            net.13.close();
         }
 
         // Stream the movement: a `MSG_MOVE_*` per axis transition, the jump and fall edges and a

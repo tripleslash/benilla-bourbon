@@ -123,6 +123,11 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Quiet: the autorun bit as the frame's calls leave it, read and written inside each call
     // (`0x513de7`), which an auto-move's stop clears in place (`0x514630`).
     "::player::press::CallAutorun",
+    // Quiet: the stand state's prediction `[player+0x1d68]`, which the local apply writes in its
+    // call, in the controller and in `SMSG_STANDSTATE_UPDATE`'s handler (`0x5f07a3`), and which
+    // `GetStandState` reads at the call (`0x5ed570`); the apply's loot close and attack stop
+    // signal in place, and no feed fires off it.
+    "::player::state::StandPending",
     // Quiet: the cast ladder's per-call state, which the cast result's, the loot response's and the
     // go's handlers hold with the ladder and never write. A press holds the first and its call resumes it before it returns
     // (`0x6e4efb`), each call sets and puts back the second, and the pet press applies the third
@@ -1389,13 +1394,8 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
     (
         "::player::controller::control",
         "the mover's queue sends the root and unroot acks at its frame update (`0x616438`, \
-         `0x6164a9`), and their input tick stops an auto-move there (`0x60e33d` → `0x60e347`)",
-    ),
-    (
-        "::player::press::press_tick",
-        "the window deactivate runs the input tick outside every call (`0x514490` → \
-         `0x5144b5`), its direction and pitch bits cleared (`0x5144a3`), whose pitch stop ends \
-         the auto-move there (`0x60ddda` → `0x60e990`)",
+         `0x6164a9`), and their input tick stops an auto-move there (`0x60e33d` → `0x60e347`), \
+         its starts' guard closing the loot there too (`0x60e990` → `0x60e9dd`)",
     ),
     (
         "::ui_chat::channels::end_session_channels_on_disconnect",
@@ -1405,14 +1405,7 @@ const AT_THEIR_OWN_PLACE: &[(&str, &str)] = &[
 
 /// The systems outside the phase that lend the call host and take a handler queue, firing off it
 /// in system order: remaining work, which only shrinks, by a suffix of the system's name.
-pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[(
-    "::ui_loot::drain_loot",
-    "the loot closes a precast end owes (`0x60d040` → `EndLootWindow` `0x48f200` at `0x60d10b`), \
-     which the reference makes inside the packet that ends it: `HandleSpellGo` (`0x6e7fc5`), the \
-     spell failures (`0x6e8dd7`, `0x6e8e8c`), the health watcher (`0x6047e7`) and \
-     `OnMonsterMove` (`0x6020e8`); the unit edits owe them after the handler and the drain \
-     closes them in its own phase, so `LOOT_CLOSED` fires behind the frame's packets",
-)];
+pub(super) const NOT_YET_PLACED: &[(&str, &str)] = &[];
 
 /// The placed queues' readers that defer work to their commands and push nothing onto a lane
 /// from them, by a suffix of the system's name, with what the commands do.
@@ -1686,13 +1679,13 @@ fn the_systems_unordered_against_the_drain_meet_it_only_on_a_pure_cache() {
         for t in [
             TypeId::of::<crate::creature_anim::PlaySeq>(),
             TypeId::of::<bevy::ecs::message::Messages<crate::creature_anim::CastEvent>>(),
-            TypeId::of::<crate::ui_loot::LootMoveStart>(),
-            TypeId::of::<crate::ui_loot::LootCloseAtRest>(),
         ] {
             if let Some(id) = world.components().get_id(t) {
                 drain.add_resource_write(id);
             }
         }
+        // The tail's loot close, which runs as its end applies.
+        drain.extend(crate::ui_loot::precast_end_close_access(world));
         if let Some(id) = world
             .components()
             .get_id(TypeId::of::<crate::player::Player>())
