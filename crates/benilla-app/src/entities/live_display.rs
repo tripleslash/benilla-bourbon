@@ -5,10 +5,12 @@
 //! The reference's display handler rebuilds the model (`0x60abe0`) when the display record changed
 //! (`0x60ae10`, against `[unit+0xb34]`), re-resolving its model facts (`0x60afb0`) and the stand or
 //! ride animation (`0x60ce70`): an instant swap, a ghost's revive too. Its scale handler eases
-//! over 2 s with a cosine smoothstep (`0x614bbf`). Here a swap tears the visual down for
-//! `attach_entity_visuals` to rebuild without the spawn fade; the unit's
-//! [`super::spell_fx::FxAttached`] list outlives it, as the reference's per-unit `+0xb4` effect
-//! list does, so persistent effects re-spawn on the new body.
+//! over 2 s with a cosine smoothstep (`0x614bbf`). A unit swaps on the update's own rebuild
+//! ([`DisplayRebuilt`]), so a new display naming the same records keeps the body, as `0x60ae10`
+//! keeps it; a game object or corpse swaps on any new id. Here a swap tears the visual down for
+//! `attach_entity_visuals` to rebuild without the spawn fade, first ending the unit's spell effects
+//! as the rebuild's `0x60ac10` loop does ([`super::spell_fx::RebuildFx`]); the auras' and the
+//! channel's re-spawn on the new body.
 
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
@@ -21,16 +23,32 @@ use super::{Creatures, VisualAttached};
 /// The reference's scale-ease window: 2 s, cosine smoothstep (`0x614bbf`).
 const SCALE_EASE_SECS: f32 = 2.0;
 
-/// The display id the visual was built with, cube included: [`refresh_live_display`]'s diff key.
+/// The display id the visual was built with, cube included: [`refresh_live_display`]'s diff key
+/// for a game object or corpse.
 #[derive(Component)]
 pub(crate) struct AppliedDisplay(pub(crate) Option<u32>);
 
-/// A live display swap tore this entity's visual down. The reference's rebuild ends by replaying
-/// the pending morph's impact kit (`0x60ad67`), which `crate::creature_anim`'s morph-latch watcher
-/// does on this edge.
+/// The reference rebuilt this unit's display (`0x60abe0`): the display watcher (`0x6049b5`), the
+/// health watcher's return to life (`0x604835`) or slot 3 (`0x5fbe28`) found a new record set
+/// (`0x60ae10`). `at` is that watcher's place among the packet's edges.
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) struct DisplayRebuilt {
+    pub(crate) entity: Entity,
+    pub(crate) at: crate::lanes::Stamp,
+    /// The row it resolved (`+0xb34`, `0x60afb0`), which the body is built from: a later
+    /// packet's id naming the same records (`0x60ae10`) leaves it.
+    pub(crate) display_id: u32,
+}
+
+/// A unit's display rebuild, or a game object's or corpse's new display id, which tore down the
+/// visual it had. The reference's rebuild ends by replaying the pending morph's impact kit
+/// (`0x60ad67`), which `crate::creature_anim`'s morph-latch watcher does on this edge.
 #[derive(Message, Clone, Copy)]
 pub(crate) struct DisplaySwapped {
     pub(crate) entity: Entity,
+    /// A unit's rebuild's place ([`DisplayRebuilt::at`]), at which `spell_fx` ends the kit starts
+    /// the wire put before it; `None` for a game object's or corpse's new id.
+    pub(crate) at: Option<crate::lanes::Stamp>,
 }
 
 /// A render-scale ease toward [`NetEntity::scale`], written absolutely each tick so a mid-ease
@@ -99,7 +117,8 @@ fn tear_down_visual(entity: &mut EntityCommands) {
 /// Rebuild every character body — players, and the units and corpses whose display is a character
 /// body ([`Creatures::is_character_body`]) — as a display swap does, for a change of the art they
 /// are made of: the updated character models turned on or off ([`crate::hd_models`]). Returns how
-/// many. An edge, never per frame.
+/// many. An edge, never per frame. Each body's effects end first and come back on the new body,
+/// as the rig heal's do ([`super::spell_fx::Rebuild::Heal`]).
 ///
 /// Call it once the new art has landed: the display and skin caches drop first, since an entry
 /// built while the reloads were in flight holds the old model's skeleton and meshes, and the
@@ -122,18 +141,49 @@ pub(crate) fn rebuild_character_bodies(world: &mut World) -> usize {
         })
         .map(|(entity, _)| entity)
         .collect();
-    let mut commands = world.commands();
-    for &entity in &bodies {
-        tear_down_visual(&mut commands.entity(entity));
+    let rebuilt = bodies.len();
+    let teardown = world.run_system_cached_with(
+        |In(bodies): In<Vec<Entity>>,
+         mut commands: Commands,
+         mut fx: super::spell_fx::RebuildFx| {
+            for entity in bodies {
+                fx.end_all(&mut commands, entity, super::spell_fx::Rebuild::Heal);
+                tear_down_visual(&mut commands.entity(entity));
+            }
+        },
+        bodies,
+    );
+    if let Err(e) = teardown {
+        warn!("character rebuild: the bodies could not be torn down — {e}");
     }
-    world.flush();
-    bodies.len()
+    rebuilt
 }
 
-/// Diff each attached entity's live appearance against what its visual was built with: a display
-/// move swaps the model, a scale move arms the 2 s ease, and a change of the native display or
-/// `SCALE_X` restamps [`CollisionHeight`]. Mount children carry no [`ObjectStore`]: their display
-/// is the host's field, diffed by `mount::reseat_mounts`.
+/// A unit's rebuild at `at` (`0x60abe0`), short of its body: the loop `0x60ac10` stops every
+/// effect the unit holds, kit sounds included (`0x61fedc`), and the tail replays the morph latch
+/// (`0x60ad67`) off [`DisplaySwapped`].
+fn rebuild_edges(
+    commands: &mut Commands,
+    fx: &mut super::spell_fx::RebuildFx,
+    swapped: &mut MessageWriter<DisplaySwapped>,
+    kit_sounds: &mut MessageWriter<crate::creature_anim::SpellKitSound>,
+    entity: Entity,
+    at: crate::lanes::Stamp,
+) {
+    swapped.write(DisplaySwapped {
+        entity,
+        at: Some(at),
+    });
+    fx.end_all(commands, entity, super::spell_fx::Rebuild::Display);
+    kit_sounds.write(crate::creature_anim::SpellKitSound::Rebuilt { entity, at });
+}
+
+/// Each attached entity's live appearance against what its visual was built with: a unit's
+/// rebuild ([`DisplayRebuilt`]) or a game object's or corpse's new display id swaps the model, a
+/// scale move arms the 2 s ease, and a change of the native display or `SCALE_X` restamps
+/// [`CollisionHeight`]. A unit rebuilt before its visual attached builds the new display.
+/// Mount children carry no [`ObjectStore`]: their display is the host's field, diffed by
+/// `mount::reseat_mounts`.
 #[allow(clippy::type_complexity)]
 pub(super) fn refresh_live_display(
     mut commands: Commands,
@@ -154,14 +204,49 @@ pub(super) fn refresh_live_display(
             Without<benilla_world::model_fade::DespawnFade>,
         ),
     >,
+    mut unattached: Query<
+        &mut NetEntity,
+        (
+            Without<VisualAttached>,
+            Without<benilla_world::model_fade::DespawnFade>,
+        ),
+    >,
+    mut rebuilds: MessageReader<DisplayRebuilt>,
     mut swapped: MessageWriter<DisplaySwapped>,
+    mut fx: super::spell_fx::RebuildFx,
+    mut kit_sounds: MessageWriter<crate::creature_anim::SpellKitSound>,
 ) {
     // The prism reads only the static catalog of `Creatures`, whose model cache changes often.
     let catalog_new = creatures.as_ref().is_some_and(|c| c.is_added());
+    // This frame's unit rebuilds, the latest of each unit's with the row it resolved: it ends
+    // whatever came before it.
+    let mut rebuilt: bevy::ecs::entity::EntityHashMap<(crate::lanes::Stamp, u32)> = default();
+    for r in rebuilds.read() {
+        let latest = rebuilt.entry(r.entity).or_insert((r.at, r.display_id));
+        if r.at >= latest.0 {
+            *latest = (r.at, r.display_id);
+        }
+    }
+    for (&entity, &(at, row)) in &rebuilt {
+        // A unit with no body yet rebuilds all the same, short of the teardown: what it held
+        // ends, the morph latch replays, and the body built later is the row's.
+        if let Ok(mut net) = unattached.get_mut(entity) {
+            net.display_id = Some(row);
+            rebuild_edges(
+                &mut commands,
+                &mut fx,
+                &mut swapped,
+                &mut kit_sounds,
+                entity,
+                at,
+            );
+        }
+    }
     for (entity, guid, mut net, store, applied, height, tf) in &mut entities {
         // Every answer below is a function of these rows and the catalog: with none changed since
-        // the last pass, each diff would find what it found then.
+        // the last pass and no rebuild of this unit, each diff would find what it found then.
         if !catalog_new
+            && !rebuilt.contains_key(&entity)
             && !store.is_changed()
             && !applied.is_changed()
             && !net.is_changed()
@@ -170,19 +255,38 @@ pub(super) fn refresh_live_display(
             continue;
         }
         let (store, applied, height) = (&*store, &*applied, height.as_deref());
-        // ── The display-id swap ──────────────────────────────────────────────────────────────
-        let live = live_display_id(net.kind, store);
-        if let Some(live) = live {
-            if applied.0 != Some(live) {
-                info!(
-                    "display swap: guid {:016x} {:?} {:?} -> {} (instant, the 0x60abe0 rebuild)",
-                    guid.0, net.kind, applied.0, live
-                );
-                net.display_id = Some(live);
-                swapped.write(DisplaySwapped { entity });
-                // `attach_entity_visuals` rebuilds from scratch, fade-skipped by `Reattached`.
-                tear_down_visual(&mut commands.entity(entity));
+        // ── The display swap ─────────────────────────────────────────────────────────────────
+        // A unit takes the row its update's rebuild resolved; any other kind, a new field.
+        let swap = match net.kind {
+            EntityKind::Unit | EntityKind::Player => {
+                rebuilt.get(&entity).map(|&(at, row)| (row, Some(at)))
             }
+            _ => live_display_id(net.kind, store)
+                .filter(|&live| applied.0 != Some(live))
+                .map(|live| (live, None)),
+        };
+        if let Some((to, at)) = swap {
+            info!(
+                "display swap: guid {:016x} {:?} {:?} -> {} (instant, the 0x60abe0 rebuild)",
+                guid.0, net.kind, applied.0, to
+            );
+            net.display_id = Some(to);
+            match at {
+                Some(at) => rebuild_edges(
+                    &mut commands,
+                    &mut fx,
+                    &mut swapped,
+                    &mut kit_sounds,
+                    entity,
+                    at,
+                ),
+                None => {
+                    swapped.write(DisplaySwapped { entity, at: None });
+                    fx.end_all(&mut commands, entity, super::spell_fx::Rebuild::Display);
+                }
+            }
+            // `attach_entity_visuals` rebuilds from scratch, fade-skipped by `Reattached`.
+            tear_down_visual(&mut commands.entity(entity));
         }
 
         // ── The scale ease ───────────────────────────────────────────────────────────────────
@@ -274,6 +378,7 @@ pub(super) fn heal_rig_starved(
             Without<benilla_world::model_fade::DespawnFade>,
         ),
     >,
+    mut fx: super::spell_fx::RebuildFx,
 ) {
     if starved.is_empty() || palettes.slot_headroom() < HEAL_MIN_HEADROOM {
         return;
@@ -283,6 +388,7 @@ pub(super) fn heal_rig_starved(
             "rig heal: guid {:016x} was denied a palette rig at attach — rebuilding (0x60abe0 shape)",
             guid.0
         );
+        fx.end_all(&mut commands, entity, super::spell_fx::Rebuild::Heal);
         tear_down_visual(
             commands
                 .entity(entity)
@@ -421,6 +527,8 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<benilla_world::rig_palette::RigPalettes>();
         app.add_message::<DisplaySwapped>();
+        app.add_message::<DisplayRebuilt>();
+        app.add_message::<crate::creature_anim::SpellKitSound>();
         app.add_systems(Update, (refresh_live_display, heal_rig_starved));
         let unit = |app: &mut App, display: u32| {
             app.world_mut()
@@ -446,6 +554,7 @@ mod tests {
         app.world_mut()
             .entity_mut(healed)
             .insert(benilla_world::rig_palette::RigStarved);
+        rebuild(&mut app, swapped);
         app.update();
         for (e, what) in [(swapped, "the swap"), (healed, "the heal")] {
             let e = app.world().entity(e);
@@ -462,6 +571,150 @@ mod tests {
                 "{what} kept the committed sheath state"
             );
         }
+    }
+
+    /// The update's rebuild of `unit` to the descriptor's display, as its display watcher
+    /// announces it, at its stamp.
+    fn rebuild(app: &mut App, unit: Entity) -> crate::lanes::Stamp {
+        rebuild_to(app, unit, 8)
+    }
+
+    /// [`rebuild`] to the row `display_id`.
+    fn rebuild_to(app: &mut App, unit: Entity, display_id: u32) -> crate::lanes::Stamp {
+        let at = crate::lanes::stamp();
+        app.world_mut()
+            .resource_mut::<Messages<DisplayRebuilt>>()
+            .write(DisplayRebuilt {
+                entity: unit,
+                at,
+                display_id,
+            });
+        at
+    }
+
+    /// An app running the swap, and a unit built in display 7 whose descriptor now says 8.
+    fn displayed_unit(attached: bool) -> (App, Entity) {
+        let mut app = App::new();
+        app.init_resource::<benilla_world::rig_palette::RigPalettes>();
+        app.add_message::<DisplaySwapped>();
+        app.add_message::<DisplayRebuilt>();
+        app.add_message::<crate::creature_anim::SpellKitSound>();
+        app.add_systems(Update, refresh_live_display);
+        let unit = app
+            .world_mut()
+            .spawn((
+                crate::net::Guid(0xB0B),
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: Some(7),
+                    scale: 1.0,
+                },
+                ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                    benilla_protocol::field::FIELD_UNIT_DISPLAYID,
+                    8,
+                )])),
+                Transform::default(),
+            ))
+            .id();
+        if attached {
+            app.world_mut()
+                .entity_mut(unit)
+                .insert((VisualAttached, AppliedDisplay(Some(7))));
+        }
+        (app, unit)
+    }
+
+    /// `0x60abe0` rebuilds only when `0x60ae10` finds a new record set (`0x60abeb`): a display
+    /// naming the same extra, model and sound rows keeps the body, so a new id alone swaps nothing.
+    #[test]
+    fn a_unit_swaps_only_on_the_updates_rebuild_not_on_a_new_id() {
+        let (mut app, unit) = displayed_unit(true);
+        app.update();
+        assert!(
+            app.world().entity(unit).contains::<VisualAttached>(),
+            "a new id the rebuild's gate passed over keeps the body"
+        );
+        rebuild(&mut app, unit);
+        app.update();
+        let e = app.world().entity(unit);
+        assert!(!e.contains::<VisualAttached>(), "the rebuild swaps it");
+        assert_eq!(e.get::<NetEntity>().unwrap().display_id, Some(8));
+    }
+
+    /// The rebuild's loop `0x60ac10` stops the kit sounds it links (`0x61fedc`) with the rest:
+    /// the swap hands the sound side the rebuild's stamp, to stop the hold loops rung before it.
+    #[test]
+    fn a_units_rebuild_hands_its_stamp_to_the_kit_sounds() {
+        use crate::creature_anim::SpellKitSound;
+        let (mut app, unit) = displayed_unit(true);
+        let at = rebuild(&mut app, unit);
+        app.update();
+        let edges: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<SpellKitSound>>()
+            .drain()
+            .filter_map(|ev| match ev {
+                SpellKitSound::Rebuilt { entity, at } => Some((entity, at)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(edges, [(unit, at)]);
+    }
+
+    /// The rebuild resolves its row at its watcher (`0x60afb0`), and a later packet's id naming
+    /// the same records leaves it (`0x60ae10`): the body is the rebuilt row's, not the frame's
+    /// last field's, built or not.
+    #[test]
+    fn a_rebuild_builds_the_row_it_resolved_not_the_frames_last_field() {
+        for attached in [true, false] {
+            let (mut app, unit) = displayed_unit(attached);
+            rebuild_to(&mut app, unit, 9);
+            app.update();
+            assert_eq!(
+                app.world().get::<NetEntity>(unit).unwrap().display_id,
+                Some(9),
+                "attached: {attached}"
+            );
+        }
+    }
+
+    /// The reference rebuilds the unit, built or not (`0x60abe0`): with no body yet only the
+    /// teardown is moot, so the effects end, the kit sounds stop and the morph latch replays.
+    #[test]
+    fn a_unit_with_no_body_yet_rebuilds_short_of_the_teardown() {
+        use crate::creature_anim::SpellKitSound;
+        let (mut app, unit) = displayed_unit(false);
+        let at = rebuild(&mut app, unit);
+        app.update();
+        let swaps: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<DisplaySwapped>>()
+            .drain()
+            .map(|s| (s.entity, s.at))
+            .collect();
+        assert_eq!(swaps, [(unit, Some(at))], "the morph latch's replay edge");
+        let stops: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<SpellKitSound>>()
+            .drain()
+            .filter_map(|ev| match ev {
+                SpellKitSound::Rebuilt { entity, at } => Some((entity, at)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stops, [(unit, at)], "the kit sounds' stop");
+    }
+
+    /// A unit rebuilt before its visual attached builds the new display, not its create's.
+    #[test]
+    fn a_unit_rebuilt_before_its_visual_attached_builds_the_new_display() {
+        let (mut app, unit) = displayed_unit(false);
+        rebuild(&mut app, unit);
+        app.update();
+        assert_eq!(
+            app.world().get::<NetEntity>(unit).unwrap().display_id,
+            Some(8)
+        );
     }
 
     #[test]

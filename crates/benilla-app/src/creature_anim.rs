@@ -714,6 +714,9 @@ pub(crate) struct CastEvent {
     pub(crate) kind: CastEventKind,
     /// `PlaySeq` stamp, carried to the kit's `EmoteAnim`.
     pub(crate) seq: u64,
+    /// The cast packet's place among what the packets queue ([`crate::lanes::stamp`]); `None` for
+    /// an edge the frame raised (a missile's arrival, a probe line), after every packet.
+    pub(crate) at: Option<crate::lanes::Stamp>,
 }
 
 /// Which cast edge fired.
@@ -890,6 +893,9 @@ pub(crate) struct SpellGoTargets {
     pub(crate) ammo_display_id: Option<u32>,
     /// `PlaySeq` stamp, the GO's `CastEvent`'s.
     pub(crate) seq: u64,
+    /// The GO packet's place, its `CastEvent`'s, which its impact kits carry; `None` for a GO the
+    /// frame raised, after every packet.
+    pub(crate) at: Option<crate::lanes::Stamp>,
 }
 
 /// The sheath policy: requests, ceremony overlays, the `AnimationData.dbc` table.
@@ -957,8 +963,9 @@ use spell_visual::{
 #[cfg(test)]
 pub(crate) use spell_visual::arm_aura_state_fx as arm_aura_state_fx_for_test;
 pub(crate) use spell_visual::{
-    held_strike_sound, ChainProcPlay, FxClass, FxStage, GroundList, KitPush, MissileSpawn,
-    PrecastTables, PrecastVisuals, SpellKitFx, SpellKitShake, SpellKitSound, SpellVisuals,
+    held_strike_sound, replay_rebuilt_kit_sounds, ChainProcPlay, FxClass, FxStage, GroundList,
+    KitPush, MissileSpawn, PrecastTables, PrecastVisuals, SpellKitFx, SpellKitShake, SpellKitSound,
+    SpellVisuals,
 };
 
 /// The per-unit animation state machine; `Transform` is required, its scale divides the rate, and

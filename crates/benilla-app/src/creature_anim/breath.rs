@@ -189,6 +189,8 @@ pub(super) fn fire_breath(
                 effect,
                 path: path.clone(),
             }],
+            // A model event of the frame, after every packet.
+            at: None,
         });
     }
     // Forget despawned units.
