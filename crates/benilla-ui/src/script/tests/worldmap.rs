@@ -1248,3 +1248,19 @@ fn the_corpse_position_is_read_at_the_call() {
         assert_eq!(corpse(s), (0.0, 0.0), "no corpse")
     });
 }
+
+/// A moving player's feed is no extract input: the map's Lua reads it through its verbs, so a new
+/// position leaves the mutation count standing, while the verb still answers the new place.
+#[test]
+fn a_moving_player_leaves_the_mutation_count_standing() {
+    let mut s = script();
+    s.set_unit_guids(&crate::script::UnitGuids {
+        player: 1,
+        ..Default::default()
+    });
+    let before = s.visual_epoch();
+    s.set_world_map_feed(Some((1, 2)), Some((0.25, 0.75)), 1.5);
+    assert_eq!(s.visual_epoch(), before, "a feed write moved the count");
+    let (x, y): (f64, f64) = s.eval(r#"return GetPlayerMapPosition("player")"#).unwrap();
+    assert_eq!((x, y), (0.25, 0.75), "the verb answers the new place");
+}

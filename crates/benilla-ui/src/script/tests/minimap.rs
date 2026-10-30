@@ -215,6 +215,13 @@ fn a_minimap_is_born_with_nine_model_children_and_the_ninth_is_the_player_arrow(
     s.run(r#"extra = CreateFrame("Frame", nil, m)"#).unwrap();
     s.set_minimap_player_facing(-1.25);
     assert_eq!(s.eval::<f32>("return GetPlayerFacing()").unwrap(), -1.25);
+
+    // A frame that turned nothing is no extract input; a turn is.
+    let still = s.visual_epoch();
+    s.set_minimap_player_facing(-1.25);
+    assert_eq!(s.visual_epoch(), still, "a still arrow moved the count");
+    s.set_minimap_player_facing(1.0);
+    assert_ne!(s.visual_epoch(), still, "a turn moves the count");
     assert_eq!(
         s.eval::<usize>("return m:GetNumChildren()").unwrap(),
         MINIMAP_ENGINE_CHILDREN + 1

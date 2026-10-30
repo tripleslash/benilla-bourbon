@@ -687,7 +687,8 @@ impl super::UiScript {
     }
 
     /// Pushes the per-frame feed: the player's zone, its projected position and facing, which the
-    /// arrows draw.
+    /// arrows draw. The feed is no extract input: the map's Lua reads it through its verbs, whose
+    /// own writes count, so a moving player's every frame leaves the mutation count standing.
     pub fn set_world_map_feed(
         &mut self,
         player_zone: Option<(u32, u32)>,
@@ -695,9 +696,11 @@ impl super::UiScript {
         player_facing: f32,
     ) {
         let mut model = self.model_mut();
+        let quiet = model.epoch();
         model.worldmap.player_zone = player_zone;
         model.worldmap.player_uv = player_uv;
         model.worldmap.player_facing = player_facing;
+        model.set_epoch(quiet);
     }
 
     /// The selection's three cells, which the app reads each frame to project the feed: continent,

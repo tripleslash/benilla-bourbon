@@ -1230,9 +1230,12 @@ impl UiScript {
     /// is loaded (`0x7103d0`), `0x4ee100` centres it on its own size, half its width and height
     /// (slots 0x1c and 0x20) in layout units; then `CMinimap::SetPlayerFacing` (`0x4eb8e0`, fed at
     /// `0x4eb0a4`–`0x4eb0b1`) copies the player's facing (radians) raw into the field
-    /// `Model:SetFacing` (`0x76dce0`) writes, so the arrow's `GetFacing()` reads it.
+    /// `Model:SetFacing` (`0x76dce0`) writes, so the arrow's `GetFacing()` reads it. A frame that
+    /// moved neither leaves the mutation count standing.
     pub fn set_minimap_player_facing(&mut self, facing: f32) {
         let mut model = self.model_mut();
+        let quiet = model.epoch();
+        let mut moved = false;
         let unit = model.layout_unit();
         let arrows: Vec<crate::widget::FrameHandle> = model
             .arena
@@ -1259,10 +1262,16 @@ impl UiScript {
                 model.arena.frame_mut(h).map(|f| &mut f.kind_state)
             {
                 if loaded {
-                    state.position = (size.0 / unit * 0.5, size.1 / unit * 0.5, 0.0);
+                    let centred = (size.0 / unit * 0.5, size.1 / unit * 0.5, 0.0);
+                    moved |= state.position != centred;
+                    state.position = centred;
                 }
+                moved |= state.facing != facing;
                 state.facing = facing;
             }
+        }
+        if !moved {
+            model.set_epoch(quiet);
         }
     }
 
