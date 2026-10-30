@@ -469,6 +469,63 @@ pub(crate) fn add_moved_position_sync(
     );
 }
 
+/// avian's `update_child_collider_position`, writing only a moved pose: avian's rewrites every
+/// body-attached hull each step (a WMO GameObject's solid props), which marks it moved and has the
+/// next step refit its AABB, and a static body's hulls never move.
+#[allow(clippy::type_complexity)]
+fn sync_child_collider_poses(
+    mut colliders: Query<
+        (
+            &ColliderTransform,
+            &mut Position,
+            &mut Rotation,
+            &ColliderOf,
+        ),
+        bevy::ecs::query::Without<RigidBody>,
+    >,
+    bodies: Query<
+        (&Position, &Rotation),
+        (
+            bevy::ecs::query::With<RigidBody>,
+            bevy::ecs::query::With<bevy::prelude::Children>,
+        ),
+    >,
+) {
+    use bevy::ecs::change_detection::DetectChangesMut;
+    for (local, mut position, mut rotation, of) in &mut colliders {
+        let Ok((body_pos, body_rot)) = bodies.get(of.body) else {
+            continue;
+        };
+        position.set_if_neq(Position(body_pos.0 + body_rot * local.translation));
+        rotation.set_if_neq((body_rot.0 * local.rotation.0).normalize().into());
+    }
+}
+
+/// Swap avian's child-collider sync for [`sync_child_collider_poses`], in the slot right after the
+/// set it leaves empty: with no diagnostics, joints or interpolation it is the set's only system.
+pub(crate) fn use_change_aware_child_sync(app: &mut bevy::app::App) {
+    use bevy::ecs::schedule::IntoScheduleConfigs;
+    app.add_systems(
+        PhysicsSchedule,
+        sync_child_collider_poses
+            .after(PhysicsStepSystems::First)
+            .before(PhysicsStepSystems::BroadPhase),
+    );
+    app.add_systems(bevy::app::Startup, drop_avian_child_sync);
+}
+
+/// Removed at the first frame's startup, not at build: a removal builds the schedule, before later
+/// plugins have added theirs ([`crate::world_plugins`] does the same for Bevy's transform copy).
+fn drop_avian_child_sync(world: &mut bevy::ecs::world::World) {
+    let _ = world.try_schedule_scope(PhysicsSchedule, |world, schedule| {
+        let _ = schedule.remove_systems_in_set(
+            PhysicsStepSystems::First,
+            world,
+            bevy::ecs::schedule::ScheduleCleanupPolicy::RemoveSystemsOnly,
+        );
+    });
+}
+
 /// The filtered sync places a spawned collider, follows a moved one, and seats a collider attached
 /// later to an entity that never moves, as avian's unfiltered one does.
 #[cfg(test)]
@@ -490,6 +547,7 @@ mod moved_position_sync {
             ..Default::default()
         });
         add_moved_position_sync(&mut app, bevy::app::PostUpdate);
+        use_change_aware_child_sync(&mut app);
         app.init_asset::<Mesh>();
         app.finish();
         app.cleanup();
@@ -508,6 +566,40 @@ mod moved_position_sync {
             w.get::<Position>(e).unwrap().0,
             w.get::<Rotation>(e).unwrap().0,
         )
+    }
+
+    #[test]
+    fn a_still_bodys_hulls_stay_unmarked_and_follow_a_move() {
+        let mut app = world();
+        let body = app
+            .world_mut()
+            .spawn((RigidBody::Static, Transform::default()))
+            .with_child((Collider::sphere(1.0), Transform::from_xyz(2.0, 0.0, 0.0)))
+            .id();
+        settle(&mut app);
+        let hull = app.world().entity(body).get::<Children>().unwrap()[0];
+        let marked = |app: &App| {
+            app.world()
+                .entity(hull)
+                .get_ref::<Position>()
+                .unwrap()
+                .last_changed()
+        };
+        let before = marked(&app);
+        settle(&mut app);
+        assert_eq!(marked(&app), before, "a still body's hull is not rewritten");
+
+        app.world_mut()
+            .get_mut::<Transform>(body)
+            .unwrap()
+            .translation
+            .z = 5.0;
+        settle(&mut app);
+        let (p, _) = pose(&app, hull);
+        assert!(
+            p.abs_diff_eq(Vec3::new(2.0, 0.0, 5.0), 1e-5),
+            "hull follows: {p}"
+        );
     }
 
     #[test]
