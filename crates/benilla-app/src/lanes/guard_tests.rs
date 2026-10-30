@@ -44,23 +44,15 @@ pub(super) enum Row {
 /// What still fires in the frame's system order rather than the packets', with what it is. A
 /// queue's row stays while any feed takes that queue; each goes when its producer moves onto a
 /// lane, and a row whose queue, feed or system is gone fails as stale.
-pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
-    (
-        Row::HostHeld,
-        "::account_data::AccountData",
-        "the account-data sections a download replaced, whose readers (the binding sets, the \
-         macros, the layout) run again off it; the chat setup's fires on its lane",
-    ),
-    (
-        Row::HostHeld,
-        "::items::Items",
-        "the record answers' callbacks still run off the frame's records rather than in the \
+pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[(
+    Row::HostHeld,
+    "::items::Items",
+    "the record answers' callbacks still run off the frame's records rather than in the \
          answer's list (`ItemCacheReceive` `0x55bdb0`, `0x55bf12`-`0x55bf39`): the \
          dress-up's (`0x504ba0`) and the equipment display's (`0x5ed880`); and the combat log's \
          (`0x6294b0`) and the auction lists' (`0x4cca10`, `0x4ccc60`, `0x4cceb0`), which \
          `run_answer_tail` runs after the answer's list rather than in it",
-    ),
-];
+)];
 
 /// The host-held queues a handler fills that no feed fires off, each named quiet beside why: the
 /// check finds a queue the handlers and the host both hold, but not whether a feed fires off it
@@ -68,6 +60,11 @@ pub(super) const NOT_YET_ON_A_LANE: &[(Row, &str, &str)] = &[
 /// off is a [`Row::HostHeld`] row instead. A new one fails until it is read, and an entry whose
 /// queue the handlers or the host no longer hold fails as stale.
 pub(super) const HOST_HELD_UNREAD: &[&str] = &[
+    // Moved here from `NOT_YET_ON_A_LANE`, so neither list grew: the account-data sections, which
+    // the logout verb flushes inside its call (`0x5ab049` → `0x5afd30`), and quiet: each section's
+    // reader runs on its own lane at the settling's stamp, inside the packet that settled it
+    // (`0x5afaca`, `0x5afd19`), the bindings', the layout's, the macros' and the chat setup's.
+    "::account_data::AccountData",
     // Quiet: StartAttack reads the stop word in its call (`0x5eccda`), the attack stop's handler
     // clears it (`0x624e6b`), and no feed reads it.
     "::creature_anim::AttackStopInFlight",
@@ -88,9 +85,9 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Quiet: the object index, which the getters read through the host as they run; the feeds that
     // read it push views (`READS_FRAME_FINAL`), and none fires off its change.
     "::net::GuidIndex",
-    // Quiet: the trainer's description getters read it through the host, and `feed_item_stats`
-    // pushes `GetBindLocation` and the `$z` token off it (its `READS_FRAME_FINAL` row); no feed
-    // fires off it.
+    // Quiet: `GetBindLocation` (`0x48dae3` → `0x5ed420`) and the `$z` token (`0x507f07` →
+    // `0x5ed420`) of the trainer's, the craft list's and the tooltips' descriptions read it through
+    // the host at the call; no feed fires off it.
     "::net::HomeBind",
     // Read through the host by the item requirement getters, and quiet: no feed fires off them.
     "::net::Proficiencies",
@@ -140,8 +137,9 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     "::spell::inflight::AutoRepeatActive",
     "::spell::inflight::PendingCast",
     "::spell::inflight::QueuedMeleeSpell",
-    // Quiet: read by the cost and `$`-token builds; the feeds that read it push views
-    // (`READS_FRAME_FINAL`), and none fires off it.
+    // Quiet: read by the cost and `$`-token builds through the host at the call; the targeting
+    // feed pushes the input's word off it (`BUILT_OUTSIDE_THE_PACKETS_IN_THE_REFERENCE`), and none
+    // fires off it.
     "::spell::mods::SpellModifiers",
     // Quiet: the units a select found the targeting cursor up for, which its writer binds at the
     // select's place (`0x4935d5` → `0x6e5b40`): a handler's in its packet (the loot response's
@@ -228,6 +226,10 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
     // Read through the host by the gossip getters, and quiet: the draw's `GOSSIP_SHOW` fires on the
     // gossip lane at its handler, and the gossip verbs hold it in their calls.
     "::ui_gossip::GossipState",
+    // Quiet: the reader's session, which the item-text getters read through the host and an
+    // item's deactivate closes in the object packet's handler (`0x5d8713`); `ITEM_TEXT_CLOSED` goes
+    // on the item-text lane at its place, and no feed fires off it.
+    "::ui_item_text::ItemTextOpen",
     // Quiet: the loot session's auto-loot byte and latch, which the response's admit and the
     // closes read in their handlers and calls; `LOOT_OPENED` and `LOOT_CLOSED` fire on the loot
     // lane, and no feed fires off them.
@@ -326,17 +328,12 @@ pub(super) const HOST_HELD_UNREAD: &[&str] = &[
 /// a row whose feed or inputs moved fails until it matches.
 #[rustfmt::skip]
 pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
-    // The account-data readers (#2448): each reruns off the sections a download stored through
-    // `&self`, read as the frame left them, where the reference runs each inside the settle that
-    // its section's digest or download handler makes (`0x5afaca`, `0x5afd19`): the bindings
-    // (`0x4b6240`), the layout (`0x490380`) and the macros (`0x4f0600`).
-    ("::bindings::reread_arrived_bindings", &["account_data::AccountData"]),
-    ("::ui_layout::load_layout", &["account_data::AccountData"]),
-    ("::ui_macro::load_macros", &["account_data::AccountData", "ui_action::ActionSlots"]),
-    // The locks of the objects that went, forgotten as the frame left the index.
-    ("::ui_items::locks::forget_gone_item_locks", &["net::GuidIndex"]),
-    ("::ui_items::feed::feed_item_stats", &["items::Items", "net::HomeBind", "net::ObjectStore",
-        "spell::mods::SpellModifiers"]),
+    // The VM's copy of the item records, seated whole in a new VM and topped up with a record that
+    // lands outside an answer (a cache file's load), as the frame left the cache; an answer pushes
+    // its record at its packet, ahead of its callbacks (`0x55bdb0`), and a tooltip build reads the
+    // record and the player at the call (`0x5075f0` at `0x52da24`). A getter's miss is asked here,
+    // where the reference's lookup sends inside the call (`0x55ba30`).
+    ("::ui_items::feed::feed_item_stats", &["items::Items"]),
     // Found once the scan took every system that writes the VM, not only the `UiFeed` phase's.
     // The world map's feed, after the tick: our position, explored bits and corpse, which
     // `GetPlayerMapPosition` (`0x4a8610`) and the setter read at the call.
@@ -363,11 +360,6 @@ pub(super) const READS_FRAME_FINAL: &[(&str, &[&str])] = &[
         "player::camera::CameraControl", "spell::group_relation::GroupRoster",
         "spell::targeting::SpellTargeting", "target::Selection", "ui_party::GroupState",
         "video::Widescreen", "vplates::PlateFlashes", "vplates::VPlateMode"]),
-    // The equip callbacks a lookup ran on a record the cache held, replayed at the frame: the
-    // reference parks only an uncached record (`0x55ba30` at `0x5e1603`) and acts on a cached one
-    // inside the call (`0x5e163b`).
-    ("::ui_bind_confirm::replay_equip_records", &["items::Items",
-        "ui_bind_confirm::PendingEquips"]),
     // The zone-channel walk (`ZoneChannelRefresh` `0x49a210`), which the reference also runs
     // inside packets: the chat settings' load (`0x499a22`) and the taxi flag's clear
     // (`0x5ff56e`).
@@ -527,6 +519,9 @@ pub(super) const READ_ONLY_TO_HANDLERS: &[&str] = &[
     // `AreaPOI.dbc`, the landmark rows the gossip marker's re-select of the map reads
     // (`0x6dac93` → `0x4a67a0`, its walk at `0x4a6819`).
     "::area_poi::AreaPoiRes",
+    // The chat log files: the logging verbs open and close them through `&self` inside their
+    // call (`0x49fea2`), a file no handler reads back; the chat tee only appends to them.
+    "::ui_chat::logging::ChatLogFiles",
     // The language word pools, which a page's show rewrites it by (`0x4e3856`), loaded once at
     // startup; the show reads the character's skill live (`0x4e3837` → `GetIndexedSpellSkill`).
     "::ui_chat::language::ChatLanguages",
@@ -1044,6 +1039,7 @@ fn the_frames_drain_runs_after_the_feeds_and_before_the_tick() {
             "auction house",
             "bank",
             "battlefield",
+            "binding arrivals",
             "cast reports",
             "cast views",
             "charter",
@@ -1059,9 +1055,11 @@ fn the_frames_drain_runs_after_the_feeds_and_before_the_tick() {
             "item text",
             "item watchers",
             "landmarks",
+            "layout arrivals",
             "list rebuilds",
             "loot",
             "loot rolls",
+            "macro arrivals",
             "mail",
             "merchant",
             "owed selects",

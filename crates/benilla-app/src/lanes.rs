@@ -644,6 +644,8 @@ fn fire_through(world: &mut World, frame: bool) {
 }
 
 #[cfg(test)]
+mod account_data_live_tests;
+#[cfg(test)]
 mod action_live_tests;
 #[cfg(test)]
 mod alert_live_tests;
@@ -671,6 +673,8 @@ mod chat_clock_live_tests;
 mod close_parked_tests;
 #[cfg(test)]
 mod cooldown_live_tests;
+#[cfg(test)]
+mod deactivate_live_tests;
 #[cfg(test)]
 mod death_live_tests;
 #[cfg(test)]
@@ -701,6 +705,10 @@ mod item_live_tests;
 mod item_tests;
 #[cfg(test)]
 mod item_text_live_tests;
+#[cfg(test)]
+mod item_view_live_tests;
+#[cfg(test)]
+mod lock_live_tests;
 #[cfg(test)]
 mod logout_live_tests;
 #[cfg(test)]
