@@ -374,6 +374,9 @@ pub struct EffectQuads {
     /// [`Self::commit`] asserts it in debug builds: every writer needs
     /// `.after(begin_effect_frame)`. [`clear_effect_frame_flag`] resets it in `Last`.
     cleared_this_frame: bool,
+    /// fork: fsr (FORK.md) — the main world has run since the last extract, which takes the
+    /// streams. A held frame of frame generation extracts with no main world run behind it.
+    pub(super) unextracted: bool,
 }
 
 impl Default for EffectQuads {
@@ -388,6 +391,7 @@ impl Default for EffectQuads {
             track_motion: false,
             // True, so a fixture with no clear can commit; the app's `Last` reset arms the check.
             cleared_this_frame: true,
+            unextracted: false,
         }
     }
 }
@@ -579,6 +583,7 @@ pub fn begin_effect_frame(
     quads.motion.clear();
     quads.track_motion = !fsr.is_empty();
     quads.cleared_this_frame = true;
+    quads.unextracted = true;
 }
 
 /// Reset [`EffectQuads::cleared_this_frame`] in `Last`, after extraction.

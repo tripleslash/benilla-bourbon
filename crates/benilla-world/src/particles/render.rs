@@ -118,6 +118,9 @@ pub struct EffectMeta {
     // fork: fsr (FORK.md) — [`Self::motion`] holds this frame's stream, one row a vertex;
     /// false while no camera runs FSR, when nothing is built or uploaded.
     motion_valid: bool,
+    /// The streams came from the main world at this frame's extract, and are not yet rebased. A
+    /// held frame's extract leaves last frame's in place, already rebased.
+    streams_fresh: bool,
     indices: RawBufferVec<u32>,
     draws: Vec<ExtractedDraw>,
     merged: Vec<MergedDraw>,
@@ -154,6 +157,7 @@ impl Default for EffectMeta {
             pools_buffer: None,
             motion: RawBufferVec::new(BufferUsages::VERTEX),
             motion_valid: false,
+            streams_fresh: false,
             indices: RawBufferVec::new(BufferUsages::INDEX),
             draws: Vec::new(),
             merged: Vec::new(),
@@ -528,7 +532,7 @@ impl SpecializedRenderPipeline for EffectPipeline {
     }
 }
 
-/// Copy the frame's stream in, and drop the cached bind groups of images that changed.
+/// Copy the frame's draw records in, and drop the cached bind groups of images that changed.
 fn extract_effects(
     mut meta: ResMut<EffectMeta>,
     mut bind_groups: ResMut<EffectBindGroups>,
@@ -544,24 +548,6 @@ fn extract_effects(
                 bind_groups.images.retain(|(image, _), _| image != id);
             }
             AssetEvent::LoadedWithDependencies { .. } => {}
-        }
-    }
-    meta.vertices.clear();
-    meta.vertices.extend(quads.verts.iter().copied());
-    meta.points.clear();
-    meta.points.extend(quads.points.iter().copied());
-    meta.particles.clear();
-    meta.particles.extend(quads.particles.iter().copied());
-    meta.pool_records.clear();
-    meta.pool_records.extend(quads.pools.iter().copied());
-    // fork: fsr (FORK.md) — the motion stream, padded to the vertices it runs beside, while
-    // a camera runs FSR; otherwise empty, and `write_buffer` uploads nothing.
-    meta.motion.clear();
-    meta.motion_valid = quads.tracks_motion();
-    if meta.motion_valid {
-        meta.motion.extend(quads.motion.iter().copied());
-        for _ in quads.motion.len()..quads.verts.len() {
-            meta.motion.push([0.0; 3]);
         }
     }
     meta.draws.clear();
@@ -583,6 +569,44 @@ fn extract_effects(
         light: d.light.clone(),
         clip: d.clip,
     }));
+}
+
+/// Take the frame's streams from the main world by swap, not copy: `begin_effect_frame` clears what
+/// it gets back, so the render world's spent buffers return as the next frame's capacity. fork: fsr
+/// (FORK.md) — a held frame's extract has no main world run behind it, so the main world holds
+/// the spent buffers and the draws still index last frame's streams, which stand.
+fn swap_effect_streams(
+    mut meta: ResMut<EffectMeta>,
+    mut main_world: ResMut<bevy::render::MainWorld>,
+) {
+    let Some(mut quads) = main_world.get_resource_mut::<EffectQuads>() else {
+        return;
+    };
+    let quads = quads.bypass_change_detection();
+    let meta = &mut *meta;
+    meta.streams_fresh = std::mem::take(&mut quads.unextracted);
+    if !meta.streams_fresh {
+        return;
+    }
+    meta.vertices.clear();
+    std::mem::swap(meta.vertices.values_mut(), &mut quads.verts);
+    meta.points.clear();
+    std::mem::swap(meta.points.values_mut(), &mut quads.points);
+    meta.particles.clear();
+    std::mem::swap(meta.particles.values_mut(), &mut quads.particles);
+    meta.pool_records.clear();
+    std::mem::swap(&mut meta.pool_records, &mut quads.pools);
+    // fork: fsr (FORK.md) — the motion stream, padded to the vertices it runs beside, while
+    // a camera runs FSR; otherwise empty, and `write_buffer` uploads nothing.
+    meta.motion.clear();
+    meta.motion_valid = quads.tracks_motion();
+    if meta.motion_valid {
+        std::mem::swap(meta.motion.values_mut(), &mut quads.motion);
+        let vertices = meta.vertices.len();
+        for _ in meta.motion.len()..vertices {
+            meta.motion.push([0.0; 3]);
+        }
+    }
 }
 
 /// `$WOW_EFFECT_TRACE`'s name for a surface-decal draw, keyed on its sort rung, the one field
@@ -718,7 +742,9 @@ fn prepare_effects(
             view.world_from_view.translation(),
         );
     }
-    for draw in &meta.draws {
+    // Rebased once: a held frame's streams are last frame's, whose copy already moved.
+    let rebase = std::mem::take(&mut meta.streams_fresh);
+    for draw in meta.draws.iter().filter(|_| rebase) {
         // fork: perf — a point draw has no vertices here: its range is in `points`, and its
         // shader rebases.
         if matches!(
@@ -1139,7 +1165,10 @@ impl Plugin for EffectLanePlugin {
             .init_resource::<SpecializedRenderPipelines<EffectPipeline>>()
             .add_render_command::<Transparent3d, DrawEffects>()
             .add_systems(RenderStartup, init_effect_pipeline)
-            .add_systems(ExtractSchedule, extract_effects)
+            .add_systems(
+                ExtractSchedule,
+                (extract_effects, swap_effect_streams).chain(),
+            )
             .add_systems(
                 Render,
                 (
@@ -1156,6 +1185,41 @@ impl Plugin for EffectLanePlugin {
 fn effect_trace() -> bool {
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *TRACE.get_or_init(|| std::env::var_os("WOW_EFFECT_TRACE").is_some())
+}
+
+#[cfg(test)]
+mod stream_swap_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A world frame's extract takes the streams and leaves the main world the spent buffers; a held
+    /// frame's, with no main world run behind it, leaves them standing for the draws that index them.
+    #[test]
+    fn a_held_frames_extract_keeps_last_frames_streams() {
+        let mut world = World::new();
+        world.init_resource::<EffectMeta>();
+        let mut main_world = bevy::render::MainWorld::default();
+        let mut quads = EffectQuads::default();
+        quads
+            .verts
+            .resize(4, <EffectVertex as bytemuck::Zeroable>::zeroed());
+        quads.unextracted = true;
+        main_world.insert_resource(quads);
+        world.insert_resource(main_world);
+
+        let extract = |world: &mut World| {
+            world.run_system_once(swap_effect_streams).unwrap();
+            let main_verts = world
+                .resource::<bevy::render::MainWorld>()
+                .resource::<EffectQuads>()
+                .verts
+                .len();
+            let meta = world.resource::<EffectMeta>();
+            (meta.vertices.len(), meta.streams_fresh, main_verts)
+        };
+        assert_eq!(extract(&mut world), (4, true, 0), "the world frame swaps");
+        assert_eq!(extract(&mut world), (4, false, 0), "the held frame keeps");
+    }
 }
 
 #[cfg(test)]
