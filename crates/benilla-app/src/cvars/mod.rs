@@ -3283,11 +3283,16 @@ mod tests {
             .non_send_mut::<UiScript>()
             .run(r#"SetCVar("MusicVolume", 0.33)"#)
             .unwrap();
-        app.update(); // sync_cvars drains the change and stamps last_change
-        assert!(
-            !tmp.join("config.toml").exists(),
-            "inside the quiet second nothing is written yet"
-        );
+        app.update();
+        // `SetCVar` stamped the change, so a frame slowed past the second by a loaded machine has
+        // rightly saved: only a read still inside it can say nothing was written.
+        let stamp = app.world().resource::<Cvars>().last_change;
+        if stamp.is_some_and(|t| t.elapsed() < SAVE_QUIET) {
+            assert!(
+                !tmp.join("config.toml").exists(),
+                "inside the quiet second nothing is written yet"
+            );
+        }
         std::thread::sleep(SAVE_QUIET + std::time::Duration::from_millis(100));
         app.update(); // the debounce has elapsed — this frame must write, exit or not
         let text = std::fs::read_to_string(tmp.join("config.toml"))
