@@ -799,16 +799,26 @@ fn repeat_at_go(
         CastLadder<'static, 'static>,
     )>,
 ) {
-    vm.turn(|script, (targeting, mut ladder)| {
-        let Some(script) = script else {
-            return;
-        };
-        if let Some(spell_id) = script.trade_skill_spell_go(spell_id) {
-            debug!(
-                "ui_tradeskill: recast {spell_id} ({} left)",
-                script.trade_skill_repeat().1
-            );
-            ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
+    let recast = vm.turn(|script, _| {
+        let script = script?;
+        let recast = script.trade_skill_spell_go(spell_id)?;
+        debug!(
+            "ui_tradeskill: recast {recast} ({} left)",
+            script.trade_skill_repeat().1
+        );
+        Some(recast)
+    });
+    let Some(recast) = recast else {
+        return;
+    };
+    // The cast's points run its listeners only once this runs outside the go's parked leg
+    // ([`repeat_hook_at_go`]): inside it every signal is held past the leg, so for now they do
+    // nothing.
+    vm.engine_cast(recast, |(targeting, mut ladder)| {
+        ladder.send(recast, &targeting.context(), CastCommit::Spell);
+    });
+    vm.turn(|script, _| {
+        if let Some(script) = script {
             script.trade_skill_recast_sent();
         }
     });

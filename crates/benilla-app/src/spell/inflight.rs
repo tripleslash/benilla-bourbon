@@ -47,6 +47,8 @@ pub(crate) struct PendingCast {
     /// The record's source (`0xceac48 + 0x00`) when it is an item, which the item's deactivate
     /// compares ([`Self::record_item`]).
     record_item: Option<u64>,
+    /// The record as `SendCast` sends it ([`Self::record_send`]).
+    record_send: Option<super::cast_send::CastSend>,
 }
 
 struct PendingCastState {
@@ -113,6 +115,7 @@ impl PendingCast {
         self.caster_is_player = true;
         self.record_target = None;
         self.record_item = None;
+        self.record_send = None;
     }
 
     /// [`Self::fill_record`] for a caster other than the active player (the pet bar's presses
@@ -121,6 +124,7 @@ impl PendingCast {
         self.caster_is_player = false;
         self.record_target = None;
         self.record_item = None;
+        self.record_send = None;
     }
 
     /// The attempt's source write (`0x6e4f8f`-`0x6e4fa1`): the casting item's guid when the
@@ -138,9 +142,14 @@ impl PendingCast {
 
     /// The gate of `AbortCast 0x6e4940`'s events: `SPELLCAST_STOP`, `_FAILED` or `_INTERRUPTED`
     /// fires only while the caster word is the active player's (`0x6e4a04`–`0x6e4a1e`), and firing
-    /// clears it (`0x6e4a5a`), so one record fires at most once whatever pops after it.
+    /// clears it (`0x6e4a5a`), so one record fires at most once whatever pops after it. A send
+    /// the record still owes finds no caster then and leaves unsent (`0x6e5572` → `0x6e59b0`).
     pub(crate) fn take_caster_event(&mut self) -> bool {
-        std::mem::take(&mut self.caster_is_player)
+        let caster = std::mem::take(&mut self.caster_is_player);
+        if caster {
+            self.record_send = None;
+        }
+        caster
     }
 
     /// The record's spell (`0xceac48 + 0x10`), written by the attempt (`0x6e4f88`) and the
@@ -160,6 +169,17 @@ impl PendingCast {
     /// and `0x6e746a`).
     pub(crate) fn record_target(&self) -> Option<u64> {
         self.record_target
+    }
+
+    /// The record as an attempt or a cursor's bind completed it for `SendCast 0x6e54f0`, which
+    /// reads it past the signals ahead of it; a refill or a cancel since leaves none.
+    pub(crate) fn record_send(&self) -> Option<&super::cast_send::CastSend> {
+        self.record_send.as_ref()
+    }
+
+    /// The record completed for its send ([`Self::record_send`]).
+    pub(crate) fn set_record_send(&mut self, send: super::cast_send::CastSend) {
+        self.record_send = Some(send);
     }
 
     /// `BindTarget 0x6e5b40`'s write of the bound unit, game object or corpse (`0x6e5cdc`,
