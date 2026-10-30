@@ -164,12 +164,17 @@ live_reads! {
         channels: crate::ui_chat::edit::ChannelLive<'static>,
         /// The acknowledged tutorial bank `TutorialsEnabled` scans.
         tutorials: crate::tutorial::TutorialLive<'static>,
+        /// The camera's freelook, which blanks the world's pick, and the TurnOrAction bit.
+        look: crate::player::LookLive<'static>,
         /// The reader's cells and its object's name, creator and material; absent in a harness
         /// without the reader or the objects.
         item_text: Option<crate::ui_item_text::ItemTextLive<'static, 'static>>,
         /// The spell and aura tooltip views, built at the setter's call; absent in a harness
         /// without the catalogs.
         tooltips: Option<crate::ui_tooltip::TooltipLive<'static, 'static>>,
+        /// The world plates' builds, the game object's and the corpse's; absent in a harness
+        /// without the object records or the caches.
+        plates: Option<crate::ui_tooltip::PlateLive<'static, 'static>>,
         /// The targeting word's halves and `SpellCanTargetUnit`'s unit leg; absent in a harness
         /// without the unit checks' inputs.
         targeting: Option<crate::spell::targeting::TargetingLive<'static, 'static>>,
@@ -335,14 +340,14 @@ impl StatsLive<'_, '_> {
         }
     }
 
-    /// The alert recompute's reads (`0x4c7ee0`) off the active player as of here, each item found
-    /// as of here, its enchantment deadline as the time packets left it; `None` while none is
-    /// held.
+    /// The alert recompute's reads (`0x4c7ee0`) off the active player as of here, each item and
+    /// its enchantment deadline found as of here; `None` while none is held.
     fn alert_inputs(&self) -> Option<benilla_ui::script::AlertInputs> {
+        use crate::ui_items::ItemObjects;
         let items = self.stores.item_objects(&self.objects);
         // `0x5d9d00(1)`: the deadline less now, 0 when unset or run out.
         let left = |guid| {
-            self.objects
+            items
                 .countdowns(guid)
                 .and_then(|c| c.enchant_deadline_ms(1))
                 .map_or(0, |ms| u32::try_from(ms).unwrap_or(u32::MAX))

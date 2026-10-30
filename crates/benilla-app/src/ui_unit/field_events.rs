@@ -1,9 +1,9 @@
 //! The interface events of the field watches and the packet handlers that signal unit events
 //! ([`crate::field_watch`]): the notice lane, whose notices fire their callbacks' signals in the
-//! packets' order among the other lanes ([`crate::lanes`]), after every snapshot those events'
-//! handlers read is pushed ([`FieldEventPushes`]), as the update handler's notify pass follows its
-//! two write passes over every block of the packet (`0x465277` after `0x46520e`, `0x465222`). The
-//! unit tokens' views the drain then steps back to each packet's state ([`super::views`]).
+//! packets' order among the other lanes ([`crate::lanes`]), each after its packet's writes, as
+//! the update handler's notify pass follows its two write passes over every block of the packet
+//! (`0x465277` after `0x46520e`, `0x465222`). The unit tokens' views the drain then steps back to
+//! each packet's state ([`super::views`]).
 
 use bevy::prelude::*;
 
@@ -12,12 +12,6 @@ use benilla_ui::strings::Arg;
 
 use crate::field_watch::{FieldNotice, NoticeLane};
 use crate::lanes::Until;
-
-/// The feeds that push what a field event's handlers read: the player's inventory and ammo. The
-/// lanes' drain runs after all of them, as the update handler writes every block of its packet
-/// before its notify pass (`0x46520e`, `0x465222`, then `0x46522d`).
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct FieldEventPushes;
 
 /// What a field notice's firing reads.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -95,6 +89,16 @@ impl NoticeFiring<'_, '_> {
             drunk(script, &mut self.sink, guid, old, new);
             return false;
         }
+        if let FieldNotice::TooltipUnit { guid } = notice {
+            if self.holds_unit(guid) {
+                script.tooltip_unit_refresh(guid);
+            }
+            return false;
+        }
+        if notice == FieldNotice::CorpsePlate {
+            script.tooltip_corpse_refresh();
+            return false;
+        }
         if notice == FieldNotice::ExploredZones {
             // The bytes as the watcher's packet left them, as the shapeshift offset reads the
             // form byte.
@@ -167,6 +171,16 @@ impl NoticeFiring<'_, '_> {
 }
 
 impl NoticeFiring<'_, '_> {
+    /// Whether the object manager holds `guid` as a unit as of the notice's place (`0x468460` with
+    /// mask 8, `0x491a1a`).
+    fn holds_unit(&self, guid: u64) -> bool {
+        self.index
+            .as_ref()
+            .and_then(|i| i.0.get(&guid))
+            .and_then(|&e| self.views.get(e).ok())
+            .is_some_and(crate::net::ObjectStore::is_unit)
+    }
+
     /// The unit tooltip's own watcher on the health of the unit it shows (`0x529560`, which the
     /// render registers on the object, `0x52a0a8`), after the bridge's: `guid`'s health as its
     /// packet left it.
@@ -629,13 +643,15 @@ pub(crate) fn fire(
         | FieldNotice::Professions
         | FieldNotice::PortraitMark { .. }
         | FieldNotice::PetMacros
-        | FieldNotice::PetGuidSet { .. } => {}
+        | FieldNotice::PetGuidSet { .. }
+        | FieldNotice::TooltipUnit { .. }
+        | FieldNotice::CorpsePlate => {}
         // Put on the trainer lane by the packet's handler ([`crate::ui_trainer::TrainerPasses`]).
         FieldNotice::TrainerPass
         | FieldNotice::AutoMoveStop
         | FieldNotice::AutorunClear
         | FieldNotice::InputTick
-        | FieldNotice::FarSightStop { .. } => {}
+        | FieldNotice::FarSight { .. } => {}
         // Run at its place by the packet's handler ([`crate::net::objects`]), its signal written
         // there.
         FieldNotice::AreaSpiritHealerClear | FieldNotice::QuestAccepted { .. } => {}
@@ -1495,19 +1511,6 @@ mod tests {
             .get_resource_or_init::<crate::ui_world_enter::ArrivalLane>()
             .push(crate::ui_world_enter::Entry::Reload);
         crate::ui_world_enter::fire_lane(app.world_mut());
-    }
-
-    /// Every feed whose push a field event's handlers read runs ahead of the drain that fires it,
-    /// as the update handler writes every block of its packet before its notify pass (`0x46520e`,
-    /// `0x465222`, then `0x46522d`).
-    #[test]
-    fn the_field_event_pushes_run_ahead_of_the_drain() {
-        let mut headless = crate::game_plugins::schedule_tests::headless_client();
-        assert!(crate::test_support::runs_before(
-            &mut headless,
-            crate::ui_char::feed_char,
-            crate::lanes::fire_in_order,
-        ));
     }
 
     /// The active player's arrival runs its ghost state (`0x5dea50` → `0x5deb2a` → `0x5de9c0`)

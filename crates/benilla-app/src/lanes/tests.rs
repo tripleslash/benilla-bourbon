@@ -657,7 +657,8 @@ fn the_roster_events_fire_at_their_packet() {
 }
 
 /// The session's end drops what the cast and house lanes hold, as the chat lane's end drops its
-/// lines: the Lua state they were readied for is replaced.
+/// lines: the Lua state they were readied for is replaced. They hold it here because the world's
+/// UI has not loaded yet, so no flush fires them.
 #[test]
 fn the_session_end_drops_the_cast_and_house_lanes() {
     let mut app = cast_client(|app| {
@@ -673,9 +674,29 @@ fn the_session_end_drops_the_cast_and_house_lanes() {
     world
         .resource_mut::<crate::ui_cast::CastReports>()
         .bar(crate::ui_cast::CastBarEdge::Stop);
+    world.insert_resource(crate::ui_script::PendingEntryUiLoad::default());
     crate::net::handlers::dispatch(world, vec![outbid()]);
+    assert!(heard(&mut app).is_empty(), "held while the UI loads");
+    let world = app.world_mut();
     world.run_schedule(OnExit(crate::client_state::ClientState::InWorld));
     assert!(world.resource::<crate::ui_cast::CastReports>().is_empty());
     fire_frame(world);
     assert!(heard(&mut app).is_empty(), "nothing left to fire");
+}
+
+/// A firing's own pushes are what moves its drain: a stamp another thread takes meanwhile, as a
+/// test beside it does on its own world, nests under nothing it fires.
+#[test]
+fn another_threads_stamp_is_no_push_of_the_firing() {
+    let at = crate::lanes::stamp();
+    let ((), moved) = crate::lanes::firing(at, || {
+        std::thread::spawn(crate::lanes::stamp)
+            .join()
+            .expect("stamps");
+    });
+    assert!(!moved, "another thread's stamp");
+    let ((), moved) = crate::lanes::firing(at, || {
+        crate::lanes::stamp();
+    });
+    assert!(moved, "the firing's own push");
 }

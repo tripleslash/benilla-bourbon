@@ -31,7 +31,6 @@ use bevy::prelude::*;
 
 use crate::net::GuidIndex;
 
-use super::camera::{CameraControl, LookButton};
 use super::state::{MoveSpeed, Player};
 
 /// Follow's turn rate in rad/s, its own (`0xc4d93c`, seeded at `0x6111f9`), not the keyboard's.
@@ -146,15 +145,17 @@ fn should_move(was_moving: bool, distance: f32, speed: f32) -> bool {
 }
 
 /// `move_start` and `autorun_engaged` are key-down edges (the stop emitters and autorun's off edge,
-/// `0x60dc90`, have no guard call); `mouse_look` is a level, re-entering the guard every frame.
+/// `0x60dc90`, have no guard call); `hand_off` is the mouse's hand-off to the body, whose facing
+/// write reaches the guard (`0x5103e0` → `0x5152e0` → `0x60de30` → `0x60e990(1, 1)`) on each
+/// motion that turns the body: behind the TurnOrAction bit (`0x5145fa`), not the look.
 fn follow_cancelled(
     move_start: bool,
     autorun_engaged: bool,
     both_engaged: bool,
-    mouse_look: bool,
+    hand_off: bool,
     lost_mover: bool,
 ) -> bool {
-    move_start || autorun_engaged || both_engaged || mouse_look || lost_mover
+    move_start || autorun_engaged || both_engaged || hand_off || lost_mover
 }
 
 /// Wrap an angle into `[-π, π)`.
@@ -192,20 +193,20 @@ pub(super) struct FollowInput<'w, 's> {
     buttons: Res<'w, ButtonInput<MouseButton>>,
     /// The movement commands' press edges, wherever bound; typing in chat does not reach them.
     binds: Res<'w, crate::bindings::BindingsState>,
-    /// The mouse-look level, read a frame behind `control`, so its cancel lands a frame after the
-    /// reference's; the world's mouse buttons are current ([`super::camera::latch_world_mouse`]
-    /// runs first).
-    rig: Res<'w, CameraControl>,
+    /// The mouse's hand-off to the body this frame ([`super::LookSample`]), written by the look
+    /// session ahead of this; absent in a harness without the mouse, which hands nothing off.
+    sample: Option<Res<'w, super::LookSample>>,
     /// The mover's descriptor block, for the cancel terms that are state: health and stun.
     mover: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::Embodied>>,
-    /// What the camera orbits, for the far-sight term; possibly a frame behind its publisher.
-    view_subject: Res<'w, super::view_subject::ViewSubject>,
+    /// The far-sight latch, the input tick's far-sight term (`0x514540`).
+    far_sight: Res<'w, super::view_subject::FarSight>,
     /// Whether we drive our own body.
     lock: Res<'w, super::MoverLock>,
 }
 
 impl FollowInput<'_, '_> {
-    /// The press edge of any of the six movement commands; turn and strafe both cancel.
+    /// The press edge of any of the six movement commands; turn and strafe both cancel. A call's
+    /// own edge ran its start's stop inside it ([`super::press::TickLegs`]).
     fn move_start(&self) -> bool {
         use crate::bindings::Input;
         [
@@ -217,7 +218,7 @@ impl FollowInput<'_, '_> {
             Input::StrafeRight,
         ]
         .iter()
-        .any(|&c| self.binds.just_pressed(c))
+        .any(|&c| self.binds.just_pressed(c) && !self.binds.settled(c))
     }
 
     /// The cancel set, the start emitters' `0x60e990` and the input tick's teardown, which end any
@@ -225,15 +226,17 @@ impl FollowInput<'_, '_> {
     pub(super) fn cancels(&self, player: &Player) -> bool {
         // The world's buttons, not the device's: the both-button run is two bindings held, and a
         // press a UI frame captured dispatches neither.
-        let both_engaged = self.rig.world_mouse.both() && self.rig.world_mouse.rose();
+        let both_engaged = super::input::both_engaged(&self.binds);
         follow_cancelled(
             self.move_start(),
             // The on edge only, as the start reaches the guard (`0x60dc60` → `0x60e990`) and the
             // stop does not (`0x60dc90`): the press toggled `autorun` first ([`super::press`]),
             // so the flag is the post-toggle value.
-            self.buttons.just_pressed(MouseButton::Forward) && player.autorun,
+            self.buttons.just_pressed(MouseButton::Forward)
+                && player.autorun
+                && !self.binds.settled(crate::bindings::Input::ToggleAutoRun),
             both_engaged,
-            self.rig.look == Some(LookButton::Right),
+            self.sample.as_deref().is_some_and(|s| s.hands_off),
             // The teardown leg, or the body handed to a server spline; the ride term is not one of
             // the reference's conjuncts (`0x5144e0`), and its reference side is untraced.
             self.input_torn_down(player.modes.rooted, self.lock.foreign_mover.is_none())
@@ -248,10 +251,7 @@ impl FollowInput<'_, '_> {
         self.mover.single().is_ok_and(|s| {
             super::state::MoverInput {
                 dead: s.0.unit_is_dead(),
-                view_is_out: super::state::view_is_out(
-                    driving_own_body,
-                    self.view_subject.remote.is_some(),
-                ),
+                view_is_out: super::state::view_is_out(driving_own_body, self.far_sight.on()),
             }
             .torn_down(rooted, s.0.unit_flags() & super::UNIT_FLAG_STUNNED != 0)
         })
@@ -383,6 +383,81 @@ pub(super) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Far sight on, its object gone: the render's update (`0x483054` → `0x5ee290`) finds the field
+    /// naming no held object, puts the camera back on the player and returns with the bit still
+    /// set (`0x5ee324`-`0x5ee360`), so the input tick's teardown leg still ends a follow
+    /// (`0x514540`, `0x5146d6`), though the camera is home.
+    #[test]
+    fn a_lost_far_sight_object_still_ends_a_follow() {
+        use super::super::view_subject::{publish_view_subject, FarSight, ViewSubject};
+        use crate::net::{Embodied, NetCommands, ObjectStore, SelfPlayer};
+        /// `PLAYER_FARSIGHT`, the guid's low word.
+        const FARSIGHT: u16 = 712;
+        const EYE: u64 = 0xF130_0000_0000_0043;
+        const LEADER: u64 = 0x52;
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<FollowState>()
+            .init_resource::<Player>()
+            .init_resource::<super::super::MoverLock>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<crate::bindings::BindingsState>()
+            .init_resource::<super::super::camera::CameraControl>()
+            .init_resource::<ViewSubject>()
+            .init_resource::<FarSight>()
+            .insert_resource(NetCommands(tx))
+            .insert_resource(MoveSpeed {
+                value: 7.0,
+                env_override: false,
+            })
+            .add_systems(Update, (publish_view_subject, steer_follow).chain());
+        let world = app.world_mut();
+        world.spawn((
+            SelfPlayer,
+            Embodied,
+            Transform::default(),
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (22, 100),
+                (28, 100),
+                (FARSIGHT, EYE as u32),
+                (FARSIGHT + 1, (EYE >> 32) as u32),
+            ])),
+        ));
+        let eye = world.spawn(Transform::from_xyz(30.0, 0.0, 0.0)).id();
+        let leader = world.spawn(Transform::from_xyz(10.0, 0.0, 0.0)).id();
+        let mut index = world.resource_mut::<GuidIndex>();
+        index.0.insert(EYE, eye);
+        index.0.insert(LEADER, leader);
+        let world = app.world();
+        let index = world.resource::<GuidIndex>();
+        world.resource::<FarSight>().start(
+            Some(EYE),
+            |g| index.0.contains_key(&g),
+            world.resource::<NetCommands>(),
+        );
+        app.world_mut().resource_mut::<GuidIndex>().0.remove(&EYE);
+        app.update();
+        let world = app.world();
+        let far_sight = world.resource::<FarSight>();
+        assert!(far_sight.on() && far_sight.camera().is_none());
+        assert!(
+            world.resource::<ViewSubject>().remote.is_none(),
+            "the camera is home"
+        );
+
+        app.world_mut()
+            .resource_mut::<FollowState>()
+            .start(LEADER, "Leader".into());
+        app.update();
+        assert_eq!(
+            app.world().resource::<FollowState>().guid,
+            None,
+            "the bit still tears the input down"
+        );
+    }
 
     #[test]
     fn the_band_is_three_and_four_point_five_yards_at_normal_speed() {

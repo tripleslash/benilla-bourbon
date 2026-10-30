@@ -52,7 +52,6 @@ pub(crate) struct RecordAsks<'w, 's> {
     guild: Option<Res<'w, crate::ui_guild::GuildState>>,
     summon: Option<Res<'w, crate::ui_summon::SummonState>>,
     battlefield: Option<ResMut<'w, crate::ui_battlefield_positions::BattlefieldPositions>>,
-    ammo_hits: Option<ResMut<'w, crate::ui_char::AmmoRecordHits>>,
     quest: Option<ResMut<'w, crate::ui_quest::QuestGiver>>,
     /// The quest cache the rebuild's lookups ask, and the leaderboard's creature waits.
     quest_log: Option<ResMut<'w, crate::ui_quest_log::QuestLog>>,
@@ -74,7 +73,15 @@ impl RecordAsks<'_, '_> {
     pub(crate) fn apply(&mut self, ask: RecordAsk) {
         use crate::query_cache::Ask;
         match ask {
-            RecordAsk::PlayerName(guid) | RecordAsk::ItemBuildName(guid) => {
+            // `UnitName`'s miss keeps its callback (`0x5171f5`, `0x517290`), once (`0x5171f1`).
+            RecordAsk::PlayerName(guid) => {
+                if let Some(names) = self.names.as_deref() {
+                    if names.resolve_player(guid, Ask::Event(&self.net)).is_none() {
+                        names.wait_for_player(guid, crate::names::NameCallback::UnitName);
+                    }
+                }
+            }
+            RecordAsk::ItemBuildName(guid) => {
                 if let Some(names) = self.names.as_deref() {
                     let _ = names.resolve_player(guid, Ask::Event(&self.net));
                 }
@@ -136,10 +143,8 @@ impl RecordAsks<'_, '_> {
                 }
             }
             RecordAsk::AmmoItem { entry, owner } => {
-                if let (Some(items), Some(hits)) =
-                    (self.items.as_deref(), self.ammo_hits.as_deref_mut())
-                {
-                    crate::ui_char::ask_ammo_record(items, &self.net, hits, entry, owner);
+                if let Some(items) = self.items.as_deref() {
+                    crate::ui_char::ask_ammo_record(items, &self.net, entry, owner);
                 }
             }
             RecordAsk::CooldownItem { entry, owner } => {

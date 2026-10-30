@@ -1566,11 +1566,6 @@ pub(crate) mod schedule_tests {
              lanes' drain, which fires the tick's packets' signals (`0x420d55`), and ahead of the \
              `OnUpdate` walk (`0x420d6a`)",
         ),
-        (
-            "::ui_unit::views::mark_frame_start",
-            "a debug snapshot of what the frame starts from, ahead of the net stage by design: it \
-             reads the units the resolver's last inputs name and pushes nothing",
-        ),
     ];
 
     /// The create's control restore (`player::regain_control_on_arrival`) runs inside the net
@@ -1615,7 +1610,6 @@ pub(crate) mod schedule_tests {
             "::player::controller::control",
             // The drain, which fires the notices the restore signals.
             "::lanes::fire_in_order",
-            "::player::camera_saved::load_camera_pose",
             "::tutorial::watch_self",
             "::poi_marker::expire_marker",
             "::glue_session::logout_smoke::debug_logout_smoke",
@@ -1625,63 +1619,18 @@ pub(crate) mod schedule_tests {
                 "`{reader}` runs after the control restore"
             );
         }
-    }
-
-    /// A nameplate's right-click is `SelectTarget` (`0x492870`), which with a targeting cursor up
-    /// binds the cast and returns, and then the unit's interact (`0x492881`), so the cast goes out
-    /// ahead of what the interact does. The click's select parks the unit; the target chain's bind
-    /// gives it to the cast; the interact runs after that, or its attack leg would swing before the
-    /// cast and select nothing.
-    #[test]
-    fn a_plates_interact_runs_after_the_bind_of_the_unit_its_click_parked() {
-        let mut app = headless_client();
-        let c = census(
-            &mut app,
-            crate::target::WorldClickLegs,
-            SyncPoints::Declared,
-        );
-        if !type_names_available(&c) {
-            eprintln!(
-                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
+        // The camera pose loads ahead of the frame's input records and packets, as the reference
+        // reads its file at the interface load (`0x481b4e` → `0x50c0e0`), before any listener.
+        let pose = reach(one("::player::camera_saved::load_camera_pose"));
+        for later in [
+            "::ui_script::input::dispatch_input_records",
+            "::net::apply::apply_net_updates",
+        ] {
+            assert!(
+                pose.contains(&one(later)),
+                "the camera pose loads ahead of `{later}`"
             );
-            return;
         }
-        let one = |suffix: &str| {
-            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
-            match (hits.next(), hits.next()) {
-                (Some((k, _)), None) => *k,
-                _ => panic!("exactly one system named `…{suffix}` in the click's legs"),
-            }
-        };
-        let (select, bind, interact) = (
-            one("::target::click::select_on_plate_click"),
-            one("::script_calls::bind_parked_picks"),
-            one("::target::click::act_on_interact"),
-        );
-        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
-        for (a, b) in &c.dependencies {
-            succ.entry(*a).or_default().push(*b);
-        }
-        let runs_before = |from: SystemKey, to: SystemKey| {
-            let mut seen = HashSet::new();
-            let mut stack = vec![from];
-            while let Some(n) = stack.pop() {
-                for m in succ.get(&n).into_iter().flatten() {
-                    if seen.insert(*m) {
-                        stack.push(*m);
-                    }
-                }
-            }
-            seen.contains(&to)
-        };
-        assert!(
-            runs_before(select, bind),
-            "the click parks before the chain binds"
-        );
-        assert!(
-            runs_before(bind, interact),
-            "the interact runs after the chain's bind"
-        );
     }
 
     /// A command press cancels the cast inside `SetCommands` (`0x51512a` → `0x6e4940`), after the
@@ -1728,50 +1677,6 @@ pub(crate) mod schedule_tests {
             "the verdict before the cancel"
         );
         assert!(after(cancel).contains(&tick), "the cancel before the tick");
-    }
-
-    /// A plate click's trade leg runs ahead of its select (`0x4925d0`: the trade request at
-    /// `0x49278e`, `SelectTarget` at `0x49280c`), so the targeting cursor it tests (`0x492668`)
-    /// is the one the click found, not what the select's bind left.
-    #[test]
-    fn a_plate_clicks_trade_leg_runs_before_its_select() {
-        let mut app = headless_client();
-        let c = census(
-            &mut app,
-            crate::target::WorldClickLegs,
-            SyncPoints::Declared,
-        );
-        if !type_names_available(&c) {
-            eprintln!(
-                "skipped: this build carries no type names (bevy/debug rides with the dev feature)"
-            );
-            return;
-        }
-        let one = |suffix: &str| {
-            let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
-            match (hits.next(), hits.next()) {
-                (Some((k, _)), None) => *k,
-                _ => panic!("exactly one system named `…{suffix}` in the click's legs"),
-            }
-        };
-        let trade = one("::ui_action::drop_item::trade_on_plate_click");
-        let mut succ: HashMap<SystemKey, Vec<SystemKey>> = HashMap::new();
-        for (a, b) in &c.dependencies {
-            succ.entry(*a).or_default().push(*b);
-        }
-        let mut seen = HashSet::new();
-        let mut stack = vec![trade];
-        while let Some(n) = stack.pop() {
-            for m in succ.get(&n).into_iter().flatten() {
-                if seen.insert(*m) {
-                    stack.push(*m);
-                }
-            }
-        }
-        assert!(
-            seen.contains(&one("::target::click::select_on_plate_click")),
-            "the trade leg runs before the plate's select"
-        );
     }
 
     /// The `Startup` VM, the stock glue's, is built after the glyph cache:
@@ -2022,6 +1927,8 @@ pub(crate) mod schedule_tests {
          "`seen_generation` is a `VmMemo`: a new VM reads `None` and rebuilds, and its seed's load owes the UPDATE_BINDINGS"),
         ("capture/probe_bg.rs", "bg_probe", Because::SelfHealing,
          "the battleground probe: dev-only (`WOW_PROBE_BG`, `cfg(feature = \"dev\")`) so it is not in a player build at all, and its `mem::take` is of its OWN pending-events string, not a queue anything else fills. Its one real VM dependency is the Lua event tap, which self-heals: `EVENT_DRAIN` returns a `<tap-gone>` sentinel when the tap's globals are missing — the case this window causes, since a tap installed in the glue VM is discarded when `mint_entry_vm` builds the interface — and the probe re-installs on the next frame"),
+        ("capture/fixtures.rs", "open_character_fixture", Because::Deliberate,
+         "a capture's fixture, dev tooling: its `fire_event` is the character fixture's stand-in for its items' creates' `UNIT_INVENTORY_CHANGED`, fired in the same VM and ahead of the window's open, so a VM with no frames to take it has no window to open either"),
         ("capture/probes/act.rs", "fire_probe_drag", Because::FilledByVm,
          "the drag probe: dev-only (`WOW_PROBE_DRAG`), it starts past `WOW_PROBE_DRAG_AT` with the \
           player's body in the world, and its `.drain(..)` is of the VM's own script errors, \
@@ -2040,19 +1947,14 @@ pub(crate) mod schedule_tests {
          "the outcome chain starts with the VM's own `Screenshot()` call"),
         ("vplates.rs", "drive_vplates", Because::Deliberate,
          "its take is the hits queued for plates: a hit before the interface is up has no plate to flash, since a plate exists only once this driver has bound it under a loaded interface, so a dropped one loses nothing"),
-        ("target/click.rs", "select_on_plate_click", Because::FilledByVm,
-         "filled only by a nameplate frame's click, which a frameless VM has no plate to make"),
         ("ui_action/cooldown_lane.rs", "fire_cooldowns", Because::Deliberate,
          "a lane's firing, run only by the drain: `drop_cooldown_log`, gated on the interface being down, drops the log the frame it is written, so no signal fires into a later VM"),
         ("ui_action/drain.rs", "drain_click_casts", Because::FilledByVm,
-         "filled only by a nameplate's right-click, which a frameless VM has no plate to make, or a crate's `Interact`; the world click's own casts drain inside its call, and the drain sends casts to the wire"),
+         "filled only by a crate's `Interact`; the world click's and a nameplate click's own casts drain inside their calls, and the drain sends casts to the wire"),
         ("ui_action/recount.rs", "arrival_slot_pass", Because::Deliberate,
          "no system: a leg the arrival lane's firing runs, inside the drain, which runs only with the interface up"),
         ("ui_action/recount.rs", "recount", Because::Deliberate,
          "no system: the item lane's firing calls it per run (`item_lane::fire_run`), inside the lanes' drain, which runs only with the interface up (`ingame_ui_up`)"),
-        ("ui_char.rs", "feed_char", Because::FilledByVm,
-         "its take is the ammo getters' hits, which only a getter's call leaves, and a frameless VM \
-          calls none; the doll's own pushes ride `VmMemo`s"),
         ("ui_guild/lane.rs", "fire_guild", Because::Deliberate,
          "a lane's firing, run only by the drain, which runs only with the interface up (`ingame_ui_up`): the lane holds what the packets queue until a drain fires it, so the login's message of the day, which lands ahead of the interface, fires into the VM that comes up"),
         ("ui_loot/mod.rs", "drain_loot", Because::Deliberate,

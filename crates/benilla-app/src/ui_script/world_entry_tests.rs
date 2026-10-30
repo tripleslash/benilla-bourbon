@@ -3131,6 +3131,7 @@ fn a_reload_releases_the_mouse_commands_and_the_mouselook() {
     let (tmp, _c, _h) = hermetic_probe("mouse-commands");
     let mut world = booted_world();
     world.init_resource::<crate::player::CameraControl>();
+    world.init_resource::<crate::bindings::BindingsState>();
     // Whether a left press's `CameraOrSelectOrMoveStart` arms a click (`0x51481a`).
     let left_arms = |world: &mut World| {
         let mut script = world.non_send_mut::<UiScript>();
@@ -3147,19 +3148,20 @@ fn a_reload_releases_the_mouse_commands_and_the_mouselook() {
         .non_send::<UiScript>()
         .run_binding("TurnOrActionStart()")
         .unwrap();
-    world
-        .resource_mut::<crate::player::CameraControl>()
-        .world_mouse
-        .mouselook_for_test();
+    world.resource_scope(|world, mut binds: Mut<crate::bindings::BindingsState>| {
+        world
+            .resource_mut::<crate::player::CameraControl>()
+            .world_mouse
+            .mouselook_for_test(&mut binds);
+    });
     assert!(!left_arms(&mut world), "the right command holds its bit");
 
     reload(&mut world, crate::client_state::ClientState::InWorld);
     assert!(left_arms(&mut world), "the reloaded VM holds no bit");
     assert!(
         !world
-            .resource::<crate::player::CameraControl>()
-            .world_mouse
-            .turn_held(),
+            .resource::<crate::bindings::BindingsState>()
+            .pressed(crate::bindings::Input::TurnOrAction),
         "the reload ended the mouselook"
     );
 

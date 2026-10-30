@@ -28,13 +28,17 @@ pub(crate) mod commands;
 pub(crate) mod edit;
 mod event;
 mod feed;
+#[cfg(test)]
+pub(crate) use feed::NAME_MAX_TRIES;
 mod frames;
 /// The idle handler: the 5-minute auto-sit and auto-AFK, and the 30-minute camp.
 pub(crate) mod idle;
 mod input;
 /// The language gate: the exemptions and fluency lookup behind the chat garble.
 mod language;
-pub(crate) use language::ChatLanguages;
+pub(crate) use language::LanguageReads;
+#[cfg(test)]
+pub(crate) use language::{test_speaker, ChatLanguages};
 /// `LoggingChat`/`LoggingCombat`: the two log files `/chatlog` and `/combatlog` toggle.
 pub(crate) mod logging;
 #[cfg(test)]
@@ -157,13 +161,12 @@ impl Plugin for UiChatPlugin {
             ))
             // The slash-command table needs the VM's globals and the emote catalog, both `Startup`.
             .add_systems(PostStartup, commands::build_slash_commands)
-            // The language gate's feeds, ahead of the chat lane that reads them; with the frame's
-            // packets, ahead of the resumed pass, as a page turn's show reads them inside its call.
+            // The word pools and the default language, ahead of the chat lane that reads them;
+            // with the frame's packets, ahead of the resumed pass.
             .add_systems(
                 Update,
                 (
                     language::load_language_words,
-                    language::feed_language_skills,
                     language::feed_default_language,
                     // After the self tag, whose `SelfPlayer` it reads.
                     language::feed_chat_language.after(benilla_world::schedule::WorldStage::Net),
@@ -234,19 +237,22 @@ impl Plugin for UiChatPlugin {
 /// feed, as in the reference: login-burst chat is queued (`0x49cae0`) behind the `[0x8435fc]`
 /// latch and drains at `0x490974`, after `PLAYER_LOGIN` (`0x490959`) and `PLAYER_ENTERING_WORLD`
 /// (`0x49096a`), while `GUILD_MOTD` fires on arrival (`0x5e7288`), so the guild line precedes the
-/// welcome. Ahead of each drain the held lines' age pass is queued ([`ChatLog::begin_frame`]).
+/// welcome. Ahead of each frame's drain the held lines' age pass is queued
+/// ([`ChatLog::begin_frame`]): a line waits on its names for frames, not for drains.
 pub(crate) fn add_chat_lane(app: &mut App) {
     use crate::lanes::LaneApp;
-    app.init_resource::<ChatLog>().add_lane(
-        "chat",
-        |world| world.get_resource::<ChatLog>()?.peek(),
-        feed::fire_chat,
-        Some(|world| {
+    app.init_resource::<ChatLog>()
+        .add_lane(
+            "chat",
+            |world| world.get_resource::<ChatLog>()?.peek(),
+            feed::fire_chat,
+            None,
+        )
+        .add_frame_begin(|world| {
             if let Some(log) = world.get_resource::<ChatLog>() {
                 log.begin_frame();
             }
-        }),
-    );
+        });
 }
 
 /// The chat session end: the undrained feed, which outlives the Lua state, and both windows'

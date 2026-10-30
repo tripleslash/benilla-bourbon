@@ -98,6 +98,10 @@ fn combo(n: u32) -> SessionEvent {
 /// the bag equipped, and a VM whose spy records the bag, lock, bank and money events with `arg1`.
 fn client() -> App {
     let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+    // In the world with the interface up, so the dispatch fires each packet's lanes.
+    app.insert_resource(bevy::prelude::State::new(
+        crate::client_state::ClientState::InWorld,
+    ));
     let world = app.world_mut();
     let pairs: Vec<(u16, u32)> = seat(23, POTIONS)
         .into_iter()
@@ -603,12 +607,8 @@ fn a_bag_updates_listener_reads_the_seat_its_packet_left() {
 /// logout runs it: `SMSG_LOGOUT_COMPLETE` and the disconnect through the handler table, which
 /// free the objects, then the session's end, whose shutdown signals the event with the host lent.
 fn before_and_at_logout(app: &mut App, expr: &str) -> (String, String) {
-    use bevy::ecs::system::RunSystemOnce;
     use std::cell::RefCell;
     use std::rc::Rc;
-    app.world_mut()
-        .run_system_once(crate::ui_char::feed_char)
-        .unwrap();
     let before: String = hosted_eval(app, &format!("return {expr}"));
     let seen: Rc<RefCell<Vec<String>>> = Rc::default();
     let sink = seen.clone();

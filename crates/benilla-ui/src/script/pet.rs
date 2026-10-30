@@ -338,7 +338,8 @@ impl super::UiScript {
         set_field!(self, player_control, in_control);
     }
 
-    /// Set the player's far-sight bit (`+0x1c70` bit 0), which `HasFullControl` reads.
+    /// Set the player's far-sight bit (`+0x1c70` bit 0), which `HasFullControl` reads with no host
+    /// to ask ([`super::FarSightOnQuery`]).
     pub fn set_far_sight_on(&mut self, on: bool) {
         set_field!(self, far_sight_on, on);
     }

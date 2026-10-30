@@ -837,8 +837,8 @@ pub(crate) use gesture::{select_gesture, Gesture, GestureQueue};
 
 /// The Bevy systems that execute the state machine `select` picks.
 mod driver;
-pub(crate) use driver::oneshot_is_live;
 use driver::{drive_animations, drive_hand_grip};
+pub(crate) use driver::{oneshot_is_live, toggle_model_refuses};
 
 /// The model event-keyframe scanner.
 mod events;
@@ -858,6 +858,8 @@ pub(crate) use impact::{DefenseAnim, PendingImpacts, SwingImpact, SwingSlowdown}
 
 /// The cast and auto-repeat state the seams queue for after the pass.
 mod edits;
+#[cfg(test)]
+pub(crate) use edits::applied_resources;
 pub(crate) use edits::{apply_unit_edits, flush_unit_edits, UnitEdit, UnitEdits};
 
 /// The unit's precast spell and its busy bit.

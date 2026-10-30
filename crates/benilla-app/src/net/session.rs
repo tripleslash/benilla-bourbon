@@ -131,9 +131,27 @@ pub(crate) struct Bridge<'w, 's> {
     dropped: ResMut<'w, DroppedOpcodes>,
     net: Res<'w, NetCommands>,
     stores: Query<'w, 's, &'static mut ObjectStore>,
+    /// The item countdown cells a teardown takes with their items, for the views' log.
+    countdowns: Query<'w, 's, &'static crate::items::Countdowns>,
     transports: Query<'w, 's, &'static crate::transport::Transport>,
     /// The active mover, which the world entry zeroes and the teardowns free with its unit.
     mover: Option<ResMut<'w, super::MoverClaim>>,
+    /// Our player's far-sight latch, which the teardowns free with it.
+    far_sight: Option<Res<'w, crate::player::FarSight>>,
+}
+
+impl Bridge<'_, '_> {
+    /// Every object freed (`0x467700` → `0x467800`), our own player too: the active mover it
+    /// names is zeroed unless its unit is still held (`0x5fb650`), and its far-sight latch goes
+    /// with it ([`crate::player::FarSight::free`]).
+    fn objects_freed(&mut self) {
+        if let Some(mover) = self.mover.as_deref_mut() {
+            mover.forget_unless_held(&self.index);
+        }
+        if let Some(far_sight) = self.far_sight.as_deref() {
+            far_sight.free();
+        }
+    }
 }
 
 fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
@@ -249,9 +267,7 @@ fn on_logged_out(
         );
         // The teardown destroys every object (`0x402011` → `0x467700`), the mover's unit with it
         // (`0x5fb650`).
-        if let Some(mover) = b.mover.as_deref_mut() {
-            mover.forget_unless_held(&b.index);
-        }
+        b.objects_freed();
         // The reference zeroes the forced table's count and the 64 slots only in teardown
         // `0x4d5360` (`0x4d5419`, `0x4d541f`), whose one caller is `ShutdownGame 0x491180`
         // (`0x4911dc`), never on a worldport. The session's end stands in for that shutdown: the
@@ -321,17 +337,19 @@ fn on_disconnected(
             &mut e.transfer,
             &mut e.disconnects,
         );
-        if let Some(mover) = b.mover.as_deref_mut() {
-            mover.forget_unless_held(&b.index);
-        }
+        b.objects_freed();
     }
 }
 
-/// The world left at once: the stores the teardown takes, logged for the views a listener reads
+/// The world left at once: the stores and countdown cells the teardown takes, logged for the views a listener reads
 /// ([`crate::ui_unit::views::ViewLog::torn_down`]).
 fn log_teardown(view_log: Option<ResMut<crate::ui_unit::views::ViewLog>>, b: &Bridge) {
     if let Some(mut log) = view_log {
-        log.torn_down(&b.index, |e| b.stores.get(e).ok());
+        log.torn_down(
+            &b.index,
+            |e| b.stores.get(e).ok(),
+            |e| b.countdowns.get(e).ok(),
+        );
     }
 }
 
@@ -589,7 +607,11 @@ impl WorldLoad<'_, '_> {
             log.records(&before, &self.group.stats);
         }
         if let Some(log) = self.view_log.as_deref_mut() {
-            log.torn_down(&b.index, |e| b.stores.get(e).ok());
+            log.torn_down(
+                &b.index,
+                |e| b.stores.get(e).ok(),
+                |e| b.countdowns.get(e).ok(),
+            );
         }
         // The transfer frees every object with no release (`0x467700` → `0x467800`): the selection
         // keeps its guid, its object gone, until the arrival's `SelectTarget(0)` (`0x490927`)
@@ -612,9 +634,7 @@ impl WorldLoad<'_, '_> {
         );
         // The world load destroys every object (`0x401bf7` → `0x467700` → `0x467800`), our own
         // player too, whose destructor zeroes the active mover it names (`0x5fb650`).
-        if let Some(mover) = b.mover.as_deref_mut() {
-            mover.forget_unless_held(&b.index);
-        }
+        b.objects_freed();
         // Loading a new world frees the released objects with the live ones (`0x467700`).
         self.released.clear();
     }

@@ -2,11 +2,12 @@
 //! packet's handler runs whole before the next (`0x537aa0` calls it at `0x537ae5`), its watchers
 //! fire inside it (`0x465570` → `0x4655dc`), and `UnitHealth` reads the live object
 //! (`0x5174d0`, `[obj+0x110]+0x40` at `0x517553`), so a listener sees the state its own packet
-//! left, never a later packet's. The lanes fire after every packet of the frame is applied, so
-//! here each update packet logs what it moved ([`ViewLog`]); the views lane rewinds the stores the
-//! tokens name and the group's records and roster cells to the frame's start and replays the log
-//! in stamp order among the other lanes ([`UnitViews`]), so the getters read each as of their
-//! listener's packet ([`ViewStores`]).
+//! left, never a later packet's. The lanes fire once a packet's handlers are done, over every
+//! packet since the last firing, the span (a packet that raised nothing fires nothing), and a
+//! handler's events among its writes, so here each update packet logs what it moved
+//! ([`ViewLog`]); the views lane rewinds the stores the tokens name and the group's records and
+//! roster cells to the span's start and replays the log in stamp order among the other lanes
+//! ([`UnitViews`]), so the getters read each as of their listener's packet ([`ViewStores`]).
 //!
 //! The unit of "as of" is the packet: the update handler `0x4651a0` runs both write passes over
 //! every block (`0x46520e`, `0x465222`) before its notify pass (`0x46522d`-`0x46528b`), so a
@@ -14,7 +15,9 @@
 //! member's group record before it signals (`0x5e5110`: `0x5e54c4`, `0x5e54d8`, then `0x5e54fa`),
 //! so the log holds the records too, and the roster cells a group list or ending writes (its party
 //! slots before its first signal `0x5e6c66`, its leader, loot and raid rows after), whole per
-//! packet, which the group tokens and the pet read at the call ([`super::live`]).
+//! packet, which the group tokens and the pet read at the call ([`super::live`]); and each item's
+//! countdown cells, which the time packets set in place (`0x5e4f30` → `0x5d9cc0`) and the worn and
+//! bag getters read as they run (`0x5d9d00`).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -26,6 +29,7 @@ use benilla_ui::script::UnitState;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use crate::items::Countdowns;
 use crate::lanes::{Stamp, Until};
 #[cfg(test)]
 use crate::names::NameCache;
@@ -56,6 +60,9 @@ enum Change {
     /// The group's roster cells on the change's other side ([`RosterCells`]), as
     /// [`Self::Record`] holds a record. It names no guid.
     Roster(Option<RosterCells>),
+    /// The item's countdown cells on the change's other side, `None` for no item, as
+    /// [`Self::Record`] holds a record.
+    Countdowns(Option<Countdowns>),
 }
 
 impl Change {
@@ -64,7 +71,7 @@ impl Change {
         match self {
             Self::Moved(moved) => put(store, moved.iter().map(|&(i, old, _)| (i, old))),
             Self::Swap(other) => std::mem::swap(store, other),
-            Self::Record(_) | Self::Roster(_) => {}
+            Self::Record(_) | Self::Roster(_) | Self::Countdowns(_) => {}
         }
     }
 
@@ -73,7 +80,7 @@ impl Change {
         match self {
             Self::Moved(moved) => put(store, moved.iter().map(|&(i, _, new)| (i, new))),
             Self::Swap(other) => std::mem::swap(store, other),
-            Self::Record(_) | Self::Roster(_) => {}
+            Self::Record(_) | Self::Roster(_) | Self::Countdowns(_) => {}
         }
     }
 }
@@ -107,15 +114,15 @@ struct Entry {
     changes: Vec<(u64, Change)>,
 }
 
-/// What the packets of the frame changed in the stores, one entry per packet, in their order.
+/// What the packets of the span changed in the stores, one entry per packet, in their order.
 /// The update handler writes it ([`crate::net`]'s object layer); the views lane takes it.
 #[derive(Resource, Default)]
 pub(crate) struct ViewLog {
     entries: Vec<Entry>,
     /// The last entry is the packet still being handled.
     open: bool,
-    /// How many times the entries were taken or dropped: a frame-start snapshot holds for the
-    /// entries it saw ([`FrameStart`]).
+    /// How many times the entries were taken or dropped: a span-start snapshot holds for the
+    /// entries it saw ([`SpanStart`]).
     epoch: u64,
 }
 
@@ -158,6 +165,12 @@ impl ViewLog {
         self.change(guid, Change::Record(before));
     }
 
+    /// `guid`'s countdown cells were set, created or taken: `before` is what they were, `None` for
+    /// no item.
+    pub(crate) fn countdowns(&mut self, guid: u64, before: Option<Countdowns>) {
+        self.change(guid, Change::Countdowns(before));
+    }
+
     /// The group's roster cells were written: `before` is what the packet found. A packet whose
     /// handler wrote them logs it once, ahead of the signals it raises (`0x5e6c66`).
     pub(crate) fn roster(&mut self, before: RosterCells) {
@@ -191,20 +204,25 @@ impl ViewLog {
     }
 
     /// The world left at once (a worldport, a disconnect, a logout): every object the object
-    /// manager holds is logged as its store stands, a destroy for each the teardown takes. For one
-    /// it keeps, the entry holds the store unchanged, which undoing and replaying leaves as it is.
+    /// manager holds is logged as its store and its item's countdown cells stand, a destroy for
+    /// each the teardown takes. For one it keeps, the entry holds them unchanged, which undoing and
+    /// replaying leaves as they are.
     pub(crate) fn torn_down<'a>(
         &mut self,
         index: &GuidIndex,
         store: impl Fn(Entity) -> Option<&'a ObjectStore>,
+        cells: impl Fn(Entity) -> Option<&'a Countdowns>,
     ) {
         for (&guid, &e) in &index.0 {
             self.replaced(guid, store(e).cloned());
+            if let Some(cells) = cells(e) {
+                self.countdowns(guid, Some(cells.clone()));
+            }
         }
         self.close();
     }
 
-    /// The frame's entries, taken for the replay.
+    /// The span's entries, taken for the replay.
     fn take(&mut self) -> Vec<Entry> {
         self.close();
         self.epoch += 1;
@@ -212,12 +230,12 @@ impl ViewLog {
     }
 }
 
-/// Each store a token can name as the frame began, with the entity it was read from, the group
+/// Each store a token can name as the span began, with the entity it was read from, the group
 /// records, and how many entries the log held then (`mark`), for the check that the rewind lands
-/// on them: a write the log missed makes it land elsewhere. Taken ahead of the frame's input
-/// records and the net stage, in debug builds.
+/// on them: a write the log missed makes it land elsewhere. Taken where each span of packets
+/// begins ([`crate::lanes::span_starts`]), in debug builds.
 #[derive(Resource, Default)]
-pub(crate) struct FrameStart {
+pub(crate) struct SpanStart {
     epoch: u64,
     mark: usize,
     stores: HashMap<u64, (Option<Entity>, Option<ObjectStore>)>,
@@ -225,15 +243,16 @@ pub(crate) struct FrameStart {
     roster: Option<RosterCells>,
 }
 
-/// [`FrameStart`]'s snapshot, of the stores and records the lane's rewind starts from: the four
+/// [`SpanStart`]'s snapshot, of the stores and records the lane's rewind starts from: the four
 /// tokens' units and every held unit a token reaches ([`super::reach`]).
 #[cfg(debug_assertions)]
-#[allow(clippy::too_many_arguments)] // what the tokens name, each read as the frame begins
-pub(crate) fn mark_frame_start(
+#[allow(clippy::too_many_arguments)] // what the tokens name, each read as the span begins
+pub(crate) fn mark_span_start(
     log: Res<ViewLog>,
-    mut start: ResMut<FrameStart>,
+    mut start: ResMut<SpanStart>,
     selection: Option<Res<Selection>>,
-    interact: Option<Res<crate::ui_session::InteractNpc>>,
+    // `"npc"`, the interaction latch itself (`0x515c00`).
+    interact: Option<Res<crate::ui_session::InteractLatch>>,
     index: Option<Res<GuidIndex>>,
     all: Query<&ObjectStore>,
     me: Query<(Entity, &Guid), With<SelfPlayer>>,
@@ -258,7 +277,8 @@ pub(crate) fn mark_frame_start(
             stores.entry(hop).or_insert_with(|| (e, store(e)));
         }
     }
-    if let Some((guid, entity)) = interact.as_deref().and_then(|i| Some((i.1?, i.0))) {
+    let npc = interact.and_then(|l| l.guid());
+    if let Some((guid, entity)) = npc.map(|g| (g, by_guid(g))) {
         stores
             .entry(guid)
             .or_insert_with(|| (entity, store(entity)));
@@ -274,14 +294,14 @@ pub(crate) fn mark_frame_start(
             script.as_deref().and_then(UiScript::world_mouseover),
             held,
         ),
-        npc: interact.as_deref().and_then(|i| i.1).unwrap_or(0),
+        npc: npc.unwrap_or(0),
         held,
     });
     for &guid in reached.held.keys() {
         let e = by_guid(guid);
         stores.entry(guid).or_insert_with(|| (e, store(e)));
     }
-    *start = FrameStart {
+    *start = SpanStart {
         epoch: log.epoch,
         mark: log.entries.len(),
         stores,
@@ -293,21 +313,24 @@ pub(crate) fn mark_frame_start(
 /// The views lane: the stores and records as of the drain's place, and what it has pushed.
 #[derive(Resource, Default)]
 pub(crate) struct UnitViews {
-    /// The frame's entries not yet applied, in stamp order.
+    /// The span's entries not yet applied, in stamp order.
     pending: VecDeque<Entry>,
     /// Each guid's store as of the drain's place, `None` for no object, with the entity its live
-    /// store is read from: every unit the frame changed.
+    /// store is read from: every unit the span changed.
     scratch: HashMap<u64, (Option<Entity>, Option<ObjectStore>)>,
-    /// Every group record as of the drain's place, while the frame changed any.
+    /// Every group record as of the drain's place, while the span changed any.
     records: Option<HashMap<u64, PartyMemberStatsInfo>>,
-    /// The group's roster cells as of the drain's place, while the frame changed them.
+    /// The group's roster cells as of the drain's place, while the span changed them.
     roster: Option<RosterCells>,
+    /// Each item's countdown cells as of the drain's place, `None` for no item: every item whose
+    /// cells the span changed.
+    countdowns: HashMap<u64, Option<Countdowns>>,
     /// The drain has fired the lane's start.
     started: bool,
     /// The stores checked against the live ones at the end of a drain, for the tests.
     #[cfg(test)]
     pub(crate) checked: usize,
-    /// The stores the rewind checked against the frame-start snapshot, for the tests.
+    /// The stores the rewind checked against the span-start snapshot, for the tests.
     #[cfg(test)]
     pub(crate) starts_checked: usize,
 }
@@ -335,6 +358,19 @@ impl UnitViews {
         scratch_as_of(&self.scratch, guid, live)
     }
 
+    /// `guid`'s countdown cells as of the drain's place: the rewound cells while the drain
+    /// replays them, else `live`.
+    pub(crate) fn countdowns_as_of<'a>(
+        &'a self,
+        guid: u64,
+        live: Option<&'a Countdowns>,
+    ) -> Option<&'a Countdowns> {
+        match self.countdowns.get(&guid) {
+            Some(cells) => cells.as_ref(),
+            None => live,
+        }
+    }
+
     /// Apply every entry `until` admits.
     fn apply(&mut self, until: Until) {
         while self.pending.front().is_some_and(|e| until.admits(e.at)) {
@@ -344,6 +380,12 @@ impl UnitViews {
             for (guid, change) in &mut entry.changes {
                 if let Change::Roster(other) = change {
                     std::mem::swap(&mut self.roster, other);
+                    continue;
+                }
+                if let Change::Countdowns(other) = change {
+                    if let Some(cells) = self.countdowns.get_mut(guid) {
+                        std::mem::swap(cells, other);
+                    }
                     continue;
                 }
                 if let Change::Record(other) = change {
@@ -364,6 +406,7 @@ impl UnitViews {
         live: impl Fn(Entity) -> Option<&'a ObjectStore>,
         live_records: &HashMap<u64, PartyMemberStatsInfo>,
         live_roster: crate::ui_party::Cells<'_>,
+        live_cells: impl Fn(u64) -> Option<&'a Countdowns>,
     ) {
         #[cfg(debug_assertions)]
         {
@@ -389,6 +432,12 @@ impl UnitViews {
                     "views: the roster cells replayed to cells the live ones are not"
                 );
             }
+            for (guid, cells) in &self.countdowns {
+                debug_assert!(
+                    cells.as_ref() == live_cells(*guid),
+                    "views: {guid:#x}'s countdowns replayed to cells the live ones are not"
+                );
+            }
         }
         self.clear();
     }
@@ -398,6 +447,7 @@ impl UnitViews {
         self.scratch.clear();
         self.records = None;
         self.roster = None;
+        self.countdowns.clear();
         self.started = false;
     }
 }
@@ -422,23 +472,29 @@ fn same_reads(a: Option<&ObjectStore>, b: Option<&ObjectStore>) -> bool {
     read(a) == read(b)
 }
 
-/// The stores the getters read, through the views lane: a script call during the drain reads the
-/// store as its listener's packet left it ([`UnitViews::as_of`]). Outside the drain it is the live
-/// store.
+/// The stores the getters read, through the views lane: a script call during a lane's firing reads
+/// the store as its listener's packet left it ([`UnitViews::as_of`]). Outside a firing it is the
+/// live store.
 #[derive(SystemParam)]
 pub(crate) struct ViewStores<'w, 's> {
     live: Query<'w, 's, (&'static ObjectStore, Option<&'static Guid>)>,
     views: Option<Res<'w, UnitViews>>,
 }
 
-/// The objects an inventory walk reads as of the drain's place ([`ViewStores::item_objects`]).
+/// The objects an inventory walk reads as of the drain's place ([`ViewStores::item_objects`]),
+/// with their countdown cells.
 pub(crate) struct AsOfObjects<'a> {
     by_guid: Box<dyn Fn(u64) -> Option<&'a ObjectStore> + 'a>,
+    cells: Box<dyn Fn(u64) -> Option<&'a Countdowns> + 'a>,
 }
 
 impl crate::ui_items::ItemObjects for AsOfObjects<'_> {
     fn object(&self, guid: u64) -> Option<&ObjectFields> {
         (self.by_guid)(guid).map(|s| &s.0)
+    }
+
+    fn countdowns(&self, guid: u64) -> Option<&Countdowns> {
+        (self.cells)(guid)
     }
 }
 
@@ -470,7 +526,7 @@ impl ViewStores<'_, '_> {
     }
 
     /// `guid`'s store as of the drain's place, `entity` the one the object manager holds it under
-    /// now ([`Self::by_guid`]): a unit a later packet of the frame destroys still reads as its
+    /// now ([`Self::by_guid`]): a unit a later packet of the span destroys still reads as its
     /// packet left it.
     pub(crate) fn at(&self, guid: u64, entity: Option<Entity>) -> Option<&ObjectStore> {
         let live = entity
@@ -480,7 +536,7 @@ impl ViewStores<'_, '_> {
     }
 
     /// The group records as of the drain's place, `live` the roster's now: while the drain replays
-    /// a frame that wrote any, as its packet left them.
+    /// a span that wrote any, as its packet left them.
     pub(crate) fn records<'a>(
         &'a self,
         live: &'a HashMap<u64, PartyMemberStatsInfo>,
@@ -492,7 +548,7 @@ impl ViewStores<'_, '_> {
     }
 
     /// The group's roster cells as of the drain's place, `live` the roster's now: while the drain
-    /// replays a frame that wrote any, as its packet left them.
+    /// replays a span that wrote any, as its packet left them.
     pub(crate) fn roster<'a>(
         &'a self,
         live: &'a crate::ui_party::GroupState,
@@ -503,14 +559,28 @@ impl ViewStores<'_, '_> {
         }
     }
 
-    /// The item objects as of the drain's place, `objects` the live ones: an item the frame's
-    /// later packets destroy still reads to an earlier listener's walk.
+    /// `guid`'s countdown cells as of the drain's place, `live` its cells now: an item whose
+    /// time packets the drain replays reads them as its listener's packet left them.
+    pub(crate) fn countdowns<'a>(
+        &'a self,
+        guid: u64,
+        live: Option<&'a Countdowns>,
+    ) -> Option<&'a Countdowns> {
+        match self.views.as_deref() {
+            Some(views) => views.countdowns_as_of(guid, live),
+            None => live,
+        }
+    }
+
+    /// The item objects and their countdown cells as of the drain's place, `objects` the live
+    /// ones: an item the span's later packets destroy still reads to an earlier listener's walk.
     pub(crate) fn item_objects<'a>(
         &'a self,
         objects: &'a crate::net::Objects<'_, '_>,
     ) -> AsOfObjects<'a> {
         AsOfObjects {
             by_guid: Box::new(move |guid| self.by_guid(guid, objects.store(guid))),
+            cells: Box::new(move |guid| self.countdowns(guid, objects.countdowns(guid))),
         }
     }
 }
@@ -628,7 +698,7 @@ pub(super) fn add_unit_views_lane(app: &mut App) {
     use crate::lanes::LaneApp;
     app.init_resource::<ViewLog>()
         .init_resource::<UnitViews>()
-        .init_resource::<FrameStart>()
+        .init_resource::<SpanStart>()
         .add_lane("unit views", peek, fire_unit_views, None)
         .add_drain_end(end_drain)
         .add_systems(
@@ -638,15 +708,13 @@ pub(super) fn add_unit_views_lane(app: &mut App) {
                 .run_if(not(crate::ui_script::ingame_ui_up)),
         );
     #[cfg(debug_assertions)]
-    app.add_systems(
-        Update,
-        mark_frame_start
-            .before(crate::ui_script::UiInput)
-            .before(benilla_world::schedule::WorldStage::Net),
-    );
+    app.add_span_start(|world| {
+        // A harness without the units' state takes no snapshot.
+        let _ = world.run_system_cached(mark_span_start);
+    });
 }
 
-/// The lane's head: its start while the frame logged anything, then its next entry.
+/// The lane's head: its start while the span logged anything, then its next entry.
 fn peek(world: &World) -> Option<Stamp> {
     let views = world.get_resource::<UnitViews>()?;
     if !views.started {
@@ -672,8 +740,8 @@ fn drop_unit_views(mut log: ResMut<ViewLog>, mut views: ResMut<UnitViews>) {
 /// Each getter resolves its token at the call (`UnitHealth` calls `0x515970` at `0x517511`), so
 /// a listener for an earlier packet reads the unit the token named then. The group tokens name the
 /// roster as of the drain's place ([`ViewStores::roster`]); not yet: the selection and interaction
-/// through the drain are the frame's last, and a token a call moves during it is left to that
-/// call's own seat, until those are versioned too (#2217).
+/// through the drain are as the span's last packet left them, and a token a call moves during it
+/// is left to that call's own seat, until those are versioned too (#2217).
 struct Seats {
     me: Option<(u64, Option<Entity>)>,
     target: Option<(u64, Option<Entity>)>,
@@ -761,17 +829,17 @@ fn carried(f: &ObjectFields) -> Vec<Option<u64>> {
     }
 }
 
-/// One guid's store from `live` back to the frame's start, undoing `entries`' changes to it in
-/// reverse, checked against the frame-start snapshot `start` when given; with every object it named
+/// One guid's store from `live` back to the span's start, undoing `entries`' changes to it in
+/// reverse, checked against the span-start snapshot `start` when given; with every object it named
 /// on the way, by the fields a token resolves through: `UNIT_FIELD_TARGET` (a `target` chain,
 /// `0x515970`), `UNIT_FIELD_CHARM` and `UNIT_FIELD_SUMMON` (a pet token, `0x4e8204`-`0x4e821a`),
 /// and the weapons the active player wears, whose items the stat getters read
 /// (`UnitAttackSpeed` `0x518f19`, `HasWandEquipped` `0x4c99c2`).
-fn undo_frame(
+fn undo_span(
     guid: u64,
     live: Option<ObjectStore>,
     entries: &mut [Entry],
-    start: Option<&FrameStart>,
+    start: Option<&SpanStart>,
 ) -> (Option<ObjectStore>, Vec<u64>) {
     let hop = |s: &Option<ObjectStore>| {
         s.as_ref()
@@ -788,7 +856,7 @@ fn undo_frame(
     };
     let mut store = live;
     let mut hops: Vec<u64> = hop(&store).collect();
-    // The store where the frame-start snapshot was taken, past the entries logged before it.
+    // The store where the span-start snapshot was taken, past the entries logged before it.
     let mark = start.map_or(0, |s| s.mark);
     let mut at_mark = None;
     for (i, entry) in entries.iter_mut().enumerate().rev() {
@@ -806,19 +874,19 @@ fn undo_frame(
         let at_mark = at_mark.unwrap_or_else(|| store.clone());
         debug_assert!(
             same_reads(at_mark.as_ref(), snapshot.as_ref()),
-            "views: {guid:#x} ({entity:?}) rewound to a store the frame did not start from: a \
+            "views: {guid:#x} ({entity:?}) rewound to a store the span did not start from: a \
              write the log missed"
         );
     }
     (store, hops)
 }
 
-/// The group records from `live` back to the frame's start, undoing `entries`' record changes in
-/// reverse, checked against the frame-start snapshot `start` when given.
+/// The group records from `live` back to the span's start, undoing `entries`' record changes in
+/// reverse, checked against the span-start snapshot `start` when given.
 fn undo_records(
     live: &HashMap<u64, PartyMemberStatsInfo>,
     entries: &mut [Entry],
-    start: Option<&FrameStart>,
+    start: Option<&SpanStart>,
 ) -> HashMap<u64, PartyMemberStatsInfo> {
     let mut records = live.clone();
     let mark = start.map_or(0, |s| s.mark);
@@ -836,19 +904,19 @@ fn undo_records(
     if let Some(snapshot) = start.and_then(|s| s.records.as_ref()) {
         debug_assert!(
             at_mark.as_ref().unwrap_or(&records) == snapshot,
-            "views: the group records rewound to a roster the frame did not start from: a write \
+            "views: the group records rewound to a roster the span did not start from: a write \
              the log missed"
         );
     }
     records
 }
 
-/// The roster cells from `live` back to the frame's start, undoing `entries`' roster changes in
-/// reverse, checked against the frame-start snapshot `start` when given.
+/// The roster cells from `live` back to the span's start, undoing `entries`' roster changes in
+/// reverse, checked against the span-start snapshot `start` when given.
 fn undo_roster(
     live: crate::ui_party::Cells<'_>,
     entries: &mut [Entry],
-    start: Option<&FrameStart>,
+    start: Option<&SpanStart>,
 ) -> RosterCells {
     let mut cells = Some(live.to_owned());
     let mark = start.map_or(0, |s| s.mark);
@@ -866,11 +934,29 @@ fn undo_roster(
     if let Some(snapshot) = start.and_then(|s| s.roster.as_ref()) {
         debug_assert!(
             at_mark.as_ref().unwrap_or(&cells).as_ref() == Some(snapshot),
-            "views: the roster cells rewound to cells the frame did not start from: a write the \
+            "views: the roster cells rewound to cells the span did not start from: a write the \
              log missed"
         );
     }
     cells.unwrap_or_else(|| live.to_owned())
+}
+
+/// `guid`'s countdown cells from `live` back to the span's start, undoing `entries`' changes to
+/// them in reverse.
+fn undo_countdowns(
+    guid: u64,
+    live: Option<Countdowns>,
+    entries: &mut [Entry],
+) -> Option<Countdowns> {
+    let mut cells = live;
+    for entry in entries.iter_mut().rev() {
+        for (g, change) in entry.changes.iter_mut().rev() {
+            if let (true, Change::Countdowns(other)) = (*g == guid, change) {
+                std::mem::swap(&mut cells, other);
+            }
+        }
+    }
+    cells
 }
 
 /// The drain's end, however it ended: one that stopped before this lane replayed all it took
@@ -884,8 +970,8 @@ fn end_drain(world: &mut World) {
 }
 
 impl UnitViews {
-    /// The lane's start: the frame's entries, and the store of each unit and the record of each
-    /// member the frame changed rewound to the frame's start.
+    /// The lane's start: the span's entries, and the store of each unit and the record of each
+    /// member the span changed rewound to the span's start.
     fn rewind(
         &mut self,
         mut entries: Vec<Entry>,
@@ -895,7 +981,8 @@ impl UnitViews {
         by_guid: impl Fn(u64) -> Option<Entity>,
         live_records: &HashMap<u64, PartyMemberStatsInfo>,
         live_roster: crate::ui_party::Cells<'_>,
-        start: Option<&FrameStart>,
+        live_cells: impl Fn(u64) -> Option<Countdowns>,
+        start: Option<&SpanStart>,
     ) {
         // The snapshot is checked against for each guid read from the entity it was taken from.
         #[cfg(test)]
@@ -908,20 +995,24 @@ impl UnitViews {
         };
         let entity_of = |guid: u64| seats.entity_of(guid).unwrap_or_else(|| by_guid(guid));
         let mut stores = Vec::new();
+        let mut cells = Vec::new();
         let mut records = false;
         let mut roster = false;
         for (guid, change) in entries.iter().flat_map(|e| &e.changes) {
             match change {
                 Change::Record(_) => records = true,
                 Change::Roster(_) => roster = true,
+                Change::Countdowns(_) => cells.push(*guid),
                 _ => stores.push(*guid),
             }
         }
+        cells.sort_unstable();
+        cells.dedup();
         stores.sort_unstable();
         stores.dedup();
         let mut scratch = HashMap::new();
         // Only a unit some view reads is rewound: what the others' entries hold drops unreplayed.
-        // A view reads too each unit a readable one named during the frame, by its target or its
+        // A view reads too each unit a readable one named during the span, by its target or its
         // pet (`"targettarget"`, `"partypet1"` before a swap), and a pet a member's earlier record
         // named; so each rewound store's names join the readable, and are rewound in turn.
         let mut queue: Vec<u64> = Vec::new();
@@ -935,7 +1026,7 @@ impl UnitViews {
                 Change::Record(Some(record)) => {
                     name(record.pet_guid.unwrap_or(0), &mut readable, &mut queue);
                 }
-                // A member the roster held through the frame, and no longer does.
+                // A member the roster held through the span, and no longer does.
                 Change::Roster(Some(cells)) => {
                     for m in cells.cells().members {
                         name(m.guid, &mut readable, &mut queue);
@@ -944,7 +1035,7 @@ impl UnitViews {
                 _ => {}
             }
         }
-        // Every item the frame changed too: the bag getters find an item by its seat or a bag's
+        // Every item the span changed too: the bag getters find an item by its seat or a bag's
         // slot as its packet left them, wherever the item came from.
         queue.extend(
             stores
@@ -956,7 +1047,7 @@ impl UnitViews {
                 continue;
             }
             let entity = entity_of(guid);
-            let (store, named) = undo_frame(
+            let (store, named) = undo_span(
                 guid,
                 entity.and_then(&live),
                 &mut entries,
@@ -974,10 +1065,10 @@ impl UnitViews {
             }
             let entity = entity_of(guid);
             if let Some(check) = start_for(guid, entity) {
-                undo_frame(guid, entity.and_then(&live), &mut entries, Some(check));
+                undo_span(guid, entity.and_then(&live), &mut entries, Some(check));
             }
         }
-        // The records likewise, rewound only when the frame changed one, and checked all the same.
+        // The records likewise, rewound only when the span changed one, and checked all the same.
         let checked_records = start.is_some_and(|s| s.records.is_some());
         let rewound =
             (records || checked_records).then(|| undo_records(live_records, &mut entries, start));
@@ -987,11 +1078,20 @@ impl UnitViews {
         let rewound =
             (roster || checked_roster).then(|| undo_roster(live_roster, &mut entries, start));
         self.roster = rewound.filter(|_| roster);
+        // Each item's countdown cells the span changed, every one: the worn and bag getters read
+        // an item's by its seat as its packet left it.
+        self.countdowns = cells
+            .into_iter()
+            .map(|guid| (guid, undo_countdowns(guid, live_cells(guid), &mut entries)))
+            .collect();
         self.pending = entries
             .into_iter()
             .filter_map(|mut entry| {
                 entry.changes.retain(|(g, c)| {
-                    matches!(c, Change::Record(_) | Change::Roster(_)) || scratch.contains_key(g)
+                    matches!(
+                        c,
+                        Change::Record(_) | Change::Roster(_) | Change::Countdowns(_)
+                    ) || scratch.contains_key(g)
                 });
                 (!entry.changes.is_empty()).then_some(entry)
             })
@@ -1008,15 +1108,17 @@ impl UnitViews {
 #[derive(SystemParam)]
 pub(crate) struct ViewSources<'w, 's> {
     index: Option<Res<'w, GuidIndex>>,
-    interact: Option<Res<'w, crate::ui_session::InteractNpc>>,
+    /// `"npc"`, the interaction latch itself (`0x515c00`).
+    interact: Option<Res<'w, crate::ui_session::InteractLatch>>,
     all: Query<'w, 's, &'static ObjectStore>,
+    cells: Query<'w, 's, &'static Countdowns>,
     self_q: Query<'w, 's, (Entity, &'static Guid), With<SelfPlayer>>,
-    start: Option<Res<'w, FrameStart>>,
+    start: Option<Res<'w, SpanStart>>,
     selection: Res<'w, Selection>,
     group: Res<'w, crate::ui_party::GroupState>,
 }
 
-/// The lane's `fire_until` ([`crate::lanes`]). Its start takes the frame's log and rewinds
+/// The lane's `fire_until` ([`crate::lanes`]). Its start takes the span's log and rewinds
 /// ([`UnitViews::rewind`]). Each firing applies every entry `until` admits, so the getters read
 /// the stores, records and roster cells as of there ([`ViewStores`]); the last entry ends the
 /// replay, every store the live one again.
@@ -1034,6 +1136,7 @@ fn fire_unit_views(
             index,
             interact,
             all,
+            cells,
             self_q,
             start,
             selection,
@@ -1041,7 +1144,11 @@ fn fire_unit_views(
         } = &src;
         let live = |e: Entity| all.get(e).ok().cloned();
         let by_guid = |guid: u64| index.as_ref().and_then(|i| i.0.get(&guid).copied());
-        let npc_seat = interact.as_deref().and_then(|i| Some((i.1?, i.0)));
+        let live_cells = |guid: u64| by_guid(guid).and_then(|e| cells.get(e).ok());
+        let npc_seat = interact
+            .as_deref()
+            .and_then(|l| l.guid())
+            .map(|g| (g, by_guid(g)));
         let Some(script) = script else {
             log.take();
             views.clear();
@@ -1073,13 +1180,19 @@ fn fire_unit_views(
                 by_guid,
                 &group.stats,
                 group.cells(),
+                |guid| live_cells(guid).cloned(),
                 start,
             );
             views.started = true;
         }
         views.apply(until);
         if views.pending.is_empty() {
-            views.finish(|e: Entity| all.get(e).ok(), &group.stats, group.cells());
+            views.finish(
+                |e: Entity| all.get(e).ok(),
+                &group.stats,
+                group.cells(),
+                live_cells,
+            );
         }
     });
 }
