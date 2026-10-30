@@ -550,7 +550,7 @@ pub(crate) enum RecordCallback {
     /// `0x4af66f` with `0x4af0a0`), one per call, or an auction notice's at the list parse
     /// (`0x4acf38` with `0x4ad010`), one per notice.
     Mail,
-    /// An auction notice's line whose item was not cached (`0x4ccf6e`, `0x4cd3eb`, `0x4cd4ef` with
+    /// An auction notice's line whose item was not cached (`0x4ccfa2`, `0x4cd41f`, `0x4cd51a` with
     /// `0x4cd190`), one per line.
     AuctionMessage,
     /// The attachment's, asked by `GetSendMailItem` (`0x4ae604` with `0x4ae710`), one per call.
@@ -585,6 +585,18 @@ pub(crate) enum RecordCallback {
     /// `ShowItemCastFailure 0x6e29b0` and the reason), one per refusal; the spell picks the
     /// line's message as its first pass would.
     CastFailure { spell: u32, reason: u8 },
+    /// A dressing-room try-on of an item not cached (`0x504579` with `TryOnItemCached 0x504ba0`),
+    /// one per call: for a found record it tries the item on again (`0x504bae` → `0x504540`).
+    TryOn,
+    /// A combat-log line that names an item not cached, by its formatter's kind (`0x628f83`,
+    /// `0x629650`, `0x6297a0`, `0x6298e1` with `OnCombatLogItemRecord 0x6294b0`), one per line: it
+    /// frees the last waiting entry of its kind and item (`0x6295b0`) and, for a found record,
+    /// runs that entry's formatter again; for a refusal it writes nothing (`0x6294fd`-`0x629504`).
+    CombatLog(crate::ui_chat::combat::ItemLog),
+    /// An auction list result's row whose item was not cached, by the list (`0x4cc9bf` with
+    /// `0x4cca10`, `0x4ccbff` with `0x4ccc60`, `0x4cce4f` with `0x4cceb0`), one per row: each
+    /// counts the page's wait down, a record or a refusal, and the last sorts and signals it.
+    AuctionList(usize),
 }
 
 impl Items {
@@ -744,6 +756,12 @@ impl Items {
     /// (`0x55c0c0`).
     pub(crate) fn cancel_waits(&self, kind: RecordCallback) {
         self.callbacks.lock_recover().retain(|&(_, cb)| cb != kind);
+    }
+
+    /// Whether a `callback` waits on `entry`'s record.
+    #[cfg(test)]
+    pub(crate) fn waiting(&self, entry: u32, callback: RecordCallback) -> bool {
+        self.callbacks.lock_recover().contains(&(entry, callback))
     }
 
     /// `DBCache::CancelCallback` (`0x55c0c0`): `callback`'s registrations off the pending record

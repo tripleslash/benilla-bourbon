@@ -38,11 +38,6 @@ use bevy::prelude::*;
 
 use crate::game_plugins::schedule_tests::{census, type_names_available, SyncPoints};
 
-/// The most rows [`super::guard_tests::READS_FRAME_FINAL`] may hold, and the most inputs across
-/// them: each only falls, so lower it when a row or an input goes.
-const FRAME_FINAL_FEEDS: usize = 1;
-const FRAME_FINAL_INPUTS: usize = 1;
-
 /// The systems that may run after the dispatch (`apply_net_updates`) and run ahead of the drain
 /// (`fire_in_order`), by a suffix of the system's name, with what each writes of the state a
 /// listener's call or a handler reads inside a packet, by its name in the crate, and why: the
@@ -65,9 +60,6 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
     ("::transport::compose_riders", &["Transform", "net::motion::remote::RemoteMotion"],
         "the arrival snap `0x7c6420` (`0x618dfc`) is written inside the packet"),
-    ("::ui_item_text::apply_reads", &["ui_item_text::ItemTextOpen"],
-        "a click's or a bag use's read, queued in its input or its call, which the reference \
-         opens inside them (`0x5f58c0`, `0x4e32e0`), ahead of the packets (`0x420d23`)"),
 ];
 
 /// The systems between the dispatch and the drain that write what the host's live reads read,
@@ -434,17 +426,17 @@ fn every_writer_between_the_dispatch_and_the_drain_is_listed() {
     assert!(empty.is_empty(), "rows with no reason: {empty:?}");
 }
 
-/// The frame-final views only shrink: [`super::guard_tests::READS_FRAME_FINAL`] holds no more rows
-/// or inputs than its ceiling.
+/// The frame-final views are gone: [`super::guard_tests::READS_FRAME_FINAL`] holds no row, and a
+/// view of a handler's state reads it live through the host instead.
 #[test]
-fn the_frame_final_views_only_shrink() {
-    let rows = super::guard_tests::READS_FRAME_FINAL;
-    let inputs: usize = rows.iter().map(|(_, i)| i.len()).sum();
+fn no_view_reads_frame_final_state() {
+    let rows: Vec<&str> = super::guard_tests::READS_FRAME_FINAL
+        .iter()
+        .map(|(feed, _)| *feed)
+        .collect();
     assert!(
-        rows.len() <= FRAME_FINAL_FEEDS && inputs <= FRAME_FINAL_INPUTS,
-        "READS_FRAME_FINAL grew to {} rows and {inputs} inputs, past {FRAME_FINAL_FEEDS} and \
-         {FRAME_FINAL_INPUTS}: read the new state live through the host instead",
-        rows.len()
+        rows.is_empty(),
+        "READS_FRAME_FINAL holds {rows:?}: read the new state live through the host instead"
     );
 }
 

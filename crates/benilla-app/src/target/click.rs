@@ -316,11 +316,13 @@ fn interaction_already_open_on(target: u64, latch: &crate::ui_session::InteractL
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct Feedback<'w> {
     errors: Res<'w, crate::ui_action::UiErrorKeys>,
-    // The mailbox's open, which registers on the interaction latch with the world in hand,
-    // `TalkToTrainer`, whose close core runs with it, and the innkeeper's ask: run against the
-    // world after the unit edits.
+    // `TalkToTrainer`, whose close core runs with the world in hand, and the innkeeper's ask: run
+    // against the world after the unit edits.
     edits: Res<'w, crate::creature_anim::UnitEdits>,
     item_text: ResMut<'w, crate::ui_item_text::ItemTextOpen>,
+    /// The mailbox a use opens, which the host opens in its place; absent in a harness without
+    /// mail.
+    mail: Option<ResMut<'w, crate::ui_mail::MailOpen>>,
     // The cast queue: this system cannot also hold `CastLadder` (a second `Items` and
     // `CastReports` borrow), so the lock verdict and the skin go to
     // `ui_action::drain::drain_click_casts`.
@@ -806,18 +808,16 @@ impl Dispatch<'_, '_> {
         if go_type == cursor_mode::GO_TYPE_MAILBOX {
             if in_reach {
                 debug!("right-click mailbox: open mail window {guid:#x}");
-                self.feedback
-                    .edits
-                    .push_world(Box::new(move |world: &mut World| {
-                        crate::ui_mail::open_mailbox(world, guid)
-                    }));
+                if let Some(mail) = self.feedback.mail.as_deref_mut() {
+                    mail.use_mailbox(guid);
+                }
             } else {
                 self.walk_to_object(entity, guid, go_type, walk);
             }
             return;
         }
         // TEXT (type 9) opens locally (`0x5f58c0` → `0x4e32e0(goGuid, 0)`; vmangos' `Use` has no
-        // type-9 case); a re-click closes it, and the page is read at paint time.
+        // type-9 case), inside the click as its host runs the read; a re-click closes it.
         if go_type == cursor_mode::GO_TYPE_TEXT {
             if !in_reach {
                 self.walk_to_object(entity, guid, go_type, walk);
@@ -1639,6 +1639,8 @@ pub(super) fn act_on_interact(
             &mut set.p1(),
             &mut selection
         ));
+        // A mailbox or a text object opens inside its use (`0x5f86b0` → `0x5f6820`, `0x5f58c0`).
+        vm.engine_open_used(mark);
     }
 }
 
@@ -1651,10 +1653,14 @@ pub(super) fn act_on_arrival(
     index: Res<crate::net::GuidIndex>,
     kinds: Query<&crate::net::NetEntity>,
 ) {
-    vm.turn(|mut script, mut dispatch| {
-        act_on_arrival_with(&mut dispatch, script.as_deref_mut(), &index, &kinds);
-        dispatch.auto.signal_follow_end(script);
+    let mark = crate::lanes::mark();
+    vm.turn(|script, mut dispatch| {
+        act_on_arrival_with(&mut dispatch, script, &index, &kinds);
     });
+    // A mailbox or a text object opens inside the dispatcher's use (`0x5f6820`, `0x5f58c0`),
+    // ahead of the follow's end it returns to.
+    vm.engine_open_used(mark);
+    vm.turn(|script, mut dispatch| dispatch.auto.signal_follow_end(script));
 }
 
 fn act_on_arrival_with(
@@ -2217,6 +2223,10 @@ pub(super) fn clear_owing(
 #[cfg(test)]
 #[path = "click_loot_tests.rs"]
 mod loot_tests;
+
+#[cfg(test)]
+#[path = "click_read_tests.rs"]
+mod read_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3553,10 +3563,9 @@ mod tests {
             let sent_use = rx
                 .try_iter()
                 .any(|c| matches!(c, ClientCommand::GameObjUse { .. }));
-            let mail_open = world
-                .resource::<crate::ui_mail::MailOpen>()
-                .mailbox
-                .is_some();
+            // The mailbox's open, or owed where the harness has no host to open it.
+            let mail = world.resource::<crate::ui_mail::MailOpen>();
+            let mail_open = mail.mailbox.is_some() || mail.used().is_some();
             assert_eq!(sent_use || mail_open, used, "{label}");
             let keys: Vec<&str> = world
                 .resource::<crate::ui_action::UiErrorKeys>()

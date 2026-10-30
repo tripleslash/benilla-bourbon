@@ -45,6 +45,8 @@ pub(crate) struct ChatCtx<'a> {
     pub items: Option<&'a crate::items::Items>,
     /// The game object cache (`0xc0e318`), which `LogOpenLock` reads for an opened object.
     pub gameobjects: Option<&'a crate::go_templates::GameObjectTemplates>,
+    /// The wire an item line's lookup asks a miss on; absent in a harness, which asks nothing.
+    pub net: Option<&'a crate::net::NetCommands>,
     /// The display ranges: the reference's `0x8629e0` table, CVar-backed.
     pub ranges: &'a combat::CombatLogRanges,
     /// `CombatLogPeriodicSpells`, for its two chat-only read sites; the whole-packet gate is in
@@ -63,6 +65,14 @@ impl ChatCtx<'_> {
             self.factions,
             self.reputations,
             self.names,
+        )
+    }
+
+    /// How an item line's lookup asks a miss: on the wire, or not at all in a harness.
+    fn item_ask(&self) -> crate::query_cache::Ask<'_> {
+        self.net.map_or(
+            crate::query_cache::Ask::Read,
+            crate::query_cache::Ask::Event,
         )
     }
 
@@ -400,18 +410,41 @@ pub(super) fn dispel_failed(
     }
 }
 
-/// `SMSG_ENCHANTMENTLOG` (`0x628f40`): "You cast %s on your %s." (`0x6291d0`) or "%s has faded
-/// from your %s." (`0x628ff0`, an empty caster guid). The first `%s` is the enchantment's name,
-/// read through `0xc0d7d8` by the packet's id; no row, or `Flags & 0x2`, and neither writes
-/// anything. The item name, the last `%s`, comes from the item cache, so an uncached entry
-/// waits. Each raises its word, `ENCHANTMENT_ADDED` or `ENCHANTMENT_REMOVED` with the
-/// enchantment's name, when the item is yours (`0x62937a`, `0x6291b6`).
+/// `SMSG_ENCHANTMENTLOG` (`0x628ea0` → `0x628f40`): the item looked up first, ahead of every
+/// test (`0x628f83`), with the log's callback, kind 1. A miss asks and keeps the packet's
+/// arguments in the wait list (`0x6293a0`), and the item's callback runs the lines again
+/// ([`item_answered`]); a cached item writes them here ([`enchantment_lines`]).
+pub(super) fn enchantment_log(
+    s: EnchantmentLog,
+    ctx: &ChatCtx,
+    stores: &impl Stores,
+    poses: &impl Poses,
+    log: &ChatLog,
+) {
+    if let Some(items) = ctx.items {
+        if items.template(s.item_entry, 0, ctx.item_ask()).is_none() {
+            let kind = combat::ItemLog::Enchantment;
+            items.wait(s.item_entry, crate::items::RecordCallback::CombatLog(kind));
+            log.push_combat_waiting(kind, s.item_entry, combat::Replay::Enchantment(s));
+            return;
+        }
+    }
+    enchantment_lines(s, ctx, stores, poses, log);
+}
+
+/// The enchantment's two lines past the lookup, at the packet or at the item's callback: "You
+/// cast %s on your %s." (`0x6291d0`) or "%s has faded from your %s." (`0x628ff0`, an empty
+/// caster guid). The first `%s` is the enchantment's name, read through `0xc0d7d8` by the
+/// packet's id; no row, or `Flags & 0x2`, and neither writes anything. The item name, the last
+/// `%s`, comes from the item cache. Each raises its word, `ENCHANTMENT_ADDED` or
+/// `ENCHANTMENT_REMOVED` with the enchantment's name, when the item is yours (`0x62937a`,
+/// `0x6291b6`).
 ///
 /// The fade needs its owner held as a unit (`0x62902c`) within its class's range; an added line
 /// takes the two-sided gate. The chat type is the literal `0x44` `SPELL_ITEM_ENCHANTMENTS` for a
 /// fade and for the owner's copy (`show_affiliation` clear); the broadcast copy takes the BUFF
 /// matrix (`0x62934e`).
-pub(super) fn enchantment_log(
+fn enchantment_lines(
     s: EnchantmentLog,
     ctx: &ChatCtx,
     stores: &impl Stores,
@@ -442,7 +475,7 @@ pub(super) fn enchantment_log(
             (s.owner, owner),
             (s.owner, owner),
             fills,
-            combat::Named::Item(s.item_entry),
+            combat::Named::Item(s.item_entry, combat::ItemLog::Enchantment),
             to_me(owner, LineWord::with("ENCHANTMENT_REMOVED", name)),
         );
         return;
@@ -464,7 +497,7 @@ pub(super) fn enchantment_log(
         (s.caster, caster),
         (s.owner, owner),
         fills,
-        combat::Named::Item(s.item_entry),
+        combat::Named::Item(s.item_entry, combat::ItemLog::Enchantment),
         to_me(owner, LineWord::with("ENCHANTMENT_ADDED", name)),
     );
 }
@@ -575,7 +608,7 @@ pub(super) fn spell_log_execute(
                     (s.caster, caster),
                     (s.caster, caster),
                     Fills::default(),
-                    combat::Named::Item(item_entry),
+                    combat::Named::Item(item_entry, combat::ItemLog::TradeSkill),
                 ),
                 // Effect 101 FEED_PET: CREATE_ITEM's shape, a different sentence.
                 E::FeedPet { item_entry } => queue_named(
@@ -587,7 +620,7 @@ pub(super) fn spell_log_execute(
                     (s.caster, caster),
                     (s.caster, caster),
                     Fills::default(),
-                    combat::Named::Item(item_entry),
+                    combat::Named::Item(item_entry, combat::ItemLog::FeedPet),
                 ),
                 // Effect 68 INTERRUPT_CAST: the sentence names the interrupted spell, off the row,
                 // not the packet's own, and so does the `INTERRUPT` word when the interrupted unit
@@ -656,7 +689,7 @@ pub(super) fn spell_log_execute(
                         (s.caster, caster),
                         (target, victim),
                         spell_fill(),
-                        combat::Named::Item(entry),
+                        combat::Named::Item(entry, combat::ItemLog::Durability),
                     );
                 }
                 // Effect 102 DISMISS_PET, in the guid-only tail: split on the caster being you, at
@@ -1103,8 +1136,60 @@ fn queue_reported(
         return false;
     };
     line.word = word;
+    // The item looked up past the caller's range test with the log's callback, dedupe 0, its
+    // kind the data (`0x629650`, `0x6297a0`, `0x6298e1`): a miss asks, leaves `0x6294b0` in the
+    // answer's list, one per line, and keeps the line in the wait list (`0x629730`, `0x629870`,
+    // `0x629a30`). The enchantment's was looked up ahead of every test ([`enchantment_log`]).
+    if let (combat::Named::Item(entry, kind), Some(items)) = (named, ctx.items) {
+        if kind != combat::ItemLog::Enchantment
+            && items.template(entry, 0, ctx.item_ask()).is_none()
+        {
+            items.wait(entry, crate::items::RecordCallback::CombatLog(kind));
+            let line = Box::new(line);
+            let replay = match kind {
+                combat::ItemLog::Durability => combat::Replay::Ranged(line),
+                _ => combat::Replay::Line(line),
+            };
+            log.push_combat_waiting(kind, entry, replay);
+            return true;
+        }
+    }
     log.push_combat(line);
     true
+}
+
+/// `OnCombatLogItemRecord 0x6294b0`, one callback for `item` of its formatter's `kind`: the last
+/// waiting entry of that kind and item freed ([`ChatLog::take_wait`]), and for a found record
+/// its formatter run again past its lookup (`0x629513`), its line written here, at the
+/// callback's place among the answer's others; for a refusal nothing (`0x6294fd`-`0x629504`).
+pub(super) fn item_answered(
+    kind: combat::ItemLog,
+    item: u32,
+    answered: bool,
+    ctx: &ChatCtx,
+    stores: &impl Stores,
+    poses: &impl Poses,
+    log: &ChatLog,
+) {
+    let Some(replay) = log.take_wait(kind, item) else {
+        return;
+    };
+    if !answered {
+        return;
+    }
+    match replay {
+        combat::Replay::Enchantment(s) => enchantment_lines(s, ctx, stores, poses, log),
+        combat::Replay::Line(line) => log.push_combat(*line),
+        combat::Replay::Ranged(line) => {
+            let subject = ctx.classify(line.subject, stores);
+            let object = ctx.classify(line.object, stores);
+            if ctx.in_range(line.subject, subject, poses)
+                || ctx.in_range(line.object, object, poses)
+            {
+                log.push_combat(*line);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
