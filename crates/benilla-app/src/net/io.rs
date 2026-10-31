@@ -1871,7 +1871,7 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
             mail_id,
             template_id,
         } => w.mail_create_text_item(mailbox, mail_id, template_id),
-        ClientCommand::ItemTextQuery { text_id, mail_id } => w.item_text_query(text_id, mail_id),
+        ClientCommand::ItemTextQuery { text_id, key } => w.item_text_query(text_id, key),
         ClientCommand::QueryNextMailTime => w.query_next_mail_time(),
         // The auction house: the auctioneer guid rides on every verb.
         ClientCommand::AuctionHello { auctioneer } => w.auction_hello(auctioneer),
