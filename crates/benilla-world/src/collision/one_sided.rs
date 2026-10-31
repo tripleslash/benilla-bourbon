@@ -28,7 +28,7 @@ use avian3d::character_controller::move_and_slide::{
 use avian3d::parry::bounding_volume::Aabb as ParryAabb;
 use avian3d::parry::math::Pose3;
 use avian3d::parry::query::{
-    cast_shapes, contact, Ray, RayCast, ShapeCastOptions, ShapeCastStatus,
+    cast_shapes, contact, PointQuery, Ray, RayCast, ShapeCastOptions, ShapeCastStatus,
 };
 use avian3d::parry::shape::Triangle;
 use avian3d::prelude::*;
@@ -49,6 +49,12 @@ const DOT_EPSILON: f32 = 0.005;
 /// vertex nearer as a hit at `t = 0`. Measured on the vertices: a penetration depth would drop a
 /// sloped floor just above the feet, and the body would fall through the world.
 const BACKFACE_BAND: f32 = 1.0 / 36.0;
+
+/// The foot cone's slope, `[0x80c740]`: its bevels rise `radius · 1.8494` from the foot (`0x631440`).
+const FOOT_CONE_SLOPE: f32 = 1.849_399;
+
+/// A face tipped no further than this from vertical has no floor to stand under.
+const FACE_UP_EPS: f32 = 1.0e-3;
 
 /// parry's cast reaches both faces of one edge within this (yd) of each other; 1e-4 splits them.
 /// Deviation: the reference keeps the later record in file order on an exact tie (`0x6327e2`),
@@ -486,7 +492,52 @@ fn behind_the_band(tri: &Triangle, shape_pose: &Pose3, shape: &Collider, dir: Ve
         .into_iter()
         .map(|v| v.dot(dir) - lead)
         .fold(f32::MIN, f32::max);
-    ahead < -BACKFACE_BAND
+    ahead < -BACKFACE_BAND && !cuts_the_foot_cone(tri, shape_pose, shape, dir)
+}
+
+/// Whether a descent still meets this floor at `t = 0` though every vertex is above the feet. A
+/// down sweep's leading faces are the four bevels (`collision/steps`, down-probe manifold), and
+/// `0x632830` measures the face, clipped to the volume, against each: a floor crossing the cone
+/// reaches a bevel at some point, whatever its height over the foot. So a walk up a ramp whose top
+/// edge stops short of the landing, with no riser between them (Shadowfang Keep's entrance stairs),
+/// ends standing on the landing rather than under it. Past the cone's height the volume is the box,
+/// and the floor has been passed.
+fn cuts_the_foot_cone(tri: &Triangle, shape_pose: &Pose3, shape: &Collider, dir: Vec3) -> bool {
+    let shape = shape.shape_scaled();
+    let (Some(capsule), Some(normal)) = (shape.as_capsule(), tri.normal()) else {
+        return false;
+    };
+    let up = shape_pose.rotation * Vec3::Y;
+    let facing = normal.dot(up);
+    if dir.dot(up) >= 0.0 || facing < FACE_UP_EPS {
+        return false;
+    }
+    let foot = shape
+        .as_support_map()
+        .map_or(shape_pose.translation, |s| s.support_point(shape_pose, -up));
+    // Over the bevels, a point's travel to the cone is `slope · (off the axis) − (over the foot)`.
+    let split = |v: Vec3| {
+        let rel = v - foot;
+        let over = rel.dot(up);
+        (rel - up * over, over)
+    };
+    let to_cone = |off: Vec3, over: f32| FOOT_CONE_SLOPE * off.length() - over;
+    let [a, b, c] = [tri.a, tri.b, tri.c].map(split);
+    // The face must reach a bevel, as the clipped polygon's vertices do in `0x632910`.
+    let reach = [a, b, c]
+        .into_iter()
+        .map(|(off, over)| to_cone(off, over))
+        .fold(f32::MIN, f32::max);
+    if reach <= -BACKFACE_BAND {
+        return false;
+    }
+    // The floor's nearest point to the axis must lie in the cone.
+    let near = Triangle::new(a.0, b.0, c.0)
+        .project_local_point(Vec3::ZERO, true)
+        .point;
+    let over = (normal.dot(tri.a - foot) - normal.dot(near)) / facing;
+    let height = capsule.radius * FOOT_CONE_SLOPE;
+    over > 0.0 && over <= height + BACKFACE_BAND && to_cone(near, over) <= 0.0
 }
 
 /// The local-frame box bounding a world AABB's eight corners.
@@ -706,14 +757,45 @@ mod tests {
         );
         assert_eq!(
             sweep(&mut flat, feet_under, Vec3::NEG_Y * 0.2),
-            None,
-            "a flat floor more than 1/36 yd above the feet has been passed"
+            Some(0.0),
+            "a floor crossing the foot cone reaches a bevel: a hit at t = 0"
         );
         let feet_just_under = Vec3::new(0.0, 0.9 - 0.02, 0.0);
         assert_eq!(
             sweep(&mut flat, feet_just_under, Vec3::NEG_Y * 0.2),
             Some(0.0),
             "a floor within the band is a hit at t = 0"
+        );
+        // The cone of a 0.4 yd body is 0.74 yd tall.
+        let feet_past_the_cone = Vec3::new(0.0, 0.9 - 0.8, 0.0);
+        assert_eq!(
+            sweep(&mut flat, feet_past_the_cone, Vec3::NEG_Y * 0.2),
+            None,
+            "a flat floor above the foot cone has been passed"
+        );
+        assert_eq!(
+            sweep(&mut flat, feet_under, Vec3::X * 0.2),
+            None,
+            "a walk meets no floor it is under: the facing gate drops it"
+        );
+    }
+
+    /// A floor the body's axis misses, wholly beside the cone, does not stop its descent.
+    #[test]
+    fn a_floor_beside_the_foot_cone_is_passed() {
+        let mut ledge = world_with_mesh(
+            vec![
+                Vec3::new(0.2, 0.1, -5.0),
+                Vec3::new(5.0, 0.1, -5.0),
+                Vec3::new(5.0, 0.1, 5.0),
+                Vec3::new(0.2, 0.1, 5.0),
+            ],
+            vec![[0u32, 2, 1], [0, 3, 2]],
+        );
+        // The capsule overlaps the ledge, whose edge is well off the 0.054 yd the cone reaches 0.1 yd up.
+        assert_eq!(
+            sweep(&mut ledge, Vec3::new(0.0, 0.9, 0.0), Vec3::NEG_Y * 0.2),
+            None
         );
     }
 

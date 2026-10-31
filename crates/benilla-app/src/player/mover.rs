@@ -1188,6 +1188,133 @@ mod tests {
         }
     }
 
+    /// A ramp whose top edge stops short of the landing, with no riser between them, as Shadowfang
+    /// Keep's entrance stairs do at WoW `(-196.2, 2143.9, 86.5)`: 0.14 yd under it at one side, 0 at
+    /// the other. Every lane of it ends standing on the landing, its feet under the plane at most by
+    /// the gap, and none goes through (`0x632830`, the band measured on the bevels).
+    #[test]
+    fn a_ramp_stopping_short_of_its_landing_walks_onto_it() {
+        const GAP: f32 = 0.14;
+        const TOP: f32 = 1.5;
+        // The ramp rises along +X to x = 3; the landing runs on from there at y = TOP.
+        let verts = vec![
+            Vec3::new(-3.0, 0.0, -2.0),
+            Vec3::new(-3.0, 0.0, 2.0),
+            Vec3::new(3.0, TOP - GAP, 2.0),
+            Vec3::new(3.0, TOP, -2.0),
+            Vec3::new(3.0, TOP, 2.0),
+            Vec3::new(9.0, TOP, 2.0),
+            Vec3::new(9.0, TOP, -2.0),
+        ];
+        for (i, lane) in [-1.5f32, -0.5, 0.5, 1.0, 1.5, 1.9].into_iter().enumerate() {
+            let tris = vec![[0, 1, 2], [0, 2, 3], [3, 4, 5], [3, 5, 6]];
+            let mut world = world_from_trimesh(verts.clone(), tris);
+            let rows = world
+                .world_mut()
+                .run_system_once(move |world: benilla_world::collision::WorldCollision| {
+                    let capsule = player_capsule();
+                    let mut time = Time::default();
+                    time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                    let mut player = Player {
+                        pos: Vec3::new(1.0, 1.1, lane),
+                        ..Default::default()
+                    };
+                    (0..60)
+                        .map(|_| {
+                            let out = step(
+                                &mut player,
+                                &time,
+                                &world,
+                                &capsule,
+                                true,
+                                Vec3::X,
+                                7.0,
+                                false,
+                                false,
+                                None,
+                                None,
+                                AIR_NUDGE_SPEED,
+                            );
+                            (out.grounded, player.pos)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap();
+            let (grounded, end) = *rows.last().unwrap();
+            assert!(
+                grounded && end.x > 4.0 && end.y > TOP - GAP - 0.02,
+                "lane {i} at z {lane}: the body must stand on the landing: {rows:?}"
+            );
+            assert!(
+                rows.iter().all(|r| r.0),
+                "lane {i} at z {lane}: no frame of the walk may fall: {rows:?}"
+            );
+        }
+    }
+
+    /// Shadowfang Keep's entrance stairs, up from WoW `(-193.0, 2143.5, 85.1)` onto the 86.5 yd
+    /// landing, on every lane the walls leave: the ramp's top edge runs 0 to 0.14 yd under the
+    /// landing with no riser, and the lanes where it stops furthest under went through.
+    #[test]
+    fn the_shadowfang_entrance_stairs_end_on_their_landing() {
+        use benilla_assets::coords::wow_to_bevy;
+        let Some(mut world) =
+            world_from_wmo("Shadowfang", "ld_shadowfanginterior", -196.0, 2144.0, 40.0)
+        else {
+            return;
+        };
+        let ends = world
+            .world_mut()
+            .run_system_once(|world: benilla_world::collision::WorldCollision| {
+                let capsule = player_capsule();
+                let half = Vec3::Y * (CAPSULE_HEIGHT * 0.5);
+                let mut time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                let from = wow_to_bevy([-193.04, 2143.5, 85.5]);
+                let to = wow_to_bevy([-196.0, 2144.89, 85.5]);
+                let up = (to - from).normalize();
+                let side = Vec3::new(-up.z, 0.0, up.x);
+                (-20..=10)
+                    .filter_map(|lane| {
+                        let lane = lane as f32 * 0.1;
+                        let top = from - up + side * lane;
+                        let hit =
+                            world.cast_mover(&capsule, top + half, Vec3::NEG_Y, SKIN_WIDTH)?;
+                        let mut player = Player {
+                            pos: top - Vec3::Y * hit.distance,
+                            ..Default::default()
+                        };
+                        for _ in 0..70 {
+                            step(
+                                &mut player,
+                                &time,
+                                &world,
+                                &capsule,
+                                true,
+                                up,
+                                7.0,
+                                false,
+                                false,
+                                None,
+                                None,
+                                AIR_NUDGE_SPEED,
+                            );
+                        }
+                        Some((lane, player.pos.y))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        assert!(
+            ends.len() > 20,
+            "the lanes must start on the ramp: {ends:?}"
+        );
+        assert!(
+            ends.iter().all(|&(_, y)| y > 86.3),
+            "every lane must end on the 86.5 yd landing: {ends:?}"
+        );
+    }
+
     /// A Stormwind Trade District kerb: a 0.28 yd sidewalk behind a ~61° bevel, profiled from a
     /// `stup` scan at the spot.
     fn world_with_kerb() -> App {
@@ -1402,23 +1529,7 @@ mod tests {
             }
         }
         assert!(!tris.is_empty(), "no {wmo} faces near ({x}, {y})");
-        let mut app = App::new();
-        app.init_resource::<benilla_world::collision::MoverTraceExclusions>();
-        app.add_plugins((
-            MinimalPlugins,
-            bevy::transform::TransformPlugin,
-            bevy::asset::AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
-            PhysicsPlugins::new(bevy::app::PostUpdate),
-        ));
-        app.init_asset::<Mesh>();
-        app.world_mut().spawn((
-            RigidBody::Static,
-            Collider::trimesh(verts, tris),
-            Transform::default(),
-        ));
-        app.update();
-        Some(app)
+        Some(world_from_trimesh(verts, tris))
     }
 
     /// Feet heights of a body dropped onto the floor under the WoW pin `(x, y, z)` and walked
