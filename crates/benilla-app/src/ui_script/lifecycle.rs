@@ -6,6 +6,7 @@
 use bevy::prelude::*;
 
 use benilla_assets::{LockRecover, LooseOpen};
+use benilla_ui::script::origin::{within, Origin};
 use benilla_ui::script::UiScript;
 use benilla_world::frame_pace::FrameStep;
 
@@ -70,7 +71,11 @@ fn install_glue_vm(world: &mut World, screen: Option<&str>) -> bool {
     // The billing verbs read the connection's word too (`0x46dbf0`, `0x46dc40`, `0x46dcf0`).
     seed_billing(world, &mut script);
     let start = bevy::platform::time::Instant::now();
-    let failures = super::glue::load_glue(&mut script);
+    // The build signals `FRAMES_LOADED` itself (`0x46aa34`), outside any packet.
+    let failures = within(
+        Origin::Allowed("ui_script::lifecycle::install_glue_vm"),
+        || super::glue::load_glue(&mut script),
+    );
     super::glue::finish_glue_load_log(&mut script);
     start_server_alert(world, &script);
     // What the glue carries across its rebuild, in place before the screen's `OnShow` reads it.
@@ -84,7 +89,11 @@ fn install_glue_vm(world: &mut World, screen: Option<&str>) -> bool {
     // `SetCurrentScreen`'s buffer is the client's (`[0xb41478]`) and outlives the Lua state: a
     // rebuild signals what it holds (`0x46b9a2`), and the screen's handler writes the same name.
     script.set_glue_screen_name(screen);
-    super::glue::signal_glue_screen(&mut script, screen);
+    // And the screen (`0x46b848`).
+    within(
+        Origin::Allowed("ui_script::lifecycle::install_glue_vm"),
+        || super::glue::signal_glue_screen(&mut script, screen),
+    );
     info!(
         "ui_script: stock glue up in {:.0} ms on \"{}\" ({} load failure(s))",
         start.elapsed().as_secs_f32() * 1000.0,
@@ -579,6 +588,16 @@ pub(crate) fn ingame_ui_up_in(world: &World) -> bool {
 /// [`shut_down_session`] then skips the shutdown writes, so a UI-less VM never overwrites the
 /// saved files.
 pub(crate) fn run_pending_entry_load(world: &mut World) {
+    // The load signals its own events, `VARIABLES_LOADED` among them (`0x49156a`), outside any
+    // packet, in every slice.
+    within(
+        Origin::Allowed("ui_script::lifecycle::run_pending_entry_load"),
+        || entry_load_slice(world),
+    );
+}
+
+/// One frame's slice of [`run_pending_entry_load`].
+fn entry_load_slice(world: &mut World) {
     if world.get_resource::<PendingEntryUiLoad>().is_none() {
         return;
     }
@@ -1206,12 +1225,19 @@ fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
     // bracket open across its frames instead.
     // The files run with a call host lent, built off the world as a system's would be, so a call
     // a file makes applies inside its verb; [`entry_finish`] lends one to each of its phases.
-    silenced_ui_load(&mut script, |script| {
-        crate::script_calls::lent_by_world(world, script, |script| {
-            let _ = load_ingame_ui(script, identity.as_ref(), &roster, version_check);
-        });
-        entry_finish(world, script, identity, seat);
-    });
+    // The load signals its own events, `VARIABLES_LOADED` among them (`0x49156a`), outside any
+    // packet.
+    within(
+        Origin::Allowed("ui_script::lifecycle::load_ingame_ui_seated"),
+        || {
+            silenced_ui_load(&mut script, |script| {
+                crate::script_calls::lent_by_world(world, script, |script| {
+                    let _ = load_ingame_ui(script, identity.as_ref(), &roster, version_check);
+                });
+                entry_finish(world, script, identity, seat);
+            });
+        },
+    );
     world.insert_non_send(script);
     arm_leaving_world(world);
 }
@@ -1516,8 +1542,11 @@ pub(crate) fn install_session_glue(world: &mut World) {
 fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     // The front runs before the unpark, so a VM still parked (the load never ran) hears none of
     // it; the sweep's latch is spent at the root, so of this edge and the worldport's, the first
-    // to a departure owns it.
-    let silenced = run_shutdown_front(world, root);
+    // to a departure owns it. The shutdown signals itself, at its root (`0x490b4d`, `0x490c2a`).
+    let silenced = within(
+        Origin::Allowed("ui_script::lifecycle::close_ui_session"),
+        || run_shutdown_front(world, root),
+    );
     // A VM still parked goes back into the world first.
     unpark_glue_vm(world);
     // An entry load still armed means no in-game UI was built, and the tail would overwrite the
@@ -1532,7 +1561,10 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     if !ui_never_loaded {
         crate::script_calls::with_hosted_vm(world, |script| {
             if let Some(script) = script {
-                shutdown_ui_state(script, identity.as_ref(), layout_held);
+                within(
+                    Origin::Allowed("ui_script::lifecycle::close_ui_session"),
+                    || shutdown_ui_state(script, identity.as_ref(), layout_held),
+                );
             }
         });
         // The shutdown's account-data writes (`0x490c55`-`0x490c79` through `0x5afed0`) arm
