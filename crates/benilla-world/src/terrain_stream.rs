@@ -597,7 +597,7 @@ impl ViewFocus {
     /// live paced body and for a cinematic's camera; through entry, a teleport and a world swap
     /// the loading cover or the settle hold waits instead.
     ///
-    /// Deviation: the debug free-fly eye holds nothing: it is benilla's own tool with no
+    /// Deviation: the debug free-fly eye holds nothing because it is benilla's own tool with no
     /// reference counterpart, and a stall there only slows the developer.
     pub(crate) fn holds_inner(&self) -> bool {
         (self.follows_body() && self.paced) || self.cinematic
@@ -1120,7 +1120,7 @@ struct InnerWaitCap(Duration);
 ///
 /// Deviation: a read still loading after [`INNER_WAIT_CAP`] is given up on with a warning, once
 /// per request, and its tile then streams on unwaited like the outer ring, where the reference
-/// waits for ever: a hung read costs one capped stall, not one every frame.
+/// waits for ever, because that way a hung read costs one capped stall, not one every frame.
 #[cfg(not(target_arch = "wasm32"))]
 fn await_inner_tiles(world: &mut World) {
     let pending: Vec<((i32, i32), Handle<AdtTile>)> = {
@@ -1187,8 +1187,8 @@ fn await_inner_tiles(world: &mut World) {
     }
 }
 
-/// Deviation: the page waits for nothing. Its one thread cannot block on a fetch, which lands
-/// only once the frame yields to the browser; the held inner tiles are still requested first and
+/// Deviation: the page waits for nothing, because its one thread cannot block on a fetch, which
+/// lands only once the frame yields to the browser; the held inner tiles are still requested first and
 /// built unbudgeted, and the stand-in lane (`provisional`) and the loading cover's backstop
 /// stand in for the wait.
 #[cfg(target_arch = "wasm32")]

@@ -90,8 +90,8 @@ pub const LOD_DIST_SHIPPED: f32 = 500.0;
 /// The range `lodDist`'s callback (`0x688ab0`) accepts; outside it, it prints its line and stores
 /// [`LOD_DIST_FALLBACK`] (`0x688af4`).
 ///
-/// Deviation: the reference accepts 50 to 250; the top is raised to the fork's 1000 yd far clip so
-/// the shipped [`LOD_DIST_SHIPPED`] passes its own check.
+/// Deviation: the reference accepts 50 to 250; the top is raised to the fork's 1000 yd far clip
+/// because the shipped [`LOD_DIST_SHIPPED`] must pass its own check.
 pub const LOD_DIST_RANGE: std::ops::RangeInclusive<f32> = 50.0..=1000.0;
 /// `0x429a0000`, what an out-of-range `lodDist` stores.
 pub const LOD_DIST_FALLBACK: f32 = 77.0;

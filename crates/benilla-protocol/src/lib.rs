@@ -196,8 +196,8 @@ fn pick<T: Clone>(addrs: &[T], draw: u32) -> Option<T> {
 /// for a name that resolves to none (`0x43ba18`). One is drawn at random ([`pick`]), as
 /// `ClientLink::Connect` (`0x5bc3e0`) hands the list to `ConnectToRandomAddress`.
 ///
-/// Deviation: on the web the page resolves nothing (the host proxies the dial), so the draw is
-/// among the pieces themselves, each counting once whatever its name resolves to.
+/// Deviation: on the web the draw is among the pieces themselves, each counting once whatever its
+/// name resolves to, because the page resolves nothing (the host proxies the dial).
 fn logon_target(realmlist: &str) -> Result<(String, u16, String)> {
     let pieces = logon_pieces(realmlist);
     let address = pieces

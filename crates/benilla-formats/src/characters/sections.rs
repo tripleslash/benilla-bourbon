@@ -312,7 +312,7 @@ impl CharSections {
     /// when that row does. Deviation: 1.12.1 builds no component for a colour without its row
     /// (`0x476b90`'s `0x477c20(0, 0, skin)` at `0x476bff`) and what it draws then is not traced; a
     /// server can send such a colour (a female Blood Elf with skin 17, where CharSections stops at
-    /// 10), and a body drawn on colour 0 beats one drawn white.
+    /// 10), and colour 0 stands in because a body drawn on it beats one drawn white.
     pub fn effective_skin(&self, race: u8, sex: u8, skin_color: u8) -> u8 {
         if self.skin_texture(race, sex, skin_color).is_none()
             && self.skin_texture(race, sex, 0).is_some()

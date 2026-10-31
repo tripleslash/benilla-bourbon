@@ -10,9 +10,9 @@
 //! its mesh untouched, as the reference keeps a chunk's buffers while its key at `+0xbc` holds. The
 //! draw only: collision, `height_at` and the pick read the decoded chunks, never these indices.
 //!
-//! Deviation: the reference rebuilds a changed chunk's indices the frame it draws; a cell rebuild
-//! here costs a vertex upload too, so at most [`REBUILDS_PER_FRAME`] cells rebuild a frame, the
-//! nearest first, and a far cell may draw its old level for a few frames after a turn.
+//! Deviation: the reference rebuilds a changed chunk's indices the frame it draws; at most
+//! [`REBUILDS_PER_FRAME`] cells rebuild a frame here, the nearest first, because a cell rebuild
+//! costs a vertex upload too, and a far cell may draw its old level for a few frames after a turn.
 
 use std::sync::Arc;
 

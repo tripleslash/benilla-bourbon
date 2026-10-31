@@ -734,6 +734,7 @@ const TYPE_GAMEOBJECT: u32 = 0x21;
 const GAMEOBJECT_FLAGS: u16 = 9;
 const GO_TRANSPORT: u32 = 0x8;
 const FORWARD: u32 = crate::creature_anim::move_flags::FORWARD;
+const ROOT: u32 = crate::creature_anim::move_flags::ROOT;
 
 /// A deck's descriptor: a game object flagged a transport.
 fn deck_fields() -> [(u16, u32); 2] {
@@ -852,6 +853,320 @@ fn a_listener_reads_a_late_mover_stepped_on_by_its_lateness() {
     assert_eq!(seen, ["0.7034,0.8000"]);
 }
 
+/// `mv` stamped `stamp` on the server's clock.
+fn stamped(mut mv: SessionEvent, stamp: u32) -> SessionEvent {
+    if let SessionEvent::UnitMove { time, .. } = &mut mv {
+        *time = stamp;
+    }
+    mv
+}
+
+/// A queued move the frame's tick fires inside its window stands the mover at its fire-time, and
+/// only the window's rest moves it on: `CMovement::AdvanceTo` (`0x616620`) cuts its step at the
+/// queued head's time (`0x61668f`-`0x61669c`) and applies the move there (`0x615c30`). A move
+/// stamped 40 ms past the mover's last, arriving 32 ms after that one fired, fires 8 ms into the
+/// next frame's 16, which carries it 0.28 yd on at a run speed of 35, where a later packet's
+/// listener reads it.
+#[test]
+fn a_listener_reads_a_move_fired_mid_frame_stepped_on_from_its_fire_time() {
+    let mut c = seated(FORWARD);
+    let mate = c.app.world().resource::<crate::net::GuidIndex>().0[&MATE];
+    c.app
+        .world_mut()
+        .entity_mut(mate)
+        .insert(crate::net::UnitSpeeds(benilla_protocol::MoveSpeeds {
+            run: 35.0,
+            ..Default::default()
+        }));
+    fine_map_spy(&mut c, "party1");
+    c.frame(vec![vec![stamped(
+        heartbeat(MATE, [700.0, 800.0, 0.0], FORWARD, None),
+        40,
+    )]]);
+    c.frame(vec![]);
+    c.frame(vec![vec![member_at(MATE, 20, ELWYNN, (100, 200))]]);
+    let seen: Vec<String> = c.eval(false, "return Fine");
+    assert_eq!(seen, ["0.7003,0.8000"]);
+}
+
+/// A monster move keeps its mover's replay chain: the start flushes the queue and stops the
+/// mover (`0x6187a0` → `0x6185f0`, `0x61aa70`), and nothing of it writes bit 31, `+0xa8`, `+0xac`
+/// or the ring. The stop's held spline forces the first move after it (`0x618c43`), which still
+/// times on the chain: stamped a second past the mover's last, it fires a second past that one's
+/// fire (`@0x618d67`), and its apply frees the spline. The second, its stamp not advanced and the
+/// mover standing, re-bases no earlier than the first's fire (`@0x618d3b`), most of a second
+/// away, so the frame's tick leaves it queued and a later packet's listener reads the member
+/// where the first put it.
+#[test]
+fn a_listener_reads_a_member_whose_moves_after_a_stop_time_on_its_chain() {
+    let mut c = seated(0);
+    c.frame(vec![vec![halt(MATE, [500.0, 600.0, 0.0])]]);
+    c.frame(vec![vec![stamped(
+        heartbeat(MATE, [700.0, 800.0, 0.0], 0, None),
+        1000,
+    )]]);
+    c.frame(vec![vec![stamped(
+        heartbeat(MATE, [900.0, 800.0, 0.0], 0, None),
+        1000,
+    )]]);
+    c.frame(vec![vec![member_at(MATE, 20, ELWYNN, (100, 200))]]);
+    let seen: Vec<String> = c.eval(false, "return Maps");
+    assert_eq!(seen, ["0.7,0.8"]);
+}
+
+/// A path the root refuses still holds the mover's spline, so the next move applies at once,
+/// where a later packet's listener reads it: the refusal stops at the path's point through one
+/// (`0x601fee` → `0x6020cd` → `0x618750` → `0x619300`), and a held spline forces the apply
+/// (`0x618c43`).
+#[test]
+fn a_listener_reads_a_rooted_members_move_after_a_refused_path_where_it_put_it() {
+    let mut c = seated(0);
+    c.frame(vec![
+        vec![SessionEvent::SplineMoveMode {
+            guid: MATE,
+            mode: benilla_protocol::SplineMode::Root,
+            apply: true,
+        }],
+        vec![walk(
+            MATE,
+            [500.0, 600.0, 0.0],
+            [900.0, 600.0, 0.0],
+            100_000,
+        )],
+    ]);
+    c.frame(vec![
+        vec![heartbeat(MATE, [700.0, 800.0, 0.0], 0, None)],
+        vec![member_at(MATE, 20, ELWYNN, (100, 200))],
+    ]);
+    let seen: Vec<String> = c.eval(false, "return Maps");
+    assert_eq!(seen, ["0.7,0.8"]);
+}
+
+/// A stop 10 yd from its member runs it there: the stop form is a path when its point is 3 yd
+/// or more off (`0x6019be`), one leg at 4× the run speed (`0x601f49`), 28 yd/s here, over
+/// `len / speed · 1000` = 357 ms (`0x601f9d`-`0x601fcc`); at its end a later packet's listener
+/// reads the member at the stop point.
+#[test]
+fn a_listener_reads_a_member_a_far_stop_ran_to_at_the_stop_point() {
+    let mut c = seated(0);
+    fine_map_spy(&mut c, "party1");
+    let mate = c.app.world().resource::<crate::net::GuidIndex>().0[&MATE];
+    c.app
+        .world_mut()
+        .entity_mut(mate)
+        .insert(crate::net::UnitSpeeds(benilla_protocol::MoveSpeeds {
+            run: 7.0,
+            ..Default::default()
+        }));
+    c.frame(vec![vec![halt(MATE, [510.0, 600.0, 0.0])]]);
+    let spline = c
+        .app
+        .world()
+        .get::<crate::net::Spline>(mate)
+        .expect("the far stop runs a path");
+    assert_eq!(spline.points, [[500.0, 600.0, 0.0], [510.0, 600.0, 0.0]]);
+    assert_eq!(spline.duration, std::time::Duration::from_millis(357));
+    // The path's clock is real time: run it to its end.
+    c.app
+        .world_mut()
+        .get_mut::<crate::net::Spline>(mate)
+        .expect("still riding")
+        .start -= std::time::Duration::from_secs(1);
+    c.frame(vec![]);
+    c.frame(vec![vec![member_at(MATE, 20, ELWYNN, (100, 200))]]);
+    let seen: Vec<String> = c.eval(false, "return Fine");
+    assert_eq!(seen, ["0.5100,0.6000"]);
+}
+
+/// A monster move's stop holds its spline, so the next move applies at once, where a later
+/// packet's listener reads it: a stop within 3 yd allocates the mover's spline (`0x6019be` →
+/// `0x618750` → `0x619300`), whose end keeps it for a remote mover (`0x619de0`), and a held
+/// spline forces the apply (`0x618c43`).
+#[test]
+fn a_listener_reads_a_member_whose_move_after_a_stop_applied_at_once() {
+    let mut c = seated(FORWARD);
+    c.frame(vec![vec![halt(MATE, [500.0, 600.0, 0.0])]]);
+    c.frame(vec![
+        vec![stamped(
+            heartbeat(MATE, [700.0, 800.0, 0.0], FORWARD, None),
+            148,
+        )],
+        vec![member_at(MATE, 20, ELWYNN, (100, 200))],
+    ]);
+    let seen: Vec<String> = c.eval(false, "return Maps");
+    assert_eq!(seen, ["0.7,0.8"]);
+}
+
+/// `SMSG_MONSTER_MOVE` walking `guid` from `from` to `to` over `duration_ms`.
+fn walk(guid: u64, from: [f32; 3], to: [f32; 3], duration_ms: u32) -> SessionEvent {
+    SessionEvent::MonsterMove {
+        guid,
+        transport: None,
+        start: from,
+        spline_id: 2,
+        path: vec![from, to],
+        facing: benilla_protocol::MonsterMoveFacing::None,
+        stop: false,
+        duration_ms,
+        flying: false,
+        run_mode: true,
+    }
+}
+
+/// A relayed move that arrives while its unit walks a server path applies at once, where a later
+/// packet's listener reads it: a live spline (`+0xa4`) forces the apply (`0x618c43`), so the
+/// standing mover's move is neither re-based past its arrival (`0x618cfc`-`0x618d41`) nor left
+/// queued for the tick.
+#[test]
+fn a_listener_reads_a_member_moved_off_a_path_where_its_packet_put_it() {
+    let mut c = seated(0);
+    c.frame(vec![vec![walk(
+        MATE,
+        [500.0, 600.0, 0.0],
+        [900.0, 600.0, 0.0],
+        100_000,
+    )]]);
+    c.frame(vec![
+        vec![heartbeat(MATE, [700.0, 800.0, 0.0], 0, None)],
+        vec![member_at(MATE, 20, ELWYNN, (100, 200))],
+    ]);
+    let seen: Vec<String> = c.eval(false, "return Maps");
+    assert_eq!(seen, ["0.7,0.8"]);
+}
+
+/// A path that stops leaves its member where the path had it, where a later packet's listener
+/// reads it: the follower writes the mover's position each step (`0x7c5490`), so the mover stands
+/// there once the stop ends the path, not where it stood before the path. A stop within 3 yd of
+/// the unit leaves it there (`0x6019be` → `0x618750`, `0x616d30` snapping only from 3 yd), so the
+/// stop's own point, 2 yd on, is not where it stands either. The walk crawls a yard in 1000 s.
+#[test]
+fn a_listener_reads_a_member_whose_path_stopped_where_the_path_left_it() {
+    let mut c = seated(0);
+    fine_map_spy(&mut c, "party1");
+    c.frame(vec![vec![walk(
+        MATE,
+        [700.0, 600.0, 0.0],
+        [701.0, 600.0, 0.0],
+        1_000_000,
+    )]]);
+    c.frame(vec![]);
+    c.frame(vec![vec![halt(MATE, [702.0, 600.0, 0.0])]]);
+    c.frame(vec![]);
+    c.frame(vec![vec![member_at(MATE, 20, ELWYNN, (100, 200))]]);
+    let seen: Vec<String> = c.eval(false, "return Fine");
+    assert_eq!(seen, ["0.7000,0.6000"]);
+}
+
+/// The first relayed move after a path has ended still applies at once, and the next one waits:
+/// a remote unit's mover keeps its path's spline past the end (`0x619de0` frees only the active
+/// player's), which forces the next relay (`0x618c43`), whose apply frees it (`0x618f43` →
+/// `0x7c6310`). So a later packet's listener reads the member where the first move put it, and
+/// still there after the second, which the frame's tick has not yet fired.
+#[test]
+fn a_listener_reads_the_first_move_after_a_path_where_it_put_it_and_the_next_where_it_stood() {
+    let mut c = seated(0);
+    c.frame(vec![vec![walk(
+        MATE,
+        [500.0, 600.0, 0.0],
+        [510.0, 600.0, 0.0],
+        1,
+    )]]);
+    c.frame(vec![]);
+    let mate = c.app.world().resource::<crate::net::GuidIndex>().0[&MATE];
+    assert!(
+        c.app.world().get::<crate::net::Spline>(mate).is_none(),
+        "the path has ended"
+    );
+    c.frame(vec![
+        vec![heartbeat(MATE, [700.0, 800.0, 0.0], 0, None)],
+        vec![member_at(MATE, 20, ELWYNN, (100, 200))],
+    ]);
+    c.frame(vec![
+        vec![heartbeat(MATE, [900.0, 800.0, 0.0], 0, None)],
+        vec![member_at(MATE, 10, ELWYNN, (100, 200))],
+    ]);
+    let seen: Vec<String> = c.eval(false, "return Maps");
+    assert_eq!(seen, ["0.7,0.8", "0.7,0.8"]);
+}
+
+/// A relayed move takes its member's swim state back from the water-at-feet mark a server path
+/// left on it, so a player feared through water and relayed on land does not swim on: the relay's
+/// word carries the swim bit (`0x618de7`), and nothing re-asks the water for a relayed player.
+#[test]
+fn a_relayed_move_drops_the_swim_mark_a_path_left() {
+    let mut c = seated(0);
+    let mate = c.app.world().resource::<crate::net::GuidIndex>().0[&MATE];
+    c.app
+        .world_mut()
+        .entity_mut(mate)
+        .insert(crate::net::CreatureSwimming);
+    c.frame(vec![vec![heartbeat(MATE, [500.0, 600.0, 0.0], 0, None)]]);
+    assert!(
+        c.app
+            .world()
+            .get::<crate::net::CreatureSwimming>(mate)
+            .is_none(),
+        "the relay's dry word, not the mark, says whether it swims"
+    );
+}
+
+/// `SMSG_MONSTER_MOVE` stopping `guid` at `at`.
+fn halt(guid: u64, at: [f32; 3]) -> SessionEvent {
+    SessionEvent::MonsterMove {
+        guid,
+        transport: None,
+        start: at,
+        spline_id: 4,
+        path: Vec::new(),
+        facing: benilla_protocol::MonsterMoveFacing::None,
+        stop: true,
+        duration_ms: 0,
+        flying: false,
+        run_mode: true,
+    }
+}
+
+/// A monster move drops its member's queued plain move, so the frame after, a listener reads the
+/// member where it stood: the start's flush hands every node to `0x618080`, whose plain-move and
+/// heartbeat tags reach no case (`0x61851e`).
+#[test]
+fn a_listener_reads_a_member_whose_queued_move_a_monster_move_dropped_where_it_stood() {
+    let mut c = seated(0);
+    c.frame(vec![
+        vec![heartbeat(MATE, [700.0, 800.0, 0.0], 0, None)],
+        vec![halt(MATE, [500.0, 600.0, 0.0])],
+    ]);
+    c.frame(vec![vec![member_at(MATE, 20, ELWYNN, (100, 200))]]);
+    let seen: Vec<String> = c.eval(false, "return Maps");
+    assert_eq!(seen, ["0.5,0.6"]);
+}
+
+/// A queued root the monster move's flush applies refuses its path: the flush's root case roots
+/// the mover (`0x618425` → `0x619a00`), and the start tests the root bit after the flush
+/// (`0x6187c2`), so no path installs.
+#[test]
+fn a_queued_root_refuses_the_monster_move_that_flushes_it() {
+    let mut c = seated(0);
+    let mut root = heartbeat(MATE, [500.0, 600.0, 0.0], ROOT, None);
+    if let SessionEvent::UnitMove { verb, .. } = &mut root {
+        *verb = benilla_protocol::RelayVerb::Root(true);
+    }
+    c.frame(vec![
+        vec![root],
+        vec![walk(
+            MATE,
+            [500.0, 600.0, 0.0],
+            [900.0, 600.0, 0.0],
+            100_000,
+        )],
+    ]);
+    let mate = c.app.world().resource::<crate::net::GuidIndex>().0[&MATE];
+    assert!(
+        c.app.world().get::<crate::net::Spline>(mate).is_none(),
+        "the rooted mover takes no path"
+    );
+}
+
 /// A standing member's packet waits for the frame's tick, so a later packet's listener reads the
 /// member where it stood: the re-base puts the fire-time at or past the arrival
 /// (`0x618cfc`-`0x618d41`), past the movement clock (`@0x618dd2`, `0x618dde`), and the move is
@@ -920,6 +1235,8 @@ fn living(mut create: SessionEvent, flags: u32, stamp: u32) -> SessionEvent {
             flags,
             pitch: 0.0,
             time: stamp,
+            fall_time: 0,
+            jump: None,
         });
     }
     create
@@ -948,6 +1265,172 @@ fn first_move_after(flags: u32) -> Vec<String> {
         vec![member_at(MATE, 20, ELWYNN, (100, 200))],
     ]);
     c.eval(false, "return Maps")
+}
+
+/// A member created running is dead-reckoned from its create, before any relayed move: the create
+/// applies its block and lists the mover while a flag of `0x20ff` is set (`0x619426` →
+/// `0x618940`), so each frame's tick steps it on (`0x616800` → `0x615b10`). Eleven frames of
+/// 16 ms at a run speed of 7 carry it 1.232 yd along its facing, +x, where a later packet's
+/// listener reads it.
+#[test]
+fn a_listener_reads_a_member_created_running_where_it_has_run_to() {
+    let mut c = client();
+    c.app
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(16),
+        ));
+    map_spy(&mut c, "party1");
+    fine_map_spy(&mut c, "party1");
+    let mut create = living(mate_created([500.0, 600.0, 0.0], None), FORWARD, 0);
+    if let SessionEvent::ObjectCreate { speeds, .. } = &mut create {
+        *speeds = Some(benilla_protocol::MoveSpeeds {
+            run: 7.0,
+            ..Default::default()
+        });
+    }
+    c.frame(vec![vec![create]]);
+    for _ in 0..10 {
+        c.frame(vec![]);
+    }
+    c.frame(vec![vec![member_at(MATE, 20, ELWYNN, (100, 200))]]);
+    let seen: Vec<String> = c.eval(false, "return Fine");
+    assert_eq!(seen, ["0.5012,0.6000"]);
+}
+
+/// A member created mid-jump goes on along its arc from its create: the apply copies the block's
+/// fall time and launch under `JUMPING` (`0x618e1b` → `0x7c6490`), so each frame's tick carries
+/// it on at the launch's horizontal speed. Eleven frames of 16 ms at 7 yd/s carry it 1.232 yd
+/// along the launch, +x, where a later packet's listener reads it.
+#[test]
+fn a_listener_reads_a_member_created_mid_jump_where_its_arc_has_carried_it() {
+    let mut c = client();
+    c.app
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(16),
+        ));
+    map_spy(&mut c, "party1");
+    fine_map_spy(&mut c, "party1");
+    let falling = crate::creature_anim::move_flags::FALLING;
+    let mut create = living(mate_created([500.0, 600.0, 0.0], None), falling, 0);
+    if let SessionEvent::ObjectCreate { mover: Some(m), .. } = &mut create {
+        m.fall_time = 100;
+        m.jump = Some(benilla_protocol::JumpInfo {
+            zspeed: -7.955_547,
+            cos_angle: 1.0,
+            sin_angle: 0.0,
+            xy_speed: 7.0,
+        });
+    }
+    c.frame(vec![vec![create]]);
+    for _ in 0..10 {
+        c.frame(vec![]);
+    }
+    c.frame(vec![vec![member_at(MATE, 20, ELWYNN, (100, 200))]]);
+    let seen: Vec<String> = c.eval(false, "return Fine");
+    assert_eq!(seen, ["0.5012,0.6000"]);
+}
+
+/// A member created on a path already ridden to its end stands where it was created: the create
+/// installs the path (`0x619387`), whose end the next tick reaches and stops the mover at
+/// (`0x7c5490` → `0x7c6c00`), so the forward bit the block carried does not run it on. Eleven
+/// frames at 7 yd/s would have carried it 1.232 yd.
+#[test]
+fn a_listener_reads_a_member_created_at_its_paths_end_where_it_stood() {
+    let mut c = client();
+    c.app
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(16),
+        ));
+    map_spy(&mut c, "party1");
+    fine_map_spy(&mut c, "party1");
+    let mut create = living(mate_created([500.0, 600.0, 0.0], None), FORWARD, 0);
+    if let SessionEvent::ObjectCreate { speeds, spline, .. } = &mut create {
+        *speeds = Some(benilla_protocol::MoveSpeeds {
+            run: 7.0,
+            ..Default::default()
+        });
+        *spline = Some(benilla_protocol::CreateSpline {
+            path: vec![[490.0, 600.0, 0.0], [500.0, 600.0, 0.0]],
+            id: 5,
+            time_passed_ms: 2000,
+            duration_ms: 2000,
+            flying: false,
+            cyclic: false,
+            run_mode: true,
+            facing: benilla_protocol::MonsterMoveFacing::None,
+        });
+    }
+    c.frame(vec![vec![create]]);
+    for _ in 0..10 {
+        c.frame(vec![]);
+    }
+    c.frame(vec![vec![member_at(MATE, 20, ELWYNN, (100, 200))]]);
+    let seen: Vec<String> = c.eval(false, "return Fine");
+    assert_eq!(seen, ["0.5000,0.6000"]);
+}
+
+/// A member created on a path already ridden stands at the path's end, facing down its last leg,
+/// where a later packet's listener reads it: the create installs the path (`0x619387`), whose
+/// end places the mover at the last point from 3 yd (`0x61a874` → `0x616d60`) and leaves the
+/// follower's heading (`0x7c5490`). Created at (500, 600), the path ends 14.1 yd off at
+/// (510, 610), heading +y.
+#[test]
+fn a_listener_reads_a_member_created_on_a_ridden_path_at_its_end() {
+    let mut c = client();
+    map_spy(&mut c, "party1");
+    fine_map_spy(&mut c, "party1");
+    let mut create = living(mate_created([500.0, 600.0, 0.0], None), FORWARD, 0);
+    if let SessionEvent::ObjectCreate { spline, .. } = &mut create {
+        *spline = Some(benilla_protocol::CreateSpline {
+            path: vec![[510.0, 590.0, 0.0], [510.0, 610.0, 0.0]],
+            id: 6,
+            time_passed_ms: 2000,
+            duration_ms: 2000,
+            flying: false,
+            cyclic: false,
+            run_mode: true,
+            facing: benilla_protocol::MonsterMoveFacing::None,
+        });
+    }
+    c.frame(vec![vec![create]]);
+    c.frame(vec![vec![member_at(MATE, 20, ELWYNN, (100, 200))]]);
+    let seen: Vec<String> = c.eval(false, "return Fine");
+    assert_eq!(seen, ["0.5100,0.6100"]);
+    let mate = c.app.world().resource::<crate::net::GuidIndex>().0[&MATE];
+    let facing = c
+        .app
+        .world()
+        .get::<crate::net::RemoteMotion>(mate)
+        .expect("mover state")
+        .orientation;
+    assert!(
+        (facing - std::f32::consts::FRAC_PI_2).abs() < 1e-5,
+        "down the last leg: {facing}"
+    );
+}
+
+/// A member created a second into a fall from rest starts its arc g/2, 9.6455 yd, above where it
+/// is created: the create's apply puts `z + D(ms)` at the mover's `+0x7c` (`0x618e1b` →
+/// `0x7c6490` → `0x7c5f30`), the height its landing measures its fall from.
+#[test]
+fn a_member_created_mid_fall_starts_its_arc_above_its_create() {
+    let mut c = client();
+    let falling = crate::creature_anim::move_flags::FALLING;
+    let mut create = living(mate_created([500.0, 600.0, 50.0], None), falling, 0);
+    if let SessionEvent::ObjectCreate { mover: Some(m), .. } = &mut create {
+        m.fall_time = 1000;
+        m.jump = Some(benilla_protocol::JumpInfo::default());
+    }
+    c.frame(vec![vec![create]]);
+    let mate = c.app.world().resource::<crate::net::GuidIndex>().0[&MATE];
+    let start = c
+        .app
+        .world()
+        .get::<crate::net::RemoteMotion>(mate)
+        .and_then(|rm| rm.fall_start)
+        .expect("a fall start")
+        .world_z;
+    assert!((start - 59.6455).abs() < 1e-3, "{start} yd");
 }
 
 /// A member's first move after a create that showed it moving is due at arrival, and seats in its

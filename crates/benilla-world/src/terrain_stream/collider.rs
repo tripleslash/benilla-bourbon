@@ -240,9 +240,9 @@ fn finish_now(task: Task<Collider>) -> Result<Collider, Task<Collider>> {
     Ok(block_on(task))
 }
 
-/// Deviation: the page cannot block its one thread on a build (a worker's result needs
-/// `Atomics.wait`, a local one the frame to yield), so an unfinished one is handed back to
-/// [`finish_colliders`] and the stand-in lane (`super::provisional`) holds the body meanwhile.
+/// Deviation: an unfinished build is handed back to [`finish_colliders`] and the stand-in lane
+/// (`super::provisional`) holds the body meanwhile, because the page cannot block its one thread
+/// on it (a worker's result needs `Atomics.wait`, a local one the frame to yield).
 #[cfg(target_arch = "wasm32")]
 fn finish_now(mut task: Task<Collider>) -> Result<Collider, Task<Collider>> {
     block_on(future::poll_once(&mut task)).ok_or(task)

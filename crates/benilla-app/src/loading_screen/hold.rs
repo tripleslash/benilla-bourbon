@@ -63,8 +63,8 @@ pub(crate) fn decide_present_hold(
     mut hold: ResMut<PresentHold>,
     mut frames: Local<u32>,
 ) {
-    // Deviation: the page holds no frame. A WebGPU canvas texture lives only until the end of the
-    // task that acquired it and the canvas shows whatever it holds then, so a withheld present is
+    // Deviation: the page holds no frame, because a WebGPU canvas texture lives only until the end
+    // of the task that acquired it and the canvas shows whatever it holds then, so a withheld present is
     // a blank canvas there, not the last frame; the destination streams in on screen instead.
     let held = cfg!(not(target_arch = "wasm32")) && player.is_some_and(|p| p.holds_the_frame());
     if held {

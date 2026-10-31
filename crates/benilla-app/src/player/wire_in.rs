@@ -286,7 +286,7 @@ pub(super) fn apply_server_moves(
         if w.needs_ack {
             if riding || boarding {
                 // Deviation: the reference acks after its blocking load (`0x401cae`); a rider acks
-                // now, so the server re-adds us to the boat at once. The hold keeps
+                // now, because then the server re-adds us to the boat at once. The hold keeps
                 // `ON_TRANSPORT` on the wire, so nothing it sends reads as a deboard.
                 let _ = net_cmds.0.send(ClientCommand::WorldportAck);
                 info!(

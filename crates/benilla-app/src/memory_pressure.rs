@@ -17,8 +17,8 @@
 //! and only `ViewDistance::farclip`, which every consumer reads, carries the cap. A setting moved
 //! while a cap holds is taken as the new setting, under the cap.
 //!
-//! Deviation: the reference has no such valve; its 32-bit process had the address space the page
-//! lacks.
+//! Deviation: the reference has no such valve, because its 32-bit process had the address space
+//! the page lacks.
 //!
 //! [`headroom`]: crate::wasm_alloc::headroom
 //! [`largest_run`]: crate::wasm_alloc::largest_run

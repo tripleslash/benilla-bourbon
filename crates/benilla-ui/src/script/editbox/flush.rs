@@ -32,7 +32,7 @@ pub(in crate::script) fn update(lua: &Lua, h: FrameHandle, dt: f32) {
 /// before the key or click acts.
 ///
 /// Deviation: the promotion's IME legs (`0x77d417`–`0x77d431`) and the IME writer's `or 6`
-/// (`0x77acde`, in `0x77ac60`) are not modelled: benilla has no IME composition.
+/// (`0x77acde`, in `0x77ac60`) are not modelled because benilla has no IME composition.
 /// Whether it did anything: a relayout, the caret leg or `OnTextChanged`.
 pub(super) fn flush(lua: &Lua, h: FrameHandle) -> bool {
     let Some((entry, owed, left)) = with_eb(lua, h, |eb| {

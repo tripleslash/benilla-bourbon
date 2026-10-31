@@ -784,8 +784,8 @@ fn drive_loading_screen(
 
     // --- Backstop, on the page alone: the ground under the focus is not resident and nothing
     // raised us. Native waits for the inner window's reads in the frame and raises no screen
-    // (`0x6985d0`). Deviation: the page cannot block its one thread on a fetch, so there the
-    // stream cannot wait and the cover stands in. In world only, since behind the glue nothing
+    // (`0x6985d0`). Deviation: because the page cannot block its one thread on a fetch, the
+    // stream cannot wait there and the cover stands in. In world only, since behind the glue nothing
     // loads; only while the focus is the body, since in a cinematic or free-fly residency
     // describes the camera's tile; and never while a same-map teleport's settle hold is up. ---
     #[cfg(target_arch = "wasm32")]

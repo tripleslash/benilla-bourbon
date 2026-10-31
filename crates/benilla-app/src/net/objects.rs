@@ -18,14 +18,14 @@ use benilla_world::model_fade::DespawnFade;
 use benilla_world::vis_chain::VisChainOnly;
 
 use super::motion::{
-    catch_up, create_spline, gameobject_rotation, monster_move_spline, pose_transform,
-    resolve_facing, set_raw_facing, smoothed, trace_create_spline, trace_move_snap, wire_yaw,
-    write_pose, MoverWorld, SplineStopped, ROOT_APPLY_WIPE,
+    catch_up, create_spline, far_stop, gameobject_rotation, monster_move_spline, pose_transform,
+    resolve_facing, ridden_create_path, set_raw_facing, smoothed, snap_from_three_yards,
+    trace_create_spline, trace_move_snap, wire_yaw, write_pose, HeldSpline, MoverWorld,
+    SplineStopped, ROOT_APPLY_WIPE,
 };
 use super::{
     ActiveMover, FieldChanged, Guid, GuidIndex, NetCommands, NetEntity, NetHandlerApp, ObjectStore,
-    RelaySeed, RemoteMotion, SelfGuid, SelfPlayer, SpeedChangeMessage, Spline, UnitMoveModes,
-    UnitSpeeds,
+    RemoteMotion, SelfGuid, SelfPlayer, SpeedChangeMessage, Spline, UnitMoveModes, UnitSpeeds,
 };
 
 mod arrival;
@@ -77,6 +77,9 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::SpeedChanged, on_speed);
 }
 
+/// A body whose mover holds a spline, live ([`Spline`]) or ended ([`HeldSpline`]).
+type HoldsSpline = Or<(With<Spline>, With<HeldSpline>)>;
+
 /// The streamed world as one parameter: the components, caches, lifecycle hooks and edges the
 /// object packets touch.
 #[derive(SystemParam)]
@@ -93,8 +96,8 @@ pub(crate) struct Scene<'w, 's> {
     stores: Query<'w, 's, &'static mut ObjectStore>,
     countdowns: Query<'w, 's, &'static mut crate::items::Countdowns>,
     remote: Query<'w, 's, &'static mut RemoteMotion>,
-    /// What a create left on a unit's mover before its first relay.
-    seeds: Query<'w, 's, &'static mut RelaySeed>,
+    /// Whose mover holds a spline, which forces a relayed move's apply (`0x618c43`).
+    paths: Query<'w, 's, (), HoldsSpline>,
     modes: Query<'w, 's, &'static mut UnitMoveModes>,
     xp_awarded: Query<'w, 's, (), With<crate::ui_chat::combat::watch::XpAwarded>>,
     client_controlled: Query<'w, 's, (), With<super::ClientControlled>>,
@@ -623,8 +626,6 @@ fn on_move_time_skipped(In(ev): In<SessionEvent>, mut sc: Scene) {
         };
         if let Ok(mut m) = sc.remote.get_mut(e) {
             m.relay.skip_time(lag_ms);
-        } else if let Ok(mut seed) = sc.seeds.get_mut(e) {
-            seed.chain.skip_time(lag_ms);
         }
     }
 }
@@ -647,6 +648,7 @@ fn on_unit_move(In(ev): In<SessionEvent>, mut sc: Scene, world: Option<MoverWorl
     {
         let now_ms = sc.real.elapsed_secs_f64() * 1000.0;
         let tick = sc.move_tick.as_deref().and_then(|t| t.0);
+        let forced = sc.index.0.get(&guid).is_some_and(|&e| sc.paths.contains(e));
         unit_move(
             guid,
             crate::net::motion::RelayMove {
@@ -662,11 +664,11 @@ fn on_unit_move(In(ev): In<SessionEvent>, mut sc: Scene, world: Option<MoverWorl
             },
             now_ms,
             tick,
+            forced,
             &mut sc.commands,
             &sc.index,
             &sc.self_guid,
             &mut sc.remote,
-            &sc.seeds,
             &mut sc.transforms,
             &sc.stores,
             &sc.speeds,
@@ -692,11 +694,61 @@ fn on_monster_move(In(ev): In<SessionEvent>, mut sc: Scene) {
         run_mode,
     } = ev
     {
-        let rooted = modes_of(guid, &sc.index, &sc.modes).rooted();
-        let smooth =
-            sc.index.0.get(&guid).is_some_and(|&e| {
-                smoothed(sc.nets.get(e).ok().map(|n| n.kind), sc.movers.contains(e))
+        // The start empties the mover's queue at once and stops it (`0x6187a0` → `0x6185f0(0, 0)`,
+        // `0x61aa70`; a stop through `0x618750`), then refuses the path on the root bit, its
+        // own (`0x6187c2`) or a granted one's. Nothing of it writes the replay chain (bit 31,
+        // `+0xa8`, `+0xac`, the ring), so the relays after the path time on from it.
+        let mut rooted = modes_of(guid, &sc.index, &sc.modes).rooted();
+        if let Some(e) = sc.index.0.get(&guid).copied() {
+            if let Ok(mut rm) = sc.remote.get_mut(e) {
+                for queued in std::mem::take(&mut rm.pending) {
+                    flush_queued(e, &queued.mv, &mut rm, &mut sc.commands);
+                }
+                rm.flags &= !PATH_START_STOP;
+                rm.vertical_velocity = 0.0;
+                rm.jump_xy_vel = [0.0; 2];
+                rm.fall_start = None;
+                rooted |= rm.flags & crate::creature_anim::move_flags::ROOT != 0;
+            }
+        }
+        // Every monster move allocates the mover's spline: a path installs it (`0x6187e0` →
+        // `0x7c62c0`), and a stop or a path the root refuses stops at its point through one
+        // (`0x601fee` → `0x6020cd` → `0x618750` → `0x619300` → `0x7c62c0`). A remote mover holds
+        // it past the end ([`HeldSpline`]).
+        if let Some(e) = sc.index.0.get(&guid).copied() {
+            if !sc.movers.contains(e) {
+                sc.commands.entity(e).insert(HeldSpline);
+            }
+        }
+        // A stop 3 yd or more from the unit runs as a path there, its form's run-mode flag `0x100`
+        // set (`0x601a28`) ([`far_stop`]).
+        let far = stop
+            .then(|| sc.index.0.get(&guid).copied())
+            .flatten()
+            .and_then(|e| {
+                let from = match transport {
+                    Some(_) => sc.riders.get(e).ok().map(|r| r.local_pos),
+                    None => sc
+                        .transforms
+                        .get(e)
+                        .ok()
+                        .map(|t| bevy_to_wow(t.translation)),
+                }?;
+                let run = sc.speeds.get(e).map_or(0.0, |u| u.0.run);
+                far_stop(from, start, run)
             });
+        let (path, duration_ms, stop, run_mode) = match far {
+            Some((leg, ms)) => (leg, ms, false, true),
+            None => (path, duration_ms, stop, run_mode),
+        };
+        let smooth = sc.index.0.get(&guid).is_some_and(|&e| {
+            let flags = sc.stores.get(e).map_or(0, |s| s.0.unit_flags());
+            smoothed(
+                sc.nets.get(e).ok().map(|n| n.kind),
+                flags,
+                sc.movers.contains(e),
+            )
+        });
         monster_move(
             guid,
             transport,
@@ -714,11 +766,13 @@ fn on_monster_move(In(ev): In<SessionEvent>, mut sc: Scene) {
             &sc.index,
             &mut sc.transforms,
             &mut sc.riders,
+            &mut sc.remote,
         );
         // A path started on the active mover runs its input tick (`0x6187a0` → `0x602053`), whose
         // precondition the server's spline fails (`0x5144e0`): the teardown leg stops the auto-move
-        // (`0x5146d6`). A stop starts no path, and nor does a rooted mover: the start returns 0 on
-        // the root bit `0x1000` (`0x6187c2`-`0x6187c7`), so `0x601fee` skips the tick.
+        // (`0x5146d6`). A near stop starts no path, and nor does a rooted mover: the start
+        // returns 0 on the root bit `0x1000` (`0x6187c2`-`0x6187c7`), so `0x601fee` skips the
+        // tick.
         let mover_rooted = sc
             .player
             .as_deref()
@@ -972,42 +1026,117 @@ fn object_create(
     // The walk this unit is already on, joined at the server's progress. Traced first, so a
     // `WOW_CREATE_SPLINE=off` run still records what the wire offered.
     trace_create_spline(guid, spline.as_ref());
+    let carries_path = spline.is_some();
+    // A path already ridden ends on the unit off the deck: at its last point from 3 yd, facing
+    // its end ([`ridden_create_path`]); a target not found leaves the leg's heading (`0x61a8b7`).
+    let ridden = spline
+        .as_ref()
+        .filter(|_| rider.is_none())
+        .and_then(|s| ridden_create_path(s).map(|end| (end, s.facing)));
     let walk = spline.and_then(create_spline);
-    // A unit's status applies forced (`0x619320` → `0x618c30`), re-seeding the mover's replay
-    // chain from the block's stamp and the clock; a held unit's ring is its own, kept.
-    let seed = matches!(kind, EntityKind::Unit | EntityKind::Player)
+    let (position, end_facing) = match ridden {
+        Some(((last, leg), facing)) => {
+            let at = snap_from_three_yards(position, last);
+            let target_pos = |g: u64| {
+                sc.index
+                    .0
+                    .get(&g)
+                    .and_then(|&te| sc.transforms.get(te).ok())
+                    .map(|t| bevy_to_wow(t.translation))
+            };
+            (at, resolve_facing(facing, at, target_pos).or(leg))
+        }
+        None => (position, None),
+    };
+    // A unit's status applies forced (`0x619320` → `0x618c30`): the mover takes the block's pose
+    // and its flags word (`new & 0x75a07dff` over the word `0x61936e` cleared), and its replay
+    // chain re-seeds from the block's stamp and the clock, on its own ring, which a held unit
+    // keeps; the queue empties. `UpdateActiveState` (`0x619426` → `0x618940`) then lists it while a
+    // flag of `0x20ff` is set, so a unit created moving is dead-reckoned from its create, and a
+    // standing one is listed by its fall start (`0x619456` → `0x617b00`). Every unit but ours
+    // takes the mover state ([`RemoteMotion`]), a path riding on it ([`Spline`]). A unit created
+    // airborne goes on along its arc: the apply copies the block's fall time and launch under
+    // `JUMPING` (`0x618e1b` → `0x7c6490`), the word cleared first, so it is a takeoff. Not built:
+    // the standing unit's fall start (`0x7c61c0`), which needs a landing a remote mover lacks; the
+    // clamp grounds a standing unit instead.
+    let motion = matches!(kind, EntityKind::Unit | EntityKind::Player)
         .then_some(mover)
         .flatten()
         .filter(|_| sc.self_guid.0 != Some(guid))
         .map(|m| {
             let held = match &landing {
-                Landing::Live(e) => sc
-                    .remote
-                    .get(*e)
-                    .map(|rm| rm.relay.clone())
-                    .or_else(|_| sc.seeds.get(*e).map(|s| s.chain.clone()))
-                    .ok(),
+                Landing::Live(e) => sc.remote.get(*e).ok().map(|rm| rm.relay.clone()),
                 Landing::New { .. } => None,
             };
-            let mut chain = held.unwrap_or_default();
-            chain.seed_at_create(m.time, sc.real.elapsed_secs_f64() * 1000.0);
-            RelaySeed {
-                chain,
-                flags: crate::creature_anim::move_flags::merge_server_authored(0, m.flags),
+            use crate::creature_anim::move_flags;
+            let mut flags = move_flags::merge_server_authored(0, m.flags);
+            // A path the create carries still ends on the mover when benilla declines it
+            // (finished, empty, or `WOW_CREATE_SPLINE=off`; the reference declines none, installing
+            // any create path, `0x619371` → `0x619387`): its end stops the mover (`0x61a863` →
+            // `0x7c6c00`), so the direction bits the block carried do not drift it on.
+            if carries_path && walk.is_none() {
+                flags &= !super::motion::spline::PATH_END_STOP;
+            }
+            let airborne = flags & move_flags::FALLING != 0;
+            let (vertical_velocity, jump_xy_vel) = if airborne {
+                crate::net::motion::jump_seed(
+                    m.jump,
+                    m.fall_time,
+                    flags & move_flags::SAFE_FALL != 0,
+                )
+            } else {
+                (0.0, [0.0; 2])
+            };
+            let fall_start = airborne.then(|| {
+                crate::net::motion::FallHeight::airborne(
+                    position,
+                    transport.as_ref(),
+                    m.jump,
+                    m.fall_time,
+                    flags & move_flags::SAFE_FALL != 0,
+                )
+            });
+            {
+                let now_ms = sc.real.elapsed_secs_f64() * 1000.0;
+                let mut relay = held.unwrap_or_default();
+                relay.seed_at_create(m.time, now_ms);
+                RemoteMotion {
+                    wow_pos: position,
+                    orientation: end_facing.unwrap_or(seat.map_or(orientation, |(_, yaw)| yaw)),
+                    flags,
+                    pitch: m.pitch,
+                    speed: 0.0,
+                    vertical_velocity,
+                    jump_xy_vel,
+                    fall_start,
+                    pending: std::collections::VecDeque::new(),
+                    relay,
+                    last_apply_ms: now_ms,
+                    last_apply_pos: position,
+                    fired_at_ms: None,
+                }
             }
         });
+    // The create's status installs its path's spline, else frees the one held (`0x619387`,
+    // `0x61940c`); a remote mover keeps it ([`HeldSpline`]).
+    let held = motion.is_some() && carries_path;
     let commands = &mut sc.commands;
     match landing {
         Landing::Live(e) => {
-            // A re-create is a fresh snapshot: refresh identity and a unit's pose, drop any
-            // extrapolation; the mover's chain goes on in the seed.
-            commands.entity(e).insert(net).remove::<RemoteMotion>();
-            match seed {
-                Some(seed) => {
-                    commands.entity(e).insert(seed);
+            if held {
+                commands.entity(e).insert(HeldSpline);
+            } else {
+                commands.entity(e).remove::<HeldSpline>();
+            }
+            // A re-create is a fresh snapshot: refresh identity and a unit's pose, and the mover
+            // state from the block, its chain going on.
+            commands.entity(e).insert(net);
+            match motion {
+                Some(motion) => {
+                    commands.entity(e).insert(motion);
                 }
                 None => {
-                    commands.entity(e).remove::<RelaySeed>();
+                    commands.entity(e).remove::<RemoteMotion>();
                 }
             }
             // The set is replaced whole; a `SMSG_FORCE_*_SPEED_CHANGE` in the same tick lands on
@@ -1092,8 +1221,11 @@ fn object_create(
             if let Some(s) = walk {
                 entity.insert(s);
             }
-            if let Some(seed) = seed {
-                entity.insert(seed);
+            if held {
+                entity.insert(HeldSpline);
+            }
+            if let Some(motion) = motion {
+                entity.insert(motion);
             }
             // Our own player is the active one from its write: the reference finds it by its guid
             // (`0x468550`), here by the tag, given in the same commands as the entity.
@@ -1121,6 +1253,7 @@ pub(super) fn object_move(
     transforms: &mut Query<&mut Transform>,
     movers: &Query<(), With<ActiveMover>>,
     smooth: bool,
+    remote: &mut Query<&mut RemoteMotion>,
 ) {
     if let Some(&e) = index.0.get(&guid) {
         if movers.contains(e) {
@@ -1138,6 +1271,11 @@ pub(super) fn object_move(
         } else {
             // A yaw only: the GameObjects that get one are transports, which their tick then owns.
             write_pose(commands, transforms, e, position, wire_yaw(orientation));
+        }
+        // A unit's mover stands there too, its dead-reckoning going on from the block's pose.
+        if let Ok(mut rm) = remote.get_mut(e) {
+            rm.wow_pos = position;
+            rm.orientation = orientation;
         }
     }
 }
@@ -1224,17 +1362,18 @@ fn seat_arrival(
 /// A relayed `MSG_MOVE_*`. The reference schedules a remote's apply (`0x618c30`): the mover's
 /// replay chain gives the packet a fire-time, a move due by the movement clock the last tick
 /// stamped (`tick`, `@0x618dd2`) applies now and any other queues for `drain_pending_moves`, this
-/// frame's tick, with dead-reckoning in between. `WOW_REMOTE_SNAP=1` applies at arrival.
+/// frame's tick, with dead-reckoning in between. A unit whose mover holds a spline (`forced`)
+/// applies at once (`0x618c43`). `WOW_REMOTE_SNAP=1` applies at arrival.
 fn unit_move(
     guid: u64,
     mv: crate::net::motion::RelayMove,
     now_ms: f64,
     tick: Option<f64>,
+    forced: bool,
     commands: &mut Commands,
     index: &GuidIndex,
     self_guid: &SelfGuid,
     remote_motion: &mut Query<&mut RemoteMotion>,
-    seeds: &Query<&mut RelaySeed>,
     transforms: &mut Query<&mut Transform>,
     stores: &Query<&mut ObjectStore>,
     speeds: &Query<&mut UnitSpeeds>,
@@ -1290,12 +1429,42 @@ fn unit_move(
         world,
     };
     {
-        // The server's pose supersedes a stale spline.
-        commands.entity(e).remove::<Spline>();
+        // The server's pose supersedes a stale spline, and takes the unit's Z back from the
+        // clamp a path handed it to ([`super::motion::spline::ground_derived`]), and its swim
+        // state from the water-at-feet mark: the relay's word carries it (`0x618de7`). The mark's
+        // stamp goes too, so a body the mark still derives asks again.
+        commands
+            .entity(e)
+            .remove::<Spline>()
+            .remove::<HeldSpline>()
+            .remove::<super::motion::spline::GroundClamped>()
+            .remove::<super::motion::CreatureSwimming>()
+            .remove::<super::motion::spline::SwimEvaluated>();
         if let Ok(mut rm) = remote_motion.get_mut(e) {
             // The chain reads the state before this move applies, as the reference times the
             // packet off the live `[esi+0x40]`/`[esi+0x150]`.
             let (flags, queue_empty) = (rm.flags, rm.pending.is_empty());
+            // A held spline forces the apply (`0x618c43`): the fire-time is stored unclamped, with
+            // no re-base, no due test and no catch-up (`@0x618d67`, `@0x618e46`); the apply frees
+            // the spline (`0x618f43`).
+            if forced {
+                rm.relay.schedule_forced(mv.wire_ms, now_ms);
+                trace_relay(
+                    guid,
+                    &mv,
+                    &rm.relay,
+                    now_ms,
+                    rm.pending.len(),
+                    RelayOutcome::Forced,
+                );
+                apply_move(e, &mv, &mut rm, now_ms, commands, landings);
+                let on_time = Lateness {
+                    late_ms: 0.0,
+                    ..late(now_ms)
+                };
+                seat_arrival(e, &mv, &mut rm, on_time, index, transforms, stores);
+                return;
+            }
             let fire_ms = rm.relay.schedule(mv.wire_ms, now_ms, flags, queue_empty);
             let at_arrival = arrival_snap() || rm.fires_at_arrival(fire_ms, tick);
             trace_relay(
@@ -1318,17 +1487,11 @@ fn unit_move(
                 rm.pending.push_back(PendingMove { fire_ms, mv });
             }
         } else {
-            // The first move builds the unit's motion where it stands, on what its create left:
-            // the chain and the flags word its schedule reads as the mover's ([`RelaySeed`]). A
-            // unit whose create carried no status seeds the chain here, its fire-time the arrival
-            // (`@0x618c54`), past the movement clock, so it waits for this frame's tick like any
-            // idle mover's, unless the lever applies it at once.
-            let seed = seeds.get(e).ok().cloned();
-            let created = seed.is_some();
-            let (relay, flags) = seed.map_or_else(
-                || (crate::net::motion::RelayChain::default(), 0),
-                |s| (s.chain, s.flags),
-            );
+            // A unit its create left without mover state, a creature standing, or one whose
+            // create carried no status, builds it at its first move, where it stands, and seeds
+            // the chain there: the fire-time is the arrival (`@0x618c54`), past the movement
+            // clock, so the move waits for this frame's tick like any idle mover's, unless the
+            // lever applies it at once, its facing shown then.
             let (wow_pos, orientation) =
                 transforms
                     .get(e)
@@ -1341,29 +1504,27 @@ fn unit_move(
             let mut rm = RemoteMotion {
                 wow_pos,
                 orientation,
-                flags,
+                flags: 0,
                 pitch: 0.0,
                 speed: 0.0,
                 vertical_velocity: 0.0,
                 jump_xy_vel: [0.0; 2],
                 fall_start: None,
                 pending: std::collections::VecDeque::new(),
-                relay,
+                relay: Default::default(),
                 last_apply_ms: now_ms,
                 last_apply_pos: wow_pos,
+                fired_at_ms: None,
             };
-            let fire_ms = rm.relay.schedule(mv.wire_ms, now_ms, flags, true);
-            debug_assert!(
-                created || fire_ms == now_ms,
+            let fire_ms = rm.relay.schedule(mv.wire_ms, now_ms, 0, true);
+            debug_assert_eq!(
+                fire_ms, now_ms,
                 "a seeding packet's fire-time is its arrival"
             );
-            if arrival_snap() || rm.fires_at_arrival(fire_ms, tick) {
-                let outcome = if created {
-                    RelayOutcome::Now
-                } else {
-                    RelayOutcome::Seed
-                };
-                trace_relay(guid, &mv, &rm.relay, now_ms, 0, outcome);
+            // A held spline forces it, as any mover's (`0x618c43`); a seed's fire-time is its
+            // arrival either way, so its lateness is none.
+            if forced || arrival_snap() || rm.fires_at_arrival(fire_ms, tick) {
+                trace_relay(guid, &mv, &rm.relay, now_ms, 0, RelayOutcome::Seed);
                 apply_move(e, &mv, &mut rm, now_ms, commands, landings);
                 // The position only: the raw facing is the chain's, and the extrapolator turns
                 // the display toward it from where it stands, as no move resets it (`0x601020`
@@ -1373,7 +1534,7 @@ fn unit_move(
                 trace_relay(guid, &mv, &rm.relay, now_ms, 0, RelayOutcome::Queued);
                 rm.pending.push_back(PendingMove { fire_ms, mv });
             }
-            commands.entity(e).insert(rm).remove::<RelaySeed>();
+            commands.entity(e).insert(rm);
         }
     }
 }
@@ -1387,7 +1548,30 @@ fn unit_move(
 /// consumer; the [`NetEntity`] and [`ObjectStore`] stay so the model draws out (a decaying corpse
 /// stays lying down). The caller has already removed the guid from the [`GuidIndex`], so a block
 /// that brings the object back spawns a fresh entity beside the fading model.
-fn tear_down(mut ent: EntityWorldMut) {
+///
+/// What the object's effect list holds goes at once, its models closed and its sounds faded
+/// (`ReleaseEffects`, `0x614120`): a unit's release runs it (`CGUnit_C::Release`, `0x5fbc84`), and
+/// every object's destructor does as it is freed (`0x613be2`). `at` is the leave's place in the
+/// wire order.
+fn tear_down(mut ent: EntityWorldMut, at: crate::lanes::Stamp, freed: bool) {
+    use crate::creature_anim::spell_visual::{SpellKitFx, SpellKitSound};
+    let unit = ent
+        .get::<NetEntity>()
+        .is_some_and(|n| matches!(n.kind, EntityKind::Unit | EntityKind::Player));
+    if unit || freed {
+        let entity = ent.id();
+        ent.world_scope(|w| {
+            if let Some(mut fx) = w.get_resource_mut::<Messages<SpellKitFx>>() {
+                fx.write(SpellKitFx::Release {
+                    entity,
+                    at: Some(at),
+                });
+            }
+            if let Some(mut sounds) = w.get_resource_mut::<Messages<SpellKitSound>>() {
+                sounds.write(SpellKitSound::Release { entity, at });
+            }
+        });
+    }
     ent.remove::<Guid>();
     ent.insert(DespawnFade::default());
 }
@@ -1415,6 +1599,7 @@ fn monster_move(
     index: &GuidIndex,
     transforms: &mut Query<&mut Transform>,
     riders: &mut Query<&mut crate::transport::TransportRider>,
+    remote: &mut Query<&mut RemoteMotion>,
 ) {
     if let Some(&e) = index.0.get(&guid) {
         // The desync readout: the gap between where we draw the unit and where its path begins.
@@ -1517,6 +1702,10 @@ fn monster_move(
                 } else if let Ok(mut t) = transforms.get_mut(e) {
                     t.rotation = Quat::from_rotation_y(orientation);
                 }
+                // The mover's own facing, which its dead-reckoning shows.
+                if let Ok(mut rm) = remote.get_mut(e) {
+                    rm.orientation = orientation;
+                }
             }
         }
         // Every spline move un-nocks and ends the precast here. The handler `0x6018f0` (opcodes
@@ -1535,9 +1724,8 @@ fn monster_move(
         if rooted {
             return;
         }
-        // The spline supersedes the relay stream: a splined player (charge, taxi) would otherwise
-        // keep stale flags that outrank the spline in the anim selector.
-        commands.entity(e).remove::<RemoteMotion>();
+        // The path rides on the mover state, which it outranks while it lives (the anim
+        // selector's `unify`) and stops where it ends.
         match spline {
             Some(spline) => {
                 commands.entity(e).insert(spline).remove::<SplineStopped>();
@@ -1552,6 +1740,57 @@ fn monster_move(
         }
     }
 }
+
+/// One queued relayed move as the flush's dispatcher takes it (`0x618080`, the flush `0x6185f0`
+/// passing `keep` 0): its tag's setter acts and its pose is dropped. The root stops the mover and
+/// roots it (tag 35: `0x619a00`, `0x61aa70` then `0x7c7340`; a relay's node has no send byte, so
+/// no snap to the path, `0x618425`), the unroot clears the bit (tag 36: `0x7c7370`; the fall it
+/// starts the start's own stop ends, `0x61aa70` at `0x6187b1`), and the teleport places the mover
+/// (tag 38: `0x6184d0` → `0x617e90`). The walk and run toggles (tags 14 and 15), the speeds (20
+/// to 25) and the mode toggles (29 to 34) act too, and every other tag drops whole (`0x61851e`):
+/// a plain move's, a heartbeat's (tag 37) and the fall start's (tag 6, `keep` 0). Not built:
+/// benilla decodes the walk, run, hover, water-walk and feather-fall relays as plain poses, so
+/// their toggles drop with them until the next relay's word carries the bits; a speed relay's
+/// speed applies at its arrival, so none is queued.
+fn flush_queued(
+    e: Entity,
+    mv: &crate::net::motion::RelayMove,
+    rm: &mut RemoteMotion,
+    commands: &mut Commands,
+) {
+    use crate::creature_anim::move_flags::ROOT;
+    match mv.verb {
+        benilla_protocol::RelayVerb::Root(true) => {
+            rm.flags = ((rm.flags & !PATH_START_STOP) | ROOT) & ROOT_APPLY_WIPE;
+        }
+        benilla_protocol::RelayVerb::Root(false) => rm.flags &= !ROOT,
+        benilla_protocol::RelayVerb::Teleport => {
+            match &mv.transport {
+                Some(t) => {
+                    commands.entity(e).insert(crate::transport::TransportRider {
+                        transport_guid: t.guid,
+                        local_pos: [t.pos.x, t.pos.y, t.pos.z],
+                        local_orientation: t.orientation,
+                    });
+                }
+                None => {
+                    commands
+                        .entity(e)
+                        .remove::<crate::transport::TransportRider>();
+                }
+            }
+            rm.wow_pos = mv.position;
+            rm.orientation = mv.orientation;
+        }
+        _ => {}
+    }
+}
+
+/// The bits a monster move's start clears on its mover (`0x6187a0` → `0x61aa70`): the fall
+/// (`0x7c6290`), the deferred starts and stops and `0x4000000` (`and 0xfbe07fff`), the turn
+/// (`0x7c6dd0`), the pitch (`0x7c6e30`), the strafe (`0x7c6ce0`), the move (`0x7c6c00`), and
+/// `0x6000` (`and 0xffff9fff`); swimming, walking and the root stay.
+const PATH_START_STOP: u32 = 0x041F_E0FF;
 
 /// This unit's granted modes; no component means all bits clear.
 fn modes_of(guid: u64, index: &GuidIndex, modes: &Query<&mut UnitMoveModes>) -> UnitMoveModes {
@@ -3142,6 +3381,7 @@ mod tests {
                 relay: Default::default(),
                 last_apply_ms: 0.0,
                 last_apply_pos: [0.0; 3],
+                fired_at_ms: None,
             }
         }
 
@@ -3290,7 +3530,8 @@ mod tests {
                     move |mut commands: Commands,
                           index: Res<GuidIndex>,
                           mut transforms: Query<&mut Transform>,
-                          mut riders: Query<&mut crate::transport::TransportRider>| {
+                          mut riders: Query<&mut crate::transport::TransportRider>,
+                          mut remote: Query<&mut RemoteMotion>| {
                         monster_move(
                             MOB,
                             None,
@@ -3308,6 +3549,7 @@ mod tests {
                             &index,
                             &mut transforms,
                             &mut riders,
+                            &mut remote,
                         );
                     },
                 )
@@ -3372,7 +3614,8 @@ mod tests {
                     move |mut commands: Commands,
                           index: Res<GuidIndex>,
                           mut transforms: Query<&mut Transform>,
-                          mut riders: Query<&mut crate::transport::TransportRider>| {
+                          mut riders: Query<&mut crate::transport::TransportRider>,
+                          mut remote: Query<&mut RemoteMotion>| {
                         monster_move(
                             MOB,
                             None,
@@ -3390,6 +3633,7 @@ mod tests {
                             &index,
                             &mut transforms,
                             &mut riders,
+                            &mut remote,
                         );
                     },
                 )
@@ -3404,12 +3648,18 @@ mod tests {
                     closes,
                     "rooted={rooted}, ours={ours}, {source:#x}: the loot release"
                 );
+                // An item's release waits on the lane behind its own unlock (`0x48f2bd`,
+                // `0x48f311`).
+                let queued = w
+                    .resource_mut::<crate::ui_loot::LootState>()
+                    .take_queued_releases();
                 assert_eq!(
                     rx.try_iter()
                         .filter(
                             |c| matches!(c, ClientCommand::LootRelease { guid } if *guid == source)
                         )
-                        .count(),
+                        .count()
+                        + queued.iter().filter(|&&g| g == source).count(),
                     usize::from(closes),
                     "rooted={rooted}, ours={ours}, {source:#x}: released once as it closes"
                 );
@@ -3443,7 +3693,8 @@ mod tests {
                 move |mut commands: Commands,
                       index: Res<GuidIndex>,
                       mut transforms: Query<&mut Transform>,
-                      mut riders: Query<&mut crate::transport::TransportRider>| {
+                      mut riders: Query<&mut crate::transport::TransportRider>,
+                      mut remote: Query<&mut RemoteMotion>| {
                     monster_move(
                         MOB,
                         Some(BOAT),
@@ -3461,6 +3712,7 @@ mod tests {
                         &index,
                         &mut transforms,
                         &mut riders,
+                        &mut remote,
                     );
                 },
             )
@@ -3495,7 +3747,8 @@ mod tests {
                 move |mut commands: Commands,
                       index: Res<GuidIndex>,
                       mut transforms: Query<&mut Transform>,
-                      mut riders: Query<&mut crate::transport::TransportRider>| {
+                      mut riders: Query<&mut crate::transport::TransportRider>,
+                      mut remote: Query<&mut RemoteMotion>| {
                     monster_move(
                         MOB,
                         None,
@@ -3513,6 +3766,7 @@ mod tests {
                         &index,
                         &mut transforms,
                         &mut riders,
+                        &mut remote,
                     );
                 },
             )
@@ -3539,7 +3793,8 @@ mod tests {
                 move |mut commands: Commands,
                       index: Res<GuidIndex>,
                       mut transforms: Query<&mut Transform>,
-                      mut riders: Query<&mut crate::transport::TransportRider>| {
+                      mut riders: Query<&mut crate::transport::TransportRider>,
+                      mut remote: Query<&mut RemoteMotion>| {
                     monster_move(
                         MOB,
                         None,
@@ -3557,6 +3812,7 @@ mod tests {
                         &index,
                         &mut transforms,
                         &mut riders,
+                        &mut remote,
                     );
                 },
             )

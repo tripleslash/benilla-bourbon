@@ -7,7 +7,7 @@
 //! `WOW_DORMANT=0` spawns every placement whole.
 //!
 //! Deviation: a woken placement's animation and particles start fresh, where the reference's
-//! frozen ones resume; the restart falls at the far edge of its fade band, where it is faint.
+//! frozen ones resume, because the restart falls at the far edge of its fade band, where it is faint.
 
 use std::sync::Arc;
 

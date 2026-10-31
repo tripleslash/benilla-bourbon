@@ -231,7 +231,7 @@ impl Header<'_> {
     /// Level `level`'s stored bytes, or `None` where the chain ends before the formula's count.
     ///
     /// Deviation: a deeper level whose span runs past the file also ends the chain, where the
-    /// reference reads past its buffer. patch-A's `Character\Troll\SCALPUPPERHAIR00_01.blp` ships
+    /// reference reads past its buffer, because patch-A's `Character\Troll\SCALPUPPERHAIR00_01.blp` ships
     /// level 6 at the file's end with size `0xFFFFD0C4`, over six intact levels.
     fn level_data<'b>(&self, bytes: &'b [u8], level: usize) -> Result<Option<&'b [u8]>> {
         let off = self.offsets[level] as usize;

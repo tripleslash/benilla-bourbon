@@ -195,8 +195,8 @@ pub(super) fn finish_glue_load_log(script: &mut UiScript) {
 /// integer (`rec+0x28`, `0x402b41`) is 1, which first sets it to `"0"` (`0x402b54`, `0x82e570`), so
 /// the intro plays once; else `"login"` (`0x82e3e0`). With no CVar table, `"login"`.
 pub(super) fn startup_screen(cvars: Option<Mut<'_, crate::cvars::Cvars>>) -> &'static str {
-    // Deviation: the page starts at the login screen and leaves the CVar as it stands: its packs
-    // carry no movie converted for the web, so the movie frame has nothing to play there.
+    // Deviation: the page starts at the login screen and leaves the CVar as it stands, because its
+    // packs carry no movie converted for the web, so the movie frame has nothing to play there.
     if cfg!(target_arch = "wasm32") {
         return GlueScreen::Login.key();
     }
@@ -351,8 +351,9 @@ pub(crate) fn watch_glue_aspect(
 /// Deviation: the reference's size callback only re-scales `GlueParent` and re-lays it out
 /// (`0x46ac51`, `0x46ac56`), as its root keeps `gxResolution`'s aspect until a rebuild (`0x41ad10`
 /// at `0x46a828`) and its window keeps that shape while dragged (`0x5989d7`); here the root is the
-/// window's, which takes any shape, so the box follows it on every resize, where a rebuild would
-/// reset the screen (the create screen's character and name, the typed password, the selection).
+/// window's, which takes any shape, so the box follows it on every resize, without a rebuild
+/// because that would reset the screen (the create screen's character and name, the typed password,
+/// the selection).
 pub(super) fn on_glue_screen_resized(script: &UiScript) {
     if let Err(e) = script.run(GLUE_PARENT_RESEAT) {
         error!("ui_script: GlueParent re-seat: {e}");

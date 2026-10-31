@@ -69,6 +69,9 @@ pub(crate) struct Cinematic {
     /// How many far shots have asked for a reload so far: the stream's focus carries it, so its
     /// load re-arms for each (a cinematic's focus is unpaced throughout, with no pacing edge).
     reloads: u32,
+    /// EndCinematic's zone-channel walk (`0x48f1d0`) is owed: a shot ended or was skipped, and the
+    /// walk has not run since ([`crate::ui_chat::walk_when_cinematic_ends`]).
+    end_walk: bool,
 }
 
 /// The black a shot that moved the camera past the reload gate holds before it fades in.
@@ -118,6 +121,11 @@ impl Cinematic {
         self.playing.is_some()
     }
 
+    /// Take EndCinematic's owed walk ([`Cinematic::end_walk`]).
+    pub(crate) fn take_end_walk(&mut self) -> bool {
+        std::mem::take(&mut self.end_walk)
+    }
+
     /// The far reloads shots have asked for so far.
     pub(crate) fn reloads(&self) -> u32 {
         self.reloads
@@ -150,6 +158,14 @@ impl Cinematic {
         }
     }
 
+    /// A cinematic that just ended, EndCinematic's walk still owed.
+    pub(crate) fn ended_for_test() -> Self {
+        Self {
+            end_walk: true,
+            ..Self::default()
+        }
+    }
+
     /// A shot-less cinematic for tests that only ask [`Cinematic::is_playing`]; a [`CinematicPath`]
     /// needs a real `Cameras\*.m2`, so anything that reads a shot panics here.
     pub(crate) fn playing_for_test() -> Self {
@@ -166,6 +182,7 @@ impl Cinematic {
             skip: false,
             hold: None,
             reloads: 0,
+            end_walk: false,
         }
     }
 
@@ -185,8 +202,8 @@ impl Cinematic {
 }
 
 /// One of the two letterbox bars, full-width black, top or bottom.
-/// Deviation: Bevy UI nodes computed per frame, not `CinematicFrame.xml`'s textures, so a window
-/// resized mid-cinematic stays letterboxed. `CinematicFrame` still shows and owns ESC.
+/// Deviation: Bevy UI nodes computed per frame, not `CinematicFrame.xml`'s textures, because that
+/// way a window resized mid-cinematic stays letterboxed. `CinematicFrame` still shows and owns ESC.
 #[derive(Component)]
 struct LetterboxBar;
 
@@ -225,6 +242,13 @@ impl Plugin for CinematicPlugin {
             .add_systems(
                 Update,
                 drive_letterbox.in_set(WorldStage::Input).after(drive),
+            )
+            // EndCinematic's walk of the zone channels (`0x48f1d0`), the frame the shot ends.
+            .add_systems(
+                Update,
+                crate::ui_chat::walk_when_cinematic_ends
+                    .in_set(WorldStage::Input)
+                    .after(drive),
             )
             // Leaving the world drops a cinematic with no ack, as the reference's teardown does
             // (`0x490a80` clears the flag and sends no `CMSG_COMPLETE_CINEMATIC`); the exit
@@ -643,6 +667,7 @@ fn drive(
                 }
             }
             if ended {
+                cine.end_walk = true;
                 // Not faded in yet: the world around the body streamed away during the flight, so
                 // hold the black the reference shows while its own load blocks. EndCinematic
                 // reloads the body's spot only when the camera ended more than 30 yards from the

@@ -1535,8 +1535,8 @@ fn convert_entry(
                             );
                         }
                         // Deviation: the V-plate border is resampled sharp to the quad's physical
-                        // size rather than GPU-magnified, so its 1 px bevel stays crisp; keyed by
-                        // that size, so only a resize re-rasterises it.
+                        // size rather than GPU-magnified, because that way its 1 px bevel stays
+                        // crisp; keyed by that size, so only a resize re-rasterises it.
                         let px = |v: f32| (v * dpi).round().max(1.0) as u32;
                         a.resampled_sprite(
                             p,

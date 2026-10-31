@@ -62,13 +62,15 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[];
 /// held to its systems' access by the same test.
 #[rustfmt::skip]
 const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
-    ("::net::motion::facing::drive_display_facing", &["Commands net::motion::remote::RemoteMotion",
-        "Commands net::motion::spline::Spline", "Transform"],
+    ("::net::motion::facing::drive_display_facing", &["Commands net::motion::spline::Spline",
+        "Transform"],
         "turns the units' models toward their facing; unit movement is \
          frame time, which the reference runs after the packets (`0x420d63` after `0x420d55`)"),
-    ("::net::motion::spline::ground_clamp_creatures", &["Transform"],
-        "settles the creatures on the ground; unit movement is \
-         frame time, which the reference runs after the packets (`0x420d63` after `0x420d55`)"),
+    ("::net::motion::spline::ground_clamp_creatures", &["Transform",
+        "net::motion::remote::RemoteMotion"],
+        "settles the creatures on the ground, and a re-grounded mover's state with them; unit \
+         movement is frame time, which the reference runs after the packets (`0x420d63` after \
+         `0x420d55`)"),
     ("::net::motion::remote::extrapolate_remote_units", &["Commands net::motion::spline::Spline",
         "Transform", "net::motion::remote::RemoteMotion"],
         "dead-reckons the remote players between their packets in the movement tick (event 5's \
@@ -97,9 +99,10 @@ const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
          → `0x6435a0`, which the reference runs after the packets (`0x420d63` after \
          `0x420d55`)"),
     ("::net::motion::spline::sample_splines", &["Commands net::motion::spline::Spline",
-        "Transform"],
-        "moves the units along their splines; unit movement is \
-         frame time, which the reference runs after the packets (`0x420d63` after `0x420d55`)"),
+        "Transform", "net::motion::remote::RemoteMotion"],
+        "moves the units along their splines and stops a mover where its path ends; unit \
+         movement is frame time, which the reference runs after the packets (`0x420d63` after \
+         `0x420d55`)"),
     ("::transport::ground_deck_riders", &["Transform", "net::motion::remote::RemoteMotion"],
         "settles the riders on their decks; unit movement is \
          frame time, which the reference runs after the packets (`0x420d63` after `0x420d55`)"),
@@ -126,8 +129,8 @@ const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
         "steps the pending-mail time in the world frame's update (its slot `0x38`, `0x4818d0` → \
          `0x4ade60`), which the frame pass runs after the packets (`0x420d6a` after `0x420d55`)"),
     ("::ui_loot::drop_loot_steps", &["ui_loot::LootState"],
-        "drops the loot lane's window signals, its pushes kept, run only while no in-game \
-         interface is up, so no listener exists"),
+        "drops the loot lane's window signals, its pushes kept and its releases sent, run only \
+         while no in-game interface is up, so no listener exists"),
     ("::ui_loot_roll::lane::drop_roll_events", &["ui_loot_roll::LootRolls"],
         "drops the rolls' lane, run only while no in-game interface is up, so no listener \
          exists"),

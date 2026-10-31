@@ -141,9 +141,9 @@ const RAIN_SPREAD: f32 = 50.0;
 
 /// The density from which rain rings the water at its full rate — the reference's `> 0.2` gate.
 ///
-/// Deviation: the reference emits nothing at or below it, which leaves a light rain (a server's
-/// intensity under 0.4, a density under 0.2) falling into still water. Below it the drop count
-/// here falls off with the density instead, so every rain that draws drops rings in proportion.
+/// Deviation: below it the drop count here falls off with the density, because the reference emits
+/// nothing at or below it, which leaves a light rain (a server's intensity under 0.4, a density
+/// under 0.2) falling into still water. So every rain that draws drops rings in proportion.
 const RAIN_MIN_DENSITY: f32 = 0.2;
 
 /// Rain drops this step at `density`: [`RAIN_DROPS`] past [`RAIN_MIN_DENSITY`], a linear share of

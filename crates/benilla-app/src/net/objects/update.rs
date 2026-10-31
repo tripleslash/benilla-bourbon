@@ -576,7 +576,11 @@ fn on_object_move(In(ev): In<SessionEvent>, mut sc: Scene) {
     if active_mover(&sc) != Some(guid) {
         found_live(&mut sc, e);
     }
-    let smooth = smoothed(sc.nets.get(e).ok().map(|n| n.kind), sc.movers.contains(e));
+    let smooth = smoothed(
+        sc.nets.get(e).ok().map(|n| n.kind),
+        sc.stores.get(e).map_or(0, |s| s.0.unit_flags()),
+        sc.movers.contains(e),
+    );
     object_move(
         guid,
         position,
@@ -586,6 +590,7 @@ fn on_object_move(In(ev): In<SessionEvent>, mut sc: Scene) {
         &mut sc.transforms,
         &sc.movers,
         smooth,
+        &mut sc.remote,
     );
 }
 
@@ -819,7 +824,10 @@ fn on_object_destroyed(In(ev): In<SessionEvent>, mut sc: Scene, script: Option<N
         free_item(&mut sc, guid);
         return;
     }
-    sc.commands.entity(e).queue(super::tear_down);
+    let at = crate::lanes::stamp();
+    sc.commands
+        .entity(e)
+        .queue(move |ent: EntityWorldMut| super::tear_down(ent, at, true));
 }
 
 /// The deactivate a release runs (vtable slot 1, `0x46496f`), reading the descriptor about to go:
@@ -1052,7 +1060,10 @@ fn release(sc: &mut Scene, guid: u64) {
     if sc.item_objects.contains(e) {
         sc.commands.entity(e).despawn();
     } else {
-        sc.commands.entity(e).queue(super::tear_down);
+        let at = crate::lanes::stamp();
+        sc.commands
+            .entity(e)
+            .queue(move |ent: EntityWorldMut| super::tear_down(ent, at, false));
     }
 }
 
@@ -1088,7 +1099,7 @@ fn on_update_end(
             // Deviation: a first-pass values block the clear header byte left unwritten re-fires,
             // for a live object, its last write's edges against the watch copy (`0x465570`,
             // `0x466686`); benilla compares against this packet's copies, which hold none for it,
-            // so a stale edge never fires twice.
+            // because that way a stale edge never fires twice.
             Notify::Values { guid, sent } => {
                 let moved = copies.get(&guid).unwrap_or(&none);
                 let block = Notified::new(Sent::Fields(&sent), moved);
@@ -1101,7 +1112,8 @@ fn on_update_end(
             // `0x465d79`). For a first-pass create the clear header byte left unwritten, an
             // object not live crashes the reference, and a live one runs the all-fields watch
             // (`0x465d8e`) against its stale watch copy, re-firing its last write's edges as the
-            // values block above does; benilla's [`notify`] fires nothing for either.
+            // values block above does; benilla's [`notify`] fires nothing for either, because the
+            // faults the reference's passes have on malformed packets are recorded, not copied.
             Notify::Create { guid, kind } => {
                 if unshown.remove(&guid) {
                     create_hook(&mut sc, guid, kind, script.as_deref(), &mut arrival);

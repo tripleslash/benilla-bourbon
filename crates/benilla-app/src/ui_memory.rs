@@ -106,8 +106,8 @@ pub(crate) fn watch_script_memory(
     time: Res<Time<Real>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    // Deviation: the page watches nothing, whatever `scriptMemory` holds. Its one remedy is the
-    // quit, and a tab has no process to end: an exit only stops the app loop and freezes the page
+    // Deviation: the page watches nothing, whatever `scriptMemory` holds, because its one remedy is
+    // the quit, and a tab has no process to end: an exit only stops the app loop and freezes the page
     // on the popup. So there is no limit, no `MEMORY_EXHAUSTED` and no deadline on the page.
     if cfg!(target_arch = "wasm32") {
         return;

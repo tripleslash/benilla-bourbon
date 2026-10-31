@@ -20,7 +20,8 @@ use super::{recv_packet, send_packet, LinkTraffic};
 const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Read timeout in the login queue, where updates can be minutes apart. Deviation: the reference
-/// waits forever; a bound tells a server that died mid-queue from a long wait.
+/// waits forever; here the wait is bounded because that tells a server that died mid-queue from a
+/// long wait.
 const QUEUE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The world server refused the session. Its code is from `messages`' `AUTH_*` block, not
@@ -63,7 +64,7 @@ pub(super) struct LinkFacts {
     /// Roster guid to race, so [`WorldSession::player_login`] can pick the chat language.
     roster_races: std::collections::HashMap<u64, u8>,
     /// The billing group the last `SMSG_AUTH_RESPONSE` to carry one gave. Deviation: zeros until
-    /// one does, where the reference's words are never initialised (the session is allocated
+    /// one does, because the reference's words are never initialised (the session is allocated
     /// without zero-fill, `ui/billing` in benilla-re).
     billing: messages::Billing,
     /// `SMSG_ADDON_INFO`'s per-record status bytes in order; `None` until the server answers.
@@ -308,12 +309,14 @@ impl WorldSession {
         // twin would have left the browser session silently without an addon verdict.
         match &packet {
             ServerPacket::AddonInfo { records } => self.link.addon_info = Some(records.clone()),
-            // Deviation: benilla runs no Warden module and answers nothing, where the reference
-            // hands `SMSG_WARDEN_DATA` to the module its connect loads (`0x6ca2f0`, `0x6ca5c0`)
-            // and sends that module's answer as `CMSG_WARDEN_DATA` (`0x6ca6a0`). The message is
-            // read past like any stray and the login goes on; what follows is the server's policy
-            // (vmangos kicks after `Warden.ClientResponseDelay`, `Warden.cpp:686-691`). benilla
-            // runs no code a server sends ([`crate::auth::AuthReject::reply`] gives the rule).
+            // Deviation: benilla runs no Warden module and answers nothing, because the answers
+            // come from native Win32 x86 code the server sends, which the client maps, links and
+            // runs in its own process (`0x7a79d0`), and benilla runs no such code on any platform
+            // ([`crate::auth::AuthReject::reply`] gives the rule). The reference hands
+            // `SMSG_WARDEN_DATA` to the module its connect loads (`0x6ca2f0`, `0x6ca5c0`) and sends
+            // that module's answer as `CMSG_WARDEN_DATA` (`0x6ca6a0`); here the message is read
+            // past like any stray and the login goes on. What follows is the server's
+            // policy (vmangos kicks after `Warden.ClientResponseDelay`, `Warden.cpp:686-691`).
             ServerPacket::Other {
                 opcode: opcode::SMSG_WARDEN_DATA,
             } => self.link.warden_asked = true,

@@ -8,8 +8,8 @@
 //!
 //! Deviation: benilla gates on terrain alone, which is more permissive; the settle hold covers a
 //! building or doodad arriving after a teleport. And an authored tile whose ADT failed to load
-//! counts as resident, where the reference would have loaded it: a permanent wall over a bad file
-//! is worse for a player than walking on without its ground.
+//! counts as resident, where the reference would have loaded it, because a permanent wall over a
+//! bad file is worse for a player than walking on without its ground.
 
 use bevy::prelude::*;
 
@@ -110,8 +110,8 @@ impl TerrainResidency {
 /// (the module's `Deviation:`). A tile the WDT does not author is never requested, so never
 /// resident.
 ///
-/// Deviation: on the page a tile a stand-in floor holds (`super::provisional`) is resident too. Its
-/// reads come over a network and are never waited for (`await_inner_tiles`), so the real colliders
+/// Deviation: on the page a tile a stand-in floor holds (`super::provisional`) is resident too,
+/// because its reads come over a network and are never waited for (`await_inner_tiles`), so the real colliders
 /// trail the body by design and the WDL floor holds it meanwhile; gating on them would stop the
 /// body at every tile line. The world's edge has no stand-in, so it still holds the body.
 pub(super) fn publish_terrain_residency(

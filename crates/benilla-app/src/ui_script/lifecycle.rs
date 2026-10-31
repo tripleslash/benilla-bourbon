@@ -184,7 +184,8 @@ fn new_vm<E: std::fmt::Display>(
         channels.mirror_into(&mut script);
     }
     // The reference seeds `rand` with the clock before `WinMain` (`0x5b800b`). Deviation: a
-    // capture run (`scenario_active`) keeps the CRT's default seed, 1, so its frames reproduce.
+    // capture run (`scenario_active`) keeps the CRT's default seed, 1, because that way its frames
+    // reproduce.
     if crate::run_mode::scenario_active() {
         script.lua().srand(1);
     }
@@ -288,7 +289,7 @@ fn install_addon_asset_resolvers(world: &mut World, script: &mut UiScript) {
     // archives alone (`0x6485f0`, flags 0).
     //
     // Deviation: the page installs no reader, so `StartMovie` answers nil and the stock movie
-    // frame hides at once: its packs carry no movie converted for the web.
+    // frame hides at once, because its packs carry no movie converted for the web.
     #[cfg(not(target_arch = "wasm32"))]
     script.set_movie_reader(Box::new(move |path, open| {
         let open = match open {
@@ -1564,9 +1565,8 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     if let Some(mut minimap) = world.get_resource_mut::<crate::minimap::MinimapWidget>() {
         minimap.0 = None;
     }
-    // And the signals the frame's field callbacks and releases parked in it, for their lanes.
+    // And the refused records' walks the field callbacks' lane holds for it.
     crate::field_callbacks::drop_parked(world);
-    crate::target::drop_parked_releases(world);
 }
 
 /// A `ReloadUI()` waiting to run: set when [`crate::ui_logout`] drains
@@ -2667,6 +2667,8 @@ mod tests {
             .arm();
         let mut loot = crate::ui_loot::LootState::default();
         loot.open(CORPSE, 1, 0, Vec::new());
+        // Open long ago: its `LOOT_OPENED` has fired.
+        loot.signals_fired();
         world.insert_resource(loot);
         let body = world.spawn_empty().id();
         {

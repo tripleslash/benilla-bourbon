@@ -575,8 +575,8 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
                 emissive,
             );
             submesh.wmo_batch = Some(class);
-            // Deviation: a non-black SIDN colour glows without the `0x10` flag too. Turtle WoW's
-            // `Stormwind.wmo` (patch-3) zeroes every MOMT flag but keeps the colours, which left its
+            // Deviation: a non-black SIDN colour glows without the `0x10` flag too, because Turtle
+            // WoW's `Stormwind.wmo` (patch-3) zeroes every MOMT flag but keeps the colours, which left its
             // lamp glass and windows dark at night; no 1.12.1 root has such a colour unflagged.
             submesh.sidn = material
                 .map(|m| m.sidn_rgb)

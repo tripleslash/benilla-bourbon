@@ -940,7 +940,7 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     }
     // Deviation: a bent read is kept only where it lands on the surface this pixel's own ray sees
     // (`refract_trust`); the reference rejects it only when it lands nearer than the water (`cmp`
-    // against the surface depth). Under that guard alone a swimmer showed twice: the water beside
+    // against the surface depth), because under that guard alone a swimmer showed twice: the water beside
     // the body, over a deep bed, bent its read onto the body, and the water over the body bent its
     // read off onto the bed, so the submerged half drew as a shifted copy. A read nearer than the
     // surface has no water in front of it, so the reference's own case is the trust's zero.

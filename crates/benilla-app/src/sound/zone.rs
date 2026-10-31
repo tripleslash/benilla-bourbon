@@ -692,8 +692,8 @@ fn start_music_stream(
         return false;
     };
     // Deviation: Turtle WoW's radio kits (60401, 60423, Everlook's `.radio` stations) name an
-    // http stream, which its client plays off the network; this one reads the chain only, so the
-    // kit is dropped, reported once, however often the server re-pushes it. No chain path holds
+    // http stream, which its client plays off the network; the kit is dropped, reported once,
+    // however often the server re-pushes it, because this one reads the chain only. No chain path holds
     // "://", and the flavor is read only for one that does.
     if path.contains("://") && crate::flavor::turtle() {
         if kits.first_unplayable(kit_id) {
@@ -840,8 +840,8 @@ fn play_music_data(
 /// open (`0x7a8860`) and the play; `None` when nothing started, a bad file reported once.
 ///
 /// Deviation: on the web target a server push plays only a file already in memory and decoded on
-/// the frame; one not yet read starts its warm and is dropped, as the server slot has no deferred
-/// latch like the zone and Lua slots' ([`retry_deferred`], [`retry_lua_music`]).
+/// the frame; one not yet read starts its warm and is dropped, because the server slot has no
+/// deferred latch like the zone and Lua slots' ([`retry_deferred`], [`retry_lua_music`]).
 fn open_music_file(
     zone: &mut ZoneAudio,
     out: &mut SoundOutput,

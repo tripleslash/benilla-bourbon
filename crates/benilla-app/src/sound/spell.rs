@@ -61,7 +61,8 @@ impl HoldLoops {
 
     /// The kit sounds `edge` stops on its unit, the books moved to match: a hold's stop and a
     /// rebuild take the loops they name, an aura's stop and a replay their kit, a play nothing.
-    /// Each fades as `0x6203e0` stops an effect's sound ([`kit_stop_fade`]).
+    /// Each fades as `0x6203e0` stops an effect's sound, or as `0x61f520` closes a released one
+    /// (`0x61f57d`), the same 0.15 s ([`kit_stop_fade`]).
     pub(crate) fn stops(&mut self, edge: &SpellKitSound) -> Vec<KitStop> {
         let (entity, kits) = match *edge {
             SpellKitSound::Play { .. } | SpellKitSound::PlayAt { .. } => return Vec::new(),
@@ -74,6 +75,7 @@ impl HoldLoops {
                 (entity, vec![kit_sound])
             }
             SpellKitSound::Rebuilt { entity, at } => (entity, self.take(entity, |h| h.at < at)),
+            SpellKitSound::Release { entity, at } => (entity, self.take(entity, |h| h.at < at)),
             SpellKitSound::Replay {
                 entity, kit_sound, ..
             } => {
@@ -211,7 +213,8 @@ fn route_spell_kit_sounds(
             }
             SpellKitSound::StopHold { .. }
             | SpellKitSound::StopKit { .. }
-            | SpellKitSound::Rebuilt { .. } => continue,
+            | SpellKitSound::Rebuilt { .. }
+            | SpellKitSound::Release { .. } => continue,
         };
         played_now.push((entity, kit_sound));
         let pos = transforms.get(entity).map(|t| t.translation).ok();
@@ -397,13 +400,35 @@ mod tests {
         assert_eq!(loops.held(unit), [(FIREBALL, BUILDUP)], "rang after");
     }
 
-    /// Every stop of a kit's sound is `0x6203e0`'s, a 0.15 s fade (`0x6204b6` → `0x7a5a10`): a
-    /// hold's and an aura's through `0x614150` (`0x6141d8`), the rebuild's through its loop
-    /// `0x60ac10`, never the 15 ms de-click of a force-stop.
+    /// `ReleaseEffects` (`0x614120`) closes each released effect, whose destructor fades its sound
+    /// over 0.15 s (`0x61f520` at `0x61f57d`); a loop rung after the release plays on.
+    #[test]
+    fn a_release_fades_what_rang_before_it() {
+        let unit = Entity::PLACEHOLDER;
+        let mut loops = HoldLoops::default();
+        edge(&mut loops, play(ARCANE_MISSILES, AM_HUM, true, None));
+        let at = crate::lanes::stamp();
+        edge(
+            &mut loops,
+            play(FIREBALL, BUILDUP, true, Some(crate::lanes::stamp())),
+        );
+        let stops: Vec<_> = loops
+            .stops(&SpellKitSound::Release { entity: unit, at })
+            .into_iter()
+            .map(|s| (s.kit_sound, s.fade.duration))
+            .collect();
+        assert_eq!(stops, [(AM_HUM, std::time::Duration::from_millis(150))]);
+        assert_eq!(loops.held(unit), [(FIREBALL, BUILDUP)]);
+    }
+
+    /// Every stop of a kit's sound is a 0.15 s fade (`0x7a5a10`): `0x6203e0`'s (`0x6204b6`) for a
+    /// hold's and an aura's through `0x614150` (`0x6141d8`) and the rebuild's through its loop
+    /// `0x60ac10`, and `~CEffect`'s (`0x61f57d`) for a release, never the 15 ms de-click of a
+    /// force-stop.
     #[test]
     fn every_kit_stop_fades_over_0_15_s() {
         let unit = Entity::PLACEHOLDER;
-        for i in 0..5 {
+        for i in 0..6 {
             let mut loops = HoldLoops::default();
             edge(&mut loops, play(FIREBALL, BUILDUP, true, None));
             edge(&mut loops, play(ARCANE_INTELLECT, AURA_LOOP, false, None));
@@ -429,6 +454,7 @@ mod tests {
                     cast_hold: false,
                     at,
                 },
+                SpellKitSound::Release { entity: unit, at },
             ][i];
             let fades: Vec<_> = loops
                 .stops(&stop)

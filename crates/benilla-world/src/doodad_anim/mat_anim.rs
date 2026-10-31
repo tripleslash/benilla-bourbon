@@ -232,7 +232,8 @@ pub struct UvAnimEntry {
 
 /// tortoise: a second texture stage's own translation loop (`textureTransform[combo + 1]`) on the
 /// entry's clocks, its row added to the stage's UV set B; the slot rides in `stage1.w` as
-/// `1 + slot`. Deviation: the stage's rotation and scaling are not applied.
+/// `1 + slot`. Deviation: the stage's rotation and scaling are not applied, because the shader
+/// only adds this row to the stage's UV set.
 struct UvStage1 {
     anim: std::sync::Arc<benilla_formats::UvAnim>,
     slot: u16,

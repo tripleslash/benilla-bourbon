@@ -464,9 +464,9 @@ fn decode_candidate(candidate: &str, bytes: &[u8], on_refusal: OnRefusal) -> Can
 /// Whether `TextureCreate` makes a BLP texture of this size: the device path's sizes
 /// ([`makes_device_texture`]) at twice the side.
 ///
-/// Deviation: `0x448450` refuses a side of 1024 or more, but benilla's containers carry the
-/// interface art upscaled to twice its size (`UI-TargetingFrame-BarFill` 1024 x 128, the loading
-/// screens 1024 x 1024), so the cap is 2048 here, and a stock-size texture passes as before. A
+/// Deviation: `0x448450` refuses a side of 1024 or more; the cap is 2048 here because benilla's
+/// containers carry the interface art upscaled to twice its size (`UI-TargetingFrame-BarFill`
+/// 1024 x 128, the loading screens 1024 x 1024), and a stock-size texture passes as before. A
 /// Turtle WoW 1.18.1 realm also takes a side that is not a power of two, as its own map art is
 /// (`Interface\WorldMap\UpperKarazhan2f`, 2004 x 1336).
 fn makes_ui_texture(width: u32, height: u32, turtle: bool) -> bool {

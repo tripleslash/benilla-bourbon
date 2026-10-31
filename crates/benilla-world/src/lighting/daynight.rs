@@ -89,8 +89,9 @@ pub(super) fn moon02_state(day_continuous: f64) -> (Vec3, f32) {
         (0.916667, 1.7453293), // 100°
         (0.996528, 0.6108652), // 35°
     ];
-    // The remainder over the float 1.7 (`0x6d425f`). Deviation: the reference takes the remainder
-    // in 1/65536 steps (`0x6d41b9`-`0x6d4259`), whose exact rounding is untraced; this one is exact.
+    // The remainder over the float 1.7 (`0x6d425f`). Deviation: this one is exact where the reference
+    // takes the remainder in 1/65536 steps (`0x6d41b9`-`0x6d4259`), because their exact rounding
+    // is untraced.
     let span = f64::from(1.7_f32);
     let phase = (day_continuous.rem_euclid(span) / span) as f32;
     let theta = interp_daynight(&AZ_TABLE, phase);

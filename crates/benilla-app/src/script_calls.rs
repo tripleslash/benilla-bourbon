@@ -169,7 +169,7 @@ disjoint::disjoint_set! {
 pub(crate) struct ScriptCallHost<'w, 's> {
     appliers: Appliers<'w, 's>,
     /// The channel the census counts sends on ([`benilla_ui::script::census`]).
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     census: Option<Res<'w, crate::net::NetCommands>>,
 }
 
@@ -194,9 +194,12 @@ pub(crate) struct EngineSelect {
 }
 
 impl ScriptCallHost<'_, '_> {
-    /// Count the census's sends on this host's channel ([`benilla_ui::script::census`]).
-    #[cfg(test)]
+    /// Count the census's sends on this host's channel ([`benilla_ui::script::census`]), which a
+    /// test refuses.
+    #[cfg(debug_assertions)]
     fn census_probe(&self) {
+        #[cfg(test)]
+        benilla_ui::script::census::refuse_sends();
         if let Some(net) = self.census.as_deref() {
             let sent = net.0.clone();
             benilla_ui::script::census::probe(move || sent.len());
@@ -204,7 +207,7 @@ impl ScriptCallHost<'_, '_> {
     }
 
     /// End the lend the census is watching ([`disjoint::end_lend`]): the appliers are all unlent.
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     fn census_done(&mut self) {
         self.appliers.end_lend();
     }
@@ -217,7 +220,7 @@ impl ScriptCallHost<'_, '_> {
     /// targeting cursor (`0x4935d5`), such as the melee probe's nearest-enemy pick (`0x6130bc` →
     /// `0x4941e6`), is bound first, where its select returned.
     pub(crate) fn engine_select(&mut self, script: &mut UiScript, select: EngineSelect) {
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         self.census_probe();
         script.host_out(|script| {
             let outer_park = self.appliers.cast().ladder.arm_park(true);
@@ -231,7 +234,7 @@ impl ScriptCallHost<'_, '_> {
             self.settle_selection(script, &mut at, select.owed);
             self.appliers.cast().ladder.arm_park(outer_park);
             self.commit_views(script);
-            #[cfg(test)]
+            #[cfg(debug_assertions)]
             self.census_done();
         });
         script.hosted(self, |_| ());
@@ -248,7 +251,7 @@ impl ScriptCallHost<'_, '_> {
         guid: u64,
         mark: crate::lanes::Mark,
     ) {
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         self.census_probe();
         script.host_out(|script| {
             let mut at = Signalled {
@@ -262,7 +265,7 @@ impl ScriptCallHost<'_, '_> {
             self.run_casts(script, &mut at);
             self.appliers.cast().ladder.arm_park(outer_park);
             self.commit_views(script);
-            #[cfg(test)]
+            #[cfg(debug_assertions)]
             self.census_done();
         });
         script.hosted(self, |_| ());
@@ -272,7 +275,7 @@ impl ScriptCallHost<'_, '_> {
     /// the trade-skill repeat's recast at its go (`0x4fd7d7` → `0x6e4b60`), whose signals' listeners
     /// run where each fires inside it, ahead of the sends after it.
     pub(crate) fn engine_cast(&mut self, script: &mut UiScript, spell_id: u32) {
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         self.census_probe();
         script.host_out(|script| {
             let mut at = Signalled {
@@ -288,7 +291,7 @@ impl ScriptCallHost<'_, '_> {
             self.run_casts(script, &mut at);
             self.appliers.cast().ladder.arm_park(outer_park);
             self.commit_views(script);
-            #[cfg(test)]
+            #[cfg(debug_assertions)]
             self.census_done();
         });
         script.hosted(self, |_| ());
@@ -299,7 +302,7 @@ impl ScriptCallHost<'_, '_> {
     /// it ([`Self::open_used`]), its signals' listeners running there with the host lent, behind
     /// the cast reports made since `mark`.
     pub(crate) fn engine_open_used(&mut self, script: &mut UiScript, mark: crate::lanes::Mark) {
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         self.census_probe();
         script.host_out(|script| {
             let mut at = Signalled {
@@ -309,7 +312,7 @@ impl ScriptCallHost<'_, '_> {
             };
             self.open_used(script, &mut at);
             self.commit_views(script);
-            #[cfg(test)]
+            #[cfg(debug_assertions)]
             self.census_done();
         });
         script.hosted(self, |_| ());
@@ -319,7 +322,7 @@ impl ScriptCallHost<'_, '_> {
     /// world-enter cascade's (`0x490927`): the deselect and its teardown signal in place, a
     /// charmed player's refused (`0x493590`) and an empty selection a no-op.
     pub(crate) fn engine_clear_target(&mut self, script: &mut UiScript, mark: crate::lanes::Mark) {
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         self.census_probe();
         script.host_out(|script| {
             let mut at = Signalled {
@@ -330,7 +333,7 @@ impl ScriptCallHost<'_, '_> {
             let owed = self.appliers.select().clear_target();
             self.settle_selection(script, &mut at, owed);
             self.commit_views(script);
-            #[cfg(test)]
+            #[cfg(debug_assertions)]
             self.census_done();
         });
         script.hosted(self, |_| ());
@@ -536,7 +539,7 @@ impl ScriptCallHost<'_, '_> {
     fn point(&mut self, script: &mut UiScript, mark: &mut crate::ui_cast::ReportMark) {
         self.signal_reports(script, mark);
         self.commit_views(script);
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         self.census_done();
         script.signal_point(self);
     }
@@ -1009,7 +1012,12 @@ impl ScriptCallHost<'_, '_> {
         while let Some(mut stage) = self.appliers.cast().ladder.take_parked() {
             self.at_point(script, at);
             if let crate::spell::CastStage::Arm(park) = &mut stage {
-                self.appliers.cast().reread_arm(park);
+                // `BindTarget`'s merge refused the unit out of range (`0x6e6089`): its line's
+                // listeners run ahead of the report's tail (`0x6e21dd` before `0x6e2218`).
+                if let Some(owed) = self.appliers.cast().reread_arm(park) {
+                    self.at_point(script, at);
+                    self.appliers.cast().reread_refused(park, owed);
+                }
             }
             self.appliers.cast().ladder.resume_parked(stage);
             // The attempt's return (`0x6e51e3`) waits past its unit's attack tail (`0x6e51de`),
@@ -1077,10 +1085,6 @@ impl ScriptCallHost<'_, '_> {
     /// the cell cleared (`0x4f502b`) and `GUILD_REGISTRAR_CLOSED` (`0x4f503a`), its signal once
     /// per run of the core, as the call's tail.
     fn close_registrar(&mut self) -> Option<CallTail> {
-        // A parked close's re-entry finds its cell clear ([`crate::ui_session::parked_close`]).
-        if crate::ui_session::parked_close(crate::ui_session::NpcWindow::Registrar) {
-            return None;
-        }
         let npc = self.appliers.petition().registrar_npc()?;
         let reenters = self.appliers.latch().release(npc);
         self.appliers.petition().clear_registrar();
@@ -1193,7 +1197,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
     }
 
     fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         self.census_probe();
         let appliers = &mut self.appliers;
         // The gate's answer for this call, made where the Lua verb ran: its casts start only if
@@ -1573,7 +1577,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
         // confirm (`0x495d60`), all signalled below as the call returns, under its input events.
         let ready = self.appliers.reports().ready_since(script, at.mark);
         self.commit_views(script);
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         self.census_done();
         if ready.is_empty() && popup.is_none() {
             return tail;
@@ -1693,13 +1697,13 @@ impl<P: SystemParam + 'static> VmWith<'_, '_, P> {
         let Some(script) = self.script.as_deref_mut() else {
             return f(None, self.set.p0());
         };
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         if let Some(host) = self.set.p1().as_ref() {
             host.census_probe();
         }
         let r = script.host_out(|script| {
             let r = f(Some(script), self.set.p0());
-            #[cfg(test)]
+            #[cfg(debug_assertions)]
             self.set.end_lend();
             r
         });
@@ -1906,45 +1910,6 @@ pub(crate) fn insert_test_vm(world: &mut World) {
     world.insert_non_send(UiScript::new().expect("a VM"));
 }
 
-/// Defer what the world's VM fires while the guard lives ([`UiScript::defer`]), with the mark to
-/// park it from ([`park_since`]); `None` with no VM.
-pub(crate) fn defer_vm(world: &World) -> Option<(benilla_ui::script::Deferring, usize)> {
-    world
-        .get_non_send::<UiScript>()
-        .map(|vm| (vm.defer(), vm.waiting_mark()))
-}
-
-/// [`defer_vm`] split: its calls apply at once through the lent host, its signals and writes park
-/// ([`UiScript::defer_split`]).
-pub(crate) fn defer_vm_split(world: &World) -> Option<(benilla_ui::script::Deferring, usize)> {
-    world
-        .get_non_send::<UiScript>()
-        .map(|vm| (vm.defer_split(), vm.waiting_mark()))
-}
-
-/// Park what the world's VM has held since `mark` ([`UiScript::park_since`]); the VM's session
-/// and the key, `None` with nothing held or no VM.
-pub(crate) fn park_since(world: &mut World, mark: usize) -> Option<(u64, u64)> {
-    let mut vm = world.get_non_send_mut::<UiScript>()?;
-    let key = vm.park_since(mark)?;
-    Some((vm.session(), key))
-}
-
-/// Run what the world's VM parked under `key` ([`UiScript::run_parked`]), with the host lent,
-/// if it is still the VM of `session`: a replaced VM's keys count from 0 again in the next.
-pub(crate) fn run_parked(world: &mut World, session: u64, key: u64) {
-    fn run(In((session, key)): In<(u64, u64)>, mut vm: HostedVm) {
-        vm.run(|script| {
-            if let Some(script) = script.filter(|s| s.session() == session) {
-                script.run_parked(key);
-            }
-        });
-    }
-    if let Err(err) = world.run_system_cached_with(run, (session, key)) {
-        debug!("script calls: parked signals did not run: {err}");
-    }
-}
-
 /// What the world's VM answers to `chunk`, for a test of an engine entry outside the feeds.
 #[cfg(test)]
 pub(crate) fn eval_in_vm<T: benilla_ui::mlua::FromLuaMulti>(world: &World, chunk: &str) -> T {
@@ -2010,7 +1975,7 @@ pub(crate) fn bind_picks_here(world: &mut World) {
 }
 
 /// The census list ([`benilla_ui::script::census`]).
-#[cfg(test)]
+#[cfg(debug_assertions)]
 pub(crate) mod census;
 
 /// A host that applies each call with `apply`, for a harness that lends its own engine half.

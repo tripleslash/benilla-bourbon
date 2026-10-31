@@ -84,8 +84,8 @@ pub fn local(secs: i64) -> (Civil, bool) {
 /// `0x740825`), then adds `_dstbias` only when `isdst` is set (`0x740811`, `0x740836`). The sum is
 /// a 32-bit `time_t`'s, so a wrap past it is negative and refused.
 ///
-/// Deviation: a `_dstbias` that takes the time below 0 faults the client, which copies the second
-/// `localtime`'s null answer unchecked (`0x740842` → `0x740860`); here it is refused.
+/// Deviation: a `_dstbias` that takes the time below 0 is refused here because it faults the
+/// client, which copies the second `localtime`'s null answer unchecked (`0x740842` → `0x740860`).
 pub fn local_seconds(utc: i32, isdst: bool) -> Option<i32> {
     let (zone, bias) = zone().biases;
     let mut t = utc.wrapping_add(zone);
@@ -369,7 +369,7 @@ mod platform {
         )
     }
 
-    /// Deviation: a browser names no zone abbreviation, so `%Z` writes nothing, as the runtime
+    /// Deviation: `%Z` writes nothing, because a browser names no zone abbreviation, as the runtime
     /// does for a zone it cannot name.
     pub(super) fn name(_isdst: bool) -> Vec<u8> {
         Vec::new()

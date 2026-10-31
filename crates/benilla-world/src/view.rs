@@ -85,7 +85,7 @@ pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=1500.0;
 /// change callback `0x688d90`, `[0x8029d0]` = 0.01 and `[0x808300]` = 0.33.
 ///
 /// Deviation: the reference refuses a value outside them, echoing "NearClip must be in range
-/// 0.01 - 0.33" (`0x869abc`); ours clamps, as every CVar consumer here clamps at its own edge.
+/// 0.01 - 0.33" (`0x869abc`); ours clamps, because every CVar consumer here clamps at its own edge.
 pub const NEARCLIP_RANGE: std::ops::RangeInclusive<f32> = 0.01..=0.33;
 
 /// The world camera's multisampling, the `gxMultisample` CVar: a sample count in [`MSAA_RANGE`],
@@ -344,7 +344,7 @@ pub fn stamp_near_clip(
 ///
 /// Deviation: the reference's camera fov is π/2 (`0x7ac620`), but its projection divides it by
 /// the diagonal, `θ = fov / (2·√(aspect² + 1))` (`0x5c3cc0`), a vertical field of 44.1° at 16:9
-/// and 54° at 4:3; the maintainer chose a modern 90° horizontal field.
+/// and 54° at 4:3; benilla takes a modern 90° horizontal field because the maintainer chose it.
 pub const CAM_FOVY: f32 = 1.024_779;
 
 /// The world camera's pose made current within `Update`, for every viewer authority there: Bevy

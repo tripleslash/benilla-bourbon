@@ -191,9 +191,10 @@ pub(super) fn load_creature_types(mut commands: Commands, world_assets: Option<R
 
 /// Everything the scan reads, shared by TAB, the attack acquire and the pet bar's Attack.
 ///
-/// Deviation: our own body is never a candidate. The reference's friendly scan picks the player at
-/// some facings (`CanAssist(P, P)` is true, `0x6061e0`; the cone test `0x47f220`), but our scoring
-/// always puts the player dead centre at distance 0, so CTRL-TAB would pick us on every press.
+/// Deviation: our own body is never a candidate because our scoring always puts the player dead
+/// centre at distance 0, so CTRL-TAB would pick us on every press. The reference's friendly scan
+/// picks the player at some facings (`CanAssist(P, P)` is true, `0x6061e0`; the cone test
+/// `0x47f220`).
 #[derive(SystemParam)]
 #[allow(clippy::type_complexity)] // one bundled system param, the app's convention
 pub(crate) struct TargetScan<'w, 's> {
@@ -1125,8 +1126,9 @@ pub(crate) struct LastEnemy(pub(crate) Option<u64>);
 /// alive was stamped the frame it was selected, so its death's deselect (`super::died`, in a later
 /// frame's packet) leaves it remembered.
 ///
-/// Deviation: sampled each frame, not stamped in `SetSelection`, so every selection writer is
-/// covered; a selected unit that turns hostile is remembered, where the reference's is not.
+/// Deviation: sampled each frame, not stamped in `SetSelection`, because that way every selection
+/// writer is covered; a selected unit that turns hostile is remembered, where the reference's is
+/// not.
 pub(super) fn remember_last_enemy(
     selection: Res<Selection>,
     stores: Query<&ObjectStore>,
@@ -1298,17 +1300,16 @@ fn select_in_place(world: &mut World, select: OwedSelect) {
     crate::script_calls::bind_picks_here(world);
 }
 
-/// The packet's owed selects, after its handlers, each run as the firing of its stamp with the
-/// world's VM held, so its sends go out in the packet and what it signals is parked on the release
-/// lane at its place ([`super::release::park_signals`]): the reference signals inside the packet
-/// (`0x49389c`, `0x493a73`).
+/// The packet's owed selects, after its handlers, each nested under its stamp as a step in its
+/// place ([`super::release::in_place`]), so its sends go out in the packet and its signals'
+/// listeners run there: the reference signals inside the packet (`0x49389c`, `0x493a73`).
 pub(super) fn run_owed_selects(world: &mut World, _: crate::lanes::Stamp) {
     let Some(mut owed) = world.get_resource_mut::<OwedSelects>() else {
         return;
     };
     for (at, select) in std::mem::take(&mut owed.0) {
         crate::lanes::firing(at, || {
-            super::release::park_signals(world, |world| select_in_place(world, select));
+            super::release::in_place(world, |world| select_in_place(world, select));
         });
     }
 }
@@ -1532,9 +1533,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let open = |world: &mut World, guid: u64| {
-            world
-                .resource_mut::<crate::ui_loot::LootState>()
-                .open(guid, 1, 0, Vec::new());
+            let mut loot = world.resource_mut::<crate::ui_loot::LootState>();
+            loot.open(guid, 1, 0, Vec::new());
+            // Open long ago: its `LOOT_OPENED` has fired.
+            loot.signals_fired();
             world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(guid);
         };
         let source = |world: &World| world.resource::<crate::ui_loot::LootState>().source();
