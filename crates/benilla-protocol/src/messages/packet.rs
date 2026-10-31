@@ -71,8 +71,8 @@ pub enum ServerPacket {
         result: u8,
         /// Our login-queue place; only for [`super::AUTH_WAIT_QUEUE`] with a long enough body.
         queue_position: Option<u32>,
-        /// The billing group; `None` on a body too short for it.
-        billing: Option<super::Billing>,
+        /// The billing fields read; `None` when under 5 bytes follow the result (`0x5b41f9`).
+        billing: Option<super::BillingRead>,
     },
     CharEnum {
         characters: Vec<Character>,
@@ -395,8 +395,8 @@ pub enum ServerPacket {
     GameObjectDespawnAnim {
         guid: u64,
     },
-    /// `SMSG_GAMEOBJECT_RESET_STATE`: a bare `u64` guid; the client re-applies the descriptor's
-    /// `GAMEOBJECT_STATE` (`0x6e9790`).
+    /// `SMSG_GAMEOBJECT_RESET_STATE`: a bare `u64` guid; the client re-applies the object's
+    /// descriptor state to its animation (`0x6e9790` → `0x5f8c00`).
     GameObjectResetState {
         guid: u64,
     },

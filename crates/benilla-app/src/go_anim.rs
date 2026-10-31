@@ -147,10 +147,11 @@ impl GoAnim {
         self.one_shot = Some(anim);
     }
 
-    /// `SMSG_GAMEOBJECT_RESET_STATE`'s re-apply (`0x5f8c00` → `0x5f8bd0`): the descriptor's
-    /// `GAMEOBJECT_STATE` stored again, absent read as ACTIVE as vmangos omits zero fields.
-    pub(crate) fn reset_state(&mut self, descriptor: Option<u32>) {
-        self.state = Some(descriptor.unwrap_or(GO_STATE_ACTIVE));
+    /// `SMSG_GAMEOBJECT_RESET_STATE` (`0x6e9790` → `0x5f8c00` → `0x5f8bd0`): store the
+    /// descriptor's `GAMEOBJECT_STATE`, undoing the open-lock and loot-release predictions. Absent
+    /// is `0`, ACTIVE, as at the seed.
+    pub(crate) fn reset_state(&mut self, store: &ObjectStore) {
+        self.state = Some(store.0.gameobject_state().unwrap_or(GO_STATE_ACTIVE));
     }
 }
 

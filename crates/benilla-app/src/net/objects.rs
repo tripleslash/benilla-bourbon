@@ -71,7 +71,7 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::GameObjectUnknown, on_gameobject_unknown)
         .net_handler(K::GameObjectCustomAnim, on_gameobject_anim)
         .net_handler(K::GameObjectDespawnAnim, on_gameobject_anim)
-        .net_handler(K::GameObjectResetState, on_gameobject_anim)
+        .net_handler(K::GameObjectResetState, on_gameobject_reset_state)
         .net_handler(K::SplineMoveMode, on_spline_move_mode)
         .net_handler(K::ForceSpeedChange, on_speed)
         .net_handler(K::SpeedChanged, on_speed);
@@ -845,18 +845,22 @@ fn on_gameobject_anim(In(ev): In<SessionEvent>, mut sc: Scene) {
                 crate::go_anim::ANIM_DESPAWN,
             );
         }
-        // `0x6e9790`: the game object (`0x468460`, mask 0x20) takes its descriptor's state again
-        // (`0x5f8c00` → `0x5f8bd0`), undoing the open-lock and loot-release predictions.
-        SessionEvent::GameObjectResetState { guid } => {
-            debug!("net: gameobject {guid:#x} reset state");
-            if let Some(&e) = sc.index.0.get(&guid) {
-                let descriptor = sc.stores.get(e).ok().and_then(|s| s.0.gameobject_state());
-                if let Ok(mut go) = sc.go_anims.get_mut(e) {
-                    go.reset_state(descriptor);
-                }
-            }
-        }
         _ => {}
+    }
+}
+
+/// `SMSG_GAMEOBJECT_RESET_STATE` (`0x6e9790`): an animated object re-applies its descriptor's
+/// state (`0x5f8c00`); a guid that is no game object here, or a static one, is skipped.
+fn on_gameobject_reset_state(
+    In(ev): In<SessionEvent>,
+    index: Res<GuidIndex>,
+    mut gos: Query<(&ObjectStore, &mut crate::go_anim::GoAnim)>,
+) {
+    if let SessionEvent::GameObjectResetState { guid } = ev {
+        debug!("net: gameobject {guid:#x} reset state");
+        if let Some((store, mut go)) = index.0.get(&guid).and_then(|&e| gos.get_mut(e).ok()) {
+            go.reset_state(store);
+        }
     }
 }
 
