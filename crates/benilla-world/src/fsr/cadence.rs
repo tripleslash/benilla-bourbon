@@ -336,13 +336,7 @@ fn fg_main(
         ahead.owed = held && cfg!(target_arch = "wasm32");
         std::mem::take(&mut ahead.ran)
     };
-    if held {
-        // `First`'s `time_system` does not run, so drain the render thread's frame instant here:
-        // its channel holds one, and the next send would panic on a full one.
-        if let Some(rx) = world.get_resource::<bevy::time::TimeReceiver>() {
-            let _ = rx.0.try_recv();
-        }
-    } else if !ran_ahead {
+    if !held && !ran_ahead {
         world.run_schedule(Main);
     }
 }

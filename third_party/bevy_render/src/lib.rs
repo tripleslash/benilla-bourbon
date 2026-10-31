@@ -391,14 +391,6 @@ impl Plugin for RenderPlugin {
         ));
 
         let (sender, receiver) = bevy_time::create_time_channels();
-        // benilla fork (BENILLA.md, "The render worker"): the worker renders on its own clock, at
-        // most once per main update and often less, so the main app keeps its own time; the
-        // worker's `send_time` then finds the channel closed, which it ignores.
-        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-        if !render_worker::active() {
-            app.insert_resource(receiver);
-        }
-        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
         app.insert_resource(receiver);
 
         let asset_server = app.world().resource::<AssetServer>().clone();
