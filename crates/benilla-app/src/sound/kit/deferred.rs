@@ -25,7 +25,15 @@
 //!
 //! **A shot that lands late is dropped, not played late.** [`LATE_WINDOW`] bounds how far behind
 //! its event a one-shot may sound; past it the file goes into the cache silently and the *next*
-//! play of it is instant. A hit sound a whole second after the hit is worse than no hit sound.
+//! play of it is instant. A hit sound a whole second after the hit is worse than no hit sound. A
+//! source's loop has no such moment: it sounds for as long as its driver holds it, however late.
+//!
+//! **A shot is one voice, and its stop reaches it.** A driver retries a source's kit every frame
+//! until its channel is live, so the retries of one voice share one shot ([`stops::same_voice`]);
+//! recorded apart, a torch's emitter opened a dozen loops when its file landed, and those filled
+//! the voice ceiling with channels it may not steal. A stop finds no channel while the file is on
+//! its way, so the shot checks the stops since its ask ([`stops::StopLedger`]); unchecked, an
+//! instant cast's loop opened after its go and rang until the next cast of the spell stopped it.
 //!
 //! ## Pre-warming
 //!
@@ -45,8 +53,8 @@ use benilla_formats::TryRead;
 use benilla_protocol::events::EntityKind;
 
 use super::{
-    play_file, play_kit_ext, stop_older_emote_voices, KitRef, Latch, PlayExtras, SoundCategory,
-    SoundKits,
+    kit_looping, play_file, play_kit_ext, source_kit_playing, stop_older_emote_voices, stops,
+    KitRef, Latch, PlayExtras, SoundCategory, SoundKits,
 };
 use crate::sound::creature::CreatureVoices;
 use crate::sound::{web_decode, AudioListener, SoundConfig, SoundOutput};
@@ -61,7 +69,15 @@ pub(super) struct PendingSfx {
     /// The chain name as written — what the retry re-reads and what an error line names.
     path: String,
     phase: SfxPhase,
-    shots: Vec<(Instant, Deferred)>,
+    shots: Vec<Shot>,
+}
+
+/// A play on record: when it asked, by the wall clock for [`LATE_WINDOW`] and by [`stops::tick`]
+/// for the stops.
+struct Shot {
+    asked: Instant,
+    tick: u64,
+    play: Deferred,
 }
 
 /// The two waits a sound goes through on this target: the pack, then the decode.
@@ -91,6 +107,16 @@ pub(super) enum Deferred {
     },
 }
 
+impl Deferred {
+    /// The kit and source a retry of this play would name; `None` for a raw file.
+    fn voice(&self) -> Option<(u32, Option<Entity>)> {
+        match self {
+            Deferred::Kit { kit, extras, .. } => Some((*kit, extras.source)),
+            Deferred::File { .. } => None,
+        }
+    }
+}
+
 impl SoundKits {
     /// Note that `key` is on its way, so [`Self::defer`] has something to record a shot against.
     /// Called from [`Self::sfx`]'s two "not here yet" arms; idempotent.
@@ -118,10 +144,25 @@ impl SoundKits {
 
     /// Record a play against the load in flight for `key`, to be replayed when it lands. A key
     /// with nothing in flight (the file turned out to be missing) drops the shot, which is the
-    /// answer it would have got anyway.
-    pub(super) fn defer(&mut self, key: &str, shot: Deferred) {
-        if let Some(p) = self.pending.get_mut(key) {
-            p.shots.push((Instant::now(), shot));
+    /// answer it would have got anyway. A retry of a voice on record renews its ask.
+    pub(super) fn defer(&mut self, key: &str, play: Deferred) {
+        let Some(p) = self.pending.get_mut(key) else {
+            return;
+        };
+        let (asked, tick) = (Instant::now(), stops::tick());
+        let retry = play.voice().and_then(|voice| {
+            p.shots.iter_mut().find(|s| {
+                s.play
+                    .voice()
+                    .is_some_and(|other| stops::same_voice(voice, other))
+            })
+        });
+        match retry {
+            Some(shot) => {
+                shot.asked = asked;
+                shot.tick = tick;
+            }
+            None => p.shots.push(Shot { asked, tick, play }),
         }
     }
 }
@@ -141,6 +182,7 @@ pub(super) fn land_sfx_loads(
         return;
     };
     if kits.pending.is_empty() {
+        out.stops.clear();
         return;
     }
     // Step the reads first: a pack that landed this frame starts decoding this frame.
@@ -191,16 +233,28 @@ pub(super) fn land_sfx_loads(
         };
         kits.cache.insert(key.clone(), data);
         super::DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        for (asked, shot) in shots {
-            let late = now.duration_since(asked);
-            if late > LATE_WINDOW {
+        for shot in shots {
+            let (kit, source, force_loop) = match &shot.play {
+                Deferred::Kit { kit, extras, .. } => (*kit, extras.source, extras.force_loop),
+                Deferred::File { .. } => (0, None, false),
+            };
+            if out.stops.stopped_since(source, kit, shot.tick) {
+                debug!("sfx: {key} landed after the stop of the play that asked — cached");
+                continue;
+            }
+            let held = source.filter(|_| force_loop || kit_looping(&kits, kit));
+            if held.is_some_and(|source| source_kit_playing(&out, source, kit)) {
+                continue;
+            }
+            let late = now.duration_since(shot.asked);
+            if late > LATE_WINDOW && held.is_none() {
                 debug!(
                     "sfx: {key} landed {} ms after the play that asked — cached, not played",
                     late.as_millis()
                 );
                 continue;
             }
-            let replayed = match shot {
+            let replayed = match shot.play {
                 Deferred::Kit {
                     kit,
                     variant,

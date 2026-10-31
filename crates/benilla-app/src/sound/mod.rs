@@ -273,6 +273,9 @@ pub(crate) struct SoundOutput {
     pub(crate) voices_denied: u64,
     /// Same-kit copies dropped by [`kit::SAME_KIT_MAX`].
     pub(crate) copies_dropped: u64,
+    /// wasm32: the stops a shot still waiting on its file honours when it lands.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) stops: kit::stops::StopLedger,
 }
 
 impl SoundOutput {
@@ -425,6 +428,8 @@ impl Plugin for SoundPlugin {
             voices_stolen: 0,
             voices_denied: 0,
             copies_dropped: 0,
+            #[cfg(target_arch = "wasm32")]
+            stops: Default::default(),
         })
         .init_resource::<SoundConfig>()
         .init_resource::<AudioListener>()

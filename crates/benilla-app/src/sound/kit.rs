@@ -27,6 +27,8 @@ use super::mixer::{self, StaticSoundData};
 /// against the file and replayed when it lands. Our carry; see its header.
 #[cfg(target_arch = "wasm32")]
 mod deferred;
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod stops;
 use super::{AudioListener, SoundConfig, SoundOutput};
 
 /// The volume slider that scales a channel (master is global). Set by the caller, as the
@@ -764,6 +766,8 @@ pub(super) fn stop_source_kit_with(
     kit_id: u32,
     fade: kira::Tween,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    out.stops.note(Some(source), Some(kit_id));
     out.channels.retain_mut(|c| {
         if c.source == Some(source) && c.kit == kit_id {
             c.handle.stop(fade);
@@ -778,6 +782,8 @@ pub(super) fn stop_source_kit_with(
 /// Returns how many it stopped, so the doodad reaper in [`super::anim_events`] can tell a reaped
 /// loop from a silent source.
 pub(super) fn stop_source(out: &mut SoundOutput, source: Entity) -> usize {
+    #[cfg(target_arch = "wasm32")]
+    out.stops.note(Some(source), None);
     let before = out.channels.len();
     out.channels.retain_mut(|c| {
         if c.source == Some(source) {
@@ -1165,6 +1171,8 @@ pub(super) fn apply_kit_debug(
 /// `OnExit(InWorld)`: every live kit channel dies with the world; the glue screens' clicks start
 /// after this edge.
 fn stop_all_channels(mut out: NonSendMut<SoundOutput>) {
+    #[cfg(target_arch = "wasm32")]
+    out.stops.note(None, None);
     let n = out.channels.len();
     for ch in &mut out.channels {
         ch.handle.stop(mixer::declick());
