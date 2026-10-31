@@ -17,6 +17,8 @@ mod creature;
 mod death_thud;
 mod emitter_pool;
 mod emote;
+#[cfg(any(target_arch = "wasm32", test))]
+mod file_rate;
 pub(crate) mod footsteps;
 mod gameobject;
 mod glue;

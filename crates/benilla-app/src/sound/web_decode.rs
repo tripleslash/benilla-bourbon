@@ -101,7 +101,7 @@ async fn decode(bytes: Vec<u8>, looping: bool) -> Result<StaticSoundData, String
 /// buffer it is given, which is exactly why the caller's `Vec` is kept: it is what the ADPCM
 /// fallback above decodes from.
 async fn decode_in_browser(bytes: &[u8]) -> Result<StaticSoundData, String> {
-    let ctx = decode_context()?;
+    let ctx = decode_context(super::file_rate::of(bytes).unwrap_or(44_100))?;
     let buf = js_sys::Uint8Array::from(bytes).buffer();
     let promise = ctx.decode_audio_data(&buf).map_err(js_err)?;
     let audio: web_sys::AudioBuffer = wasm_bindgen_futures::JsFuture::from(promise)
@@ -114,27 +114,31 @@ async fn decode_in_browser(bytes: &[u8]) -> Result<StaticSoundData, String> {
     frames_from(&audio).await
 }
 
-/// The one context this module decodes on, built on first use and kept.
+/// The context this module decodes a `rate` file on, built on first use and kept.
 ///
-/// Offline, and 1 frame long: its only job is to own `decodeAudioData`. The length and rate are
-/// the constructor's required arguments, not a choice about the audio — `decodeAudioData` sizes
-/// its own output from the file, and we read the rate back off the buffer it returns.
-fn decode_context() -> Result<web_sys::OfflineAudioContext, String> {
+/// Offline, and 1 frame long: its only job is to own `decodeAudioData`, which resamples to its
+/// context's rate. At the file's own rate there is nothing to resample, so the mixer's resampler is
+/// the only one a sound meets, as natively: a 22050 Hz step on a 44100 Hz context lost everything
+/// its resampler's low-pass took. A rate the browser refuses falls back to the wasm decoder.
+fn decode_context(rate: u32) -> Result<web_sys::OfflineAudioContext, String> {
     thread_local! {
-        static CTX: std::cell::RefCell<Option<web_sys::OfflineAudioContext>> =
-            const { std::cell::RefCell::new(None) };
+        static CTX: std::cell::RefCell<std::collections::HashMap<u32, web_sys::OfflineAudioContext>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
     }
     CTX.with(|cell| {
         let mut cell = cell.borrow_mut();
-        if cell.is_none() {
-            *cell = Some(
-                web_sys::OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
-                    2, 1, 44_100.0,
-                )
-                .map_err(js_err)?,
-            );
+        if let Some(ctx) = cell.get(&rate) {
+            return Ok(ctx.clone());
         }
-        Ok(cell.as_ref().expect("just filled").clone())
+        let ctx =
+            web_sys::OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
+                2,
+                1,
+                rate as f32,
+            )
+            .map_err(js_err)?;
+        cell.insert(rate, ctx.clone());
+        Ok(ctx)
     })
 }
 
