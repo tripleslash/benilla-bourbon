@@ -1006,7 +1006,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 - The reference refuses a value outside them, echoing "NearClip must be in range 0.01 - 0.33" (`0x869abc`); ours clamps, because every CVar consumer here clamps at its own edge. ([`src/view.rs:87`](../crates/benilla-world/src/view.rs#L87))
 - The reference projects the detailed world to `farclip` and the horizon to `horizonfarclip` (default 2112, floored at `farclip + 528`); ours has one far plane well beyond `farclip`, because the WDL ring draws in the same projection, and the detailed world ends at `farclip` by the wall. ([`src/view.rs:246`](../crates/benilla-world/src/view.rs#L246))
-- The reference's camera fov is π/2 (`0x7ac620`), but its projection divides it by the diagonal, `θ = fov / (2·√(aspect² + 1))` (`0x5c3cc0`), a vertical field of 44.1° at 16:9 and 54° at 4:3; benilla takes a modern 90° horizontal field because the maintainer chose it. ([`src/view.rs:345`](../crates/benilla-world/src/view.rs#L345))
+- The reference's world camera holds π/2 (`0x50a707`), and its projection divides it by the diagonal, `θ = fov / (2·√(aspect² + 1))` (`0x5c3cc0`), so its vertical field follows the aspect: 54° at 4:3, 44.1° at 16:9, 35° at 21:9. benilla takes a modern 90° horizontal field because the maintainer chose it. ([`src/view.rs:327`](../crates/benilla-world/src/view.rs#L327))
 
 #### water_fx
 
