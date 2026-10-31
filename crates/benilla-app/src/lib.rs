@@ -239,13 +239,10 @@ mod ui_world_map;
 mod video;
 mod vm_pass;
 mod vplates;
-#[cfg(any(
-    test,
-    all(
-        target_arch = "wasm32",
-        target_feature = "atomics",
-        not(debug_assertions)
-    )
+#[cfg(all(
+    target_arch = "wasm32",
+    target_feature = "atomics",
+    not(debug_assertions)
 ))]
 mod wasm_alloc;
 mod wdb;

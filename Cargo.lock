@@ -834,6 +834,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "benilla-wasm-alloc-test"
+version = "0.2.0"
+
+[[package]]
 name = "benilla-wdt"
 version = "0.2.0"
 
