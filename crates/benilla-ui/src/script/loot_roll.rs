@@ -64,7 +64,7 @@ impl LiveQuery for LootRollQuery {
 }
 
 /// Roll `roll_id` now: the host's answer, else the VM's copy.
-fn entry(lua: &Lua, roll_id: u32) -> Option<LootRollEntry> {
+pub(super) fn entry(lua: &Lua, roll_id: u32) -> Option<LootRollEntry> {
     ask(lua, &LootRollQuery { roll_id }).unwrap_or_else(|| {
         let model = lua
             .app_data_ref::<crate::script::ModelCell>()

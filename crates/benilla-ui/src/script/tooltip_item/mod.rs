@@ -888,19 +888,9 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // `is-number` else `Usage: SetLootRollItem(id)` (`0x855650`, `0x53657b`).
             let roll_id = binding_abi::index_arg32(lua, roll_id, "Usage: SetLootRollItem(id)")?;
             let h = frame_handle_of(lua, &this)?;
-            let entry = {
-                let model = lua
-                    .app_data_mut::<crate::script::ModelCell>()
-                    .expect("model app_data");
-                model
-                    .loot_rolls
-                    .rolls
-                    .iter()
-                    .find(|r| r.roll_id == roll_id)
-                    .cloned()
-                    .filter(|r| r.item_id != 0)
-            };
-            let Some(entry) = entry else {
+            // The roll at the call, as the getters read it.
+            let Some(entry) = super::loot_roll::entry(lua, roll_id).filter(|r| r.item_id != 0)
+            else {
                 return Ok(());
             };
             let inst = render::ItemInstance {

@@ -597,6 +597,34 @@ fn ctrl_and_shift_on_the_roll_icon_preview_and_post_its_link() {
     );
 }
 
+/// The icon alone holds the hover script (`LootFrame.xml:343`): on it the stock tooltip names the
+/// roll's item, off it the tooltip hides, and the name beside it shows none.
+#[test]
+fn hovering_the_roll_icon_shows_its_item() {
+    use super::test_ui::{hover, unhover};
+    const SHOWN: &str = "return GameTooltip:IsVisible() and GameTooltipTextLeft1:GetText() or nil";
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = setup();
+    s.set_loot_rolls(rolls());
+    s.fire_event(
+        "START_LOOT_ROLL",
+        vec![ScriptValue::Int(8), ScriptValue::Int(60_000)],
+    );
+    s.resolve();
+
+    hover(&mut s, "GroupLootFrame1IconFrame");
+    assert_eq!(
+        s.eval::<Option<String>>(SHOWN).unwrap().as_deref(),
+        Some("Worn Shortsword")
+    );
+    unhover(&mut s);
+    assert_eq!(s.eval::<Option<String>>(SHOWN).unwrap(), None);
+
+    hover(&mut s, "GroupLootFrame1Name");
+    assert_eq!(s.eval::<Option<String>>(SHOWN).unwrap(), None);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Addons inherit `GroupLootFrameTemplate` by its 1.12 name and reach for its children; the icon
 /// is `IconFrameIcon` because it is nested in the `IconFrame` button (`LootFrame.xml:314`).
 #[test]

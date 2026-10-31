@@ -104,6 +104,29 @@ fn the_roll_getters_read_the_list_at_the_call() {
     assert_eq!(eval::<String>(&mut app, false, READ), "nil/1/false/false");
 }
 
+/// The icon's hover (`LootFrame.xml:343`) builds from the engine's roll at the call (`0x5364a0`), a
+/// voted roll too, since it stays listed until its result; a roll the result freed builds nothing.
+#[test]
+fn the_roll_hover_builds_from_the_list_at_the_call() {
+    const HOVER: &str = "TT:SetOwner(B, 'ANCHOR_RIGHT') TT:SetLootRollItem(1) \
+        return TT:NumLines() > 0 and TTTextLeft1:GetText() or nil";
+    let mut app = rolls_client();
+    crate::ui_script::test_ui::load_tooltip_template(app.world().non_send::<UiScript>());
+    eval::<()>(
+        &mut app,
+        false,
+        "local a = CreateFrame('Button', 'B') a:SetPoint('CENTER', 0, 0) a:SetWidth(10) \
+         a:SetHeight(10) CreateFrame('GameTooltip', 'TT', nil, 'TestTooltipTemplate')",
+    );
+    crate::net::handlers::dispatch(app.world_mut(), vec![start(0)]);
+    let sulfuras = Some("Sulfuras".to_string());
+    assert_eq!(eval::<Option<String>>(&mut app, true, HOVER), sulfuras);
+    eval::<()>(&mut app, true, "RollOnLoot(1, 0)");
+    assert_eq!(eval::<Option<String>>(&mut app, true, HOVER), sulfuras);
+    crate::net::handlers::dispatch(app.world_mut(), vec![won(0)]);
+    assert_eq!(eval::<Option<String>>(&mut app, true, HOVER), None);
+}
+
 /// The start's `START_LOOT_ROLL` fires at its packet's place between a fall's `UNIT_COMBAT` on
 /// each side, its listener reading the roll's item.
 #[test]
