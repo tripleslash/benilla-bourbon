@@ -121,21 +121,35 @@ fn load_area_triggers(mut commands: Commands, assets: Option<Res<WorldAssets>>) 
     }
 }
 
+/// Whether the check runs at all: the reference's gate `0x5e215e` wants the player's health
+/// above 0 (signed), and no player object skips it too (`0x5e214f`).
+fn check_runs(store: Option<&ObjectStore>) -> bool {
+    store.is_some_and(|s| !s.0.unit_is_dead())
+}
+
+/// An entry's two sends, in the reference's order: the heartbeat with the live pose
+/// (`0x5e221e`, `0x600a10` with 0xee), then CMSG_AREATRIGGER (`0x5e225d`).
+fn send_entry(net: &NetCommands, player: &mut Player, now: f32, trigger_id: u32) {
+    crate::player::send_heartbeat(&net.0, player, now);
+    let _ = net.0.send(ClientCommand::AreaTrigger { trigger_id });
+}
+
 /// The per-frame check (`0x5e2110`).
 fn check_area_triggers(
     triggers: Option<Res<AreaTriggers>>,
     map: Option<Res<CurrentMap>>,
-    player: Res<Player>,
+    mut player: ResMut<Player>,
+    me: Query<&ObjectStore, With<SelfPlayer>>,
+    time: Res<Time>,
     mut inside: ResMut<InsideTrigger>,
     mut retry: ResMut<TriggerRetry>,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
     net: Res<NetCommands>,
 ) {
     let (Some(triggers), Some(map)) = (triggers, map) else {
         return;
     };
     // Before the server has placed us, `pos` is not a server position.
-    if !player.active {
+    if !player.active || !check_runs(me.single().ok()) {
         return;
     }
     let here = bevy_to_wow(player.pos);
@@ -153,7 +167,7 @@ fn check_area_triggers(
             return;
         }
         // Resting now keeps the claim armed: the server can drop the rest a tick after setting it.
-        let resting = self_q
+        let resting = me
             .single()
             .is_ok_and(|s| s.0.player_flags() & PLAYER_FLAGS_RESTING != 0);
         if resting {
@@ -168,9 +182,7 @@ fn check_area_triggers(
         if claim.at.elapsed() < RETRY_AFTER || moved < RETRY_MOVED {
             return;
         }
-        let _ = net.0.send(ClientCommand::AreaTrigger {
-            trigger_id: claim.id,
-        });
+        send_entry(&net, &mut player, time.elapsed_secs(), claim.id);
         retry.0 = Some(Claim {
             at: Instant::now(),
             from: here,
@@ -183,7 +195,7 @@ fn check_area_triggers(
         );
         return;
     };
-    let _ = net.0.send(ClientCommand::AreaTrigger { trigger_id });
+    send_entry(&net, &mut player, time.elapsed_secs(), trigger_id);
     retry.0 = Some(Claim {
         map: map.0,
         id: trigger_id,
@@ -240,6 +252,40 @@ mod tests {
 
         // The Deadmines entrance (78), an instance portal: a 7 yd sphere on map 0.
         assert_eq!(inside.step(&cat, 0, [-11208.5, 1685.34, 25.7612]), Some(78));
+    }
+
+    #[test]
+    fn an_entry_sends_the_heartbeat_with_the_live_pose_before_the_trigger() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let net = NetCommands(tx);
+        let mut player = Player::default();
+        player.pos = benilla_assets::coords::wow_to_bevy([8799.41, 969.787, 30.2409]);
+        send_entry(&net, &mut player, 5.0, 542);
+        let ClientCommand::Move { kind, pos, .. } = rx.try_recv().expect("heartbeat first") else {
+            panic!("the first send is a move");
+        };
+        assert_eq!(kind, crate::net::MoveKind::Heartbeat);
+        for (got, want) in pos.iter().zip([8799.41, 969.787, 30.2409]) {
+            assert!((got - want).abs() < 0.01, "{pos:?}");
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::AreaTrigger { trigger_id: 542 })
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_dead_player_or_no_player_skips_the_check() {
+        let alive = |hp: u32| {
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+                benilla_protocol::field::FIELD_UNIT_HEALTH,
+                hp,
+            )]))
+        };
+        assert!(check_runs(Some(&alive(10))));
+        assert!(!check_runs(Some(&alive(0))));
+        assert!(!check_runs(None));
     }
 
     #[test]
