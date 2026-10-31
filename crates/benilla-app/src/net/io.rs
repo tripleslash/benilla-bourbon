@@ -1811,6 +1811,9 @@ pub(super) fn dispatch(w: &mut WorldWriter, cmd: ClientCommand) -> Result<()> {
         ClientCommand::CastSpellTradeItem { spell_id, slot } => {
             w.cast_spell_trade_item(spell_id, slot)
         }
+        ClientCommand::CastSpellTargets { spell_id, target } => {
+            w.cast_spell_targets(spell_id, target)
+        }
         ClientCommand::LootMasterGive { guid, slot, target } => {
             w.loot_master_give(guid, slot, target)
         }

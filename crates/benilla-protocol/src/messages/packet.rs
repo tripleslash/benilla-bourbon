@@ -9,16 +9,16 @@ use super::{
     ExplorationXp, FriendEntry, FriendStatusUpdate, GameObjectQueryInfo, GmTicket, GossipOption,
     GossipPoi, GroupLootInfo, GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo,
     GuildQueryResponse, GuildRoster, InitWorldStates, InspectHonorStats, ItemInfo, ItemPushResult,
-    JumpInfo, LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll,
-    MailListEntry, MirrorTimerStart, MoveMode, Object, PartyKillLog, PartyMemberStatsInfo,
-    PeriodicAuraLog, PetMode, PetSpells, PetitionQueryResponse, PetitionRename, PetitionShowList,
-    PetitionShowSignatures, PetitionSignResults, PvpCredit, QuestComplete, QuestConfirmAccept,
-    QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestPushResult,
-    QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellChainTargets,
-    SpellCooldown, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellGo, SpellHealLog,
-    SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, SpellStart, SplineMode,
-    StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose,
-    VendorItem, WhoResults, WowTime, XpGain,
+    JumpInfo, LevelUpInfo, LfgResults, LootAllPassed, LootItem, LootRoll, LootRollWon,
+    LootStartRoll, MailListEntry, MirrorTimerStart, MoveMode, Object, PartyKillLog,
+    PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, PetitionQueryResponse,
+    PetitionRename, PetitionShowList, PetitionShowSignatures, PetitionSignResults, PvpCredit,
+    QuestComplete, QuestConfirmAccept, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption,
+    QuestPushResult, QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind,
+    SpellChainTargets, SpellCooldown, SpellDamageLog, SpellDispelLog, SpellEnergizeLog, SpellGo,
+    SpellHealLog, SpellInstaKillLog, SpellLogExecute, SpellLogMiss, SpellOutcomeLog, SpellStart,
+    SplineMode, StabledPet, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
+    TransportPose, VendorItem, WhoResults, WowTime, XpGain,
 };
 
 /// The final facing a `SMSG_MONSTER_MOVE` dictates (`moveType`): kept for the path's end when a
@@ -996,6 +996,8 @@ pub enum ServerPacket {
     GroupInvite {
         inviter: String,
     },
+    /// `SMSG_GROUP_CANCEL`: the inviter withdrew; the body (a name) is read and dropped (`0x5e6770`).
+    GroupCancel,
     /// `SMSG_GROUP_DECLINE`: an invite we sent was declined.
     GroupDecline {
         name: String,
@@ -1130,6 +1132,8 @@ pub enum ServerPacket {
     FriendStatus(FriendStatusUpdate),
     /// `SMSG_WHO`: the `/who` answer, up to 49 rows plus the true match total.
     WhoResults(WhoResults),
+    /// `MSG_LOOKING_FOR_GROUP`'s reply (`0x4e8dc0`): up to 50 records and the total.
+    LookingForGroup(LfgResults),
     /// `SMSG_GUILD_QUERY_RESPONSE`: a guild's name, ten rank names and tabard, cached by guild id.
     GuildQueryResponse(GuildQueryResponse),
     /// `SMSG_GUILD_ROSTER`: a complete snapshot, resent on any change: MOTD, info, ranks, members.
@@ -1604,6 +1608,7 @@ impl ServerPacket {
                 format!("SMSG_FORCE_{kind:?}_SPEED_CHANGE")
             }
             ServerPacket::GroupInvite { .. } => "SMSG_GROUP_INVITE".into(),
+            ServerPacket::GroupCancel => "SMSG_GROUP_CANCEL".into(),
             ServerPacket::GroupDecline { .. } => "SMSG_GROUP_DECLINE".into(),
             ServerPacket::GroupUninvited => "SMSG_GROUP_UNINVITE".into(),
             ServerPacket::GroupLeaderChanged { .. } => "SMSG_GROUP_SET_LEADER".into(),
@@ -1643,6 +1648,7 @@ impl ServerPacket {
             ServerPacket::IgnoreList { .. } => "SMSG_IGNORE_LIST".into(),
             ServerPacket::FriendStatus(..) => "SMSG_FRIEND_STATUS".into(),
             ServerPacket::WhoResults(..) => "SMSG_WHO".into(),
+            ServerPacket::LookingForGroup(..) => "MSG_LOOKING_FOR_GROUP".into(),
             ServerPacket::GuildQueryResponse(..) => "SMSG_GUILD_QUERY_RESPONSE".into(),
             ServerPacket::GuildRoster(..) => "SMSG_GUILD_ROSTER".into(),
             ServerPacket::GuildEvent(..) => "SMSG_GUILD_EVENT".into(),

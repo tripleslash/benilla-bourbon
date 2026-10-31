@@ -538,6 +538,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             launch,
         }],
         ServerPacket::GroupInvite { inviter } => vec![SessionEvent::GroupInvite { inviter }],
+        ServerPacket::GroupCancel => vec![SessionEvent::GroupCancel],
         ServerPacket::GroupDecline { name } => vec![SessionEvent::GroupDecline { name }],
         ServerPacket::GroupUninvited => vec![SessionEvent::GroupUninvited],
         ServerPacket::GroupLeaderChanged { name } => {
@@ -631,6 +632,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::IgnoreList { guids } => vec![SessionEvent::IgnoreList { guids }],
         ServerPacket::FriendStatus(status) => vec![SessionEvent::FriendStatus(status)],
         ServerPacket::WhoResults(results) => vec![SessionEvent::WhoResults(results)],
+        ServerPacket::LookingForGroup(results) => vec![SessionEvent::LfgResults(results)],
         ServerPacket::GuildQueryResponse(response) => {
             vec![SessionEvent::GuildQueryResponse(response)]
         }
