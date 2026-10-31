@@ -12,10 +12,13 @@
 //!   slices. Runs of slices (spans) come from one pool under [`SPANS`]: a TLSF index by length, free
 //!   neighbours merged. The pool grows memory by [`GROW_STEP`] at a time (`?alloc_grow_mb=`), so a
 //!   load burst pays a few `memory.grow`s instead of one per allocation that outruns the free space.
-//! - A block up to 64 KiB comes from a page: a span of one slice (classes up to 8 KiB) or four, cut
+//! - A block up to 64 KiB comes from a page: a span of one slice (classes up to 8 KiB) or two, cut
 //!   into blocks of one size class. A page belongs to one heap, and a heap is held by one thread at a
 //!   time through a flag nobody waits on: a thread takes the heap its stack address picks, or the
 //!   next free one. Allocating from a page takes no lock.
+//! - One live block holds its whole page, and a live block cannot be moved, so pages are made to
+//!   empty by themselves: a page that gets a block back goes last in its list, and a sparse page at
+//!   the head is passed over while a fuller one has room, so new blocks stop landing in it.
 //! - A block is freed into its page by taking the page's heap, when that is free; while another
 //!   thread holds it, the block goes on the heap's inbox, a lock-free list its next holder takes in.
 //!   A worker's mesh dropped on the page thread, or the page's buffers dropped on a worker, never
@@ -62,9 +65,11 @@ const CLASS_ALIGN: usize = 16;
 const MAX_SMALL: usize = CLASSES[N_CLASSES - 1];
 /// The class index by `size.div_ceil(16)`, for sizes `0..=MAX_SMALL`.
 const CLASS_OF: [u8; MAX_SMALL / 16 + 1] = class_table();
-/// Classes up to this size are cut from one-slice pages, larger ones from [`MEDIUM_SLICES`].
+/// Classes up to this size are cut from one-slice pages, larger ones from [`MEDIUM_SLICES`]. Two
+/// slices hold two blocks of the largest class: a survivor pins one neighbour at most there, and a
+/// page takes [`SPANS`] once per two blocks, where a page per block would take it for each.
 const SMALL_PAGE_MAX: usize = 8 * 1024;
-const MEDIUM_SLICES: u32 = 4;
+const MEDIUM_SLICES: u32 = 2;
 
 const fn class_table() -> [u8; MAX_SMALL / 16 + 1] {
     let mut table = [0u8; MAX_SMALL / 16 + 1];
@@ -512,7 +517,11 @@ fn drain(turn: &FairGuard<'_>, n: usize) {
 fn retire(s: u32) {
     match SPANS.try_lock() {
         // SAFETY: `slices` is `SPANS`'s, and the span is no longer in use.
-        Some(turn) => release(&turn, s, unsafe { (*sp(s)).slices }),
+        Some(turn) => {
+            release(&turn, s, unsafe { (*sp(s)).slices });
+            // So a span deferred in a burst does not wait for the next allocation of a span.
+            drain(&turn, DRAIN);
+        }
         None => defer(s),
     }
 }
@@ -561,6 +570,114 @@ fn pooled_run() -> u32 {
         0 => 0,
         map => bin_low(63 - map.leading_zeros() as usize),
     }
+}
+
+/// The upper bound of each size bucket [`census_line`] splits large blocks into, bytes.
+const LARGE_BUCKETS: [usize; 6] = [128 << 10, 512 << 10, 1 << 20, 4 << 20, 16 << 20, usize::MAX];
+/// How many size classes [`census_line`] names, heaviest first.
+const CENSUS_CLASSES: usize = 8;
+
+/// Linear memory by what the allocator holds it for: live blocks against the pages they pin, large
+/// blocks by size, free spans and spans waiting on [`DEFERRED`]. A walk of the span table under
+/// [`SPANS`], so `kind` and `slices` are exact; a page's `used` is read racily and may be a free
+/// behind, which a report 30 s apart does not feel.
+#[cfg_attr(
+    test,
+    expect(
+        dead_code,
+        reason = "the web build's growth report reads it; the test reads `census`"
+    )
+)]
+pub(crate) fn census_line() -> String {
+    let c = census();
+    let mb = |bytes: u64| bytes >> 20;
+    let pages: u64 = c.pages.iter().map(|(span, _)| span).sum();
+    let live: u64 = c.pages.iter().map(|(_, live)| live).sum();
+    let large: u64 = c.large.iter().map(|(_, bytes)| bytes).sum();
+    let mut line = format!(
+        "\n[diag]   alloc: pages {}MB holding {}MB live, large {}MB, free {}MB, deferred {}MB\n\
+         [diag]   alloc large:",
+        mb(pages),
+        mb(live),
+        mb(large),
+        mb(c.free),
+        mb(c.deferred),
+    );
+    for (bound, (n, bytes)) in LARGE_BUCKETS.iter().zip(c.large) {
+        if *bound == usize::MAX {
+            line.push_str(&format!(" rest {n}/{}MB", mb(bytes)));
+        } else {
+            line.push_str(&format!(" <{}K {n}/{}MB", bound >> 10, mb(bytes)));
+        }
+    }
+    line.push_str("\n[diag]   alloc classes (span/live):");
+    let mut classes: Vec<usize> = (0..N_CLASSES).collect();
+    classes.sort_unstable_by_key(|&i| std::cmp::Reverse(c.pages[i].0));
+    for i in classes.into_iter().take(CENSUS_CLASSES) {
+        let (span, live) = c.pages[i];
+        line.push_str(&format!(" {}B {}/{}MB", CLASSES[i], mb(span), mb(live)));
+    }
+    line
+}
+
+struct Census {
+    /// Per class: bytes of its pages, bytes of its live blocks.
+    pages: [(u64, u64); N_CLASSES],
+    /// Per [`LARGE_BUCKETS`] entry: large blocks, their bytes.
+    large: [(u32, u64); LARGE_BUCKETS.len()],
+    free: u64,
+    deferred: u64,
+}
+
+fn census() -> Census {
+    let mut c = Census {
+        pages: [(0, 0); N_CLASSES],
+        large: [(0, 0); LARGE_BUCKETS.len()],
+        free: 0,
+        deferred: 0,
+    };
+    let _turn = SPANS.lock();
+    let top = (heap::bytes() >> SLICE_SHIFT).min(MAX_SLICES) as u32;
+    let mut s = 0;
+    while s < top {
+        if head_of(s) != s {
+            s += 1;
+            continue;
+        }
+        // SAFETY: the walk holds `SPANS`, which owns `kind` and `slices`; the page fields are plain
+        // integers read for a report, written only by their heap's holder.
+        unsafe {
+            let n = (*sp(s)).slices.max(1);
+            let bytes = u64::from(n) << SLICE_SHIFT;
+            match (*sp(s)).kind {
+                FREE => c.free += bytes,
+                PAGE => {
+                    let class = usize::from((*sp(s)).class).min(N_CLASSES - 1);
+                    let used = ptr::read_volatile(ptr::addr_of!((*sp(s)).used));
+                    c.pages[class].0 += bytes;
+                    c.pages[class].1 += u64::from(used) * CLASSES[class] as u64;
+                }
+                _ => {
+                    let bucket = LARGE_BUCKETS
+                        .iter()
+                        .position(|&bound| bytes as usize <= bound)
+                        .unwrap_or(LARGE_BUCKETS.len() - 1);
+                    c.large[bucket].0 += 1;
+                    c.large[bucket].1 += bytes;
+                }
+            }
+            s += n;
+        }
+    }
+    let mut at = DEFERRED.load(Ordering::Acquire);
+    while at != NIL {
+        // SAFETY: only a holder of `SPANS` pops, so a listed span stays listed during the walk.
+        unsafe {
+            c.deferred += u64::from((*sp(at)).slices) << SLICE_SHIFT;
+            at = (*sp(at)).next;
+        }
+    }
+    c
 }
 
 /// Memory growth since the last call: (grows, grows by the step, bytes grown).
@@ -687,6 +804,8 @@ const EMPTY_BUDGET: u32 = 256 * 1024;
 /// Tries at this thread's own heap before taking another: whoever holds it is likely freeing one
 /// block. Taking another at once spread 16 threads over 25 heaps, each with its own pages.
 const OWN_HEAP_TRIES: u32 = 64;
+/// A page at its list's head with under 1/this of its blocks out is passed over for the next.
+const SPARSE_BELOW: u32 = 4;
 
 /// One heap: per class, its pages that have a block to give, and the flag that hands them to one
 /// thread at a time.
@@ -699,6 +818,8 @@ struct Heap {
 
 struct Lists {
     pages: [u32; N_CLASSES],
+    /// The last page of each list, where a page that gets a block back goes.
+    tails: [u32; N_CLASSES],
     allocs: u32,
     /// Bytes of the kept empty pages.
     kept: u32,
@@ -714,6 +835,7 @@ impl Heap {
             inbox: AtomicPtr::new(ptr::null_mut()),
             lists: UnsafeCell::new(Lists {
                 pages: [NIL; N_CLASSES],
+                tails: [NIL; N_CLASSES],
                 allocs: 0,
                 kept: 0,
             }),
@@ -770,6 +892,11 @@ struct HeapGuard {
 
 impl Drop for HeapGuard {
     fn drop(&mut self) {
+        // The next holder may be a long way off when the thread that owns the heap goes idle, and
+        // an inbox block holds its page until it is taken in.
+        if !self.heap.inbox.load(Ordering::Relaxed).is_null() {
+            self.collect();
+        }
         self.heap.busy.store(false, Ordering::Release);
     }
 }
@@ -796,6 +923,15 @@ impl HeapGuard {
                 if p == NIL {
                     return ptr::null_mut();
                 }
+            }
+        }
+        // SAFETY: a listed page is this heap's, as are the pages listed with it.
+        unsafe {
+            let page = sp(p);
+            if (*page).next != NIL && (*page).used * SPARSE_BELOW < (*page).cap {
+                self.unlink(p);
+                self.link(p);
+                p = self.lists().pages[c];
             }
         }
         // SAFETY: a listed page is this heap's, and has a block to give.
@@ -856,13 +992,15 @@ impl HeapGuard {
         unsafe {
             let page = sp(p);
             let c = (*page).class as usize;
-            let head = self.lists().pages[c];
-            (*page).prev = NIL;
-            (*page).next = head;
-            if head != NIL {
-                (*sp(head)).prev = p;
+            let tail = self.lists().tails[c];
+            (*page).prev = tail;
+            (*page).next = NIL;
+            if tail == NIL {
+                self.lists().pages[c] = p;
+            } else {
+                (*sp(tail)).next = p;
             }
-            self.lists().pages[c] = p;
+            self.lists().tails[c] = p;
             (*page).listed = true;
         }
     }
@@ -877,7 +1015,9 @@ impl HeapGuard {
             } else {
                 (*sp(prev)).next = next;
             }
-            if next != NIL {
+            if next == NIL {
+                self.lists().tails[(*page).class as usize] = prev;
+            } else {
                 (*sp(next)).prev = prev;
             }
             (*page).listed = false;
@@ -1191,6 +1331,23 @@ mod tests {
         release(&turn, s, n);
     }
 
+    /// The census finds a live large block in its size bucket and a live class block's page. Other
+    /// tests allocate meanwhile, so it reads a floor, and holds both blocks across the read.
+    #[test]
+    fn the_census_counts_live_blocks() {
+        let large = Layout::from_size_align(300 * 1024, 8).unwrap();
+        let small = Layout::from_size_align(1024, 8).unwrap();
+        let (a, b) = unsafe { (PageAlloc.alloc(large), PageAlloc.alloc(small)) };
+        let c = census();
+        assert!(c.large[1].0 >= 1, "300 KiB is under the 512 KiB bound");
+        let (span, live) = c.pages[class_of(small).unwrap()];
+        assert!(span >= SLICE as u64 && live >= 1024);
+        unsafe {
+            PageAlloc.dealloc(a, large);
+            PageAlloc.dealloc(b, small);
+        }
+    }
+
     /// Fill a block with a pattern its owner can check.
     fn fill(block: *mut u8, size: usize, seed: u8) {
         for i in 0..size {
@@ -1321,6 +1478,74 @@ mod tests {
             unsafe { (*sp(p)).used } < used,
             "the collect freed it into its page"
         );
+    }
+
+    /// A held heap let go takes in its inbox, so no idle owner pins a page with freed blocks.
+    #[test]
+    fn letting_a_heap_go_takes_in_its_inbox() {
+        let mut heap = hold_a_heap();
+        let table = heap.heap;
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let block = heap.alloc(class_of(layout).unwrap());
+        let freeing = block as usize;
+        std::thread::spawn(move || unsafe { PageAlloc.dealloc(freeing as *mut u8, layout) })
+            .join()
+            .unwrap();
+        assert!(inbox_has(table, block));
+        drop(heap);
+        assert!(!inbox_has(table, block));
+    }
+
+    /// A page drained to sparse is passed over while a fuller one has room, so it can empty.
+    #[test]
+    fn a_sparse_page_gets_no_new_blocks_while_a_fuller_one_has_room() {
+        let mut heap = hold_a_heap();
+        let c = class_of(Layout::from_size_align(12000, 8).unwrap()).unwrap();
+        let mut blocks: Vec<*mut u8> = Vec::new();
+        let (a, b) = loop {
+            blocks.push(heap.alloc(c));
+            let mut pages: Vec<u32> = blocks.iter().map(|b| page_of(*b)).collect();
+            pages.dedup();
+            let full = |p: &u32| unsafe { (*sp(*p)).used == (*sp(*p)).cap };
+            if let [.., a, b] = pages.as_slice() {
+                if full(a) && full(b) {
+                    break (*a, *b);
+                }
+            }
+        };
+        // `a` keeps one block, under a quarter of its cap; `b` gives one back and stays fuller.
+        let mut kept_in_a = false;
+        let mut freed_in_b = false;
+        blocks.retain(|&block| {
+            let p = page_of(block);
+            let free = if p == a {
+                std::mem::replace(&mut kept_in_a, true)
+            } else if p == b {
+                !std::mem::replace(&mut freed_in_b, true)
+            } else {
+                false
+            };
+            if free {
+                unsafe { heap.free_local(p, block) };
+            }
+            !free
+        });
+        let next = heap.alloc(c);
+        assert_ne!(page_of(next), a, "the sparse page was passed over");
+        unsafe { heap.free_local(page_of(next), next) };
+        for block in blocks {
+            unsafe { heap.free_local(page_of(block), block) };
+        }
+    }
+
+    /// No page spans more than two slices, and every page holds at least two blocks, so even the
+    /// largest class takes the pool's lock once per two blocks.
+    #[test]
+    fn a_page_is_two_slices_at_most_and_two_blocks_at_least() {
+        for (c, &size) in CLASSES.iter().enumerate() {
+            assert!(page_slices(c) <= 2, "{size}");
+            assert!(page_slices(c) as usize * SLICE / size >= 2, "{size}");
+        }
     }
 
     /// A page whose blocks are all freed goes back to the pool unless it is its class's only one.

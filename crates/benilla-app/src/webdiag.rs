@@ -641,6 +641,7 @@ fn growers(world: &World, base: &Counts, now: &Counts, t: f32) {
         mb(now.js_heap),
         signed_mb(now.js_heap as i64 - base.js_heap as i64),
     ));
+    out(&bytes_line(world));
     if rows.is_empty() {
         out("[diag]   no component population grew — the leak is not entities.");
         return;
@@ -652,6 +653,123 @@ fn growers(world: &World, base: &Counts, now: &Counts, t: f32) {
             .map_or_else(|| format!("{id:?}"), |i| short(&i.name().to_string()));
         out(&format!("[diag]   {delta:>+8}  (now {total:>7})  {name}"));
     }
+}
+
+/// How many models the byte report names.
+const TOP_MODELS: usize = 6;
+
+/// The CPU bytes one decoded submesh holds.
+fn submesh_bytes(g: &benilla_formats::RenderSubmesh) -> u64 {
+    (std::mem::size_of_val(g.positions.as_slice())
+        + std::mem::size_of_val(g.normals.as_slice())
+        + std::mem::size_of_val(g.uvs.as_slice())
+        + std::mem::size_of_val(g.indices.as_slice())
+        + std::mem::size_of_val(g.joints.as_slice())
+        + std::mem::size_of_val(g.weights.as_slice())
+        + std::mem::size_of_val(g.vertex_colors.as_slice())) as u64
+}
+
+/// The linear memory each population holds: decoded model geometry, main-world mesh and image
+/// copies, terrain chunks and the Lua heap, with the heaviest models by name, so a footprint names
+/// its owner where the counts above name only how many.
+fn bytes_line(world: &World) -> String {
+    let server = world.get_resource::<AssetServer>();
+    let mut seen = std::collections::HashSet::new();
+    let mut top: Vec<(u64, String)> = Vec::new();
+    let mut geometry = |subs: &[benilla_assets::ModelSubmesh], path: Option<String>| {
+        let bytes: u64 = subs
+            .iter()
+            .filter(|s| seen.insert(Arc::as_ptr(&s.geometry) as usize))
+            .map(|s| submesh_bytes(&s.geometry))
+            .sum();
+        top.push((bytes, path.unwrap_or_default()));
+        bytes
+    };
+    let path_of = |id: bevy::asset::UntypedAssetId| {
+        server
+            .and_then(|s| s.get_path(id))
+            .map(|p| p.path().display().to_string())
+    };
+    let (mut m2, mut m2_n) = (0u64, 0usize);
+    if let Some(assets) = world.get_resource::<Assets<benilla_assets::M2Model>>() {
+        for (id, model) in assets.iter() {
+            m2 += geometry(&model.submeshes, path_of(id.untyped()));
+            m2_n += 1;
+        }
+    }
+    let (mut wmo, mut wmo_n) = (0u64, 0usize);
+    if let Some(assets) = world.get_resource::<Assets<benilla_assets::WmoModel>>() {
+        for (id, model) in assets.iter() {
+            wmo += geometry(&model.submeshes, path_of(id.untyped()));
+            wmo_n += 1;
+        }
+    }
+    let (mut mesh, mut mesh_kept) = (0u64, 0usize);
+    if let Some(assets) = world.get_resource::<Assets<Mesh>>() {
+        for (_, m) in assets.iter() {
+            let Ok(attributes) = m.try_attributes() else {
+                continue;
+            };
+            mesh_kept += 1;
+            mesh += attributes
+                .map(|(a, v)| (a.format.size() as usize * v.len()) as u64)
+                .sum::<u64>();
+            mesh += match m.try_indices_option() {
+                Ok(Some(bevy::mesh::Indices::U16(i))) => std::mem::size_of_val(i.as_slice()) as u64,
+                Ok(Some(bevy::mesh::Indices::U32(i))) => std::mem::size_of_val(i.as_slice()) as u64,
+                _ => 0,
+            };
+        }
+    }
+    let (mut image, mut image_kept) = (0u64, 0usize);
+    if let Some(assets) = world.get_resource::<Assets<Image>>() {
+        for (_, i) in assets.iter() {
+            if let Some(data) = &i.data {
+                image_kept += 1;
+                image += data.len() as u64;
+            }
+        }
+    }
+    let (mut terrain, mut tiles) = (0u64, 0usize);
+    if let Some(assets) = world.get_resource::<Assets<benilla_assets::AdtTile>>() {
+        for (_, tile) in assets.iter() {
+            tiles += 1;
+            terrain += tile
+                .chunks
+                .iter()
+                .map(|c| {
+                    (std::mem::size_of_val(c.positions.as_slice())
+                        + std::mem::size_of_val(c.normals.as_slice())
+                        + std::mem::size_of_val(c.uvs.as_slice())
+                        + std::mem::size_of_val(c.indices.as_slice())) as u64
+                })
+                .sum::<u64>();
+        }
+    }
+    let lua = world
+        .get_non_send::<benilla_ui::script::UiScript>()
+        .map_or(0, |s| s.lua().used_memory() as u64);
+    top.sort_unstable_by_key(|(bytes, _)| std::cmp::Reverse(*bytes));
+    let mut line = format!(
+        "[diag]   bytes: m2 {} ({m2_n}), wmo {} ({wmo_n}), mesh cpu {} ({mesh_kept}), img cpu {} \
+         ({image_kept}), terrain {} ({tiles}), lua {}",
+        mb(m2),
+        mb(wmo),
+        mb(mesh),
+        mb(image),
+        mb(terrain),
+        mb(lua),
+    );
+    for (bytes, path) in top.into_iter().take(TOP_MODELS) {
+        line.push_str(&format!("\n[diag]   top model {} {path}", mb(bytes)));
+    }
+    #[cfg(all(
+        target_arch = "wasm32",
+        target_feature = "atomics",
+        not(debug_assertions)
+    ))]
+    line.push_str(&crate::wasm_alloc::census_line());
+    line
 }
 
 /// How many archetypes a window lists by their components, at most.
