@@ -479,6 +479,9 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("SoundListenerAtCharacter", "1"),
     // `EmoteSounds` (`0x4573b9`): the received text-emote voice kit, and only that.
     same("EmoteSounds", "1"),
+    // `MapWaterSounds` (`0x462ac9`, record `[0xb2306c]`, handler `0x462af0`): 0 hard-stops the four
+    // liquid loops and keeps the driver `0x462b50` from arming any (`liquid_loop`).
+    same("MapWaterSounds", "1"),
     // `SoundZoneMusicNoDelay` (`0x4578b3`): `next_track_time`'s immediate path.
     same("SoundZoneMusicNoDelay", "0"),
     // `assistAttack` (`0x48fc50`, record `[0xb4d8f8]`): `/assist` also starts the swing. The "3"
@@ -500,11 +503,12 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("cameraDistanceMoveSpeed", "8.33").checked(benilla_ui::script::check_camera_decay),
     // MOUSE_SENSITIVITY (`UIOptionsFrame.lua:87`): FrameXML's spelling of the binary's `mouseSpeed`
     // (`0x402c7b`); lookups are case-insensitive (`CVar::Lookup 0x63de30`), here as there. The
-    // reference's default is `SPI_GETMOUSESPEED × 0.1`, "1.0" on stock Windows, and its record
-    // `[0x882704]` has no reader: the slider sets the OS pointer speed (`0x402ec0`, [0.1, 2.0]).
-    // The default matches; Deviation: here the dial multiplies the camera's own rate, because
+    // reference's default is `SPI_GETMOUSESPEED × 0.1` (`0x42cd60`) formatted `%1.1f` (`0x82e994`,
+    // `0x402c4d`-`0x402c7b`): "1.0" on a stock OS (speed 10). Its record `[0x882704]` has no reader:
+    // the slider sets the OS pointer speed (`0x402ec0`, [0.1, 2.0]).
+    // The default is that string; Deviation: here the dial multiplies the camera's own rate, because
     // benilla does not change the OS pointer speed, a system-wide setting.
-    same("mousespeed", "1"),
+    same("mousespeed", "1.0"),
     // The zoom-out limit is `cameraDistanceMax × cameraDistanceMaxFactor`, held to [0, 50]
     // (`0x5112d6`). `cameraDistanceMax` (`0x50beb2`, default `0x84fbd0`) has no panel row; its
     // validator `0x50b310` refuses a value outside [0, 50]. The factor is MAX_FOLLOW_DIST
@@ -737,6 +741,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // callback refuses above 1 and prints "Shadow mip level changed upon restart.", and the
     // terrain's shadow-map mip (`0x66f877`) reads it at load. `hwDetect` leaves it at 1.
     same("shadowLevel", "1").checked(benilla_ui::script::check_shadow_level),
+    // `shadowLOD` (`0x6d8157`, "1", record `[0x86f5b4]`, handler `0x6d8450`): the blob-shadow entry
+    // `0x6d78f0` draws only at 1. The handler refuses outside 0..=1 and says "Shadow LOD set to %d".
+    same("shadowLOD", "1").checked(benilla_ui::script::check_shadow_lod),
+    // `shadowBias` (`0x6d817d`, "0.1", record `[0xcea620]`, handler `0x6d8530`): the decal draw
+    // `0x6d7480` (the selection ring and the blob shadow) biases depth by `2 * bias / 32767` while
+    // it is nonzero. The handler refuses outside 0..=1 and says "Shadow bias set to %f".
+    same("shadowBias", "0.1").checked(benilla_ui::script::check_shadow_bias),
+    // `violenceLevel` (`0x6c5ae1`, flags 0, record `[0xce8534]`): registered at the locale's cap
+    // from the table `0x86c3f8` (`0x6c5aa0`), "2" but koKR's "1". The callback `0x6c5af0` stores
+    // the level clamped to the cap; the blood spurt indexes `UnitBloodLevels` by it (`0x60a39d`).
+    same_by_locale("violenceLevel", "2", &[(KO_KR, "1")]),
     // `doodadAnim` (`0x6884d8`, "1", flags 1, callback `0x688a10`, record `[0xc7f354]`), behind
     // `Get/SetDoodadAnim`: the callback toggles bit `0x8000` of `[0xc7b2a4]` and calls `0x6953d0`,
     // a bare `ret`, so no animation reads it. `hwDetect` sets 0 or 1 by CPU tier.

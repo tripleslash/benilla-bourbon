@@ -12,10 +12,6 @@ use bevy::render::render_resource::{Buffer, Face};
 
 use crate::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF};
 use crate::SpatialCache;
-/// Native only: the web target's [`WorldAssets::texture`] hands the same read to the `AssetServer`
-/// instead of decoding it here.
-#[cfg(not(target_arch = "wasm32"))]
-use benilla_formats::read_texture_native_chain;
 use benilla_formats::{
     blp_to_rgba, makes_device_texture, tga_texture_size, tga_to_rgba, Chain, ModelBlend, TryRead,
     TGA_GATE_PREFIX,
@@ -842,6 +838,27 @@ impl<T> LockRecover<T> for Mutex<T> {
     }
 }
 
+/// The chain a model texture name resolves to, as `TextureCreate` resolves it (`0x449d90`): the
+/// first of [`sprite_candidates`] that makes a texture ([`makes_texture`]). A `.tga` takes the
+/// levels of the files beside it ([`crate::tga_chain`]). Native only: the web target's
+/// [`WorldAssets::texture`] hands the same read to the `AssetServer` instead of decoding it here.
+#[cfg(not(target_arch = "wasm32"))]
+fn model_texture_chain(chain: &Chain, path: &str) -> Option<benilla_formats::BlpMipChain> {
+    sprite_candidates(path).iter().find_map(|candidate| {
+        let bytes = chain.read(candidate).ok()?;
+        if !makes_texture(candidate, &bytes) {
+            return None;
+        }
+        if !is_tga_name(candidate) {
+            return benilla_formats::blp_bytes_to_native_chain(&bytes).ok();
+        }
+        let stem = candidate.strip_suffix(".tga").unwrap_or(candidate);
+        crate::tga_chain::tga_texture_chain(&bytes, |n| {
+            chain.read(&crate::tga_chain::mip_file_name(stem, n)).ok()
+        })
+    })
+}
+
 impl WorldAssets {
     /// Drop every cache filled from the chain — decoded textures, UI sprites and their misses, the
     /// derived images and the materials over them — for a change of the data the chain answers
@@ -908,32 +925,34 @@ impl WorldAssets {
         self.cache.sync(generation);
     }
 
-    /// Decode and upload a BLP once per path and wrap; later requests share the handle.
+    /// Decode and upload a model texture once per name and wrap; later requests share the handle.
+    /// The name resolves as `TextureCreate` resolves it (`0x449d90`): [`sprite_candidates`], keyed
+    /// on [`sprite_key`], the first candidate that makes a texture ([`makes_texture`]) being it.
     pub fn texture(
         &mut self,
         path: &str,
         wrap: (bool, bool),
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let key = (normalize_path(&crate::blp_file_name(path)), wrap.0, wrap.1);
+        let key = (sprite_key(path), wrap.0, wrap.1);
         if let Some(handle) = self.textures.fetch(&key) {
             return Some(handle);
         }
-        let handle = self.upload_world_texture(&key.0, wrap, images)?;
+        let handle = self.upload_world_texture(path, wrap, images)?;
         self.textures.insert(key, handle.clone());
         Some(handle)
     }
 
-    /// [`Self::texture`]'s decode where loaders run on their own threads: read the BLP out of the
-    /// chain and upload it now. World art uploads as the BLP stores it; nothing reads it main-side.
+    /// [`Self::texture`]'s decode where loaders run on their own threads: read the file out of the
+    /// chain and upload it now. World art uploads as the file stores it; nothing reads it main-side.
     #[cfg(not(target_arch = "wasm32"))]
     fn upload_world_texture(
         &self,
-        key: &str,
+        path: &str,
         wrap: (bool, bool),
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let chain = read_texture_native_chain(&mut self.chain.lock_recover(), key).ok()?;
+        let chain = model_texture_chain(&self.chain.lock_recover(), path)?;
         Some(images.add(repeat_texture_authored(crate::for_upload(chain), wrap)))
     }
 
@@ -947,15 +966,16 @@ impl WorldAssets {
     #[cfg(target_arch = "wasm32")]
     fn upload_world_texture(
         &self,
-        key: &str,
+        path: &str,
         wrap: (bool, bool),
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
         let _ = images; // the AssetServer owns the upload on this target
-        if !self.chain.lock_recover().contains(key) {
+        let chain = self.chain.lock_recover();
+        if !sprite_candidates(path).iter().any(|c| chain.contains(c)) {
             return None;
         }
-        Some(self.server.load(crate::texture_url(key, wrap)))
+        Some(self.server.load(crate::texture_url(path, wrap)))
     }
 
     /// A clamp-sampled sRGB sprite, mip 0 only, opened as an interface texture
@@ -1368,6 +1388,7 @@ impl WorldAssets {
                 sidn: Vec4::ZERO, // clutter is never SIDN/WINDOW glass (WMO-only)
                 anim_slots: Vec4::ZERO,
                 stage1: Vec4::ZERO, // a tuft is one texture
+                stage1_uv: Vec4::ZERO,
                 stage1_texture: None,
                 light_buf: self.shared_light.clone(),
             },
@@ -1450,6 +1471,24 @@ impl DataLoadAppExt for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A model texture the clutter and skybox loads name resolves whatever extension it spells.
+    #[test]
+    fn a_world_asset_texture_resolves_through_the_texturecreate_chain() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = Chain::open(&data).expect("open the chain");
+        let blp = model_texture_chain(&chain, "Environments\\Stars\\Stars.blp")
+            .expect("the stock spelling resolves");
+        for raw in [
+            "Environments\\Stars\\Stars",
+            "Environments\\Stars\\Stars.tga",
+        ] {
+            let got = model_texture_chain(&chain, raw).unwrap_or_else(|| panic!("{raw}"));
+            assert_eq!((got.width, got.height), (blp.width, blp.height), "{raw}");
+            assert_eq!(got.mips.len(), blp.mips.len(), "{raw}");
+        }
+        assert!(model_texture_chain(&chain, "Environments\\Stars\\NoSuchStars").is_none());
+    }
 
     #[test]
     fn loose_addon_file_maps_addon_paths_case_insensitively() {

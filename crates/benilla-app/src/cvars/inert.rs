@@ -11,7 +11,7 @@
 //! refuses a write carries it as its check: the camera block's (`0x50b380`, `0x50b3c0`,
 //! `0x50bfe0`, `0x50c000`, `0x50c040`), the error filter's (`0x4030f0`), the target range's
 //! (`0x490720`) and the world's (`0x688b70`, `0x688bd0`, `0x688f00`, `0x688fb0`, `0x689000`,
-//! `0x689050`, `0x689250`, `0x689450`, `0x6d8530`). The two LOD distances' (`0x688ab0`,
+//! `0x689050`, `0x689250`, `0x689450`). The two LOD distances' (`0x688ab0`,
 //! `0x6891f0`) never refuse but print a line out of range, and `ffxRectangle`'s (`0x6cde30`)
 //! prints its state; they run too. The trailing address is
 //! the register site in `reference/cvars.tsv`.
@@ -233,7 +233,6 @@ pub(super) const INERT: &[Registered] = &[
     same("mapObjLightLOD", "0").checked(benilla_ui::script::check_map_obj_light_lod), // 0x6886ec
     same("mapObjOverbright", "1"),          // 0x6886c6
     same("mapShadows", "1"),                // 0x6884fe
-    same("MapWaterSounds", "1"),            // 0x462ac9
     same("MaxLights", "4").checked(benilla_ui::script::check_max_lights), // 0x688596
     same("mouseInvertYaw", "0"),            // 0x50b72d
     same("ObjectSelectionCircle", "1"),     // 0x6146ec
@@ -243,8 +242,6 @@ pub(super) const INERT: &[Registered] = &[
     same("PlayerFadeInRate", "4096"),       // 0x481b72
     same("PlayerFadeOutAlpha", "128"),      // 0x481bbf
     same("PlayerFadeOutRate", "4096"),      // 0x481b91
-    same("shadowBias", "0.1").checked(benilla_ui::script::check_shadow_bias), // 0x6d817d
-    same("shadowLOD", "1"),                 // 0x6d8157
     same("ShowErrors", "1"),                // 0x402cc1
     same("showfootprintparticles", "1"),    // 0x6039b5
     same("showfootprints", "1"),            // 0x688842
@@ -260,6 +257,5 @@ pub(super) const INERT: &[Registered] = &[
     same("triangleStrips", "1"),            // 0x68888e
     same("unitDrawDist", "300.0").checked(benilla_ui::script::check_unit_draw_dist), // 0x68875e
     same("UnitNameRenderMode", "2"),        // 0x48fdc3
-    same("violenceLevel", "2"),             // 0x6c5ae1
     same("waterLOD", "0").checked(benilla_ui::script::check_water_lod), // 0x688784
 ];

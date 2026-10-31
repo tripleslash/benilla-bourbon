@@ -283,7 +283,7 @@ fn wow_normalize(v: vec3<f32>) -> vec3<f32> {
     return select(vec3<f32>(0.0), normalize(v), l2 > 1e-12);
 }
 
-fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
+fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec4<f32> {
     let count = u32(wow_light.point_count.x);
     var sel = array<u32, 3>(0u, 0u, 0u);
     var sd = array<f32, 3>(1e30, 1e30, 1e30);
@@ -305,7 +305,7 @@ fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
             sd[2] = d2; sel[2] = i;
         }
     }
-    var sum = vec3<f32>(0.0);
+    var sum = vec4<f32>(0.0);
     for (var s = 0u; s < 3u; s = s + 1u) {
         if (sd[s] > 9.9e29) {
             break;
@@ -315,7 +315,7 @@ fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
         let d = length(to_light);
         let atten = 1.0 / (0.7 * d + 0.03 * d * d);
         let nl = max(dot(N, to_light / max(d, 1e-4)), 0.0);
-        sum += wow_light.points[2u * sel[s] + 1u].rgb * (atten * nl);
+        sum += vec4<f32>(wow_light.points[2u * sel[s] + 1u].rgb * (atten * nl), 1.0);
     }
     return sum;
 }
@@ -368,6 +368,360 @@ fn point_light_eval(sel: vec3<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
     return sum;
 }
 
+// fork: rain on surfaces (`benilla::wet_hook`): the sun's sheen on a wet fragment.
+fn wet_sheen_at(boost: f32, n_lit: vec3<f32>, p: vec3<f32>, shadow: f32) -> vec3<f32> {
+    return wet_hook::wet_sheen(boost, n_lit, normalize(view.world_position - p),
+        -normalize(wow_light.light_sun.xyz), wow_light.light_diffuse.rgb, wow_light.fog_color.rgb,
+        shadow);
+}
+
+#ifdef WOW_MODERN
+// fork: modern lighting (FORK.md) — a modern pipeline's stage-0 colour, lit per
+// pixel where a classic one takes `vertex_light`'s per-vertex colour: `wow_model.wgsl`'s
+// `modern_lit_rgb` over the flag words. `base` is the bare texel.
+fn modern_gx_rgb(
+    in: GxVsOut,
+    base: vec3<f32>,
+    vc: vec4<f32>,
+    has_vc: bool,
+    n_lit: vec3<f32>,
+    world_shadow: f32,
+    modern_lite: bool,
+) -> vec3<f32> {
+    let folded = select(base, base * vc.rgb, has_vc);
+    // fork: modern lighting (FORK.md, P6) — the binned local-light grid replaces
+    // the three-nearest selection where it is live, and reaches the WMO and interior-prop lanes,
+    // whose vertex stage deliberately zeroes the selection (the reference commits no point light to
+    // a WMO surface). It has to: P6 retires the bake that used to be those rooms' light.
+    var point_lit_px: vec3<f32>;
+    if (locallight::grid_live(modern_block.lights) && !modern_lite) {
+        point_lit_px = modern_local_lights(
+            in.world_position.xyz,
+            n_lit,
+            (in.word & WORD_INTERIOR) != 0u,
+            modern_lite,
+        );
+    } else {
+        var point_sel = in.point_sel;
+#ifndef MODERN_VERTEX_WALKS
+        // The mirror's selection, which the vertex stage leaves to it while the grid is live.
+        if (locallight::grid_live(modern_block.lights) && (in.word & (WORD_WMO | WORD_INTERIOR)) == 0u) {
+            point_sel = point_light_select(in.anchor);
+        }
+#endif
+        point_lit_px = point_light_eval(point_sel, in.world_position.xyz, n_lit);
+    }
+    // fork: modern lighting (P6) — interiors run the modern lanes whenever the probe field is live,
+    // which is the plan's tier split: Low traces no probes and keeps the bake and `prop_probes`.
+    let modern_interior = modern_block.gi.params.x > 0.5 && !modern_lite;
+    var lit_modern_room = vec3<f32>(0.0);
+    if (modern_interior && (in.word & WORD_INTERIOR) != 0u) {
+        let room_gi = modern_gi_ambient(in.world_position.xyz, n_lit, 1.0, modern_lite);
+        let room = max(modern_block.gi.interior.rgb, wow_light.light_ambient.rgb * MODERN_ROOM_FLOOR);
+        lit_modern_room = mix(room, room_gi.rgb, room_gi.w);
+    }
+    let L = -normalize(wow_light.light_sun.xyz);
+    let ndotl = max(dot(n_lit, L), 0.0);
+    let lit_nl = clamp(
+        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    // Keep ambient energy when the sun is blocked. The retained pass also carries authored fixture
+    // and probe lighting, which a directional shadow must not darken; a fully sunlit fragment keeps
+    // `lit_nl` exactly: `ambient + (lit − ambient) × 1.0` need not round back to it.
+    var lit_nl_shadowed = select(
+        lit_nl,
+        clamp(
+            wow_light.light_ambient.rgb + (lit_nl - wow_light.light_ambient.rgb) * world_shadow,
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        ),
+        world_shadow < 0.999,
+    );
+    // The sky map and the probe field at this fragment, read ONCE: the exterior doodad lane below
+    // wants the same two for its lobe (same point, same normal).
+    var modern_sky = 1.0;
+    var modern_gi = vec4<f32>(0.0);
+    if ((in.word & WORD_INTERIOR) == 0u && !modern_lite) {
+        let amb = wow_light.light_ambient.rgb;
+        // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
+        modern_gi = modern_gi_ambient(in.world_position.xyz, n_lit, 0.0, modern_lite);
+        // The sky map only where the field does not answer whole (`sunshadow::probe_or_sky`); both
+        // blends take `modern_sky` through that same helper, so 1 is exact for both.
+        if (modern_gi.w < 1.0) {
+            modern_sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, modern_lite);
+        }
+        lit_nl_shadowed = clamp(sunshadow::shade_floor(sunshadow::probe_or_sky(amb, modern_sky, modern_gi), amb) + max(lit_nl - amb, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    // The order-2 SH basis products over the fragment normal, shared by the exterior doodad lobe
+    // and the interior-prop probe lane.
+    let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
+    let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
+    if ((in.word & WORD_WMO) != 0u) {
+        // ---- WMO surfaces: wow_model.wgsl's is_wmo branch ----
+        let interior = (in.word & WORD_INTERIOR) != 0u;
+        let class_int = (in.word & WORD_CLASS_INT) != 0u;
+        let class_trans = (in.word & WORD_CLASS_TRANS) != 0u;
+        let trans_a = vc.a; // 1.0 where no MOCV is authored
+        // WINDOW (MOMT 0x20), interior drawer only: GL_LIGHT0 becomes the Direct/Ambient
+        // midpoint pair, ambient +16/255 saturating (0x6d37e0).
+        let window_mid = 0.5 * (wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb);
+        // The window's directional half rides the sun, so it takes the shadow.
+        let lit_window_shadowed = clamp(
+            window_mid + vec3<f32>(16.0 / 255.0) + window_mid * ndotl * world_shadow,
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+        let lit_int_base = select(lit_nl_shadowed, lit_window_shadowed, (in.word & WORD_WINDOW) != 0u);
+        // The classic interior light by batch class, before MOCV: what a modern room is floored on.
+        var bake_interior = vec3<f32>(1.0);
+        if (class_trans) {
+            bake_interior = mix(vec3<f32>(1.0), lit_int_base, trans_a);
+        } else if (!class_int) {
+            bake_interior = lit_int_base;
+        }
+        var lit_wmo_interior = vec3<f32>(1.0);
+        if (modern_interior) {
+            // fork: modern lighting (P6) — every batch class takes the room's own light: INT is no
+            // longer unlit, TRANS has no bake left to lerp toward, and the WINDOW swap is replaced
+            // by the pane's SIDN emission below.
+            lit_wmo_interior = lit_modern_room;
+        } else if (class_trans) {
+            lit_wmo_interior = mix(vec3<f32>(1.0), lit_int_base, trans_a);
+        } else if (!class_int) {
+            lit_wmo_interior = lit_int_base;
+        }
+        // EXTERIOR surfaces are the ones the sun can be blocked from (the fetch is gated on
+        // !interior, so `lit_nl_shadowed` collapses to `lit_nl` for interior fragments anyway).
+        let lit_wmo = select(lit_nl_shadowed, lit_wmo_interior, interior);
+        // SIDN night glow (MOMT 0x10): the authored emissive × the live night fraction, an
+        // EMISSION term — inside the clamped sum, never MOCV-multiplied; dead on the unlit
+        // INT lane, TRANS-weighted by the lit-pass alpha.
+        let rec = recs[in.word & 0xffffu];
+        let sidn_rgb = vec3<f32>(
+            f32(rec.z & 0xffu),
+            f32((rec.z >> 8u) & 0xffu),
+            f32((rec.z >> 16u) & 0xffu),
+        ) / 255.0;
+        var sidn_w = 1.0;
+        if (interior) {
+            if (class_trans) {
+                sidn_w = trans_a;
+            } else if (class_int) {
+                sidn_w = 0.0;
+            }
+        }
+        var sidn_e = sidn_rgb * (wow_light.grade.x * sidn_w);
+        // fork: modern lighting (P6) — a modern window is an emitter, on every class and with a
+        // daylight floor (`wow_model.wgsl` carries the same three numbers).
+        if (modern_interior && interior) {
+            sidn_e = sidn_rgb * (MODERN_SIDN_GAIN * mix(MODERN_SIDN_DAY, 1.0, wow_light.grade.x));
+        }
+        // fork: modern lighting (FORK.md, P3/P6) — a modern WMO surface drops its
+        // baked MOCV light (exterior since P3, interior since P6); MOCV's ALPHA survives indoors as
+        // the emissive mask it was authored as, added unclamped so a hearth reaches the bloom.
+        let drop_mocv = !interior || modern_interior;
+        var primary = clamp(
+            select(vc.rgb, vec3<f32>(1.0), drop_mocv) * (lit_wmo + point_lit_px) + sidn_e,
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+        if (modern_interior && interior) {
+            var emissive = sidn_e;
+            if (class_int && has_vc) {
+                emissive = emissive + vec3<f32>(MODERN_MOCV_EMISSIVE * trans_a);
+            }
+            let lit_sum = max(
+                select(vc.rgb, vec3<f32>(1.0), drop_mocv) * (lit_wmo + point_lit_px),
+                vc.rgb * bake_interior * MODERN_BAKE_FLOOR,
+            );
+            primary = clamp(lit_sum, vec3<f32>(0.0), vec3<f32>(1.0)) + emissive;
+        }
+        if (interior && class_int && has_vc && !modern_interior) {
+            // INT, where the bake stands: the reference's interior pixel shader (literal 4.0),
+            // tex·MOCV·(1 + 4·MOCV.a), clamped once. A colour-less INT batch keeps tex × lit.
+            return clamp(base * vc.rgb * (1.0 + 4.0 * vc.a), vec3<f32>(0.0), vec3<f32>(1.0));
+        }
+        return base * primary;
+    }
+    if ((in.word & WORD_INTERIOR) != 0u) {
+        // ---- interior M2 props: wow_model.wgsl's interior-prop branch ----
+        // The spawn-folded SH probe (MODD ambient, fixed-axis diffuse, the group's MOLR lobes)
+        // over the fragment normal; its soft wrap is the reference's, not a hard max(N·L, 0).
+        let probe = 7u * ((recs[in.word & 0xffffu].w >> 1u) & 0x1fffu);
+        let n1 = vec4<f32>(n_lit, 1.0);
+        let lit_prop = clamp(
+            vec3<f32>(
+                dot(wow_light.prop_probes[probe + 0u], n1)
+                    + dot(wow_light.prop_probes[probe + 3u], quad)
+                    + wow_light.prop_probes[probe + 6u].x * x2y2,
+                dot(wow_light.prop_probes[probe + 1u], n1)
+                    + dot(wow_light.prop_probes[probe + 4u], quad)
+                    + wow_light.prop_probes[probe + 6u].y * x2y2,
+                dot(wow_light.prop_probes[probe + 2u], n1)
+                    + dot(wow_light.prop_probes[probe + 5u], quad)
+                    + wow_light.prop_probes[probe + 6u].z * x2y2,
+            ),
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+        // fork: modern lighting (FORK.md, P6) — an interior MODD prop reads the
+        // room the way its walls do; the folded `prop_probes` slot survives on Low alone. It keeps
+        // its classic light as a floor, as the walls do (`MODERN_BAKE_FLOOR`).
+        let lit_prop_room = select(
+            lit_prop,
+            max(lit_modern_room, lit_prop * MODERN_BAKE_FLOOR),
+            modern_interior,
+        );
+        return folded * clamp(lit_prop_room + point_lit_px, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    // ---- exterior ADT doodads and exterior MODD props ----
+    // The `Model2.bls` order-2 SH sun lobe. The baked MCSH doodad shade retires (P3), so the intensity
+    // family is its `min(I, 1)` cap, 1, on every lane.
+    let sun_dc = wow_light.grade.yzw;
+    let sun_lobe = vec3<f32>(
+        wow_light.sh_c10_r.w + sun_dc.x
+            + dot(wow_light.sh_c10_r.xyz, n_lit) + dot(wow_light.sh_c13_r, quad)
+            + wow_light.sh_c16.x * x2y2,
+        wow_light.sh_c10_g.w + sun_dc.y
+            + dot(wow_light.sh_c10_g.xyz, n_lit) + dot(wow_light.sh_c13_g, quad)
+            + wow_light.sh_c16.y * x2y2,
+        wow_light.sh_c10_b.w + sun_dc.z
+            + dot(wow_light.sh_c10_b.xyz, n_lit) + dot(wow_light.sh_c13_b, quad)
+            + wow_light.sh_c16.z * x2y2,
+    );
+    // The SH lobe's own ambient rows (the .w column) are the doodad lane's ambient share.
+    let sun_ambient = vec3<f32>(
+        wow_light.sh_c10_r.w,
+        wow_light.sh_c10_g.w,
+        wow_light.sh_c10_b.w,
+    );
+    // fork: modern lighting (FORK.md, P5) — the doodad lobe's own ambient share
+    // comes from the probes, scaled to keep the lobe's authored colour balance. This lane is exterior
+    // by construction, so `modern_sky` / `modern_gi` were read above.
+    let amb_gi = sunshadow::shade_floor(sunshadow::probe_or_sky(sun_ambient, modern_sky, modern_gi), sun_ambient);
+    let lit_doodad = clamp(amb_gi + max(sun_lobe - sun_ambient, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+    // Sun disabled (light_sun.w) falls back to the FFP matte, like the entity path.
+    var lit = select(lit_nl_shadowed, lit_doodad, wow_light.light_sun.w > 0.5);
+#ifdef GX_TWO_SIDED
+#ifdef GX_CUTOUT
+    // fork: modern lighting (FORK.md, P3) — foliage: wrap diffuse + back-lit
+    // transmission under the cascades (see wow_model.wgsl).
+    {
+        let to_eye = normalize(view.world_position.xyz - in.world_position.xyz);
+        let nl = dot(n_lit, L);
+        let wrap = max((nl + 0.5) / 1.5, 0.0) - max(nl, 0.0);
+        let back = pow(max(dot(to_eye, -L), 0.0), 6.0);
+        lit = lit + wow_light.light_diffuse.rgb * world_shadow * (0.5 * max(wrap, 0.0) + 0.6 * back);
+    }
+#endif
+#endif
+    return folded * clamp(lit + point_lit_px, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+#endif
+
+// The lit colour at one vertex, `wow_model.wgsl`'s `vertex_light` over the flag words: the
+// reference lights per vertex and interpolates the clamped colour, the vertex colour inside the
+// clamp as the lit material. Both faces light from the submitted normal (no
+// GL_LIGHT_MODEL_TWO_SIDE in the reference). `vc` is the vertex colour, white where the batch
+// authors none; `point_lit.w` counts the bound point lights.
+fn vertex_light(normal: vec3<f32>, point_lit: vec4<f32>, vc: vec4<f32>, word: u32) -> vec3<f32> {
+    let n_lit = wow_normalize(normal);
+    let L = -normalize(wow_light.light_sun.xyz);
+    let ndotl = max(dot(n_lit, L), 0.0);
+    // The FFP light sum, unclamped: GL clamps the lit colour once, after the material colour.
+    let sum_nl = wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl;
+    let rec = recs[word & 0xffffu];
+    if ((word & WORD_WMO) != 0u) {
+        // ---- WMO surfaces: wow_model.wgsl's is_wmo lane ----
+        // Interior batch classes: INT is unlit (the bake is the room's light), TRANS's lit pass
+        // and EXT take the FFP sum. Exterior groups take it at sun scale 1, no terrain shade and
+        // no SH lobe (prog 198/VS 151). WINDOW (MOMT 0x20), interior drawer only: GL_LIGHT0
+        // becomes the Direct/Ambient midpoint as diffuse and it +16/255 as ambient, that byte
+        // add saturating on its own (0x6d37e0).
+        let window_mid = 0.5 * (wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb);
+        let sum_window = min(window_mid + vec3<f32>(16.0 / 255.0), vec3<f32>(1.0))
+            + window_mid * ndotl;
+        var sum_wmo = sum_nl;
+        // SIDN night glow (MOMT 0x10): authored emissive × night fraction, an emission term
+        // inside the clamp and never MOCV-multiplied; zero on INT, and TRANS's blend weights it.
+        var sidn_w = 1.0;
+        if ((word & WORD_INTERIOR) != 0u) {
+            sum_wmo = select(sum_nl, sum_window, (word & WORD_WINDOW) != 0u);
+            if ((word & WORD_CLASS_INT) != 0u) {
+                sum_wmo = vec3<f32>(1.0);
+                sidn_w = 0.0;
+            }
+        }
+        let sidn_rgb = vec3<f32>(
+            f32(rec.z & 0xffu),
+            f32((rec.z >> 8u) & 0xffu),
+            f32((rec.z >> 16u) & 0xffu),
+        ) / 255.0;
+        let sidn_e = sidn_rgb * (wow_light.grade.x * sidn_w);
+        // GL_COLOR_MATERIAL: MOCV multiplies the light sum inside the clamp; emission adds beside.
+        return clamp(vc.rgb * sum_wmo + sidn_e, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    // Order-2 SH basis terms of the vertex normal, for the doodad lobe and the probe lane.
+    let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
+    let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
+    var e: vec3<f32>;
+    if ((word & WORD_INTERIOR) != 0u) {
+        // ---- interior M2 props: wow_model.wgsl's interior-prop lane ----
+        // The spawn-folded SH probe (MODD ambient, fixed-axis diffuse, the group's MOLR lobes)
+        // over the vertex normal; its soft wrap is the reference's, not a hard max(N·L, 0).
+        let probe = 7u * ((rec.w >> 1u) & 0x1fffu);
+        let n1 = vec4<f32>(n_lit, 1.0);
+        e = vec3<f32>(
+            dot(wow_light.prop_probes[probe + 0u], n1)
+                + dot(wow_light.prop_probes[probe + 3u], quad)
+                + wow_light.prop_probes[probe + 6u].x * x2y2,
+            dot(wow_light.prop_probes[probe + 1u], n1)
+                + dot(wow_light.prop_probes[probe + 4u], quad)
+                + wow_light.prop_probes[probe + 6u].y * x2y2,
+            dot(wow_light.prop_probes[probe + 2u], n1)
+                + dot(wow_light.prop_probes[probe + 5u], quad)
+                + wow_light.prop_probes[probe + 6u].z * x2y2,
+        );
+    } else {
+        // ---- exterior ADT doodads and exterior MODD props ----
+        // Model2.bls order-2 SH sun lobe at intensity 0.5 Shaded (MCSH), 1.0 Matte, 2.5 Lit.
+        // Deviation: the `min(I, 1)` cap, as in wow_model.wgsl, because lifting it takes
+        // sun-facing surfaces past 1.0; Matte keeps its own bit so it stays 1.0 if the cap goes.
+        let shade_t = select(1.0, 0.0, (word & WORD_SHADE_LIT) != 0u);
+        let intensity = min(
+            select(mix(2.5, 0.5, shade_t), 1.0, (word & WORD_MATTE) != 0u),
+            1.0,
+        );
+        let sun_dc = wow_light.grade.yzw * intensity;
+        let sun_lobe = vec3<f32>(
+            wow_light.sh_c10_r.w + sun_dc.x
+                + intensity
+                    * (dot(wow_light.sh_c10_r.xyz, n_lit) + dot(wow_light.sh_c13_r, quad)
+                        + wow_light.sh_c16.x * x2y2),
+            wow_light.sh_c10_g.w + sun_dc.y
+                + intensity
+                    * (dot(wow_light.sh_c10_g.xyz, n_lit) + dot(wow_light.sh_c13_g, quad)
+                        + wow_light.sh_c16.y * x2y2),
+            wow_light.sh_c10_b.w + sun_dc.z
+                + intensity
+                    * (dot(wow_light.sh_c10_b.xyz, n_lit) + dot(wow_light.sh_c13_b, quad)
+                        + wow_light.sh_c16.z * x2y2),
+        );
+        // Sun disabled (light_sun.w) falls back to the FFP sum, like the entity path.
+        e = select(sum_nl, sun_lobe, wow_light.light_sun.w > 0.5);
+    }
+    // `Model2.bls`: with a point light bound the program clamps E to [0, 1] before `c28`
+    // multiplies it, with none it writes `c28·E` to the saturating `oD0`.
+    e += point_lit.rgb;
+    if (point_lit.w > 0.5) {
+        e = clamp(e, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    // `c28`: the vertex colour, the M2Color baked constant, is the lit material.
+    return clamp(vc.rgb * e, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 // ---- the pass ----
 
 struct GxVertex {
@@ -385,10 +739,12 @@ struct GxVsOut {
     // colour pass tests `Equal` against what it wrote.
     @builtin(position) @invariant position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
+    // fork: the normal the rain and a modern fragment read.
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) @interpolate(flat) word: u32,
-    @location(4) point_lit: vec3<f32>,
+    // The lit colour from `vertex_light`, clamped at the vertex and interpolated.
+    @location(4) primary: vec3<f32>,
     @location(5) color: vec4<f32>,
     // fork: modern lighting (FORK.md, P3) — the vertex's point-light selection (flat).
     @location(6) @interpolate(flat) point_sel: vec3<u32>,
@@ -407,10 +763,9 @@ fn vertex(v: GxVertex) -> GxVsOut {
     if ((recs[v.word & 0xffffu].w & 1u) != 0u) {
         out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
         out.world_position = vec4<f32>(0.0);
-        out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
         out.uv = vec2<f32>(0.0);
         out.word = v.word;
-        out.point_lit = vec3<f32>(0.0);
+        out.primary = vec3<f32>(0.0);
         out.color = vec4<f32>(1.0);
         return out;
     }
@@ -423,46 +778,41 @@ fn vertex(v: GxVertex) -> GxVsOut {
     out.color = v.color;
     // Up to 3 nearest point lights, chosen from the placement origin. WMO surfaces take none,
     // as in the reference; interior props neither: the probe holds their group's MOLR lights.
-    if ((v.word & (WORD_WMO | WORD_INTERIOR)) != 0u) {
-        out.point_lit = vec3<f32>(0.0);
-        // …and the per-pixel selection with it. It used to be left unwritten, which was harmless
-        // only because the grid overwrote the fragment's answer on every modern frame. Now that
-        // the fragment keeps this selection outside the grid, an unwritten output would be an
-        // undefined one — and index 0 is `point_light_eval`'s own "no light", so spelling it is
-        // both the defined value and the reference's answer for these lanes.
-        out.point_sel = vec3<u32>(0u);
-    } else {
+    out.point_sel = vec3<u32>(0u);
 #ifdef WOW_MODERN
-        // A modern fragment never reads the Gouraud sum (`point_light_eval` or the grid replaces
-        // it), and reads the three-nearest selection only where the grid does not answer — so
-        // neither walk of the whole light table runs per vertex for nothing.
-        out.point_lit = vec3<f32>(0.0);
+    // A modern fragment lights itself (`modern_gx_rgb`), so it reads no `primary`, and reads the
+    // three-nearest selection only where the grid does not answer: neither walk of the whole light
+    // table runs per vertex for nothing. Index 0 is `point_light_eval`'s own "no light", the
+    // reference's answer for the WMO and interior-prop lanes.
+    out.primary = vec3<f32>(1.0);
+    if ((v.word & (WORD_WMO | WORD_INTERIOR)) == 0u) {
 #ifdef MODERN_VERTEX_WALKS
-        if (locallight::grid_live(modern_block.lights)
-            && !sunshadow::mirror_view(modern_block.cascades, view.world_position)) {
-            out.point_sel = vec3<u32>(0u);
-        } else {
+        if (!locallight::grid_live(modern_block.lights)
+            || sunshadow::mirror_view(modern_block.cascades, view.world_position)) {
             out.point_sel = point_light_select(v.anchor);
         }
 #else
         // fork: perf — nor does the water mirror walk it per vertex. The mirror lights with the
         // three-nearest selection, which is a function of the placement's anchor alone, so its
-        // fragments make it from the flat anchor (`fragment`): the same lights, chosen for the
+        // fragments make it from the flat anchor (`modern_gx_rgb`): the same lights, chosen for the
         // few pixels the mirror shades instead of for every vertex it transforms (Auberdine,
         // Cinematic: 1.7M vertices against 98k fragments).
         // `MODERN_VERTEX_WALKS` is the A/B lever (`$WOW_MODERN_VERTEXWALKS=1`).
         out.anchor = v.anchor;
-        if (locallight::grid_live(modern_block.lights)) {
-            out.point_sel = vec3<u32>(0u);
-        } else {
+        if (!locallight::grid_live(modern_block.lights)) {
             out.point_sel = point_light_select(v.anchor);
         }
 #endif
-#else
-        out.point_lit = point_light_sum(world, v.normal, v.anchor);
-        out.point_sel = point_light_select(v.anchor);
-#endif
     }
+#else
+    var point_lit = vec4<f32>(0.0);
+    if ((v.word & (WORD_WMO | WORD_INTERIOR)) == 0u) {
+        point_lit = point_light_sum(world, v.normal, v.anchor);
+    }
+    // A colour-less batch takes a constant 1.0 (WORD_HAS_VC).
+    let vc = select(vec4<f32>(1.0), v.color, (v.word & WORD_HAS_VC) != 0u);
+    out.primary = vertex_light(v.normal, point_lit, vc, v.word);
+#endif
     return out;
 }
 
@@ -635,58 +985,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // plain ambient and N·L, and an interior keeps its bake. See `terrain.wgsl` for why.
 #ifdef WOW_MODERN
     let modern_lite = sunshadow::mirror_view(modern_block.cascades, view.world_position);
-#else
-    let modern_lite = false;
 #endif
-    // fork: modern lighting (FORK.md, P3) — per-pixel point lights in a modern frame.
-    // Was a `select`, which in WGSL evaluates BOTH arms: a classic pipeline ran the per-pixel
-    // selection loop and then threw it away.
-    var point_lit_px = in.point_lit;
-#ifdef WOW_MODERN
-    // fork: modern lighting (FORK.md, P6) — the binned local-light grid replaces
-    // the three-nearest selection where it is live, and reaches the WMO and interior-prop lanes,
-    // whose vertex stage deliberately zeroes the selection (the reference commits no point light to
-    // a WMO surface). It has to: P6 retires the bake that used to be those rooms' light.
-    if (locallight::grid_live(modern_block.lights) && !modern_lite) {
-        point_lit_px = modern_local_lights(
-            in.world_position.xyz,
-            n_lit,
-            (in.word & WORD_INTERIOR) != 0u,
-            modern_lite,
-        );
-    } else {
-        var point_sel = in.point_sel;
-#ifndef MODERN_VERTEX_WALKS
-        // The mirror's selection, which the vertex stage leaves to it while the grid is live.
-        if (locallight::grid_live(modern_block.lights) && (in.word & (WORD_WMO | WORD_INTERIOR)) == 0u) {
-            point_sel = point_light_select(in.anchor);
-        }
-#endif
-        point_lit_px = point_light_eval(point_sel, in.world_position.xyz, n_lit);
-    }
-#endif
-    // fork: modern lighting (P6) — interiors run the modern lanes whenever the probe field is live,
-    // which is the plan's tier split: Low traces no probes and keeps the bake and `prop_probes`.
-#ifdef WOW_MODERN
-    let modern_interior = modern_block.gi.params.x > 0.5 && !modern_lite;
-#else
-    let modern_interior = false;
-#endif
-    var lit_modern_room = vec3<f32>(0.0);
-#ifdef WOW_MODERN
-    if (modern_interior && (in.word & WORD_INTERIOR) != 0u) {
-        let room_gi = modern_gi_ambient(in.world_position.xyz, n_lit, 1.0, modern_lite);
-        let room = max(modern_block.gi.interior.rgb, wow_light.light_ambient.rgb * MODERN_ROOM_FLOOR);
-        lit_modern_room = mix(room, room_gi.rgb, room_gi.w);
-    }
-#endif
-    let L = -normalize(wow_light.light_sun.xyz);
-    let ndotl = max(dot(n_lit, L), 0.0);
-    let lit_nl = clamp(
-        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl,
-        vec3<f32>(0.0),
-        vec3<f32>(1.0),
-    );
     // The retained path uses the same Bevy directional shadow map as terrain and entity models.
     // `static_gx` used to have no mesh-view shadow bindings, which made every Stormwind WMO act
     // as if shadows were disabled even though the caster map was populated.
@@ -716,273 +1015,42 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
         world_shadow = world_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
     }
-    let shadow_term = world_shadow;
-#else
-    let shadow_term = mix(SHADOW_SUN_FLOOR, 1.0, world_shadow);
 #endif
-    // Keep ambient energy when the realtime map blocks the sun. The retained pass also carries
-    // authored fixture/probe lighting, which must not be darkened by a directional shadow. The
-    // `world_shadow < 0.999` arm keeps `worldShadows 0` (no shadow-mapped light) and a fully
-    // sunlit fragment byte-identical: `ambient + (lit − ambient) × 1.0` is not guaranteed to
-    // round back to `lit`.
-    let lit_nl_shadowed_classic = select(
-        lit_nl,
-        clamp(
-            wow_light.light_ambient.rgb + (lit_nl - wow_light.light_ambient.rgb) * shadow_term,
-            vec3<f32>(0.0),
-            vec3<f32>(1.0),
-        ),
-        world_shadow < 0.999,
-    );
-    // fork: modern lighting (FORK.md, P3) — modern exterior: sun share under the cascades, ambient
-    // under the sky-occlusion map.
-    var lit_nl_shadowed = lit_nl_shadowed_classic;
-    // The sky map and the probe field at this fragment, read ONCE: the exterior doodad lane below
-    // wants the same two for its lobe (same point, same normal), and both lanes are evaluated before
-    // `select` keeps one.
-    var modern_sky = 1.0;
-    var modern_gi = vec4<f32>(0.0);
-#ifdef WOW_MODERN
-    if ((in.word & WORD_INTERIOR) == 0u && !modern_lite) {
-        let amb = wow_light.light_ambient.rgb;
-        // fork: modern lighting (FORK.md, P5) — the probe field over the sky map.
-        modern_gi = modern_gi_ambient(in.world_position.xyz, n_lit, 0.0, modern_lite);
-        // The sky map only where the field does not answer whole (`sunshadow::probe_or_sky`); both
-        // blends below take `modern_sky` through that same helper, so 1 is exact for both.
-        if (modern_gi.w < 1.0) {
-            modern_sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, modern_lite);
-        }
-        lit_nl_shadowed = clamp(sunshadow::shade_floor(sunshadow::probe_or_sky(amb, modern_sky, modern_gi), amb) + max(lit_nl - amb, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
-    }
-#endif
-    // The order-2 SH basis products over the fragment normal — shared by the exterior
-    // doodad lobe and the interior-prop probe lane (wow_model.wgsl computes them once too).
-    let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
-    let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
     // A colour-less batch takes a constant 1.0, not interpolated white: interpolating a constant
     // attribute gives 1.0±ε, and base × 0.99999994 rounds about half the pixels one byte down.
     let has_vc = (in.word & WORD_HAS_VC) != 0u;
     let vc = select(vec4<f32>(1.0), in.color, has_vc);
     let folded = select(base.rgb, base.rgb * vc.rgb, has_vc);
-    var rgb: vec3<f32>;
-    if ((in.word & WORD_WMO) != 0u) {
-        // ---- WMO surfaces: wow_model.wgsl's is_wmo branch ----
-        let interior = (in.word & WORD_INTERIOR) != 0u;
-        let class_int = (in.word & WORD_CLASS_INT) != 0u;
-        let class_trans = (in.word & WORD_CLASS_TRANS) != 0u;
-        let trans_a = vc.a; // 1.0 where no MOCV is authored
-        // WINDOW (MOMT 0x20), interior drawer only: GL_LIGHT0 becomes the Direct/Ambient
-        // midpoint pair, ambient +16/255 saturating (0x6d37e0).
-        let window_mid = 0.5 * (wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb);
-        // The window's directional half rides the sun, so it takes the shadow term (×1.0 exact
-        // when the caster is off — no identity guard needed on a pure multiply).
-        let lit_window_shadowed = clamp(
-            window_mid + vec3<f32>(16.0 / 255.0) + window_mid * ndotl * shadow_term,
-            vec3<f32>(0.0),
-            vec3<f32>(1.0),
-        );
-        let lit_int_base = select(lit_nl_shadowed, lit_window_shadowed, (in.word & WORD_WINDOW) != 0u);
-        // The interior BATCH-CLASS lanes (trace-forensics-abbey-interior-d3d §2): INT = unlit
-        // (the bake IS the room's light), TRANS = the per-vertex MOCV-alpha lit↔bake lerp,
-        // EXT = plain lit_nl. Exterior groups take lit_nl at sun-scale 1 (prog 198/VS 151 —
-        // no terrain shade, no SH lobe).
-        // The classic interior light by batch class, before MOCV: what a modern room is floored on.
-        var bake_interior = vec3<f32>(1.0);
-        if (class_trans) {
-            bake_interior = mix(vec3<f32>(1.0), lit_int_base, trans_a);
-        } else if (!class_int) {
-            bake_interior = lit_int_base;
-        }
-        var lit_wmo_interior = vec3<f32>(1.0);
-        if (modern_interior) {
-            // fork: modern lighting (P6) — every batch class takes the room's own light: INT is no
-            // longer unlit, TRANS has no bake left to lerp toward, and the WINDOW swap is replaced
-            // by the pane's SIDN emission below.
-            lit_wmo_interior = lit_modern_room;
-        } else if (class_trans) {
-            lit_wmo_interior = mix(vec3<f32>(1.0), lit_int_base, trans_a);
-        } else if (!class_int) {
-            lit_wmo_interior = lit_int_base;
-        }
-        // EXTERIOR surfaces are the ones the realtime map can shadow (the fetch above is
-        // gated on !interior, so `lit_nl_shadowed` collapses to `lit_nl` for interior
-        // fragments anyway). Taking plain `lit_nl` here left every Stormwind street and
-        // wall unshadowed while the caster map was fully populated.
-        let lit_wmo = select(lit_nl_shadowed, lit_wmo_interior, interior);
-        // SIDN night glow (MOMT 0x10): the authored emissive × the live night fraction, an
-        // EMISSION term — inside the clamped sum, never MOCV-multiplied; dead on the unlit
-        // INT lane, TRANS-weighted by the lit-pass alpha (wmo-interior-night-light §4).
-        let rec = recs[in.word & 0xffffu];
-        let sidn_rgb = vec3<f32>(
-            f32(rec.z & 0xffu),
-            f32((rec.z >> 8u) & 0xffu),
-            f32((rec.z >> 16u) & 0xffu),
-        ) / 255.0;
-        var sidn_w = 1.0;
-        if (interior) {
-            if (class_trans) {
-                sidn_w = trans_a;
-            } else if (class_int) {
-                sidn_w = 0.0;
-            }
-        }
-        var sidn_e = sidn_rgb * (wow_light.grade.x * sidn_w);
-        // fork: modern lighting (P6) — a modern window is an emitter, on every class and with a
-        // daylight floor (`wow_model.wgsl` carries the same three numbers).
-        if (modern_interior && interior) {
-            sidn_e = sidn_rgb * (MODERN_SIDN_GAIN * mix(MODERN_SIDN_DAY, 1.0, wow_light.grade.x));
-        }
-        // GL_COLOR_MATERIAL: MOCV multiplies the lit terms INSIDE the clamp (point term is
-        // zero on WMO surfaces, kept in the sum for exact mirroring), emission adds beside.
-        // fork: modern lighting (FORK.md, P3/P6) — a modern WMO surface drops its
-        // baked MOCV light (exterior since P3, interior since P6); MOCV's ALPHA survives indoors as
-        // the emissive mask it was authored as, added unclamped so a hearth reaches the bloom.
-        // The classic sum is left term for term as upstream wrote it (float addition does not
-        // associate, and the classic frame is held byte-identical); the modern interior is its own
-        // statement, with the emission OUTSIDE the clamp so a hearth reaches the bloom.
-        let drop_mocv = MODERN_FRAME && (!interior || modern_interior);
-        var primary = clamp(
-            select(vc.rgb, vec3<f32>(1.0), drop_mocv) * (lit_wmo + point_lit_px) + sidn_e,
-            vec3<f32>(0.0),
-            vec3<f32>(1.0),
-        );
-        if (modern_interior && interior) {
-            var emissive = sidn_e;
-            if (class_int && has_vc) {
-                emissive = emissive + vec3<f32>(MODERN_MOCV_EMISSIVE * trans_a);
-            }
-            let lit_sum = max(
-                select(vc.rgb, vec3<f32>(1.0), drop_mocv) * (lit_wmo + point_lit_px),
-                vc.rgb * bake_interior * MODERN_BAKE_FLOOR,
-            );
-            primary = clamp(lit_sum, vec3<f32>(0.0), vec3<f32>(1.0)) + emissive;
-        }
-        // The entity algebra EXACTLY: bevy pre-folds vc into base and the shader divides it
-        // back out — (tex×vc)/max(vc, 1/255) is not tex in floats, so simplifying would
-        // break the pixel-identity bar.
-        let tex_rgb = folded / max(vc.rgb, vec3<f32>(1.0 / 255.0));
-        rgb = tex_rgb * primary;
-        if (interior && class_int && has_vc && !modern_interior) {
-            // INT self-illumination: tex·MOCV·(1 + 4·MOCV.a), only the final [0,1] clamp —
-            // the client's own interior pixel shader (literal 4.0). Gated on AUTHORED
-            // colours: a colour-less INT batch takes the entity path's no-COLORS combine
-            // (plain tex × lit), which the white-vc algebra above already reproduces.
+    // The stage-0 modulate: the texel times the lit colour `vertex_light` clamped per vertex,
+    // whose vertex colour is inside its clamp.
+    var rgb = base.rgb * in.primary;
+    if ((in.word & WORD_WMO) != 0u && (in.word & WORD_INTERIOR) != 0u) {
+        if ((in.word & WORD_CLASS_TRANS) != 0u) {
+            // TRANS: the lit pass by MOCV.a (blend 9) under the unlit `tex × MOCV` by 1 − MOCV.a
+            // (blend 7), `0x6b5190`, as one lerp.
+            rgb = base.rgb * mix(vc.rgb, in.primary, vc.a);
+        } else if ((in.word & WORD_CLASS_INT) != 0u && has_vc) {
+            // INT self-illumination, the reference's interior pixel shader (literal 4.0):
+            // tex·MOCV·(1 + 4·MOCV.a), clamped once. A colour-less INT batch keeps tex × lit.
             rgb = clamp(
-                tex_rgb * vc.rgb * (1.0 + 4.0 * trans_a),
+                base.rgb * vc.rgb * (1.0 + 4.0 * vc.a),
                 vec3<f32>(0.0),
                 vec3<f32>(1.0),
             );
         }
-    } else if ((in.word & WORD_INTERIOR) != 0u) {
-        // ---- interior M2 props: wow_model.wgsl's interior-prop branch ----
-        // The spawn-folded SH probe (MODD ambient, fixed-axis diffuse, the group's MOLR lobes)
-        // over the fragment normal; its soft wrap is the reference's, not a hard max(N·L, 0).
-        let probe = 7u * ((recs[in.word & 0xffffu].w >> 1u) & 0x1fffu);
-        let n1 = vec4<f32>(n_lit, 1.0);
-        let lit_prop = clamp(
-            vec3<f32>(
-                dot(wow_light.prop_probes[probe + 0u], n1)
-                    + dot(wow_light.prop_probes[probe + 3u], quad)
-                    + wow_light.prop_probes[probe + 6u].x * x2y2,
-                dot(wow_light.prop_probes[probe + 1u], n1)
-                    + dot(wow_light.prop_probes[probe + 4u], quad)
-                    + wow_light.prop_probes[probe + 6u].y * x2y2,
-                dot(wow_light.prop_probes[probe + 2u], n1)
-                    + dot(wow_light.prop_probes[probe + 5u], quad)
-                    + wow_light.prop_probes[probe + 6u].z * x2y2,
-            ),
-            vec3<f32>(0.0),
-            vec3<f32>(1.0),
-        );
-        // fork: modern lighting (FORK.md, P6) — an interior MODD prop reads the
-        // room the way its walls do; the folded `prop_probes` slot survives on Low alone. It keeps
-        // its classic light as a floor, as the walls do (`MODERN_BAKE_FLOOR`).
-        let lit_prop_room = select(
-            lit_prop,
-            max(lit_modern_room, lit_prop * MODERN_BAKE_FLOOR),
-            modern_interior,
-        );
-        let primary = clamp(lit_prop_room + point_lit_px, vec3<f32>(0.0), vec3<f32>(1.0));
-        rgb = folded * primary;
-    } else {
-        // ---- exterior ADT doodads and exterior MODD props ----
-        // Model2.bls order-2 SH sun lobe at intensity 0.5 Shaded (MCSH), 1.0 Matte, 2.5 Lit.
-        // Deviation: the `min(I, 1)` cap, as in wow_model.wgsl, because lifting it takes sun-facing
-        // surfaces past 1.0; Matte keeps its own bit so it stays 1.0 if the cap goes.
-        // fork: modern lighting (FORK.md, P3): the baked MCSH doodad shade
-        // retires in a modern frame.
-        let shade_t = select(select(1.0, 0.0, (in.word & WORD_SHADE_LIT) != 0u), 0.0, MODERN_FRAME);
-        let intensity = min(
-            select(mix(2.5, 0.5, shade_t), 1.0, (in.word & WORD_MATTE) != 0u),
-            1.0,
-        );
-        let sun_dc = wow_light.grade.yzw * intensity;
-        let sun_lobe = vec3<f32>(
-            wow_light.sh_c10_r.w + sun_dc.x
-                + intensity
-                    * (dot(wow_light.sh_c10_r.xyz, n_lit) + dot(wow_light.sh_c13_r, quad)
-                        + wow_light.sh_c16.x * x2y2),
-            wow_light.sh_c10_g.w + sun_dc.y
-                + intensity
-                    * (dot(wow_light.sh_c10_g.xyz, n_lit) + dot(wow_light.sh_c13_g, quad)
-                        + wow_light.sh_c16.y * x2y2),
-            wow_light.sh_c10_b.w + sun_dc.z
-                + intensity
-                    * (dot(wow_light.sh_c10_b.xyz, n_lit) + dot(wow_light.sh_c13_b, quad)
-                        + wow_light.sh_c16.z * x2y2),
-        );
-        // The SH lobe's own ambient rows (the .w column) are the doodad lane's ambient share:
-        // subtract-and-restore around the shadow term so only the directional part of the lobe
-        // dims. Guarded like `lit_nl_shadowed` so the no-shadow state stays byte-identical.
-        let sun_ambient = vec3<f32>(
-            wow_light.sh_c10_r.w,
-            wow_light.sh_c10_g.w,
-            wow_light.sh_c10_b.w,
-        );
-        let lit_doodad_plain = clamp(sun_lobe, vec3<f32>(0.0), vec3<f32>(1.0));
-        let lit_doodad_classic = select(
-            lit_doodad_plain,
-            clamp(
-                sun_ambient + (sun_lobe - sun_ambient) * shadow_term,
-                vec3<f32>(0.0),
-                vec3<f32>(1.0),
-            ),
-            world_shadow < 0.999,
-        );
-        // fork: modern lighting (FORK.md, P3) — modern: the lobe's ambient under the sky map.
-        var lit_doodad = lit_doodad_classic;
-#ifdef WOW_MODERN
-        {
-            // fork: modern lighting (FORK.md, P5) — the doodad lobe's own ambient
-            // share comes from the probes, scaled to keep the lobe's authored colour balance. This lane
-            // is exterior by construction, so `modern_sky` / `modern_gi` were read above.
-            let amb_gi = sunshadow::shade_floor(sunshadow::probe_or_sky(sun_ambient, modern_sky, modern_gi), sun_ambient);
-            lit_doodad = clamp(amb_gi + max(sun_lobe - sun_ambient, vec3<f32>(0.0)) * world_shadow, vec3<f32>(0.0), vec3<f32>(1.0));
-        }
-#endif
-        // Sun disabled (light_sun.w) falls back to the FFP matte, like the entity path.
-        var lit = select(lit_nl_shadowed, lit_doodad, wow_light.light_sun.w > 0.5);
-        // FFP combine: the light sum saturates FIRST, the texture (× the baked constant
-        // tint, when authored) modulates the clamped result. Statics: inst_tint identity,
-        // no highlight, no SIDN.
-#ifdef GX_TWO_SIDED
-#ifdef GX_CUTOUT
-        // fork: modern lighting (FORK.md, P3) — foliage: wrap diffuse + back-lit
-        // transmission under the cascades (see wow_model.wgsl).
-#ifdef WOW_MODERN
-        {
-            let to_eye = normalize(view.world_position.xyz - in.world_position.xyz);
-            let nl = dot(n_lit, L);
-            let wrap = max((nl + 0.5) / 1.5, 0.0) - max(nl, 0.0);
-            let back = pow(max(dot(to_eye, -L), 0.0), 6.0);
-            lit = lit + wow_light.light_diffuse.rgb * world_shadow * (0.5 * max(wrap, 0.0) + 0.6 * back);
-        }
-#endif
-#endif
-#endif
-        let primary = clamp(lit + point_lit_px, vec3<f32>(0.0), vec3<f32>(1.0));
-        rgb = folded * primary;
     }
+#ifdef WOW_MODERN
+    rgb = modern_gx_rgb(in, base.rgb, vc, has_vc, n_lit, world_shadow, modern_lite);
+#else
+    // fork: `worldShadows`' realtime map blocks only the sun, so an exterior vertex's colour falls
+    // toward its ambient share, the vertex colour × the scene ambient. An unshadowed fragment keeps
+    // `rgb` exactly.
+    if ((in.word & WORD_INTERIOR) == 0u && world_shadow < 0.999) {
+        let sun_free = min(vc.rgb * wow_light.light_ambient.rgb, in.primary);
+        let shaded = sun_free + (in.primary - sun_free) * mix(SHADOW_SUN_FLOOR, 1.0, world_shadow);
+        rgb = rgb * shaded / max(in.primary, vec3<f32>(1.0 / 255.0));
+    }
+#endif
     // Unlit (M2 UNLIT 0x01, WMO UNLIT on an exterior group): texture × vertex colour, no light.
     if ((in.word & WORD_UNLIT) != 0u) {
         rgb = folded;
@@ -1006,9 +1074,8 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
         wow_light.env);
     rgb = wet.albedo;
     if (wet.boost > 0.0) {
-        rgb = min(rgb + wet_hook::wet_sheen(wet.boost, n_lit,
-            normalize(view.world_position - in.world_position.xyz), L,
-            wow_light.light_diffuse.rgb, wow_light.fog_color.rgb, world_shadow), vec3<f32>(1.0));
+        rgb = min(rgb + wet_sheen_at(wet.boost, n_lit, in.world_position.xyz, world_shadow),
+            vec3<f32>(1.0));
     }
     // Planar eye-Z fog; other fog modes belong to blends never admitted here. The interior triple
     // keys on the per-frame record bit, not `WORD_INTERIOR`: the client sets it per group under

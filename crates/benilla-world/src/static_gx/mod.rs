@@ -916,6 +916,98 @@ mod tests {
         );
     }
 
+    /// The static pass lights as the entity pass does, per vertex: `vertex_light` holds every
+    /// lane, the vertex stage writes its clamped colour to the interpolated `primary`, and the
+    /// fragment only modulates the texel by it.
+    #[test]
+    fn the_static_light_is_evaluated_per_vertex() {
+        let src = include_str!("../shaders/static_gx.wgsl");
+        let at = |needle: &str| {
+            src.find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` is gone"))
+        };
+        let light = &src[at("fn vertex_light(")..at("// ---- the pass ----")];
+        let vertex = &src[at("@vertex")..at("@fragment")];
+        let fragment = &src[at("@fragment")..];
+        for (lane, term) in [
+            ("the exterior SH lobe", "wow_light.sh_c10_r.w + sun_dc.x"),
+            ("the FFP N·L", "let ndotl = max(dot(n_lit, L), 0.0);"),
+            (
+                "the interior probe",
+                "dot(wow_light.prop_probes[probe + 0u], n1)",
+            ),
+        ] {
+            assert!(light.contains(term), "{lane} left `vertex_light`");
+        }
+        assert!(
+            vertex.contains("out.primary = vertex_light(v.normal, point_lit, vc, v.word);"),
+            "the vertex stage no longer lights its vertex"
+        );
+        assert!(
+            src.contains("    @location(4) primary: vec3<f32>,\n"),
+            "the lit colour must be interpolated across the triangle, never flat"
+        );
+        for term in [
+            "sh_c10",
+            "prop_probes",
+            "light_sun",
+            "light_diffuse",
+            "point_light_sum",
+            "vertex_light(",
+        ] {
+            assert!(
+                !fragment.contains(term),
+                "the fragment evaluates `{term}` again — the reference lights per vertex"
+            );
+        }
+    }
+
+    /// The vertex colour is the lit material inside the one clamp, as in `wow_model.wgsl`: MOCV
+    /// under GL_COLOR_MATERIAL (`0x59cfec`), a doodad's baked M2Color as `Model2.bls`'s `c28`,
+    /// whose light sum clamps first only with a point light bound.
+    #[test]
+    fn the_static_vertex_colour_is_lit_inside_the_one_clamp() {
+        let src = include_str!("../shaders/static_gx.wgsl");
+        let at = |needle: &str| {
+            src.find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` is gone"))
+        };
+        let light = &src[at("fn vertex_light(")..at("// ---- the pass ----")];
+        let fragment = &src[at("@fragment")..];
+        for (why, line) in [
+            (
+                "the FFP sum is never clamped on its own",
+                "let sum_nl = wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl;",
+            ),
+            (
+                "a WMO's MOCV multiplies the light sum inside the one clamp",
+                "return clamp(vc.rgb * sum_wmo + sidn_e, vec3<f32>(0.0), vec3<f32>(1.0));",
+            ),
+            (
+                "a doodad's colour multiplies E inside the one clamp",
+                "return clamp(vc.rgb * e, vec3<f32>(0.0), vec3<f32>(1.0));",
+            ),
+            (
+                "E clamps first only with a point light bound",
+                "if (point_lit.w > 0.5) {\n        e = clamp(e, vec3<f32>(0.0), vec3<f32>(1.0));\n    }",
+            ),
+        ] {
+            assert!(light.contains(line), "{why}: `{line}` is gone");
+        }
+        assert!(
+            !light.contains("clamp(sun_lobe"),
+            "the SH lobe clamps before the colour multiplies it again"
+        );
+        assert!(
+            fragment.contains("var rgb = base.rgb * in.primary;"),
+            "the texel multiplies the vertex colour outside the clamp again"
+        );
+        assert!(
+            fragment.contains("rgb = base.rgb * mix(vc.rgb, in.primary, vc.a);"),
+            "a TRANS batch is its clamped lit pass by MOCV.a over the unlit `tex × MOCV`"
+        );
+    }
+
     #[test]
     fn a_collected_region_is_undrawn_until_it_publishes() {
         let mut gx = StaticGx::default();

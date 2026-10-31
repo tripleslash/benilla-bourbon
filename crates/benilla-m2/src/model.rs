@@ -2,6 +2,8 @@
 
 use std::ffi::CString;
 
+use benilla_bytes::ByteExt;
+
 use crate::track::{
     M2QuatTrack, M2ScalarSplineTrack, M2ScalarTrack, M2Vec3SplineTrack, M2Vec3Track,
 };
@@ -105,16 +107,18 @@ impl M2Bone {
     }
 }
 
-/// One M2 vertex, 48 bytes: position @0, weights @0x0c, indices @0x10, normal @0x14, UV @0x20,
-/// second UV @0x28.
+/// One M2 vertex, 48 bytes: position @0, weights @0x0c, indices @0x10, normal @0x14, UV set 0
+/// @0x20 and UV set 1 @0x28, the device's vertex format 12 (`0x8097a8`).
 pub struct M2Vertex {
     pub position: C3,
     /// Per-vertex bone influence weights (`/255`), paired with [`Self::bone_indices`].
     pub bone_weights: [u8; 4],
     pub bone_indices: [u8; 4],
     pub normal: C3,
+    /// UV set 0, the coordinates texture stage 0 reads.
     pub tex_coords: C2,
-    /// The second coordinate set, a texture stage's when `texture_unit_lookup` names set 1.
+    /// UV set 1, the coordinates texture stage 1 reads: every `Model2.bls` program (`0x706510`)
+    /// passes `texcoord[k]` to stage `k`, whatever its coordinate entry at or below 2 holds.
     pub tex_coords2: C2,
 }
 
@@ -226,9 +230,9 @@ pub struct M2Model {
     /// The texture-unit lookup (header `0x9c`), by `texture_coord_combo_index`: a UV channel or a
     /// generated environment coordinate (see [`Self::stage_is_env_mapped`]).
     pub texture_unit_lookup: Vec<u16>,
-    /// The file's u16s just past [`Self::texture_unit_lookup`], which the reference reads for an
-    /// index past its end ([`Self::stage_coord`]); empty where the file ends there.
-    pub texture_unit_lookup_past: Vec<u16>,
+    /// The file offset of [`Self::texture_unit_lookup`], `None` for an empty table, which the
+    /// reference's fixup leaves a null pointer (`0x71e160`); see [`Self::stage_coord`].
+    pub(crate) texture_unit_lookup_at: Option<usize>,
     /// The texture transforms, reached through [`Self::texture_transform_lookup`].
     pub texture_transforms: Vec<M2TextureTransform>,
     /// The texture combiner presets (header `0x144`, u16), read in version 0x101 alone: there a
@@ -236,8 +240,12 @@ pub struct M2Model {
     /// [`Self::stage_combine`]. Empty in version 0x100.
     pub texture_combiners: Vec<u16>,
     /// The texture-animation lookup (header `0xac`, u16): `texture_transform_combo_index`
-    /// (`0x70b897`) to [`Self::texture_transforms`], `0xffff` for none.
+    /// (`0x70b897`) to [`Self::texture_transforms`], `0xffff` for none. A stage reads it through
+    /// [`Self::stage_transform`].
     pub texture_transform_lookup: Vec<u16>,
+    /// The file offset of [`Self::texture_transform_lookup`], `None` for an empty table, which the
+    /// fixup leaves a null pointer (`0x71d17d`).
+    pub(crate) texture_transform_lookup_at: Option<usize>,
     /// Global-sequence durations (header `0x14`, ms): the clocks `gseq` tracks wrap on.
     pub global_sequences: Vec<u32>,
     pub bones: Vec<M2Bone>,
@@ -268,31 +276,47 @@ pub struct M2Model {
 }
 
 impl M2Model {
-    /// The coordinate source of `batch`'s stage `stage`: the [`Self::texture_unit_lookup`] entry
-    /// at `texture_coord_combo_index + stage`. The 1.12.1 draw's gate `0x70b8bd` reads it
-    /// unchecked, so an index past the table reads the file's next u16s
-    /// ([`Self::texture_unit_lookup_past`]).
-    ///
-    /// tortoise deviation: past the table a stage reads the UV set of its own number, as the Turtle
-    /// WoW client draws it. HD model packs (OctoWoW HD's `UI_MainMenu.m2`) ship two-texture units
-    /// over a one-entry table; on the Turtle client their stage 1 reads UV set 1, where the
-    /// clamped masks fit (the pillar swirls' `T_VFX_Border_256`, the portal's door masks). 1.12.1's
-    /// read-past gives UV set 0 there, which hides the swirls entirely.
-    pub fn stage_coord(&self, batch: &crate::SkinBatch, stage: u16) -> Option<u16> {
+    /// The coordinate entry `batch`'s stage `stage` reads: the u16 at `texture_coord_combo_index +
+    /// stage` of [`Self::texture_unit_lookup`], from `bytes`, the file this model was parsed from.
+    /// The draw indexes the table unchecked (`0x70b8bd`) in the file it holds whole, so an index
+    /// past the table reads the file's next u16s. `None` for an empty table, which the reference
+    /// reads through a null pointer, and past the file's end.
+    pub fn stage_coord(&self, bytes: &[u8], batch: &crate::SkinBatch, stage: u16) -> Option<u16> {
         let idx = batch.texture_coord_combo_index as usize + stage as usize;
-        self.texture_unit_lookup.get(idx).copied().or(Some(stage))
+        if let Some(&v) = self.texture_unit_lookup.get(idx) {
+            return Some(v);
+        }
+        let at = self.texture_unit_lookup_at?.checked_add(idx * 2)?;
+        bytes.u16_at(at)
     }
 
-    /// Whether `batch`'s stage `stage` takes generated environment coordinates: a coordinate source
-    /// ([`Self::stage_coord`]) above 2 (art: `0xffff`), or none at all, gives the stage digit 2 of
-    /// the vertex shader id (`0x71de50`, the test at `0x71deaa`), whose `Shaders\Vertex\Model2.bls`
-    /// program writes the sphere map `0.5 + 0.5·R.xy/|R|` of the view-space reflection `R`, which
-    /// no texture transform drives. The draw's gate `0x70b8bd` makes the same test; the constants
-    /// it then writes (`0x70b8d0`) that program does not read. A table too short for the stage
-    /// (the OctoWoW HD pack's `UI_MainMenu.m2`: one entry, two-texture batches) reads on into the
-    /// file, where that file holds a 0: UV set 0, not the sphere map.
-    pub fn stage_is_env_mapped(&self, batch: &crate::SkinBatch, stage: u16) -> bool {
-        self.stage_coord(batch, stage).is_none_or(|v| v > 2)
+    /// The texture transform `batch`'s stage `stage` moves by: the texAnimLookup entry at
+    /// `texture_transform_combo_index + stage`, which the draw reads unchecked as it does the
+    /// coordinate entry (`0x70b8aa`), so past the table it reads the file's next u16s. An entry
+    /// at or above the transform count (header `+0x74`) is the identity (`0x70b8ff`-`0x70b90b`),
+    /// as are an empty table and a read past the file's end.
+    pub fn stage_transform(
+        &self,
+        bytes: &[u8],
+        batch: &crate::SkinBatch,
+        stage: u16,
+    ) -> Option<&M2TextureTransform> {
+        let idx = batch.texture_transform_combo_index as usize + stage as usize;
+        let ti = match self.texture_transform_lookup.get(idx) {
+            Some(&v) => v,
+            None => bytes.u16_at(self.texture_transform_lookup_at?.checked_add(idx * 2)?)?,
+        };
+        self.texture_transforms.get(usize::from(ti))
+    }
+
+    /// Whether `batch`'s stage `stage` takes generated environment coordinates: a coordinate entry
+    /// ([`Self::stage_coord`]) above 2 (art: `0xffff`), or none to read, gives the stage digit 2
+    /// of the vertex shader id (`0x71de50`, the test at `0x71deaa`), whose
+    /// `Shaders\Vertex\Model2.bls` program writes the sphere map `0.5 + 0.5·R.xy/|R|` of the
+    /// view-space reflection `R`, which no texture transform drives. The draw's gate `0x70b8bd`
+    /// makes the same test; the constants it then writes (`0x70b8d0`) that program does not read.
+    pub fn stage_is_env_mapped(&self, bytes: &[u8], batch: &crate::SkinBatch, stage: u16) -> bool {
+        self.stage_coord(bytes, batch, stage).is_none_or(|v| v > 2)
     }
 
     /// The combine preset (0 to 5, gx render states `0x1f + k`) stage `stage` of `batch` binds

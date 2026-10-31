@@ -61,7 +61,8 @@ pub struct MipLevel {
 }
 
 impl DecodedBlp {
-    /// The authored chain length: `max(log2 w, log2 h)` with mipmaps, else 0 (`mips` still holds
+    /// The authored chain length with mipmaps, `floor(log2(max(w, h))) + 1` (`0x5a4ac0`, stored at
+    /// `0x5a83fb`), else 0 (`mips` still holds
     /// level 0).
     pub fn mip_chain_count(&self) -> usize {
         self.mip_chain_count
@@ -74,11 +75,14 @@ const PALETTE_SIZE: usize = 256 * 4;
 /// A cap on the header's dimensions, which size the buffers (1.12 art stops at 1024×1024).
 const MAX_DIM: u32 = 8192;
 
+/// The levels from `width` by `height` down to 1 by 1: `0x5a4ac0`, and `0x44ae70` for a TGA's.
+pub fn full_mip_count(width: u32, height: u32) -> usize {
+    width.max(height).max(1).ilog2() as usize + 1
+}
+
 fn mip_chain_count(width: u32, height: u32, has_mipmaps: bool) -> usize {
     if has_mipmaps {
-        let w = (width as f32).log2() as usize;
-        let h = (height as f32).log2() as usize;
-        w.max(h)
+        full_mip_count(width, height)
     } else {
         0
     }
@@ -540,7 +544,7 @@ mod tests {
         let mut sizes = [0u32; 16];
         let mut payload = Vec::new();
         let base = (HEADER_SIZE + PALETTE_SIZE) as u32;
-        // The chain count for 8x8 is 3, so the stored 1x1 is past it and unread.
+        // The chain count for 8x8 is 4 (8, 4, 2, 1): the stored 1x1 is read.
         for (i, (w, h)) in [(8u32, 8u32), (4, 4), (2, 2), (1, 1)]
             .into_iter()
             .enumerate()
@@ -556,6 +560,22 @@ mod tests {
         b.resize(HEADER_SIZE + PALETTE_SIZE, 0);
         b.extend_from_slice(&payload);
         b
+    }
+
+    /// `0x5a4ac0` counts levels until both sides are 1: 8x8 has 8, 4, 2, 1, and 256x64 has 9.
+    #[test]
+    fn the_chain_keeps_the_one_by_one_level() {
+        assert_eq!(mip_chain_count(8, 8, true), 4);
+        assert_eq!(mip_chain_count(256, 256, true), 9);
+        assert_eq!(mip_chain_count(256, 64, true), 9);
+        assert_eq!(mip_chain_count(1, 1, true), 1);
+        assert_eq!(mip_chain_count(1, 16, true), 5);
+        assert_eq!(mip_chain_count(8, 8, false), 0);
+        let b = dxt_blp(0, 8);
+        let decoded = decode(&b).unwrap();
+        assert_eq!(decoded.mip_chain_count(), 4);
+        let last = decoded.mips.last().unwrap();
+        assert_eq!((last.width, last.height), (1, 1));
     }
 
     #[test]
@@ -634,7 +654,7 @@ mod tests {
         b[84 + 2 * 4..88 + 2 * 4].copy_from_slice(&short.to_le_bytes());
         let off = native_level_offset(&b, 2);
         let native = decode_native(&b).expect("short tail still decodes");
-        let tail = native.mips.last().unwrap();
+        let tail = &native.mips[2];
         assert_eq!((tail.width, tail.height), (2, 2));
         assert_eq!(tail.bytes.len(), 8, "one whole BC1 block");
         assert_eq!(
@@ -651,7 +671,7 @@ mod tests {
         assert_eq!(decoded.mips.len(), native.mips.len());
         let mut out = vec![0u8; 2 * 2 * 4];
         texpresso::Format::Bc1.decompress(&tail.bytes, 2, 2, &mut out);
-        assert_eq!(out, decoded.mips.last().unwrap().rgba);
+        assert_eq!(out, decoded.mips[2].rgba);
     }
 
     /// A 2×8 DXT3 level is stored as one block (`max(1, (2/4)·(8/4))`) where the grid needs two;

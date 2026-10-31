@@ -44,6 +44,8 @@ pub(crate) struct CvarCallbacks<'w> {
     realmlist: Option<ResMut<'w, crate::realmlist::Realmlist>>,
     gamma: Option<ResMut<'w, crate::ui_gamma::DisplayGamma>>,
     render_scale: Option<ResMut<'w, crate::world_backdrop::RenderScale>>,
+    shadows: Option<ResMut<'w, crate::blob_shadow::ShadowSettings>>,
+    violence: Option<ResMut<'w, crate::creature_anim::blood::ViolenceLevel>>,
     // fork: the rows of this fork's own options ([`ForkKnobs`]).
     fork: ForkKnobs<'w>,
 }
@@ -146,6 +148,12 @@ impl CvarCallbacks<'_> {
         }
         if let Some(k) = fork.hd_models.as_mut() {
             crate::hd_models::on_cvar(ev, k.reborrow());
+        }
+        if let Some(k) = self.shadows.as_mut() {
+            crate::blob_shadow::on_cvar(ev, k.reborrow());
+        }
+        if let Some(k) = self.violence.as_mut() {
+            crate::creature_anim::blood::on_cvar(ev, k.reborrow(), cvars.locale);
         }
     }
 }

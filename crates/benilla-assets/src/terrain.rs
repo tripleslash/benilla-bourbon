@@ -13,12 +13,13 @@ use bevy::render::render_resource::{
     TextureViewDimension,
 };
 
-/// Every layer's edge in the tile array; Elwynn's ground BLPs are natively 256² with 8 mips, and
+/// Every layer's edge in the tile array; Elwynn's ground BLPs are natively 256² with 9 mips, and
 /// the array holds them at twice that for the upscaled layer set.
 pub(crate) const LAYER_TEX_SIZE: u32 = 256 * 2;
 
-/// Per-layer mip count, the authored count at 256².
-pub(crate) const LAYER_MIP_COUNT: u32 = 8;
+/// Per-layer mip count, the full chain of the array's edge: down to 1 as the reference's 256²
+/// chain runs (`0x5a4ac0`).
+pub(crate) const LAYER_MIP_COUNT: u32 = 10;
 
 /// Non-sRGB, so sampling does not linearize and shader math stays in gamma byte space, as in the
 /// reference.
@@ -401,12 +402,21 @@ mod tests {
         }
     }
 
+    /// The layer chain is the full chain of the array's edge, down to 1 (`0x5a4ac0`).
+    #[test]
+    fn the_layer_chain_runs_to_one_by_one() {
+        assert_eq!(
+            LAYER_MIP_COUNT as usize,
+            benilla_formats::full_mip_count(LAYER_TEX_SIZE, LAYER_TEX_SIZE)
+        );
+    }
+
     #[test]
     fn a_tile_passes_its_blocks_through_only_when_every_clause_holds() {
         let ok = || {
             vec![
-                raw(BlpTexels::Bc2, LAYER_TEX_SIZE, 8, false),
-                raw(BlpTexels::Bc2, LAYER_TEX_SIZE, 8, false),
+                raw(BlpTexels::Bc2, LAYER_TEX_SIZE, LAYER_MIP_COUNT, false),
+                raw(BlpTexels::Bc2, LAYER_TEX_SIZE, LAYER_MIP_COUNT, false),
             ]
         };
         assert_eq!(passthrough_form(&ok(), true), Some(BlpTexels::Bc2));
@@ -415,22 +425,27 @@ mod tests {
         assert_eq!(passthrough_form(&ok(), false), None);
         // Mixed block forms, the common case: a `_s` variant is DXT3, a base without one DXT1.
         let mixed = vec![
-            raw(BlpTexels::Bc1, LAYER_TEX_SIZE, 8, false),
-            raw(BlpTexels::Bc2, LAYER_TEX_SIZE, 8, false),
+            raw(BlpTexels::Bc1, LAYER_TEX_SIZE, LAYER_MIP_COUNT, false),
+            raw(BlpTexels::Bc2, LAYER_TEX_SIZE, LAYER_MIP_COUNT, false),
         ];
         assert_eq!(passthrough_form(&mixed, true), None);
         // Not natively the array's size.
-        let small = vec![raw(BlpTexels::Bc2, LAYER_TEX_SIZE / 2, 7, false)];
+        let small = vec![raw(
+            BlpTexels::Bc2,
+            LAYER_TEX_SIZE / 2,
+            LAYER_MIP_COUNT - 1,
+            false,
+        )];
         assert_eq!(passthrough_form(&small, true), None);
         // A short chain.
         let short = vec![raw(BlpTexels::Bc2, LAYER_TEX_SIZE, 5, false)];
         assert_eq!(passthrough_form(&short, true), None);
         // A matte layer.
-        let matte = vec![raw(BlpTexels::Bc2, LAYER_TEX_SIZE, 8, true)];
+        let matte = vec![raw(BlpTexels::Bc2, LAYER_TEX_SIZE, LAYER_MIP_COUNT, true)];
         assert_eq!(passthrough_form(&matte, true), None);
         // Raw1/Raw3 tilesets have no block form at all.
         let raw1 = vec![RawLayer {
-            chain: synthetic_chain(LAYER_TEX_SIZE, 8),
+            chain: synthetic_chain(LAYER_TEX_SIZE, LAYER_MIP_COUNT),
             matte: false,
         }];
         assert_eq!(passthrough_form(&raw1, true), None);
@@ -442,11 +457,11 @@ mod tests {
     fn a_packed_block_array_is_exactly_the_size_its_format_implies() {
         for form in [BlpTexels::Bc1, BlpTexels::Bc2, BlpTexels::Bc3] {
             let layers = vec![
-                raw(form, LAYER_TEX_SIZE, 8, false),
-                raw(form, LAYER_TEX_SIZE, 8, false),
+                raw(form, LAYER_TEX_SIZE, LAYER_MIP_COUNT, false),
+                raw(form, LAYER_TEX_SIZE, LAYER_MIP_COUNT, false),
             ];
             // A level of the wrong size must not reach the packer.
-            let mut short = raw(form, LAYER_TEX_SIZE, 8, false);
+            let mut short = raw(form, LAYER_TEX_SIZE, LAYER_MIP_COUNT, false);
             short.chain.mips[3].truncate(4);
             assert_eq!(passthrough_form(&[short], true), None, "{form:?}");
             let packed = pack([107, 133, 82, 0], layers, true);
@@ -509,11 +524,11 @@ mod tests {
     fn the_decoded_path_still_stomps_a_matte_layers_alpha() {
         let layers = vec![
             RawLayer {
-                chain: synthetic_chain(256, 8),
+                chain: synthetic_chain(256, 9),
                 matte: true,
             },
             RawLayer {
-                chain: synthetic_chain(256, 8),
+                chain: synthetic_chain(256, 9),
                 matte: false,
             },
         ];

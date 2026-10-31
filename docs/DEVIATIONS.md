@@ -33,7 +33,7 @@ A setting boots at the reference's default unless it is listed here (`docs/METHO
 
 Each entry is the first sentence of a `Deviation:` comment, linking to where it lives.
 
-- [benilla-app](#benilla-app): 269
+- [benilla-app](#benilla-app): 270
 - [benilla-assets](#benilla-assets): 8
 - [benilla-blp](#benilla-blp): 2
 - [benilla-formats](#benilla-formats): 28
@@ -41,7 +41,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - [benilla-protocol](#benilla-protocol): 30
 - [benilla-srp](#benilla-srp): 2
 - [benilla-ui](#benilla-ui): 137
-- [benilla-world](#benilla-world): 60
+- [benilla-world](#benilla-world): 59
 
 ### benilla-app
 
@@ -96,7 +96,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### blob_shadow
 
-- The shadow is gated on `InheritedVisibility`, though the reference draws one under an undrawn body (`0x48161d`), because benilla's exterior-scene election hides units the reference never loads, and their shadows would stay on the floor below. ([`src/blob_shadow.rs:29`](../crates/benilla-app/src/blob_shadow.rs#L29))
+- The shadow is gated on `InheritedVisibility`, though the reference draws one under an undrawn body (`0x48161d`), because benilla's exterior-scene election hides units the reference never loads, and their shadows would stay on the floor below. ([`src/blob_shadow.rs:34`](../crates/benilla-app/src/blob_shadow.rs#L34))
 
 #### camera_shake
 
@@ -133,9 +133,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - For a row that is not latched the change callback runs, inside the call that restored it, where the reference runs no callback here (`0x63dff0`, `0x63e010`), because a knob moves only through its callback (`callbacks::CvarCallbacks`), which also stands in for the reference's direct reads of the record; without it knob and value would disagree until the next write. ([`src/cvars/mod.rs:499`](../crates/benilla-app/src/cvars/mod.rs#L499))
 - The reference's `SaveConfig` (`0x63d980`) writes only at world entry (`0x46b6f6`), at the leave-world tail (`0x490c35`-`0x490c64`) and at shutdown (`0x63daf0`), so a crash or a kill loses every change since; here a player's settings survive one because the config saves a quiet second after a change. ([`src/cvars/mod.rs:1576`](../crates/benilla-app/src/cvars/mod.rs#L1576))
 - The reference clips at full scale and has no headroom mechanism (its SFX-bus duck `0x457960` is a sidechain armed only by server-pushed voice lines); benilla limits because every SFX is mastered to full scale and overlapping kits clip. ([`src/cvars/table.rs:243`](../crates/benilla-app/src/cvars/table.rs#L243))
-- Here the dial multiplies the camera's own rate, because benilla does not change the OS pointer speed, a system-wide setting. ([`src/cvars/table.rs:505`](../crates/benilla-app/src/cvars/table.rs#L505))
-- "0" raises a borderless fullscreen window instead of mode-setting the display, because Wayland and macOS offer no mode-set and X11's leaves the desktop changed after a crash (`crate::video`). ([`src/cvars/table.rs:658`](../crates/benilla-app/src/cvars/table.rs#L658))
-- Benilla, which has no exclusive mode, applies the same curve in the composite pass (`crate::ui_gamma::DisplayGamma`), because the skipped upload would make a slider that moves no pixel. `SetGamma 0x4891f0` writes `"%f"` ("1.000000"), which `SaveConfig` (`0x63da4a`) keeps as a diff against the default "1.0", as the reference does. ([`src/cvars/table.rs:779`](../crates/benilla-app/src/cvars/table.rs#L779))
+- Here the dial multiplies the camera's own rate, because benilla does not change the OS pointer speed, a system-wide setting. ([`src/cvars/table.rs:509`](../crates/benilla-app/src/cvars/table.rs#L509))
+- "0" raises a borderless fullscreen window instead of mode-setting the display, because Wayland and macOS offer no mode-set and X11's leaves the desktop changed after a crash (`crate::video`). ([`src/cvars/table.rs:662`](../crates/benilla-app/src/cvars/table.rs#L662))
+- Benilla, which has no exclusive mode, applies the same curve in the composite pass (`crate::ui_gamma::DisplayGamma`), because the skipped upload would make a slider that moves no pixel. `SetGamma 0x4891f0` writes `"%f"` ("1.000000"), which `SaveConfig` (`0x63da4a`) keeps as a diff against the default "1.0", as the reference does. ([`src/cvars/table.rs:794`](../crates/benilla-app/src/cvars/table.rs#L794))
 
 #### death
 
@@ -287,7 +287,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The reference also refuses to open a new non-music stream while inactive (`0x7a52bf`); benilla starts everything and gates the output, because a refusal at kit start would make an unattended capture record silence. ([`src/sound/mod.rs:113`](../crates/benilla-app/src/sound/mod.rs#L113))
 - Default off where the reference registers "1", because its reverb is FMOD 3's EAX API, which renders only with hardware 3D mixing, so off is what the reference is heard to produce (inferred: `fmod.dll`'s render side is untraced). ([`src/sound/mod.rs:121`](../crates/benilla-app/src/sound/mod.rs#L121))
 - `SoundOutputLimiter`, not a 1.12 CVar, default on, because that way overlapping full-scale kits are limited rather than clipped. The reference has no headroom mechanism and clips at full scale, as kira's hard clamp would (see `limiter`). ([`src/sound/mod.rs:139`](../crates/benilla-app/src/sound/mod.rs#L139))
-- With no character the reference leaves the listener where it was; benilla seats it on the camera, where the view is. ([`src/sound/mod.rs:501`](../crates/benilla-app/src/sound/mod.rs#L501))
+- With no character the reference leaves the listener where it was; benilla seats it on the camera, where the view is. ([`src/sound/mod.rs:509`](../crates/benilla-app/src/sound/mod.rs#L509))
 - The reference also plays an optimistic coin at the loot-money click, and at the auto-loot sweep's money, once per loot source (`0x4c201b`-`0x4c2020`, the same `0x458030` call; `0xb71bc4` set at `0x4c221e`, reset at `0x4c1d95`), so looted money sounds twice; benilla plays the watcher's coin alone, because one coin on the confirmed change reads cleanly and the round trip the early coin hides is imperceptible on a local server. ([`src/sound/money.rs:7`](../crates/benilla-app/src/sound/money.rs#L7))
 - 1.12.1 sets FMOD up on driver 0 and, when that fails, runs silent for the session (`Sound::Initialize` `0x7a4330`, the driver −1 → 0 at `0x7a445f`); here another output stands in, because on Linux the default is often a stock `dmix` whose card a sound server holds. ([`src/sound/output/cpal.rs:193`](../crates/benilla-app/src/sound/output/cpal.rs#L193))
 - A change of the default output device is followed (here and in `coreaudio.rs`), where 1.12.1 initialises its sound device once and never again (`Sound::Initialize` `0x7a4330` refuses a second call; the driver-enumeration functions `0x7a6320`-`0x7a6380` have no caller), because a headset plugged in mid-session should play at once. On ALSA the watch sees only the "default" PCM, whose id never changes, so on Linux it is the sound server (PipeWire or Pulse) that moves the stream. ([`src/sound/output/cpal.rs:544`](../crates/benilla-app/src/sound/output/cpal.rs#L544))
@@ -433,7 +433,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### ui_models
 
-- The reference's paint (`0x76d240`) reads the eye before it rebuilds the root, so a facing change draws one frame late; not reproduced, because it is an ordering quirk. ([`src/ui_models/mod.rs:1468`](../crates/benilla-app/src/ui_models/mod.rs#L1468))
+- The reference's paint (`0x76d240`) reads the eye before it rebuilds the root, so a facing change draws one frame late; not reproduced, because it is an ordering quirk. ([`src/ui_models/mod.rs:1469`](../crates/benilla-app/src/ui_models/mod.rs#L1469))
 
 #### ui_pet
 
@@ -467,10 +467,11 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - No signature or digest check (`0x46a90b`, `0x46a9d3`, `0x401560(9)`), so the chain's toc always loads and `FRAMES_LOADED` follows, because the check verifies Blizzard's signature with a key carried in the client binary, which benilla does not ship, and a modified interface file is loaded rather than refused. ([`src/ui_script/glue.rs:14`](../crates/benilla-app/src/ui_script/glue.rs#L14))
 - The page starts at the login screen and leaves the CVar as it stands, because its packs carry no movie converted for the web, so the movie frame has nothing to play there. ([`src/ui_script/glue.rs:198`](../crates/benilla-app/src/ui_script/glue.rs#L198))
 - The reference's size callback only re-scales `GlueParent` and re-lays it out (`0x46ac51`, `0x46ac56`), as its root keeps `gxResolution`'s aspect until a rebuild (`0x41ad10` at `0x46a828`) and its window keeps that shape while dragged (`0x5989d7`); here the root is the window's, which takes any shape, so the box follows it on every resize, without a rebuild because that would reset the screen (the create screen's character and name, the typed password, the selection). ([`src/ui_script/glue.rs:351`](../crates/benilla-app/src/ui_script/glue.rs#L351))
-- The reference's handler completes whichever operation is current; here only the character list's does, in state 3, and a reply of another cause (a roster nothing of the screen asked for) or of another link (before a realm change) completes nothing, because the reference has one link and one request in flight and so cannot tell those replies from the operation they would be applied to, while here the IO thread's park serves several. ([`src/ui_script/glue_mgr.rs:1538`](../crates/benilla-app/src/ui_script/glue_mgr.rs#L1538))
+- The screen state is not set to 1 after the report (`0x473ef9`), because that store returns the glue from the survey state 11, which benilla never enters, and from the idle screen it would leave a logon standing with none running. ([`src/ui_script/glue_mgr.rs:741`](../crates/benilla-app/src/ui_script/glue_mgr.rs#L741))
+- The reference's handler completes whichever operation is current; here only the character list's does, in state 3, and a reply of another cause (a roster nothing of the screen asked for) or of another link (before a realm change) completes nothing, because the reference has one link and one request in flight and so cannot tell those replies from the operation they would be applied to, while here the IO thread's park serves several. ([`src/ui_script/glue_mgr.rs:1562`](../crates/benilla-app/src/ui_script/glue_mgr.rs#L1562))
 - The character is the platform's Unicode text, because that way a player can type any language on any platform. The reference's window is ANSI (`RegisterClassExA`, `DefWindowProcA`), so `WM_CHAR` carries a byte of the system code page, which `0x42d185`-`0x42d1f5` maps through a table `GetACP` picks; a character outside that code page never arrives. ([`src/ui_script/input.rs:768`](../crates/benilla-app/src/ui_script/input.rs#L768))
-- A capture run (`scenario_active`) keeps the CRT's default seed, 1, because that way its frames reproduce. ([`src/ui_script/lifecycle.rs:186`](../crates/benilla-app/src/ui_script/lifecycle.rs#L186))
-- The page installs no reader, so `StartMovie` answers nil and the stock movie frame hides at once, because its packs carry no movie converted for the web. ([`src/ui_script/lifecycle.rs:291`](../crates/benilla-app/src/ui_script/lifecycle.rs#L291))
+- A capture run (`scenario_active`) keeps the CRT's default seed, 1, because that way its frames reproduce. ([`src/ui_script/lifecycle.rs:200`](../crates/benilla-app/src/ui_script/lifecycle.rs#L200))
+- The page installs no reader, so `StartMovie` answers nil and the stock movie frame hides at once, because its packs carry no movie converted for the web. ([`src/ui_script/lifecycle.rs:305`](../crates/benilla-app/src/ui_script/lifecycle.rs#L305))
 - The files are under `benilla-config/Logs/`, because the install is read-only. ([`src/ui_script/load_log.rs:5`](../crates/benilla-app/src/ui_script/load_log.rs#L5))
 - `FULLSCREEN_QUADS_RESEAT` re-sizes the full-screen quads, which the stock files size only in their OnLoads, because a resize here keeps the loaded UI and the blackout would stop short of the new screen. Host-side, not in the layer: it adapts the engine's resizable window, and changes nothing the stock UI does at a fixed size. ([`src/ui_script/manifest.rs:136`](../crates/benilla-app/src/ui_script/manifest.rs#L136))
 - No `FrameXML.toc` signature check, where `UI_Init` loads on a failed one and then quits (`0x401560(0xa)` at `0x48ff90`), because the check verifies Blizzard's signature with a key carried in the client binary, which benilla does not ship, and a modified interface file is loaded rather than refused. ([`src/ui_script/manifest.rs:241`](../crates/benilla-app/src/ui_script/manifest.rs#L241))
@@ -552,13 +553,13 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### model
 
-- A card authored facing away from the viewer is lit on the face it presents, because the reference shades it inverted and camera-dependent. Flip its normals, never its winding, which would show the single-sided ones the reference culls at every angle. ([`src/model.rs:170`](../crates/benilla-assets/src/model.rs#L170))
+- A card authored facing away from the viewer is lit on the face it presents, because the reference shades it inverted and camera-dependent. Flip its normals, never its winding, which would show the single-sided ones the reference culls at every angle. ([`src/model.rs:168`](../crates/benilla-assets/src/model.rs#L168))
 
 #### shaders
 
 - This is the `specular`/`pixelShaders` = 1 leg the reference install runs; both CVars (`0x6886a0`/`0x688712`) default to 0, where water has no program, no specular, a plain ADD combine and no blend. An active ARB program bypasses the texture environment. ([`src/shaders/liquid.wgsl:18`](../crates/benilla-assets/src/shaders/liquid.wgsl#L18))
 - A bent read is kept only where it lands on the surface this pixel's own ray sees (`refract_trust`); the reference rejects it only when it lands nearer than the water (`cmp` against the surface depth), because under that guard alone a swimmer showed twice: the water beside the body, over a deep bed, bent its read onto the body, and the water over the body bent its read off onto the bed, so the submerged half drew as a shifted copy. A read nearer than the surface has no water in front of it, so the reference's own case is the trust's zero. ([`src/shaders/liquid_cata.wgsl:941`](../crates/benilla-assets/src/shaders/liquid_cata.wgsl#L941))
-- `min(I, 1)`. The reference bakes I into the SH unclamped (`0x71c4e0`), so a lit entity commits ×2.5 there and ×1.0 here; lifting the cap takes sun-facing surfaces past 1.0. `entity_shade::LIT_T` aims the lit ramp at 1.0 because of it: lift the cap and set `LIT_T` back to 0.0 together. ([`src/shaders/wow_model.wgsl:1005`](../crates/benilla-assets/src/shaders/wow_model.wgsl#L1005))
+- `min(I, 1)`. The reference bakes I into the SH unclamped (`0x71c4e0`), so a lit entity commits ×2.5 there and ×1.0 here; lifting the cap takes sun-facing surfaces past 1.0. `entity_shade::LIT_T` aims the lit ramp at 1.0 because of it: lift the cap and set `LIT_T` back to 0.0 together. ([`src/shaders/wow_model.wgsl:1079`](../crates/benilla-assets/src/shaders/wow_model.wgsl#L1079))
 
 #### wmo
 
@@ -567,13 +568,13 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### world_assets
 
 - The reference uploads the shipped frames as they are; this evens them because their means differ (`ocean_h` alpha 55.985..57.628 over its 30 frames, more down the DXT3 mips), and at distance, where mipping averages a level to one value, the far sheet brightens and dims once per 1.25 s loop. An additive offset leaves the ripple's crests unscaled; per channel, since `detail.rgb` and `detail.a` both drift. Water only: magma and slime keep their pulse. ([`src/world_assets/images.rs:71`](../crates/benilla-assets/src/world_assets/images.rs#L71))
-- `0x448450` refuses a side of 1024 or more; the cap is 2048 here because benilla's containers carry the interface art upscaled to twice its size (`UI-TargetingFrame-BarFill` 1024 x 128, the loading screens 1024 x 1024), and a stock-size texture passes as before. A Turtle WoW 1.18.1 realm also takes a side that is not a power of two, as its own map art is (`Interface\WorldMap\UpperKarazhan2f`, 2004 x 1336). ([`src/world_assets/mod.rs:467`](../crates/benilla-assets/src/world_assets/mod.rs#L467))
+- `0x448450` refuses a side of 1024 or more; the cap is 2048 here because benilla's containers carry the interface art upscaled to twice its size (`UI-TargetingFrame-BarFill` 1024 x 128, the loading screens 1024 x 1024), and a stock-size texture passes as before. A Turtle WoW 1.18.1 realm also takes a side that is not a power of two, as its own map art is (`Interface\WorldMap\UpperKarazhan2f`, 2004 x 1336). ([`src/world_assets/mod.rs:463`](../crates/benilla-assets/src/world_assets/mod.rs#L463))
 ### benilla-blp
 
 #### (crate root)
 
-- A deeper level whose span runs past the file also ends the chain, where the reference reads past its buffer, because patch-A's `Character\Troll\SCALPUPPERHAIR00_01.blp` ships level 6 at the file's end with size `0xFFFFD0C4`, over six intact levels. ([`src/lib.rs:233`](../crates/benilla-blp/src/lib.rs#L233))
-- Past the file's end `pad_to` zero-fills, because the reference reads stale buffer bytes there. ([`src/lib.rs:253`](../crates/benilla-blp/src/lib.rs#L253))
+- A deeper level whose span runs past the file also ends the chain, where the reference reads past its buffer, because patch-A's `Character\Troll\SCALPUPPERHAIR00_01.blp` ships level 6 at the file's end with size `0xFFFFD0C4`, over six intact levels. ([`src/lib.rs:237`](../crates/benilla-blp/src/lib.rs#L237))
+- Past the file's end `pad_to` zero-fills, because the reference reads stale buffer bytes there. ([`src/lib.rs:257`](../crates/benilla-blp/src/lib.rs#L257))
 ### benilla-formats
 
 #### bundled_addons
@@ -619,9 +620,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### models
 
 - The fraction is clamped to `[0, 1]` because the reference extrapolates, which for a window whose brackets miss the band can push a fix16 factor negative and cull the batch on a quirk. ([`src/models/key_anim.rs:130`](../crates/benilla-formats/src/models/key_anim.rs#L130))
-- Owners past the ceiling (Maraudon's waterfalls, the glue screens) keep the interleave with their emitters, because a bias past a 200-yard owner would jump every transparent surface in the zone. ([`src/models/m2_batches.rs:738`](../crates/benilla-formats/src/models/m2_batches.rs#L738))
-- The fx lane redraws them as projected decals (`ground_fx`) because that way they drape the terrain. ([`src/models/types.rs:394`](../crates/benilla-formats/src/models/types.rs#L394))
-- Consumers light such a card off the side it presents, because the reference's shading of it is inverted and follows the camera. ([`src/models/types.rs:466`](../crates/benilla-formats/src/models/types.rs#L466))
+- Owners past the ceiling (Maraudon's waterfalls, the glue screens) keep the interleave with their emitters, because a bias past a 200-yard owner would jump every transparent surface in the zone. ([`src/models/m2_batches.rs:740`](../crates/benilla-formats/src/models/m2_batches.rs#L740))
+- The fx lane redraws them as projected decals (`ground_fx`) because that way they drape the terrain. ([`src/models/types.rs:401`](../crates/benilla-formats/src/models/types.rs#L401))
+- Consumers light such a card off the side it presents, because the reference's shading of it is inverted and follows the camera. ([`src/models/types.rs:474`](../crates/benilla-formats/src/models/types.rs#L474))
 - The UV comes from the model-space position, not each surface's own `(i, j)`, because the two agree on cell-aligned surfaces and the position never seams where they are not. Magma and slime use this period too; the reference reads their UV from the vertex's authored `int16` pair × 1/256 (`0x6b6993`), which is not parsed. ([`src/models/wmo/group.rs:19`](../crates/benilla-formats/src/models/wmo/group.rs#L19))
 - A non-black SIDN colour glows without the `0x10` flag too, because Turtle WoW's `Stormwind.wmo` (patch-3) zeroes every MOMT flag but keeps the colours, which left its lamp glass and windows dark at night; no 1.12.1 root has such a colour unflagged. ([`src/models/wmo/group.rs:578`](../crates/benilla-formats/src/models/wmo/group.rs#L578))
 
@@ -795,7 +796,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - An auto-store into a bank item or keyring slot sends nothing, because no container id names it and no stock caller passes one; the reference sends it and the server refuses. ([`src/script/cursor/bag_verbs.rs:26`](../crates/benilla-ui/src/script/cursor/bag_verbs.rs#L26))
 - A row index the list no longer holds buys nothing and drops, because this site reads through a null row in the reference (`0x4c7e9a`, `0x4c7ea5`). ([`src/script/cursor/bag_verbs.rs:132`](../crates/benilla-ui/src/script/cursor/bag_verbs.rs#L132))
 - Slot 11 is refused, because the reference's gate (`cmp esi,0xa; jbe`) admits it; `0x4bce00` checks its bound (`0x4bce14`) but `0x4bc9a0` does not, so it writes one dword past the array (`0x4bcad9`), and the autocast toggle (`0x4bcbb0`) reads that word (`[0xb71438+0x28]`) with no bounds check. ([`src/script/cursor/pet.rs:20`](../crates/benilla-ui/src/script/cursor/pet.rs#L20))
-- The top is 1000, not the reference's 250, because the fork's shipped 500 (a 1000 yd far clip) must be in range; `benilla_world::horizon::LOD_DIST_RANGE` is the same span. ([`src/script/cvar_checks.rs:433`](../crates/benilla-ui/src/script/cvar_checks.rs#L433))
+- The top is 1000, not the reference's 250, because the fork's shipped 500 (a 1000 yd far clip) must be in range; `benilla_world::horizon::LOD_DIST_RANGE` is the same span. ([`src/script/cvar_checks.rs:444`](../crates/benilla-ui/src/script/cvar_checks.rs#L444))
 - The list is the window sizes this client can present, not the device's display modes, because benilla makes no exclusive mode-set. `"WxH"` is a contract: `OptionsFrame.lua:281-284` splits on the `x`, raising on a string without one, and `CT_Viewport.lua:107` matches `"(%d+)x(%d+)"`, failing silently. ([`src/script/cvars.rs:81`](../crates/benilla-ui/src/script/cvars.rs#L81))
 - The tie-break is ours, because area alone with the reference's adjacent-only dedupe can leave a duplicate `"WxH"` when two modes share an area (1280x960, 1600x768). ([`src/script/cvars.rs:94`](../crates/benilla-ui/src/script/cvars.rs#L94))
 - An id out of range is ignored, because the reference reads one entry past the last (`0x48c67c`) and a clamp would apply a format the player did not pick. A missing id is ignored too, where the reference takes the first entry (`0x48c657`). ([`src/script/cvars.rs:804`](../crates/benilla-ui/src/script/cvars.rs#L804))
@@ -808,8 +809,8 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The minutes come from the server's table, not from spell 15007's `Spell.dbc` duration, because the aura the server applies is what the dialog must warn about. ([`src/script/death.rs:44`](../crates/benilla-ui/src/script/death.rs#L44))
 - The promotion's IME legs (`0x77d417`–`0x77d431`) and the IME writer's `or 6` (`0x77acde`, in `0x77ac60`) are not modelled because benilla has no IME composition. Whether it did anything: a relayout, the caret leg or `OnTextChanged`. ([`src/script/editbox/flush.rs:34`](../crates/benilla-ui/src/script/editbox/flush.rs#L34))
 - The nameplate glow is shown but never drawn, because its additive rim reads as hard edge lines in our linear-blending pipeline; the lit plate brightens its bar instead. It stays a real shown ADD region, as `glow:IsShown()` is the mouseover signal 1.12 nameplate addons read. ([`src/script/extract.rs:226`](../crates/benilla-ui/src/script/extract.rs#L226))
-- A host of 0x80 bytes or more is refused because the reference copies the host into a 0x80-byte buffer (`0x5abc7c`-`0x5abc9c`) and writes its terminator one byte past the end, and the cut host could end in a whitelisted suffix the real one does not; this takes the safe side. ([`src/script/glue_core.rs:424`](../crates/benilla-ui/src/script/glue_core.rs#L424))
-- Benilla keeps that decode and then encodes it again, every byte outside the URL characters `URL_SAFE` as `%XY` (a decoded `%` too), because the opener on some platforms is a shell script (`xdg-open`) or takes the raw command tail (`rundll32`) and the string comes off the wire: no space, quote, backtick, `$`, `;`, `<`, `>`, `|`, `^`, `\`, brace or control byte reaches it. The result must be an `http://` or `https://` (case-folded) address with a host, and nothing else; the reference would open whatever the server sent, `file:` and program paths included. ([`src/script/glue_core.rs:469`](../crates/benilla-ui/src/script/glue_core.rs#L469))
+- A host of 0x80 bytes or more is refused because the reference copies the host into a 0x80-byte buffer (`0x5abc7c`-`0x5abc9c`) and writes its terminator one byte past the end, and the cut host could end in a whitelisted suffix the real one does not; this takes the safe side. ([`src/script/glue_core.rs:433`](../crates/benilla-ui/src/script/glue_core.rs#L433))
+- Benilla keeps that decode and then encodes it again, every byte outside the URL characters `URL_SAFE` as `%XY` (a decoded `%` too), because the opener on some platforms is a shell script (`xdg-open`) or takes the raw command tail (`rundll32`) and the string comes off the wire: no space, quote, backtick, `$`, `;`, `<`, `>`, `|`, `^`, `\`, brace or control byte reaches it. The result must be an `http://` or `https://` (case-folded) address with a host, and nothing else; the reference would open whatever the server sent, `file:` and program paths included. ([`src/script/glue_core.rs:478`](../crates/benilla-ui/src/script/glue_core.rs#L478))
 - Past `NAME_TRIES` names the answer is nil, where the reference keeps trying, forever when the generator has learned nothing. ([`src/script/glue_create.rs:997`](../crates/benilla-ui/src/script/glue_create.rs#L997))
 - With no Region rows the reference reads a NULL category (`0x46e5b8`, `0x46f26a`) and faults; benilla lists every realm under one category, because that way a client whose `Wow.ini` names another Region still reaches a realm. ([`src/script/glue_realm.rs:195`](../crates/benilla-ui/src/script/glue_realm.rs#L195))
 - Equal nonzero counts tie here, where the reference answers +1 both ways (its name tie-break at `0x46e841` is clobbered by `0x46e846`), because a comparator that is not a total order has no defined sort. ([`src/script/glue_realm.rs:260`](../crates/benilla-ui/src/script/glue_realm.rs#L260))
@@ -920,7 +921,6 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### doodad_anim
 
 - Every instance scrolls in one phase, where the reference phases a band loop per arm and a gseq loop from each instance's attach (`CM2Model+0x68`), because one uniform serves the material and a seamless scroll looks the same at any phase. ([`src/doodad_anim/mat_anim.rs:195`](../crates/benilla-world/src/doodad_anim/mat_anim.rs#L195))
-- The stage's rotation and scaling are not applied, because the shader only adds this row to the stage's UV set. ([`src/doodad_anim/mat_anim.rs:235`](../crates/benilla-world/src/doodad_anim/mat_anim.rs#L235))
 - This runs for every resident host, where the reference stops a doodad culled out of its scene list (`[CM2Scene+0x20]`) and re-arms it at once on re-link (`0x7074b0`, `0x683f80`), because gating it so would re-roll the whole field on the frame the camera turns back. ([`src/doodad_anim/mod.rs:366`](../crates/benilla-world/src/doodad_anim/mod.rs#L366))
 
 #### entity_shade
@@ -974,7 +974,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### shaders
 
-- The `min(I, 1)` cap, as in wow\_model.wgsl, because lifting it takes sun-facing surfaces past 1.0; Matte keeps its own bit so it stays 1.0 if the cap goes. fork: modern lighting (FORK.md, P3): the baked MCSH doodad shade retires in a modern frame. ([`src/shaders/static_gx.wgsl:910`](../crates/benilla-world/src/shaders/static_gx.wgsl#L910))
+- The `min(I, 1)` cap, as in wow\_model.wgsl, because lifting it takes sun-facing surfaces past 1.0; Matte keeps its own bit so it stays 1.0 if the cap goes. ([`src/shaders/static_gx.wgsl:690`](../crates/benilla-world/src/shaders/static_gx.wgsl#L690))
 
 #### sky_order
 

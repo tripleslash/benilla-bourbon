@@ -214,14 +214,14 @@ pub(super) fn setup_sun(
                 .texture
                 .as_deref()
                 .and_then(|t| texture(t, (sub.wrap_x, sub.wrap_y)));
-            // The second stage by its own UV set; `Stars.m2` has no env-mapped stage.
+            // The second stage on UV set 1; `Stars.m2` has no env-mapped stage.
             let stage2 = sub
                 .stage1
                 .as_ref()
-                .filter(|st| !st.uvs.is_empty())
+                .filter(|_| !sub.uvs2.is_empty())
                 .and_then(|st| {
                     let tex = texture(st.texture.as_deref()?, (st.wrap_x, st.wrap_y))?;
-                    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, st.uvs.clone());
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, sub.uvs2.clone());
                     Some(tex)
                 });
             // The batch's static transparency weight, baked as a loop; sampled at 0, as
