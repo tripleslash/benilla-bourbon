@@ -29,6 +29,11 @@ struct LightTable {
     points: array<vec4<f32>, 512>,
 }
 @group(0) @binding(5) var<storage, read> light_table: LightTable;
+// The terrain heightfield the analytic bank lies on (`froxelfog::bank_air`).
+@group(0) @binding(6) var bank_ground: texture_depth_2d;
+// The key's shadow, whether it reaches the analytic bank.
+@group(0) @binding(7) var shadow_map: texture_depth_2d_array;
+@group(0) @binding(8) var shadow_samp: sampler_comparison;
 
 const SHAFT_TAPS: u32 = 16u;
 // Where, as a share of the view distance, the detailed world starts dissolving into the silhouette.
@@ -148,6 +153,53 @@ fn open_sky(uv: vec2<f32>) -> f32 {
     return select(0.0, 1.0, depth_at(px) <= 0.0);
 }
 
+// The terrain under `p`, filtered across the heightfield's texels so the bank shows no steps; the ground
+// under the camera off the map and over an undrawn texel.
+fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
+    if (f.ground.x <= 0.5) {
+        return f.night.y;
+    }
+    let q = vec4<f32>(p, 1.0);
+    let uv = vec2<f32>(dot(f.ground_x, q), dot(f.ground_y, q));
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
+        return f.night.y;
+    }
+    let n = f.ground.w;
+    let at = uv * n - vec2<f32>(0.5);
+    let base = floor(at);
+    let t = at - base;
+    let top = vec2<i32>(i32(n) - 1);
+    let i = vec2<i32>(base);
+    let d00 = textureLoad(bank_ground, clamp(i, vec2<i32>(0), top), 0);
+    let d10 = textureLoad(bank_ground, clamp(i + vec2<i32>(1, 0), vec2<i32>(0), top), 0);
+    let d01 = textureLoad(bank_ground, clamp(i + vec2<i32>(0, 1), vec2<i32>(0), top), 0);
+    let d11 = textureLoad(bank_ground, clamp(i + vec2<i32>(1, 1), vec2<i32>(0), top), 0);
+    if (min(min(d00, d10), min(d01, d11)) <= 0.0) {
+        return f.night.y;
+    }
+    let d = mix(mix(d00, d10, t.x), mix(d01, d11, t.x), t.y);
+    return f.ground.y + d * f.ground.z;
+}
+
+// How much of the key reaches the bank along a ray: two taps a yard off the ground where the bank
+// lies, near the eye and further out, by the lookup that does not follow the camera, so a turn leaves
+// them as they were.
+const BANK_KEY_NEAR: f32 = 8.0;
+const BANK_KEY_FAR: f32 = 40.0;
+
+fn bank_key(eye: vec3<f32>, p: vec3<f32>, ground: f32) -> f32 {
+    let ray = p - eye;
+    let len = max(length(ray), 1e-3);
+    let dir = ray / len;
+    var sum = 0.0;
+    for (var i = 0u; i < 2u; i = i + 1u) {
+        var at = eye + dir * min(len, select(BANK_KEY_NEAR, BANK_KEY_FAR, i == 1u));
+        at.y = max(at.y, ground + 1.0);
+        sum = sum + sunshadow::sun_visibility_anywhere(shadow_map, shadow_samp, modern_block.cascades, at);
+    }
+    return sum * 0.5;
+}
+
 @fragment
 fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let f = modern_block.fog;
@@ -161,6 +213,11 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Not in the water mirror: the light's screen position is the main view's, so the taps would march
     // toward the wrong point of the mirror's frame, sixteen of them per reflected pixel.
     let mirror = sunshadow::mirror_view(modern_block.cascades, view.world_position);
+    if (!mirror && f.bank.x > 0.0) {
+        let ground = select(terrain_under(f, p), f.night.y, sky);
+        let key = bank_key(view.world_position, p, ground);
+        fog = froxelfog::with_bank(fog, froxelfog::bank_air(f, view.world_position, p, ground, key));
+    }
 
     // The seam: over the last stretch before the view distance the detailed world dissolves into the
     // distant band's own silhouette colour, so where the detailed terrain ends and the WDL band begins

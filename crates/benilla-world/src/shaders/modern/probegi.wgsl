@@ -33,10 +33,10 @@ struct GiParams {
     // probe's escaped rays see instead of the sky. w = flags: 1 = cascade 0 is the interior
     // sub-grid, 2 = Chebyshev probe visibility (High and above).
     interior: vec4<f32>,
-    // Room for P7's grading — also the padding that aligns the light grid behind this block. 8
-    // rows since the froxel block grew by ten (the room fog, the night banks, the ground rows,
-    // the lamp halos' air, the sky's exposure): the offset has to land on 256 again.
-    spare: array<vec4<f32>, 8>,
+    // Room for P7's grading — also the padding that aligns the light grid behind this block. 7
+    // rows since the froxel block grew by eleven (the room fog, the night banks, the ground rows,
+    // the lamp halos' air, the sky's exposure, the banks' dials): the offset has to land on 256 again.
+    spare: array<vec4<f32>, 7>,
 }
 
 // Cascade `c`'s grid row, picked by constant index: `g` is a by-value copy, and a computed index

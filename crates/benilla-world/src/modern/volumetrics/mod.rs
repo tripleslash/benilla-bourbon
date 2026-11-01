@@ -42,7 +42,7 @@ pub(crate) use node::froxel_pass;
 pub(crate) use node::{fog_composite_pass, lamp_halo_pass};
 
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
-pub const FOG_BYTES: usize = 3 * 64 + 24 * 16;
+pub const FOG_BYTES: usize = 3 * 64 + 25 * 16;
 /// Offset of the `ground_x` row inside the tail: the render world writes the terrain heightfield's
 /// addressing there (`node::prepare_froxels`), which only it knows.
 pub(crate) const GROUND_OFFSET: usize = 3 * 64 + 19 * 16;
@@ -225,6 +225,10 @@ pub struct FroxelFog {
     /// fork: x, y = the auto-exposure's lift and room (`look::lift_room`), whose inverse the
     /// composite draws sky pixels at (`look::unlifted`); zw reserved.
     pub sky: Vec4,
+    /// fork: the analytic ground bank (`froxelfog.wgsl`'s `bank_air`): x = its extinction at the
+    /// ground (1/yd, 0 where the look's banks stay in the volume); y, z = its fade with distance,
+    /// the yards and the share left; w = a steep view's gain.
+    pub bank: Vec4,
 }
 
 impl FroxelFog {
@@ -261,6 +265,7 @@ impl FroxelFog {
             self.ground,
             self.halo_air,
             self.sky,
+            self.bank,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -597,6 +602,7 @@ fn update_volume(
     let veil = 1.0 + (MOON_VEIL - 1.0) * super::sun_arc::moon_key();
     let night_glow = Vec3::from(l.fog_color.map(super::srgb_to_linear))
         * (NIGHT_GLOW * night * veil * look.0.night_glow);
+    let bank_analytic = look.0.bank_analytic > 0.5;
     let grid = tier.grid;
     let cut = hist.prev_clip.is_none()
         || hist.prev_grid != grid
@@ -695,7 +701,7 @@ fn update_volume(
             .unwrap_or_default()
             .extend(night_glow.z),
         night: Vec4::new(
-            if super::banks_enabled() {
+            if super::banks_enabled() && !bank_analytic {
                 BANK_EXTINCTION * night_bank_share(&look.0, night, added)
             } else {
                 0.0
@@ -722,6 +728,16 @@ fn update_volume(
             let (lift, room) = super::look::lift_room();
             Vec4::new(lift, room, 0.0, 0.0)
         },
+        bank: Vec4::new(
+            if super::banks_enabled() && bank_analytic {
+                BANK_EXTINCTION * night_bank_share(&look.0, night, added)
+            } else {
+                0.0
+            },
+            look.0.bank_thin_yd,
+            look.0.bank_far_share,
+            look.0.bank_steep,
+        ),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -904,8 +920,8 @@ mod tests {
     fn the_tail_matches_the_wgsl_layout() {
         let v = ModernVolume::default();
         assert_eq!(v.block.len(), BLOCK_TAIL_BYTES);
-        assert_eq!(FOG_BYTES, 576);
-        // `ModernBlock` = cascades (400) + fog (416) + grid (4096): a multiple of its 16-byte alignment.
+        assert_eq!(FOG_BYTES, 592);
+        // `ModernBlock` = cascades (400) + fog (432) + grid (4096): a multiple of its 16-byte alignment.
         assert_eq!(
             (crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16,
             0

@@ -103,11 +103,18 @@ pub struct ZoneLook {
     /// share of the night's banks (`volumetrics::added_air`); 1 lights them by the whole moon and
     /// lays the whole night bank, dense fog lying on the ground.
     pub bank_moon: f32,
-    /// fork: the ground banks' fade with planar depth (`froxel_scatter.wgsl`'s `ground_banks`):
-    /// the yards of its exponential.
+    /// fork: the ground banks leave the froxel volume for an exact integral per pixel
+    /// (`froxelfog.wgsl`'s `bank_air`), which has no grid, jitter or history to flicker or lag. Over
+    /// 0.5 on; a look that stays in the volume ignores the three dials below.
+    pub bank_analytic: f32,
+    /// fork: the analytic bank's fade with distance: the yards of its exponential.
     pub bank_thin_yd: f32,
     /// fork: the share of the ground banks that fade leaves at any distance.
     pub bank_far_share: f32,
+    /// fork: the ground banks' gain on a ray as steep as straight down, in proportion to its slope.
+    /// A thin layer seen from above is a couple of yards of fog where a grazing ray has hundreds,
+    /// so it veils the ground at the feet only if a steep ray takes it denser. 0 = no gain.
+    pub bank_steep: f32,
 }
 
 impl ZoneLook {
@@ -148,7 +155,9 @@ impl ZoneLook {
         moon_key: 1.0,
         bank_moon: 0.0,
         bank_thin_yd: 60.0,
+        bank_analytic: 0.0,
         bank_far_share: 0.1,
+        bank_steep: 0.0,
     };
 
     /// fork: **the default look at noon**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
@@ -234,6 +243,8 @@ impl ZoneLook {
             bank_moon: m(self.bank_moon, to.bank_moon),
             bank_thin_yd: m(self.bank_thin_yd, to.bank_thin_yd),
             bank_far_share: m(self.bank_far_share, to.bank_far_share),
+            bank_steep: m(self.bank_steep, to.bank_steep),
+            bank_analytic: m(self.bank_analytic, to.bank_analytic),
         }
     }
 
@@ -266,6 +277,8 @@ impl ZoneLook {
             && d(self.bank_moon, other.bank_moon)
             && d(self.bank_thin_yd, other.bank_thin_yd)
             && d(self.bank_far_share, other.bank_far_share)
+            && d(self.bank_steep, other.bank_steep)
+            && d(self.bank_analytic, other.bank_analytic)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.haze_tint[i], other.haze_tint[i])
@@ -412,11 +425,13 @@ impl ZoneLook {
         saturation: 0.85,
         vignette: 0.32,
         key_tint: [1.0, 0.88, 0.85],
-        // A thin veil on the ground at every hour, over the sea fog: thickest at the camera and
+        // A thin veil on the ground at every hour, into the sea fog: thickest at the camera and
         // little of it in the distance, as the reference's lies.
-        ground_fog: 1.8,
+        ground_fog: 0.6,
         bank_thin_yd: 25.0,
         bank_far_share: 0.05,
+        bank_steep: 3.5,
+        bank_analytic: 1.0,
         night_banks: 0.6,
         night_glow: 0.5,
         sea_fog: 0.06,
@@ -858,7 +873,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_thin_yd,bank_far_share`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_thin_yd,bank_far_share,bank_steep,bank_analytic`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -911,6 +926,8 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.bank_moon, 42);
     set(&mut look.bank_thin_yd, 43);
     set(&mut look.bank_far_share, 44);
+    set(&mut look.bank_steep, 45);
+    set(&mut look.bank_analytic, 46);
     look
 }
 

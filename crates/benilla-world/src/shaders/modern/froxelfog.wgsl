@@ -78,6 +78,10 @@ struct FroxelFog {
     // fork: x, y = the auto-exposure's lift and room (`look::lift_room`): the composite draws the fog
     // over sky pixels at the lift's inverse, so the sky keeps the zone look's exposure. zw reserved.
     sky: vec4<f32>,
+    // fork: the analytic ground bank (`bank_air`): x = its extinction at the ground (1/yd, 0 where the
+    // look's banks stay in the volume); y, z = its fade with distance, the yards and the share left;
+    // w = a steep view's gain.
+    bank: vec4<f32>,
 }
 
 // fork: **the air a lamp's halo stands in** — `f` with the open air's medium swapped for its
@@ -454,6 +458,68 @@ fn integrated(vol: texture_3d<f32>, samp: sampler, f: FroxelFog, uv: vec2<f32>, 
     let v = textureSampleLevel(vol, samp, texel / f.alloc.xyz, 0.0);
     let ramp = clamp(c, 0.0, 1.0);
     return vec4<f32>(v.rgb * ramp, mix(1.0, v.a, ramp));
+}
+
+// fork: **the analytic ground bank.** A layer `exp(-h / 2 yd)` over the ground, its height taken as
+// linear along the ray from the eye to `p`, and a fade with distance that is a sum of a constant and an
+// exponential: the integral along the ray is closed, so the bank has no grid, jitter or history, and
+// a pixel holds the same value however the camera turned to it. Lit by the sky, and by the key's phase
+// as far as `key` says it reaches the bank (0 shadowed, 1 lit), which the caller reads. `ground` is the
+// terrain under `p`; a zone with a sea fog lays the bank on the water. rgb = in-scatter, a =
+// transmittance.
+const BANK_INV_HEIGHT: f32 = 0.5;
+// Above this the layer has thinned to nothing (`exp(-24)`).
+const BANK_TOP: f32 = 48.0;
+// The bank is brighter than the air around it in the sky's light, so in full shade it still reads, flat
+// and without the key's highlight.
+const BANK_SKY_GAIN: f32 = 1.5;
+
+// The integral of `exp(-a t)` over `[0, t]`.
+fn bank_span(a: f32, t: f32) -> f32 {
+    if (abs(a * t) < 1e-3) {
+        return t;
+    }
+    return (1.0 - exp(-a * t)) / a;
+}
+
+fn bank_air(f: FroxelFog, eye: vec3<f32>, p: vec3<f32>, ground: f32, key: f32) -> vec4<f32> {
+    let clear = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (f.bank.x <= 0.0) {
+        return clear;
+    }
+    let ray = p - eye;
+    let len = max(length(ray), 1e-3);
+    let floor_y = select(-1e9, 0.0, f.night.w > 0.0);
+    let h_eye = max(eye.y - max(f.night.y, floor_y), 0.0);
+    let h_end = max(p.y - max(ground, floor_y), 0.0);
+    let slope = (h_end - h_eye) / len;
+    // Start where the ray enters the layer's reach, and stop at the view distance.
+    var skip = 0.0;
+    if (h_eye > BANK_TOP) {
+        if (slope >= 0.0) {
+            return clear;
+        }
+        skip = (h_eye - BANK_TOP) / -slope;
+    }
+    let span = min(len, max(f.phase.y, 1.0)) - skip;
+    if (span <= 0.0) {
+        return clear;
+    }
+    let a = BANK_INV_HEIGHT * slope;
+    let fade = 1.0 / max(f.bank.y, 1.0);
+    let far_part = f.bank.z * bank_span(a, span);
+    let near_part = (1.0 - f.bank.z) * exp(-skip * fade) * bank_span(a + fade, span);
+    let steep = 1.0 + f.bank.w * abs(ray.y) / len;
+    let tau = f.bank.x * steep * exp(-BANK_INV_HEIGHT * min(h_eye, BANK_TOP)) * (far_part + near_part);
+    let through = exp(-max(tau, 0.0));
+    let lum = f.ambient.rgb * BANK_SKY_GAIN + night_glow(f)
+        + f.sun.rgb * (dual_phase(f, dot(ray / len, f.sun_dir.xyz)) * key);
+    return vec4<f32>(lum * (1.0 - through), through);
+}
+
+// `fog` seen through `bank`, which lies in front of it as far as the blend can tell.
+fn with_bank(fog: vec4<f32>, bank: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(bank.rgb + fog.rgb * bank.a, fog.a * bank.a);
 }
 
 // The fog between the main camera and world point `p`: rgb = in-scatter, a = transmittance. A surface

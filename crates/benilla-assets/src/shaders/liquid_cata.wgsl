@@ -1258,7 +1258,21 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     if (wow_light.point_count.y > 0.5 && wow_light.fog_color.w > 0.5 && w.kind.x < 0.5) {
         let air = modern_block.fog;
         let fog = colorspace::air_exposure(
-            froxelfog::fog_at(modern_fog_volume, scene_samp, air, in.world_position.xyz),
+            froxelfog::with_bank(
+                froxelfog::fog_at(modern_fog_volume, scene_samp, air, in.world_position.xyz),
+                froxelfog::bank_air(
+                    air,
+                    air.camera.xyz,
+                    in.world_position.xyz,
+                    in.world_position.y,
+                    sunshadow::sun_visibility_load(
+                        modern_shadow_map,
+                        modern_block.cascades,
+                        in.world_position.xyz + vec3<f32>(0.0, 1.0, 0.0),
+                        froxelfog::view_depth(air, in.world_position.xyz),
+                    ),
+                ),
+            ),
             air.sky.x,
             air.sky.y,
         );

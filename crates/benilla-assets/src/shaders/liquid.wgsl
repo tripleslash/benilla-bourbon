@@ -305,7 +305,11 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     if (wow_light.point_count.y > 0.5 && wow_light.fog_color.w > 0.5 && w.kind.x < 0.5) {
         let air = modern_block.fog;
         let fog = colorspace::air_exposure(
-            froxelfog::fog_at(modern_fog_volume, modern_fog_samp, air, in.world_position.xyz),
+            froxelfog::with_bank(
+                froxelfog::fog_at(modern_fog_volume, modern_fog_samp, air, in.world_position.xyz),
+                // No shadow map binds here, so the bank takes no key over this water and cannot glow.
+                froxelfog::bank_air(air, air.camera.xyz, in.world_position.xyz, in.world_position.y, 0.0),
+            ),
             air.sky.x,
             air.sky.y,
         );
