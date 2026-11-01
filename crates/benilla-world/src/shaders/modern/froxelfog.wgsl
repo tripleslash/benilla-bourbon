@@ -477,11 +477,12 @@ fn bank_top(f: FroxelFog) -> f32 {
     return 12.0 / max(f.bank.y, 1e-3);
 }
 
-// The clouds' drift against the wind's scroll, and how much thinner, and how much finer, the second octave
-// is drawn.
-const BANK_PATCH_DRIFT: f32 = 0.1;
-const BANK_PATCH_DETAIL: f32 = 0.35;
-const BANK_PATCH_DETAIL_SCALE: f32 = 2.3;
+// The two finer octaves' scale and share. Coverage this high
+// joins into one mass at any base scale, so only the finer octaves can break a large bank up.
+const BANK_OCTAVE_MID: f32 = 3.0;
+const BANK_OCTAVE_FINE: f32 = 8.0;
+const BANK_OCTAVE_MID_SHARE: f32 = 0.3;
+const BANK_OCTAVE_FINE_SHARE: f32 = 0.24;
 
 fn bank_hash(q: vec2<f32>) -> f32 {
     return fract(sin(dot(q, vec2<f32>(127.1, 311.7))) * 43758.5453);
@@ -499,30 +500,66 @@ fn bank_noise(q: vec2<f32>) -> f32 {
     );
 }
 
-// The bank's density share at world point `p`: 1 in a cloud, down to `1 - sky.z` between them. Fixed in
-// the world and drifting with the wind, so a turn of the camera does not change it. `detail` is how much
-// of the second octave a read of this length resolves.
-fn bank_patch(f: FroxelFog, p: vec3<f32>, detail: f32) -> f32 {
-    let q = (p.xz + f.wind.xz * BANK_PATCH_DRIFT) / max(f.sky.w, 1.0);
-    var n = bank_noise(q);
-    if (detail > 0.0) {
-        n = mix(n, bank_noise(q * BANK_PATCH_DETAIL_SCALE + vec2<f32>(17.3, 5.1)), BANK_PATCH_DETAIL * detail);
+// Three octaves of noise at `q`, whose base feature is `yd` yards. A read `span` yards long holds an octave
+// only while that octave's feature is longer than the read, or it would alias into speckle.
+fn bank_octaves(q: vec2<f32>, yd: f32, span: f32) -> f32 {
+    let mid = BANK_OCTAVE_MID_SHARE * bank_resolves(yd / BANK_OCTAVE_MID, span);
+    let fine = BANK_OCTAVE_FINE_SHARE * bank_resolves(yd / BANK_OCTAVE_FINE, span);
+    var n = bank_noise(q) * (1.0 - mid - fine);
+    if (mid > 0.0) {
+        n += bank_noise(q * BANK_OCTAVE_MID + vec2<f32>(17.3, 5.1)) * mid;
     }
+    if (fine > 0.0) {
+        n += bank_noise(q * BANK_OCTAVE_FINE + vec2<f32>(7.9, 13.3)) * fine;
+    }
+    return n;
+}
+
+fn bank_resolves(feature: f32, span: f32) -> f32 {
+    return 1.0 - smoothstep(0.5 * feature, 2.0 * feature, span);
+}
+
+// The bank's density share at world point `p`, read over `span` yards: 1 in a cloud, down to `1 - sky.z`
+// between them. Fixed in the world, so neither time nor a turn of the camera changes it.
+fn bank_patch(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
+    let yd = max(f.sky.w, 1.0);
+    let n = bank_octaves(p.xz / yd, yd, span);
     return mix(1.0 - f.sky.z, 1.0, smoothstep(0.2, 0.8, n));
 }
 
-// The clear patches' feature size against the clouds', and how much a finer octave roughens their edge.
-const BANK_CLEAR_SCALE: f32 = 0.8;
-const BANK_CLEAR_ROUGH: f32 = 0.25;
+// The clear patches' feature size against the clouds', and how much a finer octave roughens them.
+const BANK_CLEAR_SCALE: f32 = 1.0;
+const BANK_CLEAR_ROUGH: f32 = 0.15;
 
-// How much of the bank stands at world point `p`: 0 in a clear patch, 1 past its edge.
-fn bank_clear(f: FroxelFog, p: vec3<f32>) -> f32 {
+// How much of the bank stands at world point `p`, read over `span` yards: 0 in a clear patch, 1 past its edge.
+fn bank_clear(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
     if (f.bank.z <= 0.0) {
         return 1.0;
     }
-    let q = (p.xz + f.wind.xz * BANK_PATCH_DRIFT) / max(f.sky.w, 1.0) * BANK_CLEAR_SCALE + vec2<f32>(41.7, 23.9);
-    let n = mix(bank_noise(q), bank_noise(q * 3.1 + vec2<f32>(7.9, 13.3)), BANK_CLEAR_ROUGH);
+    let yd = max(f.sky.w, 1.0) / BANK_CLEAR_SCALE;
+    let q = p.xz / yd + vec2<f32>(41.7, 23.9);
+    // Only a little of one finer octave: the fine ones punch small round holes in the bank.
+    let rough = BANK_CLEAR_ROUGH * bank_resolves(yd / BANK_OCTAVE_MID, span);
+    let n = mix(bank_noise(q), bank_noise(q * BANK_OCTAVE_MID + vec2<f32>(17.3, 5.1)), rough);
     return smoothstep(f.bank.z, f.bank.z + max(f.bank.w, 1e-3), n);
+}
+
+// The bands' length and breadth against the clouds' feature, how far they wander, and their thinnest and
+// thickest share of the veil, about 1 on average.
+const BANK_BAND_LENGTH: f32 = 4.0;
+const BANK_BAND_BREADTH: f32 = 1.2;
+const BANK_BAND_WANDER: f32 = 0.6;
+const BANK_BAND_THIN: f32 = 0.4;
+const BANK_BAND_THICK: f32 = 1.6;
+
+// How thick the bank lies at world point `p`: long wandering bands, thicker and thinner, across the clouds.
+// It scales the veil's ceiling as well as its depth, since the ceiling would otherwise even them out.
+fn bank_band(f: FroxelFog, p: vec3<f32>) -> f32 {
+    let w = p.xz / max(f.sky.w, 1.0);
+    let along = vec2<f32>(0.866 * w.x + 0.5 * w.y, 0.866 * w.y - 0.5 * w.x);
+    let q = along / vec2<f32>(BANK_BAND_LENGTH, BANK_BAND_BREADTH) + vec2<f32>(11.1, 67.3);
+    let n = bank_noise(q + vec2<f32>(0.0, BANK_BAND_WANDER * bank_noise(q * 0.5 + vec2<f32>(3.7, 29.1))));
+    return mix(BANK_BAND_THIN, BANK_BAND_THICK, smoothstep(0.3, 0.7, n));
 }
 
 // The integral of `exp(-a t)` over `[0, t]`: the length of air a layer thinning at `a` fills.
@@ -563,11 +600,10 @@ fn bank_stretch(f: FroxelFog, eye: vec3<f32>, dir: vec3<f32>, t0: f32, t1: f32, 
     let p = eye + dir * select(t1 - centre, t0 + centre, h0 <= h1);
     var clouds = 1.0;
     if (f.sky.z > 0.0) {
-        let fine = max(f.sky.w, 1.0) / BANK_PATCH_DETAIL_SCALE;
-        clouds = bank_patch(f, p, 1.0 - smoothstep(0.5 * fine, 2.0 * fine, span));
+        clouds = bank_patch(f, p, span);
     }
     let air = exp(-f.bank.y * low) * span;
-    let open = bank_clear(f, p) * air;
+    let open = bank_clear(f, p, span) * bank_band(f, p) * air;
     return vec3<f32>(clouds * open, open, air);
 }
 

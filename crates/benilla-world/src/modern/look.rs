@@ -337,8 +337,9 @@ impl ZoneLook {
         // lower, under the trunks and lamps that stand close around a road here.
         ground_fog: 3.0,
         night_banks: 3.0,
-        bank_height: 0.9,
+        bank_height: 1.5,
         bank_clear: Self::DARKSHORE.bank_clear,
+        bank_clear_edge: Self::DARKSHORE.bank_clear_edge,
         bank_analytic: Self::DARKSHORE.bank_analytic,
         bank_patch: Self::DARKSHORE.bank_patch,
         bank_patch_yd: Self::DARKSHORE.bank_patch_yd,
@@ -462,13 +463,14 @@ impl ZoneLook {
         // under a low ceiling so a long ray reads as a short one does, in clouds with clear patches
         // between them, as the reference's lies (`worldview_pose=6346.6,510.4,23.6,174.2,2.9`, 18:20).
         ground_fog: 1.9,
-        bank_height: 2.5,
-        bank_clear: 0.35,
+        bank_height: 1.5,
+        bank_clear: 0.2,
+        bank_clear_edge: 0.8,
         bank_analytic: 1.0,
         bank_patch: 0.9,
         bank_patch_yd: 65.0,
         bank_rgb: [0.9, 0.82, 0.8],
-        bank_veil: 0.26,
+        bank_veil: 0.083,
         night_banks: 0.6,
         night_glow: 0.5,
         sea_fog: 0.025,
