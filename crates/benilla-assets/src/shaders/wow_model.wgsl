@@ -354,6 +354,11 @@ struct WowVsOut {
     // Stage 1's coordinate, generated or the vertex's UV set 1; (0, 0) without a stage 1. Location
     // 12: the fork's `point_sel` holds 11.
     @location(12) stage1_uv: vec2<f32>,
+#ifdef WOW_MODERN
+    // fork: the ground this draw stands on, its placement's, for the analytic bank: a blended batch
+    // draws after the fog composite and has no heightfield of its own.
+    @location(13) @interpolate(flat) bank_ground: f32,
+#endif
 }
 
 // The generated environment coordinate of `Model2.bls` (its programs for a stage whose coordinate
@@ -1214,6 +1219,13 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
         out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
     }
 #endif
+#ifdef WOW_MODERN
+#ifdef WOW_MERGED_FADE
+    out.bank_ground = vertex.fade_sphere.y;
+#else
+    out.bank_ground = frame_origin.y;
+#endif
+#endif
 #endif
 
 #ifdef VERTEX_UVS_A
@@ -1701,7 +1713,17 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         // classic per-blend policy: scene fog for alpha, fade to black for additive, the blend identity
         // for Mod (1) and Mod2x (0.5, after its 2.295 source scale).
         if (!opaque_intent && fog_policy != 4u && wow_light.fog_color.w > 0.5) {
-            let fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, modern_block.fog, in.world_position.xyz);
+            var fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, modern_block.fog, in.world_position.xyz);
+            // fork: the analytic bank, which the composite gives the opaque batches: a doodad riding
+            // its fade twin stood unfogged in the veil. Not in the water mirror, as in the composite.
+            let air = modern_block.fog;
+            if (air.bank.x > 0.0 && !sunshadow::mirror_view(modern_block.cascades, view.world_position)) {
+                fog = colorspace::air_exposure(
+                    froxelfog::with_bank(fog, froxelfog::bank_air(air, air.camera.xyz, in.world_position.xyz, in.bank_ground)),
+                    air.sky.x,
+                    air.sky.y,
+                );
+            }
             if (is_additive || fog_policy == 1u) {
                 lin = lin * fog.a;
             } else if (is_mod || fog_policy == 2u) {
