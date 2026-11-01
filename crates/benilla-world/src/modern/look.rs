@@ -107,6 +107,15 @@ pub struct ZoneLook {
     /// (`froxelfog.wgsl`'s `bank_air`), which has no grid, jitter or history to flicker or lag. Over
     /// 0.5 on; a look that stays in the volume ignores the three dials below.
     pub bank_analytic: f32,
+    /// fork: how far the analytic bank gathers into clouds: the share of its density the thin air
+    /// between them gives up. 0 = an even sheet; `ground_fog` is always the clouds' peak.
+    pub bank_patch: f32,
+    /// fork: the clouds' feature size (yd).
+    pub bank_patch_yd: f32,
+    /// fork: the analytic bank's own colour (linear radiance), the same at every hour.
+    pub bank_rgb: [f32; 3],
+    /// fork: the analytic bank's ceiling: the most of a surface it can veil, approached softly.
+    pub bank_veil: f32,
     /// fork: the analytic bank's fade with distance: the yards of its exponential.
     pub bank_thin_yd: f32,
     /// fork: the share of the ground banks that fade leaves at any distance.
@@ -156,6 +165,10 @@ impl ZoneLook {
         bank_moon: 0.0,
         bank_thin_yd: 60.0,
         bank_analytic: 0.0,
+        bank_patch: 0.0,
+        bank_patch_yd: 30.0,
+        bank_rgb: [0.0, 0.0, 0.0],
+        bank_veil: 1.0,
         bank_far_share: 0.1,
         bank_steep: 0.0,
     };
@@ -245,6 +258,10 @@ impl ZoneLook {
             bank_far_share: m(self.bank_far_share, to.bank_far_share),
             bank_steep: m(self.bank_steep, to.bank_steep),
             bank_analytic: m(self.bank_analytic, to.bank_analytic),
+            bank_patch: m(self.bank_patch, to.bank_patch),
+            bank_patch_yd: m(self.bank_patch_yd, to.bank_patch_yd),
+            bank_rgb: [0, 1, 2].map(|i| m(self.bank_rgb[i], to.bank_rgb[i])),
+            bank_veil: m(self.bank_veil, to.bank_veil),
         }
     }
 
@@ -279,6 +296,10 @@ impl ZoneLook {
             && d(self.bank_far_share, other.bank_far_share)
             && d(self.bank_steep, other.bank_steep)
             && d(self.bank_analytic, other.bank_analytic)
+            && d(self.bank_patch, other.bank_patch)
+            && d(self.bank_patch_yd, other.bank_patch_yd)
+            && d(self.bank_veil, other.bank_veil)
+            && (0..3).all(|i| d(self.bank_rgb[i], other.bank_rgb[i]))
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.haze_tint[i], other.haze_tint[i])
@@ -427,11 +448,15 @@ impl ZoneLook {
         key_tint: [1.0, 0.88, 0.85],
         // A thin veil on the ground at every hour, into the sea fog: thickest at the camera and
         // little of it in the distance, as the reference's lies.
-        ground_fog: 0.6,
+        ground_fog: 2.0,
         bank_thin_yd: 25.0,
         bank_far_share: 0.05,
         bank_steep: 3.5,
         bank_analytic: 1.0,
+        bank_patch: 0.95,
+        bank_patch_yd: 45.0,
+        bank_rgb: [0.3, 0.15, 0.12],
+        bank_veil: 0.5,
         night_banks: 0.6,
         night_glow: 0.5,
         sea_fog: 0.06,
@@ -873,7 +898,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_thin_yd,bank_far_share,bank_steep,bank_analytic`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_thin_yd,bank_far_share,bank_steep,bank_analytic,bank_patch,bank_patch_yd,bank_rgb r,g,b,bank_veil`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -928,6 +953,12 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.bank_far_share, 44);
     set(&mut look.bank_steep, 45);
     set(&mut look.bank_analytic, 46);
+    set(&mut look.bank_patch, 47);
+    set(&mut look.bank_patch_yd, 48);
+    for c in 0..3 {
+        set(&mut look.bank_rgb[c], 49 + c);
+    }
+    set(&mut look.bank_veil, 52);
     look
 }
 

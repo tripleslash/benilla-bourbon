@@ -1260,18 +1260,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         let fog = colorspace::air_exposure(
             froxelfog::with_bank(
                 froxelfog::fog_at(modern_fog_volume, scene_samp, air, in.world_position.xyz),
-                froxelfog::bank_air(
-                    air,
-                    air.camera.xyz,
-                    in.world_position.xyz,
-                    in.world_position.y,
-                    sunshadow::sun_visibility_load(
-                        modern_shadow_map,
-                        modern_block.cascades,
-                        in.world_position.xyz + vec3<f32>(0.0, 1.0, 0.0),
-                        froxelfog::view_depth(air, in.world_position.xyz),
-                    ),
-                ),
+                froxelfog::bank_air(air, air.camera.xyz, in.world_position.xyz, in.world_position.y),
             ),
             air.sky.x,
             air.sky.y,

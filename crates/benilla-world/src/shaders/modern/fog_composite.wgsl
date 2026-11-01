@@ -31,9 +31,6 @@ struct LightTable {
 @group(0) @binding(5) var<storage, read> light_table: LightTable;
 // The terrain heightfield the analytic bank lies on (`froxelfog::bank_air`).
 @group(0) @binding(6) var bank_ground: texture_depth_2d;
-// The key's shadow, whether it reaches the analytic bank.
-@group(0) @binding(7) var shadow_map: texture_depth_2d_array;
-@group(0) @binding(8) var shadow_samp: sampler_comparison;
 
 const SHAFT_TAPS: u32 = 16u;
 // Where, as a share of the view distance, the detailed world starts dissolving into the silhouette.
@@ -181,23 +178,33 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     return f.ground.y + d * f.ground.z;
 }
 
-// How much of the key reaches the bank along a ray: two taps a yard off the ground where the bank
-// lies, near the eye and further out, by the lookup that does not follow the camera, so a turn leaves
-// them as they were.
-const BANK_KEY_NEAR: f32 = 8.0;
-const BANK_KEY_FAR: f32 = 40.0;
+// The stretches a ray takes over the terrain, shorter near the eye, where the ground is seen closely.
+const BANK_STRETCHES: u32 = 5u;
 
-fn bank_key(eye: vec3<f32>, p: vec3<f32>, ground: f32) -> f32 {
+// The bank from the eye to `p`, each stretch's height read off the terrain under its ends, so the bank
+// follows every dip and crest the ray passes over.
+fn bank_over_terrain(f: froxelfog::FroxelFog, eye: vec3<f32>, p: vec3<f32>) -> vec4<f32> {
     let ray = p - eye;
     let len = max(length(ray), 1e-3);
     let dir = ray / len;
-    var sum = 0.0;
-    for (var i = 0u; i < 2u; i = i + 1u) {
-        var at = eye + dir * min(len, select(BANK_KEY_NEAR, BANK_KEY_FAR, i == 1u));
-        at.y = max(at.y, ground + 1.0);
-        sum = sum + sunshadow::sun_visibility_anywhere(shadow_map, shadow_samp, modern_block.cascades, at);
+    let reach = min(len, max(f.phase.y, 1.0));
+    var h0 = max(eye.y - froxelfog::bank_floor(f, f.night.y), 0.0);
+    var t0 = 0.0;
+    var depth = 0.0;
+    for (var i = 1u; i <= BANK_STRETCHES; i = i + 1u) {
+        let share = f32(i) / f32(BANK_STRETCHES);
+        let t1 = reach * share * share;
+        let at = eye + dir * t1;
+        let h1 = max(at.y - froxelfog::bank_floor(f, terrain_under(f, at)), 0.0);
+        depth = depth + froxelfog::bank_stretch(f, eye, dir, t0, t1, h0, h1);
+        // A ray that has climbed out of the layer never comes back to it.
+        if (h1 >= froxelfog::BANK_TOP && h1 >= h0) {
+            break;
+        }
+        h0 = h1;
+        t0 = t1;
     }
-    return sum * 0.5;
+    return froxelfog::bank_fog(f, dir, depth);
 }
 
 @fragment
@@ -214,9 +221,7 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // toward the wrong point of the mirror's frame, sixteen of them per reflected pixel.
     let mirror = sunshadow::mirror_view(modern_block.cascades, view.world_position);
     if (!mirror && f.bank.x > 0.0) {
-        let ground = select(terrain_under(f, p), f.night.y, sky);
-        let key = bank_key(view.world_position, p, ground);
-        fog = froxelfog::with_bank(fog, froxelfog::bank_air(f, view.world_position, p, ground, key));
+        fog = froxelfog::with_bank(fog, bank_over_terrain(f, view.world_position, p));
     }
 
     // The seam: over the last stretch before the view distance the detailed world dissolves into the

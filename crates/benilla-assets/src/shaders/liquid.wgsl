@@ -307,8 +307,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
         let fog = colorspace::air_exposure(
             froxelfog::with_bank(
                 froxelfog::fog_at(modern_fog_volume, modern_fog_samp, air, in.world_position.xyz),
-                // No shadow map binds here, so the bank takes no key over this water and cannot glow.
-                froxelfog::bank_air(air, air.camera.xyz, in.world_position.xyz, in.world_position.y, 0.0),
+                froxelfog::bank_air(air, air.camera.xyz, in.world_position.xyz, in.world_position.y),
             ),
             air.sky.x,
             air.sky.y,

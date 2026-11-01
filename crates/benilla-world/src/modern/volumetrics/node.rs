@@ -431,10 +431,8 @@ fn specialize_composites(
                     storage_buffer_read_only_sized(false, None),
                     // The point table, for the per-pixel lamp halos (`fog_composite.wgsl`).
                     storage_buffer_read_only_sized(false, None),
-                    // The terrain heightfield the analytic bank lies on, and the key's shadow on it.
+                    // The terrain heightfield the analytic bank lies on.
                     texture_depth_2d(),
-                    texture_2d_array(TextureSampleType::Depth),
-                    sampler(SamplerBindingType::Comparison),
                 ),
             ),
         );
@@ -641,12 +639,6 @@ fn run_fog_pass(
     let Some(light) = world.get_resource::<SharedLightBuffer>() else {
         return;
     };
-    let Some(shadow) = world
-        .resource::<RenderAssets<GpuImage>>()
-        .get(MODERN_SHADOW_MAP.id())
-    else {
-        return;
-    };
     let Some(bank_ground) = world
         .get_resource::<FroxelTargets>()
         .and_then(|t| t.bank_ground.as_ref())
@@ -664,8 +656,6 @@ fn run_fog_pass(
             block.buffer.as_entire_binding(),
             light.0.as_entire_binding(),
             bank_ground,
-            &shadow.texture_view,
-            &shadow.sampler,
         )),
     );
     let diagnostics = render_context.diagnostic_recorder();

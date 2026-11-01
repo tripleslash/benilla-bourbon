@@ -42,7 +42,7 @@ pub(crate) use node::froxel_pass;
 pub(crate) use node::{fog_composite_pass, lamp_halo_pass};
 
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
-pub const FOG_BYTES: usize = 3 * 64 + 25 * 16;
+pub const FOG_BYTES: usize = 3 * 64 + 26 * 16;
 /// Offset of the `ground_x` row inside the tail: the render world writes the terrain heightfield's
 /// addressing there (`node::prepare_froxels`), which only it knows.
 pub(crate) const GROUND_OFFSET: usize = 3 * 64 + 19 * 16;
@@ -223,12 +223,15 @@ pub struct FroxelFog {
     /// w = the key's share on the shaft haze's and banks' isotropic half (`look::key_air_share`).
     pub halo_air: Vec4,
     /// fork: x, y = the auto-exposure's lift and room (`look::lift_room`), whose inverse the
-    /// composite draws sky pixels at (`look::unlifted`); zw reserved.
+    /// composite draws sky pixels at (`look::unlifted`); z, w = the analytic bank's clouds, the share
+    /// of its density between them and their feature size (`look::ZoneLook::bank_patch`).
     pub sky: Vec4,
     /// fork: the analytic ground bank (`froxelfog.wgsl`'s `bank_air`): x = its extinction at the
     /// ground (1/yd, 0 where the look's banks stay in the volume); y, z = its fade with distance,
     /// the yards and the share left; w = a steep view's gain.
     pub bank: Vec4,
+    /// fork: the analytic bank's colour (linear radiance); w = its ceiling on the veil.
+    pub bank_color: Vec4,
 }
 
 impl FroxelFog {
@@ -266,6 +269,7 @@ impl FroxelFog {
             self.halo_air,
             self.sky,
             self.bank,
+            self.bank_color,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -726,7 +730,7 @@ fn update_volume(
         ),
         sky: {
             let (lift, room) = super::look::lift_room();
-            Vec4::new(lift, room, 0.0, 0.0)
+            Vec4::new(lift, room, look.0.bank_patch, look.0.bank_patch_yd)
         },
         bank: Vec4::new(
             if super::banks_enabled() && bank_analytic {
@@ -738,6 +742,7 @@ fn update_volume(
             look.0.bank_far_share,
             look.0.bank_steep,
         ),
+        bank_color: Vec3::from(look.0.bank_rgb).extend(look.0.bank_veil),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -920,8 +925,8 @@ mod tests {
     fn the_tail_matches_the_wgsl_layout() {
         let v = ModernVolume::default();
         assert_eq!(v.block.len(), BLOCK_TAIL_BYTES);
-        assert_eq!(FOG_BYTES, 592);
-        // `ModernBlock` = cascades (400) + fog (432) + grid (4096): a multiple of its 16-byte alignment.
+        assert_eq!(FOG_BYTES, 608);
+        // `ModernBlock` = cascades (400) + fog (448) + grid (4096): a multiple of its 16-byte alignment.
         assert_eq!(
             (crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16,
             0
