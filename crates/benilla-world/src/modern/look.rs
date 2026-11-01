@@ -159,6 +159,16 @@ impl ZoneLook {
         ..Self::NEUTRAL
     };
 
+    /// fork: **the default look at night**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
+    /// across `sun_arc::night_at`: [`Self::DARKSHORE`]'s air, thin haze, a far reach and full
+    /// silhouettes (asked in the viewer). Its banks stay Darkshore's own: an ordinary night lies clear.
+    pub const NIGHT: Self = Self {
+        haze: 0.001,
+        fog_reach: 2.2,
+        silhouette: 1.0,
+        ..Self::NEUTRAL
+    };
+
     /// The key's colour row moved `noon_mix` of the way to [`Self::noon_key`] at the row's own
     /// linear luminance, so the noon sun changes hue and never brightness.
     pub fn noon_key_row(&self, row: [f32; 3]) -> [f32; 3] {
@@ -446,13 +456,19 @@ const MIST_ZONES: &[u32] = &[11, 15, 331, 141, 357, 5642];
 const MIST_BANKS: f32 = 0.25;
 
 /// The zone's look at `minute` of the day: the default look takes [`ZoneLook::NOON`] across midday
-/// (`sun_arc::midday_at`) and Darkshore [`ZoneLook::DARKSHORE_NOON`]; the snow zones take
+/// (`sun_arc::midday_at`) and [`ZoneLook::NIGHT`] across the night (`sun_arc::night_at`), which never
+/// meet, and Darkshore [`ZoneLook::DARKSHORE_NOON`] across midday; the snow zones take
 /// [`ZoneLook::COLD_NIGHT`] across the night (`sun_arc::night_at`); any other zone with its own
 /// look keeps it at every hour. A misty zone keeps its banks on top, at every hour.
 pub fn look_for_zone_at(zone: u32, minute: f32) -> ZoneLook {
     let look = look_for_zone(zone);
     let (to, t) = if look == ZoneLook::NEUTRAL {
-        (ZoneLook::NOON, super::sun_arc::midday_at(minute))
+        let night = super::sun_arc::night_at(minute);
+        if night > 0.0 {
+            (ZoneLook::NIGHT, night)
+        } else {
+            (ZoneLook::NOON, super::sun_arc::midday_at(minute))
+        }
     } else if look == ZoneLook::DARKSHORE {
         (ZoneLook::DARKSHORE_NOON, super::sun_arc::midday_at(minute))
     } else if look == ZoneLook::COLD {
@@ -1079,10 +1095,26 @@ mod tests {
     /// The default look takes the noon row across midday only; a zone with its own look keeps it.
     #[test]
     fn only_the_default_look_ramps_into_noon() {
-        assert_eq!(look_for_zone_at(999_999, 0.0), ZoneLook::NEUTRAL);
+        assert_eq!(look_for_zone_at(999_999, 480.0), ZoneLook::NEUTRAL);
         assert_eq!(look_for_zone_at(999_999, 720.0), ZoneLook::NOON);
         assert_eq!(look_for_zone_at(1, 720.0), ZoneLook::COLD);
         assert_eq!(look_for_zone_at(10, 720.0), ZoneLook::EERIE);
+    }
+
+    /// The default look's night takes Darkshore's air and none of its banks; only the default look
+    /// does, and a zone with its own look keeps it.
+    #[test]
+    fn the_default_looks_night_wears_darkshores_air() {
+        let (n, d) = (look_for_zone_at(999_999, 120.0), ZoneLook::DARKSHORE);
+        assert_eq!(n, ZoneLook::NIGHT);
+        assert_eq!(
+            (n.haze, n.fog_reach, n.silhouette),
+            (d.haze, d.fog_reach, d.silhouette)
+        );
+        assert_eq!((n.ground_fog, n.night_banks), (0.0, 0.0));
+        assert_eq!(look_for_zone_at(11, 120.0).night_banks, MIST_BANKS);
+        assert_eq!(look_for_zone_at(10, 120.0), ZoneLook::EERIE);
+        assert_eq!(look_for_zone_at(IRONFORGE_ZONE, 120.0), ZoneLook::IRONFORGE);
     }
 
     /// Every snow zone's night air is clearer than its day's, and the day's look comes back by
