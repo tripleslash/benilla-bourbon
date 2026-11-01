@@ -229,8 +229,8 @@ pub struct FroxelFog {
     /// of its density between them and their feature size (`look::ZoneLook::bank_patch`).
     pub sky: Vec4,
     /// fork: the analytic ground bank (`froxelfog.wgsl`'s `bank_air`): x = its extinction at the
-    /// ground (1/yd, 0 where the look's banks stay in the volume); y, z = its fade with distance,
-    /// the yards and the share left; w = a steep view's gain.
+    /// ground (1/yd, 0 where the look's banks stay in the volume); y = 1 / its height (yd); z, w =
+    /// its clear patches (`ZoneLook::bank_clear`, `bank_clear_edge`).
     pub bank: Vec4,
     /// fork: the analytic bank's colour (linear radiance, [`bank_light`]); w = its ceiling on the veil.
     pub bank_color: Vec4,
@@ -740,9 +740,9 @@ fn update_volume(
             } else {
                 0.0
             },
-            look.0.bank_thin_yd,
-            look.0.bank_far_share,
-            look.0.bank_steep,
+            1.0 / look.0.bank_height.max(0.1),
+            look.0.bank_clear,
+            look.0.bank_clear_edge,
         ),
         bank_color: bank_light(
             Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint),

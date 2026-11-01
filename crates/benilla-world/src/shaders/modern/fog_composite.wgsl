@@ -178,33 +178,26 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     return f.ground.y + d * f.ground.z;
 }
 
-// The stretches a ray takes over the terrain, shorter near the eye, where the ground is seen closely.
-const BANK_STRETCHES: u32 = 5u;
-
-// The bank from the eye to `p`, each stretch's height read off the terrain under its ends, so the bank
-// follows every dip and crest the ray passes over.
+// The bank from the eye to `p`, each stretch's height read off the terrain under its ends, the eye's too,
+// so the bank follows every dip and crest the ray passes over and nothing in it follows the camera. Every
+// stretch counts: a ray stands high over a hollow and comes back down to the ground past it.
 fn bank_over_terrain(f: froxelfog::FroxelFog, eye: vec3<f32>, p: vec3<f32>) -> vec4<f32> {
     let ray = p - eye;
     let len = max(length(ray), 1e-3);
     let dir = ray / len;
     let reach = min(len, max(f.phase.y, 1.0));
-    var h0 = max(eye.y - froxelfog::bank_floor(f, f.night.y), 0.0);
+    var h0 = max(eye.y - froxelfog::bank_floor(f, terrain_under(f, eye)), 0.0);
     var t0 = 0.0;
-    var depth = 0.0;
-    for (var i = 1u; i <= BANK_STRETCHES; i = i + 1u) {
-        let share = f32(i) / f32(BANK_STRETCHES);
-        let t1 = reach * share * share;
+    var depth = vec3<f32>(0.0);
+    for (var i = 1u; i <= froxelfog::BANK_STRETCHES; i = i + 1u) {
+        let t1 = reach * froxelfog::bank_stretch_end(i);
         let at = eye + dir * t1;
         let h1 = max(at.y - froxelfog::bank_floor(f, terrain_under(f, at)), 0.0);
         depth = depth + froxelfog::bank_stretch(f, eye, dir, t0, t1, h0, h1);
-        // A ray that has climbed out of the layer never comes back to it.
-        if (h1 >= froxelfog::BANK_TOP && h1 >= h0) {
-            break;
-        }
         h0 = h1;
         t0 = t1;
     }
-    return froxelfog::bank_fog(f, dir, depth);
+    return froxelfog::bank_fog(f, froxelfog::bank_at_surface(f, depth, h0));
 }
 
 @fragment
