@@ -272,8 +272,10 @@ pub(super) fn track_unit_interiors(
         &crate::world_unit::WorldUnit,
         Option<&mut UnitWmoRoom>,
     )>,
+    footprints: Query<&WmoFootprint>,
 ) {
     let generation = residency.generation();
+    let mut buildings = None;
     for (entity, transform, body, claim) in &mut units {
         // World position, not the local one: a mounted unit's `Transform` is seat-relative.
         let pos = transform.translation();
@@ -293,7 +295,15 @@ pub(super) fn track_unit_interiors(
             .map(|b| transform.transform_point(Vec3::from(b.center)).y - pos.y)
             .unwrap_or(0.0)
             .max(ROOM_UNDER_FLOOR_TOLERANCE);
-        let room = room_at(&wmos, &instances, &streamer, &adt_tiles, pos, reach);
+        let buildings = buildings.get_or_insert_with(|| {
+            verdict_buildings_stamped(
+                &wmos,
+                instances
+                    .iter()
+                    .map(|(e, i)| (e, i, footprints.get(e).ok())),
+            )
+        });
+        let room = room_at(buildings, &streamer, &adt_tiles, pos, reach);
         let next = UnitWmoRoom {
             room,
             at: pos,
@@ -321,31 +331,28 @@ pub(crate) const ROOM_UNDER_FLOOR_TOLERANCE: f32 = 2.0;
 /// The WMO room a world position stands in, by the faces-only ray; only on a miss, a second pass
 /// from `reach` higher finds a body whose origin sits below its floor.
 fn room_at(
-    wmos: &Assets<WmoModel>,
-    instances: &Query<(Entity, &WmoPortalInstance)>,
+    buildings: &[VerdictBuilding<'_, Entity>],
     streamer: &TerrainStreamer,
     adt_tiles: &Assets<AdtTile>,
     feet_world: Vec3,
     reach: f32,
 ) -> Option<WmoRoom> {
-    room_cast(wmos, instances, streamer, adt_tiles, feet_world, 0.0)
-        .or_else(|| room_cast(wmos, instances, streamer, adt_tiles, feet_world, reach))
+    room_cast(buildings, streamer, adt_tiles, feet_world, 0.0)
+        .or_else(|| room_cast(buildings, streamer, adt_tiles, feet_world, reach))
 }
 
 /// One faces-only room cast from `feet_world + rise`: the nearest hit across every placement
 /// ([`nearest_claim`]), a room when its group is not exterior.
 fn room_cast(
-    wmos: &Assets<WmoModel>,
-    instances: &Query<(Entity, &WmoPortalInstance)>,
+    buildings: &[VerdictBuilding<'_, Entity>],
     streamer: &TerrainStreamer,
     adt_tiles: &Assets<AdtTile>,
     feet_world: Vec3,
     rise: f32,
 ) -> Option<WmoRoom> {
     let probe_world = feet_world + Vec3::Y * (POSITION_PROBE_LIFT + rise);
-    let buildings = verdict_buildings(wmos, instances.iter());
     nearest_claim(
-        &buildings,
+        buildings,
         streamer,
         adt_tiles,
         probe_world,
@@ -435,6 +442,72 @@ pub fn indoor_verdict_at<'a, K: Copy>(
     indoor_verdict_among(&buildings, streamer, adt_tiles, anchor_world, attach)
 }
 
+/// A placed building's cached inverse and the world XZ box (Bevy x, z) of its collision bounds,
+/// stamped once its model loads. A down-ray outside the box can hit none of its faces, the same
+/// rejection the local-space bounds test makes, without the transform.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct WmoFootprint {
+    pub local_from_world: bevy::math::Affine3A,
+    lo: Vec2,
+    hi: Vec2,
+}
+
+impl WmoFootprint {
+    fn of(inst: &WmoPortalInstance, model: &WmoModel) -> Self {
+        // Padded past float noise in the corner transforms; a model without bounds holds nothing.
+        const PAD: f32 = 0.05;
+        let up = inst.world_from_local.transform_vector3(Vec3::Y);
+        let (lo, hi) = match model.collision_bounds {
+            None => (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+            // A tilted placement's column slants through its local frame, so the local test can
+            // pass outside this box: only a yaw-only placement rejects here.
+            Some(_) if up.normalize_or_zero().y < 1.0 - 1e-6 => {
+                (Vec2::splat(f32::NEG_INFINITY), Vec2::splat(f32::INFINITY))
+            }
+            Some((min, max)) => {
+                let mut lo = Vec2::splat(f32::INFINITY);
+                let mut hi = Vec2::splat(f32::NEG_INFINITY);
+                for i in 0..8 {
+                    let c = [
+                        if i & 1 == 0 { min[0] } else { max[0] },
+                        if i & 2 == 0 { min[1] } else { max[1] },
+                        if i & 4 == 0 { min[2] } else { max[2] },
+                    ];
+                    let w = inst.world_from_local.transform_point3(wow_to_bevy(c));
+                    lo = lo.min(Vec2::new(w.x, w.z));
+                    hi = hi.max(Vec2::new(w.x, w.z));
+                }
+                (lo - PAD, hi + PAD)
+            }
+        };
+        Self {
+            local_from_world: inst.world_from_local.inverse(),
+            lo,
+            hi,
+        }
+    }
+
+    /// Whether a vertical column through `world` can cross the building's collision bounds.
+    pub fn holds(&self, world: Vec3) -> bool {
+        world.x >= self.lo.x && world.x <= self.hi.x && world.z >= self.lo.y && world.z <= self.hi.y
+    }
+}
+
+/// Stamp [`WmoFootprint`] on each building whose model has loaded; placements never move.
+pub(super) fn stamp_wmo_footprints(
+    mut commands: Commands,
+    wmos: Res<Assets<WmoModel>>,
+    pending: Query<(Entity, &WmoPortalInstance), Without<WmoFootprint>>,
+) {
+    for (entity, inst) in &pending {
+        if let Some(model) = wmos.get(&inst.handle) {
+            commands
+                .entity(entity)
+                .try_insert(WmoFootprint::of(inst, model));
+        }
+    }
+}
+
 /// A resident building made ready for many verdicts in one frame: its loaded model and inverse
 /// placement, so each verdict skips the asset lookup and the inverse per building.
 pub struct VerdictBuilding<'a, K> {
@@ -442,6 +515,7 @@ pub struct VerdictBuilding<'a, K> {
     inst: &'a WmoPortalInstance,
     model: &'a WmoModel,
     local_from_world: bevy::math::Affine3A,
+    footprint: Option<WmoFootprint>,
 }
 
 /// The loaded buildings among `instances`, for [`indoor_verdict_among`].
@@ -457,6 +531,28 @@ pub fn verdict_buildings<'a, K: Copy>(
                 inst,
                 model: wmos.get(&inst.handle)?,
                 local_from_world: inst.world_from_local.inverse(),
+                footprint: None,
+            })
+        })
+        .collect()
+}
+
+/// [`verdict_buildings`] over stamped buildings: each keeps its [`WmoFootprint`], so a ray skips
+/// the transform of every building whose box its column misses.
+pub fn verdict_buildings_stamped<'a>(
+    wmos: &'a Assets<WmoModel>,
+    instances: impl IntoIterator<Item = (Entity, &'a WmoPortalInstance, Option<&'a WmoFootprint>)>,
+) -> Vec<VerdictBuilding<'a, Entity>> {
+    instances
+        .into_iter()
+        .filter_map(|(key, inst, footprint)| {
+            Some(VerdictBuilding {
+                key,
+                inst,
+                model: wmos.get(&inst.handle)?,
+                local_from_world: footprint
+                    .map_or_else(|| inst.world_from_local.inverse(), |f| f.local_from_world),
+                footprint: footprint.copied(),
             })
         })
         .collect()
@@ -548,6 +644,9 @@ fn nearest_claim<'a, K: Copy>(
             break;
         }
         for b in buildings {
+            if b.footprint.is_some_and(|f| !f.holds(probe_world)) {
+                continue; // the bounds test below would reject it
+            }
             let (key, inst, model, local_from_world) = (b.key, b.inst, b.model, b.local_from_world);
             let probe_local = bevy_to_wow(local_from_world.transform_point3(probe_world));
             if !column_in_collision_bounds(model.collision_bounds, probe_local, retry_up) {
@@ -1145,9 +1244,9 @@ mod tests {
                  instances: Query<(Entity, &WmoPortalInstance)>,
                  streamer: Res<TerrainStreamer>,
                  adt_tiles: Res<Assets<AdtTile>>| {
+                    let buildings = verdict_buildings(&wmos, instances.iter());
                     room_at(
-                        &wmos,
-                        &instances,
+                        &buildings,
                         &streamer,
                         &adt_tiles,
                         wow_to_bevy([0.0, 0.0, 0.0]),
@@ -1163,6 +1262,55 @@ mod tests {
                 group: 0
             })
         );
+    }
+
+    /// A footprint rejects only columns the local bounds test rejects: at any yaw, and it stands
+    /// aside for a tilted placement. A model without bounds holds nothing, as that test does.
+    #[test]
+    fn a_footprint_rejects_only_what_the_bounds_test_rejects() {
+        let mut model = bare_model();
+        model.collision_bounds = Some(([-10.0, -20.0, 0.0], [10.0, 20.0, 5.0]));
+        let origin = Vec3::new(100.0, 30.0, -40.0);
+        let placed = |rotation: Quat| WmoPortalInstance {
+            handle: Handle::default(),
+            world_from_local: Affine3A::from_rotation_translation(rotation, origin),
+            name_set: 0,
+            visible: Vec::new(),
+            interior_fog: Vec::new(),
+            liquid_visited: Vec::new(),
+            flooded: Vec::new(),
+            lit: Vec::new(),
+        };
+        for (rotation, tilted) in [
+            (Quat::from_rotation_y(0.7), false),
+            (Quat::from_rotation_x(0.3), true),
+        ] {
+            let inst = placed(rotation);
+            let footprint = WmoFootprint::of(&inst, &model);
+            let local_from_world = inst.world_from_local.inverse();
+            let mut rejected = 0;
+            for x in -40..=40 {
+                for z in -40..=40 {
+                    for height in [-30.0, 2.0, 120.0, 400.0] {
+                        let world = origin + Vec3::new(x as f32, height, z as f32);
+                        if footprint.holds(world) {
+                            continue;
+                        }
+                        rejected += 1;
+                        let local = bevy_to_wow(local_from_world.transform_point3(world));
+                        for up in [false, true] {
+                            assert!(
+                                !column_in_collision_bounds(model.collision_bounds, local, up),
+                                "rejected a column the bounds test admits: {world}"
+                            );
+                        }
+                    }
+                }
+            }
+            assert_eq!(rejected == 0, tilted, "rejected {rejected} at {rotation}");
+        }
+        model.collision_bounds = None;
+        assert!(!WmoFootprint::of(&placed(Quat::IDENTITY), &model).holds(origin));
     }
 
     /// The derived bounds cover only vertices a face references: an orphan must not inflate them.
