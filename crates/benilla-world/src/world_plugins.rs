@@ -209,6 +209,7 @@ impl Plugin for WorldFoundation {
         });
         crate::collision::add_moved_position_sync(app, PostUpdate);
         crate::collision::use_change_aware_child_sync(app);
+        crate::collision::use_change_aware_aabb_refit(app);
         // Static transform tracking always on: movers are 1–3% of the world, so the adaptive
         // check's two full scans a frame could only ever conclude "track".
         app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::Enabled);

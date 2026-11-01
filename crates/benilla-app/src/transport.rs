@@ -17,13 +17,13 @@ use bevy::platform::time::Instant;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// avian's own AABB and collider-tree refresh, run a second time each frame in the chain below.
-use avian3d::collider_tree::update_moved_collider_aabbs as republish_moved_collider_aabbs;
-use avian3d::prelude::{Collider, Position, RigidBody, Rotation};
+use avian3d::prelude::{Position, RigidBody, Rotation};
 use benilla_formats::{
     elevator_period_ms, elevator_sample, load_elevator_paths, load_taxi_path_nodes,
     ElevatorKeyframe, ElevatorPaths, ShipAnim, TaxiPathNodes, TransportSample, TransportTimetable,
 };
+// The collider AABB and collider-tree refresh, run a second time each frame in the chain below.
+use benilla_world::collision::refit_changed_collider_aabbs as republish_moved_collider_aabbs;
 use bevy::prelude::*;
 
 use crate::go_templates::GameObjectTemplates;
@@ -50,10 +50,10 @@ impl Plugin for TransportPlugin {
                 // reads the world. avian refreshes collider AABBs in `PostUpdate`, after `Update`,
                 // so without [`republish_moved_collider_aabbs`] the mover's casts see the deck's
                 // previous-frame box, above its rider after one long frame. It writes no
-                // tick resource, so a second run is idempotent; it sweeps every collider.
+                // tick resource, and it refits only the colliders moved since its own last run.
                 (
                     deck_ticks(),
-                    republish_moved_collider_aabbs::<Collider>,
+                    republish_moved_collider_aabbs,
                     compose_riders,
                     ground_deck_riders,
                 )
