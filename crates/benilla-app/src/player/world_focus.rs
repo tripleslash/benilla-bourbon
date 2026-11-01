@@ -423,7 +423,6 @@ pub(crate) fn insert_test_room(world: &mut World, flags: u32) {
         visible: vec![true],
         lit: vec![true],
         interior_fog: vec![false],
-        liquid_visited: vec![false],
         flooded: vec![None],
     });
 }

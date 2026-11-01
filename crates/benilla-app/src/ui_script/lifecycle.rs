@@ -1000,6 +1000,7 @@ fn entry_prepare(
     crate::ui_items::feed::seed_vm_item_records(world, script);
     crate::ui_tradeskill::seed_repeat(world, script);
     crate::ui_unit::seed_language_table(world, script);
+    crate::ui_unit::seed_item_req_names(world, script);
     // The world map's continent and zone lists: static DBC data in the reference, read at file
     // scope (Astrolabe builds its whole zone table from `GetMapContinents`/`GetMapZones` there).
     crate::ui_world_map::seed_world_map_catalog(world, script);

@@ -25,6 +25,7 @@
 - **benilla-srp** (no Bevy) — WoW 1.12.1 (build 5875) SRP6 client and world-header crypto
 - **benilla-ui** (no Bevy) — Engine-free WoW UI engine core: TOC and FrameXML parsing, templates, anchors, z-order
 - **benilla-visual** (no Bevy) — Perceptual image diff for the visual A/B render harness
+- **benilla-wasm-alloc-test** (no Bevy) — The web build's allocator and its tests, compiled alone with no dependencies
 - **benilla-wdt** (no Bevy) — WDT map tile-table reader and tile/world coordinates for WoW 1.12.1 (build 5875)
 - **benilla-wmo** (no Bevy) — WMO (root and group) reader for WoW 1.12.1 (build 5875)
 - **benilla-world** (Bevy) — The world renderer: terrain, water, sky, weather, models, lighting, collision and the frame ladder; everything needed to put something in a world and ask the world about itself, with no game attached
@@ -126,6 +127,7 @@
 - **benilla-srp** (lib.rs): vanilla_header 
 - **benilla-ui** (lib.rs): auction_sort bindings_xml civil color crt framexml justify layout loader markup messages order screencoord script source status strings test_support toc widget 
 - **benilla-visual** (lib.rs): relight 
+- **benilla-wasm-alloc-test** (lib.rs): wasm_alloc 
 - **benilla-world** (lib.rs): art_scope assets bgwin billboard boot build_id card_store clouds clutter collision decal dev_state doodad_anim entity_shade exterior_cull ffx_glow final_pass frame_pace fsr ground_fx horizon instance_tint interact interior launch_env layout_keys lighting liquid log_ring mac_quit map_proj mat_anim_table mesh_tag model_fade model_forms model_render modern modkeys particles perf_probe ribbons ride_frame rig_anim rig_palette rig_rider schedule shaders sky sky_order skybox ssilvb static_gx static_merge straddle sun surface system_profile terrain_stream thread_qos view vis_chain water_fx wdl weather wind wmo_portal world_census world_flags world_map world_plugins world_point world_unit worldview zfill 
 - **wenilla-host** (lib.rs): data packs remote static_site ws 
 - **benilla-packer** (main.rs): append group inspect merge overlay plan sidecars 
@@ -207,7 +209,7 @@
 - `WOW_BOOTH_LOG` — benilla-app/src/portrait/mod.rs
 - `WOW_CAM_CHANGED` — benilla-app/src/perf/mod.rs
 - `WOW_CAM_DUMP` — benilla-app/src/player/camera.rs
-- `WOW_CAPTURE` — benilla-app/src/account_data/sections.rs, benilla-app/src/account_data/tests.rs, benilla-app/src/bindings.rs, benilla-app/src/capture/mod.rs, benilla-app/src/capture/scenarios.rs, benilla-app/src/cvars/mod.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/lanes/account_data_live_tests.rs, benilla-app/src/lanes/action_live_tests.rs, benilla-app/src/lib.rs, benilla-app/src/local_state.rs, benilla-app/src/net.rs, benilla-app/src/net/apply.rs, benilla-app/src/player/camera_saved.rs, benilla-app/src/run_mode.rs, benilla-app/src/sound/mod.rs, benilla-app/src/ui_chat/settings.rs, benilla-app/src/ui_chat/tests.rs, benilla-app/src/ui_logout.rs, benilla-app/src/ui_macro/tests.rs, benilla-app/src/ui_saved.rs, benilla-app/src/ui_script/addons.rs, benilla-app/src/ui_script/layer_tests.rs, benilla-app/src/ui_script/lifecycle.rs, benilla-app/src/ui_script/mod.rs, benilla-app/src/ui_script/world_entry_tests.rs, benilla-app/src/video.rs, benilla-app/src/wdb/tests.rs, benilla-world/src/bgwin.rs, benilla-world/src/clouds/mod.rs, benilla-world/src/dev_state.rs, benilla-world/src/wind/mod.rs
+- `WOW_CAPTURE` — benilla-app/src/account_data/sections.rs, benilla-app/src/account_data/tests.rs, benilla-app/src/bindings.rs, benilla-app/src/capture/mod.rs, benilla-app/src/capture/scenarios.rs, benilla-app/src/cvars/mod.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/glue_session/roster.rs, benilla-app/src/lanes/account_data_live_tests.rs, benilla-app/src/lanes/action_live_tests.rs, benilla-app/src/lib.rs, benilla-app/src/local_state.rs, benilla-app/src/net.rs, benilla-app/src/net/apply.rs, benilla-app/src/player/camera_saved.rs, benilla-app/src/run_mode.rs, benilla-app/src/sound/mod.rs, benilla-app/src/ui_chat/settings.rs, benilla-app/src/ui_chat/tests.rs, benilla-app/src/ui_logout.rs, benilla-app/src/ui_macro/tests.rs, benilla-app/src/ui_saved.rs, benilla-app/src/ui_script/addons.rs, benilla-app/src/ui_script/layer_tests.rs, benilla-app/src/ui_script/lifecycle.rs, benilla-app/src/ui_script/mod.rs, benilla-app/src/ui_script/world_entry_tests.rs, benilla-app/src/video.rs, benilla-app/src/wdb/tests.rs, benilla-world/src/bgwin.rs, benilla-world/src/clouds/mod.rs, benilla-world/src/dev_state.rs, benilla-world/src/wind/mod.rs
 - `WOW_CAPTURE_AGE` — benilla-app/src/capture/mod.rs
 - `WOW_CAPTURE_DEADLINE` — benilla-app/src/capture/mod.rs
 - `WOW_CAPTURE_OUT` — benilla-app/src/capture/mod.rs
@@ -340,8 +342,9 @@
 - `WOW_LIGHT_GRID` — benilla-world/src/wmo_portal/audit/light_probe.rs
 - `WOW_LIGHT_GROUP` — benilla-app/src/lib.rs, benilla-world/src/lighting/global_light.rs
 - `WOW_LIQUID_DC` — benilla-assets/src/world_assets/images.rs
+- `WOW_LIQUID_TRACE` — benilla-world/src/model_render/visibility.rs
 - `WOW_LIVE_` — benilla-world/src/bgwin.rs
-- `WOW_LIVE_FPS` — benilla-app/src/capture/probes/live_fps.rs, benilla-app/src/dev.rs, benilla-world/src/bgwin.rs
+- `WOW_LIVE_FPS` — benilla-app/src/capture/probes/live_fps.rs, benilla-app/src/dev.rs, benilla-world/src/bgwin.rs, benilla-world/src/world_plugins.rs
 - `WOW_LIVE_FPS_AT` — benilla-app/src/capture/probes/live_fps.rs
 - `WOW_LIVE_FPS_MOVE` — benilla-app/src/capture/probes/live_fps.rs
 - `WOW_LIVE_SHOT` — benilla-app/src/capture/live_shot.rs, benilla-app/src/dev.rs
@@ -535,7 +538,7 @@
 - `WOW_RESIZE` — benilla-app/src/capture/mod.rs
 - `WOW_RES_CENSUS` — benilla-app/src/perf/census.rs
 - `WOW_REVEAL` — benilla-app/src/capture/probes/reveal.rs, benilla-app/src/dev.rs
-- `WOW_RIG` — benilla-app/src/capture/probe_rig.rs, benilla-app/src/dev.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/glue_session/realm_smoke.rs, benilla-app/src/local_state.rs, benilla-app/src/net.rs, benilla-app/src/probe_shield.rs, benilla-app/src/run_mode.rs, benilla-world/src/bgwin.rs
+- `WOW_RIG` — benilla-app/src/capture/probe_rig.rs, benilla-app/src/dev.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/glue_session/realm_smoke.rs, benilla-app/src/glue_session/roster.rs, benilla-app/src/local_state.rs, benilla-app/src/net.rs, benilla-app/src/probe_shield.rs, benilla-app/src/run_mode.rs, benilla-world/src/bgwin.rs
 - `WOW_RIG_CENSUS` — benilla-world/src/rig_palette.rs
 - `WOW_RIG_COST` — benilla-world/src/rig_palette.rs
 - `WOW_RIG_SKIN` — benilla-assets/src/materials.rs
@@ -594,7 +597,7 @@
 - `WOW_UI_SCALE` — benilla-app/src/cvars/mod.rs, benilla-app/src/ui_script/mod.rs
 - `WOW_UI_SPLICE_VERIFY` — benilla-app/src/ui_script/extract/mod.rs
 - `WOW_UI_VERIFY` — benilla-app/src/ui_script/extract/mod.rs
-- `WOW_UNATTENDED` — benilla-app/src/cvars/mod.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/lanes/selection_live_tests.rs, benilla-app/src/local_state.rs, benilla-app/src/net.rs, benilla-app/src/net/session.rs, benilla-app/src/run_mode.rs, benilla-world/src/bgwin.rs
+- `WOW_UNATTENDED` — benilla-app/src/cvars/mod.rs, benilla-app/src/glue_session/login.rs, benilla-app/src/glue_session/roster.rs, benilla-app/src/lanes/selection_live_tests.rs, benilla-app/src/local_state.rs, benilla-app/src/net.rs, benilla-app/src/net/session.rs, benilla-app/src/run_mode.rs, benilla-world/src/bgwin.rs
 - `WOW_UNIT_VISUALS` — benilla-app/src/capture/probes/visual_census.rs, benilla-app/src/dev.rs
 - `WOW_UNIT_VISUALS_RADIUS` — benilla-app/src/capture/probes/visual_census.rs
 - `WOW_UPLOAD_BUDGET` — benilla-world/src/world_plugins.rs

@@ -176,8 +176,9 @@ fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
                 generation,
             });
         }
-        SessionEvent::RosterFailed { epoch } => {
-            e.roster_failed.write(RosterFailedMessage { epoch });
+        SessionEvent::RosterFailed { epoch, emptied } => {
+            e.roster_failed
+                .write(RosterFailedMessage { epoch, emptied });
         }
         SessionEvent::AddonInfo { records } => {
             // Held for the screens built after it, and for the world entry's load.
@@ -190,8 +191,16 @@ fn on_login_edge(In(ev): In<SessionEvent>, mut e: Edges) {
         SessionEvent::LoginFailed {
             refusal, reason, ..
         } => login_failed(refusal, reason, &mut e.login_failures),
-        SessionEvent::RealmList { realms, failed } => {
-            e.realm_lists.write(RealmListMessage { realms, failed });
+        SessionEvent::RealmList {
+            realms,
+            failed,
+            emptied,
+        } => {
+            e.realm_lists.write(RealmListMessage {
+                realms,
+                failed,
+                emptied,
+            });
         }
         SessionEvent::CharActionResult { action, code } => {
             char_action_result(action, code, &mut e.char_actions)

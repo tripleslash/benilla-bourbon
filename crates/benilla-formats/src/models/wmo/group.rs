@@ -213,9 +213,9 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid) -> Option<LiquidMesh> {
         return None;
     }
 
-    // One kind per surface, `0x6ba970`'s: the first wet nibble of the grid's first row of tiles
-    // only (`0x6ba971`); the group's liquid word is not read (`0x6b62ef`). A first row all holes
-    // is type 0xf, whose frame the reference requests anyway, a client fault: it draws nothing.
+    // One kind per surface, `0x6ba970`'s: the first wet nibble of the first tile row, the only row
+    // it scans (`+0x100`, the x tile count), and never `groupLiquid` (`0x6b62e0` reads no `+0x38`).
+    // A dry first row is type 0xf, which draws nothing (`0x6b6374`).
     let type_nibble = lq.tile_flags[..xt]
         .iter()
         .map(|&f| f & 0xf)
@@ -679,30 +679,62 @@ mod tests {
     }
 
     #[test]
-    fn wmo_liquid_type_is_the_first_rows_first_wet_tile() {
-        // A 2×2-tile grid: the first row's second tile is magma (2); the second row's first tile,
-        // slime (3), comes earlier in no row scan `0x6ba970` makes.
+    fn wmo_magma_and_all_holes() {
         let lq = WmoLiquid {
-            xverts: 3,
-            yverts: 3,
-            xtiles: 2,
-            ytiles: 2,
+            xverts: 2,
+            yverts: 2,
+            xtiles: 1,
+            ytiles: 1,
             base: [0.0, 0.0, 0.0],
             material_id: 0,
-            heights: vec![0.0; 9],
-            opacity: Vec::new(),
-            tile_flags: vec![0x0f, 0x42, 0x43, 0x40],
+            heights: vec![0.0; 4],
+            opacity: vec![200; 4],
+            tile_flags: vec![0x42], // magma
         };
         let m = build_wmo_liquid_mesh(&lq).expect("magma mesh");
         assert_eq!(m.kind, LiquidKind::Magma);
         assert!(m.depths.iter().all(|&v| v == 0.0)); // fullbright ⇒ depth V unused
 
-        // A first row all holes is the reference's type 0xf: no surface, though the second is wet.
-        let dry_first_row = WmoLiquid {
-            tile_flags: vec![0x0f, 0x0f, 0x40, 0x40],
+        let all_holes = WmoLiquid {
+            tile_flags: vec![0x0f],
             ..lq
         };
-        assert!(build_wmo_liquid_mesh(&dry_first_row).is_none());
+        assert!(build_wmo_liquid_mesh(&all_holes).is_none());
+    }
+
+    /// The kind is `0x6ba970`'s alone: the first wet nibble of the first tile row, the `+0x100`
+    /// bytes it scans, never the header's `groupLiquid`, which `0x6b62e0` does not read.
+    #[test]
+    fn wmo_liquid_kind_is_the_first_rows_alone() {
+        // A group file: `groupLiquid` at MOGP 0x34, and an MLIQ of 2×2 tiles at height 0.
+        let group = |group_liquid: u32, tiles: [u8; 4]| {
+            let mut mliq = Vec::new();
+            for n in [3u32, 3, 2, 2] {
+                mliq.extend(n.to_le_bytes());
+            }
+            mliq.extend([0u8; 12 + 2 + 9 * 8]); // base, materialId, 9 vertices
+            mliq.extend(tiles);
+            let mut mogp = vec![0u8; 68];
+            mogp[0x34..0x38].copy_from_slice(&group_liquid.to_le_bytes());
+            mogp.extend(chunk(b"QILM", &mliq));
+            let mut g = Vec::new();
+            g.extend(chunk(b"REVM", &17u32.to_le_bytes()));
+            g.extend(chunk(b"PGOM", &mogp));
+            g
+        };
+        // Row 0: a hole, then water (4); row 1 magma (2); `groupLiquid` says magma.
+        let m = wmo_group_liquid_mesh(&group(2, [0x0f, 0x04, 0x02, 0x02])).expect("a water mesh");
+        assert_eq!(
+            m.kind,
+            LiquidKind::Still,
+            "the first row's tile, not groupLiquid"
+        );
+        assert_eq!(m.sound_nibble, 4);
+        // Row 0 all holes, row 1 magma: the scan finds nothing, type 0xf, which draws nothing.
+        assert!(
+            wmo_group_liquid_mesh(&group(NO_GROUP_LIQUID, [0x0f, 0x0f, 0x02, 0x02])).is_none(),
+            "a later row's tile never types the surface"
+        );
     }
 
     #[test]

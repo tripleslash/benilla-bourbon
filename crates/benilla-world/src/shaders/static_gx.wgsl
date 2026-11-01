@@ -577,8 +577,8 @@ fn modern_gx_rgb(
         return folded * clamp(lit_prop_room + point_lit_px, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     // ---- exterior ADT doodads and exterior MODD props ----
-    // The `Model2.bls` order-2 SH sun lobe. The baked MCSH doodad shade retires (P3), so the intensity
-    // family is its `min(I, 1)` cap, 1, on every lane.
+    // The `Model2.bls` order-2 SH sun lobe. The baked MCSH doodad shade retires (P3), so this lane holds
+    // the intensity family at 1, on every lane.
     let sun_dc = wow_light.grade.yzw;
     let sun_lobe = vec3<f32>(
         wow_light.sh_c10_r.w + sun_dc.x
@@ -686,14 +686,10 @@ fn vertex_light(normal: vec3<f32>, point_lit: vec4<f32>, vc: vec4<f32>, word: u3
         );
     } else {
         // ---- exterior ADT doodads and exterior MODD props ----
-        // Model2.bls order-2 SH sun lobe at intensity 0.5 Shaded (MCSH), 1.0 Matte, 2.5 Lit.
-        // Deviation: the `min(I, 1)` cap, as in wow_model.wgsl, because lifting it takes
-        // sun-facing surfaces past 1.0; Matte keeps its own bit so it stays 1.0 if the cap goes.
+        // Model2.bls order-2 SH sun lobe at intensity 0.5 Shaded (MCSH), 1.0 Matte, 2.5 Lit,
+        // baked unclamped as wow_model.wgsl's (`0x71c4e0`); only the per-vertex sum clamps.
         let shade_t = select(1.0, 0.0, (word & WORD_SHADE_LIT) != 0u);
-        let intensity = min(
-            select(mix(2.5, 0.5, shade_t), 1.0, (word & WORD_MATTE) != 0u),
-            1.0,
-        );
+        let intensity = select(mix(2.5, 0.5, shade_t), 1.0, (word & WORD_MATTE) != 0u);
         let sun_dc = wow_light.grade.yzw * intensity;
         let sun_lobe = vec3<f32>(
             wow_light.sh_c10_r.w + sun_dc.x

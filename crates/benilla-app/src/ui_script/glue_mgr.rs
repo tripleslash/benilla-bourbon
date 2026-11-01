@@ -168,7 +168,9 @@ use bevy::prelude::*;
 use std::cell::{Ref, RefCell, RefMut};
 use std::rc::Rc;
 
-use benilla_protocol::{Character, LoginRefusal, LoginStage, RealmInfo, RosterCause};
+use benilla_protocol::{
+    Character, LoginRefusal, LoginStage, RealmInfo, RealmListEmptied, RosterCause,
+};
 use benilla_ui::script::origin::{within, Origin};
 use benilla_ui::script::{
     GlueCall, GlueCharacter, GlueHost, GlueNotice, GlueRealm, GlueRealmCells, GlueRequest,
@@ -296,6 +298,7 @@ const STATUS_CONNECTING: u8 = 0x07;
 const STATUS_AUTHENTICATING: u8 = 0x0b;
 const STATUS_AUTH_OK: u8 = 0x0c;
 const STATUS_AUTH_FAILED: u8 = 0x0d;
+const STATUS_SESSION_EXPIRED: u8 = 0x17;
 const STATUS_WAIT_QUEUE: u8 = 0x1b;
 const STATUS_REALM_LIST_IN_PROGRESS: u8 = 0x22;
 const STATUS_REALM_LIST_SUCCESS: u8 = 0x23;
@@ -1299,6 +1302,23 @@ impl GlueMgr {
         self.outbox.push(Outgoing::Begin(Step::Connect));
     }
 
+    /// A query that empties the holder (`0x5b23ff`, `0x5b2893`, `0x5b2560`, `0x5b2c9e`), the
+    /// categories keeping their indices, which answer null from then on (`0x5ab930`). The pending
+    /// operation fails with the status `0x5abb90` maps its argument to.
+    fn on_realm_list_emptied(&mut self, end: RealmListEmptied) {
+        self.holder.clear();
+        self.holder_moved = true;
+        if !self.op.awaiting_list || self.op.done {
+            return;
+        }
+        self.op.awaiting_list = false;
+        let status = match end {
+            RealmListEmptied::ListFailed => STATUS_REALM_LIST_FAILED,
+            RealmListEmptied::SessionExpired => STATUS_SESSION_EXPIRED,
+        };
+        self.op.complete(false, status);
+    }
+
     /// A realm list reply: the holder filled (`0x5b2230`), then the pending operation's arm of
     /// `0x5abb90`. A query's success is `REALM_LIST_SUCCESS`; a connect's dials the selected realm,
     /// or the one [`Self::connect_realm`] finds, and completes only through the dial (`0x5ab823`
@@ -1578,15 +1598,21 @@ impl GlueMgr {
         self.op.complete(true, STATUS_CHAR_LIST_RETRIEVED);
     }
 
-    /// The roster ask failed on the stream: the query completes `CHAR_LIST_FAILED` (`0x5ab300`'s
-    /// failure leg, `SetStatus(0, 0x2c)`), which the tick opens as `OKAY`. The session ends behind
-    /// it as a dropped socket does, so the disconnect handler follows (`0x46c540`).
-    fn on_roster_failed(&mut self, epoch: u64) {
+    /// The roster ask failed: the query completes `CHAR_LIST_FAILED` (`0x5ab300`'s failure leg,
+    /// `SetStatus(0, 0x2c)`), which the tick opens as `OKAY`. `emptied` is a reply that failed the
+    /// list itself, which it empties (`0x5b4539`-`0x5b455d`) on a link that stays up; on a failed
+    /// stream the session ends behind it as a dropped socket does, so the disconnect handler
+    /// follows (`0x46c540`).
+    fn on_roster_failed(&mut self, epoch: u64, emptied: bool) {
         if epoch != self.link
             || self.state != ScreenState::CharList
             || self.op.kind != OpKind::CharList
         {
             return;
+        }
+        if emptied {
+            self.characters = 0;
+            self.roster.clear();
         }
         self.op.complete(false, STATUS_CHAR_LIST_FAILED);
     }
@@ -2182,10 +2208,10 @@ pub(crate) fn drive_glue_mgr(
                 mgr.on_stage(msg.stage, glue_up);
             }
             // The logon's list ends the logon, then answers the connect its latch begins.
-            let lists: Vec<(Vec<RealmInfo>, bool)> = news
+            let lists: Vec<(Vec<RealmInfo>, bool, Option<RealmListEmptied>)> = news
                 .realm_lists
                 .read()
-                .map(|m| (m.realms.clone(), m.failed))
+                .map(|m| (m.realms.clone(), m.failed, m.emptied))
                 .collect();
             if !lists.is_empty() {
                 mgr.on_logon_done();
@@ -2207,8 +2233,11 @@ pub(crate) fn drive_glue_mgr(
             let mut mgr = shared.get_mut();
             let player = RunModeRealm::default();
             let run = run.as_deref().unwrap_or(&player);
-            for (realms, failed) in lists {
-                mgr.on_realm_list(realms, failed, &realm_name, run);
+            for (realms, failed, emptied) in lists {
+                match emptied {
+                    Some(end) => mgr.on_realm_list_emptied(end),
+                    None => mgr.on_realm_list(realms, failed, &realm_name, run),
+                }
             }
             for msg in news.failures.read() {
                 mgr.on_failed(msg);
@@ -2232,7 +2261,7 @@ pub(crate) fn drive_glue_mgr(
         {
             let mut mgr = shared.get_mut();
             for msg in news.roster_failures.read() {
-                mgr.on_roster_failed(msg.epoch);
+                mgr.on_roster_failed(msg.epoch, msg.emptied);
             }
             for msg in news.rosters.read() {
                 mgr.on_roster(msg.characters.clone(), msg.cause, msg.epoch);

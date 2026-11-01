@@ -121,6 +121,7 @@ mod emitters {
     use super::super::ChatCtx;
 
     mod dispel;
+    mod gate;
     mod lines;
     mod words;
 
@@ -869,6 +870,26 @@ mod emitters {
             show_affiliation: false,
         };
         Bench::new().lines(|ctx, st, po, log| super::super::enchantment_log(s, ctx, st, po, log))
+    }
+
+    /// `0x628ea0` takes the first guid as the owner, the target of either line. vmangos writes a
+    /// fade's empty caster first (`Objects/Player.cpp:12053`), which arrives as an add aimed at
+    /// guid 0, and `0x626630` refuses that (`0x626690`-`0x6266a6`).
+    #[test]
+    fn an_empty_first_guid_writes_no_line() {
+        let mut body = vec![0u8; 8];
+        body.extend_from_slice(&MOB.to_le_bytes());
+        body.extend_from_slice(&2589u32.to_le_bytes());
+        body.extend_from_slice(&CRUSADER.to_le_bytes());
+        body.push(0);
+        let parsed = benilla_protocol::messages::parse_server(
+            benilla_protocol::messages::opcode::SMSG_ENCHANTMENTLOG,
+            &body,
+        );
+        let Ok(benilla_protocol::ServerPacket::EnchantmentLog(s)) = parsed else {
+            panic!("an enchantment log");
+        };
+        assert!(enchant(s.caster, s.owner, s.enchant_id).is_empty());
     }
 
     /// The packet's id names a `SpellItemEnchantment` row through `0xc0d7d8` (`0x62922d`,

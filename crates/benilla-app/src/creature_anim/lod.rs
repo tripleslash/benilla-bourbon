@@ -558,7 +558,6 @@ mod tests {
                 // itself falls back to (`lit = all true` for an instance nothing has gated).
                 lit: vec![true, true],
                 interior_fog: vec![false, false],
-                liquid_visited: vec![false, false],
                 flooded: vec![None, None],
             })
             .id();

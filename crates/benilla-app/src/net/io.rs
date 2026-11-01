@@ -39,8 +39,8 @@ use bevy::platform::time::Instant;
 use anyhow::{anyhow, Result};
 use benilla_assets::LockRecover;
 use benilla_protocol::{
-    messages::SurveyAnswer, AuthReject, CharAction, LoginStage, Poll, RosterCause, SessionEnd,
-    SessionEvent, WorldReader, WorldSession, WorldWriter,
+    messages::SurveyAnswer, AuthReject, CharAction, LoginStage, Poll, RealmListEmptied,
+    RosterCause, SessionEnd, SessionEvent, WorldReader, WorldSession, WorldWriter,
 };
 use crossbeam_channel::{Receiver, Sender};
 
@@ -463,44 +463,50 @@ enum WorldEnd {
 }
 
 /// Publish a realm list: a fresh one, or with `failed` the last one held, after a query that got
-/// no answer (`REALM_LIST_FAILED`). False once the app is gone.
+/// no answer (`REALM_LIST_FAILED`), and with `emptied` too none, after a query that empties the
+/// holder. False once the app is gone.
 fn publish(
     events_tx: &Sender<SessionEvent>,
     realms: &[benilla_protocol::RealmInfo],
     failed: bool,
+    emptied: Option<RealmListEmptied>,
 ) -> bool {
     events_tx
         .send(SessionEvent::RealmList {
             realms: realms.to_vec(),
             failed,
+            emptied,
         })
         .is_ok()
 }
 
 /// A realm list query on the realmd link, `RequestRealmList`'s (`0x5ab840`) and the connect's
-/// own (`0x5aab6d`), then the answer published. A request that fails for any reason (the link
-/// realmd closed, the 5 s timeout, a reply that does not parse) dials realmd again and asks once
-/// more; vmangos closes every link after `MaxSessionDuration`, 300 s by default, while a list may
-/// stand longer. False once the app is gone.
+/// own (`0x5aab6d`), then the answer published. A request that fails the link (the link realmd
+/// closed, the 5 s timeout, a reply the link's walk calls malformed) dials realmd again and asks
+/// once more; vmangos closes every link after `MaxSessionDuration`, 300 s by default, while a list
+/// may stand longer. A failed re-dial empties the list, as a failed reconnect empties the holder
+/// ([`redial_failure`]). A reply only the record fill refuses fails the query with the link up
+/// (`0x5b23ff`). False once the app is gone.
 ///
 /// Deviation: the reference re-dials only from `RequestRealmList`, and only when the link is down
 /// (`[CLoginMgr+5]` clear, `0x5ab857` → `0x5b2200`), with the reconnect challenge (`0x5b2134`,
 /// `[Logon+0xc]`); the connect's query sends only on a link in state 6 (`0x5bc14c`) and otherwise
 /// nothing, leaving the screen on its connecting dialog for good. Here both queries re-dial on
-/// any failure, with a full logon from the cycle's credentials, because benilla's logon has no
-/// reconnect exchange and a connect that can never complete is a dead end, not a behaviour; the
-/// new session key serves the next world dial as the reconnect's would. A PIN account's re-dial
-/// presses the PIN the logon proved on its new challenge's grid, as the reconnect asks for none.
-/// A PIN a re-dial's proof has refused (a TOTP code moves on, vmangos `AuthSocket.cpp:720`) is
-/// forgotten and the logon dials no more, so every query fails from then on: each refusal is a
-/// wrong password to the server (`:856`), and the list asks every 5 s.
+/// any failure of the link, with a full logon from the cycle's credentials, because benilla's
+/// logon has no reconnect exchange and a connect that can never complete is a dead end, not a
+/// behaviour; the new session key serves the next world dial as the reconnect's would. A PIN
+/// account's re-dial presses the PIN the logon proved on its new challenge's grid, as the
+/// reconnect asks for none. A PIN a re-dial's proof has refused (a TOTP code moves on, vmangos
+/// `AuthSocket.cpp:720`) is forgotten and the logon dials no more, so every query fails from then
+/// on: each refusal is a wrong password to the server (`:856`), and the list asks every 5 s.
 async fn query(
     logon: &mut benilla_protocol::Logon,
     req: &LoginRequest,
     events_tx: &Sender<SessionEvent>,
 ) -> bool {
     let mut ok = logon.refresh_realms_async(REALM_REFRESH_TIMEOUT).await;
-    if !ok && logon.can_redial() {
+    let mut emptied = None;
+    if !ok && !logon.realmd_live() && logon.can_redial() {
         let kept = logon.pin().map(<[u8]>::to_vec);
         let mut press = async |grid: &[u8; 10]| {
             redial_digits(kept.as_deref(), crate::run_mode::EnvPin::process())
@@ -520,17 +526,34 @@ async fn query(
         {
             Ok(fresh) => {
                 *logon = fresh;
-                ok = true;
+                ok = !logon.realms_refused;
             }
             Err(e) => {
                 bevy::log::warn!("net: realm list re-dial failed: {e:#}");
                 if logon.pin().is_some() && e.downcast_ref::<AuthReject>().is_some() {
                     logon.forget_pin();
                 }
+                logon.realms.clear();
+                emptied = Some(redial_failure(&e));
             }
         }
     }
-    publish(events_tx, &logon.realms, !ok)
+    let refused = logon.realms_refused.then_some(RealmListEmptied::ListFailed);
+    publish(events_tx, &logon.realms, !ok, emptied.or(refused))
+}
+
+/// What a failed re-dial ends a query with, read as the reconnect it stands in for: a proof's
+/// result of 9 or 10 is `0x5b2860`'s arm for 2 or 3 (`0x5b28be`, `0x5b2893`, by the table at
+/// `0x5b2910`); any other is its arm for 1 (`0x5b28dd`), as a refused challenge (`0x5bae37`), a
+/// failed dial and a dropped link are through `0x5b2c9e`.
+fn redial_failure(e: &anyhow::Error) -> RealmListEmptied {
+    match e.downcast_ref::<AuthReject>() {
+        Some(AuthReject {
+            code: 9 | 10,
+            reply: benilla_protocol::LogonReply::Proof,
+        }) => RealmListEmptied::ListFailed,
+        _ => RealmListEmptied::SessionExpired,
+    }
 }
 
 /// What a park woke to first: credentials, a realm request or a character request; `None` is a
@@ -587,7 +610,7 @@ async fn login_park(parks: &Parks, events_tx: &Sender<SessionEvent>) -> Option<L
             Woke::Login(req) => return req,
             Woke::Realm(None) => return None,
             Woke::Realm(Some(RealmRequest::Refresh)) => {
-                if !publish(events_tx, &[], true) {
+                if !publish(events_tx, &[], true, None) {
                     return None;
                 }
             }
@@ -780,7 +803,9 @@ async fn run(
         //
         // An answer queued during a dead cycle must not answer this list.
         while parks.park_rx.try_recv().is_ok() {}
-        if !publish(events_tx, &logon.realms, false) {
+        let refused = logon.realms_refused;
+        let emptied = refused.then_some(RealmListEmptied::ListFailed);
+        if !publish(events_tx, &logon.realms, refused, emptied) {
             return Ok(Cycle::Exit);
         }
         let mut pick = match logon_park(&mut logon, &req, parks, events_tx).await {
@@ -1029,10 +1054,27 @@ async fn world(
                                 characters = c;
                                 Parked::Listed
                             }
+                            // The reply failed the list: it is emptied (`0x5b4539`-`0x5b455d`) and
+                            // the screen's query fails (`0x5ab300`), on a link that stays up.
+                            Err(e) if e.is::<benilla_protocol::CharListFailed>() => {
+                                characters.clear();
+                                let sent = events_tx.send(SessionEvent::RosterFailed {
+                                    epoch,
+                                    emptied: true,
+                                });
+                                if sent.is_ok() {
+                                    Parked::StayPut
+                                } else {
+                                    Parked::Exit
+                                }
+                            }
                             // The stream failed under the ask: the screen's query fails
                             // (`0x5ab300`), and the session ends as a dropped socket does.
                             Err(e) => {
-                                let _ = events_tx.send(SessionEvent::RosterFailed { epoch });
+                                let _ = events_tx.send(SessionEvent::RosterFailed {
+                                    epoch,
+                                    emptied: false,
+                                });
                                 return Err(e);
                             }
                         }

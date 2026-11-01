@@ -1420,7 +1420,6 @@ mod tests {
                 visible: vec![true],
                 lit: vec![true],
                 interior_fog: vec![false],
-                liquid_visited: vec![false],
                 flooded: vec![None],
             })
             .id();

@@ -375,6 +375,24 @@ pub(crate) fn reaches_tail(
     )
 }
 
+/// `ReportCastFailure`'s auto-repeat leg, ahead of its line (`0x6e1cd9`-`0x6e1cea`): with a player
+/// (`0x6e1c69`), a report of the running repeat spell stops it (`0x6ea080`), for any reason but
+/// 0x17 (`0x6e1ce4`), and the stop's pop (`0x6ea160`) leaves the tail no cancel to send.
+fn report_stops_repeat(
+    fail: &CastFail,
+    me: Option<Entity>,
+    auto_repeat: &mut AutoRepeatActive,
+    edits: &crate::creature_anim::UnitEdits,
+    core: &mut CastCore,
+) {
+    if me.is_some()
+        && auto_repeat.0 == Some(fail.spell_id)
+        && fail.reason != super::report::REASON_DONT_REPORT
+    {
+        crate::creature_anim::cancel_auto_repeat_local(me, auto_repeat, edits, core);
+    }
+}
+
 /// The client's own refusal through the reporter: its line, then its tail.
 fn refuse(
     core: &mut CastCore,
@@ -421,9 +439,24 @@ impl CastLadder<'_, '_> {
         }
     }
 
-    /// A refusal of the client's own through `ReportCastFailure 0x6e1a00`: its line, then its
-    /// tail.
+    /// [`report_stops_repeat`] for a refusal the ladder is about to report.
+    fn stop_refused_repeat(&mut self, fail: &CastFail) {
+        let me = self.self_player.single().ok().map(|(e, _)| e);
+        let mut core = CastCore {
+            pending: &mut self.pending,
+            queued_melee: &mut self.queued_melee,
+            ground: &mut self.ground,
+            reports: &mut self.reports,
+            net: &self.commands,
+            tutorials: self.tutorials.as_deref(),
+        };
+        report_stops_repeat(fail, me, &mut self.auto_repeat, &self.edits, &mut core);
+    }
+
+    /// A refusal of the client's own through `ReportCastFailure 0x6e1a00`: its auto-repeat leg, its
+    /// line, then its tail.
     pub(crate) fn report_local(&mut self, fail: CastFail) {
+        self.stop_refused_repeat(&fail);
         let reaches = reaches_tail(&fail, self.spells.as_deref(), &self.items, &self.commands);
         self.core().report(fail, false, reaches);
     }
@@ -635,9 +668,6 @@ impl CastLadder<'_, '_> {
                     }
                     return None;
                 };
-                if attempt.is_some() {
-                    self.wand_handoff(me);
-                }
                 // The send stores the record's spell (`0x6e585a`), which `TryCast`'s attack tail
                 // compares with its own (`0x6e51be`): a record a listener's attempt refilled
                 // starts no swing of this attempt's.
@@ -868,6 +898,7 @@ impl CastLadder<'_, '_> {
         // once they have run ([`Self::reread_refused`]).
         let standing = self.ground.take_word();
         let fail = CastFail::local(record, reason);
+        self.stop_refused_repeat(&fail);
         let reaches = reaches_tail(&fail, self.spells.as_deref(), &self.items, &self.commands);
         self.core().report_line(fail);
         Some(OwedRefusal {
@@ -1042,6 +1073,7 @@ impl CastLadder<'_, '_> {
                 );
                 self.drop_word();
                 let fail = CastFail::local(spell_id, reason);
+                self.stop_refused_repeat(&fail);
                 let reaches =
                     reaches_tail(&fail, self.spells.as_deref(), &self.items, &self.commands);
                 self.core().report_line(fail);
@@ -1125,42 +1157,6 @@ impl CastLadder<'_, '_> {
             &mut self.stand,
             &self.edits,
             self.spells.as_deref(),
-            &mut core,
-        );
-    }
-
-    /// The wand handoff ahead of the send: the running repeat is cancelled when it carries
-    /// `AttributesEx3 & 0x400000` (wand Shoot 5019), so Auto Shot survives. `CMSG_CANCEL_CAST`
-    /// naming it goes first, then the local cancel and its ack.
-    fn wand_handoff(&mut self, me: Option<Entity>) {
-        let Some(cached) = self.auto_repeat.0 else {
-            return;
-        };
-        if !self
-            .spells
-            .as_ref()
-            .and_then(|s| s.catalog.get(cached))
-            .is_some_and(|d| d.casting_cancels_autorepeat())
-        {
-            return;
-        }
-        debug!("ui_action: a new cast cancels the running wand repeat {cached}");
-        let _ = self
-            .commands
-            .0
-            .send(ClientCommand::CancelCast { spell_id: cached });
-        let mut core = CastCore {
-            pending: &mut self.pending,
-            queued_melee: &mut self.queued_melee,
-            ground: &mut self.ground,
-            reports: &mut self.reports,
-            net: &self.commands,
-            tutorials: self.tutorials.as_deref(),
-        };
-        crate::creature_anim::cancel_auto_repeat_local(
-            me,
-            &mut self.auto_repeat,
-            &self.edits,
             &mut core,
         );
     }
@@ -1532,7 +1528,10 @@ fn send_spell_cast(
     // A refusal through the reporter, then the attempt's `xor al,al` exit.
     macro_rules! refuse {
         ($fail:expr) => {{
-            refuse(core, spells, items, commands, $fail);
+            let fail = $fail;
+            let me = self_player.single().ok().map(|(e, _)| e);
+            report_stops_repeat(&fail, me, auto_repeat, edits, core);
+            refuse(core, spells, items, commands, fail);
             return;
         }};
     }
@@ -1542,6 +1541,8 @@ fn send_spell_cast(
     macro_rules! refuse_ahead_of_bail {
         ($fail:expr) => {{
             let fail = $fail;
+            let me = self_player.single().ok().map(|(e, _)| e);
+            report_stops_repeat(&fail, me, auto_repeat, edits, core);
             let reaches = reaches_tail(&fail, spells, items, commands);
             core.report_line(fail);
             *sent = Some(CastStage::Refused {
@@ -1755,9 +1756,9 @@ fn send_spell_cast(
         .map_or(0, |u| u.category);
     if cooldowns.not_ready(spell_id, queried_item, item_category, def, now) {
         debug!("ui_action: cast {spell_id} refused locally — not ready (the validator's rung 1)");
-        // The one packet a local refusal sends (`0x609576–0x60960f`, spell leg only): a running
-        // repeat with AttributesEx3 0x400000 (wand Shoot) gets `CMSG_CANCEL_CAST`, then the local
-        // cancel.
+        // The spell leg's own packet, ahead of its report (`0x609576`-`0x60960f`), and the one read
+        // of the bit (`0x60959e`): a running repeat with AttributesEx3 0x400000 (wand Shoot) gets
+        // `CMSG_CANCEL_CAST`, then the local cancel. A ready cast passes it by (`0x609570`).
         if !commit.is_item() {
             if let Some(cached) = auto_repeat.0 {
                 if spells
@@ -2986,6 +2987,132 @@ mod tests {
             Some(RAPTOR_STRIKE),
             "the strike still queues — only the attack-start was skipped"
         );
+    }
+
+    /// The wand repeat's cancel sits inside the validator's not-ready refusal alone (`0x609570 je`
+    /// passes a ready cast by, `0x60959e`), so a cast that commits leaves it running, with no
+    /// `CMSG_CANCEL_CAST` for it; the same cast refused not ready stops it (`0x6095e7`,
+    /// `0x6095ec`).
+    #[test]
+    fn a_committed_cast_leaves_the_wand_repeat_running() {
+        use benilla_formats::SpellDisplay;
+        use std::collections::HashMap;
+        const SHOOT: u32 = 5019;
+        const SMITE: u32 = 585;
+        let (mut world, rx) = world();
+        let mut spells = Spells::empty_for_tests();
+        spells.catalog = benilla_formats::SpellCatalog::from_displays(HashMap::from([
+            (
+                SHOOT,
+                SpellDisplay {
+                    targets: 0x2,
+                    attributes_ex2: 0x20,
+                    attributes_ex3: 0x0040_0000,
+                    ..Default::default()
+                },
+            ),
+            (
+                SMITE,
+                SpellDisplay {
+                    targets: 0x2,
+                    recovery_ms: 60_000,
+                    ..Default::default()
+                },
+            ),
+        ]));
+        world.insert_resource(spells);
+        world.spawn(SelfPlayer);
+        world.resource_mut::<AutoRepeatActive>().0 = Some(SHOOT);
+
+        send_at(&mut world, SMITE, MOB);
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == SMITE),
+            "the cast goes out"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no CANCEL_CAST for the wand and no CANCEL_AUTO_REPEAT"
+        );
+        assert_eq!(world.resource::<AutoRepeatActive>().0, Some(SHOOT));
+        assert!(
+            !stream(&mut world).contains(&"STOP_AUTOREPEAT"),
+            "and no STOP_AUTOREPEAT_SPELL"
+        );
+
+        // Refused not ready, the spell's own recovery running: the validator's cancel, then its
+        // stop.
+        world
+            .resource_mut::<crate::spell::PendingCast>()
+            .clear_if(SMITE);
+        let smite = SpellDisplay {
+            recovery_ms: 60_000,
+            ..Default::default()
+        };
+        world.resource_mut::<crate::spell::Cooldowns>().start_spell(
+            SMITE,
+            &smite,
+            0,
+            Instant::now(),
+            None,
+        );
+        send_at(&mut world, SMITE, MOB);
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CancelCast { spell_id }) if spell_id == SHOOT),
+            "`0x6095e7` names the wand"
+        );
+        assert!(matches!(rx.try_recv(), Ok(ClientCommand::CancelAutoRepeat)));
+        assert!(rx.try_recv().is_err(), "the refused cast sends nothing");
+        assert_eq!(world.resource::<AutoRepeatActive>().0, None);
+    }
+
+    /// The reporter's auto-repeat leg, ahead of its line (`0x6e1cd9`-`0x6e1cea` → `0x6ea080`): an arm
+    /// refusal of the running repeat spell, which the attempt pushed (`0x6e5026`), stops it with
+    /// `CMSG_CANCEL_AUTO_REPEAT_SPELL`, and the stop's pop (`0x6ea160`) leaves the tail no spell in
+    /// flight to cancel (`0x6e2201`), so `SPELLCAST_FAILED` fires by itself (`0x6e224a`). Another
+    /// spell's refusal leaves the repeat running.
+    #[test]
+    fn a_refusal_of_the_running_repeat_spell_stops_it_and_sends_no_cancel_cast() {
+        use benilla_formats::SpellDisplay;
+        use std::collections::HashMap;
+        const FIREBALL: u32 = 133;
+        let (mut world, rx) = world();
+        let mut spells = Spells::empty_for_tests();
+        // An enemy word with nothing to bind is refused at the arm (`0x6e507b`-`0x6e50a9`).
+        let enemy = |attributes_ex2: u32| SpellDisplay {
+            implicit_target_a1: 6,
+            attributes_ex2,
+            ..Default::default()
+        };
+        spells.catalog = benilla_formats::SpellCatalog::from_displays(HashMap::from([
+            (AUTO_SHOT, enemy(0x20)),
+            (FIREBALL, enemy(0)),
+        ]));
+        world.insert_resource(spells);
+        world.spawn(SelfPlayer);
+        world.resource_mut::<AutoRepeatActive>().0 = Some(AUTO_SHOT);
+
+        send(&mut world, FIREBALL, CastCommit::Spell);
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(sent[..], [ClientCommand::CancelCast { spell_id: FIREBALL }]),
+            "{sent:?}"
+        );
+        assert_eq!(world.resource::<AutoRepeatActive>().0, Some(AUTO_SHOT));
+        let _ = stream(&mut world);
+
+        send(&mut world, AUTO_SHOT, CastCommit::Spell);
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(sent[..], [ClientCommand::CancelAutoRepeat]),
+            "{sent:?}"
+        );
+        assert_eq!(world.resource::<AutoRepeatActive>().0, None);
+        assert!(!world.resource::<crate::spell::PendingCast>().in_flight());
+        let edges: Vec<_> = stream(&mut world)
+            .into_iter()
+            .filter(|r| *r != "CHANGED")
+            .collect();
+        assert_eq!(edges, ["STOP_AUTOREPEAT", "REFUSED", "FAILED"]);
     }
 
     /// Not yet swinging: the tail fires, `0x6131a0` → `0x5ecb70` runs, and its `0x5ecd8c` cancels

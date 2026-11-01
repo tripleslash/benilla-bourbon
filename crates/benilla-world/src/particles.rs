@@ -919,7 +919,6 @@ pub(crate) mod tests {
             handle: Handle::default(),
             world_from_local: bevy::math::Affine3A::IDENTITY,
             name_set: 0,
-            liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
             visible: vec![true, false, false],
             lit: vec![true, false, false],

@@ -1107,7 +1107,6 @@ mod tests {
                         name_set: 0,
                         visible: vec![true],
                         interior_fog: vec![false],
-                        liquid_visited: vec![false],
                         flooded: vec![None],
                         lit: vec![true],
                     })
@@ -1277,7 +1276,6 @@ mod tests {
             name_set: 0,
             visible: Vec::new(),
             interior_fog: Vec::new(),
-            liquid_visited: Vec::new(),
             flooded: Vec::new(),
             lit: Vec::new(),
         };

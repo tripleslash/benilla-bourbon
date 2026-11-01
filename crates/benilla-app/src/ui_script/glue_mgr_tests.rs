@@ -983,11 +983,47 @@ fn a_failed_roster_ask_opens_okay_with_char_list_failed() {
     m.get_character_list();
     settle(&mut m);
     m.outbox.clear();
-    m.on_roster_failed(2);
+    m.on_roster_failed(2, false);
     m.tick();
     settle(&mut m);
     assert!(m.outbox.is_empty() && !m.op.done, "another link's failure");
-    m.on_roster_failed(3);
+    m.on_roster_failed(3, false);
+    m.tick();
+    settle(&mut m);
+    assert_eq!(
+        m.outbox,
+        [
+            Outgoing::Update {
+                text: Text::Key("CHAR_LIST_FAILED"),
+                button: None,
+            },
+            open("OKAY", Some("CHAR_LIST_FAILED")),
+        ]
+    );
+    assert_eq!(m.state, ScreenState::Idle);
+}
+
+/// A reply that failed the list empties it (`0x5b4539`-`0x5b455d`) and completes the query
+/// `CHAR_LIST_FAILED`; a failure on the stream reaches no such reply and leaves the last list.
+#[test]
+fn a_failed_character_list_empties_the_roster_and_opens_okay() {
+    let asked = |emptied| {
+        let mut m = fresh();
+        m.connected = true;
+        m.on_world_authenticated(realm("Fake"), 3);
+        settle(&mut m);
+        m.get_character_list();
+        settle(&mut m);
+        m.characters = 1;
+        m.roster = vec![crate::glue_session::roster::test_character(7, "Alpha")];
+        m.on_roster_failed(3, emptied);
+        m
+    };
+    let m = asked(false);
+    assert_eq!((m.characters, m.roster.len()), (1, 1));
+    let mut m = asked(true);
+    assert_eq!((m.characters, m.roster.len()), (0, 0));
+    m.outbox.clear();
     m.tick();
     settle(&mut m);
     assert_eq!(
@@ -2805,6 +2841,40 @@ fn the_stock_select_with_no_link_shows_the_selected_realms_pvp() {
     );
 }
 
+/// A query that empties the holder fails with the status `0x5abb90` maps its argument to,
+/// `REALM_LIST_FAILED` (`0x5abbd8`) or `AUTH_SESSION_EXPIRED` (`0x5abba2`); a query with no answer
+/// fails `REALM_LIST_FAILED` and keeps the holder.
+#[test]
+fn an_emptied_realm_list_empties_the_holder_and_fails_by_its_status() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _rx, _) = stock_app();
+    let query = |app: &mut App, failed, emptied| {
+        {
+            let mut m = mgr_mut(app);
+            m.state = ScreenState::RealmList;
+            m.op = Operation::begin(OpKind::GetRealms, STATUS_REALM_LIST_IN_PROGRESS);
+            m.holder = vec![realm("Fake")];
+        }
+        app.world_mut().write_message(RealmListMessage {
+            realms: Vec::new(),
+            failed,
+            emptied,
+        });
+        app.update();
+    };
+    query(&mut app, true, None);
+    assert_eq!(mgr(&app).holder.len(), 1, "no answer keeps the holder");
+    for (end, key) in [
+        (RealmListEmptied::ListFailed, "REALM_LIST_FAILED"),
+        (RealmListEmptied::SessionExpired, "AUTH_SESSION_EXPIRED"),
+    ] {
+        query(&mut app, true, Some(end));
+        assert!(mgr(&app).holder.is_empty(), "{key}");
+        let text = vm(&app).global_text(key);
+        assert_eq!(dialog(&app), Some(("OKAY".into(), text)));
+    }
+}
+
 /// The stock dialog over a world failure with no realm held: the failure's `OKAY` presses itself
 /// in state 2, the `CANCEL` "Retrieving realm list" follows, and the list's reply closes it.
 #[test]
@@ -2824,6 +2894,7 @@ fn the_stock_realm_list_dialog_after_a_world_failure_closes_on_its_reply() {
     app.world_mut().write_message(RealmListMessage {
         realms: vec![realm("Fake")],
         failed: false,
+        emptied: None,
     });
     app.update();
     assert_eq!(dialog(&app), None, "the query's success closes it");
@@ -2923,8 +2994,16 @@ fn pump(
                 }
                 stages.write(LoginStageMessage { stage });
             }
-            E::RealmList { realms, failed } => {
-                lists.write(RealmListMessage { realms, failed });
+            E::RealmList {
+                realms,
+                failed,
+                emptied,
+            } => {
+                lists.write(RealmListMessage {
+                    realms,
+                    failed,
+                    emptied,
+                });
             }
             E::LoginFailed {
                 refusal, reason, ..
@@ -2956,8 +3035,8 @@ fn pump(
                     generation,
                 });
             }
-            E::RosterFailed { epoch } => {
-                failed_rosters.write(RosterFailedMessage { epoch });
+            E::RosterFailed { epoch, emptied } => {
+                failed_rosters.write(RosterFailedMessage { epoch, emptied });
             }
             E::LoginQueued { position, realm } => {
                 queued.write(LoginQueuedMessage { position, realm });

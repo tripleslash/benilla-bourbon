@@ -9,7 +9,8 @@
 //! Kept from 1.12: the validity filters (`0x493e40`, `CanAttack 0x606980`, critters), the
 //! [`commit_owing`] through `SetSelection` (`0x493540`), the attack acquire (`0x612df0` at `0x6130b5`),
 //! the ATTACKERSTATEUPDATE and spell start acquires (`0x6259c9`–`0x6259fe`, `0x6e7963`-`0x6e799c`)
-//! and the 41 yd range.
+//! and the range, `targetNearestDistance`'s value ([`super::TabRange`], `0x49435d`). The radius
+//! behind the cone, `targetNearestDistanceRadius`, has no counterpart.
 
 use benilla_formats::CreatureTypeTable;
 use benilla_protocol::{guid, EntityKind};
@@ -28,8 +29,6 @@ use super::Selection;
 // == The Classic-priority dials ==
 // Each names the Classic Era cvar it stands in for; the values are tuned.
 
-/// `targetNearestDistance`, the TAB range in yards: 1.12's default (`[0x804510]`).
-const TAB_RANGE: f32 = 41.0;
 /// `TargetPriorityFrustumPullInSides`: the viewport width fraction pulled in from each side.
 const FRUSTUM_PULL_SIDES: f32 = 0.10;
 /// `TargetPriorityFrustumPullInTop`: the viewport height fraction pulled down from the top.
@@ -40,7 +39,7 @@ const FRUSTUM_PULL_BOT: f32 = 0.10;
 const HISTORY_SECS: f64 = 4.0;
 /// The weight per unit of off-centerness (0 at the centre, about 1 at a corner).
 const W_SCREEN: f32 = 1.0;
-/// The weight per unit of `dist / TAB_RANGE`.
+/// The weight per unit of distance over the TAB range.
 const W_DIST: f32 = 1.0;
 /// Above the other terms' largest sum, so an attacker outranks anything peaceful.
 const COMBAT_WITH_ME_BONUS: f32 = 3.0;
@@ -93,8 +92,8 @@ struct Candidate {
 }
 
 /// Off-centerness (none off-screen) plus normalized distance, minus the fighting-me bonus.
-fn priority_score(off_center: Option<f32>, dist: f32, combat_with_me: bool) -> f32 {
-    off_center.map_or(0.0, |c| W_SCREEN * c) + W_DIST * (dist / TAB_RANGE)
+fn priority_score(off_center: Option<f32>, dist: f32, range: f32, combat_with_me: bool) -> f32 {
+    off_center.map_or(0.0, |c| W_SCREEN * c) + W_DIST * (dist / range)
         - if combat_with_me {
             COMBAT_WITH_ME_BONUS
         } else {
@@ -237,6 +236,8 @@ pub(crate) struct TargetScan<'w, 's> {
     index: Option<Res<'w, GuidIndex>>,
     /// The party slots and raid roster modes 3 and 4 test; `Option` for the same harnesses.
     group: Option<Res<'w, crate::ui_party::GroupState>>,
+    /// `targetNearestDistance`, the default's in those harnesses.
+    tab_range: Option<Res<'w, super::TabRange>>,
 }
 
 impl TargetScan<'_, '_> {
@@ -310,6 +311,11 @@ impl TargetScan<'_, '_> {
         };
         let me = self_guid.map(|g| g.0);
         let cam = self.camera.single().ok();
+        // The limit the collector squares (`0x494350`, `0x49435d`).
+        let range = self
+            .tab_range
+            .as_deref()
+            .map_or(super::TabRange::default().0, |r| r.0);
         // Off-centerness on the pulled-in screen, 0 at the centre and about 1 at a corner, `None`
         // outside it. Callers project the root + 1 yd, so feet just below the edge still count.
         let project = |world: Vec3| -> Option<f32> {
@@ -376,14 +382,14 @@ impl TargetScan<'_, '_> {
             // draw election hides every body outside the frustum, which would empty the off-screen
             // tier.
             let dist = (tf.translation - self_tf.translation).length();
-            if dist > TAB_RANGE {
-                trace_unit(guid_c.0, tf, "REJECT range (41 yd)");
+            if dist > range {
+                trace_unit(guid_c.0, tf, "REJECT range");
                 continue;
             }
             let off_center = project(tf.translation + Vec3::Y);
             // Enemy side only: a healer in combat and targeting you would head the CTRL-TAB pool.
             let cwm = side == ScanSide::Enemy && store.is_some_and(|s| combat_with_me(s, me));
-            let score = priority_score(off_center, dist, cwm);
+            let score = priority_score(off_center, dist, range, cwm);
             if trace {
                 let screen = off_center
                     .map(|c| format!("center+{c:.2}"))
@@ -1118,13 +1124,22 @@ pub(crate) struct AttackNearestRequest;
 /// `0x489b45` and written at `0x49377d` in `SetSelection`. Never cleared: an unresolved guid is a
 /// bare `ret` in the select helper `0x489a40`, not a deselect.
 #[derive(Resource, Default)]
-pub(crate) struct LastEnemy(pub(crate) Option<u64>);
+pub(crate) struct LastEnemy(pub(crate) Option<u64>, StampWatch);
+
+/// What the stamp last read of the selection: its object, and whether `CanAttack` held of it.
+#[derive(Clone, Copy, Default)]
+struct StampWatch {
+    object: Option<(Entity, u64)>,
+    attackable: bool,
+}
 
 /// Stamp [`LastEnemy`] behind the five-conjunct gate `0x49372f`–`0x493778`, on the object
-/// `SetSelection` found and lit (`0x4936f3`-`0x493701`, [`Selection::lit`]): one that streams in
-/// later under the selected guid was never selected, so it is never stamped. A hostile selected
-/// alive was stamped the frame it was selected, so its death's deselect (`super::died`, in a later
-/// frame's packet) leaves it remembered.
+/// `SetSelection` found and lit (`0x4936f3`-`0x493701`, [`Selection::lit`]), as the select makes
+/// it and at no other time: a dismount, a revival or the target's health back stamps nothing, and
+/// one that streams in later under the selected guid was never selected. A hostile selected alive
+/// was stamped the frame it was selected, so its death's deselect (`super::died`, in a later
+/// frame's packet) leaves it remembered. The deviation's one case past the select is `CanAttack`
+/// rising under the standing selection, which runs the gate once, as a select would.
 ///
 /// Deviation: sampled each frame, not stamped in `SetSelection`, because that way every selection
 /// writer is covered; a selected unit that turns hostile is remembered, where the reference's is
@@ -1136,9 +1151,28 @@ pub(super) fn remember_last_enemy(
     world: RelationWorld,
     mut last: ResMut<LastEnemy>,
 ) {
-    let Some((entity, guid)) = selection.lit.zip(selection.guid) else {
+    let Some(object) = selection.lit.zip(selection.guid) else {
+        last.1 = StampWatch::default();
         return;
     };
+    let (entity, guid) = object;
+    let store = stores.get(entity).ok();
+    // Conjunct 5: `CanAttack(player, new)`.
+    let attackable = (|| {
+        let (me, unit) = (world.me()?, world.unit_of(guid, store?));
+        Some(world.get().can_attack(&me, &unit))
+    })();
+    let attackable = attackable == Some(true);
+    let seen = last.1;
+    last.1 = StampWatch {
+        object: Some(object),
+        attackable,
+    };
+    // The gate's one run: at the select, or as `CanAttack` rises under it.
+    let due = seen.object != Some(object) || !seen.attackable;
+    if !(attackable && due) {
+        return;
+    }
     // Conjunct 1: the player object resolves.
     let Some(me) = self_store.iter().next() else {
         return;
@@ -1147,18 +1181,8 @@ pub(super) fn remember_last_enemy(
     if me.0.is_dead_or_ghost() || me.0.unit_mount_display_id() != 0 {
         return;
     }
-    let store = stores.get(entity).ok();
     // Conjunct 4: health, or the dead-looking flag, so a feigning target stays remembered.
-    let alive_enough = store.is_some_and(|s| !s.0.unit_is_dead() || s.0.unit_dynflag_dead());
-    if !alive_enough {
-        return;
-    }
-    // Conjunct 5: `CanAttack(player, new)`.
-    let attackable = (|| {
-        let (me, unit) = (world.me()?, world.unit_of(guid, store?));
-        Some(world.get().can_attack(&me, &unit))
-    })();
-    if attackable == Some(true) {
+    if store.is_some_and(|s| !s.0.unit_is_dead() || s.0.unit_dynflag_dead()) {
         last.0 = Some(guid);
     }
 }
@@ -1726,14 +1750,20 @@ mod tests {
 
     #[test]
     fn priority_score_weighs_center_distance_and_combat() {
+        const RANGE: f32 = 41.0;
         assert!(
-            priority_score(Some(0.05), 30.0, false) < priority_score(Some(0.9), 3.0, false),
+            priority_score(Some(0.05), 30.0, RANGE, false)
+                < priority_score(Some(0.9), 3.0, RANGE, false),
             "a centered far mob outranks a screen-edge close one"
         );
         // Same centrality: the nearest wins.
-        assert!(priority_score(Some(0.2), 5.0, false) < priority_score(Some(0.2), 35.0, false));
         assert!(
-            priority_score(Some(0.9), 40.0, true) < priority_score(Some(0.0), 1.0, false),
+            priority_score(Some(0.2), 5.0, RANGE, false)
+                < priority_score(Some(0.2), 35.0, RANGE, false)
+        );
+        assert!(
+            priority_score(Some(0.9), 40.0, RANGE, true)
+                < priority_score(Some(0.0), 1.0, RANGE, false),
             "the combat bonus dominates the geometric terms"
         );
     }
@@ -2042,6 +2072,56 @@ mod tests {
         assert_eq!(pool(&mut world, ScanSide::Raid), [PARTY, PARTY_DEAD]);
     }
 
+    /// The collector's limit is `targetNearestDistance`'s value (`[0xb4e2a8]+0x24`, squared at
+    /// `0x49435d`), 41 until a write moves it.
+    #[test]
+    fn the_tab_range_is_the_cvars_value() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        const NEAR: u64 = 0xA1;
+        const FAR: u64 = 0xA2;
+        let mut world = World::new();
+        world.init_resource::<Reputations>();
+        world.init_resource::<NameCache>();
+        world.init_resource::<super::super::TabRange>();
+        world.spawn((
+            SelfPlayer,
+            Transform::default(),
+            Guid(1),
+            store(&[
+                (F_TYPE, TYPE_PLAYER),
+                (F_FLAGS, CONTROLLED),
+                (F_HEALTH, 100),
+                (F_MAXHEALTH, 100),
+            ]),
+        ));
+        for (guid, z) in [(NEAR, 15.0), (FAR, 30.0)] {
+            world.spawn((
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                Guid(guid),
+                Transform::from_xyz(0.0, 0.0, z),
+                store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)]),
+            ));
+        }
+        let pool = |world: &mut World| {
+            world
+                .run_system_once(|scan: TargetScan| {
+                    scan.build(ScanSide::Enemy)
+                        .iter()
+                        .map(|c| c.guid)
+                        .collect::<Vec<_>>()
+                })
+                .expect("the scan runs as a one-shot system")
+        };
+        assert_eq!(pool(&mut world), [NEAR, FAR]);
+        world.resource_mut::<super::super::TabRange>().0 = 20.0;
+        assert_eq!(pool(&mut world), [NEAR]);
+    }
+
     #[test]
     fn a_body_the_draw_election_culled_is_still_a_candidate() {
         use bevy::ecs::system::RunSystemOnce;
@@ -2158,6 +2238,15 @@ mod tests {
             Some(0xB),
             "a corpse is not remembered — the target's health leg"
         );
+        // Its health back under the standing selection: the gate has run.
+        world
+            .entity_mut(dead_mob)
+            .insert(store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)]));
+        assert_eq!(
+            select(&mut world, Some((dead_mob, 0xD))),
+            Some(0xB),
+            "and passing the health test later stamps nothing"
+        );
         // A feigner, with the dead-looking dynflag, is remembered.
         let feigner = world
             .spawn(store(&[
@@ -2190,31 +2279,94 @@ mod tests {
             world.entity_mut(me).insert(store(&base));
         };
         let c = mob(&mut world);
-        with_self(&mut world, &[(F_MOUNTDISPLAYID, 1234)]);
-        assert_eq!(
-            select(&mut world, Some((c, 0xC))),
-            Some(0xE),
-            "mounted: the reference does not stamp"
-        );
-        with_self(&mut world, &[(F_HEALTH, 0)]);
-        assert_eq!(
-            select(&mut world, Some((c, 0xC))),
-            Some(0xE),
-            "dead: the reference does not stamp"
-        );
-        with_self(&mut world, &[(F_PLAYER_FLAGS, 0x10)]);
-        assert_eq!(
-            select(&mut world, Some((c, 0xC))),
-            Some(0xE),
-            "ghost: a ghost's wire health is 1, so this needs its own leg"
-        );
-        // The control: put the body back and the same selection stamps.
-        with_self(&mut world, &[]);
+        // A ghost's wire health is 1, so its state needs its own leg.
+        let states: [(&[(u16, u32)], &str); 3] = [
+            (&[(F_MOUNTDISPLAYID, 1234)], "mounted"),
+            (&[(F_HEALTH, 0)], "dead"),
+            (&[(F_PLAYER_FLAGS, 0x10)], "a ghost"),
+        ];
+        for (fields, state) in states {
+            with_self(&mut world, fields);
+            assert_eq!(
+                select(&mut world, Some((c, 0xC))),
+                Some(0xE),
+                "{state}: the reference does not stamp"
+            );
+            // The state clearing under the standing selection stamps nothing either.
+            with_self(&mut world, &[]);
+            assert_eq!(
+                select(&mut world, Some((c, 0xC))),
+                Some(0xE),
+                "{state}, then not: the gate ran at the select"
+            );
+            assert_eq!(select(&mut world, None), Some(0xE));
+        }
+        // The control: the body back and the same unit selected anew stamps.
         assert_eq!(
             select(&mut world, Some((c, 0xC))),
             Some(0xC),
             "the gate is the three states, not the selection"
         );
+    }
+
+    /// The recorded deviation's case: `CanAttack` rising under a standing selection runs the gate
+    /// once (the reference, which stamps at the select alone, `0x49377d`, never stamps it).
+    #[test]
+    fn a_standing_selection_stamps_only_as_it_turns_hostile() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        const ARBITER: u32 = 7;
+        let mut world = World::new();
+        world.init_resource::<Reputations>();
+        world.init_resource::<Selection>();
+        world.init_resource::<LastEnemy>();
+        let duellist = |team: u32, mount: u32| {
+            store(&[
+                (F_TYPE, TYPE_PLAYER),
+                (F_FLAGS, CONTROLLED),
+                (F_HEALTH, 100),
+                (F_MAXHEALTH, 100),
+                (F_MOUNTDISPLAYID, mount),
+                (F_DUEL_ARBITER, ARBITER),
+                (F_DUEL_TEAM, team),
+            ])
+        };
+        let me = world
+            .spawn((SelfPlayer, crate::net::Guid(0x1), duellist(1, 0)))
+            .id();
+        let remember = |world: &mut World| {
+            world
+                .run_system_once(remember_last_enemy)
+                .expect("the sampler runs as a one-shot system");
+            world.resource::<LastEnemy>().0
+        };
+        let select = |world: &mut World, entity: Entity, guid: u64| {
+            *world.resource_mut::<Selection>() = Selection {
+                target: Some(entity),
+                guid: Some(guid),
+                lit: Some(entity),
+                ..Default::default()
+            };
+        };
+
+        // A same-team partner is friendly, so the select stamps nothing and neither does waiting.
+        let partner = world.spawn(duellist(1, 0)).id();
+        select(&mut world, partner, 0xA);
+        assert_eq!(remember(&mut world), None);
+        assert_eq!(remember(&mut world), None);
+        // The other team's is attackable: it turned hostile under the selection.
+        world.entity_mut(partner).insert(duellist(2, 0));
+        assert_eq!(remember(&mut world), Some(0xA));
+
+        // Turning hostile while we ride fails the gate at its one run, and a dismount is too late.
+        let rider = world.spawn(duellist(1, 0)).id();
+        select(&mut world, rider, 0xB);
+        assert_eq!(remember(&mut world), Some(0xA));
+        world.entity_mut(me).insert(duellist(1, 1234));
+        world.entity_mut(rider).insert(duellist(2, 0));
+        assert_eq!(remember(&mut world), Some(0xA));
+        world.entity_mut(me).insert(duellist(1, 0));
+        assert_eq!(remember(&mut world), Some(0xA));
     }
 
     #[test]

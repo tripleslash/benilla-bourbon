@@ -1033,7 +1033,11 @@ mod tests {
         let last_pos = |world: &World| world.get::<InteriorAnchor>(unit).unwrap().last_pos;
 
         world.run_system_once(classify_entity_interior).unwrap();
-        assert_eq!(last_pos(&world), Vec3::ZERO, "the first resolve runs parked");
+        assert_eq!(
+            last_pos(&world),
+            Vec3::ZERO,
+            "the first resolve runs parked"
+        );
 
         let moved = Vec3::new(50.0, 0.0, 0.0);
         world
@@ -1091,7 +1095,6 @@ mod tests {
                 visible: vec![true],
                 lit: vec![true],
                 interior_fog: vec![gate],
-                liquid_visited: vec![false],
                 flooded: vec![None],
             })
             .id()

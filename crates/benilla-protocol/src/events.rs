@@ -100,6 +100,16 @@ pub enum RosterCause {
     Asked,
 }
 
+/// What a realm list query that empties the holder ends with: the argument the logon object passes
+/// `0x5abb90`, which maps it to a status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealmListEmptied {
+    /// Arguments 2, 3 and 4: `REALM_LIST_FAILED` (`0x24`).
+    ListFailed,
+    /// Argument 1: `AUTH_SESSION_EXPIRED` (`0x17`).
+    SessionExpired,
+}
+
 /// How a world session ended. On a loss the reference fires `DISCONNECTED_FROM_SERVER` and
 /// `GlueParent.lua` returns to the login screen; a logout returns to character select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,10 +184,13 @@ pub enum SessionEvent {
     LoginStage { stage: LoginStage },
     /// The account's realms (`CMD_REALM_LIST`); emitted by the IO thread after the logon and for
     /// each query (the reference re-requests every 5 s). `failed` is a query that got no answer
-    /// (`REALM_LIST_FAILED`); `realms` is then the list last held, empty with no logon.
+    /// (`REALM_LIST_FAILED`); `realms` is then the list last held, empty with no logon. `emptied`
+    /// goes with a `failed` query that empties the holder: a reply the record fill refused
+    /// (`0x5b23ff`), or a failed re-dial, as a failed reconnect does (`0x5b2860`, `0x5b2c9e`).
     RealmList {
         realms: Vec<crate::RealmInfo>,
         failed: bool,
+        emptied: Option<RealmListEmptied>,
     },
     /// The world server accepted the authentication (`SMSG_AUTH_RESPONSE` `AUTH_OK`, `0x5ab2b8`
     /// → `0x5aab80`): the world connect is done and the IO thread is at the character park, with
@@ -197,10 +210,11 @@ pub enum SessionEvent {
     AddonInfo {
         records: Vec<crate::messages::AddonRecord>,
     },
-    /// A roster ask on the parked session failed on the stream (`0x5ab300`'s failure leg,
-    /// `SetStatus(0, 0x2c)`, `CHAR_LIST_FAILED`); the session ends after it. Emitted by the IO
-    /// thread, never wire-decoded.
-    RosterFailed { epoch: u64 },
+    /// A roster ask on the parked session failed (`0x5ab300`'s failure leg, `SetStatus(0, 0x2c)`,
+    /// `CHAR_LIST_FAILED`). `emptied` is a reply that failed the list itself, which empties it
+    /// (`0x5b4539`-`0x5b455d`), on a link that stays up; else the stream failed under the ask and
+    /// the session ends after it. Emitted by the IO thread, never wire-decoded.
+    RosterFailed { epoch: u64, emptied: bool },
     /// Queued for a full realm (`AUTH_WAIT_QUEUE`), per queue packet: a wait, not an outcome.
     LoginQueued {
         position: Option<u32>,
