@@ -458,14 +458,13 @@ impl AssetLoader for WmoModelLoader {
                 (parse_wmo_root(&bytes), id, lights, ambient)
             })
             .await;
+        // Lowercased so the `.wmo` strip matches; MPQ lookup is case-insensitive anyway.
+        let root_path = ctx.path().path().to_string_lossy().to_ascii_lowercase();
         // **`Arc`, so a group's geometry parse can take the root with it.** `wmo_group_submeshes`
         // needs the root's material and batch tables, and it is the one call in the group loop
         // heavy enough to be worth a crossing. The root is never mutated after this line (31 uses,
         // all reads), so sharing it costs nothing and copies nothing.
-        let root = std::sync::Arc::new(root.map_err(to_io)?);
-
-        // Lowercased so the `.wmo` strip matches; MPQ lookup is case-insensitive anyway.
-        let root_path = ctx.path().path().to_string_lossy().to_ascii_lowercase();
+        let root = std::sync::Arc::new(root.map_err(to_io)?.at_path(&root_path));
         let stem = root_path
             .strip_suffix(".wmo")
             .unwrap_or(&root_path)

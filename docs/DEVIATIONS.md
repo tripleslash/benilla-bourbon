@@ -627,7 +627,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The fx lane redraws them as projected decals (`ground_fx`) because that way they drape the terrain. ([`src/models/types.rs:401`](../crates/benilla-formats/src/models/types.rs#L401))
 - Consumers light such a card off the side it presents, because the reference's shading of it is inverted and follows the camera. ([`src/models/types.rs:474`](../crates/benilla-formats/src/models/types.rs#L474))
 - The UV comes from the model-space position, not each surface's own `(i, j)`, because the two agree on cell-aligned surfaces and the position never seams where they are not. Magma and slime use this period too; the reference reads their UV from the vertex's authored `int16` pair × 1/256 (`0x6b6993`), which is not parsed. ([`src/models/wmo/group.rs:19`](../crates/benilla-formats/src/models/wmo/group.rs#L19))
-- A non-black SIDN colour glows without the `0x10` flag too, because Turtle WoW's `Stormwind.wmo` (patch-3) zeroes every MOMT flag but keeps the colours, which left its lamp glass and windows dark at night; no 1.12.1 root has such a colour unflagged. ([`src/models/wmo/group.rs:578`](../crates/benilla-formats/src/models/wmo/group.rs#L578))
+- In a root that lost its SIDN flag (`SIDN_FLAG_LOST`) a non-black SIDN colour glows without the `0x10` flag too, because Turtle WoW's `Stormwind.wmo` and its like zero every MOMT flag but keep the colours, which left their lamp glass and windows dark at night. Elsewhere an unflagged colour stays dark, as in the reference (`0x6b4090`). ([`src/models/wmo/group.rs:579`](../crates/benilla-formats/src/models/wmo/group.rs#L579))
 
 #### particles
 

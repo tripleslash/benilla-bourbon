@@ -49,6 +49,34 @@ pub struct WmoGroupInfo {
     pub bbox_max: [f32; 3],
 }
 
+/// The roots whose SIDN flag Turtle WoW's data lost: every MOMT flag is zero and the colours stand
+/// on the window and lamp glass alone (and `kttownhall`'s clock face). `Stormwind.wmo`'s stock copy
+/// flags those same materials. Any other root with an unflagged colour has it on its walls and props.
+const SIDN_FLAG_LOST: [&str; 22] = [
+    "stormwind.wmo",
+    "stormwindharbor.wmo",
+    "al_barracks.wmo",
+    "al_twostory.wmo",
+    "albs.wmo",
+    "alfarm.wmo",
+    "alinn.wmo",
+    "dal_hq.wmo",
+    "highelf_smallhouse01.wmo",
+    "kt_barn.wmo",
+    "kt_barracks.wmo",
+    "kt_hq.wmo",
+    "kt_lo.wmo",
+    "kt_lumbermill.wmo",
+    "kt_magetower.wmo",
+    "kt_twostory.wmo",
+    "ktbs.wmo",
+    "ktfarm.wmo",
+    "ktinn.wmo",
+    "kttownhall.wmo",
+    "magetower.wmo",
+    "prisonlonghouse_lordaeron.wmo",
+];
+
 /// A parsed WMO root, the tables [`super::wmo_group_submeshes`] resolves each group against.
 pub struct WmoRoot {
     /// The raw parse, whose material and texture tables the group batch build reads.
@@ -60,9 +88,20 @@ pub struct WmoRoot {
     fogs: Vec<WmoFog>,
     skybox: Option<String>,
     convex_volume: Vec<[f32; 4]>,
+    /// A non-black SIDN colour glows without the `0x10` flag ([`Self::at_path`]).
+    pub(super) glows_unflagged_sidn: bool,
 }
 
 impl WmoRoot {
+    /// This root as read from `path`, which says whether it lost its SIDN flag.
+    pub fn at_path(mut self, path: &str) -> Self {
+        let file = path.rsplit(['\\', '/']).next().unwrap_or(path);
+        self.glows_unflagged_sidn = SIDN_FLAG_LOST
+            .iter()
+            .any(|lost| file.eq_ignore_ascii_case(lost));
+        self
+    }
+
     /// Number of group files (`<stem>_NNN.wmo`) this root references.
     pub fn group_count(&self) -> u32 {
         match &self.parsed {
@@ -172,6 +211,7 @@ pub fn parse_wmo_root(bytes: &[u8]) -> Result<WmoRoot> {
         fogs,
         skybox,
         convex_volume,
+        glows_unflagged_sidn: false,
     })
 }
 

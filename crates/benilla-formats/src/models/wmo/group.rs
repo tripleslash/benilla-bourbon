@@ -477,6 +477,7 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
     // The reference fades once per group, gated on its `+0xbc` done-byte (`0x6b3f90`); a group
     // loads once, so the load is the gate.
     let colors = fixed_colors(&group, group_bytes, root).unwrap_or_default();
+    let glows_unflagged_sidn = root.glows_unflagged_sidn;
     let ParsedWmo::Root(root) = &root.parsed else {
         anyhow::bail!("WmoRoot is not a root");
     };
@@ -575,12 +576,13 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
                 emissive,
             );
             submesh.wmo_batch = Some(class);
-            // Deviation: a non-black SIDN colour glows without the `0x10` flag too, because Turtle
-            // WoW's `Stormwind.wmo` (patch-3) zeroes every MOMT flag but keeps the colours, which left its
-            // lamp glass and windows dark at night; no 1.12.1 root has such a colour unflagged.
+            // Deviation: in a root that lost its SIDN flag (`SIDN_FLAG_LOST`) a non-black SIDN colour
+            // glows without the `0x10` flag too, because Turtle WoW's `Stormwind.wmo` and its like
+            // zero every MOMT flag but keep the colours, which left their lamp glass and windows dark
+            // at night. Elsewhere an unflagged colour stays dark, as in the reference (`0x6b4090`).
             submesh.sidn = material
                 .map(|m| m.sidn_rgb)
-                .filter(|rgb| flags & 0x10 != 0 || *rgb != [0; 3]);
+                .filter(|rgb| flags & 0x10 != 0 || (glows_unflagged_sidn && *rgb != [0; 3]));
             submesh.window = flags & 0x20 != 0;
             if !has_normals {
                 submesh.normals.clear(); // no MONR: the renderer computes flat normals
@@ -794,6 +796,47 @@ mod tests {
         assert!(colors(0x8).is_empty(), "EXTERIOR: no MOCV stream");
         assert!(colors(0x40).is_empty(), "exterior-lit: no MOCV stream");
         assert_eq!(colors(0x0).len(), 3, "interior: the bake is the light");
+    }
+
+    /// A SIDN colour needs its flag (`0x6b4090`), but in a root that lost it.
+    #[test]
+    fn an_unflagged_sidn_colour_glows_only_in_a_root_that_lost_its_flag() {
+        let root_with = |flags: u32, sidn: [u8; 4]| {
+            let mut mohd = vec![0u8; 64];
+            mohd[4..8].copy_from_slice(&1u32.to_le_bytes());
+            let mut momt = [0u8; 64];
+            momt[..4].copy_from_slice(&flags.to_le_bytes());
+            momt[0x10..0x14].copy_from_slice(&sidn);
+            let mut bytes = chunk(b"DHOM", &mohd);
+            bytes.extend(chunk(b"XTOM", b"a.blp\0\0\0"));
+            bytes.extend(chunk(b"TMOM", &momt));
+            super::super::parse_wmo_root(&bytes).expect("root")
+        };
+        let mut mogp = vec![0u8; 68];
+        mogp[8..12].copy_from_slice(&0x8u32.to_le_bytes());
+        let verts: Vec<u8> = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+            .iter()
+            .flat_map(|v| super::super::test_bytes::f3(*v))
+            .collect();
+        mogp.extend(chunk(b"TVOM", &verts));
+        mogp.extend(chunk(b"IVOM", &[0, 0, 1, 0, 2, 0]));
+        let mut moba = [0u8; 24];
+        moba[16..18].copy_from_slice(&3u16.to_le_bytes());
+        mogp.extend(chunk(b"ABOM", &moba));
+        let group = chunk(b"PGOM", &mogp);
+        let sidn = |root: &WmoRoot| wmo_group_submeshes(&group, root).expect("submeshes")[0].sidn;
+
+        const COLOUR: [u8; 4] = [3, 2, 1, 255];
+        const LIT: Option<[u8; 3]> = Some([1, 2, 3]);
+        const CITY: &str = "World\\wmo\\Azeroth\\Buildings\\Stormwind\\Stormwind.wmo";
+        const HARBOR: &str = "world/wmo/azeroth/buildings/stormwind/stormwindharbor.wmo";
+        const LODGE: &str = "World\\wmo\\Kalimdor\\Buildings\\DSNightElfHuntersLodge.wmo";
+        assert_eq!(sidn(&root_with(0x10, COLOUR).at_path(LODGE)), LIT);
+        assert_eq!(sidn(&root_with(0, COLOUR).at_path(LODGE)), None);
+        assert_eq!(sidn(&root_with(0, COLOUR)), None);
+        assert_eq!(sidn(&root_with(0, COLOUR).at_path(CITY)), LIT);
+        assert_eq!(sidn(&root_with(0, COLOUR).at_path(HARBOR)), LIT);
+        assert_eq!(sidn(&root_with(0, [0, 0, 0, 255]).at_path(CITY)), None);
     }
 
     /// Shadowmoon_Slagpit01_00x: MOGP declares 0x40 (short of the 0x44 header) and its sub-chunks
