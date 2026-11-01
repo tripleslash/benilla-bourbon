@@ -62,12 +62,13 @@ fn shaft_phase(f: froxelfog::FroxelFog, phase: f32) -> f32 {
 // hard as the shaft haze, so a beam reads brightest where it crosses a bank. It starts at the
 // camera's feet, and what stands above it stays crisp. Coarse noise patches read as blobs a hundred
 // yards wide. A grazing ray's path through a layer grows with distance, which alone gives no veil
-// near the eye and a wall far off, so the layer thins linearly with planar depth, to
-// `BANK_FAR_SHARE` of itself at `BANK_THIN_TO` yards: a veil close by, and the distance reads.
-// 1 / the banks' height falloff (yd) above the terrain, about two heightfield texels (1.5 yd each).
-const BANK_INV_FALLOFF: f32 = 0.4;
+// near the eye and a wall far off, so the layer thins with planar depth, an exponential of
+// `BANK_THIN_YD` yards toward `BANK_FAR_SHARE` of itself: densest at the eye with no kink on the way,
+// a veil close by, and the distance reads.
+// 1 / the banks' height falloff (yd) above the terrain, about 2 yd.
+const BANK_INV_FALLOFF: f32 = 0.5;
 const BANK_FAR_SHARE: f32 = 0.1;
-const BANK_THIN_TO: f32 = 150.0;
+const BANK_THIN_YD: f32 = 60.0;
 // A bank's in-scatter: the key as the shaft haze takes it, and this share of the sky.
 const BANK_KEY_GAIN: f32 = 1.6;
 const BANK_SKY_SHARE: f32 = 0.8;
@@ -97,7 +98,7 @@ fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>, d: f32, terrain: vec2<f32
     }
     let ground = select(f.night.y, terrain.x, terrain.y > 0.5);
     let above = max(p.y - ground, 0.0);
-    let thin = mix(1.0, BANK_FAR_SHARE, clamp(d / BANK_THIN_TO, 0.0, 1.0));
+    let thin = mix(BANK_FAR_SHARE, 1.0, exp(-d / BANK_THIN_YD));
     return core * thin * exp(-min(above * BANK_INV_FALLOFF, 24.0));
 }
 
