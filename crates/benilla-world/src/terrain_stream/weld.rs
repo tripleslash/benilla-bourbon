@@ -203,6 +203,7 @@ mod tests {
             refs: 1,
             owner: (0, 0),
             sleeper: None,
+            probe_slots: Vec::new(),
             bounds: None,
         }
     }
