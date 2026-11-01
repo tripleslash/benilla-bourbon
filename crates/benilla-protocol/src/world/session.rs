@@ -55,6 +55,9 @@ pub struct WorldSession {
     chat_language: u32,
     /// `SMSG_TUTORIAL_FLAGS` when it lands during the handshake rather than in the world stream.
     tutorial_flags: Option<Vec<u8>>,
+    /// The `SMSG_GUILD_QUERY_RESPONSE`s read at character select, until
+    /// [`Self::take_guild_answers`].
+    guild_answers: Vec<messages::GuildQueryResponse>,
 }
 
 /// What the connection learned that outlives one character's world session, carried by the read
@@ -192,6 +195,7 @@ impl WorldSession {
             traffic,
             chat_language: messages::LANGUAGE_COMMON,
             tutorial_flags: None,
+            guild_answers: Vec::new(),
         };
 
         // AUTH_RESPONSE is not always first, so others are skipped.
@@ -309,6 +313,8 @@ impl WorldSession {
         // twin would have left the browser session silently without an addon verdict.
         match &packet {
             ServerPacket::AddonInfo { records } => self.link.addon_info = Some(records.clone()),
+            // So can a guild's answer, which is no reply to any of them (`0x555290`).
+            ServerPacket::GuildQueryResponse(answer) => self.guild_answers.push(answer.clone()),
             // Deviation: benilla runs no Warden module and answers nothing, because the answers
             // come from native Win32 x86 code the server sends, which the client maps, links and
             // runs in its own process (`0x7a79d0`), and benilla runs no such code on any platform
@@ -390,6 +396,19 @@ impl WorldSession {
         if let ServerPacket::TutorialFlags(flags) = packet {
             self.tutorial_flags = Some(flags.bytes);
         }
+    }
+
+    /// Ask for a guild's record at character select, as the select build's emblem lookup does on a
+    /// miss (`0x472cde` → `0x6d6d20` → `0x560e30`). Nothing waits on the reply: vmangos answers an
+    /// unknown id with another packet (`Handlers/GuildHandler.cpp:44`), and a read here takes the
+    /// answer whenever it comes ([`Self::take_guild_answers`]).
+    pub fn guild_query(&mut self, guild_id: u32) -> Result<()> {
+        self.send(opcode::CMSG_GUILD_QUERY, &messages::guild_query(guild_id))
+    }
+
+    /// The guild answers read at character select since the last call, in the order they came.
+    pub fn take_guild_answers(&mut self) -> Vec<messages::GuildQueryResponse> {
+        std::mem::take(&mut self.guild_answers)
     }
 
     /// Create a character; returns the `SMSG_CHAR_CREATE` result byte.
@@ -993,6 +1012,7 @@ impl WorldSession {
             traffic: writer.traffic,
             chat_language: writer.chat_language,
             tutorial_flags: None,
+            guild_answers: Vec::new(),
         };
         session
             .set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))

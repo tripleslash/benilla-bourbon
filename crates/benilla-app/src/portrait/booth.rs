@@ -218,6 +218,7 @@ pub(super) fn clear_booth_rig(commands: &mut Commands, root: Entity) {
         super::StageRig,
         benilla_world::rig_anim::PoseEveryFrame,
         benilla_world::rig_palette::RigSkin,
+        super::panes::StandChain,
     )>();
 }
 
@@ -335,7 +336,7 @@ pub(super) fn spawn_booth_effects(
 
 /// Spawns a booth model's own emitters, on its own joints (a scene's braziers, a pet's flames),
 /// and returns `(emitters, billboard frames)`. `root` is the fallback owner, the cloud's anchor
-/// and every emitter's parent, so a re-bake reaps them.
+/// and every emitter's parent, so a re-bake reaps them. `clock` is the sequence their tracks read.
 ///
 /// A booth pose drops the camera billboards
 /// ([`benilla_world::rig_anim::RigPose::without_camera_billboards`]), so an emitter under a
@@ -348,6 +349,7 @@ pub(super) fn spawn_booth_own_emitters(
     layer: &RenderLayers,
     light: Option<&bevy::render::render_resource::Buffer>,
     emitters: &[benilla_assets::ModelEmitter],
+    clock: benilla_world::particles::EmitClock,
 ) -> (usize, usize) {
     let mut spawned = 0usize;
     let mut frames = 0usize;
@@ -390,8 +392,7 @@ pub(super) fn spawn_booth_own_emitters(
                 // A booth bake has no appear or despawn ramp and no self-avatar feather.
                 alpha: None,
             },
-            // A booth loops its one authored clip forever, as a doodad does.
-            benilla_world::particles::EmitClock::Pinned,
+            clock,
         ) else {
             continue;
         };

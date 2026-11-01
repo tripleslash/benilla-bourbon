@@ -92,6 +92,7 @@ pub(crate) struct ControlRestore;
 // The last writer of a self body part's render alpha: `entities::apply_unit_mat_alpha` orders
 // itself before it.
 pub(crate) use camera::apply_self_model_fade;
+pub(crate) use camera_saved::{camera_at_interface_load, rebuild_camera};
 use controller::control;
 pub(crate) use controller::LookSample;
 // The private camera and `state` items are re-imported for the modules beside this one, which
@@ -389,8 +390,8 @@ impl Plugin for PlayerPlugin {
                 Update,
                 (
                     view_subject::publish_view_subject,
-                    // The spyglass zoom (aura 76), before `control`, which reads it to hold the
-                    // rig in first person.
+                    // The spyglass zoom (aura 76), before `control`, which takes its start and end
+                    // onto the camera.
                     scoped_view::apply_scoped_view,
                 )
                     .in_set(WorldStage::Input)

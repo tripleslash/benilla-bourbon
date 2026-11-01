@@ -85,7 +85,8 @@ generated from the code.
 
 ## Status
 
-Fully playable on any 1.12.1 server. What is left:
+Fully playable on a 1.12.1 server that doesn't enforce Warden or need client changes beyond its
+MPQ archives. What is left:
 
 - The long tail of small differences from 1.12.1, tracked as
   [issues](https://github.com/samwhosung/benilla/issues).

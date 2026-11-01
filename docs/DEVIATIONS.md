@@ -140,7 +140,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### death
 
-- `0x492130` compares the positions whatever map we stand on, so a ghost on another map at the corpse's coordinates reads in range for a reclaim the server refuses; here only the corpse's display map counts because the server refuses that reclaim. ([`src/death/mod.rs:308`](../crates/benilla-app/src/death/mod.rs#L308))
+- `0x492130` compares the positions whatever map we stand on, so a ghost on another map at the corpse's coordinates reads in range for a reclaim the server refuses; here only the corpse's display map counts because the server refuses that reclaim. ([`src/death/mod.rs:316`](../crates/benilla-app/src/death/mod.rs#L316))
 
 #### entities
 
@@ -219,11 +219,11 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - Here it rides the deck, because the reference stores the world point unconverted and reads it back as deck-local (`0x60fe6c`, `0x610e95`) and so, on a transport, walks astray. ([`src/player/approach.rs:420`](../crates/benilla-app/src/player/approach.rs#L420))
 - Here the deck is fixed at the arm, because the reference converts back through the transport the player stands on each frame (`0x610e6b`), so stepping off mid-walk sends the point astray. ([`src/player/approach.rs:450`](../crates/benilla-app/src/player/approach.rs#L450))
 - Here the melee walk does not turn, because the reference's melee arm names the player's own guid (`0x60fe5f`), so it turns to face itself, a fixed heading. ([`src/player/approach.rs:666`](../crates/benilla-app/src/player/approach.rs#L666))
-- The shape is kept, its scale anchored to `LOOK_SENSITIVITY` on both axes at the default speeds, because the unit factor is a per-machine OS setting and this keeps the shipped feel: both axes turn alike, where the reference's yaw turns 1.5× faster than its pitch. ([`src/player/camera.rs:121`](../crates/benilla-app/src/player/camera.rs#L121))
+- The shape is kept, its scale anchored to `LOOK_SENSITIVITY` on both axes at the default speeds, because the unit factor is a per-machine OS setting and this keeps the shipped feel: both axes turn alike, where the reference's yaw turns 1.5× faster than its pitch. ([`src/player/camera.rs:132`](../crates/benilla-app/src/player/camera.rs#L132))
 - A delay holds the channel at `from`, because the reference's `0x512830` backs the start time up by the delay, so `s` runs negative and the even cosine jumps the value away and back, an unclamped divide rather than a behaviour. No default reaches it: every `cameraTerrainTilt*` row's `Delay` is 0, and the pitch and bias arms pass 0. ([`src/player/camera_channel.rs:13`](../crates/benilla-app/src/player/camera_channel.rs#L13))
-- A code table, not the reference's ninety `cameraTerrainTilt<Style><State>` CVars, because the matrix is a law, not a setting. ([`src/player/camera_dynamics.rs:285`](../crates/benilla-app/src/player/camera_dynamics.rs#L285))
-- The reference sweeps the camera collision against the bobbed eye (`0x50ed47`); benilla adds the offset after the sweep, because it shares camera shake's accumulator there. ([`src/player/camera_dynamics.rs:450`](../crates/benilla-app/src/player/camera_dynamics.rs#L450))
-- Both values clamp to the rig's range, because a hand-edited file should not land a pose play cannot reach; the reference stores them unbounded, the pitch until a mouse-look re-clamps it. ([`src/player/camera_saved.rs:64`](../crates/benilla-app/src/player/camera_saved.rs#L64))
+- A code table, not the reference's ninety `cameraTerrainTilt<Style><State>` CVars, because the matrix is a law, not a setting. ([`src/player/camera_dynamics.rs:323`](../crates/benilla-app/src/player/camera_dynamics.rs#L323))
+- The reference sweeps the camera collision against the bobbed eye (`0x50ed47`); benilla adds the offset after the sweep, because it shares camera shake's accumulator there. ([`src/player/camera_dynamics.rs:488`](../crates/benilla-app/src/player/camera_dynamics.rs#L488))
+- Both values clamp to the rig's range, because a hand-edited file should not land a pose play cannot reach; the reference stores them unbounded, the pitch until a mouse-look re-clamps it. ([`src/player/camera_saved.rs:66`](../crates/benilla-app/src/player/camera_saved.rs#L66))
 - `ResetView` writes the CVars back to their defaults, because the CVar store is our persistence; the reference (`0x50fae0`) touches no CVar, so its reset reverts at next launch. ([`src/player/camera_view.rs:15`](../crates/benilla-app/src/player/camera_view.rs#L15))
 - The starting zoom, `CAM_DIST_DEFAULT`, is 15 yd where the reference starts at 5.55, the third-person-A row of its default table `0x84f488` that `cameraView` 1 picks (`0x50c17a`, `0x50c18b`; the `cameraDistance` CVar itself registers "0.0"), because that gives a wider view. ([`src/player/camera_zoom.rs:10`](../crates/benilla-app/src/player/camera_zoom.rs#L10))
 - No drunk field-of-view lane, because the reference's is invisible in play: its target `(179° − 90°)·fraction` (camera `+0x10c`, setter `0x511250`) eases at `cameraFoVSmoothSpeed`, 0.5°/s, and restarts on every drunk-byte change, so it creeps under 1°. Not built: entering the world already drunk, the reference snaps the full fisheye (`0x50d0f0`). ([`src/player/drunk.rs:46`](../crates/benilla-app/src/player/drunk.rs#L46))
@@ -354,7 +354,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 #### ui_duel
 
 - The challenger's name comes from the `NameCache`, so a name still being queried delays the popup to the name's answer rather than dropping it; the reference reads it off the streamed player and fires nothing without one (`0x4d4a72`). ([`src/ui_duel.rs:8`](../crates/benilla-app/src/ui_duel.rs#L8))
-- Zero arms nothing, because the reference prints 0 and re-arms forever on the `dec`'s wraparound, a bug vmangos never reaches (it sends 3000). ([`src/ui_duel.rs:95`](../crates/benilla-app/src/ui_duel.rs#L95))
+- Zero arms nothing, because the reference prints 0 and re-arms forever on the `dec`'s wraparound, a bug vmangos never reaches (it sends 3000). ([`src/ui_duel.rs:100`](../crates/benilla-app/src/ui_duel.rs#L100))
 
 #### ui_gamma
 
@@ -373,7 +373,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 - A script's 16-letter name, which the reference's bindings pass (1 to 16 code points, `0x4d20d0`, `0x4d2210`), is dropped rather than sent or truncated, because vmangos would kick the session. ([`src/ui_guild/feed.rs:72`](../crates/benilla-app/src/ui_guild/feed.rs#L72))
 - Bounded at the ten slots, because the reference's read (`0x4c93e7`) runs past its array. ([`src/ui_guild/mod.rs:87`](../crates/benilla-app/src/ui_guild/mod.rs#L87))
-- Clamped to ten, because the reference's unbounded loop (`0x4d0bb0`) overruns its ten-slot array from a hostile `rankCount` of 11: index 10 is `0xb726f8`, a float its initializer writes (`0x4d279c`). ([`src/ui_guild/mod.rs:562`](../crates/benilla-app/src/ui_guild/mod.rs#L562))
+- Clamped to ten, because the reference's unbounded loop (`0x4d0bb0`) overruns its ten-slot array from a hostile `rankCount` of 11: index 10 is `0xb726f8`, a float its initializer writes (`0x4d279c`). ([`src/ui_guild/mod.rs:587`](../crates/benilla-app/src/ui_guild/mod.rs#L587))
 - An exact tie is `Equal` where the reference answers ±1, and a NaN has a place (`total_cmp`), because Rust's sort requires a total order. ([`src/ui_guild/sort.rs:72`](../crates/benilla-app/src/ui_guild/sort.rs#L72))
 - The reference ties a miss with a hit (`0x4d0e27`, `0x4d0ea1`), no total order. ([`src/ui_guild/sort.rs:89`](../crates/benilla-app/src/ui_guild/sort.rs#L89))
 
@@ -401,9 +401,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 - A negative answer releases the row, where the reference's callback `0x4c2ac0` returns on a failed query and the window never opens, because an entry the server cannot describe would otherwise keep the loot shut for good. ([`src/ui_loot/mod.rs:243`](../crates/benilla-app/src/ui_loot/mod.rs#L243))
 - It is the display row, where the reference's is the item index plus one (`0x4c2885`), because that way an addon's `GetLootSlotInfo(arg1)` reads the row the dialog is for. ([`src/ui_loot/mod.rs:336`](../crates/benilla-app/src/ui_loot/mod.rs#L336))
-- A row cleared meanwhile stops counting, because `ClearLootRow` (`0x4c1f00`) cancels its callback (`0x4c1f52`) and never lowers the count (its writers are `0x4c1def`, `0x4c1e94` and `0x4c2af6` alone), so in 1.12.1 a group member's take of an uncached item before the answer leaves that corpse's window shut until the next loot response resets the count (`0x4c1def`), and ours opens. ([`src/ui_loot/mod.rs:904`](../crates/benilla-app/src/ui_loot/mod.rs#L904))
-- `autoLootDefault` is benilla's own option, 1.12 auto-looting only on a shift-click, and off is 1.12's behaviour. On, every window auto-loots unless Shift is held: an interaction stores the byte inverted by it (`interaction_byte`), and a pickpocket or disenchant window, which no interaction stores the byte for, takes it at its copier's end from the Shift held then. ([`src/ui_loot/mod.rs:934`](../crates/benilla-app/src/ui_loot/mod.rs#L934))
-- Our close paths clear it guid-matched, where `CloseInteraction` clears it unconditionally (`0x48f2c9`), because that way closing an old window keeps a newer `CMSG_LOOT`'s latch. ([`src/ui_loot/mod.rs:962`](../crates/benilla-app/src/ui_loot/mod.rs#L962))
+- A row cleared meanwhile stops counting, because `ClearLootRow` (`0x4c1f00`) cancels its callback (`0x4c1f52`) and never lowers the count (its writers are `0x4c1def`, `0x4c1e94` and `0x4c2af6` alone), so in 1.12.1 a group member's take of an uncached item before the answer leaves that corpse's window shut until the next loot response resets the count (`0x4c1def`), and ours opens. ([`src/ui_loot/mod.rs:911`](../crates/benilla-app/src/ui_loot/mod.rs#L911))
+- `autoLootDefault` is benilla's own option, 1.12 auto-looting only on a shift-click, and off is 1.12's behaviour. On, every window auto-loots unless Shift is held: an interaction stores the byte inverted by it (`interaction_byte`), and a pickpocket or disenchant window, which no interaction stores the byte for, takes it at its copier's end from the Shift held then. ([`src/ui_loot/mod.rs:941`](../crates/benilla-app/src/ui_loot/mod.rs#L941))
+- Our close paths clear it guid-matched, where `CloseInteraction` clears it unconditionally (`0x48f2c9`), because that way closing an old window keeps a newer `CMSG_LOOT`'s latch. ([`src/ui_loot/mod.rs:969`](../crates/benilla-app/src/ui_loot/mod.rs#L969))
 
 #### ui_loot_roll
 
@@ -515,7 +515,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### ui_trade
 
-- An out-of-range slot is dropped, where the reference indexes its 7-slot mirror unchecked, because an out-of-bounds write is not a behaviour to reproduce. ([`src/ui_trade/mod.rs:411`](../crates/benilla-app/src/ui_trade/mod.rs#L411))
+- An out-of-range slot is dropped, where the reference indexes its 7-slot mirror unchecked, because an out-of-bounds write is not a behaviour to reproduce. ([`src/ui_trade/mod.rs:416`](../crates/benilla-app/src/ui_trade/mod.rs#L416))
 
 #### ui_trainer
 
