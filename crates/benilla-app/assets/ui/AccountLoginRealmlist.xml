@@ -4,6 +4,9 @@
          too), none of the web-link buttons, and the realmlist as a readout alone, the address the
          next login dials, over the Cinematics button; this fork offers no realmlist editor. The
          host keeps BENILLA_REALMLIST. -->
+    <!-- Deviation: this readout, where 1.12.1 has only realmlist.wtf beside the executable and no
+         interface for it, because the install is read-only and a page has none, so no such file
+         can name the address the next login dials. -->
     <Script>
         -- This fork's login screen keeps logging in, Credits and Cinematics: Quit, the stock
         -- screen's Terms of Use, Community Site and Manage Account, and Turtle WoW's Reddit,
