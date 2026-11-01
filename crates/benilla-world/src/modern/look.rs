@@ -375,12 +375,12 @@ impl ZoneLook {
         key: 0.85,
         fill: 0.95,
         exposure: 0.95,
-        haze: 0.0025,
+        haze: 0.0015,
         forward: 0.82,
         key_scatter: 0.9,
         glow: [1.15, 0.7, 0.6],
         haze_tint: [0.85, 0.76, 0.78],
-        fog_reach: 0.7,
+        fog_reach: 1.4,
         fog_tint: [2.1, 1.85, 1.85],
         fog_falloff: 100.0,
         sky_tint: [1.15, 1.0, 1.0],
@@ -390,7 +390,8 @@ impl ZoneLook {
         saturation: 0.85,
         vignette: 0.32,
         key_tint: [1.0, 0.88, 0.85],
-        // No ground banks by day: only the sea fog lies here at every hour.
+        // A faint layer on the ground at every hour, over the sea fog.
+        ground_fog: 0.7,
         night_banks: 0.6,
         night_glow: 0.5,
         sea_fog: 0.06,
@@ -1225,17 +1226,15 @@ mod tests {
         assert!(n.saturation < d.saturation);
     }
 
-    /// Darkshore's sea fog is its own: no other look lays one, it is the zone's only bank by day,
+    /// Darkshore's sea fog is its own: no other look lays one, its ground banks lie at every hour,
     /// and its grey authored rows are tinted warm, toward the reference's mauve.
     #[test]
     fn only_darkshore_lays_a_sea_fog() {
         let d = look_for_zone(DARKSHORE_ZONE);
         assert!(d.sea_fog > 0.0);
-        // The sea fog is its only bank by day: the ground banks are the night's.
         for minute in [420.0, 720.0, 1020.0] {
-            assert_eq!(
-                look_for_zone_at(DARKSHORE_ZONE, minute).ground_fog,
-                0.0,
+            assert!(
+                look_for_zone_at(DARKSHORE_ZONE, minute).ground_fog > 0.0,
                 "{minute}"
             );
         }

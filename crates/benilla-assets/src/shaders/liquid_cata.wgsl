@@ -1256,7 +1256,12 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     // P4: transparent water draws after the fog composite, so it fogs itself; opaque magma and slime
     // (`kind.x`) draw before it and are fogged there.
     if (wow_light.point_count.y > 0.5 && wow_light.fog_color.w > 0.5 && w.kind.x < 0.5) {
-        let fog = froxelfog::fog_at(modern_fog_volume, scene_samp, modern_block.fog, in.world_position.xyz);
+        let air = modern_block.fog;
+        let fog = colorspace::air_exposure(
+            froxelfog::fog_at(modern_fog_volume, scene_samp, air, in.world_position.xyz),
+            air.sky.x,
+            air.sky.y,
+        );
         rgb = rgb * fog.a + fog.rgb;
     }
     return vec4<f32>(rgb, c.a);

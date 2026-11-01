@@ -58,17 +58,19 @@ fn shaft_phase(f: froxelfog::FroxelFog, phase: f32) -> f32 {
 }
 
 // fork: **ground fog.** Overnight (and by day in the dark zones) the air near the ground gathers into
-// banks (`fog.night`): dense within a few yards of the terrain under each froxel, broken into
-// patches by the drifting noise at a coarse scale, and lit by the key as hard as the shaft haze, so
-// a beam reads brightest where it crosses a bank.
-// The patches' feature size (yd), and the noise band that is bank: below the low edge is clear air.
-const BANK_SCALE: f32 = 150.0;
-// 1 / the banks' height falloff (yd) above the terrain: dense within a few yards of it.
-const BANK_INV_FALLOFF: f32 = 0.25;
-const BANK_EDGE: vec2<f32> = vec2<f32>(0.45, 0.72);
+// banks (`fog.night`): one thin, unbroken layer on the terrain under each froxel, lit by the key as
+// hard as the shaft haze, so a beam reads brightest where it crosses a bank. It starts at the
+// camera's feet, and what stands above it stays crisp. Coarse noise patches read as blobs a hundred
+// yards wide. A grazing ray's path through a layer grows with distance, which alone gives no veil
+// near the eye and a wall far off, so the layer thins linearly with planar depth, to
+// `BANK_FAR_SHARE` of itself at `BANK_THIN_TO` yards: a veil close by, and the distance reads.
+// 1 / the banks' height falloff (yd) above the terrain, about two heightfield texels (1.5 yd each).
+const BANK_INV_FALLOFF: f32 = 0.4;
+const BANK_FAR_SHARE: f32 = 0.1;
+const BANK_THIN_TO: f32 = 150.0;
 // A bank's in-scatter: the key as the shaft haze takes it, and this share of the sky.
 const BANK_KEY_GAIN: f32 = 1.6;
-const BANK_SKY_SHARE: f32 = 0.5;
+const BANK_SKY_SHARE: f32 = 0.8;
 
 // The terrain under `p` from the heightfield (`probegi::terrain_height`'s read), read once per froxel
 // for the ground banks and the sea fog: x = the height at the texel `p` clamps to (`-1e9` where
@@ -86,19 +88,17 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(f.ground.y + d * f.ground.z, select(0.0, 1.0, all(raw == uv)));
 }
 
-// The ground banks' extinction at `p` (1/yd), over `terrain` (`terrain_under`; off or outside it,
-// the ground under the camera).
-fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>, terrain: vec2<f32>) -> f32 {
+// The ground banks' extinction at `p`, `d` yards of planar depth from the camera (1/yd), over
+// `terrain` (`terrain_under`; off or outside it, the ground under the camera).
+fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>, d: f32, terrain: vec2<f32>) -> f32 {
     let core = f.night.x;
     if (core <= 0.0) {
         return 0.0;
     }
     let ground = select(f.night.y, terrain.x, terrain.y > 0.5);
     let above = max(p.y - ground, 0.0);
-    let height = exp(-min(above * BANK_INV_FALLOFF, 24.0));
-    let q = vec3<f32>(p.x, p.y * 0.25, p.z) + f.wind.xyz * 0.5;
-    let n = textureSampleLevel(noise_tex, repeat_samp, q / BANK_SCALE + vec3<f32>(0.37, 0.11, 0.73), 0.0).r;
-    return core * height * smoothstep(BANK_EDGE.x, BANK_EDGE.y, n);
+    let thin = mix(1.0, BANK_FAR_SHARE, clamp(d / BANK_THIN_TO, 0.0, 1.0));
+    return core * thin * exp(-min(above * BANK_INV_FALLOFF, 24.0));
 }
 
 // fork: **sea fog.** A zone look's `sea_fog` (`fog.night.w`) lays a bank on the ocean along the
@@ -255,7 +255,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         terrain = terrain_under(f, p);
     }
     // fork: the ground banks (outside rooms: a building's air is its own).
-    let sigma_bank = ground_banks(f, p, terrain) * (1.0 - room);
+    let sigma_bank = ground_banks(f, p, d, terrain) * (1.0 - room);
     // fork: the sea fog, lit as the zone's own fog (`lum_fog`'s open-air term).
     let sigma_sea = sea_fog(f, p, terrain.x, noise) * (1.0 - room);
     let sigma = sigma_fog + sigma_haze + sigma_night + sigma_bank + sigma_sea;

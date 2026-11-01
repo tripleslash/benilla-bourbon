@@ -91,7 +91,7 @@ const HAZE_SCALE: f32 = 0.67;
 /// fork: **ground fog** — the banks' extinction at the ground (1/yd) at the full SIDN night, which
 /// falls off within a few yards of the terrain under each froxel (`froxel_scatter.wgsl`'s
 /// `BANK_INV_FALLOFF`; the GI heightfield, past it the ground under the camera).
-/// `froxel_scatter.wgsl` breaks them into patches and lights them with the shaft haze's key.
+/// `froxel_scatter.wgsl` lights them with the shaft haze's key.
 /// Overnight a zone look's `night_banks` takes its share (none in an ordinary zone, the whole bank
 /// in a dark one), and its `ground_fog` keeps a share by day. Anchored to one plane at the camera's
 /// ground, 0.035 filled Hillsbrad's low ground and left Gilneas's hills bare.

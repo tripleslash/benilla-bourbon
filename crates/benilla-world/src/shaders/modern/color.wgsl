@@ -70,3 +70,20 @@ fn unlifted(c: vec3<f32>, lift: f32, room: f32) -> vec3<f32> {
     let u = select((d - b) / (2.0 * a), 2.0 * y * r / max(b + d, 1e-12), b >= 0.0);
     return c * select(u / y, 1.0 / max(lift, 1e-3), y < 1e-8);
 }
+
+// fork: **the air keeps the sky's exposure over the world too.** The fog over the sky is drawn
+// unlifted, and lifted over the world the same air met it at the horizon as a hard line: on a dark
+// night a fogged-out sea, ship or distant band stood pale under a black horizon. A world pixel takes
+// the unlift of its in-scatter (`fog.rgb`) in the share the fog hides it (`1 − fog.a`): one swallowed
+// by the air lands where the sky's air does, one in clear air keeps the whole lift. Both terms of
+// `rgb + dst * a` scale, so the surface goes with its air. The fog composite and the water, which
+// fogs itself after the composite, both take this.
+fn air_exposure(fog: vec4<f32>, lift: f32, room: f32) -> vec4<f32> {
+    let y = luminance(fog.rgb);
+    if (y <= 1e-8) {
+        return fog;
+    }
+    let s = luminance(unlifted(fog.rgb, lift, room)) / y;
+    let g = mix(s, 1.0, clamp(fog.a, 0.0, 1.0));
+    return vec4<f32>(fog.rgb * g, fog.a * g);
+}

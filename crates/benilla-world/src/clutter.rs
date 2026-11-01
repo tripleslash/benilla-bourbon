@@ -131,9 +131,9 @@ pub(crate) const DETAIL_DOODAD_ALPHA_REF: f32 = 128.0 / 255.0;
 /// The reference's hardcoded detail-doodad draw distance, 70 yd (`[0x867958]`); clutter fades out
 /// over its last quarter.
 ///
-/// fork: modern lighting — doubled to 140 yd (the director's call, 2026-09-17): with the long-range
-/// fog the ground past 70 yd reads bare.
-pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 140.0;
+/// fork: modern lighting — 200 yd (the director's call): with the long-range fog the ground past
+/// 70 yd reads bare, and past 140 yd still did.
+pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 200.0;
 
 /// Ground-clutter tunables. `density` scales the reference's 16 cells per chunk (`frillDensity`),
 /// and a change re-scatters loaded tiles, as the 1.12 setter rebuilds its chunks. Seeded from
