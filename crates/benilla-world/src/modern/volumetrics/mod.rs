@@ -96,6 +96,8 @@ const HAZE_SCALE: f32 = 0.67;
 /// in a dark one), and its `ground_fog` keeps a share by day. Anchored to one plane at the camera's
 /// ground, 0.035 filled Hillsbrad's low ground and left Gilneas's hills bare.
 const BANK_EXTINCTION: f32 = 0.022;
+/// fork: the analytic bank's dimmest luminance (linear).
+const BANK_LIGHT_FLOOR: f32 = 0.015;
 /// fork: under a risen moon the night air's uniform glow drops to this share: the moonlight and
 /// the banks carry the night instead of a veil over everything.
 const MOON_VEIL: f32 = 0.4;
@@ -230,7 +232,7 @@ pub struct FroxelFog {
     /// ground (1/yd, 0 where the look's banks stay in the volume); y, z = its fade with distance,
     /// the yards and the share left; w = a steep view's gain.
     pub bank: Vec4,
-    /// fork: the analytic bank's colour (linear radiance); w = its ceiling on the veil.
+    /// fork: the analytic bank's colour (linear radiance, [`bank_light`]); w = its ceiling on the veil.
     pub bank_color: Vec4,
 }
 
@@ -742,7 +744,12 @@ fn update_volume(
             look.0.bank_far_share,
             look.0.bank_steep,
         ),
-        bank_color: Vec3::from(look.0.bank_rgb).extend(look.0.bank_veil),
+        bank_color: bank_light(
+            Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint),
+            Vec3::from(media.key_in) * Vec3::from(look.0.key_hue(look.0.glow)),
+            Vec3::from(look.0.bank_rgb),
+        )
+        .extend(look.0.bank_veil),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -773,6 +780,20 @@ fn fading_room(
         *latched = None;
     }
     *latched
+}
+
+/// fork: the analytic bank's colour this frame: the hour's light in the zone's air, flat, as one value
+/// over every pixel, with half the key for want of a phase that would glow toward it. Its veil is the
+/// same at every hour and this follows the light under it, so the bank reads alike from noon to
+/// midnight, held off black by [`BANK_LIGHT_FLOOR`] so a dark night does not lose it.
+fn bank_light(ambient: Vec3, key: Vec3, gain: Vec3) -> Vec3 {
+    let light = (ambient + key * 0.5) * gain;
+    let lum = light.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+    if lum > 1e-4 && lum < BANK_LIGHT_FLOOR {
+        light * (BANK_LIGHT_FLOOR / lum)
+    } else {
+        light
+    }
 }
 
 /// The share of the night air and rain's humid veil a zone takes on top of its own air (see
@@ -919,6 +940,19 @@ mod tests {
             night_bank_share(&banked, 1.0, added_air(&banked)),
             banked.night_banks
         );
+    }
+
+    /// The bank's colour follows the hour's light, its hue kept where a dark night lifts it to the
+    /// floor.
+    #[test]
+    fn the_banks_colour_follows_the_light_down_to_a_floor() {
+        let gain = Vec3::ONE;
+        let day = bank_light(Vec3::splat(0.2), Vec3::splat(0.4), gain);
+        assert_eq!(day, Vec3::splat(0.4));
+        let night = bank_light(Vec3::new(0.002, 0.001, 0.003), Vec3::ZERO, gain);
+        let lum = night.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+        assert!((lum - BANK_LIGHT_FLOOR).abs() < 1e-5, "{lum}");
+        assert!(night.z > night.x && night.x > night.y, "{night}");
     }
 
     #[test]

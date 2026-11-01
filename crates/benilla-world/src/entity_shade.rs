@@ -517,6 +517,8 @@ mod tests {
                 GlobalTransform::default(),
                 GroundShade {
                     sampled: true,
+                    t: LIT_T,
+                    target: LIT_T,
                     ..GroundShade::default()
                 },
             ))
@@ -604,6 +606,8 @@ mod tests {
                 GlobalTransform::default(),
                 GroundShade {
                     sampled: true,
+                    t: LIT_T,
+                    target: LIT_T,
                     ..GroundShade::default()
                 },
             ))

@@ -711,6 +711,7 @@ mod tests {
             .init_resource::<crate::wmo_portal::ExteriorWindows>()
             .init_resource::<crate::wmo_portal::CameraInteriorClaim>()
             .init_resource::<crate::wmo_portal::CameraWmoFog>()
+            .init_resource::<crate::wmo_portal::CameraRoomExtent>()
             .init_resource::<crate::wmo_portal::WmoCullProbe>()
             .init_resource::<crate::terrain_stream::TerrainStreamer>()
             .init_resource::<super::super::FarSideTwins>()

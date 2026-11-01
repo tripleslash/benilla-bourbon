@@ -112,7 +112,8 @@ pub struct ZoneLook {
     pub bank_patch: f32,
     /// fork: the clouds' feature size (yd).
     pub bank_patch_yd: f32,
-    /// fork: the analytic bank's own colour (linear radiance), the same at every hour.
+    /// fork: a gain per channel on the analytic bank's colour, which is this hour's light
+    /// (`volumetrics::bank_light`), so its veil reads alike at every hour.
     pub bank_rgb: [f32; 3],
     /// fork: the analytic bank's ceiling: the most of a surface it can veil, approached softly.
     pub bank_veil: f32,
@@ -167,7 +168,7 @@ impl ZoneLook {
         bank_analytic: 0.0,
         bank_patch: 0.0,
         bank_patch_yd: 30.0,
-        bank_rgb: [0.0, 0.0, 0.0],
+        bank_rgb: [1.0, 1.0, 1.0],
         bank_veil: 1.0,
         bank_far_share: 0.1,
         bank_steep: 0.0,
@@ -221,7 +222,7 @@ impl ZoneLook {
     }
 
     fn lerp(self, to: Self, t: f32) -> Self {
-        let m = |a: f32, b: f32| a + (b - a) * t;
+        let m = |a: f32, b: f32| a * (1.0 - t) + b * t;
         Self {
             key: m(self.key, to.key),
             fill: m(self.fill, to.fill),
@@ -455,7 +456,6 @@ impl ZoneLook {
         bank_analytic: 1.0,
         bank_patch: 0.95,
         bank_patch_yd: 45.0,
-        bank_rgb: [0.3, 0.15, 0.12],
         bank_veil: 0.5,
         night_banks: 0.6,
         night_glow: 0.5,
