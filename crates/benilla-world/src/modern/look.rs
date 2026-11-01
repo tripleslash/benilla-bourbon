@@ -103,6 +103,11 @@ pub struct ZoneLook {
     /// share of the night's banks (`volumetrics::added_air`); 1 lights them by the whole moon and
     /// lays the whole night bank, dense fog lying on the ground.
     pub bank_moon: f32,
+    /// fork: the ground banks' fade with planar depth (`froxel_scatter.wgsl`'s `ground_banks`):
+    /// the yards of its exponential.
+    pub bank_thin_yd: f32,
+    /// fork: the share of the ground banks that fade leaves at any distance.
+    pub bank_far_share: f32,
 }
 
 impl ZoneLook {
@@ -142,6 +147,8 @@ impl ZoneLook {
         moon_hue: 1.0,
         moon_key: 1.0,
         bank_moon: 0.0,
+        bank_thin_yd: 60.0,
+        bank_far_share: 0.1,
     };
 
     /// fork: **the default look at noon**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
@@ -225,6 +232,8 @@ impl ZoneLook {
             moon_hue: m(self.moon_hue, to.moon_hue),
             moon_key: m(self.moon_key, to.moon_key),
             bank_moon: m(self.bank_moon, to.bank_moon),
+            bank_thin_yd: m(self.bank_thin_yd, to.bank_thin_yd),
+            bank_far_share: m(self.bank_far_share, to.bank_far_share),
         }
     }
 
@@ -255,6 +264,8 @@ impl ZoneLook {
             && d(self.moon_hue, other.moon_hue)
             && d(self.moon_key, other.moon_key)
             && d(self.bank_moon, other.bank_moon)
+            && d(self.bank_thin_yd, other.bank_thin_yd)
+            && d(self.bank_far_share, other.bank_far_share)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.haze_tint[i], other.haze_tint[i])
@@ -384,12 +395,13 @@ impl ZoneLook {
     pub const DARKSHORE: Self = Self {
         key: 0.85,
         fill: 0.95,
-        exposure: 0.95,
+        exposure: 1.3,
         haze: 0.001,
         forward: 0.82,
         key_scatter: 0.9,
         glow: [1.15, 0.7, 0.6],
-        haze_tint: [0.85, 0.76, 0.78],
+        // Salmon, and at this thin a haze it colours the ground banks more than the air.
+        haze_tint: [2.4, 1.45, 1.1],
         fog_reach: 2.2,
         fog_tint: [2.1, 1.85, 1.85],
         fog_falloff: 100.0,
@@ -400,8 +412,11 @@ impl ZoneLook {
         saturation: 0.85,
         vignette: 0.32,
         key_tint: [1.0, 0.88, 0.85],
-        // A faint layer on the ground at every hour, over the sea fog.
-        ground_fog: 0.4,
+        // A thin veil on the ground at every hour, over the sea fog: thickest at the camera and
+        // little of it in the distance, as the reference's lies.
+        ground_fog: 1.8,
+        bank_thin_yd: 25.0,
+        bank_far_share: 0.05,
         night_banks: 0.6,
         night_glow: 0.5,
         sea_fog: 0.06,
@@ -419,6 +434,7 @@ impl ZoneLook {
     /// warm fog read golden under the white noon sun (asked in the viewer): the noon sun, glow, fog,
     /// haze and sky go grey at the same fog brightness, and the grade is less saturated.
     pub const DARKSHORE_NOON: Self = Self {
+        exposure: 0.95,
         glow: [1.0, 0.96, 0.95],
         haze_tint: [0.8, 0.8, 0.82],
         fog_tint: [1.9, 1.9, 1.93],
@@ -842,7 +858,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_thin_yd,bank_far_share`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -893,6 +909,8 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.moon_hue, 40);
     set(&mut look.moon_key, 41);
     set(&mut look.bank_moon, 42);
+    set(&mut look.bank_thin_yd, 43);
+    set(&mut look.bank_far_share, 44);
     look
 }
 
