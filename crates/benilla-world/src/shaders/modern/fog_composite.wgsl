@@ -184,6 +184,12 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     return f.ground.y + d * f.ground.z;
 }
 
+// How much of the bank the ground at `at` holds: none in a clear patch (but its floor), so where the bank
+// says there is none, a surface there shows none of its own.
+fn bank_holds(f: froxelfog::FroxelFog, at: vec3<f32>) -> f32 {
+    return froxelfog::bank_clear(f, at, 1.0);
+}
+
 // The bank from the eye to `p`, each stretch's height read off the terrain under its ends, the eye's too,
 // so the bank follows every dip and crest the ray passes over and nothing in it follows the camera. Every
 // stretch counts: a ray stands high over a hollow and comes back down to the ground past it.
@@ -196,22 +202,34 @@ fn bank_over_terrain(f: froxelfog::FroxelFog, eye: vec3<f32>, p: vec3<f32>) -> v
     var t0 = 0.0;
     var depth = vec3<f32>(0.0);
     var lit = 0.0;
+    var here = 1.0;
+    let shaded = f.bank_reach.x > 0.0;
     for (var i = 1u; i <= froxelfog::BANK_STRETCHES; i = i + 1u) {
         let t1 = reach * froxelfog::bank_stretch_end(i);
         let at = eye + dir * t1;
-        let floor = froxelfog::bank_floor(f, terrain_under(f, at));
+        let ground = terrain_under(f, at);
+        let floor = froxelfog::bank_floor(f, ground);
         let h1 = max(at.y - floor, 0.0);
-        let stretch = froxelfog::bank_stretch(f, eye, dir, t0, t1, h0, h1);
-        let q = vec3<f32>(at.x, floor + BANK_LIGHT_LIFT, at.z);
-        let vis = sunshadow::sun_visibility_fast(
-            shadow_map, shadow_samp, modern_block.cascades, q, froxelfog::view_depth(f, q));
+        // Each stretch held to the ground at its end, so the one that ends at the surface carries
+        // nothing where the bank lies nowhere.
+        here = bank_holds(f, at);
+        let raw = froxelfog::bank_stretch(f, eye, dir, t0, t1, h0, h1);
+        let stretch = vec3<f32>(raw.xy * here, raw.z);
+        var vis = 0.5;
+        if (shaded) {
+            let q = vec3<f32>(at.x, floor + BANK_LIGHT_LIFT, at.z);
+            vis = sunshadow::sun_visibility_fast(
+                shadow_map, shadow_samp, modern_block.cascades, q, froxelfog::view_depth(f, q));
+        }
         depth = depth + stretch;
         lit = lit + stretch.x * vis;
         h0 = h1;
         t0 = t1;
     }
-    let fog = froxelfog::bank_fog(f, froxelfog::bank_at_surface(f, depth, h0));
-    return froxelfog::bank_in_key(f, fog, lit / max(depth.x, 1e-6));
+    // The least air a surface holds (`bank_at_surface`) only where the ground there holds the bank.
+    let raised = depth + (froxelfog::bank_at_surface(f, depth, h0) - depth) * here;
+    let fog = froxelfog::bank_fog(f, raised);
+    return froxelfog::bank_far(f, froxelfog::bank_in_key(f, fog, lit / max(depth.x, 1e-6)), len);
 }
 
 @fragment

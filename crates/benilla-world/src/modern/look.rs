@@ -118,6 +118,21 @@ pub struct ZoneLook {
     pub bank_rgb: [f32; 3],
     /// fork: the analytic bank's ceiling: the most of a surface it can veil, approached softly.
     pub bank_veil: f32,
+    /// fork: how far the analytic bank's light follows the key's shadow at night: 0 a flat colour over
+    /// every pixel (half the key), 1 the whole key in the open and none in shade, as the froxel banks
+    /// were lit. [`Self::bank_shade_day`] by day, the two eased across `sun_arc::night_at`.
+    pub bank_shade: f32,
+    /// fork: [`Self::bank_shade`] by day.
+    pub bank_shade_day: f32,
+    /// fork: the share of the analytic bank's veil left past [`Self::bank_far_yd`] from the camera: a
+    /// thin layer lies thick over the ground at the feet and lighter over the land in the distance,
+    /// which the zone's own fog already veils. 1 = no fade.
+    pub bank_far: f32,
+    /// fork: the yards from the camera by which the bank has faded to [`Self::bank_far`], starting
+    /// from a quarter of it.
+    pub bank_far_yd: f32,
+    /// fork: the share of the bank a clear patch keeps (0 = bare ground there).
+    pub bank_clear_floor: f32,
     /// fork: the yards over which the analytic bank thins by `e` above the ground. A body stands in it
     /// where this is near its own height; a thinner layer veils the ground and leaves the body clear.
     pub bank_height: f32,
@@ -173,6 +188,11 @@ impl ZoneLook {
         bank_patch_yd: 130.0,
         bank_rgb: [1.0, 1.0, 1.0],
         bank_veil: 1.0,
+        bank_shade: 0.0,
+        bank_shade_day: 0.0,
+        bank_far: 1.0,
+        bank_far_yd: 200.0,
+        bank_clear_floor: 0.0,
     };
 
     /// fork: **the default look at noon**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
@@ -264,6 +284,11 @@ impl ZoneLook {
             bank_patch_yd: to.bank_patch_yd,
             bank_rgb: [0, 1, 2].map(|i| m(self.bank_rgb[i], to.bank_rgb[i])),
             bank_veil: m(self.bank_veil, to.bank_veil),
+            bank_shade: m(self.bank_shade, to.bank_shade),
+            bank_shade_day: m(self.bank_shade_day, to.bank_shade_day),
+            bank_far: m(self.bank_far, to.bank_far),
+            bank_far_yd: m(self.bank_far_yd, to.bank_far_yd),
+            bank_clear_floor: m(self.bank_clear_floor, to.bank_clear_floor),
         }
     }
 
@@ -301,6 +326,11 @@ impl ZoneLook {
             && d(self.bank_patch, other.bank_patch)
             && d(self.bank_patch_yd, other.bank_patch_yd)
             && d(self.bank_veil, other.bank_veil)
+            && d(self.bank_shade, other.bank_shade)
+            && d(self.bank_shade_day, other.bank_shade_day)
+            && d(self.bank_far, other.bank_far)
+            && d(self.bank_far_yd, other.bank_far_yd)
+            && d(self.bank_clear_floor, other.bank_clear_floor)
             && (0..3).all(|i| d(self.bank_rgb[i], other.bank_rgb[i]))
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
@@ -338,14 +368,17 @@ impl ZoneLook {
         ground_fog: 3.0,
         night_banks: 3.0,
         bank_height: 1.5,
-        bank_clear: Self::DARKSHORE.bank_clear,
-        bank_clear_edge: Self::DARKSHORE.bank_clear_edge,
+        bank_clear: 0.2,
+        bank_clear_edge: 0.8,
         bank_analytic: Self::DARKSHORE.bank_analytic,
         bank_patch: Self::DARKSHORE.bank_patch,
         bank_patch_yd: Self::DARKSHORE.bank_patch_yd,
         // This look's air is far darker than Darkshore's salmon.
         bank_rgb: [2.0, 2.0, 2.0],
         bank_veil: 0.23,
+        // Lit where the moon reaches it, so the bank reads alike over moonlit ground and in shade.
+        bank_shade: 1.0,
+        bank_shade_day: 1.0,
         night_glow: 1.0,
         noon_mix: 0.0,
         // The dark zones need the doubled moon to read at night (Duskwood, approved in the client).
@@ -444,7 +477,8 @@ impl ZoneLook {
         fill: 0.95,
         exposure: 0.85,
         haze: 0.001,
-        forward: 0.82,
+        // Little forward lobe: a low sun does not glow the distance into a salmon wall.
+        forward: 0.3,
         key_scatter: 0.9,
         glow: [1.15, 0.7, 0.6],
         // Salmon, and at this thin a haze it colours the ground banks more than the air.
@@ -462,18 +496,24 @@ impl ZoneLook {
         // A thin veil directly above the ground at every hour, into the sea fog, fixed in the world,
         // under a low ceiling so a long ray reads as a short one does, in clouds with clear patches
         // between them, as the reference's lies (`worldview_pose=6346.6,510.4,23.6,174.2,2.9`, 18:20).
-        ground_fog: 1.9,
-        bank_height: 1.5,
+        ground_fog: 3.0,
+        bank_height: 1.0,
         bank_clear: 0.2,
         bank_clear_edge: 0.8,
         bank_analytic: 1.0,
         bank_patch: 0.9,
         bank_patch_yd: 65.0,
         bank_rgb: [0.9, 0.82, 0.8],
-        bank_veil: 0.083,
+        bank_veil: 0.15,
+        bank_far: 1.0,
+        bank_far_yd: 200.0,
+        // The faintest veil in the clear patches, so the open ground is not bare.
+        bank_clear_floor: 0.1,
+        // The moon's shadow at night; by day the flat colour, as approved.
+        bank_shade: 1.0,
         night_banks: 0.6,
         night_glow: 0.5,
-        sea_fog: 0.025,
+        sea_fog: 0.035,
         // The moon lights the haze from every side, not as a second sun.
         moon_glow: 0.1,
         // The salmon glow and warm key are the sun's: the moon lights in its own colour.
@@ -912,7 +952,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_height,bank_analytic,bank_patch,bank_patch_yd,bank_rgb r,g,b,bank_veil,bank_clear,bank_clear_edge`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_height,bank_analytic,bank_patch,bank_patch_yd,bank_rgb r,g,b,bank_veil,bank_clear,bank_clear_edge,bank_far,bank_far_yd,bank_clear_floor`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -973,6 +1013,9 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.bank_veil, 50);
     set(&mut look.bank_clear, 51);
     set(&mut look.bank_clear_edge, 52);
+    set(&mut look.bank_far, 53);
+    set(&mut look.bank_far_yd, 54);
+    set(&mut look.bank_clear_floor, 55);
     look
 }
 

@@ -42,7 +42,7 @@ pub(crate) use node::froxel_pass;
 pub(crate) use node::{fog_composite_pass, lamp_halo_pass};
 
 /// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
-pub const FOG_BYTES: usize = 3 * 64 + 26 * 16;
+pub const FOG_BYTES: usize = 3 * 64 + 27 * 16;
 /// Offset of the `ground_x` row inside the tail: the render world writes the terrain heightfield's
 /// addressing there (`node::prepare_froxels`), which only it knows.
 pub(crate) const GROUND_OFFSET: usize = 3 * 64 + 19 * 16;
@@ -234,6 +234,8 @@ pub struct FroxelFog {
     pub bank: Vec4,
     /// fork: the analytic bank's colour (linear radiance, [`bank_light`]); w = its ceiling on the veil.
     pub bank_color: Vec4,
+    /// fork: the analytic bank's light and reach (`froxelfog.wgsl`'s `bank_reach`).
+    pub bank_reach: Vec4,
 }
 
 impl FroxelFog {
@@ -272,6 +274,7 @@ impl FroxelFog {
             self.sky,
             self.bank,
             self.bank_color,
+            self.bank_reach,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -750,6 +753,12 @@ fn update_volume(
             Vec3::from(look.0.bank_rgb),
         )
         .extend(look.0.bank_veil),
+        bank_reach: Vec4::new(
+            look.0.bank_shade_day + (look.0.bank_shade - look.0.bank_shade_day) * night,
+            look.0.bank_far,
+            look.0.bank_clear_floor.clamp(0.0, 1.0),
+            look.0.bank_far_yd.max(1.0),
+        ),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -959,7 +968,7 @@ mod tests {
     fn the_tail_matches_the_wgsl_layout() {
         let v = ModernVolume::default();
         assert_eq!(v.block.len(), BLOCK_TAIL_BYTES);
-        assert_eq!(FOG_BYTES, 608);
+        assert_eq!(FOG_BYTES, 624);
         // `ModernBlock` = cascades (400) + fog (448) + grid (4096): a multiple of its 16-byte alignment.
         assert_eq!(
             (crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16,

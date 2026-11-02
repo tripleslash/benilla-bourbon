@@ -85,6 +85,10 @@ struct FroxelFog {
     bank: vec4<f32>,
     // fork: the analytic bank's colour, this hour's light (linear radiance); w = its ceiling on the veil.
     bank_color: vec4<f32>,
+    // fork: x = how far the bank's light follows the key's shadow (`bank_in_key`); y = the share of its
+    // veil left in the distance, from a quarter of w yards from the camera to w; z = the share of it a
+    // clear patch keeps.
+    bank_reach: vec4<f32>,
 }
 
 // fork: **the air a lamp's halo stands in** — `f` with the open air's medium swapped for its
@@ -531,7 +535,8 @@ fn bank_patch(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
 const BANK_CLEAR_SCALE: f32 = 1.4;
 const BANK_CLEAR_ROUGH: f32 = 0.28;
 
-// How much of the bank stands at world point `p`, read over `span` yards: 0 in a clear patch, 1 past its edge.
+// How much of the bank stands at world point `p`, read over `span` yards: `bank_reach.z` in a clear patch
+// (the faintest veil, so the ground there is not bare), 1 past its edge.
 fn bank_clear(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
     if (f.bank.z <= 0.0) {
         return 1.0;
@@ -541,7 +546,7 @@ fn bank_clear(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
     // Only a little of one finer octave: the fine ones punch small round holes in the bank.
     let rough = BANK_CLEAR_ROUGH * bank_resolves(yd / BANK_OCTAVE_MID, span);
     let n = mix(bank_noise(q), bank_noise(q * BANK_OCTAVE_MID + vec2<f32>(17.3, 5.1)), rough);
-    return smoothstep(f.bank.z, f.bank.z + max(f.bank.w, 1e-3), n);
+    return mix(f.bank_reach.z, 1.0, smoothstep(f.bank.z, f.bank.z + max(f.bank.w, 1e-3), n));
 }
 
 // The bands' length and breadth against the clouds' feature, how far they wander, and their thinnest and
@@ -607,13 +612,19 @@ fn bank_stretch(f: FroxelFog, eye: vec3<f32>, dir: vec3<f32>, t0: f32, t1: f32, 
     return vec3<f32>(clouds * open, open, air);
 }
 
-// The air a surface on the ground holds at the least (yd), and `depth` (`bank_stretch`) raised to it for a
-// surface `h` over the ground. A thin layer holds a dozen yards along a grazing ray and only three on a
-// bank tilted toward the eye or in a hollow past a crest, which cut those out of the veil with a hard edge.
-const BANK_SURFACE_AIR: f32 = 5.0;
+// The air a surface on the ground holds at the least, in heights of the layer, and `depth` (`bank_stretch`)
+// raised to it for a surface `h` over the ground. A 1.5 yd layer holds a dozen yards along a grazing ray and
+// only three on a bank tilted toward the eye or in a hollow past a crest, which cut those out of the veil
+// with a hard edge; five yards closed that. A thinner layer holds less: a fixed five yards laid a 0.5 yd
+// layer as an opaque sheet over the ground at the feet.
+const BANK_SURFACE_AIR: f32 = 5.0 / 1.5;
+// The ground cover (yd) a surface counts as ground under: grass and low shrubs stand in the veil the
+// ground under them takes, or every tuft over a thin layer cut a dark hole through the bank.
+const BANK_GROUND_COVER: f32 = 1.0;
 
 fn bank_at_surface(f: FroxelFog, depth: vec3<f32>, h: f32) -> vec3<f32> {
-    let least = BANK_SURFACE_AIR * exp(-f.bank.y * h);
+    let over = max(h - BANK_GROUND_COVER, 0.0);
+    let least = BANK_SURFACE_AIR / max(f.bank.y, 1e-3) * exp(-f.bank.y * over);
     return depth * max(least / max(depth.z, 1e-3), 1.0);
 }
 
@@ -628,13 +639,21 @@ fn bank_fog(f: FroxelFog, depth: vec3<f32>) -> vec4<f32> {
 }
 
 // `fog` (`bank_fog`) lit by the key where `vis` of it sees the key: `bank_color` holds the ambient and half
-// the key (`volumetrics::bank_light`), and this takes the whole key in the open and none of it in shadow, as
-// the froxel banks do (`froxel_scatter.wgsl`'s `lum_bank`), so the bank darkens and brightens with the ground
-// under it and stands out alike over moonlit ground and over the ground in shade.
+// the key (`volumetrics::bank_light`), and a look with `bank_reach.x` 1 takes the whole key in the open and
+// none of it in shadow, as the froxel banks do (`froxel_scatter.wgsl`'s `lum_bank`), so the bank darkens
+// and brightens with the ground under it. At 0 the colour stays flat.
 fn bank_in_key(f: FroxelFog, fog: vec4<f32>, vis: f32) -> vec4<f32> {
     let flat = f.ambient.rgb + f.sun.rgb * 0.5;
-    let shaded = f.ambient.rgb + f.sun.rgb * clamp(vis, 0.0, 1.0);
+    let key = mix(0.5, clamp(vis, 0.0, 1.0), f.bank_reach.x);
+    let shaded = f.ambient.rgb + f.sun.rgb * key;
     return vec4<f32>(fog.rgb * shaded / max(flat, vec3<f32>(1e-6)), fog.a);
+}
+
+// `fog` (`bank_fog`) at `dist` yards from the camera, faded to `bank_reach.y` of itself over the land in
+// the distance: the layer lies thick at the feet, and the zone's own fog veils the far land.
+fn bank_far(f: FroxelFog, fog: vec4<f32>, dist: f32) -> vec4<f32> {
+    let k = mix(1.0, f.bank_reach.y, smoothstep(0.25 * f.bank_reach.w, f.bank_reach.w, dist));
+    return vec4<f32>(fog.rgb * k, 1.0 - (1.0 - fog.a) * k);
 }
 
 // The stretches a ray takes over the ground, and where stretch `i` ends as a share of the ray: shorter near
@@ -669,7 +688,7 @@ fn bank_air(f: FroxelFog, eye: vec3<f32>, p: vec3<f32>, ground: f32) -> vec4<f32
         t0 = t1;
         from_h = to_h;
     }
-    return bank_fog(f, bank_at_surface(f, depth, h1));
+    return bank_far(f, bank_fog(f, bank_at_surface(f, depth, h1)), len);
 }
 
 // `fog` seen through `bank`, which lies in front of it as far as the blend can tell.
