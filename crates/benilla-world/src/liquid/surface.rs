@@ -949,6 +949,8 @@ mod tests {
     /// `spawn_liquids` over `sheets`, each with its MCIN chunk index: the app and what it spawned.
     fn spawn_adt(sheets: Vec<(usize, LiquidMesh)>) -> (App, Vec<Entity>) {
         use bevy::ecs::system::RunSystemOnce;
+        // The waterline collider builds on the async pool, which no plugin here starts.
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
         let mut app = App::new();
         app.add_plugins(bevy::asset::AssetPlugin::default())
             .init_asset::<Mesh>()
