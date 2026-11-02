@@ -130,3 +130,8 @@ session here:
   for want of space, remove the build artifacts under `target/`'s profile folders that no build
   touched today and run it again. Free space is read with `df`, never `du`, which walks the whole
   tree.
+- **Tests run under cargo-nextest.** Every test run, scoped or whole, is `cargo nextest run` (or
+  `scripts/unit-tests.sh`, which picks it); doctests stay `cargo test --doc`. Where `cargo nextest`
+  is missing, install it first: the prebuilt binary,
+  `curl -LsSf https://get.nexte.st/latest/windows-tar | tar zxf - -C ~/.cargo/bin` on Windows
+  (`linux` or `mac` in place of `windows-tar` elsewhere).
