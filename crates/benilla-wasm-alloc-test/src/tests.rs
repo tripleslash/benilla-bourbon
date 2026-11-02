@@ -372,6 +372,43 @@ fn pooled(turn: &FairGuard<'_>, slice: u32) -> Option<(u32, u32)> {
     })
 }
 
+/// A heap's kept empty pages go back to the pool when the heap gives back what it keeps.
+#[test]
+fn a_kept_page_is_given_back() {
+    let mut heap = hold_a_heap();
+    let c = class_of(Layout::from_size_align(40000, 8).unwrap()).unwrap();
+    let block = heap.alloc(c);
+    let p = page_of(block);
+    unsafe { heap.free_local(p, block) };
+    let kept = |p: u32| unsafe { (*sp(p)).kind == PAGE && (*sp(p)).kept };
+    if !kept(p) {
+        // Another page of the class, or the budget spent: nothing was kept to give back.
+        return;
+    }
+    heap.release_kept();
+    // The page may be another heap's by now: the pool hands it out again at once.
+    assert_ne!(heap.lists().pages[c], p);
+    assert_eq!(heap.lists().kept, 0, "every kept page went back");
+}
+
+/// A trim gives back the spans waiting on the deferred list.
+#[test]
+fn a_trim_drains_the_deferred_spans() {
+    let large = Layout::from_size_align(256 * 1024, 8).unwrap();
+    let block = unsafe { PageAlloc.alloc(large) };
+    let s = page_of(block);
+    {
+        let _turn = SPANS.lock();
+        let freeing = block as usize;
+        std::thread::spawn(move || unsafe { PageAlloc.dealloc(freeing as *mut u8, large) })
+            .join()
+            .unwrap();
+        assert!(deferred_has(s));
+    }
+    trim();
+    assert!(!deferred_has(s), "the trim drained it");
+}
+
 /// A span split off and given back merges with its free neighbour into one span again.
 #[test]
 fn freed_neighbours_merge() {
@@ -597,4 +634,249 @@ fn realloc_keeps_the_bytes_and_zeroed_reads_zero() {
         assert!((0..size).all(|i| unsafe { *zeroed.add(i) } == 0));
         unsafe { PageAlloc.dealloc(zeroed, layout) };
     }
+}
+
+/// xorshift32: a fixed stream of numbers for the simulation.
+struct Rng(u32);
+
+impl Rng {
+    fn next(&mut self) -> u32 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 17;
+        self.0 ^= self.0 << 5;
+        self.0
+    }
+
+    /// Log-uniform in `lo..hi`.
+    fn log_size(&mut self, lo: usize, hi: usize) -> usize {
+        let t = (self.next() >> 8) as f64 / (1u32 << 24) as f64;
+        ((lo as f64) * ((hi as f64) / (lo as f64)).powf(t)) as usize
+    }
+}
+
+/// What [`streaming_sim`] measured.
+#[derive(Debug)]
+struct SimResult {
+    /// The most bytes live at once, and the linear memory grown to hold them.
+    peak_live: usize,
+    grown: usize,
+    /// 48 MiB requests that found no run.
+    huge_failed: usize,
+    /// Requests that found no memory.
+    failed: usize,
+    /// With only the long-lived blocks left: slices pooled free, and the longest of their runs.
+    free_slices: u32,
+    longest_run: u32,
+}
+
+/// The longest free span the pool files, and the sum of them, slices.
+fn pool_runs() -> (u32, u32) {
+    let turn = SPANS.lock();
+    drain(&turn, usize::MAX);
+    let pool = pool(&turn);
+    let (mut sum, mut longest) = (0, 0);
+    for b in 0..BINS {
+        let mut s = unsafe { (*pool).bins[b] };
+        while s != NIL {
+            let n = unsafe { (*sp(s)).slices };
+            sum += n;
+            longest = longest.max(n);
+            s = unsafe { (*sp(s)).next };
+        }
+    }
+    (sum, longest)
+}
+
+/// A world streaming tiles through a window of nine, over a modelled 2 GiB: each tile's small
+/// blocks, buffers and textures, a buffer grown by doubling, decode scratch freed at once, and a
+/// few blocks of each tile kept by long-lived caches that evict at random. Single-threaded, so
+/// one heap and one stream of placements: the same input lays memory out the same way.
+fn streaming_sim() -> SimResult {
+    let cap_mb: usize = std::env::var("SIM_CAP_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2048);
+    heap::set_model_bytes(cap_mb << 20);
+    let mut huge_failed = 0usize;
+    GROW_STEP.store(64 << 20, Ordering::Relaxed);
+    let mut rng = Rng(0x9E37_79B9);
+    let mut live = 0usize;
+    let mut peak_live = 0usize;
+    let failed = std::cell::Cell::new(0usize);
+    let alloc = |size: usize, live: &mut usize| -> Option<(usize, usize)> {
+        let block = unsafe { PageAlloc.alloc(Layout::from_size_align(size, 8).unwrap()) };
+        if block.is_null() {
+            failed.set(failed.get() + 1);
+            return None;
+        }
+        *live += size;
+        Some((block as usize, size))
+    };
+    let free = |(block, size): (usize, usize), live: &mut usize| {
+        *live -= size;
+        unsafe { PageAlloc.dealloc(block as *mut u8, Layout::from_size_align(size, 8).unwrap()) };
+    };
+    let mut tiles: std::collections::VecDeque<Vec<(usize, usize)>> = Default::default();
+    let mut cache: Vec<(usize, usize)> = Vec::new();
+    let mut assets: Vec<(usize, (usize, usize))> = Vec::new();
+    for step in 0..240 {
+        let mut tile = Vec::new();
+        for i in 0..4000 {
+            let size = rng.log_size(16, 4096);
+            let Some(b) = alloc(size, &mut live) else {
+                continue;
+            };
+            if i % 50 == 0 {
+                cache.push(b);
+            } else {
+                tile.push(b);
+            }
+        }
+        for _ in 0..300 {
+            let size = rng.log_size(4096, 64 << 10);
+            tile.extend(alloc(size, &mut live));
+        }
+        for _ in 0..40 {
+            let size = rng.log_size(64 << 10, 4 << 20);
+            tile.extend(alloc(size, &mut live));
+        }
+        // Shared assets: textures and models that outlive the tile that loaded them, by 1 to 40
+        // tiles, each.
+        for _ in 0..12 {
+            let size = rng.log_size(64 << 10, 8 << 20);
+            if let Some(b) = alloc(size, &mut live) {
+                let until = step + 1 + rng.next() as usize % 40;
+                assets.push((until, b));
+            }
+        }
+        let mut k = 0;
+        while k < assets.len() {
+            if assets[k].0 <= step {
+                free(assets.swap_remove(k).1, &mut live);
+            } else {
+                k += 1;
+            }
+        }
+        let scratch = alloc(rng.log_size(1 << 20, 24 << 20), &mut live);
+        // A transient block as large as the browser's biggest (a 49.7 MiB one trapped).
+        let huge = alloc(48 << 20, &mut live);
+        if huge.is_none() {
+            huge_failed += 1;
+        }
+        // A buffer grown by doubling to its tile's size, as a `Vec` is.
+        let target = rng.log_size(1 << 20, 24 << 20);
+        let mut size = 1024;
+        let mut grown = alloc(size, &mut live);
+        while size < target {
+            let Some((block, have)) = grown else { break };
+            let next = size * 2;
+            let moved = unsafe {
+                PageAlloc.realloc(
+                    block as *mut u8,
+                    Layout::from_size_align(have, 8).unwrap(),
+                    next,
+                )
+            };
+            if moved.is_null() {
+                failed.set(failed.get() + 1);
+                break;
+            }
+            live += next - have;
+            size = next;
+            grown = Some((moved as usize, next));
+        }
+        tile.extend(grown);
+        peak_live = peak_live.max(live);
+        if let Some(s) = scratch {
+            free(s, &mut live);
+        }
+        if let Some(h) = huge {
+            free(h, &mut live);
+        }
+        // The caches keep about 3% of what one tile allocates in small blocks, evicting at random.
+        while cache.len() > 800 {
+            let at = rng.next() as usize % cache.len();
+            free(cache.swap_remove(at), &mut live);
+        }
+        tiles.push_back(tile);
+        if tiles.len() > 9 {
+            let mut old = tiles.pop_front().unwrap();
+            while !old.is_empty() {
+                let at = rng.next() as usize % old.len();
+                free(old.swap_remove(at), &mut live);
+            }
+        }
+    }
+    for tile in tiles {
+        for b in tile {
+            free(b, &mut live);
+        }
+    }
+    for (_, b) in assets {
+        free(b, &mut live);
+    }
+    let (free_slices, longest_run) = pool_runs();
+    for b in cache {
+        free(b, &mut live);
+    }
+    SimResult {
+        peak_live,
+        grown: heap::bytes(),
+        huge_failed,
+        failed: failed.get() - huge_failed,
+        free_slices,
+        longest_run,
+    }
+}
+
+/// The simulation, run alone: its process holds no other test's blocks, and the parent reads
+/// its line. `cargo test -p benilla-wasm-alloc-test -- --ignored --nocapture sim_alone` prints it.
+#[test]
+#[ignore = "run in its own process by `streaming_keeps_memory_compact`"]
+fn sim_alone() {
+    let r = streaming_sim();
+    println!(
+        "SIM peak_live={} grown={} failed={} huge_failed={} free={} longest={}",
+        r.peak_live, r.grown, r.failed, r.huge_failed, r.free_slices, r.longest_run
+    );
+}
+
+/// Streaming tiles through a window grows memory to little over the most it held at once, and
+/// the long-lived blocks left behind leave most of the freed memory in one run.
+#[test]
+fn streaming_keeps_memory_compact() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "wasm_alloc::tests::sim_alone",
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("SIM "))
+        .unwrap_or_else(|| panic!("no result: {text}"));
+    let field = |k: &str| -> usize {
+        line.split(' ')
+            .find_map(|f| f.strip_prefix(&format!("{k}=")))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    println!("{line}");
+    assert_eq!(field("failed") + field("huge_failed"), 0, "{line}");
+    // Measured: 1.27 times the peak with pages placed by fit, 1.21 with them at the bottom.
+    assert!(
+        field("grown") * 4 <= field("peak_live") * 5,
+        "grew past a quarter over the peak: {line}"
+    );
+    // Measured: 31% of the free memory in its longest run with pages placed by fit, 68% with them
+    // at the bottom.
+    assert!(
+        field("longest") * 2 >= field("free"),
+        "the long-lived blocks split the free memory: {line}"
+    );
 }

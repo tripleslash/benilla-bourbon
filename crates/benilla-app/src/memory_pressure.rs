@@ -236,6 +236,14 @@ impl Ballast {
 ))]
 const GAUGE_SECS: f64 = 2.0;
 
+/// Seconds between the allocator trims short gauges ask for.
+#[cfg(all(
+    target_arch = "wasm32",
+    target_feature = "atomics",
+    not(debug_assertions)
+))]
+const TRIM_SECS: f64 = 1.0;
+
 /// Weigh the headroom and the largest run once a frame and apply the valve's answer, saying so on
 /// the console; under `?diag=1`, the gauges, the largest block asked for since the last line and
 /// the steps every [`GAUGE_SECS`] besides.
@@ -249,10 +257,19 @@ fn relieve(
     mut view: ResMut<benilla_world::view::ViewDistance>,
     time: Res<Time<Real>>,
     mut gauge: Local<Option<(bool, f64)>>,
+    mut trimmed_at: Local<f64>,
 ) {
-    let headroom = crate::wasm_alloc::headroom();
-    let run = crate::wasm_alloc::largest_run();
+    let mut headroom = crate::wasm_alloc::headroom();
+    let mut run = crate::wasm_alloc::largest_run();
     let now = time.elapsed_secs_f64();
+    // Short gauges first give back what the allocator holds freed but unmerged, so a step is
+    // never shed for memory a burst of frees left deferred or kept.
+    if (headroom < valve.shed_below || run < valve.run_below) && now - *trimmed_at >= TRIM_SECS {
+        *trimmed_at = now;
+        crate::wasm_alloc::trim();
+        headroom = crate::wasm_alloc::headroom();
+        run = crate::wasm_alloc::largest_run();
+    }
     let (armed, next) = gauge.get_or_insert_with(|| (crate::webdiag::armed(), 0.0));
     if *armed && now >= *next {
         *next = now + GAUGE_SECS;

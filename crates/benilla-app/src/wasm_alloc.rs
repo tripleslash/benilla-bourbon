@@ -12,6 +12,10 @@
 //!   slices. Runs of slices (spans) come from one pool under [`SPANS`]: a TLSF index by length, free
 //!   neighbours merged. The pool grows memory by [`GROW_STEP`] at a time (`?alloc_grow_mb=`), so a
 //!   load burst pays a few `memory.grow`s instead of one per allocation that outruns the free space.
+//! - Pages are cut from the lowest free span, large blocks from the span that fits them best. A
+//!   page a few long-lived blocks keep is kept for good, and pages placed by fit landed in every run
+//!   the large blocks free, so memory with most of it free held no long run; at the bottom, they
+//!   leave the runs above whole.
 //! - A block up to 64 KiB comes from a page: a span of one slice (classes up to 8 KiB) or two, cut
 //!   into blocks of one size class. A page belongs to one heap, and a heap is held by one thread at a
 //!   time through a flag nobody waits on: a thread takes the heap its stack address picks, or the
@@ -280,6 +284,11 @@ const BINS: usize = 64;
 
 struct Pool {
     bins: [u32; BINS],
+    /// Bit `s` set: a free span starts at slice `s`. A page is taken from the lowest one that holds
+    /// it ([`take_low`]).
+    heads: [u64; MAX_SLICES / 64],
+    /// Bit `w` set: `heads[w]` is not 0.
+    summary: [u64; MAX_SLICES / 64 / 64],
 }
 
 struct PoolCell(UnsafeCell<Pool>);
@@ -287,7 +296,11 @@ struct PoolCell(UnsafeCell<Pool>);
 // SAFETY: only a holder of `SPANS` touches the pool.
 unsafe impl Sync for PoolCell {}
 
-static POOL: PoolCell = PoolCell(UnsafeCell::new(Pool { bins: [NIL; BINS] }));
+static POOL: PoolCell = PoolCell(UnsafeCell::new(Pool {
+    bins: [NIL; BINS],
+    heads: [0; MAX_SLICES / 64],
+    summary: [0; MAX_SLICES / 64 / 64],
+}));
 
 /// Slices filed free in the pool's bins, kept by [`bin_insert`] and [`bin_remove`] under [`SPANS`];
 /// read without it by [`headroom`].
@@ -344,6 +357,9 @@ fn bin_insert(turn: &FairGuard<'_>, s: u32) {
         }
         (*pool).bins[b] = s;
         MAP.fetch_or(1 << b, Ordering::Relaxed);
+        let w = s as usize / 64;
+        (*pool).heads[w] |= 1 << (s % 64);
+        (*pool).summary[w / 64] |= 1 << (w % 64);
     }
 }
 
@@ -366,7 +382,78 @@ fn bin_remove(turn: &FairGuard<'_>, s: u32) {
         if next != NIL {
             (*sp(next)).prev = prev;
         }
+        let w = s as usize / 64;
+        (*pool).heads[w] &= !(1 << (s % 64));
+        if (*pool).heads[w] == 0 {
+            (*pool).summary[w / 64] &= !(1 << (w % 64));
+        }
     }
+}
+
+/// The lowest free span head at or above slice `from`, or [`NIL`].
+fn next_head(pool: &Pool, from: u32) -> u32 {
+    let mut w = from as usize / 64;
+    if w >= pool.heads.len() {
+        return NIL;
+    }
+    let bits = pool.heads[w] & (!0u64 << (from % 64));
+    if bits != 0 {
+        return (w * 64) as u32 + bits.trailing_zeros();
+    }
+    w += 1;
+    let mut sw = w / 64;
+    while sw < pool.summary.len() {
+        let words = if sw == w / 64 {
+            pool.summary[sw] & (!0u64 << (w % 64))
+        } else {
+            pool.summary[sw]
+        };
+        if words != 0 {
+            let w = sw * 64 + words.trailing_zeros() as usize;
+            return (w * 64) as u32 + pool.heads[w].trailing_zeros();
+        }
+        sw += 1;
+    }
+    NIL
+}
+
+/// Free spans [`take_low`] looks at before leaving the request to [`take`]'s fit.
+const LOW_LOOK: u32 = 64;
+
+/// A span of exactly `n` slices cut from the lowest free span that holds it, its tail filed back,
+/// or [`NIL`] when none of the lowest [`LOW_LOOK`] does. Pages, which a few long-lived blocks
+/// hold for good, gather at the bottom of memory this way, and the runs above them stay whole
+/// for the large blocks, where a fit by length scatters pages through every span it splits.
+fn take_low(turn: &FairGuard<'_>, n: u32) -> u32 {
+    // SAFETY: the caller holds `SPANS`.
+    unsafe {
+        let pool = &*pool(turn);
+        let mut s = next_head(pool, 0);
+        for _ in 0..LOW_LOOK {
+            if s == NIL {
+                return NIL;
+            }
+            if (*sp(s)).slices >= n {
+                return cut(turn, s, n);
+            }
+            s = next_head(pool, s + 1);
+        }
+        NIL
+    }
+}
+
+/// Take free span `s` out of the pool and cut its first `n` slices, filing the rest back.
+fn cut(turn: &FairGuard<'_>, s: u32, n: u32) -> u32 {
+    bin_remove(turn, s);
+    // SAFETY: the caller holds `SPANS`.
+    unsafe {
+        let have = (*sp(s)).slices;
+        if have > n {
+            file(turn, s + n, have - n);
+        }
+        (*sp(s)).slices = n;
+    }
+    s
 }
 
 /// File slices `s..s + n` as one free span; its neighbours are not free.
@@ -435,13 +522,7 @@ fn take(turn: &FairGuard<'_>, n: u32) -> u32 {
         if s == NIL {
             return NIL;
         }
-        bin_remove(turn, s);
-        let have = (*sp(s)).slices;
-        if have > n {
-            file(turn, s + n, have - n);
-        }
-        (*sp(s)).slices = n;
-        s
+        cut(turn, s, n)
     }
 }
 
@@ -491,15 +572,27 @@ fn alloc_span(turn: &FairGuard<'_>, n: u32) -> u32 {
         return NIL;
     }
     drain(turn, DRAIN);
-    let mut s = take(turn, n);
+    let mut s = place(turn, n);
     if s == NIL && DEFERRED.load(Ordering::Relaxed) != NIL {
         drain(turn, usize::MAX);
-        s = take(turn, n);
+        s = place(turn, n);
     }
     if s == NIL && grow(turn, n) {
-        s = take(turn, n);
+        s = place(turn, n);
     }
     s
+}
+
+/// A span of `n` slices from the pool: a page's from the bottom of memory ([`take_low`]), a large
+/// block's by fit.
+fn place(turn: &FairGuard<'_>, n: u32) -> u32 {
+    if n <= MEDIUM_SLICES {
+        let s = take_low(turn, n);
+        if s != NIL {
+            return s;
+        }
+    }
+    take(turn, n)
 }
 
 /// Spans freed while [`SPANS`] was busy, linked through their `next`. Any thread pushes; only a
@@ -1070,6 +1163,24 @@ impl HeapGuard {
         }
     }
 
+    /// Give the kept empty pages back to the pool. A kept page is its class's only one, so it
+    /// heads its list.
+    fn release_kept(&mut self) {
+        if self.lists().kept == 0 {
+            return;
+        }
+        for c in 0..N_CLASSES {
+            let p = self.lists().pages[c];
+            // SAFETY: a listed page is this heap's.
+            if p != NIL && unsafe { (*sp(p)).kept } {
+                unsafe { (*sp(p)).kept = false };
+                self.lists().kept -= unsafe { (*sp(p)).slices } << SLICE_SHIFT;
+                self.unlink(p);
+                retire(p);
+            }
+        }
+    }
+
     /// Free into their pages the blocks other threads left in this heap's inbox.
     fn collect(&mut self) {
         let mut node = self.heap.inbox.swap(ptr::null_mut(), Ordering::Acquire);
@@ -1111,6 +1222,22 @@ impl HeapGuard {
             }
         }
     }
+}
+
+/// Give back at once what the allocator holds as used and need not: every free heap's inbox and
+/// kept empty pages, and every span on [`DEFERRED`], merged into the pool. A burst of frees under
+/// load (a ring of tiles released) leaves spans deferred two at a time and pages kept per heap,
+/// none of them in [`headroom`] or [`largest_run`] and none merged with their free neighbours; a
+/// trim puts them back in one run where they lie side by side. A heap another thread holds is
+/// passed over, so no thread waits but on [`SPANS`] for the drain.
+pub(crate) fn trim() {
+    for index in 0..HEAPS {
+        if let Some(mut heap) = try_take(index) {
+            heap.collect();
+            heap.release_kept();
+        }
+    }
+    drain(&SPANS.lock(), usize::MAX);
 }
 
 /// Free a class block: into its page if its heap is free, else onto that heap's inbox.
@@ -1201,16 +1328,19 @@ fn out_of_memory(size: usize) {
 #[cfg(not(target_arch = "wasm32"))]
 fn out_of_memory(_size: usize) {}
 
-/// Resize a large block in place: shrink it, or grow it into a free span right after it.
-fn resize_large(block: *mut u8, new_size: usize) -> bool {
+/// Resize a large block where it is: shrink it, or grow it into the free spans beside it, the one
+/// after it first and the end of the one before it for the rest, its bytes moved down after
+/// [`SPANS`] is let go. A buffer grown by doubling then needs no second run as long as itself,
+/// beside the one it leaves. The block's address, or null when its neighbours are too short.
+fn resize_large(block: *mut u8, old_size: usize, new_size: usize) -> *mut u8 {
     let Some(want) = slices_for(new_size) else {
-        return false;
+        return ptr::null_mut();
     };
     let s = page_of(block);
     // SAFETY: a live block's `slices` changes only by its owner's resize.
     let have = unsafe { (*sp(s)).slices };
     if want == have {
-        return true;
+        return block;
     }
     let turn = SPANS.lock();
     // SAFETY: the caller holds `SPANS`.
@@ -1218,26 +1348,53 @@ fn resize_large(block: *mut u8, new_size: usize) -> bool {
         if want < have {
             (*sp(s)).slices = want;
             release(&turn, s + want, have - want);
-            return true;
+            return block;
         }
-        let right = s + have;
         let need = want - have;
-        if (right as usize) < MAX_SLICES
+        let right = s + have;
+        let rn = if (right as usize) < MAX_SLICES
             && head_of(right) == right
             && (*sp(right)).kind == FREE
-            && (*sp(right)).slices >= need
         {
-            bin_remove(&turn, right);
-            let spare = (*sp(right)).slices - need;
-            if spare > 0 {
-                file(&turn, right + need, spare);
-            }
-            set_head(right, need, s);
-            (*sp(s)).slices = want;
-            return true;
+            (*sp(right)).slices
+        } else {
+            0
+        };
+        let left = if s > 0 { head_of(s - 1) } else { NIL };
+        let ln = if left != NIL && (*sp(left)).kind == FREE {
+            (*sp(left)).slices
+        } else {
+            0
+        };
+        if rn + ln < need {
+            return ptr::null_mut();
         }
+        let from_right = rn.min(need);
+        let from_left = need - from_right;
+        if from_right > 0 {
+            bin_remove(&turn, right);
+            if rn > from_right {
+                file(&turn, right + from_right, rn - from_right);
+            }
+        }
+        if from_left > 0 {
+            bin_remove(&turn, left);
+            if ln > from_left {
+                file(&turn, left, ln - from_left);
+            }
+        }
+        let head = s - from_left;
+        (*sp(head)).kind = LARGE;
+        (*sp(head)).slices = want;
+        set_head(head, want, head);
+        drop(turn);
+        let moved = addr_of(head) as *mut u8;
+        if moved != block {
+            // The spans are this block's now; the copy overlaps, and runs without the lock.
+            ptr::copy(block, moved, old_size);
+        }
+        moved
     }
-    false
 }
 
 /// Class blocks from pages in per-thread heaps, everything else a span of its own.
@@ -1273,8 +1430,11 @@ unsafe impl GlobalAlloc for PageAlloc {
         let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
         match (class_of(layout), class_of(new_layout)) {
             (Some(a), Some(b)) if a == b => return block,
-            (None, None) if layout.align() <= SLICE && resize_large(block, new_size) => {
-                return block;
+            (None, None) if layout.align() <= SLICE => {
+                let resized = resize_large(block, layout.size(), new_size);
+                if !resized.is_null() {
+                    return resized;
+                }
             }
             _ => {}
         }
