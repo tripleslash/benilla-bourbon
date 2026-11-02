@@ -101,6 +101,7 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("TouchPhase", Plumbing),
     ("NativeKey", Plumbing),
     ("NativeKeyCode", Plumbing),
+    ("ACCESS_KIT_ADAPTERS", Plumbing),
     ("ExitCondition", Plumbing),
     // Bevy 0.19's window-exit set, which `shutdown.rs` orders `OnAppExit` after: a set name.
     ("ExitSystems", Plumbing),
@@ -111,6 +112,7 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("RawHandleWrapper", Plumbing),
     ("VideoMode", Plumbing),
     ("Window", Plumbing),
+    ("WindowCreated", Plumbing),
     ("WindowLevel", Plumbing),
     ("WindowMode", Plumbing),
     ("WindowPlugin", Plumbing),
