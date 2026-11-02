@@ -191,6 +191,29 @@ fn rows_make_mut<'a>(
     Arc::make_mut(rows)
 }
 
+/// One bone's three palette rows: `world × ibp`, transposed to the rows the vertex stage reads.
+fn bone_rows(world: &GlobalTransform, ibp: &Mat4) -> [[f32; 4]; 3] {
+    let m = world.affine() * Affine3A::from_mat4(*ibp);
+    let (m3, t) = (m.matrix3, m.translation);
+    [
+        [m3.x_axis.x, m3.y_axis.x, m3.z_axis.x, t.x],
+        [m3.x_axis.y, m3.y_axis.y, m3.z_axis.y, t.y],
+        [m3.x_axis.z, m3.y_axis.z, m3.z_axis.z, t.z],
+    ]
+}
+
+/// The rows [`RigPalettes::write_rig_worlds`] writes for `worlds`, appended to `out`: a pure
+/// function of one rig, so the world pass builds them on its workers into buffers it keeps.
+pub(crate) fn rig_rows_into(
+    rig: &RigSkin,
+    worlds: &[GlobalTransform],
+    ibp: &[Mat4],
+    out: &mut Vec<[[f32; 4]; 3]>,
+) {
+    let n = worlds.len().min(ibp.len()).min(rig.len as usize);
+    out.extend((0..n).map(|b| bone_rows(&worlds[b], &ibp[b])));
+}
+
 fn rebase(mut world: Affine3A, origin: Vec3) -> Affine3A {
     world.translation -= bevy::math::Vec3A::from(origin);
     world
@@ -382,31 +405,42 @@ impl RigPalettes {
         origin: Vec3,
     ) {
         let n = (worlds.len().min(ibp.len()) as u32).min(rig.len);
+        let rows = self.rig_rows_mut(rig, n, origin);
+        for (b, out) in rows.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+            *out = bone_rows(&worlds[b], &ibp[b]);
+        }
+    }
+
+    /// [`Self::write_rig_worlds`] from rows [`rig_rows_into`] already built, so the world pass
+    /// multiplies on its workers and the shared buffer only takes a copy.
+    pub(crate) fn write_rig_rows(&mut self, rig: &RigSkin, bones: &[[[f32; 4]; 3]], origin: Vec3) {
+        let bones = &bones[..bones.len().min(rig.len as usize)];
+        self.rig_rows_mut(rig, bones.len() as u32, origin)
+            .copy_from_slice(bones.as_flattened());
+    }
+
+    /// The rows of `rig`'s first `n` bones, ready to overwrite: its origin set and the range queued
+    /// for upload.
+    fn rig_rows_mut(&mut self, rig: &RigSkin, n: u32, origin: Vec3) -> &mut [[f32; 4]] {
         let (slot, base) = (rig.slot, rig.base);
         self.cost_rows += n;
         self.set_origin(slot, origin);
+        if n > 0 {
+            let mirrored = self.mirrored.get(slot as usize).copied().unwrap_or(false);
+            self.dirty.push((base, n, mirrored));
+        }
         let wm = self.bone_watermark();
+        let (a, b) = (3 * base as usize, 3 * (base + n) as usize);
         let rows = rows_make_mut(
             &mut self.rows,
             &mut self.spare,
             &mut self.since_swap,
             wm,
-            (3 * base as usize, 3 * (base + n) as usize),
+            (a, b),
             &mut self.cost_copies,
             &mut self.cost_copy_us,
         );
-        for b in 0..n as usize {
-            let m = worlds[b].affine() * Affine3A::from_mat4(ibp[b]);
-            let (m3, t) = (m.matrix3, m.translation);
-            let r = 3 * (base as usize + b);
-            rows[r] = [m3.x_axis.x, m3.y_axis.x, m3.z_axis.x, t.x];
-            rows[r + 1] = [m3.x_axis.y, m3.y_axis.y, m3.z_axis.y, t.y];
-            rows[r + 2] = [m3.x_axis.z, m3.y_axis.z, m3.z_axis.z, t.z];
-        }
-        if n > 0 {
-            let mirrored = self.mirrored.get(slot as usize).copied().unwrap_or(false);
-            self.dirty.push((base, n, mirrored));
-        }
+        &mut rows[a..b]
     }
 
     /// The rider write: every row of `slot` gets one rigid frame in the host rig's space (a model
@@ -1054,6 +1088,44 @@ pub fn spawn_joints(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The world pass's write, rows built on a worker into a buffer other rigs share and then
+    /// copied in, lands what the direct write lands.
+    #[test]
+    fn copied_rows_match_the_direct_write() {
+        let ibp = vec![
+            Mat4::from_translation(Vec3::new(0.5, -1.0, 2.0)),
+            Mat4::from_rotation_y(0.4),
+            Mat4::from_scale(Vec3::splat(0.5)),
+        ];
+        let worlds = [
+            GlobalTransform::from_translation(Vec3::X),
+            GlobalTransform::from(
+                Transform::from_rotation(Quat::from_rotation_z(0.3)).with_scale(Vec3::splat(2.0)),
+            ),
+            GlobalTransform::from_xyz(1.0, 2.0, 3.0),
+        ];
+        let origin = Vec3::new(10.0, 0.0, -4.0);
+        let mut ibps = Assets::<SkinnedMeshInverseBindposes>::default();
+        let handle = ibps.add(SkinnedMeshInverseBindposes::from(ibp.clone()));
+
+        let mut direct = RigPalettes::default();
+        let a = RigSkin::allocate_bones(&mut direct, 3, handle.clone()).unwrap();
+        direct.write_rig_worlds(&a, &worlds, &ibp, origin);
+
+        let mut copied = RigPalettes::default();
+        let b = RigSkin::allocate_bones(&mut copied, 3, handle).unwrap();
+        let mut rows = vec![[[9.0; 4]; 3]];
+        let at = rows.len();
+        rig_rows_into(&b, &worlds, &ibp, &mut rows);
+        copied.write_rig_rows(&b, &rows[at..], origin);
+
+        let want = direct.rig_rows(a.slot, 3);
+        assert!(want.is_some());
+        assert_eq!(copied.rig_rows(b.slot, 3), want);
+        assert_eq!(copied.dirty, direct.dirty);
+        assert_eq!(copied.origins, direct.origins);
+    }
 
     /// A rig skins with the bindposes of the model it was built from: the asset replaced in place
     /// by a reload does not reach it, and a rig built after the reload takes the new ones.
