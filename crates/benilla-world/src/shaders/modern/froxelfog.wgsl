@@ -627,6 +627,16 @@ fn bank_fog(f: FroxelFog, depth: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(f.bank_color.rgb * veil, 1.0 - veil);
 }
 
+// `fog` (`bank_fog`) lit by the key where `vis` of it sees the key: `bank_color` holds the ambient and half
+// the key (`volumetrics::bank_light`), and this takes the whole key in the open and none of it in shadow, as
+// the froxel banks do (`froxel_scatter.wgsl`'s `lum_bank`), so the bank darkens and brightens with the ground
+// under it and stands out alike over moonlit ground and over the ground in shade.
+fn bank_in_key(f: FroxelFog, fog: vec4<f32>, vis: f32) -> vec4<f32> {
+    let flat = f.ambient.rgb + f.sun.rgb * 0.5;
+    let shaded = f.ambient.rgb + f.sun.rgb * clamp(vis, 0.0, 1.0);
+    return vec4<f32>(fog.rgb * shaded / max(flat, vec3<f32>(1e-6)), fog.a);
+}
+
 // The stretches a ray takes over the ground, and where stretch `i` ends as a share of the ray: shorter near
 // the eye, where the ground is seen closely.
 const BANK_STRETCHES: u32 = 5u;

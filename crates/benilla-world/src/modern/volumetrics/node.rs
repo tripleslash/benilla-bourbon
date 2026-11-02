@@ -433,6 +433,9 @@ fn specialize_composites(
                     storage_buffer_read_only_sized(false, None),
                     // The terrain heightfield the analytic bank lies on.
                     texture_depth_2d(),
+                    // The key light's cascades, for the analytic bank's light.
+                    texture_2d_array(TextureSampleType::Depth),
+                    sampler(SamplerBindingType::Comparison),
                 ),
             ),
         );
@@ -645,6 +648,12 @@ fn run_fog_pass(
     else {
         return;
     };
+    let Some(shadow) = world
+        .resource::<RenderAssets<GpuImage>>()
+        .get(MODERN_SHADOW_MAP.id())
+    else {
+        return;
+    };
     let bind = render_context.render_device().create_bind_group(
         label,
         &pipeline_cache.get_bind_group_layout(layout),
@@ -656,6 +665,8 @@ fn run_fog_pass(
             block.buffer.as_entire_binding(),
             light.0.as_entire_binding(),
             bank_ground,
+            &shadow.texture_view,
+            &shadow.sampler,
         )),
     );
     let diagnostics = render_context.diagnostic_recorder();

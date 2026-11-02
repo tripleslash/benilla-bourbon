@@ -31,6 +31,12 @@ struct LightTable {
 @group(0) @binding(5) var<storage, read> light_table: LightTable;
 // The terrain heightfield the analytic bank lies on (`froxelfog::bank_air`).
 @group(0) @binding(6) var bank_ground: texture_depth_2d;
+// The key light's cascades, so the analytic bank takes the moon only where the moon reaches it.
+@group(0) @binding(7) var shadow_map: texture_depth_2d_array;
+@group(0) @binding(8) var shadow_samp: sampler_comparison;
+
+// How far over the ground the bank's light is read (yd): inside the layer, clear of the ground's own bias.
+const BANK_LIGHT_LIFT: f32 = 1.0;
 
 const SHAFT_TAPS: u32 = 16u;
 // Where, as a share of the view distance, the detailed world starts dissolving into the silhouette.
@@ -189,15 +195,23 @@ fn bank_over_terrain(f: froxelfog::FroxelFog, eye: vec3<f32>, p: vec3<f32>) -> v
     var h0 = max(eye.y - froxelfog::bank_floor(f, terrain_under(f, eye)), 0.0);
     var t0 = 0.0;
     var depth = vec3<f32>(0.0);
+    var lit = 0.0;
     for (var i = 1u; i <= froxelfog::BANK_STRETCHES; i = i + 1u) {
         let t1 = reach * froxelfog::bank_stretch_end(i);
         let at = eye + dir * t1;
-        let h1 = max(at.y - froxelfog::bank_floor(f, terrain_under(f, at)), 0.0);
-        depth = depth + froxelfog::bank_stretch(f, eye, dir, t0, t1, h0, h1);
+        let floor = froxelfog::bank_floor(f, terrain_under(f, at));
+        let h1 = max(at.y - floor, 0.0);
+        let stretch = froxelfog::bank_stretch(f, eye, dir, t0, t1, h0, h1);
+        let q = vec3<f32>(at.x, floor + BANK_LIGHT_LIFT, at.z);
+        let vis = sunshadow::sun_visibility_fast(
+            shadow_map, shadow_samp, modern_block.cascades, q, froxelfog::view_depth(f, q));
+        depth = depth + stretch;
+        lit = lit + stretch.x * vis;
         h0 = h1;
         t0 = t1;
     }
-    return froxelfog::bank_fog(f, froxelfog::bank_at_surface(f, depth, h0));
+    let fog = froxelfog::bank_fog(f, froxelfog::bank_at_surface(f, depth, h0));
+    return froxelfog::bank_in_key(f, fog, lit / max(depth.x, 1e-6));
 }
 
 @fragment
