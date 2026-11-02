@@ -257,7 +257,8 @@ pub fn sun_arc_enabled() -> bool {
 /// light grid put on the fragment, cube shadows included (P6), `6` = **cell occupancy** (P8): green
 /// where the cell kept every light that reached it, yellow where it is exactly full, red where more
 /// lights reached it than `PER_CELL` can name — the probe for "why is that lamp dark?", which is a
-/// budget question and not a falloff one. `0` (default) = off.
+/// budget question and not a falloff one, `7` = an interior WMO surface's blend toward the light
+/// outside (red: how far inside, green: the probe field's openness). `0` (default) = off.
 pub fn shadow_debug_mode() -> u8 {
     static CELL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| {

@@ -345,7 +345,7 @@ impl ZoneLook {
         bank_patch_yd: Self::DARKSHORE.bank_patch_yd,
         // This look's air is far darker than Darkshore's salmon.
         bank_rgb: [2.0, 2.0, 2.0],
-        bank_veil: Self::DARKSHORE.bank_veil,
+        bank_veil: 0.26,
         night_glow: 1.0,
         noon_mix: 0.0,
         // The dark zones need the doubled moon to read at night (Duskwood, approved in the client).

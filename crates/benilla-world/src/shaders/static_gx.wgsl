@@ -39,6 +39,11 @@ const MODERN_ROOM_FLOOR: f32 = 0.30;
 // bake, MOCV included): the probe field alone left the Cleft of Shadows and the Drag near black
 // where the reference's bake lights the rock.
 const MODERN_BAKE_FLOOR: f32 = 0.9;
+// fork: the probe field's openness over which a modern interior WMO surface eases from the light
+// outside (below the first) to the room's own (above the second), in place of the line the group's
+// interior flag draws at a cave mouth or a doorway. `wow_model.wgsl` carries the same pair.
+const MODERN_ROOM_OPEN_INSIDE: f32 = 0.02;
+const MODERN_ROOM_OPEN_OUTSIDE: f32 = 0.2;
 
 // Prefix of lighting::global_light's buffer; field order in sync with it and wow_model.wgsl.
 struct WowLight {
@@ -100,16 +105,30 @@ const MODERN_FRAME: bool = false;
 // `lite` (the water mirror, `sunshadow::mirror_view`): the finest cascade that owns the point answers
 // alone, without the Chebyshev visibility.
 fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: bool) -> vec4<f32> {
+    return modern_gi_field(p, nrm, recv_interior, lite).gi;
+}
+
+// `modern_gi_ambient`, and the field's openness at the point (`probegi::openness`).
+struct GiField {
+    gi: vec4<f32>,
+    open: f32,
+}
+
+fn modern_gi_field(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: bool) -> GiField {
     var g = modern_block.gi;
     if (lite) {
         g.interior.w = f32(u32(g.interior.w) & ~2u);
     }
     if (g.params.x < 0.5 || g.params.z <= 0.0) {
-        return vec4<f32>(0.0);
+        return GiField(vec4<f32>(0.0), 0.0);
     }
     var sum = vec3<f32>(0.0);
     var answered = 0.0;
     var left = 1.0;
+    // The openness is the finest cascade's alone, faded to closed at its edge: a coarse lattice's
+    // probes stand over a cave's roof, see the sky, and would open the whole cave inside its box.
+    var open = 0.0;
+    var open_read = false;
     let count = u32(g.dims.w);
     for (var c = 0u; c < count; c = c + 1u) {
         let pk = probegi::pick(g, c, p, nrm, recv_interior);
@@ -124,6 +143,10 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: boo
         let share = select(left * pk.inside, 1.0, lite);
         sum = sum + cell_gi.rgb * (cell_gi.w * share);
         answered = answered + cell_gi.w * share;
+        if (!open_read) {
+            open = probegi::openness(acc) * pk.inside;
+            open_read = true;
+        }
         // Only the share that ANSWERED is spent: a cell the fine cascade is unsure of (freshly
         // scrolled probes, probes inside walls) hands the rest to the coarser cascade rather than
         // to the sky map. From afar that coarser cascade answered this point whole, so falling back
@@ -135,9 +158,9 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: boo
         }
     }
     if (answered <= 0.001) {
-        return vec4<f32>(0.0);
+        return GiField(vec4<f32>(0.0), open);
     }
-    return vec4<f32>(sum * (g.params.z / answered), clamp(answered, 0.0, 1.0));
+    return GiField(vec4<f32>(sum * (g.params.z / answered), clamp(answered, 0.0, 1.0)), open);
 }
 
 // fork: modern lighting (FORK.md, P6) — the local lights that reach this
@@ -415,10 +438,14 @@ fn modern_gx_rgb(
     // which is the plan's tier split: Low traces no probes and keeps the bake and `prop_probes`.
     let modern_interior = modern_block.gi.params.x > 0.5 && !modern_lite;
     var lit_modern_room = vec3<f32>(0.0);
+    // How far inside the room this surface lies: 1 where the field sees no sky, 0 at an opening.
+    var room_inside = 1.0;
     if (modern_interior && (in.word & WORD_INTERIOR) != 0u) {
-        let room_gi = modern_gi_ambient(in.world_position.xyz, n_lit, 1.0, modern_lite);
+        let room_field = modern_gi_field(in.world_position.xyz, n_lit, 1.0, modern_lite);
+        let room_gi = room_field.gi;
         let room = max(modern_block.gi.interior.rgb, wow_light.light_ambient.rgb * MODERN_ROOM_FLOOR);
         lit_modern_room = mix(room, room_gi.rgb, room_gi.w);
+        room_inside = 1.0 - smoothstep(MODERN_ROOM_OPEN_INSIDE, MODERN_ROOM_OPEN_OUTSIDE, room_field.open);
     }
     let L = -normalize(wow_light.light_sun.xyz);
     let ndotl = max(dot(n_lit, L), 0.0);
@@ -537,6 +564,23 @@ fn modern_gx_rgb(
                 vc.rgb * bake_interior * MODERN_BAKE_FLOOR,
             );
             primary = clamp(lit_sum, vec3<f32>(0.0), vec3<f32>(1.0)) + emissive;
+            if (room_inside < 0.999 && (in.word & WORD_WMO) != 0u) {
+                // Toward an opening the surface takes the light an exterior one would there: the
+                // field over the sky map, the sun under its cascades and clouds, no MOCV.
+                let amb = wow_light.light_ambient.rgb;
+                let out_gi = modern_gi_ambient(in.world_position.xyz, n_lit, 0.0, modern_lite);
+                var out_sky = 1.0;
+                if (out_gi.w < 1.0) {
+                    out_sky = sunshadow::sky_ambient(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, modern_lite);
+                }
+                let mview_z = (view.view_from_world * in.world_position).z;
+                var out_sun = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, n_lit, -mview_z, modern_lite);
+                let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
+                out_sun = out_sun * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
+                let lit_out = clamp(sunshadow::shade_floor(sunshadow::probe_or_sky(amb, out_sky, out_gi), amb) + max(lit_nl - amb, vec3<f32>(0.0)) * out_sun, vec3<f32>(0.0), vec3<f32>(1.0));
+                let outside = clamp(lit_out + point_lit_px, vec3<f32>(0.0), vec3<f32>(1.0));
+                primary = mix(outside, primary, room_inside);
+            }
         }
         if (interior && class_int && has_vc && !modern_interior) {
             // INT, where the bake stands: the reference's interior pixel shader (literal 4.0),
@@ -1093,7 +1137,18 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
 #ifdef WOW_MODERN
     if (modern_block.cascades.params.w > 0.5) {
         let dbg = modern_block.cascades.params.w;
-        if (dbg > 5.5) {
+        if (dbg > 6.5) {
+            // fork: mode 7 — an interior surface's place between the light outside and the room's
+            // own: red = how far inside (1 = the room's light alone), green = the field's openness.
+            // Exterior surfaces are dark blue.
+            if ((in.word & WORD_INTERIOR) != 0u) {
+                let dfield = modern_gi_field(in.world_position.xyz, n_lit, 1.0, false);
+                let dinside = 1.0 - smoothstep(MODERN_ROOM_OPEN_INSIDE, MODERN_ROOM_OPEN_OUTSIDE, dfield.open);
+                rgb = vec3<f32>(dinside, dfield.open, 0.0);
+            } else {
+                rgb = vec3<f32>(0.0, 0.0, 0.25);
+            }
+        } else if (dbg > 5.5) {
             // fork: P8 — mode 6: **cell occupancy**, the probe for "why is that lamp dark?".
             // The binning pass records how many lights REACHED each cell alongside how many it
             // could keep (`PER_CELL`), so this shows where the per-cell budget is the thing

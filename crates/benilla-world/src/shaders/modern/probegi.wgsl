@@ -222,10 +222,13 @@ struct GiAccum {
     /// The same weight **before** the class match — the denominator that says how much of this cell
     /// the class test threw away. See [`finish`].
     base: f32,
+    /// The probes' sky visibility under that same weight: how open to the sky this cell is,
+    /// whichever class the receiver is. See [`openness`].
+    open: f32,
 }
 
 fn start() -> GiAccum {
-    return GiAccum(vec3<f32>(0.0), 0.0, 0.0, 0.0);
+    return GiAccum(vec3<f32>(0.0), 0.0, 0.0, 0.0, 0.0);
 }
 
 fn accum(a: GiAccum, g: GiParams, pk: GiPick, k: u32, probe: GiProbe, p: vec3<f32>, nrm: vec3<f32>) -> GiAccum {
@@ -267,7 +270,7 @@ fn accum(a: GiAccum, g: GiParams, pk: GiPick, k: u32, probe: GiProbe, p: vec3<f3
         }
     }
     let e = max(probe.dc.rgb + probe.sh_x.rgb * nrm.x + probe.sh_y.rgb * nrm.y + probe.sh_z.rgb * nrm.z, vec3<f32>(0.0));
-    return GiAccum(a.sum + e * w, a.weight + w, a.sky + probe.sh_x.w * w, a.base + base_w);
+    return GiAccum(a.sum + e * w, a.weight + w, a.sky + probe.sh_x.w * w, a.base + base_w, a.open + probe.sh_x.w * base_w);
 }
 
 // rgb = the irradiance over pi the ambient row is replaced by; w = how much of the cell answered.
@@ -304,6 +307,16 @@ fn finish(a: GiAccum, recv: f32) -> vec4<f32> {
     let survived = smoothstep(0.20, 0.60, clamp(a.weight / a.base, 0.0, 1.0));
     let confidence = clamp(a.weight * 3.0, 0.0, 1.0) * mix(1.0, survived, clamp(recv, 0.0, 1.0));
     return vec4<f32>(a.sum / a.weight, confidence);
+}
+
+// The cell's sky visibility before the class match, 0 to 1: a room's back wall reads 0, its
+// doorway what share of its probes' rays leave it. What eases an interior surface into the light
+// outside it, where the group's interior flag alone would cut a line.
+fn openness(a: GiAccum) -> f32 {
+    if (a.base <= 1e-5) {
+        return 0.0;
+    }
+    return clamp(a.open / a.base, 0.0, 1.0);
 }
 
 // The nearest probe's slot — the froxels' one-tap lookup.

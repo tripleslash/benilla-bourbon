@@ -528,8 +528,8 @@ fn bank_patch(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
 }
 
 // The clear patches' feature size against the clouds', and how much a finer octave roughens them.
-const BANK_CLEAR_SCALE: f32 = 1.0;
-const BANK_CLEAR_ROUGH: f32 = 0.15;
+const BANK_CLEAR_SCALE: f32 = 1.4;
+const BANK_CLEAR_ROUGH: f32 = 0.28;
 
 // How much of the bank stands at world point `p`, read over `span` yards: 0 in a clear patch, 1 past its edge.
 fn bank_clear(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
