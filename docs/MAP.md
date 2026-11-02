@@ -130,7 +130,7 @@
 - **benilla-wasm-alloc-test** (lib.rs): wasm_alloc 
 - **benilla-world** (lib.rs): art_scope assets bgwin billboard boot build_id card_store clouds clutter collision decal dev_state doodad_anim entity_shade exterior_cull ffx_glow final_pass frame_pace fsr ground_fx horizon instance_tint interact interior launch_env layout_keys lighting liquid log_ring mac_quit map_proj mat_anim_table mesh_tag model_fade model_forms model_render modern modkeys particles perf_probe ribbons ride_frame rig_anim rig_palette rig_rider schedule shaders sky sky_order skybox ssilvb static_gx static_merge straddle sun surface system_profile terrain_stream thread_qos view vis_chain water_fx wdl weather wind wmo_portal world_census world_flags world_map world_plugins world_point world_unit worldview zfill 
 - **wenilla-host** (lib.rs): data packs remote static_site ws 
-- **benilla-packer** (main.rs): append group inspect merge overlay plan sidecars 
+- **benilla-packer** (main.rs): append group inspect merge overlay plan sidecars sidn stack wdl 
 
 ## CLI binaries
 

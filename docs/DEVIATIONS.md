@@ -36,8 +36,9 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - [benilla-app](#benilla-app): 274
 - [benilla-assets](#benilla-assets): 7
 - [benilla-blp](#benilla-blp): 2
-- [benilla-formats](#benilla-formats): 28
+- [benilla-formats](#benilla-formats): 27
 - [benilla-lua](#benilla-lua): 11
+- [benilla-packer](#benilla-packer): 2
 - [benilla-protocol](#benilla-protocol): 30
 - [benilla-srp](#benilla-srp): 2
 - [benilla-ui](#benilla-ui): 137
@@ -627,7 +628,6 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The fx lane redraws them as projected decals (`ground_fx`) because that way they drape the terrain. ([`src/models/types.rs:401`](../crates/benilla-formats/src/models/types.rs#L401))
 - Consumers light such a card off the side it presents, because the reference's shading of it is inverted and follows the camera. ([`src/models/types.rs:474`](../crates/benilla-formats/src/models/types.rs#L474))
 - The UV comes from the model-space position, not each surface's own `(i, j)`, because the two agree on cell-aligned surfaces and the position never seams where they are not. Magma and slime use this period too; the reference reads their UV from the vertex's authored `int16` pair × 1/256 (`0x6b6993`), which is not parsed. ([`src/models/wmo/group.rs:19`](../crates/benilla-formats/src/models/wmo/group.rs#L19))
-- In a root that lost its SIDN flag (`SIDN_FLAG_LOST`) a non-black SIDN colour glows without the `0x10` flag too, because Turtle WoW's `Stormwind.wmo` and its like zero every MOMT flag but keep the colours, which left their lamp glass and windows dark at night. Elsewhere an unflagged colour stays dark, as in the reference (`0x6b4090`). ([`src/models/wmo/group.rs:579`](../crates/benilla-formats/src/models/wmo/group.rs#L579))
 
 #### particles
 
@@ -685,6 +685,15 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 - These are benilla's own needs, past what the client's checks (`Vm::checkstack`) reserve: a frame's registers above `c_maxstack` (`Proto::maxstack`), and the host's and natives' pushes, which ask for no margin of `EXTRA_STACK` and one more. Where they pass what the client reserved, the stack grows where the client's would not. ([`src/vm.rs:985`](../crates/benilla-lua/src/vm.rs#L985))
 - benilla's scratch registers above a frame's `c_maxstack` (`Proto::maxstack`) stay on the stack; the client has none, and halves. ([`src/vm.rs:2332`](../crates/benilla-lua/src/vm.rs#L2332))
+### benilla-packer
+
+#### sidn
+
+- The flag is set where Turtle WoW's data lost it, because its own client reads these roots unflagged and leaves their glass dark while the colours, like the stock city's flags, say that glass was meant to glow. ([`src/sidn.rs:18`](../crates/benilla-packer/src/sidn.rs#L18))
+
+#### wdl
+
+- A layer's far band is rebuilt on that layer's ADTs, because the reference (Turtle WoW's own 1.12 client) reads the same stale `.wdl` and draws the old coasts beyond the new ones. ([`src/wdl.rs:22`](../crates/benilla-packer/src/wdl.rs#L22))
 ### benilla-protocol
 
 #### (crate root)

@@ -31,9 +31,10 @@ pub struct WdlFile {
 }
 
 /// One tile's absolute heights in yards: 17×17 corners, then 16×16 cell centres, row-major.
-struct MareTile {
-    outer: [i16; OUTER_N],
-    inner: [i16; INNER_N],
+#[derive(Clone, PartialEq, Eq)]
+pub struct MareTile {
+    pub outer: [i16; OUTER_N],
+    pub inner: [i16; INNER_N],
 }
 
 /// One tile's outer height grid, as a **regular lattice** rather than a mesh — the shape a
@@ -81,6 +82,62 @@ impl WdlFile {
             .read_file(&path)
             .with_context(|| format!("reading {path}"))?;
         parse_wdl(&bytes).with_context(|| format!("parsing {path}"))
+    }
+
+    /// Parse a `.wdl`'s bytes.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        parse_wdl(bytes)
+    }
+
+    /// A WDL of these tiles, `[tile_y * 64 + tile_x]` as on disk.
+    pub fn from_tiles(tiles: Vec<Option<MareTile>>) -> Result<Self> {
+        if tiles.len() != 4096 {
+            bail!("{} tiles, expected 4096", tiles.len());
+        }
+        Ok(Self { tiles })
+    }
+
+    /// Tile `(tile_x, tile_y)`'s MARE heights, or `None` if the map has no such tile.
+    pub fn tile(&self, tile_x: u32, tile_y: u32) -> Option<&MareTile> {
+        if tile_x >= 64 || tile_y >= 64 {
+            return None;
+        }
+        self.tiles[tile_index(tile_x, tile_y)].as_ref()
+    }
+
+    /// The file `parse` reads back: `MVER` 18, `head` verbatim (the chunks a source file carries
+    /// between `MVER` and `MAOF`, none in vanilla), `MAOF`, then each present tile's `MARE` in MAOF
+    /// order, followed by its `MAHO` hole mask where `holes` gives one. The reference's reader
+    /// (`0x6944a0`) seeks each MAOF offset and reads the 545 heights alone, so `MAHO` is shape, not
+    /// data, to a 1.12 client.
+    pub fn encode(&self, head: &[u8], holes: Option<&[Option<[u16; 16]>]>) -> Vec<u8> {
+        let chunk = |out: &mut Vec<u8>, magic: &[u8; 4], len: usize| {
+            out.extend(magic.iter().rev());
+            out.extend_from_slice(&(len as u32).to_le_bytes());
+        };
+        let mut out = Vec::new();
+        chunk(&mut out, b"MVER", 4);
+        out.extend_from_slice(&18u32.to_le_bytes());
+        out.extend_from_slice(head);
+        chunk(&mut out, b"MAOF", 4096 * 4);
+        let maof = out.len();
+        out.resize(maof + 4096 * 4, 0);
+        for (i, tile) in self.tiles.iter().enumerate() {
+            let Some(tile) = tile else { continue };
+            let at = out.len() as u32;
+            out[maof + i * 4..maof + i * 4 + 4].copy_from_slice(&at.to_le_bytes());
+            chunk(&mut out, b"MARE", MARE_BYTES);
+            for h in tile.outer.iter().chain(&tile.inner) {
+                out.extend_from_slice(&h.to_le_bytes());
+            }
+            if let Some(mask) = holes.and_then(|h| h.get(i).copied().flatten()) {
+                chunk(&mut out, b"MAHO", 32);
+                for row in mask {
+                    out.extend_from_slice(&row.to_le_bytes());
+                }
+            }
+        }
+        out
     }
 
     /// Number of present (non-empty) tiles.

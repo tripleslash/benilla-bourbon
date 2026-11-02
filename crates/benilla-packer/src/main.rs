@@ -19,6 +19,9 @@ mod merge;
 mod overlay;
 mod plan;
 mod sidecars;
+mod sidn;
+mod stack;
+mod wdl;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -75,6 +78,12 @@ enum Cmd {
     /// Work out the Turtle WoW 1.18.1 layer: what a Turtle install's numbered patches add to or
     /// change over the 1.12.1 corpus, as the key list `build --only` packs. See `overlay.rs`.
     Overlay(overlay::OverlayArgs),
+    /// Measure each map's WDL against the ADTs a stack of containers serves, and write corrected
+    /// `.wdl`s where they disagree. See `wdl.rs`.
+    Wdl(wdl::WdlArgs),
+    /// Set the lost SIDN flag on the glass of the WMO roots that lost it, as a loose tree for
+    /// `append --loose`. See `sidn.rs`.
+    Sidn(sidn::SidnArgs),
 }
 
 #[derive(Parser)]
@@ -233,6 +242,8 @@ fn main() -> Result<()> {
         Cmd::Overlay(a) => overlay::overlay(a),
         Cmd::Merge(a) => merge::merge(a),
         Cmd::Append(a) => append::append(a),
+        Cmd::Wdl(a) => wdl::wdl(a),
+        Cmd::Sidn(a) => sidn::sidn(a),
         Cmd::Sidecars(a) => {
             let index =
                 Index::parse(std::fs::read(a.packs.join("index.bpi")).context("reading index")?)

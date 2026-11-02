@@ -464,7 +464,7 @@ impl AssetLoader for WmoModelLoader {
         // needs the root's material and batch tables, and it is the one call in the group loop
         // heavy enough to be worth a crossing. The root is never mutated after this line (31 uses,
         // all reads), so sharing it costs nothing and copies nothing.
-        let root = std::sync::Arc::new(root.map_err(to_io)?.at_path(&root_path));
+        let root = std::sync::Arc::new(root.map_err(to_io)?);
         let stem = root_path
             .strip_suffix(".wmo")
             .unwrap_or(&root_path)
