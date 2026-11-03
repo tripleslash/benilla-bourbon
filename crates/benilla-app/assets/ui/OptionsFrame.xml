@@ -2393,7 +2393,8 @@
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- Deviation: benilla's own level control, beside
-                                             1.12's Gamma (ui_gamma.rs). -->
+                                             1.12's Gamma (ui_gamma.rs), because Gamma holds black
+                                             where it is and dark scenes need their blacks lifted. -->
                                         <Frame name="$parentRowBrightness" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>

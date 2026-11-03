@@ -44,5 +44,3 @@ crates/benilla-ui/src/script/stdlib.rs	with `#` and one byte of room, `_store_nu
 crates/benilla-ui/src/script/tooltip/size.rs	`0x530a52` lays it out at once; getters resolve first, so only OnSizeChanged
 crates/benilla-ui/src/script/worldmap.rs	the engine's own push (the world-enter sync) queues `WORLD_MAP_UPDATE` for the next
 crates/benilla-world/src/collision/one_sided.rs	the reference keeps the later record in file order on an exact
-crates/benilla-app/assets/ui/OptionsFrame.xml	benilla's own level control, beside 1.12's Gamma (ui_gamma.rs).
-crates/benilla-formats/src/bundled_addons.rs	the reference client ships no addon. benilla bundles a few (`third_party/addons`), which

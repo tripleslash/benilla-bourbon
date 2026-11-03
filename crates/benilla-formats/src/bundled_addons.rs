@@ -3,8 +3,9 @@
 //! and sounds the addon names by path all resolve through the one read every caller already makes.
 //!
 //! Deviation: the reference client ships no addon. benilla bundles a few (`third_party/addons`),
-//! which the app registers as off until the player ticks them (`ui_script::addons`). Which folders
-//! exist is this module's; which of them a flavor offers is the app's.
+//! which the app registers as off until the player ticks them (`ui_script::addons`), because a
+//! browser page has no AddOns folder a player could install them into. Which folders exist is this
+//! module's; which of them a flavor offers is the app's.
 //!
 //! Where the files are:
 //! * native: `$BENILLA_BUNDLED_ADDONS` (set and empty: none), else `<project folder>/third_party/
