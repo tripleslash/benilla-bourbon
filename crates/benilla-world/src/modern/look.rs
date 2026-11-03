@@ -133,6 +133,10 @@ pub struct ZoneLook {
     pub bank_far_yd: f32,
     /// fork: the share of the bank a clear patch keeps (0 = bare ground there).
     pub bank_clear_floor: f32,
+    /// fork: the analytic bank's colour gain while the moon keys (`sun_arc::moon_key`, eased in): the
+    /// hour's fog colour falls to about the moonlit ground's brightness, and the veil sank into it.
+    /// With the moon down nothing changes. 1 = none.
+    pub bank_moon_gain: f32,
     /// fork: the yards over which the analytic bank thins by `e` above the ground. A body stands in it
     /// where this is near its own height; a thinner layer veils the ground and leaves the body clear.
     pub bank_height: f32,
@@ -193,6 +197,7 @@ impl ZoneLook {
         bank_far: 1.0,
         bank_far_yd: 200.0,
         bank_clear_floor: 0.0,
+        bank_moon_gain: 1.0,
     };
 
     /// fork: **the default look at noon**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
@@ -289,6 +294,7 @@ impl ZoneLook {
             bank_far: m(self.bank_far, to.bank_far),
             bank_far_yd: m(self.bank_far_yd, to.bank_far_yd),
             bank_clear_floor: m(self.bank_clear_floor, to.bank_clear_floor),
+            bank_moon_gain: m(self.bank_moon_gain, to.bank_moon_gain),
         }
     }
 
@@ -331,6 +337,7 @@ impl ZoneLook {
             && d(self.bank_far, other.bank_far)
             && d(self.bank_far_yd, other.bank_far_yd)
             && d(self.bank_clear_floor, other.bank_clear_floor)
+            && d(self.bank_moon_gain, other.bank_moon_gain)
             && (0..3).all(|i| d(self.bank_rgb[i], other.bank_rgb[i]))
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
@@ -510,6 +517,8 @@ impl ZoneLook {
         bank_far_yd: 200.0,
         // The faintest veil in the clear patches, so the open ground is not bare.
         bank_clear_floor: 0.8,
+        // Twice the colour under the moon (approved live at 4:00).
+        bank_moon_gain: 2.0,
         // The moon's shadow at night; by day the flat colour, as approved.
         bank_shade: 1.0,
         night_banks: 0.6,
@@ -953,7 +962,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_height,bank_analytic,bank_patch,bank_patch_yd,bank_rgb r,g,b,bank_veil,bank_clear,bank_clear_edge,bank_far,bank_far_yd,bank_clear_floor`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_height,bank_analytic,bank_patch,bank_patch_yd,bank_rgb r,g,b,bank_veil,bank_clear,bank_clear_edge,bank_far,bank_far_yd,bank_clear_floor,bank_moon_gain`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -1017,6 +1026,7 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.bank_far, 53);
     set(&mut look.bank_far_yd, 54);
     set(&mut look.bank_clear_floor, 55);
+    set(&mut look.bank_moon_gain, 56);
     look
 }
 

@@ -747,11 +747,12 @@ fn update_volume(
             look.0.bank_clear,
             look.0.bank_clear_edge,
         ),
-        bank_color: bank_light(
+        bank_color: (bank_light(
             Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint),
             Vec3::from(media.key_in) * Vec3::from(look.0.key_hue(look.0.glow)),
             Vec3::from(look.0.bank_rgb),
-        )
+        ) * (1.0
+            + (look.0.bank_moon_gain - 1.0) * super::sun_arc::moon_key().clamp(0.0, 1.0)))
         .extend(look.0.bank_veil),
         bank_reach: Vec4::new(
             look.0.bank_shade_day + (look.0.bank_shade - look.0.bank_shade_day) * night,
