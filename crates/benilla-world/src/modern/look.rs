@@ -519,8 +519,6 @@ impl ZoneLook {
         bank_clear_floor: 0.8,
         // Twice the colour under the moon (approved live at 4:00).
         bank_moon_gain: 2.0,
-        // The moon's shadow at night; by day the flat colour, as approved.
-        bank_shade: 1.0,
         night_banks: 0.6,
         night_glow: 0.5,
         sea_fog: 0.035,
