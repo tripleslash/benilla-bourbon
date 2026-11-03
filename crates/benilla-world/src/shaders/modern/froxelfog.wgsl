@@ -645,9 +645,10 @@ fn bank_fog(f: FroxelFog, depth: vec3<f32>) -> vec4<f32> {
 // ground and over the ground in shade. The fog medium's own split would not do: it holds the ambient to
 // most of its light (`media::SHADED_SHARE`), and the bank sank into the moonlit ground. Hue kept.
 //
-// And never darker than `BANK_SURFACE_ALBEDO` of that light: at night the hour's fog colour falls to about
-// the ground's own brightness, and the veil over it vanished. A surface's albedo is well under this, so
-// the bank stays a lighter veil over the ground at every hour; by day the fog colour is above it.
+// And never darker than `BANK_SURFACE_ALBEDO` of the key's share of that light: under the moon the hour's
+// fog colour falls to about the moonlit ground's own brightness, and the veil over it vanished. A
+// surface's albedo is well under this, so the bank stays a lighter veil over moonlit ground; with no key
+// (the moon down) nothing changes, and by day the fog colour is above it.
 const BANK_SURFACE_ALBEDO: f32 = 0.6;
 
 fn bank_in_key(f: FroxelFog, fog: vec4<f32>, vis: f32, ambient: vec3<f32>, key: vec3<f32>) -> vec4<f32> {
@@ -659,7 +660,7 @@ fn bank_in_key(f: FroxelFog, fog: vec4<f32>, vis: f32, ambient: vec3<f32>, key: 
         return fog;
     }
     let colour = max(dot(f.bank_color.rgb, w), 1e-6);
-    let lift = max(colour, BANK_SURFACE_ALBEDO * flat) / colour;
+    let lift = max(colour, BANK_SURFACE_ALBEDO * 0.5 * k) / colour;
     let lit = a + k * mix(0.5, clamp(vis, 0.0, 1.0), f.bank_reach.x);
     return vec4<f32>(fog.rgb * (lift * lit / flat), fog.a);
 }
