@@ -89,10 +89,27 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(f.ground.y + d * f.ground.z, select(0.0, 1.0, all(raw == uv)));
 }
 
+// fork: under an analytic veil (`fog.bank.x`) the volume's banks build up in the deepest part of its
+// stronger stretches: on the clear patches' noise (`froxelfog::bank_clear_noise`), from `BUILD_START`
+// of the way across the patches' edge band (`bank.z` to `bank.z + bank.w`) to `BUILD_DEPTH` past that,
+// squared. Most of the land keeps the veil alone; the stronger stretches rise into a bank from their
+// edge inward.
+const BUILD_START: f32 = 0.0;
+const BUILD_DEPTH: f32 = 0.15;
+
+fn bank_patches(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
+    if (f.bank.x <= 0.0) {
+        return 1.0;
+    }
+    let from = f.bank.z + BUILD_START * max(f.bank.w, 1e-3);
+    let build = smoothstep(from, from + BUILD_DEPTH, froxelfog::bank_clear_noise(f, p, 1.0));
+    return build * build;
+}
+
 // The ground banks' extinction at `p`, `d` yards of planar depth from the camera (1/yd), over
 // `terrain` (`terrain_under`; off or outside it, the ground under the camera).
 fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>, d: f32, terrain: vec2<f32>) -> f32 {
-    let core = f.night.x;
+    let core = f.night.x * bank_patches(f, p);
     if (core <= 0.0) {
         return 0.0;
     }

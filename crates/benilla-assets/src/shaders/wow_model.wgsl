@@ -1266,6 +1266,14 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 #else
     out.bank_ground = frame_origin.y;
 #endif
+#ifdef VERTEX_UVS_B
+    // A clutter tuft's own ground: its vertex less its height from base (UV_B.x, `clutter.rs`). The
+    // chunk's origin stood in, and every tuft below it lay whole in the bank: blended grass in the
+    // distance took the full veil, one flat colour, where the near grass stood out of it.
+    if (m.clutter_fade.w > 0.5) {
+        out.bank_ground = out.world_position.y - vertex.uv_b.x;
+    }
+#endif
 #endif
 #endif
 

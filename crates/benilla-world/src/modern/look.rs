@@ -384,8 +384,8 @@ impl ZoneLook {
         vignette: 0.38,
         // Darkshore's veil in this look's own light, the same clear patches at every hour, over the
         // volume's banks as they were before the veil (0.7 by day, 1.0 at night).
-        ground_fog: 3.0,
-        night_banks: 3.0,
+        ground_fog: 2.46,
+        night_banks: 2.46,
         bank_height: 0.5,
         bank_clear: 0.2,
         bank_clear_edge: 0.8,
@@ -515,19 +515,19 @@ impl ZoneLook {
         // A thin veil directly above the ground at every hour, into the sea fog, fixed in the world,
         // under a low ceiling so a long ray reads as a short one does, in clouds with clear patches
         // between them, as the reference's lies (`worldview_pose=6346.6,510.4,23.6,174.2,2.9`, 18:20).
-        ground_fog: 3.0,
-        bank_height: 0.5,
-        bank_clear: 0.2,
-        bank_clear_edge: 0.8,
+        ground_fog: 8.0,
+        bank_height: 0.3,
+        bank_clear: 0.45,
+        bank_clear_edge: 0.45,
         bank_analytic: 1.0,
-        bank_patch: 0.6,
-        bank_patch_yd: 40.0,
+        bank_patch: 0.023,
+        bank_patch_yd: 70.0,
         bank_rgb: [0.9, 0.82, 0.8],
-        bank_veil: 0.22,
+        bank_veil: 0.1,
         bank_far: 1.0,
         bank_far_yd: 200.0,
         // The faintest veil in the clear patches, so the open ground is not bare.
-        bank_clear_floor: 0.8,
+        bank_clear_floor: 0.5,
         // The volume's banks under the veil at every hour, as before the veil (`ground_fog` 1.8).
         bank_froxel: 1.8,
         bank_froxel_night: 1.8,

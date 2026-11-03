@@ -541,12 +541,18 @@ fn bank_clear(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
     if (f.bank.z <= 0.0) {
         return 1.0;
     }
+    // Only a little of one finer octave: the fine ones punch small round holes in the bank.
+    let n = bank_clear_noise(f, p, span);
+    return mix(f.bank_reach.z, 1.0, smoothstep(f.bank.z, f.bank.z + max(f.bank.w, 1e-3), n));
+}
+
+// The noise the clear patches cut at `p` (`bank_clear`): under `bank.z` a patch, past `bank.z + bank.w`
+// the whole veil, and further past it the depths the volume's banks build up in.
+fn bank_clear_noise(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
     let yd = max(f.sky.w, 1.0) / BANK_CLEAR_SCALE;
     let q = p.xz / yd + vec2<f32>(41.7, 23.9);
-    // Only a little of one finer octave: the fine ones punch small round holes in the bank.
     let rough = BANK_CLEAR_ROUGH * bank_resolves(yd / BANK_OCTAVE_MID, span);
-    let n = mix(bank_noise(q), bank_noise(q * BANK_OCTAVE_MID + vec2<f32>(17.3, 5.1)), rough);
-    return mix(f.bank_reach.z, 1.0, smoothstep(f.bank.z, f.bank.z + max(f.bank.w, 1e-3), n));
+    return mix(bank_noise(q), bank_noise(q * BANK_OCTAVE_MID + vec2<f32>(17.3, 5.1)), rough);
 }
 
 // The bands' length and breadth against the clouds' feature, how far they wander, and their thinnest and
@@ -558,8 +564,18 @@ const BANK_BAND_THIN: f32 = 0.4;
 const BANK_BAND_THICK: f32 = 1.6;
 
 // How thick the bank lies at world point `p`: long wandering bands, thicker and thinner, across the clouds.
-// It scales the veil's ceiling as well as its depth, since the ceiling would otherwise even them out.
+// It scales the veil's ceiling as well as its depth, since the ceiling would otherwise even them out. The
+// veil's bands are its thinnest share doubled (`BANK_BAND_VEIL_BASE`) with a thirty-second of the swing
+// over it (`BANK_BAND_VEIL_SWING`), as its clouds are; the volume's banks read the whole (`bank_band_full`).
+const BANK_BAND_VEIL_BASE: f32 = 2.0 * BANK_BAND_THIN;
+const BANK_BAND_VEIL_SWING: f32 = (BANK_BAND_THICK - BANK_BAND_THIN) / 32.0;
+
 fn bank_band(f: FroxelFog, p: vec3<f32>) -> f32 {
+    let t = (bank_band_full(f, p) - BANK_BAND_THIN) / (BANK_BAND_THICK - BANK_BAND_THIN);
+    return BANK_BAND_VEIL_BASE + BANK_BAND_VEIL_SWING * t;
+}
+
+fn bank_band_full(f: FroxelFog, p: vec3<f32>) -> f32 {
     let w = p.xz / max(f.sky.w, 1.0);
     let along = vec2<f32>(0.866 * w.x + 0.5 * w.y, 0.866 * w.y - 0.5 * w.x);
     let q = along / vec2<f32>(BANK_BAND_LENGTH, BANK_BAND_BREADTH) + vec2<f32>(11.1, 67.3);
@@ -618,13 +634,9 @@ fn bank_stretch(f: FroxelFog, eye: vec3<f32>, dir: vec3<f32>, t0: f32, t1: f32, 
 // with a hard edge; five yards closed that. A thinner layer holds less: a fixed five yards laid a 0.5 yd
 // layer as an opaque sheet over the ground at the feet.
 const BANK_SURFACE_AIR: f32 = 5.0 / 1.5;
-// The ground cover (yd) a surface counts as ground under: grass and low shrubs stand in the veil the
-// ground under them takes, or every tuft over a thin layer cut a dark hole through the bank.
-const BANK_GROUND_COVER: f32 = 1.0;
 
 fn bank_at_surface(f: FroxelFog, depth: vec3<f32>, h: f32) -> vec3<f32> {
-    let over = max(h - BANK_GROUND_COVER, 0.0);
-    let least = BANK_SURFACE_AIR / max(f.bank.y, 1e-3) * exp(-f.bank.y * over);
+    let least = BANK_SURFACE_AIR / max(f.bank.y, 1e-3) * exp(-f.bank.y * h);
     return depth * max(least / max(depth.z, 1e-3), 1.0);
 }
 
