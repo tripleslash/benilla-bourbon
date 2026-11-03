@@ -644,9 +644,19 @@ fn bank_at_surface(f: FroxelFog, depth: vec3<f32>, h: f32) -> vec3<f32> {
 // the share of this ray's air outside the clear patches, so a patch stays clear however much air a ray
 // holds, and a long ray lies lighter for the patches it crosses.
 fn bank_fog(f: FroxelFog, depth: vec3<f32>) -> vec4<f32> {
+    return bank_fog_over(f, depth, 0.0);
+}
+
+// The share of the veil a surface `h` yards over the ground keeps (`bank_fog_over`): a grass tip half a
+// yard up keeps about 0.4 of the ground's at a 0.3 yd layer. A level ray to a far tuft runs yards
+// through the layer just before it, and the tip sank into the veil the ground beside it took.
+const BANK_STANDS_OUT: f32 = 0.5;
+
+fn bank_fog_over(f: FroxelFog, depth: vec3<f32>, h: f32) -> vec4<f32> {
     let tau = depth.x * f.bank.x;
     let ceiling = max(f.bank_color.w * depth.y / max(depth.z, 1e-6), 1e-3);
-    let veil = ceiling * (1.0 - exp(-max(tau, 0.0) / ceiling));
+    let stands = exp(-max(h, 0.0) * f.bank.y * BANK_STANDS_OUT);
+    let veil = stands * ceiling * (1.0 - exp(-max(tau, 0.0) / ceiling));
     return vec4<f32>(f.bank_color.rgb * veil, 1.0 - veil);
 }
 
@@ -713,7 +723,7 @@ fn bank_air(f: FroxelFog, eye: vec3<f32>, p: vec3<f32>, ground: f32) -> vec4<f32
         from_h = to_h;
     }
     let raised = depth + (bank_at_surface(f, depth, h1) - depth) * here;
-    return bank_far(f, bank_fog(f, raised), len);
+    return bank_far(f, bank_fog_over(f, raised, h1), len);
 }
 
 // `fog` seen through `bank`, which lies in front of it as far as the blend can tell.
