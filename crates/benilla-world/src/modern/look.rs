@@ -517,8 +517,8 @@ impl ZoneLook {
         bank_far_yd: 200.0,
         // The faintest veil in the clear patches, so the open ground is not bare.
         bank_clear_floor: 0.8,
-        // Twice the colour under the moon (approved live at 4:00).
-        bank_moon_gain: 2.0,
+        // Half again the colour under the moon (approved live at 4:00).
+        bank_moon_gain: 1.5,
         night_banks: 0.6,
         night_glow: 0.5,
         sea_fog: 0.035,
