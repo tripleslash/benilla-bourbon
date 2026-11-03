@@ -710,10 +710,14 @@ fn update_volume(
             .unwrap_or_default()
             .extend(night_glow.z),
         night: Vec4::new(
-            if super::banks_enabled() && !bank_analytic {
+            if !super::banks_enabled() {
+                0.0
+            } else if !bank_analytic {
                 BANK_EXTINCTION * night_bank_share(&look.0, night, added)
             } else {
-                0.0
+                let froxel =
+                    look.0.bank_froxel + (look.0.bank_froxel_night - look.0.bank_froxel) * night;
+                BANK_EXTINCTION * froxel.max(0.0)
             },
             bank_ground,
             bank_air_share(&look.0),

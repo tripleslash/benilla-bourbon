@@ -1758,13 +1758,14 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
             // fork: the analytic bank, which the composite gives the opaque batches: a doodad riding
             // its fade twin stood unfogged in the veil. Not in the water mirror, as in the composite.
             let air = modern_block.fog;
-            if (air.bank.x > 0.0 && !sunshadow::mirror_view(modern_block.cascades, view.world_position)) {
-                fog = colorspace::air_exposure(
-                    froxelfog::with_bank(fog, froxelfog::bank_air(air, air.camera.xyz, in.world_position.xyz, in.bank_ground)),
-                    air.sky.x,
-                    air.sky.y,
-                );
+            let mirror = sunshadow::mirror_view(modern_block.cascades, view.world_position);
+            if (air.bank.x > 0.0 && !mirror) {
+                fog = froxelfog::with_bank(fog, froxelfog::bank_air(air, air.camera.xyz, in.world_position.xyz, in.bank_ground));
             }
+            // The composite's exposure on a world pixel's air (`colorspace::air_exposure`), with or
+            // without the bank: a fading tuft in the volume's banks alone stood darker than the
+            // ground the composite fogged around it.
+            fog = colorspace::air_exposure(fog, air.sky.x, air.sky.y);
             if (is_additive || fog_policy == 1u) {
                 lin = lin * fog.a;
             } else if (is_mod || fog_policy == 2u) {

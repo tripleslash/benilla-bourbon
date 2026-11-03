@@ -133,6 +133,12 @@ pub struct ZoneLook {
     pub bank_far_yd: f32,
     /// fork: the share of the bank a clear patch keeps (0 = bare ground there).
     pub bank_clear_floor: f32,
+    /// fork: an analytic look's froxel banks by day: the volume's ground banks at this `ground_fog`,
+    /// under the analytic veil, so the banks take the volume's light and shadow and the veil lies on
+    /// the ground through them. Eased to [`Self::bank_froxel_night`] across `sun_arc::night_at`. 0 = none.
+    pub bank_froxel: f32,
+    /// fork: [`Self::bank_froxel`] at night.
+    pub bank_froxel_night: f32,
     /// fork: the analytic bank's colour gain while the moon keys (`sun_arc::moon_key`, eased in): the
     /// hour's fog colour falls to about the moonlit ground's brightness, and the veil sank into it.
     /// With the moon down nothing changes. 1 = none.
@@ -198,6 +204,8 @@ impl ZoneLook {
         bank_far_yd: 200.0,
         bank_clear_floor: 0.0,
         bank_moon_gain: 1.0,
+        bank_froxel: 0.0,
+        bank_froxel_night: 0.0,
     };
 
     /// fork: **the default look at noon**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
@@ -295,6 +303,8 @@ impl ZoneLook {
             bank_far_yd: m(self.bank_far_yd, to.bank_far_yd),
             bank_clear_floor: m(self.bank_clear_floor, to.bank_clear_floor),
             bank_moon_gain: m(self.bank_moon_gain, to.bank_moon_gain),
+            bank_froxel: m(self.bank_froxel, to.bank_froxel),
+            bank_froxel_night: m(self.bank_froxel_night, to.bank_froxel_night),
         }
     }
 
@@ -338,6 +348,8 @@ impl ZoneLook {
             && d(self.bank_far_yd, other.bank_far_yd)
             && d(self.bank_clear_floor, other.bank_clear_floor)
             && d(self.bank_moon_gain, other.bank_moon_gain)
+            && d(self.bank_froxel, other.bank_froxel)
+            && d(self.bank_froxel_night, other.bank_froxel_night)
             && (0..3).all(|i| d(self.bank_rgb[i], other.bank_rgb[i]))
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
@@ -370,8 +382,8 @@ impl ZoneLook {
         haze: 0.0034,
         shafts: 0.4,
         vignette: 0.38,
-        // Darkshore's bank in this look's own light, the same veil and clear patches at every hour, lying
-        // lower, under the trunks and lamps that stand close around a road here.
+        // Darkshore's veil in this look's own light, the same clear patches at every hour, over the
+        // volume's banks as they were before the veil (0.7 by day, 1.0 at night).
         ground_fog: 3.0,
         night_banks: 3.0,
         bank_height: 0.5,
@@ -384,9 +396,8 @@ impl ZoneLook {
         // This look's air is far darker than Darkshore's salmon.
         bank_rgb: [2.0, 2.0, 2.0],
         bank_veil: 0.23,
-        // Lit where the moon reaches it, so the bank reads alike over moonlit ground and in shade.
-        bank_shade: 1.0,
-        bank_shade_day: 1.0,
+        bank_froxel: 0.7,
+        bank_froxel_night: 1.0,
         night_glow: 1.0,
         noon_mix: 0.0,
         // The dark zones need the doubled moon to read at night (Duskwood, approved in the client).
@@ -517,8 +528,9 @@ impl ZoneLook {
         bank_far_yd: 200.0,
         // The faintest veil in the clear patches, so the open ground is not bare.
         bank_clear_floor: 0.8,
-        // Half again the colour under the moon (approved live at 4:00).
-        bank_moon_gain: 1.5,
+        // The volume's banks under the veil at every hour, as before the veil (`ground_fog` 1.8).
+        bank_froxel: 1.8,
+        bank_froxel_night: 1.8,
         night_banks: 0.6,
         night_glow: 0.5,
         sea_fog: 0.035,
@@ -960,7 +972,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
 /// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
 /// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_height,bank_analytic,bank_patch,bank_patch_yd,bank_rgb r,g,b,bank_veil,bank_clear,bank_clear_edge,bank_far,bank_far_yd,bank_clear_floor,bank_moon_gain`. An empty or unparsable entry keeps the zone's value.
+/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_height,bank_analytic,bank_patch,bank_patch_yd,bank_rgb r,g,b,bank_veil,bank_clear,bank_clear_edge,bank_far,bank_far_yd,bank_clear_floor,bank_moon_gain,bank_froxel,bank_froxel_night`. An empty or unparsable entry keeps the zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -1025,6 +1037,8 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.bank_far_yd, 54);
     set(&mut look.bank_clear_floor, 55);
     set(&mut look.bank_moon_gain, 56);
+    set(&mut look.bank_froxel, 57);
+    set(&mut look.bank_froxel_night, 58);
     look
 }
 
@@ -1303,10 +1317,10 @@ mod tests {
     /// A cross-fade takes the clouds' size at once: any fade of it moves them over the ground.
     #[test]
     fn no_cross_fade_slides_the_banks_clouds() {
-        let early = ZoneLook::NEUTRAL.lerp(ZoneLook::EERIE, 0.01);
-        assert_eq!(early.bank_patch_yd, ZoneLook::EERIE.bank_patch_yd);
+        let early = ZoneLook::NEUTRAL.lerp(ZoneLook::DARKSHORE, 0.01);
+        assert_eq!(early.bank_patch_yd, ZoneLook::DARKSHORE.bank_patch_yd);
         assert_ne!(
-            ZoneLook::EERIE.bank_patch_yd,
+            ZoneLook::DARKSHORE.bank_patch_yd,
             ZoneLook::NEUTRAL.bank_patch_yd
         );
     }
