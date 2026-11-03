@@ -638,15 +638,22 @@ fn bank_fog(f: FroxelFog, depth: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(f.bank_color.rgb * veil, 1.0 - veil);
 }
 
-// `fog` (`bank_fog`) lit by the key where `vis` of it sees the key: `bank_color` holds the ambient and half
-// the key (`volumetrics::bank_light`), and a look with `bank_reach.x` 1 takes the whole key in the open and
-// none of it in shadow, as the froxel banks do (`froxel_scatter.wgsl`'s `lum_bank`), so the bank darkens
-// and brightens with the ground under it. At 0 the colour stays flat.
-fn bank_in_key(f: FroxelFog, fog: vec4<f32>, vis: f32) -> vec4<f32> {
-    let flat = f.ambient.rgb + f.sun.rgb * 0.5;
-    let key = mix(0.5, clamp(vis, 0.0, 1.0), f.bank_reach.x);
-    let shaded = f.ambient.rgb + f.sun.rgb * key;
-    return vec4<f32>(fog.rgb * shaded / max(flat, vec3<f32>(1e-6)), fog.a);
+// `fog` (`bank_fog`) lit by the key where `vis` of it sees the key, `ambient` and `key` the light the
+// surfaces take (the shared light's rows 0 and 1, linear). `bank_color` holds the ambient and half the key
+// (`volumetrics::bank_light`); a look with `bank_reach.x` 1 brightens it as the ground under it brightens,
+// the whole key in the open and none in shade, so the bank reads at the same strength over moonlit
+// ground and over the ground in shade. The fog medium's own split would not do: it holds the ambient to
+// most of its light (`media::SHADED_SHARE`), and the bank sank into the moonlit ground. Hue kept.
+fn bank_in_key(f: FroxelFog, fog: vec4<f32>, vis: f32, ambient: vec3<f32>, key: vec3<f32>) -> vec4<f32> {
+    let w = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let a = dot(ambient, w);
+    let k = dot(key, w);
+    let flat = a + 0.5 * k;
+    if (flat <= 1e-6) {
+        return fog;
+    }
+    let lit = a + k * mix(0.5, clamp(vis, 0.0, 1.0), f.bank_reach.x);
+    return vec4<f32>(fog.rgb * (lit / flat), fog.a);
 }
 
 // `fog` (`bank_fog`) at `dist` yards from the camera, faded to `bank_reach.y` of itself over the land in
@@ -681,14 +688,20 @@ fn bank_air(f: FroxelFog, eye: vec3<f32>, p: vec3<f32>, ground: f32) -> vec4<f32
     var t0 = 0.0;
     var from_h = h0;
     var depth = vec3<f32>(0.0);
+    var here = 1.0;
     for (var i = 1u; i <= BANK_STRETCHES; i = i + 1u) {
         let t1 = reach * bank_stretch_end(i);
         let to_h = mix(h0, h1, t1 / len);
-        depth = depth + bank_stretch(f, eye, dir, t0, t1, from_h, to_h);
+        // Each stretch held to the clear patch at its end, as the composite's (`bank_over_terrain`), so
+        // a blended tuft in a clear patch takes the veil the ground around it takes.
+        here = bank_clear(f, eye + dir * t1, 1.0);
+        let raw = bank_stretch(f, eye, dir, t0, t1, from_h, to_h);
+        depth = depth + vec3<f32>(raw.xy * here, raw.z);
         t0 = t1;
         from_h = to_h;
     }
-    return bank_far(f, bank_fog(f, bank_at_surface(f, depth, h1)), len);
+    let raised = depth + (bank_at_surface(f, depth, h1) - depth) * here;
+    return bank_far(f, bank_fog(f, raised), len);
 }
 
 // `fog` seen through `bank`, which lies in front of it as far as the blend can tell.

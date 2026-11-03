@@ -504,7 +504,7 @@ impl ZoneLook {
         bank_patch: 0.9,
         bank_patch_yd: 65.0,
         bank_rgb: [0.9, 0.82, 0.8],
-        bank_veil: 0.15,
+        bank_veil: 0.22,
         bank_far: 1.0,
         bank_far_yd: 200.0,
         // The faintest veil in the clear patches, so the open ground is not bare.

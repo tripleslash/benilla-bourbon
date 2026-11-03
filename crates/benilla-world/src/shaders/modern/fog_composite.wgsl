@@ -229,7 +229,11 @@ fn bank_over_terrain(f: froxelfog::FroxelFog, eye: vec3<f32>, p: vec3<f32>) -> v
     // The least air a surface holds (`bank_at_surface`) only where the ground there holds the bank.
     let raised = depth + (froxelfog::bank_at_surface(f, depth, h0) - depth) * here;
     let fog = froxelfog::bank_fog(f, raised);
-    return froxelfog::bank_far(f, froxelfog::bank_in_key(f, fog, lit / max(depth.x, 1e-6)), len);
+    return froxelfog::bank_far(f, froxelfog::bank_in_key(
+        f, fog, lit / max(depth.x, 1e-6),
+        colorspace::srgb_to_linear(light_table.rows[0].xyz),
+        colorspace::srgb_to_linear(light_table.rows[1].xyz),
+    ), len);
 }
 
 @fragment
