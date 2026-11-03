@@ -367,12 +367,13 @@ impl ZoneLook {
         // lower, under the trunks and lamps that stand close around a road here.
         ground_fog: 3.0,
         night_banks: 3.0,
-        bank_height: 1.5,
+        bank_height: 0.5,
         bank_clear: 0.2,
         bank_clear_edge: 0.8,
         bank_analytic: Self::DARKSHORE.bank_analytic,
         bank_patch: Self::DARKSHORE.bank_patch,
         bank_patch_yd: Self::DARKSHORE.bank_patch_yd,
+        bank_clear_floor: Self::DARKSHORE.bank_clear_floor,
         // This look's air is far darker than Darkshore's salmon.
         bank_rgb: [2.0, 2.0, 2.0],
         bank_veil: 0.23,
@@ -497,18 +498,18 @@ impl ZoneLook {
         // under a low ceiling so a long ray reads as a short one does, in clouds with clear patches
         // between them, as the reference's lies (`worldview_pose=6346.6,510.4,23.6,174.2,2.9`, 18:20).
         ground_fog: 3.0,
-        bank_height: 1.0,
+        bank_height: 0.5,
         bank_clear: 0.2,
         bank_clear_edge: 0.8,
         bank_analytic: 1.0,
-        bank_patch: 0.9,
-        bank_patch_yd: 65.0,
+        bank_patch: 0.6,
+        bank_patch_yd: 40.0,
         bank_rgb: [0.9, 0.82, 0.8],
         bank_veil: 0.22,
         bank_far: 1.0,
         bank_far_yd: 200.0,
         // The faintest veil in the clear patches, so the open ground is not bare.
-        bank_clear_floor: 0.1,
+        bank_clear_floor: 0.8,
         // The moon's shadow at night; by day the flat colour, as approved.
         bank_shade: 1.0,
         night_banks: 0.6,
