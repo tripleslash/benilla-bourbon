@@ -116,6 +116,7 @@ pub mod dev_state;
 pub mod doodad_anim;
 pub mod entity_shade;
 pub mod exterior_cull;
+pub mod fanout;
 pub mod ffx_glow;
 pub mod final_pass;
 pub mod frame_pace;

@@ -152,32 +152,41 @@ pub fn sample_mat_anim(time: Res<Time>, hosts: Query<AlphaHost>, mut q: Query<&m
     // The world clock in f64: a long-uptime f32 drifts whole milliseconds.
     let world = time.elapsed_secs_f64();
     // Each instance reads its host and writes only itself; a sample that lands where it stood
-    // leaves the row unmarked, since the Visibility authority re-walks every marked batch.
-    q.par_iter_mut().for_each(|mut m| {
-        if m.frozen {
-            return;
-        }
-        // A host with no player yet keeps its last slot at t = 0, a bind-posed model's pose.
-        let (played, clock): HostSample = m.host.map_or((None, None), |h| {
-            let (rig, clock) = hosts.get(h).ok().unwrap_or((None, None));
-            (rig.and_then(|(p, a)| playing_seq(p, a)), clock.map(|c| c.0))
-        });
-        let (seq, elapsed) = match played {
-            Some((seq, t)) => (Some(seq), t),
-            None if m.host.is_some() => (m.seq, 0.0),
-            None => (m.seq, now - m.spawned_at),
-        };
-        // The gseq cursor is sceneNow − attach, the anchor stamped on the first pass, on the
-        // host's own scene clock when it has one.
-        let shared = clock.unwrap_or(world);
-        let attach = m.gseq_attach.unwrap_or(shared);
-        let current = m.anim.sample(seq, elapsed, shared - attach);
-        if m.seq != seq || m.gseq_attach.is_none() || m.current.to_bits() != current.to_bits() {
-            m.seq = seq;
-            m.gseq_attach = Some(attach);
-            m.current = current;
-        }
+    // leaves the row unmarked, since the Visibility authority re-walks every marked batch. Reading
+    // `frozen` through `Mut` marks nothing.
+    let mut rows: Vec<Mut<MatAnim>> = q.iter_mut().filter(|m| !m.frozen).collect();
+    crate::fanout::for_each_chunk_mut(&mut rows, SAMPLE_CHUNK, |chunk| {
+        chunk
+            .iter_mut()
+            .for_each(|m| sample_one(m, &hosts, now, world));
     });
+}
+
+/// Rows per [`sample_mat_anim`] task: a sample is well under a microsecond.
+const SAMPLE_CHUNK: usize = 512;
+
+/// One unfrozen instance's sample, written only where it moved.
+fn sample_one(m: &mut Mut<MatAnim>, hosts: &Query<AlphaHost>, now: f32, world: f64) {
+    // A host with no player yet keeps its last slot at t = 0, a bind-posed model's pose.
+    let (played, clock): HostSample = m.host.map_or((None, None), |h| {
+        let (rig, clock) = hosts.get(h).ok().unwrap_or((None, None));
+        (rig.and_then(|(p, a)| playing_seq(p, a)), clock.map(|c| c.0))
+    });
+    let (seq, elapsed) = match played {
+        Some((seq, t)) => (Some(seq), t),
+        None if m.host.is_some() => (m.seq, 0.0),
+        None => (m.seq, now - m.spawned_at),
+    };
+    // The gseq cursor is sceneNow − attach, the anchor stamped on the first pass, on the host's
+    // own scene clock when it has one.
+    let shared = clock.unwrap_or(world);
+    let attach = m.gseq_attach.unwrap_or(shared);
+    let current = m.anim.sample(seq, elapsed, shared - attach);
+    if m.seq != seq || m.gseq_attach.is_none() || m.current.to_bits() != current.to_bits() {
+        m.seq = seq;
+        m.gseq_attach = Some(attach);
+        m.current = current;
+    }
 }
 
 /// The scan marker: a part whose material can be a [`UvAnimMaterials`] or [`TintAnimMaterials`]

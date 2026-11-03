@@ -8,7 +8,6 @@ use std::time::Duration;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_protocol::{CreateSpline, EntityKind, MonsterMoveFacing};
 use bevy::prelude::*;
-use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
 use bevy::utils::Parallel;
 
 use crate::entities::CollisionHeight;
@@ -772,10 +771,10 @@ pub(in crate::net) fn ground_clamp_creatures(
             inserts.borrow_local_mut().push(first);
         }
     };
-    if trace.is_some() || casts.len() <= CLAMP_BATCH {
+    if trace.is_some() {
         casts.iter_mut().for_each(clamp);
     } else {
-        casts.par_chunk_map_mut(ComputeTaskPool::get(), CLAMP_BATCH, |_, chunk| {
+        benilla_world::fanout::for_each_chunk_mut(&mut casts, CLAMP_BATCH, |chunk| {
             chunk.iter_mut().for_each(&clamp);
         });
     }
