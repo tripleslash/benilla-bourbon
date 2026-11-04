@@ -103,8 +103,9 @@ fn bank_patches(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     if (f.bank.x <= 0.0) {
         return 1.0;
     }
-    let from = f.bank.z - BUILD_FROM;
-    return smoothstep(from, from + BUILD_DEPTH, froxelfog::bank_clear_noise(f, p, 1.0));
+    // Not `from`: a WGSL reserved word, which naga passes and the browser's compiler rejects.
+    let start = f.bank.z - BUILD_FROM;
+    return smoothstep(start, start + BUILD_DEPTH, froxelfog::bank_clear_noise(f, p, 1.0));
 }
 
 // The ground banks' extinction at `p`, `d` yards of planar depth from the camera (1/yd), over
