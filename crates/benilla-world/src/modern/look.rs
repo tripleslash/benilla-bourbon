@@ -524,6 +524,9 @@ impl ZoneLook {
         bank_patch_yd: 70.0,
         bank_rgb: [0.9, 0.82, 0.8],
         bank_veil: 0.1,
+        // By day the veil takes the sun where the sun reaches the ground: flat at half the key it
+        // matched the sunlit ground and read only in shade. The night stays flat (no moon streaks).
+        bank_shade_day: 1.0,
         bank_far: 1.0,
         bank_far_yd: 200.0,
         // The faintest veil in the clear patches, so the open ground is not bare.
