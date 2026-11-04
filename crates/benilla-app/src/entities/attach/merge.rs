@@ -159,27 +159,17 @@ pub(in crate::entities) struct MergedForms {
 }
 
 /// Merged forms keyed by (the first member's geometry `Arc`, the member set): one model's one
-/// silhouette, shared by every unit of that display. Each entry holds that `Arc`, so the address
-/// it is keyed by cannot be reused by another model's geometry — a reload replaces a model in
-/// place — while the entry lives. Cleared whole past [`MERGED_FORMS_CAP`].
+/// silhouette, shared by every unit of that display. Each entry holds that geometry weakly: it
+/// hits only while the same model is resident, and goes once the model unloads, so a freed
+/// address reused by another model never answers. Cleared whole past [`MERGED_FORMS_CAP`].
 #[derive(Resource, Default)]
-pub(crate) struct MergedFormsCache(HashMap<(usize, Vec<u32>), KeyedForms>);
-
-/// One cached group's forms and the geometry its key's address is taken from.
-struct KeyedForms {
-    _key: Arc<RenderSubmesh>,
-    forms: MergedForms,
-}
+pub(crate) struct MergedFormsCache(
+    HashMap<(usize, Vec<u32>), (std::sync::Weak<RenderSubmesh>, MergedForms)>,
+);
 
 const MERGED_FORMS_CAP: usize = 1024;
 
 impl MergedFormsCache {
-    /// Drop every entry, with the display caches: once their models go, a key's address may be
-    /// reused by another model's geometry.
-    pub(in crate::entities) fn clear(&mut self) {
-        self.0.clear();
-    }
-
     /// The forms of `group`, built on a miss; a singleton borrows the model's own, uncached.
     pub(in crate::entities) fn forms(
         &mut self,
@@ -197,9 +187,12 @@ impl MergedFormsCache {
             };
         }
         let key = (Arc::as_ptr(&first.geometry) as usize, group.members.clone());
-        if let Some(cached) = self.0.get(&key) {
-            return cached.forms.clone();
+        // The key's address is the live geometry's own while the weak still upgrades.
+        if let Some((_, f)) = self.0.get(&key).filter(|(m, _)| m.strong_count() > 0) {
+            return f.clone();
         }
+        // A miss is a new display's first spawn: drop the forms of models that have unloaded.
+        self.0.retain(|_, (model, _)| model.strong_count() > 0);
         if self.0.len() >= MERGED_FORMS_CAP {
             self.0.clear();
         }
@@ -223,13 +216,8 @@ impl MergedFormsCache {
             skinned_mesh: skinned,
             aabb,
         };
-        self.0.insert(
-            key,
-            KeyedForms {
-                _key: first.geometry.clone(),
-                forms: forms.clone(),
-            },
-        );
+        self.0
+            .insert(key, (Arc::downgrade(&first.geometry), forms.clone()));
         forms
     }
 }
