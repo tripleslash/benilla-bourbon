@@ -106,6 +106,14 @@ pub struct WowModelKey {
     /// pipeline does not compile the modern code at all (`WOW_MODERN`): carrying it dead behind the
     /// runtime flag turned Chrome/Metal's leaf-card holes black in classic frames.
     modern: bool,
+    /// The blend twin's re-applied cutout (`clutter_fade.z` bit 10).
+    twin_cutout: bool,
+    /// The far-clip wall compiled out (`clutter_fade.z` bit 15): a twin for a part wholly inside
+    /// `farclip`, where the wall cannot cut. A reachable `discard` turns off a tile GPU's
+    /// hidden-surface removal for the whole draw.
+    no_far_wall: bool,
+    /// The UI model tile's cell scissor (`anim_slots.w`).
+    ui_cell: bool,
     // The WMO batch order is deliberately not a key axis (a pipeline per batch index stalls a
     // city's first sight): the file-order layering (`0x6b4f10`/`0x6b5190`) rides `sun_scale.y`.
 }
@@ -125,6 +133,9 @@ impl From<&WowModelExt> for WowModelKey {
             far_side: markers & 0x800 != 0,
             sky_depth: markers & 0x2000 != 0,
             modern: MODERN_MODEL_PIPELINES.load(std::sync::atomic::Ordering::Relaxed),
+            twin_cutout: markers & 0x400 != 0,
+            no_far_wall: markers & 0x8000 != 0,
+            ui_cell: e.anim_slots.w > 0.5,
         }
     }
 }
@@ -304,6 +315,20 @@ impl MaterialExtension for WowModelExt {
                     .push("MODERN_VERTEX_WALKS".into());
                 if let Some(fragment) = descriptor.fragment.as_mut() {
                     fragment.shader_defs.push("MODERN_VERTEX_WALKS".into());
+                }
+            }
+        }
+        // Each `discard` the batch can reach, and only those: one compiled in costs the draw its
+        // hidden-surface removal on a tile GPU even where it never fires.
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            let k = &key.bind_group_data;
+            for (on, def) in [
+                (!k.no_far_wall, "WOW_FAR_WALL"),
+                (k.twin_cutout, "WOW_TWIN_CUTOUT"),
+                (k.ui_cell, "WOW_UI_CELL"),
+            ] {
+                if on {
+                    fragment.shader_defs.push(def.into());
                 }
             }
         }

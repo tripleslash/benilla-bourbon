@@ -82,7 +82,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### aura_visual
 
-- A non-zero rate is ignored, because the only one shipped (`8947848.0` on kit 1744, a packed grey in the rate column) is noise on the reference's integer-ms clock and has no faithful form on our f32-second one. ([`src/aura_visual.rs:229`](../crates/benilla-app/src/aura_visual.rs#L229))
+- A non-zero rate is ignored, because the only one shipped (`8947848.0` on kit 1744, a packed grey in the rate column) is noise on the reference's integer-ms clock and has no faithful form on our f32-second one. ([`src/aura_visual.rs:230`](../crates/benilla-app/src/aura_visual.rs#L230))
 
 #### bindings
 
@@ -149,10 +149,10 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - The page waits for nothing and its stage comes together over the frames after the change, because the page's one thread may never block, and the reads the wait would hold for land on it. ([`src/entities/attach/glue_stage.rs:34`](../crates/benilla-app/src/entities/attach/glue_stage.rs#L34))
 - `0x472420` installs a landed guild's crest on the record selected at that moment (`0x4724a4`), whichever record's guild it is (`0x472455`), so a late answer can paint another character's guild; benilla paints only the standing record's own, because that paint is a quirk that is a bug. ([`src/entities/attach/preview.rs:1042`](../crates/benilla-app/src/entities/attach/preview.rs#L1042))
 - A cap on one hop's sub-segment count, which the reference lacks, because that way a vertex run is never sized off table data alone; shipped rows peak at 12 (30 yd at `avgSegLen` 2.78). ([`src/entities/chain_beam.rs:54`](../crates/benilla-app/src/entities/chain_beam.rs#L54))
-- Not the reference's generator (`((rand & 0x7fffff) | 0x3f800000)` re-centred through `2.0`), because the look rests on the amplitude and the advection, both exact, never on the draw sequence. ([`src/entities/chain_beam.rs:111`](../crates/benilla-app/src/entities/chain_beam.rs#L111))
+- Not the reference's generator (`((rand & 0x7fffff) | 0x3f800000)` re-centred through `2.0`), because the look rests on the amplitude and the advection, both exact, never on the draw sequence. ([`src/entities/chain_beam.rs:112`](../crates/benilla-app/src/entities/chain_beam.rs#L112))
 - The reference updates every unit every frame; here only units showing a flagged visual are tracked, and a parked rig skips its ray and re-seeds at the slope on waking, because that bounds the cost at one ray per flagged unit on screen. Nothing shows: an unflagged unit's vector is never read, and a first-sight seed at the slope seats a mount-up at once, as the reference does. ([`src/entities/conform.rs:67`](../crates/benilla-app/src/entities/conform.rs#L67))
-- While false the pane keeps re-taking and a late weapon is baked, because the reference copies a finished model and ours stream in. ([`src/entities/equipment/resolve.rs:182`](../crates/benilla-app/src/entities/equipment/resolve.rs#L182))
-- It attaches at that clip's `$SHL`, where the reference attaches it at the draw's start, because it keys on the ranged slot's sheath so it arrives with the bow it feeds; the two are a few hundred ms apart in one clip and never seen apart. ([`src/entities/equipment/resolve.rs:573`](../crates/benilla-app/src/entities/equipment/resolve.rs#L573))
+- While false the pane keeps re-taking and a late weapon is baked, because the reference copies a finished model and ours stream in. ([`src/entities/equipment/resolve.rs:184`](../crates/benilla-app/src/entities/equipment/resolve.rs#L184))
+- It attaches at that clip's `$SHL`, where the reference attaches it at the draw's start, because it keys on the ranged slot's sheath so it arrives with the bow it feeds; the two are a few hundred ms apart in one clip and never seen apart. ([`src/entities/equipment/resolve.rs:575`](../crates/benilla-app/src/entities/equipment/resolve.rs#L575))
 - `Hold` is one repeating play where the reference re-arms it each pass with variation -1, a weighted random pick, because at most one `Spells\` model authors several variations. ([`src/entities/spell_fx/lifecycle.rs:11`](../crates/benilla-app/src/entities/spell_fx/lifecycle.rs#L11))
 
 #### game_tip
@@ -934,7 +934,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### doodad_anim
 
-- Every instance scrolls in one phase, where the reference phases a band loop per arm and a gseq loop from each instance's attach (`CM2Model+0x68`), because one uniform serves the material and a seamless scroll looks the same at any phase. ([`src/doodad_anim/mat_anim.rs:204`](../crates/benilla-world/src/doodad_anim/mat_anim.rs#L204))
+- Every instance scrolls in one phase, where the reference phases a band loop per arm and a gseq loop from each instance's attach (`CM2Model+0x68`), because one uniform serves the material and a seamless scroll looks the same at any phase. ([`src/doodad_anim/mat_anim.rs:208`](../crates/benilla-world/src/doodad_anim/mat_anim.rs#L208))
 - This runs for every resident host, where the reference stops a doodad culled out of its scene list (`[CM2Scene+0x20]`) and re-arms it at once on re-link (`0x7074b0`, `0x683f80`), because gating it so would re-roll the whole field on the frame the camera turns back. ([`src/doodad_anim/mod.rs:366`](../crates/benilla-world/src/doodad_anim/mod.rs#L366))
 
 #### exterior_cull

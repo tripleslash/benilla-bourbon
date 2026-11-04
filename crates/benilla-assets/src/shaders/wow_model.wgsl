@@ -1387,21 +1387,23 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // The UI model tile's cell clip: the reference gives each `<Model>` pane its widget rect as the
     // viewport; our panes share an atlas, so the tile passes its cell as a mat-anim row
     // (`anim_slots.w`, `[min.x, min.y, max.x, max.y]` in atlas texels) and this is the scissor.
-    if (m.anim_slots.w > 0.5) {
-        let r = wow_light.matanim[u32(m.anim_slots.w)];
-        if (in.position.x < r.x || in.position.y < r.y
-            || in.position.x > r.z || in.position.y > r.w) {
-            discard;
-        }
+#ifdef WOW_UI_CELL
+    let r = wow_light.matanim[u32(m.anim_slots.w)];
+    if (in.position.x < r.x || in.position.y < r.y
+        || in.position.x > r.z || in.position.y > r.w) {
+        discard;
     }
+#endif
     // The far-clip wall: discard past `farclip` (`fog_params.w`, 0 = off) by planar eye depth, as
-    // terrain.wgsl does.
+    // terrain.wgsl does. Off on a part wholly inside the wall (`benilla_world::far_wall`).
+#ifdef WOW_FAR_WALL
     if (wow_light.fog_params.w > 0.0) {
         let clip_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
         if (clip_z > wow_light.fog_params.w) {
             discard;
         }
     }
+#endif
 #ifdef WOW_WATER_CLIP
     // The straddle split: a translucent model crossing its water plane draws on each side of the
     // water pass (the far copy has `clutter_fade.z` bit 11) and each copy keeps its half, the
@@ -1526,17 +1528,22 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // The blend twin re-applies its source's cutout: the reference scales ALPHAREF with the fade,
     // so the cutoff stays tex.a < 224/255 on the unfaded alpha. Only for a source batch that
     // alpha-tests (bit 10): ALPHAREF keys on the stored blend mode.
-    if ((u32(m.clutter_fade.z) & 1024u) != 0u && base_color.a < VANILLA_ALPHA_KEY) {
+#ifdef WOW_TWIN_CUTOUT
+    if (base_color.a < VANILLA_ALPHA_KEY) {
         discard;
     }
+#endif
     // fork: the alpha-mask cutout, spelled out in the entry point as well as in bevy's
     // `alpha_discard` below. Past a certain fragment size (the modern lighting stack) Chrome/Metal
     // stopped honouring the discard inside that helper, and alpha-tested WMO canopies and tree cards
-    // drew as solid polygons. Bits: ALPHA_MODE_RESERVED_BITS (7 << 29), MASK (1 << 29).
+    // drew as solid polygons. Bits: ALPHA_MODE_RESERVED_BITS (7 << 29), MASK (1 << 29). Compiled
+    // only where Bevy's helper is (`MAY_DISCARD`, the Mask key), so an opaque draw has no discard.
+#ifdef MAY_DISCARD
     if ((pbr_input.material.flags & (7u << 29u)) == (1u << 29u)
         && base_color.a < pbr_input.material.alpha_cutoff) {
         discard;
     }
+#endif
     // fork: the depth-prime twin stops here, and the colour lane below is not COMPILED into it at
     // all (a preprocessor cut, not an early return, so no dead tail reaches naga's MSL writer). On
     // Chrome/Metal a colour-masked twin carrying the whole lighting stack lost its cutout: it wrote

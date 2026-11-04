@@ -128,7 +128,7 @@
 - **benilla-ui** (lib.rs): auction_sort bindings_xml civil color crt framexml justify layout loader markup messages order screencoord script source status strings test_support toc widget 
 - **benilla-visual** (lib.rs): relight 
 - **benilla-wasm-alloc-test** (lib.rs): wasm_alloc 
-- **benilla-world** (lib.rs): art_scope assets bgwin billboard boot build_id card_store clouds clutter collision decal dev_state doodad_anim entity_shade exterior_cull fanout ffx_glow final_pass frame_pace fsr ground_fx horizon instance_tint interact interior launch_env layout_keys lighting liquid log_ring mac_quit map_proj mat_anim_table mesh_tag model_fade model_forms model_render modern modkeys particles perf_probe ribbons ride_frame rig_anim rig_palette rig_rider schedule shaders sky sky_order skybox ssilvb static_gx static_merge straddle sun surface system_profile terrain_stream thread_qos view vis_chain water_fx wdl weather wind wmo_portal world_census world_flags world_map world_plugins world_point world_unit worldview zfill 
+- **benilla-world** (lib.rs): art_scope assets bgwin billboard boot build_id card_store clouds clutter collision decal dev_state doodad_anim entity_shade exterior_cull fanout far_wall ffx_glow final_pass frame_pace fsr ground_fx horizon instance_tint interact interior launch_env layout_keys lighting liquid log_ring mac_quit map_proj mat_anim_table mesh_tag model_fade model_forms model_render modern modkeys particles perf_probe ribbons ride_frame rig_anim rig_palette rig_rider schedule shaders sky sky_order skybox ssilvb static_gx static_merge straddle sun surface system_profile terrain_stream thread_qos view vis_chain water_fx wdl weather wind wmo_portal world_census world_flags world_map world_plugins world_point world_unit worldview zfill 
 - **wenilla-host** (lib.rs): data packs remote static_site ws 
 - **benilla-packer** (main.rs): append group inspect merge overlay plan sidecars sidn stack wdl 
 
@@ -259,6 +259,7 @@
 - `WOW_ENTITY_CENSUS` — benilla-app/src/capture/probes/world_census.rs, benilla-app/src/dev.rs
 - `WOW_FADE_NEAR` — benilla-world/src/terrain_stream/spawn/mod.rs
 - `WOW_FARCLIP` — benilla-app/src/cvars/mod.rs, benilla-app/src/lib.rs, benilla-world/src/view.rs
+- `WOW_FAR_WALL` — benilla-assets/src/materials.rs
 - `WOW_FIRE_FLICKER` — benilla-app/src/lib.rs, benilla-world/src/lighting/flicker.rs
 - `WOW_FIXED_DT` — benilla-world/src/frame_pace.rs
 - `WOW_FOG_DUMP` — benilla-world/src/lighting/resolve.rs, benilla-world/src/liquid/query.rs
@@ -586,8 +587,10 @@
 - `WOW_TRAIL_CENSUS` — benilla-app/src/capture/probes/trail_census.rs, benilla-app/src/dev.rs
 - `WOW_TRILINEAR` — benilla-app/src/cvars/mod.rs, benilla-assets/src/tex_filter.rs
 - `WOW_TURTLE` — benilla-app/src/lib.rs
+- `WOW_TWIN_CUTOUT` — benilla-assets/src/materials.rs
 - `WOW_TWIST_GAP` — benilla-app/src/player/body_pose.rs
 - `WOW_UISCRIPT_DUMP` — benilla-app/tests/ui_script_wall.rs
+- `WOW_UI_CELL` — benilla-assets/src/materials.rs
 - `WOW_UI_COST` — benilla-app/src/ui_script/extract/mod.rs
 - `WOW_UI_DIFF` — benilla-app/src/ui_pass.rs, benilla-app/src/ui_script/extract/mod.rs
 - `WOW_UI_GATE` — benilla-app/src/ui_script/extract/mod.rs
