@@ -26,6 +26,7 @@ use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_phase::{sort_phase_system, ViewSortedRenderPhases};
+use bevy::render::sync_component::SyncComponent;
 use bevy::render::view::ExtractedView;
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 
@@ -109,6 +110,10 @@ pub struct RenderSortLink {
     mesh_pivot: Vec3,
     key_point: Vec3,
     world: Affine3A,
+}
+
+impl SyncComponent for M2SortLink {
+    type Target = RenderSortLink;
 }
 
 impl ExtractComponent for M2SortLink {
@@ -439,20 +444,20 @@ fn order_m2_transparents(
         let eye = view.world_from_view.translation();
         let mut others = Vec::with_capacity(phase.items.len());
         let mut m2 = Vec::new();
-        for mut item in std::mem::take(&mut phase.items) {
-            let keys = links.get(item.entity.0).ok().and_then(|link| {
+        for (key, mut item) in std::mem::take(&mut phase.items) {
+            let keys = links.get(key.0).ok().and_then(|link| {
                 let sort = materials
                     .instances
-                    .get(&item.entity.1)
+                    .get(&key.1)
                     .and_then(|m| sorts.0.get(&m.asset_id));
                 m2_keys(link, sort, |p| rangefinder.distance(&p), eye)
             });
             match keys {
                 Some(keys) => {
                     item.distance = keys.merge_depth;
-                    m2.push((keys, item));
+                    m2.push((keys, (key, item)));
                 }
-                None => others.push((item.distance, item)),
+                None => others.push((item.distance, (key, item))),
             }
         }
         if m2.is_empty() {
@@ -464,7 +469,7 @@ fn order_m2_transparents(
             .into_iter()
             .map(|(keys, item)| (keys.merge_depth, item))
             .collect();
-        phase.items = merge(others, m2);
+        phase.items = merge(others, m2).into_iter().collect();
     }
 }
 
