@@ -56,6 +56,9 @@ pub struct BillboardCard {
     /// to the pivot below it, which it turns by its own replaced basis. Empty on a joint, whose
     /// rig composes the chain.
     carried: Vec<(BillboardKind, Vec3)>,
+    /// The pivot the card's mesh is centred on, model-local Bevy axes: the card's frame holds it
+    /// at its origin.
+    mesh_pivot: Vec3,
 }
 
 impl BillboardCard {
@@ -82,6 +85,7 @@ impl BillboardCard {
             follow: None,
             local_pivot: seat,
             carried,
+            mesh_pivot: info.pivot,
         }
     }
 
@@ -125,6 +129,7 @@ impl BillboardCard {
             follow: Some(owner),
             local_pivot: pivot,
             carried: Vec::new(),
+            mesh_pivot: Vec3::ZERO,
         }
     }
 
@@ -149,6 +154,11 @@ impl BillboardCard {
     /// (`model_render::visibility`) draws it only while this entity is visible.
     pub fn follows(&self) -> Option<Entity> {
         self.follow
+    }
+
+    /// The model-local point the card's mesh is centred on, which its frame carries.
+    pub fn mesh_pivot(&self) -> Vec3 {
+        self.mesh_pivot
     }
 
     /// Re-seats the card from a fresh `placement` (a quest marker over a moving unit).

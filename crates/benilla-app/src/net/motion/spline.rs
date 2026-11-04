@@ -724,6 +724,8 @@ pub(in crate::net) fn ground_clamp_creatures(
             // (`remote::HIDDEN_STRIDE`); its Y holds the seat in between, which nothing draws.
             Option<&Visibility>,
         ),
+        // A mount is a model of its unit with no movement of its own (`0x607a00`), and its
+        // `Transform` is host-local: a world probe there would sink it under the rider.
         Without<crate::entities::mount::MountBody>,
     >,
     mut frame: Local<u32>,
@@ -1261,8 +1263,7 @@ fn creature_swim_state(marked: bool, depth: f32, boundary: f32, unit_flags: u32)
 /// Chained before [`ground_clamp_creatures`] so a fresh mark exempts the clamp the same frame.
 pub(in crate::net) fn mark_swimming_creatures(
     mut commands: Commands,
-    // A mount child rides its host: a host-local `Transform` cannot answer a world water query, and
-    // the clamp beside this system must walk the same population.
+    // A mount swims with its unit: its host-local `Transform` is no world point (`0x607a00`).
     units: Query<SwimMarkQuery, (SwimMarkGate, Without<crate::entities::mount::MountBody>)>,
     stamped: Query<Entity, With<SwimEvaluated>>,
     world: benilla_world::world_point::WorldPoint,
@@ -1529,6 +1530,38 @@ mod under_floor {
         );
     }
 
+    /// A mount child is a model of its unit (`0x607a00`) with a host-local `Transform`: the clamp
+    /// grounds the mounted unit and never probes the child's local origin as a world point, where
+    /// a floor just under it would sink the mount by its host's height.
+    #[test]
+    fn a_mount_child_is_never_grounded_by_its_local_origin() {
+        let (mut app, npc) = half_arrived_world();
+        // A floor under the child's local origin read as a world point, in the probe's reach.
+        floor_at(&mut app, -1.0);
+        app.update();
+        let mount = app
+            .world_mut()
+            .spawn((
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: Some(1),
+                    scale: 1.0,
+                },
+                crate::entities::mount::MountBody { host: npc },
+                Transform::default(),
+                ChildOf(npc),
+            ))
+            .id();
+        clamp(&mut app);
+        assert_eq!(y_of(&app, npc), TERRAIN_Y, "the mounted unit is grounded");
+        assert_eq!(
+            y_of(&app, mount),
+            0.0,
+            "the mount stays at its unit's origin, not dropped onto a floor near (0, 0)"
+        );
+        assert!(app.world().get::<GroundClamped>(mount).is_none());
+    }
+
     /// A re-sent identical pose (same seat) is re-grounded, not held at the wire Z.
     #[test]
     fn a_pose_re_sent_unchanged_is_re_grounded_not_held() {
@@ -1598,31 +1631,6 @@ mod under_floor {
             TERRAIN_Y + 40.0,
             "no surface in reach ⇒ the wire's Z stands"
         );
-    }
-
-    #[test]
-    fn a_mount_child_keeps_its_seat_over_a_floor_under_the_map_origin() {
-        // Alterac Valley: `md_icecave03`'s floor runs 2.03 yd under the map origin, where a mount
-        // child's parent-relative zero would probe if it were taken for a world pose.
-        let (mut app, npc) = half_arrived_world();
-        floor_at(&mut app, -2.03);
-        let mount = app
-            .world_mut()
-            .spawn((
-                NetEntity {
-                    kind: EntityKind::Unit,
-                    display_id: None,
-                    scale: 1.0,
-                },
-                crate::entities::mount::MountBody { host: npc },
-                Transform::default(),
-                ChildOf(npc),
-            ))
-            .id();
-        app.update();
-        clamp(&mut app);
-        assert_eq!(y_of(&app, mount), 0.0, "the mount stays at its host's feet");
-        assert!(app.world().get::<GroundClamped>(mount).is_none());
     }
 }
 

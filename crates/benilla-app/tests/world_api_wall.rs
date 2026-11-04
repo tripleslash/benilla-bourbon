@@ -174,6 +174,8 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("model_render::ModelPart", "record"),
     ("model_render::ShadowOccluder", "wall"),
     ("model_render::lazy::realize", "record"),
+    ("model_render::order::NoDepthFill", "wall"),
+    ("model_render::order::SortInstance", "wall"),
     ("modern::LightingModel", "wall"),
     ("modern::LightingQuality", "wall"),
     ("modern::LightingSettings", "wall"),

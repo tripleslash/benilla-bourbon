@@ -318,6 +318,7 @@ pub use models::{
     WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot, DEGENERATE_RING_FOOTPRINT, NO_GROUP_LIQUID,
     OWNER_RUNG_BUCKETS,
 };
+pub use models::{transparent_cmp, vertex_shader_id, BatchOrder, TransparentElement};
 mod terrain;
 pub use terrain::{
     adt_to_tile_mesh, area_id_at, chunk_lod_indices, find_tile_near, ground_effect_at,

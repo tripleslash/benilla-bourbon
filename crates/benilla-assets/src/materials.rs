@@ -198,6 +198,9 @@ pub struct WowModelExt {
     #[texture(124, dimension = "3d", visibility(fragment))]
     #[sampler(125, visibility(fragment))]
     pub modern_fog: Handle<Image>,
+    /// An M2 batch's keys in the scene's transparent order (`0x70ae10`), which the render world
+    /// sorts it by; `None` for WMO and clutter. Not a binding.
+    pub order: Option<benilla_formats::BatchOrder>,
 }
 
 impl MaterialExtension for WowModelExt {

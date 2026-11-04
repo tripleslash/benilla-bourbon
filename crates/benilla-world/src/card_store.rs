@@ -51,6 +51,9 @@ pub struct StoredCard {
     pub anim_mat: bool,
     /// The mouse pick's occluder marker, as the spawn site gives an opaque card.
     pub occluder: Option<crate::interact::PickOccluderPart>,
+    /// The placement's instance in the transparent order, which the spawn site gives every batch
+    /// (`crate::model_render::order::placement_instance`).
+    pub sort: Option<crate::model_render::order::SortInstance>,
 }
 
 impl StoredCard {
@@ -79,6 +82,9 @@ impl StoredCard {
         }
         if self.anim_mat {
             e.insert(crate::doodad_anim::AnimMatPart);
+        }
+        if let Some(sort) = self.sort {
+            e.insert(sort);
         }
         e
     }
@@ -242,6 +248,7 @@ mod tests {
             probe: false,
             anim_mat: false,
             occluder: None,
+            sort: None,
         }
     }
 

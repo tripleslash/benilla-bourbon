@@ -145,6 +145,8 @@ pub fn spawn_model_entities(
     let animated = host.is_some()
         || (dormant && host_model.is_some_and(|(m, _)| crate::doodad_anim::hosts(m)));
     let rig_root = host.as_ref().map(|h| h.root);
+    // Every M2 batch, with whether it is a card, for the transparent order's instance.
+    let mut sorted: Vec<(Entity, bool)> = Vec::new();
     if let Some(h) = &host {
         out.push(h.root);
     }
@@ -177,9 +179,9 @@ pub fn spawn_model_entities(
                 continue;
             }
         }
-        // The authored order biases the transparent sort, so coplanar layers draw in file order;
-        // a WMO batch also takes it into the clip-z nudge, as the reference draws MOBA batches in
-        // strict file order (`0x6b4f10`/`0x6b5190`).
+        // The authored order keys the batch's material; a WMO batch also takes it into its sort
+        // bias and the clip-z nudge, as the reference draws MOBA batches in strict file order
+        // (`0x6b4f10`/`0x6b5190`). An M2 batch sorts by the transparent order's keys.
         let batch_order = u16::try_from(batch_idx + 1).unwrap_or(u16::MAX);
         let interior = sub.interior || interior_slot.is_some();
         // A billboard card culls by its `0x04` flag like any batch: the bone turns +X to the
@@ -221,6 +223,7 @@ pub fn spawn_model_entities(
             sub.combine,
             shade,
             batch_order,
+            sub.geometry.order,
             sub.uv_anim.as_ref(),
             sub.rgb_anim.as_ref(),
             sub.wmo_batch,
@@ -260,6 +263,7 @@ pub fn spawn_model_entities(
                 sub.combine,
                 shade,
                 batch_order,
+                sub.geometry.order,
                 sub.uv_anim.as_ref(),
                 sub.rgb_anim.as_ref(),
                 sub.wmo_batch,
@@ -295,6 +299,7 @@ pub fn spawn_model_entities(
                     sub.env_map,
                     shade,
                     batch_order,
+                    sub.geometry.order,
                     sub.uv_anim.as_ref(),
                     sub.rgb_anim.as_ref(),
                     sub.wmo_batch,
@@ -649,6 +654,7 @@ pub fn spawn_model_entities(
                         || sub.rgb_anim.as_ref().is_some_and(|a| a.period > 0.0)
                         || seq_owner.is_some(),
                     occluder,
+                    sort: None,
                 });
                 continue;
             }
@@ -730,6 +736,9 @@ pub fn spawn_model_entities(
                 .entity(entity)
                 .insert(crate::mesh_tag::InteriorProbePayload);
         }
+        if !is_wmo {
+            sorted.push((entity, sub.billboard.is_some()));
+        }
         // On the entity-hosted lane the batch is lit by its own doodad def, not its host; set
         // here as only this site reaches every batch, cards included.
         if entity_hosted {
@@ -771,19 +780,43 @@ pub fn spawn_model_entities(
             out.push(entity);
         }
     }
-    if !stored.is_empty() {
-        // A model of cards alone keeps ribbons' fallback owner a real part: its cards spawn now.
-        let ribbons = m2.is_some_and(|(m, _)| !m.ribbons.is_empty());
-        if ribbons && out.is_empty() {
-            out.extend(stored.iter().map(|c| c.spawn(commands).id()));
-        } else {
-            // Last in the list, so no site that takes the first entity picks the holder.
-            out.push(
-                commands
-                    .spawn(crate::card_store::CardHolder::new(stored))
-                    .id(),
-            );
+    // A model of cards alone keeps ribbons' fallback owner a real part: its cards spawn now.
+    let ribbons = m2.is_some_and(|(m, _)| !m.ribbons.is_empty());
+    if !stored.is_empty() && ribbons && out.is_empty() {
+        for c in stored.drain(..) {
+            let id = c.spawn(commands).id();
+            out.push(id);
+            sorted.push((id, true));
         }
+    }
+    // The stored cards wait on one holder, which stands in as the instance of a placement its
+    // stored cards alone draw.
+    let holder = (!stored.is_empty()).then(|| commands.spawn_empty().id());
+    // One instance for the transparent order, keyed at the placement's origin: a placement's
+    // batches are separate world roots, so each names it, a stored card as it spawns.
+    let key = crate::model_render::order::placement_instance(
+        rig_root,
+        &sorted,
+        card_owner,
+        transform.translation,
+    )
+    .or_else(|| {
+        holder.map(|h| crate::model_render::order::SortInstance::at(h, None, transform.translation))
+    });
+    if let Some(key) = key {
+        for &(entity, _) in &sorted {
+            commands.entity(entity).insert(key);
+        }
+        for c in &mut stored {
+            c.sort = Some(key);
+        }
+    }
+    if let Some(h) = holder {
+        // Last in the list, so no site that takes the first entity picks the holder.
+        commands
+            .entity(h)
+            .insert(crate::card_store::CardHolder::new(stored));
+        out.push(h);
     }
     // Animation runs while a submesh is drawn or, for a meshless host, while its gate admits it.
     let arm = host.as_ref().and_then(|h| h.seq.map(|_| h.root));
