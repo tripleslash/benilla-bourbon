@@ -89,39 +89,34 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(f.ground.y + d * f.ground.z, select(0.0, 1.0, all(raw == uv)));
 }
 
-// fork: under an analytic veil (`fog.bank.x`) the volume's banks follow the veil's strength: the clear
-// patches' noise (`froxelfog::bank_clear_noise`) from `BUILD_FROM` under the patches' threshold
-// (`bank.z`) to the heart of a stronger stretch `BUILD_DEPTH` past that. The bank thickens with it, up
-// to `BUILD_GAIN` times its density, at the plain banks' height (`BANK_INV_FALLOFF`), not the veil's
-// thin layer. At the dial's density alone the volume read as nothing over the veil.
+// fork: under an analytic veil (`fog.bank.x`) the volume's banks lie where the clear patches' noise
+// (`froxelfog::bank_clear_noise`) runs high: from `BUILD_FROM` under the patches' threshold (`bank.z`)
+// to a whole bank `BUILD_DEPTH` past that, squared. The noise keeps near its middle, so a threshold at
+// the patches' edge or past it left almost no ground a bank.
 const BUILD_FROM: f32 = 0.15;
 const BUILD_DEPTH: f32 = 0.3;
-const BUILD_GAIN: f32 = 4.0;
 
-// How far the banks at `p` have built up (0 to 1); 1 where no analytic veil lies.
 fn bank_patches(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     if (f.bank.x <= 0.0) {
         return 1.0;
     }
     // Not `from`: a WGSL reserved word, which naga passes and the browser's compiler rejects.
     let start = f.bank.z - BUILD_FROM;
-    return smoothstep(start, start + BUILD_DEPTH, froxelfog::bank_clear_noise(f, p, 1.0));
+    let build = smoothstep(start, start + BUILD_DEPTH, froxelfog::bank_clear_noise(f, p, 1.0));
+    return build * build;
 }
 
 // The ground banks' extinction at `p`, `d` yards of planar depth from the camera (1/yd), over
 // `terrain` (`terrain_under`; off or outside it, the ground under the camera).
 fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>, d: f32, terrain: vec2<f32>) -> f32 {
-    let build = bank_patches(f, p);
-    let core = f.night.x * build;
+    let core = f.night.x * bank_patches(f, p);
     if (core <= 0.0) {
         return 0.0;
     }
-    // Only under an analytic veil does the bank grow past the plain banks' density.
-    let grow = select(0.0, build, f.bank.x > 0.0);
     let ground = select(f.night.y, terrain.x, terrain.y > 0.5);
     let above = max(p.y - ground, 0.0);
     let thin = mix(BANK_FAR_SHARE, 1.0, exp(-d / BANK_THIN_YD));
-    return core * (1.0 + (BUILD_GAIN - 1.0) * grow) * thin * exp(-min(above * BANK_INV_FALLOFF, 24.0));
+    return core * thin * exp(-min(above * BANK_INV_FALLOFF, 24.0));
 }
 
 // fork: **sea fog.** A zone look's `sea_fog` (`fog.night.w`) lays a bank on the ocean along the
