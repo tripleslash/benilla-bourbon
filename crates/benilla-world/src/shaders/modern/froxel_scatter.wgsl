@@ -89,19 +89,20 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(f.ground.y + d * f.ground.z, select(0.0, 1.0, all(raw == uv)));
 }
 
-// fork: under an analytic veil (`fog.bank.x`) the volume's banks lie where the clear patches' noise
-// (`froxelfog::bank_clear_noise`) runs high: from `BUILD_FROM` under the patches' threshold (`bank.z`)
-// to a whole bank `BUILD_DEPTH` past that, squared. The noise keeps near its middle, so a threshold at
-// the patches' edge or past it left almost no ground a bank.
-const BUILD_FROM: f32 = 0.15;
-const BUILD_DEPTH: f32 = 0.3;
+// fork: under an analytic veil (`fog.bank.x`) the volume's banks build up in the deepest part of its
+// stronger stretches: on the clear patches' noise (`froxelfog::bank_clear_noise`), from `BUILD_START`
+// of the way across the patches' edge band (`bank.z` to `bank.z + bank.w`) to `BUILD_DEPTH` past that,
+// squared. Most of the land keeps the veil alone; the stronger stretches rise into a bank from their
+// edge inward.
+const BUILD_START: f32 = 0.0;
+const BUILD_DEPTH: f32 = 0.15;
 
 fn bank_patches(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     if (f.bank.x <= 0.0) {
         return 1.0;
     }
     // Not `from`: a WGSL reserved word, which naga passes and the browser's compiler rejects.
-    let start = f.bank.z - BUILD_FROM;
+    let start = f.bank.z + BUILD_START * max(f.bank.w, 1e-3);
     let build = smoothstep(start, start + BUILD_DEPTH, froxelfog::bank_clear_noise(f, p, 1.0));
     return build * build;
 }
