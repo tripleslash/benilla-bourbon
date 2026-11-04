@@ -39,6 +39,7 @@ pub(crate) const ANIM_DESPAWN: u16 = 157;
 /// An animated GameObject's client-side state, tagged by [`crate::entities::attach`] in place of a
 /// creature's `AnimDriver`, and driven by [`drive_go_anim`].
 #[derive(Component, Default)]
+#[component(storage = "SparseSet")]
 pub(crate) struct GoAnim {
     /// The stored `GAMEOBJECT_STATE` (`go+0x27c`), the one truth for animation and collision;
     /// `None` until first sight.

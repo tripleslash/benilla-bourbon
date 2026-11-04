@@ -36,6 +36,7 @@ mod lod;
 /// Wielded `(item class, subclass)` per hand as worn (`GetWeapon(slot, 1)`, `0x605e30`, what the
 /// paperdoll shows); behaviour reads `armed_main`/`armed_off`, which apply the disarm ladder.
 #[derive(Component, Clone, Copy, Default, PartialEq, Eq)]
+#[component(storage = "SparseSet")]
 pub(crate) struct Wielded {
     pub(crate) main: Option<(u8, u8)>,
     pub(crate) off: Option<(u8, u8)>,
@@ -781,6 +782,7 @@ impl StateKitPins {
 /// A hand's fingers close (`HandsClosed`, 15) purely because a weapon occupies its attach point,
 /// not on combat or sheath; a shield or empty hand stays open (`0x60b590`, paperdoll `0x5059a0`).
 #[derive(Component, Default, Clone, Copy, PartialEq, Eq)]
+#[component(storage = "SparseSet")]
 pub(crate) struct HandGrip {
     /// A weapon on the right-hand attach point (id 1).
     pub(crate) right: bool,
@@ -983,6 +985,7 @@ pub(crate) use spell_visual::{
 /// so is the unit's [`CommittedSheath`], which outlives a rebuilt driver.
 #[derive(Component)]
 #[require(Transform, CommittedSheath)]
+#[component(storage = "SparseSet")]
 pub(crate) struct AnimDriver {
     mode: Mode,
     /// The targeted gait id, to cross-fade only on a change; `None` forces a fresh pick.

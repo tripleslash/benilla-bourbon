@@ -77,6 +77,7 @@ impl ItemDisplays {
 /// `bodyslots` by bodyslot - 2, shirt to tabard. `settled` holds once every worn entry has a
 /// template answer, so the first composite is dressed rather than naked for a frame.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[component(storage = "SparseSet")]
 pub(crate) struct Equipment {
     pub(crate) bodyslots: [u32; 8],
     /// A geoset and a runtime cape texture, no body region.
@@ -213,6 +214,7 @@ mod worn_pins_tests {
 
 /// The [`Equipment`] a player's visual was dressed with; a change re-dresses it in place.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub(in crate::entities) struct AppliedEquipment(pub(in crate::entities) Equipment);
 
 /// A visual rebuilt for a mount or display swap, not a spawn: it skips the appear-fade.
@@ -236,6 +238,7 @@ const TABARD_BODYSLOT: usize = 7;
 
 /// The item models a unit shows this frame, in [`ATTACH_SLOT_NAMES`] order.
 #[derive(Component, Default, Clone, PartialEq, Eq)]
+#[component(storage = "SparseSet")]
 pub(crate) struct HeldItems {
     slots: [Option<HeldSlot>; ATTACH_SLOTS],
 }
@@ -339,6 +342,7 @@ pub(crate) enum ItemModelKind {
 /// A body model's attachment points and event markers, each a bone and a Bevy-space offset from
 /// its bind pivot; the joint entities are `RigPose::anchor_for`'s.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub(crate) struct BoneAttach {
     pub(crate) points: HashMap<u16, (u16, Vec3)>,
     /// First record per FourCC (`0x7130e0`): the missile launch points `$CSL`/`$CSR`/`$CST`
@@ -348,6 +352,7 @@ pub(crate) struct BoneAttach {
 
 /// The item models spawned for a unit: the [`HeldItems`] they were built from and each slot's root.
 #[derive(Component, Default)]
+#[component(storage = "SparseSet")]
 pub(crate) struct HeldAttached {
     applied: HeldItems,
     spawned: [Option<Entity>; ATTACH_SLOTS],

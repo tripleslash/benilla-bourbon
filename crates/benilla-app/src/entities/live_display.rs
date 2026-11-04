@@ -29,6 +29,7 @@ const SCALE_EASE_SECS: f32 = 2.0;
 
 /// The display id the visual was built with, cube included.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub(crate) struct AppliedDisplay(pub(crate) Option<u32>);
 
 /// The reference rebuilt this unit's display (`0x60abe0`): the display watcher (`0x6049b5`), the

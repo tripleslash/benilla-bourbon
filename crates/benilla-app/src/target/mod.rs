@@ -243,6 +243,7 @@ pub(crate) fn go_is_nearest(character: &Hovered, go: &HoveredObject) -> bool {
 /// horizontal extents (`0x608e00`/`0x60aee0`); the ring scales it by `OBJECT_FIELD_SCALE_X`.
 /// Stamped at attach; a model-less unit has none and takes the ring's fallback radius.
 #[derive(Component, Clone, Copy)]
+#[component(storage = "SparseSet")]
 pub(crate) struct SelectionRadius(pub(crate) f32);
 
 /// The set the targeting chain's frame-time half runs in: readers of [`Selection`], [`Hovered`]

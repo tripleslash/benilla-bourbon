@@ -97,6 +97,7 @@ pub(crate) struct TransportLegLeft {
 /// The create-block anchor: the server's path-progress ms and the local instant it arrived,
 /// inserted on every create that carries `UPDATE_FLAG_TRANSPORT`.
 #[derive(Component, Clone, Copy)]
+#[component(storage = "SparseSet")]
 pub(crate) struct TransportAnchor {
     pub(crate) progress_ms: u32,
     pub(crate) at: Instant,
@@ -105,6 +106,7 @@ pub(crate) struct TransportAnchor {
 /// A pending type-11 lift, captured off the create block: its keyframe path is keyed by the
 /// template entry, which `OBJECT_FIELD_ENTRY` carries, so no template query is needed.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub(crate) struct ElevatorSeed {
     /// `gameobject_template` entry, `TransportAnimation.dbc`'s `TransportID` key.
     pub(crate) entry: u32,
@@ -120,6 +122,7 @@ pub(crate) struct ElevatorSeed {
 
 /// A ticking transport, armed by [`arm_transports`].
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub(crate) struct Transport {
     drive: Drive,
     /// Last frame's `moving`, for the dock and depart log lines.

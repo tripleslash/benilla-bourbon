@@ -1327,6 +1327,7 @@ impl FlyCam {
 /// `0.9 ×` the vertex box's Z extent; `0.0` for a display with no bounds. Stamped on every modeled
 /// unit at attach; [`model_pivot_height`] makes it the world pivot.
 #[derive(Component, Clone, Copy, Default)]
+#[component(storage = "SparseSet")]
 pub(crate) struct CameraPivot {
     pub height_local: f32,
     /// The **mounted** correction to that height, model-local and pre-scale
