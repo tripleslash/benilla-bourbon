@@ -715,7 +715,15 @@ fn sea_tail(f: FroxelFog, p: vec3<f32>, t_start: f32) -> vec4<f32> {
     let tau = f.night.w * SEA_TAIL_COVER * len * (1.0 - t) * clamp(mean, 0.0, 1.0);
     let tr = exp(-tau);
     let phase = dual_phase(f, dot(ray / len, f.sun_dir.xyz));
-    let lum = f.ambient.rgb + f.ambient_open.rgb + f.sun.rgb * phase;
+    // The key lights only the stretch above the surface: under it the air takes the ambient alone, as
+    // in the volume (`froxel_scatter.wgsl`'s `under_sea`).
+    let ya = f.camera.y + ray.y * t;
+    let yb = p.y;
+    var lit = select(0.0, 1.0, ya > 0.0 && yb > 0.0);
+    if ((ya > 0.0) != (yb > 0.0)) {
+        lit = max(ya, yb) / (abs(ya) + abs(yb));
+    }
+    let lum = f.ambient.rgb + f.ambient_open.rgb + f.sun.rgb * (phase * lit);
     return vec4<f32>(lum * (1.0 - tr), tr);
 }
 

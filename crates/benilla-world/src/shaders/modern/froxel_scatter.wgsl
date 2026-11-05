@@ -145,6 +145,18 @@ fn sea_reaches(f: froxelfog::FroxelFog, p: vec3<f32>) -> bool {
     return f.night.w > 0.0 && f.ground.x > 0.5 && above <= SEA_HEIGHT * 10.0 && above >= -SEA_DEPTH;
 }
 
+// fork: **the key does not reach under the sea.** The sea fog keeps its density under the surface
+// (`sea_fog`), and lit by the key's forward lobe there the air under the water glowed toward the sun
+// and the water showed the glare through it. Under the surface, over a sea bed (or open ocean), the air
+// takes the ambient alone, fully a yard down. 0 above the water or in a zone without sea fog.
+fn under_sea(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
+    let depth = SEA_LEVEL - p.y;
+    if (depth <= 0.0 || !sea_reaches(f, p) || terrain_under(f, p).x >= SEA_LEVEL) {
+        return 0.0;
+    }
+    return smoothstep(0.0, 1.0, depth);
+}
+
 // How far around a froxel the shore is judged (yd): well wider than a rock standing out of the sea, so
 // only a beach clears the bank. Read at one texel, a rock's own texel cleared a box of air over it; at
 // twelve yards its foot still stood in clear air, a dark patch under a fogged top.
@@ -325,7 +337,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // a partial value instead of flipping on and off with the per-frame jitter.
     // Slices are quadratic in depth (d = far * s^2), so a slice is 2 * sqrt(far * d) / n deep.
     let along = normalize(p - f.camera.xyz) * max(0.5 * sqrt(f.grid.w * d) / n.z, 0.1);
-    let sun_vis = 0.5 * cloud * (
+    let sun_vis = 0.5 * cloud * (1.0 - under_sea(f, p)) * (
         sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p - along, d)
             + sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p + along, d)
     );
