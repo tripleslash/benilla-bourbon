@@ -173,46 +173,27 @@ struct WowLight {
 @group(#{MATERIAL_BIND_GROUP}) @binding(125) var modern_fog_samp: sampler;
 
 // fork: modern lighting — the ground mist between the eye and a blended fragment at `p`, over `ground`
-// (`froxelfog::mist_air`'s heights), each stretch lit as the composite lights the opaque ground's
-// (`fog_composite.wgsl`'s `mist_over_terrain`): the key as far as its shadow lets it, the sky as far
-// as the sky map does. A leaf or a twig under a canopy then stands in mist as dark as the air
-// around it, not in the open sky's.
+// (`froxelfog::mist_level_ray`), lit as the composite lights the opaque ground's
+// (`fog_composite.wgsl`'s `mist_over_terrain`): the key as far as its shadow lets it there, the sky as far
+// as the sky map does. A leaf or a twig under a canopy then stands in mist as dark as the air around it,
+// and holds still as the camera moves.
 fn modern_mist(f: froxelfog::FroxelFog, p: vec3<f32>, ground: f32) -> vec4<f32> {
     let eye = f.camera.xyz;
     let ray = p - eye;
     let len = max(length(ray), 1e-3);
     let dir = ray / len;
-    let mu = dot(dir, f.sun_dir.xyz);
-    let h0 = max(eye.y - froxelfog::mist_floor(f, f.night.y), 0.0);
-    let h1 = max(p.y - froxelfog::mist_floor(f, ground), 0.0);
-    let floor0 = eye.y - h0;
-    let far = froxelfog::mist_reach(f);
-    let reach = min(len, far);
-    var t0 = 0.0;
-    var from_h = h0;
-    var light = vec3<f32>(0.0);
-    var tr = 1.0;
-    for (var i = 1u; i <= froxelfog::MIST_STRETCHES; i = i + 1u) {
-        let t1 = select(min(froxelfog::mist_stretch_end(i), reach), reach, i == froxelfog::MIST_STRETCHES);
-        let to_h = mix(h0, h1, t1 / len);
-        let mid = eye + dir * (0.5 * (t0 + t1));
-        let tau = froxelfog::mist_tau(f, mid, t1 - t0, from_h, to_h) * froxelfog::mist_taper(0.5 * (t0 + t1), far);
-        if (tau > 1e-6) {
-            let at = eye + dir * t1;
-            let floor = mix(floor0, p.y - h1, t1 / len);
-            // Read at the stretch's end, as the composite reads the opaque ground's.
-            let q = vec3<f32>(at.x, floor + froxelfog::MIST_LIGHT_LIFT, at.z);
-            let c = modern_block.cascades;
-            let vis = sunshadow::sun_visibility_fast(modern_shadow_map, modern_shadow_samp, c, q, froxelfog::view_depth(f, q));
-            let sky = sunshadow::sky_visibility_fast(modern_shadow_map, modern_shadow_samp, c, q);
-            let e = exp(-tau);
-            light = light + froxelfog::mist_light(f, mu, vis, sky) * (tr * (1.0 - e));
-            tr = tr * e;
-        }
-        t0 = t1;
-        from_h = to_h;
+    let end = eye + dir * min(len, froxelfog::mist_reach(f));
+    let veil = froxelfog::mist_level_ray(f, eye, end, ground);
+    let tau = veil.tau;
+    if (tau <= 1e-6) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
-    return vec4<f32>(light, tr);
+    let q = vec3<f32>(veil.at.x, froxelfog::mist_floor(f, ground) + froxelfog::MIST_LIGHT_LIFT, veil.at.z);
+    let c = modern_block.cascades;
+    let vis = sunshadow::sun_visibility_fast(modern_shadow_map, modern_shadow_samp, c, q, froxelfog::view_depth(f, q));
+    let sky = sunshadow::sky_visibility_fast(modern_shadow_map, modern_shadow_samp, c, q);
+    let tr = exp(-tau);
+    return froxelfog::mist_cap(vec4<f32>(froxelfog::mist_light(f, dot(dir, f.sun_dir.xyz), vis, sky) * (1.0 - tr), tr));
 }
 
 // fork: modern lighting (FORK.md, P5) — the probe field's irradiance at this
@@ -1313,7 +1294,9 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 #endif
 #ifdef WOW_MODERN
 #ifdef WOW_MERGED_FADE
-    out.bank_ground = vertex.fade_sphere.y;
+    // The placement's fade sphere's foot: its centre sat halfway up a tree, and every leaf under it lay
+    // in the veil as though on the ground, a box of haze in the canopy.
+    out.bank_ground = vertex.fade_sphere.y - vertex.fade_sphere.w;
 #else
     out.bank_ground = frame_origin.y;
 #endif

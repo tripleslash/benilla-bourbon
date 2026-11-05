@@ -182,46 +182,53 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     return f.ground.y + d * f.ground.z;
 }
 
-// The mist from the eye to `p` (`froxelfog`'s ground mist), each stretch's height read off the terrain under
-// its ends, the eye's too, so the mist follows every dip and crest the ray passes over and nothing in it
-// follows the camera. Every stretch counts: a ray stands high over a hollow and comes back down to the
-// ground past it. Each stretch scatters the key as far as the key reaches the ground at its end and the
-// ambient as far as the sky does, behind the mist before it.
+// The mist from the eye to `p` (`froxelfog`'s ground veil, `froxelfog::mist_level_ray`'s reads), the ray's
+// height over the terrain read off the heightfield at each read back from the pixel, lit where the ray
+// stands over the layer's peak: the key as far as it reaches there, the ambient as far as the sky does.
+// Everything in it is anchored at the pixel, so its veil holds still under a moving camera.
 fn mist_over_terrain(f: froxelfog::FroxelFog, eye: vec3<f32>, p: vec3<f32>) -> vec4<f32> {
     let ray = p - eye;
-    let len = max(length(ray), 1e-3);
-    let dir = ray / len;
-    let mu = dot(dir, f.sun_dir.xyz);
     let far = froxelfog::mist_reach(f);
-    let reach = min(len, far);
-    var h0 = max(eye.y - froxelfog::mist_floor(f, terrain_under(f, eye)), 0.0);
-    var t0 = 0.0;
-    var light = vec3<f32>(0.0);
-    var tr = 1.0;
-    for (var i = 1u; i <= froxelfog::MIST_STRETCHES; i = i + 1u) {
-        let t1 = select(min(froxelfog::mist_stretch_end(i), reach), reach, i == froxelfog::MIST_STRETCHES);
-        let at = eye + dir * t1;
-        let floor = froxelfog::mist_floor(f, terrain_under(f, at));
-        let h1 = max(at.y - floor, 0.0);
-        let mid = eye + dir * (0.5 * (t0 + t1));
-        let tau = froxelfog::mist_tau(f, mid, t1 - t0, h0, h1) * froxelfog::mist_taper(0.5 * (t0 + t1), far);
-        if (tau > 1e-6) {
-            // The stretch's light is read at its end, over the ground the ray comes down to: the
-            // veil lies there, and the last stretch's end is the pixel's own ground, fixed in the
-            // world. Read anywhere between, at a distance from the camera, it slid over the ground as
-            // the camera moved.
-            let c = modern_block.cascades;
-            let q = vec3<f32>(at.x, floor + froxelfog::MIST_LIGHT_LIFT, at.z);
-            let vis = sunshadow::sun_visibility_fast(shadow_map, shadow_samp, c, q, froxelfog::view_depth(f, q));
-            let sky = sunshadow::sky_visibility_fast(shadow_map, shadow_samp, c, q);
-            let e = exp(-tau);
-            light = light + froxelfog::mist_light(f, mu, vis, sky) * (tr * (1.0 - e));
-            tr = tr * e;
-        }
-        h0 = h1;
-        t0 = t1;
+    let len = min(max(length(ray), 1e-3), far);
+    if (f.mist.x <= 0.0 || len < 1e-3) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
-    return vec4<f32>(light, tr);
+    let dir = normalize(ray);
+    let end = eye + dir * len;
+    let reach = min(len, froxelfog::MIST_SEGMENT);
+    let crest = froxelfog::MIST_PEAK / max(f.mist.y, 1e-3);
+    var tau = 0.0;
+    var d0 = 0.0;
+    var h0 = max(end.y - froxelfog::mist_floor(f, terrain_under(f, end)), 0.0);
+    var at = end - dir * min(froxelfog::MIST_LIGHT_BACK, len);
+    var found = false;
+    for (var j = 1u; j <= froxelfog::MIST_READS; j = j + 1u) {
+        let d1 = min(froxelfog::mist_back(j), reach);
+        let q = end - dir * d1;
+        let h1 = max(q.y - froxelfog::mist_floor(f, terrain_under(f, q)), 0.0);
+        tau = tau + froxelfog::mist_stretch(f, end, dir, len, d0, d1, h0, h1);
+        if (!found && d1 >= froxelfog::MIST_LIGHT_BACK && h1 >= crest) {
+            at = q;
+            found = true;
+        }
+        if (d1 >= reach) {
+            break;
+        }
+        d0 = d1;
+        h0 = h1;
+    }
+    tau = tau * froxelfog::mist_taper(len, far);
+    if (tau <= 1e-6) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let c = modern_block.cascades;
+    // Lit over the ground under that read, clear of the ground's shadow bias.
+    let lit_floor = froxelfog::mist_floor(f, terrain_under(f, at));
+    let lq = vec3<f32>(at.x, select(lit_floor, at.y, lit_floor < -1.0) + froxelfog::MIST_LIGHT_LIFT, at.z);
+    let vis = sunshadow::sun_visibility_fast(shadow_map, shadow_samp, c, lq, froxelfog::view_depth(f, lq));
+    let sky = sunshadow::sky_visibility_fast(shadow_map, shadow_samp, c, lq);
+    let tr = exp(-tau);
+    return froxelfog::mist_cap(vec4<f32>(froxelfog::mist_light(f, dot(dir, f.sun_dir.xyz), vis, sky) * (1.0 - tr), tr));
 }
 
 @fragment

@@ -474,31 +474,69 @@ fn mist_clear_noise(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
     return mix(mist_noise(q), mist_noise(q * BANK_OCTAVE_MID + vec2<f32>(17.3, 5.1)), rough);
 }
 
-// How much of the veil's density stands at world point `p`, read over `span` yards: `medium.z` in a
-// clear patch (the faintest veil, so the ground there is not bare), 1 past its edge.
-fn mist_clear(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
+// How much of the veil's density stands where the clear patches' noise is `n`: `medium.z` in a clear
+// patch (the faintest veil, so the ground there is not bare), 1 past its edge.
+fn mist_clear(f: FroxelFog, n: f32) -> f32 {
     if (f.mist.z <= 0.0) {
         return 1.0;
     }
-    let n = mist_clear_noise(f, p, span);
     return mix(f.medium.z, 1.0, smoothstep(f.mist.z, f.mist.z + max(f.mist.w, 1e-3), n));
 }
 
+// fork: the veil's thickness over the ground where the clear patches' noise is `n`, as a share of its
+// scale height: it swells into low mounds where it is dense and sinks in the clear patches, so its top
+// rolls over the ground and stands in depth as the camera moves, never a flat sheet. Even where the
+// patches are off.
+const MIST_SWELL_LOW: f32 = 0.6;
+const MIST_SWELL_HIGH: f32 = 1.4;
+
+fn mist_swell(n: f32) -> f32 {
+    return mix(MIST_SWELL_LOW, MIST_SWELL_HIGH, n);
+}
+
+// The patches' noise a ray's veil takes, read once at `p`, the ray's own end: every stretch of the ray
+// takes it, so a pixel's veil depends on the ground it shows and never on where the camera stands. Read
+// per stretch at the stretches' ends, a distance from the camera, the last two stretches (which hold
+// nearly all of a ray's veil) took different values across each stretch boundary, and those rings swept
+// over the ground as the camera moved. The finer octave fades with the distance `len`, continuously.
+fn mist_ray_noise(f: FroxelFog, p: vec3<f32>, len: f32) -> f32 {
+    return mist_clear_noise(f, p, MIST_NOISE_SPAN * len);
+}
+
+// The span over which a ray's noise is read, per yard of its length: about a pixel's footprint on
+// grazing ground.
+const MIST_NOISE_SPAN: f32 = 0.05;
+
+// fork: **the veil floats.** Its density is `e^(-h/H) - e^(-h/L)` over its own peak, `L` this share of
+// `H`: nothing on the ground, `mist.x` at about half a scale height, thinning above. Densest on the
+// ground, it read as a colour painted on the ground; lifted, the grass's roots and the ground under it
+// stay clear and the layer stands over them.
+const MIST_LIFT: f32 = 0.35;
+// The height of the peak, as a share of `H`: `ln(H/L) H L / (H - L)`.
+const MIST_PEAK: f32 = 0.565;
+
+// The mean of `exp(-h / s)` over heights `h0` to `h1`, exact.
+fn mist_exp_mean(h0: f32, h1: f32, s: f32) -> f32 {
+    let a = min(h0, MIST_ABOVE * s) / s;
+    let b = min(h1, MIST_ABOVE * s) / s;
+    if (abs(b - a) > 1e-3) {
+        return (exp(-a) - exp(-b)) / (b - a);
+    }
+    return exp(-0.5 * (a + b));
+}
+
 // The veil's optical depth over a stretch `dt` yards long whose height over the ground runs from `h0` to
-// `h1`, thinned by the clear patches at `mid`, the stretch's middle.
-fn mist_tau(f: FroxelFog, mid: vec3<f32>, dt: f32, h0: f32, h1: f32) -> f32 {
-    let hh = 1.0 / max(f.mist.y, 1e-3);
+// `h1`, thinned and lowered by the clear patches where their noise is `n` (`mist_ray_noise`,
+// `mist_swell`). Each exponential of the lifted profile integrates exactly.
+fn mist_tau(f: FroxelFog, n: f32, dt: f32, h0: f32, h1: f32) -> f32 {
+    let hh = mist_swell(n) / max(f.mist.y, 1e-3);
     if (dt <= 0.0 || min(h0, h1) >= MIST_ABOVE * hh) {
         return 0.0;
     }
-    let a = min(h0, MIST_ABOVE * hh) / hh;
-    let b = min(h1, MIST_ABOVE * hh) / hh;
-    var mean = exp(-0.5 * (a + b));
-    if (abs(b - a) > 1e-3) {
-        mean = (exp(-a) - exp(-b)) / (b - a);
-    }
-    let air = dt * mean;
-    return f.mist.x * air * mist_clear(f, mid, air);
+    let l = MIST_LIFT * hh;
+    let peak = exp(-MIST_PEAK) - exp(-MIST_PEAK / MIST_LIFT);
+    let mean = max(mist_exp_mean(h0, h1, hh) - mist_exp_mean(h0, h1, l), 0.0) / peak;
+    return f.mist.x * dt * mean * mist_clear(f, n);
 }
 
 // The light a stretch of the mist scatters toward the eye: `mu` the cosine between the view ray and the
@@ -542,45 +580,103 @@ fn mist_taper(t: f32, reach: f32) -> f32 {
     return 1.0 - smoothstep((1.0 - MIST_TAPER) * reach, reach, t);
 }
 
-// The stretches a ray takes over the ground: stretch `i` ends `mist_stretch_end(i)` yards from the eye,
-// the same distances for every ray, short near the eye, where the ground is seen closely. Cut at shares
-// of each ray's own length instead, a ray to a rock and a ray to the sky beside it read the ground they
-// cross at different places and took different veils: the rock stood in a band with a hard edge.
-const MIST_STRETCHES: u32 = 11u;
+// fork: **a ray's veil, anchored at its end.** The ray to `end` is read back from its end at set distances
+// (`mist_back`), the ray's height over the ground taken at each and linear between, each stretch exact
+// with the patches' and the swell's noise at its middle, so a grazing ray takes the mean of the yards of
+// layer it crosses, as a volume does. The reads are the end's: they move with it smoothly and never
+// cross it, so a pixel's veil holds still under a moving camera. Read at set distances from the eye
+// instead, the reads slid over the ground with the camera and a few inches of terrain between two of them
+// moved a veil this thin by half: bands of other veil swept the screen. Read at one point, or over the
+// end's own ground plane, the pattern lay like paint, and a slope at a hill's foot, carried back up the
+// hill, laid the whole layer along a ray that stood yards over the ground.
+const MIST_SEGMENT: f32 = 80.0;
+const MIST_READS: u32 = 7u;
+// How far back from its end a ray's veil is lit at the least (yd): a ray over the layer ends on a rock's
+// or a trunk's face, and read under that face the light was the object's own shadow, in stripes.
+const MIST_LIGHT_BACK: f32 = 2.0;
 
-fn mist_stretch_end(i: u32) -> f32 {
-    return 2.0 * (pow(1.8, f32(i)) - 1.0);
+// The `j`-th read's distance back from the ray's end (yd): 0, 0.6, 1.9, 4.4, 9.4, 19, 39, 79.
+fn mist_back(j: u32) -> f32 {
+    return 0.625 * (exp2(f32(j)) - 1.0);
 }
 
-// The mist from `eye` to `p`, for the water, whose rays run over open water: `ground` under `p` (the water
-// passes give `MIST_NO_GROUND`), the
-// camera's ground under the eye and the height linear between them, the key and the sky reaching every
-// stretch. As many stretches as the composite takes (`fog_composite.wgsl`'s `mist_over_terrain`); a
-// blended model takes the same with the key's shadow and the sky map (`wow_model.wgsl`'s `modern_mist`).
-fn mist_air(f: FroxelFog, eye: vec3<f32>, p: vec3<f32>, ground: f32) -> vec4<f32> {
-    if (f.mist.x <= 0.0) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+// A ray's veil: `tau`, and `at`, where it is lit (the first read back from the end that stands over the
+// layer's peak, at least `MIST_LIGHT_BACK` back).
+struct MistRay {
+    tau: f32,
+    at: vec3<f32>,
+}
+
+// One stretch of [`mist_ray`]: from the read `d0` back (height `h0`) to `d1` back (height `h1`).
+fn mist_stretch(f: FroxelFog, end: vec3<f32>, dir: vec3<f32>, len: f32, d0: f32, d1: f32, h0: f32, h1: f32) -> f32 {
+    let mid = end - dir * (0.5 * (d0 + d1));
+    let n = mist_ray_noise(f, mid, len - 0.5 * (d0 + d1));
+    return mist_tau(f, n, d1 - d0, h0, h1);
+}
+
+// The veil over level ground at `ground` under the ray's end, for the water and the blended models,
+// which have no heightfield (`fog_composite.wgsl`'s `mist_over_terrain` reads the terrain at each read).
+fn mist_level_ray(f: FroxelFog, eye: vec3<f32>, end: vec3<f32>, ground: f32) -> MistRay {
+    let floor = mist_floor(f, ground);
+    let ray = end - eye;
+    let len = length(ray);
+    if (f.mist.x <= 0.0 || len < 1e-3) {
+        return MistRay(0.0, end);
     }
+    let dir = ray / len;
+    let reach = min(len, MIST_SEGMENT);
+    let crest = MIST_PEAK / max(f.mist.y, 1e-3);
+    var tau = 0.0;
+    var d0 = 0.0;
+    var h0 = max(end.y - floor, 0.0);
+    var at = end - dir * min(MIST_LIGHT_BACK, len);
+    var found = false;
+    for (var j = 1u; j <= MIST_READS; j = j + 1u) {
+        let d1 = min(mist_back(j), reach);
+        let q = end - dir * d1;
+        let h1 = max(q.y - floor, 0.0);
+        tau = tau + mist_stretch(f, end, dir, len, d0, d1, h0, h1);
+        if (!found && d1 >= MIST_LIGHT_BACK && h1 >= crest) {
+            at = q;
+            found = true;
+        }
+        if (d1 >= reach) {
+            break;
+        }
+        d0 = d1;
+        h0 = h1;
+    }
+    return MistRay(tau * mist_taper(len, mist_reach(f)), at);
+}
+
+// The mist from `eye` to `p` over `ground` under `p`, level (`mist_level_ray`), for the water (whose
+// passes give `MIST_NO_GROUND`: none) and the blended models, the key and the sky reaching it whole.
+fn mist_air(f: FroxelFog, eye: vec3<f32>, p: vec3<f32>, ground: f32) -> vec4<f32> {
     let ray = p - eye;
     let len = max(length(ray), 1e-3);
     let dir = ray / len;
-    let h0 = max(eye.y - mist_floor(f, f.night.y), 0.0);
-    let h1 = max(p.y - mist_floor(f, ground), 0.0);
-    let far = mist_reach(f);
-    let reach = min(len, far);
-    var t0 = 0.0;
-    var from_h = h0;
-    var tau = 0.0;
-    for (var i = 1u; i <= MIST_STRETCHES; i = i + 1u) {
-        let t1 = select(min(mist_stretch_end(i), reach), reach, i == MIST_STRETCHES);
-        let to_h = mix(h0, h1, t1 / len);
-        let mid = eye + dir * (0.5 * (t0 + t1));
-        tau = tau + mist_tau(f, mid, t1 - t0, from_h, to_h) * mist_taper(0.5 * (t0 + t1), far);
-        t0 = t1;
-        from_h = to_h;
+    let end = eye + dir * min(len, mist_reach(f));
+    let tau = mist_level_ray(f, eye, end, ground).tau;
+    if (tau <= 1e-6) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
     let tr = exp(-tau);
-    return vec4<f32>(mist_light(f, dot(dir, f.sun_dir.xyz), 1.0, 1.0) * (1.0 - tr), tr);
+    return mist_cap(vec4<f32>(mist_light(f, dot(dir, f.sun_dir.xyz), 1.0, 1.0) * (1.0 - tr), tr));
+}
+
+// fork: **the veil's ceiling.** A thin layer seen edge-on lays yards of itself along a grazing ray: the far
+// ground saturated into an opaque sheet of the veil's colour, every path and slope one flat mess. A ray's
+// veil saturates softly toward this opacity instead (`C (1 - e^(-a / C))`, the same at small `a`), so the
+// distance stands under a faint veil and keeps its own shapes; the light scales with it.
+const MIST_CEILING: f32 = 0.3;
+
+fn mist_cap(m: vec4<f32>) -> vec4<f32> {
+    let a = 1.0 - m.a;
+    if (a <= 1e-5) {
+        return m;
+    }
+    let capped = MIST_CEILING * (1.0 - exp(-a / MIST_CEILING));
+    return vec4<f32>(m.rgb * (capped / a), 1.0 - capped);
 }
 
 // `fog` seen through `mist`, which lies in front of it as far as the blend can tell.

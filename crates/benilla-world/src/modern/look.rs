@@ -409,18 +409,20 @@ impl ZoneLook {
         key_tint: [1.0, 0.86, 0.8],
         // A thin veil lying on the ground at every hour, into the sea fog, fixed in the world, thinner
         // in clear patches, as the reference's lies (`worldview_pose=6346.6,510.4,23.6,174.2,2.9`,
-        // 18:20).
-        ground_fog: 1.4,
-        bank_height: 0.5,
+        // 18:20): a subtle band under the grass tops, floating over the ground, swelling and sinking.
+        ground_fog: 4.0,
+        bank_height: 0.3,
         bank_clear: 0.45,
         bank_clear_edge: 0.45,
         bank_analytic: 1.0,
         bank_patch_yd: 70.0,
-        // The faintest veil in the clear patches, so the open ground is not bare.
-        bank_clear_floor: 0.5,
-        // The volume's banks under the veil at every hour (`ground_fog` 1.8).
-        bank_froxel: 1.8,
-        bank_froxel_night: 1.8,
+        // A faint veil in the clear patches, so the open ground is never bare and the denser
+        // stretches read as patches of fog over it.
+        bank_clear_floor: 0.6,
+        // No volume banks under the veil: the froxels' jitter and history swam and lagged as the
+        // camera moved, where the veil, exact per pixel, holds still.
+        bank_froxel: 0.0,
+        bank_froxel_night: 0.0,
         night_banks: 0.6,
         sea_fog: 0.028,
         // The moon lights the haze from every side, not as a second sun.
