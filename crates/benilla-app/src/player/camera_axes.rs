@@ -159,7 +159,7 @@ pub(super) fn tick(
     }
     let yaw = look.yaw_speed.to_radians() * (at(ViewAxis::Right) - at(ViewAxis::Left));
     if !rig.follow.move_target(yaw) {
-        cam.yaw += yaw;
+        cam.yaw = crate::creature_anim::wrap_pi(cam.yaw + yaw);
     }
     let pitch = (look.pitch_speed * PITCH_RATE_SCALE).to_radians()
         * (at(ViewAxis::Down) - at(ViewAxis::Up));
@@ -208,7 +208,11 @@ mod tests {
     fn each_axis_moves_at_its_cvar_speed() {
         let (mut r, mut c) = (rig(10.0), cam());
         run(&mut r, &mut c, &[(ViewAxis::Right, true)], 11, 0.1);
-        assert!((c.yaw - 180f32.to_radians()).abs() < 1e-4, "{}", c.yaw);
+        assert!(
+            crate::creature_anim::wrap_pi(c.yaw - 180f32.to_radians()).abs() < 1e-4,
+            "{}",
+            c.yaw
+        );
 
         let (mut r, mut c) = (rig(10.0), cam());
         run(&mut r, &mut c, &[(ViewAxis::Down, true)], 11, 0.1);

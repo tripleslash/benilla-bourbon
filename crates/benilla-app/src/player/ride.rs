@@ -36,9 +36,9 @@ pub(super) fn carry(
                 dyaw = (dyaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
                     - std::f32::consts::PI;
                 player.carry_to(world);
-                player.face_yaw += dyaw;
+                player.face_yaw = wrap_pi(player.face_yaw + dyaw);
                 player.model_yaw = wrap_pi(player.model_yaw + dyaw);
-                cam.yaw += dyaw;
+                cam.yaw = wrap_pi(cam.yaw + dyaw);
                 if let Some(r) = player.ride.as_mut() {
                     r.boat_yaw = yaw_now;
                     r.placed = true;

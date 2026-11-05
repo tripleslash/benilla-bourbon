@@ -227,9 +227,9 @@ pub(super) fn apply_server_moves(
                 ride.boat_yaw = boat_yaw;
                 player.pos = boat.translation + boat.rotation * ride.local_pos;
                 let dyaw = wrap_pi(w.orientation + boat_yaw - player.face_yaw);
-                player.face_yaw += dyaw;
+                player.face_yaw = wrap_pi(player.face_yaw + dyaw);
                 player.model_yaw = wrap_pi(player.model_yaw + dyaw);
-                cam.yaw += dyaw;
+                cam.yaw = wrap_pi(cam.yaw + dyaw);
             }
         } else if boarding {
             let guid = player
@@ -613,7 +613,7 @@ fn apply_self_move(
     let dyaw = wrap_pi(m.orientation - player.face_yaw);
     player.face_yaw = wrap_pi(player.face_yaw + dyaw);
     player.model_yaw = wrap_pi(player.model_yaw + dyaw);
-    cam.yaw += dyaw;
+    cam.yaw = wrap_pi(cam.yaw + dyaw);
     player.mover_pitch = m.pitch;
 
     // On a deck the packet moved us within the platform frame (`ON_TRANSPORT` is outside the mask):

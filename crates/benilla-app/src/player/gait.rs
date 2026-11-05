@@ -30,6 +30,9 @@ pub(super) fn drive_body_heading(
     } else {
         strafe_body_offset(move_flags_now)
     };
+    // The facing as a reduced angle, as the reference holds it: hundreds of radians out, the
+    // difference below kept a few 1e-5 of precision and the shuffle never settled.
+    player.face_yaw = wrap_pi(player.face_yaw);
     let mut body_turn_step = 0.0_f32;
     if swimming {
         player.model_yaw = player.face_yaw;
@@ -102,5 +105,38 @@ mod tests {
             player.model_yaw, 0.0,
             "under the 90° ceiling a steering frame moves the body not at all"
         );
+    }
+
+    /// A standing body settles onto any facing, however far the aim was turned: at a facing hundreds
+    /// of radians out, `face_yaw - model_yaw` keeps only a few 1e-5 of precision, the release sweep
+    /// never lands inside the shuffle's threshold, and the turn-in-place shuffle ran for good. The
+    /// facing is kept wrapped where it accumulates; the guard here holds whatever a writer does.
+    #[test]
+    fn the_standing_body_settles_on_a_far_turned_facing() {
+        for face in [300.0_f32, 600.0, 900.0] {
+            let mut player = Player {
+                face_yaw: face,
+                model_yaw: wrap_pi(face) + 1.0,
+                ..Default::default()
+            };
+            let mut flags = 0;
+            for _ in 0..120 {
+                flags = drive_body_heading(
+                    &mut player,
+                    0,
+                    1.0 / 60.0,
+                    false,
+                    false,
+                    false,
+                    false,
+                    std::f32::consts::PI,
+                );
+            }
+            assert_eq!(
+                flags & (move_flags::TURN_LEFT | move_flags::TURN_RIGHT),
+                0,
+                "facing {face}: the body still shuffles after two seconds"
+            );
+        }
     }
 }

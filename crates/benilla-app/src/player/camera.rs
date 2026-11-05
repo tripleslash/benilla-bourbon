@@ -1488,7 +1488,7 @@ pub(super) fn run_look_session(
         // A mouse turn sets mode bit 6 (`0x50fee9`).
         rig.view_moved |= delta != Vec2::ZERO;
         let d_yaw = -delta.x * yaw_rate;
-        cam.yaw += d_yaw;
+        cam.yaw = wrap_pi(cam.yaw + d_yaw);
         // `mouseInvertPitch` flips only the pitch axis.
         let dy = if look_cfg.invert_pitch {
             -delta.y
@@ -1773,7 +1773,7 @@ pub(super) fn seat_camera(
     // leaves this carry running.
     let look_held = rig.look.is_some();
     if !look_held {
-        cam.yaw += turn_delta;
+        cam.yaw = wrap_pi(cam.yaw + turn_delta);
     }
     if let Some(yaw) = rig.follow.advance(follow, cam.yaw, dt, look_held) {
         cam.yaw = yaw;

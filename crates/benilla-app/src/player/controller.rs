@@ -660,14 +660,14 @@ pub(super) fn control(
             let slowed = translating || player.airborne_since.is_some();
             let rate = turn_rate * if slowed { TURN_RATE_MOVING } else { 1.0 };
             turn_delta = turn * rate * dt;
-            player.face_yaw += turn_delta;
+            player.face_yaw = wrap_pi(player.face_yaw + turn_delta);
         }
         // The drunk veer: while moving, the wobble adds to the facing every frame and commits
         // through the facing setter, so it streams like a turn (`0x60aa70`-`0x60aab7`,
         // `0x60de30`); a held keyboard turn skips it (`0x60aa5a`). Both yaw conventions grow
         // leftward, and it joins `turn_delta`, so the camera follows the meander.
         if drunk_wobble != 0.0 && translating && !turning {
-            player.face_yaw += drunk_wobble;
+            player.face_yaw = wrap_pi(player.face_yaw + drunk_wobble);
             turn_delta = drunk_wobble;
         }
         let face_rot = Quat::from_rotation_y(player.face_yaw);

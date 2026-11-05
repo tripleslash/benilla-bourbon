@@ -652,7 +652,7 @@ impl Player {
     /// Turn the aim by `radians`, the scripted mouse turn (`capture::probe_look`): the same
     /// `face_yaw` a real mouse turn writes and the facing stream diffs.
     pub(crate) fn turn_aim(&mut self, radians: f32) {
-        self.face_yaw += radians;
+        self.face_yaw = crate::creature_anim::wrap_pi(self.face_yaw + radians);
     }
 
     /// Set the mover pitch, the scripted dive (`capture::probe_pitch`), under the mouse-look
