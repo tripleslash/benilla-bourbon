@@ -129,8 +129,23 @@ pub(super) struct PickPose<'w, 's> {
     /// The world-space matrices the vertex stage skins with, read from the CPU rows.
     palettes: Res<'w, benilla_world::rig_palette::RigPalettes>,
     rigs: Query<'w, 's, &'static benilla_world::rig_palette::RigSkin>,
+    /// Worn gear drawn through its wearer's slot: its palette is the wearer's rider rows.
+    riders: Query<'w, 's, &'static benilla_world::rig_rider::RigRider>,
     /// Pass 1's skinned parts, which pass 2 casts against instead of skinning again.
     scratch: Local<'s, PosedPickScratch>,
+}
+
+impl PickPose<'_, '_> {
+    /// The skinning matrices a part linked to `rig` draws with.
+    fn palette(&self, rig: Entity) -> Option<Vec<Mat4>> {
+        if let Ok(skin) = self.rigs.get(rig) {
+            return self
+                .palettes
+                .world_palette(skin.slot, skin.bones() as usize);
+        }
+        let rider = self.riders.get(rig).ok().filter(|r| r.row.is_some())?;
+        self.palettes.rider_world_palette(rider.slot)
+    }
 }
 
 /// The local identity and what of it and of the corpses the pick takes, as one [`SystemParam`].
@@ -373,10 +388,7 @@ impl UnitPicker<'_, '_> {
             // The skinning matrices of one skeleton's parts, as of last frame's propagated pose.
             let palette_of =
                 |sk: &[(&Mesh3d, &benilla_world::rig_palette::RigPart)]| -> Option<Vec<Mat4>> {
-                    sk.first().and_then(|(_, part)| {
-                        let rig = pose.rigs.get(part.0).ok()?;
-                        pose.palettes.world_palette(rig.slot, rig.bones() as usize)
-                    })
+                    sk.first().and_then(|(_, part)| pose.palette(part.0))
                 };
             // The pass-2 ladder (`0x480c90`): alive 3, dead 2, a corpse 2 when
             // `CORPSE_DYNFLAG_LOOTABLE`, else 0 (`0x480cec`). A corpse has no UNIT block, so its

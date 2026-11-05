@@ -542,6 +542,8 @@ fn collect_entity_casters(
         Option<&RigPart>,
     )>,
     rigs: Query<&RigSkin>,
+    // Worn gear drawn through a row of its wearer's slot.
+    riders: Query<&crate::rig_rider::RigRider>,
     materials: Res<Assets<WowModelMaterial>>,
     lighting: Res<WowLighting>,
     cameras: Query<&GlobalTransform, With<WorldCamera>>,
@@ -602,8 +604,8 @@ fn collect_entity_casters(
             None
         };
         let rig_slot = rig
-            .and_then(|r| rigs.get(r.0).ok())
-            .map(|skin| u32::from(skin.slot));
+            .and_then(|r| crate::rig_palette::part_slot(r.0, &rigs, &riders))
+            .map(u32::from);
         let (scale, _, translation) = gt.to_scale_rotation_translation();
         // The cascade cull's sphere. A rigged part bounds by its box too: an animated doodad's is the
         // authored all-animation box (`terrain_stream::spawn::assemble`), and a posed body strays

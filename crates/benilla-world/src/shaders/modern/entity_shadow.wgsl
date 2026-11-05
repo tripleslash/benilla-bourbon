@@ -35,6 +35,12 @@ struct SkinRegions {
     palettes: array<vec4<f32>>,
 }
 @group(1) @binding(1) var<storage, read> skin: SkinRegions;
+
+// wow_model.wgsl's `wow_rig_row`: the table word packs the base bone and the body's bone count.
+fn wow_rig_row(word: u32, joint: u32) -> u32 {
+    let base = word & 0x1ffffu;
+    return select(base + joint, base + (word >> 17u) + (joint & 0x7fffu), joint >= 0x8000u);
+}
 #endif
 
 #ifdef CUTOUT
@@ -69,11 +75,11 @@ fn vertex(v: PartVertex) -> PartVsOut {
     var out: PartVsOut;
 #ifdef SKINNED
     let slot = part.rig_slot;
-    let base = skin.rig_table[slot];
-    let b0 = 3u * (base + v.joint_indices.x);
-    let b1 = 3u * (base + v.joint_indices.y);
-    let b2 = 3u * (base + v.joint_indices.z);
-    let b3 = 3u * (base + v.joint_indices.w);
+    let word = skin.rig_table[slot];
+    let b0 = 3u * wow_rig_row(word, v.joint_indices.x);
+    let b1 = 3u * wow_rig_row(word, v.joint_indices.y);
+    let b2 = 3u * wow_rig_row(word, v.joint_indices.z);
+    let b3 = 3u * wow_rig_row(word, v.joint_indices.w);
     let w = v.joint_weights;
     let r0 = w.x * skin.palettes[b0] + w.y * skin.palettes[b1] + w.z * skin.palettes[b2] + w.w * skin.palettes[b3];
     let r1 = w.x * skin.palettes[b0 + 1u] + w.y * skin.palettes[b1 + 1u] + w.z * skin.palettes[b2 + 1u] + w.w * skin.palettes[b3 + 1u];

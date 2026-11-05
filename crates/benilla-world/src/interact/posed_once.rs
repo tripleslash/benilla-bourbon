@@ -99,7 +99,9 @@ impl PosedPickScratch {
             let mut m = Mat4::ZERO;
             for k in 0..4 {
                 if w[k] > 0.0 {
-                    if let Some(mk) = palette.get(j[k] as usize) {
+                    // A rigid rider's joint indexes the rider palette, as in `ray_posed_mesh`.
+                    let joint = j[k] & !benilla_assets::RIDER_JOINT_BIT;
+                    if let Some(mk) = palette.get(joint as usize) {
                         m += *mk * w[k];
                     }
                 }

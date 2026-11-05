@@ -74,14 +74,20 @@ struct PartVsOut {
 }
 
 #ifdef SKINNED
+// wow_model.wgsl's `wow_rig_row`: the table word packs the base bone and the body's bone count.
+fn wow_rig_row(word: u32, joint: u32) -> u32 {
+    let base = word & 0x1ffffu;
+    return select(base + joint, base + (word >> 17u) + (joint & 0x7fffu), joint >= 0x8000u);
+}
+
 // Twice, not one function over a pointer: a `storage` pointer parameter needs WGSL's
 // `unrestricted_pointer_parameters`, which not every browser has.
 fn skinned_cur(slot: u32, v: PartVertex) -> vec3<f32> {
-    let base = skin.rig_table[slot];
-    let b0 = 3u * (base + v.joint_indices.x);
-    let b1 = 3u * (base + v.joint_indices.y);
-    let b2 = 3u * (base + v.joint_indices.z);
-    let b3 = 3u * (base + v.joint_indices.w);
+    let word = skin.rig_table[slot];
+    let b0 = 3u * wow_rig_row(word, v.joint_indices.x);
+    let b1 = 3u * wow_rig_row(word, v.joint_indices.y);
+    let b2 = 3u * wow_rig_row(word, v.joint_indices.z);
+    let b3 = 3u * wow_rig_row(word, v.joint_indices.w);
     let w = v.joint_weights;
     let r0 = w.x * skin.palettes[b0] + w.y * skin.palettes[b1]
         + w.z * skin.palettes[b2] + w.w * skin.palettes[b3];
@@ -94,11 +100,11 @@ fn skinned_cur(slot: u32, v: PartVertex) -> vec3<f32> {
     return vec3<f32>(dot(r0, p), dot(r1, p), dot(r2, p)) + skin.rig_origin[slot].xyz;
 }
 fn skinned_prev(slot: u32, v: PartVertex) -> vec3<f32> {
-    let base = prev_skin.rig_table[slot];
-    let b0 = 3u * (base + v.joint_indices.x);
-    let b1 = 3u * (base + v.joint_indices.y);
-    let b2 = 3u * (base + v.joint_indices.z);
-    let b3 = 3u * (base + v.joint_indices.w);
+    let word = prev_skin.rig_table[slot];
+    let b0 = 3u * wow_rig_row(word, v.joint_indices.x);
+    let b1 = 3u * wow_rig_row(word, v.joint_indices.y);
+    let b2 = 3u * wow_rig_row(word, v.joint_indices.z);
+    let b3 = 3u * wow_rig_row(word, v.joint_indices.w);
     let w = v.joint_weights;
     let r0 = w.x * prev_skin.palettes[b0] + w.y * prev_skin.palettes[b1]
         + w.z * prev_skin.palettes[b2] + w.w * prev_skin.palettes[b3];

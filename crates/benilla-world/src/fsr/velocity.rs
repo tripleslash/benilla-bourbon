@@ -103,6 +103,8 @@ pub fn collect_motion_parts(
         &ViewVisibility,
     )>,
     rigs: Query<&crate::rig_palette::RigSkin>,
+    // Worn gear drawn through a row of its wearer's slot.
+    riders: Query<&crate::rig_rider::RigRider>,
     model_materials: Res<Assets<benilla_assets::materials::WowModelMaterial>>,
     std_materials: Res<Assets<StandardMaterial>>,
     mut out: ResMut<FsrMotionParts>,
@@ -177,8 +179,8 @@ pub fn collect_motion_parts(
             .then(|| m.base.base_color_texture.as_ref().map(|h| h.id()))
             .flatten();
         let rig_slot = rig
-            .and_then(|r| rigs.get(r.0).ok())
-            .map(|skin| u32::from(skin.slot));
+            .and_then(|r| crate::rig_palette::part_slot(r.0, &rigs, &riders))
+            .map(u32::from);
         skinned_seen |= rig_slot.is_some();
         push(
             entity,

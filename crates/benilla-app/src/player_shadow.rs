@@ -500,7 +500,9 @@ fn collect_world_geometry(
         }
         admitted += 1;
         let base = positions.len() as u32;
-        if let Some(rig_part) = rig_part {
+        // A rigid item rides a row of its wearer's slot and owns no skin: at bind pose its
+        // propagated transform places it whole, as the static path does.
+        if let Some(rig_part) = rig_part.filter(|r| rigs.contains(r.0)) {
             append_skinned(pick, rig_part, rigs, palettes, positions);
         } else if let Some(global) = global {
             positions.extend(
