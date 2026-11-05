@@ -624,9 +624,8 @@ fn update_volume(
     // A hard cut (no history, a new grid, a jump) drops the whole volume's history. A quick turn only
     // the near froxels': far air reprojects exactly under a rotation, and what the turn brings on screen
     // fails the reprojection's bounds test anyway (`froxel_scatter.wgsl`'s depth ramp).
-    let cut = hist.prev_clip.is_none()
-        || hist.prev_grid != grid
-        || hist.prev_camera.distance(cam) > 12.0;
+    let cut =
+        hist.prev_clip.is_none() || hist.prev_grid != grid || hist.prev_camera.distance(cam) > 12.0;
     let turned = hist.prev_forward.dot(forward) < 0.9;
     let prev_clip = hist.prev_clip.unwrap_or(clip_from_world);
     hist.frame = hist.frame.wrapping_add(1);
