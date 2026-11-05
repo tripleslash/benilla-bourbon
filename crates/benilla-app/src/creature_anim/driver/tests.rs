@@ -176,7 +176,7 @@ fn a_death_is_stamped_as_its_clip_ends() {
         .spawn((
             model,
             AnimationPlayer::default(),
-            AnimationTransitions::new(),
+            BlendSlot::default(),
             AnimDriver::default(),
             crate::net::ObjectStore(alive(&[])),
         ))

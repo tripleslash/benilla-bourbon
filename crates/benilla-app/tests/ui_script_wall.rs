@@ -46,8 +46,9 @@ fn family(rel: &str) -> Family {
 /// events at their signal points; 43: the host's world click, `script_calls/world_click.rs`,
 /// which applies the mouse commands' click inside their calls and keeps the steps that wait for
 /// an arm's pick in the calling VM) and this fork's `webprogress.rs`, the boot-progress bridge to
-/// the page, whose `"ready"` edge is the first frame the glue VM shows a scene.
-const CEILING: usize = 44;
+/// the page, whose `"ready"` edge is the first frame the glue VM shows a scene, and `webdiag.rs`,
+/// the browser build's stutter probe, whose growth report reads the VM's Lua heap size.
+const CEILING: usize = 45;
 
 /// How far under [`CEILING`] the count may sit before the test asks for the ceiling to follow it.
 const SLACK: usize = 4;
