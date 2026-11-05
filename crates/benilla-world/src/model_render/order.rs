@@ -19,14 +19,12 @@ use std::cmp::Ordering;
 
 use bevy::asset::{AssetEvent, UntypedAssetId};
 use bevy::core_pipeline::core_3d::Transparent3d;
-use bevy::ecs::query::QueryItem;
 use bevy::math::Affine3A;
 use bevy::pbr::RenderMaterialInstances;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_phase::{sort_phase_system, ViewSortedRenderPhases};
-use bevy::render::sync_component::SyncComponent;
+use bevy::render::sync_world::{MainEntity, MainEntityHashMap};
 use bevy::render::view::ExtractedView;
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 
@@ -101,7 +99,7 @@ pub struct M2SortLink {
 }
 
 /// [`M2SortLink`] in the render world.
-#[derive(Component, Clone)]
+#[derive(Clone)]
 pub struct RenderSortLink {
     instance: u64,
     depth_fill: bool,
@@ -112,17 +110,9 @@ pub struct RenderSortLink {
     world: Affine3A,
 }
 
-impl SyncComponent for M2SortLink {
-    type Target = RenderSortLink;
-}
-
-impl ExtractComponent for M2SortLink {
-    type QueryData = &'static Self;
-    type QueryFilter = Changed<Self>;
-    type Out = RenderSortLink;
-
-    fn extract_component(link: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
-        Some(RenderSortLink {
+impl From<&M2SortLink> for RenderSortLink {
+    fn from(link: &M2SortLink) -> Self {
+        Self {
             instance: link.instance.to_bits(),
             depth_fill: link.depth_fill,
             fill_copy: link.fill_copy,
@@ -130,7 +120,28 @@ impl ExtractComponent for M2SortLink {
             mesh_pivot: link.mesh_pivot,
             key_point: link.key_point,
             world: link.world,
-        })
+        }
+    }
+}
+
+/// Every M2 batch's link in the render world, by the main entity a phase item names. A map, not
+/// an extracted component: Bevy 0.19 extracts a mesh by its main entity and syncs none to the
+/// render world, and a synced component would sync every batch a frame after its mesh was queued
+/// without one, which drew no character's hair.
+#[derive(Resource, Default)]
+struct RenderSortLinks(MainEntityHashMap<RenderSortLink>);
+
+/// Mirror the links that changed and drop the ones that went.
+fn extract_sort_links(
+    mut links: ResMut<RenderSortLinks>,
+    changed: Extract<Query<(Entity, &M2SortLink), Changed<M2SortLink>>>,
+    mut removed: Extract<RemovedComponents<M2SortLink>>,
+) {
+    for entity in removed.read() {
+        links.0.remove(&MainEntity::from(entity));
+    }
+    for (entity, link) in &changed {
+        links.0.insert(MainEntity::from(entity), link.into());
     }
 }
 
@@ -434,7 +445,7 @@ fn order_m2_transparents(
     views: Query<&ExtractedView>,
     materials: Res<RenderMaterialInstances>,
     sorts: Res<MaterialSorts>,
-    links: Query<&RenderSortLink>,
+    links: Res<RenderSortLinks>,
 ) {
     for view in &views {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
@@ -445,7 +456,7 @@ fn order_m2_transparents(
         let mut others = Vec::with_capacity(phase.items.len());
         let mut m2 = Vec::new();
         for (key, mut item) in std::mem::take(&mut phase.items) {
-            let keys = links.get(key.0).ok().and_then(|link| {
+            let keys = links.0.get(&key.1).and_then(|link| {
                 let sort = materials
                     .instances
                     .get(&key.1)
@@ -477,18 +488,21 @@ fn order_m2_transparents(
 /// links are taken after `CheckVisibility`, once every pass that places a transform before it
 /// (cards, nameplates, raid marks) has run.
 pub(crate) fn plugin(app: &mut App) {
-    app.add_plugins(ExtractComponentPlugin::<M2SortLink>::default())
-        .add_systems(
-            PostUpdate,
-            (link_m2_batches, refresh_m2_links)
-                .chain()
-                .after(crate::billboard::BillboardPlace)
-                .after(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
-        );
+    app.add_systems(
+        PostUpdate,
+        (link_m2_batches, refresh_m2_links)
+            .chain()
+            .after(crate::billboard::BillboardPlace)
+            .after(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
+    );
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render
             .init_resource::<MaterialSorts>()
-            .add_systems(ExtractSchedule, extract_material_sorts)
+            .init_resource::<RenderSortLinks>()
+            .add_systems(
+                ExtractSchedule,
+                (extract_material_sorts, extract_sort_links),
+            )
             .add_systems(
                 Render,
                 order_m2_transparents
@@ -503,6 +517,34 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
+
+    /// A link must not sync its batch to the render world: Bevy 0.19 extracts a mesh by its main
+    /// entity, and a batch synced a frame after its mesh was queued drew no character's hair.
+    #[test]
+    fn a_linked_batch_is_not_synced_to_the_render_world() {
+        let mut app = App::new();
+        plugin(&mut app);
+        let batch = app
+            .world_mut()
+            .spawn(M2SortLink {
+                key: KeyPoint {
+                    frame: None,
+                    origin: Vec3::ZERO,
+                },
+                instance: Entity::PLACEHOLDER,
+                depth_fill: true,
+                fill_copy: false,
+                order: None,
+                mesh_pivot: Vec3::ZERO,
+                key_point: Vec3::ZERO,
+                world: Affine3A::IDENTITY,
+            })
+            .id();
+        assert!(!app
+            .world()
+            .entity(batch)
+            .contains::<bevy::render::sync_world::SyncToRenderWorld>());
+    }
 
     fn link(depth_fill: bool, instance: u64, key: Vec3, order: BatchOrder) -> RenderSortLink {
         RenderSortLink {
