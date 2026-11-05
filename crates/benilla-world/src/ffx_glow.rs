@@ -759,8 +759,8 @@ fn dither_armed() -> f32 {
     }
 }
 
-/// The combine uniform's floats: the reference's 8, then the fork's grade and lift rows.
-const COMBINE_FLOATS: usize = 16;
+/// The combine uniform's floats: the reference's 8, then the fork's grade row.
+const COMBINE_FLOATS: usize = 12;
 /// [`COMBINE_FLOATS`] in bytes, the buffer's and the layout's size.
 const COMBINE_BYTES: u64 = (COMBINE_FLOATS * 4) as u64;
 
@@ -1017,9 +1017,9 @@ fn blur_read(uniform: &[f32]) -> bool {
 /// One view's combine uniform and whether its underwater entry is armed, for both combine nodes.
 ///
 /// fork: modern lighting — the uniform is [`COMBINE_FLOATS`] floats, not 8: `wave.z` flags a
-/// modern scene, `wave.w` carries the zone look's exposure, a third row its cinematic grade (zeros
-/// = off) and a fourth the auto-exposure's lift (`look::lift_room`). Both combine sites (the world
-/// node and the UI camera's backdrop) write it whole.
+/// modern scene, `wave.w` carries the exposure (the zone look's, with the auto-exposure's lift: one
+/// gain on the whole frame, as a camera's is) and a third row its cinematic grade (zeros = off).
+/// Both combine sites (the world node and the UI camera's backdrop) write it whole.
 fn live_combine(world: &World, glow: &FfxGlow) -> ([f32; COMBINE_FLOATS], bool) {
     let switches = *world.resource::<FfxSwitches>();
     let wave = *world.resource::<FfxWave>();
@@ -1039,11 +1039,8 @@ fn live_combine(world: &World, glow: &FfxGlow) -> ([f32; COMBINE_FLOATS], bool) 
     uniform[..8].copy_from_slice(&classic);
     if modern_view(glow) {
         uniform[6] = 1.0;
-        uniform[7] = crate::modern::look::base_exposure();
+        uniform[7] = crate::modern::look::exposure();
         uniform[8..12].copy_from_slice(&crate::modern::look::grade());
-        let (lift, room) = crate::modern::look::lift_room();
-        uniform[12] = lift;
-        uniform[13] = room;
     }
     (uniform, wave_armed(glow.state, wave, player))
 }

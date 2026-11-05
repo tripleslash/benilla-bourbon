@@ -198,7 +198,6 @@
 - `WOW_AUDIT_START` — benilla-world/src/wmo_portal/audit/mod.rs
 - `WOW_AUDIT_WMO` — benilla-world/src/wmo_portal/audit/mod.rs
 - `WOW_AUTO_EXPOSURE` — benilla-world/src/modern/look.rs
-- `WOW_AUTO_EXPOSURE_ROOM` — benilla-world/src/modern/look.rs
 - `WOW_AUTO_EXPOSURE_TARGET` — benilla-world/src/modern/look.rs
 - `WOW_BARE_DOODAD_COLLIDERS` — benilla-world/src/terrain_stream/collider.rs
 - `WOW_BG` — benilla-app/src/cvars/mod.rs, benilla-world/src/bgwin.rs
@@ -391,7 +390,6 @@
 - `WOW_MODERN_LIGHTS` — benilla-app/src/lib.rs, benilla-world/src/modern/lights/mod.rs
 - `WOW_MODERN_LOOK` — benilla-app/src/lib.rs, benilla-world/src/modern/look.rs
 - `WOW_MODERN_MIRRORTIER` — benilla-app/src/lib.rs, benilla-world/src/modern/mod.rs
-- `WOW_MODERN_MOON_HAZE` — benilla-world/src/modern/look.rs
 - `WOW_MODERN_PERVIEW` — benilla-world/src/modern/mod.rs
 - `WOW_MODERN_SHADOWDEBUG` — benilla-app/src/lib.rs, benilla-world/src/modern/mod.rs
 - `WOW_MODERN_STARS` — benilla-world/src/sun/follow.rs

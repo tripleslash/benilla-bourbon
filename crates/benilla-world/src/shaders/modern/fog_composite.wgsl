@@ -10,7 +10,6 @@
 #import bevy_render::view::View
 #import benilla_modern::sunshadow
 #import benilla_modern::froxelfog
-#import benilla_modern::colorspace
 
 @group(0) @binding(0) var<uniform> view: View;
 #ifdef FOG_MSAA
@@ -29,14 +28,12 @@ struct LightTable {
     points: array<vec4<f32>, 512>,
 }
 @group(0) @binding(5) var<storage, read> light_table: LightTable;
-// The terrain heightfield the ground veil lies on (`bank_over_terrain`).
-@group(0) @binding(6) var bank_ground: texture_depth_2d;
-// The key light's cascades, so the ground veil scatters the key only where the key reaches it.
+// The terrain heightfield the ground mist lies on (`mist_over_terrain`).
+@group(0) @binding(6) var mist_ground: texture_depth_2d;
+// The key light's cascades and the sky map, so the ground mist scatters the key and the sky only where
+// they reach it.
 @group(0) @binding(7) var shadow_map: texture_depth_2d_array;
 @group(0) @binding(8) var shadow_samp: sampler_comparison;
-
-// How far over the ground the veil's key is read (yd): clear of the ground's own shadow bias.
-const BANK_LIGHT_LIFT: f32 = 1.0;
 
 const SHAFT_TAPS: u32 = 16u;
 // Where, as a share of the view distance, the detailed world starts dissolving into the silhouette.
@@ -76,7 +73,7 @@ fn point_halos(f: froxelfog::FroxelFog, eye: vec3<f32>, ray: vec3<f32>, seg: f32
         if (share <= 0.0) {
             continue;
         }
-        let halo_yd = froxelfog::point_halo_yd(room, froxelfog::lamp_sigma(clear_air, pos_range.xyz, room, 0.0));
+        let halo_yd = froxelfog::point_halo_yd(room, froxelfog::lamp_sigma(clear_air, pos_range.xyz, room));
         let reach = min(HALO_REACH * halo_yd, pos_range.w);
         if (miss2 >= reach * reach) {
             continue;
@@ -106,7 +103,7 @@ fn point_halos(f: froxelfog::FroxelFog, eye: vec3<f32>, ray: vec3<f32>, seg: f32
         }
         let integral = acc * ((th1 - th0) / (f32(HALO_TAPS) * h));
         let pc = eye + ray * clamp(tp, t0, t1);
-        let ext = froxelfog::extinction(clear_air, pc, froxelfog::LAMP_EYE_DEPTH, room, 1.0, 0.0);
+        let ext = froxelfog::extinction(clear_air, pc, room, 1.0);
         let through = froxelfog::fog_at(fog_volume, fog_samp, f, pc).a;
         let excess = froxelfog::point_halo_gain(room) - froxelfog::point_far_share(room);
         let scattered = (ext.x + ext.y + ext.z) * froxelfog::LAMP_EYE_GAIN * integral.x
@@ -157,64 +154,68 @@ fn open_sky(uv: vec2<f32>) -> f32 {
 }
 
 // The terrain under `p`, filtered across the heightfield's texels so the veil shows no steps; the ground
-// under the camera off the map and over an undrawn texel.
+// under the camera when there is no heightfield at all, its edge row past its edge, and no ground
+// (`MIST_NO_GROUND`) over an undrawn texel. With the camera's ground standing in past the edge,
+// everything out there lower than it, the sea and the foot of every rock in it, lay inside a wall of
+// veil with a flat top; ending the veil at the edge walked a ring of it along with the camera.
 fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     if (f.ground.x <= 0.5) {
         return f.night.y;
     }
     let q = vec4<f32>(p, 1.0);
-    let uv = vec2<f32>(dot(f.ground_x, q), dot(f.ground_y, q));
-    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
-        return f.night.y;
-    }
+    let uv = clamp(vec2<f32>(dot(f.ground_x, q), dot(f.ground_y, q)), vec2<f32>(0.0), vec2<f32>(1.0));
     let n = f.ground.w;
     let at = uv * n - vec2<f32>(0.5);
     let base = floor(at);
     let t = at - base;
     let top = vec2<i32>(i32(n) - 1);
     let i = vec2<i32>(base);
-    let d00 = textureLoad(bank_ground, clamp(i, vec2<i32>(0), top), 0);
-    let d10 = textureLoad(bank_ground, clamp(i + vec2<i32>(1, 0), vec2<i32>(0), top), 0);
-    let d01 = textureLoad(bank_ground, clamp(i + vec2<i32>(0, 1), vec2<i32>(0), top), 0);
-    let d11 = textureLoad(bank_ground, clamp(i + vec2<i32>(1, 1), vec2<i32>(0), top), 0);
+    let d00 = textureLoad(mist_ground, clamp(i, vec2<i32>(0), top), 0);
+    let d10 = textureLoad(mist_ground, clamp(i + vec2<i32>(1, 0), vec2<i32>(0), top), 0);
+    let d01 = textureLoad(mist_ground, clamp(i + vec2<i32>(0, 1), vec2<i32>(0), top), 0);
+    let d11 = textureLoad(mist_ground, clamp(i + vec2<i32>(1, 1), vec2<i32>(0), top), 0);
+    // An undrawn texel is open water with no tile under it: no ground the veil can lie on.
     if (min(min(d00, d10), min(d01, d11)) <= 0.0) {
-        return f.night.y;
+        return froxelfog::MIST_NO_GROUND;
     }
     let d = mix(mix(d00, d10, t.x), mix(d01, d11, t.x), t.y);
     return f.ground.y + d * f.ground.z;
 }
 
-// The veil from the eye to `p` (`froxelfog`'s ground veil), each stretch's height read off the terrain under
-// its ends, the eye's too, so the veil follows every dip and crest the ray passes over and nothing in it
+// The mist from the eye to `p` (`froxelfog`'s ground mist), each stretch's height read off the terrain under
+// its ends, the eye's too, so the mist follows every dip and crest the ray passes over and nothing in it
 // follows the camera. Every stretch counts: a ray stands high over a hollow and comes back down to the
-// ground past it. Each stretch scatters the key as far as the key reaches the ground at its end, behind the
-// veil before it.
-fn bank_over_terrain(f: froxelfog::FroxelFog, eye: vec3<f32>, p: vec3<f32>) -> vec4<f32> {
+// ground past it. Each stretch scatters the key as far as the key reaches the ground at its end and the
+// ambient as far as the sky does, behind the mist before it.
+fn mist_over_terrain(f: froxelfog::FroxelFog, eye: vec3<f32>, p: vec3<f32>) -> vec4<f32> {
     let ray = p - eye;
     let len = max(length(ray), 1e-3);
     let dir = ray / len;
     let mu = dot(dir, f.sun_dir.xyz);
-    let reach = min(len, max(f.phase.y, 1.0));
-    var h0 = max(eye.y - froxelfog::bank_floor(f, terrain_under(f, eye)), 0.0);
+    let far = froxelfog::mist_reach(f);
+    let reach = min(len, far);
+    var h0 = max(eye.y - froxelfog::mist_floor(f, terrain_under(f, eye)), 0.0);
     var t0 = 0.0;
     var light = vec3<f32>(0.0);
     var tr = 1.0;
-    let shaded = f.bank_reach.x > 0.0;
-    for (var i = 1u; i <= froxelfog::BANK_STRETCHES; i = i + 1u) {
-        let t1 = reach * froxelfog::bank_stretch_end(i);
+    for (var i = 1u; i <= froxelfog::MIST_STRETCHES; i = i + 1u) {
+        let t1 = select(min(froxelfog::mist_stretch_end(i), reach), reach, i == froxelfog::MIST_STRETCHES);
         let at = eye + dir * t1;
-        let floor = froxelfog::bank_floor(f, terrain_under(f, at));
+        let floor = froxelfog::mist_floor(f, terrain_under(f, at));
         let h1 = max(at.y - floor, 0.0);
-        let tau = froxelfog::veil_tau(f, eye, dir, t0, t1, h0, h1);
+        let mid = eye + dir * (0.5 * (t0 + t1));
+        let tau = froxelfog::mist_tau(f, mid, t1 - t0, h0, h1) * froxelfog::mist_taper(0.5 * (t0 + t1), far);
         if (tau > 1e-6) {
-            var vis = 0.5;
-            if (shaded) {
-                let q = vec3<f32>(at.x, floor + BANK_LIGHT_LIFT, at.z);
-                vis = sunshadow::sun_visibility_fast(
-                    shadow_map, shadow_samp, modern_block.cascades, q, froxelfog::view_depth(f, q));
-            }
+            // The stretch's light is read at its end, over the ground the ray comes down to: the
+            // veil lies there, and the last stretch's end is the pixel's own ground, fixed in the
+            // world. Read anywhere between, at a distance from the camera, it slid over the ground as
+            // the camera moved.
+            let c = modern_block.cascades;
+            let q = vec3<f32>(at.x, floor + froxelfog::MIST_LIGHT_LIFT, at.z);
+            let vis = sunshadow::sun_visibility_fast(shadow_map, shadow_samp, c, q, froxelfog::view_depth(f, q));
+            let sky = sunshadow::sky_visibility_fast(shadow_map, shadow_samp, c, q);
             let e = exp(-tau);
-            light = light + froxelfog::veil_light(f, mu, vis) * (tr * (1.0 - e));
+            light = light + froxelfog::mist_light(f, mu, vis, sky) * (tr * (1.0 - e));
             tr = tr * e;
         }
         h0 = h1;
@@ -236,21 +237,20 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Not in the water mirror: the light's screen position is the main view's, so the taps would march
     // toward the wrong point of the mirror's frame, sixteen of them per reflected pixel.
     let mirror = sunshadow::mirror_view(modern_block.cascades, view.world_position);
-    if (!mirror && f.bank.x > 0.0) {
-        fog = froxelfog::with_bank(fog, bank_over_terrain(f, view.world_position, p));
+    if (!mirror && f.mist.x > 0.0) {
+        fog = froxelfog::with_mist(fog, mist_over_terrain(f, view.world_position, p));
     }
 
     // The seam: over the last stretch before the view distance the detailed world dissolves into the
-    // distant band's own silhouette colour, so where the detailed terrain ends and the WDL band begins
-    // there is no line. (The band itself is drawn behind the wall — its depth sits past `farclip`.)
+    // distant band's own silhouette (`wdl.wgsl`: the distant terrain's albedo under the ambient, flat),
+    // so where the detailed terrain ends and the WDL band begins there is no line. (The band itself is drawn behind the wall — its depth sits past `farclip`.)
     let farclip = f.phase.y;
     if (!sky && farclip > 0.0 && !mirror) {
         let d = froxelfog::view_depth(f, p);
         if (d <= farclip) {
             let k = smoothstep(SEAM_FROM * farclip, farclip, d);
             if (k > 0.0) {
-                let fog_lin = f.ambient.rgb + f.sun.rgb * 0.5;
-                let silhouette = fog_lin * pow(max(f.sun_dir.w, 0.0), 2.2);
+                let silhouette = f.light_ambient.rgb * f.light_ambient.w;
                 // Composite as `rgb + dst * a`: the pixel keeps (1 − k) of itself and gains k of the
                 // silhouette, both seen through this pixel's own fog.
                 fog = vec4<f32>(fog.rgb + silhouette * (k * fog.a), fog.a * (1.0 - k));
@@ -275,12 +275,5 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         fog = vec4<f32>(max(fog.rgb + key * (shaft * f.proj.w * f.screen.z), vec3<f32>(0.0)), fog.a);
     }
 
-    // fork: the fog over the sky keeps the zone look's exposure, as the dome under it does
-    // (`look::unlifted`): the auto-exposure lifts the world alone.
-    if (sky) {
-        fog = vec4<f32>(colorspace::unlifted(fog.rgb, f.sky.x, f.sky.y), fog.a);
-    } else {
-        fog = colorspace::air_exposure(fog, f.sky.x, f.sky.y);
-    }
     return fog;
 }

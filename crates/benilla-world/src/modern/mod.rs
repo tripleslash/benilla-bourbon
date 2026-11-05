@@ -39,6 +39,11 @@ pub fn night_floor(ambient: [f32; 3], night: f32) -> [f32; 3] {
     [0, 1, 2].map(|c| ambient[c].max(NIGHT_AMBIENT[c] * n))
 }
 
+/// The albedo (linear) the distant terrain is lit with: the WDL band past the view distance
+/// (`wdl.wgsl`) and the seam the detailed world dissolves into before it (`fog_composite.wgsl`).
+/// The band has no texture, so it takes one ground's: a dark soil or grass, about sRGB 90.
+pub const DISTANT_ALBEDO: f32 = 0.1;
+
 /// P1b's fixed exposure (the FFXGlow combine's `wave.w`); auto-exposure lands in P7.
 pub const MODERN_EXPOSURE: f32 = 1.0;
 
@@ -308,6 +313,16 @@ pub fn srgb_to_linear(c: f32) -> f32 {
         x / 12.92
     } else {
         ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The exact sRGB encode, the inverse of [`srgb_to_linear`].
+pub fn linear_to_srgb(c: f32) -> f32 {
+    let x = c.max(0.0);
+    if x <= 0.003_130_8 {
+        x * 12.92
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
     }
 }
 

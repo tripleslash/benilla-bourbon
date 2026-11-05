@@ -629,10 +629,10 @@ fn build_light_data(
     fresh.rows = [[0.0; 4]; LIGHT_HEADER_ROWS];
     fresh.env = env.map(|e| e.pack()).unwrap_or_default();
     // fork: modern lighting (FORK.md) — the zone look's fog tint (1 in classic).
-    let (fog_tint, silhouette) = if active.as_ref().is_some_and(|a| a.is_modern()) {
+    let (fog_tint, distant_albedo) = if active.as_ref().is_some_and(|a| a.is_modern()) {
         (
             crate::modern::look::fog_tint(),
-            crate::modern::look::silhouette(),
+            crate::modern::DISTANT_ALBEDO,
         )
     } else {
         ([1.0; 3], 0.0)
@@ -645,7 +645,7 @@ fn build_light_data(
         l.fog_color[2] * fog_tint[2],
         fog_enable,
     ]; // 4 fog_color (w=enable)
-    rows[5] = [l.fog_start, l.fog_end, silhouette, farclip]; // 5 fog_params (z = modern WDL silhouette; w=farclip)
+    rows[5] = [l.fog_start, l.fog_end, distant_albedo, farclip]; // 5 fog_params (z = modern distant albedo; w=farclip)
     rows[13] = [rs[0], rs[1], rs[2], rsa]; // 13 water river shallow (w=alpha)
     rows[14] = [rd[0], rd[1], rd[2], rda]; // 14 water river deep
     rows[15] = [os[0], os[1], os[2], osa]; // 15 water ocean shallow
@@ -676,8 +676,29 @@ fn build_light_data(
     } else {
         l.ambient
     };
-    let diffuse_row = [0, 1, 2].map(|i| l.diffuse[i] * key * key_tint[i]);
-    pack_model_core_rows(rows, ambient_row.map(|c| c * fill), diffuse_row, l.sun_dir);
+    // fork: modern lighting — the key as the air lets it through, and the sky as the surfaces see it
+    // through the haze: the authored sky's share, the haze's own glow the rest (`look::sun_through`,
+    // `look::air_sky`).
+    let (through, (sky_through, glow)) = if active.as_ref().is_some_and(|a| a.is_modern()) {
+        (
+            crate::modern::look::sun_through(),
+            crate::modern::look::air_sky(),
+        )
+    } else {
+        (1.0, (1.0, [0.0; 3]))
+    };
+    let diffuse_row = [0, 1, 2].map(|i| l.diffuse[i] * key * key_tint[i] * through);
+    let ambient_row: [f32; 3] = std::array::from_fn(|i| {
+        let a = ambient_row[i] * fill;
+        if sky_through < 1.0 {
+            crate::modern::linear_to_srgb(
+                crate::modern::srgb_to_linear(a) * sky_through + glow[i] * (1.0 - sky_through),
+            )
+        } else {
+            a
+        }
+    });
+    pack_model_core_rows(rows, ambient_row, diffuse_row, l.sun_dir);
     // The point table: lights within [`POINT_PACK_RADIUS`], nearest first past capacity. Dividing
     // by 4π undoes the spawn's premultiply, so the colour is the authored `colour × intensity`,
     // committed raw. Entries past the count stay stale; the count row guards every reader.

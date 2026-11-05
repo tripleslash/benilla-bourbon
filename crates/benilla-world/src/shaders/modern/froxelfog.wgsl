@@ -26,16 +26,20 @@ struct FroxelFog {
     // xyz = the integrated volume texture's allocated size; w = mode (0 off, 1 analytic, 2 froxels).
     alloc: vec4<f32>,
     // x = fog extinction at the reference height (1/yd); y = 1 / height falloff (yd); z = reference
-    // height (the regional ground); w = fog start (planar yd).
+    // height (the regional ground); w = the ground banks' clear patches' feature size (yd,
+    // `ZoneLook::bank_patch_yd`).
     media: vec4<f32>,
-    // x = shaft haze extinction (1/yd, never near-cleared); y = noise amount; z = shaft key radiance (r);
+    // x = shaft haze extinction (1/yd); y = noise amount; z = the share of the veil's density a clear
+    // patch keeps (`ZoneLook::bank_clear_floor`);
     // w = scatter history weight: 0 on a hard cut, negative on a quick turn (near froxels drop theirs).
     medium: vec4<f32>,
-    // rgb = ambient in-scatter radiance (albedo x ambient); w = shaft key radiance (g).
+    // rgb = the air's ambient in-scatter from the sky above it: albedo x the dome's light (linear),
+    // which a canopy hides (the sky map); `ambient_open` the rest. w free.
     ambient: vec4<f32>,
-    // rgb = key-light in-scatter radiance (albedo x key); w = the forward lobe's share.
+    // rgb = the air's key in-scatter before phase and shadow: albedo x the surfaces' key (linear);
+    // w = the forward lobe's share.
     sun: vec4<f32>,
-    // xyz = unit direction TOWARD the key light; w = the distant silhouette's shade (the WDL band's).
+    // xyz = unit direction TOWARD the key light; w free.
     sun_dir: vec4<f32>,
     // x = the backward lobe's g; y = the view distance (farclip, yd); z = this frame's slice jitter [0, 1); w = frame index.
     phase: vec4<f32>,
@@ -45,7 +49,7 @@ struct FroxelFog {
     proj: vec4<f32>,
     // xy = the key light's uv in the main view; z = its on-screen weight; w = froxel point-light count.
     screen: vec4<f32>,
-    // xyz = noise scroll (yd); w = shaft key radiance (b).
+    // xyz = noise scroll (yd); w free.
     wind: vec4<f32>,
     // fork: modern lighting — THE ROOM THE CAMERA STANDS IN. xyz = the centre of its MOGI box in
     // world space, w = its radius (yd); w = 0 means the camera is in no room and the whole lane is
@@ -55,88 +59,66 @@ struct FroxelFog {
     // hall — a 30 yd tunnel carrying a 292 yd record — wrapped the city in the building's teal.
     room: vec4<f32>,
     // x = the room medium's extinction (1/yd, uniform); y = its weight (the classic 4 s interior
-    // crossfade); z = the night air's extinction (1/yd); w = the night air's glow (r).
+    // crossfade); z = the night air's extinction (1/yd); w free.
     room_media: vec4<f32>,
-    // rgb = the room's ambient in-scatter radiance; w = the night air's glow (g).
+    // rgb = the room air's ambient in-scatter (its albedo x the ambient); w free.
     room_ambient: vec4<f32>,
-    // rgb = the room's key-light in-scatter radiance; w = the night air's glow (b).
+    // rgb = the room air's key in-scatter (its albedo x the key); w free.
     room_sun: vec4<f32>,
-    // fork: the night's ground banks. x = extinction at the ground (1/yd, 0 by day); y = the ground
-    // under the camera (world y); z = the key's share on their isotropic half (`halo_air.w`, up to 1
-    // where the zone look's banks are ground fog: `volumetrics::bank_air_share`); w = the sea fog's
-    // extinction at sea level (1/yd, the zone look's `sea_fog`; `froxel_scatter::sea_fog`).
+    // fork: the ground banks. x = the volume's banks' extinction at the ground (1/yd); y = the ground
+    // under the camera (world y); z = the top of the clear patches' noise band the volume's banks
+    // build in (`froxel_scatter.wgsl`'s `bank_patches`); w = the sea fog's extinction at sea level
+    // (1/yd, the zone look's `sea_fog`; `froxel_scatter::sea_fog`).
     night: vec4<f32>,
-    // fork: the terrain heightfield the banks lie on (`probegi::GiClip`'s `hf_row_x`, `hf_row_y` and
+    // fork: the terrain heightfield the ground mist lies on (`probegi::GiClip`'s `hf_row_x`, `hf_row_y` and
     // `hf`: x = enabled, y = lowest height, z = span, w = texels), written in the render world.
     ground_x: vec4<f32>,
     ground_y: vec4<f32>,
     ground: vec4<f32>,
     // fork: the lamp halos' air — the zone's medium solved in clear weather (`volumetrics::halo_air`):
-    // x = fog extinction (1/yd), y = near-clear range (planar yd), z = haze extinction; w = the key's
-    // share on the shaft haze's and banks' isotropic half (`look::key_air_share`).
+    // x = fog extinction (1/yd), z = haze extinction; y, w free.
     halo_air: vec4<f32>,
-    // fork: x, y = the auto-exposure's lift and room (`look::lift_room`): the composite draws the fog
-    // over sky pixels at the lift's inverse, so the sky keeps the zone look's exposure. z = the top of
-    // the clear patches' noise band the volume's banks build in (`froxel_scatter.wgsl`'s
-    // `bank_patches`); w = the clear patches' feature size (yd).
-    sky: vec4<f32>,
-    // fork: the ground veil (`bank_air`): x = its extinction at the ground (1/yd, 0 where the look's
-    // banks stay in the volume); y = 1 / its height (yd); z, w = its clear patches, the noise they
-    // fall under (0 = none) and the noise over which they fade into the veil.
-    bank: vec4<f32>,
-    // fork: the veil's light, this hour's light flat (linear radiance); w = the key's share of it.
-    bank_color: vec4<f32>,
-    // fork: x = how far the veil's key follows the key's shadow (`veil_light`); z = the share of its
-    // density a clear patch keeps; y, w unused.
-    bank_reach: vec4<f32>,
+    // fork: the light the surfaces take, unscattered (linear): rgb = the ambient; w = the distant
+    // terrain's albedo (`modern::DISTANT_ALBEDO`), which the seam dissolves the detailed world into.
+    light_ambient: vec4<f32>,
+    // fork: the ground veil (`mist_air`): x = its extinction at the ground (1/yd, 0 where the look's
+    // banks stay in the volume); y = 1 / its scale height (yd); z, w = its clear patches, the noise
+    // they fall under (0 = none) and the noise over which they fade into the veil.
+    mist: vec4<f32>,
+    // fork: rgb = the air's ambient in-scatter that no canopy hides: albedo x the light arriving
+    // sideways and from below (the ground's, and the diffuse light the air scattered out of the key).
+    ambient_open: vec4<f32>,
+    // fork: rgb = `ambient_open` for the room's air.
+    room_open: vec4<f32>,
 }
 
 // fork: **the air a lamp's halo stands in** — `f` with the open air's medium swapped for its
-// clear-weather solve. Rain and storms thicken the medium (no near-clear range, more haze, a
-// shorter fog end), and a halo scattered by that medium swelled with the weather; scattered by
+// clear-weather solve. Rain and storms thicken the medium (more haze, a shorter fog end), and a halo scattered by that medium swelled with the weather; scattered by
 // this one it stays the lamp's own, and the storm only dims it through the fog in front of it.
 fn halo_fog(f: FroxelFog) -> FroxelFog {
     var g = f;
     g.media.x = f.halo_air.x;
-    g.media.w = f.halo_air.y;
     g.medium.x = f.halo_air.z;
     return g;
 }
 
-// fork: **a lamp's halo is the same from any distance.** The lamps scatter off the air as it is
-// `LAMP_EYE_DEPTH` yards from the eye (inside the near-clear range, at the night air's near share),
-// not at their own depth: there the fog thickens past the near-clear range and the night air
-// triples by 80 yd, so a camp's torch stood in a wide bright bloom from afar and shrank to its
-// glow a step closer. 1, not 0: with no near-clear range `fog_clear`'s smoothstep has equal edges.
-// That air scatters `LAMP_EYE_GAIN` times harder, a little of the glow the near look gave up, far
-// short of the distant bloom (up to ~2.9 times the air).
-const LAMP_EYE_DEPTH: f32 = 1.0;
+// fork: the lamps scatter `LAMP_EYE_GAIN` times harder than the air alone would.
 const LAMP_EYE_GAIN: f32 = 1.25;
 
-// Under full cover the shaft haze is this much denser (`canopy_cover` in `froxel_scatter.wgsl`).
-const CANOPY_HAZE: f32 = 1.5;
 // fork: **a room's air stays clear.** Inside a building (the room weight) the open air's shaft haze
 // keeps `ROOM_HAZE_SHARE`: an inn's candles over the zone's haze put a grey veil on the common room.
 const ROOM_HAZE_SHARE: f32 = 0.15;
-// fork: the night air keeps `NIGHT_NEAR_SHARE` of itself at the camera, ramping to all of it between
-// `NIGHT_CLEAR_NEAR` and `NIGHT_CLEAR_FAR` yards of planar depth: the street stays readable, the
-// distance layers into the haze, and the lamps beside the player still have air to light.
-const NIGHT_NEAR_SHARE: f32 = 0.35;
-const NIGHT_CLEAR_NEAR: f32 = 10.0;
-const NIGHT_CLEAR_FAR: f32 = 80.0;
 
-// The medium's extinction at world point `p`, `d` yards of planar depth from the main camera, per
-// yard of ray: x = the fog, y = the shaft haze, z = the night air. `room` is `room_weight` at `p`,
-// `wisps` the drifting noise's scale on the fog (1 = its mean), `cover` the canopy cover (0 = open).
-fn extinction(f: FroxelFog, p: vec3<f32>, d: f32, room: f32, wisps: f32, cover: f32) -> vec3<f32> {
+// The medium's extinction at world point `p`, per yard of ray: x = the fog, y = the shaft haze, z = the
+// night air. `room` is `room_weight` at `p`, `wisps` the drifting noise's scale on the fog (1 = its mean).
+// The air is the same however far the camera stands from it.
+fn extinction(f: FroxelFog, p: vec3<f32>, room: f32, wisps: f32) -> vec3<f32> {
     let density = height_density(f, p.y);
     // fork: modern lighting — a room's medium reaches as far as the room does: inside its walls the
-    // building's MFOG (uniform, no near-clear range), past them the zone's own air.
-    let open_fog = f.media.x * fog_clear(f, d) * density;
-    let fog = mix(open_fog, f.room_media.x, room) * wisps;
-    let haze = f.medium.x * density * (1.0 + CANOPY_HAZE * cover) * mix(1.0, ROOM_HAZE_SHARE, room);
-    let night = f.room_media.z * density
-        * mix(NIGHT_NEAR_SHARE, 1.0, smoothstep(NIGHT_CLEAR_NEAR, NIGHT_CLEAR_FAR, d));
+    // building's MFOG (uniform), past them the zone's own air.
+    let fog = mix(f.media.x * density, f.room_media.x, room) * wisps;
+    let haze = f.medium.x * density * mix(1.0, ROOM_HAZE_SHARE, room);
+    let night = f.room_media.z * density;
     return vec3<f32>(fog, haze, night);
 }
 
@@ -255,8 +237,8 @@ const HAZY_HALO_FULL: f32 = 0.024;
 const HAZY_HALO_SHARE: f32 = 0.375;
 
 // The extinction the lamps scatter off at `p` (1/yd), from the clear-weather air `halo_fog(f)`.
-fn lamp_sigma(clear_air: FroxelFog, p: vec3<f32>, room: f32, cover: f32) -> f32 {
-    let ext = extinction(clear_air, p, LAMP_EYE_DEPTH, room, 1.0, cover);
+fn lamp_sigma(clear_air: FroxelFog, p: vec3<f32>, room: f32) -> f32 {
+    let ext = extinction(clear_air, p, room, 1.0);
     return (ext.x + ext.y + ext.z) * LAMP_EYE_GAIN;
 }
 
@@ -308,11 +290,6 @@ fn room_reach(f: FroxelFog, dir: vec3<f32>) -> f32 {
     return max(sqrt(disc) - b, 0.0);
 }
 
-// fork: the night air's own glow, scattered on top of the haze's (`volumetrics::NIGHT_GLOW`).
-fn night_glow(f: FroxelFog) -> vec3<f32> {
-    return vec3<f32>(f.room_media.w, f.room_ambient.w, f.room_sun.w);
-}
-
 const MODE_ANALYTIC: f32 = 1.0;
 const MODE_FROXEL: f32 = 2.0;
 
@@ -347,13 +324,6 @@ fn height_average(f: FroxelFog, y_from: f32, y_to: f32) -> f32 {
     return clamp((exp(a) - exp(b)) / (dy * k), 0.0, 3.0);
 }
 
-// The fog is a long-range height fog (`volumetrics::media`): `media.x` per yard of ray at the reference
-// height, clear before the fog start. The start eases in over a fifth of itself so the froxels do not
-// band on it.
-fn fog_clear(f: FroxelFog, d: f32) -> f32 {
-    return smoothstep(0.8 * f.media.w, f.media.w, d);
-}
-
 // The forward lobe's g (mirrors `media::FORWARD_G`).
 const FORWARD_G: f32 = 0.75;
 
@@ -371,10 +341,35 @@ fn dual_phase(f: FroxelFog, mu: f32) -> f32 {
 }
 
 // Analytic height fog along the main camera's ray to `p`, from fraction `t_start` of the way there to `p`
-// itself: rgb = in-scattered radiance, a = transmittance. The fog starts at the near-clear distance;
-// the shaft haze does not.
+// itself: rgb = in-scattered radiance, a = transmittance. Past the froxel grid nothing knows where the key
+// is shadowed, so the key lights the whole stretch, as it does the froxels it reaches.
 fn analytic_path(f: FroxelFog, p: vec3<f32>, t_start: f32) -> vec4<f32> {
-    return analytic_path_keyed(f, p, t_start, 1.0);
+    let ray = p - f.camera.xyz;
+    let len = length(ray);
+    let t = max(t_start, 0.0);
+    if (len < 1e-3 || t >= 1.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let dir = ray / len;
+    let phase = dual_phase(f, dot(dir, f.sun_dir.xyz));
+    // The room's share of THIS ray: the air the camera is breathing, as far as the room's walls.
+    // Beyond them the open air takes over, which is why the two are integrated one after the other
+    // instead of mixed — the fog over a city seen from a doorway is the city's, not the doorway's.
+    let room_len = clamp(room_reach(f, dir), 0.0, len) * (1.0 - t);
+    let room_w = f.room_media.y * select(0.0, 1.0, f.room.w > 0.0);
+    let room_tau = f.room_media.x * room_len * room_w;
+    let room_tr = exp(-room_tau);
+    let room_lum = f.room_ambient.rgb + f.room_open.rgb + f.room_sun.rgb * phase;
+    // The open air keeps the ray the room did not take.
+    let open_share = max(1.0 - (room_len / len) * room_w, 0.0);
+    let path = len * (1.0 - t) * height_average(f, f.camera.y + ray.y * t, p.y);
+    let fog_tau = f.media.x * path * open_share;
+    let haze_tau = (f.medium.x + f.room_media.z) * path;
+    let far_tau = distance_fog(f, len, ray.y / len) - distance_fog(f, len * t, ray.y / len);
+    let tr = exp(-(fog_tau + haze_tau + far_tau));
+    let lum = f.ambient.rgb + f.ambient_open.rgb + f.sun.rgb * phase;
+    // Front to back: the room, then everything past it.
+    return vec4<f32>(room_lum * (1.0 - room_tr) + room_tr * lum * (1.0 - tr), room_tr * tr);
 }
 
 // Distance fog on top of the height fog: the long range fades out completely before the distant
@@ -399,47 +394,6 @@ fn low_reach(f: FroxelFog, len: f32, dy: f32) -> f32 {
         return min(len, climb / dy);
     }
     return len;
-}
-
-// Past the froxel grid nothing knows where the key light is shadowed, so the tail keeps only this
-// share of its key in-scatter: a long view ray past a ridge or a canopy otherwise lit up the whole
-// distance behind it as if the sun reached every yard of it.
-const TAIL_KEY_SHARE: f32 = 0.35;
-
-fn analytic_path_keyed(f: FroxelFog, p: vec3<f32>, t_start: f32, key_share: f32) -> vec4<f32> {
-    let ray = p - f.camera.xyz;
-    let len = length(ray);
-    let t = max(t_start, 0.0);
-    if (len < 1e-3 || t >= 1.0) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    }
-    // Planar depth grows linearly along the ray, so the fog start is a fixed fraction of it.
-    let d = max(view_depth(f, p), 1e-3);
-    let t_fog = max(t, clamp(0.9 * f.media.w / d, 0.0, 1.0));
-    let dir = ray / len;
-    let phase = dual_phase(f, dot(dir, f.sun_dir.xyz));
-    // The room's share of THIS ray: the air the camera is breathing, as far as the room's walls.
-    // Beyond them the open air takes over, which is why the two are integrated one after the other
-    // instead of mixed — the fog over a city seen from a doorway is the city's, not the doorway's.
-    let room_len = clamp(room_reach(f, dir), 0.0, len) * (1.0 - t);
-    let room_w = f.room_media.y * select(0.0, 1.0, f.room.w > 0.0);
-    let room_tau = f.room_media.x * room_len * room_w;
-    let room_tr = exp(-room_tau);
-    let room_lum = f.room_ambient.rgb + f.room_sun.rgb * (phase * key_share);
-    // The open air keeps the ray the room did not take.
-    let open_share = max(1.0 - (room_len / len) * room_w, 0.0);
-    let fog_tau = f.media.x * len * (1.0 - t_fog) * height_average(f, f.camera.y + ray.y * t_fog, p.y) * open_share;
-    // fork: plus the night air (`room_media.z`), which glows on top (`night_glow`).
-    let haze_path = len * (1.0 - t) * height_average(f, f.camera.y + ray.y * t, p.y);
-    let night_tau = f.room_media.z * haze_path;
-    let haze_tau = f.medium.x * haze_path + night_tau;
-    let far_tau = distance_fog(f, len, ray.y / len) - distance_fog(f, len * t, ray.y / len);
-    let total_tau = fog_tau + haze_tau + far_tau;
-    let tr = exp(-total_tau);
-    let lum = f.ambient.rgb + f.sun.rgb * (phase * key_share)
-        + night_glow(f) * (night_tau / max(total_tau, 1e-6));
-    // Front to back: the room, then everything past it.
-    return vec4<f32>(room_lum * (1.0 - room_tr) + room_tr * lum * (1.0 - tr), room_tr * tr);
 }
 
 // Where a world point falls in the froxel grid: xy = screen uv, z = slice coordinate, w = 1 when inside
@@ -468,195 +422,170 @@ fn integrated(vol: texture_3d<f32>, samp: sampler, f: FroxelFog, uv: vec2<f32>, 
 }
 
 // fork: **the ground veil.** A thin layer of air lying on the ground, fixed in the world, whose density
-// depends on altitude alone: `bank.x` (1/yd) up to its top `1 / bank.y` yards over the ground, falling off
-// over `VEIL_SOFT` of that height above it, a logistic in the height `h`:
-// `sigma(h) = bank.x / (1 + exp((h - top) / soft))`. Along a stretch of a ray whose height runs linearly,
-// the optical depth is closed (the logistic's integral is `h - soft * softplus((h - top) / soft)`), so the
-// veil has no grid, jitter or history, and a pixel holds the same value however the camera turned to it.
-// Distance enters only through the ray: a level ray far over the ground crosses yards of it, one looking
-// down at the feet a few inches. Its clear patches (`bank_clear`) thin the density, never the light. The
-// light is single scattering: each stretch scatters the hour's light (`bank_color`) toward the eye, its key
-// through a forward-leaning phase and the key's visibility there, behind the transmittance before it. A
-// zone with a sea fog lays the veil on the water. rgb = in-scatter, a = transmittance.
+// falls off exponentially with height over the terrain under it: `mist.x` (1/yd) at the ground, `e`
+// thinner every `1 / mist.y` yards up, thinned in its clear patches (`mist_clear`). It is thinner than a
+// standing eye is high, so the ground near the feet, seen steeply through a few inches of it, keeps its
+// own colour, and the ground far off, seen at a grazing angle through yards of it, stands under a veil
+// that the grass rises out of. Along a stretch of a ray whose height over the ground runs linearly from
+// `h0` to `h1`, its optical depth is exact: `σ · dt · H (e^(−h0/H) − e^(−h1/H)) / (h1 − h0)`. It has no
+// grid, jitter or history, and a pixel holds the same value however the camera turned to it. It is the
+// same medium as the air: it scatters the albedo of the light that reaches it, the sky's as far as the
+// sky map lets it, the light from the sides and below whole, and the key through the air's phase and the
+// key's shadow. A zone with a sea fog lays it on the water. rgb = in-scatter, a = transmittance.
 
-// The soft top's width, as a share of the veil's height: 0.15 yd over a 0.5 yd veil.
-const VEIL_SOFT: f32 = 0.3;
-// Past this many widths over the top the veil holds nothing (`exp(-30)`).
-const VEIL_ABOVE: f32 = 30.0;
-// The phase: half isotropic, half a Henyey-Greenstein lobe toward the key, so a low sun glows the veil
-// before it warmly and the ground away from it keeps the hour's flat light.
-const VEIL_G: f32 = 0.55;
-const VEIL_FORWARD: f32 = 0.5;
-
-// The veil's top over the ground (yd).
-fn veil_top(f: FroxelFog) -> f32 {
-    return 1.0 / max(f.bank.y, 1e-3);
-}
-
-fn veil_soft(f: FroxelFog) -> f32 {
-    return VEIL_SOFT * veil_top(f);
-}
-
-fn softplus(x: f32) -> f32 {
-    return max(x, 0.0) + log(1.0 + exp(-abs(x)));
-}
-
-// The density's share at height `h` (1 at the ground, 0.5 at the top).
-fn veil_density(f: FroxelFog, h: f32) -> f32 {
-    return 1.0 / (1.0 + exp(clamp((h - veil_top(f)) / veil_soft(f), -VEIL_ABOVE, VEIL_ABOVE)));
-}
-
-// The column of air under height `h`, in yards of the ground's density (the logistic's integral); held past
-// `VEIL_ABOVE` widths over the top, where nothing is left to add.
-fn veil_column(f: FroxelFog, h: f32) -> f32 {
-    let top = veil_top(f);
-    let soft = veil_soft(f);
-    let y = min(h, top + VEIL_ABOVE * soft);
-    return y - soft * softplus((y - top) / soft);
-}
-
-// The yards of ground-density air along a stretch `dt` long whose height runs from `h0` to `h1`.
-fn veil_air(f: FroxelFog, dt: f32, h0: f32, h1: f32) -> f32 {
-    let dh = h1 - h0;
-    if (abs(dh) < 1e-3) {
-        return dt * veil_density(f, 0.5 * (h0 + h1));
-    }
-    return max(dt * (veil_column(f, h1) - veil_column(f, h0)) / dh, 0.0);
-}
-
-// Where along a stretch (`t0` to `t1`, heights `h0` to `h1`) its air lies: the middle of the part under
-// the top's soft edge, or the low end where the whole stretch stands over it.
-fn veil_mid(f: FroxelFog, t0: f32, t1: f32, h0: f32, h1: f32) -> f32 {
-    let edge = veil_top(f) + 2.0 * veil_soft(f);
-    if (h0 <= edge && h1 <= edge) {
-        return 0.5 * (t0 + t1);
-    }
-    if (h0 > edge && h1 > edge) {
-        return select(t1, t0, h0 < h1);
-    }
-    let tc = t0 + (t1 - t0) * (edge - h0) / (h1 - h0);
-    return select(0.5 * (tc + t1), 0.5 * (t0 + tc), h0 < h1);
-}
-
-// The veil's optical depth over one stretch of a ray, `t0` to `t1` yards from `eye` along `dir`, its height
-// over the ground `h0` to `h1`, thinned by the clear patches where its air lies.
-fn veil_tau(f: FroxelFog, eye: vec3<f32>, dir: vec3<f32>, t0: f32, t1: f32, h0: f32, h1: f32) -> f32 {
-    let dt = t1 - t0;
-    if (dt <= 0.0 || min(h0, h1) >= veil_top(f) + VEIL_ABOVE * veil_soft(f)) {
-        return 0.0;
-    }
-    let air = veil_air(f, dt, h0, h1);
-    let p = eye + dir * veil_mid(f, t0, t1, h0, h1);
-    return f.bank.x * air * bank_clear(f, p, air);
-}
-
-fn veil_phase(mu: f32) -> f32 {
-    return mix(1.0, hg(VEIL_G, mu), VEIL_FORWARD);
-}
-
-// The light a stretch of the veil scatters toward the eye, `mu` the cosine between the view ray and the key
-// and `vis` the key's visibility there. `bank_color` is the hour's light flat (the ambient and half the
-// key: `volumetrics::bank_light`) and `bank_color.w` the key's share of it, which the phase takes and, as
-// far as the look's shade (`bank_reach.x`) follows it, the key's shadow; at phase 1 and half seen, the flat
-// colour itself.
-fn veil_light(f: FroxelFog, mu: f32, vis: f32) -> vec3<f32> {
-    let seen = 2.0 * mix(0.5, clamp(vis, 0.0, 1.0), f.bank_reach.x);
-    let key = f.bank_color.w;
-    return f.bank_color.rgb * ((1.0 - key) + key * seen * veil_phase(mu));
-}
-
+// Past this many scale heights over the ground the veil holds nothing (`exp(-12)`).
+const MIST_ABOVE: f32 = 12.0;
+// How far over the ground a stretch's light is read (yd): clear of the ground's own shadow bias.
+const MIST_LIGHT_LIFT: f32 = 1.0;
 // The clear patches' feature size against the noise's, and how much a finer octave roughens them.
 const BANK_CLEAR_SCALE: f32 = 1.4;
 const BANK_CLEAR_ROUGH: f32 = 0.28;
-// A finer octave's scale (`bank_clear_noise`).
+// A finer octave's scale (`mist_clear_noise`).
 const BANK_OCTAVE_MID: f32 = 3.0;
 
-fn bank_hash(q: vec2<f32>) -> f32 {
+fn mist_hash(q: vec2<f32>) -> f32 {
     return fract(sin(dot(q, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
 // Smooth value noise, 0 to 1.
-fn bank_noise(q: vec2<f32>) -> f32 {
+fn mist_noise(q: vec2<f32>) -> f32 {
     let i = floor(q);
     let t = q - i;
     let s = t * t * (vec2<f32>(3.0) - 2.0 * t);
     return mix(
-        mix(bank_hash(i), bank_hash(i + vec2<f32>(1.0, 0.0)), s.x),
-        mix(bank_hash(i + vec2<f32>(0.0, 1.0)), bank_hash(i + vec2<f32>(1.0, 1.0)), s.x),
+        mix(mist_hash(i), mist_hash(i + vec2<f32>(1.0, 0.0)), s.x),
+        mix(mist_hash(i + vec2<f32>(0.0, 1.0)), mist_hash(i + vec2<f32>(1.0, 1.0)), s.x),
         s.y,
     );
 }
 
 // Whether an octave of `feature` yards resolves over a read `span` yards long, or would alias into speckle.
-fn bank_resolves(feature: f32, span: f32) -> f32 {
+fn mist_resolves(feature: f32, span: f32) -> f32 {
     return 1.0 - smoothstep(0.5 * feature, 2.0 * feature, span);
 }
 
-// How much of the veil's density stands at world point `p`, read over `span` yards: `bank_reach.z` in a
+// The noise the clear patches cut at `p`, its feature `media.w` yards: under `mist.z` a patch, past
+// `mist.z + mist.w` the whole veil. The volume's banks build up in its top (`froxel_scatter.wgsl`'s
+// `bank_patches`). Only a little of one finer octave: the fine ones punch small round holes in the veil.
+fn mist_clear_noise(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
+    let yd = max(f.media.w, 1.0) / BANK_CLEAR_SCALE;
+    let q = p.xz / yd + vec2<f32>(41.7, 23.9);
+    let rough = BANK_CLEAR_ROUGH * mist_resolves(yd / BANK_OCTAVE_MID, span);
+    return mix(mist_noise(q), mist_noise(q * BANK_OCTAVE_MID + vec2<f32>(17.3, 5.1)), rough);
+}
+
+// How much of the veil's density stands at world point `p`, read over `span` yards: `medium.z` in a
 // clear patch (the faintest veil, so the ground there is not bare), 1 past its edge.
-fn bank_clear(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
-    if (f.bank.z <= 0.0) {
+fn mist_clear(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
+    if (f.mist.z <= 0.0) {
         return 1.0;
     }
-    let n = bank_clear_noise(f, p, span);
-    return mix(f.bank_reach.z, 1.0, smoothstep(f.bank.z, f.bank.z + max(f.bank.w, 1e-3), n));
+    let n = mist_clear_noise(f, p, span);
+    return mix(f.medium.z, 1.0, smoothstep(f.mist.z, f.mist.z + max(f.mist.w, 1e-3), n));
 }
 
-// The noise the clear patches cut at `p` (`bank_clear`), its feature `sky.w` yards: under `bank.z` a patch,
-// past `bank.z + bank.w` the whole veil. The volume's banks build up in its top (`froxel_scatter.wgsl`'s
-// `bank_patches`). Only a little of one finer octave: the fine ones punch small round holes in the veil.
-fn bank_clear_noise(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
-    let yd = max(f.sky.w, 1.0) / BANK_CLEAR_SCALE;
-    let q = p.xz / yd + vec2<f32>(41.7, 23.9);
-    let rough = BANK_CLEAR_ROUGH * bank_resolves(yd / BANK_OCTAVE_MID, span);
-    return mix(bank_noise(q), bank_noise(q * BANK_OCTAVE_MID + vec2<f32>(17.3, 5.1)), rough);
+// The veil's optical depth over a stretch `dt` yards long whose height over the ground runs from `h0` to
+// `h1`, thinned by the clear patches at `mid`, the stretch's middle.
+fn mist_tau(f: FroxelFog, mid: vec3<f32>, dt: f32, h0: f32, h1: f32) -> f32 {
+    let hh = 1.0 / max(f.mist.y, 1e-3);
+    if (dt <= 0.0 || min(h0, h1) >= MIST_ABOVE * hh) {
+        return 0.0;
+    }
+    let a = min(h0, MIST_ABOVE * hh) / hh;
+    let b = min(h1, MIST_ABOVE * hh) / hh;
+    var mean = exp(-0.5 * (a + b));
+    if (abs(b - a) > 1e-3) {
+        mean = (exp(-a) - exp(-b)) / (b - a);
+    }
+    let air = dt * mean;
+    return f.mist.x * air * mist_clear(f, mid, air);
 }
 
-// The ground a bank's height is measured from, at `ground`: the water, in a zone with a sea fog.
-fn bank_floor(f: FroxelFog, ground: f32) -> f32 {
-    return max(ground, select(-1e9, 0.0, f.night.w > 0.0));
+// The light a stretch of the mist scatters toward the eye: `mu` the cosine between the view ray and the
+// key, `vis` the key's visibility there, `sky` the share of the dome's light that reaches it (the light
+// arriving sideways and from below reaches it whole).
+fn mist_light(f: FroxelFog, mu: f32, vis: f32, sky: f32) -> vec3<f32> {
+    return f.ambient.rgb * sky + f.ambient_open.rgb + f.sun.rgb * (dual_phase(f, mu) * vis);
 }
 
-// The stretches a ray takes over the ground, and where stretch `i` ends as a share of the ray: shorter near
-// the eye, where the ground is seen closely.
-const BANK_STRETCHES: u32 = 5u;
-
-fn bank_stretch_end(i: u32) -> f32 {
-    let share = f32(i) / f32(BANK_STRETCHES);
-    return share * share;
+// The ground the veil's height is measured from: the terrain above sea level. The veil is ground fog,
+// which forms over land; it does not lie on the water (laid on the sea, a grazing look across the bay
+// saw it as an opaque sheet that cut every rock off flat), nor on the sea floor under it (lit from
+// inside the rocks standing there, it hung a dark band with a flat top across each one past the
+// water's drawn reach). The sea has its own bank (`froxel_scatter.wgsl`'s `sea_fog`).
+fn mist_floor(f: FroxelFog, ground: f32) -> f32 {
+    return select(ground, MIST_NO_GROUND, ground < -1.0);
 }
 
-// The veil from `eye` to `p`, for a lane with no heightfield or shadow bound: `ground` under `p`, the
-// camera's ground under the eye and the height linear between them, the key half seen. As many stretches
-// as the composite takes (`fog_composite.wgsl`'s `bank_over_terrain`), so a blended surface reads the
-// same veil as the opaque ground around it.
-fn bank_air(f: FroxelFog, eye: vec3<f32>, p: vec3<f32>, ground: f32) -> vec4<f32> {
-    if (f.bank.x <= 0.0) {
+// The ground under the water for a lane that knows only the surface: none the veil can reach.
+const MIST_NO_GROUND: f32 = -1e4;
+
+// The share of the terrain heightfield's half-width the veil is laid out to along a ray, and the share of
+// that over which it tapers off. Past the heightfield nothing knows where the ground is: laid on a guess
+// there it banded the far ground, and ended at the heightfield's edge it walked a ring with the camera.
+// Ended along the ray, every pixel past the reach carries the same veil, and the far field is the haze's.
+const MIST_REACH_SHARE: f32 = 0.9;
+const MIST_TAPER: f32 = 0.3;
+
+// How far along a ray the veil is laid (yd): the heightfield's reach, or the view distance without one.
+fn mist_reach(f: FroxelFog) -> f32 {
+    let far = max(f.phase.y, 1.0);
+    if (f.ground.x <= 0.5) {
+        return far;
+    }
+    let half = 0.5 / max(length(f.ground_x.xyz), 1e-6);
+    return min(far, MIST_REACH_SHARE * half);
+}
+
+// The veil's weight at `t` yards along a ray: whole near the eye, tapering to none at `reach`.
+fn mist_taper(t: f32, reach: f32) -> f32 {
+    return 1.0 - smoothstep((1.0 - MIST_TAPER) * reach, reach, t);
+}
+
+// The stretches a ray takes over the ground: stretch `i` ends `mist_stretch_end(i)` yards from the eye,
+// the same distances for every ray, short near the eye, where the ground is seen closely. Cut at shares
+// of each ray's own length instead, a ray to a rock and a ray to the sky beside it read the ground they
+// cross at different places and took different veils: the rock stood in a band with a hard edge.
+const MIST_STRETCHES: u32 = 11u;
+
+fn mist_stretch_end(i: u32) -> f32 {
+    return 2.0 * (pow(1.8, f32(i)) - 1.0);
+}
+
+// The mist from `eye` to `p`, for the water, whose rays run over open water: `ground` under `p` (the water
+// passes give `MIST_NO_GROUND`), the
+// camera's ground under the eye and the height linear between them, the key and the sky reaching every
+// stretch. As many stretches as the composite takes (`fog_composite.wgsl`'s `mist_over_terrain`); a
+// blended model takes the same with the key's shadow and the sky map (`wow_model.wgsl`'s `modern_mist`).
+fn mist_air(f: FroxelFog, eye: vec3<f32>, p: vec3<f32>, ground: f32) -> vec4<f32> {
+    if (f.mist.x <= 0.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
     let ray = p - eye;
     let len = max(length(ray), 1e-3);
     let dir = ray / len;
-    let h0 = max(eye.y - bank_floor(f, f.night.y), 0.0);
-    let h1 = max(p.y - bank_floor(f, ground), 0.0);
-    let reach = min(len, max(f.phase.y, 1.0));
+    let h0 = max(eye.y - mist_floor(f, f.night.y), 0.0);
+    let h1 = max(p.y - mist_floor(f, ground), 0.0);
+    let far = mist_reach(f);
+    let reach = min(len, far);
     var t0 = 0.0;
     var from_h = h0;
     var tau = 0.0;
-    for (var i = 1u; i <= BANK_STRETCHES; i = i + 1u) {
-        let t1 = reach * bank_stretch_end(i);
+    for (var i = 1u; i <= MIST_STRETCHES; i = i + 1u) {
+        let t1 = select(min(mist_stretch_end(i), reach), reach, i == MIST_STRETCHES);
         let to_h = mix(h0, h1, t1 / len);
-        tau = tau + veil_tau(f, eye, dir, t0, t1, from_h, to_h);
+        let mid = eye + dir * (0.5 * (t0 + t1));
+        tau = tau + mist_tau(f, mid, t1 - t0, from_h, to_h) * mist_taper(0.5 * (t0 + t1), far);
         t0 = t1;
         from_h = to_h;
     }
     let tr = exp(-tau);
-    return vec4<f32>(veil_light(f, dot(dir, f.sun_dir.xyz), 0.5) * (1.0 - tr), tr);
+    return vec4<f32>(mist_light(f, dot(dir, f.sun_dir.xyz), 1.0, 1.0) * (1.0 - tr), tr);
 }
 
-// `fog` seen through `bank`, which lies in front of it as far as the blend can tell.
-fn with_bank(fog: vec4<f32>, bank: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(bank.rgb + fog.rgb * bank.a, fog.a * bank.a);
+// `fog` seen through `mist`, which lies in front of it as far as the blend can tell.
+fn with_mist(fog: vec4<f32>, mist: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(mist.rgb + fog.rgb * mist.a, fog.a * mist.a);
 }
 
 // fork: **the sea fog past the froxel grid.** Inside the grid the sea fog is the scatter pass's
@@ -668,7 +597,7 @@ fn with_bank(fog: vec4<f32>, bank: vec4<f32>) -> vec4<f32> {
 const SEA_TAIL_TOP: f32 = 20.0;
 const SEA_TAIL_COVER: f32 = 0.6;
 
-fn sea_tail(f: FroxelFog, p: vec3<f32>, t_start: f32, key_share: f32) -> vec4<f32> {
+fn sea_tail(f: FroxelFog, p: vec3<f32>, t_start: f32) -> vec4<f32> {
     if (f.night.w <= 0.0 || f.ground.x < 0.5) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
@@ -690,7 +619,7 @@ fn sea_tail(f: FroxelFog, p: vec3<f32>, t_start: f32, key_share: f32) -> vec4<f3
     let tau = f.night.w * SEA_TAIL_COVER * len * (1.0 - t) * clamp(mean, 0.0, 1.0);
     let tr = exp(-tau);
     let phase = dual_phase(f, dot(ray / len, f.sun_dir.xyz));
-    let lum = f.ambient.rgb + f.sun.rgb * (phase * key_share);
+    let lum = f.ambient.rgb + f.ambient_open.rgb + f.sun.rgb * phase;
     return vec4<f32>(lum * (1.0 - tr), tr);
 }
 
@@ -713,8 +642,8 @@ fn fog_at(vol: texture_3d<f32>, samp: sampler, f: FroxelFog, p: vec3<f32>) -> ve
     if (d <= f.grid.w) {
         return near;
     }
-    let air = analytic_path_keyed(f, p, f.grid.w / d, TAIL_KEY_SHARE);
+    let air = analytic_path(f, p, f.grid.w / d);
     // The air spreads along the whole stretch and the sea bank lies at its low end, so the air comes first.
-    let tail = with_bank(sea_tail(f, p, f.grid.w / d, TAIL_KEY_SHARE), air);
+    let tail = with_mist(sea_tail(f, p, f.grid.w / d), air);
     return vec4<f32>(near.rgb + near.a * tail.rgb, near.a * tail.a);
 }

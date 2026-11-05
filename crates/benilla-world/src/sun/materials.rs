@@ -78,7 +78,6 @@ pub struct StarExt {
     /// fork: the modern horizon fade (`follow::MODERN_STAR_HORIZON`), modern frames only: the dome is
     /// gone below the view elevation (sine) `.x` and whole above `.y`; `.y` 0 = no fade. The dome
     /// draws after the fog composite, so without it the nebulae ran unhazed down to the horizon.
-    /// `.zw` the auto-exposure's lift and room (`look::lift_room`), which the dome inverts.
     #[uniform(103)]
     pub(super) horizon: Vec4,
     /// fork: the modern sky's hue (`follow::star_tint`), modern frames only: `.rgb` the hue of the

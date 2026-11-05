@@ -172,6 +172,49 @@ struct WowLight {
 @group(#{MATERIAL_BIND_GROUP}) @binding(124) var modern_fog_volume: texture_3d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(125) var modern_fog_samp: sampler;
 
+// fork: modern lighting — the ground mist between the eye and a blended fragment at `p`, over `ground`
+// (`froxelfog::mist_air`'s heights), each stretch lit as the composite lights the opaque ground's
+// (`fog_composite.wgsl`'s `mist_over_terrain`): the key as far as its shadow lets it, the sky as far
+// as the sky map does. A leaf or a twig under a canopy then stands in mist as dark as the air
+// around it, not in the open sky's.
+fn modern_mist(f: froxelfog::FroxelFog, p: vec3<f32>, ground: f32) -> vec4<f32> {
+    let eye = f.camera.xyz;
+    let ray = p - eye;
+    let len = max(length(ray), 1e-3);
+    let dir = ray / len;
+    let mu = dot(dir, f.sun_dir.xyz);
+    let h0 = max(eye.y - froxelfog::mist_floor(f, f.night.y), 0.0);
+    let h1 = max(p.y - froxelfog::mist_floor(f, ground), 0.0);
+    let floor0 = eye.y - h0;
+    let far = froxelfog::mist_reach(f);
+    let reach = min(len, far);
+    var t0 = 0.0;
+    var from_h = h0;
+    var light = vec3<f32>(0.0);
+    var tr = 1.0;
+    for (var i = 1u; i <= froxelfog::MIST_STRETCHES; i = i + 1u) {
+        let t1 = select(min(froxelfog::mist_stretch_end(i), reach), reach, i == froxelfog::MIST_STRETCHES);
+        let to_h = mix(h0, h1, t1 / len);
+        let mid = eye + dir * (0.5 * (t0 + t1));
+        let tau = froxelfog::mist_tau(f, mid, t1 - t0, from_h, to_h) * froxelfog::mist_taper(0.5 * (t0 + t1), far);
+        if (tau > 1e-6) {
+            let at = eye + dir * t1;
+            let floor = mix(floor0, p.y - h1, t1 / len);
+            // Read at the stretch's end, as the composite reads the opaque ground's.
+            let q = vec3<f32>(at.x, floor + froxelfog::MIST_LIGHT_LIFT, at.z);
+            let c = modern_block.cascades;
+            let vis = sunshadow::sun_visibility_fast(modern_shadow_map, modern_shadow_samp, c, q, froxelfog::view_depth(f, q));
+            let sky = sunshadow::sky_visibility_fast(modern_shadow_map, modern_shadow_samp, c, q);
+            let e = exp(-tau);
+            light = light + froxelfog::mist_light(f, mu, vis, sky) * (tr * (1.0 - e));
+            tr = tr * e;
+        }
+        t0 = t1;
+        from_h = to_h;
+    }
+    return vec4<f32>(light, tr);
+}
+
 // fork: modern lighting (FORK.md, P5) — the probe field's irradiance at this
 // fragment: the eight probes around it in the finest cascade that owns the point, and whatever a
 // coarser one can still answer beyond that. `rgb` is in the ambient row's own units (it replaces
@@ -1778,17 +1821,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         // for Mod (1) and Mod2x (0.5, after its 2.295 source scale).
         if (!opaque_intent && fog_policy != 4u && wow_light.fog_color.w > 0.5) {
             var fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, modern_block.fog, in.world_position.xyz);
-            // fork: the analytic bank, which the composite gives the opaque batches: a doodad riding
-            // its fade twin stood unfogged in the veil. Not in the water mirror, as in the composite.
+            // fork: the ground mist, which the composite gives the opaque batches: a doodad riding
+            // its fade twin stood unfogged in it. Not in the water mirror, as in the composite.
             let air = modern_block.fog;
             let mirror = sunshadow::mirror_view(modern_block.cascades, view.world_position);
-            if (air.bank.x > 0.0 && !mirror) {
-                fog = froxelfog::with_bank(fog, froxelfog::bank_air(air, air.camera.xyz, in.world_position.xyz, in.bank_ground));
+            if (air.mist.x > 0.0 && !mirror) {
+                fog = froxelfog::with_mist(fog, modern_mist(air, in.world_position.xyz, in.bank_ground));
             }
-            // The composite's exposure on a world pixel's air (`colorspace::air_exposure`), with or
-            // without the bank: a fading tuft in the volume's banks alone stood darker than the
-            // ground the composite fogged around it.
-            fog = colorspace::air_exposure(fog, air.sky.x, air.sky.y);
             if (is_additive || fog_policy == 1u) {
                 lin = lin * fog.a;
             } else if (is_mod || fog_policy == 2u) {

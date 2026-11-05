@@ -278,6 +278,27 @@ pub(crate) fn dome_stops(light: &WowLighting) -> ([Vec4; 5], Vec4) {
     (sky, fog)
 }
 
+/// fork: modern lighting — the dome's six colours as a modern frame draws them (linear): its five
+/// stops, zenith first, and the horizon (`sky.wgsl`'s `fog`).
+pub(crate) fn dome_radiance(light: &WowLighting) -> [Vec3; 6] {
+    let tint = |c: [f32; 3], t: [f32; 3]| {
+        Vec3::from(std::array::from_fn::<f32, 3, _>(|i| {
+            crate::modern::srgb_to_linear((c[i] * t[i]).clamp(0.0, 1.0))
+        }))
+    };
+    let (sky, fog) = (
+        crate::modern::look::sky_tint(),
+        crate::modern::look::fog_tint(),
+    );
+    std::array::from_fn(|i| {
+        if i < 5 {
+            tint(light.sky[i], sky)
+        } else {
+            tint(light.fog_color, fog)
+        }
+    })
+}
+
 /// Push the time-of-day sky stops and fog colour (`WowLighting`) into the dome material.
 fn update_sky_colors(
     light: Res<WowLighting>,
@@ -292,13 +313,11 @@ fn update_sky_colors(
     // (midday, or a `highlightSky` 0 zone) leaves the gradient untouched.
     let s = light.celestial_dir;
     let sun_az = s.z.atan2(s.x);
-    let (lift, room) = crate::modern::look::lift_room();
     let warp = Vec4::new(
         benilla_assets::quantize(light.sky_warp, 4096.0),
         benilla_assets::quantize(sun_az, 4096.0),
-        // A modern frame's sky inverts the auto-exposure (`look::unlifted`): its lift and room.
-        benilla_assets::quantize(lift, 1024.0),
-        benilla_assets::quantize(room, 4096.0),
+        0.0,
+        0.0,
     );
     benilla_assets::write_gated(
         &mut materials,

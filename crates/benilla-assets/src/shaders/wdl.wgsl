@@ -30,12 +30,12 @@ const WDL_DEPTH_PUSH: f32 = 0.999;
 // The shared global light (`lighting::global_light`), mirrored up to the rows WDL reads. Rows 4
 // and 5 are the scene fog block, right by construction: the horizon band is never inside a WMO.
 struct WowLight {
-    _light_ambient: vec4<f32>, // 0
+    light_ambient: vec4<f32>,  // 0 rgb = the ambient (gamma, modern: the look's fill applied)
     _light_diffuse: vec4<f32>, // 1
     _light_sun: vec4<f32>,     // 2
     _light_spec: vec4<f32>,    // 3
     fog_color: vec4<f32>,      // 4 rgb = Light.dbc row 7 (gamma 0..1); w = enable (>0.5 ⇒ blend)
-    fog_params: vec4<f32>,     // 5 xy = scene fog start/end (unread); z = a modern frame's silhouette shade (`modern::look`); w = farclip wall (0 = off)
+    fog_params: vec4<f32>,     // 5 xy = scene fog start/end (unread); z = a modern frame's distant albedo (`modern::DISTANT_ALBEDO`); w = farclip wall (0 = off)
     _rows_6_19: array<vec4<f32>, 14>,
     point_count: vec4<f32>,    // 20 // fork: modern lighting (FORK.md) — y = modern flag
 };
@@ -78,17 +78,18 @@ fn fragment(in: WdlVsOut) -> WdlFsOut {
     if (w.fog_color.w > 0.5) {
         rgb = w.fog_color.xyz;
     }
-    // fork: modern lighting (FORK.md) — a modern frame draws the horizon band as an
-    // unlit SILHOUETTE: a darker body of the fog's own colour, with no key light and no facets. The fog composite lays the height fog over it from its true distance,
-    // so the far ranges' feet vanish into the haze and their crests rise above it.
-    let modern = w.point_count.y > 0.5;
-    if (modern) {
-        rgb = clamp(w.fog_color.xyz * w.fog_params.z, vec3<f32>(0.0), vec3<f32>(1.0));
-    }
-
     var out: WdlFsOut;
     // Raw gamma out; the frame decodes once, in the FFXGlow combine.
-    out.color = vec4<f32>(colorspace::modern_out(rgb, w.point_count.y), 1.0); // fork: modern lighting (FORK.md)
+    out.color = vec4<f32>(rgb, 1.0);
+    // fork: modern lighting (FORK.md) — a modern frame draws the horizon band as a
+    // SILHOUETTE in the scene's own light: one flat body, the distant ground's albedo under the
+    // ambient the detailed terrain takes, with no key light and no facets, in linear light. The fog
+    // composite lays the air over it from its true distance, so the far ranges' feet vanish into the
+    // haze and their crests rise above it.
+    let modern = w.point_count.y > 0.5;
+    if (modern) {
+        out.color = vec4<f32>(colorspace::srgb_to_linear(w.light_ambient.rgb) * w.fog_params.z, 1.0);
+    }
     // The depth clamp. `view_z_to_depth_ndc` takes view-space z, negative in front of the camera,
     // so the wall is at `-farclip`.
     var depth = in.clip_position.z;

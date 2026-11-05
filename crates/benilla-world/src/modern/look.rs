@@ -6,12 +6,11 @@
 //! - `key` / `fill` — the key-to-fill ratio (A3): gains on the shared light's diffuse and ambient rows
 //!   in a modern frame (`global_light::build_light_data`), aimed at 6–10:1 under forest canopies;
 //! - `exposure` — the post's exposure (the FFXGlow combine's `wave.w`);
-//! - `haze` — the shaft haze extinction, never near-cleared, so shafts start at the camera (A1);
-//! - `forward` — the dual-lobe phase's forward share: warm toward the sun, the zone's hue away (A2);
-//! - `key_scatter` — how strongly the key light scatters into the fog;
-//! - `glow` — the colour of the light scattered toward the sun (the froxel key in-scatter and the sky's
-//!   Mie halo), and `haze_tint` — the colour of the ambient haze away from it. Classic Light.dbc fog
-//!   is often grey where the reference grade is warm: Darkshore's salmon dawn is these two rows.
+//! - `haze` — the shaft haze extinction (A1);
+//! - `forward` — the dual-lobe phase's forward share: bright toward the sun, dimmer away (A2);
+//! - `glow` — the colour of the sky's Mie halo around the sun. The air itself scatters the light the
+//!   surfaces take, in the fog colour's hue (`volumetrics::media`): Darkshore's salmon dusk is its
+//!   warm key through a forward lobe, not a colour painted on the air.
 //!
 //! Zones are `AreaTable.dbc` top-level rows; a subzone resolves through its parents. The area comes
 //! from the character's [`CurrentArea`], or — with no avatar (the engine-only world view) — from the
@@ -26,7 +25,7 @@ use benilla_assets::DataLoadAppExt;
 use benilla_assets::{AdtTile, LockRecover, WorldAssets};
 use benilla_formats::AreaTableCatalog;
 
-use super::{srgb_to_linear, ActiveLighting};
+use super::{linear_to_srgb, srgb_to_linear, ActiveLighting};
 use crate::lighting::{GameClock, WowLighting};
 use crate::terrain_stream::{area_id_under, CurrentArea, TerrainStreamer};
 use crate::view::WorldCamera;
@@ -38,9 +37,7 @@ pub struct ZoneLook {
     pub exposure: f32,
     pub haze: f32,
     pub forward: f32,
-    pub key_scatter: f32,
     pub glow: [f32; 3],
-    pub haze_tint: [f32; 3],
     /// How far the long-range height fog reaches against the zone's authored fog end (>1 = clearer).
     pub fog_reach: f32,
     /// A gamma multiplier on the authored fog colour the medium is solved toward.
@@ -49,13 +46,6 @@ pub struct ZoneLook {
     pub fog_falloff: f32,
     /// A gamma multiplier on the sky dome's five authored stops.
     pub sky_tint: [f32; 3],
-    /// The distant (WDL) silhouette's shade against the fog colour.
-    pub silhouette: f32,
-    /// The fog is clear at least this far out (planar yd): the scene around the camera stays crisp
-    /// while the long range still fades into the ground fog.
-    pub fog_clear: f32,
-    /// Gain on the key light scattered by the shaft haze — how hard light cones read.
-    pub shafts: f32,
     /// The post's cinematic grade: contrast, saturation, vignette strength, and toe (gamma > 1 deepens
     /// the shadows).
     pub contrast: f32,
@@ -73,9 +63,6 @@ pub struct ZoneLook {
     /// zone lies clear at night, and only the dark zones (eerie, Tirisfal, Darkshore) keep banks, and
     /// the misty ones a share on the default look (`MIST_ZONES`).
     pub night_banks: f32,
-    /// fork: the night air's glow (`volumetrics::NIGHT_GLOW`) as a share: an ordinary zone's night
-    /// stays clear, a dark zone's air glows grey.
-    pub night_glow: f32,
     /// fork: how far a building's own fog (its MFOG) reaches against its authored span (>1 = clearer).
     pub room_reach: f32,
     /// fork: the noon sun's hue (gamma), taken at the authored key's luminance
@@ -98,28 +85,17 @@ pub struct ZoneLook {
     /// rows, and over a bright authored night diffuse (Elwynn's) twice the key read as dusk, where
     /// snow and the dark zones need it to read at all. 1 = the default look's night.
     pub moon_key: f32,
-    /// fork: how much the ground banks stand out from the haze under the moon: 0 lights them as
-    /// the shaft haze is lit ([`MOON_HAZE`] on their isotropic half) and lays only a hazy zone's
-    /// share of the night's banks (`volumetrics::added_air`); 1 lights them by the whole moon and
-    /// lays the whole night bank, dense fog lying on the ground.
+    /// fork: how much of the night's ground banks a hazy zone lays: 0 only a hazy zone's share of
+    /// them (`volumetrics::added_air`); 1 the whole night bank, dense fog lying on the ground.
     pub bank_moon: f32,
     /// fork: the ground banks leave the froxel volume for the ground veil, an exact single-scattering
-    /// integral per pixel (`froxelfog.wgsl`'s `bank_air`), which has no grid, jitter or history to
+    /// integral per pixel (`froxelfog.wgsl`'s `mist_air`), which has no grid, jitter or history to
     /// flicker or lag. Over 0.5 on; a look that stays in the volume ignores the dials below.
     pub bank_analytic: f32,
     /// fork: the clear patches' noise feature size (yd). It divides world coordinates near 6,000, so a
     /// cross-fade of it would send the patches flying over the ground: [`ZoneLook::lerp`] takes it at
     /// once.
     pub bank_patch_yd: f32,
-    /// fork: a gain per channel on the veil's light, which is this hour's light
-    /// (`volumetrics::bank_light`), so its veil reads alike at every hour.
-    pub bank_rgb: [f32; 3],
-    /// fork: how far the veil's key follows the key's shadow at night: 0 half the key over every
-    /// stretch, 1 the whole key in the open and none in shade. [`Self::bank_shade_day`] by day, the
-    /// two eased across `sun_arc::night_at`.
-    pub bank_shade: f32,
-    /// fork: [`Self::bank_shade`] by day.
-    pub bank_shade_day: f32,
     /// fork: the share of the veil's density a clear patch keeps (0 = bare ground there).
     pub bank_clear_floor: f32,
     /// fork: an analytic look's froxel banks by day: the volume's ground banks at this `ground_fog`,
@@ -128,12 +104,8 @@ pub struct ZoneLook {
     pub bank_froxel: f32,
     /// fork: [`Self::bank_froxel`] at night.
     pub bank_froxel_night: f32,
-    /// fork: the veil's light gain while the moon keys (`sun_arc::moon_key`, eased in): the
-    /// hour's fog colour falls to about the moonlit ground's brightness, and the veil sank into it.
-    /// With the moon down nothing changes. 1 = none.
-    pub bank_moon_gain: f32,
-    /// fork: the ground veil's height (yd): its density holds to here and falls off over a soft top
-    /// above it. A body stands in it where this is near its own height; a thinner layer veils the
+    /// fork: the ground veil's scale height (yd): its density falls by `e` every this many yards over
+    /// the ground. A body stands in it where this is near its own height; a thinner layer veils the
     /// ground and leaves the body clear.
     pub bank_height: f32,
     /// fork: the veil's clear patches: the noise (0 to 1) under which it thins to
@@ -154,16 +126,11 @@ impl ZoneLook {
         exposure: 1.0,
         haze: 0.0024,
         forward: 0.72,
-        key_scatter: 0.7,
         glow: [1.0, 1.0, 1.0],
-        haze_tint: [1.0, 1.0, 1.0],
         fog_reach: 0.5,
         fog_tint: [1.0, 1.0, 1.0],
         fog_falloff: 70.0,
         sky_tint: [1.0, 1.0, 1.0],
-        silhouette: 0.55,
-        fog_clear: 450.0,
-        shafts: 0.3,
         contrast: 1.12,
         saturation: 0.86,
         vignette: 0.3,
@@ -171,7 +138,6 @@ impl ZoneLook {
         key_tint: [1.0, 1.0, 1.0],
         ground_fog: 0.0,
         night_banks: 0.0,
-        night_glow: 0.33,
         room_reach: 1.0,
         noon_key: [1.0, 0.8, 0.4],
         noon_mix: 0.0,
@@ -180,18 +146,14 @@ impl ZoneLook {
         moon_hue: 1.0,
         moon_key: 1.0,
         bank_moon: 0.0,
+        bank_analytic: 0.0,
+        bank_patch_yd: 130.0,
+        bank_clear_floor: 0.0,
+        bank_froxel: 0.0,
+        bank_froxel_night: 0.0,
         bank_height: 4.0,
         bank_clear: 0.0,
         bank_clear_edge: 0.2,
-        bank_analytic: 0.0,
-        bank_patch_yd: 130.0,
-        bank_rgb: [1.0, 1.0, 1.0],
-        bank_shade: 0.0,
-        bank_shade_day: 0.0,
-        bank_clear_floor: 0.0,
-        bank_moon_gain: 1.0,
-        bank_froxel: 0.0,
-        bank_froxel_night: 0.0,
     };
 
     /// fork: **the default look at noon**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
@@ -201,7 +163,6 @@ impl ZoneLook {
     /// rows keep the default look.
     pub const NOON: Self = Self {
         fill: 0.85,
-        haze_tint: [0.8, 1.0, 1.05],
         contrast: 1.28,
         saturation: 1.12,
         toe: 1.07,
@@ -210,12 +171,11 @@ impl ZoneLook {
     };
 
     /// fork: **the default look at night**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
-    /// across `sun_arc::night_at`: [`Self::DARKSHORE`]'s air, thin haze, a far reach and full
-    /// silhouettes (asked in the viewer). Its banks stay Darkshore's own: an ordinary night lies clear.
+    /// across `sun_arc::night_at`: [`Self::DARKSHORE`]'s air, thin haze and a far reach (asked in the
+    /// viewer). Its mist stays the zone's own: an ordinary night lies clear.
     pub const NIGHT: Self = Self {
         haze: 0.001,
         fog_reach: 2.2,
-        silhouette: 1.0,
         ..Self::NEUTRAL
     };
 
@@ -249,16 +209,11 @@ impl ZoneLook {
             exposure: m(self.exposure, to.exposure),
             haze: m(self.haze, to.haze),
             forward: m(self.forward, to.forward),
-            key_scatter: m(self.key_scatter, to.key_scatter),
             glow: [0, 1, 2].map(|i| m(self.glow[i], to.glow[i])),
-            haze_tint: [0, 1, 2].map(|i| m(self.haze_tint[i], to.haze_tint[i])),
             fog_reach: m(self.fog_reach, to.fog_reach),
             fog_tint: [0, 1, 2].map(|i| m(self.fog_tint[i], to.fog_tint[i])),
             fog_falloff: m(self.fog_falloff, to.fog_falloff),
             sky_tint: [0, 1, 2].map(|i| m(self.sky_tint[i], to.sky_tint[i])),
-            silhouette: m(self.silhouette, to.silhouette),
-            fog_clear: m(self.fog_clear, to.fog_clear),
-            shafts: m(self.shafts, to.shafts),
             contrast: m(self.contrast, to.contrast),
             saturation: m(self.saturation, to.saturation),
             vignette: m(self.vignette, to.vignette),
@@ -266,7 +221,6 @@ impl ZoneLook {
             key_tint: [0, 1, 2].map(|i| m(self.key_tint[i], to.key_tint[i])),
             ground_fog: m(self.ground_fog, to.ground_fog),
             night_banks: m(self.night_banks, to.night_banks),
-            night_glow: m(self.night_glow, to.night_glow),
             room_reach: m(self.room_reach, to.room_reach),
             noon_key: [0, 1, 2].map(|i| m(self.noon_key[i], to.noon_key[i])),
             noon_mix: m(self.noon_mix, to.noon_mix),
@@ -275,18 +229,14 @@ impl ZoneLook {
             moon_hue: m(self.moon_hue, to.moon_hue),
             moon_key: m(self.moon_key, to.moon_key),
             bank_moon: m(self.bank_moon, to.bank_moon),
+            bank_analytic: m(self.bank_analytic, to.bank_analytic),
+            bank_patch_yd: to.bank_patch_yd,
+            bank_clear_floor: m(self.bank_clear_floor, to.bank_clear_floor),
+            bank_froxel: m(self.bank_froxel, to.bank_froxel),
+            bank_froxel_night: m(self.bank_froxel_night, to.bank_froxel_night),
             bank_height: m(self.bank_height, to.bank_height),
             bank_clear: m(self.bank_clear, to.bank_clear),
             bank_clear_edge: m(self.bank_clear_edge, to.bank_clear_edge),
-            bank_analytic: m(self.bank_analytic, to.bank_analytic),
-            bank_patch_yd: to.bank_patch_yd,
-            bank_rgb: [0, 1, 2].map(|i| m(self.bank_rgb[i], to.bank_rgb[i])),
-            bank_shade: m(self.bank_shade, to.bank_shade),
-            bank_shade_day: m(self.bank_shade_day, to.bank_shade_day),
-            bank_clear_floor: m(self.bank_clear_floor, to.bank_clear_floor),
-            bank_moon_gain: m(self.bank_moon_gain, to.bank_moon_gain),
-            bank_froxel: m(self.bank_froxel, to.bank_froxel),
-            bank_froxel_night: m(self.bank_froxel_night, to.bank_froxel_night),
         }
     }
 
@@ -297,19 +247,14 @@ impl ZoneLook {
             && d(self.exposure, other.exposure)
             && d(self.haze, other.haze)
             && d(self.forward, other.forward)
-            && d(self.key_scatter, other.key_scatter)
             && d(self.fog_reach, other.fog_reach)
             && d(self.fog_falloff, other.fog_falloff)
-            && d(self.silhouette, other.silhouette)
-            && d(self.fog_clear, other.fog_clear)
-            && d(self.shafts, other.shafts)
             && d(self.contrast, other.contrast)
             && d(self.saturation, other.saturation)
             && d(self.vignette, other.vignette)
             && d(self.toe, other.toe)
             && d(self.ground_fog, other.ground_fog)
             && d(self.night_banks, other.night_banks)
-            && d(self.night_glow, other.night_glow)
             && d(self.room_reach, other.room_reach)
             && d(self.noon_mix, other.noon_mix)
             && d(self.sea_fog, other.sea_fog)
@@ -317,21 +262,16 @@ impl ZoneLook {
             && d(self.moon_hue, other.moon_hue)
             && d(self.moon_key, other.moon_key)
             && d(self.bank_moon, other.bank_moon)
+            && d(self.bank_analytic, other.bank_analytic)
+            && d(self.bank_patch_yd, other.bank_patch_yd)
+            && d(self.bank_clear_floor, other.bank_clear_floor)
+            && d(self.bank_froxel, other.bank_froxel)
+            && d(self.bank_froxel_night, other.bank_froxel_night)
             && d(self.bank_height, other.bank_height)
             && d(self.bank_clear, other.bank_clear)
             && d(self.bank_clear_edge, other.bank_clear_edge)
-            && d(self.bank_analytic, other.bank_analytic)
-            && d(self.bank_patch_yd, other.bank_patch_yd)
-            && d(self.bank_shade, other.bank_shade)
-            && d(self.bank_shade_day, other.bank_shade_day)
-            && d(self.bank_clear_floor, other.bank_clear_floor)
-            && d(self.bank_moon_gain, other.bank_moon_gain)
-            && d(self.bank_froxel, other.bank_froxel)
-            && d(self.bank_froxel_night, other.bank_froxel_night)
-            && (0..3).all(|i| d(self.bank_rgb[i], other.bank_rgb[i]))
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
-                    && d(self.haze_tint[i], other.haze_tint[i])
                     && d(self.fog_tint[i], other.fog_tint[i])
                     && d(self.sky_tint[i], other.sky_tint[i])
                     && d(self.key_tint[i], other.key_tint[i])
@@ -344,25 +284,21 @@ impl ZoneLook {
     /// fork: **the eerie look.** Brill's calibration (Tirisfal at 14:00 against a reference shot),
     /// for every dark zone: a dim green sun over a deep fill, so the dapple reads under the canopy;
     /// the shafts lit green through a haze whose shadowed air stays dark; green fog and sky, a lower
-    /// exposure and a saturated, harder grade; and the night's full ground-fog banks and glowing
-    /// air, kept through the day.
+    /// exposure and a saturated, harder grade; and ground mist, thicker at night.
     pub const EERIE: Self = Self {
         key: 0.85,
         fill: 0.55,
         exposure: 0.6,
         glow: [0.65, 1.0, 0.7],
-        haze_tint: [0.22, 0.34, 0.26],
         fog_tint: [0.8, 1.0, 0.8],
         sky_tint: [0.6, 0.7, 0.6],
         key_tint: [0.78, 1.0, 0.8],
         saturation: 1.15,
         contrast: 1.25,
         haze: 0.0034,
-        shafts: 0.4,
         vignette: 0.38,
         // Darkshore's ground veil in this look's own light, the same clear patches at every hour, over
-        // the volume's banks as they were before the veil (0.7 by day, 1.0 at night), which build
-        // where Darkshore's do.
+        // the volume's banks (0.7 by day, 1.0 at night), which build where Darkshore's do.
         ground_fog: Self::DARKSHORE.ground_fog,
         night_banks: Self::DARKSHORE.ground_fog,
         bank_height: Self::DARKSHORE.bank_height,
@@ -371,16 +307,12 @@ impl ZoneLook {
         bank_analytic: Self::DARKSHORE.bank_analytic,
         bank_patch_yd: Self::DARKSHORE.bank_patch_yd,
         bank_clear_floor: Self::DARKSHORE.bank_clear_floor,
-        bank_shade_day: Self::DARKSHORE.bank_shade_day,
-        // This look's air is far darker than Darkshore's salmon.
-        bank_rgb: [2.0, 2.0, 2.0],
         bank_froxel: 0.7,
         bank_froxel_night: 1.0,
-        night_glow: 1.0,
         noon_mix: 0.0,
         // The dark zones need the doubled moon to read at night (Duskwood, approved in the client).
         moon_key: 2.0,
-        // Their night banks are ground fog, not more haze: whole, and lit by the whole moon.
+        // Their night banks are ground fog, not more haze: whole.
         bank_moon: 1.0,
         ..Self::NEUTRAL
     };
@@ -389,7 +321,6 @@ impl ZoneLook {
     /// shafts, fog and sky lean further from red and blue toward green.
     pub const TIRISFAL: Self = Self {
         glow: [0.58, 1.0, 0.62],
-        haze_tint: [0.19, 0.36, 0.22],
         fog_tint: [0.7, 1.05, 0.7],
         sky_tint: [0.52, 0.72, 0.52],
         key_tint: [0.72, 1.0, 0.74],
@@ -406,14 +337,10 @@ impl ZoneLook {
         exposure: 1.22,
         haze: 0.004,
         forward: 0.6,
-        key_scatter: 0.6,
         glow: [0.72, 0.88, 1.18],
-        haze_tint: [0.42, 0.68, 1.28],
         fog_reach: 0.38,
         fog_tint: [0.58, 0.82, 1.32],
         sky_tint: [0.6, 0.84, 1.32],
-        fog_clear: 250.0,
-        shafts: 0.25,
         contrast: 1.1,
         saturation: 1.0,
         vignette: 0.28,
@@ -444,17 +371,12 @@ impl ZoneLook {
         fill: 1.05,
         exposure: 1.3,
         haze: 0.0008,
-        key_scatter: 0.4,
-        haze_tint: [1.0, 0.92, 0.82],
         fog_reach: 1.5,
-        fog_clear: 900.0,
-        shafts: 0.15,
         contrast: 1.08,
         saturation: 0.95,
         vignette: 0.2,
         toe: 1.0,
         night_banks: 0.0,
-        night_glow: 0.0,
         room_reach: 3.0,
         noon_mix: 0.0,
         ..Self::NEUTRAL
@@ -472,45 +394,35 @@ impl ZoneLook {
     pub const DARKSHORE: Self = Self {
         key: 0.85,
         fill: 0.95,
-        exposure: 0.85,
+        exposure: 1.0,
         haze: 0.001,
-        // Little forward lobe: a low sun does not glow the distance into a salmon wall.
-        forward: 0.3,
-        key_scatter: 0.9,
+        // A little forward lobe: the sun's side of the haze is gently brighter, never a glare.
+        forward: 0.1,
         glow: [1.15, 0.7, 0.6],
-        // Salmon, and at this thin a haze it colours the ground banks more than the air.
-        haze_tint: [2.4, 1.45, 1.1],
-        fog_reach: 3.2,
-        fog_tint: [2.1, 1.85, 1.85],
+        fog_reach: 1.5,
+        fog_tint: [1.85, 1.82, 1.85],
         fog_falloff: 100.0,
-        sky_tint: [0.85, 0.7, 0.66],
-        silhouette: 1.0,
-        fog_clear: 80.0,
+        sky_tint: [0.85, 0.8, 0.82],
         contrast: 1.12,
-        saturation: 1.05,
+        saturation: 0.85,
         vignette: 0.32,
-        key_tint: [1.0, 0.65, 0.5],
-        // A thin veil lying half a yard deep on the ground at every hour, into the sea fog, fixed in
-        // the world, thinner in clear patches, as the reference's lies
-        // (`worldview_pose=6346.6,510.4,23.6,174.2,2.9`, 18:20). 0.03/yd: a ray from a standing
-        // camera to the ground 50 yd off crosses about 6 yd of it, a fifth veiled.
+        key_tint: [1.0, 0.86, 0.8],
+        // A thin veil lying on the ground at every hour, into the sea fog, fixed in the world, thinner
+        // in clear patches, as the reference's lies (`worldview_pose=6346.6,510.4,23.6,174.2,2.9`,
+        // 18:20).
         ground_fog: 1.4,
         bank_height: 0.5,
         bank_clear: 0.45,
         bank_clear_edge: 0.45,
         bank_analytic: 1.0,
         bank_patch_yd: 70.0,
-        bank_rgb: [0.9, 0.82, 0.8],
         // The faintest veil in the clear patches, so the open ground is not bare.
         bank_clear_floor: 0.5,
-        // By day the sun glows the veil where it reaches the ground; the moon lights it evenly.
-        bank_shade_day: 1.0,
-        // The volume's banks under the veil at every hour, as before the veil (`ground_fog` 1.8).
+        // The volume's banks under the veil at every hour (`ground_fog` 1.8).
         bank_froxel: 1.8,
         bank_froxel_night: 1.8,
         night_banks: 0.6,
-        night_glow: 0.5,
-        sea_fog: 0.035,
+        sea_fog: 0.028,
         // The moon lights the haze from every side, not as a second sun.
         moon_glow: 0.1,
         // The salmon glow and warm key are the sun's: the moon lights in its own colour.
@@ -527,7 +439,6 @@ impl ZoneLook {
     pub const DARKSHORE_NOON: Self = Self {
         exposure: 0.95,
         glow: [1.0, 0.96, 0.95],
-        haze_tint: [0.8, 0.8, 0.82],
         fog_tint: [1.9, 1.9, 1.93],
         sky_tint: [1.0, 1.0, 1.04],
         saturation: 0.72,
@@ -626,24 +537,20 @@ struct ZoneCatalog(AreaTableCatalog);
 
 const ONE_BITS: u32 = 0x3f80_0000;
 static KEY: AtomicU32 = AtomicU32::new(ONE_BITS);
+static SUN_THROUGH: AtomicU32 = AtomicU32::new(ONE_BITS);
+static SKY_THROUGH: AtomicU32 = AtomicU32::new(ONE_BITS);
+static AIR_GLOW: [AtomicU32; 3] = [const { AtomicU32::new(0) }; 3];
 static MOON_KEY_GAIN: AtomicU32 = AtomicU32::new(ONE_BITS);
 static FILL: AtomicU32 = AtomicU32::new(ONE_BITS);
 static EXPOSURE: AtomicU32 = AtomicU32::new(ONE_BITS);
-static AUTO_LIFT: AtomicU32 = AtomicU32::new(ONE_BITS);
 static FOG_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
 static SKY_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
 static KEY_TINT: [AtomicU32; 3] = [const { AtomicU32::new(ONE_BITS) }; 3];
-static SILHOUETTE: AtomicU32 = AtomicU32::new(0x3f33_3333); // 0.7
 static GRADE: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 
 /// The zone look's cinematic grade for the post: `[contrast, saturation, vignette, toe]`.
 pub fn grade() -> [f32; 4] {
     [0, 1, 2, 3].map(|i| f32::from_bits(GRADE[i].load(Ordering::Relaxed)))
-}
-
-/// The zone look's distant-silhouette shade (the WDL band, a modern frame only).
-pub fn silhouette() -> f32 {
-    f32::from_bits(SILHOUETTE.load(Ordering::Relaxed))
 }
 
 /// The zone look's gamma multiplier on the authored fog colour (1 in classic).
@@ -672,16 +579,6 @@ pub const MOON_KEY: f32 = 0.85;
 /// The fill's multiplier under a full moon: the shadowed side falls toward the night floor.
 pub const MOON_FILL: f32 = 0.45;
 
-/// The exact sRGB encode, the inverse of [`srgb_to_linear`].
-fn linear_to_srgb(c: f32) -> f32 {
-    let x = c.max(0.0);
-    if x <= 0.003_130_8 {
-        x * 12.92
-    } else {
-        1.055 * x.powf(1.0 / 2.4) - 0.055
-    }
-}
-
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
@@ -700,83 +597,41 @@ pub fn key_fill() -> (f32, f32) {
     )
 }
 
-/// fork: the share of the moon's key the shaft haze and banks scatter on their isotropic half
-/// (`froxel_scatter.wgsl`'s `shaft_phase`); their phase lobe, where a beam reads, takes it whole as
-/// it takes the sun's. The authored night diffuse rows are bright enough to light the ground
-/// (Darkshore's is 0.58), and haze lit by them evenly read as a pale dusk out to the horizon.
-pub const MOON_HAZE: f32 = 0.4;
-
-/// Dev tuning (`$WOW_MODERN_MOON_HAZE`, browser `?modern_moon_haze=`): the share in place of
-/// [`MOON_HAZE`].
-fn moon_haze() -> f32 {
-    crate::launch_env::live_var("WOW_MODERN_MOON_HAZE")
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .map_or(MOON_HAZE, |v| v.clamp(0.0, 1.0))
+/// fork: **the key through the air** (`volumetrics::sun_through`): the share of the key light the
+/// air above the ground lets through to it (1 in classic, and in clear air at a high sun).
+pub fn sun_through() -> f32 {
+    f32::from_bits(SUN_THROUGH.load(Ordering::Relaxed))
 }
 
-/// The key light's share on the air's isotropic half (1 by day, [`MOON_HAZE`] under the moon).
-pub fn key_air_share() -> f32 {
-    lerp(1.0, moon_haze(), super::sun_arc::moon_key())
+/// fork: **the sky a surface sees through the air** (`volumetrics::sky_through`): the share of the
+/// authored sky's light the haze above the ground lets through to it (1 in classic and in clear
+/// air), and the haze's own glow (linear), which lights it from the rest of its sky. In thick haze
+/// the ground's sky is the glowing haze.
+pub fn air_sky() -> (f32, [f32; 3]) {
+    (
+        f32::from_bits(SKY_THROUGH.load(Ordering::Relaxed)),
+        [0, 1, 2].map(|i| f32::from_bits(AIR_GLOW[i].load(Ordering::Relaxed))),
+    )
 }
 
-/// The post's exposure for a modern frame.
+/// Publish [`sun_through`] and [`air_sky`] for the next frame's light rows.
+pub(crate) fn publish_sun(through: f32, sky_through: f32, glow: [f32; 3]) {
+    SUN_THROUGH.store(through.to_bits(), Ordering::Relaxed);
+    SKY_THROUGH.store(sky_through.to_bits(), Ordering::Relaxed);
+    for (cell, v) in AIR_GLOW.iter().zip(glow) {
+        cell.store(v.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// The post's exposure for a modern frame: the zone look's, times the auto-exposure's lift. One
+/// gain on the whole frame, world, air and sky alike, as a camera's exposure is.
 pub fn exposure() -> f32 {
     f32::from_bits(EXPOSURE.load(Ordering::Relaxed))
 }
 
-/// The post's exposure for a modern frame without the auto-exposure's lift: the zone look's own.
-/// The combine applies the lift on top, by [`lifted`].
-pub fn base_exposure() -> f32 {
-    exposure() / auto_lift().max(1e-3)
-}
-
-/// The auto-exposure's share of [`exposure`]: 1 with it off or on a classic frame.
-pub fn auto_lift() -> f32 {
-    f32::from_bits(AUTO_LIFT.load(Ordering::Relaxed))
-}
-
-/// The lift and its room in scene units (before [`base_exposure`]), as the combine and the sky
-/// passes read them: `(lift, AUTO_EXPOSURE_ROOM / base_exposure)`.
-pub fn lift_room() -> (f32, f32) {
-    (auto_lift(), exposure_room() / base_exposure().max(1e-3))
-}
-
-/// [`AUTO_EXPOSURE_ROOM`], or `$WOW_AUTO_EXPOSURE_ROOM` (browser `?auto_exposure_room=`) live, for
-/// tuning: a large room is the plain linear lift.
-fn exposure_room() -> f32 {
-    crate::launch_env::live_var("WOW_AUTO_EXPOSURE_ROOM")
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or(AUTO_EXPOSURE_ROOM)
-}
-
-/// fork: **the auto-exposure lifts the dark, not the light.** The eye adapting to a dark ground
-/// should not blow out what is already bright (a sun shaft's haze, a fogged far hill), so the lift
-/// is a gain on each pixel's luminance `y`, `1 + (lift - 1) / (1 + (lift - 1) y / room)`: the whole
-/// lift in the dark, never below 1, and at most `room` of added brightness. `colorspace::lifted`
-/// is the combine's twin.
-pub fn lifted(y: f32, lift: f32, room: f32) -> f32 {
-    let a = lift - 1.0;
-    y * (1.0 + a / (1.0 + a * y / room.max(1e-6)))
-}
-
-/// fork: [`lifted`]'s inverse: the luminance a pixel must hold for the lift to land it at `y`. The
-/// sky dome, the clouds and the fog over the sky draw at it, so the sky keeps the zone look's
-/// exposure at every brightness: a dark night sky is as dark as the ground the lift is for, which
-/// no luminance curve tells apart. `colorspace::unlifted` is the shaders' twin.
-pub fn unlifted(y: f32, lift: f32, room: f32) -> f32 {
-    // The root of `a u² + (room·lift − a y) u − y·room = 0`, in the form without cancellation.
-    let (a, room) = (lift - 1.0, room.max(1e-6));
-    let b = room * lift - a * y;
-    let d = (b * b + 4.0 * a * y * room).max(0.0).sqrt();
-    if b >= 0.0 {
-        2.0 * y * room / (b + d).max(1e-12)
-    } else {
-        (d - b) / (2.0 * a)
-    }
-}
-
 /// **The auto-exposure**: it lifts a dark picture into visible brightness and does nothing else.
+/// The lift is a plain gain in [`exposure`], the same on every pixel: a dark pixel and a lamp both
+/// take it, and the tonemap's shoulder holds the bright.
 /// It meters the screen: the scene's log-average luminance ([`super::meter`]) as the zone look
 /// exposes it, so a dark zone, a night and deep shade all lift as the eye would adapt. Below
 /// [`AUTO_EXPOSURE_TARGET`] it makes up four fifths of the shortfall, in stops; at and above
@@ -808,10 +663,6 @@ const AUTO_EXPOSURE_SECONDS: f32 = 1.5;
 ///
 /// fork: 0.02 since 2026-10-25 (the director's call), from 0.06, with the strength above.
 const AUTO_EXPOSURE_TARGET: f32 = 0.02;
-/// The most brightness the auto-exposure adds to a pixel (linear luminance, as the zone look
-/// exposes it): five times [`AUTO_EXPOSURE_TARGET`], so a dark scene's key and its shadows take the
-/// whole lift and its lights almost none (a 0.5 haze under an 8x lift gains a fifth).
-const AUTO_EXPOSURE_ROOM: f32 = 0.1;
 /// Seconds without a new meter reading before the authored rows stand in again.
 const METER_STALE_SECONDS: f32 = 1.0;
 
@@ -898,8 +749,6 @@ fn publish(look: ZoneLook, auto_exposure: f32) {
         (super::MODERN_EXPOSURE * look.exposure * auto_exposure).to_bits(),
         Ordering::Relaxed,
     );
-    AUTO_LIFT.store(auto_exposure.to_bits(), Ordering::Relaxed);
-    SILHOUETTE.store(look.silhouette.to_bits(), Ordering::Relaxed);
     for (i, v) in [look.contrast, look.saturation, look.vignette, look.toe]
         .into_iter()
         .enumerate()
@@ -947,9 +796,8 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 }
 
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
-/// row, in field order — `key,fill,exposure,haze,forward,key_scatter,glow r,g,b,haze_tint r,g,b,
-/// fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,silhouette,fog_clear,shafts,contrast,saturation,vignette,toe,
-/// key_tint r,g,b,ground_fog,night_banks,night_glow,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_height,bank_analytic,bank_patch_yd,bank_rgb r,g,b,bank_clear,bank_clear_edge,bank_clear_floor,bank_moon_gain,bank_froxel,bank_froxel_night,bank_shade,bank_shade_day`. An empty or unparsable entry keeps the zone's value.
+/// row, in field order — `key,fill,exposure,haze,forward,glow r,g,b,fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,contrast,saturation,vignette,toe,key_tint r,g,b,ground_fog,night_banks,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_analytic,bank_patch_yd,bank_clear_floor,bank_froxel,bank_froxel_night,bank_height,bank_clear,bank_clear_edge`. An empty or unparsable entry keeps the
+/// zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
         .map(|v| v.split(',').map(|p| p.trim().parse().ok()).collect())
@@ -968,52 +816,44 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.exposure, 2);
     set(&mut look.haze, 3);
     set(&mut look.forward, 4);
-    set(&mut look.key_scatter, 5);
     for c in 0..3 {
-        set(&mut look.glow[c], 6 + c);
-        set(&mut look.haze_tint[c], 9 + c);
-        set(&mut look.fog_tint[c], 13 + c);
-        set(&mut look.sky_tint[c], 17 + c);
+        set(&mut look.glow[c], 5 + c);
     }
-    set(&mut look.fog_reach, 12);
-    set(&mut look.fog_falloff, 16);
-    set(&mut look.silhouette, 20);
-    set(&mut look.fog_clear, 21);
-    set(&mut look.shafts, 22);
-    set(&mut look.contrast, 23);
-    set(&mut look.saturation, 24);
-    set(&mut look.vignette, 25);
-    set(&mut look.toe, 26);
+    set(&mut look.fog_reach, 8);
     for c in 0..3 {
-        set(&mut look.key_tint[c], 27 + c);
+        set(&mut look.fog_tint[c], 9 + c);
     }
-    set(&mut look.ground_fog, 30);
-    set(&mut look.night_banks, 31);
-    set(&mut look.night_glow, 32);
-    set(&mut look.room_reach, 33);
+    set(&mut look.fog_falloff, 12);
     for c in 0..3 {
-        set(&mut look.noon_key[c], 34 + c);
+        set(&mut look.sky_tint[c], 13 + c);
     }
-    set(&mut look.noon_mix, 37);
-    set(&mut look.sea_fog, 38);
-    set(&mut look.moon_glow, 39);
-    set(&mut look.moon_hue, 40);
-    set(&mut look.moon_key, 41);
-    set(&mut look.bank_moon, 42);
-    set(&mut look.bank_height, 43);
-    set(&mut look.bank_analytic, 44);
-    set(&mut look.bank_patch_yd, 45);
+    set(&mut look.contrast, 16);
+    set(&mut look.saturation, 17);
+    set(&mut look.vignette, 18);
+    set(&mut look.toe, 19);
     for c in 0..3 {
-        set(&mut look.bank_rgb[c], 46 + c);
+        set(&mut look.key_tint[c], 20 + c);
     }
-    set(&mut look.bank_clear, 49);
-    set(&mut look.bank_clear_edge, 50);
-    set(&mut look.bank_clear_floor, 51);
-    set(&mut look.bank_moon_gain, 52);
-    set(&mut look.bank_froxel, 53);
-    set(&mut look.bank_froxel_night, 54);
-    set(&mut look.bank_shade, 55);
-    set(&mut look.bank_shade_day, 56);
+    set(&mut look.ground_fog, 23);
+    set(&mut look.night_banks, 24);
+    set(&mut look.room_reach, 25);
+    for c in 0..3 {
+        set(&mut look.noon_key[c], 26 + c);
+    }
+    set(&mut look.noon_mix, 29);
+    set(&mut look.sea_fog, 30);
+    set(&mut look.moon_glow, 31);
+    set(&mut look.moon_hue, 32);
+    set(&mut look.moon_key, 33);
+    set(&mut look.bank_moon, 34);
+    set(&mut look.bank_analytic, 35);
+    set(&mut look.bank_patch_yd, 36);
+    set(&mut look.bank_clear_floor, 37);
+    set(&mut look.bank_froxel, 38);
+    set(&mut look.bank_froxel_night, 39);
+    set(&mut look.bank_height, 40);
+    set(&mut look.bank_clear, 41);
+    set(&mut look.bank_clear_edge, 42);
     look
 }
 
@@ -1121,29 +961,6 @@ fn update_look(
 mod tests {
     use super::*;
 
-    /// The lift takes a dark pixel the whole way, a bright one barely, never darkens and never
-    /// crosses two pixels over; its inverse lands every pixel back where it was.
-    #[test]
-    fn the_lift_lifts_the_dark_and_leaves_the_light() {
-        let room = AUTO_EXPOSURE_ROOM;
-        for lift in [1.0, 1.5, 3.0, AUTO_EXPOSURE_MAX] {
-            let mut prev = 0.0;
-            for i in 1..=400 {
-                let y = i as f32 * 0.01 * 0.01 * i as f32;
-                let out = lifted(y, lift, room);
-                assert!(out >= y && out <= y * lift + 1e-6, "{lift} {y} {out}");
-                assert!(out - y <= room + 1e-6);
-                assert!(out > prev);
-                prev = out;
-                let back = lifted(unlifted(y, lift, room), lift, room);
-                assert!((back - y).abs() <= 1e-4 * y.max(1.0), "{lift} {y} {back}");
-            }
-        }
-        // A near-black pixel takes the whole 8x; a sun shaft's 0.5 haze about a fifth more.
-        assert!(lifted(1e-5, 8.0, room) / 1e-5 > 7.99);
-        assert!(lifted(0.5, 8.0, room) < 0.5 * 1.2);
-    }
-
     /// The screen lift leaves an open day alone, rises as the exposed picture darkens, counts the
     /// look's own exposure, and never passes its ceiling.
     #[test]
@@ -1228,7 +1045,7 @@ mod tests {
     fn the_default_looks_night_wears_darkshores_air() {
         let (n, d) = (look_for_zone_at(999_999, 120.0), ZoneLook::DARKSHORE);
         assert_eq!(n, ZoneLook::NIGHT);
-        assert_eq!((n.haze, n.silhouette), (d.haze, d.silhouette));
+        assert_eq!(n.haze, d.haze);
         assert_eq!((n.ground_fog, n.night_banks), (0.0, 0.0));
         assert_eq!(look_for_zone_at(11, 120.0).night_banks, MIST_BANKS);
         assert_eq!(look_for_zone_at(10, 120.0), ZoneLook::EERIE);
@@ -1280,7 +1097,7 @@ mod tests {
         for zone in COLD_ZONES {
             let c = look_for_zone(*zone);
             assert_eq!(c, ZoneLook::COLD, "zone {zone}");
-            for tint in [c.key_tint, c.fog_tint, c.sky_tint, c.haze_tint] {
+            for tint in [c.key_tint, c.fog_tint, c.sky_tint] {
                 assert!(
                     tint[2] > 1.0 && tint[0] < tint[1] && tint[1] < tint[2],
                     "zone {zone}"
@@ -1300,21 +1117,15 @@ mod tests {
         );
     }
 
-    /// An ordinary zone's night is clearer than a dark zone's: no banks and a dim air glow.
+    /// An ordinary zone's night lies clear; a dark zone keeps its whole bank overnight.
     #[test]
     fn only_the_dark_zones_nights_are_eerie() {
         for zone in EERIE_ZONES.iter().chain([&TIRISFAL_ZONE]) {
             let d = look_for_zone(*zone);
-            assert_eq!(
-                (d.night_banks, d.night_glow),
-                (d.ground_fog, 1.0),
-                "zone {zone}"
-            );
+            assert_eq!(d.night_banks, d.ground_fog, "zone {zone}");
         }
         for zone in [12, 33, 14, 1637, 17, 215] {
-            let n = look_for_zone(zone);
-            assert_eq!(n.night_banks, 0.0, "zone {zone}");
-            assert!(n.night_glow < ZoneLook::EERIE.night_glow, "zone {zone}");
+            assert_eq!(look_for_zone(zone).night_banks, 0.0, "zone {zone}");
         }
     }
 
@@ -1349,7 +1160,6 @@ mod tests {
         let green = |c: [f32; 3]| c[1] / c[0].max(c[2]);
         for (a, b) in [
             (t.glow, e.glow),
-            (t.haze_tint, e.haze_tint),
             (t.fog_tint, e.fog_tint),
             (t.sky_tint, e.sky_tint),
             (t.key_tint, e.key_tint),
@@ -1381,7 +1191,6 @@ mod tests {
         let (d, n) = (ZoneLook::DARKSHORE, ZoneLook::DARKSHORE_NOON);
         for (a, b) in [
             (n.glow, d.glow),
-            (n.haze_tint, d.haze_tint),
             (n.fog_tint, d.fog_tint),
             (n.sky_tint, d.sky_tint),
             (n.key_tint, d.key_tint),

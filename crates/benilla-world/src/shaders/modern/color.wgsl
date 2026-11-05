@@ -52,38 +52,3 @@ fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
-// fork: the auto-exposure's gain at luminance `y` (`look::lifted`): the whole `lift` in the dark,
-// never below 1, at most `room` of added brightness, so it lifts the dark and leaves the light.
-fn lift_gain(y: f32, lift: f32, room: f32) -> f32 {
-    let a = lift - 1.0;
-    return 1.0 + a / (1.0 + a * max(y, 0.0) / max(room, 1e-6));
-}
-
-// fork: `c` scaled so the lift lands its luminance where it is now (`look::unlifted`): the sky
-// keeps the zone look's exposure under the auto-exposure.
-fn unlifted(c: vec3<f32>, lift: f32, room: f32) -> vec3<f32> {
-    let y = max(luminance(c), 0.0);
-    let a = lift - 1.0;
-    let r = max(room, 1e-6);
-    let b = r * lift - a * y;
-    let d = sqrt(max(b * b + 4.0 * a * y * r, 0.0));
-    let u = select((d - b) / (2.0 * a), 2.0 * y * r / max(b + d, 1e-12), b >= 0.0);
-    return c * select(u / y, 1.0 / max(lift, 1e-3), y < 1e-8);
-}
-
-// fork: **the air keeps the sky's exposure over the world too.** The fog over the sky is drawn
-// unlifted, and lifted over the world the same air met it at the horizon as a hard line: on a dark
-// night a fogged-out sea, ship or distant band stood pale under a black horizon. A world pixel takes
-// the unlift of its in-scatter (`fog.rgb`) in the share the fog hides it (`1 − fog.a`): one swallowed
-// by the air lands where the sky's air does, one in clear air keeps the whole lift. Both terms of
-// `rgb + dst * a` scale, so the surface goes with its air. The fog composite and the water, which
-// fogs itself after the composite, both take this.
-fn air_exposure(fog: vec4<f32>, lift: f32, room: f32) -> vec4<f32> {
-    let y = luminance(fog.rgb);
-    if (y <= 1e-8) {
-        return fog;
-    }
-    let s = luminance(unlifted(fog.rgb, lift, room)) / y;
-    let g = mix(s, 1.0, clamp(fog.a, 0.0, 1.0));
-    return vec4<f32>(fog.rgb * g, fog.a * g);
-}

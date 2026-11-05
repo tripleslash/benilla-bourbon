@@ -599,26 +599,10 @@ pub(super) fn follow_stars(
     } else {
         byte / 255.0 * share
     };
-    // fork: `.w` = the reciprocal of the zone look's exposure, and the horizon row's `.zw` the
-    // auto-exposure's lift and room, which the dome inverts (`look::unlifted`), so the night sky
-    // reaches the screen at its classic brightness: the lift exists to make a dark lit world
-    // readable, and on the star dome it blew the nebulae out to white. The tonemap is the identity
-    // below its knee, where the night sky sits. 1 on a classic frame, in 1/1024 steps for the
-    // write gate.
-    let unexpose = if linear > 0.5 {
-        benilla_assets::quantize(1.0 / crate::modern::look::base_exposure().max(1e-3), 1024.0)
-    } else {
-        1.0
-    };
-    // fork: the horizon fade on a linear frame (`StarExt::horizon`).
+    // fork: the horizon fade on a linear frame (`StarExt::horizon`). The dome takes the frame's one
+    // exposure, as everything else in it does.
     let horizon = if linear > 0.5 {
-        let (lift, room) = crate::modern::look::lift_room();
-        Vec4::new(
-            0.0,
-            MODERN_STAR_HORIZON,
-            benilla_assets::quantize(lift, 1024.0),
-            benilla_assets::quantize(room, 4096.0),
-        )
+        Vec4::new(0.0, MODERN_STAR_HORIZON, 0.0, 0.0)
     } else {
         Vec4::ZERO
     };
@@ -666,7 +650,6 @@ pub(super) fn follow_stars(
                     || (shown
                         && (m.base.uv_transform != uv
                             || m.extension.params.z != linear
-                            || m.extension.params.w != unexpose
                             || m.extension.horizon != horizon
                             || m.extension.tint != tint))
             },
@@ -674,7 +657,6 @@ pub(super) fn follow_stars(
                 m.base.base_color = color;
                 m.base.uv_transform = uv;
                 m.extension.params.z = linear;
-                m.extension.params.w = unexpose;
                 m.extension.horizon = horizon;
                 m.extension.tint = tint;
             },

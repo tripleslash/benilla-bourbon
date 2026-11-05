@@ -544,7 +544,9 @@ fn update_gi(
 
     // What a probe under nothing reads: half the sky's own mean, half what the ground bounces back.
     let ambient = Vec3::from(lighting.ambient);
-    let diffuse = Vec3::from(lighting.diffuse) * Vec3::from(super::look::key_tint());
+    let diffuse = Vec3::from(lighting.diffuse)
+        * Vec3::from(super::look::key_tint())
+        * super::look::sun_through();
     let (key, fill) = super::look::key_fill();
     let ambient = ambient * fill;
     let sun_up = (-lighting.sun_dir.normalize_or(Vec3::Y)).y.max(0.0);

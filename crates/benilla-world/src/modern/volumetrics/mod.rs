@@ -69,17 +69,10 @@ const CLOUD_HEIGHT: f32 = 350.0;
 /// Scatter history weight on a steady frame (was the plan's 0.9: beams shimmered with the jitter).
 const HISTORY_WEIGHT: f32 = 0.95;
 /// fork: **the night air** — haze extinction (1/yd) added in every zone overnight (scaled by the
-/// SIDN night fraction), so a night city layers into a lit haze with distance, as the Forever
-/// Orgrimmar night shot does. `froxel_scatter.wgsl` keeps `NIGHT_NEAR_SHARE` of it at the camera and
-/// all of it past `NIGHT_CLEAR_FAR`, so the street stays readable and the lamps around the player
-/// still have air to light. By day it is zero. It rides `room_media.z`, apart from the zone's own
-/// shaft haze.
+/// SIDN night fraction): the damp night air, so a night city layers into its lamp-lit haze with
+/// distance. It scatters the light that reaches it as the haze does, and nothing of its own. By day
+/// it is zero. It rides `room_media.z`, apart from the zone's own shaft haze.
 const NIGHT_HAZE: f32 = 0.004;
-/// fork: the night air's own glow: the zone's fog colour (decoded) times this, times the night
-/// fraction and the zone look's `night_glow`, is the radiance it scatters on top of the haze's. The
-/// night fog alone solves to a near black veil (Orgrimmar's is 0.011 linear), where the reference's
-/// night haze is a lit purple.
-const NIGHT_GLOW: f32 = 5.0;
 /// fork: **the air is as faint by day as it is at midnight.** The zone rows' shaft haze was fitted
 /// to reference shots, and in play the daylight lit it into a veil — Goldshire at dusk sat in an
 /// orange wash, while the same air under the moon read as the faint haze the user wants at every
@@ -88,25 +81,23 @@ const NIGHT_GLOW: f32 = 5.0;
 /// street the player stands in. Halfway to the thinnest tried (0.25 / 0.5), which cleared noon but
 /// lost the dusk glow. The live `WOW_MODERN_LOOK` override is scaled too.
 const HAZE_SCALE: f32 = 0.67;
-/// fork: **ground fog** — the banks' extinction at the ground (1/yd) at the full SIDN night, which
-/// falls off within a few yards of the terrain under each froxel (`froxel_scatter.wgsl`'s
-/// `BANK_INV_FALLOFF`; the GI heightfield, past it the ground under the camera).
-/// `froxel_scatter.wgsl` lights them with the shaft haze's key.
-/// Overnight a zone look's `night_banks` takes its share (none in an ordinary zone, the whole bank
-/// in a dark one), and its `ground_fog` keeps a share by day. Anchored to one plane at the camera's
-/// ground, 0.035 filled Hillsbrad's low ground and left Gilneas's hills bare.
+/// fork: **ground fog** — the volume's banks' extinction at the ground (1/yd) at the full SIDN night,
+/// which falls off within a few yards of the terrain under each froxel (`froxel_scatter.wgsl`'s
+/// `BANK_INV_FALLOFF`; the GI heightfield, past it the ground under the camera). Overnight a zone
+/// look's `night_banks` takes its share (none in an ordinary zone, the whole bank in a dark one), and
+/// its `ground_fog` keeps a share by day. Anchored to one plane at the camera's ground, 0.035 filled
+/// Hillsbrad's low ground and left Gilneas's hills bare.
 const BANK_EXTINCTION: f32 = 0.022;
-/// fork: the ground veil's dimmest luminance (linear).
-const BANK_LIGHT_FLOOR: f32 = 0.015;
+/// fork: the ground veil's extinction at the ground (1/yd) at a look's full share (`froxelfog.wgsl`'s
+/// `mist_air`): about 0.035 at Darkshore's, a faint veil over the ground the grass rises out of. Its
+/// droplets send back most of the light they take, the grass a tenth: at 0.1 it lay on the ground as
+/// a bright sheet several times the ground's own brightness.
+const VEIL_EXTINCTION: f32 = 0.025;
 /// fork: the top of the clear patches' noise band the volume's banks build in under a ground veil
 /// (`froxel_scatter.wgsl`'s `bank_patches`): Darkshore's edge band's top, in every look that lays the
-/// veil, so the eerie looks' banks build where Darkshore's do. Their own band (0.2 to 1.0) ends where
-/// the noise almost never reaches, and they laid none.
+/// veil, so the eerie looks' banks build where Darkshore's do.
 const BANK_BUILD_TOP: f32 =
     super::look::ZoneLook::DARKSHORE.bank_clear + super::look::ZoneLook::DARKSHORE.bank_clear_edge;
-/// fork: under a risen moon the night air's uniform glow drops to this share: the moonlight and
-/// the banks carry the night instead of a veil over everything.
-const MOON_VEIL: f32 = 0.4;
 /// fork: **a hazy zone stays as hazy as it is.** The zone's own air by day (1/yd: its shaft haze,
 /// its day banks and any sea fog) up to which the night air and rain's humid veil come in whole
 /// (Elwynn's haze), and from which a zone counts as hazy already (Darkshore's coast, the eerie
@@ -227,23 +218,20 @@ pub struct FroxelFog {
     pub ground_x: Vec4,
     pub ground_y: Vec4,
     pub ground: Vec4,
-    /// fork: the lamp halos' clear-weather air: x = fog extinction, y = near-clear range, z = haze;
-    /// w = the key's share on the shaft haze's and banks' isotropic half (`look::key_air_share`).
+    /// fork: the lamp halos' clear-weather air: x = fog extinction, z = haze; y, w free.
     pub halo_air: Vec4,
-    /// fork: x, y = the auto-exposure's lift and room (`look::lift_room`), whose inverse the
-    /// composite draws sky pixels at (`look::unlifted`); z = the top of the noise band the volume's
-    /// banks build in ([`BANK_BUILD_TOP`]); w = the clear patches' feature size
-    /// (`look::ZoneLook::bank_patch_yd`).
-    pub sky: Vec4,
-    /// fork: the ground veil (`froxelfog.wgsl`'s `bank_air`): x = its extinction at the ground (1/yd,
-    /// 0 where the look's banks stay in the volume); y = 1 / its height (yd); z, w = its clear patches
-    /// (`ZoneLook::bank_clear`, `bank_clear_edge`).
-    pub bank: Vec4,
-    /// fork: the veil's light (linear radiance, [`bank_light`]); w = the key's share of it
-    /// ([`bank_key_share`]).
-    pub bank_color: Vec4,
-    /// fork: the veil's shade and clear patches' floor (`froxelfog.wgsl`'s `bank_reach`).
-    pub bank_reach: Vec4,
+    /// fork: the ambient the surfaces take, unscattered (linear); w = the distant terrain's albedo
+    /// ([`super::DISTANT_ALBEDO`]).
+    pub light_ambient: Vec4,
+    /// fork: the ground mist (`froxelfog.wgsl`'s `mist_air`): x = its extinction at the ground (1/yd,
+    /// 0 = none); y = 1 / its scale height (yd); z, w free.
+    pub mist: Vec4,
+    /// fork: the open air's ambient in-scatter that no canopy hides (linear): its albedo x the light
+    /// arriving sideways and from below, the ground's and the diffuse light the air scattered out of
+    /// the key (`ambient` holds the sky's, which the sky map occludes); w free.
+    pub ambient_open: Vec4,
+    /// fork: [`Self::ambient_open`] for the room's air; w free.
+    pub room_open: Vec4,
 }
 
 impl FroxelFog {
@@ -279,10 +267,10 @@ impl FroxelFog {
             self.ground_y,
             self.ground,
             self.halo_air,
-            self.sky,
-            self.bank,
-            self.bank_color,
-            self.bank_reach,
+            self.light_ambient,
+            self.mist,
+            self.ambient_open,
+            self.room_open,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -520,31 +508,41 @@ fn update_volume(
     // shader because a room's medium reaches only as far as the room does ([`CameraRoomExtent`]):
     // one blended medium is what wrapped the city seen from Orgrimmar's gate hall in 292 yd of the
     // building's teal.
+    // The light the surfaces take (`lighting::global_light`'s rows): the ambient with its moonlight
+    // floor and the look's fill, the key with the look's gain, tint and horizon fade.
+    let (key_gain, fill) = super::look::key_fill();
+    let key_tint = super::look::key_tint();
+    let ambient_row = super::night_floor(l.ambient, l.sidn_night).map(|c| c * fill);
+    let key_row: [f32; 3] = std::array::from_fn(|c| l.diffuse[c] * key_gain * key_tint[c]);
+    let light_ambient = Vec3::from(ambient_row.map(super::srgb_to_linear));
+    let light_key = Vec3::from(key_row.map(super::srgb_to_linear));
+    let (air_sky, air_open) = air_ambient(
+        &crate::sky::dome_radiance(l),
+        light_ambient,
+        light_key,
+        to_light.y,
+    );
     let shared =
         |fog_color: [f32; 3], fog_start: f32, fog_end: f32, interior: f32| media::MediaInputs {
             fog_color,
             fog_start,
             fog_end,
             zone_fog_end: l.zone_fog_end,
-            // The same moonlight floor the surfaces take, so night haze is not black under a lit ground.
-            ambient: super::night_floor(l.ambient, l.sidn_night),
-            // The key's horizon fade (a set moon scatters nothing into the haze).
-            diffuse: l.diffuse.map(|c| c * super::sun_arc::key_horizon()),
+            ambient: air_sky.to_array(),
+            diffuse: light_key.to_array(),
             storm: l.storm_bcc,
             underwater: underwater.as_deref().is_some_and(|u| u.0.any()),
             interior,
             haze: look.0.haze * HAZE_SCALE + super::weather::HEAVY_HAZE * humid,
             // fork: under the moon the look keeps `moon_glow` of its forward lobe.
             forward: look.0.forward * (1.0 + (look.0.moon_glow - 1.0) * super::sun_arc::moon_key()),
-            key_scatter: look.0.key_scatter,
             fog_reach: look.0.fog_reach,
             fog_tint: look.0.fog_tint,
             fog_falloff: look.0.fog_falloff,
-            fog_clear: look.0.fog_clear,
             room_reach: look.0.room_reach,
             added_air: added,
         };
-    let media = media::solve(&shared(l.fog_color, l.fog_start, l.fog_end, 0.0));
+    let mut media = media::solve(&shared(l.fog_color, l.fog_start, l.fog_end, 0.0));
     // fork: the lamp halos' air — the same zone solved in clear weather, so rain and storms neither
     // swell nor fade a lamp's glow (`froxelfog::halo_fog`), but for heavy rain, whose wet air the
     // lamps bloom into (`modern::weather::HEAVY_HALO_GAIN`).
@@ -564,7 +562,7 @@ fn update_volume(
             .filter(|(_, radius)| *radius > 0.0),
         room_w,
     );
-    let room_media = (room_w > 1e-3).then(|| {
+    let mut room_media = (room_w > 1e-3).then(|| {
         media::solve(&shared(
             l.wmo_fog_color,
             l.wmo_fog_start,
@@ -599,26 +597,50 @@ fn update_volume(
     };
     hist.bank_ground = Some(bank_ground);
 
+    // **The key through the air.** The direct light reaching the ground has crossed the air above it
+    // toward the light; the air scattered the rest out of the beam, and the share of that heading down
+    // reaches the ground as diffuse light. For the surfaces and
+    // the air alike. The air the key crosses is the air over the ground, the shaft haze and the night
+    // air; the long-range fog is the zone's distance (calibrated on its authored fog end, compressed to
+    // the game's distances), not a column over the ground: counted, it took most of a low sun that
+    // the reference shows lighting the trunks gold through Darkshore's haze. Read at the regional
+    // ground, not the camera's: the camera climbing a hill must not change the light on the scene.
+    let night = l.sidn_night.clamp(0.0, 1.0);
+    let sigma_ground = media.haze + NIGHT_HAZE * night * added;
+    let through = sun_through(sigma_ground, media.inv_height, to_light.y);
+    let lost = light_key * ((1.0 - through) * to_light.y.max(0.0) * SCATTERED_DOWN);
+    let scatter = Vec3::from(media.albedo) * lost;
+    media.key_in = media.key_in.map(|c| c * through);
+    if let Some(m) = room_media.as_mut() {
+        m.key_in = m.key_in.map(|c| c * through);
+    }
+    // The light that reaches the air sideways and from below, past any canopy.
+    let open = air_open + scatter;
+    let open_in = |m: &media::Media| Vec3::from(m.albedo) * open;
+    // The sky a surface sees through the air above it: the authored sky's share, and the air's own
+    // glow (its in-scatter, the phase averaged over the sphere) from the rest. Here the whole column
+    // counts, the zone's long-range fog with it: the sky's low band, where most of the hemisphere's
+    // path through the air lies, is that fog, glowing.
+    let sky_through = sky_through(media.density + sigma_ground, media.inv_height);
+    let glow = Vec3::from(media.albedo) * (air_sky + open) + Vec3::from(media.key_in);
+    super::look::publish_sun(through, sky_through, glow.to_array());
+
     // Dev (`?modern_foglog=1`): the solved medium every two seconds.
     if crate::launch_env::var("WOW_MODERN_FOGLOG").as_deref() == Some("1") {
         hist.log_timer -= dt;
         if hist.log_timer <= 0.0 {
             hist.log_timer = 2.0;
             info!(
-                "modern fog: night {:.2} moon_key {:.2} cam_y {:.0} bank_ground {:.0} density {:.5} clear {:.0} ref {:.0} key_in {:?} amb_in {:?} diffuse {:?} ambient {:?} key_horizon {:.2} to_light {:?} zone_end {:.0} fog {:?} room {:?} room_w {:.2} room_density {:.5} wmo_fog {:.0}..{:.0}",
+                "modern fog: night {:.2} moon_key {:.2} cam_y {:.0} bank_ground {:.0} density {:.5} ref {:.0} albedo {:?} key_in {:?} amb_in {:?} diffuse {:?} ambient {:?} key_horizon {:.2} to_light {:?} zone_end {:.0} fog {:?} room {:?} room_w {:.2} room_density {:.5} wmo_fog {:.0}..{:.0} air_ambient {:?} dome {:?} sun_through {:.3} scatter {:?}",
                 l.sidn_night, super::sun_arc::moon_key(), cam.y, bank_ground,
-                media.density, media.near_clear, reference_height, media.key_in, media.ambient_in,
+                media.density, reference_height, media.albedo, media.key_in, media.ambient_in,
                 l.diffuse, l.ambient, super::sun_arc::key_horizon(), to_light, l.zone_fog_end, l.fog_color,
-                room, room_w, room_media.map_or(0.0, |m| m.density), l.wmo_fog_start, l.wmo_fog_end
+                room, room_w, room_media.map_or(0.0, |m| m.density), l.wmo_fog_start, l.wmo_fog_end,
+                (air_sky, air_open), l.sky, through, scatter
             );
         }
     }
 
-    let shaft_key = shaft_key(l.diffuse, &look.0);
-    let night = l.sidn_night.clamp(0.0, 1.0);
-    let veil = 1.0 + (MOON_VEIL - 1.0) * super::sun_arc::moon_key();
-    let night_glow = Vec3::from(l.fog_color.map(super::srgb_to_linear))
-        * (NIGHT_GLOW * night * veil * look.0.night_glow);
     let bank_analytic = look.0.bank_analytic > 0.5;
     let grid = tier.grid;
     // A hard cut (no history, a new grid, a jump) drops the whole volume's history. A quick turn only
@@ -668,12 +690,12 @@ fn update_volume(
             media.density,
             media.inv_height,
             reference_height,
-            media.near_clear,
+            look.0.bank_patch_yd,
         ),
         medium: Vec4::new(
             media.haze,
             media.noise,
-            shaft_key.x,
+            look.0.bank_clear_floor.clamp(0.0, 1.0),
             // Negative on a quick turn: the shader drops only the near froxels' history.
             match (cut, turned) {
                 (true, _) => 0.0,
@@ -681,11 +703,9 @@ fn update_volume(
                 (false, false) => HISTORY_WEIGHT,
             },
         ),
-        // The zone look's colour dials (`look::ZoneLook::glow` / `haze_tint`).
-        ambient: (Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint)).extend(shaft_key.y),
-        sun: (Vec3::from(media.key_in) * Vec3::from(look.0.key_hue(look.0.glow)))
-            .extend(media.forward_share),
-        sun_dir: to_light.extend(look.0.silhouette),
+        ambient: Vec3::from(media.ambient_in).extend(0.0),
+        sun: Vec3::from(media.key_in).extend(media.forward_share),
+        sun_dir: to_light.extend(0.0),
         phase: Vec4::new(
             media.g_backward,
             // The view distance: where the detailed world ends and the distant (WDL) band begins.
@@ -701,29 +721,28 @@ fn update_volume(
             tier.shafts,
         ),
         screen: Vec4::new(light_uv.x, light_uv.y, on_screen, tier.point_lights as f32),
-        wind: wind.extend(shaft_key.z),
+        wind: wind.extend(0.0),
         // The room the camera stands in, and its own medium — `room.w` 0 (no room, or none solved)
         // switches the whole lane off in the shader.
         room: match (room, &room_media) {
             (Some((centre, radius)), Some(_)) => centre.extend(radius),
             _ => Vec4::ZERO,
         },
-        // fork: the night air's extinction and glow (see `NIGHT_HAZE`, `NIGHT_GLOW`); the glow's rgb
-        // rides the three spare `.w` lanes of the room rows.
+        // fork: the night air's extinction (see `NIGHT_HAZE`).
         room_media: Vec4::new(
             room_media.map_or(0.0, |m| m.density),
             room_w,
             NIGHT_HAZE * night * added,
-            night_glow.x,
+            0.0,
         ),
         room_ambient: room_media
-            .map(|m| Vec3::from(m.ambient_in) * Vec3::from(look.0.haze_tint))
+            .map(|m| Vec3::from(m.ambient_in))
             .unwrap_or_default()
-            .extend(night_glow.y),
+            .extend(0.0),
         room_sun: room_media
-            .map(|m| Vec3::from(m.key_in) * Vec3::from(look.0.key_hue(look.0.glow)))
+            .map(|m| Vec3::from(m.key_in))
             .unwrap_or_default()
-            .extend(night_glow.z),
+            .extend(0.0),
         night: Vec4::new(
             if !super::banks_enabled() {
                 0.0
@@ -735,7 +754,7 @@ fn update_volume(
                 BANK_EXTINCTION * froxel.max(0.0)
             },
             bank_ground,
-            bank_air_share(&look.0),
+            BANK_BUILD_TOP,
             // fork: the zone look's sea fog (`froxel_scatter.wgsl`'s `sea_fog`).
             if super::banks_enabled() {
                 look.0.sea_fog
@@ -746,19 +765,12 @@ fn update_volume(
         ground_x: Vec4::ZERO,
         ground_y: Vec4::ZERO,
         ground: Vec4::ZERO,
-        halo_air: Vec4::new(
-            halo_air.density,
-            halo_air.near_clear,
-            halo_air.haze * halo_humid,
-            super::look::key_air_share(),
-        ),
-        sky: {
-            let (lift, room) = super::look::lift_room();
-            Vec4::new(lift, room, BANK_BUILD_TOP, look.0.bank_patch_yd)
-        },
-        bank: Vec4::new(
+        halo_air: Vec4::new(halo_air.density, 0.0, halo_air.haze * halo_humid, 0.0),
+        light_ambient: (light_ambient * sky_through + glow * (1.0 - sky_through))
+            .extend(super::DISTANT_ALBEDO),
+        mist: Vec4::new(
             if super::banks_enabled() && bank_analytic {
-                BANK_EXTINCTION * night_bank_share(&look.0, night, added)
+                VEIL_EXTINCTION * night_bank_share(&look.0, night, added)
             } else {
                 0.0
             },
@@ -766,21 +778,12 @@ fn update_volume(
             look.0.bank_clear,
             look.0.bank_clear_edge,
         ),
-        bank_color: {
-            let ambient = Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint);
-            let key = Vec3::from(media.key_in) * Vec3::from(look.0.key_hue(look.0.glow));
-            let gain = Vec3::from(look.0.bank_rgb);
-            (bank_light(ambient, key, gain)
-                * (1.0
-                    + (look.0.bank_moon_gain - 1.0) * super::sun_arc::moon_key().clamp(0.0, 1.0)))
-            .extend(bank_key_share(ambient, key, gain))
-        },
-        bank_reach: Vec4::new(
-            look.0.bank_shade_day + (look.0.bank_shade - look.0.bank_shade_day) * night,
-            0.0,
-            look.0.bank_clear_floor.clamp(0.0, 1.0),
-            0.0,
-        ),
+        ambient_open: open_in(&media).extend(0.0),
+        room_open: room_media
+            .as_ref()
+            .map(open_in)
+            .unwrap_or_default()
+            .extend(0.0),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -813,30 +816,57 @@ fn fading_room(
     *latched
 }
 
-/// fork: the ground veil's light this frame: the hour's light in the zone's air, flat, the ambient and
-/// half the key (the key's share, [`bank_key_share`], is what the shader's phase and shadow take). Its
-/// density is the same at every hour and this follows the light under it, so the veil reads alike
-/// from noon to midnight, held off black by [`BANK_LIGHT_FLOOR`] so a dark night does not lose it.
-fn bank_light(ambient: Vec3, key: Vec3, gain: Vec3) -> Vec3 {
-    let light = (ambient + key * 0.5) * gain;
-    let lum = light.dot(Vec3::new(0.2126, 0.7152, 0.0722));
-    if lum > 1e-4 && lum < BANK_LIGHT_FLOOR {
-        light * (BANK_LIGHT_FLOOR / lum)
+/// The lowest elevation (sine) the key's path through the air is taken at: a key on the horizon
+/// would cross the whole layer sideways.
+const SUN_LOWEST_SIN: f32 = 0.05;
+/// The path (yd) a key crosses through air with no height falloff (a uniform medium).
+const UNIFORM_SUN_PATH: f32 = 1000.0;
+/// The share of the light the air scatters out of the key's beam that heads down, to the ground:
+/// haze and fog droplets scatter forward (the phase's forward `g` is 0.75), so most of it.
+const SCATTERED_DOWN: f32 = 0.85;
+
+/// fork: **the key through the air**: the share of the key the air lets through to the ground,
+/// `e^(−τ)` over the column toward the light. Above an exponential height fog of extinction `sigma`
+/// at the ground and scale height `1 / inv_height`, the column's optical depth along a ray rising
+/// at `sin_up` is exactly `sigma / (inv_height · sin_up)`.
+pub(crate) fn sun_through(sigma: f32, inv_height: f32, sin_up: f32) -> f32 {
+    let up = sin_up.max(SUN_LOWEST_SIN);
+    let path = if inv_height > 1e-6 {
+        1.0 / (inv_height * up)
     } else {
-        light
-    }
+        UNIFORM_SUN_PATH / up
+    };
+    (-sigma.max(0.0) * path).exp()
 }
 
-/// fork: the key's share of [`bank_light`]'s luminance (0 to 1), which the floor's lift keeps.
-fn bank_key_share(ambient: Vec3, key: Vec3, gain: Vec3) -> f32 {
-    let w = Vec3::new(0.2126, 0.7152, 0.0722);
-    let k = (key * 0.5 * gain).dot(w).max(0.0);
-    let all = k + (ambient * gain).dot(w).max(0.0);
-    if all > 1e-6 {
-        (k / all).clamp(0.0, 1.0)
+/// fork: **the sky through the haze**: the share of the sky's light that reaches the ground through
+/// the haze above it, over the whole upper hemisphere (whose mean path through a layer is twice the
+/// vertical one), against the haze's own glow, which fills the rest of the ground's sky.
+pub(crate) fn sky_through(sigma: f32, inv_height: f32) -> f32 {
+    let column = if inv_height > 1e-6 {
+        1.0 / inv_height
     } else {
-        0.0
+        UNIFORM_SUN_PATH
+    };
+    (-2.0 * sigma.max(0.0) * column).exp()
+}
+
+/// fork: **the light that reaches the air**, the mean radiance arriving at a point from every
+/// direction (linear), in two parts: the sky dome as it is drawn over the upper half, solid-angle
+/// weighted (`dome`: [`crate::sky::dome_radiance`]), which a canopy over the point hides; and the
+/// ground's reflected light over the lower half (the distant terrain's albedo under the ambient and
+/// the key at its elevation `sun_up`), which none does. Haze lit by them, seen level and deep,
+/// converges on the sky at the horizon, as real haze does.
+pub(crate) fn air_ambient(dome: &[Vec3; 6], ambient: Vec3, key: Vec3, sun_up: f32) -> (Vec3, Vec3) {
+    // The dome's stops' elevations (deg): zenith, 16.8, 9.8, 3.7, 1.8, the horizon (`sky.wgsl`).
+    const ELEV: [f32; 6] = [90.0, 16.8, 9.8, 3.7, 1.8, 0.0];
+    let mut sky = Vec3::ZERO;
+    for i in 0..5 {
+        let w = ELEV[i].to_radians().sin() - ELEV[i + 1].to_radians().sin();
+        sky += (dome[i] + dome[i + 1]) * (0.5 * w);
     }
+    let ground = (ambient + key * sun_up.max(0.0)) * super::DISTANT_ALBEDO;
+    (sky * 0.5, ground * 0.5)
 }
 
 /// The share of the night air and rain's humid veil a zone takes on top of its own air (see
@@ -847,30 +877,13 @@ pub(crate) fn added_air(look: &super::look::ZoneLook) -> f32 {
     1.0 + (HAZY_SHARE - 1.0) * hazy
 }
 
-/// The ground banks' share of [`BANK_EXTINCTION`] at night fraction `night`: the day's banks, and
+/// The ground mist's share of [`BANK_EXTINCTION`] at night fraction `night`: the day's banks, and
 /// `added` of what the night lays over them, all of it where the look's banks are ground fog
 /// (`ZoneLook::bank_moon` 1).
 fn night_bank_share(look: &super::look::ZoneLook, night: f32, added: f32) -> f32 {
     let day = look.ground_fog.max(0.0);
     let added = added + (1.0 - added) * look.bank_moon.clamp(0.0, 1.0);
     day + added * (night * look.night_banks - day).max(0.0)
-}
-
-/// The key's share on the banks' isotropic half: the shaft haze's ([`super::look::key_air_share`]),
-/// up to the whole moon where the look's banks are ground fog (`ZoneLook::bank_moon` 1).
-fn bank_air_share(look: &super::look::ZoneLook) -> f32 {
-    let haze = super::look::key_air_share();
-    haze + (1.0 - haze) * look.bank_moon.clamp(0.0, 1.0)
-}
-
-/// The shaft haze's key radiance: the key light's own colour (decoded and horizon-faded) times the
-/// zone's key scattering, glow and shaft gain — not the medium's key term, which is normalized to
-/// the fog colour and would tint every beam with the zone's fog hue. Under the moon the isotropic
-/// half takes `look::key_air_share` of it (`halo_air.w`).
-fn shaft_key(diffuse: [f32; 3], look: &super::look::ZoneLook) -> Vec3 {
-    let horizon = super::sun_arc::key_horizon();
-    let scale = look.key_scatter.max(0.0) * look.shafts.max(0.0) * horizon;
-    Vec3::from(diffuse.map(super::srgb_to_linear)) * Vec3::from(look.key_hue(look.glow)) * scale
 }
 
 /// How far the regional reference may sit below the ground under the camera (yd) — most of a
@@ -985,26 +998,50 @@ mod tests {
         );
     }
 
-    /// The bank's colour follows the hour's light, its hue kept where a dark night lifts it to the
-    /// floor.
+    /// The key crosses the column above the ground: the higher the sun, the less air on its way; no
+    /// air lets all of it through.
     #[test]
-    fn the_banks_colour_follows_the_light_down_to_a_floor() {
-        let gain = Vec3::ONE;
-        let day = bank_light(Vec3::splat(0.2), Vec3::splat(0.4), gain);
-        assert_eq!(day, Vec3::splat(0.4));
-        let night = bank_light(Vec3::new(0.002, 0.001, 0.003), Vec3::ZERO, gain);
-        let lum = night.dot(Vec3::new(0.2126, 0.7152, 0.0722));
-        assert!((lum - BANK_LIGHT_FLOOR).abs() < 1e-5, "{lum}");
-        assert!(night.z > night.x && night.x > night.y, "{night}");
+    fn the_key_crosses_the_air_above_the_ground() {
+        assert_eq!(sun_through(0.0, 1.0 / 70.0, 0.5), 1.0);
+        let noon = sun_through(0.004, 1.0 / 70.0, 1.0);
+        let dusk = sun_through(0.004, 1.0 / 70.0, 0.2);
+        assert!((noon - (-0.004f32 * 70.0).exp()).abs() < 1e-6, "{noon}");
+        assert!(dusk < noon && dusk > 0.0, "{dusk}");
+        assert_eq!(
+            sun_through(0.004, 1.0 / 70.0, -0.3),
+            sun_through(0.004, 1.0 / 70.0, SUN_LOWEST_SIN)
+        );
     }
 
-    /// The key's share of the veil's light is half the key against the ambient, none without a key.
+    /// Clear air shows a surface the whole sky; a haze column of optical depth `τ` shows it `e^(−2τ)`.
     #[test]
-    fn the_veils_key_share_is_half_the_key_over_the_light() {
-        let share = bank_key_share(Vec3::splat(0.2), Vec3::splat(0.4), Vec3::ONE);
-        assert!((share - 0.5).abs() < 1e-6, "{share}");
-        assert_eq!(bank_key_share(Vec3::splat(0.2), Vec3::ZERO, Vec3::ONE), 0.0);
-        assert_eq!(bank_key_share(Vec3::ZERO, Vec3::ZERO, Vec3::ONE), 0.0);
+    fn a_surface_sees_its_sky_through_the_haze() {
+        assert_eq!(sky_through(0.0, 1.0 / 70.0), 1.0);
+        let t = sky_through(0.005, 1.0 / 100.0);
+        assert!((t - (-1.0f32).exp()).abs() < 1e-6, "{t}");
+    }
+
+    /// The air's ambient is the sky's mean over the top half and the lit ground's over the bottom:
+    /// a uniform sky of radiance `s` over black ground gives `s / 2`.
+    #[test]
+    fn the_airs_ambient_is_the_sky_above_and_the_ground_below() {
+        let s = Vec3::new(0.2, 0.3, 0.4);
+        let (a, below) = air_ambient(&[s; 6], Vec3::ZERO, Vec3::ZERO, 1.0);
+        assert!((a - s * 0.5).abs().max_element() < 1e-6, "{a}");
+        assert_eq!(below, Vec3::ZERO);
+        // The zenith weighs most: the band above 16.8 deg is 71 % of the half sphere.
+        let mut dome = [Vec3::ZERO; 6];
+        dome[0] = Vec3::ONE;
+        dome[1] = Vec3::ONE;
+        let top = air_ambient(&dome, Vec3::ZERO, Vec3::ZERO, 1.0).0.x * 2.0;
+        assert!(top > 0.7 && top < 0.8, "{top}");
+        // Lit ground adds its share; a set sun lights none of it.
+        let lit = air_ambient(&[Vec3::ZERO; 6], Vec3::ZERO, Vec3::ONE, 1.0);
+        assert!(lit.1.x > 0.0 && lit.0 == Vec3::ZERO);
+        assert_eq!(
+            air_ambient(&[Vec3::ZERO; 6], Vec3::ZERO, Vec3::ONE, -0.2).1,
+            Vec3::ZERO
+        );
     }
 
     /// The volume's banks build under every veiled look's band: Darkshore's top lies inside each
@@ -1025,7 +1062,7 @@ mod tests {
         let v = ModernVolume::default();
         assert_eq!(v.block.len(), BLOCK_TAIL_BYTES);
         assert_eq!(FOG_BYTES, 624);
-        // `ModernBlock` = cascades (400) + fog (448) + grid (4096): a multiple of its 16-byte alignment.
+        // `ModernBlock` = cascades + fog + grid: a multiple of its 16-byte alignment.
         assert_eq!(
             (crate::modern::shadow::CASCADES_BYTES + BLOCK_TAIL_BYTES) % 16,
             0
