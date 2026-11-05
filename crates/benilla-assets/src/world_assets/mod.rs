@@ -708,7 +708,20 @@ pub fn moved_aside(dir: &Path, name: &str) -> bool {
 /// builds from the filter and force arguments (`0x449dd2` to `0x449dec`, compared at `0x449f39`
 /// and `0x449f47`), and the file flag is read only by the loaders (`0x449e20`, `0x449e32`), so a
 /// name's first open wins while it is cached (`0x449df3`).
-struct Opened<K>(HashMap<K, (LooseOpen, Option<Handle<Image>>)>);
+///
+/// Each entry also carries a used-since-the-last-sweep flag for [`Self::release_unused`]: the
+/// reference frees a texture once no region shows it (`CSimpleTexture::SetTexture` closes the
+/// region's old handle, `HandleClose` deletes the `CTexture` at a zero refcount, and `~CTexture`
+/// returns its GPU texture to the pool), and showing it again decodes the file again.
+struct Opened<K>(HashMap<K, OpenedEntry>);
+
+/// One [`Opened`] entry: the open that made it, the handle (`None` for a miss), and whether a
+/// lookup asked for it since the last sweep.
+struct OpenedEntry {
+    open: LooseOpen,
+    handle: Option<Handle<Image>>,
+    used: bool,
+}
 
 impl<K> Default for Opened<K> {
     fn default() -> Self {
@@ -717,20 +730,46 @@ impl<K> Default for Opened<K> {
 }
 
 impl<K: Eq + std::hash::Hash> Opened<K> {
-    /// The cached answer, `Some(None)` for a cached miss.
-    fn get(&self, key: &K) -> Option<Option<Handle<Image>>> {
-        self.0.get(key).map(|(_, handle)| handle.clone())
+    /// The cached answer, `Some(None)` for a cached miss. A lookup counts as a use.
+    fn get(&mut self, key: &K) -> Option<Option<Handle<Image>>> {
+        let entry = self.0.get_mut(key)?;
+        entry.used = true;
+        Some(entry.handle.clone())
     }
 
     fn insert(&mut self, key: K, open: LooseOpen, handle: Option<Handle<Image>>) {
-        self.0.insert(key, (open, handle));
+        self.0.insert(
+            key,
+            OpenedEntry {
+                open,
+                handle,
+                used: true,
+            },
+        );
     }
 
     /// Keep the entries `keep(key, open, hit)` says to.
     fn retain(&mut self, mut keep: impl FnMut(&K, LooseOpen, bool) -> bool) {
         self.0
-            .retain(|key, (open, handle)| keep(key, *open, handle.is_some()));
+            .retain(|key, e| keep(key, e.open, e.handle.is_some()));
     }
+
+    /// Drop each sprite no lookup asked for since the last call and nothing else holds: the UI
+    /// asks for every quad's sprite each frame, and a material or a held handle keeps it shown.
+    /// Misses stay, so a bad path never re-walks the chain per frame. How many went.
+    fn release_unused(&mut self) -> usize {
+        let before = self.0.len();
+        self.0.retain(|_, e| match &e.handle {
+            None => true,
+            Some(handle) => std::mem::take(&mut e.used) || !only_held_here(handle),
+        });
+        before - self.0.len()
+    }
+}
+
+/// Whether this cache's handle is the asset's last strong one.
+fn only_held_here(handle: &Handle<Image>) -> bool {
+    matches!(handle, Handle::Strong(arc) if std::sync::Arc::strong_count(arc) == 1)
 }
 
 /// The UI sprite caches, and the install index's generation they were filled under.
@@ -792,6 +831,14 @@ impl SpriteCaches {
         self.resample_sources.retain(|k, v| stays(k, v.is_some()));
         self.portraits.retain(|k, _, hit| stays(k, hit));
         self.masks.retain(|k, _, hit| stays(k, hit));
+    }
+
+    /// [`Opened::release_unused`] over every handle cache; how many sprites went.
+    fn release_unused(&mut self) -> usize {
+        self.sprites.release_unused()
+            + self.tiled.release_unused()
+            + self.portraits.release_unused()
+            + self.masks.release_unused()
     }
 }
 
@@ -868,6 +915,12 @@ impl WorldAssets {
         self.textures.clear();
         self.model_materials.clear();
         self.cache.clear();
+    }
+
+    /// Release the UI sprites nothing showed since the last call ([`Opened::release_unused`]);
+    /// how many went.
+    pub fn release_unshown_sprites(&mut self) -> usize {
+        self.cache.release_unused()
     }
 
     /// Open the store over an opened patch chain. `shared_light` is a raw `Buffer`, not the
@@ -1793,6 +1846,56 @@ mod tests {
         assert!(c.portraits.get(&"p".to_string()).is_none());
         assert!(c.masks.get(&"mask".to_string()).is_some());
         assert!(c.resampled.is_empty());
+    }
+
+    fn cached_sprite(images: &mut Assets<Image>) -> Option<Handle<Image>> {
+        Some(images.add(Image::default()))
+    }
+
+    /// A sprite no lookup asked for over a whole sweep, and held nowhere else, is released; the
+    /// insert counts as a use, so the first sweep keeps it.
+    #[test]
+    fn a_sprite_unasked_for_a_whole_sweep_and_held_nowhere_else_is_released() {
+        let mut images = Assets::<Image>::default();
+        let mut c = Opened::<&str>::default();
+        c.insert("a", LooseOpen::Index, cached_sprite(&mut images));
+        assert_eq!(c.release_unused(), 0);
+        assert_eq!(c.release_unused(), 1);
+        assert_eq!(c.get(&"a"), None);
+    }
+
+    #[test]
+    fn a_lookup_between_sweeps_keeps_a_sprite() {
+        let mut images = Assets::<Image>::default();
+        let mut c = Opened::<&str>::default();
+        c.insert("a", LooseOpen::Index, cached_sprite(&mut images));
+        for _ in 0..3 {
+            assert!(c.get(&"a").is_some_and(|h| h.is_some()));
+            assert_eq!(c.release_unused(), 0);
+        }
+    }
+
+    /// A material sampling it, or a held handle (the sky discs, the loading screen, the minimap),
+    /// keeps a sprite alive while it is shown.
+    #[test]
+    fn a_sprite_something_else_holds_stays_until_it_lets_go() {
+        let mut images = Assets::<Image>::default();
+        let mut c = Opened::<&str>::default();
+        let held = cached_sprite(&mut images);
+        c.insert("a", LooseOpen::Archives, held.clone());
+        c.release_unused();
+        assert_eq!(c.release_unused(), 0, "still held elsewhere");
+        drop(held);
+        assert_eq!(c.release_unused(), 1);
+    }
+
+    #[test]
+    fn a_cached_miss_is_never_released() {
+        let mut c = Opened::<&str>::default();
+        c.insert("bad", LooseOpen::Index, None);
+        c.release_unused();
+        assert_eq!(c.release_unused(), 0);
+        assert_eq!(c.get(&"bad"), Some(None));
     }
 
     /// A `Blizzard*` folder holding its own `.toc`, any case, is moved aside and answers no path;
