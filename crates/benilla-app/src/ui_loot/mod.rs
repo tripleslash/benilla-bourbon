@@ -2189,10 +2189,25 @@ pub(super) fn move_start_keeps(loot: &LootState, source: u64) -> bool {
 /// the loot lane runs. Nothing with no window open (`0x48f23f`), and nothing in a harness without
 /// the loot window or the wire.
 pub(crate) fn close_at_precast_end(world: &mut World, moving: bool) {
-    if let Err(e) = world.run_system_cached_with(precast_end_close, moving) {
+    // Registered once and run by id: `run_system_cached_with` reaches its id through a
+    // `resource_scope`, which marks the cache resource written on every call, and the unit edits
+    // this runs inside write only the resources they declare.
+    let id = match world.get_resource::<PrecastEndCloseId>() {
+        Some(id) => id.0,
+        None => {
+            let id = world.register_system(precast_end_close);
+            world.insert_resource(PrecastEndCloseId(id));
+            id
+        }
+    };
+    if let Err(e) = world.run_system_with(id, moving) {
         debug!("ui_loot: the precast end's close did not run: {e}");
     }
 }
+
+/// [`precast_end_close`]'s registered id, seated by the first [`close_at_precast_end`].
+#[derive(Resource)]
+struct PrecastEndCloseId(bevy::ecs::system::SystemId<In<bool>>);
 
 fn precast_end_close(In(moving): In<bool>, mut close: PrecastEndClose) {
     close.close(moving);
