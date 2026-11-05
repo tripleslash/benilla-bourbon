@@ -96,8 +96,14 @@ const HAZE_SCALE: f32 = 0.67;
 /// in a dark one), and its `ground_fog` keeps a share by day. Anchored to one plane at the camera's
 /// ground, 0.035 filled Hillsbrad's low ground and left Gilneas's hills bare.
 const BANK_EXTINCTION: f32 = 0.022;
-/// fork: the analytic bank's dimmest luminance (linear).
+/// fork: the ground veil's dimmest luminance (linear).
 const BANK_LIGHT_FLOOR: f32 = 0.015;
+/// fork: the top of the clear patches' noise band the volume's banks build in under a ground veil
+/// (`froxel_scatter.wgsl`'s `bank_patches`): Darkshore's edge band's top, in every look that lays the
+/// veil, so the eerie looks' banks build where Darkshore's do. Their own band (0.2 to 1.0) ends where
+/// the noise almost never reaches, and they laid none.
+const BANK_BUILD_TOP: f32 =
+    super::look::ZoneLook::DARKSHORE.bank_clear + super::look::ZoneLook::DARKSHORE.bank_clear_edge;
 /// fork: under a risen moon the night air's uniform glow drops to this share: the moonlight and
 /// the banks carry the night instead of a veil over everything.
 const MOON_VEIL: f32 = 0.4;
@@ -225,16 +231,18 @@ pub struct FroxelFog {
     /// w = the key's share on the shaft haze's and banks' isotropic half (`look::key_air_share`).
     pub halo_air: Vec4,
     /// fork: x, y = the auto-exposure's lift and room (`look::lift_room`), whose inverse the
-    /// composite draws sky pixels at (`look::unlifted`); z, w = the analytic bank's clouds, the share
-    /// of its density between them and their feature size (`look::ZoneLook::bank_patch`).
+    /// composite draws sky pixels at (`look::unlifted`); z = the top of the noise band the volume's
+    /// banks build in ([`BANK_BUILD_TOP`]); w = the clear patches' feature size
+    /// (`look::ZoneLook::bank_patch_yd`).
     pub sky: Vec4,
-    /// fork: the analytic ground bank (`froxelfog.wgsl`'s `bank_air`): x = its extinction at the
-    /// ground (1/yd, 0 where the look's banks stay in the volume); y = 1 / its height (yd); z, w =
-    /// its clear patches (`ZoneLook::bank_clear`, `bank_clear_edge`).
+    /// fork: the ground veil (`froxelfog.wgsl`'s `bank_air`): x = its extinction at the ground (1/yd,
+    /// 0 where the look's banks stay in the volume); y = 1 / its height (yd); z, w = its clear patches
+    /// (`ZoneLook::bank_clear`, `bank_clear_edge`).
     pub bank: Vec4,
-    /// fork: the analytic bank's colour (linear radiance, [`bank_light`]); w = its ceiling on the veil.
+    /// fork: the veil's light (linear radiance, [`bank_light`]); w = the key's share of it
+    /// ([`bank_key_share`]).
     pub bank_color: Vec4,
-    /// fork: the analytic bank's light and reach (`froxelfog.wgsl`'s `bank_reach`).
+    /// fork: the veil's shade and clear patches' floor (`froxelfog.wgsl`'s `bank_reach`).
     pub bank_reach: Vec4,
 }
 
@@ -613,10 +621,13 @@ fn update_volume(
         * (NIGHT_GLOW * night * veil * look.0.night_glow);
     let bank_analytic = look.0.bank_analytic > 0.5;
     let grid = tier.grid;
+    // A hard cut (no history, a new grid, a jump) drops the whole volume's history. A quick turn only
+    // the near froxels': far air reprojects exactly under a rotation, and what the turn brings on screen
+    // fails the reprojection's bounds test anyway (`froxel_scatter.wgsl`'s depth ramp).
     let cut = hist.prev_clip.is_none()
         || hist.prev_grid != grid
-        || hist.prev_camera.distance(cam) > 12.0
-        || hist.prev_forward.dot(forward) < 0.9;
+        || hist.prev_camera.distance(cam) > 12.0;
+    let turned = hist.prev_forward.dot(forward) < 0.9;
     let prev_clip = hist.prev_clip.unwrap_or(clip_from_world);
     hist.frame = hist.frame.wrapping_add(1);
     let jitter = halton(hist.frame % 16 + 1, 2);
@@ -664,7 +675,12 @@ fn update_volume(
             media.haze,
             media.noise,
             shaft_key.x,
-            if cut { 0.0 } else { HISTORY_WEIGHT },
+            // Negative on a quick turn: the shader drops only the near froxels' history.
+            match (cut, turned) {
+                (true, _) => 0.0,
+                (false, true) => -HISTORY_WEIGHT,
+                (false, false) => HISTORY_WEIGHT,
+            },
         ),
         // The zone look's colour dials (`look::ZoneLook::glow` / `haze_tint`).
         ambient: (Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint)).extend(shaft_key.y),
@@ -739,7 +755,7 @@ fn update_volume(
         ),
         sky: {
             let (lift, room) = super::look::lift_room();
-            Vec4::new(lift, room, look.0.bank_patch, look.0.bank_patch_yd)
+            Vec4::new(lift, room, BANK_BUILD_TOP, look.0.bank_patch_yd)
         },
         bank: Vec4::new(
             if super::banks_enabled() && bank_analytic {
@@ -751,18 +767,20 @@ fn update_volume(
             look.0.bank_clear,
             look.0.bank_clear_edge,
         ),
-        bank_color: (bank_light(
-            Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint),
-            Vec3::from(media.key_in) * Vec3::from(look.0.key_hue(look.0.glow)),
-            Vec3::from(look.0.bank_rgb),
-        ) * (1.0
-            + (look.0.bank_moon_gain - 1.0) * super::sun_arc::moon_key().clamp(0.0, 1.0)))
-        .extend(look.0.bank_veil),
+        bank_color: {
+            let ambient = Vec3::from(media.ambient_in) * Vec3::from(look.0.haze_tint);
+            let key = Vec3::from(media.key_in) * Vec3::from(look.0.key_hue(look.0.glow));
+            let gain = Vec3::from(look.0.bank_rgb);
+            (bank_light(ambient, key, gain)
+                * (1.0
+                    + (look.0.bank_moon_gain - 1.0) * super::sun_arc::moon_key().clamp(0.0, 1.0)))
+            .extend(bank_key_share(ambient, key, gain))
+        },
         bank_reach: Vec4::new(
             look.0.bank_shade_day + (look.0.bank_shade - look.0.bank_shade_day) * night,
-            look.0.bank_far,
+            0.0,
             look.0.bank_clear_floor.clamp(0.0, 1.0),
-            look.0.bank_far_yd.max(1.0),
+            0.0,
         ),
     };
     hist.prev_clip = Some(clip_from_world);
@@ -796,10 +814,10 @@ fn fading_room(
     *latched
 }
 
-/// fork: the analytic bank's colour this frame: the hour's light in the zone's air, flat, as one value
-/// over every pixel, with half the key for want of a phase that would glow toward it. Its veil is the
-/// same at every hour and this follows the light under it, so the bank reads alike from noon to
-/// midnight, held off black by [`BANK_LIGHT_FLOOR`] so a dark night does not lose it.
+/// fork: the ground veil's light this frame: the hour's light in the zone's air, flat, the ambient and
+/// half the key (the key's share, [`bank_key_share`], is what the shader's phase and shadow take). Its
+/// density is the same at every hour and this follows the light under it, so the veil reads alike
+/// from noon to midnight, held off black by [`BANK_LIGHT_FLOOR`] so a dark night does not lose it.
 fn bank_light(ambient: Vec3, key: Vec3, gain: Vec3) -> Vec3 {
     let light = (ambient + key * 0.5) * gain;
     let lum = light.dot(Vec3::new(0.2126, 0.7152, 0.0722));
@@ -807,6 +825,18 @@ fn bank_light(ambient: Vec3, key: Vec3, gain: Vec3) -> Vec3 {
         light * (BANK_LIGHT_FLOOR / lum)
     } else {
         light
+    }
+}
+
+/// fork: the key's share of [`bank_light`]'s luminance (0 to 1), which the floor's lift keeps.
+fn bank_key_share(ambient: Vec3, key: Vec3, gain: Vec3) -> f32 {
+    let w = Vec3::new(0.2126, 0.7152, 0.0722);
+    let k = (key * 0.5 * gain).dot(w).max(0.0);
+    let all = k + (ambient * gain).dot(w).max(0.0);
+    if all > 1e-6 {
+        (k / all).clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 
@@ -967,6 +997,28 @@ mod tests {
         let lum = night.dot(Vec3::new(0.2126, 0.7152, 0.0722));
         assert!((lum - BANK_LIGHT_FLOOR).abs() < 1e-5, "{lum}");
         assert!(night.z > night.x && night.x > night.y, "{night}");
+    }
+
+    /// The key's share of the veil's light is half the key against the ambient, none without a key.
+    #[test]
+    fn the_veils_key_share_is_half_the_key_over_the_light() {
+        let share = bank_key_share(Vec3::splat(0.2), Vec3::splat(0.4), Vec3::ONE);
+        assert!((share - 0.5).abs() < 1e-6, "{share}");
+        assert_eq!(bank_key_share(Vec3::splat(0.2), Vec3::ZERO, Vec3::ONE), 0.0);
+        assert_eq!(bank_key_share(Vec3::ZERO, Vec3::ZERO, Vec3::ONE), 0.0);
+    }
+
+    /// The volume's banks build under every veiled look's band: Darkshore's top lies inside each
+    /// one's own patches' reach, short of where the noise ends.
+    #[test]
+    fn every_veiled_looks_banks_build_where_darkshores_do() {
+        use crate::modern::look::ZoneLook;
+        const { assert!(BANK_BUILD_TOP < 1.0) };
+        for look in [ZoneLook::DARKSHORE, ZoneLook::EERIE, ZoneLook::TIRISFAL] {
+            assert!(look.bank_analytic > 0.5);
+            assert!(look.bank_clear + look.bank_clear_edge >= BANK_BUILD_TOP);
+            assert_eq!(look.bank_patch_yd, ZoneLook::DARKSHORE.bank_patch_yd);
+        }
     }
 
     #[test]

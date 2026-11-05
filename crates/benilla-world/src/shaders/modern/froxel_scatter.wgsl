@@ -62,9 +62,10 @@ fn shaft_phase(f: froxelfog::FroxelFog, phase: f32) -> f32 {
 // hard as the shaft haze, so a beam reads brightest where it crosses a bank. It starts at the
 // camera's feet, and what stands above it stays crisp. Coarse noise patches read as blobs a hundred
 // yards wide. A grazing ray's path through a layer grows with distance, which alone gives no veil
-// near the eye and a wall far off, so the layer thins with planar depth, an exponential of
-// `BANK_THIN_YD` yards toward `BANK_FAR_SHARE` of itself: densest at the eye with no kink on the way,
-// a veil close by, and the distance reads.
+// near the eye and a wall far off, so the layer thins with distance from the camera, an exponential
+// of `BANK_THIN_YD` yards toward `BANK_FAR_SHARE` of itself: densest at the eye with no kink on the
+// way, a veil close by, and the distance reads. The distance is the eye's, not the planar depth, so a
+// turn of the camera leaves a bank as it lay.
 // 1 / the banks' height falloff (yd) above the terrain, about 2 yd.
 const BANK_INV_FALLOFF: f32 = 0.5;
 const BANK_FAR_SHARE: f32 = 0.1;
@@ -89,32 +90,42 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(f.ground.y + d * f.ground.z, select(0.0, 1.0, all(raw == uv)));
 }
 
-// fork: under an analytic veil (`fog.bank.x`) the volume's banks lie only where the veil is intense:
-// on the clear patches' noise (`froxelfog::bank_clear_noise`), over the last `BUILD_DEPTH` before the
-// edge band's top (`bank.z + bank.w`), where the veil reaches its whole strength, squared. Most of the
-// land keeps the veil alone.
+// fork: under the ground veil (`fog.bank.x`) the volume's banks lie only where the clear patches'
+// noise (`froxelfog::bank_clear_noise`) is high: over the last `BUILD_DEPTH` before the top of
+// Darkshore's edge band (`sky.z`), squared, in every look that lays the veil, whatever its own patches,
+// so the eerie looks' banks build where Darkshore's do. Most of the land keeps the veil alone.
 const BUILD_DEPTH: f32 = 0.15;
 
 fn bank_patches(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
     if (f.bank.x <= 0.0) {
         return 1.0;
     }
-    let full = f.bank.z + max(f.bank.w, 1e-3);
+    let full = f.sky.z;
     let build = smoothstep(full - BUILD_DEPTH, full, froxelfog::bank_clear_noise(f, p, 1.0));
     return build * build;
 }
 
-// The ground banks' extinction at `p`, `d` yards of planar depth from the camera (1/yd), over
-// `terrain` (`terrain_under`; off or outside it, the ground under the camera).
-fn ground_banks(f: froxelfog::FroxelFog, p: vec3<f32>, d: f32, terrain: vec2<f32>) -> f32 {
-    let core = f.night.x * bank_patches(f, p);
+// The ground banks' mean extinction (1/yd) over one froxel's stretch of its centre ray, `a` to `b`, over
+// `terrain` (`terrain_under`; off or outside it, the ground under the camera). The layer's height falls
+// off within a couple of yards, so near the eye a slice looking down spans much of it: a point read at a
+// jittered depth swung between the layer's floor and the air above it every frame, and the history
+// could not hold that through a quick turn. The mean over the stretch is closed, so a froxel's bank is
+// the same every frame.
+fn ground_banks(f: froxelfog::FroxelFog, a: vec3<f32>, b: vec3<f32>, terrain: vec2<f32>) -> f32 {
+    let c = 0.5 * (a + b);
+    let core = f.night.x * bank_patches(f, c);
     if (core <= 0.0) {
         return 0.0;
     }
     let ground = select(f.night.y, terrain.x, terrain.y > 0.5);
-    let above = max(p.y - ground, 0.0);
-    let thin = mix(BANK_FAR_SHARE, 1.0, exp(-d / BANK_THIN_YD));
-    return core * thin * exp(-min(above * BANK_INV_FALLOFF, 24.0));
+    let ka = min(max(a.y - ground, 0.0) * BANK_INV_FALLOFF, 24.0);
+    let kb = min(max(b.y - ground, 0.0) * BANK_INV_FALLOFF, 24.0);
+    var layer = exp(-0.5 * (ka + kb));
+    if (abs(kb - ka) > 1e-3) {
+        layer = (exp(-ka) - exp(-kb)) / (kb - ka);
+    }
+    let thin = mix(BANK_FAR_SHARE, 1.0, exp(-length(c - f.camera.xyz) / BANK_THIN_YD));
+    return core * thin * layer;
 }
 
 // fork: **sea fog.** A zone look's `sea_fog` (`fog.night.w`) lays a bank on the ocean along the
@@ -225,6 +236,35 @@ fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>, to_eye: vec3<f32>, room: f32, 
     return sum;
 }
 
+// fork: the history's extinction is held within this share of the froxel's own this frame, its radiance
+// scaled with it. The history is fetched at the nearest texel of its reprojection, which on a quick
+// turn is a neighbour up to half a froxel off; near the eye, where a bank's edge crosses a few froxels,
+// that neighbour's density outweighed the froxel's own nineteen to one and the bank jumped. The density
+// this frame barely jitters (the banks are slice means), so the hold costs the light's averaging nothing.
+const HISTORY_SIGMA_SLACK: f32 = 0.25;
+
+// fork: **the history by depth.** The near froxels keep the tight hold above and drop their history on
+// a quick turn; the far ones are the opposite trade. A far slice is ten yards and more deep and a froxel
+// there many yards across, so the jitter swings its sample through a sea bank's height and billows and
+// its density by far more than the hold's quarter: held, the history followed every swing and the
+// distant banks shimmered. So past `STABLE_NEAR_YD` the hold widens to `FAR_SIGMA_SLACK`, the weight
+// rises to `FAR_HISTORY_WEIGHT` (the jitter's sixteen-frame cycle averaged several times over), and a
+// turn keeps the history, since distant air reprojects exactly under a rotation; at `STABLE_FAR_YD`
+// the froxel is all far.
+const STABLE_NEAR_YD: f32 = 40.0;
+// Where in the range (its share of `grid.w`) the open air's key starts handing over to the tail's.
+const TAIL_EASE_FROM: f32 = 0.6;
+const STABLE_FAR_YD: f32 = 160.0;
+const FAR_SIGMA_SLACK: f32 = 4.0;
+const FAR_HISTORY_WEIGHT: f32 = 0.985;
+
+// The world point at screen `uv` and planar depth `d` (reverse-Z, infinite perspective: `d` sits at ndc z
+// = near / d).
+fn froxel_point(f: froxelfog::FroxelFog, uv: vec2<f32>, d: f32) -> vec3<f32> {
+    let h = f.world_from_clip * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, f.proj.x / d, 1.0);
+    return h.xyz / h.w;
+}
+
 // A per-froxel, per-frame offset in [-0.5, 0.5]: the one-tap shadow lookup then covers the froxel's
 // footprint over the history instead of its centre alone, so a shaft's edge is not a froxel staircase.
 fn froxel_jitter(id: vec3<u32>, frame: f32) -> vec2<f32> {
@@ -243,9 +283,11 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5) + froxel_jitter(id, f.phase.w) * 0.5) / n.xy;
     let s = (f32(id.z) + f.phase.z) / n.z;
     let d = max(froxelfog::depth_of_slice(f, s), f.proj.x);
-    // Reverse-Z, infinite perspective: planar depth `d` sits at ndc z = near / d.
-    let h = f.world_from_clip * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, f.proj.x / d, 1.0);
-    let p = h.xyz / h.w;
+    let p = froxel_point(f, uv, d);
+    // fork: the froxel's own stretch of its centre ray, unjittered: the ground banks are its mean.
+    let uv_c = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / n.xy;
+    let slab_a = froxel_point(f, uv_c, max(froxelfog::depth_of_slice(f, f32(id.z) / n.z), f.proj.x));
+    let slab_b = froxel_point(f, uv_c, max(froxelfog::depth_of_slice(f, f32(id.z + 1u) / n.z), f.proj.x));
 
     // Extinction. The fog is a height fog, clear before its start; the shaft haze (amendment A1) never
     // clears, so shafts can begin at the camera. Both are per yard of the view ray.
@@ -264,14 +306,14 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let sigma_fog = ext.x;
     let sigma_haze = ext.y;
     let sigma_night = ext.z;
-    // fork: the terrain under the froxel, read once for the ground banks and the sea fog, and only
-    // when one of them can reach it.
+    // fork: the terrain under the froxel's centre, read once for the ground banks and the sea fog, and
+    // only when one of them can reach it.
     var terrain = vec2<f32>(-1e9, 0.0);
     if (f.ground.x > 0.5 && (f.night.x > 0.0 || sea_reaches(f, p))) {
-        terrain = terrain_under(f, p);
+        terrain = terrain_under(f, 0.5 * (slab_a + slab_b));
     }
     // fork: the ground banks (outside rooms: a building's air is its own).
-    let sigma_bank = ground_banks(f, p, d, terrain) * (1.0 - room);
+    let sigma_bank = ground_banks(f, slab_a, slab_b, terrain) * (1.0 - room);
     // fork: the sea fog, lit as the zone's own fog (`lum_fog`'s open-air term).
     let sigma_sea = sea_fog(f, p, terrain.x, noise) * (1.0 - room);
     let sigma = sigma_fog + sigma_haze + sigma_night + sigma_bank + sigma_sea;
@@ -322,8 +364,16 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     let phase = froxelfog::dual_phase(f, mu);
+    // fork: the open air and the sea fog hand their key to the tail's share (`froxelfog::TAIL_KEY_SHARE`)
+    // over the range's last stretch, where the tail takes over (`froxelfog::fog_at`). At full key to the
+    // far plane, a dense bank there, toward the sun, glowed white against the dimmer air past it.
+    let key_far = mix(
+        1.0,
+        froxelfog::TAIL_KEY_SHARE,
+        smoothstep(TAIL_EASE_FROM * f.grid.w, f.grid.w, d),
+    );
     // The zone's open air; the sea fog is lit as it is.
-    let lum_sea = f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis);
+    let lum_sea = f.ambient.rgb * sky_term + f.sun.rgb * (phase * sun_vis * key_far);
     let lum_fog = mix(
         lum_sea,
         f.room_ambient.rgb * sky_term + f.room_sun.rgb * (phase * sun_vis),
@@ -383,8 +433,18 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         sigma,
     );
 
-    // History: this froxel's world point in last frame's grid. Clip w is the planar depth.
-    if (f.medium.w > 0.0) {
+    // History: this froxel's world point in last frame's grid. Clip w is the planar depth. `medium.w` is the
+    // steady weight, 0 on a hard cut and negative on a quick turn; the depth ramp sets this froxel's share.
+    let far_share = smoothstep(
+        STABLE_NEAR_YD,
+        STABLE_FAR_YD,
+        froxelfog::depth_of_slice(f, (f32(id.z) + 0.5) / n.z),
+    );
+    let steady = abs(f.medium.w);
+    let near_weight = select(steady, 0.0, f.medium.w < 0.0);
+    let weight = select(mix(near_weight, max(steady, FAR_HISTORY_WEIGHT), far_share), 0.0, steady <= 0.0);
+    let slack = mix(HISTORY_SIGMA_SLACK, FAR_SIGMA_SLACK, far_share);
+    if (weight > 0.0) {
         let prev = f.prev_clip_from_world * vec4<f32>(p, 1.0);
         if (prev.w > f.proj.x && prev.w < f.grid.w) {
             let pn = prev.xy / prev.w;
@@ -401,7 +461,14 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
                 // drifted with the history weight) and the jitter's beat survived the blend — the
                 // Darkshire town hall pulsed at the Halton period.
                 let texel = min(vec3<u32>(uvw * n), vec3<u32>(f.grid.xyz) - vec3<u32>(1u));
-                cur = mix(cur, textureLoad(history_tex, texel, 0), f.medium.w);
+                var hist = textureLoad(history_tex, texel, 0);
+                let held = clamp(hist.a, cur.a * max(1.0 - slack, 0.0), cur.a * (1.0 + slack));
+                if (hist.a > 1e-7) {
+                    hist = vec4<f32>(hist.rgb * (held / hist.a), held);
+                } else {
+                    hist = cur;
+                }
+                cur = mix(cur, hist, weight);
             }
         }
     }

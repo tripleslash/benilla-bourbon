@@ -29,7 +29,7 @@ struct FroxelFog {
     // height (the regional ground); w = fog start (planar yd).
     media: vec4<f32>,
     // x = shaft haze extinction (1/yd, never near-cleared); y = noise amount; z = shaft key radiance (r);
-    // w = scatter history weight (0 on a cut).
+    // w = scatter history weight: 0 on a hard cut, negative on a quick turn (near froxels drop theirs).
     medium: vec4<f32>,
     // rgb = ambient in-scatter radiance (albedo x ambient); w = shaft key radiance (g).
     ambient: vec4<f32>,
@@ -76,18 +76,18 @@ struct FroxelFog {
     // share on the shaft haze's and banks' isotropic half (`look::key_air_share`).
     halo_air: vec4<f32>,
     // fork: x, y = the auto-exposure's lift and room (`look::lift_room`): the composite draws the fog
-    // over sky pixels at the lift's inverse, so the sky keeps the zone look's exposure. z, w = the
-    // analytic bank's clouds, the share of its density between them and their feature size (yd).
+    // over sky pixels at the lift's inverse, so the sky keeps the zone look's exposure. z = the top of
+    // the clear patches' noise band the volume's banks build in (`froxel_scatter.wgsl`'s
+    // `bank_patches`); w = the clear patches' feature size (yd).
     sky: vec4<f32>,
-    // fork: the analytic ground bank (`bank_air`): x = its extinction at the ground (1/yd, 0 where the
-    // look's banks stay in the volume); y = 1 / its height (yd); z, w = its clear patches, the noise
-    // they fall under (0 = none) and the noise over which they fade into the bank.
+    // fork: the ground veil (`bank_air`): x = its extinction at the ground (1/yd, 0 where the look's
+    // banks stay in the volume); y = 1 / its height (yd); z, w = its clear patches, the noise they
+    // fall under (0 = none) and the noise over which they fade into the veil.
     bank: vec4<f32>,
-    // fork: the analytic bank's colour, this hour's light (linear radiance); w = its ceiling on the veil.
+    // fork: the veil's light, this hour's light flat (linear radiance); w = the key's share of it.
     bank_color: vec4<f32>,
-    // fork: x = how far the bank's light follows the key's shadow (`bank_in_key`); y = the share of its
-    // veil left in the distance, from a quarter of w yards from the camera to w; z = the share of it a
-    // clear patch keeps.
+    // fork: x = how far the veil's key follows the key's shadow (`veil_light`); z = the share of its
+    // density a clear patch keeps; y, w unused.
     bank_reach: vec4<f32>,
 }
 
@@ -467,26 +467,109 @@ fn integrated(vol: texture_3d<f32>, samp: sampler, f: FroxelFog, uv: vec2<f32>, 
     return vec4<f32>(v.rgb * ramp, mix(1.0, v.a, ramp));
 }
 
-// fork: **the analytic ground bank.** A layer `exp(-h * bank.y)` over the ground whose density reads
-// nothing of the eye, so it lies still in the world as the camera walks through it. Its height is linear
-// along each stretch of the ray and each stretch's integral is closed, so the bank has no grid, jitter or
-// history, and a pixel holds the same value however the camera turned to it. Its colour is one value a
-// frame, the hour's light with no phase or shadow in it, so its veil reads alike at every hour and nothing
-// glows from behind a mountain, and the veil rises softly to the look's ceiling, so a long path through
-// the layer reads as a short one does. A zone with a sea fog lays the bank on the water. rgb = in-scatter,
-// a = transmittance.
+// fork: **the ground veil.** A thin layer of air lying on the ground, fixed in the world, whose density
+// depends on altitude alone: `bank.x` (1/yd) up to its top `1 / bank.y` yards over the ground, falling off
+// over `VEIL_SOFT` of that height above it, a logistic in the height `h`:
+// `sigma(h) = bank.x / (1 + exp((h - top) / soft))`. Along a stretch of a ray whose height runs linearly,
+// the optical depth is closed (the logistic's integral is `h - soft * softplus((h - top) / soft)`), so the
+// veil has no grid, jitter or history, and a pixel holds the same value however the camera turned to it.
+// Distance enters only through the ray: a level ray far over the ground crosses yards of it, one looking
+// down at the feet a few inches. Its clear patches (`bank_clear`) thin the density, never the light. The
+// light is single scattering: each stretch scatters the hour's light (`bank_color`) toward the eye, its key
+// through a forward-leaning phase and the key's visibility there, behind the transmittance before it. A
+// zone with a sea fog lays the veil on the water. rgb = in-scatter, a = transmittance.
 
-// Above this the layer has thinned to nothing (`exp(-12)`).
-fn bank_top(f: FroxelFog) -> f32 {
-    return 12.0 / max(f.bank.y, 1e-3);
+// The soft top's width, as a share of the veil's height: 0.15 yd over a 0.5 yd veil.
+const VEIL_SOFT: f32 = 0.3;
+// Past this many widths over the top the veil holds nothing (`exp(-30)`).
+const VEIL_ABOVE: f32 = 30.0;
+// The phase: half isotropic, half a Henyey-Greenstein lobe toward the key, so a low sun glows the veil
+// before it warmly and the ground away from it keeps the hour's flat light.
+const VEIL_G: f32 = 0.55;
+const VEIL_FORWARD: f32 = 0.5;
+
+// The veil's top over the ground (yd).
+fn veil_top(f: FroxelFog) -> f32 {
+    return 1.0 / max(f.bank.y, 1e-3);
 }
 
-// The two finer octaves' scale and share. Coverage this high
-// joins into one mass at any base scale, so only the finer octaves can break a large bank up.
+fn veil_soft(f: FroxelFog) -> f32 {
+    return VEIL_SOFT * veil_top(f);
+}
+
+fn softplus(x: f32) -> f32 {
+    return max(x, 0.0) + log(1.0 + exp(-abs(x)));
+}
+
+// The density's share at height `h` (1 at the ground, 0.5 at the top).
+fn veil_density(f: FroxelFog, h: f32) -> f32 {
+    return 1.0 / (1.0 + exp(clamp((h - veil_top(f)) / veil_soft(f), -VEIL_ABOVE, VEIL_ABOVE)));
+}
+
+// The column of air under height `h`, in yards of the ground's density (the logistic's integral); held past
+// `VEIL_ABOVE` widths over the top, where nothing is left to add.
+fn veil_column(f: FroxelFog, h: f32) -> f32 {
+    let top = veil_top(f);
+    let soft = veil_soft(f);
+    let y = min(h, top + VEIL_ABOVE * soft);
+    return y - soft * softplus((y - top) / soft);
+}
+
+// The yards of ground-density air along a stretch `dt` long whose height runs from `h0` to `h1`.
+fn veil_air(f: FroxelFog, dt: f32, h0: f32, h1: f32) -> f32 {
+    let dh = h1 - h0;
+    if (abs(dh) < 1e-3) {
+        return dt * veil_density(f, 0.5 * (h0 + h1));
+    }
+    return max(dt * (veil_column(f, h1) - veil_column(f, h0)) / dh, 0.0);
+}
+
+// Where along a stretch (`t0` to `t1`, heights `h0` to `h1`) its air lies: the middle of the part under
+// the top's soft edge, or the low end where the whole stretch stands over it.
+fn veil_mid(f: FroxelFog, t0: f32, t1: f32, h0: f32, h1: f32) -> f32 {
+    let edge = veil_top(f) + 2.0 * veil_soft(f);
+    if (h0 <= edge && h1 <= edge) {
+        return 0.5 * (t0 + t1);
+    }
+    if (h0 > edge && h1 > edge) {
+        return select(t1, t0, h0 < h1);
+    }
+    let tc = t0 + (t1 - t0) * (edge - h0) / (h1 - h0);
+    return select(0.5 * (tc + t1), 0.5 * (t0 + tc), h0 < h1);
+}
+
+// The veil's optical depth over one stretch of a ray, `t0` to `t1` yards from `eye` along `dir`, its height
+// over the ground `h0` to `h1`, thinned by the clear patches where its air lies.
+fn veil_tau(f: FroxelFog, eye: vec3<f32>, dir: vec3<f32>, t0: f32, t1: f32, h0: f32, h1: f32) -> f32 {
+    let dt = t1 - t0;
+    if (dt <= 0.0 || min(h0, h1) >= veil_top(f) + VEIL_ABOVE * veil_soft(f)) {
+        return 0.0;
+    }
+    let air = veil_air(f, dt, h0, h1);
+    let p = eye + dir * veil_mid(f, t0, t1, h0, h1);
+    return f.bank.x * air * bank_clear(f, p, air);
+}
+
+fn veil_phase(mu: f32) -> f32 {
+    return mix(1.0, hg(VEIL_G, mu), VEIL_FORWARD);
+}
+
+// The light a stretch of the veil scatters toward the eye, `mu` the cosine between the view ray and the key
+// and `vis` the key's visibility there. `bank_color` is the hour's light flat (the ambient and half the
+// key: `volumetrics::bank_light`) and `bank_color.w` the key's share of it, which the phase takes and, as
+// far as the look's shade (`bank_reach.x`) follows it, the key's shadow; at phase 1 and half seen, the flat
+// colour itself.
+fn veil_light(f: FroxelFog, mu: f32, vis: f32) -> vec3<f32> {
+    let seen = 2.0 * mix(0.5, clamp(vis, 0.0, 1.0), f.bank_reach.x);
+    let key = f.bank_color.w;
+    return f.bank_color.rgb * ((1.0 - key) + key * seen * veil_phase(mu));
+}
+
+// The clear patches' feature size against the noise's, and how much a finer octave roughens them.
+const BANK_CLEAR_SCALE: f32 = 1.4;
+const BANK_CLEAR_ROUGH: f32 = 0.28;
+// A finer octave's scale (`bank_clear_noise`).
 const BANK_OCTAVE_MID: f32 = 3.0;
-const BANK_OCTAVE_FINE: f32 = 8.0;
-const BANK_OCTAVE_MID_SHARE: f32 = 0.3;
-const BANK_OCTAVE_FINE_SHARE: f32 = 0.24;
 
 fn bank_hash(q: vec2<f32>) -> f32 {
     return fract(sin(dot(q, vec2<f32>(127.1, 311.7))) * 43758.5453);
@@ -504,50 +587,24 @@ fn bank_noise(q: vec2<f32>) -> f32 {
     );
 }
 
-// Three octaves of noise at `q`, whose base feature is `yd` yards. A read `span` yards long holds an octave
-// only while that octave's feature is longer than the read, or it would alias into speckle.
-fn bank_octaves(q: vec2<f32>, yd: f32, span: f32) -> f32 {
-    let mid = BANK_OCTAVE_MID_SHARE * bank_resolves(yd / BANK_OCTAVE_MID, span);
-    let fine = BANK_OCTAVE_FINE_SHARE * bank_resolves(yd / BANK_OCTAVE_FINE, span);
-    var n = bank_noise(q) * (1.0 - mid - fine);
-    if (mid > 0.0) {
-        n += bank_noise(q * BANK_OCTAVE_MID + vec2<f32>(17.3, 5.1)) * mid;
-    }
-    if (fine > 0.0) {
-        n += bank_noise(q * BANK_OCTAVE_FINE + vec2<f32>(7.9, 13.3)) * fine;
-    }
-    return n;
-}
-
+// Whether an octave of `feature` yards resolves over a read `span` yards long, or would alias into speckle.
 fn bank_resolves(feature: f32, span: f32) -> f32 {
     return 1.0 - smoothstep(0.5 * feature, 2.0 * feature, span);
 }
 
-// The bank's density share at world point `p`, read over `span` yards: 1 in a cloud, down to `1 - sky.z`
-// between them. Fixed in the world, so neither time nor a turn of the camera changes it.
-fn bank_patch(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
-    let yd = max(f.sky.w, 1.0);
-    let n = bank_octaves(p.xz / yd, yd, span);
-    return mix(1.0 - f.sky.z, 1.0, smoothstep(0.2, 0.8, n));
-}
-
-// The clear patches' feature size against the clouds', and how much a finer octave roughens them.
-const BANK_CLEAR_SCALE: f32 = 1.4;
-const BANK_CLEAR_ROUGH: f32 = 0.28;
-
-// How much of the bank stands at world point `p`, read over `span` yards: `bank_reach.z` in a clear patch
-// (the faintest veil, so the ground there is not bare), 1 past its edge.
+// How much of the veil's density stands at world point `p`, read over `span` yards: `bank_reach.z` in a
+// clear patch (the faintest veil, so the ground there is not bare), 1 past its edge.
 fn bank_clear(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
     if (f.bank.z <= 0.0) {
         return 1.0;
     }
-    // Only a little of one finer octave: the fine ones punch small round holes in the bank.
     let n = bank_clear_noise(f, p, span);
     return mix(f.bank_reach.z, 1.0, smoothstep(f.bank.z, f.bank.z + max(f.bank.w, 1e-3), n));
 }
 
-// The noise the clear patches cut at `p` (`bank_clear`): under `bank.z` a patch, past `bank.z + bank.w`
-// the whole veil, and further past it the depths the volume's banks build up in.
+// The noise the clear patches cut at `p` (`bank_clear`), its feature `sky.w` yards: under `bank.z` a patch,
+// past `bank.z + bank.w` the whole veil. The volume's banks build up in its top (`froxel_scatter.wgsl`'s
+// `bank_patches`). Only a little of one finer octave: the fine ones punch small round holes in the veil.
 fn bank_clear_noise(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
     let yd = max(f.sky.w, 1.0) / BANK_CLEAR_SCALE;
     let q = p.xz / yd + vec2<f32>(41.7, 23.9);
@@ -555,134 +612,9 @@ fn bank_clear_noise(f: FroxelFog, p: vec3<f32>, span: f32) -> f32 {
     return mix(bank_noise(q), bank_noise(q * BANK_OCTAVE_MID + vec2<f32>(17.3, 5.1)), rough);
 }
 
-// The bands' length and breadth against the clouds' feature, how far they wander, and their thinnest and
-// thickest share of the veil, about 1 on average.
-const BANK_BAND_LENGTH: f32 = 4.0;
-const BANK_BAND_BREADTH: f32 = 1.2;
-const BANK_BAND_WANDER: f32 = 0.6;
-const BANK_BAND_THIN: f32 = 0.4;
-const BANK_BAND_THICK: f32 = 1.6;
-
-// How thick the bank lies at world point `p`: long wandering bands, thicker and thinner, across the clouds.
-// It scales the veil's ceiling as well as its depth, since the ceiling would otherwise even them out. The
-// veil's bands are its thinnest share doubled (`BANK_BAND_VEIL_BASE`) with a thirty-second of the swing
-// over it (`BANK_BAND_VEIL_SWING`), as its clouds are; the volume's banks read the whole (`bank_band_full`).
-const BANK_BAND_VEIL_BASE: f32 = 2.0 * BANK_BAND_THIN;
-const BANK_BAND_VEIL_SWING: f32 = (BANK_BAND_THICK - BANK_BAND_THIN) / 32.0;
-
-fn bank_band(f: FroxelFog, p: vec3<f32>) -> f32 {
-    let t = (bank_band_full(f, p) - BANK_BAND_THIN) / (BANK_BAND_THICK - BANK_BAND_THIN);
-    return BANK_BAND_VEIL_BASE + BANK_BAND_VEIL_SWING * t;
-}
-
-fn bank_band_full(f: FroxelFog, p: vec3<f32>) -> f32 {
-    let w = p.xz / max(f.sky.w, 1.0);
-    let along = vec2<f32>(0.866 * w.x + 0.5 * w.y, 0.866 * w.y - 0.5 * w.x);
-    let q = along / vec2<f32>(BANK_BAND_LENGTH, BANK_BAND_BREADTH) + vec2<f32>(11.1, 67.3);
-    let n = bank_noise(q + vec2<f32>(0.0, BANK_BAND_WANDER * bank_noise(q * 0.5 + vec2<f32>(3.7, 29.1))));
-    return mix(BANK_BAND_THIN, BANK_BAND_THICK, smoothstep(0.3, 0.7, n));
-}
-
-// The integral of `exp(-a t)` over `[0, t]`: the length of air a layer thinning at `a` fills.
-fn bank_span(a: f32, t: f32) -> f32 {
-    if (a * t < 1e-3) {
-        return t;
-    }
-    return (1.0 - exp(-a * t)) / a;
-}
-
-// The mean `s` of `exp(-a s)` over `[0, t]`: where along a stretch its air lies.
-fn bank_centre(a: f32, t: f32) -> f32 {
-    let x = a * t;
-    if (x < 1e-2) {
-        return 0.5 * t;
-    }
-    return (1.0 - x / (exp(min(x, 30.0)) - 1.0)) / a;
-}
-
 // The ground a bank's height is measured from, at `ground`: the water, in a zone with a sea fog.
 fn bank_floor(f: FroxelFog, ground: f32) -> f32 {
     return max(ground, select(-1e9, 0.0, f.night.w > 0.0));
-}
-
-// The bank's optical depth over one stretch of a ray, `t0` to `t1` yards from `eye` along `dir`, its
-// height over the ground `h0` to `h1`, integrated in closed form from the low end. The clouds are read
-// where the stretch's air lies, not at its middle: a ray coming down holds its air in its last yards over
-// the ground. x = the depth with the clouds, y = the air outside the clear patches, z = all the air.
-fn bank_stretch(f: FroxelFog, eye: vec3<f32>, dir: vec3<f32>, t0: f32, t1: f32, h0: f32, h1: f32) -> vec3<f32> {
-    let dt = t1 - t0;
-    let low = min(h0, h1);
-    if (dt <= 0.0 || low >= bank_top(f)) {
-        return vec3<f32>(0.0);
-    }
-    let thin = f.bank.y * (max(h0, h1) - low) / dt;
-    let span = bank_span(thin, dt);
-    let centre = bank_centre(thin, dt);
-    let p = eye + dir * select(t1 - centre, t0 + centre, h0 <= h1);
-    var clouds = 1.0;
-    if (f.sky.z > 0.0) {
-        clouds = bank_patch(f, p, span);
-    }
-    let air = exp(-f.bank.y * low) * span;
-    let open = bank_clear(f, p, span) * bank_band(f, p) * air;
-    return vec3<f32>(clouds * open, open, air);
-}
-
-// The air a surface on the ground holds at the least, in heights of the layer, and `depth` (`bank_stretch`)
-// raised to it for a surface `h` over the ground. A 1.5 yd layer holds a dozen yards along a grazing ray and
-// only three on a bank tilted toward the eye or in a hollow past a crest, which cut those out of the veil
-// with a hard edge; five yards closed that. A thinner layer holds less: a fixed five yards laid a 0.5 yd
-// layer as an opaque sheet over the ground at the feet.
-const BANK_SURFACE_AIR: f32 = 5.0 / 1.5;
-
-fn bank_at_surface(f: FroxelFog, depth: vec3<f32>, h: f32) -> vec3<f32> {
-    let least = BANK_SURFACE_AIR / max(f.bank.y, 1e-3) * exp(-f.bank.y * h);
-    return depth * max(least / max(depth.z, 1e-3), 1.0);
-}
-
-// The fog of optical depth `depth` (`bank_stretch`): its veil rises softly to the look's ceiling, scaled by
-// the share of this ray's air outside the clear patches, so a patch stays clear however much air a ray
-// holds, and a long ray lies lighter for the patches it crosses.
-fn bank_fog(f: FroxelFog, depth: vec3<f32>) -> vec4<f32> {
-    return bank_fog_over(f, depth, 0.0);
-}
-
-// The share of the veil a surface `h` yards over the ground keeps (`bank_fog_over`): a grass tip half a
-// yard up keeps about 0.4 of the ground's at a 0.3 yd layer. A level ray to a far tuft runs yards
-// through the layer just before it, and the tip sank into the veil the ground beside it took.
-const BANK_STANDS_OUT: f32 = 0.5;
-
-fn bank_fog_over(f: FroxelFog, depth: vec3<f32>, h: f32) -> vec4<f32> {
-    let tau = depth.x * f.bank.x;
-    let ceiling = max(f.bank_color.w * depth.y / max(depth.z, 1e-6), 1e-3);
-    let stands = exp(-max(h, 0.0) * f.bank.y * BANK_STANDS_OUT);
-    let veil = stands * ceiling * (1.0 - exp(-max(tau, 0.0) / ceiling));
-    return vec4<f32>(f.bank_color.rgb * veil, 1.0 - veil);
-}
-
-// `fog` (`bank_fog`) lit by the key where `vis` of it sees the key, `ambient` and `key` the light the
-// surfaces take (the shared light's rows 0 and 1, linear). `bank_color` holds the ambient and half the key
-// (`volumetrics::bank_light`); a look with `bank_reach.x` 1 brightens it as the ground under it brightens,
-// the whole key in the open and none in shade, so the bank reads at the same strength over moonlit
-// ground and over the ground in shade. The fog medium's own split would not do: it holds the ambient to
-// most of its light (`media::SHADED_SHARE`), and the bank sank into the moonlit ground. Hue kept.
-fn bank_in_key(f: FroxelFog, fog: vec4<f32>, vis: f32, ambient: vec3<f32>, key: vec3<f32>) -> vec4<f32> {
-    let w = vec3<f32>(0.2126, 0.7152, 0.0722);
-    let a = dot(ambient, w);
-    let k = dot(key, w);
-    let flat = a + 0.5 * k;
-    if (flat <= 1e-6) {
-        return fog;
-    }
-    let lit = a + k * mix(0.5, clamp(vis, 0.0, 1.0), f.bank_reach.x);
-    return vec4<f32>(fog.rgb * (lit / flat), fog.a);
-}
-
-// `fog` (`bank_fog`) at `dist` yards from the camera, faded to `bank_reach.y` of itself over the land in
-// the distance: the layer lies thick at the feet, and the zone's own fog veils the far land.
-fn bank_far(f: FroxelFog, fog: vec4<f32>, dist: f32) -> vec4<f32> {
-    let k = mix(1.0, f.bank_reach.y, smoothstep(0.25 * f.bank_reach.w, f.bank_reach.w, dist));
-    return vec4<f32>(fog.rgb * k, 1.0 - (1.0 - fog.a) * k);
 }
 
 // The stretches a ray takes over the ground, and where stretch `i` ends as a share of the ray: shorter near
@@ -694,9 +626,10 @@ fn bank_stretch_end(i: u32) -> f32 {
     return share * share;
 }
 
-// The bank from `eye` to `p`, for a lane with no heightfield bound: `ground` under `p`, the camera's ground
-// under the eye and the height linear between them. As many stretches as the composite takes, so a blended
-// surface reads the same clouds as the opaque ground around it.
+// The veil from `eye` to `p`, for a lane with no heightfield or shadow bound: `ground` under `p`, the
+// camera's ground under the eye and the height linear between them, the key half seen. As many stretches
+// as the composite takes (`fog_composite.wgsl`'s `bank_over_terrain`), so a blended surface reads the
+// same veil as the opaque ground around it.
 fn bank_air(f: FroxelFog, eye: vec3<f32>, p: vec3<f32>, ground: f32) -> vec4<f32> {
     if (f.bank.x <= 0.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
@@ -709,26 +642,56 @@ fn bank_air(f: FroxelFog, eye: vec3<f32>, p: vec3<f32>, ground: f32) -> vec4<f32
     let reach = min(len, max(f.phase.y, 1.0));
     var t0 = 0.0;
     var from_h = h0;
-    var depth = vec3<f32>(0.0);
-    var here = 1.0;
+    var tau = 0.0;
     for (var i = 1u; i <= BANK_STRETCHES; i = i + 1u) {
         let t1 = reach * bank_stretch_end(i);
         let to_h = mix(h0, h1, t1 / len);
-        // Each stretch held to the clear patch at its end, as the composite's (`bank_over_terrain`), so
-        // a blended tuft in a clear patch takes the veil the ground around it takes.
-        here = bank_clear(f, eye + dir * t1, 1.0);
-        let raw = bank_stretch(f, eye, dir, t0, t1, from_h, to_h);
-        depth = depth + vec3<f32>(raw.xy * here, raw.z);
+        tau = tau + veil_tau(f, eye, dir, t0, t1, from_h, to_h);
         t0 = t1;
         from_h = to_h;
     }
-    let raised = depth + (bank_at_surface(f, depth, h1) - depth) * here;
-    return bank_far(f, bank_fog_over(f, raised, h1), len);
+    let tr = exp(-tau);
+    return vec4<f32>(veil_light(f, dot(dir, f.sun_dir.xyz), 0.5) * (1.0 - tr), tr);
 }
 
 // `fog` seen through `bank`, which lies in front of it as far as the blend can tell.
 fn with_bank(fog: vec4<f32>, bank: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(bank.rgb + fog.rgb * bank.a, fog.a * bank.a);
+}
+
+// fork: **the sea fog past the froxel grid.** Inside the grid the sea fog is the scatter pass's
+// (`froxel_scatter.wgsl`'s `sea_fog`); without this the bank stopped dead at the grid's far plane and the
+// sea and horizon beyond it stood in clear air, a hard line across the water. Past the plane it is the
+// same bank in the mean: exponential over sea level with the swell's mean top (`SEA_HEIGHT` 16 yd x
+// 1.25) and the billows' mean cover, lit as the tail's own air is, so the two converge into one
+// distance. Gated as the bank is: on in the zone and the heightfield live.
+const SEA_TAIL_TOP: f32 = 20.0;
+const SEA_TAIL_COVER: f32 = 0.6;
+
+fn sea_tail(f: FroxelFog, p: vec3<f32>, t_start: f32, key_share: f32) -> vec4<f32> {
+    if (f.night.w <= 0.0 || f.ground.x < 0.5) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let ray = p - f.camera.xyz;
+    let len = length(ray);
+    let t = clamp(t_start, 0.0, 1.0);
+    if (len < 1e-3 || t >= 1.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    // The mean of exp(-height / top) along the segment, heights above the sea (the water carries its
+    // own fog below it, as dense as at the surface).
+    let a = max(f.camera.y + ray.y * t, 0.0);
+    let b = max(p.y, 0.0);
+    let dy = b - a;
+    var mean = exp(-0.5 * (a + b) / SEA_TAIL_TOP);
+    if (abs(dy) > 1e-2) {
+        mean = SEA_TAIL_TOP * (exp(-a / SEA_TAIL_TOP) - exp(-b / SEA_TAIL_TOP)) / dy;
+    }
+    let tau = f.night.w * SEA_TAIL_COVER * len * (1.0 - t) * clamp(mean, 0.0, 1.0);
+    let tr = exp(-tau);
+    let phase = dual_phase(f, dot(ray / len, f.sun_dir.xyz));
+    let lum = f.ambient.rgb + f.sun.rgb * (phase * key_share);
+    return vec4<f32>(lum * (1.0 - tr), tr);
 }
 
 // The fog between the main camera and world point `p`: rgb = in-scatter, a = transmittance. A surface
@@ -750,6 +713,8 @@ fn fog_at(vol: texture_3d<f32>, samp: sampler, f: FroxelFog, p: vec3<f32>) -> ve
     if (d <= f.grid.w) {
         return near;
     }
-    let tail = analytic_path_keyed(f, p, f.grid.w / d, TAIL_KEY_SHARE);
+    let air = analytic_path_keyed(f, p, f.grid.w / d, TAIL_KEY_SHARE);
+    // The air spreads along the whole stretch and the sea bank lies at its low end, so the air comes first.
+    let tail = with_bank(sea_tail(f, p, f.grid.w / d, TAIL_KEY_SHARE), air);
     return vec4<f32>(near.rgb + near.a * tail.rgb, near.a * tail.a);
 }
