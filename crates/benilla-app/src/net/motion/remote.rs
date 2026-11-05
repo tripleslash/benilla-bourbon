@@ -582,7 +582,10 @@ fn rotate_xy(v: [f32; 2], yaw: f32) -> [f32; 2] {
 /// per frame, drawn or not. A sweep over the owed time is still a sweep, so a hidden
 /// mover cannot pass a wall it would have hit; it is only coarser in time, and the next packet
 /// corrects the pose as it always did. Shown again, it steps every frame from the next one.
-/// Staggered by entity, so the hidden crowd's sweeps spread evenly over the frames.
+/// Staggered by entity, so the hidden crowd's sweeps spread evenly over the frames. A body the
+/// interface reads where it stands (a party or raid member, whose map position `partyN` and
+/// `raidN` read) is never strided, and a body whose queued move fired this frame takes its turn
+/// then, so a listener reads it where the reference's every-frame step leaves it.
 pub(in crate::net) const HIDDEN_STRIDE: u32 = 4;
 
 /// Whether hidden body `e` takes its turn on frame `frame` (see [`HIDDEN_STRIDE`]).
@@ -609,6 +612,8 @@ pub(in crate::net) fn extrapolate_remote_units(
     // A rider's deck, looked up by its transport guid.
     decks: Query<&Transform, Without<RemoteMotion>>,
     world: MoverWorld,
+    // The group's guids, whose map positions the interface reads: never strided.
+    roster: Option<Res<crate::spell::group_relation::GroupRoster>>,
     // The runaway watch's last reported silent second per mover.
     mut warned: Local<bevy::platform::collections::HashMap<Entity, u32>>,
     // When each mover last wrote a `rem` line.
@@ -622,7 +627,7 @@ pub(in crate::net) fn extrapolate_remote_units(
             Option<&mut crate::creature_anim::BodyTwist>,
             Has<super::FacingStep>,
             Option<&mut crate::transport::TransportRider>,
-            // Trace-only: joins a `rem` line to its `rly` lines.
+            // Joins a `rem` line to its `rly` lines, and names a group member for the stride.
             Option<&crate::net::Guid>,
             // Modes from `SMSG_SPLINE_MOVE_*`, which vmangos sends only for a unit it drives; a
             // player's ride the pose, so the union is the reference's one `CMovement+0x40` word.
@@ -660,11 +665,16 @@ pub(in crate::net) fn extrapolate_remote_units(
         store,
     ) in &mut q
     {
-        let hidden = vis.is_some_and(|v| *v == Visibility::Hidden);
+        let grouped = guid.is_some_and(|g| {
+            roster
+                .as_deref()
+                .is_some_and(|r| r.party.contains(&g.0) || r.raid.contains(&g.0))
+        });
+        let hidden = vis.is_some_and(|v| *v == Visibility::Hidden) && !grouped;
         let window = if hidden {
             let acc = owed.entry(e).or_insert(0.0);
             *acc += frame_dt;
-            if !hidden_turn(e, *frame) {
+            if !hidden_turn(e, *frame) && rm.fired_at_ms.is_none() {
                 continue;
             }
             std::mem::take(acc)

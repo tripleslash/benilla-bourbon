@@ -62,8 +62,8 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[];
 /// held to its systems' access by the same test.
 #[rustfmt::skip]
 const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
-    ("::net::motion::facing::drive_display_facing", &["Commands net::motion::spline::Spline",
-        "Transform"],
+    ("::net::motion::facing::drive_display_facing", &["Commands net::motion::remote::RemoteMotion",
+        "Commands net::motion::spline::Spline", "Transform"],
         "turns the units' models toward their facing; unit movement is \
          frame time, which the reference runs after the packets (`0x420d63` after `0x420d55`)"),
     ("::net::motion::spline::ground_clamp_creatures", &["Transform",
@@ -71,7 +71,8 @@ const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
         "settles the creatures on the ground, and a re-grounded mover's state with them; unit \
          movement is frame time, which the reference runs after the packets (`0x420d63` after \
          `0x420d55`)"),
-    ("::net::motion::remote::extrapolate_remote_units", &["Commands net::motion::spline::Spline",
+    ("::net::motion::remote::extrapolate_remote_units", &[
+        "Commands net::motion::remote::RemoteMotion", "Commands net::motion::spline::Spline",
         "Transform", "net::motion::remote::RemoteMotion"],
         "dead-reckons the remote players between their packets in the movement tick (event 5's \
          `0x616800` → `0x615b10`), frame time, which the reference runs after the packets \
@@ -89,7 +90,7 @@ const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
          `0x616800` → `0x615b10` → `0x616620` → `0x615c30`), then stamps the clock the next \
          frame's arrivals are due by (`0x616846`), frame time, which the reference runs after \
          the packets (`0x420d63` after `0x420d55`)"),
-    ("::Collider>", &["ColliderTrees"],
+    ("::refit_changed_collider_aabbs", &["ColliderTrees"],
         "refits the collision world's trees to the colliders frame time moved, the decks among \
          them, which the reference moves in the movement tick (event 5's `0x616800` → \
          `0x630970`), after the packets (`0x420d63` after `0x420d55`): a due arrival's catch-up \
