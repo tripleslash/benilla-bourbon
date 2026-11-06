@@ -10,6 +10,8 @@
 //! From inside, exterior shells draw only through deferred windows, doorways the flood reached onto
 //! an `0x8` group (none skips the pass, `0x6b3c87`): per window, every `0x8` group inside a frustum
 //! clipped to that doorway becomes a flood root (`0x6b3d39 call 0x6b41c0`), carrying its rect on.
+//! An eye in an open-air `0x40` group (a city street) is the exception, a deviation: every outdoor
+//! group draws and the exterior is unrestricted (`compute_pvs_traced`).
 //!
 //! This module computes each group's visible bit ([`WmoPortalInstance::visible`]); the one
 //! `Visibility` authority, `crate::model_render`'s `apply_model_visibility`, ANDs it with the rest.
@@ -543,10 +545,14 @@ pub(crate) fn compute_wmo_pvs(
                     // the containing map object (`[0xc7b748]`) and defers that flood's windows,
                     // the list Pass 2 already used. Its push test is `0x8` alone
                     // (`opens_a_window`), not the `0x148` of `exterior_visible` above.
-                    windows = Some((
-                        std::mem::take(&mut fresh.windows),
-                        std::mem::take(&mut fresh.reaches),
-                    ));
+                    // An open-air eye keeps the outside leg's whole frustum (the deviation in
+                    // `compute_pvs_traced`).
+                    windows = (!fresh.open_air).then(|| {
+                        (
+                            std::mem::take(&mut fresh.windows),
+                            std::mem::take(&mut fresh.reaches),
+                        )
+                    });
                 }
             }
         }
@@ -808,6 +814,9 @@ pub(crate) struct GroupPvs {
     /// Stack steps across every run of the walk this frame, Pass 1 and each Pass-2 replay; the dump
     /// prints it.
     pub(crate) iters: u32,
+    /// The eye stands in an `0x40`-not-`0x8` group, open to the sky: every outdoor group is
+    /// visible and the exterior draws unrestricted (the deviation in `compute_pvs_traced`).
+    pub(crate) open_air: bool,
 }
 
 /// One step on the walk's stack: the group to enter, the group it was entered from (so the entry
@@ -974,6 +983,11 @@ fn compute_pvs_traced<T: FloodTrace>(
         .in_group
         .and_then(|gi| nav.get(gi))
         .is_some_and(|n| n.flags & EXTERIOR == 0);
+    let open_air = inside_leg
+        && seeds
+            .in_group
+            .and_then(|gi| nav.get(gi))
+            .is_some_and(|n| n.flags & EXTERIOR_LIT != 0);
     match seeds.in_group {
         Some(c) => {
             stack.push((c, usize::MAX, FULL_SCREEN, 0, true));
@@ -991,8 +1005,23 @@ fn compute_pvs_traced<T: FloodTrace>(
             }
         }
     }
-    // Pass 1, the interior flood (`0x6b3bd4..0x6b3c10`), the only run that records windows.
-    flood.walk(&mut stack, inside_leg, trace);
+    // Pass 1, the interior flood (`0x6b3bd4..0x6b3c10`), the only run that records windows. An
+    // open-air eye records none: its exterior is unrestricted, so there is nothing to replay.
+    flood.walk(&mut stack, inside_leg && !open_air, trace);
+    // Deviation: an eye in an `0x40`-not-`0x8` group (Stormwind's streets, Orgrimmar's valleys)
+    // takes every outdoor group as visible, and `compute_wmo_pvs` gives it the outside leg's
+    // unrestricted exterior. The reference treats such a street as a room: from Stormwind's trade
+    // district the flood reaches no portal onto the `0x8` shell, so it draws no terrain, and the
+    // Mage Quarter tower or the hills over the walls only while a portal chain happens to frame
+    // them. These are open to the sky, so that culling hides what is plainly in view. Interiors
+    // still take the flood; the callback groups keep Pass 3.
+    if open_air {
+        for (gi, g) in nav.iter().enumerate() {
+            if g.flags & (EXTERIOR | EXTERIOR_LIT) != 0 && g.flags & CALLBACK_PASS == 0 {
+                flood.visible[gi] = true;
+            }
+        }
+    }
 
     // Pass 2, the deferred-window replay (`0x6b3c73..0x6b3d6f`): skipped with an empty worklist
     // (`0x6b3c87`), so a sealed room draws no exterior shell. Per window, each `0x8` group inside a
@@ -1050,6 +1079,7 @@ fn compute_pvs_traced<T: FloodTrace>(
         windows: flood.windows,
         reaches: flood.reaches,
         iters: flood.iters,
+        open_air,
     }
 }
 
@@ -1614,6 +1644,59 @@ mod tests {
             "the callback arm belongs to BOTH legs — gating it on the inside leg left 20 of the 24 \
              real groups undrawable from anywhere"
         );
+    }
+
+    /// The open-air deviation: an eye in an `0x40` street with no portal onto an `0x8` group, the
+    /// Stormwind trade district's case, still draws every outdoor group and leaves the exterior
+    /// unrestricted, while a true interior stays the flood's.
+    #[test]
+    fn an_open_air_street_draws_every_outdoor_group() {
+        // The doorway model, sealed, with the camera's room open to the sky.
+        let mut model = doorway_model();
+        model.portal_refs.clear();
+        model.group_nav[0].ref_count = 0;
+        model.group_nav[1].ref_count = 0;
+        model.group_nav[0].flags |= EXTERIOR_LIT;
+        let view = Mat4::look_at_rh(
+            bevy::math::Vec3::new(0.0, 1.0, 3.0),
+            bevy::math::Vec3::new(-32.0, 1.0, -4.0),
+            bevy::math::Vec3::Y,
+        );
+        let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
+        let street = compute_pvs_traced(
+            &model,
+            [-3.0, 0.0, 1.0],
+            None,
+            &clip,
+            &Affine3A::IDENTITY,
+            &mut (),
+        );
+        assert!(street.open_air, "an 0x40-not-0x8 seed is open to the sky");
+        assert!(
+            street.windows.is_empty(),
+            "no worklist: the exterior is whole"
+        );
+        assert!(
+            street.visible[..4].iter().all(|v| *v),
+            "the street and every 0x8 shell draw, though no portal reaches them"
+        );
+        assert!(
+            !street.visible[4],
+            "an interior no portal reaches stays culled"
+        );
+
+        // The control: the same room without 0x40 is the sealed room, its shells dark.
+        model.group_nav[0].flags &= !EXTERIOR_LIT;
+        let room = compute_pvs_traced(
+            &model,
+            [-3.0, 0.0, 1.0],
+            None,
+            &clip,
+            &Affine3A::IDENTITY,
+            &mut (),
+        );
+        assert!(!room.open_air);
+        assert!(!room.visible[1] && !room.visible[2] && !room.visible[3]);
     }
 
     /// An interior room `g0` (floor at z=0, the seed) whose doorway `p0` (WoW x=0, y ∈ [-0.5,0.5],
