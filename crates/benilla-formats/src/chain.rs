@@ -91,10 +91,87 @@ impl StoredBlob {
 /// A priority-ordered patch chain of MPQ archives (`Send + Sync`; reads are `&self` and lock-free).
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Chain {
-    /// Ascending priority: later archives win.
+    /// Ascending priority: later archives win. Empty when [`Self::packs`] answers.
     archives: Vec<Archive>,
+    /// fork: desktop — the BENPACK container this chain reads in place of archives, with the
+    /// updated character models over it when they are on ([`crate::netpack`]).
+    packs: Option<Packs>,
     /// The locale the chain's `Wow.ini` names, read once at open as start-up reads it once.
     locale: Locale,
+}
+
+/// A native chain's containers: the base corpus and the HD layer over it, the web chain's
+/// priority law ([`crate::layers::pick_layer`]) between them.
+#[cfg(not(target_arch = "wasm32"))]
+struct Packs {
+    base: std::sync::Arc<crate::netpack::NetPackStore>,
+    hd: Option<std::sync::Arc<crate::netpack::NetPackStore>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Packs {
+    /// The container that answers `name`, and the name to ask it for: the web chain's `pick` over
+    /// the live Turtle and reforged mounts ([`crate::remote::turtle`]), the HD layer and the base
+    /// — [`crate::layers::pick_layer`], the whole priority law.
+    fn pick(&self, name: &str) -> (std::sync::Arc<crate::netpack::NetPackStore>, Option<String>) {
+        let turtle = crate::remote::turtle();
+        let reforged = crate::remote::reforged();
+        let alias = match (&self.hd, &turtle) {
+            (Some(_), Some(t)) if is_table(name) => {
+                let alias = crate::layers::turtle_hd_alias(name);
+                t.contains(&alias).then_some(alias)
+            }
+            _ => None,
+        };
+        let layer = crate::layers::pick_layer(
+            reforged.as_ref().map(|r| r.contains(name)),
+            self.hd.as_ref().map(|hd| hd.contains(name)),
+            turtle.as_ref().map(|t| t.contains(name)),
+            alias.is_some(),
+        );
+        use crate::layers::Layer;
+        match (layer, turtle, &self.hd, reforged) {
+            (Layer::Reforged, _, _, Some(r)) => (r, None),
+            (Layer::TurtleHdAlias, Some(t), _, _) => (t, alias),
+            (Layer::Hd, _, Some(hd), _) => (std::sync::Arc::clone(hd), None),
+            (Layer::Turtle, Some(t), _, _) => (t, None),
+            _ => (std::sync::Arc::clone(&self.base), None),
+        }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        crate::remote::reforged().is_some_and(|r| r.contains(name))
+            || self.hd.as_ref().is_some_and(|hd| hd.contains(name))
+            || crate::remote::turtle().is_some_and(|t| t.contains(name))
+            || self.base.contains(name)
+    }
+
+    fn read(&self, name: &str) -> Result<Vec<u8>> {
+        let (store, alias) = self.pick(name);
+        store.read(alias.as_deref().unwrap_or(name))
+    }
+
+    /// The base container, and the origin's HD layer over it when `hd_models` asks; a layer that
+    /// will not open is reported and left out, as the web chain leaves it.
+    fn open(base: std::sync::Arc<crate::netpack::NetPackStore>, hd_models: bool) -> Self {
+        let hd = if hd_models {
+            match crate::remote::segment(crate::layers::HD_DATA_SEGMENT) {
+                Some(Ok(hd)) => Some(hd),
+                Some(Err(e)) => {
+                    eprintln!(
+                        "benilla: updated character models are on but the origin's {} container \
+                         did not open ({e:#}); running on the original art",
+                        crate::layers::HD_DATA_SEGMENT
+                    );
+                    None
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        Self { base, hd }
+    }
 }
 
 /// The web build's `Chain`: a **BENPACK container** (`crate::webpack`) read out of a static object
@@ -142,7 +219,6 @@ impl Mounts {
 
 /// Whether `name` is a DBC table, by its suffix and without allocating: the one kind of name the
 /// Turtle layer can carry a merge of (see [`crate::layers::TURTLE_HD_ALIAS_PREFIX`]).
-#[cfg(target_arch = "wasm32")]
 fn is_table(name: &str) -> bool {
     let b = name.as_bytes();
     b.len() >= 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".dbc")
@@ -224,6 +300,19 @@ impl Chain {
     /// Single-`.MPQ` opens ignore the flag: naming an archive is an instruction to mount it, and a
     /// caller that passes `patch-A.MPQ` by path means that archive (the packer's HD build does).
     pub fn open_layered(path: &Path, hd_models: bool) -> Result<Self> {
+        // fork: desktop — a folder holding a BENPACK container (the data origin's cache, or one
+        // built on this machine) is read as one, never mounted as an install.
+        if let Some(store) = crate::remote::store_at(path) {
+            let store =
+                store.with_context(|| format!("opening the container at {}", path.display()))?;
+            let mut chain = Self {
+                archives: Vec::new(),
+                packs: Some(Packs::open(store, hd_models)),
+                locale: Locale::default(),
+            };
+            chain.locale = crate::wow_ini::client_locale(&chain);
+            return Ok(chain);
+        }
         let mut archives = Vec::new();
         if path.is_dir() {
             let mut names: Vec<String> = std::fs::read_dir(path)
@@ -258,6 +347,7 @@ impl Chain {
         }
         let mut chain = Self {
             archives,
+            packs: None,
             locale: Locale::default(),
         };
         chain.locale = crate::wow_ini::client_locale(&chain);
@@ -291,6 +381,7 @@ impl Chain {
             .collect::<Result<Vec<_>>>()?;
         let mut chain = Self {
             archives,
+            packs: None,
             locale: Locale::default(),
         };
         chain.locale = crate::wow_ini::client_locale(&chain);
@@ -303,8 +394,22 @@ impl Chain {
         self.archives.iter().rev().find(|a| a.contains(name))
     }
 
+    /// Whether this chain reads a BENPACK container rather than MPQ archives: no [`Archive`]
+    /// handles to hand out, so a caller that streams out of one reads through [`Self::read`].
+    pub fn is_packed(&self) -> bool {
+        self.packs.is_some()
+    }
+
+    /// Whether the updated character models are mounted over this chain's container.
+    pub fn hd_character_models(&self) -> bool {
+        self.packs.as_ref().is_some_and(|p| p.hd.is_some())
+    }
+
     /// Whether `name` (`/` or `\`, any case) is a readable file, not a delete marker.
     pub fn contains(&self, name: &str) -> bool {
+        if let Some(packs) = &self.packs {
+            return packs.contains(name) || crate::bundled_addons::contains(name);
+        }
         match self.resolve(name) {
             Some(a) => !a.is_delete_marker(name),
             None => crate::bundled_addons::contains(name),
@@ -318,6 +423,14 @@ impl Chain {
 
     /// Read a file by internal path (`/` or `\`) from its winning archive.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
+        if let Some(packs) = &self.packs {
+            if !packs.contains(name) {
+                if let Some(bytes) = crate::bundled_addons::read(name) {
+                    return Ok(bytes);
+                }
+            }
+            return packs.read(name);
+        }
         if self.resolve(name).is_none() {
             if let Some(bytes) = crate::bundled_addons::read(name) {
                 return Ok(bytes);
@@ -388,6 +501,13 @@ impl Chain {
     /// read folding into the latter), and the call sites that use it behave on native exactly as
     /// they did before the lane existed.
     pub fn try_read(&self, name: &str) -> TryRead {
+        // fork: desktop — a container's pack may still be a download away: `Pending` until it lands.
+        if let Some(packs) = &self.packs {
+            if packs.contains(name) {
+                let (store, alias) = packs.pick(name);
+                return store.try_read(alias.as_deref().unwrap_or(name));
+            }
+        }
         match self.read(name) {
             Ok(bytes) => TryRead::Ready(bytes),
             Err(_) => TryRead::Missing,
@@ -397,15 +517,26 @@ impl Chain {
     /// Would [`Self::try_read`] answer without deferring? **Always true on native**, where every
     /// read resolves on the spot — see the web twin for what it is for.
     #[inline]
-    pub fn ready(&self, _name: &str) -> bool {
-        true
+    pub fn ready(&self, name: &str) -> bool {
+        match &self.packs {
+            Some(packs) => {
+                let (store, alias) = packs.pick(name);
+                store.is_ready(alias.as_deref().unwrap_or(name))
+            }
+            None => true,
+        }
     }
 
     /// Say that `name` will be wanted soon. **Nothing to do on native** — a file on disk is not
     /// warmed by being mentioned — so this is an empty call the optimiser deletes, and the shared
     /// call sites can say what they mean without a `cfg`.
     #[inline]
-    pub fn prefetch(&self, _name: &str) {}
+    pub fn prefetch(&self, name: &str) {
+        if let Some(packs) = &self.packs {
+            let (store, alias) = packs.pick(name);
+            store.prefetch(alias.as_deref().unwrap_or(name));
+        }
+    }
 
     /// The chain's named files with sizes, for development and extraction; a file in no listfile
     /// (most of `texture.MPQ`) is readable by name but not listed. Unions every archive's
@@ -413,6 +544,25 @@ impl Chain {
     pub fn list(&self) -> Result<Vec<ChainEntry>> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
+        if let Some(packs) = &self.packs {
+            // The web chain's listing: the base listfile, each live layer's names appended once,
+            // a merged table's alias left out (it is how the pair answers `<name>`).
+            let alias_prefix = crate::layers::TURTLE_HD_ALIAS_PREFIX.to_ascii_lowercase();
+            let (turtle, reforged) = (crate::remote::turtle(), crate::remote::reforged());
+            let stores = std::iter::once(&packs.base)
+                .chain(reforged.as_ref())
+                .chain(packs.hd.as_ref())
+                .chain(turtle.as_ref());
+            for store in stores {
+                for entry in store.listfile().unwrap_or_default() {
+                    let key = entry.name.replace('/', "\\").to_ascii_lowercase();
+                    if !key.starts_with(&alias_prefix) && seen.insert(key) {
+                        out.push(entry);
+                    }
+                }
+            }
+            return Ok(out);
+        }
         for archive in &self.archives {
             let Ok(listfile) = archive.read_file("(listfile)") else {
                 continue;
@@ -451,6 +601,16 @@ impl Chain {
     /// never written (`0x648e85`-`0x648ea0`, `SMemAlloc` without the zero flag), so which arm
     /// reads it is not fixed by the bytes.
     pub fn enumerate_archive_files(&self, prefix: &str) -> Vec<String> {
+        if self.packs.is_some() {
+            // The web chain's deviation, for the same reason: one listfile for the whole corpus.
+            let mut out = Vec::new();
+            for entry in self.list().unwrap_or_default() {
+                let name = entry.name.replace('/', "\\");
+                let line = &name.as_bytes()[..name.len().min(LISTFILE_LINE_MAX)];
+                pass_line(line, prefix, &mut out);
+            }
+            return out;
+        }
         let named = |a: &&Archive, name: &str| {
             a.path()
                 .file_name()

@@ -71,10 +71,12 @@ pub fn var(name: &str) -> Option<String> {
 /// a build-time constant would bake an address into a 90 MB wasm module, while this is a ~100-byte
 /// `no-cache` asset that a re-upload of one file repoints.
 ///
-/// Native: always `None`. There is no page, and the native client has real environment variables.
+/// Native: the data origin's `config.json` when the client reads one (fork: desktop,
+/// [`crate::desktop::config`]), else `None`: there is no page, and the native client has real
+/// environment variables.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn config(_key: &str) -> Option<String> {
-    None
+pub(crate) fn config(key: &str) -> Option<String> {
+    crate::desktop::config(key)
 }
 
 #[cfg(target_arch = "wasm32")]

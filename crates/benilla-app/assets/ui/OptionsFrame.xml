@@ -451,6 +451,20 @@
 
         -- ── The setting pages: 1.12 rows in the era Settings grammar ──
         -- Descriptions 1.12 lacks take a BENILLA_ prefix.
+        -- fork: desktop — the display rows a native client's own window takes (`BENILLA_NATIVE`).
+        BENILLA_TOOLTIP_DISPLAY_MODE =
+            "How the game takes the screen.\n\n"
+            .. "Fullscreen gives the game the monitor at its current resolution. Windowed is a "
+            .. "window at the Resolution below. Windowed (Borderless) is a window without a frame "
+            .. "covering the whole monitor, which switches to other programs instantly. "
+            .. "Applies when you click Apply."
+        BENILLA_TOOLTIP_RESOLUTION =
+            "The size of the game's window while it is windowed. Fullscreen and Windowed "
+            .. "(Borderless) always fill the monitor. Applies when you click Apply."
+        BENILLA_TOOLTIP_MULTISAMPLE =
+            "Smooths the jagged edges of the 3D world by sampling every pixel several times, at "
+            .. "a cost in frame rate. Values your graphics card does not offer are lowered to the "
+            .. "highest it does. Takes effect the next time the world loads."
         BENILLA_TOOLTIP_RENDER_SCALE =
             "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
             .. "The interface is unaffected at any setting.\n\n"
@@ -703,6 +717,65 @@
                 "RowShowDamage", "RowPeriodicDamage", "RowPetDamage",
             },
         }
+
+        -- fork: desktop — a native client's display rows close the Display section, after Gamma;
+        -- the web build's page owns the window and lists none of them (the rows stay hidden).
+        if ( BENILLA_NATIVE ) then
+            local graphics = BENILLA_OPTIONS_PAGE_ROWS.Graphics
+            for i, rkey in ipairs(graphics) do
+                if ( rkey == "RowGamma" ) then
+                    table.insert(graphics, i + 1, "RowDisplayMode")
+                    table.insert(graphics, i + 2, "RowResolution")
+                    table.insert(graphics, i + 3, "RowMultisample")
+                    break
+                end
+            end
+        end
+
+        -- Display Mode over the reference's two rows: `gxWindow` (0 is fullscreen) and
+        -- `gxMaximize` (a windowed window over the whole monitor, frameless). 0 Fullscreen,
+        -- 1 Windowed, 2 Windowed (Borderless).
+        function BenillaDisplayMode_Get()
+            if ( (tonumber(GetCVar("gxWindow")) or 0) == 0 ) then
+                return 0
+            end
+            if ( (tonumber(GetCVar("gxMaximize")) or 0) ~= 0 ) then
+                return 2
+            end
+            return 1
+        end
+
+        -- Both rows, then the commit the `gx*` rows wait for (BenillaOptionsRow_Set's).
+        function BenillaDisplayMode_Set(mode)
+            local window, maximize = "1", "0"
+            if ( mode == 0 ) then
+                window = "0"
+            elseif ( mode == 2 ) then
+                maximize = "1"
+            end
+            SetCVar("gxWindow", window)
+            SetCVar("gxMaximize", maximize)
+            RestartGx()
+        end
+
+        -- The Resolution row's entries: GetScreenResolutions' sizes, the stored one among them
+        -- when the monitor does not list it.
+        function BenillaResolution_Entries()
+            local entries, seen = {}, {}
+            local sizes = { GetScreenResolutions() }
+            for i = 1, getn(sizes) do
+                local size = sizes[i]
+                if ( size and not seen[size] ) then
+                    seen[size] = 1
+                    table.insert(entries, { text = size, value = size })
+                end
+            end
+            local current = GetCVar("gxResolution")
+            if ( current and current ~= "" and not seen[current] ) then
+                table.insert(entries, { text = current, value = current })
+            end
+            return entries
+        end
 
         -- `tip` is a GlobalStrings key, resolved at hover as UIOptionsFrame.lua:265 does.
         -- fork: the head over a row that opens a section, in the gap above it.
@@ -2474,12 +2547,74 @@
                                                     info.valueStep, "gamma")
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <!-- fork: desktop — a native client's display rows
+                                             (`BENILLA_NATIVE`), shown and listed only there; the
+                                             web build's page owns its window. -->
+                                        <Frame name="$parentRowDisplayMode" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGamma" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGamma" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsNumFuncRow_OnLoad(this, BenillaDisplayMode_Get,
+                                                    BenillaDisplayMode_Set, "0", "Display Mode",
+                                                    "BENILLA_TOOLTIP_DISPLAY_MODE")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Fullscreen", value = "0" },
+                                                    { text = "Windowed", value = "1" },
+                                                    { text = "Windowed (Borderless)", value = "2" },
+                                                })
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowResolution" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowDisplayMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowDisplayMode" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- `gxResolution`, the windowed size; committed by
+                                                -- RestartGx like every `gx*` row.
+                                                BenillaOptionsRow_OnLoad(this, "gxResolution", "Resolution",
+                                                    "BENILLA_TOOLTIP_RESOLUTION")
+                                                BenillaOptionsDropdownRow_Setup(this, BenillaResolution_Entries())
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowMultisample" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowResolution" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowResolution" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- `gxMultisample`, a sample count the engine clamps
+                                                -- to the device's ceiling; 1 is none. The world
+                                                -- camera reads it as it spawns.
+                                                BenillaOptionsRow_OnLoad(this, "gxMultisample", "Multisampling",
+                                                    "BENILLA_TOOLTIP_MULTISAMPLE")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Off", value = "1" },
+                                                    { text = "2x", value = "2" },
+                                                    { text = "4x", value = "4" },
+                                                    { text = "8x", value = "8" },
+                                                })
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                         <Frame name="$parentRowFarclip" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowGamma" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowGamma" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
+                                                -- fork: desktop — under the display rows where they
+                                                -- show, the section gap kept.
+                                                if ( BENILLA_NATIVE ) then
+                                                    local above = this:GetParent():GetName() .. "RowMultisample"
+                                                    this:ClearAllPoints()
+                                                    this:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -33)
+                                                    this:SetPoint("TOPRIGHT", above, "BOTTOMRIGHT", 0, -33)
+                                                end
                                                 BenillaOptionsRow_OnLoad(this, "farclip", "Terrain Distance",
                                                     "OPTION_TOOLTIP_FARCLIP")
                                                 local info = BenillaGraphicsSliderInfo(2)
@@ -4024,10 +4159,10 @@
             -- Deviation: Turtle's rows benilla cannot honour are cut, by the name Turtle keys them
             -- with (Options\Options.lua), because they would do nothing here.
             local cut = {
-                -- What the browser page owns, not the client: the display mode and its refresh,
-                -- the desktop's gamma ramp, multisampling, vsync and the hardware cursor.
-                RESOLUTION = 1, WINDOWED_MODE = 1, WINDOWED_MAXIMIZED = 1, REFRESH = 1,
-                DESKTOP_GAMMA = 1, MULTISAMPLE = 1, VERTICAL_SYNC = 1, TRIPLE_BUFFER = 1,
+                -- What the browser page owns, not the client: the display mode's refresh, the
+                -- desktop's gamma ramp, vsync and the hardware cursor.
+                REFRESH = 1,
+                DESKTOP_GAMMA = 1, VERTICAL_SYNC = 1, TRIPLE_BUFFER = 1,
                 HARDWARE_CURSOR = 1, FIX_LAG = 1,
                 -- A CVar benilla has no reader for: `useUiScale` (the UI scale always applies),
                 -- `lod`, `shadowLevel`, `baseMip`, the 1.12 shader switches, `movieSubtitle`.
@@ -4048,6 +4183,15 @@
                 -- clutter's own rows carry the ground cover.
                 ENVIRONMENT_DETAIL = 1,
             }
+            -- fork: desktop — the display mode, its resolution and multisampling are the page's
+            -- on the web build; a native client (`BENILLA_NATIVE`) has a window of its own to set
+            -- them on, through Turtle's own rows.
+            if ( not BENILLA_NATIVE ) then
+                cut.RESOLUTION = 1
+                cut.WINDOWED_MODE = 1
+                cut.WINDOWED_MAXIMIZED = 1
+                cut.MULTISAMPLE = 1
+            end
             for i = getn(GameOptions), 1, -1 do
                 local category = GameOptions[i]
                 if ( category.options ) then

@@ -349,10 +349,18 @@ fn work(plan: CompositePlan, chain: Arc<Mutex<Chain>>) -> Work {
 #[cfg(not(target_arch = "wasm32"))]
 fn read_texture(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<BlpMipChain> {
     let name = path.replace('/', "\\");
-    let archive = chain.lock_recover().archive_for(&name)?;
-    let bytes = archive
-        .read_file(&name)
-        .with_context(|| format!("reading texture '{name}'"))?;
+    let bytes = {
+        let locked = chain.lock_recover();
+        if locked.is_packed() {
+            // fork: desktop — a container hands out no archive to read outside the lock.
+            locked.read(&name)
+        } else {
+            let archive = locked.archive_for(&name)?;
+            drop(locked);
+            archive.read_file(&name).map_err(anyhow::Error::from)
+        }
+    }
+    .with_context(|| format!("reading texture '{name}'"))?;
     blp_bytes_to_mip_chain(&bytes).with_context(|| format!("decoding texture '{name}'"))
 }
 

@@ -1,7 +1,8 @@
 //! The login engine: the session's credentials, the IO thread's pre-logon park, the glue screens'
-//! asks, the login's success edge and the saved account. Deviation (this fork): the glue's
-//! `QuitGame` is heard and ignored ([`GlueLogin::Quit`]): in a browser tab, closing the client is
-//! the browser's gesture, and the fork's login screen has no Quit button. What the screens show of it is
+//! asks, the login's success edge and the saved account. Deviation (this fork): on the web build
+//! the glue's `QuitGame` is heard and ignored ([`GlueLogin::Quit`]), because in a browser tab
+//! closing the client is the browser's gesture, and the page's login screen has no Quit button; a
+//! native client ends its process, as the reference does. What the screens show of it is
 //! the glue manager's ([`crate::ui_script::glue_mgr`]), which reads the net messages themselves and
 //! the one refusal with no message behind it ([`LoginGuardRefused`]).
 //!
@@ -142,8 +143,8 @@ pub(crate) enum GlueLogin {
     /// `DisconnectFromServer` (`0x46d340`): the world session dropped if there is one, then the
     /// logon cancelled, as select's Back drops the parked session.
     Disconnect,
-    /// `QuitGame` (`0x46cea0` → `0x401560(0)`), where the reference's process ends. Deviation
-    /// (this fork): ignored, since no login screen quits the client (the module header's).
+    /// `QuitGame` (`0x46cea0` → `0x401560(0)`), where the reference's process ends, as a native
+    /// client's does. Deviation (this fork): ignored on the web build (the module header's).
     Quit,
     /// `CLoginMgr::Cancel` (`0x5b3320`) on a logon that failed: the realmd link closes if one is
     /// open (`[login+5]`, `0x5b3323`; only the IO thread's logon park holds one), and nothing
@@ -152,8 +153,8 @@ pub(crate) enum GlueLogin {
 }
 
 /// The glue manager's asks: a typed submit (the account saving is the stock Lua's
-/// `SetSavedAccountName`), a cancel, a disconnect as select's Back; a quit is ignored (this fork's
-/// deviation, the module header's).
+/// `SetSavedAccountName`), a cancel, a disconnect as select's Back; a quit ends a native client and
+/// is ignored on the web build (this fork's deviation, the module header's).
 pub(crate) fn answer_glue(
     mut asks: MessageReader<GlueLogin>,
     mut attempt: Attempt,
@@ -161,6 +162,8 @@ pub(crate) fn answer_glue(
     realm: Option<Res<crate::net::RealmChoice>>,
     state: Res<State<ClientState>>,
     mut commands: Commands,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut, unused_variables))]
+    mut exit: MessageWriter<AppExit>,
 ) {
     for ask in asks.read() {
         match ask {
@@ -186,7 +189,13 @@ pub(crate) fn answer_glue(
                 }
             }
             GlueLogin::Quit => {
-                info!("login: QuitGame ignored — no login screen quits the client in this fork");
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    info!("login: QuitGame — exiting");
+                    exit.write(AppExit::Success);
+                }
+                #[cfg(target_arch = "wasm32")]
+                info!("login: QuitGame ignored — a browser tab is closed by the browser");
             }
         }
     }

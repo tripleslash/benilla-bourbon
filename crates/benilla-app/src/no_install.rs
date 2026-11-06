@@ -30,6 +30,25 @@ impl NoInstall {
     /// A `Data` folder whose archives will not open, a base archive missing or corrupt: as fatal as
     /// no folder, as the reference's `0x4038ef` and `0x403b6f` are for a base archive.
     pub(crate) fn unreadable(data_dir: &std::path::Path, err: &anyhow::Error) -> Self {
+        // fork: desktop — a client that reads an origin's data has no install to blame: the first
+        // start could not fetch the index and nothing is cached yet.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(origin) = benilla_formats::remote::origin() {
+            return Self {
+                title: "benilla: the game data could not be fetched",
+                message: format!(
+                    "benilla reads its game data from
+  {origin}
+and keeps it in
+  {}
+but                      could not open it:
+  {err:#}
+
+Check the internet connection and start                      benilla again.",
+                    data_dir.display()
+                ),
+            };
+        }
         Self {
             title: "benilla: the WoW install cannot be read",
             message: format!(

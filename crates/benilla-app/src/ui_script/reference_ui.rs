@@ -105,6 +105,19 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     if let Some(answer) = read_loose(&benilla_formats::install_index().get(), req) {
         return answer;
     }
+    // fork: desktop — a client reading the site's data reads its loose files as the page does,
+    // the Turtle layer's ahead of the corpus's while it is mounted.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let turtle = benilla_formats::layers::turtle_mounted()
+            .then(|| benilla_formats::remote::loose(benilla_formats::layers::TURTLE_DATA_SEGMENT, req))
+            .flatten();
+        if let Some(bytes) = turtle
+            .or_else(|| benilla_formats::remote::loose(benilla_formats::remote::DATA_SEGMENT, req))
+        {
+            return Some(bytes);
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     if let Some(bytes) = read_loose_web(req) {
         return Some(bytes);

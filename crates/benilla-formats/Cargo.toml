@@ -28,8 +28,20 @@ benilla-blp = { path = "../benilla-blp" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 benilla-wdt = { path = "../benilla-wdt" }
 benilla-wmo = { path = "../benilla-wmo" }
+# The BENPACK container's reader: the web build's only store, and natively the store a client with
+# no install reads (`src/netpack/`). Default features only: the `write` half is the packer's.
+benilla-pack = { path = "../benilla-pack" }
+
+# The native pack store's network half (`src/netpack/fetch.rs`): a blocking HTTPS client, its TLS
+# rustls with the webpki roots so the binary needs no system certificate store, and the CRC32 a
+# downloaded pack is checked against before it is kept.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+crc32fast = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
+# The pack store's tests build their own small containers.
+benilla-pack = { path = "../benilla-pack", features = ["write"] }
 glam = "0.31"
 
 # `Chain` reads a BENPACK container over HTTP instead of mounting MPQ archives on the web target
@@ -50,9 +62,6 @@ web-sys = { version = "0.3.99", features = [
     # (`quiet_console_on_web`), so the console is the only place left to say it.
     "console",
 ] }
-# The container's reader. Default features only — the `write` half is the native packer's, and
-# keeping it off is what lets this dependency exist at all on wasm32.
-benilla-pack = { path = "../benilla-pack" }
 # The page seams are plain globals (`__wenilla_packs`, `__wenilla_boottrace`), reached through
 # Reflect rather than a wasm-bindgen module import, so the client still runs on a page that ships
 # neither.

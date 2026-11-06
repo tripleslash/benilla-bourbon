@@ -25,6 +25,13 @@ strum = { version = "0.26", features = ["derive"] }
 # clock on wasm32, where `std::time::Instant::now()` panics.
 web-time = "1"
 
+# fork: desktop — the native transport's WebSocket body (`src/transport/native_ws.rs`), for a realm
+# reachable only through a gateway: blocking tungstenite over rustls, its roots webpki's, so the
+# binary needs no system certificate store. `ring` is the one crypto provider installed.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+
 # The logon challenge's time-zone bias on unix, `localtime_r`'s.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

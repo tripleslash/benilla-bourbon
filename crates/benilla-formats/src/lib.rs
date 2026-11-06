@@ -35,6 +35,13 @@ pub use loose::{
     LooseOpen,
 };
 mod characters;
+/// fork: desktop — the native store for a client with no install: the BENPACK container fetched
+/// from its origin and cached on disk.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod netpack;
+/// fork: desktop — the origin a client with no install reads from, and the folder it caches in.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod remote;
 /// Web-target HTTP plumbing (bytes and byte ranges, in place of a filesystem). Always compiled
 /// (`encode_name` is plain Rust and tested natively); the browser-only pieces are gated to `wasm32`
 /// inside the module itself.

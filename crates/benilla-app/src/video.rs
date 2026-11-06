@@ -2,11 +2,14 @@
 //! `gxVSync` rows (`OptionsFrame.lua:14`, `:9`) and `gxResolution`, the windowed size and, in
 //! fullscreen, the size the screen runs at.
 //!
-//! Deviation: `gxWindow "0"` is borderless fullscreen, not 1.12's exclusive mode-set at
-//! `gxResolution`, because Wayland has no client mode-setting (winit ignores
+//! Deviation: off Windows, `gxWindow "0"` is borderless fullscreen, not 1.12's exclusive
+//! mode-set at `gxResolution`, because Wayland has no client mode-setting (winit ignores
 //! `Fullscreen::Exclusive` there), and X11's XRandR changes the desktop's mode and a crash leaves
 //! it changed. Bevy's `WindowMode::Fullscreen` also panics on a live change that cannot resolve a
-//! monitor (`bevy_winit::winit_windows:91`, `system.rs:333`).
+//! monitor (`bevy_winit::winit_windows:91`, `system.rs:333`). On Windows (fork: desktop) it is the
+//! reference's exclusive fullscreen, at the monitor's current video mode rather than at
+//! `gxResolution`, because the windowed size is what that row saves here ([`fullscreen_mode`]);
+//! the borderless window over the monitor is `gxMaximize` there, as in the reference.
 //!
 //! The `gx*` rows are latched until `RestartGx()`, as in 1.12; a restart re-asserts them against
 //! the window rather than re-creating the device, since wgpu reconfigures the surface live.
@@ -29,6 +32,8 @@ use bevy::prelude::*;
 use bevy::render::renderer::RenderAdapterInfo;
 use bevy::window::Monitor;
 use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution};
+#[cfg(windows)]
+use bevy::window::VideoModeSelection;
 use std::time::Duration;
 
 /// `$WOW_NOVSYNC=1`: uncap for this session only; it never reaches `config.toml` (the
@@ -69,10 +74,12 @@ pub(crate) fn at_requested_dpi(res: WindowResolution) -> WindowResolution {
     }
 }
 
-/// The display modes benilla ships; neither is the reference's mode-setting fullscreen.
+/// The display modes benilla ships: fullscreen is the reference's exclusive mode on Windows only
+/// ([`fullscreen_mode`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum DisplayMode {
-    /// Borderless, filling the monitor: `gxWindow "0"`, the reference's default.
+    /// Fullscreen, `gxWindow "0"`, the reference's default: exclusive on Windows, elsewhere
+    /// borderless over the monitor ([`fullscreen_mode`]).
     #[default]
     Fullscreen,
     /// A window at [`VideoConfig::windowed`]. `gxWindow "1"`.
@@ -110,10 +117,23 @@ pub(crate) fn window_mode(
     monitor: MonitorSelection,
 ) -> WindowMode {
     match (display, maximize) {
-        (DisplayMode::Fullscreen, _) | (DisplayMode::Windowed, true) => {
-            WindowMode::BorderlessFullscreen(monitor)
-        }
+        (DisplayMode::Fullscreen, _) => fullscreen_mode(monitor),
+        (DisplayMode::Windowed, true) => WindowMode::BorderlessFullscreen(monitor),
         (DisplayMode::Windowed, false) => WindowMode::Windowed,
+    }
+}
+
+/// `gxWindow "0"` on this platform: on Windows the reference's exclusive fullscreen, at the
+/// monitor's current video mode; elsewhere the borderless window over the monitor (the module
+/// header's deviation).
+pub(crate) fn fullscreen_mode(monitor: MonitorSelection) -> WindowMode {
+    #[cfg(windows)]
+    {
+        WindowMode::Fullscreen(monitor, VideoModeSelection::Current)
+    }
+    #[cfg(not(windows))]
+    {
+        WindowMode::BorderlessFullscreen(monitor)
     }
 }
 
@@ -988,6 +1008,7 @@ pub(crate) fn apply_window_mode(
                 WindowMode::BorderlessFullscreen(_),
                 WindowMode::BorderlessFullscreen(_)
             )
+            | (WindowMode::Fullscreen(..), WindowMode::Fullscreen(..))
     );
     if already && !forced {
         return;
@@ -1030,7 +1051,10 @@ pub(crate) fn show_screen_size(
     };
     let res = &window.resolution;
     let screen = (cfg.display == DisplayMode::Fullscreen
-        && matches!(window.mode, WindowMode::BorderlessFullscreen(_))
+        && matches!(
+            window.mode,
+            WindowMode::BorderlessFullscreen(_) | WindowMode::Fullscreen(..)
+        )
         && res.physical_width() > 0
         && res.physical_height() > 0)
         .then(|| format!("{}x{}", res.physical_width(), res.physical_height()));
@@ -1249,14 +1273,16 @@ mod tests {
         );
     }
 
-    /// `WindowMode::Fullscreen` is ignored on Wayland and panics without a monitor.
+    /// `WindowMode::Fullscreen` is ignored on Wayland and panics without a monitor, so off Windows
+    /// the default is the borderless window; on Windows it is the reference's exclusive mode.
     #[test]
-    fn the_default_is_borderless_fullscreen_not_exclusive() {
+    fn the_default_is_exclusive_fullscreen_on_windows_only() {
         assert_eq!(DisplayMode::default(), DisplayMode::Fullscreen);
-        assert!(matches!(
-            window_mode(DisplayMode::Fullscreen, false, MonitorSelection::Primary),
-            WindowMode::BorderlessFullscreen(_)
-        ));
+        let mode = window_mode(DisplayMode::Fullscreen, false, MonitorSelection::Primary);
+        #[cfg(windows)]
+        assert!(matches!(mode, WindowMode::Fullscreen(_, _)), "{mode:?}");
+        #[cfg(not(windows))]
+        assert!(matches!(mode, WindowMode::BorderlessFullscreen(_)), "{mode:?}");
         assert_eq!(
             window_mode(DisplayMode::Windowed, false, MonitorSelection::Primary),
             WindowMode::Windowed
@@ -1271,7 +1297,7 @@ mod tests {
     #[test]
     fn the_window_is_born_at_the_locales_registered_modes() {
         let none = |_: &str| None;
-        let fullscreen = WindowMode::BorderlessFullscreen(MonitorSelection::Primary);
+        let fullscreen = fullscreen_mode(MonitorSelection::Primary);
         for locale in 0..8 {
             assert_eq!(boot_window_mode_for(|| locale, none, false), fullscreen);
         }
@@ -1315,7 +1341,7 @@ mod tests {
         for locale in [4, 0] {
             assert_eq!(
                 boot_window_mode_for(|| locale, junk, false),
-                WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+                fullscreen_mode(MonitorSelection::Primary),
                 "locale {locale}"
             );
         }
@@ -1335,10 +1361,7 @@ mod tests {
     fn a_fully_stored_config_asks_no_locale() {
         let both = |_: &str| Some("0".to_string());
         let mode = boot_window_mode_for(|| panic!("the locale was read"), both, false);
-        assert_eq!(
-            mode,
-            WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
-        );
+        assert_eq!(mode, fullscreen_mode(MonitorSelection::Primary));
     }
 
     /// The reference's polarity: the row is "Windowed Mode".
@@ -1375,11 +1398,9 @@ mod tests {
             .mode = window_mode(DisplayMode::Fullscreen, false, MonitorSelection::Primary);
 
         app.update();
-        assert!(
-            matches!(
-                app.world().entity(win).get::<Window>().unwrap().mode,
-                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
-            ),
+        assert_eq!(
+            app.world().entity(win).get::<Window>().unwrap().mode,
+            fullscreen_mode(MonitorSelection::Primary),
             "an already-fullscreen window must not be re-asserted onto another monitor selection"
         );
 
@@ -1403,10 +1424,10 @@ mod tests {
         // Back in, on `Current`: the monitor the window is on by now.
         app.world_mut().resource_mut::<VideoConfig>().display = DisplayMode::Fullscreen;
         app.update();
-        assert!(matches!(
+        assert_eq!(
             app.world().entity(win).get::<Window>().unwrap().mode,
-            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
-        ));
+            fullscreen_mode(MonitorSelection::Current)
+        );
     }
 
     /// In fullscreen `gxResolution` answers the size the screen runs at, the borderless window's
@@ -1464,7 +1485,7 @@ mod tests {
         );
         assert_eq!(
             window_mode(DisplayMode::Fullscreen, true, m),
-            WindowMode::BorderlessFullscreen(m),
+            fullscreen_mode(m),
             "fullscreen ignores it"
         );
     }

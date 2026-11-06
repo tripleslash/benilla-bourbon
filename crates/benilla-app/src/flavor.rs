@@ -222,17 +222,44 @@ fn mount(to: ClientFlavor) -> anyhow::Result<Option<impl Fn(&str) -> bool>> {
     }))
 }
 
-/// A mounted layer's membership test.
+/// Natively the Turtle layer is the desktop's ([`benilla_formats::remote::mount_turtle`]), read off
+/// the same site the page reads, on the page's terms; a client reading an install has none, so a
+/// Turtle realm cannot be played and Vanilla is all there is.
 #[cfg(not(target_arch = "wasm32"))]
-type LayerContains = fn(&str) -> bool;
-
-/// Native has no Turtle layer: a Turtle realm cannot be played, and Vanilla is all there is.
-#[cfg(not(target_arch = "wasm32"))]
-fn mount(to: ClientFlavor) -> anyhow::Result<Option<LayerContains>> {
-    match to {
-        ClientFlavor::Turtle => anyhow::bail!("this build has no Turtle WoW layer (web only)"),
-        ClientFlavor::Vanilla => Ok(None),
+fn mount(to: ClientFlavor) -> anyhow::Result<Option<impl Fn(&str) -> bool>> {
+    use benilla_formats::remote;
+    if !benilla_formats::layers::turtle_available() {
+        return match to {
+            ClientFlavor::Turtle => {
+                anyhow::bail!("this build has no Turtle WoW layer (no data origin)")
+            }
+            ClientFlavor::Vanilla => Ok(None),
+        };
     }
+    let (store, reforged) = match to {
+        ClientFlavor::Turtle => {
+            remote::mount_turtle()?;
+            if benilla_formats::layers::reforged_models() {
+                if let Err(e) = remote::mount_reforged() {
+                    warn!("flavor: the reforged models and textures could not be mounted — {e:#}");
+                }
+            }
+            (remote::turtle(), remote::reforged())
+        }
+        ClientFlavor::Vanilla => {
+            let stores = (remote::turtle(), remote::reforged());
+            remote::close_reforged();
+            remote::close_turtle();
+            stores
+        }
+    };
+    if store.is_none() && reforged.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(move |name: &str| {
+        store.as_ref().is_some_and(|s| s.contains(name))
+            || reforged.as_ref().is_some_and(|r| r.contains(name))
+    }))
 }
 
 /// A realm the client cannot play: say why, and leave the park unanswered so another realm can be

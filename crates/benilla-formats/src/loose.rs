@@ -419,13 +419,27 @@ impl LooseIndexCell {
     }
 }
 
+/// Whether this process reads a data origin rather than an install (fork: desktop).
+fn reads_origin() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::remote::origin().is_some()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
 /// The player's install as a [`LooseIndexCell`], over [`wow_data`] and its parent folder; empty
 /// without an install, and always on the web build, whose `wow_data` is a URL root with no
 /// folder to walk (the page's loose top-level files are `ui_script::reference_ui`'s fetch).
 pub fn install_index() -> Arc<LooseIndexCell> {
     static CELL: LazyLock<Arc<LooseIndexCell>> = LazyLock::new(|| {
         Arc::new(LooseIndexCell::new(|| match wow_data() {
-            Some(data) if cfg!(not(target_arch = "wasm32")) => {
+            // fork: desktop — the data origin's cache is no install: its loose files come from the
+            // site (`crate::remote::loose`), never from a walk of the cache folder.
+            Some(data) if cfg!(not(target_arch = "wasm32")) && !reads_origin() => {
                 LooseIndex::build(data.parent(), &data)
             }
             _ => LooseIndex::default(),

@@ -186,6 +186,13 @@ fn new_vm<E: std::fmt::Display>(
         .copied()
         .unwrap_or_default();
     script.set_flavor(flavor.ui());
+    // fork: desktop — `BENILLA_NATIVE`: 1 on a native client, nil on the web build. The layer
+    // offers Exit Game, the login screen's Quit and the display rows (resolution, window mode,
+    // multisampling) only where there is a process to end and a window of its own to size.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Err(e) = script.lua().globals().set("BENILLA_NATIVE", 1) {
+        warn!("ui_script: BENILLA_NATIVE not set: {e}");
+    }
     script.set_european_numbers(european_numbers);
     // `[0xc0e080]`, which start-up sets once from `Wow.ini`, so every VM answers `GetLocale` alike.
     script.set_locale(super::client_locale().index());

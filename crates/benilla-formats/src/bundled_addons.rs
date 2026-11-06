@@ -8,8 +8,9 @@
 //! module's; which of them a flavor offers is the app's.
 //!
 //! Where the files are:
-//! * native: `$BENILLA_BUNDLED_ADDONS` (set and empty: none), else `<project folder>/third_party/
-//!   addons` in a dev build, else `<exe dir>/bundled-addons`;
+//! * native: `$BENILLA_BUNDLED_ADDONS` (set and empty: none), else the data origin's, cached
+//!   (`crate::remote::addons_dir`), else `<project folder>/third_party/addons` in a dev build, else
+//!   `<exe dir>/bundled-addons`;
 //! * web: `/addons/<Folder>/<file>` on the page's origin, listed by `/addons/index.txt` (one
 //!   relative path per line), since a static origin has no directory listing.
 
@@ -92,6 +93,11 @@ fn web_base() -> String {
 fn root() -> Option<PathBuf> {
     if let Some(over) = std::env::var_os("BENILLA_BUNDLED_ADDONS") {
         return (!over.is_empty()).then(|| PathBuf::from(over));
+    }
+    // fork: desktop — a client reading the origin's data takes the origin's bundled addons too,
+    // cached beside its packs (`crate::remote::sync_addons`).
+    if let Some(dir) = crate::remote::addons_dir() {
+        return Some(dir);
     }
     if let Some(project) = crate::project_folder() {
         return Some(project.join("third_party").join("addons"));

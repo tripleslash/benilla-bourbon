@@ -188,8 +188,8 @@ fn the_movies_end_returns_to_the_login_screen_and_its_music() {
     assert_eq!(s.take_errors(), Vec::<String>::new());
 }
 
-/// This fork's login layer: the stock Quit button and the web-link buttons are gone and stay gone
-/// through the screen's own `OnShow`.
+/// This fork's login layer in a VM with no `BENILLA_NATIVE` (the web build's): the stock Quit
+/// button and the web-link buttons are gone and stay gone through the screen's own `OnShow`.
 #[test]
 fn the_stock_login_shows_no_quit_button() {
     let _ = benilla_formats::wow_data_or_skip!();

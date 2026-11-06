@@ -169,10 +169,24 @@ pub fn data_generation() -> u64 {
     DATA_GENERATION.load(Ordering::Acquire)
 }
 
+/// Mark a live mount change ([`data_generation`]).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn bump_generation() {
+    DATA_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
 /// Whether this target can mount the Turtle layer at all: the browser build, which is served the
-/// `data-turtle` container. The native build reads MPQs and has no Turtle container to read.
-pub const fn turtle_available() -> bool {
-    cfg!(target_arch = "wasm32")
+/// `data-turtle` container, and (fork: desktop) a native client reading the same site
+/// ([`crate::remote::origin`]). A native build reading MPQs has no Turtle container to read.
+pub fn turtle_available() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        true
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::remote::origin().is_some()
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -290,7 +304,8 @@ pub use live::{
     unmount_turtle,
 };
 
-/// Whether the reforged art layer is mounted now. Always `false` natively.
+/// Whether the reforged art layer is mounted now. Natively, the desktop's live mount
+/// ([`crate::remote::reforged`]); `false` on an install.
 pub fn reforged_mounted() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
@@ -298,7 +313,7 @@ pub fn reforged_mounted() -> bool {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        false
+        crate::remote::reforged().is_some()
     }
 }
 
@@ -319,7 +334,8 @@ pub fn reforged_models() -> bool {
     REFORGED_MODELS.load(Ordering::Relaxed)
 }
 
-/// Whether the Turtle layer is mounted now. Always `false` natively.
+/// Whether the Turtle layer is mounted now. Natively, the desktop's live mount
+/// ([`crate::remote::turtle`]); `false` on an install.
 pub fn turtle_mounted() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
@@ -327,7 +343,7 @@ pub fn turtle_mounted() -> bool {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        false
+        crate::remote::turtle().is_some()
     }
 }
 

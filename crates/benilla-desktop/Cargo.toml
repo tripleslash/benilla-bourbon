@@ -1,0 +1,26 @@
+[package]
+name = "benilla-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "fork: desktop — the self-contained Windows client: benilla's launcher with its game data fetched from wow.example.com and every file it keeps in wow-data/ beside the executable"
+
+[lints]
+workspace = true
+
+[features]
+# Off in the shipped build (`scripts/build-desktop.sh` builds `--no-default-features`); on, it is
+# a dev build that still reads the origin and keeps its state beside the executable.
+default = ["dev"]
+dev = ["benilla-app/dev"]
+
+[dependencies]
+benilla-app = { path = "../benilla-app", default-features = false }
+
+[build-dependencies]
+benilla-buildstamp = { path = "../benilla-buildstamp" }
+
+[[bin]]
+name = "wow-reforged"
+path = "src/main.rs"
+test = false

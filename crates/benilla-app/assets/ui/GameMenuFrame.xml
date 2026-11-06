@@ -4,8 +4,9 @@
         Deviation: the rungs are the 1.15 era client's ESC menu, because its settings screens
         replace 1.12's, which are much worse to use; the era's AddOns rung is dropped, since the
         character-select AddOns screen is the only addon UI. Addons address `GameMenuFrame` by name.
-        Deviation (this fork): no Exit Game rung either, because a browser tab has no process for it
-        to end; `Quit()` and the QUIT countdown stay for `/quit`.
+        Deviation (this fork): the Exit Game rung only on a native client (`BENILLA_NATIVE`), because
+        a browser tab has no process for it to end; `Quit()` and the QUIT countdown stay for `/quit`
+        there.
     -->
     <Script><![CDATA[
         -- A rung with nothing behind it yet (Edit Mode), disabled.
@@ -173,7 +174,7 @@
             </Button>
 
             <!-- As the reference: disabled while a CAMP or QUIT countdown is up; `/quit` still
-                 raises QUIT without the Exit Game rung. -->
+                 raises QUIT where the Exit Game rung is hidden. -->
             <Button name="GameMenuButtonLogout" inherits="GameMenuButtonTemplate" text="LOGOUT">
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="GameMenuButtonMacros" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
@@ -189,6 +190,27 @@
                     <OnClick>
                         PlaySound("igMainMenuLogout")
                         Logout()
+                        HideUIPanel(GameMenuFrame)
+                    </OnClick>
+                </Scripts>
+            </Button>
+            <!-- GameMenuFrame.xml's Exit Game, under Log Out as in the era's menu. A native client's
+                 only (shown below); the countdown gate is Log Out's. -->
+            <Button name="GameMenuButtonQuit" inherits="GameMenuButtonTemplate" text="EXIT_GAME" hidden="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnShow>
+                        if not StaticPopup_Visible("CAMP") and not StaticPopup_Visible("QUIT") then
+                            this:Enable()
+                        else
+                            this:Disable()
+                        end
+                    </OnShow>
+                    <OnClick>
+                        PlaySound("igMainMenuQuit")
+                        Quit()
                         HideUIPanel(GameMenuFrame)
                     </OnClick>
                 </Scripts>
@@ -221,6 +243,13 @@
         </Scripts>
     </Frame>
     <Script><![CDATA[
+        -- A native client's Exit Game rung under Log Out, Return to Game under it, one rung taller.
+        if ( BENILLA_NATIVE ) then
+            GameMenuButtonQuit:Show()
+            GameMenuButtonContinue:ClearAllPoints()
+            GameMenuButtonContinue:SetPoint("TOPLEFT", GameMenuButtonQuit, "BOTTOMLEFT", 0, -20)
+            GameMenuFrame:SetHeight(GameMenuFrame:GetHeight() + GameMenuButtonQuit:GetHeight())
+        end
         -- On a Turtle realm the Key Bindings rung sits between Options and Edit Mode, one rung
         -- taller.
         if ( BENILLA_TURTLE_OPTIONS ) then

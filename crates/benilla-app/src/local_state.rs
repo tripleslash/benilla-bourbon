@@ -13,6 +13,10 @@
 //!    ([`shared_root`]).
 //! 4. `<exe dir>/benilla-config/`.
 //!
+//! fork: desktop — a launcher that names a portable folder ([`set_portable`]) replaces steps 3 and
+//! 4 with `<exe dir>/<that name>/`: the self-contained client keeps its settings, addons, saved
+//! variables and fetched game data in the one folder beside its executable.
+//!
 //! With `$WOW_CAPTURE` set every path resolves to `None`: a capture neither reads nor writes
 //! player state.
 
@@ -72,8 +76,49 @@ fn run_home_in(temp: &Path, pid: u32) -> PathBuf {
     temp.join(format!("benilla-run-{pid}")).join(STATE_DIR)
 }
 
+/// The portable folder's name, beside the executable ([`set_portable`]).
+static PORTABLE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Keep every resident in `<exe dir>/<name>/` (`wow-data`), ahead of the project folder and
+/// the default name. The launcher's, before anything resolves a path; the first call wins.
+pub(crate) fn set_portable(name: &'static str) {
+    let _ = PORTABLE.set(name);
+}
+
+/// The executable's folder.
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+}
+
+/// fork: desktop — where fetched game data is cached: `$BENILLA_PACK_CACHE`, else `packs/` under
+/// the resident folder, never an unattended run's own temp folder, so probes share one download.
+/// Game data is not player state, so a capture run reads the same cache.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn pack_cache() -> PathBuf {
+    if let Some(over) = std::env::var_os("BENILLA_PACK_CACHE").filter(|v| !v.is_empty()) {
+        return PathBuf::from(over);
+    }
+    std::env::var_os("BENILLA_HOME")
+        .filter(|_| !crate::run_mode::unattended())
+        .map(PathBuf::from)
+        .or_else(resident_home)
+        .unwrap_or_else(|| std::env::temp_dir().join(STATE_DIR))
+        .join("packs")
+}
+
 /// Steps 3 and 4 of [`home`]: the folder the build itself lives in.
 fn resident_home() -> Option<PathBuf> {
+    resident_home_with(PORTABLE.get().copied())
+}
+
+/// [`resident_home`] with the portable name passed in, so a test can walk it without setting the
+/// process-wide one.
+fn resident_home_with(portable: Option<&str>) -> Option<PathBuf> {
+    if let Some(name) = portable {
+        return exe_dir().map(|dir| dir.join(name));
+    }
     // 3 · the project folder, dev builds only.
     if let Some(root) = dev_project_root() {
         return Some(root.join(STATE_DIR));
@@ -1076,6 +1121,22 @@ mod tests {
 
     /// A player build resolves beside the binary; a dev build to the primary checkout, even from a
     /// linked worktree (whose `.git` is a file), unless that worktree declares a probe account.
+    /// fork: desktop — a portable launcher keeps everything in its named folder beside the
+    /// executable, dev build or not: settings, and the fetched game data under it.
+    #[test]
+    fn a_portable_launcher_keeps_its_state_beside_the_executable() {
+        let exe_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_eq!(
+            resident_home_with(Some("wow-data")),
+            Some(exe_dir.join("wow-data"))
+        );
+        assert_ne!(resident_home_with(None), Some(exe_dir.join("wow-data")));
+    }
+
     #[test]
     fn the_state_folder_lands_where_the_build_says() {
         let _l = ENV_LOCK

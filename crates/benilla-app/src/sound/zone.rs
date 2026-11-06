@@ -1263,7 +1263,17 @@ fn bed_opening(zone: &ZoneAudio) -> bool {
 /// through its MPQ file callbacks. The chain's lock covers the archive lookup alone.
 #[cfg(not(target_arch = "wasm32"))]
 fn open_bed(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<StreamingSoundData<FromFileError>> {
-    let archive = chain.lock_recover().archive_for(path)?;
+    let locked = chain.lock_recover();
+    if locked.is_packed() {
+        // fork: desktop — a container has no archive to stream from: the bed is read whole (a
+        // pack frame, a few MB at most) and streamed out of memory.
+        let bytes = locked.read(path)?;
+        drop(locked);
+        let len = bytes.len() as u64;
+        return Ok(mixer::stream_from_source(std::io::Cursor::new(bytes), len)?.loop_region(..));
+    }
+    let archive = locked.archive_for(path)?;
+    drop(locked);
     let file = archive
         .open_file(path)
         .with_context(|| format!("opening {path} in {}", archive.path().display()))?;

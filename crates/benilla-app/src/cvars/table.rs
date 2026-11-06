@@ -672,10 +672,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
          the blob decal `blob_shadow.rs` still owns at 0",
     ),
     // `gxWindow` (`0x63a889`): "1" when the locale is zhCN (`0x63a738`, `0x63a74c`), else "0"
-    // (`0x63a865`-`0x63a86c`). The knob is [`crate::video::VideoConfig::display`]. Deviation: "0"
-    // raises a borderless fullscreen window instead of mode-setting the display, because Wayland
-    // and macOS offer no mode-set and X11's leaves the desktop changed after a crash
-    // ([`crate::video`]).
+    // (`0x63a865`-`0x63a86c`). The knob is [`crate::video::VideoConfig::display`]. Deviation: off
+    // Windows "0" raises a borderless fullscreen window instead of mode-setting the display,
+    // because Wayland and macOS offer no mode-set and X11's leaves the desktop changed after a
+    // crash; on Windows it is exclusive at the current mode ([`crate::video`]).
     same_by_locale("gxWindow", "0", &[(ZH_CN, "1")]).latched(),
     // `gxResolution` (`0x63a7c1`, "640x480", flags 3, callback `0x63aa00`), a string row parsed by
     // `video::on_cvar` into the windowed size. In fullscreen it answers the borderless window's

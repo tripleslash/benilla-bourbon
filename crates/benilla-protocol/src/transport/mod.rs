@@ -22,7 +22,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Conn, ConnReader, ConnWriter};
+pub use native::{set_ws_base, ws_base, Conn, ConnReader, ConnWriter};
+#[cfg(not(target_arch = "wasm32"))]
+mod native_ws;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;

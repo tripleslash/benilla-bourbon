@@ -85,6 +85,9 @@ mod cvars;
 mod death;
 #[cfg(feature = "dev")]
 mod debug_panel;
+/// fork: desktop — the boot step of a client that reads its game data from an origin.
+#[cfg(not(target_arch = "wasm32"))]
+mod desktop;
 /// The dev/player seam: the instrument groups and the boundary rule. Always compiled; what it holds
 /// is not.
 mod dev;
@@ -480,6 +483,20 @@ pub fn config_dir() -> Option<std::path::PathBuf> {
     local_state::home()
 }
 
+/// fork: desktop — keep every resident (settings, addons, saved variables, the fetched game data)
+/// in `<exe dir>/<name>/`, for a self-contained client. Call before [`run`].
+pub fn set_portable_home(name: &'static str) {
+    local_state::set_portable(name);
+}
+
+/// fork: desktop — read the game data from `origin` (the web build's site, e.g.
+/// `https://wow.example.com`) instead of an install, and take its `config.json`'s gateway and
+/// realmlist. `$BENILLA_DATA_URL` overrides it. Call before [`run`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_data_origin(origin: &str) {
+    benilla_formats::remote::set_origin(origin);
+}
+
 /// What a crate on top of benilla adds to the built app ([`run_with`]).
 type Extension<'a> = Box<dyn FnOnce(&mut App) + 'a>;
 
@@ -571,6 +588,11 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     benilla_assets::frame_budget::set_offload_enabled(
         webenv::var("WOW_OFFLOAD").as_deref() != Some("0"),
     );
+
+    // fork: desktop — a client reading an origin's data caches it, fetches the bundled addons and
+    // reads the site's gateway and realmlist, all before the install is resolved below.
+    #[cfg(not(target_arch = "wasm32"))]
+    desktop::prepare();
 
     // Fonts, art and the stock interface all come from the install, so without one the client
     // ends here, before any window or plugin exists (`no_install`).

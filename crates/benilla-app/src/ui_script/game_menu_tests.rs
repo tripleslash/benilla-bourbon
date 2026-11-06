@@ -46,7 +46,8 @@ fn bag_harness_with(extra: &[&str]) -> UiScript {
 
 /// Top to bottom. Deviation: the 1.15 era client's ESC ladder, because its settings screens
 /// replace 1.12's; without the AddOns rung, as the character-select screen is the only addon UI,
-/// and (this fork) without Exit Game, as a browser tab has no process for it to end.
+/// and (this fork) without Exit Game in a VM with no `BENILLA_NATIVE` (the web build's), as a
+/// browser tab has no process for it to end.
 const LADDER: [&str; 6] = [
     "GameMenuButtonOptions",
     "BenillaGameMenuButtonEditMode",

@@ -53,8 +53,14 @@ fn benilla_checkout() -> Option<&'static Path> {
 
 /// The vanilla `Data` directory, or `None` when there is no install. Uncached, so a `$WOW_DATA`
 /// change is seen.
+///
+/// fork: desktop — with a data origin named ([`crate::remote::origin`]) the answer is that origin's
+/// cached container, ahead of every install candidate.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn wow_data() -> Option<PathBuf> {
+    if let Some(dir) = crate::remote::data_dir() {
+        return Some(dir);
+    }
     candidates().into_iter().find(|c| c.is_dir())
 }
 
