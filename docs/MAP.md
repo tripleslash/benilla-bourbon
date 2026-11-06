@@ -326,6 +326,7 @@
 - `WOW_JITTER` — benilla-app/src/capture/probes/jitter.rs, benilla-app/src/dev.rs
 - `WOW_JITTER_RAW` — benilla-app/src/capture/probes/jitter.rs
 - `WOW_LAMP_DYNAMIC` — benilla-app/src/lib.rs, benilla-world/src/modern/lights/mod.rs
+- `WOW_LAMP_HALO` — benilla-world/src/modern/volumetrics/mod.rs
 - `WOW_LAMP_SHADOWED` — benilla-app/src/lib.rs, benilla-world/src/modern/lights/mod.rs
 - `WOW_LAMP_TAPS` — benilla-app/src/lib.rs, benilla-world/src/modern/lights/mod.rs
 - `WOW_LAMP_TILE` — benilla-app/src/lib.rs, benilla-world/src/modern/lights/mod.rs

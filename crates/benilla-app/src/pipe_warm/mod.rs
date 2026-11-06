@@ -321,6 +321,15 @@ impl WarmPass {
     fn covers(&self, class: Option<ViewClass>) -> bool {
         self.warmed_once && class.is_some_and(|c| self.warmed_views.contains(&c))
     }
+
+    /// A pass with its warm work done, for the cover's tests.
+    #[cfg(test)]
+    pub(crate) fn done_for_test() -> Self {
+        Self {
+            done: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// How long after the last reveal `pending == 0` means drained: the counters cross worlds a frame

@@ -4,16 +4,17 @@
 //! drawn in 1.12). A transfer aboard a transport with a drawn route shows the world map and that
 //! route instead ([`ship`]).
 //!
-//! Event-raised and readiness-cleared, as in the reference: it rises at the character pick's
-//! `Connected` edge and at `SMSG_TRANSFER_PENDING` (`0x406640`, and `0x4072c0` for a transport,
-//! whose screen is the leg's route over the world map, [`route`]) and clears on a per-frame
-//! readiness poll. The reference's one blocking stretch
+//! Event-raised, as in the reference: it rises at the character pick's `Connected` edge and at
+//! `SMSG_TRANSFER_PENDING` (`0x406640`, and `0x4072c0` for a transport, whose screen is the leg's
+//! route over the world map, [`route`]). It clears on a per-frame readiness poll that also waits
+//! for our arrival. The reference's one blocking stretch
 //! (`SMSG_NEW_WORLD`'s `0x401b00` defers `0x401bc0` onto the deadline heap, drained at `0x420d0c`)
 //! also suppresses input, which this client builds explicitly ([`input`]).
 //!
 //! A destination snap only ends a raise's wait ([`LoadingScreen::snap_landed`]). The screen clears
-//! when the destination is scene-presentable ([`WorldLoadProgress`]), never on the body reaching
-//! the ground.
+//! when the destination is scene-presentable ([`WorldLoadProgress`]) and, for a load that brings
+//! one, our own player's create has arrived, where the reference ends it (`0x5debbd`); never on the
+//! body reaching the ground.
 
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -204,6 +205,11 @@ pub(crate) struct LoadingScreen {
     /// residency cannot clear a screen raised for the new one (at world entry the login vista is
     /// resident well before `SMSG_LOGIN_VERIFY_WORLD`).
     awaiting_snap: bool,
+    /// A raise whose load brings our own player's create holds until that create: the reference
+    /// ends the screen at our arrival (`0x5debbd` → `0x407e80`), never before it, so the world
+    /// never shows without our body. A ship's leg change brings none, and an abort or a logout
+    /// drops the wait.
+    awaiting_arrival: bool,
     /// The map this screen's art resolves from, the reference's `[0x82f00c]`, set by every raise;
     /// `None` is its `-1`, no backdrop. Not `CurrentMap`: vmangos can relocate a character inside
     /// `Player::LoadFromDB` (`Player.cpp:15020`), under a live screen. Its writers: `0x4067e6` and
@@ -285,9 +291,22 @@ impl LoadingScreen {
     /// announced destination passes the current map). Only an edge that reaches the reference's
     /// transition entries calls this, never a snap ([`Self::snap_landed`]).
     fn raise(&mut self, reason: &str, awaiting_snap: bool, map: Option<u32>, now: f32) {
+        self.raise_for(reason, awaiting_snap, true, map, now);
+    }
+
+    /// [`Self::raise`] for a load that does or does not bring our create (`awaiting_arrival`).
+    fn raise_for(
+        &mut self,
+        reason: &str,
+        awaiting_snap: bool,
+        awaiting_arrival: bool,
+        map: Option<u32>,
+        now: f32,
+    ) {
         self.active = true;
         self.blackout = false;
         self.awaiting_snap = awaiting_snap;
+        self.awaiting_arrival = awaiting_arrival;
         self.map = map;
         self.ready_frames = 0;
         self.displayed = 0.0; // restart the fill for the new load
@@ -461,8 +480,13 @@ fn release_interface_on_arrival(
     cinematic: Option<Res<crate::cinematic::Cinematic>>,
     mut screen: ResMut<LoadingScreen>,
 ) {
+    if arrived.is_empty() {
+        return;
+    }
+    // The arrival is what the screen waited for, a pending cinematic's included.
+    screen.awaiting_arrival = false;
     let pending = cinematic.is_some_and(|c| c.is_pending());
-    if !arrived.is_empty() && !pending && screen.active {
+    if !pending && screen.active {
         screen.see_through = true;
     }
 }
@@ -726,7 +750,10 @@ fn drive_loading_screen(
             }
             // Cleared with no snap in flight is `SMSG_TRANSFER_ABORTED` (a worldport lands below
             // this frame): stop waiting, and the resident old world clears the screen.
-            None => screen.awaiting_snap = false,
+            None => {
+                screen.awaiting_snap = false;
+                screen.awaiting_arrival = false;
+            }
         }
     }
     // `0x407de0`, from the ship tick: the route of the leg we left, which stores −1 for the map on
@@ -741,7 +768,7 @@ fn drive_loading_screen(
             &mut images,
         );
         let map = if route.is_some() { None } else { screen.map };
-        screen.raise("transport leg", false, map, now);
+        screen.raise_for("transport leg", false, false, map, now);
         screen.set_route(route);
     }
     // A snap never re-raises a live screen ([`LoadingScreen::far_snap`]). vmangos sends the
@@ -765,6 +792,7 @@ fn drive_loading_screen(
         screen.active = true;
         screen.blackout = true;
         screen.awaiting_snap = false;
+        screen.awaiting_arrival = false;
         screen.ready_frames = 0;
         info!(
             "loading screen: blackout ({})",
@@ -796,7 +824,8 @@ fn drive_loading_screen(
         && *state.get() == crate::client_state::ClientState::InWorld
     {
         // Same map by construction: the ground under the body.
-        screen.raise("focus not resident", false, map_id, now);
+        // No create comes with this load: our player is already in the world.
+        screen.raise_for("focus not resident", false, false, map_id, now);
     }
     // The body walked off onto a building's ground that is still arriving and is held there: the
     // same cover, cleared by the same rule, once the hold has ended.
@@ -804,7 +833,13 @@ fn drive_loading_screen(
         && player.as_ref().is_some_and(|p| p.ground_hold)
         && *state.get() == crate::client_state::ClientState::InWorld
     {
-        screen.raise("ground under the body still arriving", false, map_id, now);
+        screen.raise_for(
+            "ground under the body still arriving",
+            false,
+            false,
+            map_id,
+            now,
+        );
     }
 
     // --- Deviation, on the page alone: a long same-map snap is covered until the destination is
@@ -825,7 +860,14 @@ fn drive_loading_screen(
         && *state.get() == crate::client_state::ClientState::InWorld
         && !(progress.is_ready() && progress.presentable())
     {
-        screen.raise("teleport, destination not presentable", false, map_id, now);
+        // `MSG_MOVE_TELEPORT_ACK` brings no create of ours, so nothing waits for one.
+        screen.raise_for(
+            "teleport, destination not presentable",
+            false,
+            false,
+            map_id,
+            now,
+        );
     }
 
     // --- Clear, sustained a few frames. ---
@@ -833,6 +875,7 @@ fn drive_loading_screen(
         if progress.is_ready()
             && progress.presentable()
             && !screen.awaiting_snap
+            && !screen.awaiting_arrival
             && !player_settling
             && warm.satisfied()
             && entry_ui_pending.is_none()
@@ -855,8 +898,8 @@ fn drive_loading_screen(
                 screen.last_wait_log = now;
                 info!(
                     "loading screen: waiting {:.1}s — {}/{} resident, {} placements pending, \
-                     {} colliders pending, {} merges pending, awaiting_snap={}, settling={}, \
-                     warm={}, ui_pending={}",
+                     {} colliders pending, {} merges pending, awaiting_snap={}, \
+                     awaiting_arrival={}, settling={}, warm={}, ui_pending={}",
                     now - screen.active_since,
                     progress.ready,
                     progress.total,
@@ -864,6 +907,7 @@ fn drive_loading_screen(
                     progress.colliders_pending,
                     progress.merge_pending,
                     screen.awaiting_snap,
+                    screen.awaiting_arrival,
                     player_settling,
                     warm.satisfied(),
                     entry_ui_pending.is_some(),
@@ -1311,6 +1355,26 @@ mod tests {
         }
     }
 
+    /// A ground hold's cover brings no create of ours, so it clears once the hold ends without
+    /// waiting for one.
+    #[test]
+    fn a_ground_hold_cover_clears_with_no_create() {
+        let mut app = in_world(GM_ISLAND);
+        app.insert_resource(crate::pipe_warm::WarmPass::done_for_test());
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .ground_hold = true;
+        app.update();
+        assert!(covering(&app), "the hold raises the cover");
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .ground_hold = false;
+        for _ in 0..=CLEAR_AFTER_READY_FRAMES {
+            app.update();
+        }
+        assert!(!covering(&app), "the hold ended, and no create was coming");
+    }
+
     /// A live body outrunning the stream (GM speed ×100) stands on unloaded ground with no hold:
     /// the reference's tile pass waits for the read in the frame and calls no raise (`0x6985d0`),
     /// so the frame hitches and no screen comes up.
@@ -1346,6 +1410,41 @@ mod tests {
         });
         app.update();
         assert!(covering(&app));
+    }
+
+    /// The reference ends a cross-map screen at our create (`0x5debbd`): a destination already
+    /// resident under the screen waits for it, and the create clears it.
+    #[test]
+    fn a_cross_map_screen_waits_for_our_create() {
+        let mut app = in_world(GM_ISLAND);
+        app.insert_resource(crate::pipe_warm::WarmPass::done_for_test());
+        app.add_systems(
+            Update,
+            release_interface_on_arrival.before(drive_loading_screen),
+        );
+        app.world_mut().write_message(crate::net::WorldportMessage {
+            map_id: 0,
+            position: NORTHSHIRE,
+            orientation: 0.0,
+            needs_ack: true,
+            transport_entry: None,
+        });
+        app.update();
+        assert!(covering(&app));
+        app.world_mut().resource_mut::<crate::player::Player>().pos =
+            benilla_assets::coords::wow_to_bevy(NORTHSHIRE);
+        app.insert_resource(benilla_world::terrain_stream::ViewFocus::body(
+            NORTHSHIRE, true,
+        ));
+        for _ in 0..30 {
+            app.update();
+            assert!(covering(&app), "the destination is in, our create is not");
+        }
+        app.world_mut().spawn(crate::net::SelfPlayer);
+        for _ in 0..=CLEAR_AFTER_READY_FRAMES {
+            app.update();
+        }
+        assert!(!covering(&app), "our create ends the screen");
     }
 
     /// `0x407de0`, from the ship tick's leg change: it raises the screen, and with no route to
