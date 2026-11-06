@@ -41,6 +41,7 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-world/src/lighting/mod.rs`, `lighting/resolve.rs` | `WowLighting::night_key` / `night_tint`: the midnight diffuse and celestial rows, sampled in `update_time_lighting` while the modern moon is up (`sun_arc::moonlit`) | P2 fix |
 | `benilla-world/src/sky.rs` | `update_sky_colors`: sky stops + fog through `decode_if_modern` | P1 |
 | `benilla-world/src/sun/follow.rs` | `disc_span` `.z` = modern flag | P1 |
+| `benilla-world/src/sun/follow.rs` | `follow_moons`: moon02's quad at size 0 in a modern frame | P4 fix |
 | `benilla-world/src/ffx_glow.rs` | render-world `combine_uniform` call: `uniform[6]` (`wave.z`) = modern flag | P1 |
 | `terrain.wgsl`, `static_gx.wgsl`, `wdl.wgsl` | `#import benilla_modern::color`; output through `color::modern_out(…, point_count.y)`; wdl's struct padded to row 20 | P1 |
 | `wow_model.wgsl` | `#import`; decode block before `out.color` (additive premultiplied in gamma, then decoded; Mod/Mod2x identity, Mod2x ×2.295) | P1 |

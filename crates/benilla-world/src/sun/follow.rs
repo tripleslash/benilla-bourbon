@@ -458,7 +458,11 @@ pub(super) fn follow_moons(
                 // the last seed once the weather has passed (`0x6d2c74`); the span still drives its
                 // wedge in the horizon band.
                 tf.translation = cam_pos + to_moon * dist;
-                let size = if hidden {
+                // fork: modern lighting (FORK.md). Deviation: no moon02 in a
+                // modern frame. The seed surfaces it black, never a moon, and over the modern night
+                // sky (a lit haze, not the classic dark dome) it read as a hole (Tirisfal, 02:00).
+                let modern = crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled();
+                let size = if hidden || modern {
                     0.0
                 } else {
                     SUN_SIZE * light.moon02_disc_scale
