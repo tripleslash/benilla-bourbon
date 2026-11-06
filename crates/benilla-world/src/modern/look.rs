@@ -377,7 +377,7 @@ impl ZoneLook {
     pub const DARKSHORE_NOON: Self = Self {
         exposure: 0.95,
         glow: [1.0, 0.96, 0.95],
-        fog_tint: [1.9, 1.9, 1.93],
+        fog_tint: [1.9, 1.9, 1.91],
         sky_tint: [1.0, 1.0, 1.04],
         saturation: 0.72,
         key_tint: [0.97, 0.97, 1.0],
