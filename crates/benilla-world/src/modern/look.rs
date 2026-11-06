@@ -387,6 +387,38 @@ impl ZoneLook {
     };
 }
 
+impl ZoneLook {
+    /// fork: **Durotar and Orgrimmar at noon**, which [`look_for_zone_at`] ramps the default look into
+    /// across midday (`sun_arc::midday_at`) in place of [`Self::NOON`]; morning, evening and night
+    /// keep the default look's own rows. Tuned live in the viewer against a modern-client reference
+    /// at noon over the Orgrimmar gate (`worldview_pose=1061.9,-4496.1,118.3,345,-6`, map 1, 12:00,
+    /// Turtle and reforged art), approved by eye. The authored rows are a deep orange sun, a red fog
+    /// `[132 61 63]` and a magenta dome, which soaked the sand, the walls and the trees into one
+    /// orange. So the key is re-hued to white at its own brightness and every texture keeps its
+    /// colour; a gamma (`toe`) under 1 lifts the gate, huts and trees, textures 20-30 % darker than
+    /// the sand at the same light (measured); and the dome and the air are turned from magenta and
+    /// red to the reference's orange horizon and red haze (its low sky within 1 % in hue). The air's
+    /// thin: the reference's distance shows through its haze.
+    pub const DUROTAR_NOON: Self = Self {
+        key: 1.2,
+        exposure: 0.33,
+        haze: 0.0008,
+        fog_reach: 2.0,
+        fog_tint: [1.3, 0.8, 0.95],
+        sky_tint: [1.35, 1.24, 1.03],
+        contrast: 1.2,
+        saturation: 1.2,
+        toe: 0.75,
+        noon_key: [1.0, 1.0, 1.0],
+        noon_mix: 1.0,
+        ..Self::NEUTRAL
+    };
+}
+
+/// `AreaTable.dbc` zone ids that take [`ZoneLook::DUROTAR_NOON`] across midday: Durotar and
+/// Orgrimmar.
+const DUROTAR_ZONES: &[u32] = &[14, 1637];
+
 /// `AreaTable.dbc` zone id that takes [`ZoneLook::DARKSHORE`].
 const DARKSHORE_ZONE: u32 = 148;
 
@@ -415,7 +447,8 @@ const MIST_BANKS: f32 = 0.25;
 
 /// The zone's look at `minute` of the day: the default look takes [`ZoneLook::NOON`] across midday
 /// (`sun_arc::midday_at`) and [`ZoneLook::NIGHT`] across the night (`sun_arc::night_at`), which never
-/// meet, and Darkshore [`ZoneLook::DARKSHORE_NOON`] across midday; the snow zones take
+/// meet, Durotar and Orgrimmar taking [`ZoneLook::DUROTAR_NOON`] in place of the noon row, and
+/// Darkshore [`ZoneLook::DARKSHORE_NOON`] across midday; the snow zones take
 /// [`ZoneLook::COLD_NIGHT`] across the night (`sun_arc::night_at`); any other zone with its own
 /// look keeps it at every hour. A misty zone keeps its banks on top, at every hour.
 pub fn look_for_zone_at(zone: u32, minute: f32) -> ZoneLook {
@@ -424,6 +457,8 @@ pub fn look_for_zone_at(zone: u32, minute: f32) -> ZoneLook {
         let night = super::sun_arc::night_at(minute);
         if night > 0.0 {
             (ZoneLook::NIGHT, night)
+        } else if DUROTAR_ZONES.contains(&zone) {
+            (ZoneLook::DUROTAR_NOON, super::sun_arc::midday_at(minute))
         } else {
             (ZoneLook::NOON, super::sun_arc::midday_at(minute))
         }
@@ -1177,6 +1212,21 @@ mod tests {
     fn every_zone_wears_elwynns_look() {
         for zone in [12, 33, 14, 1637, 17, 215] {
             assert_eq!(look_for_zone(zone), ZoneLook::NEUTRAL, "zone {zone}");
+        }
+    }
+
+    /// Durotar and Orgrimmar take their noon row across midday and the default look's own rows at
+    /// dawn, dusk and night.
+    #[test]
+    fn durotar_takes_its_noon_row_only_across_midday() {
+        for zone in DUROTAR_ZONES {
+            assert_eq!(look_for_zone_at(*zone, 720.0), ZoneLook::DUROTAR_NOON);
+            assert_eq!(look_for_zone_at(*zone, 420.0), look_for_zone_at(12, 420.0));
+            assert_eq!(
+                look_for_zone_at(*zone, 1200.0),
+                look_for_zone_at(12, 1200.0)
+            );
+            assert_eq!(look_for_zone_at(*zone, 120.0), look_for_zone_at(12, 120.0));
         }
     }
 }
