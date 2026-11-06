@@ -1300,14 +1300,6 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 #else
     out.bank_ground = frame_origin.y;
 #endif
-#ifdef VERTEX_UVS_B
-    // A clutter tuft's own ground: its vertex less its height from base (UV_B.x, `clutter.rs`). The
-    // chunk's origin stood in, and every tuft below it lay whole in the bank: blended grass in the
-    // distance took the full veil, one flat colour, where the near grass stood out of it.
-    if (m.clutter_fade.w > 0.5) {
-        out.bank_ground = out.world_position.y - vertex.uv_b.x;
-    }
-#endif
 #endif
 #endif
 
@@ -1801,8 +1793,12 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         // fork: modern lighting (FORK.md, P4) — an opaque-intent batch is fogged by the
         // composite; a blended one draws after it, so it fogs itself from the froxel volume under the
         // classic per-blend policy: scene fog for alpha, fade to black for additive, the blend identity
-        // for Mod (1) and Mod2x (0.5, after its 2.295 source scale).
-        if (!opaque_intent && fog_policy != 4u && wow_light.fog_color.w > 0.5) {
+        // for Mod (1) and Mod2x (0.5, after its 2.295 source scale). Ground clutter blends but draws in
+        // the alpha-mask pass, before the composite, which fogs it over its depth like the terrain
+        // under it: fogged here too, every tuft took the fog and the veil twice, greyer than its
+        // ground and the more so the farther off.
+        let mask_pass_clutter = m.clutter_fade.w > 0.5;
+        if (!opaque_intent && !mask_pass_clutter && fog_policy != 4u && wow_light.fog_color.w > 0.5) {
             var fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, modern_block.fog, in.world_position.xyz);
             // fork: the ground mist, which the composite gives the opaque batches: a doodad riding
             // its fade twin stood unfogged in it. Not in the water mirror, as in the composite.
