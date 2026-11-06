@@ -208,6 +208,18 @@ exclusion rests on an unmeasured recollection (bevyengine/bevy#10812); bevyengin
 proposes the same deletion. It shows on a login as `pipeline warm: N rigs drained` where it used to
 print `TIMED OUT`.
 
+## The eleventh delta: the exit frame is not rendered
+
+`src/pipelined_rendering.rs`: `renderer_extract` takes the finished render app back as ever, and on
+a frame with an `AppExit` keeps it in `RenderAppChannels` instead of handing it over, so the exit
+frame is not rendered and no render frame runs beside `bevy_winit`'s teardown. Upstream starts that
+frame and then blocks in `RenderAppChannels::drop`, with no timeout, as the windows go. Two waits on
+the render thread can then never end: Metal's `nextDrawable`, whose timeout `wgpu-hal` turns off in
+`configure`, and a non-Send render system (`create_surfaces` on macOS), queued for a main thread
+that serves nothing in that drop. A `WOW_LIVE_FPS` run on an M1 sat at 0% CPU after its last
+saved-variables line (measured in benilla-wotlk). `benilla-app`'s `shutdown` tests exit on a
+non-Send render system, which hangs without the patch.
+
 ## The delta, and the command that proves it
 
 **A few lines changed in five upstream files, one module added.**
@@ -221,6 +233,7 @@ print `TIMED OUT`.
 | `src/render_asset.rs` | `RenderAsset::DEFERRABLE`, asked by `prepare_assets` before each of its two deferrals (above) |
 | `src/mesh/mod.rs` | `RenderMesh` sets `DEFERRABLE = false` (above) |
 | `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta) |
+| `src/pipelined_rendering.rs` | `renderer_extract` holds the render app back on the exit frame (eleventh delta) |
 | `src/lib.rs` | `mod wasm_serial;`; the render worker's lines (eighth delta); `destroy_released_gpu_resources` and its counter (ninth delta) |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |
 | `src/render_worker.rs`, `src/settings.rs`, `src/view/window/mod.rs`, `src/renderer/{wgpu_wrapper,render_device,mod}.rs`, `src/render_resource/buffer.rs` | the render worker (eighth delta, its own table) |
