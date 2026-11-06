@@ -11,7 +11,8 @@
 //! an `0x8` group (none skips the pass, `0x6b3c87`): per window, every `0x8` group inside a frustum
 //! clipped to that doorway becomes a flood root (`0x6b3d39 call 0x6b41c0`), carrying its rect on.
 //! An eye in an open-air `0x40` group (a city street) is the exception, a deviation: every outdoor
-//! group draws and the exterior is unrestricted (`compute_pvs_traced`).
+//! group draws and the exterior is unrestricted (`compute_pvs_traced`), except an [`UNREACHABLE`]
+//! group, which keeps the reference's flood.
 //!
 //! This module computes each group's visible bit ([`WmoPortalInstance::visible`]); the one
 //! `Visibility` authority, `crate::model_render`'s `apply_model_visibility`, ANDs it with the rest.
@@ -63,6 +64,12 @@ const EXTERIOR: u32 = 0x8;
 /// takes the exterior leg on `MOGI & 0x48`, the zone-text bit on `0x8` alone. Stormwind's streets
 /// (115 of 306 groups) and Orgrimmar's valleys are `0x40` without `0x8`.
 const EXTERIOR_LIT: u32 = 0x40;
+
+/// MOGP `0x80`, a group no player stands in, drawn only where a portal frames it. Stock
+/// `stormwind.wmo` sets it on the callback group g82 alone; Turtle's (`patch-3.mpq`) also sets it on
+/// three stand-in towers, g104, g105 and g218, each reached through one-way window portals (g218
+/// only through p257 from the `0x8` shell g46, g105 only through p38 from g280).
+const UNREACHABLE: u32 = 0x80;
 
 /// Eye-on-portal-plane band (yd): an eye this close to a portal's plane and inside its polygon gets
 /// the full-screen rect (`0x6b46f0`, `|d| <= 0.01` at `0x8029d0`). The side test still runs: the
@@ -1014,10 +1021,14 @@ fn compute_pvs_traced<T: FloodTrace>(
     // hides what is plainly in view there. The reference treats such a street as a room: from
     // Stormwind's trade district the flood reaches no portal onto the `0x8` shell, so it draws no
     // terrain, and the Mage Quarter tower or the hills over the walls only while a portal chain
-    // happens to frame them. Interiors still take the flood; the callback groups keep Pass 3.
+    // happens to frame them. Interiors still take the flood; the callback groups keep Pass 3; an
+    // `0x80` group keeps the flood too, because forcing Turtle's stand-in towers visible stands a
+    // second cathedral tower over the Trade District and Cathedral Square.
     if open_air {
         for (gi, g) in nav.iter().enumerate() {
-            if g.flags & (EXTERIOR | EXTERIOR_LIT) != 0 && g.flags & CALLBACK_PASS == 0 {
+            if g.flags & (EXTERIOR | EXTERIOR_LIT) != 0
+                && g.flags & (CALLBACK_PASS | UNREACHABLE) == 0
+            {
                 flood.visible[gi] = true;
             }
         }
@@ -1684,6 +1695,30 @@ mod tests {
             !street.visible[4],
             "an interior no portal reaches stays culled"
         );
+
+        // An 0x40 group no portal reaches draws with the street; one also 0x80 (Turtle's stand-in
+        // towers in stormwind.wmo) keeps the flood, so it stays culled.
+        let street_from = |model: &WmoModel| {
+            compute_pvs_traced(
+                model,
+                [-3.0, 0.0, 1.0],
+                None,
+                &clip,
+                &Affine3A::IDENTITY,
+                &mut (),
+            )
+        };
+        model.group_nav[4].flags |= EXTERIOR_LIT;
+        assert!(
+            street_from(&model).visible[4],
+            "an 0x40 group draws from the street"
+        );
+        model.group_nav[4].flags |= UNREACHABLE;
+        assert!(
+            !street_from(&model).visible[4],
+            "an 0x80 group draws only where a portal frames it"
+        );
+        model.group_nav[4].flags &= !(EXTERIOR_LIT | UNREACHABLE);
 
         // The control: the same room without 0x40 is the sealed room, its shells dark.
         model.group_nav[0].flags &= !EXTERIOR_LIT;
