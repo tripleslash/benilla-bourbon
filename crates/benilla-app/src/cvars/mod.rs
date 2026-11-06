@@ -1093,11 +1093,20 @@ fn session_values(world: &World) -> Vec<(&'static str, Option<String>)> {
         let v = world.get_resource::<benilla_world::view::ViewDistance>();
         out.push(("farclip", v.map(|s| s.farclip.to_string())));
     }
-    // The clutter lever takes both spellings of its knob; an off-grid multiplier seeds off-grid.
+    // The clutter levers seed the knobs the scatter and the fade read: the density gain and the
+    // draw distance.
+    let clutter = || world.get_resource::<benilla_world::clutter::ClutterConfig>();
     if set("WOW_CLUTTER_DENSITY") {
-        let v = world.get_resource::<benilla_world::clutter::ClutterConfig>();
-        out.push(("WorldDetail", v.map(|c| (c.density - 1.0).to_string())));
-        out.push(("frillDensity", v.map(|c| c.frill_density().to_string())));
+        out.push((
+            "groundClutterDensity",
+            clutter().map(|c| c.density_gain.to_string()),
+        ));
+    }
+    if set("WOW_CLUTTER_FADE") {
+        out.push((
+            "groundClutterDistance",
+            clutter().map(|c| c.fade_far.to_string()),
+        ));
     }
     if crate::video::novsync_env() {
         let v = world.get_resource::<crate::video::VideoConfig>();
@@ -1338,7 +1347,8 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "foliageWind",
     "foliageWindStrength",
     "rainSurfaces",
-    // fork: the ground clutter's density gain and tuft size.
+    // fork: the ground clutter's draw distance, density gain and tuft size.
+    "groundClutterDistance",
     "groundClutterDensity",
     "groundClutterScale",
     // The Graphics Preset and the two rows it governs that the page does not show.
@@ -2075,10 +2085,18 @@ mod tests {
             d["foliageWindStrength"],
             benilla_world::wind::FoliageWindStrength::REGISTERED
         );
-        // fork: the ground clutter's gain and size boot at the engine's own.
+        // fork: the ground clutter's distance, gain and size boot at the engine's own.
         let clutter = ClutterConfig::default();
+        assert_eq!(d["groundClutterDistance"], clutter.fade_far);
         assert_eq!(d["groundClutterDensity"], clutter.density_gain);
         assert_eq!(d["groundClutterScale"], clutter.scale);
+        // The shipped ground cover is the High stop times a gain of 1: what Environment Detail
+        // High scattered with the old gain at 1.
+        assert_eq!(d["groundClutterDensity"], 1.0);
+        assert_eq!(
+            clutter.scatter_density(),
+            (d["WorldDetail"] + 1.0) * d["groundClutterDensity"]
+        );
         assert_eq!(
             d["rainSurfaces"] != 0.0,
             benilla_world::weather::wetness::RainSurfaces::default().0
@@ -2550,8 +2568,37 @@ mod tests {
             assert_eq!(brightness.lift(), lift, "brightness {wrote}");
         }
         assert_eq!(res::<ClutterConfig>(&app).frill_density(), 32.0);
-        // Both spellings reach the field from a state neither holds; `$WOW_CLUTTER_DENSITY` takes
-        // both for the session. Two values, since writing the sibling's mirrored value is a no-op.
+        // fork: the stop no longer moves the scatter; the gain alone does, on the High stop.
+        apply(&mut app, "groundClutterDensity", "1");
+        for stop in ["0", "1", "2"] {
+            apply(&mut app, "WorldDetail", stop);
+            assert_eq!(
+                res::<ClutterConfig>(&app).scatter_density(),
+                3.0,
+                "stop {stop}"
+            );
+        }
+        apply(&mut app, "groundClutterDensity", "0.5");
+        assert_eq!(res::<ClutterConfig>(&app).scatter_density(), 1.5);
+        apply(&mut app, "groundClutterDensity", "9");
+        assert_eq!(res::<ClutterConfig>(&app).scatter_density(), 6.0);
+        // fork: the draw distance in yards, held to 70..=500.
+        for (wrote, want) in [
+            ("300", 300.0),
+            ("10", 70.0),
+            ("9000", 500.0),
+            ("450", 450.0),
+        ] {
+            apply(&mut app, "groundClutterDistance", wrote);
+            assert_eq!(
+                res::<ClutterConfig>(&app).fade_far,
+                want,
+                "groundClutterDistance {wrote}"
+            );
+        }
+        apply(&mut app, "WorldDetail", "1");
+        // Both spellings reach the field from a state neither holds. Two values, since writing
+        // the sibling's mirrored value is a no-op.
         for (key, value) in [
             (benilla_ui::script::CVAR_WORLD_DETAIL, "2"),
             (benilla_ui::script::CVAR_FRILL_DENSITY, "16"),
@@ -3449,13 +3496,14 @@ mod tests {
     /// ([`session_values`], [`crate::video::windowed_env`], [`crate::local_state::home`]); the
     /// persistence variables are `ENV_LOCK`'s own, the window ones are the capture tests'. The fork's
     /// rows read the last nine ([`session_values`], [`apply_gpu_tier`], [`apply_boot_layers`]).
-    const HOST_ENV: [&str; 22] = [
+    const HOST_ENV: [&str; 23] = [
         "WOW_WIN",
         "WOW_CAPTURE",
         "WOW_CAPTURE_UI",
         "WOW_UI_SCALE",
         "WOW_FARCLIP",
         "WOW_CLUTTER_DENSITY",
+        "WOW_CLUTTER_FADE",
         "WOW_NOVSYNC",
         "WOW_TRILINEAR",
         "WOW_ANISO",

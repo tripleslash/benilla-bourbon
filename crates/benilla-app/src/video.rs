@@ -549,9 +549,11 @@ impl VideoKnobs<'_> {
                     lava.0 = if ev.flag() { 1.0 } else { 0.0 };
                 }
             }
-            // fork: Ground Clutter Density, a gain on the Environment Detail stop; the loaded tiles
-            // re-scatter off the change, as a stop change does.
+            // fork: Ground Clutter Density, a gain on the High stop's cells, whatever stop
+            // Environment Detail holds; the loaded tiles re-scatter off the change.
             "groundclutterdensity" => clutter.set_density_gain(v),
+            // fork: Ground Clutter Draw Distance in yards; the built chunks re-mesh off the change.
+            "groundclutterdistance" => clutter.set_fade_far(v),
             // fork: Ground Clutter Size, a factor on every tuft's own scale; the built chunks
             // re-mesh off the change.
             "groundclutterscale" => clutter.set_scale(v),

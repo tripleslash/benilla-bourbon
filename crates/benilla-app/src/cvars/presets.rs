@@ -27,7 +27,8 @@ pub(crate) const GRAPHICS_PRESET_NAMES: [&str; 6] =
 /// The one place the ladder is written down: one line per governed row, one column per rung.
 ///
 /// Left out: `spellEffectLevel` and `foliageWindStrength` (the same on every
-/// rung) and the rows latched at boot (`anisotropic`, `gxMultisample`, `gxVSync`). With frame
+/// rung), `WorldDetail` (no renderer reads it; the ground clutter's own rows carry the ground
+/// cover) and the rows latched at boot (`anisotropic`, `gxMultisample`, `gxVSync`). With frame
 /// generation on, render scale is capped at 1, which every column respects. A row that lands
 /// later is one line here, once it is registered: an unregistered member never matches, and the
 /// ladder would read Custom for ever.
@@ -37,7 +38,6 @@ pub(crate) const GRAPHICS_PRESETS: &[(&str, [&str; 6])] = &[
     ("lightingModel",     ["0",    "1",    "1",    "1",   "1",    "1"]),
     ("lightingQuality",   ["0",    "0",    "1",    "2",   "3",    "4"]),
     ("farclip",           ["350",  "350",  "477",  "777", "1000", "1000"]),
-    ("WorldDetail",       ["1",    "1",    "2",    "2",   "2",    "2"]),
     ("weatherDensity",    ["2",    "3",    "3",    "3",   "3",    "3"]),
     ("worldShadows",      ["0",    "1",    "1",    "1",   "1",    "1"]),
     ("ssaoStrength",      ["0",    "0",    "0.4",  "0.4", "0.4",  "0.4"]),
@@ -48,7 +48,10 @@ pub(crate) const GRAPHICS_PRESETS: &[(&str, [&str; 6])] = &[
     ("renderScale",       ["1",    "0.67", "0.67", "1",   "1",    "1"]),
     ("frameGeneration",   ["0",    "1",    "1",    "1",   "1",    "1"]),
     ("foliageWind",       ["0",    "1",    "2",    "2",   "2",    "2"]),
-    ("groundClutterDensity", ["1", "1",    "2",    "2",   "2",    "2"]),
+    // The density gain is on the High stop: 0.6667 is the Medium stop's cells, the reference's
+    // boot stop. The distance's 70 is the reference's hardcoded one.
+    ("groundClutterDistance", ["70", "300", "300",  "300", "300",  "300"]),
+    ("groundClutterDensity", ["0.6667", "0.6667", "1", "1", "1",  "1"]),
     ("groundClutterScale", ["1",   "1.3",  "1.3",  "1.3", "1.3",  "1.3"]),
     ("rainSurfaces",      ["0",    "0",    "1",    "1",   "1",    "1"]),
     ("lavaLight",         ["0",    "1",    "1",    "1",   "1",    "1"]),

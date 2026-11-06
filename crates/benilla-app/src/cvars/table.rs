@@ -405,14 +405,15 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // also writes `SmallCull` {0.07, 0.04, 0.01}, and `GetWorldDetail` reads only `SmallCull`,
     // whose registered 0.04 is stop 1: the reference's slider boots at Medium. Welded to
     // `ClutterConfig::default().density` (stop = density - 1). Ours boots at High (the director's
-    // call, 2026-09-08), `SmallCull` with it below.
+    // call, 2026-09-08), `SmallCull` with it below. Deviation: no renderer reads the stop; the
+    // ground clutter runs at High times `groundClutterDensity` (the director's call, 2026-11-06).
     ours(
         "WorldDetail",
         "2",
-        "the Environment Detail stop our Graphics page and `GetWorldDetail` read; 1.12 keeps the \
-         stop in `smallCull` and `frillDensity` and registers no CVar of this name. Ours starts at \
-         High where the reference's own slider reads Medium, because ground cover is most of what \
-         the world looks like, and the stop is one drag away either way",
+        "the Environment Detail stop `GetWorldDetail` reads; 1.12 keeps the stop in `smallCull` \
+         and `frillDensity` and registers no CVar of this name. Ours starts at High where the \
+         reference's own slider reads Medium, the stop the ground clutter's own density is \
+         measured from",
     ),
     // `SmallCull` (`0x68854a`: name `0x8696f8`, default `0x869718` "0.04", flags 1, callback
     // `0x688b10`, record `[0xc7f330]`). The callback refuses outside [0.001, 2.0] and stores into
@@ -1037,15 +1038,24 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "the fork's own — the gain on `foliageWind`'s sway",
     ),
-    // `groundClutterDensity` — a gain on the Environment Detail stop's cells per chunk, 0..2 (0 no
-    // clutter, 2 twice the stop). `groundClutterScale` — a factor on every tuft's own random scale,
-    // 0.5..2. Both re-build the loaded clutter on a change.
-    // Both ship past the reference's look (the director's call, 2026-11-06): twice the stop's
-    // cells and tufts 30% larger; Classic in the preset ladder puts both back at 1.
+    // `groundClutterDistance` — the detail-doodad draw distance in yards, 70..500 (70 the
+    // reference's hardcoded `[0x867958]`). `groundClutterDensity` — a gain on the High stop's
+    // cells per chunk (`frillDensity` 48), 0..2 (0 no clutter, 1 High as 1.12 scatters it, 2 twice
+    // it), whatever stop `WorldDetail` holds. `groundClutterScale` — a factor on every tuft's own
+    // random scale, 0.5..2. All three re-build the loaded clutter on a change.
+    // The distance and the size ship past the reference's look (the director's call, 2026-11-06):
+    // 300 yd and tufts 30% larger; Classic in the preset ladder puts them back at 70 yd and 1.
+    ours(
+        "groundClutterDistance",
+        "300",
+        "the fork's own — 1.12 draws ground clutter to a hardcoded 70 yd; ours ships 300 yd, \
+         because the ground reads bare under the long view the modern look draws",
+    ),
     ours(
         "groundClutterDensity",
-        "2",
-        "the fork's own — 1.12 scatters exactly the Environment Detail stop's cells; ours ships          twice them, because the ground reads bare under the long view the modern look draws",
+        "1",
+        "the fork's own — 1.12 scatters the Environment Detail stop's cells; ours scatters the \
+         High stop's times this gain, so it alone sets the ground cover",
     ),
     ours(
         "groundClutterScale",

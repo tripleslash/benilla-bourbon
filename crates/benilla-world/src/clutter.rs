@@ -45,16 +45,17 @@ impl Plugin for ClutterPlugin {
     }
 }
 
-/// Drop the built meshes when the cutout value or the tuft scale moves (a density write must not
-/// re-mesh): both are baked into the build. The reference's `detailDoodadAlpha` is a console command
-/// (`0x6739a0`, registered at `0x63f9e0`), not a CVar, so it never persists.
+/// Drop the built meshes when the cutout value, the tuft scale or the draw distance moves (a
+/// density write must not re-mesh): all three are baked into the build, the distance as the
+/// material's fade. The reference's `detailDoodadAlpha` is a console command (`0x6739a0`,
+/// registered at `0x63f9e0`), not a CVar, so it never persists.
 fn remesh_on_cutout_change(
     mut commands: Commands,
     cfg: Res<ClutterConfig>,
     mut chunks: Query<&mut ClutterChunk>,
-    mut last: Local<Option<(f32, f32)>>,
+    mut last: Local<Option<(f32, f32, f32)>>,
 ) {
-    let now = (cfg.alpha_ref, cfg.scale);
+    let now = (cfg.alpha_ref, cfg.scale, cfg.fade_far);
     let Some(prev) = last.replace(now) else {
         return;
     };
@@ -69,9 +70,11 @@ fn remesh_on_cutout_change(
         }
     }
     info!(
-        "clutter: detailDoodadAlpha {}, scale x{} — dropped {n} built mesh(es) to rebuild",
+        "clutter: detailDoodadAlpha {}, scale x{}, distance {} yd — dropped {n} built mesh(es) \
+         to rebuild",
         (cfg.alpha_ref * 255.0).round() as u32,
-        cfg.scale
+        cfg.scale,
+        cfg.fade_far
     );
 }
 
@@ -131,18 +134,28 @@ pub(crate) struct GroundClutter {
 pub(crate) const DETAIL_DOODAD_ALPHA_REF: f32 = 128.0 / 255.0;
 
 /// The reference's hardcoded detail-doodad draw distance, 70 yd (`[0x867958]`); clutter fades out
-/// over its last quarter.
-///
-/// fork: modern lighting — 400 yd (the director's call): with the long-range fog the ground past
-/// 70 yd reads bare, past 140 yd still did, and past 200 yd too.
-pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 400.0;
+/// over its last quarter. The low end of the Ground Clutter Draw Distance slider.
+pub const DETAIL_DOODAD_FADE_FAR_REFERENCE: f32 = 70.0;
 
-/// fork: the Ground Clutter Density gain (`groundClutterDensity`) on top of the Environment Detail
-/// stop: 0 is no clutter, 1 the stop as 1.12 scatters it, 2 twice its cells per chunk.
+/// fork: the Ground Clutter Draw Distance (`groundClutterDistance`), in yards: from the
+/// reference's 70 up to 500, because with the long-range fog the ground past 70 yd reads bare.
+pub const CLUTTER_DISTANCE_RANGE: std::ops::RangeInclusive<f32> =
+    DETAIL_DOODAD_FADE_FAR_REFERENCE..=500.0;
+
+/// fork: the shipped draw distance, 300 yd (the director's call, 2026-11-06).
+pub const CLUTTER_DISTANCE_DEFAULT: f32 = 300.0;
+
+/// The Environment Detail High stop's density, `frillDensity` 48 (`0x804518`): the base the Ground
+/// Clutter Density gain scales.
+pub const CLUTTER_DENSITY_BASE: f32 = 3.0;
+
+/// fork: the Ground Clutter Density gain (`groundClutterDensity`) on the High stop's cells: 0 is no
+/// clutter, 1 High as 1.12 scatters it, 2 twice its cells per chunk.
 pub const CLUTTER_DENSITY_GAIN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 
-/// fork: the shipped density gain, twice the stop's cells (the director's call, 2026-11-06).
-pub const CLUTTER_DENSITY_GAIN_DEFAULT: f32 = 2.0;
+/// fork: the shipped density gain, the High stop as 1.12 scatters it (the director's call,
+/// 2026-11-06).
+pub const CLUTTER_DENSITY_GAIN_DEFAULT: f32 = 1.0;
 
 /// fork: the Ground Clutter Size factor (`groundClutterScale`) on every tuft's own random scale.
 pub const CLUTTER_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
@@ -150,10 +163,15 @@ pub const CLUTTER_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 /// fork: the shipped tuft size, 30% over the reference's (the director's call, 2026-11-06).
 pub const CLUTTER_SCALE_DEFAULT: f32 = 1.3;
 
-/// Ground-clutter tunables. `density` scales the reference's 16 cells per chunk (`frillDensity`),
-/// and a change re-scatters loaded tiles, as the 1.12 setter rebuilds its chunks. Seeded from
-/// `$WOW_CLUTTER_DENSITY`, `$WOW_CLUTTER_ALPHA` and `$WOW_CLUTTER_FADE`; density 0 is no clutter.
-/// fork: `density_gain` multiplies the stop's density and `scale` every tuft's size.
+/// Ground-clutter tunables. `density` is the Environment Detail stop, the reference's 16 cells per
+/// chunk times it (`frillDensity`), kept for `GetWorldDetail` and `GetCVar`.
+///
+/// Deviation: the scatter does not read `density`. It runs at the High stop times `density_gain`
+/// ([`Self::scatter_density`]), so Ground Clutter Density alone sets how much ground cover there
+/// is, and Environment Detail no longer does (the director's call, 2026-11-06). A change
+/// re-scatters loaded tiles, as the 1.12 setter rebuilds its chunks. `fade_far` is the Ground
+/// Clutter Draw Distance and `scale` every tuft's size. Seeded from `$WOW_CLUTTER_DENSITY` (the
+/// gain; 0 is no clutter), `$WOW_CLUTTER_ALPHA` and `$WOW_CLUTTER_FADE`.
 #[derive(Resource, Clone, Copy)]
 pub struct ClutterConfig {
     pub density: f32,
@@ -198,35 +216,47 @@ impl ClutterConfig {
         };
     }
 
-    /// The multiplier the scatter runs at: the stop's density times the fork's density gain.
+    /// fork: the Ground Clutter Draw Distance in yards, held to its range; a non-number is the
+    /// default.
+    pub fn set_fade_far(&mut self, yards: f32) {
+        self.fade_far = if yards.is_finite() {
+            yards.clamp(
+                *CLUTTER_DISTANCE_RANGE.start(),
+                *CLUTTER_DISTANCE_RANGE.end(),
+            )
+        } else {
+            CLUTTER_DISTANCE_DEFAULT
+        };
+    }
+
+    /// The multiplier the scatter runs at: the High stop's density times the density gain,
+    /// whatever stop Environment Detail holds.
     pub fn scatter_density(&self) -> f32 {
-        self.density * self.density_gain
+        CLUTTER_DENSITY_BASE * self.density_gain
     }
 }
 
 impl Default for ClutterConfig {
     fn default() -> Self {
         let env = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f32>().ok());
-        Self {
-            // Deviation: ×2, `frillDensity` 32 (the panel's Medium), because a fresh install's
-            // `hwDetect` value (24 from `VideoHardware.dbc`, 8 on the weakest parts) is on no panel
-            // stop, and Medium is the nearest stop no sparser.
-            //
-            // **Back to x3/High on 2026-09-08, the director's call.** The paragraph above is
-            // the 1649 reasoning and it still stands as *analysis*; what it does not settle is
-            // which stop a fresh client should start on, and that is a look call. It is taken here
-            // rather than left to the row because this literal and the CVar's registered default
-            // are the same fact spelled twice, welded by `cvars::tests`.
-            density: env("WOW_CLUTTER_DENSITY").unwrap_or(3.0).max(0.0),
+        let mut cfg = Self {
+            // The High stop, as `WorldDetail` "2" registers it: the same fact spelled twice,
+            // welded by `cvars::tests`.
+            density: CLUTTER_DENSITY_BASE,
             alpha_ref: env("WOW_CLUTTER_ALPHA")
                 .unwrap_or(DETAIL_DOODAD_ALPHA_REF)
                 .clamp(0.0, 1.0),
-            fade_far: env("WOW_CLUTTER_FADE")
-                .unwrap_or(DETAIL_DOODAD_FADE_FAR)
-                .max(1.0),
+            fade_far: CLUTTER_DISTANCE_DEFAULT,
             density_gain: CLUTTER_DENSITY_GAIN_DEFAULT,
             scale: CLUTTER_SCALE_DEFAULT,
+        };
+        if let Some(gain) = env("WOW_CLUTTER_DENSITY") {
+            cfg.set_density_gain(gain);
         }
+        if let Some(yards) = env("WOW_CLUTTER_FADE") {
+            cfg.set_fade_far(yards);
+        }
+        cfg
     }
 }
 

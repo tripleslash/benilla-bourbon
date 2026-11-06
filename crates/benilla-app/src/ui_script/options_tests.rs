@@ -1532,14 +1532,15 @@ fn the_brightness_slider_reads_its_cvar_and_stages_to_apply() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Environment Detail over `WorldDetail`: the readout names the stop, and an out-of-range value
-/// shows the nearest one without being written back.
+/// fork: Ground Clutter Draw Distance over `groundClutterDistance`, in its place under Terrain
+/// Distance: 70 to 500 yd, ten apart, read as yards, written on Apply. Environment Detail has no
+/// row: no renderer reads its stop.
 #[test]
-fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
+fn the_ground_clutter_distance_slider_writes_the_cvar_in_yards() {
     benilla_formats::wow_data_or_skip!();
-    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowWorldDetail";
+    const ROW: &str = "BenillaOptionsFrameContainerBodyGraphicsRowGroundClutterDistance";
     let mut s = audio_harness();
-    s.set_cvar_host("WorldDetail", "0");
+    s.set_cvar_host("groundClutterDistance", "300");
     let mut s = harness_on(s);
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
@@ -1547,59 +1548,39 @@ fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}Label:GetText()"))
             .unwrap(),
-        "Environment Detail"
+        "Ground Clutter Draw Distance"
     );
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
             .unwrap(),
-        "Low"
+        "300"
     );
     assert!(
         s.take_cvar_changes().is_empty(),
         "reading the table on select must not write it back"
     );
-
-    // The reference's grid: three stops, one apart (`OptionsFrame.lua:27`).
     assert!(s
         .eval::<bool>(&format!(
             "local lo, hi = {ROW}ControlSlider:GetMinMaxValues() \
-             return lo == 0 and hi == 2 and {ROW}ControlSlider:GetValueStep() == 1"
+             return lo == 70 and hi == 500 and {ROW}ControlSlider:GetValueStep() == 10"
         ))
         .unwrap());
 
-    s.run(&format!("{ROW}ControlSlider:SetValue(2)")).unwrap();
+    s.run(&format!("{ROW}ControlSlider:SetValue(450)")).unwrap();
     s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
-        vec![("WorldDetail".to_string(), "2".to_string())]
+        vec![("groundClutterDistance".to_string(), "450".to_string())]
     );
     assert_eq!(
         s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
             .unwrap(),
-        "High"
-    );
-
-    s.run(&format!("{ROW}ControlSlider:SetValue(0.6)")).unwrap();
-    assert_eq!(
-        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
-            .unwrap(),
-        "Medium"
-    );
-    s.run("BenillaOptionsFrameApplyButton:Click()").unwrap();
-
-    // "-1" is what the clutter-density override seeds for clutter off.
-    s.set_cvar_host("WorldDetail", "-1");
-    s.take_cvar_changes();
-    s.run("BenillaOptionsFrameCategoryListRowAudio:Click(); BenillaOptionsFrameCategoryListRowGraphics:Click()")
-        .unwrap();
-    assert_eq!(
-        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
-            .unwrap(),
-        "Low"
+        "450"
     );
     assert!(
-        s.take_cvar_changes().is_empty(),
-        "the nearest-stop display must not write back"
+        s.eval::<bool>("return BenillaOptionsFrameContainerBodyGraphicsRowWorldDetail == nil")
+            .unwrap(),
+        "Environment Detail has no row on our page"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
