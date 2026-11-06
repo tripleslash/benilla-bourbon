@@ -2502,7 +2502,8 @@
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: `groundClutterDensity`, our own row: a gain
-                                                -- on the Environment Detail stop, 1.0x as 1.12.
+                                                -- on the Environment Detail stop, 1.0x as 1.12;
+                                                -- ships at 2.0x.
                                                 BenillaOptionsRow_OnLoad(this, "groundClutterDensity", "Ground Clutter Density",
                                                     "BENILLA_TOOLTIP_GROUND_CLUTTER_DENSITY")
                                                 BenillaOptionsSliderRow_Setup(this, 0, 2.0, 0.1, "factor")
@@ -2515,7 +2516,7 @@
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: `groundClutterScale`, our own row: a factor
-                                                -- on every tuft's size, 1.0x as 1.12.
+                                                -- on every tuft's size, 1.0x as 1.12; ships at 1.3x.
                                                 BenillaOptionsRow_OnLoad(this, "groundClutterScale", "Ground Clutter Size",
                                                     "BENILLA_TOOLTIP_GROUND_CLUTTER_SCALE")
                                                 BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.1, "factor")

@@ -141,14 +141,14 @@ pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 400.0;
 /// stop: 0 is no clutter, 1 the stop as 1.12 scatters it, 2 twice its cells per chunk.
 pub const CLUTTER_DENSITY_GAIN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 
-/// fork: the shipped density gain, the stop as 1.12 scatters it.
-pub const CLUTTER_DENSITY_GAIN_DEFAULT: f32 = 1.0;
+/// fork: the shipped density gain, twice the stop's cells (the director's call, 2026-11-06).
+pub const CLUTTER_DENSITY_GAIN_DEFAULT: f32 = 2.0;
 
 /// fork: the Ground Clutter Size factor (`groundClutterScale`) on every tuft's own random scale.
 pub const CLUTTER_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 
-/// fork: the shipped tuft size, the reference's.
-pub const CLUTTER_SCALE_DEFAULT: f32 = 1.0;
+/// fork: the shipped tuft size, 30% over the reference's (the director's call, 2026-11-06).
+pub const CLUTTER_SCALE_DEFAULT: f32 = 1.3;
 
 /// Ground-clutter tunables. `density` scales the reference's 16 cells per chunk (`frillDensity`),
 /// and a change re-scatters loaded tiles, as the 1.12 setter rebuilds its chunks. Seeded from
@@ -180,7 +180,10 @@ impl ClutterConfig {
     /// fork: the Ground Clutter Density gain, held to its range; a non-number is the default.
     pub fn set_density_gain(&mut self, gain: f32) {
         self.density_gain = if gain.is_finite() {
-            gain.clamp(*CLUTTER_DENSITY_GAIN_RANGE.start(), *CLUTTER_DENSITY_GAIN_RANGE.end())
+            gain.clamp(
+                *CLUTTER_DENSITY_GAIN_RANGE.start(),
+                *CLUTTER_DENSITY_GAIN_RANGE.end(),
+            )
         } else {
             CLUTTER_DENSITY_GAIN_DEFAULT
         };

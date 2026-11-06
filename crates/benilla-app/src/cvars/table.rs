@@ -1040,15 +1040,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `groundClutterDensity` — a gain on the Environment Detail stop's cells per chunk, 0..2 (0 no
     // clutter, 2 twice the stop). `groundClutterScale` — a factor on every tuft's own random scale,
     // 0.5..2. Both re-build the loaded clutter on a change.
+    // Both ship past the reference's look (the director's call, 2026-11-06): twice the stop's
+    // cells and tufts 30% larger; Classic in the preset ladder puts both back at 1.
     ours(
         "groundClutterDensity",
-        "1",
-        "the fork's own — 1.12 scatters exactly the Environment Detail stop's cells",
+        "2",
+        "the fork's own — 1.12 scatters exactly the Environment Detail stop's cells; ours ships          twice them, because the ground reads bare under the long view the modern look draws",
     ),
     ours(
         "groundClutterScale",
-        "1",
-        "the fork's own — 1.12 draws every tuft at its model's size",
+        "1.3",
+        "the fork's own — 1.12 draws every tuft at its model's size; ours ships 30% larger, so          the cover fills the ground in",
     ),
     // `rainSurfaces` — rain soaks sky-exposed surfaces (darker, puddles, a wet sheen) and they dry
     // after it stops; 0 is the reference's dry look, exactly. Applies to the next frame.

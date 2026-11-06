@@ -48,6 +48,8 @@ pub(crate) const GRAPHICS_PRESETS: &[(&str, [&str; 6])] = &[
     ("renderScale",       ["1",    "0.67", "0.67", "1",   "1",    "1"]),
     ("frameGeneration",   ["0",    "1",    "1",    "1",   "1",    "1"]),
     ("foliageWind",       ["0",    "1",    "2",    "2",   "2",    "2"]),
+    ("groundClutterDensity", ["1", "1",    "2",    "2",   "2",    "2"]),
+    ("groundClutterScale", ["1",   "1.3",  "1.3",  "1.3", "1.3",  "1.3"]),
     ("rainSurfaces",      ["0",    "0",    "1",    "1",   "1",    "1"]),
     ("lavaLight",         ["0",    "1",    "1",    "1",   "1",    "1"]),
 ];
