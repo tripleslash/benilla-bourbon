@@ -237,8 +237,8 @@ mod tests {
         }
     }
 
-    /// The fog colour sets the air's hue, never its brightness: the same light through a darker fog
-    /// colour of the same hue scatters the same.
+    /// The fog colour sets the air's hue, never its brightness: however dark or light the authored
+    /// colour, its brightest channel scatters `ALBEDO` of the light.
     #[test]
     fn the_fog_colour_is_the_hue_not_the_brightness() {
         let bright = solve(&elwynn_noon());
@@ -246,10 +246,11 @@ mod tests {
             fog_color: [0.55 * 0.5, 0.68 * 0.5, 0.80 * 0.5],
             ..elwynn_noon()
         });
-        for c in 0..3 {
-            let (b, d) = (bright.ambient_in[c], dim.ambient_in[c]);
-            assert!((b - d).abs() < 0.05 * b.max(1e-3), "{c}: {b} vs {d}");
+        for m in [bright, dim] {
+            let peak = m.albedo[0].max(m.albedo[1]).max(m.albedo[2]);
+            assert!((peak - ALBEDO).abs() < 1e-6, "{:?}", m.albedo);
         }
+        assert!((bright.ambient_in[2] - dim.ambient_in[2]).abs() < 1e-6);
         // Bluer fog, bluer air.
         assert!(bright.albedo[2] > bright.albedo[0]);
         assert!((bright.albedo[2] - ALBEDO).abs() < 1e-6);
