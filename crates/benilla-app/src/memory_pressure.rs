@@ -13,6 +13,11 @@
 //! while it loads is shed again at once; one shed again within a minute did not fit, and the wait
 //! before the next try grows.
 //!
+//! The shed line guards a fall: flown into a city, the headroom drops faster than a shed step
+//! unloads. Held still, it wanders, and a view that settles just under the line (Stormwind's full
+//! ring, about 500 MiB) would shed and take back its last step without end. So the line holds only
+//! while the headroom falls fast; still, a step is shed only a [`BAND`] under it.
+//!
 //! The player's setting is never touched: the `farclip` CVar and the saved config keep their value,
 //! and only `ViewDistance::farclip`, which every consumer reads, carries the cap. A setting moved
 //! while a cap holds is taken as the new setting, under the cap.
@@ -31,6 +36,14 @@ use bevy::prelude::*;
 /// MiB in 2 s, faster than a shed step unloads: a line at 256 trapped, and one at 384 trapped in one
 /// flight of two, each time with the step shed seconds before.
 const SHED_BELOW: usize = 512 << 20;
+/// How far under [`SHED_BELOW`] a still headroom may sit before a step is shed: Stormwind's 1017 yd
+/// ring settled at 495 to 509 MiB, and the headroom wanders 35 MiB as a window settles.
+const BAND: usize = 96 << 20;
+/// Bytes a second of fall that make the headroom fast, for [`SHED_BELOW`]: a taxi's flight into
+/// Stormwind fell 155 MiB/s, a window settling wanders 35 MiB.
+const FALL_PER_SEC: f64 = (64u64 << 20) as f64;
+/// The fall is measured across at least this many seconds, so one frame's burst is not a fall.
+const FALL_SECS: f64 = 1.0;
 /// Below this many bytes in the largest run, a step is shed (`?mem_run_mb=`, a measuring lever):
 /// the headroom sums free slices, and a large block needs them in one run. The largest block those
 /// flights asked for was 55.5 MiB, which a run from 56 MiB holds; both traps were a block of 16.5
@@ -76,6 +89,8 @@ pub(crate) struct MemoryPressure {
     dwell: f64,
     /// When the last step came back, while a shed may still say it did not fit.
     restored_at: Option<f64>,
+    /// The headroom sampled at least [`FALL_SECS`] apart, the older first, as (seconds, bytes).
+    samples: [(f64, usize); 2],
 }
 
 impl Default for MemoryPressure {
@@ -90,6 +105,7 @@ impl Default for MemoryPressure {
             ample_since: None,
             dwell: 0.0,
             restored_at: None,
+            samples: [(0.0, 0); 2],
         }
     }
 }
@@ -98,6 +114,13 @@ impl MemoryPressure {
     /// One weighing at `now` seconds, given the allocator's `headroom`, its `largest_run` and the
     /// live `farclip`: the view distance to write, if it changes.
     fn weigh(&mut self, now: f64, headroom: usize, run: usize, farclip: f32) -> Option<f32> {
+        // The fall since the older sample, between one and two spans of FALL_SECS ago.
+        if now - self.samples[1].0 >= FALL_SECS {
+            self.samples = [self.samples[1], (now, headroom)];
+        }
+        let (then, was) = self.samples[0];
+        let falling =
+            was.saturating_sub(headroom) as f64 > FALL_PER_SEC * (now - then).max(FALL_SECS);
         // The player moved the setting while a cap holds: the new setting, under the cap.
         if let Some(&cap) = self.caps.last() {
             if farclip != self.applied {
@@ -106,11 +129,13 @@ impl MemoryPressure {
                 return (self.applied != farclip).then_some(self.applied);
             }
         }
-        // A step that came back is shed again as soon as its loads cross the line; any other
-        // change waits out its settle.
+        // Under the band, or a run too short, at any pace; under the line, only while falling.
+        let deep = headroom < self.shed_below.saturating_sub(BAND) || run < self.run_below;
+        let short = deep || (headroom < self.shed_below && falling);
+        // A step that came back is shed again as soon as its loads cross the band, its own loads
+        // being the fall; any other change waits out its settle.
         let came_back = self.restored_at == Some(self.changed_at);
-        let short = headroom < self.shed_below || run < self.run_below;
-        if now - self.changed_at < SETTLE_SECS && !(came_back && short) {
+        if now - self.changed_at < SETTLE_SECS && !(came_back && deep) {
             return None;
         }
         if self.restored_at.is_some_and(|t| now - t >= REFIT_SECS) {
@@ -312,10 +337,60 @@ mod tests {
             None,
             "above the line"
         );
-        assert_eq!(v.weigh(10.0, 500 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(10.0, 400 * MIB, RUN, 1000.0), Some(800.0));
         assert_eq!(v.weigh(15.0, 100 * MIB, RUN, 800.0), None, "settling");
-        assert_eq!(v.weigh(18.0, 500 * MIB, RUN, 800.0), Some(640.0));
+        assert_eq!(v.weigh(18.0, 400 * MIB, RUN, 800.0), Some(640.0));
         assert_eq!(v.depth(), 2);
+    }
+
+    /// A fast fall sheds at the line, above the band: the flight into a city.
+    #[test]
+    fn a_fast_fall_sheds_at_the_line() {
+        let mut v = MemoryPressure::default();
+        assert_eq!(v.weigh(10.0, 900 * MIB, RUN, 1000.0), None);
+        assert_eq!(v.weigh(11.0, 750 * MIB, RUN, 1000.0), None);
+        assert_eq!(
+            v.weigh(12.0, 600 * MIB, RUN, 1000.0),
+            None,
+            "above the line"
+        );
+        assert_eq!(v.weigh(13.0, 500 * MIB, RUN, 1000.0), Some(800.0));
+    }
+
+    /// A still headroom in the band sheds nothing.
+    #[test]
+    fn a_still_headroom_in_the_band_sheds_nothing() {
+        let mut v = MemoryPressure::default();
+        for t in 10..200 {
+            let headroom = if t % 2 == 0 { 495 } else { 509 };
+            assert_eq!(v.weigh(f64::from(t), headroom * MIB, RUN, 1000.0), None);
+        }
+    }
+
+    /// A step whose loads settle in the band stays: Stormwind's last step, 814 to 1017 yd, which
+    /// cost 340 MiB and left 495 to 509, no longer goes and comes back without end.
+    #[test]
+    fn a_step_that_settles_in_the_band_stays() {
+        let mut v = MemoryPressure::default();
+        assert_eq!(v.weigh(10.0, 400 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(
+            v.weigh(18.0, 834 * MIB, RUN, 800.0),
+            None,
+            "the wait starts"
+        );
+        assert_eq!(v.weigh(21.0, 834 * MIB, RUN, 800.0), Some(1000.0));
+        for (t, headroom) in [(22, 700), (23, 600), (24, 520), (25, 509), (26, 495)] {
+            assert_eq!(
+                v.weigh(f64::from(t), headroom * MIB, RUN, 1000.0),
+                None,
+                "its own loads"
+            );
+        }
+        for t in 27..400 {
+            let headroom = if t % 2 == 0 { 495 } else { 509 };
+            assert_eq!(v.weigh(f64::from(t), headroom * MIB, RUN, 1000.0), None);
+        }
+        assert_eq!(v.depth(), 0);
     }
 
     /// Ample headroom never sheds, and with nothing shed there is nothing to give back.
@@ -332,8 +407,8 @@ mod tests {
     #[test]
     fn cheap_steps_come_back_in_a_run_down_to_none() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 500 * MIB, RUN, 1000.0), Some(800.0));
-        assert_eq!(v.weigh(18.0, 500 * MIB, RUN, 800.0), Some(640.0));
+        assert_eq!(v.weigh(10.0, 400 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(18.0, 400 * MIB, RUN, 800.0), Some(640.0));
         assert_eq!(v.weigh(26.0, 700 * MIB, RUN, 640.0), None, "no room");
         assert_eq!(
             v.weigh(30.0, 850 * MIB, RUN, 640.0),
@@ -355,8 +430,8 @@ mod tests {
     #[test]
     fn a_run_stops_where_the_room_ends() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 500 * MIB, RUN, 1000.0), Some(800.0));
-        assert_eq!(v.weigh(18.0, 500 * MIB, RUN, 800.0), Some(640.0));
+        assert_eq!(v.weigh(10.0, 400 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(18.0, 400 * MIB, RUN, 800.0), Some(640.0));
         assert_eq!(
             v.weigh(26.0, 900 * MIB, RUN, 640.0),
             None,
@@ -374,7 +449,7 @@ mod tests {
     #[test]
     fn a_dip_restarts_the_wait() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 500 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(10.0, 400 * MIB, RUN, 1000.0), Some(800.0));
         assert_eq!(
             v.weigh(18.0, 2000 * MIB, RUN, 800.0),
             None,
@@ -392,7 +467,7 @@ mod tests {
     #[test]
     fn a_step_that_does_not_fit_goes_at_once_and_waits_longer_each_time() {
         let mut v = MemoryPressure::default();
-        assert_eq!(v.weigh(10.0, 500 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(10.0, 400 * MIB, RUN, 1000.0), Some(800.0));
         assert_eq!(
             v.weigh(18.0, 800 * MIB, RUN, 800.0),
             None,
@@ -401,7 +476,7 @@ mod tests {
         assert_eq!(v.weigh(21.0, 800 * MIB, RUN, 800.0), Some(1000.0));
         assert_eq!(v.weigh(22.0, 600 * MIB, RUN, 1000.0), None, "loading");
         assert_eq!(
-            v.weigh(23.0, 500 * MIB, RUN, 1000.0),
+            v.weigh(23.0, 400 * MIB, RUN, 1000.0),
             Some(800.0),
             "under the line: shed at once"
         );
@@ -412,7 +487,7 @@ mod tests {
         );
         assert_eq!(v.weigh(60.0, 800 * MIB, RUN, 800.0), None, "half a minute");
         assert_eq!(v.weigh(61.0, 800 * MIB, RUN, 800.0), Some(1000.0));
-        assert_eq!(v.weigh(65.0, 500 * MIB, RUN, 1000.0), Some(800.0), "again");
+        assert_eq!(v.weigh(65.0, 400 * MIB, RUN, 1000.0), Some(800.0), "again");
         assert_eq!(
             v.weigh(73.0, 800 * MIB, RUN, 800.0),
             None,
@@ -421,7 +496,7 @@ mod tests {
         assert_eq!(v.weigh(132.0, 800 * MIB, RUN, 800.0), None, "a minute now");
         assert_eq!(v.weigh(133.0, 800 * MIB, RUN, 800.0), Some(1000.0));
         assert_eq!(v.weigh(193.0, 700 * MIB, RUN, 1000.0), None, "it held");
-        assert_eq!(v.weigh(200.0, 500 * MIB, RUN, 1000.0), Some(800.0));
+        assert_eq!(v.weigh(200.0, 400 * MIB, RUN, 1000.0), Some(800.0));
         assert_eq!(
             v.weigh(208.0, 800 * MIB, RUN, 800.0),
             None,
