@@ -22,6 +22,12 @@
 //!
 //! A store with no origin reads a container built on this machine (`benilla-pack build`'s `--out`)
 //! in place, its packs at their served paths.
+//!
+//! **The background fill** ([`NetPackStore::next_unfilled`], [`NetPackStore::fill`], driven by
+//! `crate::remote`'s fill thread) fetches the packs nothing has asked for yet, one at a time, and
+//! only while no read or warm is downloading anything ([`foreground_busy`]) and no warm waits
+//! ([`NetPackStore::warm_pending`]): a client idling at the login screen keeps filling its cache,
+//! and the moment the game asks for something the fill stands aside.
 
 mod fetch;
 
@@ -30,6 +36,7 @@ pub use fetch::{Fetch, Folder, Http};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -51,6 +58,31 @@ const ATTEMPTS: usize = 3;
 /// file, so only a solid one (one zstd stream, unreadable in parts) is held whole.
 const SOLID_CACHE_BYTES: usize = 256 * 1024 * 1024;
 
+/// Downloads in flight for a read or a warm, every store's together: the background fill takes the
+/// line only while this is 0.
+static FOREGROUND: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a read or a warm is downloading a pack now, in any store.
+pub fn foreground_busy() -> bool {
+    FOREGROUND.load(Ordering::Acquire) > 0
+}
+
+/// Holds [`FOREGROUND`] up for one download.
+struct Foreground;
+
+impl Foreground {
+    fn enter() -> Self {
+        FOREGROUND.fetch_add(1, Ordering::AcqRel);
+        Foreground
+    }
+}
+
+impl Drop for Foreground {
+    fn drop(&mut self) {
+        FOREGROUND.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// A container, open: its index in memory, its packs on disk or a fetch away.
 pub struct NetPackStore {
     root: PathBuf,
@@ -64,6 +96,10 @@ pub struct NetPackStore {
     /// Packs whose download failed this session: a `try_read` of them is a miss, not a wait.
     failed: Mutex<HashSet<u32>>,
     warm: WarmQueue,
+    /// The background fill's place: every pack below it is cached or skipped.
+    fill_cursor: AtomicU32,
+    /// Packs whose background download failed: the fill passes them, a read still asks.
+    fill_skipped: Mutex<HashSet<u32>>,
 }
 
 impl NetPackStore {
@@ -84,6 +120,8 @@ impl NetPackStore {
             landed: Condvar::new(),
             failed: Mutex::new(HashSet::new()),
             warm: WarmQueue::default(),
+            fill_cursor: AtomicU32::new(0),
+            fill_skipped: Mutex::new(HashSet::new()),
         })
     }
 
@@ -229,9 +267,62 @@ impl NetPackStore {
             .contains(&pack_id)
     }
 
+    /// Whether a warm waits in this store's queue.
+    pub fn warm_pending(&self) -> bool {
+        !self
+            .warm
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .heap
+            .is_empty()
+    }
+
+    /// The next pack the background fill should fetch, or `None` when every pack is cached (or
+    /// failed): the first past the fill's place that is neither. A store with no origin has
+    /// nothing to fill.
+    pub fn next_unfilled(&self) -> Option<u32> {
+        self.origin.as_ref()?;
+        let skipped = |id: u32| {
+            self.has_failed(id)
+                || self
+                    .fill_skipped
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(&id)
+        };
+        let mut at = self.fill_cursor.load(Ordering::Relaxed);
+        while at < self.index.pack_count() {
+            if let Some(meta) = self.index.pack(at) {
+                if self.cached(at, &meta).is_none() && !skipped(at) {
+                    self.fill_cursor.store(at, Ordering::Relaxed);
+                    return Some(at);
+                }
+            }
+            at += 1;
+        }
+        self.fill_cursor.store(at, Ordering::Relaxed);
+        None
+    }
+
+    /// Fetch one pack for the background fill. It does not count as foreground, and a failure
+    /// skips the pack for the fill alone: a read of it later still downloads it.
+    pub fn fill(&self, pack_id: u32) -> io::Result<()> {
+        let meta = self.index.pack(pack_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("no pack {pack_id}"))
+        })?;
+        self.ensure_as(pack_id, &meta, false).map(|_| ())
+    }
+
     /// The pack on disk, downloading it first when it is not; one download per pack however many
     /// threads ask.
     fn ensure(&self, pack_id: u32, meta: &PackMeta) -> io::Result<PathBuf> {
+        self.ensure_as(pack_id, meta, true)
+    }
+
+    /// [`Self::ensure`], `foreground` saying whether the download is a read's or a warm's (which
+    /// hold the background fill off) or the fill's own.
+    fn ensure_as(&self, pack_id: u32, meta: &PackMeta, foreground: bool) -> io::Result<PathBuf> {
         if let Some(path) = self.cached(pack_id, meta) {
             return Ok(path);
         }
@@ -254,15 +345,21 @@ impl NetPackStore {
             }
             loading.insert(pack_id);
         }
+        let held = foreground.then(Foreground::enter);
         let got = download(
             origin.as_ref(),
             &self.pack_file(pack_id, meta),
             pack_id,
             meta,
         );
+        drop(held);
         if got.is_err() {
-            self.failed
-                .lock()
+            let skip = if foreground {
+                &self.failed
+            } else {
+                &self.fill_skipped
+            };
+            skip.lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(pack_id);
         }

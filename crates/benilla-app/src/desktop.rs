@@ -2,6 +2,8 @@
 //! build's site) instead of an install, set up the way the page sets itself up: the containers
 //! cached in the resident folder, the bundled addons fetched beside them, and the site's
 //! `config.json` read for the WebSocket gateway and the realmlist ([`crate::webenv::config`]).
+//! Then the background fill ([`benilla_formats::remote::start_background_fill`]) completes the
+//! cache whenever nothing else is being fetched.
 //!
 //! Nothing here runs without an origin ([`benilla_formats::remote::origin`]): an install-reading
 //! client boots exactly as before.
@@ -32,6 +34,12 @@ pub(crate) fn prepare() {
     if let Some(ws) = gateway() {
         println!("net: dialing the realm through the gateway {ws}");
         benilla_protocol::transport::set_ws_base(ws);
+    }
+    // The packs nothing has asked for yet, fetched while nothing else is, so the cache keeps
+    // filling at the login screen and in quiet play. Not for an unattended run, whose timings
+    // and bandwidth are its measurement; `$BENILLA_BACKGROUND_FETCH=0` turns it off for a player.
+    if !crate::run_mode::unattended() {
+        benilla_formats::remote::start_background_fill();
     }
 }
 

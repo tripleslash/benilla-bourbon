@@ -100,6 +100,101 @@ pub fn segment(segment: &str) -> Option<Result<Arc<NetPackStore>>> {
     store_at(&cache_root().join(segment))
 }
 
+/// How long nothing may have been fetched for a read or a warm before the background fill takes
+/// the line, so a burst's next request does not queue behind a fill download.
+const FILL_QUIET: std::time::Duration = std::time::Duration::from_secs(1);
+/// How often the fill looks again once every container it fills is complete (or unreachable).
+const FILL_DONE_POLL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Start the background fill for this process, once: one thread that fetches the packs nothing
+/// has asked for yet while nothing else is being fetched ([`crate::netpack`]'s header), so a
+/// client idling at the login screen keeps filling its cache. Off with
+/// `$BENILLA_BACKGROUND_FETCH=0`; nothing to do without an origin.
+pub fn start_background_fill() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    if origin().is_none() || !background_fill_enabled() {
+        return;
+    }
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("pack-fill".into())
+            .spawn(fill_loop);
+    });
+}
+
+/// `$BENILLA_BACKGROUND_FETCH`: on unless it reads `0`, `off` or `false`.
+fn background_fill_enabled() -> bool {
+    match std::env::var("BENILLA_BACKGROUND_FETCH") {
+        Ok(v) => crate::layers::layer_switch(&v) != Some(false),
+        Err(_) => true,
+    }
+}
+
+/// The containers the fill completes, in order: the base corpus, the updated character models
+/// while that setting is on, the Turtle WoW layer (a realm list may offer a 1.18.1 realm), and its
+/// reforged art while that setting is on. Asked afresh on every pass, so a setting changed after
+/// boot is followed.
+fn fill_segments() -> Vec<&'static str> {
+    let mut out = vec![DATA_SEGMENT];
+    if crate::layers::hd_character_models() {
+        out.push(crate::layers::HD_DATA_SEGMENT);
+    }
+    out.push(crate::layers::TURTLE_DATA_SEGMENT);
+    if crate::layers::reforged_models() {
+        out.push(crate::layers::REFORGED_DATA_SEGMENT);
+    }
+    out
+}
+
+/// Whether a read or a warm is fetching, or a warm waits, in any open container.
+fn foreground_active() -> bool {
+    if crate::netpack::foreground_busy() {
+        return true;
+    }
+    let stores: Vec<Arc<NetPackStore>> = STORES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default();
+    stores.iter().any(|s| s.warm_pending())
+}
+
+/// The fill thread: wait for [`FILL_QUIET`], fetch the next pack the first incomplete container
+/// lacks, and look again; with every container complete, look again after [`FILL_DONE_POLL`].
+fn fill_loop() {
+    let mut quiet_since: Option<std::time::Instant> = None;
+    loop {
+        if foreground_active() {
+            quiet_since = None;
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            continue;
+        }
+        let since = *quiet_since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() < FILL_QUIET {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
+        }
+        let mut fetched = false;
+        for name in fill_segments() {
+            // A container that will not open (offline, or not hosted) is passed this round.
+            let Some(Ok(store)) = segment(name) else {
+                continue;
+            };
+            if let Some(pack_id) = store.next_unfilled() {
+                if let Err(e) = store.fill(pack_id) {
+                    eprintln!("benilla: background fill of {name} pack {pack_id}: {e}");
+                }
+                fetched = true;
+                break;
+            }
+        }
+        if !fetched {
+            std::thread::sleep(FILL_DONE_POLL);
+        }
+    }
+}
+
 /// One of the install's loose top-level files the site serves beside a container, at
 /// `{origin}/{segment}/loose/<name lowercased>` (`eula.html`, `tos.html`, `Credits.html`): the
 /// page's `read_loose_web`. Fetched once into `<segment>/loose/` and read from there after; a miss
