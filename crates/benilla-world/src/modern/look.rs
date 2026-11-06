@@ -269,9 +269,11 @@ impl ZoneLook {
 
     /// fork: **Tirisfal Glades**, the eerie look tinted greener (asked in the viewer): the sun,
     /// shafts, fog and sky lean further from red and blue toward green, through a thinner haze than
-    /// the eerie look's 0.0017, day and night (asked).
+    /// the eerie look's 0.0017, day and night (asked), keeping the full 1.3 day banks the other dark
+    /// zones thinned (asked).
     pub const TIRISFAL: Self = Self {
         haze: 0.0012,
+        ground_fog: 1.3,
         glow: [0.58, 1.0, 0.62],
         fog_tint: [0.7, 1.05, 0.7],
         sky_tint: [0.52, 0.72, 0.52],
