@@ -228,7 +228,7 @@
 - `WOW_CLUSTERS` — benilla-app/src/player/setup.rs, benilla-world/src/view.rs
 - `WOW_CLUTTER_ALPHA` — benilla-world/src/clutter.rs
 - `WOW_CLUTTER_DENSITY` — benilla-app/src/cvars/mod.rs, benilla-app/src/lib.rs, benilla-world/src/clutter.rs
-- `WOW_CLUTTER_FADE` — benilla-world/src/clutter.rs
+- `WOW_CLUTTER_FADE` — benilla-app/src/cvars/mod.rs, benilla-world/src/clutter.rs
 - `WOW_COLUMN_COST` — benilla-assets/src/column_grid.rs
 - `WOW_COMPUTE_THREADS` — benilla-world/src/boot.rs
 - `WOW_CPU_CENSUS` — benilla-app/src/perf/census.rs

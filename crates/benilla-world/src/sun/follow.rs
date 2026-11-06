@@ -459,8 +459,9 @@ pub(super) fn follow_moons(
                 // wedge in the horizon band.
                 tf.translation = cam_pos + to_moon * dist;
                 // fork: modern lighting (FORK.md). Deviation: no moon02 in a
-                // modern frame. The seed surfaces it black, never a moon, and over the modern night
-                // sky (a lit haze, not the classic dark dome) it read as a hole (Tirisfal, 02:00).
+                // modern frame, because the seed surfaces it black, never a moon, and over the
+                // modern night sky (a lit haze, not the classic dark dome) it reads as a hole
+                // (Tirisfal, 02:00).
                 let modern = crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled();
                 let size = if hidden || modern {
                     0.0
