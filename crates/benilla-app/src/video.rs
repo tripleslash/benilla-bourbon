@@ -549,6 +549,12 @@ impl VideoKnobs<'_> {
                     lava.0 = if ev.flag() { 1.0 } else { 0.0 };
                 }
             }
+            // fork: Ground Clutter Density, a gain on the Environment Detail stop; the loaded tiles
+            // re-scatter off the change, as a stop change does.
+            "groundclutterdensity" => clutter.set_density_gain(v),
+            // fork: Ground Clutter Size, a factor on every tuft's own scale; the built chunks
+            // re-mesh off the change.
+            "groundclutterscale" => clutter.set_scale(v),
             "foliagewindstrength" => {
                 if let Some(strength) = fork.4.as_deref_mut() {
                     *strength = benilla_world::wind::FoliageWindStrength::from_cvar(v);

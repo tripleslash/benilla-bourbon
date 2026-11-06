@@ -319,15 +319,22 @@
         end
 
         -- The era SettingsList layout: the head at (10,-12), each next at (0,-9), as in the XML.
-        function BenillaOptionsSearch_Place(name, prev)
+        -- fork: a row that opens a section sits `BENILLA_OPTIONS_SECTION_GAP` lower, its head in
+        -- the gap; a search lays rows out without heads.
+        function BenillaOptionsSearch_Place(name, prev, sectioned)
             local f = getglobal(name)
+            local gap = 0
+            if sectioned and f.sectionHead then gap = BENILLA_OPTIONS_SECTION_GAP end
+            if f.sectionHead then
+                if gap > 0 then f.sectionHead:Show() else f.sectionHead:Hide() end
+            end
             f:ClearAllPoints()
             if prev then
-                f:SetPoint("TOPLEFT", prev, "BOTTOMLEFT", 0, -9)
-                f:SetPoint("TOPRIGHT", prev, "BOTTOMRIGHT", 0, -9)
+                f:SetPoint("TOPLEFT", prev, "BOTTOMLEFT", 0, -9 - gap)
+                f:SetPoint("TOPRIGHT", prev, "BOTTOMRIGHT", 0, -9 - gap)
             else
-                f:SetPoint("TOPLEFT", "BenillaOptionsFrameContainerBody", "TOPLEFT", 10, -12)
-                f:SetPoint("TOPRIGHT", "BenillaOptionsFrameContainerBody", "TOPRIGHT", -20, -12)
+                f:SetPoint("TOPLEFT", "BenillaOptionsFrameContainerBody", "TOPLEFT", 10, -12 - gap)
+                f:SetPoint("TOPRIGHT", "BenillaOptionsFrameContainerBody", "TOPRIGHT", -20, -12 - gap)
             end
         end
 
@@ -336,7 +343,7 @@
             local prev = nil
             for _, rkey in ipairs(BENILLA_OPTIONS_PAGE_ROWS[key]) do
                 local name = "BenillaOptionsFrameContainerBody" .. key .. rkey
-                BenillaOptionsSearch_Place(name, prev)
+                BenillaOptionsSearch_Place(name, prev, 1)
                 getglobal(name):Show()
                 prev = name
             end
@@ -474,6 +481,15 @@
             .. "calmer, higher is a blustery day. Storms swing everything harder on top.\n\n"
             .. "Grass still parts around characters the same way. Needs Foliage Wind on."
 
+        -- fork: the ground clutter's density and size -- 1.12 has no such rows.
+        BENILLA_TOOLTIP_GROUND_CLUTTER_DENSITY =
+            "How much grass, flowers and other ground cover grows, on top of Environment Detail. "
+            .. "1.0x is exactly what Environment Detail scatters; 2.0x is twice as much, 0 is "
+            .. "none.\n\nMore ground cover costs frame rate where it is thick."
+        BENILLA_TOOLTIP_GROUND_CLUTTER_SCALE =
+            "How large each tuft of grass, flower or pebble is drawn. 1.0x is the original "
+            .. "client's size; higher fills the ground in with taller cover."
+
         BENILLA_TOOLTIP_GRAPHICS_PRESET =
             "Sets every graphics setting below at once, from the original client's look to the "
             .. "most detailed one: lighting, view distance, ground detail, weather, shadows, "
@@ -604,6 +620,19 @@
             .. "— nights, caves and interiors are what it is for; below 50% dims the brightest. "
             .. "At 50% the picture is unchanged."
 
+        -- fork: a page's sections, by the row each opens: the title its head reads. The XML
+        -- anchors an opening row `BENILLA_OPTIONS_SECTION_GAP` (24) further down, as the
+        -- layout does.
+        BENILLA_OPTIONS_SECTION_GAP = 24
+        BENILLA_OPTIONS_PAGE_SECTIONS = {
+            Graphics = {
+                RowUiScale = "Display",
+                RowFarclip = "World Detail",
+                RowLightingModel = "Lighting",
+                RowWeatherDensity = "Weather & Time",
+            },
+        }
+
         BENILLA_OPTIONS_PAGE_ROWS = {
             -- The era Controls order first; the rest follow their 1.12 box's columns.
             Controls = {
@@ -619,42 +648,19 @@
                 "RowEnableMusic", "RowEnableAmbience", "RowEnableErrorSpeech",
                 "RowBackgroundSound",
             },
+            -- fork: the Graphics page in sections (BENILLA_OPTIONS_PAGE_SECTIONS): the Preset, then
+            -- how the picture is presented, what the world is made of, how it is lit, and what
+            -- moves in it.
             Graphics = {
-                -- fork: the Graphics Preset heads the page it names (FORK.md).
                 "RowGraphicsPreset",
-                "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
-                "RowGamma", "RowWeatherDensity",
-                -- Display Mode was pulled 2026-09-08 (the director's call): the client ships two
-                -- window states and the window's own title-bar control already moves between
-                -- them, so the row was a second way to say one thing. `gxWindow` survives as the
-                -- CVar and as `$WOW_WIN` — what went is the row, on exactly the terms 1648
-                -- pulled Multisampling's. Upstream still ships the row (2180 rebuilt it against
-                -- modern Classic's boolean dropdown); this branch keeps it pulled, and the CVar
-                -- it rode is untouched either way, so nothing downstream of the panel differs.
-                --
-                -- Brightness, Gamma and Weather Intensity arrive from upstream ABOVE that seat
-                -- rather than below it: all are "what the world IS" rows, and the group they join
-                -- runs from scale and distance down through detail to the picture's own level and
-                -- gamma.
-                --
-                -- Updated Character Models closes the "what the world IS" group: it is the only
-                -- row on the page that changes the ART rather than how the art is drawn.
-                "RowVerticalSync", "RowWorldShadows", "RowHdModels",
-                -- The indirect-lighting pair sits between the shadow toggle and Render Scale:
-                -- everything above it is what the world IS, Render Scale is how big it gets
-                -- drawn, and Render Scale keeps the last seat its own note below claims.
-                "RowAmbientOcclusion", "RowIndirectLight", "RowWaterDetail",
-                -- fork: the modern lighting model and its tier (FORK.md).
-                "RowLightingModel", "RowLightingQuality", "RowAutoExposure",
-                -- fork: the hour the world's day and night are drawn at.
+                "RowUiScale", "RowRenderScale", "RowRcasSharpness", "RowFrameGeneration",
+                "RowVerticalSync", "RowBrightness", "RowGamma",
+                "RowFarclip", "RowWorldDetail", "RowGroundClutterDensity", "RowGroundClutterScale",
+                "RowHdModels", "RowSpellDetail", "RowWaterDetail",
+                "RowLightingModel", "RowLightingQuality", "RowWorldShadows", "RowAmbientOcclusion",
+                "RowIndirectLight", "RowAutoExposure",
+                "RowWeatherDensity", "RowRainSurfaces", "RowFoliageWind", "RowFoliageWindStrength",
                 "RowServerTimeOffset",
-                -- fork: the Everwood port (FORK.md) -- what moves in the world.
-                "RowFoliageWind", "RowFoliageWindStrength", "RowRainSurfaces",
-                -- fork: fsr (FORK.md) — how the world is presented, above how big it is drawn.
-                "RowFrameGeneration",
-                "RowRenderScale",
-                -- fork: fsr (FORK.md) -- FSR's sharpening, beside the scale it sharpens.
-                "RowRcasSharpness",
             },
             -- Guild Names and Player Titles are children of Player Names
             -- (UIOptionsFrame.lua:703-709).
@@ -694,10 +700,27 @@
         }
 
         -- `tip` is a GlobalStrings key, resolved at hover as UIOptionsFrame.lua:265 does.
+        -- fork: the head over a row that opens a section, in the gap above it.
+        function BenillaOptionsRow_SectionHead(row)
+            local parent = row:GetParent()
+            local pname = parent and parent:GetName()
+            if not pname then return end
+            local key = string.gsub(pname, "^BenillaOptionsFrameContainerBody", "")
+            local sections = BENILLA_OPTIONS_PAGE_SECTIONS[key]
+            local title = sections and sections[string.sub(row:GetName(), string.len(pname) + 1)]
+            if not title then return end
+            local head = row:CreateFontString(row:GetName() .. "SectionHead", "OVERLAY",
+                "BenillaOptionsFontHighlightMedium")
+            head:SetPoint("BOTTOMLEFT", row, "TOPLEFT", 4, 6)
+            head:SetText(title)
+            row.sectionHead = head
+        end
+
         function BenillaOptionsRow_OnLoad(row, cvar, label, tip, child)
             row.cvar = cvar
             row.tip = tip
             row.searchTag = string.upper(label)
+            BenillaOptionsRow_SectionHead(row)
             -- BenillaOptionsRow_SetEnabled's disabled font must keep the child size.
             row.child = child
             local l = getglobal(row:GetName() .. "Label")
@@ -994,6 +1017,10 @@
         function BenillaOptionsRow_FormatValue(row, value)
             if row.fmt == "raw" then
                 return string.format("%d", math.floor(value + 0.5))
+            end
+            -- fork: "factor": a multiplier, `1.3x`.
+            if row.fmt == "factor" then
+                return string.format("%.1fx", value)
             end
             -- fork: "hours": a signed offset, `+3 h`, `0 h`, `-5 h`.
             if row.fmt == "hours" then
@@ -2333,8 +2360,8 @@
                                         </Frame>
                                         <Frame name="$parentRowUiScale" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGraphicsPreset" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGraphicsPreset" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGraphicsPreset" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGraphicsPreset" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "uiScale", "UI Scale",
@@ -2346,50 +2373,64 @@
                                                 this.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowFarclip" inherits="BenillaOptionsSliderRowTemplate">
+                                        <Frame name="$parentRowRenderScale" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                BenillaOptionsRow_OnLoad(this, "farclip", "Terrain Distance",
-                                                    "OPTION_TOOLTIP_FARCLIP")
-                                                local info = BenillaGraphicsSliderInfo(2)
-                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
-                                                    info.valueStep, "raw")
+                                                -- Deviation: our own row (the reference draws to
+                                                -- the backbuffer), and no Multisampling because it
+                                                -- misses alpha-tested cutouts. Deferred: a write
+                                                -- rebuilds the render target.
+                                                BenillaOptionsRow_OnLoad(this, "renderScale", "Render Scale",
+                                                    "BENILLA_TOOLTIP_RENDER_SCALE")
+                                                -- fork: fsr (FORK.md) -- a 0.01 grid, so
+                                                -- FSR's 0.67 is a stop, marked with 1x.
+                                                this.marks = BENILLA_RENDER_SCALE_MARKS
+                                                BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.01)
+                                                this.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowWorldDetail" inherits="BenillaOptionsSliderRowTemplate">
+                                        <Frame name="$parentRowRcasSharpness" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFarclip" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFarclip" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                BenillaOptionsRow_OnLoad(this, "WorldDetail", "Environment Detail",
-                                                    "OPTION_TOOLTIP_ENVIRONMENT_DETAIL")
-                                                -- Stop names from the era quality ladder.
-                                                local info = BenillaGraphicsSliderInfo(3)
-                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
-                                                    info.valueStep, nil,
-                                                    { "Low", "Medium", "High" })
+                                                -- fork: fsr (FORK.md) -- `rcasSharpness`,
+                                                -- our own row: the SDK's 0-1 sharpness, 87.5%
+                                                -- as shipped, on a grid that stops on it.
+                                                BenillaOptionsRow_OnLoad(this, "rcasSharpness", "RCAS Sharpening",
+                                                    "BENILLA_TOOLTIP_RCAS_SHARPNESS")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.025)
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <!-- On the CVar, as 1.12's slider 8 lands: there is no
-                                             SetspellEffectLevel global. -->
-                                        <Frame name="$parentRowSpellDetail" inherits="BenillaOptionsSliderRowTemplate">
+                                        <Frame name="$parentRowFrameGeneration" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRcasSharpness" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRcasSharpness" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                BenillaOptionsRow_OnLoad(this, "spellEffectLevel", SPELL_DETAIL,
-                                                    "OPTION_TOOLTIP_SPELL_DETAIL")
-                                                -- Our names for the handler's emission scalars
-                                                -- 0.33, 0.66 and 1.0 (`0x689510`).
-                                                local info = BenillaGraphicsSliderInfo(8)
-                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
-                                                    info.valueStep, nil,
-                                                    { "Low", "Medium", "High" })
+                                                -- fork: fsr (FORK.md) -- `frameGeneration`,
+                                                -- our own row. Deferred: a write moves the
+                                                -- render target's size cap.
+                                                BenillaOptionsRow_OnLoad(this, "frameGeneration", "Use Frame Generation",
+                                                    "BENILLA_TOOLTIP_FRAME_GENERATION")
+                                                this.deferred = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowVerticalSync" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- 1.12's Video Options checkbox 5. Staged to Apply
+                                                -- like the page; the present mode then changes
+                                                -- live despite its gxRestart = 1.
+                                                BenillaOptionsRow_OnLoad(this, "gxVSync", "Vertical Sync",
+                                                    "OPTION_TOOLTIP_VERTICAL_SYNC")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- Deviation: benilla's own level control, beside
@@ -2397,8 +2438,8 @@
                                              where it is and dark scenes need their blacks lifted. -->
                                         <Frame name="$parentRowBrightness" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "brightness", "Brightness",
@@ -2426,51 +2467,64 @@
                                                     info.valueStep, "gamma")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <!-- On the CVar, as 1.12's lands: there is no
-                                             SetweatherDensity global. -->
-                                        <Frame name="$parentRowWeatherDensity" inherits="BenillaOptionsSliderRowTemplate">
+                                        <Frame name="$parentRowFarclip" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGamma" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGamma" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGamma" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGamma" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                BenillaOptionsRow_OnLoad(this, "weatherDensity", "Weather Intensity",
-                                                    "OPTION_TOOLTIP_WEATHER_DETAIL")
-                                                -- Our names for `0x67b870`'s spawn-rate gains
-                                                -- `{0.1, 0.33, 0.66, 1.0}` (`[0x8680ec]`).
-                                                local info = BenillaGraphicsSliderInfo(9)
+                                                BenillaOptionsRow_OnLoad(this, "farclip", "Terrain Distance",
+                                                    "OPTION_TOOLTIP_FARCLIP")
+                                                local info = BenillaGraphicsSliderInfo(2)
+                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
+                                                    info.valueStep, "raw")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowWorldDetail" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFarclip" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFarclip" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "WorldDetail", "Environment Detail",
+                                                    "OPTION_TOOLTIP_ENVIRONMENT_DETAIL")
+                                                -- Stop names from the era quality ladder.
+                                                local info = BenillaGraphicsSliderInfo(3)
                                                 BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
                                                     info.valueStep, nil,
-                                                    { "Minimal", "Low", "Medium", "Full" })
+                                                    { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowVerticalSync" inherits="BenillaOptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowGroundClutterDensity" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWeatherDensity" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWeatherDensity" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                -- 1.12's Video Options checkbox 5. Staged to Apply
-                                                -- like the page; the present mode then changes
-                                                -- live despite its gxRestart = 1.
-                                                BenillaOptionsRow_OnLoad(this, "gxVSync", "Vertical Sync",
-                                                    "OPTION_TOOLTIP_VERTICAL_SYNC")
+                                                -- fork: `groundClutterDensity`, our own row: a gain
+                                                -- on the Environment Detail stop, 1.0x as 1.12.
+                                                BenillaOptionsRow_OnLoad(this, "groundClutterDensity", "Ground Clutter Density",
+                                                    "BENILLA_TOOLTIP_GROUND_CLUTTER_DENSITY")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 2.0, 0.1, "factor")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowWorldShadows" inherits="BenillaOptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowGroundClutterScale" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowVerticalSync" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGroundClutterDensity" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGroundClutterDensity" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                BenillaOptionsRow_OnLoad(this, "worldShadows", "Real Character Shadows",
-                                                    "BENILLA_TOOLTIP_WORLD_SHADOWS")
+                                                -- fork: `groundClutterScale`, our own row: a factor
+                                                -- on every tuft's size, 1.0x as 1.12.
+                                                BenillaOptionsRow_OnLoad(this, "groundClutterScale", "Ground Clutter Size",
+                                                    "BENILLA_TOOLTIP_GROUND_CLUTTER_SCALE")
+                                                BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.1, "factor")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowHdModels" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWorldShadows" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldShadows" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGroundClutterScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGroundClutterScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Use updated character models -- benilla's own
@@ -2494,51 +2548,28 @@
                                                     "BENILLA_TOOLTIP_HD_MODELS")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowAmbientOcclusion" inherits="BenillaOptionsSliderRowTemplate">
+                                        <!-- On the CVar, as 1.12's slider 8 lands: there is no
+                                             SetspellEffectLevel global. -->
+                                        <Frame name="$parentRowSpellDetail" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowHdModels" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowHdModels" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                -- Ambient Occlusion -- the AO half of the
-                                                -- screen-space indirect-lighting pass
-                                                -- (benilla_world::ssilvb). benilla's own row, no
-                                                -- 1.12 counterpart, in the Render Scale mould.
-                                                --
-                                                -- 0-100%, narrower than the CVar's own clamp
-                                                -- (SSILVB_RANGE, 0-2). The headroom above is for
-                                                -- a hand-typed CVar and for looking at an
-                                                -- exaggerated term while tuning; this is what a
-                                                -- player should be offered.
-                                                --
-                                                -- fork: staged to Apply like every Graphics row
-                                                -- (the maintainer's call); the render node reads
-                                                -- the strength each frame from then on.
-                                                BenillaOptionsRow_OnLoad(this, "ssaoStrength", "Ambient Occlusion",
-                                                    "BENILLA_TOOLTIP_AMBIENT_OCCLUSION")
-                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.05)
-                                            </OnLoad></Scripts>
-                                        </Frame>
-                                        <Frame name="$parentRowIndirectLight" inherits="BenillaOptionsSliderRowTemplate">
-                                            <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAmbientOcclusion" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAmbientOcclusion" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            </Anchors>
-                                            <Scripts><OnLoad>
-                                                -- Indirect Lighting -- the colour-bleed half of
-                                                -- the same gather, and the same row shape as its
-                                                -- neighbour above for the same reasons. At 0% the
-                                                -- bounce term is exactly zero and Ambient
-                                                -- Occlusion is left running on its own.
-                                                BenillaOptionsRow_OnLoad(this, "ssgiStrength", "Indirect Lighting",
-                                                    "BENILLA_TOOLTIP_INDIRECT_LIGHT")
-                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.05)
+                                                BenillaOptionsRow_OnLoad(this, "spellEffectLevel", SPELL_DETAIL,
+                                                    "OPTION_TOOLTIP_SPELL_DETAIL")
+                                                -- Our names for the handler's emission scalars
+                                                -- 0.33, 0.66 and 1.0 (`0x689510`).
+                                                local info = BenillaGraphicsSliderInfo(8)
+                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
+                                                    info.valueStep, nil,
+                                                    { "Low", "Medium", "High" })
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowWaterDetail" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowIndirectLight" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowIndirectLight" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowSpellDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Water Detail -- which of benilla's two liquid
@@ -2577,8 +2608,8 @@
                                         </Frame>
                                         <Frame name="$parentRowLightingModel" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWaterDetail" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: Lighting -- `lightingModel`, 0 classic / 1 modern.
@@ -2609,10 +2640,61 @@
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowAutoExposure" inherits="BenillaOptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowWorldShadows" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowLightingQuality" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowLightingQuality" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "worldShadows", "Real Character Shadows",
+                                                    "BENILLA_TOOLTIP_WORLD_SHADOWS")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAmbientOcclusion" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWorldShadows" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWorldShadows" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Ambient Occlusion -- the AO half of the
+                                                -- screen-space indirect-lighting pass
+                                                -- (benilla_world::ssilvb). benilla's own row, no
+                                                -- 1.12 counterpart, in the Render Scale mould.
+                                                --
+                                                -- 0-100%, narrower than the CVar's own clamp
+                                                -- (SSILVB_RANGE, 0-2). The headroom above is for
+                                                -- a hand-typed CVar and for looking at an
+                                                -- exaggerated term while tuning; this is what a
+                                                -- player should be offered.
+                                                --
+                                                -- fork: staged to Apply like every Graphics row
+                                                -- (the maintainer's call); the render node reads
+                                                -- the strength each frame from then on.
+                                                BenillaOptionsRow_OnLoad(this, "ssaoStrength", "Ambient Occlusion",
+                                                    "BENILLA_TOOLTIP_AMBIENT_OCCLUSION")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.05)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowIndirectLight" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAmbientOcclusion" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAmbientOcclusion" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Indirect Lighting -- the colour-bleed half of
+                                                -- the same gather, and the same row shape as its
+                                                -- neighbour above for the same reasons. At 0% the
+                                                -- bounce term is exactly zero and Ambient
+                                                -- Occlusion is left running on its own.
+                                                BenillaOptionsRow_OnLoad(this, "ssgiStrength", "Indirect Lighting",
+                                                    "BENILLA_TOOLTIP_INDIRECT_LIGHT")
+                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.05)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAutoExposure" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowIndirectLight" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowIndirectLight" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: Auto Exposure -- `autoExposure`, the modern
@@ -2621,23 +2703,40 @@
                                                     "BENILLA_TOOLTIP_AUTO_EXPOSURE")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowServerTimeOffset" inherits="BenillaOptionsSliderRowTemplate">
+                                        <!-- On the CVar, as 1.12's lands: there is no
+                                             SetweatherDensity global. -->
+                                        <Frame name="$parentRowWeatherDensity" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                -- fork: `serverTimeOffset`, our own row: whole
-                                                -- hours on the server's time of day, -12 to +12.
-                                                BenillaOptionsRow_OnLoad(this, "serverTimeOffset", "Server Time Offset",
-                                                    "BENILLA_TOOLTIP_SERVER_TIME_OFFSET")
-                                                BenillaOptionsSliderRow_Setup(this, -12, 12, 1, "hours")
+                                                BenillaOptionsRow_OnLoad(this, "weatherDensity", "Weather Intensity",
+                                                    "OPTION_TOOLTIP_WEATHER_DETAIL")
+                                                -- Our names for `0x67b870`'s spawn-rate gains
+                                                -- `{0.1, 0.33, 0.66, 1.0}` (`[0x8680ec]`).
+                                                local info = BenillaGraphicsSliderInfo(9)
+                                                BenillaOptionsSliderRow_Setup(this, info.minValue, info.maxValue,
+                                                    info.valueStep, nil,
+                                                    { "Minimal", "Low", "Medium", "Full" })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRainSurfaces" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowWeatherDensity" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowWeatherDensity" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: `rainSurfaces`, wet surfaces in rain (the
+                                                -- Everwood port).
+                                                BenillaOptionsRow_OnLoad(this, "rainSurfaces", "Wet Surfaces in Rain",
+                                                    "BENILLA_TOOLTIP_RAIN_SURFACES")
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowFoliageWind" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowServerTimeOffset" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowServerTimeOffset" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRainSurfaces" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRainSurfaces" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: Foliage Wind -- `foliageWind`, 0 off /
@@ -2664,63 +2763,17 @@
                                                 BenillaOptionsSliderRow_Setup(this, 0.25, 3, 0.25)
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowRainSurfaces" inherits="BenillaOptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowServerTimeOffset" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowFoliageWindStrength" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowFoliageWindStrength" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                -- fork: `rainSurfaces`, wet surfaces in rain (the
-                                                -- Everwood port).
-                                                BenillaOptionsRow_OnLoad(this, "rainSurfaces", "Wet Surfaces in Rain",
-                                                    "BENILLA_TOOLTIP_RAIN_SURFACES")
-                                            </OnLoad></Scripts>
-                                        </Frame>
-                                        <Frame name="$parentRowFrameGeneration" inherits="BenillaOptionsCheckboxRowTemplate">
-                                            <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRainSurfaces" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRainSurfaces" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            </Anchors>
-                                            <Scripts><OnLoad>
-                                                -- fork: fsr (FORK.md) -- `frameGeneration`,
-                                                -- our own row. Deferred: a write moves the
-                                                -- render target's size cap.
-                                                BenillaOptionsRow_OnLoad(this, "frameGeneration", "Use Frame Generation",
-                                                    "BENILLA_TOOLTIP_FRAME_GENERATION")
-                                                this.deferred = 1
-                                            </OnLoad></Scripts>
-                                        </Frame>
-                                        <Frame name="$parentRowRenderScale" inherits="BenillaOptionsSliderRowTemplate">
-                                            <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            </Anchors>
-                                            <Scripts><OnLoad>
-                                                -- Deviation: our own row (the reference draws to
-                                                -- the backbuffer), and no Multisampling because it
-                                                -- misses alpha-tested cutouts. Deferred: a write
-                                                -- rebuilds the render target.
-                                                BenillaOptionsRow_OnLoad(this, "renderScale", "Render Scale",
-                                                    "BENILLA_TOOLTIP_RENDER_SCALE")
-                                                -- fork: fsr (FORK.md) -- a 0.01 grid, so
-                                                -- FSR's 0.67 is a stop, marked with 1x.
-                                                this.marks = BENILLA_RENDER_SCALE_MARKS
-                                                BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.01)
-                                                this.deferred = 1
-                                            </OnLoad></Scripts>
-                                        </Frame>
-                                        <Frame name="$parentRowRcasSharpness" inherits="BenillaOptionsSliderRowTemplate">
-                                            <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            </Anchors>
-                                            <Scripts><OnLoad>
-                                                -- fork: fsr (FORK.md) -- `rcasSharpness`,
-                                                -- our own row: the SDK's 0-1 sharpness, 87.5%
-                                                -- as shipped, on a grid that stops on it.
-                                                BenillaOptionsRow_OnLoad(this, "rcasSharpness", "RCAS Sharpening",
-                                                    "BENILLA_TOOLTIP_RCAS_SHARPNESS")
-                                                BenillaOptionsSliderRow_Setup(this, 0, 1.0, 0.025)
+                                                -- fork: `serverTimeOffset`, our own row: whole
+                                                -- hours on the server's time of day, -12 to +12.
+                                                BenillaOptionsRow_OnLoad(this, "serverTimeOffset", "Server Time Offset",
+                                                    "BENILLA_TOOLTIP_SERVER_TIME_OFFSET")
+                                                BenillaOptionsSliderRow_Setup(this, -12, 12, 1, "hours")
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
@@ -3882,6 +3935,8 @@
             -- fork: the Everwood port (FORK.md)
             BENILLA_FOLIAGE_WIND = "Foliage Wind"
             BENILLA_FOLIAGE_WIND_STRENGTH = "Foliage Wind Strength"
+            BENILLA_GROUND_CLUTTER_DENSITY = "Ground Clutter Density"
+            BENILLA_GROUND_CLUTTER_SCALE = "Ground Clutter Size"
             BENILLA_RAIN_SURFACES = "Wet Surfaces in Rain"
             BENILLA_GRAPHICS_PRESET = "Graphics Preset"
             BENILLA_BRIGHTNESS = "Brightness"
@@ -4044,6 +4099,17 @@
                 { category = WORLD_APPEARANCE, row = {
                     name = "BENILLA_RAIN_SURFACES", desc = BENILLA_TOOLTIP_RAIN_SURFACES,
                     type = "checkbutton", cvar = "rainSurfaces" } },
+                -- fork: the ground clutter's density and size.
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_GROUND_CLUTTER_DENSITY",
+                    desc = BENILLA_TOOLTIP_GROUND_CLUTTER_DENSITY,
+                    type = "slider", cvar = "groundClutterDensity",
+                    minval = 0, maxval = 2.0, step = 0.1 } },
+                { category = WORLD_APPEARANCE, row = {
+                    name = "BENILLA_GROUND_CLUTTER_SCALE",
+                    desc = BENILLA_TOOLTIP_GROUND_CLUTTER_SCALE,
+                    type = "slider", cvar = "groundClutterScale",
+                    minval = 0.5, maxval = 2.0, step = 0.1 } },
                 { category = PIXEL_SHADERS, row = {
                     name = "BENILLA_LIGHTING_MODEL", desc = BENILLA_TOOLTIP_LIGHTING_MODEL,
                     type = "dropdown", identifier = "BenillaLightingModel",
@@ -4149,6 +4215,72 @@
                 local category = GameOptions[i]
                 if ( category.options and getn(category.options) == 0 ) then
                     tremove(GameOptions, i)
+                end
+            end
+            -- fork: the VIDEO categories regrouped as our Graphics page's sections, by what a row
+            -- changes: Turtle's Display, World Appearance and Pixel Shaders mix the picture, the
+            -- world's detail, its light and the hour. A row named here moves to its section in
+            -- this order; any other stays with the section its Turtle category maps to.
+            local sections = {
+                { name = "Display", from = DISPLAY, rows = {
+                    "BENILLA_GRAPHICS_PRESET", "UI_SCALE", "BENILLA_RENDER_SCALE",
+                    "BENILLA_RCAS_SHARPNESS", "BENILLA_FRAME_GENERATION", "BENILLA_BRIGHTNESS",
+                    "GAMMA" } },
+                { name = "World Detail", from = WORLD_APPEARANCE, rows = {
+                    "FARCLIP", "ENVIRONMENT_DETAIL", "BENILLA_GROUND_CLUTTER_DENSITY",
+                    "BENILLA_GROUND_CLUTTER_SCALE", "BENILLA_HD_MODELS", "BENILLA_REFORGED_MODELS",
+                    "SPELL_DETAIL", "BENILLA_WATER_DETAIL" } },
+                { name = "Lighting", from = PIXEL_SHADERS, rows = {
+                    "BENILLA_LIGHTING_MODEL", "BENILLA_LIGHTING_QUALITY", "BENILLA_WORLD_SHADOWS",
+                    "BENILLA_AMBIENT_OCCLUSION", "BENILLA_INDIRECT_LIGHT", "BENILLA_AUTO_EXPOSURE" } },
+                { name = "Weather & Time", rows = {
+                    "WEATHER_DETAIL", "BENILLA_RAIN_SURFACES", "BENILLA_FOLIAGE_WIND",
+                    "BENILLA_FOLIAGE_WIND_STRENGTH", "BENILLA_SERVER_TIME_OFFSET" } },
+            }
+            local first, last
+            for i, category in ipairs(GameOptions) do
+                if ( not category.options ) then
+                    if ( first ) then break end
+                    if ( category.name == VIDEO ) then first = i + 1 end
+                elseif ( first ) then
+                    last = i
+                end
+            end
+            if ( first and last ) then
+                local home, byName, found, rest = {}, {}, {}, {}
+                for _, section in ipairs(sections) do
+                    section.options = {}
+                    for _, name in ipairs(section.rows) do home[name] = section end
+                    if ( section.from ) then byName[section.from] = section end
+                end
+                for i = first, last do
+                    local category = GameOptions[i]
+                    for _, option in ipairs(category.options) do
+                        if ( home[option.name] ) then
+                            found[option.name] = option
+                        else
+                            tinsert(rest, { section = byName[category.name] or sections[2],
+                                option = option })
+                        end
+                    end
+                end
+                for _, section in ipairs(sections) do
+                    for _, name in ipairs(section.rows) do
+                        if ( found[name] ) then tinsert(section.options, found[name]) end
+                    end
+                end
+                for _, r in ipairs(rest) do
+                    tinsert(r.section.options, r.option)
+                end
+                for i = last, first, -1 do
+                    tremove(GameOptions, i)
+                end
+                local at = first
+                for _, section in ipairs(sections) do
+                    if ( getn(section.options) > 0 ) then
+                        tinsert(GameOptions, at, { name = section.name, options = section.options })
+                        at = at + 1
+                    end
                 end
             end
             -- Turtle's OnLoad listed the categories before the cut: list them again.

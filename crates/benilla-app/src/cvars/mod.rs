@@ -1338,6 +1338,9 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "foliageWind",
     "foliageWindStrength",
     "rainSurfaces",
+    // fork: the ground clutter's density gain and tuft size.
+    "groundClutterDensity",
+    "groundClutterScale",
     // The Graphics Preset and the two rows it governs that the page does not show.
     "graphicsQuality",
     "reforgedModels",
@@ -2072,6 +2075,10 @@ mod tests {
             d["foliageWindStrength"],
             benilla_world::wind::FoliageWindStrength::REGISTERED
         );
+        // fork: the ground clutter's gain and size boot at the engine's own.
+        let clutter = ClutterConfig::default();
+        assert_eq!(d["groundClutterDensity"], clutter.density_gain);
+        assert_eq!(d["groundClutterScale"], clutter.scale);
         assert_eq!(
             d["rainSurfaces"] != 0.0,
             benilla_world::weather::wetness::RainSurfaces::default().0

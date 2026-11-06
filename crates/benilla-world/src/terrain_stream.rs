@@ -1350,7 +1350,7 @@ fn spawn_streamed_tiles(
                 tx as u32,
                 ty as u32,
                 &clutter.catalog,
-                clutter_cfg.density,
+                clutter_cfg.scatter_density(),
                 &mut clutter_ents,
             );
             tile.clutter = clutter_ents;
@@ -1750,7 +1750,7 @@ fn rescatter_clutter(
     cfg: Res<ClutterConfig>,
     mut last: Local<Option<(f32, bool)>>,
 ) {
-    let now = (cfg.density, crate::modern::frame_is_modern());
+    let now = (cfg.scatter_density(), crate::modern::frame_is_modern());
     let prev = last.replace(now);
     let (Some(prev), Some(clutter)) = (prev, clutter) else {
         return;
@@ -1776,7 +1776,7 @@ fn rescatter_clutter(
             tx as u32,
             ty as u32,
             &clutter.catalog,
-            cfg.density,
+            cfg.scatter_density(),
             &mut tile.clutter,
         );
         n += 1;
@@ -1784,7 +1784,7 @@ fn rescatter_clutter(
     if n > 0 {
         info!(
             "clutter: world detail x{} — re-scattered {n} tiles",
-            cfg.density
+            cfg.scatter_density()
         );
     }
 }

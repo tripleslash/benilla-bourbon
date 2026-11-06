@@ -45,19 +45,20 @@ impl Plugin for ClutterPlugin {
     }
 }
 
-/// Drop the built meshes when the cutout value moves (a density write must not re-mesh): the ref is
-/// baked into the material. The reference's `detailDoodadAlpha` is a console command (`0x6739a0`,
-/// registered at `0x63f9e0`), not a CVar, so it never persists.
+/// Drop the built meshes when the cutout value or the tuft scale moves (a density write must not
+/// re-mesh): both are baked into the build. The reference's `detailDoodadAlpha` is a console command
+/// (`0x6739a0`, registered at `0x63f9e0`), not a CVar, so it never persists.
 fn remesh_on_cutout_change(
     mut commands: Commands,
     cfg: Res<ClutterConfig>,
     mut chunks: Query<&mut ClutterChunk>,
-    mut last: Local<Option<f32>>,
+    mut last: Local<Option<(f32, f32)>>,
 ) {
-    let Some(prev) = last.replace(cfg.alpha_ref) else {
+    let now = (cfg.alpha_ref, cfg.scale);
+    let Some(prev) = last.replace(now) else {
         return;
     };
-    if prev == cfg.alpha_ref {
+    if prev == now {
         return;
     }
     let mut n = 0;
@@ -68,8 +69,9 @@ fn remesh_on_cutout_change(
         }
     }
     info!(
-        "clutter: detailDoodadAlpha {} — dropped {n} built mesh(es) to re-cut",
-        (cfg.alpha_ref * 255.0).round() as u32
+        "clutter: detailDoodadAlpha {}, scale x{} — dropped {n} built mesh(es) to rebuild",
+        (cfg.alpha_ref * 255.0).round() as u32,
+        cfg.scale
     );
 }
 
@@ -135,14 +137,30 @@ pub(crate) const DETAIL_DOODAD_ALPHA_REF: f32 = 128.0 / 255.0;
 /// 70 yd reads bare, past 140 yd still did, and past 200 yd too.
 pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 400.0;
 
+/// fork: the Ground Clutter Density gain (`groundClutterDensity`) on top of the Environment Detail
+/// stop: 0 is no clutter, 1 the stop as 1.12 scatters it, 2 twice its cells per chunk.
+pub const CLUTTER_DENSITY_GAIN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
+
+/// fork: the shipped density gain, the stop as 1.12 scatters it.
+pub const CLUTTER_DENSITY_GAIN_DEFAULT: f32 = 1.0;
+
+/// fork: the Ground Clutter Size factor (`groundClutterScale`) on every tuft's own random scale.
+pub const CLUTTER_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
+
+/// fork: the shipped tuft size, the reference's.
+pub const CLUTTER_SCALE_DEFAULT: f32 = 1.0;
+
 /// Ground-clutter tunables. `density` scales the reference's 16 cells per chunk (`frillDensity`),
 /// and a change re-scatters loaded tiles, as the 1.12 setter rebuilds its chunks. Seeded from
 /// `$WOW_CLUTTER_DENSITY`, `$WOW_CLUTTER_ALPHA` and `$WOW_CLUTTER_FADE`; density 0 is no clutter.
+/// fork: `density_gain` multiplies the stop's density and `scale` every tuft's size.
 #[derive(Resource, Clone, Copy)]
 pub struct ClutterConfig {
     pub density: f32,
     pub alpha_ref: f32,
     pub fade_far: f32,
+    pub density_gain: f32,
+    pub scale: f32,
 }
 
 impl ClutterConfig {
@@ -157,6 +175,29 @@ impl ClutterConfig {
     pub fn set_frill_density(&mut self, frill: f32) {
         self.density = frill.clamp(1.0, benilla_formats::FRILL_DENSITY_MAX as f32)
             / benilla_formats::FRILL_DENSITY as f32;
+    }
+
+    /// fork: the Ground Clutter Density gain, held to its range; a non-number is the default.
+    pub fn set_density_gain(&mut self, gain: f32) {
+        self.density_gain = if gain.is_finite() {
+            gain.clamp(*CLUTTER_DENSITY_GAIN_RANGE.start(), *CLUTTER_DENSITY_GAIN_RANGE.end())
+        } else {
+            CLUTTER_DENSITY_GAIN_DEFAULT
+        };
+    }
+
+    /// fork: the Ground Clutter Size factor, held to its range; a non-number is the default.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = if scale.is_finite() {
+            scale.clamp(*CLUTTER_SCALE_RANGE.start(), *CLUTTER_SCALE_RANGE.end())
+        } else {
+            CLUTTER_SCALE_DEFAULT
+        };
+    }
+
+    /// The multiplier the scatter runs at: the stop's density times the fork's density gain.
+    pub fn scatter_density(&self) -> f32 {
+        self.density * self.density_gain
     }
 }
 
@@ -180,6 +221,8 @@ impl Default for ClutterConfig {
             fade_far: env("WOW_CLUTTER_FADE")
                 .unwrap_or(DETAIL_DOODAD_FADE_FAR)
                 .max(1.0),
+            density_gain: CLUTTER_DENSITY_GAIN_DEFAULT,
+            scale: CLUTTER_SCALE_DEFAULT,
         }
     }
 }
@@ -317,7 +360,8 @@ pub(crate) fn scatter_tile_clutter(
             lo = lo.min(v);
             hi = hi.max(v);
         }
-        hi.y += CLUTTER_TUFT_HEIGHT;
+        // Grown for the largest tuft size, so a scale change needs no re-registration.
+        hi.y += CLUTTER_TUFT_HEIGHT * CLUTTER_SCALE_RANGE.end();
         entities.push(
             commands
                 .spawn(ClutterChunk {
@@ -373,6 +417,7 @@ fn build_chunk_clutter(
     models: &[(String, Vec<ShadedPlacement>)],
     alpha_ref: f32,
     fade_far: f32,
+    scale: f32,
     geometry: &mut ClutterGeometry,
     assets: &mut WorldAssets,
     meshes: &mut Assets<Mesh>,
@@ -415,8 +460,8 @@ fn build_chunk_clutter(
                 let base = positions.len() as u32;
                 let origin = wow_to_bevy(d.position);
                 let rot = Quat::from_rotation_y(d.yaw);
-                // The reference's random per-tuft scale, in [0.9, 1.1].
-                let inst_scale = d.scale;
+                // The reference's random per-tuft scale, in [0.9, 1.1], times the fork's size.
+                let inst_scale = d.scale * scale;
                 let phase = tuft_phase(origin);
                 // One tint per tuft, the lit material (colour material on ambient and diffuse,
                 // `0x59cfec`): `wow_model.wgsl` lights `clamp(grey × light) × texture`.
@@ -656,6 +701,7 @@ pub(crate) fn stream_chunk_clutter(
             models,
             cfg.alpha_ref,
             cfg.fade_far,
+            cfg.scale,
             &mut geometry,
             &mut assets,
             &mut meshes,

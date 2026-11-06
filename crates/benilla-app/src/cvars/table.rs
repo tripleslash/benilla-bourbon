@@ -1037,6 +1037,19 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "the fork's own — the gain on `foliageWind`'s sway",
     ),
+    // `groundClutterDensity` — a gain on the Environment Detail stop's cells per chunk, 0..2 (0 no
+    // clutter, 2 twice the stop). `groundClutterScale` — a factor on every tuft's own random scale,
+    // 0.5..2. Both re-build the loaded clutter on a change.
+    ours(
+        "groundClutterDensity",
+        "1",
+        "the fork's own — 1.12 scatters exactly the Environment Detail stop's cells",
+    ),
+    ours(
+        "groundClutterScale",
+        "1",
+        "the fork's own — 1.12 draws every tuft at its model's size",
+    ),
     // `rainSurfaces` — rain soaks sky-exposed surfaces (darker, puddles, a wet sheen) and they dry
     // after it stops; 0 is the reference's dry look, exactly. Applies to the next frame.
     ours(
