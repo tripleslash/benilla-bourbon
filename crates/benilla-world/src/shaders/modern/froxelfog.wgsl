@@ -73,7 +73,8 @@ struct FroxelFog {
     ground_y: vec4<f32>,
     ground: vec4<f32>,
     // fork: the lamp halos' air — the zone's medium solved in clear weather (`volumetrics::halo_air`):
-    // x = fog extinction (1/yd), z = haze extinction; y, w free.
+    // x = fog extinction (1/yd), y = the halo's gain over its excess (`volumetrics::lamp_halo`),
+    // z = haze extinction; w free.
     halo_air: vec4<f32>,
     // fork: the light the surfaces take, unscattered (linear): rgb = the ambient; w = the distant
     // terrain's albedo (`modern::DISTANT_ALBEDO`), which the seam dissolves the detailed world into.
@@ -250,6 +251,12 @@ fn point_far_share(room: f32) -> f32 {
 
 fn point_halo_gain(room: f32) -> f32 {
     return mix(POINT_HALO_GAIN, ROOM_POINT_HALO_GAIN, room);
+}
+
+// fork: a lamp's halo excess over its far share, under the look's halo gain (`halo_air.y`): the far
+// share and the flame itself stay, only the glow around it scales.
+fn point_halo_excess(f: FroxelFog, room: f32) -> f32 {
+    return (point_halo_gain(room) - point_far_share(room)) * f.halo_air.y;
 }
 
 // Yards over which the room's medium fades out at its own bound, so a doorway is a soft edge in the

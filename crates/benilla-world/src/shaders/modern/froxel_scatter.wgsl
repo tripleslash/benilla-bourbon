@@ -212,7 +212,7 @@ fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_cou
         return PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
     }
     let excess = select(
-        (froxelfog::point_halo_gain(room) - far) * exp(-dl / froxelfog::point_halo_yd(room, lamp_sigma)),
+        froxelfog::point_halo_excess(modern_block.fog, room) * exp(-dl / froxelfog::point_halo_yd(room, lamp_sigma)),
         0.0,
         froxelfog::is_halo_light(i, halo_count, rgb_class.w) || !froxelfog::has_halo(rgb_class.w),
     );

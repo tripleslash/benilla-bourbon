@@ -81,6 +81,20 @@ const NIGHT_HAZE: f32 = 0.004;
 /// street the player stands in. Halfway to the thinnest tried (0.25 / 0.5), which cleared noon but
 /// lost the dusk glow. The live `WOW_MODERN_LOOK` override is scaled too.
 const HAZE_SCALE: f32 = 0.67;
+
+/// fork: the lamp halos' gain over their excess past the far share (`froxelfog::point_halo_excess`):
+/// at 1.0 a night lamp's glow swamped the screen around it (Dolanaar at 4:00). 0.7 shrinks the
+/// over-white disc by two fifths and keeps the lamp's core within 3 % of its brightness; at 0 the
+/// core itself halves, since the lamp air is most of what makes the flame read bright.
+const LAMP_HALO: f32 = 0.7;
+
+/// [`LAMP_HALO`], or the page's live `?lamp_halo=` (`$WOW_LAMP_HALO`), the look-dev dial.
+fn lamp_halo() -> f32 {
+    crate::launch_env::live_var("WOW_LAMP_HALO")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|g| g.is_finite() && *g >= 0.0)
+        .unwrap_or(LAMP_HALO)
+}
 /// fork: **ground fog** — the volume's banks' extinction at the ground (1/yd) at the full SIDN night,
 /// which falls off within a few yards of the terrain under each froxel (`froxel_scatter.wgsl`'s
 /// `BANK_INV_FALLOFF`; the GI heightfield, past it the ground under the camera). Overnight a zone
@@ -208,7 +222,8 @@ pub struct FroxelFog {
     pub ground_x: Vec4,
     pub ground_y: Vec4,
     pub ground: Vec4,
-    /// fork: the lamp halos' clear-weather air: x = fog extinction, z = haze; y, w free.
+    /// fork: the lamp halos' clear-weather air: x = fog extinction, y = the halo gain
+    /// ([`lamp_halo`]), z = haze; w free.
     pub halo_air: Vec4,
     /// fork: the ambient the surfaces take, unscattered (linear); w = the distant terrain's albedo
     /// ([`super::DISTANT_ALBEDO`]).
@@ -745,7 +760,12 @@ fn update_volume(
         ground_x: Vec4::ZERO,
         ground_y: Vec4::ZERO,
         ground: Vec4::ZERO,
-        halo_air: Vec4::new(halo_air.density, 0.0, halo_air.haze * halo_humid, 0.0),
+        halo_air: Vec4::new(
+            halo_air.density,
+            lamp_halo(),
+            halo_air.haze * halo_humid,
+            0.0,
+        ),
         light_ambient: (light_ambient * sky_through + glow * (1.0 - sky_through))
             .extend(super::DISTANT_ALBEDO),
         ambient_open: open_in(&media).extend(0.0),
