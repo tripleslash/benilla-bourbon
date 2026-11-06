@@ -93,6 +93,22 @@ fn fs_blur(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     return sum * 0.25;
 }
 
+/// fork: **Pass 4 — the blurred mirror.** The planar mirror (`blur_src` here), at its own quarter
+/// size, through `fs_blur`'s four taps at `fs_blur`'s offset measured in FRAME pixels: three of them
+/// out, so each tap covers the same two-frame-pixel span `fs_blur`'s bilinear taps average. The
+/// mirror under the screen-space trace comes out as soft as the trace over it, and the lerp between
+/// the two is a change of picture, never of sharpness.
+@fragment
+fn fs_blur_reflect(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let frame = vec2<f32>(textureDimensions(blur_src) << vec2<u32>(#{LIQUID_REFLECT_SHIFT}u));
+    let o = 3.0 / frame;
+    var sum = textureSample(blur_src, src_samp, in.uv + vec2<f32>(-o.x, -o.y));
+    sum += textureSample(blur_src, src_samp, in.uv + vec2<f32>(o.x, -o.y));
+    sum += textureSample(blur_src, src_samp, in.uv + vec2<f32>(-o.x, o.y));
+    sum += textureSample(blur_src, src_samp, in.uv + vec2<f32>(o.x, o.y));
+    return sum * 0.25;
+}
+
 /// **Pass 3 — linear view depth.** The main depth buffer, reconstructed into yards along the view
 /// axis and written to `R32Float`.
 ///

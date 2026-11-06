@@ -607,7 +607,7 @@ pub(super) fn setup_liquid(
                     scene_color: targets.color.clone(),
                     scene_blur: targets.blur.clone(),
                     scene_depth: targets.depth.clone(),
-                    reflect_map: targets.reflect.clone(),
+                    reflect_map: targets.reflect_blur.clone(),
                     ripple_map: ripples.map.clone(),
                     kind: Vec4::new(
                         if kind.is_fullbright() { 1.0 } else { 0.0 },
@@ -639,6 +639,7 @@ pub(super) fn setup_liquid(
                     look_a: cata_water_look(kind)[0],
                     look_b: cata_water_look(kind)[1],
                     look_c: cata_water_look(kind)[2],
+                    look_d: cata_water_look(kind)[3],
                     light_buf: world_assets.shared_light.clone(),
                     modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES, // fork: modern lighting (FORK.md, P4)
                     modern_fog: benilla_assets::materials::MODERN_FOG_VOLUME,
@@ -741,13 +742,17 @@ fn cata_optics(kind: LiquidKind) -> Vec4 {
 
 /// fork: modern lighting — the Modern (Experimental) tier's look, the target being WoW Forever's
 /// water: a clear bed that takes the water's hue from the first inches, the bank's shadows carried
-/// across it, a calm surface and a sky in it that never turns to chrome. `[look_a, look_b, look_c]`
-/// on the material:
+/// across it, a calm surface and a sky in it that never turns to chrome. `[look_a, look_b, look_c,
+/// look_d]` on the material:
 ///
 /// * `look_a` = (bed filter, its onset depth in yd, head-on reflectance, reflection pulled to the body);
-/// * `look_b` = (wind swell a river keeps, swell over no depth, refraction bend per yd, glitter spike);
+/// * `look_b` = (wind swell a river keeps, swell over no depth, refraction bend per yd, highlight
+///   roughness `α`);
 /// * `look_c` = (reflectance at grazing, the power of the climb to it, share of the reference
-///   combine blended over the clear surface, the wind ripples' RMS slope).
+///   combine blended over the clear surface, the wind ripples' RMS slope);
+/// * `look_d` = (the sun/moon disk's angular radius in radians, the share of the kind's own swell
+///   on the highlight's normal, the wind ripples' RMS slope on it — the sea's alone, a river or lake
+///   having no ripple octaves — the highlight's gain).
 ///
 /// The Fresnel is the reference combine's shape (`0.1 + 0.5 · fres²`) rather than water's: a floor
 /// that keeps the sky in a river looked down on, and a cap that stops the water toward the horizon
@@ -755,24 +760,33 @@ fn cata_optics(kind: LiquidKind) -> Vec4 {
 /// of them) and the sea keeps its whole wind sea whatever `look_b.x` says. The ripples are a light
 /// wind's: a real surface's RMS slope runs ~0.1-0.2 at a few yards a second of wind. Magma and slime
 /// never reach the lane.
-fn cata_water_look(kind: LiquidKind) -> [Vec4; 3] {
+///
+/// The highlight is Forever's PBR water: a lobe narrower than the light's disk (`α` below the
+/// radius), so each facet that sees the disk reflects all of it and the path breaks into flat,
+/// sharp-edged islands, spread wide by a normal that keeps the swell the shallows' calm gives up —
+/// each kind's own octaves, never the sea's on a lake. The disk is a stylised ~2.6°, five times the real sun's, which is what makes the islands
+/// big enough to read; rapids take a broader lobe, white water being rough.
+fn cata_water_look(kind: LiquidKind) -> [Vec4; 4] {
     let fresnel = Vec4::new(0.35, 2.0, 0.5, 0.2);
     match kind {
         LiquidKind::Ocean => [
             Vec4::new(0.35, 1.0, 0.08, 0.3),
-            Vec4::new(1.0, 0.5, 0.25, 0.4),
+            Vec4::new(1.0, 0.5, 0.25, 0.04),
             fresnel,
+            Vec4::new(0.045, 1.0, 0.2, 1.0),
         ],
         LiquidKind::Rapids => [
             Vec4::new(0.5, 0.6, 0.08, 0.3),
-            Vec4::new(0.35, 0.6, 0.25, 0.25),
+            Vec4::new(0.35, 0.6, 0.25, 0.07),
             fresnel,
+            Vec4::new(0.045, 1.0, 0.0, 1.0),
         ],
-        LiquidKind::Magma | LiquidKind::Slime => [Vec4::ZERO; 3],
+        LiquidKind::Magma | LiquidKind::Slime => [Vec4::ZERO; 4],
         _ => [
             Vec4::new(0.5, 0.6, 0.08, 0.3),
-            Vec4::new(0.35, 0.25, 0.25, 0.25),
+            Vec4::new(0.35, 0.25, 0.25, 0.03),
             fresnel,
+            Vec4::new(0.045, 1.0, 0.0, 1.0),
         ],
     }
 }
@@ -1297,10 +1311,11 @@ pub(super) fn sync_water_tier(
 }
 
 /// fork: modern lighting — the live override of the Modern (Experimental) tier's look
-/// (`$WOW_WATER_LOOK`, browser `?water_look=`): up to twelve comma-separated values over
+/// (`$WOW_WATER_LOOK`, browser `?water_look=`): up to sixteen comma-separated values over
 /// [`cata_water_look`]'s lanes in order — `bed_filter, filter_depth, reflect_f0, reflect_body,
-/// wind_keep, shallow_keep, refract_bend, glint_spike, reflect_grazing, fresnel_power, cata_share,
-/// ripple_slope`. An empty or unparsable entry keeps the kind's own value, so `,,0.3` moves only
+/// wind_keep, shallow_keep, refract_bend, highlight_roughness, reflect_grazing, fresnel_power,
+/// cata_share, ripple_slope, disk_radius, highlight_swell, highlight_ripples, highlight_gain`. An
+/// empty or unparsable entry keeps the kind's own value, so `,,0.3` moves only
 /// the reflection. For calibrating against a reference shot without a rebuild; the settled numbers
 /// belong in [`cata_water_look`].
 ///
@@ -1330,7 +1345,7 @@ pub(super) fn sync_water_look(
             continue;
         };
         let mut look = cata_water_look(key.kind);
-        for (i, v) in over.iter().enumerate().take(12) {
+        for (i, v) in over.iter().enumerate().take(16) {
             if let Some(v) = v {
                 look[i / 4][i % 4] = *v;
             }
@@ -1338,6 +1353,7 @@ pub(super) fn sync_water_look(
         material.extension.look_a = look[0];
         material.extension.look_b = look[1];
         material.extension.look_c = look[2];
+        material.extension.look_d = look[3];
     }
     info!("liquid: water look {now:?}");
     *last = Some(now);

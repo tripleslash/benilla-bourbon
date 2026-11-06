@@ -567,6 +567,9 @@ pub struct LiquidCataExt {
     /// mirroring the camera with `C4Plane::Mirror` about `(0, 0, 1, −0)`. `benilla_world`'s
     /// `liquid::reflect` owns the camera that fills it.
     ///
+    /// fork: bound to the mirror's BLURRED copy (`liquid::screen`'s `reflect_blur`), as soft as
+    /// [`Self::scene_blur`], which the screen-space trace lays over it.
+    ///
     /// **No sampler of its own** — it takes 106 (`scene_samp`), the linear-clamp one the other two
     /// screen reads use. It is addressed by a projected screen coordinate exactly as they are, and
     /// the WebGPU 16-sampler cap is close enough here to be worth not spending a fourth on.
@@ -679,7 +682,7 @@ pub struct LiquidCataExt {
     pub look_a: Vec4,
     /// fork: modern lighting — the same tier's calm: `x` = the wind swell a river or lake keeps (the
     /// sea always keeps all of it), `y` = the swell left over water with no depth under it, `z` = the
-    /// refraction's bend per yard of water crossed, `w` = the sun glitter spike's gain.
+    /// refraction's bend per yard of water crossed, `w` = the sun/moon highlight's GGX roughness `α`.
     #[uniform(102)]
     pub look_b: Vec4,
     /// fork: modern lighting — the same tier's Fresnel: `x` = the reflectance at grazing (the curve's
@@ -688,6 +691,12 @@ pub struct LiquidCataExt {
     /// slope, a multi-octave layer under the swell.
     #[uniform(102)]
     pub look_c: Vec4,
+    /// fork: modern lighting — the same tier's sun/moon highlight, a GGX lobe off a light disk on a
+    /// normal of its own: `x` = the disk's angular radius (radians), `y` = how much of the kind's own
+    /// swell, uncalmed over the shallows, that normal carries, `z` = the wind ripples' RMS slope on
+    /// it (the sea's alone), `w` = the highlight's gain over the microfacet value.
+    #[uniform(102)]
+    pub look_d: Vec4,
 
     /// **The shared global light**, as [`LiquidExt::light_buf`] — same buffer, same rows. The cata
     /// path reads the two water swatches for its depth ramp, the sun/ambient/diffuse for its

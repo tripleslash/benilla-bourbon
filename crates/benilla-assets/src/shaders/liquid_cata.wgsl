@@ -150,13 +150,17 @@ struct LiquidParams {
     // come in, z = the head-on reflectance, w = how much of the reflection is pulled to the body.
     look_a: vec4<f32>,
     // x = the wind swell a river or lake keeps (the sea keeps all of it), y = the swell left over
-    // water with no depth under it, z = the refraction's bend per yard of water, w = the glitter
-    // spike's gain.
+    // water with no depth under it, z = the refraction's bend per yard of water, w = the sun/moon
+    // highlight's GGX roughness `α` (`disk_highlight`).
     look_b: vec4<f32>,
     // x = the reflectance at grazing (the Fresnel's cap), y = the power of its climb, z = the share
     // of the reference's combine blended over the clear surface, w = the wind ripples' RMS slope
     // (`wind_ripples`).
     look_c: vec4<f32>,
+    // The highlight: x = the light disk's angular radius (radians), y = the share of the kind's own
+    // swell on the highlight's own normal, z = the wind ripples' RMS slope on it (the sea's alone),
+    // w = its gain over the microfacet value.
+    look_d: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;
 
@@ -688,6 +692,62 @@ fn wind_ripples(xz: vec2<f32>, foot_x: vec2<f32>, foot_y: vec2<f32>) -> vec2<f32
     return slope / sqrt(energy * 0.5);
 }
 
+// fork: modern lighting — the experimental tier's highlight: water's own head-on reflectance (the
+// sun's Fresnel is the physical one, so a sunset path climbs to full at grazing where the stylised
+// reflection caps), and the geometric specular AA's screen-space variance and clamp (Tokuyoshi &
+// Kaplanyan 2019's 0.25 and 0.18).
+const WATER_F0: f32 = 0.02;
+const SPEC_AA_VARIANCE: f32 = 0.25;
+const SPEC_AA_CLAMP: f32 = 0.18;
+const HIGHLIGHT_PI: f32 = 3.14159265;
+
+/// fork: modern lighting — **geometric specular antialiasing**: `α` widened by how far the normal
+/// turns across the pixel, so a lobe narrower than the pixel's spread of facets is drawn as the
+/// average of them — a steady sheet of glitter in the distance instead of a sparkle that crawls. The
+/// same idea as `wind_ripples`' footprint fade, on the lobe instead of the slope. Called in uniform
+/// control flow (the derivatives).
+fn specular_aa(n: vec3<f32>, alpha: f32) -> f32 {
+    let dx = dpdx(n);
+    let dy = dpdy(n);
+    let variance = SPEC_AA_VARIANCE * (dot(dx, dx) + dot(dy, dy));
+    let kernel = min(2.0 * variance, SPEC_AA_CLAMP);
+    return sqrt(clamp(alpha * alpha + kernel, 0.0, 1.0));
+}
+
+/// fork: modern lighting — **the sun or moon off the water**, per unit of the key's light: GGX with
+/// the height-correlated Smith visibility and Schlick's Fresnel, lit by a DISK of angular radius
+/// `radius` rather than a point. The disk is Karis's representative point (2013): the light direction
+/// moved to the point of the disk nearest the reflected ray, and the lobe's peak rescaled by
+/// `(α / α')²`, `α' = α + tan(radius) / 2`, so the disk's energy stays what a point's would be.
+///
+/// With `α` under the radius every facet whose reflected ray falls inside the disk sees all of it and
+/// the rest see nothing: a highlight broken into flat, sharp-edged islands as wide as the swell spreads
+/// the facets, each one as bright as the disk itself. `π` because the frame's lit colour is
+/// `albedo · light` with no `1/π`, so the key here is illuminance over `π`.
+fn disk_highlight(n: vec3<f32>, to_eye: vec3<f32>, to_light: vec3<f32>, alpha: f32, radius: f32) -> f32 {
+    let nv = dot(n, to_eye);
+    if (nv <= 1e-4) {
+        return 0.0;
+    }
+    let r = reflect(-to_eye, n);
+    let tan_r = tan(radius);
+    let to_ray = dot(to_light, r) * r - to_light;
+    let lp = normalize(to_light + to_ray * clamp(tan_r / max(length(to_ray), 1e-5), 0.0, 1.0));
+    let nl = clamp(dot(n, lp), 0.0, 1.0);
+    let h = normalize(lp + to_eye);
+    let nh = clamp(dot(n, h), 0.0, 1.0);
+    let vh = clamp(dot(to_eye, h), 0.0, 1.0);
+    let a = max(alpha, 0.002);
+    let a2 = a * a;
+    let a_disk = clamp(a + 0.5 * tan_r, 0.0, 1.0);
+    let energy = a2 / (a_disk * a_disk);
+    let dd = nh * nh * (a2 - 1.0) + 1.0;
+    let d = a2 / (HIGHLIGHT_PI * dd * dd);
+    let vis = 0.5 / max(nl * (nv * (1.0 - a) + a) + nv * (nl * (1.0 - a) + a), 1e-5);
+    let f = WATER_F0 + (1.0 - WATER_F0) * pow(1.0 - vh, 5.0);
+    return HIGHLIGHT_PI * d * vis * f * nl * energy;
+}
+
 /// fork: modern lighting — **stylised clear water**, above the water, in linear radiance. Replaces
 /// the classic COMBINE on a modern frame at the Modern (Experimental) water tier (`waterDetail 3`,
 /// `w.optics.w`; plain Modern keeps the combine) — not its reflection, which arrives here as `refl`
@@ -797,18 +857,23 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // there; a classic frame keeps its own fog and the reference's sun specular.
     let experimental = !below && w.optics.w > 0.5;
     // fork: modern lighting — the experimental tier's wind ripples, read here in uniform control flow
-    // for the pixel footprint's derivatives. Only the sea carries them; a river, a lake and a WMO's
-    // liquid keep the cata bump's own octaves.
+    // for the pixel footprint's derivatives. Only the sea carries them, on its calm surface
+    // (`look_c.w`) and on its highlight's normal (`look_d.z`); a river, a lake and a WMO's liquid keep
+    // the cata bump's own octaves on both.
     var ripples = vec2<f32>(0.0);
-    if (experimental && w.kind.y > 0.5 && w.look_c.w > 0.0) {
-        ripples = w.look_c.w * wind_ripples(
+    var spec_ripples = vec2<f32>(0.0);
+    if (experimental && w.kind.y > 0.5 && (w.look_c.w > 0.0 || w.look_d.z > 0.0)) {
+        let unit = wind_ripples(
             in.world_position.xz, dpdx(in.world_position.xz), dpdy(in.world_position.xz),
         );
+        ripples = w.look_c.w * unit;
+        spec_ripples = w.look_d.z * unit;
     }
 
     // The swell, plus whatever a body wading nearby has pushed into the water. The two are summed
     // as SLOPES and normalised once — see `bump_gradient`.
-    var swell = bump_gradient(in);
+    let bump = bump_gradient(in);
+    var swell = bump;
     // fork: modern lighting — a modern frame adds a wind-driven swell under the authored bump.
     var wind = vec2<f32>(0.0);
     if (modern) {
@@ -843,6 +908,22 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         1.0,
         grad.y * w.shade_params.x,
     ));
+    // fork: modern lighting — the experimental tier's highlight has a normal of its own: the calm
+    // surface is what the bed and the sky are read through, but the sun's path needs the facets the
+    // shallows' calm (`look_b.y`) takes away to spread its islands wide. It keeps each kind's own
+    // octaves — the authored bump, the wind sea at the share the calm surface keeps (all of it on the
+    // sea, `look_b.x` on a river or lake), and the wind ripples on the sea alone — `look_d.y` of them,
+    // whatever the depth. Its roughness is widened here, in uniform control flow, by how far that
+    // normal turns per pixel.
+    var spec_n = n;
+    var spec_alpha = w.look_b.w;
+    if (experimental && modern) {
+        let spec_keep = select(w.look_b.x, 1.0, w.kind.y > 0.5);
+        let full = (bump + wind * spec_keep + spec_ripples) * w.look_d.y;
+        let spec_grad = normalize(vec3<f32>(full + ripple_slope(in.world_position.xz, full), 1.0));
+        spec_n = normalize(vec3<f32>(spec_grad.x * w.shade_params.x, 1.0, spec_grad.y * w.shade_params.x));
+        spec_alpha = specular_aa(spec_n, w.look_b.w);
+    }
     let to_light = -normalize(wow_light.light_sun.xyz);
 
     // Fresnel. `1 − saturate(N · −V)`, squared — the program keeps both, using the plain value for
@@ -1219,20 +1300,25 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         }
     }
     // fork: modern lighting — the sun's glitter path: a tight HDR lobe on the reflected ray over a
-    // broad sheen, only where the sun reaches the surface. Added in linear by the wrapper.
+    // broad sheen, only where the sun (or the moon, which keys the light by night) reaches the
+    // surface. Added in linear by the wrapper.
     if (modern_above && to_light.y > -0.05) {
-        let rv = reflect(v, n);
-        let sd = clamp(dot(rv, to_light), 0.0, 1.0);
         // Warmed by the zone's scatter colour (the froxel key in-scatter, normalised), so a dawn
         // glitter path takes the haze's salmon instead of the key row's white.
         let scatter = modern_block.fog.sun.rgb;
         let warm = scatter / max(max(scatter.r, max(scatter.g, scatter.b)), 1e-4);
         let key = pow(wow_light.light_diffuse.rgb, vec3<f32>(2.2)) * mix(vec3<f32>(1.0), warm, 0.6);
         let horizon = smoothstep(-0.05, 0.08, to_light.y);
-        // The experimental tier's calm water keeps the broad path and only `look_b.w` of the spike —
-        // the pin-point sparkle field is the glossy half of the look it steps away from.
-        let spike = select(9.0, 9.0 * w.look_b.w, experimental);
-        modern_glint = key * ((pow(sd, 900.0) * spike + pow(sd, 160.0) * 0.8 + pow(sd, 24.0) * 0.12) * water_sun * horizon * (0.35 + 0.65 * fres));
+        if (experimental) {
+            // The experimental tier's highlight is a microfacet lobe off the light's disk on its own
+            // rough normal (`disk_highlight`): Forever's PBR water, its path broken into flat-topped
+            // islands as bright as the disk, rather than a smooth glow on a calm surface.
+            modern_glint = key * (disk_highlight(spec_n, -v, to_light, spec_alpha, w.look_d.x) * w.look_d.w * water_sun * horizon);
+        } else {
+            let rv = reflect(v, n);
+            let sd = clamp(dot(rv, to_light), 0.0, 1.0);
+            modern_glint = key * ((pow(sd, 900.0) * 9.0 + pow(sd, 160.0) * 0.8 + pow(sd, 24.0) * 0.12) * water_sun * horizon * (0.35 + 0.65 * fres));
+        }
     }
     // Foam last, and additively: it sits ON the water rather than being tinted by it, and it is
     // the one term that should survive a dark shoreline at dusk.

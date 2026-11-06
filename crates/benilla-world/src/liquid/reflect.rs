@@ -394,7 +394,7 @@ fn mirror_frustum(pose: &GlobalTransform, projection: &Projection, far: f32) -> 
 /// **Why the second addition exists.** The plane is deliberately HELD when the eye leaves water
 /// (see the `held` binding below) so that stepping off a shore does not move the mirror four
 /// hundred yards in one frame. The cost of that kindness was never bounded: a camera in the middle
-/// of a dry zone still rendered a second, half-resolution pass over the whole scene, into a texture
+/// of a dry zone still rendered a second, reduced-resolution pass over the whole scene, into a texture
 /// no fragment would sample, because the only liquid in the session was one the player walked past
 /// ten minutes ago. That is the single largest thing in the frame with nothing at all to show for
 /// it.
@@ -1117,6 +1117,7 @@ mod tests {
             blur: Handle::default(),
             depth: Handle::default(),
             reflect: Handle::default(),
+            reflect_blur: Handle::default(),
             size: UVec2::ONE,
         });
         app.world_mut().spawn((

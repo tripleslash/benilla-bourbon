@@ -6,7 +6,7 @@
 //! | reference stage | reference name | here |
 //! |---|---|---|
 //! | `samp0` | `"LiquidProc BackBufferTex"` | [`LiquidScreenTargets::color`] — refraction |
-//! | `samp1` | `GetFakeReflectionBuffer()` | [`LiquidScreenTargets::reflect`] — the planar mirror |
+//! | `samp1` | `GetFakeReflectionBuffer()` | [`LiquidScreenTargets::reflect_blur`] — the planar mirror, blurred |
 //! | `samp3` | `"blurredBack"` | [`LiquidScreenTargets::blur`] — the screen-space reflection |
 //! | `samp6` | `DepthCache::GetDepthSR()` | [`LiquidScreenTargets::depth`] — linear view depth |
 //!
@@ -17,6 +17,10 @@
 //! render and belongs to a camera, not to a node — [`super::reflect`] owns it; this file only
 //! allocates its target, because the resize discipline below is the same for all four and having
 //! one of them keep its own copy of it is how the four drift apart.
+//!
+//! fork: a fourth pass blurs that mirror into [`LiquidScreenTargets::reflect_blur`], the same four
+//! taps over the same frame-pixel footprint as the screen-space reflection's copy, and the water
+//! reads that — so the mirror and the trace lerped over it are equally soft.
 //!
 //! ## Multisampling
 //!
@@ -76,12 +80,20 @@ const BLUR_SHIFT: u32 = 2;
 /// `reflectionDownscale` CVar, whose `CreateReflectionBuffer` sizes the target
 /// `viewport / (1 << downscale)`.
 ///
-/// The CVar registers at `"0"` (full frame) and `SetReflectionDownscale` accepts up to 4. One is
-/// taken here rather than zero because this buffer is never read sharp: every fetch of it is a
+/// The CVar registers at `"0"` (full frame) and `SetReflectionDownscale` accepts up to 4. A
+/// non-zero shift is taken here because this buffer is never read sharp: every fetch of it is a
 /// projected read 20 yards along a bent ray, and the term it feeds is then lerped against a
 /// quarter-resolution blur. A second full-resolution scene render to be read that softly is the one
 /// cost in this feature with nothing to show for it.
-const REFLECT_SHIFT: u32 = 1;
+///
+/// fork: two, a quarter of the frame like [`BLUR_SHIFT`]'s copy, rather than one: the mirror is
+/// read through [`LiquidScreenTargets::reflect_blur`], blurred over the same frame-pixel footprint as
+/// the screen-space trace laid over it, so the half-resolution detail never reached the water. A
+/// quarter of the mirror's fill for the same picture.
+///
+/// Deviation: the reference's `reflectionDownscale` boots at `0` (the full frame); the mirror
+/// renders at a quarter because the water only ever reads it through a quarter-resolution blur.
+const REFLECT_SHIFT: u32 = 2;
 
 /// The three pictures of the frame the cata water shader reads.
 ///
@@ -102,6 +114,10 @@ pub(crate) struct LiquidScreenTargets {
     /// screen-space trace is laid over. Filled by a camera (`liquid::reflect`), not by a node —
     /// it is a scene render, not a blit.
     pub(crate) reflect: Handle<Image>,
+    /// fork: the mirror, four-tap blurred at its own size over [`Self::blur`]'s footprint in frame
+    /// pixels — what the water reads as `reflect_map`, so the mirror under the screen-space trace is
+    /// exactly as soft as the trace over it.
+    pub(crate) reflect_blur: Handle<Image>,
     /// The size `color`/`depth` were allocated at. A change here is what triggers the republish.
     pub(crate) size: UVec2,
 }
@@ -130,6 +146,11 @@ impl LiquidScreenTargets {
             )),
             reflect: images.add(target_image(
                 "liquid_reflection",
+                reflect_size,
+                TextureFormat::Rgba16Float,
+            )),
+            reflect_blur: images.add(target_image(
+                "liquid_reflection_blur",
                 reflect_size,
                 TextureFormat::Rgba16Float,
             )),
@@ -241,13 +262,14 @@ pub(crate) fn resize_targets(
         targets.blur.clone(),
         targets.depth.clone(),
         targets.reflect.clone(),
+        targets.reflect_blur.clone(),
     ];
     *targets = LiquidScreenTargets::allocate(&mut images, size);
     for (_, material) in materials.iter_mut() {
         material.extension.scene_color = targets.color.clone();
         material.extension.scene_blur = targets.blur.clone();
         material.extension.scene_depth = targets.depth.clone();
-        material.extension.reflect_map = targets.reflect.clone();
+        material.extension.reflect_map = targets.reflect_blur.clone();
     }
     for handle in retired {
         images.remove(&handle);
@@ -275,6 +297,8 @@ struct ScreenVariant {
     copy: CachedRenderPipelineId,
     blur: CachedRenderPipelineId,
     linear_depth: CachedRenderPipelineId,
+    // fork: the mirror's blur (`fs_blur_reflect`).
+    reflect_blur: CachedRenderPipelineId,
 }
 
 fn init_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -340,11 +364,16 @@ fn build_variant(
             ),
         ),
     );
-    let defs: Vec<ShaderDefVal> = if ms {
+    let mut defs: Vec<ShaderDefVal> = if ms {
         vec!["LIQUID_SCREEN_MSAA".into()]
     } else {
         vec![]
     };
+    // fork: how much smaller than the frame the mirror is, so its blur can tap in frame pixels.
+    defs.push(ShaderDefVal::UInt(
+        "LIQUID_REFLECT_SHIFT".into(),
+        REFLECT_SHIFT,
+    ));
     let pipeline = |label: &'static str, entry: &'static str, format: TextureFormat| {
         RenderPipelineDescriptor {
             label: Some(label.into()),
@@ -380,6 +409,11 @@ fn build_variant(
             "liquid_screen_depth",
             "fs_linear_depth",
             TextureFormat::R32Float,
+        )),
+        reflect_blur: pipeline_cache.queue_render_pipeline(pipeline(
+            "liquid_reflection_blur",
+            "fs_blur_reflect",
+            TextureFormat::Rgba16Float,
         )),
         layout,
     }
@@ -419,10 +453,11 @@ pub(crate) fn liquid_screen_pass(
             return; // `specialize_pipelines` builds it this frame; drawn next
         };
         let cache = world.resource::<PipelineCache>();
-        let (Some(copy), Some(blur), Some(linear_depth)) = (
+        let (Some(copy), Some(blur), Some(linear_depth), Some(reflect_blur)) = (
             cache.get_render_pipeline(variant.copy),
             cache.get_render_pipeline(variant.blur),
             cache.get_render_pipeline(variant.linear_depth),
+            cache.get_render_pipeline(variant.reflect_blur),
         ) else {
             return; // still compiling — the water falls back to its flat lane this frame
         };
@@ -430,10 +465,12 @@ pub(crate) fn liquid_screen_pass(
             return;
         };
         let gpu_images = world.resource::<RenderAssets<GpuImage>>();
-        let (Some(color), Some(blurred), Some(depth_out)) = (
+        let (Some(color), Some(blurred), Some(depth_out), Some(mirror), Some(mirror_blurred)) = (
             gpu_images.get(&targets.color),
             gpu_images.get(&targets.blur),
             gpu_images.get(&targets.depth),
+            gpu_images.get(&targets.reflect),
+            gpu_images.get(&targets.reflect_blur),
         ) else {
             return; // the images have not been prepared yet
         };
@@ -462,12 +499,15 @@ pub(crate) fn liquid_screen_pass(
         // simply the texture neither of them writes.
         let bind_write_color = bind("liquid_screen_bind_write", &blurred.texture_view);
         let bind_blur = bind("liquid_screen_bind_blur", &color.texture_view);
+        // fork: the mirror's blur reads the mirror at 4 and writes `reflect_blur`, which no group
+        // binds. The mirror camera (`order` −1) has already filled it this frame.
+        let bind_mirror = bind("liquid_reflection_bind_blur", &mirror.texture_view);
 
         // colour ← the live main texture; blur ← that copy; depth ← the view's depth buffer.
         // The blur reads `color` rather than the main texture again purely so the two colour reads
         // agree bit for bit — a reflection sampling a different frame from the refraction beside it
         // is the kind of mismatch that only shows up in motion.
-        let passes: [(&str, &RenderPipeline, &BindGroup, &TextureView); 3] = [
+        let passes: [(&str, &RenderPipeline, &BindGroup, &TextureView); 4] = [
             (
                 "liquid_screen_copy",
                 copy,
@@ -485,6 +525,12 @@ pub(crate) fn liquid_screen_pass(
                 linear_depth,
                 &bind_write_color,
                 &depth_out.texture_view,
+            ),
+            (
+                "liquid_reflection_blur",
+                reflect_blur,
+                &bind_mirror,
+                &mirror_blurred.texture_view,
             ),
         ];
         for (label, pipeline, group, dst) in passes {
