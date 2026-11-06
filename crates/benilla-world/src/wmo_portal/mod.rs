@@ -1010,11 +1010,11 @@ fn compute_pvs_traced<T: FloodTrace>(
     flood.walk(&mut stack, inside_leg && !open_air, trace);
     // Deviation: an eye in an `0x40`-not-`0x8` group (Stormwind's streets, Orgrimmar's valleys)
     // takes every outdoor group as visible, and `compute_wmo_pvs` gives it the outside leg's
-    // unrestricted exterior. The reference treats such a street as a room: from Stormwind's trade
-    // district the flood reaches no portal onto the `0x8` shell, so it draws no terrain, and the
-    // Mage Quarter tower or the hills over the walls only while a portal chain happens to frame
-    // them. These are open to the sky, so that culling hides what is plainly in view. Interiors
-    // still take the flood; the callback groups keep Pass 3.
+    // unrestricted exterior, because these streets are open to the sky and the reference's culling
+    // hides what is plainly in view there. The reference treats such a street as a room: from
+    // Stormwind's trade district the flood reaches no portal onto the `0x8` shell, so it draws no
+    // terrain, and the Mage Quarter tower or the hills over the walls only while a portal chain
+    // happens to frame them. Interiors still take the flood; the callback groups keep Pass 3.
     if open_air {
         for (gi, g) in nav.iter().enumerate() {
             if g.flags & (EXTERIOR | EXTERIOR_LIT) != 0 && g.flags & CALLBACK_PASS == 0 {

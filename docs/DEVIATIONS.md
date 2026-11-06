@@ -42,7 +42,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 - [benilla-protocol](#benilla-protocol): 30
 - [benilla-srp](#benilla-srp): 2
 - [benilla-ui](#benilla-ui): 137
-- [benilla-world](#benilla-world): 57
+- [benilla-world](#benilla-world): 59
 
 ### benilla-app
 
@@ -181,7 +181,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### memory_pressure
 
-- The reference has no such valve, because its 32-bit process had the address space the page lacks. ([`src/memory_pressure.rs:20`](../crates/benilla-app/src/memory_pressure.rs#L20))
+- The reference has no such valve, because its 32-bit process had the address space the page lacks. ([`src/memory_pressure.rs:25`](../crates/benilla-app/src/memory_pressure.rs#L25))
 
 #### minimap
 
@@ -991,6 +991,10 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 - The reference tests each doodad's sphere against the horizon (`0x683700` → `0x686000`); the test takes the cell's box, which only ever hides less, because a retained cell is one batched draw of its 4×4 chunks' doodads. ([`src/static_gx/cull.rs:514`](../crates/benilla-world/src/static_gx/cull.rs#L514))
 
+#### sun
+
+- No moon02 in a modern frame. The seed surfaces it black, never a moon, and over the modern night sky (a lit haze, not the classic dark dome) it read as a hole (Tirisfal, 02:00). ([`src/sun/follow.rs:461`](../crates/benilla-world/src/sun/follow.rs#L461))
+
 #### terrain_stream
 
 - The debug free-fly eye holds nothing because it is benilla's own tool with no reference counterpart, and a stall there only slows the developer. ([`src/terrain_stream.rs:603`](../crates/benilla-world/src/terrain_stream.rs#L603))
@@ -1031,6 +1035,7 @@ Each entry is the first sentence of a `Deviation:` comment, linking to where it 
 
 #### wmo_portal
 
+- An eye in an `0x40`-not-`0x8` group (Stormwind's streets, Orgrimmar's valleys) takes every outdoor group as visible, and `compute_wmo_pvs` gives it the outside leg's unrestricted exterior, because these streets are open to the sky and the reference's culling hides what is plainly in view there. The reference treats such a street as a room: from Stormwind's trade district the flood reaches no portal onto the `0x8` shell, so it draws no terrain, and the Mage Quarter tower or the hills over the walls only while a portal chain happens to frame them. Interiors still take the flood; the callback groups keep Pass 3. ([`src/wmo_portal/mod.rs:1011`](../crates/benilla-world/src/wmo_portal/mod.rs#L1011))
 - When legs A and B both miss and no terrain lies at or below the eye, Leg C runs the same race over the camera-only faces (DETAIL without NOCAMCOLLIDE), because the 1.12 client blanks the whole building from a pocket floored only with DETAIL faces, as at the Deadmines entrance. ([`src/wmo_portal/seed.rs:21`](../crates/benilla-world/src/wmo_portal/seed.rs#L21))
 
 #### zfill
