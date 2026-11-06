@@ -10,9 +10,8 @@
 //! From inside, exterior shells draw only through deferred windows, doorways the flood reached onto
 //! an `0x8` group (none skips the pass, `0x6b3c87`): per window, every `0x8` group inside a frustum
 //! clipped to that doorway becomes a flood root (`0x6b3d39 call 0x6b41c0`), carrying its rect on.
-//! An eye in an open-air `0x40` group (a city street) is the exception, a deviation: every outdoor
-//! group draws and the exterior is unrestricted (`compute_pvs_traced`), except an [`UNREACHABLE`]
-//! group, which keeps the reference's flood.
+//! An eye in an open-air `0x40` group (a city street) takes the same flood and windows, with a
+//! deviation: its terrain is unrestricted and the [`OPEN_AIR_LANDMARKS`] draw (`compute_pvs_traced`).
 //!
 //! This module computes each group's visible bit ([`WmoPortalInstance::visible`]); the one
 //! `Visibility` authority, `crate::model_render`'s `apply_model_visibility`, ANDs it with the rest.
@@ -65,11 +64,11 @@ const EXTERIOR: u32 = 0x8;
 /// (115 of 306 groups) and Orgrimmar's valleys are `0x40` without `0x8`.
 const EXTERIOR_LIT: u32 = 0x40;
 
-/// MOGP `0x80`, a group no player stands in, drawn only where a portal frames it. Stock
-/// `stormwind.wmo` sets it on the callback group g82 alone; Turtle's (`patch-3.mpq`) also sets it on
-/// three stand-in towers, g104, g105 and g218, each reached through one-way window portals (g218
-/// only through p257 from the `0x8` shell g46, g105 only through p38 from g280).
-const UNREACHABLE: u32 = 0x80;
+/// The groups an open-air eye draws whatever its flood reaches, as (`MOHD.wmoID`, MOGP `uniqueID`),
+/// the `WMOAreaTable` keys, which hold where Turtle's `stormwind.wmo` renumbers the groups (stock
+/// g122, Turtle g117). Stormwind's Mage Quarter tower alone (61, 2644): it stands over the Trade
+/// District's walls, and the reference draws it only while a portal chain frames it.
+const OPEN_AIR_LANDMARKS: &[(u32, u32)] = &[(61, 2644)];
 
 /// Eye-on-portal-plane band (yd): an eye this close to a portal's plane and inside its polygon gets
 /// the full-screen rect (`0x6b46f0`, `|d| <= 0.01` at `0x8029d0`). The side test still runs: the
@@ -552,8 +551,8 @@ pub(crate) fn compute_wmo_pvs(
                     // the containing map object (`[0xc7b748]`) and defers that flood's windows,
                     // the list Pass 2 already used. Its push test is `0x8` alone
                     // (`opens_a_window`), not the `0x148` of `exterior_visible` above.
-                    // An open-air eye keeps the outside leg's whole frustum (the deviation in
-                    // `compute_pvs_traced`).
+                    // An open-air eye keeps the outside leg's whole frustum; its windows fed
+                    // Pass 2 alone (the deviation in `compute_pvs_traced`).
                     windows = (!fresh.open_air).then(|| {
                         (
                             std::mem::take(&mut fresh.windows),
@@ -821,8 +820,8 @@ pub(crate) struct GroupPvs {
     /// Stack steps across every run of the walk this frame, Pass 1 and each Pass-2 replay; the dump
     /// prints it.
     pub(crate) iters: u32,
-    /// The eye stands in an `0x40`-not-`0x8` group, open to the sky: every outdoor group is
-    /// visible and the exterior draws unrestricted (the deviation in `compute_pvs_traced`).
+    /// The eye stands in an `0x40`-not-`0x8` group, open to the sky: the [`OPEN_AIR_LANDMARKS`]
+    /// are visible and the exterior draws unrestricted (the deviation in `compute_pvs_traced`).
     pub(crate) open_air: bool,
 }
 
@@ -1013,22 +1012,19 @@ fn compute_pvs_traced<T: FloodTrace>(
         }
     }
     // Pass 1, the interior flood (`0x6b3bd4..0x6b3c10`), the only run that records windows. An
-    // open-air eye records none: its exterior is unrestricted, so there is nothing to replay.
-    flood.walk(&mut stack, inside_leg && !open_air, trace);
+    // open-air eye records them too: its `0x8` shells keep Pass 2, though its terrain does not.
+    flood.walk(&mut stack, inside_leg, trace);
     // Deviation: an eye in an `0x40`-not-`0x8` group (Stormwind's streets, Orgrimmar's valleys)
-    // takes every outdoor group as visible, and `compute_wmo_pvs` gives it the outside leg's
+    // also draws the [`OPEN_AIR_LANDMARKS`], and `compute_wmo_pvs` gives it the outside leg's
     // unrestricted exterior, because these streets are open to the sky and the reference's culling
     // hides what is plainly in view there. The reference treats such a street as a room: from
-    // Stormwind's trade district the flood reaches no portal onto the `0x8` shell, so it draws no
-    // terrain, and the Mage Quarter tower or the hills over the walls only while a portal chain
-    // happens to frame them. Interiors still take the flood; the callback groups keep Pass 3; an
-    // `0x80` group keeps the flood too, because forcing Turtle's stand-in towers visible stands a
-    // second cathedral tower over the Trade District and Cathedral Square.
+    // Stormwind's trade district the flood reaches no portal onto an `0x8` shell, so it draws no
+    // terrain, and the Mage Quarter tower and the hills over the walls only while a portal chain
+    // happens to frame them. Every other group, street, shell or interior, keeps the reference's
+    // flood and windows.
     if open_air {
         for (gi, g) in nav.iter().enumerate() {
-            if g.flags & (EXTERIOR | EXTERIOR_LIT) != 0
-                && g.flags & (CALLBACK_PASS | UNREACHABLE) == 0
-            {
+            if OPEN_AIR_LANDMARKS.contains(&(model.wmo_id, g.area_table_id)) {
                 flood.visible[gi] = true;
             }
         }
@@ -1657,11 +1653,11 @@ mod tests {
         );
     }
 
-    /// The open-air deviation: an eye in an `0x40` street with no portal onto an `0x8` group, the
-    /// Stormwind trade district's case, still draws every outdoor group and leaves the exterior
-    /// unrestricted, while a true interior stays the flood's.
+    /// The open-air deviation, sealed: an eye in an `0x40` street with no portal onto an `0x8`
+    /// group, the Stormwind trade district's case, records no window and draws the Mage Quarter
+    /// tower, while its `0x8` shells, an interior and another street stay culled.
     #[test]
-    fn an_open_air_street_draws_every_outdoor_group() {
+    fn an_open_air_street_draws_only_the_landmark() {
         // The doorway model, sealed, with the camera's room open to the sky.
         let mut model = doorway_model();
         model.portal_refs.clear();
@@ -1674,31 +1670,7 @@ mod tests {
             bevy::math::Vec3::Y,
         );
         let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
-        let street = compute_pvs_traced(
-            &model,
-            [-3.0, 0.0, 1.0],
-            None,
-            &clip,
-            &Affine3A::IDENTITY,
-            &mut (),
-        );
-        assert!(street.open_air, "an 0x40-not-0x8 seed is open to the sky");
-        assert!(
-            street.windows.is_empty(),
-            "no worklist: the exterior is whole"
-        );
-        assert!(
-            street.visible[..4].iter().all(|v| *v),
-            "the street and every 0x8 shell draw, though no portal reaches them"
-        );
-        assert!(
-            !street.visible[4],
-            "an interior no portal reaches stays culled"
-        );
-
-        // An 0x40 group no portal reaches draws with the street; one also 0x80 (Turtle's stand-in
-        // towers in stormwind.wmo) keeps the flood, so it stays culled.
-        let street_from = |model: &WmoModel| {
+        let pvs_from = |model: &WmoModel| {
             compute_pvs_traced(
                 model,
                 [-3.0, 0.0, 1.0],
@@ -1708,21 +1680,57 @@ mod tests {
                 &mut (),
             )
         };
+        let street = pvs_from(&model);
+        assert!(street.open_air, "an 0x40-not-0x8 seed is open to the sky");
+        assert!(street.windows.is_empty(), "no portal opens a window");
+        assert!(street.visible[0], "the camera's own street");
+        assert!(
+            !street.visible[1] && !street.visible[2] && !street.visible[3],
+            "an 0x8 shell no window shows stays culled, as Stormwind's gate shell from the Trade \
+             District"
+        );
+        assert!(
+            !street.visible[4],
+            "an interior no portal reaches stays culled"
+        );
+
+        // Another street no portal reaches stays culled; the same group keyed as Stormwind's Mage
+        // Quarter tower draws.
         model.group_nav[4].flags |= EXTERIOR_LIT;
         assert!(
-            street_from(&model).visible[4],
-            "an 0x40 group draws from the street"
+            !pvs_from(&model).visible[4],
+            "another street draws only where the flood reaches it"
         );
-        model.group_nav[4].flags |= UNREACHABLE;
+        model.wmo_id = 61;
+        model.group_nav[4].area_table_id = 2644;
         assert!(
-            !street_from(&model).visible[4],
-            "an 0x80 group draws only where a portal frames it"
+            pvs_from(&model).visible[4],
+            "the Mage Quarter tower draws from the street"
         );
-        model.group_nav[4].flags &= !(EXTERIOR_LIT | UNREACHABLE);
 
-        // The control: the same room without 0x40 is the sealed room, its shells dark.
+        // The control: the same room without 0x40 is the sealed room, the tower dark.
         model.group_nav[0].flags &= !EXTERIOR_LIT;
-        let room = compute_pvs_traced(
+        let room = pvs_from(&model);
+        assert!(!room.open_air);
+        assert!(
+            !room.visible[4],
+            "a room draws only what its flood reaches"
+        );
+    }
+
+    /// The open-air deviation keeps Pass 2 for the `0x8` shells: from a street with a doorway onto
+    /// one, the shell straight through it draws and the one 30 yd aside does not, as from a room.
+    #[test]
+    fn an_open_air_street_keeps_the_shells_windows() {
+        let mut model = doorway_model();
+        model.group_nav[0].flags |= EXTERIOR_LIT;
+        let view = Mat4::look_at_rh(
+            bevy::math::Vec3::new(0.0, 1.0, 3.0),
+            bevy::math::Vec3::new(0.0, 1.0, -10.0),
+            bevy::math::Vec3::Y,
+        );
+        let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
+        let street = compute_pvs_traced(
             &model,
             [-3.0, 0.0, 1.0],
             None,
@@ -1730,8 +1738,18 @@ mod tests {
             &Affine3A::IDENTITY,
             &mut (),
         );
-        assert!(!room.open_air);
-        assert!(!room.visible[1] && !room.visible[2] && !room.visible[3]);
+        assert!(street.open_air);
+        assert_eq!(street.windows.len(), 1, "the doorway is the one window");
+        assert!(
+            street.visible[1],
+            "the exterior group the portal opens onto"
+        );
+        assert!(street.visible[2], "the shell its window shows");
+        assert!(!street.visible[3], "the shell 30 yd off the window's axis");
+        assert!(
+            street.visible[4],
+            "the interior flooded from the admitted shell"
+        );
     }
 
     /// An interior room `g0` (floor at z=0, the seed) whose doorway `p0` (WoW x=0, y ∈ [-0.5,0.5],
