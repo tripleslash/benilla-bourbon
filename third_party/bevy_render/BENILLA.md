@@ -196,6 +196,18 @@ and counts them for `benilla_app::webdiag` (`take_released_gpu_objects`). The sl
 `destroy()` (fourth delta) stays: it releases a buffer bind groups may still hold, earlier than a
 guard would.
 
+## The tenth delta: pipelines build on the async-compute pool on macOS too
+
+`render_resource/pipeline_cache.rs`: `create_pipeline_task` spawns each pipeline build onto the
+async-compute pool on macOS, as it does on every other native platform; the two `target_os =
+"macos"` lines are deleted from its `cfg` pair. Upstream compiles inline on the render thread there,
+so a burst serialises naga's WGSL→MSL translation into one frame: a Dalaran login on an M1 spent
+~5 s of its loading screen on the pipeline warm pass and still timed out. Async, the warm drains and
+the login clears in 8.5–9.0 s instead of 11.1–12.5 s (measured in benilla-wotlk). Upstream's
+exclusion rests on an unmeasured recollection (bevyengine/bevy#10812); bevyengine/bevy#26151
+proposes the same deletion. It shows on a login as `pipeline warm: N rigs drained` where it used to
+print `TIMED OUT`.
+
 ## The delta, and the command that proves it
 
 **A few lines changed in five upstream files, one module added.**
@@ -208,6 +220,7 @@ guard would.
 | `src/batching/gpu_preprocessing.rs` | two `ComputeTaskPool::get().scope(` (0.19.1 lines ~2355 and ~2657) become `crate::wasm_serial::compute_scope(`, and the now-unused `use bevy_tasks::ComputeTaskPool;` goes |
 | `src/render_asset.rs` | `RenderAsset::DEFERRABLE`, asked by `prepare_assets` before each of its two deferrals (above) |
 | `src/mesh/mod.rs` | `RenderMesh` sets `DEFERRABLE = false` (above) |
+| `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta) |
 | `src/lib.rs` | `mod wasm_serial;`; the render worker's lines (eighth delta); `destroy_released_gpu_resources` and its counter (ninth delta) |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |
 | `src/render_worker.rs`, `src/settings.rs`, `src/view/window/mod.rs`, `src/renderer/{wgpu_wrapper,render_device,mod}.rs`, `src/render_resource/buffer.rs` | the render worker (eighth delta, its own table) |

@@ -1,6 +1,6 @@
-//! The pipeline warm pass and its instrument. On macOS Bevy compiles every pipeline synchronously
-//! on the render thread, so a variant first drawn live is a frame-long stall; the pass compiles
-//! every reachable variant behind the loading cover instead.
+//! The pipeline warm pass and its instrument. Bevy builds a variant's pipeline the first time it is
+//! drawn, on the async-compute pool, and skips the batch until it lands, so a variant first drawn
+//! live is a pop-in; the pass compiles every reachable variant behind the loading cover instead.
 //!
 //! - [`WarmPass`] and `spawn_menagerie`: one tiny rig per reachable variant, spawned once the
 //!   entry cover is on screen and revealed [`WARM_REVEAL_PER_FRAME`] at a time so each frame's
@@ -50,7 +50,7 @@ pub(crate) struct PipeShared {
 }
 
 impl PipeWatch {
-    /// Whether a pipeline is still building. Off macOS the build is async, and until it settles
+    /// Whether a pipeline is still building. The build is async, and until it settles
     /// `SetItemPipeline` skips the batch, so a one-shot bake taken now would miss it.
     ///
     /// `settled` is read first: the pair is unsynchronised, and this order can only err towards a
@@ -326,9 +326,9 @@ impl WarmPass {
 /// How long after the last reveal `pending == 0` means drained: the counters cross worlds a frame
 /// apart.
 const WARM_SETTLE_SECS: f32 = 0.25;
-/// Rigs revealed per frame. On macOS the pipeline cache drains its whole backlog in one frame,
-/// inline, so this bounds each frame's compile batch to within one 43 ms audio device cycle.
-/// `$WOW_WARM_SLICE` overrides it; 0 means unpaced.
+/// Rigs revealed per frame, which bounds the first-sight extract and queue work each frame takes
+/// on; the compiles themselves run on the async-compute pool. `$WOW_WARM_SLICE` overrides it; 0
+/// means unpaced.
 const WARM_REVEAL_PER_FRAME: usize = 24;
 
 /// The pacing slice actually in force, `$WOW_WARM_SLICE` applied once.
