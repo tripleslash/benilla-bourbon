@@ -349,8 +349,18 @@ fn build_entry(
     built
 }
 
-/// Build requested forms most urgent first, [`MESH_BUDGET`] and [`VERT_BUDGET`] per frame while
-/// live, uncapped behind the loading cover; at least one submesh always builds.
+/// The furnisher's per-frame `(submesh, vertex)` caps: [`MESH_BUDGET`] and [`VERT_BUDGET`] while
+/// live, both unbounded behind the loading cover, which absorbs the burst.
+fn frame_caps(paced: bool) -> (usize, usize) {
+    if paced {
+        (MESH_BUDGET, VERT_BUDGET)
+    } else {
+        (usize::MAX, usize::MAX)
+    }
+}
+
+/// Build requested forms most urgent first, within [`frame_caps`]; at least one submesh always
+/// builds.
 pub(crate) fn furnish_model_forms(
     mut forms: ResMut<ModelForms>,
     m2s: Res<Assets<M2Model>>,
@@ -383,8 +393,8 @@ pub(crate) fn furnish_model_forms(
     if !forms.pending() {
         return;
     }
-    let cap = if focus.paced { MESH_BUDGET } else { usize::MAX };
-    let built = forms.furnish(&m2s, &wmos, &mut meshes, cap, VERT_BUDGET);
+    let (cap, vert_cap) = frame_caps(focus.paced);
+    let built = forms.furnish(&m2s, &wmos, &mut meshes, cap, vert_cap);
     activity.model_meshes_built += built as u32;
     activity.mfurnish_ms += t0.elapsed().as_secs_f32() * 1000.0;
 }
@@ -511,5 +521,13 @@ mod tests {
             frames <= 40,
             "a city crossing's models must land within ~2/3 s at 60 Hz, got {frames} frames"
         );
+    }
+
+    /// Behind the cover neither cap holds, so a city's WMO group batches build in the frame they
+    /// land.
+    #[test]
+    fn the_cover_lifts_both_furnisher_caps() {
+        assert_eq!(frame_caps(false), (usize::MAX, usize::MAX));
+        assert_eq!(frame_caps(true), (MESH_BUDGET, VERT_BUDGET));
     }
 }
