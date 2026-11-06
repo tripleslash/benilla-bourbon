@@ -131,8 +131,8 @@ mod tests {
         assert_eq!(
             PATTER_SHAPE,
             EffectShape::Patter {
-                right: 1.0 / 12.0,
-                up: 1.0 / 6.0,
+                right: 1.5 / 12.0,
+                up: 1.5 / 6.0,
                 life: 0.25,
             }
         );
@@ -199,7 +199,7 @@ mod tests {
         assert!((px(200.0) - 1.0).abs() < 1e-6, "flat past the floor");
     }
 
-    /// The streak's fixed world size (`0x80ff78`, `0x80ff74`) and the wind's lean ride the shape,
+    /// The streak's fixed world size (`0x80ff78`, the short tail) and the wind's lean ride the shape,
     /// with the near shrink a modern frame asks for and none on a classic one.
     #[test]
     fn the_streak_shape_carries_the_references_size_and_the_tilt() {
@@ -209,7 +209,7 @@ mod tests {
                 streak_shape(tilt, near),
                 EffectShape::Streak {
                     half_w: 0.05,
-                    tail: 2.0,
+                    tail: 1.5,
                     near,
                     tilt,
                 }

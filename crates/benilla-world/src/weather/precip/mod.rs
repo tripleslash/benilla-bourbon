@@ -59,11 +59,12 @@ const fn pool_bound(kind: WeatherKind) -> usize {
                 0x4000
             }
         }
+        // Rain's ceiling carries `1/RAIN_FALL_SCALE` for the longer fall.
         _ => {
             if SHADER_LEG {
-                0xC000
+                0x14000
             } else {
-                0x4000
+                0x6C00
             }
         }
     }
@@ -105,17 +106,24 @@ const RAIN_DRIFT_BASE: f32 = 9.49;
 const RAIN_DRIFT_EPS: f32 = 0.01;
 const RAIN_SPREAD_W: f32 = f32::from_bits(0x3e56_7750); // 0x80ffc4 ≈ 0.20944 (12°)
 const RAIN_SPREAD_BIAS: f32 = f32::from_bits(0x3d56_7750); // 0x80ffc0 ≈ 0.05236 (3°)
+/// Deviation: rain's whole velocity, fall and drift, is scaled by 0.6 so it falls slower and
+/// softer at the reference's slant (asked by the maintainer); 1.0 is byte-faithful.
+const RAIN_FALL_SCALE: f32 = 0.6;
 /// The streak triangle: base `head ∓ 0.05·right` (`0x80ff78`), apex `head + tilt·(2·antiVel̂)`
 /// (`0x80ff74`), fixed world sizes, not scaled by speed; no vertex colour.
 const STREAK_HALF_W: f32 = 0.05;
-const STREAK_TAIL: f32 = 2.0;
+/// Deviation: the tail is 1.5 yd, not the reference's 2 (`0x80ff74`), a shorter, softer streak
+/// for the slower fall ([`RAIN_FALL_SCALE`]).
+const STREAK_TAIL: f32 = 1.5;
 /// Rain's forced fog window (render states 0x0a/0x0b): under Mod2x its grey-0.5 colour is
 /// neutral, so this is the streak distance fade. `EffectFog::Rain`'s row is written from these.
 pub(crate) const RAIN_FOG_START: f32 = 70.0;
 pub(crate) const RAIN_FOG_END: f32 = 75.0;
 /// Patter triangle half-edges: `view_right/12` and `view_up/6` (`0x80e004`, `0x803568`).
-const PATTER_RIGHT: f32 = 1.0 / 12.0;
-const PATTER_UP: f32 = 1.0 / 6.0;
+/// Deviation: both are 1.5× the reference's, `/8` and `/4`, so a splash reads on the floor
+/// (asked by the maintainer).
+const PATTER_RIGHT: f32 = 1.5 / 12.0;
+const PATTER_UP: f32 = 1.5 / 6.0;
 /// Spawn-box horizontal half-extents, from the ctor args (`0x67be40`): rain 130×130
 /// (`0x43020000`), snow 90×90 (`0x42b40000`).
 const RAIN_HALF_XY: f32 = 65.0;

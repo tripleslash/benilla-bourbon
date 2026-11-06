@@ -485,9 +485,13 @@ pub(super) fn spawn_particle(
         ),
     };
     let heading = DRIFT_AZ_CENTER + (r[4] - 0.5) * spread;
-    // `vy` is strictly negative for both kinds, so `T` is positive and finite.
-    let vel = wow_azimuth_to_bevy(heading) * drift_mag + Vec3::Y * vy;
-    (origin + slab * (scatter - vel * (z_off / -vy)), vel)
+    let scale = match kind {
+        WeatherKind::Rain => RAIN_FALL_SCALE,
+        _ => 1.0,
+    };
+    // `vel.y` is strictly negative for both kinds, so `T` is positive and finite.
+    let vel = (wow_azimuth_to_bevy(heading) * drift_mag + Vec3::Y * vy) * scale;
+    (origin + slab * (scatter - vel * (z_off / -vel.y)), vel)
 }
 
 /// One kind's frame: retire, record, activate sealed packets, integrate, land.
