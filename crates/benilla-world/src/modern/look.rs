@@ -99,10 +99,12 @@ impl ZoneLook {
         key: 1.1,
         fill: 0.9,
         exposure: 1.0,
-        haze: 0.0024,
+        // Thin haze and a far reach (approved in the viewer at Orgrimmar's gate): 0.0024 and 0.5 soaked
+        // Orgrimmar, Durotar, the Barrens and Elwynn in their fog colour.
+        haze: 0.0008,
         forward: 0.72,
         glow: [1.0, 1.0, 1.0],
-        fog_reach: 0.5,
+        fog_reach: 1.5,
         fog_tint: [1.0, 1.0, 1.0],
         fog_falloff: 70.0,
         sky_tint: [1.0, 1.0, 1.0],
