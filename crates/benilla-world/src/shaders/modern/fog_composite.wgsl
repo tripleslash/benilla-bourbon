@@ -28,12 +28,6 @@ struct LightTable {
     points: array<vec4<f32>, 512>,
 }
 @group(0) @binding(5) var<storage, read> light_table: LightTable;
-// The terrain heightfield the ground mist lies on (`mist_over_terrain`).
-@group(0) @binding(6) var mist_ground: texture_depth_2d;
-// The key light's cascades and the sky map, so the ground mist scatters the key and the sky only where
-// they reach it.
-@group(0) @binding(7) var shadow_map: texture_depth_2d_array;
-@group(0) @binding(8) var shadow_samp: sampler_comparison;
 
 const SHAFT_TAPS: u32 = 16u;
 // Where, as a share of the view distance, the detailed world starts dissolving into the silhouette.
@@ -153,92 +147,6 @@ fn open_sky(uv: vec2<f32>) -> f32 {
     return select(0.0, 1.0, depth_at(px) <= 0.0);
 }
 
-// The terrain under `p`, filtered across the heightfield's texels so the veil shows no steps; the ground
-// under the camera when there is no heightfield at all, its edge row past its edge, and no ground
-// (`MIST_NO_GROUND`) over an undrawn texel. With the camera's ground standing in past the edge,
-// everything out there lower than it, the sea and the foot of every rock in it, lay inside a wall of
-// veil with a flat top; ending the veil at the edge walked a ring of it along with the camera.
-fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
-    if (f.ground.x <= 0.5) {
-        return f.night.y;
-    }
-    let q = vec4<f32>(p, 1.0);
-    let uv = clamp(vec2<f32>(dot(f.ground_x, q), dot(f.ground_y, q)), vec2<f32>(0.0), vec2<f32>(1.0));
-    let n = f.ground.w;
-    let at = uv * n - vec2<f32>(0.5);
-    let base = floor(at);
-    let t = at - base;
-    let top = vec2<i32>(i32(n) - 1);
-    let i = vec2<i32>(base);
-    let d00 = textureLoad(mist_ground, clamp(i, vec2<i32>(0), top), 0);
-    let d10 = textureLoad(mist_ground, clamp(i + vec2<i32>(1, 0), vec2<i32>(0), top), 0);
-    let d01 = textureLoad(mist_ground, clamp(i + vec2<i32>(0, 1), vec2<i32>(0), top), 0);
-    let d11 = textureLoad(mist_ground, clamp(i + vec2<i32>(1, 1), vec2<i32>(0), top), 0);
-    // An undrawn texel is open water with no tile under it: no ground the veil can lie on.
-    if (min(min(d00, d10), min(d01, d11)) <= 0.0) {
-        return froxelfog::MIST_NO_GROUND;
-    }
-    let d = mix(mix(d00, d10, t.x), mix(d01, d11, t.x), t.y);
-    return f.ground.y + d * f.ground.z;
-}
-
-// How far the veil's shadow taps spread around the pixel's column (yd): about the layer's depth.
-const MIST_SHADOW_SPREAD: f32 = 0.6;
-
-// The mist from the eye to `p` (`froxelfog`'s ground veil, `froxelfog::mist_level_ray`'s reads), the ray's
-// height over the terrain read off the heightfield at each read back from the pixel, lit in the column
-// over the pixel's own world point: the key as far as it reaches there, the ambient as far as the sky
-// does. Everything in it is anchored at the pixel, so its veil and its shadows hold still under a moving
-// camera, and a shadow on the ground is the veil's shadow too. Lit at a read back along the ray instead,
-// a pixel showed the shadow of ground yards toward the eye: turning the camera swung the shadows across
-// the veil, cut out of it where they missed the ground's own.
-fn mist_over_terrain(f: froxelfog::FroxelFog, eye: vec3<f32>, p: vec3<f32>) -> vec4<f32> {
-    let ray = p - eye;
-    let far = froxelfog::mist_reach(f);
-    let len = min(max(length(ray), 1e-3), far);
-    if (f.mist.x <= 0.0 || len < 1e-3) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    }
-    let dir = normalize(ray);
-    let end = eye + dir * len;
-    let reach = min(len, froxelfog::MIST_SEGMENT);
-    var tau = 0.0;
-    var d0 = 0.0;
-    let end_floor = froxelfog::mist_floor(f, terrain_under(f, end));
-    var h0 = max(end.y - end_floor, 0.0);
-    for (var j = 1u; j <= froxelfog::MIST_READS; j = j + 1u) {
-        let d1 = min(froxelfog::mist_back(j), reach);
-        let q = end - dir * d1;
-        let h1 = max(q.y - froxelfog::mist_floor(f, terrain_under(f, q)), 0.0);
-        tau = tau + froxelfog::mist_stretch(f, end, dir, len, d0, d1, h0, h1);
-        if (d1 >= reach) {
-            break;
-        }
-        d0 = d1;
-        h0 = h1;
-    }
-    tau = tau * froxelfog::mist_taper(len, far);
-    if (tau <= 1e-6) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    }
-    let c = modern_block.cascades;
-    // Lit over the pixel's own point (or the ground under it, whichever is higher), clear of the
-    // surface's shadow bias, and softened over a world-aligned cross: the veil is a yard deep, and one
-    // tap drew its shadow as hard as the ground's and striped it along a face's bias.
-    let base = select(max(end.y, end_floor), end.y, end_floor < -1.0) + froxelfog::MIST_LIGHT_LIFT;
-    let lq = vec3<f32>(end.x, base, end.z);
-    let dz = froxelfog::view_depth(f, lq);
-    var vis = 0.0;
-    for (var k = 0u; k < 4u; k = k + 1u) {
-        let a = f32(k) * 1.5707964;
-        let o = vec3<f32>(cos(a), 0.0, sin(a)) * MIST_SHADOW_SPREAD;
-        vis = vis + 0.25 * sunshadow::sun_visibility_fast(shadow_map, shadow_samp, c, lq + o, dz);
-    }
-    let sky = sunshadow::sky_visibility_fast(shadow_map, shadow_samp, c, lq);
-    let tr = exp(-tau);
-    return froxelfog::mist_cap(vec4<f32>(froxelfog::mist_light(f, dot(dir, f.sun_dir.xyz), vis, sky) * (1.0 - tr), tr));
-}
-
 @fragment
 fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let f = modern_block.fog;
@@ -252,9 +160,6 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Not in the water mirror: the light's screen position is the main view's, so the taps would march
     // toward the wrong point of the mirror's frame, sixteen of them per reflected pixel.
     let mirror = sunshadow::mirror_view(modern_block.cascades, view.world_position);
-    if (!mirror && f.mist.x > 0.0) {
-        fog = froxelfog::with_mist(fog, mist_over_terrain(f, view.world_position, p));
-    }
 
     // The seam: over the last stretch before the view distance the detailed world dissolves into the
     // distant band's own silhouette (`wdl.wgsl`: the distant terrain's albedo under the ambient, flat),

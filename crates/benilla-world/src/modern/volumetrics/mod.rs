@@ -88,16 +88,6 @@ const HAZE_SCALE: f32 = 0.67;
 /// its `ground_fog` keeps a share by day. Anchored to one plane at the camera's ground, 0.035 filled
 /// Hillsbrad's low ground and left Gilneas's hills bare.
 const BANK_EXTINCTION: f32 = 0.022;
-/// fork: the ground veil's extinction at the ground (1/yd) at a look's full share (`froxelfog.wgsl`'s
-/// `mist_air`): about 0.035 at Darkshore's, a faint veil over the ground the grass rises out of. Its
-/// droplets send back most of the light they take, the grass a tenth: at 0.1 it lay on the ground as
-/// a bright sheet several times the ground's own brightness.
-const VEIL_EXTINCTION: f32 = 0.025;
-/// fork: the top of the clear patches' noise band the volume's banks build in under a ground veil
-/// (`froxel_scatter.wgsl`'s `bank_patches`): Darkshore's edge band's top, in every look that lays the
-/// veil, so the eerie looks' banks build where Darkshore's do.
-const BANK_BUILD_TOP: f32 =
-    super::look::ZoneLook::DARKSHORE.bank_clear + super::look::ZoneLook::DARKSHORE.bank_clear_edge;
 /// fork: **a hazy zone stays as hazy as it is.** The zone's own air by day (1/yd: its shaft haze,
 /// its day banks and any sea fog) up to which the night air and rain's humid veil come in whole
 /// (Elwynn's haze), and from which a zone counts as hazy already (Darkshore's coast, the eerie
@@ -223,15 +213,15 @@ pub struct FroxelFog {
     /// fork: the ambient the surfaces take, unscattered (linear); w = the distant terrain's albedo
     /// ([`super::DISTANT_ALBEDO`]).
     pub light_ambient: Vec4,
-    /// fork: the ground mist (`froxelfog.wgsl`'s `mist_air`): x = its extinction at the ground (1/yd,
-    /// 0 = none); y = 1 / its scale height (yd); z, w free.
-    pub mist: Vec4,
     /// fork: the open air's ambient in-scatter that no canopy hides (linear): its albedo x the light
     /// arriving sideways and from below, the ground's and the diffuse light the air scattered out of
     /// the key (`ambient` holds the sky's, which the sky map occludes); w free.
     pub ambient_open: Vec4,
     /// fork: [`Self::ambient_open`] for the room's air; w free.
     pub room_open: Vec4,
+    /// Free: keeps [`FOG_BYTES`] at the size that puts the block's later sections on 256-byte offsets
+    /// (`lights::node::LIGHT_OFFSET`).
+    pub pad: Vec4,
 }
 
 impl FroxelFog {
@@ -268,9 +258,9 @@ impl FroxelFog {
             self.ground,
             self.halo_air,
             self.light_ambient,
-            self.mist,
             self.ambient_open,
             self.room_open,
+            self.pad,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -641,7 +631,6 @@ fn update_volume(
         }
     }
 
-    let bank_analytic = look.0.bank_analytic > 0.5;
     let grid = tier.grid;
     // A hard cut (no history, a new grid, a jump) drops the whole volume's history. A quick turn only
     // the near froxels': far air reprojects exactly under a rotation, and what the turn brings on screen
@@ -686,16 +675,11 @@ fn update_volume(
         view_row: view_from_world.row(2),
         grid: grid.as_vec3().extend(tier.range),
         alloc: VOLUME_ALLOC.as_vec3().extend(tier.mode.as_f32()),
-        media: Vec4::new(
-            media.density,
-            media.inv_height,
-            reference_height,
-            look.0.bank_patch_yd,
-        ),
+        media: Vec4::new(media.density, media.inv_height, reference_height, 0.0),
         medium: Vec4::new(
             media.haze,
             media.noise,
-            look.0.bank_clear_floor.clamp(0.0, 1.0),
+            0.0,
             // Negative on a quick turn: the shader drops only the near froxels' history.
             match (cut, turned) {
                 (true, _) => 0.0,
@@ -744,17 +728,13 @@ fn update_volume(
             .unwrap_or_default()
             .extend(0.0),
         night: Vec4::new(
-            if !super::banks_enabled() {
-                0.0
-            } else if !bank_analytic {
+            if super::banks_enabled() {
                 BANK_EXTINCTION * night_bank_share(&look.0, night, added)
             } else {
-                let froxel =
-                    look.0.bank_froxel + (look.0.bank_froxel_night - look.0.bank_froxel) * night;
-                BANK_EXTINCTION * froxel.max(0.0)
+                0.0
             },
             bank_ground,
-            BANK_BUILD_TOP,
+            0.0,
             // fork: the zone look's sea fog (`froxel_scatter.wgsl`'s `sea_fog`).
             if super::banks_enabled() {
                 look.0.sea_fog
@@ -768,22 +748,13 @@ fn update_volume(
         halo_air: Vec4::new(halo_air.density, 0.0, halo_air.haze * halo_humid, 0.0),
         light_ambient: (light_ambient * sky_through + glow * (1.0 - sky_through))
             .extend(super::DISTANT_ALBEDO),
-        mist: Vec4::new(
-            if super::banks_enabled() && bank_analytic {
-                VEIL_EXTINCTION * night_bank_share(&look.0, night, added)
-            } else {
-                0.0
-            },
-            1.0 / look.0.bank_height.max(0.1),
-            look.0.bank_clear,
-            look.0.bank_clear_edge,
-        ),
         ambient_open: open_in(&media).extend(0.0),
         room_open: room_media
             .as_ref()
             .map(open_in)
             .unwrap_or_default()
             .extend(0.0),
+        pad: Vec4::ZERO,
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
@@ -877,7 +848,7 @@ pub(crate) fn added_air(look: &super::look::ZoneLook) -> f32 {
     1.0 + (HAZY_SHARE - 1.0) * hazy
 }
 
-/// The ground mist's share of [`BANK_EXTINCTION`] at night fraction `night`: the day's banks, and
+/// The ground banks' share of [`BANK_EXTINCTION`] at night fraction `night`: the day's banks, and
 /// `added` of what the night lays over them, all of it where the look's banks are ground fog
 /// (`ZoneLook::bank_moon` 1).
 fn night_bank_share(look: &super::look::ZoneLook, night: f32, added: f32) -> f32 {
@@ -1042,19 +1013,6 @@ mod tests {
             air_ambient(&[Vec3::ZERO; 6], Vec3::ZERO, Vec3::ONE, -0.2).1,
             Vec3::ZERO
         );
-    }
-
-    /// The volume's banks build under every veiled look's band: Darkshore's top lies inside each
-    /// one's own patches' reach, short of where the noise ends.
-    #[test]
-    fn every_veiled_looks_banks_build_where_darkshores_do() {
-        use crate::modern::look::ZoneLook;
-        const { assert!(BANK_BUILD_TOP < 1.0) };
-        for look in [ZoneLook::DARKSHORE, ZoneLook::EERIE, ZoneLook::TIRISFAL] {
-            assert!(look.bank_analytic > 0.5);
-            assert!(look.bank_clear + look.bank_clear_edge >= BANK_BUILD_TOP);
-            assert_eq!(look.bank_patch_yd, ZoneLook::DARKSHORE.bank_patch_yd);
-        }
     }
 
     #[test]

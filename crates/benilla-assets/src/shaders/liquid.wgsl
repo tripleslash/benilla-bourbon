@@ -304,10 +304,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     // (`kind.x`) draw before it and are fogged there.
     if (wow_light.point_count.y > 0.5 && wow_light.fog_color.w > 0.5 && w.kind.x < 0.5) {
         let air = modern_block.fog;
-        let fog = froxelfog::with_mist(
-            froxelfog::fog_at(modern_fog_volume, modern_fog_samp, air, in.world_position.xyz),
-            froxelfog::mist_air(air, air.camera.xyz, in.world_position.xyz, froxelfog::MIST_NO_GROUND),
-        );
+        let fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, air, in.world_position.xyz);
         rgb = rgb * fog.a + fog.rgb;
     }
     return vec4<f32>(rgb, c.a);

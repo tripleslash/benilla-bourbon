@@ -172,30 +172,6 @@ struct WowLight {
 @group(#{MATERIAL_BIND_GROUP}) @binding(124) var modern_fog_volume: texture_3d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(125) var modern_fog_samp: sampler;
 
-// fork: modern lighting — the ground mist between the eye and a blended fragment at `p`, over `ground`
-// (`froxelfog::mist_level_ray`), lit as the composite lights the opaque ground's
-// (`fog_composite.wgsl`'s `mist_over_terrain`): the key as far as its shadow lets it there, the sky as far
-// as the sky map does. A leaf or a twig under a canopy then stands in mist as dark as the air around it,
-// and holds still as the camera moves.
-fn modern_mist(f: froxelfog::FroxelFog, p: vec3<f32>, ground: f32) -> vec4<f32> {
-    let eye = f.camera.xyz;
-    let ray = p - eye;
-    let len = max(length(ray), 1e-3);
-    let dir = ray / len;
-    let end = eye + dir * min(len, froxelfog::mist_reach(f));
-    let veil = froxelfog::mist_level_ray(f, eye, end, ground);
-    let tau = veil.tau;
-    if (tau <= 1e-6) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    }
-    let q = vec3<f32>(veil.at.x, froxelfog::mist_floor(f, ground) + froxelfog::MIST_LIGHT_LIFT, veil.at.z);
-    let c = modern_block.cascades;
-    let vis = sunshadow::sun_visibility_fast(modern_shadow_map, modern_shadow_samp, c, q, froxelfog::view_depth(f, q));
-    let sky = sunshadow::sky_visibility_fast(modern_shadow_map, modern_shadow_samp, c, q);
-    let tr = exp(-tau);
-    return froxelfog::mist_cap(vec4<f32>(froxelfog::mist_light(f, dot(dir, f.sun_dir.xyz), vis, sky) * (1.0 - tr), tr));
-}
-
 // fork: modern lighting (FORK.md, P5) — the probe field's irradiance at this
 // fragment: the eight probes around it in the finest cascade that owns the point, and whatever a
 // coarser one can still answer beyond that. `rgb` is in the ambient row's own units (it replaces
@@ -402,11 +378,6 @@ struct WowVsOut {
     // Stage 1's coordinate, generated or the vertex's UV set 1; (0, 0) without a stage 1. Location
     // 12: the fork's `point_sel` holds 11.
     @location(12) stage1_uv: vec2<f32>,
-#ifdef WOW_MODERN
-    // fork: the ground this draw stands on, its placement's, for the analytic bank: a blended batch
-    // draws after the fog composite and has no heightfield of its own.
-    @location(13) @interpolate(flat) bank_ground: f32,
-#endif
 }
 
 // The generated environment coordinate of `Model2.bls` (its programs for a stage whose coordinate
@@ -1292,15 +1263,6 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
         out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
     }
 #endif
-#ifdef WOW_MODERN
-#ifdef WOW_MERGED_FADE
-    // The placement's fade sphere's foot: its centre sat halfway up a tree, and every leaf under it lay
-    // in the veil as though on the ground, a box of haze in the canopy.
-    out.bank_ground = vertex.fade_sphere.y - vertex.fade_sphere.w;
-#else
-    out.bank_ground = frame_origin.y;
-#endif
-#endif
 #endif
 
 #ifdef VERTEX_UVS_A
@@ -1795,18 +1757,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
         // classic per-blend policy: scene fog for alpha, fade to black for additive, the blend identity
         // for Mod (1) and Mod2x (0.5, after its 2.295 source scale). Ground clutter blends but draws in
         // the alpha-mask pass, before the composite, which fogs it over its depth like the terrain
-        // under it: fogged here too, every tuft took the fog and the veil twice, greyer than its
+        // under it: fogged here too, every tuft took the fog twice, greyer than its
         // ground and the more so the farther off.
         let mask_pass_clutter = m.clutter_fade.w > 0.5;
         if (!opaque_intent && !mask_pass_clutter && fog_policy != 4u && wow_light.fog_color.w > 0.5) {
-            var fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, modern_block.fog, in.world_position.xyz);
-            // fork: the ground mist, which the composite gives the opaque batches: a doodad riding
-            // its fade twin stood unfogged in it. Not in the water mirror, as in the composite.
-            let air = modern_block.fog;
-            let mirror = sunshadow::mirror_view(modern_block.cascades, view.world_position);
-            if (air.mist.x > 0.0 && !mirror) {
-                fog = froxelfog::with_mist(fog, modern_mist(air, in.world_position.xyz, in.bank_ground));
-            }
+            let fog = froxelfog::fog_at(modern_fog_volume, modern_fog_samp, modern_block.fog, in.world_position.xyz);
             if (is_additive || fog_policy == 1u) {
                 lin = lin * fog.a;
             } else if (is_mod || fog_policy == 2u) {

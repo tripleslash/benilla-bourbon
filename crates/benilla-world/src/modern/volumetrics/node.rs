@@ -68,8 +68,6 @@ struct FroxelTargets {
     ready: bool,
     /// fork: a one-texel depth map the ground-fog banks read when the GI heightfield is absent.
     ground_stub: Option<(Texture, TextureView)>,
-    /// fork: this frame's heightfield or its stub, for the composite's analytic bank.
-    bank_ground: Option<TextureView>,
 }
 
 fn init_pipelines(
@@ -274,10 +272,6 @@ fn prepare_froxels(
         let view = texture.create_view(&TextureViewDescriptor::default());
         targets.ground_stub = Some((texture, view));
     }
-    targets.bank_ground = ground
-        .as_ref()
-        .map(|(_, view)| view.clone())
-        .or_else(|| targets.ground_stub.as_ref().map(|(_, view)| view.clone()));
 
     if modern && volume.mode == FogMode::Froxel {
         let inputs = (
@@ -431,11 +425,6 @@ fn specialize_composites(
                     storage_buffer_read_only_sized(false, None),
                     // The point table, for the per-pixel lamp halos (`fog_composite.wgsl`).
                     storage_buffer_read_only_sized(false, None),
-                    // The terrain heightfield the analytic bank lies on.
-                    texture_depth_2d(),
-                    // The key light's cascades, for the analytic bank's light.
-                    texture_2d_array(TextureSampleType::Depth),
-                    sampler(SamplerBindingType::Comparison),
                 ),
             ),
         );
@@ -642,18 +631,6 @@ fn run_fog_pass(
     let Some(light) = world.get_resource::<SharedLightBuffer>() else {
         return;
     };
-    let Some(bank_ground) = world
-        .get_resource::<FroxelTargets>()
-        .and_then(|t| t.bank_ground.as_ref())
-    else {
-        return;
-    };
-    let Some(shadow) = world
-        .resource::<RenderAssets<GpuImage>>()
-        .get(MODERN_SHADOW_MAP.id())
-    else {
-        return;
-    };
     let bind = render_context.render_device().create_bind_group(
         label,
         &pipeline_cache.get_bind_group_layout(layout),
@@ -664,9 +641,6 @@ fn run_fog_pass(
             &volume.sampler,
             block.buffer.as_entire_binding(),
             light.0.as_entire_binding(),
-            bank_ground,
-            &shadow.texture_view,
-            &shadow.sampler,
         )),
     );
     let diagnostics = render_context.diagnostic_recorder();

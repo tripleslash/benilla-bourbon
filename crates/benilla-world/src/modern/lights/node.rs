@@ -28,6 +28,9 @@ use crate::modern::ActiveLighting;
 /// cascades, the froxel tail and the GI parameters in front of it add to exactly 5376), which is
 /// what lets the binning pass bind that region alone as read-write.
 pub const LIGHT_OFFSET: u64 = (CASCADES_BYTES + BLOCK_TAIL_BYTES + GI_PARAMS_BYTES) as u64;
+// The largest `min_storage_buffer_offset_alignment` WebGPU allows: a layout change in front of the grid
+// that breaks it fails here, not as a validation error at the first bind.
+const _: () = assert!(LIGHT_OFFSET.is_multiple_of(256));
 
 #[derive(Resource)]
 struct LightPipelines {

@@ -56,8 +56,8 @@ pub struct ZoneLook {
     /// the reference grade does not carry (Durotar's noon sun is a deep orange where the reference
     /// shot's is near white).
     pub key_tint: [f32; 3],
-    /// fork: the ground-fog banks by day, as a share of the night's (`volumetrics`): 0 at night only,
-    /// 1 as thick at noon as at midnight. Under [`Self::bank_analytic`], the ground veil's density.
+    /// fork: the volume's ground-fog banks by day, in shares of `volumetrics::BANK_EXTINCTION`: 0
+    /// lays them at night only.
     pub ground_fog: f32,
     /// fork: the night's ground-fog banks as a share of the full bank (`volumetrics`): an ordinary
     /// zone lies clear at night, and only the dark zones (eerie, Tirisfal, Darkshore) keep banks, and
@@ -88,31 +88,6 @@ pub struct ZoneLook {
     /// fork: how much of the night's ground banks a hazy zone lays: 0 only a hazy zone's share of
     /// them (`volumetrics::added_air`); 1 the whole night bank, dense fog lying on the ground.
     pub bank_moon: f32,
-    /// fork: the ground banks leave the froxel volume for the ground veil, an exact single-scattering
-    /// integral per pixel (`froxelfog.wgsl`'s `mist_air`), which has no grid, jitter or history to
-    /// flicker or lag. Over 0.5 on; a look that stays in the volume ignores the dials below.
-    pub bank_analytic: f32,
-    /// fork: the clear patches' noise feature size (yd). It divides world coordinates near 6,000, so a
-    /// cross-fade of it would send the patches flying over the ground: [`ZoneLook::lerp`] takes it at
-    /// once.
-    pub bank_patch_yd: f32,
-    /// fork: the share of the veil's density a clear patch keeps (0 = bare ground there).
-    pub bank_clear_floor: f32,
-    /// fork: an analytic look's froxel banks by day: the volume's ground banks at this `ground_fog`,
-    /// under the veil, so the banks take the volume's light and shadow and the veil lies on the
-    /// ground through them. Eased to [`Self::bank_froxel_night`] across `sun_arc::night_at`. 0 = none.
-    pub bank_froxel: f32,
-    /// fork: [`Self::bank_froxel`] at night.
-    pub bank_froxel_night: f32,
-    /// fork: the ground veil's scale height (yd): its density falls by `e` every this many yards over
-    /// the ground. A body stands in it where this is near its own height; a thinner layer veils the
-    /// ground and leaves the body clear.
-    pub bank_height: f32,
-    /// fork: the veil's clear patches: the noise (0 to 1) under which it thins to
-    /// [`Self::bank_clear_floor`], about a fifth of the ground at 0.35. 0 = none.
-    pub bank_clear: f32,
-    /// fork: the noise over which a clear patch fades into the bank: smaller is a sharper edge.
-    pub bank_clear_edge: f32,
 }
 
 impl ZoneLook {
@@ -146,14 +121,6 @@ impl ZoneLook {
         moon_hue: 1.0,
         moon_key: 1.0,
         bank_moon: 0.0,
-        bank_analytic: 0.0,
-        bank_patch_yd: 130.0,
-        bank_clear_floor: 0.0,
-        bank_froxel: 0.0,
-        bank_froxel_night: 0.0,
-        bank_height: 4.0,
-        bank_clear: 0.0,
-        bank_clear_edge: 0.2,
     };
 
     /// fork: **the default look at noon**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
@@ -229,14 +196,6 @@ impl ZoneLook {
             moon_hue: m(self.moon_hue, to.moon_hue),
             moon_key: m(self.moon_key, to.moon_key),
             bank_moon: m(self.bank_moon, to.bank_moon),
-            bank_analytic: m(self.bank_analytic, to.bank_analytic),
-            bank_patch_yd: to.bank_patch_yd,
-            bank_clear_floor: m(self.bank_clear_floor, to.bank_clear_floor),
-            bank_froxel: m(self.bank_froxel, to.bank_froxel),
-            bank_froxel_night: m(self.bank_froxel_night, to.bank_froxel_night),
-            bank_height: m(self.bank_height, to.bank_height),
-            bank_clear: m(self.bank_clear, to.bank_clear),
-            bank_clear_edge: m(self.bank_clear_edge, to.bank_clear_edge),
         }
     }
 
@@ -262,14 +221,6 @@ impl ZoneLook {
             && d(self.moon_hue, other.moon_hue)
             && d(self.moon_key, other.moon_key)
             && d(self.bank_moon, other.bank_moon)
-            && d(self.bank_analytic, other.bank_analytic)
-            && d(self.bank_patch_yd, other.bank_patch_yd)
-            && d(self.bank_clear_floor, other.bank_clear_floor)
-            && d(self.bank_froxel, other.bank_froxel)
-            && d(self.bank_froxel_night, other.bank_froxel_night)
-            && d(self.bank_height, other.bank_height)
-            && d(self.bank_clear, other.bank_clear)
-            && d(self.bank_clear_edge, other.bank_clear_edge)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.fog_tint[i], other.fog_tint[i])
@@ -284,7 +235,7 @@ impl ZoneLook {
     /// fork: **the eerie look.** Brill's calibration (Tirisfal at 14:00 against a reference shot),
     /// for every dark zone: a dim green sun over a deep fill, so the dapple reads under the canopy;
     /// the shafts lit green through a haze whose shadowed air stays dark; green fog and sky, a lower
-    /// exposure and a saturated, harder grade; and ground mist, thicker at night.
+    /// exposure and a saturated, harder grade; and ground fog, thicker at night.
     pub const EERIE: Self = Self {
         key: 0.85,
         fill: 0.55,
@@ -295,20 +246,16 @@ impl ZoneLook {
         key_tint: [0.78, 1.0, 0.8],
         saturation: 1.15,
         contrast: 1.25,
-        haze: 0.0034,
+        // Half the air the look was tuned with (asked in the client): since the air scatters the light
+        // that reaches it under one exposure, Brill's 181 yd fog end at the default reach (0.0177/yd)
+        // and this haze at 0.0034 hid the town 60 yd off in a lit green wash.
+        haze: 0.0017,
+        fog_reach: 1.0,
         vignette: 0.38,
-        // Darkshore's ground veil in this look's own light, the same clear patches at every hour, over
-        // the volume's banks (0.7 by day, 1.0 at night), which build where Darkshore's do.
-        ground_fog: Self::DARKSHORE.ground_fog,
-        night_banks: Self::DARKSHORE.ground_fog,
-        bank_height: Self::DARKSHORE.bank_height,
-        bank_clear: 0.2,
-        bank_clear_edge: 0.8,
-        bank_analytic: Self::DARKSHORE.bank_analytic,
-        bank_patch_yd: Self::DARKSHORE.bank_patch_yd,
-        bank_clear_floor: Self::DARKSHORE.bank_clear_floor,
-        bank_froxel: 0.7,
-        bank_froxel_night: 1.0,
+        // The volume's banks lying faintly over all the ground, lit and shadowed in depth (approved in
+        // the viewer at Lordaeron, `worldview_pose=633.4,1337.2,93.1,1920.3,-3.8`, 14:00).
+        ground_fog: 1.7,
+        night_banks: 2.25,
         noon_mix: 0.0,
         // The dark zones need the doubled moon to read at night (Duskwood, approved in the client).
         moon_key: 2.0,
@@ -407,23 +354,12 @@ impl ZoneLook {
         saturation: 0.85,
         vignette: 0.32,
         key_tint: [1.0, 0.86, 0.8],
-        // A thin veil lying on the ground at every hour, into the sea fog, fixed in the world, thinner
-        // in clear patches, as the reference's lies (`worldview_pose=6346.6,510.4,23.6,174.2,2.9`,
-        // 18:20): a subtle band under the grass tops, floating over the ground, swelling and sinking.
-        ground_fog: 4.0,
-        bank_height: 0.3,
-        bank_clear: 0.45,
-        bank_clear_edge: 0.45,
-        bank_analytic: 1.0,
-        bank_patch_yd: 70.0,
-        // A faint veil in the clear patches, so the open ground is never bare and the denser
-        // stretches read as patches of fog over it.
-        bank_clear_floor: 0.6,
-        // No volume banks under the veil: the froxels' jitter and history swam and lagged as the
-        // camera moved, where the veil, exact per pixel, holds still.
-        bank_froxel: 0.0,
-        bank_froxel_night: 0.0,
-        night_banks: 0.6,
+        // The volume's banks lying faintly over all the ground at every hour, into the sea fog, as the
+        // eerie looks' lie (approved in the viewer, `worldview_pose=6339.2,517.3,25.5,1272.4,-5.9`, 18:20).
+        ground_fog: 1.7,
+        night_banks: 2.25,
+        // The night's banks whole: ground fog, not the haze's share.
+        bank_moon: 1.0,
         sea_fog: 0.028,
         // The moon lights the haze from every side, not as a second sun.
         moon_glow: 0.1,
@@ -798,7 +734,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 }
 
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
-/// row, in field order — `key,fill,exposure,haze,forward,glow r,g,b,fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,contrast,saturation,vignette,toe,key_tint r,g,b,ground_fog,night_banks,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_analytic,bank_patch_yd,bank_clear_floor,bank_froxel,bank_froxel_night,bank_height,bank_clear,bank_clear_edge`. An empty or unparsable entry keeps the
+/// row, in field order — `key,fill,exposure,haze,forward,glow r,g,b,fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,contrast,saturation,vignette,toe,key_tint r,g,b,ground_fog,night_banks,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon`. An empty or unparsable entry keeps the
 /// zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
@@ -848,14 +784,6 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.moon_hue, 32);
     set(&mut look.moon_key, 33);
     set(&mut look.bank_moon, 34);
-    set(&mut look.bank_analytic, 35);
-    set(&mut look.bank_patch_yd, 36);
-    set(&mut look.bank_clear_floor, 37);
-    set(&mut look.bank_froxel, 38);
-    set(&mut look.bank_froxel_night, 39);
-    set(&mut look.bank_height, 40);
-    set(&mut look.bank_clear, 41);
-    set(&mut look.bank_clear_edge, 42);
     look
 }
 
@@ -1108,23 +1036,15 @@ mod tests {
         }
     }
 
-    /// A cross-fade takes the clear patches' size at once: any fade of it moves them over the ground.
-    #[test]
-    fn no_cross_fade_slides_the_veils_patches() {
-        let early = ZoneLook::NEUTRAL.lerp(ZoneLook::DARKSHORE, 0.01);
-        assert_eq!(early.bank_patch_yd, ZoneLook::DARKSHORE.bank_patch_yd);
-        assert_ne!(
-            ZoneLook::DARKSHORE.bank_patch_yd,
-            ZoneLook::NEUTRAL.bank_patch_yd
-        );
-    }
-
-    /// An ordinary zone's night lies clear; a dark zone keeps its whole bank overnight.
+    /// An ordinary zone's night lies clear; a dark zone keeps its bank overnight, thicker than by day.
     #[test]
     fn only_the_dark_zones_nights_are_eerie() {
         for zone in EERIE_ZONES.iter().chain([&TIRISFAL_ZONE]) {
             let d = look_for_zone(*zone);
-            assert_eq!(d.night_banks, d.ground_fog, "zone {zone}");
+            assert!(
+                d.night_banks >= d.ground_fog && d.ground_fog > 0.0,
+                "zone {zone}"
+            );
         }
         for zone in [12, 33, 14, 1637, 17, 215] {
             assert_eq!(look_for_zone(zone).night_banks, 0.0, "zone {zone}");
