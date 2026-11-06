@@ -255,7 +255,7 @@ impl ZoneLook {
         // The volume's banks lying faintly over all the ground, lit and shadowed in depth (approved in
         // the viewer at Lordaeron, `worldview_pose=642.2,1351.1,88.0,2204.3,-9.3`, 14:00).
         ground_fog: 1.3,
-        night_banks: 1.7,
+        night_banks: 1.3,
         noon_mix: 0.0,
         // The dark zones need the doubled moon to read at night (Duskwood, approved in the client).
         moon_key: 2.0,
@@ -357,7 +357,7 @@ impl ZoneLook {
         // The volume's banks lying faintly over all the ground at every hour, into the sea fog, as the
         // eerie looks' lie (approved in the viewer, `worldview_pose=6405.2,492.5,13.9,4310.7,-8.1`, 18:20).
         ground_fog: 1.3,
-        night_banks: 1.7,
+        night_banks: 1.3,
         // The night's banks whole: ground fog, not the haze's share.
         bank_moon: 1.0,
         sea_fog: 0.028,
