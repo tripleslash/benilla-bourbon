@@ -499,8 +499,13 @@ impl Device {
         let downlevel = adapter.raw.capabilities.downlevel.clone();
         let limits = &adapter.raw.capabilities.limits;
 
-        let enable_indirect_validation = instance_flags
+        // BENILLA: on DX12 the indirect-draw rewrite is what carries `first_vertex` /
+        // `base_vertex` and `first_instance` to the shader (the per-draw root constant of the
+        // pipeline layout's command signatures), so it runs whatever the flag says; without it
+        // every indirect draw reads the builtins as 0 (gfx-rs/wgpu#7974).
+        let enable_indirect_validation = (instance_flags
             .contains(wgt::InstanceFlags::VALIDATION_INDIRECT_CALL)
+            || adapter.backend() == wgt::Backend::Dx12)
             && downlevel.flags.contains(
                 wgt::DownlevelFlags::INDIRECT_EXECUTION | wgt::DownlevelFlags::COMPUTE_SHADERS,
             )

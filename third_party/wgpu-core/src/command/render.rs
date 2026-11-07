@@ -769,6 +769,11 @@ pub enum RenderPassErrorInner {
         end_count_offset: u64,
         count_buffer_size: u64,
     },
+    // BENILLA: on DX12 a multi-draw-indirect-count's arguments are rewritten into one storage
+    // binding (`indirect_validation::DrawBatcher::add_contiguous`), so `max_count` is bounded
+    // by the binding size.
+    #[error("Indirect draw with count needs {size} bytes of rewritten arguments, more than the maximum storage buffer binding size {max_binding_size}")]
+    IndirectCountTooLargeForRewrite { size: u64, max_binding_size: u64 },
     #[error(transparent)]
     ResourceUsageCompatibility(#[from] ResourceUsageCompatibilityError),
     #[error("Render bundle has incompatible targets, {0}")]
@@ -901,6 +906,7 @@ impl WebGpuError for RenderPassError {
             | RenderPassErrorInner::UnalignedIndirectBufferOffset(..)
             | RenderPassErrorInner::IndirectBufferOverrun { .. }
             | RenderPassErrorInner::IndirectCountBufferOverrun { .. }
+            | RenderPassErrorInner::IndirectCountTooLargeForRewrite { .. }
             | RenderPassErrorInner::ResourceUsageCompatibility(..)
             | RenderPassErrorInner::IncompatibleBundleReadOnlyDepthStencil { .. }
             | RenderPassErrorInner::ImmediateOffsetAlignment
@@ -2132,6 +2138,7 @@ pub(super) fn encode_render_pass(
                     };
                     multi_draw_indirect_count(
                         &mut state,
+                        &mut indirect_draw_validation_batcher,
                         device,
                         buffer,
                         offset,
@@ -2947,6 +2954,7 @@ fn multi_draw_indirect(
 
 fn multi_draw_indirect_count(
     state: &mut State,
+    indirect_draw_validation_batcher: &mut crate::indirect_validation::DrawBatcher,
     device: &Arc<Device>,
     indirect_buffer: Arc<crate::resource::Buffer>,
     offset: u64,
@@ -2984,11 +2992,26 @@ fn multi_draw_indirect_count(
     indirect_buffer.same_device(device)?;
     count_buffer.same_device(device)?;
 
-    state
-        .pass
-        .scope
-        .buffers
-        .merge_single(&indirect_buffer, wgt::BufferUses::INDIRECT)?;
+    // BENILLA: on DX12 the draws' arguments go through the indirect-draw rewrite, as
+    // `multi_draw_indirect`'s do: it puts each draw's `first_vertex` / `base_vertex` and
+    // `first_instance` in front of its arguments, where the pipeline layout's command signature
+    // sets them as the special-constants root constant for that draw. Upstream hands the raw
+    // buffer to `ExecuteIndirect` with the device's plain signatures, so every draw read
+    // `@builtin(instance_index)` from 0 and `@builtin(vertex_index)` without its base
+    // (gfx-rs/wgpu#7974). The compute shader reads the arguments, so the buffer is a storage
+    // read in this pass; the count buffer is still read by `ExecuteIndirect` itself.
+    let rewrite = family != DrawCommandFamily::DrawMeshTasks
+        && device.backend() == wgt::Backend::Dx12
+        && state.pass.base.device.indirect_validation.is_some();
+
+    state.pass.scope.buffers.merge_single(
+        &indirect_buffer,
+        if rewrite {
+            wgt::BufferUses::STORAGE_READ_ONLY
+        } else {
+            wgt::BufferUses::INDIRECT
+        },
+    )?;
 
     indirect_buffer.check_usage(BufferUsages::INDIRECT)?;
     let indirect_raw = indirect_buffer.try_raw(state.pass.base.snatch_guard)?;
@@ -3039,6 +3062,35 @@ fn multi_draw_indirect_count(
             MemoryInitKind::NeedsInitializedMemory,
         ),
     );
+
+    // BENILLA: the rewrite above. All `max_count` draws are rewritten, back to back in one
+    // destination buffer, and `ExecuteIndirect` reads the caller's count as before.
+    let (indirect_raw, offset) = if rewrite {
+        let (dst_resource_index, dst_offset) = indirect_draw_validation_batcher.add_contiguous(
+            state.pass.base.indirect_draw_validation_resources,
+            device,
+            &indirect_buffer,
+            offset,
+            max_count,
+            family,
+            if family == DrawCommandFamily::DrawIndexed {
+                state.index.limit
+            } else {
+                state.vertex.limits.vertex_limit
+            },
+            state.vertex.limits.instance_limit,
+        )?;
+        (
+            state
+                .pass
+                .base
+                .indirect_draw_validation_resources
+                .get_dst_buffer(dst_resource_index),
+            dst_offset,
+        )
+    } else {
+        (indirect_raw, offset)
+    };
 
     match family {
         DrawCommandFamily::Draw => unsafe {

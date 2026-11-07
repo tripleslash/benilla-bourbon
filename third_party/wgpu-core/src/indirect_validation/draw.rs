@@ -716,6 +716,10 @@ fn calculate_src_offsets(buffer_size: u64, limits: &Limits, offset: u64) -> (u64
 struct BufferPoolEntry {
     buffer: Box<dyn hal::DynBuffer>,
     bind_group: Box<dyn hal::DynBindGroup>,
+    // BENILLA: the buffer's size. `BUFFER_SIZE` for a pooled entry; larger for a destination
+    // made for one multi-draw-indirect-count whose draws do not fit a pooled buffer, which is
+    // destroyed with its command buffer instead of pooled (`DrawResources::drop`).
+    size: u64,
 }
 
 fn create_buffer_and_bind_group(
@@ -725,9 +729,30 @@ fn create_buffer_and_bind_group(
     buffer_label: Option<&'static str>,
     bind_group_label: Option<&'static str>,
 ) -> Result<BufferPoolEntry, hal::DeviceError> {
+    create_sized_buffer_and_bind_group(
+        device,
+        BUFFER_SIZE,
+        usage,
+        bind_group_layout,
+        buffer_label,
+        bind_group_label,
+    )
+}
+
+// BENILLA: `create_buffer_and_bind_group` at any size of at least `BUFFER_SIZE` (the binding
+// layouts' `min_binding_size`).
+fn create_sized_buffer_and_bind_group(
+    device: &dyn hal::DynDevice,
+    size: wgt::BufferSize,
+    usage: wgt::BufferUses,
+    bind_group_layout: &dyn hal::DynBindGroupLayout,
+    buffer_label: Option<&'static str>,
+    bind_group_label: Option<&'static str>,
+) -> Result<BufferPoolEntry, hal::DeviceError> {
+    debug_assert!(size >= BUFFER_SIZE);
     let buffer_desc = hal::BufferDescriptor {
         label: buffer_label,
-        size: BUFFER_SIZE.get(),
+        size: size.get(),
         usage,
         memory_flags: hal::MemoryFlags::empty(),
     };
@@ -741,18 +766,18 @@ fn create_buffer_and_bind_group(
             count: 1,
         }],
         // SAFETY: We just created the buffer with this size.
-        buffers: &[hal::BufferBinding::new_unchecked(
-            buffer.as_ref(),
-            0,
-            BUFFER_SIZE,
-        )],
+        buffers: &[hal::BufferBinding::new_unchecked(buffer.as_ref(), 0, size)],
         samplers: &[],
         textures: &[],
         acceleration_structures: &[],
         external_textures: &[],
     };
     let bind_group = unsafe { device.create_bind_group(&bind_group_desc) }?;
-    Ok(BufferPoolEntry { buffer, bind_group })
+    Ok(BufferPoolEntry {
+        buffer,
+        bind_group,
+        size: size.get(),
+    })
 }
 
 #[derive(Clone)]
@@ -772,7 +797,21 @@ impl Drop for DrawResources {
     fn drop(&mut self) {
         if let Some(ref indirect_validation) = self.device.indirect_validation {
             let indirect_draw_validation = &indirect_validation.draw;
-            indirect_draw_validation.release_dst_entries(self.dst_entries.drain(..));
+            // BENILLA: a destination made larger than the pool's size for one
+            // multi-draw-indirect-count is destroyed, not pooled. This runs once the command
+            // buffer has completed (`EncoderInFlight` holds these resources until then), which
+            // is what makes pooling the others safe as well.
+            let (pooled, oversized): (Vec<_>, Vec<_>) = self
+                .dst_entries
+                .drain(..)
+                .partition(|entry| entry.size == BUFFER_SIZE.get());
+            for entry in oversized {
+                unsafe {
+                    self.device.raw().destroy_bind_group(entry.bind_group);
+                    self.device.raw().destroy_buffer(entry.buffer);
+                }
+            }
+            indirect_draw_validation.release_dst_entries(pooled.into_iter());
             indirect_draw_validation.release_metadata_entries(self.metadata_entries.drain(..));
         }
     }
@@ -823,6 +862,53 @@ impl DrawResources {
         };
         let entry_data = Self::get_subrange_impl(ensure_entry, current_entry, size)?;
         Ok((entry_data.index, entry_data.offset))
+    }
+
+    /// BENILLA: a contiguous range of `size` bytes in one destination buffer, for the
+    /// rewritten arguments of one multi-draw-indirect-count, which `ExecuteIndirect` reads as
+    /// one array. A range that fits a pooled buffer comes from the pool as any other draw's
+    /// does (`get_subrange_impl` never splits a range); a larger one gets a buffer of its own,
+    /// after which the next range starts a new pooled buffer.
+    fn get_dst_contiguous_subrange(
+        &mut self,
+        size: u64,
+        current_entry: &mut Option<CurrentEntry>,
+    ) -> Result<(usize, u64), RenderPassErrorInner> {
+        if size <= BUFFER_SIZE.get() {
+            return Ok(self.get_dst_subrange(size, current_entry)?);
+        }
+        let max_binding_size = self.device.limits.max_storage_buffer_binding_size;
+        if size > max_binding_size {
+            return Err(RenderPassErrorInner::IndirectCountTooLargeForRewrite {
+                size,
+                max_binding_size,
+            });
+        }
+        let indirect_draw_validation = &self.device.indirect_validation.as_ref().unwrap().draw;
+        let entry = create_sized_buffer_and_bind_group(
+            self.device.raw(),
+            wgt::BufferSize::new(size).unwrap(),
+            wgt::BufferUses::INDIRECT | wgt::BufferUses::STORAGE_READ_WRITE,
+            indirect_draw_validation.dst_bind_group_layout.as_ref(),
+            hal_label(
+                Some("(wgpu internal) Indirect draw validation destination buffer"),
+                self.device.instance_flags,
+            ),
+            hal_label(
+                Some("(wgpu internal) Indirect draw validation destination bind group layout"),
+                self.device.instance_flags,
+            ),
+        )
+        .map_err(DeviceError::from_hal)?;
+        // `get_subrange_impl` only ever appends the entry after `current_entry`, so the new
+        // buffer's index is the length, and marking it full sends the next range to a new one.
+        let index = self.dst_entries.len();
+        self.dst_entries.push(entry);
+        *current_entry = Some(CurrentEntry {
+            index,
+            offset: BUFFER_SIZE.get(),
+        });
+        Ok((index, 0))
     }
 
     fn get_metadata_subrange(
@@ -958,7 +1044,10 @@ impl DrawIndirectValidationBatch {
 
 /// Accumulates all needed data needed to validate indirect draws.
 pub(crate) struct DrawBatcher {
-    batches: FastHashMap<(TrackerIndex, u64, usize), DrawIndirectValidationBatch>,
+    // BENILLA: the key's last element is the `BUFFER_SIZE` window of the destination buffer
+    // an entry writes to, always 0 in a pooled buffer. It keeps a batch's metadata within one
+    // metadata buffer when a multi-draw-indirect-count's destination is larger than that.
+    batches: FastHashMap<(TrackerIndex, u64, usize, u64), DrawIndirectValidationBatch>,
     current_dst_entry: Option<CurrentEntry>,
 }
 
@@ -989,6 +1078,81 @@ impl DrawBatcher {
         let (dst_resource_index, dst_offset) = indirect_draw_validation_resources
             .get_dst_subrange(stride, &mut self.current_dst_entry)?;
 
+        self.record(
+            device,
+            src_buffer,
+            offset,
+            family,
+            vertex_or_index_limit,
+            instance_limit,
+            dst_resource_index,
+            dst_offset,
+        );
+
+        Ok((dst_resource_index, dst_offset))
+    }
+
+    /// BENILLA: add the `count` indirect draws of one multi-draw-indirect-count, their
+    /// rewritten arguments laid out back to back in one destination buffer, so that one
+    /// `draw_*_indirect_count` with the caller's count buffer reads them as one array.
+    ///
+    /// Every one of the `count` (the call's `max_count`) is rewritten, since the count itself
+    /// is only known on the GPU; those past it are never executed.
+    ///
+    /// Returns the index of the destination buffer in `indirect_draw_validation_resources` and
+    /// the offset of the first draw's arguments.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_contiguous(
+        &mut self,
+        indirect_draw_validation_resources: &mut DrawResources,
+        device: &Device,
+        src_buffer: &Arc<crate::resource::Buffer>,
+        offset: u64,
+        count: u32,
+        family: crate::command::DrawCommandFamily,
+        vertex_or_index_limit: u64,
+        instance_limit: u64,
+    ) -> Result<(usize, u64), RenderPassErrorInner> {
+        let src_stride = crate::command::get_src_stride_of_indirect_args(family);
+        let dst_stride = crate::command::get_dst_stride_of_indirect_args(device.backend(), family);
+
+        let (dst_resource_index, dst_offset) = indirect_draw_validation_resources
+            .get_dst_contiguous_subrange(
+                dst_stride * u64::from(count),
+                &mut self.current_dst_entry,
+            )?;
+
+        for i in 0..u64::from(count) {
+            self.record(
+                device,
+                src_buffer,
+                offset + src_stride * i,
+                family,
+                vertex_or_index_limit,
+                instance_limit,
+                dst_resource_index,
+                dst_offset + dst_stride * i,
+            );
+        }
+
+        Ok((dst_resource_index, dst_offset))
+    }
+
+    /// BENILLA: upstream's `add` past the destination's allocation, so `add_contiguous` can
+    /// share it: the metadata entry that rewrites the draw at `offset` in `src_buffer` into
+    /// `dst_offset` of destination `dst_resource_index`.
+    #[allow(clippy::too_many_arguments)]
+    fn record(
+        &mut self,
+        device: &Device,
+        src_buffer: &Arc<crate::resource::Buffer>,
+        offset: u64,
+        family: crate::command::DrawCommandFamily,
+        vertex_or_index_limit: u64,
+        instance_limit: u64,
+        dst_resource_index: usize,
+        dst_offset: u64,
+    ) {
         let buffer_size = src_buffer.size;
         let limits = device.adapter.limits();
         let (src_dynamic_offset, src_offset) = calculate_src_offsets(buffer_size, &limits, offset);
@@ -1007,6 +1171,7 @@ impl DrawBatcher {
             src_buffer_tracker_index,
             src_dynamic_offset,
             dst_resource_index,
+            dst_offset / BUFFER_SIZE.get(),
         )) {
             hashbrown::hash_map::Entry::Occupied(mut occupied_entry) => {
                 occupied_entry.get_mut().entries.push(entry)
@@ -1026,7 +1191,5 @@ impl DrawBatcher {
                 });
             }
         }
-
-        Ok((dst_resource_index, dst_offset))
     }
 }

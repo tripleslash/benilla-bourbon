@@ -1495,10 +1495,37 @@ impl crate::CommandEncoder for super::CommandEncoder {
         count_offset: wgt::BufferAddress,
         max_count: u32,
     ) {
-        unsafe { self.prepare_draw(0, 0) };
+        // BENILLA: as `draw_indirect` does. Where the layout has command signatures that
+        // set the special constants per draw, wgpu-core has rewritten the arguments into that
+        // signature's layout (`[first_vertex, first_instance, 0]` before each draw's
+        // arguments; `multi_draw_indirect_count` in the vendored wgpu-core), so each draw
+        // gets its own `first_vertex` / `base_vertex` and `first_instance`. Upstream always
+        // used the device's plain signature and set both to 0 for every draw
+        // (gfx-rs/wgpu#7974).
+        if self
+            .pass
+            .layout
+            .special_constants
+            .as_ref()
+            .and_then(|sc| sc.indirect_cmd_signatures.as_ref())
+            .is_some()
+        {
+            unsafe { self.prepare_vertex_buffers() };
+            self.update_root_elements();
+        } else {
+            unsafe { self.prepare_draw(0, 0) };
+        }
+        let cmd_signature = &self
+            .pass
+            .layout
+            .special_constants
+            .as_ref()
+            .and_then(|sc| sc.indirect_cmd_signatures.as_ref())
+            .unwrap_or_else(|| &self.shared.cmd_signatures)
+            .draw;
         unsafe {
             self.list.as_ref().unwrap().ExecuteIndirect(
-                &self.shared.cmd_signatures.draw,
+                cmd_signature,
                 max_count,
                 &buffer.resource,
                 offset,
@@ -1515,10 +1542,37 @@ impl crate::CommandEncoder for super::CommandEncoder {
         count_offset: wgt::BufferAddress,
         max_count: u32,
     ) {
-        unsafe { self.prepare_draw(0, 0) };
+        // BENILLA: as `draw_indexed_indirect` does. Where the layout has command signatures that
+        // set the special constants per draw, wgpu-core has rewritten the arguments into that
+        // signature's layout (`[first_vertex, first_instance, 0]` before each draw's
+        // arguments; `multi_draw_indirect_count` in the vendored wgpu-core), so each draw
+        // gets its own `first_vertex` / `base_vertex` and `first_instance`. Upstream always
+        // used the device's plain signature and set both to 0 for every draw
+        // (gfx-rs/wgpu#7974).
+        if self
+            .pass
+            .layout
+            .special_constants
+            .as_ref()
+            .and_then(|sc| sc.indirect_cmd_signatures.as_ref())
+            .is_some()
+        {
+            unsafe { self.prepare_vertex_buffers() };
+            self.update_root_elements();
+        } else {
+            unsafe { self.prepare_draw(0, 0) };
+        }
+        let cmd_signature = &self
+            .pass
+            .layout
+            .special_constants
+            .as_ref()
+            .and_then(|sc| sc.indirect_cmd_signatures.as_ref())
+            .unwrap_or_else(|| &self.shared.cmd_signatures)
+            .draw_indexed;
         unsafe {
             self.list.as_ref().unwrap().ExecuteIndirect(
-                &self.shared.cmd_signatures.draw_indexed,
+                cmd_signature,
                 max_count,
                 &buffer.resource,
                 offset,

@@ -110,8 +110,15 @@ web-task = { path = "third_party/web-task" }
 # cpal 0.17's 0.4, and a lock holds one `links = "alsa"` (`third_party/alsa-0.9/BENILLA.md`).
 alsa = { path = "third_party/alsa-0.9" }
 # wgpu-hal 29.0.4, patched so a presentation stall past wgpu-core's 1 s frame timeout is waited out
-# and not turned into a lost device (`third_party/wgpu-hal/BENILLA.md`).
+# and not turned into a lost device, and so DX12 count draws execute with the pipeline layout's
+# per-draw special-constants signature (`third_party/wgpu-hal/BENILLA.md`).
 wgpu-hal = { path = "third_party/wgpu-hal" }
+# wgpu-core 29.0.4, patched so DX12 multi-draw-indirect-count draws give each draw its own
+# `first_instance` and `base_vertex`: its arguments go through the indirect-draw rewrite that
+# carries them to the shader, which upstream runs for plain multi-draw only, and that rewrite
+# runs on DX12 whatever `VALIDATION_INDIRECT_CALL` says (gfx-rs/wgpu#7974,
+# `third_party/wgpu-core/BENILLA.md`).
+wgpu-core = { path = "third_party/wgpu-core" }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]
