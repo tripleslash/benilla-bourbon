@@ -112,9 +112,11 @@
   #benilla { display: block; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
              transform-origin: 0 0; }
   /* Top-right, over the canvas: the canvas is the whole viewport, so there is no bar to sit in. */
-  #fs { position: fixed; top: 0; right: 0; z-index: 10; padding: .3rem .6rem; color: #ddd;
-        background: rgba(0,0,0,.55); border: 0; border-bottom-left-radius: 6px; cursor: pointer;
-        font: 12px system-ui, sans-serif; text-decoration: underline; }
+  #bar { position: fixed; top: 0; right: 0; z-index: 10; display: flex;
+         background: rgba(0,0,0,.55); border-bottom-left-radius: 6px; }
+  #bar > button, #bar > a { padding: .3rem .6rem; color: #ddd; background: none; border: 0;
+        cursor: pointer; font: 12px system-ui, sans-serif; text-decoration: underline; }
+  #bar > [hidden] { display: none; }
 </style>
 <script>
   // Sound: the browser suspends any AudioContext created before the first user gesture (autoplay
@@ -247,7 +249,13 @@
     };
   }
 </script>
-<button type="button" id="fs" title="Full screen. Captures Esc, Tab and Ctrl+W for the game — press and hold Esc to leave.">full screen</button>
+<div id="bar">
+  <!-- fork: desktop — shown once `wow-reforged.exe.parts.json` is found on the site
+       (scripts/stage-desktop.sh); web/platform.js's `installDesktopDownload` assembles the parts. -->
+  <a id="desktop" href="wow-reforged.exe.parts.json" download="wow-reforged.exe" hidden
+     title="Download the Windows desktop client, wow-reforged.exe.">desktop client</a>
+  <button type="button" id="fs" title="Full screen. Captures Esc, Tab and Ctrl+W for the game — press and hold Esc to leave.">full screen</button>
+</div>
 <canvas id="benilla"></canvas>
 <script>
   // Dev page: allow `?user=&pass=&char=` links to log in. A hosting page that fetched the
@@ -279,8 +287,12 @@
   // see web/platform.js. Durable storage is not asked for here; `packs.js::bootstrap` does it on
   // the boot path, ahead of the service worker's first write.
   import('./platform.js')
-    .then(({ installFullscreenToggle, holdMouseNavigationButtons }) => {
+    .then(({ installFullscreenToggle, holdMouseNavigationButtons, installDesktopDownload }) => {
       installFullscreenToggle(document.getElementById('fs'), {
+        focusTarget: document.getElementById('benilla'),
+      });
+      // Optional-called, like the line below.
+      installDesktopDownload?.(document.getElementById('desktop'), {
         focusTarget: document.getElementById('benilla'),
       });
       // Optional-called: a cached platform.js from before this export must not throw here.

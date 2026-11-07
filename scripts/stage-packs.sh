@@ -198,6 +198,11 @@ if [ -f "${SITE}/wow_bg.wasm" ]; then
   echo "split wow_bg.wasm (${bytes} B) into $(ls "${SITE}"/wow.part*.wasm | wc -l) parts"
 fi
 
+# fork: desktop — the desktop client, `target/desktop/wow-reforged.exe`, split the same way into
+# `wow-reforged.exe.partNN` + `wow-reforged.exe.parts.json` for the page's "Desktop client" link.
+# The clear above removed the last staging, so this restores it; absent exe is an ordinary state.
+bash scripts/stage-desktop.sh
+
 # The class of bug, not the instance: anything else that grows past the cap fails the same way, and
 # it fails inside an upload to the static host minutes into an upload rather than here. `-maxdepth 1` on
 # purpose — the packs under `data/` are capped by the packer (measured max 9.49 MiB) and walking a

@@ -216,6 +216,37 @@ if ([IO.File]::Exists($wasmAbs)) {
     Write-Host "split wow_bg.wasm ($bytes B) into $($parts.Length) parts"
 }
 
+# fork: desktop - the desktop client split the same way into 24 MiB `wow-reforged.exe.partNN` files
+# plus `wow-reforged.exe.parts.json`, for the page's "Desktop client" link. The twin of
+# scripts/stage-desktop.sh; absent exe is an ordinary state.
+Get-ChildItem -LiteralPath $siteAbs -File -Force |
+    Where-Object { $_.Name -clike 'wow-reforged.exe.part*' } | ForEach-Object { [IO.File]::Delete($_.FullName) }
+$exeAbs = Resolve-Repo 'target/desktop/wow-reforged.exe'
+if ([IO.File]::Exists($exeAbs)) {
+    $bytes = (New-Object IO.FileInfo $exeAbs).Length
+    $buf = New-Object byte[] $WASM_PART_MAX
+    $exeParts = New-Object Collections.Generic.List[string]
+    $in = [IO.File]::OpenRead($exeAbs)
+    try {
+        while ($true) {
+            $n = Read-Full $in $buf
+            if ($n -le 0) { break }
+            $name = 'wow-reforged.exe.part{0:d2}' -f $exeParts.Count
+            $out = [IO.File]::Create([IO.Path]::Combine($siteAbs, $name))
+            try { $out.Write($buf, 0, $n) } finally { $out.Dispose() }
+            $exeParts.Add($name)
+        }
+    } finally {
+        $in.Dispose()
+    }
+    $quoted = @($exeParts | ForEach-Object { '"' + $_ + '"' })
+    $json = '{"bytes":' + $bytes + ',"parts":[' + ($quoted -join ',') + ']}' + "`n"
+    [IO.File]::WriteAllText([IO.Path]::Combine($siteAbs, 'wow-reforged.exe.parts.json'), $json, (New-Object Text.UTF8Encoding $false))
+    Write-Host "split wow-reforged.exe ($bytes B) into $($exeParts.Count) parts"
+} else {
+    Write-Err 'note: no target/desktop/wow-reforged.exe - staging without the desktop client (scripts/build-desktop.sh)'
+}
+
 # Nothing at the top of the site may exceed the cap; the packs are capped by the packer.
 $oversize = @(Get-ChildItem -LiteralPath $siteAbs -File -Force | Where-Object { $_.Length -gt $WASM_PART_MAX })
 if ($oversize.Count -gt 0) {

@@ -29,8 +29,39 @@ WASM_PART_MAX = 24 * 1024 * 1024
 KEEP = ("data", "data-hd", "data-turtle", "data-reforged")
 
 
+DESKTOP_EXE = "target/desktop/wow-reforged.exe"
+DESKTOP_NAME = "wow-reforged.exe"
+
+
 def out(text):
     print(text, flush=True)
+
+
+def stage_desktop():
+    """fork: desktop — split wow-reforged.exe into 24 MiB `wow-reforged.exe.partNN` files plus
+    `wow-reforged.exe.parts.json`, for the page's "Desktop client" link. The twin of
+    scripts/stage-desktop.sh; absent exe is an ordinary state."""
+    for name in os.listdir(SITE):
+        if name.startswith(DESKTOP_NAME + ".part"):
+            os.remove(os.path.join(SITE, name))
+    if not os.path.isfile(DESKTOP_EXE):
+        err("note: no %s — staging without the desktop client (scripts/build-desktop.sh)" % DESKTOP_EXE)
+        return
+    size = os.path.getsize(DESKTOP_EXE)
+    parts = []
+    with open(DESKTOP_EXE, "rb") as f:
+        while True:
+            buf = f.read(WASM_PART_MAX)
+            if not buf:
+                break
+            name = "%s.part%02d" % (DESKTOP_NAME, len(parts))
+            with open(os.path.join(SITE, name), "wb") as part:
+                part.write(buf)
+            parts.append(name)
+    manifest = '{"bytes":%d,"parts":[%s]}\n' % (size, ",".join('"%s"' % p for p in parts))
+    with open(os.path.join(SITE, DESKTOP_NAME + ".parts.json"), "wb") as f:
+        f.write(manifest.encode("utf-8"))
+    out("split %s (%d B) into %d parts" % (DESKTOP_NAME, size, len(parts)))
 
 
 def err(text):
@@ -232,6 +263,9 @@ def main():
         with open(os.path.join(SITE, "wow.parts.json"), "wb") as f:
             f.write(manifest.encode("utf-8"))
         out("split wow_bg.wasm (%d B) into %d parts" % (size, len(parts)))
+
+    # fork: desktop — the desktop client split the same way (scripts/stage-desktop.sh, the bash twin).
+    stage_desktop()
 
     # Nothing at the top of the site may exceed the cap; the packs are capped by the packer.
     with os.scandir(SITE) as it:

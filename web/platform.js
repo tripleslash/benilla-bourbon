@@ -1,5 +1,5 @@
 // platform.js — browser-platform glue the client cannot ask for itself: full-screen key capture,
-// and holding the page against the mouse's side buttons.
+// holding the page against the mouse's side buttons, and (fork) the desktop client download.
 // Imported by the hosting page (web/index.html), the same way boot.js is.
 //
 // Everything here is best-effort. Every entry point is feature-detected and every failure is
@@ -111,4 +111,86 @@ export function holdMouseNavigationButtons(target = window) {
   } catch (e) {
     console.warn('platform.js: history pin unavailable:', e);
   }
+}
+
+// fork: desktop — the "Desktop client" link: download `wow-reforged.exe`, which the site holds as
+// 24 MiB parts (a static host refuses any asset over 25 MiB) named by `wow-reforged.exe.parts.json`,
+// `{"bytes":N,"parts":[...]}` (scripts/stage-desktop.sh). The link stays hidden unless that
+// manifest is found, so a site without the exe (or `trunk serve`) shows nothing. A click fetches
+// the parts in order, shows the progress in the link's label, checks the byte count against the
+// manifest and saves the joined bytes as one file through a blob URL.
+//
+// `focusTarget` (the canvas) gets focus back afterwards, for the reason `installFullscreenToggle`
+// gives.
+export function installDesktopDownload(link, {
+  manifest = 'wow-reforged.exe.parts.json',
+  filename = 'wow-reforged.exe',
+  focusTarget = null,
+} = {}) {
+  if (!link) return;
+  const label = link.textContent;
+  const manifestUrl = new URL(manifest, document.baseURI);
+  // `no-cache`: the parts are rewritten in place under the same names by every build, and a part
+  // from one build joined to another's would be a corrupt exe that only fails when it is run.
+  const readManifest = async () => {
+    const r = await fetch(manifestUrl, { cache: 'no-cache' });
+    if (!r.ok) throw new Error(`${manifest}: HTTP ${r.status}`);
+    const m = await r.json();
+    if (!Number.isSafeInteger(m.bytes) || !Array.isArray(m.parts) || m.parts.length === 0) {
+      throw new Error(`${manifest}: malformed`);
+    }
+    return m;
+  };
+  readManifest().then(() => { link.hidden = false; }, () => {});
+
+  let busy = false;
+  link.addEventListener('click', async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    busy = true;
+    let failed = false;
+    try {
+      const m = await readManifest();
+      let got = 0;
+      const show = () => {
+        link.textContent = `${label} ${Math.min(100, Math.floor((got * 100) / m.bytes))}%`;
+      };
+      show();
+      const blobs = [];
+      for (const part of m.parts) {
+        const r = await fetch(new URL(part, manifestUrl), { cache: 'no-cache' });
+        if (!r.ok || !r.body) throw new Error(`${part}: HTTP ${r.status}`);
+        const reader = r.body.getReader();
+        const chunks = [];
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          got += value.byteLength;
+          show();
+        }
+        blobs.push(new Blob(chunks));
+      }
+      if (got !== m.bytes) throw new Error(`got ${got} B, the manifest says ${m.bytes} B`);
+      const url = URL.createObjectURL(new Blob(blobs, { type: 'application/octet-stream' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // The save dialog reads the URL asynchronously; a minute is far past it.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      failed = true;
+      console.warn('desktop client download:', err);
+      link.textContent = `${label}: download failed`;
+      setTimeout(() => { link.textContent = label; }, 5_000);
+    } finally {
+      if (!failed) link.textContent = label;
+      busy = false;
+      focusTarget?.focus?.();
+    }
+  });
 }

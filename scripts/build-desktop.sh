@@ -65,3 +65,9 @@ out="target/desktop"
 mkdir -p "$out"
 cp "target/$triple/$profile/wow-reforged.exe" "$out/wow-reforged.exe"
 echo "built $out/wow-reforged.exe ($(wc -c < "$out/wow-reforged.exe") bytes)"
+
+# Stage it into web/site/ as `wow-reforged.exe.partNN` for an upload to the static host and the page's
+# "Desktop client" link. Skipped for an instrumented PGO build, which is not one to ship.
+if [ "${pgo}" != generate ]; then
+  bash scripts/stage-desktop.sh "$out/wow-reforged.exe"
+fi

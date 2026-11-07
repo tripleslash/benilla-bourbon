@@ -1,4 +1,4 @@
-# Static-host headers (the `_headers` format). Sixteen rules of the 100 allowed.
+# Static-host headers (the `_headers` format). Seventeen rules of the 100 allowed.
 #
 # Hosted from web/site/_headers (staged out of Trunk's dist by scripts/stage-packs.sh).
 
@@ -128,6 +128,12 @@
   #
   # At the root, not under /data: it ships with the build (`web/config.json` -> Trunk -> dist), not
   # with the container, so `sw.js` — scoped to /data/ — never sees it and needs no exception for it.
+  Cache-Control: no-cache
+
+/wow-reforged.exe.*
+  # fork: desktop — the desktop client's parts and their manifest (scripts/stage-desktop.sh). Every
+  # build rewrites them in place under the same names, and a part held from an older build joined to
+  # a newer one is a corrupt exe, so each is revalidated (an ETag match, no body) on every download.
   Cache-Control: no-cache
 
 /favicon.ico
