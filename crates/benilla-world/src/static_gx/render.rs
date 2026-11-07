@@ -911,33 +911,6 @@ fn assemble_region(
 }
 
 impl GxCellGpu {
-    /// Every run of this region, merged across selection keys, into `pass`, whose vertex buffer
-    /// is this region's slice starting at `base_vertex`; binds the region's own index buffer.
-    /// `pipeline` picks the pipeline for `(cutout, two_sided)`; a run it has none for is skipped.
-    /// `counter` is the [`super::GX_DRAWS`] slot the draws count in.
-    fn draw_whole<'w>(
-        &'w self,
-        pass: &mut bevy::render::render_phase::TrackedRenderPass<'w>,
-        base_vertex: u32,
-        pipeline: impl Fn(bool, bool) -> Option<&'w RenderPipeline>,
-        counter: usize,
-    ) {
-        pass.set_index_buffer(self.indices.slice(..), IndexFormat::Uint32);
-        for run in &self.whole {
-            let Some(p) = pipeline(run.cutout, run.two_sided) else {
-                continue;
-            };
-            pass.set_render_pipeline(p);
-            pass.set_bind_group(1, &self.bind_groups[run.slot].1, &[]);
-            crate::static_gx::count_draw(counter);
-            pass.draw_indexed(
-                run.index_range.clone(),
-                i32::try_from(base_vertex).unwrap_or(0),
-                0..1,
-            );
-        }
-    }
-
     /// Whether every texture this region held items back for is resident now, so a re-assembly
     /// can draw them; a complete region never re-assembles.
     fn wants_reassembly(&self, images: &RenderAssets<GpuImage>) -> bool {
@@ -1086,61 +1059,59 @@ pub(crate) fn static_gx_pass(
             return;
         };
         let allocator = world.resource::<MeshAllocator>();
-        // WMO regions first, then the doodad phase near-first, the 1.12 client's WMO-then-doodad
-        // drain order. Cells draw whole; a region draws only its admitted runs.
-        let mut resolved: Vec<(&GxCellGpu, &GxCellDraw, Option<&GxSel>)> = Vec::new();
+        // All four pipelines or none: a region drawing only its opaque half would flash its
+        // cutout content off for a frame.
+        let Some(ready) = pipeline_table(pipeline_cache, &pipes.pipelines) else {
+            return;
+        };
+        // …and the prepass with them: a colour pipeline testing `Equal` against depth nobody laid
+        // would draw nothing at all.
+        let Some(ready_pre) = pipeline_table(pipeline_cache, &pipes.prepass) else {
+            return;
+        };
+        // fork: one draw list for both passes — gathered and state-sorted once, so the prepass
+        // and the colour pass cannot disagree about what was drawn (`batch`).
+        // WMO regions are phase 0 and the doodad phase 1, the 1.12 client's WMO-then-doodad drain
+        // order; inside a phase the draws go by state, not near-first. Cells draw whole; a region
+        // draws only its admitted runs.
+        let mut batch = GxBatch::new(world);
         for (entity, sel) in &gx.visible_wmos {
             if let (Some(gpu), Some(draw)) = (cache.wmos.get(entity), gx.wmos.get(entity)) {
-                resolved.push((gpu, draw, Some(sel)));
+                if let Some(r) = batch.region(gpu, draw, allocator) {
+                    batch.push_admitted(r, 0, sel, pipe_class);
+                }
             }
         }
         for vis in &gx.visible {
             match vis {
                 GxDoodadVis::Cell(cell) => {
                     if let (Some(gpu), Some(draw)) = (cache.cells.get(cell), gx.cells.get(cell)) {
-                        resolved.push((gpu, draw, None));
+                        if let Some(r) = batch.region(gpu, draw, allocator) {
+                            batch.push_whole(r, 1, pipe_class);
+                        }
                     }
                 }
                 GxDoodadVis::Prop(entity, sel) => {
                     if let (Some(gpu), Some(draw)) = (cache.props.get(entity), gx.props.get(entity))
                     {
-                        resolved.push((gpu, draw, Some(sel)));
+                        if let Some(r) = batch.region(gpu, draw, allocator) {
+                            batch.push_admitted(r, 1, sel, pipe_class);
+                        }
                     }
                 }
             }
         }
-        if resolved.is_empty() {
+        if !batch.has_regions() {
             return;
         }
-        // All four pipelines or none: a region drawing only its opaque half would flash its
-        // cutout content off for a frame.
-        let mut ready: HashMap<(bool, bool), &RenderPipeline> = HashMap::default();
-        for (k, id) in &pipes.pipelines {
-            match pipeline_cache.get_render_pipeline(*id) {
-                Some(p) => {
-                    ready.insert(*k, p);
-                }
-                None => return,
-            }
-        }
-        // …and the prepass with them: a colour pipeline testing `Equal` against depth nobody laid
-        // would draw nothing at all.
-        let mut ready_pre: HashMap<(bool, bool), &RenderPipeline> = HashMap::default();
-        for (k, id) in &pipes.prepass {
-            match pipeline_cache.get_render_pipeline(*id) {
-                Some(p) => {
-                    ready_pre.insert(*k, p);
-                }
-                None => return,
-            }
-        }
+        batch.finish();
         let view_offsets = &view_bind.main_offsets;
         // `render/static_gx/elapsed_gpu` on Vulkan and DX12: the perf journal's `gpu_static`.
         let diagnostics = render_context.diagnostic_recorder();
         let diagnostics = diagnostics.as_deref();
         // fork: the depth prepass — the same draws in the same order through the depth-only twins,
         // in a pass of its own (it takes the depth clear; the colour pass below then loads it).
-        if !ready_pre.is_empty() {
+        if !pipes.prepass.is_empty() {
             let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
                 label: Some("static_gx_prepass"),
                 color_attachments: &[],
@@ -1151,7 +1122,8 @@ pub(crate) fn static_gx_pass(
             });
             let span = diagnostics.pass_span(&mut pass, "static_gx_prepass");
             pass.set_bind_group(0, &view_bind.main, view_offsets);
-            draw_resolved(&mut pass, &resolved, allocator, &ready_pre, &light_bind.0);
+            pass.set_bind_group(2, &light_bind.0, &[]);
+            batch.emit(&mut pass, &ready_pre, 0);
             span.end(&mut pass);
         }
         let depth_attachment = depth.get_attachment(StoreOp::Store);
@@ -1166,54 +1138,24 @@ pub(crate) fn static_gx_pass(
         });
         let span = diagnostics.pass_span(&mut pass, "static_gx");
         pass.set_bind_group(0, &view_bind.main, view_offsets);
-        draw_resolved(&mut pass, &resolved, allocator, &ready, &light_bind.0);
+        pass.set_bind_group(2, &light_bind.0, &[]);
+        batch.emit(&mut pass, &ready, 0);
         span.end(&mut pass);
     }
 }
 
-/// Every admitted run of the resolved cells, regions and props, through `pipes` keyed
-/// `(cutout, two_sided)` — the one draw loop the prepass and the colour pass share, so the two can
-/// never disagree about what was drawn.
-fn draw_resolved<'w>(
-    pass: &mut bevy::render::render_phase::TrackedRenderPass<'w>,
-    resolved: &[(&'w GxCellGpu, &'w GxCellDraw, Option<&'w GxSel>)],
-    allocator: &'w MeshAllocator,
-    pipes: &HashMap<(bool, bool), &'w RenderPipeline>,
-    light_bind: &'w BindGroup,
-) {
-    pass.set_bind_group(2, light_bind, &[]);
-    for (gpu, draw, sel) in resolved {
-        let Some(vslice) = allocator.mesh_vertex_slice(&draw.mesh.id()) else {
-            continue;
-        };
-        pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-        // A cell draws whole; a region only its admitted selection keys.
-        let Some(sel) = sel else {
-            gpu.draw_whole(
-                pass,
-                vslice.range.start,
-                |cut, two| pipes.get(&(cut, two)).copied(),
-                0,
-            );
-            continue;
-        };
-        pass.set_index_buffer(gpu.indices.slice(..), IndexFormat::Uint32);
-        for run in &gpu.runs {
-            if let Some(group) = run.group {
-                if !sel.drawn.get(usize::from(group)).copied().unwrap_or(false) {
-                    continue;
-                }
-            }
-            pass.set_render_pipeline(pipes[&(run.cutout, run.two_sided)]);
-            pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
-            crate::static_gx::count_draw(0);
-            pass.draw_indexed(
-                run.index_range.clone(),
-                i32::try_from(vslice.range.start).unwrap_or(0),
-                0..1,
-            );
-        }
+/// The pipelines of `ids` as a table in [`batch::pipe_class`] order, `None` where a key has none;
+/// `None` altogether while any of them is still compiling.
+fn pipeline_table<'a>(
+    pipeline_cache: &'a PipelineCache,
+    ids: &HashMap<(bool, bool), CachedRenderPipelineId>,
+) -> Option<[Option<&'a RenderPipeline>; 4]> {
+    let mut table = [None; 4];
+    for (&(cutout, two_sided), id) in ids {
+        let class = pipe_class(cutout, two_sided)?;
+        table[usize::from(class)] = Some(pipeline_cache.get_render_pipeline(*id)?);
     }
+    Some(table)
 }
 
 /// Wire the render half (called by the plugin only when armed).
@@ -1232,14 +1174,19 @@ pub(super) fn build(app: &mut App) {
     render_app
         .init_resource::<GxGpuCache>()
         .init_resource::<GxTexturePool>()
+        .init_resource::<batch::GxDrawPool>()
         .add_systems(
             bevy::render::RenderStartup,
-            init_pipelines.after(bevy::pbr::MeshPipelineSystems),
+            (
+                init_pipelines.after(bevy::pbr::MeshPipelineSystems),
+                batch::init_indirect,
+            ),
         )
         .add_systems(
             Render,
             (
                 prepare_static_gx.in_set(RenderSystems::PrepareResources),
+                batch::prepare_indirect.in_set(RenderSystems::PrepareResources),
                 prepare_view_bind.in_set(RenderSystems::PrepareBindGroups),
             ),
         )
@@ -1388,6 +1335,9 @@ mod tests {
     }
 }
 
+// fork: the state-sorted draw list every retained pass issues through, multi-drawn on native.
+mod batch;
+use batch::{pipe_class, GxBatch};
 // fork: modern lighting (FORK.md) — see `modern/HOOKS.md`.
 mod modern_shadow;
 pub(crate) use modern_shadow::gx_shadow_pass;

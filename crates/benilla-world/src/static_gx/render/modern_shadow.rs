@@ -1113,6 +1113,8 @@ pub(crate) fn gx_shadow_pass(
             return;
         };
         let now = Instant::now();
+        // One draw list, refilled per redrawn layer.
+        let mut batch = GxBatch::new(world);
 
         // The local-light atlas is the layer after the sky map and is drawn below, not here: it is
         // not a cascade, it is not cleared every frame, and no entity is drawn into it.
@@ -1296,24 +1298,21 @@ pub(crate) fn gx_shadow_pass(
                             complete = false;
                         }
                         if let Some((opaque, cutout)) = ready {
-                            for (gpu, draw) in &casters {
+                            // fork: the cascade's casters as one state-sorted list (`batch`):
+                            // depth only, so every run takes the opaque or the cutout pipeline.
+                            batch.clear();
+                            for &(gpu, draw) in &casters {
                                 if outside_cascade(&clip_from_world, draw) {
                                     continue;
                                 }
-                                // The region's own index buffer is bound by `draw_whole`; the mesh gives vertices.
-                                let Some(vslice) = allocator.mesh_vertex_slice(&draw.mesh.id())
-                                else {
+                                let Some(r) = batch.region(gpu, draw, allocator) else {
                                     complete = false;
                                     continue;
                                 };
-                                pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                                gpu.draw_whole(
-                                    &mut pass,
-                                    vslice.range.start,
-                                    |cut, _| Some(if cut { cutout } else { opaque }),
-                                    1,
-                                );
+                                batch.push_whole(r, 0, |cut, _| Some(u8::from(cut)));
                             }
+                            batch.finish();
+                            batch.emit(&mut pass, &[Some(opaque), Some(cutout)], 1);
                         }
                     }
                     span.end(&mut pass);
@@ -1615,6 +1614,7 @@ fn draw_local_atlas(
         if build != 0 {
             let complete = draw_atlas_statics(
                 render_context,
+                world,
                 frame,
                 static_target,
                 view_bind,
@@ -1787,6 +1787,7 @@ fn draw_local_atlas(
 #[allow(clippy::too_many_arguments)]
 fn draw_atlas_statics(
     render_context: &mut RenderContext<'_, '_>,
+    world: &World,
     frame: &ModernShadowFrame,
     view: &TextureView,
     view_bind: &BindGroup,
@@ -1802,6 +1803,8 @@ fn draw_atlas_statics(
     let (opaque, cutout) = pipes;
     let mut complete = 0u32;
     let mut near: Vec<&(&GxCellGpu, &GxCellDraw)> = Vec::new();
+    // fork: one draw list, refilled per face (`batch`).
+    let mut batch = GxBatch::new(world);
     let diagnostics = render_context.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
     let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
@@ -1858,8 +1861,8 @@ fn draw_atlas_statics(
             // fork: P8 — the per-face cull, and the reason the tile is bound LAZILY: a caster
             // reaches this face only if its box touches the face's 90° cone, and a face nothing
             // touches must not pay for a viewport, a scissor and a bind group to draw nothing.
-            let mut set_up = false;
-            for (gpu, draw) in near.iter() {
+            batch.clear();
+            for &&(gpu, draw) in near.iter() {
                 if !face_sees(
                     face,
                     light.pos,
@@ -1868,24 +1871,19 @@ fn draw_atlas_statics(
                 ) {
                     continue;
                 }
-                // The region's own index buffer is bound by `draw_whole`; the mesh gives vertices.
-                let Some(vslice) = allocator.mesh_vertex_slice(&draw.mesh.id()) else {
+                let Some(r) = batch.region(gpu, draw, allocator) else {
                     whole = false;
                     continue;
                 };
-                if !set_up {
-                    set_atlas_tile(&mut pass, slot, face, tile);
-                    pass.set_bind_group(0, view_bind, &[offset]);
-                    set_up = true;
-                }
-                pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                gpu.draw_whole(
-                    &mut pass,
-                    vslice.range.start,
-                    |cut, _| Some(if cut { cutout } else { opaque }),
-                    1,
-                );
+                batch.push_whole(r, 0, |cut, _| Some(u8::from(cut)));
             }
+            if !batch.has_regions() {
+                continue;
+            }
+            set_atlas_tile(&mut pass, slot, face, tile);
+            pass.set_bind_group(0, view_bind, &[offset]);
+            batch.finish();
+            batch.emit(&mut pass, &[Some(opaque), Some(cutout)], 1);
         }
         if whole {
             complete |= bit;

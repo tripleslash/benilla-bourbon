@@ -922,10 +922,35 @@ pub(crate) fn gi_voxel_pass(
             }
         }
 
+        // fork: the raster pipelines as the batch's four-entry table (`batch::pipe_class` order).
+        let raster = super::batch::PIPE_KEYS.map(|key| {
+            pipes
+                .raster
+                .get(&key)
+                .and_then(|id| pipeline_cache.get_render_pipeline(*id))
+        });
+        // One draw list per job, state-sorted once and issued by each of the job's axis passes.
+        let mut batch = GxBatch::new(world);
         for job in &state.jobs {
             let voxel = tier.voxel[job.level];
             let (world_lo, world_hi) = level_box(job.lo, job.hi, voxel);
             let span = (job.hi - job.lo).max(IVec3::ONE);
+            batch.clear();
+            for &(gpu, draw) in &casters {
+                let center = draw.origin + Vec3::from(draw.aabb.center);
+                if !overlaps(
+                    center,
+                    Vec3::from(draw.aabb.half_extents),
+                    world_lo,
+                    world_hi,
+                ) {
+                    continue;
+                }
+                if let Some(r) = batch.region(gpu, draw, allocator) {
+                    batch.push_whole(r, 0, pipe_class);
+                }
+            }
+            batch.finish();
             {
                 let encoder = render_context.command_encoder();
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -962,32 +987,7 @@ pub(crate) fn gi_voxel_pass(
                 let timing = diagnostics.pass_span(&mut pass, "modern_gi_voxelize");
                 pass.set_bind_group(0, view_bind, &[*offset]);
                 pass.set_bind_group(2, store_bind, &[]);
-                for (gpu, draw) in &casters {
-                    let center = draw.origin + Vec3::from(draw.aabb.center);
-                    if !overlaps(
-                        center,
-                        Vec3::from(draw.aabb.half_extents),
-                        world_lo,
-                        world_hi,
-                    ) {
-                        continue;
-                    }
-                    let Some(vslice) = allocator.mesh_vertex_slice(&draw.mesh.id()) else {
-                        continue;
-                    };
-                    pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                    gpu.draw_whole(
-                        &mut pass,
-                        vslice.range.start,
-                        |cut, two| {
-                            pipes
-                                .raster
-                                .get(&(cut, two))
-                                .and_then(|id| pipeline_cache.get_render_pipeline(*id))
-                        },
-                        2,
-                    );
-                }
+                batch.emit(&mut pass, &raster, 2);
                 timing.end(&mut pass);
             }
         }

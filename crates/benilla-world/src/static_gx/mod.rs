@@ -135,12 +135,29 @@ pub(crate) static GX_PERF: [std::sync::atomic::AtomicU64; 5] = [
 ];
 
 /// Draw calls, `WOW_GX_PERF` only: the colour pass and its depth prepass, the shadow cascades,
-/// the GI voxelizer. Each costs its encode in the pass's `CommandEncoder::finish`.
+/// the GI voxelizer. Each costs its encode in the pass's `CommandEncoder::finish`; a multi-draw
+/// counts once.
 pub(crate) static GX_DRAWS: [std::sync::atomic::AtomicU64; 3] = [
     std::sync::atomic::AtomicU64::new(0),
     std::sync::atomic::AtomicU64::new(0),
     std::sync::atomic::AtomicU64::new(0),
 ];
+
+/// Runs gathered, `WOW_GX_PERF` only, slotted like [`GX_DRAWS`]: what the passes asked to draw
+/// before the batch fused runs and folded them into multi-draws (`render/batch.rs`).
+pub(crate) static GX_RUNS: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// Count `n` gathered runs in [`GX_RUNS`] slot `i`; a no-op when the meter is off.
+#[inline]
+pub(crate) fn count_runs(i: usize, n: u32) {
+    if gx_perf_enabled() {
+        GX_RUNS[i].fetch_add(u64::from(n), std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// Count one draw in [`GX_DRAWS`] slot `i`; a no-op when the meter is off.
 #[inline]
