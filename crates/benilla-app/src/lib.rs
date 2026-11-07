@@ -498,6 +498,13 @@ pub fn set_data_origin(origin: &str) {
     benilla_formats::remote::set_origin(origin);
 }
 
+/// fork: desktop — the origin the game data is read from: `$BENILLA_DATA_URL`, else what
+/// [`set_data_origin`] named; `None` when the client reads an install.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn data_origin() -> Option<String> {
+    benilla_formats::remote::origin()
+}
+
 /// What a crate on top of benilla adds to the built app ([`run_with`]).
 type Extension<'a> = Box<dyn FnOnce(&mut App) + 'a>;
 

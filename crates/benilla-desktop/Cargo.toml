@@ -16,12 +16,30 @@ dev = ["benilla-app/dev"]
 
 [dependencies]
 benilla-app = { path = "../benilla-app", default-features = false }
+# The self-update (`src/update.rs`): the same blocking HTTPS client and rustls roots the pack store
+# fetches with, and the SHA-1 the downloaded exe is checked against.
+sha1.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+# The update's progress window (`src/update/window.rs`), plain Win32 and GDI.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 benilla-buildstamp = { path = "../benilla-buildstamp" }
 # The executable's icon resource (web/favicon.ico, WoW.exe's own), compiled with the Windows SDK's
 # rc.exe when the target is Windows.
 winresource = "0.1"
+
+# The self-update, a library so its tests build without the client.
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "wow-reforged"
