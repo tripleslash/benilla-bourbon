@@ -1107,40 +1107,46 @@ pub(crate) fn static_gx_pass(
         batch.finish();
         let view_offsets = &view_bind.main_offsets;
         // `render/static_gx/elapsed_gpu` on Vulkan and DX12: the perf journal's `gpu_static`.
-        let diagnostics = render_context.diagnostic_recorder();
-        let diagnostics = diagnostics.as_deref();
         // fork: the depth prepass — the same draws in the same order through the depth-only twins,
         // in a pass of its own (it takes the depth clear; the colour pass below then loads it).
+        // The attachments are taken here, in pass order, because the first to ask for one takes
+        // its clear; the two passes then record as jobs of their own (`crate::par_encode`), in
+        // parallel on native and submitted prepass first everywhere.
+        let mut jobs = Vec::with_capacity(2);
         if !pipes.prepass.is_empty() {
-            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-                label: Some("static_gx_prepass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Store)),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            let span = diagnostics.pass_span(&mut pass, "static_gx_prepass");
-            pass.set_bind_group(0, &view_bind.main, view_offsets);
-            pass.set_bind_group(2, &light_bind.0, &[]);
-            batch.emit(&mut pass, &ready_pre, 0);
-            span.end(&mut pass);
+            jobs.push((None, depth.get_attachment(StoreOp::Store)));
         }
         let depth_attachment = depth.get_attachment(StoreOp::Store);
-        let color_attachment = target.get_color_attachment();
-        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-            label: Some("static_gx"),
-            color_attachments: &[Some(color_attachment)],
-            depth_stencil_attachment: Some(depth_attachment),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        let span = diagnostics.pass_span(&mut pass, "static_gx");
-        pass.set_bind_group(0, &view_bind.main, view_offsets);
-        pass.set_bind_group(2, &light_bind.0, &[]);
-        batch.emit(&mut pass, &ready, 0);
-        span.end(&mut pass);
+        jobs.push((Some(target.get_color_attachment()), depth_attachment));
+        let batch = &batch;
+        crate::par_encode::record(
+            &mut render_context,
+            jobs,
+            |render_context, (color, depth)| {
+                let diagnostics = render_context.diagnostic_recorder();
+                let (label, table) = if color.is_some() {
+                    ("static_gx", &ready)
+                } else {
+                    ("static_gx_prepass", &ready_pre)
+                };
+                // The prepass has no colour target at all, not an empty slot.
+                let colors = [color];
+                let used = usize::from(colors[0].is_some());
+                let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &colors[..used],
+                    depth_stencil_attachment: Some(depth),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                let span = diagnostics.pass_span(&mut pass, label);
+                pass.set_bind_group(0, &view_bind.main, view_offsets);
+                pass.set_bind_group(2, &light_bind.0, &[]);
+                batch.emit(&mut pass, table, 0);
+                span.end(&mut pass);
+            },
+        );
     }
 }
 

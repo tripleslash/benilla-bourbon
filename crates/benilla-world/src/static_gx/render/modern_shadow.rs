@@ -29,6 +29,7 @@ use crate::modern::shadow::{
     ModernCascades, ModernEntityCasters, ModernTerrainCasters, LOCAL_LAYER, MAX_CASCADES,
     SHADOW_LAYERS, SHADOW_MAP_SIZE, SKY_LAYER,
 };
+use crate::par_encode::Recorder;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::platform::collections::HashMap as StrideMap;
 use bevy::platform::time::Instant;
@@ -432,20 +433,22 @@ fn restore_buffer(
         .restore_pool
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if pool.get(i).is_none_or(|b| b.size() < bytes.len() as u64) {
-        let buffer = device.create_buffer(&BufferDescriptor {
+    let make = || {
+        device.create_buffer(&BufferDescriptor {
             label: Some("modern_shadow_restore_rects"),
             size: (bytes.len() as u64).next_power_of_two().max(4096),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        if i < pool.len() {
-            pool[i] = buffer;
-        } else {
-            pool.push(buffer);
-        }
+        })
+    };
+    // fork: layers record in parallel (`crate::par_encode`), so `i` may arrive before a smaller
+    // one: grow the pool to it, so every caller writes the buffer at its own index and no other.
+    if pool.len() <= i {
+        pool.resize_with(i + 1, make);
+    } else if pool[i].size() < bytes.len() as u64 {
+        pool[i] = make();
     }
-    let buffer = pool[i.min(pool.len() - 1)].clone();
+    let buffer = pool[i].clone();
     queue.write_buffer(&buffer, 0, bytes);
     buffer
 }
@@ -1060,8 +1063,6 @@ pub(crate) fn gx_shadow_pass(
         };
         // Every pass below opens a `modern_*` span: the journal's `gpu_modern` column
         // (`benilla-app` `perf::journal`) where the device times passes.
-        let diagnostics = render_context.diagnostic_recorder();
-        let diagnostics = diagnostics.as_deref();
         let cascades = world.resource::<ModernCascades>();
         let pipeline_cache = world.resource::<PipelineCache>();
         let ready = world.get_resource::<GxShadowPipelines>().and_then(|pipes| {
@@ -1113,12 +1114,11 @@ pub(crate) fn gx_shadow_pass(
             return;
         };
         let now = Instant::now();
-        // One draw list, refilled per redrawn layer.
-        let mut batch = GxBatch::new(world);
 
-        // The local-light atlas is the layer after the sky map and is drawn below, not here: it is
+        // The local-light atlas is the layer after the sky map and is its own job below: it is
         // not a cascade, it is not cleared every frame, and no entity is drawn into it.
-        for i in 0..frame.layers.len().min(SKY_LAYER + 1) {
+        let layer_job = |render_context: &mut Recorder<'_>, i: usize| {
+            let diagnostics = render_context.diagnostic_recorder();
             let layer = &frame.layers[i];
             // The last layer is the sky-occlusion map: static casters only, from straight above.
             let is_sky = i == SKY_LAYER;
@@ -1153,7 +1153,7 @@ pub(crate) fn gx_shadow_pass(
             // A held layer keeps what it shows: no restore, no entity pass, and its dirty
             // rectangles stand for the frame that next redraws it.
             if cached && !is_sky && holds_entities(i, frame.frame_no) {
-                continue;
+                return;
             }
 
             if cached {
@@ -1300,7 +1300,7 @@ pub(crate) fn gx_shadow_pass(
                         if let Some((opaque, cutout)) = ready {
                             // fork: the cascade's casters as one state-sorted list (`batch`):
                             // depth only, so every run takes the opaque or the cutout pipeline.
-                            batch.clear();
+                            let mut batch = GxBatch::new(world);
                             for &(gpu, draw) in &casters {
                                 if outside_cascade(&clip_from_world, draw) {
                                     continue;
@@ -1357,17 +1357,17 @@ pub(crate) fn gx_shadow_pass(
 
             // Dynamic pass, every frame: entity parts on top of the (cached or fresh) static layer.
             if !active || is_sky {
-                continue;
+                return;
             }
             let Some(entities) = world.get_resource::<EntityShadowFrame>() else {
-                continue;
+                return;
             };
             let (Some(draw_bind), Some(skin_bind)) = (&entities.draw_bind, &entities.skin_bind)
             else {
-                continue;
+                return;
             };
             if entities.draws.is_empty() {
-                continue;
+                return;
             }
             let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
                 label: Some("modern_shadow_dynamic"),
@@ -1455,23 +1455,37 @@ pub(crate) fn gx_shadow_pass(
                     *slot = tile_runs(&wrote, SHADOW_MAP_SIZE);
                 }
             }
-        }
+        };
 
         // fork: modern lighting (FORK.md, P6) — the shadowed local lights' cube
         // atlas. Every face is static content lit by a light that does not move, so the whole layer
         // is redrawn only when the chosen set or the static world changes; a settled room pays
         // nothing at all after the first frame.
-        draw_local_atlas(
-            &mut render_context,
-            world,
-            frame,
-            &casters,
-            static_hash,
-            atlas_ready,
-            pipeline_cache,
-            meshes,
-            allocator,
-        );
+        let atlas_job = |render_context: &mut Recorder<'_>| {
+            draw_local_atlas(
+                render_context,
+                world,
+                frame,
+                &casters,
+                static_hash,
+                atlas_ready,
+                pipeline_cache,
+                meshes,
+                allocator,
+            );
+        };
+
+        // fork: every cascade layer, the sky map and the atlas write only their own array layer
+        // (and its cached copy), so each records as a job of its own (`crate::par_encode`): in
+        // parallel on native, submitted in this order everywhere.
+        let mut jobs: Vec<Option<usize>> = (0..frame.layers.len().min(SKY_LAYER + 1))
+            .map(Some)
+            .collect();
+        jobs.push(None);
+        crate::par_encode::record(&mut render_context, jobs, |rec, job| match job {
+            Some(i) => layer_job(rec, i),
+            None => atlas_job(rec),
+        });
     }
 }
 
@@ -1502,7 +1516,7 @@ pub(crate) fn gx_shadow_pass(
 /// drawing nothing.
 #[allow(clippy::too_many_arguments)]
 fn draw_local_atlas(
-    render_context: &mut RenderContext<'_, '_>,
+    render_context: &mut Recorder<'_>,
     world: &World,
     frame: &ModernShadowFrame,
     casters: &[(&GxCellGpu, &GxCellDraw)],
@@ -1707,8 +1721,8 @@ fn draw_local_atlas(
             continue;
         }
         bevy::log::debug!(
-                "lamp atlas: layer {layer_index} dynamic phase — restore {restore_faces:?}, draw {draw_faces:?}"
-            );
+            "lamp atlas: layer {layer_index} dynamic phase — restore {restore_faces:?}, draw {draw_faces:?}"
+        );
         if restore_faces.iter().any(|&m| m != 0) {
             match restore {
                 Some((pipeline, layout)) => restore_atlas_slots(
@@ -1786,7 +1800,7 @@ fn draw_local_atlas(
 /// `depth_fill.wgsl`) and the rest of the layer is loaded untouched.
 #[allow(clippy::too_many_arguments)]
 fn draw_atlas_statics(
-    render_context: &mut RenderContext<'_, '_>,
+    render_context: &mut Recorder<'_>,
     world: &World,
     frame: &ModernShadowFrame,
     view: &TextureView,
@@ -1806,7 +1820,6 @@ fn draw_atlas_statics(
     // fork: one draw list, refilled per face (`batch`).
     let mut batch = GxBatch::new(world);
     let diagnostics = render_context.diagnostic_recorder();
-    let diagnostics = diagnostics.as_deref();
     let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("modern_local_shadow"),
         color_attachments: &[],
@@ -1897,7 +1910,7 @@ fn draw_atlas_statics(
 /// (`near`, from [`dynamic_casters_for`]) drawn over their freshly restored static depth.
 #[allow(clippy::too_many_arguments)]
 fn draw_atlas_entities(
-    render_context: &mut RenderContext<'_, '_>,
+    render_context: &mut Recorder<'_>,
     frame: &ModernShadowFrame,
     view: &TextureView,
     view_bind: &BindGroup,
@@ -1915,7 +1928,6 @@ fn draw_atlas_entities(
         return;
     };
     let diagnostics = render_context.diagnostic_recorder();
-    let diagnostics = diagnostics.as_deref();
     let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("modern_local_shadow_dynamic"),
         color_attachments: &[],
@@ -2013,7 +2025,7 @@ fn draw_atlas_entities(
 /// format, and a whole-layer copy is 16.8 MB to undo one character walking past one lamp.
 #[allow(clippy::too_many_arguments)]
 fn restore_atlas_slots(
-    render_context: &mut RenderContext<'_, '_>,
+    render_context: &mut Recorder<'_>,
     frame: &ModernShadowFrame,
     queue: &RenderQueue,
     pipeline_cache: &PipelineCache,
@@ -2052,7 +2064,6 @@ fn restore_atlas_slots(
         &BindGroupEntries::sequential((cache_view, buffer.as_entire_binding())),
     );
     let diagnostics = render_context.diagnostic_recorder();
-    let diagnostics = diagnostics.as_deref();
     let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("modern_local_shadow_restore"),
         color_attachments: &[],

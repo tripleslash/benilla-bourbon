@@ -27,6 +27,7 @@ use super::*;
 use crate::modern::gi::{self, GiClip, GiTier, ModernGi, ModernGiScene};
 use crate::modern::shadow::ModernTerrainCasters;
 use crate::modern::ActiveLighting;
+use crate::par_encode::Recorder;
 
 /// Samples per voxel edge in the voxelizing raster: a wall thinner than a voxel still fills it.
 const SUPERSAMPLE: u32 = 3;
@@ -819,93 +820,94 @@ pub(crate) fn gi_voxel_pass(
     mut render_context: RenderContext,
 ) {
     let gx_view = view.into_inner();
-    {
-        if !gx_view.primary {
-            return;
-        }
-        let state = world.resource::<GiVoxelState>();
-        let Some(tier) = state.tier else {
+    if !gx_view.primary {
+        return;
+    }
+    let state = world.resource::<GiVoxelState>();
+    let Some(tier) = state.tier else {
+        return;
+    };
+    let pipeline_cache = world.resource::<PipelineCache>();
+    let pipes = world.resource::<GiVoxelPipelines>();
+    let gx = world.resource::<GxWorld>();
+    let cache = world.resource::<GxGpuCache>();
+    let meshes = world.resource::<RenderAssets<RenderMesh>>();
+    let allocator = world.resource::<MeshAllocator>();
+    // Every pass below opens a `modern_*` span: the journal's `gpu_modern` column.
+
+    // The terrain heightfield: redrawn only when the terrain or its window changed.
+    let height = state
+        .height_pending
+        .then(|| state.height.as_ref().zip(state.height_bind.as_ref()))
+        .flatten();
+    let height_job = |render_context: &mut Recorder<'_>| {
+        let Some((height, bind)) = height else {
             return;
         };
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let pipes = world.resource::<GiVoxelPipelines>();
-        let gx = world.resource::<GxWorld>();
-        let cache = world.resource::<GxGpuCache>();
-        let meshes = world.resource::<RenderAssets<RenderMesh>>();
-        let allocator = world.resource::<MeshAllocator>();
-        // Every pass below opens a `modern_*` span: the journal's `gpu_modern` column.
         let diagnostics = render_context.diagnostic_recorder();
-        let diagnostics = diagnostics.as_deref();
-
-        // The terrain heightfield: redrawn only when the terrain or its window changed.
-        if state.height_pending {
-            if let (Some(height), Some(bind)) = (&state.height, &state.height_bind) {
-                let terrain = world.get_resource::<ModernTerrainCasters>();
-                let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-                    label: Some("modern_gi_heightfield"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                        view: &height.1,
-                        depth_ops: Some(Operations {
-                            load: LoadOp::Clear(0.0),
-                            store: StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                let timing = diagnostics.pass_span(&mut pass, "modern_gi_heightfield");
-                pass.set_bind_group(0, bind, &[state.height_offset]);
-                for (mesh_id, _, _, _) in terrain.iter().flat_map(|t| t.cells.iter()) {
-                    let Some(mesh) = meshes.get(*mesh_id) else {
-                        continue;
-                    };
-                    let Some(pipeline) = pipes
-                        .height
-                        .get(&mesh.layout.0.layout().array_stride)
-                        .and_then(|id| pipeline_cache.get_render_pipeline(*id))
-                    else {
-                        continue;
-                    };
-                    let (Some(vslice), Some(islice)) = (
-                        allocator.mesh_vertex_slice(mesh_id),
-                        allocator.mesh_index_slice(mesh_id),
-                    ) else {
-                        continue;
-                    };
-                    let bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } =
-                        &mesh.buffer_info
-                    else {
-                        continue;
-                    };
-                    pass.set_render_pipeline(pipeline);
-                    pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                    pass.set_index_buffer(islice.buffer.slice(..), *index_format);
-                    crate::static_gx::count_draw(2);
-                    pass.draw_indexed(
-                        islice.range.clone(),
-                        i32::try_from(vslice.range.start).unwrap_or(0),
-                        0..1,
-                    );
-                }
-                timing.end(&mut pass);
-            }
+        let terrain = world.get_resource::<ModernTerrainCasters>();
+        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("modern_gi_heightfield"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &height.1,
+                depth_ops: Some(Operations {
+                    load: LoadOp::Clear(0.0),
+                    store: StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let timing = diagnostics.pass_span(&mut pass, "modern_gi_heightfield");
+        pass.set_bind_group(0, bind, &[state.height_offset]);
+        for (mesh_id, _, _, _) in terrain.iter().flat_map(|t| t.cells.iter()) {
+            let Some(mesh) = meshes.get(*mesh_id) else {
+                continue;
+            };
+            let Some(pipeline) = pipes
+                .height
+                .get(&mesh.layout.0.layout().array_stride)
+                .and_then(|id| pipeline_cache.get_render_pipeline(*id))
+            else {
+                continue;
+            };
+            let (Some(vslice), Some(islice)) = (
+                allocator.mesh_vertex_slice(mesh_id),
+                allocator.mesh_index_slice(mesh_id),
+            ) else {
+                continue;
+            };
+            let bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } =
+                &mesh.buffer_info
+            else {
+                continue;
+            };
+            pass.set_render_pipeline(pipeline);
+            pass.set_vertex_buffer(0, vslice.buffer.slice(..));
+            pass.set_index_buffer(islice.buffer.slice(..), *index_format);
+            crate::static_gx::count_draw(2);
+            pass.draw_indexed(
+                islice.range.clone(),
+                i32::try_from(vslice.range.start).unwrap_or(0),
+                0..1,
+            );
         }
+        timing.end(&mut pass);
+    };
 
-        if state.jobs.is_empty() {
-            return;
+    let voxel = match (&state.view_bind, &state.store_bind, &state.depth) {
+        (Some(view_bind), Some(store_bind), Some(depth)) if !state.jobs.is_empty() => {
+            pipeline_cache
+                .get_compute_pipeline(pipes.clear)
+                .map(|clear| (view_bind, store_bind, depth, clear))
         }
-        let (Some(view_bind), Some(store_bind), Some(depth)) =
-            (&state.view_bind, &state.store_bind, &state.depth)
-        else {
-            return;
-        };
-        let Some(clear) = pipeline_cache.get_compute_pipeline(pipes.clear) else {
-            return;
-        };
-        let mut casters: Vec<(&GxCellGpu, &GxCellDraw)> = Vec::new();
+        _ => None,
+    };
+    let mut casters: Vec<(&GxCellGpu, &GxCellDraw)> = Vec::new();
+    if voxel.is_some() {
         for (key, gpu) in &cache.cells {
             if let Some(draw) = gx.cells.get(key) {
                 casters.push((gpu, draw));
@@ -921,77 +923,96 @@ pub(crate) fn gi_voxel_pass(
                 casters.push((gpu, draw));
             }
         }
+    }
 
-        // fork: the raster pipelines as the batch's four-entry table (`batch::pipe_class` order).
-        let raster = super::batch::PIPE_KEYS.map(|key| {
-            pipes
-                .raster
-                .get(&key)
-                .and_then(|id| pipeline_cache.get_render_pipeline(*id))
-        });
-        // One draw list per job, state-sorted once and issued by each of the job's axis passes.
+    // fork: the raster pipelines as the batch's four-entry table (`batch::pipe_class` order).
+    let raster = super::batch::PIPE_KEYS.map(|key| {
+        pipes
+            .raster
+            .get(&key)
+            .and_then(|id| pipeline_cache.get_render_pipeline(*id))
+    });
+    // One draw list per job, state-sorted once and issued by each of the job's axis passes.
+    let voxel_job = |render_context: &mut Recorder<'_>, j: usize| {
+        let Some((view_bind, store_bind, depth, clear)) = voxel else {
+            return;
+        };
+        let diagnostics = render_context.diagnostic_recorder();
+        let job = &state.jobs[j];
+        let voxel = tier.voxel[job.level];
+        let (world_lo, world_hi) = level_box(job.lo, job.hi, voxel);
+        let span = (job.hi - job.lo).max(IVec3::ONE);
         let mut batch = GxBatch::new(world);
-        for job in &state.jobs {
-            let voxel = tier.voxel[job.level];
-            let (world_lo, world_hi) = level_box(job.lo, job.hi, voxel);
-            let span = (job.hi - job.lo).max(IVec3::ONE);
-            batch.clear();
-            for &(gpu, draw) in &casters {
-                let center = draw.origin + Vec3::from(draw.aabb.center);
-                if !overlaps(
-                    center,
-                    Vec3::from(draw.aabb.half_extents),
-                    world_lo,
-                    world_hi,
-                ) {
-                    continue;
-                }
-                if let Some(r) = batch.region(gpu, draw, allocator) {
-                    batch.push_whole(r, 0, pipe_class);
-                }
+        for &(gpu, draw) in &casters {
+            let center = draw.origin + Vec3::from(draw.aabb.center);
+            if !overlaps(
+                center,
+                Vec3::from(draw.aabb.half_extents),
+                world_lo,
+                world_hi,
+            ) {
+                continue;
             }
-            batch.finish();
-            {
-                let encoder = render_context.command_encoder();
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("modern_gi_voxel_clear"),
-                    timestamp_writes: None,
-                });
-                let timing = diagnostics.pass_span(&mut pass, "modern_gi_voxel_clear");
-                pass.set_pipeline(clear);
-                pass.set_bind_group(0, view_bind, &[job.axis[0]]);
-                pass.set_bind_group(1, store_bind, &[]);
-                pass.dispatch_workgroups(
-                    (span.x as u32).div_ceil(4),
-                    (span.y as u32).div_ceil(4),
-                    (span.z as u32).div_ceil(4),
-                );
-                timing.end(&mut pass);
-            }
-            for offset in &job.axis {
-                let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-                    label: Some("modern_gi_voxelize"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                        view: depth,
-                        depth_ops: Some(Operations {
-                            load: LoadOp::Clear(0.0),
-                            store: StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                let timing = diagnostics.pass_span(&mut pass, "modern_gi_voxelize");
-                pass.set_bind_group(0, view_bind, &[*offset]);
-                pass.set_bind_group(2, store_bind, &[]);
-                batch.emit(&mut pass, &raster, 2);
-                timing.end(&mut pass);
+            if let Some(r) = batch.region(gpu, draw, allocator) {
+                batch.push_whole(r, 0, pipe_class);
             }
         }
+        batch.finish();
+        {
+            let encoder = render_context.command_encoder();
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("modern_gi_voxel_clear"),
+                timestamp_writes: None,
+            });
+            let timing = diagnostics.pass_span(&mut pass, "modern_gi_voxel_clear");
+            pass.set_pipeline(clear);
+            pass.set_bind_group(0, view_bind, &[job.axis[0]]);
+            pass.set_bind_group(1, store_bind, &[]);
+            pass.dispatch_workgroups(
+                (span.x as u32).div_ceil(4),
+                (span.y as u32).div_ceil(4),
+                (span.z as u32).div_ceil(4),
+            );
+            timing.end(&mut pass);
+        }
+        for offset in &job.axis {
+            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                label: Some("modern_gi_voxelize"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(Operations {
+                        load: LoadOp::Clear(0.0),
+                        store: StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let timing = diagnostics.pass_span(&mut pass, "modern_gi_voxelize");
+            pass.set_bind_group(0, view_bind, &[*offset]);
+            pass.set_bind_group(2, store_bind, &[]);
+            batch.emit(&mut pass, &raster, 2);
+            timing.end(&mut pass);
+        }
+    };
+
+    // fork: the heightfield and each voxel job record as jobs of their own (`crate::par_encode`):
+    // in parallel on native, submitted in this order everywhere, so the jobs' clears and writes
+    // to the shared clipmap and depth target still reach the GPU in sequence.
+    let mut jobs: Vec<Option<usize>> = Vec::new();
+    if height.is_some() {
+        jobs.push(None);
     }
+    if voxel.is_some() {
+        jobs.extend((0..state.jobs.len()).map(Some));
+    }
+    crate::par_encode::record(&mut render_context, jobs, |rec, job| match job {
+        None => height_job(rec),
+        Some(j) => voxel_job(rec, j),
+    });
 }
 
 /// Wire the pass between the modern shadow pass and the probe trace (called from `render::build`).

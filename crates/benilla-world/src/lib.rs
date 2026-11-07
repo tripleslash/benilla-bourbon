@@ -147,6 +147,8 @@ pub mod model_forms;
 pub mod model_render;
 pub mod modern;
 pub mod modkeys;
+/// fork: parallel command recording for render systems with independent passes (native).
+pub(crate) mod par_encode;
 pub mod particles;
 
 /// fork: the perf rig — a player-lane frame probe, because the browser build compiles
