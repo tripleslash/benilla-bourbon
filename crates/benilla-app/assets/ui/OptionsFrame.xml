@@ -4094,6 +4094,7 @@
             BENILLA_INDIRECT_LIGHT = "Indirect Lighting"
             BENILLA_WATER_DETAIL = "Water Detail"
             -- fork: desktop
+            BENILLA_MULTISAMPLE = "Multisampling"
             BENILLA_GRAPHICS_API = "Graphics API"
             BENILLA_RENDER_SCALE = "Render Scale"
             -- fork: fsr (FORK.md)
@@ -4174,6 +4175,14 @@
                 { text = "Grass", value = "1" },
                 { text = "Grass + Trees", value = "2" },
             })
+            -- fork: desktop — our Multisampling row's entries in place of Turtle's, whose list is
+            -- GetMultisampleFormats' and names the single-sample format "1x".
+            BenillaMultisampleDropdown_Init = dropdown("gxMultisample", {
+                { text = "Off", value = "1" },
+                { text = "2x", value = "2" },
+                { text = "4x", value = "4" },
+                { text = "8x", value = "8" },
+            })
             -- fork: desktop — the API the renderer is created on (`gxApi`).
             BenillaGraphicsApiDropdown_Init = dropdown("gxApi", {
                 { text = "DirectX 12", value = "direct3d" },
@@ -4222,8 +4231,11 @@
                 cut.RESOLUTION = 1
                 cut.WINDOWED_MODE = 1
                 cut.WINDOWED_MAXIMIZED = 1
-                cut.MULTISAMPLE = 1
             end
+            -- Deviation: Turtle's Multisampling row lists GetMultisampleFormats' entries, the
+            -- first "1x", one sample, which is none; ours (below, native only) names it Off, as
+            -- our window's row does.
+            cut.MULTISAMPLE = 1
             for i = getn(GameOptions), 1, -1 do
                 local category = GameOptions[i]
                 if ( category.options ) then
@@ -4360,9 +4372,15 @@
                     getter = "BenillaTurtle_GetFriendlyPlates",
                     setter = "BenillaTurtle_SetFriendlyPlates", defaultValue = "0" } },
             }
-            -- fork: desktop — a native client's Graphics API row, the Display section's last;
-            -- `restartGx` commits the latched row, which the next launch reads.
+            -- fork: desktop — a native client's Multisampling and Graphics API rows, the Display
+            -- section's last; `restartGx` commits each latched row.
             if ( BENILLA_NATIVE ) then
+                -- `gxMultisample`, Off its registered default; latched, committed by RestartGx,
+                -- and the world camera reads it as it spawns.
+                tinsert(rows, { category = DISPLAY, row = {
+                    name = "BENILLA_MULTISAMPLE", desc = BENILLA_TOOLTIP_MULTISAMPLE,
+                    type = "dropdown", identifier = "BenillaMultisample", cvar = "gxMultisample",
+                    restartGx = 1 } })
                 tinsert(rows, { category = DISPLAY, row = {
                     name = "BENILLA_GRAPHICS_API", desc = BENILLA_TOOLTIP_GRAPHICS_API,
                     type = "dropdown", identifier = "BenillaGraphicsApi", cvar = "gxApi",
@@ -4420,7 +4438,7 @@
                 { name = "Display", from = DISPLAY, rows = {
                     "BENILLA_GRAPHICS_PRESET", "UI_SCALE", "BENILLA_RENDER_SCALE",
                     "BENILLA_RCAS_SHARPNESS", "BENILLA_FRAME_GENERATION", "BENILLA_BRIGHTNESS",
-                    "GAMMA", "BENILLA_GRAPHICS_API" } },
+                    "GAMMA", "BENILLA_MULTISAMPLE", "BENILLA_GRAPHICS_API" } },
                 { name = "World Detail", from = WORLD_APPEARANCE, rows = {
                     "FARCLIP", "BENILLA_GROUND_CLUTTER_DISTANCE", "BENILLA_GROUND_CLUTTER_DENSITY",
                     "BENILLA_GROUND_CLUTTER_SCALE", "BENILLA_HD_MODELS", "BENILLA_REFORGED_MODELS",
