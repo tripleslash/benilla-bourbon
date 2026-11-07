@@ -71,6 +71,28 @@ impl<'d> Recorder<'d> {
     }
 }
 
+/// What a job, its result and its recorder cross threads with: `Send` (and [`JobSync`]'s `Sync`)
+/// on native, nothing on wasm32, whose wgpu handles are neither and whose jobs never leave the
+/// calling thread ([`serial`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) trait JobSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> JobSend for T {}
+#[cfg(target_arch = "wasm32")]
+pub(crate) trait JobSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T> JobSend for T {}
+
+/// The recorder's bound beside [`JobSend`]: `Sync` on native, nothing on wasm32.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) trait JobSync: Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Sync> JobSync for T {}
+#[cfg(target_arch = "wasm32")]
+pub(crate) trait JobSync {}
+#[cfg(target_arch = "wasm32")]
+impl<T> JobSync for T {}
+
 /// Whether jobs record serially: always on wasm32, on native when `WOW_SERIAL_ENCODE=1`.
 pub(crate) fn serial() -> bool {
     if cfg!(target_arch = "wasm32") {
@@ -84,9 +106,9 @@ pub(crate) fn serial() -> bool {
 /// after whatever `ctx` already holds. Returns each job's result, in job order.
 pub(crate) fn record<J, R, F>(ctx: &mut RenderContext, jobs: Vec<J>, f: F) -> Vec<R>
 where
-    J: Send,
-    R: Send + 'static,
-    F: Fn(&mut Recorder<'_>, J) -> R + Sync,
+    J: JobSend,
+    R: JobSend + 'static,
+    F: Fn(&mut Recorder<'_>, J) -> R + JobSync,
 {
     let device = ctx.render_device().clone();
     let diagnostics = ctx.diagnostic_recorder();
