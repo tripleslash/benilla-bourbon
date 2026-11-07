@@ -87,6 +87,24 @@ impl Drop for super::CommandEncoder {
 }
 
 impl super::CommandEncoder {
+    /// BENILLA: async compute. The D3D12 state of a buffer use as this encoder must name it.
+    fn buffer_state(&self, usage: wgt::BufferUses) -> Direct3D12::D3D12_RESOURCE_STATES {
+        let marked = usage.contains(crate::ASYNC_COMPUTE_BUFFER_MARK);
+        let state = conv::map_buffer_usage_to_state(usage - crate::ASYNC_COMPUTE_BUFFER_MARK);
+        conv::compute_queue_state(state, marked || self.is_compute())
+    }
+
+    /// BENILLA: async compute. The texture twin of [`Self::buffer_state`].
+    fn texture_state(&self, usage: wgt::TextureUses) -> Direct3D12::D3D12_RESOURCE_STATES {
+        let marked = usage.contains(crate::ASYNC_COMPUTE_TEXTURE_MARK);
+        let state = conv::map_texture_usage_to_state(usage - crate::ASYNC_COMPUTE_TEXTURE_MARK);
+        conv::compute_queue_state(state, marked || self.is_compute())
+    }
+
+    fn is_compute(&self) -> bool {
+        self.list_type == Direct3D12::D3D12_COMMAND_LIST_TYPE_COMPUTE
+    }
+
     unsafe fn begin_pass(&mut self, kind: super::PassKind, label: crate::Label) {
         let list = self.list.as_ref().unwrap();
         self.pass.kind = kind;
@@ -407,13 +425,10 @@ impl crate::CommandEncoder for super::CommandEncoder {
         let list = if let Some(list) = list {
             list
         } else {
+            // BENILLA: async compute — a list of the queue's type.
             unsafe {
-                self.device.CreateCommandList(
-                    0,
-                    Direct3D12::D3D12_COMMAND_LIST_TYPE_DIRECT,
-                    &self.allocator,
-                    None,
-                )
+                self.device
+                    .CreateCommandList(0, self.list_type, &self.allocator, None)
             }
             .into_device_result("Create command list")?
         };
@@ -456,8 +471,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         self.temp.barriers.clear();
 
         for barrier in barriers {
-            let s0 = conv::map_buffer_usage_to_state(barrier.usage.from);
-            let s1 = conv::map_buffer_usage_to_state(barrier.usage.to);
+            // BENILLA: async compute — the queue-aware mapping (`conv::compute_queue_state`).
+            let s0 = self.buffer_state(barrier.usage.from);
+            let s1 = self.buffer_state(barrier.usage.to);
             if s0 != s1 {
                 let raw = Direct3D12::D3D12_RESOURCE_BARRIER {
                     Type: Direct3D12::D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
@@ -476,7 +492,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
                     },
                 };
                 self.temp.barriers.push(raw);
-            } else if barrier.usage.from == wgt::BufferUses::STORAGE_READ_WRITE
+            } else if barrier.usage.from - crate::ASYNC_COMPUTE_BUFFER_MARK
+                == wgt::BufferUses::STORAGE_READ_WRITE
                 || barrier.usage.from == wgt::BufferUses::ACCELERATION_STRUCTURE_QUERY
             {
                 let raw = Direct3D12::D3D12_RESOURCE_BARRIER {
@@ -511,8 +528,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         self.temp.barriers.clear();
 
         for barrier in barriers {
-            let s0 = conv::map_texture_usage_to_state(barrier.usage.from);
-            let s1 = conv::map_texture_usage_to_state(barrier.usage.to);
+            // BENILLA: async compute — the queue-aware mapping (`conv::compute_queue_state`).
+            let s0 = self.texture_state(barrier.usage.from);
+            let s1 = self.texture_state(barrier.usage.to);
             if s0 != s1 {
                 let mut raw = Direct3D12::D3D12_RESOURCE_BARRIER {
                     Type: Direct3D12::D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
@@ -577,7 +595,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
                         }
                     }
                 }
-            } else if barrier.usage.from == wgt::TextureUses::STORAGE_READ_WRITE {
+            } else if barrier.usage.from - crate::ASYNC_COMPUTE_TEXTURE_MARK
+                == wgt::TextureUses::STORAGE_READ_WRITE
+            {
                 let raw = Direct3D12::D3D12_RESOURCE_BARRIER {
                     Type: Direct3D12::D3D12_RESOURCE_BARRIER_TYPE_UAV,
                     Flags: Direct3D12::D3D12_RESOURCE_BARRIER_FLAG_NONE,

@@ -2447,6 +2447,36 @@ impl super::Adapter {
         family_index: u32,
         queue_index: u32,
     ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
+        unsafe {
+            self.device_from_raw_with_async_queue(
+                raw_device,
+                drop_callback,
+                enabled_extensions,
+                features,
+                limits,
+                memory_hints,
+                family_index,
+                queue_index,
+                None,
+            )
+        }
+    }
+
+    /// BENILLA: async compute. [`Self::device_from_raw`], plus the family and index of a second
+    /// queue `raw_device` was created with, for `create_async_compute_queue`.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn device_from_raw_with_async_queue(
+        &self,
+        raw_device: ash::Device,
+        drop_callback: Option<crate::DropCallback>,
+        enabled_extensions: &[&'static CStr],
+        features: wgt::Features,
+        limits: &wgt::Limits,
+        memory_hints: &wgt::MemoryHints,
+        family_index: u32,
+        queue_index: u32,
+        async_queue: Option<(u32, u32)>,
+    ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
         let mem_properties = {
             profiling::scope!("vkGetPhysicalDeviceMemoryProperties");
             unsafe {
@@ -2775,6 +2805,8 @@ impl super::Adapter {
             texture_identity_factory: super::ResourceIdentityFactory::new(),
             texture_view_identity_factory: super::ResourceIdentityFactory::new(),
             empty_descriptor_set_layout,
+            async_queue,
+            async_queue_taken: core::sync::atomic::AtomicBool::new(false),
         });
 
         let relay_semaphores = super::RelaySemaphores::new(&shared)?;
@@ -2785,6 +2817,7 @@ impl super::Adapter {
             family_index,
             relay_semaphores: Mutex::new(relay_semaphores),
             signal_semaphores: Mutex::new(SemaphoreList::new(SemaphoreListMode::Signal)),
+            wait_semaphores: Mutex::new(SemaphoreList::new(SemaphoreListMode::Wait)),
         };
 
         let allocation_sizes = AllocationSizes::from_memory_hints(memory_hints).into();
@@ -2842,10 +2875,47 @@ impl super::Adapter {
         let mut enabled_phd_features = self.physical_device_features(&enabled_extensions, features);
 
         let family_index = 0; //TODO
+                              // BENILLA: async compute — a second queue for `create_async_compute_queue`: a queue of a
+                              // compute-only family where there is one, else a second queue of the graphics family.
+                              // Cross-queue waits are timeline semaphores, so none without them.
+        let async_slot = if self.private_caps.timeline_semaphores {
+            let families = unsafe {
+                self.instance
+                    .raw
+                    .get_physical_device_queue_family_properties(self.raw)
+            };
+            families
+                .iter()
+                .position(|f| {
+                    f.queue_flags.contains(vk::QueueFlags::COMPUTE)
+                        && !f.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                        && f.queue_count > 0
+                })
+                .map(|f| (f as u32, 0))
+                .or_else(|| {
+                    families
+                        .first()
+                        .filter(|f| f.queue_count > 1)
+                        .map(|_| (family_index, 1))
+                })
+        } else {
+            None
+        };
+        const PRIORITIES: [f32; 2] = [1.0, 1.0];
         let family_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family_index)
-            .queue_priorities(&[1.0]);
+            .queue_priorities(match async_slot {
+                Some((f, _)) if f == family_index => &PRIORITIES,
+                _ => &PRIORITIES[..1],
+            });
         let mut family_infos = Vec::from([family_info]);
+        if let Some((f, _)) = async_slot.filter(|&(f, _)| f != family_index) {
+            family_infos.push(
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(f)
+                    .queue_priorities(&PRIORITIES[..1]),
+            );
+        }
 
         let mut pre_info = vk::DeviceCreateInfo::default();
 
@@ -2892,7 +2962,7 @@ impl super::Adapter {
         }
 
         unsafe {
-            self.device_from_raw(
+            self.device_from_raw_with_async_queue(
                 raw_device,
                 None,
                 &enabled_extensions,
@@ -2901,6 +2971,7 @@ impl super::Adapter {
                 memory_hints,
                 family_info.queue_family_index,
                 0,
+                async_slot,
             )
         }
     }

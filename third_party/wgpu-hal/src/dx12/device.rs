@@ -785,11 +785,10 @@ impl crate::Device for super::Device {
         &self,
         desc: &crate::CommandEncoderDescriptor<super::Queue>,
     ) -> Result<super::CommandEncoder, crate::DeviceError> {
-        let allocator: Direct3D12::ID3D12CommandAllocator = unsafe {
-            self.raw
-                .CreateCommandAllocator(Direct3D12::D3D12_COMMAND_LIST_TYPE_DIRECT)
-        }
-        .into_device_result("Command allocator creation")?;
+        // BENILLA: async compute — the allocator and its lists take the queue's type.
+        let allocator: Direct3D12::ID3D12CommandAllocator =
+            unsafe { self.raw.CreateCommandAllocator(desc.queue.list_type) }
+                .into_device_result("Command allocator creation")?;
 
         if let Some(label) = desc.label {
             allocator.set_name(label)?;
@@ -812,6 +811,7 @@ impl crate::Device for super::Device {
             temp: super::Temp::default(),
             end_of_pass_timer_query: None,
             counters: Arc::clone(&self.counters),
+            list_type: desc.queue.list_type,
         })
     }
 
@@ -2282,6 +2282,27 @@ impl crate::Device for super::Device {
 
     unsafe fn destroy_query_set(&self, _set: super::QuerySet) {
         self.counters.query_sets.sub(1);
+    }
+
+    /// BENILLA: async compute. A `COMPUTE` command queue beside the direct one.
+    unsafe fn create_async_compute_queue(&self) -> Option<super::Queue> {
+        let raw: Direct3D12::ID3D12CommandQueue = unsafe {
+            self.raw
+                .CreateCommandQueue(&Direct3D12::D3D12_COMMAND_QUEUE_DESC {
+                    Type: Direct3D12::D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                    Priority: Direct3D12::D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
+                    Flags: Direct3D12::D3D12_COMMAND_QUEUE_FLAG_NONE,
+                    NodeMask: 0,
+                })
+        }
+        .inspect_err(|e| log::warn!("async compute: no compute queue ({e})"))
+        .ok()?;
+        let _ = raw.set_name("wgpu async compute");
+        Some(super::Queue {
+            raw,
+            temp_lists: Mutex::new(Vec::new()),
+            list_type: Direct3D12::D3D12_COMMAND_LIST_TYPE_COMPUTE,
+        })
     }
 
     unsafe fn create_fence(&self) -> Result<super::Fence, crate::DeviceError> {

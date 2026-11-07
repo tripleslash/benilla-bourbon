@@ -588,6 +588,101 @@ pub struct CoreRenderPass {
     id: crate::cmp::Identifier,
 }
 
+/// benilla local patch (async compute): `wgpu_core`'s async compute queue, with what reports its
+/// errors (`api/async_compute.rs`).
+#[derive(Debug)]
+pub struct CoreAsyncComputeQueue {
+    pub(crate) context: ContextWgpuCore,
+    raw: Arc<wgc::device::AsyncComputeQueue>,
+    error_sink: ErrorSink,
+}
+
+impl CoreDevice {
+    pub(crate) fn create_async_compute_queue(&self) -> Option<CoreAsyncComputeQueue> {
+        let raw = self.context.0.device_create_async_compute_queue(self.id)?;
+        Some(CoreAsyncComputeQueue {
+            context: self.context.clone(),
+            raw,
+            error_sink: Arc::clone(&self.error_sink),
+        })
+    }
+}
+
+impl CoreAsyncComputeQueue {
+    pub(crate) fn create_command_encoder(
+        &self,
+        desc: &crate::CommandEncoderDescriptor<'_>,
+    ) -> dispatch::DispatchCommandEncoder {
+        let (id, error) = self.context.0.async_queue_create_command_encoder(
+            &self.raw,
+            &desc.map_label(|l| l.map(Borrowed)),
+            None,
+        );
+        if let Some(cause) = error {
+            self.context.handle_error(
+                &self.error_sink,
+                cause,
+                desc.label,
+                "AsyncComputeQueue::create_command_encoder",
+            );
+        }
+        CoreCommandEncoder {
+            context: self.context.clone(),
+            id,
+            error_sink: Arc::clone(&self.error_sink),
+        }
+        .into()
+    }
+
+    pub(crate) fn submit(
+        &self,
+        command_buffers: &mut dyn Iterator<Item = dispatch::DispatchCommandBuffer>,
+    ) -> u64 {
+        let temp = command_buffers.collect::<SmallVec<[_; 4]>>();
+        let ids = temp
+            .iter()
+            .map(|cmdbuf| cmdbuf.as_core().id)
+            .collect::<SmallVec<[_; 4]>>();
+        let index = match self.context.0.async_queue_submit(&self.raw, &ids) {
+            Ok(index) => index,
+            Err((index, err)) => {
+                self.context.handle_error_nolabel(
+                    &self.error_sink,
+                    err,
+                    "AsyncComputeQueue::submit",
+                );
+                index
+            }
+        };
+        drop(temp);
+        index
+    }
+
+    pub(crate) fn wait_for_main(&self, index: u64) {
+        if let Err(err) = self.raw.wait_for_main(index) {
+            self.context
+                .handle_error_nolabel(&self.error_sink, err, "AsyncComputeQueue::wait_for");
+        }
+    }
+
+    pub(crate) fn timestamp_period(&self) -> f32 {
+        self.raw.get_timestamp_period()
+    }
+}
+
+impl CoreQueue {
+    pub(crate) fn wait_for_async(&self, async_queue: &CoreAsyncComputeQueue, index: u64) {
+        if let Err(err) = self
+            .context
+            .0
+            .queue_wait_for_async(self.id, &async_queue.raw, index)
+        {
+            self.context
+                .handle_error_nolabel(&self.error_sink, err, "Queue::wait_for");
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CoreCommandEncoder {
     pub(crate) context: ContextWgpuCore,

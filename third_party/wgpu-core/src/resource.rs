@@ -686,7 +686,14 @@ impl Buffer {
             .buffers
             .set_single(self, internal_use);
 
-        let submit_index = if let Some(queue) = device.get_queue() {
+        // BENILLA: async compute — a buffer the async queue still uses maps after it retires there
+        // (and then after the main queue's uses, `Device::maintain`).
+        let async_index = device
+            .get_async_queue()
+            .and_then(|q| q.lock_life().map_if_used(self));
+        let submit_index = if let Some(index) = async_index {
+            index
+        } else if let Some(queue) = device.get_queue() {
             queue.lock_life().map(self).unwrap_or(0) // '0' means no wait is necessary
         } else {
             // We can safely unwrap below since we just set the `map_state` to `BufferMapState::Waiting`.
@@ -985,11 +992,21 @@ impl Buffer {
             if pending_writes.contains_buffer(self) {
                 pending_writes.consume_temp(temp);
             } else {
+                // BENILLA: async compute — freed once neither queue uses it.
                 let mut life_lock = queue.lock_life();
                 let last_submit_index = life_lock.get_buffer_latest_submission_index(self);
-                if let Some(last_submit_index) = last_submit_index {
-                    life_lock.schedule_resource_destruction(temp, last_submit_index);
-                }
+                let async_queue = device.get_async_queue();
+                let mut async_life = async_queue.as_ref().map(|q| q.lock_life());
+                let async_use = async_life.as_mut().and_then(|life| {
+                    let index = life.get_buffer_latest_submission_index(self)?;
+                    Some((&mut **life, index))
+                });
+                crate::device::async_queue::schedule_destruction(
+                    &mut life_lock,
+                    last_submit_index,
+                    async_use,
+                    temp,
+                );
             }
         }
     }
@@ -1482,11 +1499,21 @@ impl Texture {
             if pending_writes.contains_texture(self) {
                 pending_writes.consume_temp(temp);
             } else {
+                // BENILLA: async compute — freed once neither queue uses it.
                 let mut life_lock = queue.lock_life();
                 let last_submit_index = life_lock.get_texture_latest_submission_index(self);
-                if let Some(last_submit_index) = last_submit_index {
-                    life_lock.schedule_resource_destruction(temp, last_submit_index);
-                }
+                let async_queue = device.get_async_queue();
+                let mut async_life = async_queue.as_ref().map(|q| q.lock_life());
+                let async_use = async_life.as_mut().and_then(|life| {
+                    let index = life.get_texture_latest_submission_index(self)?;
+                    Some((&mut **life, index))
+                });
+                crate::device::async_queue::schedule_destruction(
+                    &mut life_lock,
+                    last_submit_index,
+                    async_use,
+                    temp,
+                );
             }
         }
     }

@@ -285,6 +285,9 @@ impl BufferUsageScope {
 pub(crate) struct BufferTracker {
     start: Vec<BufferUses>,
     end: Vec<BufferUses>,
+    /// BENILLA: async compute. Buffers this command buffer recorded a barrier for: their state
+    /// changed inside it, so their start state alone does not say what it used.
+    transitioned: Vec<bool>,
 
     metadata: ResourceMetadata<Arc<Buffer>>,
 
@@ -298,6 +301,7 @@ impl BufferTracker {
         Self {
             start: Vec::new(),
             end: Vec::new(),
+            transitioned: Vec::new(),
 
             metadata: ResourceMetadata::new(),
 
@@ -320,6 +324,7 @@ impl BufferTracker {
     pub fn set_size(&mut self, size: usize) {
         self.start.resize(size, BufferUses::empty());
         self.end.resize(size, BufferUses::empty());
+        self.transitioned.resize(size, false);
 
         self.metadata.set_size(size);
     }
@@ -336,6 +341,44 @@ impl BufferTracker {
         self.metadata.contains(buffer.tracker_index().as_usize())
     }
 
+    /// BENILLA: async compute. Note the buffers of the pending transitions as transitioned.
+    fn note_transitions(&mut self) {
+        for pending in &self.temp {
+            if let Some(t) = self.transitioned.get_mut(pending.id as usize) {
+                *t = true;
+            }
+        }
+    }
+
+    /// BENILLA: async compute. The one state the buffer was used in, if it was used only for
+    /// reading and never changed state inside this command buffer. Such a use needs no barrier on
+    /// the queue that runs it and can run beside another queue's read in the same state.
+    pub(crate) fn read_only_state(&self, buffer: &Buffer) -> Option<BufferUses> {
+        let index = buffer.tracker_index().as_usize();
+        if !self.metadata.contains(index) || self.transitioned.get(index) != Some(&false) {
+            return None;
+        }
+        let (start, end) = (self.start[index], self.end[index]);
+        (start == end
+            && !start.intersects(BufferUses::EXCLUSIVE)
+            && !start.contains(hal::ASYNC_COMPUTE_BUFFER_MARK))
+        .then_some(start)
+    }
+
+    /// BENILLA: async compute. Mark every use of this (async compute) command buffer that is not a
+    /// read-only one (`read_only_state`) with `hal::ASYNC_COMPUTE_BUFFER_MARK`, in its start and
+    /// end state: the transitions into it and out of it then name the compute-queue state.
+    pub(crate) fn mark_for_async_queue(&mut self) {
+        let owned = self.metadata.owned_indices().collect::<Vec<_>>();
+        for index in owned {
+            let buffer = unsafe { self.metadata.get_resource_unchecked(index) }.clone();
+            if self.read_only_state(&buffer).is_none() {
+                self.start[index] |= hal::ASYNC_COMPUTE_BUFFER_MARK;
+                self.end[index] |= hal::ASYNC_COMPUTE_BUFFER_MARK;
+            }
+        }
+    }
+
     /// Returns a list of all buffers tracked.
     pub fn used_resources(&self) -> impl Iterator<Item = &Arc<Buffer>> + '_ {
         self.metadata.owned_resources()
@@ -346,6 +389,7 @@ impl BufferTracker {
         &'b mut self,
         snatch_guard: &'a SnatchGuard<'a>,
     ) -> impl Iterator<Item = BufferBarrier<'a, dyn hal::DynBuffer>> {
+        self.note_transitions();
         let buffer_barriers = self.temp.drain(..).map(|pending| {
             let buf = unsafe { self.metadata.get_resource_unchecked(pending.id as _) };
             pending.into_hal(buf, snatch_guard)
@@ -382,6 +426,7 @@ impl BufferTracker {
 
         strict_assert!(self.temp.len() <= 1);
 
+        self.note_transitions();
         self.temp.pop()
     }
 

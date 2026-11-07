@@ -21,6 +21,8 @@
 //! - Treat wgpu-types types and wgpu-core types as a single set.
 
 mod adapter;
+// benilla local patch (async compute).
+mod async_compute;
 mod bind_group;
 mod bind_group_layout;
 mod blas;
@@ -53,6 +55,7 @@ mod texture_view;
 mod tlas;
 
 pub use adapter::*;
+pub use async_compute::*;
 pub use bind_group::*;
 pub use bind_group_layout::*;
 pub use blas::*;

@@ -628,6 +628,10 @@ pub(crate) struct InnerCommandEncoder {
     pub(crate) api: EncodingApi,
 
     pub(crate) label: String,
+
+    /// BENILLA: async compute. `raw` records for the async compute queue: it goes back to
+    /// `Device::async_command_allocator`, whose encoders make compute-only command lists.
+    pub(crate) async_compute: bool,
 }
 
 impl InnerCommandEncoder {
@@ -793,7 +797,11 @@ impl Drop for InnerCommandEncoder {
         }
         // SAFETY: We are in the Drop impl and we don't use self.raw anymore after this point.
         let raw = unsafe { ManuallyDrop::take(&mut self.raw) };
-        self.device.command_allocator.release_encoder(raw);
+        if self.async_compute {
+            self.device.async_command_allocator.release_encoder(raw);
+        } else {
+            self.device.command_allocator.release_encoder(raw);
+        }
     }
 }
 
@@ -834,6 +842,10 @@ pub struct CommandBufferMutable {
     indirect_draw_validation_resources: crate::indirect_validation::DrawResources,
 
     pub(crate) commands: Vec<Command<ArcReferences>>,
+
+    /// BENILLA: async compute. Recorded for the async compute queue, which runs compute and
+    /// copies only and is the only queue that takes it.
+    pub(crate) async_compute: bool,
 
     /// If tracing, `command_encoder_finish` replaces the `Arc`s in `commands`
     /// with integer pointers, and moves them into `trace_commands`.
@@ -880,6 +892,17 @@ impl CommandEncoder {
         device: &Arc<Device>,
         label: &Label,
     ) -> Self {
+        Self::new_for_queue(encoder, device, label, false)
+    }
+
+    /// BENILLA: async compute. [`Self::new`] for an encoder of the main queue (`false`) or of the
+    /// async compute queue (`true`).
+    pub(crate) fn new_for_queue(
+        encoder: Box<dyn hal::DynCommandEncoder>,
+        device: &Arc<Device>,
+        label: &Label,
+        async_compute: bool,
+    ) -> Self {
         CommandEncoder {
             device: device.clone(),
             label: label.to_string(),
@@ -893,6 +916,7 @@ impl CommandEncoder {
                         is_open: false,
                         api: EncodingApi::Undecided,
                         label: label.to_string(),
+                        async_compute,
                     },
                     trackers: Tracker::new(
                         device.ordered_buffer_usages,
@@ -905,6 +929,7 @@ impl CommandEncoder {
                     indirect_draw_validation_resources:
                         crate::indirect_validation::DrawResources::new(device.clone()),
                     commands: Vec::new(),
+                    async_compute,
                     #[cfg(feature = "trace")]
                     trace_commands: if device.trace.lock().is_some() {
                         Some(Vec::new())
@@ -1019,6 +1044,19 @@ impl CommandEncoder {
         }
 
         let commands = mem::take(&mut cmd_buf_data.commands);
+
+        // BENILLA: async compute — a compute queue cannot run a render pass, and a texture clear
+        // may be one (depth, stencil and render-target-only formats).
+        if cmd_buf_data.async_compute {
+            for command in &commands {
+                let what = match command {
+                    ArcCommand::RunRenderPass { .. } => "a render pass",
+                    ArcCommand::ClearTexture { .. } => "a texture clear",
+                    _ => continue,
+                };
+                return Err(CommandEncoderError::AsyncComputeOnly(what));
+            }
+        }
 
         #[cfg(feature = "trace")]
         if device.trace.lock().is_some() {
@@ -1542,6 +1580,9 @@ impl WebGpuError for EncoderStateError {
 #[derive(Clone, Debug, Error)]
 #[non_exhaustive]
 pub enum CommandEncoderError {
+    /// BENILLA: async compute.
+    #[error("An async compute command buffer cannot record {0}")]
+    AsyncComputeOnly(&'static str),
     #[error(transparent)]
     State(#[from] EncoderStateError),
     #[error(transparent)]
@@ -1606,6 +1647,7 @@ impl CommandEncoderError {
 impl WebGpuError for CommandEncoderError {
     fn webgpu_error_type(&self) -> ErrorType {
         match self {
+            Self::AsyncComputeOnly(_) => ErrorType::Validation,
             Self::Device(e) => e.webgpu_error_type(),
             Self::InvalidResource(e) => e.webgpu_error_type(),
             Self::DebugGroupError(e) => e.webgpu_error_type(),

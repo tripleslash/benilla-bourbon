@@ -76,6 +76,33 @@ signature's layout on DX12 (`[first_vertex, first_instance, 0]` then the argumen
 32) before handing the buffer here; `third_party/wgpu-core/BENILLA.md` has the mechanism. Mesh-task
 count draws are untouched on both sides.
 
+## The third patch — an async compute queue (DX12, Vulkan)
+
+A second, compute-only queue beside the main one, which wgpu-core drives
+(`third_party/wgpu-core/BENILLA.md`, "Async compute") so benilla's froxel, light-binning and meter
+compute can run beside the raster passes. Every hunk is marked `BENILLA: async compute`.
+
+| file | hunk |
+|---|---|
+| `src/lib.rs` | `Device::create_async_compute_queue(&self) -> Option<Queue>` (default `None`; GL, Metal and noop keep it) and `Queue::wait_for_fence(&self, fence: &Fence, value: FenceValue) -> Result<(), DeviceError>` (default `Err(Unexpected)`): later submissions on the queue wait on the GPU until another queue's `fence` reaches `value`. `ASYNC_COMPUTE_BUFFER_MARK` / `ASYNC_COMPUTE_TEXTURE_MARK`: bit 15 of `wgt::BufferUses` / `wgt::TextureUses`, which wgpu-types 29 leaves unnamed (a `const` assertion fails the build if a bump names it), set by wgpu-core on a use the async queue left. |
+| `src/dynamic/device.rs`, `src/dynamic/queue.rs` | the two methods on `DynDevice` / `DynQueue`. |
+| `src/dx12/device.rs` | `create_async_compute_queue`: `CreateCommandQueue` with `D3D12_COMMAND_LIST_TYPE_COMPUTE`. `create_command_encoder` makes its allocator, and so its lists, of the queue's type. |
+| `src/dx12/mod.rs`, `src/dx12/adapter.rs` | `Queue` and `CommandEncoder` carry their `D3D12_COMMAND_LIST_TYPE`; `Queue::wait_for_fence` is `ID3D12CommandQueue::Wait`. |
+| `src/dx12/command.rs`, `src/dx12/conv.rs` | `transition_buffers` / `transition_textures` map a use through `compute_queue_state`: on a compute list, or for a marked use, without `PIXEL_SHADER_RESOURCE`, the one graphics-only state a compute-queue use maps to (the runtime fails `Close` on a compute list that names it: measured, `E_INVALIDARG`). The UAV-barrier test ignores the mark. |
+| `src/vulkan/adapter.rs` | `open_with_callback` asks for a second queue: the first queue of a compute-only family where there is one, else queue 1 of the graphics family; none without timeline semaphores (the cross-queue wait is one). `device_from_raw` keeps its signature and forwards to `device_from_raw_with_async_queue`, which records the slot. |
+| `src/vulkan/device.rs`, `src/vulkan/mod.rs` | `create_async_compute_queue` hands that queue out once, with its own relay semaphores. `Queue::wait_for_fence` queues a timeline wait (`ALL_COMMANDS`) that the next `submit` takes. Buffers and images are `VK_SHARING_MODE_CONCURRENT` over both families when the async queue is of another family (`DeviceShared::concurrent_families`). An encoder of the compute family masks its barriers' stages and accesses to what such a family supports (`conv::compute_queue_barrier`); the mark is stripped before layouts and stages are derived. |
+
+**Why these resource rules.** DX12: wgpu-core records every transition *into* an async submission
+on the main (direct) queue, which may name any state, and marks what the async lists write or
+transition, so the transition *out* names the compute-queue state; a compute list itself only ever
+names compute states. No common-state decay or promotion is relied on. Vulkan: a second family
+needs either ownership transfers (a release on one queue matched by an acquire on the other, per
+resource, with the layouts repeated) or concurrent sharing; concurrent sharing is one flag at
+creation and nothing per frame, and the semaphore wait already orders the memory. Its possible cost is
+drivers that disable compression for concurrent images (reported for some AMD generations; not
+measured here).
+The second-queue-of-the-graphics-family fallback needs neither.
+
 ## How to check
 
 `diff -u <registry>/wgpu-hal-29.0.4/src/vulkan/swapchain/native.rs third_party/wgpu-hal/src/vulkan/swapchain/native.rs`

@@ -1179,6 +1179,71 @@ impl Global {
         (id, Some(error))
     }
 
+    /// BENILLA: async compute. The device's async compute queue (`Device::create_async_compute_queue`).
+    pub fn device_create_async_compute_queue(
+        &self,
+        device_id: DeviceId,
+    ) -> Option<Arc<crate::device::AsyncComputeQueue>> {
+        self.hub.devices.get(device_id).create_async_compute_queue()
+    }
+
+    /// BENILLA: async compute. A command encoder whose command buffers only `queue` takes.
+    pub fn async_queue_create_command_encoder(
+        &self,
+        queue: &Arc<crate::device::AsyncComputeQueue>,
+        desc: &wgt::CommandEncoderDescriptor<Label>,
+        id_in: Option<id::CommandEncoderId>,
+    ) -> (id::CommandEncoderId, Option<DeviceError>) {
+        profiling::scope!("AsyncComputeQueue::create_command_encoder");
+        let fid = self.hub.command_encoders.prepare(id_in);
+        match queue.create_command_encoder(&desc.label) {
+            Ok(cmd_enc) => (fid.assign(cmd_enc), None),
+            Err(error) => {
+                let id = fid.assign(Arc::new(CommandEncoder::new_invalid(
+                    &queue.device,
+                    &desc.label,
+                    error.clone().into(),
+                )));
+                (id, Some(error))
+            }
+        }
+    }
+
+    /// BENILLA: async compute. Submit command buffers recorded with
+    /// [`Self::async_queue_create_command_encoder`] on `queue`.
+    pub fn async_queue_submit(
+        &self,
+        queue: &Arc<crate::device::AsyncComputeQueue>,
+        command_buffer_ids: &[id::CommandBufferId],
+    ) -> Result<
+        crate::SubmissionIndex,
+        (
+            crate::SubmissionIndex,
+            crate::device::queue::QueueSubmitError,
+        ),
+    > {
+        let guard = self.hub.command_buffers.read();
+        let command_buffers = command_buffer_ids
+            .iter()
+            .map(|id| guard.get(*id))
+            .collect::<Vec<_>>();
+        drop(guard);
+        queue.submit(&command_buffers)
+    }
+
+    /// BENILLA: async compute. Make the main queue wait on the GPU for `index` of `async_queue`.
+    pub fn queue_wait_for_async(
+        &self,
+        queue_id: QueueId,
+        async_queue: &crate::device::AsyncComputeQueue,
+        index: crate::SubmissionIndex,
+    ) -> Result<(), DeviceError> {
+        self.hub
+            .queues
+            .get(queue_id)
+            .wait_for_async(async_queue, index)
+    }
+
     pub fn command_encoder_drop(&self, command_encoder_id: id::CommandEncoderId) {
         profiling::scope!("CommandEncoder::drop");
         api_log!("CommandEncoder::drop {command_encoder_id:?}");

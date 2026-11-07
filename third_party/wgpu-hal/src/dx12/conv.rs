@@ -214,6 +214,22 @@ pub fn map_texture_usage_to_state(usage: wgt::TextureUses) -> Direct3D12::D3D12_
     state
 }
 
+/// BENILLA: async compute. A state as a compute command list may name it. Of what wgpu maps a
+/// compute-queue use to, only `PIXEL_SHADER_RESOURCE` is graphics-only (D3D12's "invalid flags for
+/// compute command list"), so a compute-queue state is the mapped one without it.
+pub fn compute_queue_state(
+    state: Direct3D12::D3D12_RESOURCE_STATES,
+    compute: bool,
+) -> Direct3D12::D3D12_RESOURCE_STATES {
+    if compute {
+        Direct3D12::D3D12_RESOURCE_STATES(
+            state.0 & !Direct3D12::D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0,
+        )
+    } else {
+        state
+    }
+}
+
 pub fn map_topology(
     topology: wgt::PrimitiveTopology,
 ) -> (

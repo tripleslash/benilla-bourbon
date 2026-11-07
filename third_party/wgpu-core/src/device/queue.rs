@@ -272,6 +272,9 @@ pub enum TempResource {
     ScratchBuffer(ScratchBuffer),
     DestroyedBuffer(DestroyedBuffer),
     DestroyedTexture(DestroyedTexture),
+    /// BENILLA: async compute. A resource destroyed while both queues still had submissions using
+    /// it: each holds one of these, and it is freed when the last of them retires.
+    Shared(Arc<TempResource>),
 }
 
 /// A series of raw [`CommandBuffer`]s that have been submitted to a
@@ -280,11 +283,11 @@ pub enum TempResource {
 /// [`CommandBuffer`]: hal::Api::CommandBuffer
 /// [`wgpu_hal::CommandEncoder`]: hal::CommandEncoder
 pub(crate) struct EncoderInFlight {
-    inner: crate::command::InnerCommandEncoder,
+    pub(crate) inner: crate::command::InnerCommandEncoder,
     pub(crate) trackers: Tracker,
     pub(crate) temp_resources: Vec<TempResource>,
     /// We only need to keep these resources alive.
-    _indirect_draw_validation_resources: crate::indirect_validation::DrawResources,
+    pub(crate) _indirect_draw_validation_resources: crate::indirect_validation::DrawResources,
 
     /// These are the buffers that have been tracked by `PendingWrites`.
     pub(crate) pending_buffers: FastHashMap<TrackerIndex, Arc<Buffer>>,
@@ -328,7 +331,7 @@ pub(crate) struct PendingWrites {
 
     temp_resources: Vec<TempResource>,
     dst_buffers: FastHashMap<TrackerIndex, Arc<Buffer>>,
-    dst_textures: FastHashMap<TrackerIndex, Arc<Texture>>,
+    pub(crate) dst_textures: FastHashMap<TrackerIndex, Arc<Texture>>,
     copied_blas_s: FastHashMap<TrackerIndex, Arc<Blas>>,
     instance_flags: wgt::InstanceFlags,
 }
@@ -381,7 +384,7 @@ impl PendingWrites {
             .push(TempResource::StagingBuffer(buffer));
     }
 
-    fn pre_submit(
+    pub(crate) fn pre_submit(
         &mut self,
         command_allocator: &CommandAllocator,
         device: &Arc<Device>,
@@ -408,6 +411,7 @@ impl PendingWrites {
                     is_open: false,
                     api: crate::command::EncodingApi::InternalUse,
                     label: "(wgpu internal) PendingWrites command encoder".into(),
+                    async_compute: false,
                 },
                 trackers: Tracker::new(device.ordered_buffer_usages, device.ordered_texture_usages),
                 temp_resources: mem::take(&mut self.temp_resources),
@@ -497,6 +501,14 @@ pub enum QueueSubmitError {
     CommandEncoder(#[from] CommandEncoderError),
     #[error(transparent)]
     ValidateAsActionsError(#[from] crate::ray_tracing::ValidateAsActionsError),
+    /// BENILLA: async compute.
+    #[error(
+        "A command buffer was submitted to a queue it was not recorded for (async compute: {0})"
+    )]
+    WrongQueue(bool),
+    /// BENILLA: async compute.
+    #[error("An async compute submission cannot use a surface texture")]
+    AsyncComputeSurfaceTexture,
 }
 
 impl WebGpuError for QueueSubmitError {
@@ -507,7 +519,10 @@ impl WebGpuError for QueueSubmitError {
             Self::CommandEncoder(e) => e.webgpu_error_type(),
             Self::ValidateAsActionsError(e) => e.webgpu_error_type(),
             Self::InvalidResource(e) => e.webgpu_error_type(),
-            Self::DestroyedResource(_) | Self::BufferStillMapped(_) => ErrorType::Validation,
+            Self::DestroyedResource(_)
+            | Self::BufferStillMapped(_)
+            | Self::WrongQueue(_)
+            | Self::AsyncComputeSurfaceTexture => ErrorType::Validation,
         }
     }
 }
@@ -1251,6 +1266,11 @@ impl Queue {
                             .and_then(|data| mem::take(&mut data.trace_commands));
 
                         let mut baked = match cmd_buf_data {
+                            // BENILLA: async compute — its command buffers go to its own queue.
+                            Ok(cmd_buf_data) if cmd_buf_data.async_compute => {
+                                first_error.get_or_insert(QueueSubmitError::WrongQueue(true));
+                                continue;
+                            }
                             Ok(cmd_buf_data) => {
                                 let res = validate_command_buffer(
                                     command_buffer,
@@ -1422,6 +1442,16 @@ impl Queue {
                 }
                 Ok(None) => {}
                 Err(e) => break 'error Err(e.into()),
+            }
+            // BENILLA: async compute — wait for the newest async submission this one conflicts
+            // with (`device::async_queue`).
+            if let Some(async_queue) = self.device.get_async_queue() {
+                let refs = active_executions.iter().collect::<Vec<_>>();
+                if let Some(index) = async_queue.conflicting_submission(&refs) {
+                    if let Err(e) = async_queue.make_main_wait(self.raw(), index) {
+                        break 'error Err(e.into());
+                    }
+                }
             }
             let hal_command_buffers = active_executions
                 .iter()
@@ -1811,7 +1841,7 @@ impl Global {
     }
 }
 
-fn validate_command_buffer(
+pub(crate) fn validate_command_buffer(
     command_buffer: &CommandBuffer,
     queue: &Queue,
     cmd_buf_data: &crate::command::CommandBufferMutable,

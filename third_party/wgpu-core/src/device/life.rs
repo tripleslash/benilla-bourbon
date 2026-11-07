@@ -208,6 +208,39 @@ impl LifetimeTracker {
         self.active.is_empty()
     }
 
+    /// BENILLA: async compute. Like [`Self::map`], but only when a submission still uses the
+    /// buffer: the async queue's half of a map, which the main queue's half follows.
+    pub(crate) fn map_if_used(&mut self, buffer: &Arc<Buffer>) -> Option<SubmissionIndex> {
+        let submission = self
+            .active
+            .iter_mut()
+            .rev()
+            .find(|a| a.contains_buffer(buffer))?;
+        submission.mapped.push(buffer.clone());
+        Some(submission.index)
+    }
+
+    /// BENILLA: async compute. The buffers whose last submission here has retired, for the main
+    /// queue's tracker to map or hold.
+    pub(crate) fn take_ready_to_map(&mut self) -> Vec<Arc<Buffer>> {
+        core::mem::take(&mut self.ready_to_map)
+    }
+
+    /// BENILLA: async compute. The newest submission past `after` with an encoder for which `f`
+    /// holds, if any.
+    pub(crate) fn newest_matching(
+        &self,
+        after: SubmissionIndex,
+        mut f: impl FnMut(&EncoderInFlight) -> bool,
+    ) -> Option<SubmissionIndex> {
+        self.active
+            .iter()
+            .rev()
+            .take_while(|a| a.index > after)
+            .find(|a| a.encoders.iter().any(&mut f))
+            .map(|a| a.index)
+    }
+
     /// Start tracking resources associated with a new queue submission.
     pub fn track_submission(&mut self, index: SubmissionIndex, encoders: Vec<EncoderInFlight>) {
         self.active.push(ActiveSubmission {

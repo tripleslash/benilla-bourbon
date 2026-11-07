@@ -209,6 +209,10 @@ pub struct Device {
     raw: Box<dyn hal::DynDevice>,
     pub(crate) adapter: Arc<Adapter>,
     pub(crate) queue: OnceCellOrLock<Weak<Queue>>,
+    /// BENILLA: async compute. The device's async compute queue, once made.
+    pub(crate) async_queue: OnceCellOrLock<Weak<super::AsyncComputeQueue>>,
+    /// BENILLA: async compute. Encoders for the async compute queue (compute-type lists).
+    pub(crate) async_command_allocator: command::CommandAllocator,
     pub(crate) zero_buffer: ManuallyDrop<Box<dyn hal::DynBuffer>>,
     pub(crate) empty_bgl: ManuallyDrop<Box<dyn hal::DynBindGroupLayout>>,
     /// The `label` from the descriptor used to create the resource.
@@ -527,6 +531,8 @@ impl Device {
             raw: raw_device,
             adapter: adapter.clone(),
             queue: OnceCellOrLock::new(),
+            async_queue: OnceCellOrLock::new(),
+            async_command_allocator: command::CommandAllocator::new(),
             zero_buffer: ManuallyDrop::new(zero_buffer),
             empty_bgl: ManuallyDrop::new(empty_bgl),
             default_external_texture_params_buffer: ManuallyDrop::new(
@@ -780,6 +786,30 @@ impl Device {
         assert!(self.queue.set(Arc::downgrade(queue)).is_ok());
     }
 
+    /// BENILLA: async compute. The async compute queue, if one was made and is alive.
+    pub(crate) fn get_async_queue(&self) -> Option<Arc<super::AsyncComputeQueue>> {
+        self.async_queue.get()?.upgrade()
+    }
+
+    /// BENILLA: async compute. Make the device's one async compute queue, or `None` where the
+    /// backend has none or one was made already.
+    pub fn create_async_compute_queue(self: &Arc<Self>) -> Option<Arc<super::AsyncComputeQueue>> {
+        if self.check_is_valid().is_err() || self.async_queue.get().is_some() {
+            return None;
+        }
+        let raw = unsafe { self.raw().create_async_compute_queue() }?;
+        let fence = match unsafe { self.raw().create_fence() } {
+            Ok(fence) => fence,
+            Err(e) => {
+                log::warn!("async compute: no fence ({e})");
+                return None;
+            }
+        };
+        let queue = Arc::new(super::AsyncComputeQueue::new(self, raw, fence));
+        self.async_queue.set(Arc::downgrade(&queue)).ok()?;
+        Some(queue)
+    }
+
     pub fn poll(
         &self,
         poll_type: wgt::PollType<crate::SubmissionIndex>,
@@ -839,6 +869,11 @@ impl Device {
 
         let mut user_closures = UserClosures::default();
 
+        // BENILLA: async compute — an index may be either queue's. A wait for it waits for both
+        // queues to finish everything up to it; each fence is waited only up to its own newest.
+        let async_queue = self.get_async_queue();
+        let async_last = async_queue.as_ref().map_or(0, |q| q.last_submission());
+
         // If a wait was requested, determine which submission index to wait for.
         let wait_submission_index = match poll_type {
             wgt::PollType::Wait {
@@ -847,7 +882,8 @@ impl Device {
             } => {
                 let last_successful_submission_index = self
                     .last_successful_submission_index
-                    .load(Ordering::Acquire);
+                    .load(Ordering::Acquire)
+                    .max(async_last);
 
                 if submission_index > last_successful_submission_index {
                     let result = Err(WaitIdleError::WrongSubmissionIndex(
@@ -865,10 +901,18 @@ impl Device {
                 ..
             } => Some(
                 self.last_successful_submission_index
-                    .load(Ordering::Acquire),
+                    .load(Ordering::Acquire)
+                    .max(async_last),
             ),
             wgt::PollType::Poll => None,
         };
+        let async_wait = wait_submission_index;
+        let wait_submission_index = wait_submission_index.map(|index| {
+            index.min(
+                self.last_successful_submission_index
+                    .load(Ordering::Acquire),
+            )
+        });
 
         // Wait for the submission index if requested.
         if let Some(target_submission_index) = wait_submission_index {
@@ -891,6 +935,34 @@ impl Device {
             if let Err(e) = wait_result {
                 let hal_error: WaitIdleError = self.handle_hal_error(e).into();
                 return (user_closures, Err(hal_error));
+            }
+        }
+
+        // BENILLA: async compute — the async queue's half of the wait, then retire what it
+        // finished: a buffer whose map waited on it moves to the main queue's tracker, which maps
+        // it or holds it for its own submissions.
+        let mut async_empty = true;
+        if let Some(async_queue) = async_queue.as_ref() {
+            if let Some(index) = async_wait {
+                let timeout = match poll_type {
+                    wgt::PollType::Wait { timeout, .. } => timeout,
+                    wgt::PollType::Poll => None,
+                };
+                if let Err(e) = async_queue.wait_idle_to(index, timeout) {
+                    return (user_closures, Err(e.into()));
+                }
+            }
+            match async_queue.maintain() {
+                Ok((ready, empty)) => {
+                    async_empty = empty;
+                    if let Some(queue) = self.get_queue() {
+                        let mut life = queue.lock_life();
+                        for buffer in ready {
+                            life.map(&buffer);
+                        }
+                    }
+                }
+                Err(e) => return (user_closures, Err(e.into())),
             }
         }
 
@@ -919,6 +991,7 @@ impl Device {
                 user_closures.blas_compact_ready,
                 queue_empty,
             ) = queue_result;
+            queue_empty &= async_empty;
             // DEADLOCK PREVENTION: We must drop `snatch_guard` before `queue` goes out of scope.
             //
             // `Queue::drop` acquires the snatch guard. If we still hold it when `queue` is dropped
@@ -1201,6 +1274,15 @@ impl Device {
 
         if let Some(last_submission) = last_submission {
             device.wait_for_submit(last_submission)?;
+        }
+        // BENILLA: async compute — and for the async queue's use of it.
+        if let Some(async_queue) = device.get_async_queue() {
+            let last = async_queue
+                .lock_life()
+                .get_buffer_latest_submission_index(buffer);
+            if let Some(last) = last {
+                async_queue.wait_idle_to(last, None)?;
+            }
         }
 
         let snatch_guard = device.snatchable_lock.read();

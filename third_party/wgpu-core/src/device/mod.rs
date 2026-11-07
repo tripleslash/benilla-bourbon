@@ -20,6 +20,8 @@ use wgt::{
     BufferAddress, DeviceLostReason, TextureFormat,
 };
 
+// BENILLA: async compute.
+pub mod async_queue;
 pub(crate) mod bgl;
 pub mod global;
 mod life;
@@ -28,7 +30,7 @@ pub mod ray_tracing;
 pub mod resource;
 #[cfg(any(feature = "trace", feature = "replay"))]
 pub mod trace;
-pub use {life::WaitIdleError, resource::Device};
+pub use {async_queue::AsyncComputeQueue, life::WaitIdleError, resource::Device};
 
 pub const SHADER_STAGE_COUNT: usize = hal::MAX_CONCURRENT_SHADER_STAGES;
 // Should be large enough for the largest possible texture row. This

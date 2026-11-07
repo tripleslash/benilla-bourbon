@@ -128,6 +128,8 @@ pub trait DynDevice: DynResource {
     unsafe fn destroy_query_set(&self, set: Box<dyn DynQuerySet>);
 
     unsafe fn create_fence(&self) -> Result<Box<dyn DynFence>, DeviceError>;
+    /// BENILLA: async compute ([`Device::create_async_compute_queue`]).
+    unsafe fn create_async_compute_queue(&self) -> Option<Box<dyn DynQueue>>;
     unsafe fn destroy_fence(&self, fence: Box<dyn DynFence>);
     unsafe fn get_fence_value(&self, fence: &dyn DynFence) -> Result<FenceValue, DeviceError>;
 
@@ -471,6 +473,10 @@ impl<D: Device + DynResource> DynDevice for D {
 
     unsafe fn create_fence(&self) -> Result<Box<dyn DynFence>, DeviceError> {
         unsafe { D::create_fence(self) }.map(|b| -> Box<dyn DynFence> { Box::new(b) })
+    }
+
+    unsafe fn create_async_compute_queue(&self) -> Option<Box<dyn DynQueue>> {
+        unsafe { D::create_async_compute_queue(self) }.map(|q| -> Box<dyn DynQueue> { Box::new(q) })
     }
 
     unsafe fn destroy_fence(&self, fence: Box<dyn DynFence>) {

@@ -20,6 +20,12 @@ pub trait DynQueue: DynResource {
         texture: Box<dyn DynSurfaceTexture>,
     ) -> Result<(), SurfaceError>;
     unsafe fn get_timestamp_period(&self) -> f32;
+    /// BENILLA: async compute ([`Queue::wait_for_fence`]).
+    unsafe fn wait_for_fence(
+        &self,
+        fence: &dyn DynFence,
+        value: FenceValue,
+    ) -> Result<(), DeviceError>;
 }
 
 impl<Q: Queue + DynResource> DynQueue for Q {
@@ -52,5 +58,14 @@ impl<Q: Queue + DynResource> DynQueue for Q {
 
     unsafe fn get_timestamp_period(&self) -> f32 {
         unsafe { Q::get_timestamp_period(self) }
+    }
+
+    unsafe fn wait_for_fence(
+        &self,
+        fence: &dyn DynFence,
+        value: FenceValue,
+    ) -> Result<(), DeviceError> {
+        let fence = fence.expect_downcast_ref();
+        unsafe { Q::wait_for_fence(self, fence, value) }
     }
 }

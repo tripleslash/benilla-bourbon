@@ -202,9 +202,19 @@ impl crate::CommandEncoder for super::CommandEncoder {
         vk_barriers.clear();
 
         for bar in barriers {
-            let (src_stage, src_access) = conv::map_buffer_usage_to_barrier(bar.usage.from);
+            // BENILLA: async compute — the mark means nothing to Vulkan's layouts or stages, and a
+            // compute-family encoder names only compute stages.
+            let from = bar.usage.from - crate::ASYNC_COMPUTE_BUFFER_MARK;
+            let to = bar.usage.to - crate::ASYNC_COMPUTE_BUFFER_MARK;
+            let (src_stage, src_access) = conv::compute_queue_barrier(
+                conv::map_buffer_usage_to_barrier(from),
+                self.compute_only,
+            );
             src_stages |= src_stage;
-            let (dst_stage, dst_access) = conv::map_buffer_usage_to_barrier(bar.usage.to);
+            let (dst_stage, dst_access) = conv::compute_queue_barrier(
+                conv::map_buffer_usage_to_barrier(to),
+                self.compute_only,
+            );
             dst_stages |= dst_stage;
 
             vk_barriers.push(
@@ -246,11 +256,20 @@ impl crate::CommandEncoder for super::CommandEncoder {
                 bar.texture.format,
                 &self.device.private_caps,
             );
-            let (src_stage, src_access) = conv::map_texture_usage_to_barrier(bar.usage.from);
-            let src_layout = conv::derive_image_layout(bar.usage.from, bar.texture.format);
+            // BENILLA: async compute — as in `transition_buffers`.
+            let from = bar.usage.from - crate::ASYNC_COMPUTE_TEXTURE_MARK;
+            let to = bar.usage.to - crate::ASYNC_COMPUTE_TEXTURE_MARK;
+            let (src_stage, src_access) = conv::compute_queue_barrier(
+                conv::map_texture_usage_to_barrier(from),
+                self.compute_only,
+            );
+            let src_layout = conv::derive_image_layout(from, bar.texture.format);
             src_stages |= src_stage;
-            let (dst_stage, dst_access) = conv::map_texture_usage_to_barrier(bar.usage.to);
-            let dst_layout = conv::derive_image_layout(bar.usage.to, bar.texture.format);
+            let (dst_stage, dst_access) = conv::compute_queue_barrier(
+                conv::map_texture_usage_to_barrier(to),
+                self.compute_only,
+            );
+            let dst_layout = conv::derive_image_layout(to, bar.texture.format);
             dst_stages |= dst_stage;
 
             vk_barriers.push(

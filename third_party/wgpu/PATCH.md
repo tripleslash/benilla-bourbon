@@ -118,6 +118,33 @@ the last of them drops, the JS object goes onto a per-thread list, and
 texture gets a guard that owns nothing: it belongs to the canvas. Bind groups have no `destroy()` in
 WebGPU and are still freed by the collector.
 
+## Async compute (`src/api/async_compute.rs`, `src/backend/wgpu_core.rs`)
+
+Native only: the public face of wgpu-core's async compute queue (`third_party/wgpu-core/BENILLA.md`,
+"Async compute", has the synchronization scheme). Every hunk is marked `benilla local patch`.
+
+```rust
+impl Device {
+    pub fn create_async_compute_queue(&self, queue: &Queue) -> Option<AsyncComputeQueue>;
+}
+#[derive(Clone, Debug)] pub struct AsyncComputeQueue { .. }
+impl AsyncComputeQueue {
+    pub fn create_command_encoder(&self, desc: &CommandEncoderDescriptor<'_>) -> CommandEncoder;
+    pub fn submit<I: IntoIterator<Item = CommandBuffer>>(&self, command_buffers: I) -> SubmissionIndex;
+    pub fn wait_for(&self, index: &SubmissionIndex);          // this queue waits for a main submission
+    pub fn get_timestamp_period(&self) -> f32;
+}
+impl Queue {
+    pub fn wait_for(&self, async_queue: &AsyncComputeQueue, index: &SubmissionIndex);
+}
+```
+
+`create_async_compute_queue` takes the main queue because a command buffer's deferred callbacks
+(`on_submitted_work_done`) run on it. It is `None` on WebGPU (the backend has no such queue), on GL
+and Metal, without a compute-capable second queue, and after the first call. `CoreAsyncComputeQueue`
+is the core backend's handle (the context, the `wgpu_core` queue, the device's error sink); errors
+go to the device's error sink like any other.
+
 ## Removal
 
 Once a wgpu release that Bevy uses includes both mappings, with a real flag for tier 1:

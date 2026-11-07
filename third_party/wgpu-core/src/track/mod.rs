@@ -651,6 +651,13 @@ pub(crate) struct Tracker {
 }
 
 impl Tracker {
+    /// BENILLA: async compute. Mark this (async compute) command buffer's writes and state changes
+    /// (`BufferTracker::mark_for_async_queue`, `TextureTracker::mark_for_async_queue`).
+    pub fn mark_for_async_queue(&mut self) {
+        self.buffers.mark_for_async_queue();
+        self.textures.mark_for_async_queue();
+    }
+
     pub fn new(
         ordered_buffer_usages: wgt::BufferUses,
         ordered_texture_usages: wgt::TextureUses,

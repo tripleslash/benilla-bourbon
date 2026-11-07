@@ -63,13 +63,100 @@ behaviour. On DX12 that now holds for count draws as well, and holds with the fl
 non-indexed draw and `src[3]` (`base_vertex`) for an indexed one, the same values wgpu-hal passes
 to `prepare_draw` for direct draws, so indirect and direct draws agree.
 
+## Async compute — `src/device/async_queue.rs` and its callers
+
+A second, compute-only queue (`AsyncComputeQueue`) beside the device's main queue, on the queue
+wgpu-hal's third patch makes. Every hunk is marked `BENILLA: async compute`.
+
+**The API** (`Global` is what the `wgpu` crate calls; `third_party/wgpu/PATCH.md` has the public one):
+
+```rust
+impl Device { pub fn create_async_compute_queue(self: &Arc<Self>) -> Option<Arc<AsyncComputeQueue>>; }
+impl AsyncComputeQueue {
+    pub fn submit(&self, command_buffers: &[Arc<CommandBuffer>])
+        -> Result<SubmissionIndex, (SubmissionIndex, QueueSubmitError)>;
+    pub fn wait_for_main(&self, index: SubmissionIndex) -> Result<(), DeviceError>;
+    pub fn last_submission(&self) -> SubmissionIndex;
+    pub fn get_timestamp_period(&self) -> f32;
+}
+impl Queue { pub fn wait_for_async(&self, q: &AsyncComputeQueue, index: SubmissionIndex) -> Result<(), DeviceError>; }
+impl Global {
+    pub fn device_create_async_compute_queue(&self, device_id: DeviceId) -> Option<Arc<AsyncComputeQueue>>;
+    pub fn async_queue_create_command_encoder(&self, queue: &Arc<AsyncComputeQueue>,
+        desc: &wgt::CommandEncoderDescriptor<Label>, id_in: Option<CommandEncoderId>)
+        -> (CommandEncoderId, Option<DeviceError>);
+    pub fn async_queue_submit(&self, queue: &Arc<AsyncComputeQueue>, command_buffer_ids: &[CommandBufferId])
+        -> Result<SubmissionIndex, (SubmissionIndex, QueueSubmitError)>;
+    pub fn queue_wait_for_async(&self, queue_id: QueueId, async_queue: &AsyncComputeQueue,
+        index: SubmissionIndex) -> Result<(), DeviceError>;
+}
+```
+
+**The synchronization scheme.**
+
+- *One index space, two fences.* Both queues take submission indices from the device's one counter;
+  each signals its own fence with its own. An index therefore names one submission on one queue,
+  and a wait for index `n` (`Device::maintain`) waits for each queue's fence up to the lesser of `n`
+  and that queue's newest.
+- *Main before async.* `AsyncComputeQueue::submit` records the memory initialization and every
+  transition into its command buffers' start states on a **main-queue** encoder (the "Async compute
+  transit"), submits it after the pending writes as one main submission, and makes the async queue
+  wait on the GPU for that. So an async submission never runs before main work submitted before
+  it, sees every `write_buffer` / `write_texture` before it, and a compute list never names a
+  graphics state.
+- *Async before main.* Every main submission (the transit included) waits on the GPU for the
+  newest async submission it conflicts with (`AsyncComputeQueue::conflicting_submission`): one
+  that uses a resource the main submission uses, unless both used it only for reading, in one and
+  the same state, with no transition inside either command buffer (`read_only_state`). Such a
+  resource needs no barrier on either queue, so the two reads overlap. A pending write conflicts
+  with every async use of its target.
+- *States.* `Tracker::mark_for_async_queue` ORs `hal::ASYNC_COMPUTE_*_MARK` into the start and end
+  states of every resource an async command buffer writes or transitions. The transit then
+  transitions into the compute-queue state and the device tracker keeps it, so the next main
+  transition starts from it (wgpu-hal maps a marked use without `PIXEL_SHADER_RESOURCE` on DX12,
+  and ignores the mark elsewhere). An unmarked read-only resource stays in its full state, which
+  a compute list may read without naming it. To tell the two apart, the command buffer trackers
+  remember which resources they recorded a barrier for (`transitioned`).
+- *Lifetimes.* Each queue's `LifetimeTracker` retires its own submissions against its own fence;
+  a resource lives while either holds it (`Arc`). `map_async` on a buffer the async queue still
+  uses is held there first (`map_if_used`), then handed to the main tracker (`Device::maintain`),
+  which maps it or holds it for its own submissions. A destroyed resource both queues still use is
+  split into two `TempResource::Shared` halves and freed when the later retires. `set_buffer_data`
+  waits for both. `device.poll(Wait)` waits for both fences, and a queue is empty only when both
+  are.
+
+**Limits.** Async command buffers come only from `async_queue_create_command_encoder`
+(`CommandBufferMutable::async_compute`), go only to the async queue (`QueueSubmitError::WrongQueue`),
+and may not record a render pass or a texture clear (`CommandEncoderError::AsyncComputeOnly`: a
+clear may be a render pass), nor use a surface texture. Their hal encoders come from and return to
+`Device::async_command_allocator`, so a compute-type list is never handed to the main queue. Query
+sets are not tracked across the queues: a query an async pass writes must be resolved by a main
+submission that waited for it (`Queue::wait_for_async`).
+
+**What is not covered.** Mapped-at-creation buffers and buffer `unmap` copies are pending writes,
+so they conflict as writes do. Ray-tracing acceleration structures are not tracked across the
+queues.
+
+| file | hunk |
+|---|---|
+| `src/device/async_queue.rs` | new: the queue, its submit, the conflict test, `schedule_destruction`, `Queue::wait_for_async`. |
+| `src/device/resource.rs` | `Device::async_queue`, `async_command_allocator`, `get_async_queue`, `create_async_compute_queue`; `maintain` waits for and retires the async queue; `set_buffer_data` waits for it. |
+| `src/device/queue.rs` | `Queue::submit` refuses async command buffers and waits where it conflicts; `TempResource::Shared`; `QueueSubmitError::{WrongQueue, AsyncComputeSurfaceTexture}`; `validate_command_buffer`, `PendingWrites::pre_submit`, `dst_textures` and two `EncoderInFlight` fields `pub(crate)`. |
+| `src/device/life.rs` | `map_if_used`, `take_ready_to_map`, `newest_matching`. |
+| `src/device/global.rs`, `src/device/mod.rs` | the `Global` entry points; the module. |
+| `src/resource.rs` | `map_async` and both `destroy`s route through the async queue. |
+| `src/command/mod.rs` | `InnerCommandEncoder::async_compute` (which allocator its encoder returns to), `CommandBufferMutable::async_compute`, `CommandEncoder::new_for_queue`, the render-pass refusal in `encode_commands`, `CommandEncoderError::AsyncComputeOnly`. |
+| `src/track/buffer.rs`, `src/track/texture.rs`, `src/track/mod.rs` | `transitioned`, `read_only_state`, `mark_for_async_queue`. |
+| `src/lock/rank.rs` | `ASYNC_QUEUE_FENCE` after `DEVICE_FENCE`; `ASYNC_QUEUE_LIFE_TRACKER` after the main queue's pending writes and life tracker. |
+
 ## How to check
 
 ```sh
 diff -ru ~/.cargo/registry/src/index.crates.io-*/wgpu-core-29.0.4 third_party/wgpu-core
 ```
 
-shows exactly the hunks above (three files, every one marked `BENILLA:`), this file, and `Only
+shows exactly the hunks above (every one marked `BENILLA:`; `src/device/async_queue.rs` is new), this
+file, and `Only
 in` the registry copy for cargo's packaging files (`.cargo-ok`, `.cargo_vcs_info.json`,
 `Cargo.lock`, `Cargo.toml.orig`). If the registry copy is absent, fetch
 `https://static.crates.io/crates/wgpu-core/wgpu-core-29.0.4.crate`.

@@ -500,6 +500,13 @@ impl super::Device {
             .usage(conv::map_texture_usage(desc.usage))
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
+        // BENILLA: async compute — shared with the compute family (`concurrent_families`).
+        let families = self.shared.concurrent_families();
+        if let Some(families) = &families {
+            vk_info = vk_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(families);
+        }
 
         let mut format_list_info = vk::ImageFormatListCreateInfo::default();
         if !vk_view_formats.is_empty() {
@@ -875,10 +882,17 @@ impl crate::Device for super::Device {
         &self,
         desc: &crate::BufferDescriptor,
     ) -> Result<super::Buffer, crate::DeviceError> {
+        // BENILLA: async compute — shared with the compute family (`concurrent_families`).
+        let families = self.shared.concurrent_families();
         let vk_info = vk::BufferCreateInfo::default()
             .size(desc.size)
-            .usage(conv::map_buffer_usage(desc.usage))
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            .usage(conv::map_buffer_usage(desc.usage));
+        let vk_info = match &families {
+            Some(families) => vk_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(families),
+            None => vk_info.sharing_mode(vk::SharingMode::EXCLUSIVE),
+        };
 
         let raw = unsafe {
             self.shared
@@ -1243,6 +1257,34 @@ impl crate::Device for super::Device {
         self.counters.samplers.sub(1);
     }
 
+    /// BENILLA: async compute. The second queue `open` created, once.
+    unsafe fn create_async_compute_queue(&self) -> Option<super::Queue> {
+        let (family_index, queue_index) = self.shared.async_queue?;
+        if self
+            .shared
+            .async_queue_taken
+            .swap(true, core::sync::atomic::Ordering::AcqRel)
+        {
+            return None;
+        }
+        let raw = unsafe { self.shared.raw.get_device_queue(family_index, queue_index) };
+        let relay_semaphores = super::RelaySemaphores::new(&self.shared)
+            .inspect_err(|e| log::warn!("async compute: no relay semaphores ({e})"))
+            .ok()?;
+        Some(super::Queue {
+            raw,
+            device: Arc::clone(&self.shared),
+            family_index,
+            relay_semaphores: Mutex::new(relay_semaphores),
+            signal_semaphores: Mutex::new(super::semaphore_list::SemaphoreList::new(
+                super::semaphore_list::SemaphoreListMode::Signal,
+            )),
+            wait_semaphores: Mutex::new(super::semaphore_list::SemaphoreList::new(
+                super::semaphore_list::SemaphoreListMode::Wait,
+            )),
+        })
+    }
+
     unsafe fn create_command_encoder(
         &self,
         desc: &crate::CommandEncoderDescriptor<super::Queue>,
@@ -1262,6 +1304,8 @@ impl crate::Device for super::Device {
 
         Ok(super::CommandEncoder {
             raw,
+            // BENILLA: async compute — only the async queue can be of another family.
+            compute_only: desc.queue.family_index != self.shared.family_index,
             device: Arc::clone(&self.shared),
             active: vk::CommandBuffer::null(),
             bind_point: vk::PipelineBindPoint::default(),

@@ -1066,6 +1066,7 @@ impl crate::Adapter for super::Adapter {
             queue: super::Queue {
                 raw: queue,
                 temp_lists: Mutex::new(Vec::new()),
+                list_type: Direct3D12::D3D12_COMMAND_LIST_TYPE_DIRECT,
             },
         })
     }

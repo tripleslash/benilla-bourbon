@@ -221,6 +221,27 @@ impl TextureStateSet {
     /// # Safety
     ///
     /// The `index` must be in bounds.
+    /// BENILLA: async compute. Mark the known states of one texture (`mark_for_async_queue`).
+    fn mark_for_async_queue(&mut self, index: usize) {
+        let mark = hal::ASYNC_COMPUTE_TEXTURE_MARK;
+        let known = |s: TextureUses| s != TextureUses::UNKNOWN && s != TextureUses::COMPLEX;
+        match self.simple.get_mut(index) {
+            Some(simple) if *simple == TextureUses::COMPLEX => {
+                if let Some(complex) = self.complex.get_mut(&index) {
+                    for mip in complex.mips.iter_mut() {
+                        for (_, state) in mip.iter_mut() {
+                            if known(*state) {
+                                *state |= mark;
+                            }
+                        }
+                    }
+                }
+            }
+            Some(simple) if known(*simple) => *simple |= mark,
+            _ => {}
+        }
+    }
+
     unsafe fn insert_simple_unchecked(&mut self, index: usize, simple: TextureUses) {
         unsafe { *self.simple.get_unchecked_mut(index) = simple };
     }
@@ -417,6 +438,9 @@ pub(crate) trait TextureTrackerSetSingle {
 pub(crate) struct TextureTracker {
     start_set: TextureStateSet,
     end_set: TextureStateSet,
+    /// BENILLA: async compute. Textures this command buffer recorded a barrier for (as
+    /// `BufferTracker::transitioned`).
+    transitioned: Vec<bool>,
 
     metadata: ResourceMetadata<Arc<Texture>>,
 
@@ -430,6 +454,7 @@ impl TextureTracker {
         Self {
             start_set: TextureStateSet::new(),
             end_set: TextureStateSet::new(),
+            transitioned: Vec::new(),
 
             metadata: ResourceMetadata::new(),
 
@@ -452,8 +477,52 @@ impl TextureTracker {
     pub fn set_size(&mut self, size: usize) {
         self.start_set.set_size(size);
         self.end_set.set_size(size);
+        self.transitioned.resize(size, false);
 
         self.metadata.set_size(size);
+    }
+
+    /// BENILLA: async compute. Note the textures of the pending transitions as transitioned.
+    fn note_transitions(&mut self) {
+        for pending in &self.temp {
+            if let Some(t) = self.transitioned.get_mut(pending.id as usize) {
+                *t = true;
+            }
+        }
+    }
+
+    /// BENILLA: async compute. The texture twin of `BufferTracker::read_only_state`; a texture
+    /// tracked per subresource has none.
+    pub(crate) fn read_only_state(&self, texture: &Texture) -> Option<TextureUses> {
+        let index = texture.tracker_index().as_usize();
+        if !self.metadata.contains(index) || self.transitioned.get(index) != Some(&false) {
+            return None;
+        }
+        let (start, end) = (
+            *self.start_set.simple.get(index)?,
+            *self.end_set.simple.get(index)?,
+        );
+        (start == end
+            && start != TextureUses::COMPLEX
+            && start != TextureUses::UNKNOWN
+            && !start.intersects(TextureUses::EXCLUSIVE)
+            && !start.contains(hal::ASYNC_COMPUTE_TEXTURE_MARK))
+        .then_some(start)
+    }
+
+    /// BENILLA: async compute. The texture twin of `BufferTracker::mark_for_async_queue`; a
+    /// texture tracked per subresource has every known subresource state marked.
+    pub(crate) fn mark_for_async_queue(&mut self) {
+        let owned = self.metadata.owned_indices().collect::<Vec<_>>();
+        for index in owned {
+            let texture = unsafe { self.metadata.get_resource_unchecked(index) }.clone();
+            if self.read_only_state(&texture).is_some() {
+                continue;
+            }
+            for set in [&mut self.start_set, &mut self.end_set] {
+                set.mark_for_async_queue(index);
+            }
+        }
     }
 
     /// Extend the vectors to let the given index be valid.
@@ -477,6 +546,7 @@ impl TextureTracker {
         &'a mut self,
         snatch_guard: &'a SnatchGuard<'a>,
     ) -> (PendingTransitionList, Vec<Option<&'a TextureInner>>) {
+        self.note_transitions();
         let mut textures = Vec::new();
         let transitions = self
             .temp
@@ -526,6 +596,7 @@ impl TextureTracker {
             )
         }
 
+        self.note_transitions();
         self.temp.drain(..)
     }
 

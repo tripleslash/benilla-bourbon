@@ -787,6 +787,9 @@ unsafe impl Sync for Device {}
 pub struct Queue {
     raw: Direct3D12::ID3D12CommandQueue,
     temp_lists: Mutex<Vec<Option<Direct3D12::ID3D12CommandList>>>,
+    /// BENILLA: async compute. `DIRECT` for the main queue, `COMPUTE` for the one
+    /// `Device::create_async_compute_queue` makes; encoders created against it take its type.
+    list_type: Direct3D12::D3D12_COMMAND_LIST_TYPE,
 }
 
 impl Queue {
@@ -916,6 +919,9 @@ pub struct CommandEncoder {
     free_lists: Vec<Direct3D12::ID3D12GraphicsCommandList>,
     pass: PassState,
     temp: Temp,
+    /// BENILLA: async compute. The type of the queue this encoder was created for; a `COMPUTE`
+    /// list maps every state without `PIXEL_SHADER_RESOURCE` (`conv::compute_queue_state`).
+    list_type: Direct3D12::D3D12_COMMAND_LIST_TYPE,
 
     /// If set, the end of the next render/compute pass will write a timestamp at
     /// the given pool & location.
@@ -1652,6 +1658,16 @@ impl crate::Queue for Queue {
     unsafe fn get_timestamp_period(&self) -> f32 {
         let frequency = unsafe { self.raw.GetTimestampFrequency() }.expect("GetTimestampFrequency");
         (1_000_000_000.0 / frequency as f64) as f32
+    }
+
+    /// BENILLA: async compute. `ID3D12CommandQueue::Wait`: a GPU-side wait, in order with this
+    /// queue's later `ExecuteCommandLists`. A fence signal and wait order memory across queues.
+    unsafe fn wait_for_fence(
+        &self,
+        fence: &Fence,
+        value: crate::FenceValue,
+    ) -> Result<(), crate::DeviceError> {
+        unsafe { self.raw.Wait(&fence.raw, value) }.into_device_result("Queue wait")
     }
 }
 #[derive(Debug)]

@@ -333,6 +333,19 @@ pub const QUERY_SIZE: wgt::BufferAddress = 8;
 pub type Label<'a> = Option<&'a str>;
 pub type MemoryRange = Range<wgt::BufferAddress>;
 pub type FenceValue = u64;
+
+/// BENILLA: async compute. A buffer use carrying this bit was left by the async compute queue
+/// (`Device::create_async_compute_queue`), whose command lists cannot hold graphics-only states:
+/// on DX12 the use maps without `PIXEL_SHADER_RESOURCE`; every other backend strips it. wgpu-core
+/// sets it in its device tracker for what an async submission used, and in the transitions it
+/// records on the main queue into that submission. Bit 15 is unnamed in wgpu-types 29.
+pub const ASYNC_COMPUTE_BUFFER_MARK: wgt::BufferUses = wgt::BufferUses::from_bits_retain(1 << 15);
+/// BENILLA: async compute. The texture twin of [`ASYNC_COMPUTE_BUFFER_MARK`].
+pub const ASYNC_COMPUTE_TEXTURE_MARK: wgt::TextureUses =
+    wgt::TextureUses::from_bits_retain(1 << 15);
+// A wgpu-types bump that names bit 15 fails here instead of aliasing a real use.
+const _: () = assert!(wgt::BufferUses::all().bits() & ASYNC_COMPUTE_BUFFER_MARK.bits() == 0);
+const _: () = assert!(wgt::TextureUses::all().bits() & ASYNC_COMPUTE_TEXTURE_MARK.bits() == 0);
 #[cfg(supports_64bit_atomics)]
 pub type AtomicFenceValue = core::sync::atomic::AtomicU64;
 #[cfg(not(supports_64bit_atomics))]
@@ -1080,6 +1093,14 @@ pub trait Device: WasmNotSendSync {
     unsafe fn destroy_query_set(&self, set: <Self::A as Api>::QuerySet);
     unsafe fn create_fence(&self) -> Result<<Self::A as Api>::Fence, DeviceError>;
     unsafe fn destroy_fence(&self, fence: <Self::A as Api>::Fence);
+
+    /// BENILLA: async compute. A second queue that runs compute and copy work beside the main
+    /// queue, or `None` where the backend has none (only DX12 and Vulkan do). Called at most once
+    /// per device. Command encoders created against it record compute-only command buffers, and
+    /// it orders against the main queue only through [`Queue::wait_for_fence`].
+    unsafe fn create_async_compute_queue(&self) -> Option<<Self::A as Api>::Queue> {
+        None
+    }
     unsafe fn get_fence_value(
         &self,
         fence: &<Self::A as Api>::Fence,
@@ -1251,6 +1272,19 @@ pub trait Queue: WasmNotSendSync {
         texture: <Self::A as Api>::SurfaceTexture,
     ) -> Result<(), SurfaceError>;
     unsafe fn get_timestamp_period(&self) -> f32;
+
+    /// BENILLA: async compute. Make every later submission on this queue wait, on the GPU, until
+    /// `fence` (signalled by another queue of the same device) reaches `value`. The wait carries
+    /// a full memory dependency. Only the queues of a device that returned an async compute queue
+    /// support it.
+    unsafe fn wait_for_fence(
+        &self,
+        fence: &<Self::A as Api>::Fence,
+        value: FenceValue,
+    ) -> Result<(), DeviceError> {
+        let _ = (fence, value);
+        Err(DeviceError::Unexpected)
+    }
 }
 
 /// Encoder and allocation pool for `CommandBuffer`s.

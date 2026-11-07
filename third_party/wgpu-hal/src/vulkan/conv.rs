@@ -570,6 +570,38 @@ pub fn map_buffer_usage(usage: wgt::BufferUses) -> vk::BufferUsageFlags {
     flags
 }
 
+/// BENILLA: async compute. A barrier scope as a compute-only queue family may name it: the
+/// graphics stages and their accesses dropped (the VUIDs on `srcStageMask`/`dstStageMask`). What
+/// such a family records only ever uses compute and transfer, so nothing it waits on is lost.
+pub fn compute_queue_barrier(
+    (stages, access): (vk::PipelineStageFlags, vk::AccessFlags),
+    compute_only: bool,
+) -> (vk::PipelineStageFlags, vk::AccessFlags) {
+    if !compute_only {
+        return (stages, access);
+    }
+    let stages = stages
+        & (vk::PipelineStageFlags::TOP_OF_PIPE
+            | vk::PipelineStageFlags::BOTTOM_OF_PIPE
+            | vk::PipelineStageFlags::DRAW_INDIRECT
+            | vk::PipelineStageFlags::COMPUTE_SHADER
+            | vk::PipelineStageFlags::TRANSFER
+            | vk::PipelineStageFlags::HOST
+            | vk::PipelineStageFlags::ALL_COMMANDS);
+    let access = access
+        & (vk::AccessFlags::INDIRECT_COMMAND_READ
+            | vk::AccessFlags::UNIFORM_READ
+            | vk::AccessFlags::SHADER_READ
+            | vk::AccessFlags::SHADER_WRITE
+            | vk::AccessFlags::TRANSFER_READ
+            | vk::AccessFlags::TRANSFER_WRITE
+            | vk::AccessFlags::HOST_READ
+            | vk::AccessFlags::HOST_WRITE
+            | vk::AccessFlags::MEMORY_READ
+            | vk::AccessFlags::MEMORY_WRITE);
+    (stages, access)
+}
+
 pub fn map_buffer_usage_to_barrier(
     usage: wgt::BufferUses,
 ) -> (vk::PipelineStageFlags, vk::AccessFlags) {

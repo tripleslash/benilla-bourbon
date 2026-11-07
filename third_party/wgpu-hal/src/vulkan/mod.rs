@@ -497,6 +497,11 @@ struct DeviceShared {
 
     empty_descriptor_set_layout: vk::DescriptorSetLayout,
 
+    /// BENILLA: async compute. The second queue `open` asked for, if it found one: its family and
+    /// index. Taken once by `Device::create_async_compute_queue`.
+    async_queue: Option<(u32, u32)>,
+    async_queue_taken: core::sync::atomic::AtomicBool,
+
     // The `drop_guard` field must be the last field of this struct so it is dropped last.
     // Do not add new fields after it.
     drop_guard: Option<crate::DropGuard>,
@@ -618,6 +623,18 @@ pub struct Queue {
     family_index: u32,
     relay_semaphores: Mutex<RelaySemaphores>,
     signal_semaphores: Mutex<SemaphoreList>,
+    /// BENILLA: async compute. Timeline waits the next submit takes (`Queue::wait_for_fence`).
+    wait_semaphores: Mutex<SemaphoreList>,
+}
+
+impl DeviceShared {
+    /// BENILLA: async compute. The queue families a resource is shared between: the graphics
+    /// family and the async queue's, where that is another family. `VK_SHARING_MODE_CONCURRENT`
+    /// over both is the scheme (`third_party/wgpu-hal/BENILLA.md`): no ownership transfers.
+    fn concurrent_families(&self) -> Option<[u32; 2]> {
+        let (family, _) = self.async_queue?;
+        (family != self.family_index).then_some([self.family_index, family])
+    }
 }
 
 impl Queue {
@@ -978,6 +995,10 @@ pub struct CommandEncoder {
     /// These could be in any Vulkan state except "pending".
     discarded: Vec<vk::CommandBuffer>,
 
+    /// BENILLA: async compute. The encoder records for a compute-only queue family: its barriers
+    /// name only the stages and accesses such a family supports (`conv::compute_queue_barrier`).
+    compute_only: bool,
+
     /// If this is true, the active renderpass enabled a debug span,
     /// and needs to be disabled on renderpass close.
     rpass_debug_marker_active: bool,
@@ -1288,6 +1309,12 @@ impl crate::Queue for Queue {
         if !guard.is_empty() {
             signal_semaphores.append(&mut guard);
         }
+        // BENILLA: async compute — the cross-queue waits `wait_for_fence` queued.
+        let mut waits = self.wait_semaphores.lock();
+        if !waits.is_empty() {
+            wait_semaphores.append(&mut waits);
+        }
+        drop(waits);
 
         // In order for submissions to be strictly ordered, we encode a dependency between each submission
         // using a pair of semaphores. This adds a wait if it is needed, and signals the next semaphore.
@@ -1362,6 +1389,26 @@ impl crate::Queue for Queue {
 
     unsafe fn get_timestamp_period(&self) -> f32 {
         self.device.timestamp_period
+    }
+
+    /// BENILLA: async compute. A timeline-semaphore wait on the next `vkQueueSubmit`, at all
+    /// commands: the signal on the other queue makes its writes available, the wait makes them
+    /// visible. Needs timeline semaphores, which `open` requires before it asks for the queue.
+    unsafe fn wait_for_fence(
+        &self,
+        fence: &Fence,
+        value: crate::FenceValue,
+    ) -> Result<(), crate::DeviceError> {
+        match *fence {
+            Fence::TimelineSemaphore(raw) => {
+                self.wait_semaphores.lock().push_wait(
+                    SemaphoreType::Timeline(raw, value),
+                    vk::PipelineStageFlags::ALL_COMMANDS,
+                );
+                Ok(())
+            }
+            Fence::FencePool { .. } => Err(crate::DeviceError::Unexpected),
+        }
     }
 }
 

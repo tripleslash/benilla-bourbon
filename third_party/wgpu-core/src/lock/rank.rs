@@ -119,8 +119,15 @@ define_lock_ranks! {
         COMMAND_ALLOCATOR_FREE_ENCODERS,
         SHARED_TRACKER_INDEX_ALLOCATOR_INNER,
         QUEUE_LIFE_TRACKER,
+        ASYNC_QUEUE_LIFE_TRACKER,
     }
     rank QUEUE_LIFE_TRACKER "Queue::life_tracker" followed by {
+        COMMAND_ALLOCATOR_FREE_ENCODERS,
+        DEVICE_TRACE,
+        ASYNC_QUEUE_LIFE_TRACKER,
+    }
+    // BENILLA: async compute. Taken after the main queue's life tracker, never before it.
+    rank ASYNC_QUEUE_LIFE_TRACKER "AsyncComputeQueue::life_tracker" followed by {
         COMMAND_ALLOCATOR_FREE_ENCODERS,
         DEVICE_TRACE,
     }
@@ -132,7 +139,9 @@ define_lock_ranks! {
     rank BUFFER_INITIALIZATION_STATUS "Buffer::initialization_status" followed by { }
     rank DEVICE_COMMAND_INDICES "Device::command_indices" followed by {}
     rank DEVICE_DEFERRED_DESTROY "Device::deferred_destroy" followed by {}
-    rank DEVICE_FENCE "Device::fence" followed by { }
+    rank DEVICE_FENCE "Device::fence" followed by { ASYNC_QUEUE_FENCE }
+    // BENILLA: async compute. Taken after `Device::fence`, never before it.
+    rank ASYNC_QUEUE_FENCE "AsyncComputeQueue::fence" followed by { }
     rank DEVICE_TRACE "Device::trace" followed by { }
     rank DEVICE_TRACKERS "Device::trackers" followed by { }
     rank DEVICE_LOST_CLOSURE "Device::device_lost_closure" followed by { }
