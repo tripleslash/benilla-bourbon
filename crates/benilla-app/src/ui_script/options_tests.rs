@@ -2789,7 +2789,6 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "AudioRowBackgroundSound",
             ),
             ("BENILLA_TOOLTIP_BRIGHTNESS", "GraphicsRowBrightness"),
-            ("BENILLA_TOOLTIP_MULTISAMPLE", "GraphicsRowMultisample"),
         ];
         if let Some((_, want_row)) = BENILLA_OWNED.iter().find(|(k, _)| *k == key) {
             assert_eq!(row, *want_row, "{row}: not this row's string");
@@ -2816,9 +2815,9 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // 84 rows less the three untipped below, less Display Mode (pulled on this fork), plus the
     // fork's seven Graphics rows (updated models, shadows, the indirect-lighting pair, Water
     // Detail, Lighting, Lighting Quality) and the Everwood port's four (Graphics Preset, Foliage
-    // Wind and its strength, Wet Surfaces in Rain), and Multisampling, listed on every build; a
-    // dropdown row is checked on the key it wears at rest.
-    assert_eq!(checked, 95, "every tipped row carries a live key");
+    // Wind and its strength, Wet Surfaces in Rain); a dropdown row is checked on the key it wears
+    // at rest.
+    assert_eq!(checked, 94, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2914,8 +2913,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // Every tipped row: the same 95 the key census counts.
-    assert_eq!(raised, 95, "every row but Auto Loot raises a description");
+    // Every tipped row: the same 94 the key census counts.
+    assert_eq!(raised, 94, "every row but Auto Loot raises a description");
 }
 
 /// 1.12's AdvancedOptionsCombatText box as saved-global rows: a click writes the global, never a
