@@ -166,17 +166,15 @@ pub fn spawn_anim_host(
     m: &M2Model,
     transform: Transform,
 ) -> Option<AnimHostSpawn> {
-    // Captures keep every doodad static, so their frames are deterministic.
-    if crate::dev_state::deterministic_run() {
+    // No host for a capture, whose frames are deterministic, or a model nothing arms: the one
+    // gate a dormant placement reads, so its batches and its wake agree.
+    if !hosts(m) {
         return None;
     }
     let tier = classify(&m.skeleton, m.animations.as_ref());
     // The sound arm, orthogonal to the tier: a bind-posed model still runs its event track, as in
     // the reference, so it gets a host with the arm bookkeeping but no `AnimationPlayer`.
     let sound_arm = m.animations.as_ref().is_some_and(arms_for_sound);
-    if matches!(tier, DoodadAnimTier::Static) && !sound_arm {
-        return None;
-    }
     let anims = m
         .animations
         .as_ref()
