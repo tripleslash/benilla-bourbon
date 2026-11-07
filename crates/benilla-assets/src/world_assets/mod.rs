@@ -1335,18 +1335,6 @@ impl WorldAssets {
         file_texture_rgba(&self.chain, &self.loose, path)
     }
 
-    /// Decode a cursor BLP ([`Self::cursor_rgba`]) for winit's custom OS cursor; macOS drives
-    /// `NSCursor` from the raw RGBA instead.
-    #[cfg(not(target_os = "macos"))]
-    pub fn decode_cursor(
-        &mut self,
-        path: &str,
-        images: &mut Assets<Image>,
-    ) -> Option<Handle<Image>> {
-        let (w, h, rgba) = self.cursor_rgba(path)?;
-        Some(images.add(cursor_texture(w, h, rgba)))
-    }
-
     /// A model submesh material, deduped by [`MaterialKey`] so submeshes sharing a texture share a
     /// handle and batch; a missing texture falls back to one shared untextured material.
     pub fn model_material(

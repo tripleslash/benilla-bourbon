@@ -5,7 +5,9 @@
 //! On macOS winit's cursor-rect route reverts to the arrow on every mouse move under a
 //! continuously redrawing Metal view, so this builds an `NSCursor` per mode, disables the window's
 //! cursor rects and sets the cursor directly; mouselook uses `NSCursor::hide`/`unhide`. Elsewhere
-//! winit's `CursorIcon::Custom` works and hide-on-look is `CursorOptions.visible`.
+//! winit's `CursorIcon::Custom` works and hide-on-look is `CursorOptions.visible`; a native
+//! window draws that picture texel for texel, so it is uploaded at the window's scale factor and
+//! keeps the 32 logical pixels a browser's CSS cursor and an `NSCursor` already give it.
 //!
 //! The pointer's visibility is one flag on the device (`[dev+0x2880]`, stored by `0x595c20`), and
 //! the last call of `0x58b590` wins ([`PointerDevice`]).
@@ -459,28 +461,93 @@ mod other {
     use bevy::prelude::*;
     use bevy::window::{CursorIcon, CustomCursor, CustomCursorImage, PrimaryWindow};
 
-    /// Stem → decoded cursor image, preloaded at startup.
-    #[derive(Resource, Default)]
-    pub(super) struct CursorImages(HashMap<String, Handle<Image>>);
+    /// A decoded cursor picture: width, height and top-to-bottom RGBA8.
+    type CursorRgba = (u32, u32, Vec<u8>);
 
-    /// Held-payload icon path, or `custom:` and the custom cursor's path → its 32×32 cursor, built
-    /// on first use and cached.
+    /// Stem → decoded cursor picture, preloaded at startup.
     #[derive(Resource, Default)]
-    pub(super) struct PayloadCursorImages(HashMap<String, Handle<Image>>);
+    pub(super) struct CursorImages(HashMap<String, CursorRgba>);
 
-    pub(super) fn setup(
-        mut commands: Commands,
-        world_assets: Option<ResMut<WorldAssets>>,
-        mut images: ResMut<Assets<Image>>,
+    /// `payload:` and the held icon's path, or `custom:` and the custom cursor's path → its 32×32
+    /// picture, built on first use and cached.
+    #[derive(Resource, Default)]
+    pub(super) struct PayloadCursorImages(HashMap<String, CursorRgba>);
+
+    /// The cursors uploaded at the window's scale, by key; dropped when the scale changes.
+    #[derive(Default)]
+    pub(super) struct ScaledCursors {
+        scale_bits: u32,
+        map: HashMap<String, Handle<Image>>,
+    }
+
+    /// The largest side winit takes for a custom cursor.
+    const MAX_CURSOR_SIDE: u32 = 256;
+
+    /// The factor a cursor picture is drawn at. The reference's 32×32 cursor is 32 logical pixels:
+    /// a browser draws a CSS cursor in CSS pixels, so the web build passes it through, while a
+    /// DPI-aware native window draws it texel for texel, so it takes the window's scale factor.
+    fn cursor_scale(window: &Window) -> f32 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = window;
+            1.0
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            window.scale_factor().max(1.0)
+        }
+    }
+
+    /// `src` resized by `scale`: texel-doubled at a whole factor, filtered at a fractional one.
+    fn scale_rgba(src: &CursorRgba, scale: f32) -> CursorRgba {
+        let (w, h, rgba) = src;
+        let side = |n: u32| ((n as f32 * scale).round() as u32).clamp(1, MAX_CURSOR_SIDE);
+        let (sw, sh) = (side(*w), side(*h));
+        if (sw, sh) == (*w, *h) {
+            return src.clone();
+        }
+        let Some(image) = image::RgbaImage::from_raw(*w, *h, rgba.clone()) else {
+            return src.clone();
+        };
+        let filter = if scale.fract().abs() < 1e-3 {
+            image::imageops::FilterType::Nearest
+        } else {
+            image::imageops::FilterType::Triangle
+        };
+        let out = image::imageops::resize(&image, sw, sh, filter);
+        (sw, sh, out.into_raw())
+    }
+
+    /// Hand the window the cursor `key` names, uploading `src` at the current scale on first use.
+    fn show(
+        commands: &mut Commands,
+        window: Entity,
+        scaled: &mut ScaledCursors,
+        images: &mut Assets<Image>,
+        key: &str,
+        src: &CursorRgba,
     ) {
-        let Some(mut world_assets) = world_assets else {
+        let scale = f32::from_bits(scaled.scale_bits);
+        let handle = scaled
+            .map
+            .entry(key.to_string())
+            .or_insert_with(|| {
+                let (w, h, rgba) = scale_rgba(src, scale);
+                images.add(cursor_texture(w, h, rgba))
+            })
+            .clone();
+        set_custom_cursor(commands, window, handle);
+    }
+
+    pub(super) fn setup(mut commands: Commands, world_assets: Option<Res<WorldAssets>>) {
+        let Some(world_assets) = world_assets else {
             return;
         };
         let mut map = HashMap::default();
         for stem in CURSOR_STEMS {
-            match world_assets.decode_cursor(&cursor_path(stem), &mut images) {
-                Some(handle) => {
-                    map.insert(stem.to_string(), handle);
+            match world_assets.cursor_rgba(&cursor_path(stem)) {
+                Some(src) => {
+                    map.insert(stem.to_string(), src);
                 }
                 None => warn!("cursor {stem}.blp missing/undecodable — mode falls back"),
             }
@@ -489,7 +556,7 @@ mod other {
     }
 
     /// Show the held payload's icon when it resolves, else the displayed mode (then its base stem,
-    /// then Point).
+    /// then Point), drawn at the window's scale.
     pub(super) fn drive(
         mut commands: Commands,
         cursor: Res<super::DisplayedCursor>,
@@ -500,40 +567,49 @@ mod other {
         mut images: ResMut<Assets<Image>>,
         mut payload_cursors: ResMut<PayloadCursorImages>,
         screen: Res<crate::loading_screen::LoadingScreen>,
-        window: Option<Single<Entity, With<PrimaryWindow>>>,
-        // The key of the cursor last handed the window: OS state, so not a
+        window: Option<Single<(Entity, &Window), With<PrimaryWindow>>>,
+        // The uploads and the key of the cursor last handed the window: OS state, so not a
         // [`crate::ui_script::VmMemo`].
+        mut scaled: Local<ScaledCursors>,
         mut last_set: Local<Option<String>>,
         mut decode_failed: Local<HashSet<String>>,
     ) {
         let Some(window) = window else {
             return;
         };
+        let (window, win) = window.into_inner();
+        // A new scale (another monitor's DPI) re-uploads every cursor and re-asserts this one.
+        let scale_bits = cursor_scale(win).to_bits();
+        if scaled.scale_bits != scale_bits {
+            scaled.scale_bits = scale_bits;
+            scaled.map.clear();
+            *last_set = None;
+        }
         let held_icon = script
             .as_ref()
             .and_then(|s| payload_icon(s, screen.covering()));
         if let Some(icon) = held_icon {
-            if last_set.as_deref() == Some(icon.as_str()) {
+            let key = format!("payload:{icon}");
+            if last_set.as_deref() == Some(key.as_str()) {
                 return; // already showing this icon
             }
-            if !payload_cursors.0.contains_key(&icon) && !decode_failed.contains(&icon) {
-                let built = world_assets.as_deref_mut().and_then(|a| {
-                    let rgba = super::decode_payload_cursor_rgba(a, &icon)?;
-                    Some(images.add(cursor_texture(32, 32, rgba)))
-                });
-                match built {
-                    Some(handle) => {
-                        payload_cursors.0.insert(icon.clone(), handle);
+            if !payload_cursors.0.contains_key(&key) && !decode_failed.contains(&key) {
+                match world_assets
+                    .as_deref_mut()
+                    .and_then(|a| super::decode_payload_cursor_rgba(a, &icon))
+                {
+                    Some(rgba) => {
+                        payload_cursors.0.insert(key.clone(), (32, 32, rgba));
                     }
                     None => {
                         warn!("cursor payload icon {icon} missing/undecodable — mode cursor kept");
-                        decode_failed.insert(icon.clone());
+                        decode_failed.insert(key.clone());
                     }
                 }
             }
-            if let Some(handle) = payload_cursors.0.get(&icon) {
-                set_custom_cursor(&mut commands, *window, handle.clone());
-                *last_set = Some(icon);
+            if let Some(src) = payload_cursors.0.get(&key) {
+                show(&mut commands, window, &mut scaled, &mut images, &key, src);
+                *last_set = Some(key);
                 return;
             }
             // Decode failed: fall through to the mode cursor.
@@ -546,13 +622,12 @@ mod other {
                 return;
             }
             if !payload_cursors.0.contains_key(&key) && !decode_failed.contains(&key) {
-                let built = world_assets.as_deref_mut().and_then(|a| {
-                    let rgba = super::decode_custom_cursor_rgba(a, &custom.0)?;
-                    Some(images.add(cursor_texture(32, 32, rgba)))
-                });
-                match built {
-                    Some(handle) => {
-                        payload_cursors.0.insert(key.clone(), handle);
+                match world_assets
+                    .as_deref_mut()
+                    .and_then(|a| super::decode_custom_cursor_rgba(a, &custom.0))
+                {
+                    Some(rgba) => {
+                        payload_cursors.0.insert(key.clone(), (32, 32, rgba));
                     }
                     None => {
                         warn!(
@@ -563,8 +638,8 @@ mod other {
                     }
                 }
             }
-            if let Some(handle) = payload_cursors.0.get(&key) {
-                set_custom_cursor(&mut commands, *window, handle.clone());
+            if let Some(src) = payload_cursors.0.get(&key) {
+                show(&mut commands, window, &mut scaled, &mut images, &key, src);
                 *last_set = Some(key);
                 return;
             }
@@ -574,18 +649,25 @@ mod other {
             return;
         };
         let stem = cursor.0.stem();
-        if last_set.as_deref() == Some(stem.as_str()) {
+        let key = format!("mode:{stem}");
+        if last_set.as_deref() == Some(key.as_str()) {
             return;
         }
-        let handle = cursors
-            .0
-            .get(&stem)
-            .or_else(|| cursors.0.get(stem.trim_start_matches("Unable")))
-            .or_else(|| cursors.0.get("Point"));
-        if let Some(handle) = handle {
-            set_custom_cursor(&mut commands, *window, handle.clone());
+        let found = [stem.as_str(), stem.trim_start_matches("Unable"), "Point"]
+            .into_iter()
+            .find_map(|s| cursors.0.get_key_value(s));
+        if let Some((name, src)) = found {
+            let upload_key = format!("mode:{name}");
+            show(
+                &mut commands,
+                window,
+                &mut scaled,
+                &mut images,
+                &upload_key,
+                src,
+            );
         }
-        *last_set = Some(stem);
+        *last_set = Some(key);
     }
 
     /// The device's flag on the window's pointer, for the cinematic, the glue and the look's
