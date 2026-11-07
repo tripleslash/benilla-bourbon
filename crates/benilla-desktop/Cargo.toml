@@ -19,6 +19,9 @@ benilla-app = { path = "../benilla-app", default-features = false }
 
 [build-dependencies]
 benilla-buildstamp = { path = "../benilla-buildstamp" }
+# The executable's icon resource (web/favicon.ico, WoW.exe's own), compiled with the Windows SDK's
+# rc.exe when the target is Windows.
+winresource = "0.1"
 
 [[bin]]
 name = "wow-reforged"

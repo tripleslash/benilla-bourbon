@@ -1,6 +1,11 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>World of Warcraft</title>
+<!-- fork: the client's icon, WoW.exe's own (web/favicon.ico; also wow-reforged.exe's, through
+     crates/benilla-desktop/build.rs). Deviation, the maintainer's call: METHOD's rule that nothing
+     from the install is committed has this one exception, the 1.12.1 client's icon group (16, 32
+     and 48 px), extracted from WoW.exe's RT_GROUP_ICON. -->
+<link rel="icon" href="favicon.ico" />
 <!-- Trunk's build description (Trunk.toml points `target` here). Paths are relative to THIS file,
      which is why the crate is reached with `../`.
 
@@ -82,6 +87,7 @@
      idea of where an operator edits a setting, while this is checked in beside the page it
      configures and lands at the dist root, which is what a static host serves. -->
 <link data-trunk rel="copy-file" href="config.json" />
+<link data-trunk rel="copy-file" href="favicon.ico" />
 <link data-trunk rel="copy-file" href="_headers" />
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }

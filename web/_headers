@@ -1,4 +1,4 @@
-# Static-host headers (the `_headers` format). Fifteen rules of the 100 allowed.
+# Static-host headers (the `_headers` format). Sixteen rules of the 100 allowed.
 #
 # Hosted from web/site/_headers (staged out of Trunk's dist by scripts/stage-packs.sh).
 
@@ -129,3 +129,8 @@
   # At the root, not under /data: it ships with the build (`web/config.json` -> Trunk -> dist), not
   # with the container, so `sw.js` — scoped to /data/ — never sees it and needs no exception for it.
   Cache-Control: no-cache
+
+/favicon.ico
+  # The page's icon (web/favicon.ico, copied into dist by Trunk). It changes only with a build, and
+  # a day is short enough that a new one reaches a returning visitor without a cache-busting query.
+  Cache-Control: public, max-age=86400
